@@ -1,0 +1,96 @@
+import compiler/syntax/ast
+import compiler/syntax/parser
+import compiler/semantic/top_level
+
+using compiler/syntax/ast::{ASTNode}
+using compiler/syntax/parser::{Parser}
+using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, dump_program_declarations}
+
+module BenchSelfhostSemanticExercise
+  def self.run_source(src : String, filename : String = "eval.iyi") : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    visitor = TopLevelVisitor.new(prog)
+    node.accept(visitor)
+    dump_program_declarations(prog)
+  end
+
+  def self.count_declarations(src : String, filename : String) : Int32
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    visitor = TopLevelVisitor.new(prog)
+    node.accept(visitor)
+    count = 0
+    prog.types.keys.each do |k|
+      unless prog.initial_type_names.includes?(k)
+        count = count + 1
+      end
+    end
+    if pdefs = prog.defs
+      pdefs.each_value { |list| count = count + list.size }
+    end
+    count
+  end
+
+  def self.run_all
+    puts "Running Selfhost Semantic Verification Suite (pure iyi stage 0)"
+    puts "==============================================================="
+    print "testing basic class and def declaration... "
+    out1 = run_source("class Foo; def bar : Int32; 1; end; end")
+    unless out1.includes?("Type: Foo (class)") && out1.includes?("Def: bar")
+      raise "basic class test failed"
+    end
+    puts "ok (class and method verified)"
+
+    print "testing class inheritance... "
+    out2 = run_source("class A; end; class B < A; end")
+    unless out2.includes?("superclass: A")
+      raise "inheritance test failed"
+    end
+    puts "ok (inheritance verified)"
+
+    print "testing traits and impls... "
+    out3 = run_source("trait Tr; abstract def f; end; class C; end; impl Tr for C; def f; end; end")
+    unless out3.includes?("Type: Tr (trait)") && out3.includes?("parents: [Reference, Tr]")
+      raise "trait and impl test failed"
+    end
+    puts "ok (traits and impls verified)"
+
+    print "testing enums and members... "
+    out4 = run_source("enum E; A; B = 10; end")
+    unless out4.includes?("enum_members: [A=0, B=10]")
+      raise "enum test failed"
+    end
+    puts "ok (enums verified)"
+
+    print "testing aliases and constants... "
+    out5 = run_source("alias MyInt = Int32; CONST_VAL = 42")
+    unless out5.includes?("Type: MyInt (alias)") && out5.includes?("Type: CONST_VAL (constant)")
+      raise "alias and const test failed"
+    end
+    puts "ok (aliases and constants verified)"
+
+    puts "==============================================================="
+    puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"
+    puts "==============================================================="
+  end
+end
+
+if Program.args.size > 0
+  if Program.args[0] == "-e" && Program.args.size > 1
+    source = Program.args[1]
+    print BenchSelfhostSemanticExercise.run_source(source, "eval.iyi")
+  elsif Program.args.size > 1 && Program.args[1] == "--count"
+    filename = Program.args[0]
+    source = File.read(filename)
+    puts BenchSelfhostSemanticExercise.count_declarations(source, filename)
+  else
+    filename = Program.args[0]
+    source = File.read(filename)
+    print BenchSelfhostSemanticExercise.run_source(source, filename)
+  end
+else
+  BenchSelfhostSemanticExercise.run_all
+end

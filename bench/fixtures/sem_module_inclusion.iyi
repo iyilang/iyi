@@ -1,0 +1,28 @@
+module Greetable
+  def greet : String
+    "hello"
+  end
+end
+
+module Loggable
+  def log(msg : String) : Nil
+  end
+end
+
+module ServiceMixin
+  include Greetable
+  include Loggable
+end
+
+class UserService
+  include ServiceMixin
+
+  def self.version : String
+    "1.0"
+  end
+end
+
+class AdminService
+  extend Greetable
+  include Loggable
+end

@@ -1,0 +1,4 @@
+class Cls
+end
+struct Cls
+end

@@ -1,0 +1,36 @@
+class Box(T)
+  def get : T
+    @val
+  end
+
+  def set(val : T) : Nil
+  end
+end
+
+struct Pair(A, B)
+  def first : A
+    @a
+  end
+
+  def second : B
+    @b
+  end
+end
+
+module Container(E)
+  def count : Int32
+    0
+  end
+end
+
+class SubBox(T) < Box(T)
+  def sub_method : String
+    "sub"
+  end
+end
+
+class IntBox < Box(Int32)
+  def int_value : Int32
+    0
+  end
+end

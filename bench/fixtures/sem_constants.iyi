@@ -1,0 +1,12 @@
+DEFAULT_TIMEOUT = 30
+APP_NAME = "iyi_test"
+DEBUG_MODE = true
+
+module Config
+  PORT = 8080
+  HOST = "localhost"
+end
+
+class ConstantsHolder
+  MAX_RETRIES = 5
+end

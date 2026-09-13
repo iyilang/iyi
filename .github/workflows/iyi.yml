@@ -591,6 +591,8 @@ jobs:
 
       - name: The selfhost normalizer rewrites what the front end rewrites
         run: bash bench/selfhost_normalizer_exercise.sh
+      - name: The selfhost semantic declaration pass matches the front end it replaces
+        run: bash bench/selfhost_semantic_exercise.sh
 
       # Not a parity gate: its oracle is a second implementation, not the tool
       # being replaced. The header of the script says why, and what would make

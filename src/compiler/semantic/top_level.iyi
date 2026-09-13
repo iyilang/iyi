@@ -1,0 +1,1222 @@
+module compiler/semantic/top_level
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/visitor
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, ClassDef, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, Var, Visibility, VisibilityModifier}
+using compiler/syntax/visitor::{Visitor}
+
+pub class TypeException < Exception
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+pub abstract class Type
+  property program : SemanticProgram
+  property namespace : ModuleType?
+  property name : String
+  property visibility : Visibility
+  property abstract : Bool
+  property struct : Bool
+
+  def initialize(@program : SemanticProgram, @namespace : ModuleType?, @name : String)
+    @visibility = Visibility::Public
+    @abstract = false
+    @struct = false
+  end
+
+  def full_name : String
+    if ns = @namespace
+      if ns.is_a?(SemanticProgram)
+        @name
+      else
+        "#{ns.full_name}::#{@name}"
+      end
+    else
+      @name
+    end
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def ==(other : Type) : Bool
+    full_name == other.full_name
+  end
+
+  def type_desc : String
+    "type"
+  end
+
+  def abstract? : Bool
+    @abstract
+  end
+
+  def struct? : Bool
+    @struct
+  end
+
+  def class? : Bool
+    false
+  end
+
+  def module? : Bool
+    false
+  end
+
+  def trait? : Bool
+    false
+  end
+
+  def enum? : Bool
+    false
+  end
+
+  def alias? : Bool
+    false
+  end
+
+  def const? : Bool
+    false
+  end
+
+  def private? : Bool
+    @visibility == Visibility::Private
+  end
+
+  def public? : Bool
+    @visibility == Visibility::Public
+  end
+end
+
+pub abstract class NamedType < Type
+  getter types : Hash(String, Type)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @types = Hash(String, Type).new
+  end
+
+  def add_type(name : String, type : Type) : Nil
+    @types[name] = type
+  end
+
+  def lookup_type(name : String) : Type?
+    @types[name]?
+  end
+end
+
+pub abstract class ModuleType < NamedType
+  getter defs : Hash(String, Array(Def))
+  getter parents : Array(Type)
+  @metaclass : ModuleType?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @defs = Hash(String, Array(Def)).new
+    @parents = [] of Type
+  end
+
+  def module? : Bool
+    true
+  end
+
+  def type_desc : String
+    "module"
+  end
+
+  def add_def(a_def : Def) : Nil
+    list = @defs[a_def.name]?
+    if list.nil?
+      list = [] of Def
+      @defs[a_def.name] = list
+    end
+    if l = list
+      l << a_def
+    end
+  end
+
+  def include(mod : Type) : Nil
+    @parents.insert(0, mod)
+  end
+
+  def metaclass : ModuleType
+    if meta = @metaclass
+      meta
+    else
+      meta = MetaclassType.new(@program, @namespace, "#{@name}:Class", self)
+      @metaclass = meta
+      meta
+    end
+  end
+
+  def metaclass? : ModuleType?
+    @metaclass
+  end
+end
+
+pub class MetaclassType < ModuleType
+  getter instance_type : Type
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @instance_type : Type)
+    super(program, namespace, name)
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub abstract class ClassType < ModuleType
+  property superclass : Type?
+  property superclass_display : String?
+  getter subclasses : Array(Type)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @superclass : Type? = nil)
+    super(program, namespace, name)
+    @subclasses = [] of Type
+    if sc = @superclass
+      @parents << sc
+      if sc.is_a?(ClassType)
+        sc.as(ClassType).subclasses << self
+      end
+    end
+  end
+
+  def class? : Bool
+    !@struct
+  end
+
+  def struct? : Bool
+    @struct
+  end
+
+  def type_desc : String
+    @struct ? "struct" : "class"
+  end
+
+  def set_superclass(sc : Type?, display_name : String? = nil) : Nil
+    @superclass = sc
+    @superclass_display = display_name || (sc ? sc.to_s : nil)
+    if sc
+      @parents << sc
+      if sc.is_a?(ClassType)
+        sc.as(ClassType).subclasses << self
+      end
+    end
+  end
+end
+
+pub class NonGenericClassType < ClassType
+end
+
+pub class GenericClassType < ClassType
+  getter type_vars : Array(String)
+  property splat_index : Int32?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil, superclass : Type? = nil)
+    super(program, namespace, name, superclass)
+  end
+end
+
+pub class NonGenericModuleType < ModuleType
+end
+
+pub class GenericModuleType < ModuleType
+  getter type_vars : Array(String)
+  property splat_index : Int32?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil)
+    super(program, namespace, name)
+  end
+end
+
+pub class TraitType < ModuleType
+  getter supertraits : Array(Type)
+  getter assoc_types : Array(String)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @supertraits = [] of Type
+    @assoc_types = [] of String
+  end
+
+  def trait? : Bool
+    true
+  end
+
+  def type_desc : String
+    "trait"
+  end
+end
+
+pub class GenericTraitType < TraitType
+  getter type_vars : Array(String)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String))
+    super(program, namespace, name)
+  end
+end
+
+pub class Const < NamedType
+  property value : ASTNode
+  property declared_type : ASTNode?
+  property value_source : String?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @value : ASTNode)
+    super(program, namespace, name)
+  end
+
+  def const? : Bool
+    true
+  end
+
+  def type_desc : String
+    "constant"
+  end
+end
+
+pub class EnumType < ModuleType
+  property base_type : Type
+  getter members : Hash(String, Const)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @base_type : Type)
+    super(program, namespace, name)
+    @members = Hash(String, Const).new
+    @parents << program.enum_type
+  end
+
+  def enum? : Bool
+    true
+  end
+
+  def type_desc : String
+    "enum"
+  end
+
+  def add_member(name : String, val_node : ASTNode) : Const
+    c = Const.new(@program, self, name, val_node)
+    @types[name] = c
+    @members[name] = c
+    c
+  end
+end
+
+pub class AliasType < NamedType
+  property value : ASTNode
+  property aliased_type : Type?
+  property aliased_type_display : String?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @value : ASTNode)
+    super(program, namespace, name)
+  end
+
+  def alias? : Bool
+    true
+  end
+
+  def type_desc : String
+    "alias"
+  end
+
+  def process_value : Type
+    if at = @aliased_type
+      at
+    else
+      scope = @namespace || @program
+      if @value.is_a?(Generic)
+        g = @value.as(Generic)
+        base = @program.lookup_type_node(g.name, scope)
+        args_strs = g.type_vars.map { |tv| @program.lookup_type_node(tv, scope).full_name }
+        @aliased_type_display = "#{base.full_name}(#{args_strs.join(", ")})"
+        @aliased_type = base
+        base
+      else
+        t = @program.lookup_type_node(@value, scope)
+        @aliased_type_display = t.full_name
+        @aliased_type = t
+        t
+      end
+    end
+  end
+end
+
+pub class ImplRecord
+  getter trait_type : Type
+  getter target_type : Type
+  getter type_vars : Array(String)?
+
+  def initialize(@trait_type : Type, @target_type : Type, @type_vars : Array(String)? = nil)
+  end
+end
+
+pub class SemanticProgram < NonGenericModuleType
+  @object_type : ClassType?
+  @value_type : ClassType?
+  @reference_type : ClassType?
+  @struct_type : ClassType?
+  @enum_type : ClassType?
+  @int32_type : ClassType?
+  @initial_type_names : Set(String)
+  @impls : Array(ImplRecord)
+
+  def object_type : ClassType
+    @object_type.as(ClassType)
+  end
+
+  def value_type : ClassType
+    @value_type.as(ClassType)
+  end
+
+  def reference_type : ClassType
+    @reference_type.as(ClassType)
+  end
+
+  def struct_type : ClassType
+    @struct_type.as(ClassType)
+  end
+
+  def enum_type : ClassType
+    @enum_type.as(ClassType)
+  end
+
+  def int32_type : ClassType
+    @int32_type.as(ClassType)
+  end
+
+  def initial_type_names : Set(String)
+    @initial_type_names
+  end
+
+  def impls : Array(ImplRecord)
+    @impls
+  end
+
+  def initialize
+    @initial_type_names = Set(String).new
+    @impls = [] of ImplRecord
+    @object_type = nil
+    @value_type = nil
+    @reference_type = nil
+    @struct_type = nil
+    @enum_type = nil
+    @int32_type = nil
+
+    super(self, nil, "main")
+
+    obj = NonGenericClassType.new(self, self, "Object", nil)
+    obj.abstract = true
+    @object_type = obj
+    @types["Object"] = obj
+
+    val = NonGenericClassType.new(self, self, "Value", obj)
+    @value_type = val
+    @types["Value"] = val
+
+    ref = NonGenericClassType.new(self, self, "Reference", obj)
+    @reference_type = ref
+    @types["Reference"] = ref
+
+    num = NonGenericClassType.new(self, self, "Number", val)
+    @types["Number"] = num
+
+    int_t = NonGenericClassType.new(self, self, "Int", num)
+    @types["Int"] = int_t
+
+    i32 = NonGenericClassType.new(self, self, "Int32", int_t)
+    @int32_type = i32
+    @types["Int32"] = i32
+
+    ["Int8", "UInt8", "Int16", "UInt16", "UInt32", "Int64", "UInt64", "Int128", "UInt128"].each do |tname|
+      @types[tname] = NonGenericClassType.new(self, self, tname, int_t)
+    end
+
+    flt = NonGenericClassType.new(self, self, "Float", num)
+    @types["Float"] = flt
+    @types["Float32"] = NonGenericClassType.new(self, self, "Float32", flt)
+    @types["Float64"] = NonGenericClassType.new(self, self, "Float64", flt)
+
+    @types["Char"] = NonGenericClassType.new(self, self, "Char", val)
+    @types["Bool"] = NonGenericClassType.new(self, self, "Bool", val)
+    @types["Nil"] = NonGenericClassType.new(self, self, "Nil", val)
+    @types["Symbol"] = NonGenericClassType.new(self, self, "Symbol", val)
+    @types["String"] = NonGenericClassType.new(self, self, "String", ref)
+
+    st = NonGenericClassType.new(self, self, "Struct", val)
+    st.abstract = true
+    st.struct = true
+    @struct_type = st
+    @types["Struct"] = st
+
+    en = NonGenericClassType.new(self, self, "Enum", val)
+    en.abstract = true
+    @enum_type = en
+    @types["Enum"] = en
+
+    @types["Class"] = NonGenericClassType.new(self, self, "Class", val)
+    @types["Array"] = GenericClassType.new(self, self, "Array", ["T"], nil, ref)
+    @types["Hash"] = GenericClassType.new(self, self, "Hash", ["K", "V"], nil, ref)
+    @types["Error"] = TraitType.new(self, self, "Error")
+
+    @initial_type_names = @types.keys.to_set
+  end
+
+  def lookup_path(path : Path) : Type?
+    lookup_path_names(path.names, self)
+  end
+
+  def lookup_path_names(names : Array(String), root : Type) : Type?
+    curr : Type? = root
+    i = 0
+    while i < names.size
+      name = names[i]
+      if c = curr
+        if c.is_a?(NamedType)
+          curr = c.as(NamedType).lookup_type(name)
+        else
+          return nil
+        end
+      else
+        return nil
+      end
+      i = i + 1
+    end
+    curr
+  end
+
+  def lookup_type_node(node : ASTNode, current_type : ModuleType) : Type
+    if node.is_a?(Path)
+      lookup_type_path(node.as(Path), current_type)
+    elsif node.is_a?(Generic)
+      g = node.as(Generic)
+      base_type = lookup_type_node(g.name, current_type)
+      base_type
+    else
+      raise("expected type, got #{node.to_s}")
+    end
+  end
+
+  def lookup_type_path(path : Path, current_type : ModuleType) : Type
+    if path.global
+      t = lookup_path_names(path.names, self)
+      if t
+        return t
+      end
+      raise("undefined constant #{path.to_s}")
+    end
+
+    first_name = path.names.first
+
+    # 1. Search in current_type
+    t = current_type.lookup_type(first_name)
+
+    # 2. Check if current_type has this name
+    if t.nil? && current_type.name == first_name
+      t = current_type
+    end
+
+    # 3. Search in parents of current_type
+    if t.nil?
+      p_idx = 0
+      while p_idx < current_type.parents.size
+        p = current_type.parents[p_idx]
+        if p.is_a?(NamedType)
+          match = p.as(NamedType).lookup_type(first_name)
+          if match
+            t = match
+            break
+          end
+        end
+        p_idx = p_idx + 1
+      end
+    end
+
+    # 4. Search enclosing namespaces
+    if t.nil?
+      ns = current_type.namespace
+      while ns
+        match = ns.lookup_type(first_name)
+        if match
+          t = match
+          break
+        end
+        if ns == self
+          break
+        end
+        ns = ns.namespace
+      end
+    end
+
+    # 5. Search in program root
+    if t.nil?
+      t = self.lookup_type(first_name)
+    end
+
+    if t.nil?
+      raise("undefined constant #{path.to_s}")
+    end
+
+    if path.names.size == 1
+      return t
+    end
+
+    rest = [] of String
+    r_i = 1
+    while r_i < path.names.size
+      rest << path.names[r_i]
+      r_i = r_i + 1
+    end
+    res = lookup_path_names(rest, t)
+    if res
+      res
+    else
+      raise("undefined constant #{path.to_s}")
+    end
+  end
+end
+
+pub class TopLevelVisitor < Visitor
+  property program : SemanticProgram
+  property current_type : ModuleType
+  property exp_nest : Int32
+
+  def initialize(@program : SemanticProgram)
+    @current_type = @program
+    @exp_nest = 0
+  end
+
+  def visit(node : Expressions) : Bool
+    node.expressions.each do |exp|
+      exp.accept(self)
+    end
+    false
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    node.exp.visibility = node.modifier
+    node.exp.accept(self)
+    false
+  end
+
+  def lookup_type_def_scope(node : ASTNode, path : Path) : ModuleType
+    if path.names.size == 1
+      @current_type
+    else
+      prefix_names = [] of String
+      p_i = 0
+      while p_i < path.names.size - 1
+        prefix_names << path.names[p_i]
+        p_i = p_i + 1
+      end
+      base = @current_type
+      i = 0
+      while i < prefix_names.size
+        pname = prefix_names[i]
+        sub = base.lookup_type(pname)
+        if sub.nil?
+          mod = NonGenericModuleType.new(@program, base, pname)
+          base.add_type(pname, mod)
+          base = mod
+        elsif sub.is_a?(ModuleType)
+          base = sub.as(ModuleType)
+        else
+          raise("#{sub.full_name} can't be used as a namespace")
+        end
+        i = i + 1
+      end
+      base
+    end
+  end
+
+  def lookup_type_def(node : ASTNode, path : Path) : Tuple(ModuleType, String, Type?)
+    scope = lookup_type_def_scope(node, path)
+    name = path.names.last
+    type = scope.lookup_type(name)
+    {scope, name, type}
+  end
+
+  def visit(node : ClassDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    created_new_type = false
+    type : ClassType
+
+    if ex = existing
+      if ex.is_a?(AliasType)
+        ex = ex.as(AliasType).process_value
+      end
+
+      unless ex.is_a?(ClassType)
+        raise("#{name} is not a #{node.struct ? "struct" : "class"}, it's a #{ex.type_desc}")
+      end
+
+      cls = ex.as(ClassType)
+      if node.struct != cls.struct?
+        raise("#{name} is not a #{node.struct ? "struct" : "class"}, it's a #{cls.type_desc}")
+      end
+
+      if tv = node.type_vars
+        if cls.is_a?(GenericClassType)
+          gen = cls.as(GenericClassType)
+          if tv != gen.type_vars
+            raise("type var#{gen.type_vars.size > 1 ? "s" : ""} must be #{gen.type_vars.join(", ")}, not #{tv.join(", ")}")
+          end
+        else
+          raise("#{name} is not a generic #{cls.type_desc}")
+        end
+      end
+      type = cls
+    else
+      created_new_type = true
+      if tv = node.type_vars
+        type = GenericClassType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericClassType.new(@program, scope, name)
+      end
+      type.abstract = node.abstract
+      type.struct = node.struct
+    end
+
+    if vis = node.visibility
+      type.visibility = vis
+    end
+
+    # Superclass handling
+    superclass : Type? = nil
+    superclass_display : String? = nil
+    if sc_node = node.superclass
+      if sc_node.is_a?(Generic)
+        g = sc_node.as(Generic)
+        base_sc = @program.lookup_type_node(g.name, @current_type)
+        superclass = base_sc
+        superclass_display = "#{base_sc.full_name}(#{g.type_vars.map(&.to_s).join(", ")})"
+      else
+        superclass = @program.lookup_type_node(sc_node, @current_type)
+        superclass_display = superclass.full_name
+      end
+
+      if superclass == @program.enum_type
+        raise("can't inherit Enum. Use the enum keyword to define enums")
+      end
+      unless superclass.is_a?(ClassType)
+        raise("#{superclass.full_name} is not a class, it's a #{superclass.type_desc}")
+      end
+    else
+      superclass = node.struct ? @program.struct_type : @program.reference_type
+      superclass_display = superclass.full_name
+    end
+
+    if node.superclass && !created_new_type && type.superclass != superclass
+      sc_str = superclass ? superclass.full_name : "nil"
+      type_sc_str = if prev_sc = type.superclass
+                      prev_sc.full_name
+                    else
+                      "nil"
+                    end
+      raise("superclass mismatch for class #{type.full_name} (#{sc_str} for #{type_sc_str})")
+    end
+
+    if created_new_type && superclass
+      sc_cls = superclass.as(ClassType)
+      if node.struct != sc_cls.struct?
+        raise("can't make #{node.struct ? "struct" : "class"} '#{node.name.names.last}' inherit #{sc_cls.type_desc} '#{sc_cls.full_name}'")
+      end
+
+      if sc_cls.struct? && !sc_cls.abstract?
+        raise("can't extend non-abstract struct #{sc_cls.full_name}")
+      end
+    end
+
+    if created_new_type
+      type.set_superclass(superclass, superclass_display)
+      scope.add_type(name, type)
+    end
+
+    old_type = @current_type
+    @current_type = type
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    type : ModuleType
+
+    if ex = existing
+      unless ex.module?
+        raise("#{name} is not a module, it's a #{ex.type_desc}")
+      end
+      mod = ex.as(ModuleType)
+      if tv = node.type_vars
+        if mod.is_a?(GenericModuleType)
+          gen = mod.as(GenericModuleType)
+          if tv != gen.type_vars
+            raise("type var#{gen.type_vars.size > 1 ? "s" : ""} must be #{gen.type_vars.join(", ")}, not #{tv.join(", ")}")
+          end
+        else
+          raise("#{name} is not a generic module")
+        end
+      end
+      type = mod
+    else
+      if tv = node.type_vars
+        type = GenericModuleType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericModuleType.new(@program, scope, name)
+      end
+      scope.add_type(name, type)
+    end
+
+    if vis = node.visibility
+      type.visibility = vis
+    end
+
+    old_type = @current_type
+    @current_type = type
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  def visit(node : TraitDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    type : TraitType
+
+    if ex = existing
+      unless ex.trait?
+        raise("#{name} is not a trait, it's a #{ex.type_desc}")
+      end
+      type = ex.as(TraitType)
+    else
+      tv = node.type_vars
+      at = node.assoc_types
+
+      if tv && at
+        clashing = [] of String
+        tv.each do |v|
+          if at.includes?(v)
+            clashing << v
+          end
+        end
+        unless clashing.empty?
+          clashing = clashing.sorted
+          raise("#{name} declares #{clashing.join(", ")} both as a parameter and as an associated type")
+        end
+      end
+
+      if tv || at
+        generic = GenericTraitType.new(@program, scope, name, tv || [] of String)
+        if at
+          at.each { |a| generic.assoc_types << a }
+        end
+        type = generic
+      else
+        type = TraitType.new(@program, scope, name)
+      end
+      scope.add_type(name, type)
+    end
+
+    if vis = node.visibility
+      type.visibility = vis
+    end
+
+    # Supertraits
+    if sts = node.supertraits
+      sts.each do |st_node|
+        st = @program.lookup_type_node(st_node, @current_type)
+        unless st.trait?
+          raise("can't require #{st.full_name}, it's a #{st.type_desc}. A trait can only require another trait")
+        end
+        if st == type
+          raise("#{type.full_name} can't require itself")
+        end
+        if type.supertraits.includes?(st)
+          raise("#{type.full_name} already requires #{st.full_name}")
+        end
+        type.supertraits << st
+      end
+    end
+
+    old_type = @current_type
+    @current_type = type
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  def visit(node : ImplDef) : Bool
+    trait_type = @program.lookup_type_node(node.trait, @current_type)
+    unless trait_type.trait?
+      raise("can't implement #{trait_type.full_name}, it's a #{trait_type.type_desc}. Only a trait can be implemented")
+    end
+
+    target_type = @program.lookup_type_node(node.target, @current_type)
+    if target_type.trait?
+      raise("can't implement #{trait_type.full_name} for #{target_type.full_name}, it's a trait. A trait is implemented for a type, and a trait is not one — to give every implementer of #{target_type.full_name} a default #{trait_type.full_name}, iyi has no blanket impls (SPEC.md II.7)")
+    end
+
+    unless target_type.is_a?(ModuleType)
+      raise("can't implement a trait for #{target_type.full_name}, it's a #{target_type.type_desc}")
+    end
+
+    target_mod = target_type.as(ModuleType)
+
+    old_type = @current_type
+    @current_type = target_mod
+    node.body.accept(self)
+    @current_type = old_type
+
+    target_mod.include(trait_type)
+    @program.impls << ImplRecord.new(trait_type, target_mod, node.type_vars)
+
+    false
+  end
+
+  def visit(node : EnumDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    enum_type : EnumType
+    if ex = existing
+      unless ex.is_a?(EnumType)
+        raise("#{name} is not a enum, it's a #{ex.type_desc}")
+      end
+      enum_type = ex.as(EnumType)
+    else
+      base = @program.int32_type.as(Type)
+      if bt = node.base_type
+        base = @program.lookup_type_node(bt, @current_type)
+        valid_base = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"].includes?(base.name)
+        unless valid_base
+          raise("enum base type must be an integer type")
+        end
+      end
+      enum_type = EnumType.new(@program, scope, name, base)
+      scope.add_type(name, enum_type)
+    end
+
+    if vis = node.visibility
+      enum_type.visibility = vis
+    end
+
+    counter = 0_i64
+    node.members.each do |member_node|
+      if member_node.is_a?(Arg)
+        arg = member_node.as(Arg)
+        mname = arg.name
+        if def_val = arg.default_value
+          if def_val.is_a?(NumberLiteral)
+            nl = def_val.as(NumberLiteral)
+            counter = nl.value.to_i64
+          end
+        end
+        val_lit = NumberLiteral.new(counter.to_s)
+        enum_type.add_member(mname, val_lit)
+        counter = counter + 1
+      end
+    end
+
+    if enum_type.members.empty?
+      raise("enum #{node.name.names.last} must have at least one member")
+    end
+
+    enum_type.add_def(Def.new("value"))
+    enum_type.members.keys.each do |mname|
+      enum_type.add_def(Def.new("#{underscore(mname)}?", return_type: Path.new("Bool")))
+    end
+
+    false
+  end
+
+  def visit(node : Alias) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    if ex = existing
+      if ex.is_a?(AliasType)
+        raise("alias #{node.name.names.last} is already defined")
+      else
+        raise("can't alias #{node.name.names.last} because it's already defined as a #{ex.type_desc}")
+      end
+    end
+
+    alias_type = AliasType.new(@program, scope, name, node.value)
+    if vis = node.visibility
+      alias_type.visibility = vis
+    end
+    scope.add_type(name, alias_type)
+
+    false
+  end
+
+  def visit(node : Def) : Bool
+    target_type : ModuleType
+
+    if rec = node.receiver
+      if rec.is_a?(Var) && rec.as(Var).name == "self"
+        target_type = @current_type.metaclass
+      else
+        rec_type = @program.lookup_type_node(rec, @current_type)
+        target_type = rec_type.as(ModuleType).metaclass
+      end
+    else
+      target_type = @current_type
+    end
+
+    if node.abstract
+      if (target_type.class? || target_type.struct?) && !target_type.abstract?
+        raise("can't define abstract def on non-abstract #{target_type.type_desc}")
+      end
+    end
+
+    if vis = node.visibility
+      node.visibility = vis
+    else
+      node.visibility = Visibility::Public
+    end
+
+    target_type.add_def(node)
+
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Path)
+      path = node.target.as(Path)
+      scope = lookup_type_def_scope(node, path)
+      name = path.names.last
+      existing = scope.lookup_type(name)
+      if existing
+        raise("already initialized constant #{existing.full_name}")
+      end
+
+      const = Const.new(@program, scope, name, node.value)
+      if vis = node.visibility
+        const.visibility = vis
+      end
+      scope.add_type(name, const)
+    end
+    false
+  end
+
+  def visit(node : Include) : Bool
+    type = @program.lookup_type_node(node.name, @current_type)
+    if type.trait?
+      raise("can't include #{type.full_name}, it's a trait. A type implements a trait by having an `impl #{type.full_name} for #{@current_type.full_name}`, which is what lets the orphan rule check it — see SPEC.md R-3")
+    end
+
+    unless type.module?
+      raise("#{type.full_name} is not a module, it's a #{type.type_desc}")
+    end
+
+    @current_type.include(type)
+    false
+  end
+
+  def visit(node : Extend) : Bool
+    type = @program.lookup_type_node(node.name, @current_type)
+    if type.trait?
+      raise("can't extend #{type.full_name}, it's a trait. A type implements a trait by having an `impl #{type.full_name} for #{@current_type.full_name}`, which is what lets the orphan rule check it — see SPEC.md R-3")
+    end
+
+    unless type.module?
+      raise("#{type.full_name} is not a module, it's a #{type.type_desc}")
+    end
+
+    @current_type.metaclass.include(type)
+    false
+  end
+end
+
+def underscore(s : String) : String
+  sb = String::Builder.new
+  i = 0
+  while i < s.bytesize
+    b = s.byte_at(i)
+    if b >= 65_u8 && b <= 90_u8
+      if i > 0
+        sb << '_'
+      end
+      sb << (b + 32_u8).unsafe_chr
+    else
+      sb << b.unsafe_chr
+    end
+    i = i + 1
+  end
+  sb.to_s
+end
+
+pub def dump_def(d : Def, io : String::Builder, indent : String) : Nil
+  io << indent << "Def: " << (d.receiver ? "self." : "") << d.name << "\n"
+  vis_str = case d.visibility
+            when Visibility::Private then "private"
+            else                          "public"
+            end
+  io << indent << "  visibility: " << vis_str << "\n"
+  io << indent << "  abstract: " << (d.abstract ? "true" : "false") << "\n"
+  args_strs = d.args.map do |arg|
+    s = arg.name
+    if r = arg.restriction
+      s = "#{s} : #{r.to_s}"
+    end
+    if dv = arg.default_value
+      s = "#{s} = #{dv.to_s}"
+    end
+    s
+  end
+  io << indent << "  args: [" << args_strs.join(", ") << "]\n"
+  ret_str = if rt = d.return_type
+              rts = rt.to_s
+              if rts.starts_with?("::")
+                rts[2, rts.bytesize - 2]
+              else
+                rts
+              end
+            else
+              "nil"
+            end
+  io << indent << "  return_type: " << ret_str << "\n"
+end
+
+pub def dump_type(t : Type, io : String::Builder, indent : String) : Nil
+  io << indent << "Type: " << t.full_name << " (" << t.type_desc << ")\n"
+  vis_str = t.private? ? "private" : "public"
+  io << indent << "  visibility: " << vis_str << "\n"
+  io << indent << "  abstract: " << (t.abstract? ? "true" : "false") << "\n"
+
+  if t.is_a?(GenericClassType)
+    io << indent << "  type_vars: [" << t.as(GenericClassType).type_vars.join(", ") << "]\n"
+  elsif t.is_a?(GenericModuleType)
+    io << indent << "  type_vars: [" << t.as(GenericModuleType).type_vars.join(", ") << "]\n"
+  elsif t.is_a?(GenericTraitType)
+    io << indent << "  type_vars: [" << t.as(GenericTraitType).type_vars.join(", ") << "]\n"
+  end
+
+  if t.is_a?(ClassType)
+    cls = t.as(ClassType)
+    if sc_disp = cls.superclass_display
+      io << indent << "  superclass: " << sc_disp << "\n"
+    end
+  end
+
+  if t.is_a?(ModuleType)
+    mod = t.as(ModuleType)
+    unless mod.parents.empty?
+      parents_strs = [] of String
+      mod.parents.each do |p|
+        if t.is_a?(ClassType) && (disp = t.as(ClassType).superclass_display) && (sc = t.as(ClassType).superclass) && (p.name == sc.name)
+          parents_strs << disp
+        else
+          parents_strs << p.full_name
+        end
+      end
+      parents_strs = parents_strs.sorted
+      io << indent << "  parents: [" << parents_strs.join(", ") << "]\n"
+    end
+  end
+
+  if t.is_a?(TraitType)
+    tr = t.as(TraitType)
+    unless tr.supertraits.empty?
+      st_strs = tr.supertraits.map(&.full_name).sorted
+      io << indent << "  supertraits: [" << st_strs.join(", ") << "]\n"
+    end
+    unless tr.assoc_types.empty?
+      at_strs = tr.assoc_types.dup.sorted
+      io << indent << "  assoc_types: [" << at_strs.join(", ") << "]\n"
+    end
+  end
+
+  if t.is_a?(EnumType)
+    en = t.as(EnumType)
+    members_keys = en.members.keys.dup.sorted
+    members_strs = members_keys.map { |k| "#{k}=#{en.members[k].value.to_s}" }
+    io << indent << "  enum_members: [" << members_strs.join(", ") << "]\n"
+  end
+
+  if t.is_a?(AliasType)
+    al = t.as(AliasType)
+    al.process_value
+    disp = al.aliased_type_display || al.process_value.full_name
+    io << indent << "  aliased_type: " << disp << "\n"
+  end
+
+  if t.is_a?(Const)
+    co = t.as(Const)
+    io << indent << "  const_value: " << co.value.to_s << "\n"
+  end
+
+  # defs
+  if t.is_a?(ModuleType)
+    mod = t.as(ModuleType)
+    all_defs = [] of Def
+    mod.defs.each_value do |list|
+      list.each { |d| all_defs << d }
+    end
+    if meta = mod.metaclass?
+      meta.defs.each_value do |list|
+        list.each do |d|
+          next if d.name == "allocate"
+          all_defs << d
+        end
+      end
+    end
+    all_defs = all_defs.sorted_by { |d| "#{d.receiver ? "self." : ""}#{d.name}" }
+    all_defs.each do |d|
+      dump_def(d, io, "#{indent}  ")
+    end
+  end
+
+  # nested types
+  if t.is_a?(NamedType) && !t.is_a?(EnumType)
+    nt = t.as(NamedType)
+    sub_names = nt.types.keys.dup.sorted
+    sub_names.each do |sname|
+      sub = nt.types[sname]
+      dump_type(sub, io, "#{indent}  ")
+    end
+  end
+end
+
+pub def dump_program_declarations(program : SemanticProgram) : String
+  sb = String::Builder.new
+
+  # Top level defs
+  top_defs = [] of Def
+  program.defs.each_value do |list|
+    list.each { |d| top_defs << d }
+  end
+  top_defs = top_defs.sorted_by(&.name)
+  top_defs.each do |d|
+    dump_def(d, sb, "")
+  end
+
+  # User types
+  user_type_names = [] of String
+  program.types.keys.each do |k|
+    unless program.initial_type_names.includes?(k)
+      user_type_names << k
+    end
+  end
+  user_type_names = user_type_names.sorted
+
+  user_type_names.each do |name|
+    t = program.types[name]
+    dump_type(t, sb, "")
+  end
+
+  sb.to_s
+end

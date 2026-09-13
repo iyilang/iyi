@@ -79,6 +79,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # codes, and usage output against the frontend iyi is still bootstrapped
     # from, requiring identical observables for every command vector.
     (r"^bench/selfhost_command_exercise\.sh$", "the frontend the selfhost command driver is checked against"),
+    # The self-hosting semantic visitor's oracle. It verifies type and method
+    # declaration tables against the frontend iyi is still bootstrapped from,
+    # requiring identical declarations for every fixture.
+    (r"^bench/selfhost_semantic_exercise\.sh$", "the frontend the selfhost semantic visitor is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

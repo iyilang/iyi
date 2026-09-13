@@ -292,6 +292,7 @@ pub class CommandDriver
   def self.check_usage : String
     <<-USAGE
     Usage: #{CommandDriver.program_name} check [switches] [program file]
+           #{CommandDriver.program_name} check --parse-only [--selfhost] [file or directory ...]
            #{CommandDriver.program_name} check --affected CHANGED [--affected CHANGED]...
 
     Type-check the program and produce nothing: no codegen, no
@@ -299,6 +300,9 @@ pub class CommandDriver
     and `-f json` makes each one data — file, line, column, size,
     message, the SPEC sections it cites, and, when the compiler
     knows the fix, a `suggested_edit` with the exact replacement.
+
+    `--parse-only` checks syntax only without semantic or type analysis.
+    Combine with `--selfhost` to use the pure iyi self-hosted parser.
 
     Every def with a fully written signature is typed even if
     nothing calls it — definition-site typing is the language's

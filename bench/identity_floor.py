@@ -91,6 +91,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # over-limit refusal, candidate search order, and error text against the
     # frontend iyi is still bootstrapped from.
     (r"^bench/selfhost_daemon_exercise\.sh$", "the frontend the selfhost build daemon is checked against"),
+    # The self-hosting platform support oracle. It verifies target triple parsing,
+    # flags, naming, and linker command generation against the frontend iyi is
+    # still bootstrapped from.
+    (r"^bench/selfhost_platform_exercise\.sh$", "the frontend the selfhost platform support is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

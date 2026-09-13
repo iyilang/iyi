@@ -1,0 +1,216 @@
+module bench/selfhost_platform_exercise
+
+import compiler/platform/target
+import compiler/platform/flags
+import compiler/platform/linker
+
+using compiler/platform/target::{Target, TargetError}
+using compiler/platform/flags::{PlatformFlags}
+using compiler/platform/linker::{Linker, LinkAnnotation, LinkCommandResult}
+
+def assert_true(cond : Bool, label : String) : Nil
+  if !cond
+    raise "assertion failed: #{label}"
+  end
+end
+
+def assert_equal(actual : String, expected : String, label : String) : Nil
+  if actual != expected
+    raise "assertion failed: #{label} (expected #{expected.inspect}, got #{actual.inspect})"
+  end
+end
+
+def assert_equal_i32(actual : Int32, expected : Int32, label : String) : Nil
+  if actual != expected
+    raise "assertion failed: #{label} (expected #{expected}, got #{actual})"
+  end
+end
+
+def normalize_paths(cmd : String) : String
+  # Normalise absolute library search paths identically on both sides with a comment saying so:
+  # Host library search paths vary across build machines, so paths ending in /lib are mapped to <LIBPATH>.
+  parts = cmd.split(' ')
+  norm_parts = [] of String
+  parts.each do |p|
+    if p == "-L/usr/local/lib"
+      norm_parts << "-L<LIBPATH>"
+    elsif p.starts_with?("-L/") && p.ends_with?("/lib")
+      norm_parts << "-L<LIBPATH>"
+    elsif p.starts_with?("/LIBPATH:/") && p.ends_with?("/lib")
+      norm_parts << "/LIBPATH:<LIBPATH>"
+    else
+      norm_parts << p
+    end
+  end
+  norm_parts.join(" ")
+end
+
+def corpus_triples : Array(String)
+  [
+    "arm64-apple-darwin",
+    "aarch64-apple-darwin",
+    "arm64-apple-macosx",
+    "x86_64-apple-darwin",
+    "x86_64-apple-macosx",
+    "x86_64-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-linux-musl",
+    "x86_64-unknown-linux-musl",
+    "aarch64-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "arm64-linux-gnu",
+    "arm64-unknown-linux-musl",
+    "x86_64-windows-msvc",
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "wasm32-wasi",
+    "wasm32-unknown-wasi",
+    "arm-unknown-linux-gnueabihf",
+    "x86_64-unknown-freebsd13.2",
+    "x86_64-unknown-openbsd",
+    "aarch64-unknown-openbsd",
+  ]
+end
+
+def run_self_checks : Nil
+  puts "== 1. Target triple parsing and normalization"
+  t1 = Target.new("arm64-apple-darwin")
+  assert_equal(t1.to_s, "aarch64-apple-darwin", "arm64 normalizes to aarch64")
+  assert_equal(t1.architecture, "aarch64", "t1 arch is aarch64")
+  assert_equal(t1.vendor, "apple", "t1 vendor is apple")
+  assert_equal(t1.environment, "darwin", "t1 env is darwin")
+  assert_equal(t1.os_name, "darwin", "t1 os_name is darwin")
+  assert_true(t1.macos?, "t1 is macos")
+  assert_true(t1.darwin?, "t1 is darwin")
+  assert_true(t1.unix?, "t1 is unix")
+  assert_true(!t1.linux?, "t1 is not linux")
+  assert_true(!t1.windows?, "t1 is not windows")
+  assert_equal_i32(t1.pointer_bit_width, 64, "t1 pointer bit width is 64")
+
+  t2 = Target.new("x86_64-linux-gnu")
+  assert_equal(t2.to_s, "x86_64-unknown-linux-gnu", "x86_64-linux-gnu adds unknown vendor")
+  assert_true(t2.linux?, "t2 is linux")
+  assert_true(t2.gnu?, "t2 is gnu")
+  assert_true(!t2.musl?, "t2 is not musl")
+  assert_true(t2.unix?, "t2 is unix")
+  assert_equal_i32(t2.pointer_bit_width, 64, "t2 pointer width 64")
+
+  t3 = Target.new("x86_64-windows-msvc")
+  assert_equal(t3.to_s, "x86_64-unknown-windows-msvc", "msvc triple normalizes vendor")
+  assert_true(t3.windows?, "t3 is windows")
+  assert_true(t3.msvc?, "t3 is msvc")
+  assert_true(t3.win32?, "t3 is win32")
+  assert_equal(t3.object_extension, ".obj", "t3 object extension is .obj")
+  assert_equal(t3.executable_extension, ".exe", "t3 executable extension is .exe")
+
+  t4 = Target.new("wasm32-wasi")
+  assert_equal(t4.to_s, "wasm32-unknown-wasi", "wasm32 wasi normalizes")
+  assert_true(t4.wasi?, "t4 is wasi")
+  assert_true(t4.unix?, "t4 is unix")
+  assert_equal_i32(t4.pointer_bit_width, 32, "t4 pointer width 32")
+  assert_equal(t4.object_extension, ".wasm", "t4 object extension is .wasm")
+  assert_equal(t4.executable_extension, "", "t4 executable extension is empty")
+
+  puts "== 2. Target triple equality"
+  t_known = Target.new("x86_64-pc-windows-msvc")
+  t_unknown = Target.new("x86_64-windows-msvc")
+  assert_true(t_known == t_unknown, "unknown vendor matches known vendor")
+
+  puts "== 3. Non-raising parser"
+  assert_true(Target.parse?("invalid").nil?, "invalid triple returns nil")
+  assert_true(Target.parse?("foo").nil?, "foo triple returns nil")
+  assert_true(Target.parse?("x86_64").nil?, "single part returns nil")
+  assert_true(!Target.parse?("x86_64-linux-gnu").nil?, "valid triple returns Target")
+
+  puts "== 4. Implied platform flags"
+  f1 = PlatformFlags.flags_for_target(t1)
+  assert_true(PlatformFlags.has_flag?(f1, "aarch64"), "f1 has aarch64")
+  assert_true(PlatformFlags.has_flag?(f1, "apple"), "f1 has apple")
+  assert_true(PlatformFlags.has_flag?(f1, "darwin"), "f1 has darwin")
+  assert_true(PlatformFlags.has_flag?(f1, "unix"), "f1 has unix")
+  assert_true(PlatformFlags.has_flag?(f1, "bits64"), "f1 has bits64")
+
+  f_test = ["release", "foo=bar", "debug", "opt=fast"]
+  assert_true(PlatformFlags.has_flag?(f_test, "release"), "has release")
+  assert_true(PlatformFlags.flag_value(f_test, "release") == true, "release value is true")
+  assert_equal(PlatformFlags.flag_value(f_test, "foo").to_s, "bar", "foo value is bar")
+  assert_equal(PlatformFlags.flag_value(f_test, "opt").to_s, "fast", "opt value is fast")
+  assert_true(PlatformFlags.flag_value(f_test, "absent") == false, "absent value is false")
+
+  puts "== 5. Linker argument quoting"
+  assert_equal(Linker.quote_posix("simple"), "simple", "simple posix quote")
+  assert_equal(Linker.quote_posix("my file.o"), "'my file.o'", "spaced posix quote")
+  assert_equal(Linker.quote_posix(""), "''", "empty posix quote")
+  assert_equal(Linker.quote_windows("simple"), "simple", "simple windows quote")
+  assert_equal(Linker.quote_windows("my file.obj"), "\"my file.obj\"", "spaced windows quote")
+
+  puts "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!"
+end
+
+def dump_corpus : Nil
+  triples = corpus_triples
+  triples.each do |t|
+    tgt = Target.new(t)
+    flags = PlatformFlags.flags_for_target(tgt)
+    lib_flags = "-L/opt/homebrew/opt/bdw-gc/lib"
+    if tgt.msvc?
+      lib_flags = "/LIBPATH:/opt/homebrew/opt/bdw-gc/lib"
+    end
+
+    res = Linker.linker_command(
+      tgt,
+      ["foo.o", "bar.o"],
+      "out_bin",
+      lib_flags: lib_flags,
+      cross_compiling: true,
+      debug: true
+    )
+
+    puts "TRIPLE: #{t}"
+    puts "  status: ok"
+    puts "  normalized: #{tgt.to_s}"
+    puts "  arch: #{tgt.architecture}"
+    puts "  vendor: #{tgt.vendor}"
+    puts "  env: #{tgt.environment}"
+    puts "  os_name: #{tgt.os_name}"
+    puts "  pointer_bits: #{tgt.pointer_bit_width}"
+    puts "  size_bits: #{tgt.size_bit_width}"
+    puts "  obj_ext: #{tgt.object_extension.inspect}"
+    puts "  exe_ext: #{tgt.executable_extension.inspect}"
+    puts "  flags: #{flags.join(" ")}"
+    puts "  linker: #{res.linker}"
+    puts "  cmd: #{normalize_paths(res.cmd)}"
+    objs = res.objects
+    if objs
+      puts "  objects: #{objs.join(" ")}"
+    else
+      puts "  objects: nil"
+    end
+  end
+end
+
+def main
+  args = Program.args
+  if args.size > 0
+    cmd = args[0]
+    if cmd == "dump"
+      dump_corpus
+      return
+    elsif cmd == "verify"
+      run_self_checks
+      return
+    else
+      # Malformed test: triggers Target.new which panics with TargetError
+      Target.new(cmd)
+      return
+    end
+  end
+
+  run_self_checks
+  puts
+  dump_corpus
+end
+
+main

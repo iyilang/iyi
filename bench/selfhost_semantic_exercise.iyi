@@ -2,11 +2,13 @@ import compiler/syntax/ast
 import compiler/syntax/parser
 import compiler/semantic/top_level
 import compiler/semantic/main_visitor
+import compiler/semantic/recursive_struct_checker
 
 using compiler/syntax/ast::{ASTNode, Expressions}
 using compiler/syntax/parser::{Parser}
-using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, dump_program_declarations}
+using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, TypeException, dump_program_declarations}
 using compiler/semantic/main_visitor::{MainVisitor, dump_program_expressions}
+using compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
 
 module BenchSelfhostSemanticExercise
   def self.run_source(src : String, filename : String = "eval.iyi") : String
@@ -15,6 +17,7 @@ module BenchSelfhostSemanticExercise
     prog = SemanticProgram.new
     visitor = TopLevelVisitor.new(prog)
     node.accept(visitor)
+    visitor.finish
     dump_program_declarations(prog)
   end
 
@@ -24,8 +27,10 @@ module BenchSelfhostSemanticExercise
     prog = SemanticProgram.new
     tl = TopLevelVisitor.new(prog)
     node.accept(tl)
+    tl.finish
     mv = MainVisitor.new(prog)
     node.accept(mv)
+    RecursiveStructChecker.new(prog).run
     dump_program_expressions(prog, node, mv)
   end
 
@@ -35,6 +40,7 @@ module BenchSelfhostSemanticExercise
     prog = SemanticProgram.new
     visitor = TopLevelVisitor.new(prog)
     node.accept(visitor)
+    visitor.finish
     count = 0
     prog.types.keys.each do |k|
       unless prog.initial_type_names.includes?(k)
@@ -109,6 +115,27 @@ module BenchSelfhostSemanticExercise
       raise "control flow typing test failed"
     end
     puts "ok (control flow typing verified)"
+
+    print "testing instance variable type inference... "
+    out8 = run_expr_source("class Point; @x = 10; def get_x : Int32; @x; end; end; p = Point.new; res = p.get_x")
+    unless out8.includes?("InstanceVar: Int32") && out8.includes?("target_def: get_x: Int32")
+      raise "instance variable typing test failed"
+    end
+    puts "ok (instance variable type inference verified)"
+
+    print "testing class variable initializers... "
+    out9 = run_expr_source("class Config; @@count = 100; def self.get_count : Int32; @@count; end; end; res = Config.get_count")
+    unless out9.includes?("ClassVar: Int32") && out9.includes?("target_def: get_count: Int32")
+      raise "class variable typing test failed"
+    end
+    puts "ok (class variable initializers verified)"
+
+    print "testing recursive struct checker... "
+    out10 = run_expr_source("struct Node; def initialize(@val : Int32); end; end; n = Node.new(1)")
+    unless out10.includes?("ClassDef: Nil")
+      raise "recursive struct check test failed"
+    end
+    puts "ok (recursive struct check verified)"
 
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"

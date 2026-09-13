@@ -7,10 +7,10 @@ import compiler/syntax/visitor
 import compiler/semantic/top_level
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, Def, Expressions, If, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/visitor::{Visitor}
-using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
+using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaTypeVar, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
 
 pub class MainVisitor < Visitor
   property program : SemanticProgram
@@ -143,6 +143,44 @@ pub class MainVisitor < Visitor
     raise("undefined local variable or method '#{node.name}' for #{scope_name}")
   end
 
+  def visit(node : InstanceVar) : Bool
+    if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+      raise("can't use instance variables at the top level")
+    end
+    target_scope = @scope || @current_type
+    target_type = if target_scope.is_a?(MetaclassType)
+                    target_scope.as(MetaclassType).instance_type
+                  else
+                    target_scope
+                  end
+    if target_type.is_a?(ModuleType)
+      if ivar = target_type.as(ModuleType).lookup_instance_var?(node.name)
+        set_type(node, ivar.type)
+        return false
+      end
+    end
+    raise("can't infer the type of instance variable '#{node.name}' of #{target_type.full_name}")
+  end
+
+  def visit(node : ClassVar) : Bool
+    if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+      raise("can't use class variables at the top level")
+    end
+    target_scope = @scope || @current_type
+    target_type = if target_scope.is_a?(MetaclassType)
+                    target_scope.as(MetaclassType).instance_type
+                  else
+                    target_scope
+                  end
+    if target_type.is_a?(ModuleType)
+      if cvar = target_type.as(ModuleType).lookup_class_var?(node.name)
+        set_type(node, cvar.type)
+        return false
+      end
+    end
+    raise("undefined class variable '#{node.name}' for #{target_type.full_name}")
+  end
+
   def visit(node : Assign) : Bool
     node.value.accept(self)
     val_type = type_of(node.value)
@@ -152,6 +190,60 @@ pub class MainVisitor < Visitor
       @vars[v.name] = val_type
       set_type(v, val_type)
       set_type(node, val_type)
+    elsif node.target.is_a?(InstanceVar)
+      ivar_node = node.target.as(InstanceVar)
+      if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+        raise("can't use instance variables at the top level")
+      end
+      target_scope = @scope || @current_type
+      target_type = if target_scope.is_a?(MetaclassType)
+                      target_scope.as(MetaclassType).instance_type
+                    else
+                      target_scope
+                    end
+      if target_type.is_a?(ModuleType)
+        mod_type = target_type.as(ModuleType)
+        if ivar = mod_type.lookup_instance_var?(ivar_node.name)
+          unless val_type.subtype_of?(ivar.type)
+            raise("instance variable '#{ivar_node.name}' of #{mod_type.full_name} must be #{ivar.type.full_name}, not (#{ivar.type.full_name} | #{val_type.full_name})")
+          end
+          set_type(ivar_node, ivar.type)
+        else
+          ivar = MetaTypeVar.new(ivar_node.name, val_type, node.value)
+          mod_type.instance_vars[ivar_node.name] = ivar
+          set_type(ivar_node, val_type)
+        end
+        set_type(node, val_type)
+      else
+        raise("can't use instance variables in #{target_type.full_name}")
+      end
+    elsif node.target.is_a?(ClassVar)
+      cvar_node = node.target.as(ClassVar)
+      if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+        raise("can't use class variables at the top level")
+      end
+      target_scope = @scope || @current_type
+      target_type = if target_scope.is_a?(MetaclassType)
+                      target_scope.as(MetaclassType).instance_type
+                    else
+                      target_scope
+                    end
+      if target_type.is_a?(ModuleType)
+        mod_type = target_type.as(ModuleType)
+        if cvar = mod_type.lookup_class_var?(cvar_node.name)
+          unless val_type.subtype_of?(cvar.type)
+            raise("type mismatch for class variable '#{cvar_node.name}': expected #{cvar.type.full_name}, got #{val_type.full_name}")
+          end
+          set_type(cvar_node, cvar.type)
+        else
+          cvar = MetaTypeVar.new(cvar_node.name, val_type, node.value)
+          mod_type.class_vars[cvar_node.name] = cvar
+          set_type(cvar_node, val_type)
+        end
+        set_type(node, val_type)
+      else
+        raise("can't use class variables in #{target_type.full_name}")
+      end
     elsif node.target.is_a?(Path)
       p = node.target.as(Path)
       set_type(p, val_type)
@@ -168,12 +260,53 @@ pub class MainVisitor < Visitor
       val.accept(self)
       val_type = type_of(val)
       unless val_type.subtype_of?(decl_type)
+        if node.var.is_a?(InstanceVar)
+          target_scope = @scope || @current_type
+          target_type = if target_scope.is_a?(MetaclassType)
+                          target_scope.as(MetaclassType).instance_type
+                        else
+                          target_scope
+                        end
+          raise("instance variable '#{node.var.as(InstanceVar).name}' of #{target_type.full_name} must be #{decl_type.full_name}, not (#{decl_type.full_name} | #{val_type.full_name})")
+        end
         raise("expected type #{decl_type.full_name}, got #{val_type.full_name}")
       end
       if node.var.is_a?(Var)
         v = node.var.as(Var)
         @vars[v.name] = decl_type
         set_type(v, decl_type)
+      elsif node.var.is_a?(InstanceVar)
+        ivar_node = node.var.as(InstanceVar)
+        if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+          raise("can only declare instance variables of a non-generic class, not a main (<Program>)")
+        end
+        target_scope = @scope || @current_type
+        target_type = if target_scope.is_a?(MetaclassType)
+                        target_scope.as(MetaclassType).instance_type
+                      else
+                        target_scope
+                      end
+        if target_type.is_a?(ModuleType)
+          mod_type = target_type.as(ModuleType)
+          mod_type.instance_vars[ivar_node.name] = MetaTypeVar.new(ivar_node.name, decl_type, val)
+          set_type(ivar_node, decl_type)
+        end
+      elsif node.var.is_a?(ClassVar)
+        cvar_node = node.var.as(ClassVar)
+        if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+          raise("can't use class variables at the top level")
+        end
+        target_scope = @scope || @current_type
+        target_type = if target_scope.is_a?(MetaclassType)
+                        target_scope.as(MetaclassType).instance_type
+                      else
+                        target_scope
+                      end
+        if target_type.is_a?(ModuleType)
+          mod_type = target_type.as(ModuleType)
+          mod_type.class_vars[cvar_node.name] = MetaTypeVar.new(cvar_node.name, decl_type, val)
+          set_type(cvar_node, decl_type)
+        end
       end
       set_type(node, decl_type)
     else
@@ -181,6 +314,38 @@ pub class MainVisitor < Visitor
         v = node.var.as(Var)
         @vars[v.name] = decl_type
         set_type(v, decl_type)
+      elsif node.var.is_a?(InstanceVar)
+        ivar_node = node.var.as(InstanceVar)
+        if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+          raise("can only declare instance variables of a non-generic class, not a main (<Program>)")
+        end
+        target_scope = @scope || @current_type
+        target_type = if target_scope.is_a?(MetaclassType)
+                        target_scope.as(MetaclassType).instance_type
+                      else
+                        target_scope
+                      end
+        if target_type.is_a?(ModuleType)
+          mod_type = target_type.as(ModuleType)
+          mod_type.instance_vars[ivar_node.name] = MetaTypeVar.new(ivar_node.name, decl_type, nil)
+          set_type(ivar_node, decl_type)
+        end
+      elsif node.var.is_a?(ClassVar)
+        cvar_node = node.var.as(ClassVar)
+        if @scope.nil? && (@current_type.is_a?(SemanticProgram) || @current_type.nil?)
+          raise("can't use class variables at the top level")
+        end
+        target_scope = @scope || @current_type
+        target_type = if target_scope.is_a?(MetaclassType)
+                        target_scope.as(MetaclassType).instance_type
+                      else
+                        target_scope
+                      end
+        if target_type.is_a?(ModuleType)
+          mod_type = target_type.as(ModuleType)
+          mod_type.class_vars[cvar_node.name] = MetaTypeVar.new(cvar_node.name, decl_type, nil)
+          set_type(cvar_node, decl_type)
+        end
       end
       set_type(node, decl_type)
     end
@@ -269,6 +434,33 @@ pub class MainVisitor < Visitor
       @current_type = t.as(ClassType)
       node.body.accept(self)
       @current_type = old_type
+
+      cls = t.as(ClassType)
+      cls.class_vars.each_value do |cvar|
+        if cvar.initializer.nil? && !cvar.type.nilable?
+          raise("class variable '#{cvar.name}' of #{cls.full_name} is not nilable (it's #{cvar.type.full_name}) so it must have an initializer")
+        end
+      end
+    end
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    name = node.name.names.last
+    t = @current_type.lookup_type(name)
+    if t && t.is_a?(ModuleType)
+      old_type = @current_type
+      @current_type = t.as(ModuleType)
+      node.body.accept(self)
+      @current_type = old_type
+
+      mod = t.as(ModuleType)
+      mod.class_vars.each_value do |cvar|
+        if cvar.initializer.nil? && !cvar.type.nilable?
+          raise("class variable '#{cvar.name}' of #{mod.full_name} is not nilable (it's #{cvar.type.full_name}) so it must have an initializer")
+        end
+      end
     end
     set_type(node, @program.nil_type)
     false
@@ -494,15 +686,24 @@ pub class MainVisitor < Visitor
     i = 0
     while i < target_def.args.size
       param = target_def.args[i]
-      if i < args.size
-        new_vars[param.name] = type_of(args[i])
-      elsif dv = param.default_value
-        dv.accept(self)
-        new_vars[param.name] = type_of(dv)
+      param_type = if i < args.size
+                     type_of(args[i])
+                   elsif dv = param.default_value
+                     dv.accept(self)
+                     type_of(dv)
+                   elsif r = param.restriction
+                     @program.lookup_type_node(r, @current_type)
+                   else
+                     @program.nil_type
+                   end
+      new_vars[param.name] = param_type
+      if param.name.starts_with?("@") && !param.name.starts_with?("@@")
+        if rec_type.is_a?(ModuleType)
+          rec_type.as(ModuleType).instance_vars[param.name] = MetaTypeVar.new(param.name, param_type)
+        end
       end
       i = i + 1
     end
-
     @vars = new_vars
     @scope = rec_type
     @current_def = target_def
@@ -552,7 +753,10 @@ pub class MainVisitor < Visitor
     if node.name == "new" && rec_type.is_a?(MetaclassType)
       inst_type = rec_type.as(MetaclassType).instance_type
       if inst_type.is_a?(ClassType)
-        if node.args.size > 0
+        candidates = [] of Def
+        visited = Set(String).new
+        collect_candidate_defs(inst_type, "initialize", candidates, visited)
+        if candidates.size > 0 || node.args.size > 0
           init_def = lookup_method_matching(inst_type, "initialize", node.args, node)
           type_method_body(init_def, inst_type, node.args, node.block)
         end
@@ -578,6 +782,10 @@ pub def node_class_name(node : ASTNode) : String
     "Assign"
   elsif node.is_a?(Var)
     "Var"
+  elsif node.is_a?(InstanceVar)
+    "InstanceVar"
+  elsif node.is_a?(ClassVar)
+    "ClassVar"
   elsif node.is_a?(Path)
     "Path"
   elsif node.is_a?(NilLiteral)
@@ -638,6 +846,10 @@ pub def dump_typed_node(node : ASTNode, visitor : MainVisitor, sb : String::Buil
     dump_typed_node(asgn.value, visitor, sb, "#{indent}    ")
   elsif node.is_a?(Var)
     sb << indent << "  name: " << node.as(Var).name << "\n"
+  elsif node.is_a?(InstanceVar)
+    sb << indent << "  name: " << node.as(InstanceVar).name << "\n"
+  elsif node.is_a?(ClassVar)
+    sb << indent << "  name: " << node.as(ClassVar).name << "\n"
   elsif node.is_a?(Path)
     sb << indent << "  names: [" << node.as(Path).names.join("::") << "]\n"
   elsif node.is_a?(NumberLiteral)

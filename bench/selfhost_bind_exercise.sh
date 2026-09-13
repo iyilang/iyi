@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # Fails when the iyi bind tool stops agreeing with the front end it replaces.
 #
-# The oracle is the shipped compiler's `Iyi.print_bind`, built with `-Di_know_what_im_doing`
-# and `LLVM_CONFIG` set. Each fixture is bound by both implementations and required
+# The oracle is the shipped compiler's `Iyi.print_bind` (`src/compiler/iyi/tools/bind.cr`),
+# built with `-Di_know_what_im_doing` and `LLVM_CONFIG` set, driven over the full
+# eleven-fixture corpus. Each fixture is bound by both implementations and required
 # byte-identical in its summary counts, method classifications, instantiation
 # statistics, and draft module declarations.
+#
+# What the oracle can and cannot do. The shipped tool consumes a semantically
+# analysed program, so a fixture the shipped front end rejects semantically is
+# reported here as UNANALYSABLE: the oracle prints the front end's error and the
+# gate fails on that fixture rather than comparing empty output against output.
+# The nine `decl_*` declaration-syntax fixtures are parser-test fixtures, and five
+# of them do not survive the shipped semantic pass (`class Recursive < self`,
+# `type SizeT = UInt64` in a lib, `include self` on a class, `trait Ordered :
+# Comparable` against a generic module, and top-level ivars). Those stay in the
+# corpus, stay red, and name the divergence rather than being cut, which is what
+# an earlier cut of this gate did.
 #
 # Machine-specific properties (absolute filesystem paths) are normalized in
 # BOTH implementations' dumps identically by stripping workspace prefixes to
@@ -88,6 +100,15 @@ fi
 echo "  Oracle: shipped Iyi.print_bind from src/compiler/iyi/tools/bind.cr (requires compiler/requires)"
 
 FIXTURES=(
+  "bench/fixtures/decl_classes_and_structs.iyi"
+  "bench/fixtures/decl_def.iyi"
+  "bench/fixtures/decl_enums.iyi"
+  "bench/fixtures/decl_lib_and_fun.iyi"
+  "bench/fixtures/decl_modules_and_inclusion.iyi"
+  "bench/fixtures/decl_operators.iyi"
+  "bench/fixtures/decl_traits_and_impls.iyi"
+  "bench/fixtures/decl_types_and_vars.iyi"
+  "bench/fixtures/decl_visibility_and_annotations.iyi"
   "bench/fixtures/bind_shard.iyi"
   "bench/fixtures/bind_generics.iyi"
 )
@@ -103,12 +124,25 @@ compare_all() {
   return $out_status
 }
 
+diverged=0
+unanalisable=0
 fixture_count=0
 total_matched_methods=0
 for rel_fixture in "${FIXTURES[@]}"; do
   fixture_name="$rel_fixture"
-  "$WORK/exercise" "$rel_fixture" > "$WORK/iyi.out"
-  CRYSTAL_PATH="$REPO/src" "$WORK/dump_crystal" "$rel_fixture" > "$WORK/crystal.out"
+  "$WORK/exercise" "$rel_fixture" > "$WORK/iyi.out" 2>"$WORK/iyi.err"
+  CRYSTAL_PATH="$REPO/src" "$WORK/dump_crystal" "$rel_fixture" > "$WORK/crystal.out" 2>"$WORK/crystal.err"
+  crystal_rc=$?
+  if [ "$crystal_rc" -ne 0 ] || [ ! -s "$WORK/crystal.out" ]; then
+    first_err=$(grep "^Error:" "$WORK/crystal.err" | head -n 1 | sed "s/^Error: //")
+    [ -z "$first_err" ] && first_err=$(head -n 1 "$WORK/crystal.err")
+    echo "  $fixture_name: UNANALYSABLE BY THE SHIPPED FRONT END"
+    echo "    the shipped semantic pass rejects this fixture: $first_err"
+    unanalisable=$((unanalisable + 1))
+    status=1
+    fixture_count=$((fixture_count + 1))
+    continue
+  fi
   if ! diff -u "$WORK/crystal.out" "$WORK/iyi.out" > "$WORK/diff.out"; then
     echo "  $fixture_name: BOUND METHODS DIFFER"
     diverged=$((diverged + 1))
@@ -121,7 +155,11 @@ for rel_fixture in "${FIXTURES[@]}"; do
   fi
   fixture_count=$((fixture_count + 1))
 done
-echo "  Parity summary: $((fixture_count - diverged))/$fixture_count fixtures bind identically ($total_matched_methods total public methods)"
+matched=$((fixture_count - diverged - unanalisable))
+echo "  Parity summary: $matched/$fixture_count fixtures bind identically ($total_matched_methods total public methods)"
+if [ "$unanalisable" -gt 0 ]; then
+  echo "  $unanalisable fixture(s) the shipped front end cannot analyse; see the UNANALYSABLE lines above for the exact divergence"
+fi
 
 echo
 echo "== 3. Mutation proofs: each one must make the comparison above fail"

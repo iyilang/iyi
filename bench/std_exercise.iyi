@@ -13,11 +13,13 @@ import std/cmp
 import std/enumerable
 import std/list
 import std/derives
+import std/slice
 
 using std/traits::{Cmp, Num, Hashable}
 using std/enumerable::{Enumerable}
 using std/list::{List}
 using std/derives::{Show}
+using std/slice::{Slice}
 
 # ---- Test Types -------------------------------------------------------------
 
@@ -441,6 +443,19 @@ assert_true(list[9]?.nil?, "list: []? answers nil past the end")
 # `Indexable#join` default it to nothing, so the same call was a compile
 # error on a Slice and a List.
 assert_str(small_seq.join, "314", "enum: join with nothing between")
+# `Indexable` does not open `Enumerable`'s door by itself (SPEC.md II.6), so
+# a `Slice` could not be zipped with an `Array` - "Array(Int32) does not
+# implement Enumerable" - and `Array` had none of `take`, `skip` or `tally`.
+# The other direction was unwired too: `Slice` wrote `unsafe_fetch` for a
+# trait it never implemented, so the most random-access type in the library
+# had no `last`.
+bridged = Slice(Int32).new(3) { |i| (i + 1) * 10 }
+assert_eq(bridged.last, 30, "slice: last, through Indexable")
+assert_eq(bridged.fetch(9, -1), -1, "slice: fetch past the end")
+assert_eq(bridged.values_at(0, 2).size, 2, "slice: values_at")
+assert_eq(bridged.zip([1, 2, 3]).size, 3, "slice: zipped with an array")
+assert_eq([1, 2, 3].take(2).size, 2, "array: take, through Enumerable")
+assert_eq([1, 1, 2].tally.size, 2, "array: tally, through Enumerable")
 puts "== std/derives: Show trait"
 assert_str(s1.show, "Score(10)", "derives: show")
 

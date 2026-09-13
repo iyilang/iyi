@@ -2,7 +2,7 @@
 #
 # Random-access sequence abstraction: the second load-bearing trait in
 # the standard library, sitting under Array, Slice, Deque, and other indexed
-# collections. It builds on Enumerable by requiring only two methods:
+# collections. It requires two methods:
 #
 #   * `abstract def size : Int32`
 #   * `abstract def unsafe_fetch(index : Int32) : Elem`
@@ -18,7 +18,11 @@
 #   * Selection and search: `sample`, `bsearch`, `bsearch_index`
 #   * Structural inspection: `dig`, `dig?`, `equals?`
 #   * Serialization and conversions: `join`, `to_a`, `hash`
-#   * Default iteration: `def each` which satisfies Enumerable requirements
+#   * Default iteration: `def each`, which an `impl Enumerable` beside this
+#     one answers with — implementing `Indexable` does not make a type
+#     `Enumerable` by itself. SPEC.md II.6 prescribes the pair: `impl
+#     Indexable for T`, then `impl Enumerable for T` answering only `type
+#     Elem`. `Array` and `Slice` both say both.
 
 module std/indexable
 
@@ -36,7 +40,10 @@ pub trait Indexable
   # ---- iteration -----------------------------------------------------------
 
   # Default iteration yielding elements sequentially from 0 up to size - 1.
-  # Satisfies Enumerable's abstract def each requirement.
+  # It answers `Enumerable`'s requirement for a type that also says `impl
+  # Enumerable`, which is one more line than the ergonomics claim implies
+  # (SPEC.md II.6) — the claim that this trait supplied it was false, and
+  # `Array` went without `zip`, `take` and the rest until the line existed.
   def each(& : Elem -> Nil) : Nil
     i = 0
     while i < size

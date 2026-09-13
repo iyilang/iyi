@@ -696,6 +696,21 @@ pub trait Enumerable
   end
 end
 
+# The prelude's `Array` is an `Enumerable`, which it was not: `Indexable`
+# has `impl Indexable for Array(T)` and that trait's header claimed its
+# `each` "satisfies Enumerable's abstract def each requirement" — it does
+# not, and SPEC.md II.6 says so, prescribing the second impl that answers
+# only `type Elem`. Without this line `slice.zip(array)` did not compile
+# ("Array(Int32) does not implement Enumerable, required by `O` in `zip`"),
+# which is the most ordinary thing a caller could ask of two sequences, and
+# `array.take(2)` did not exist. `Array#each` is the prelude's own, so the
+# impl needs nothing but the element type. It lives here rather than in the
+# prelude because R-3 puts an impl with the trait or with the type, and the
+# prelude does not know std exists.
+impl Enumerable for Array(T) forall T
+  type Elem = T
+end
+
 # ---------------------------------------------------------------------------
 # Method coverage
 # ---------------------------------------------------------------------------

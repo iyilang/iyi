@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **The two traits were wired to nothing.** `Slice` wrote `unsafe_fetch`
+  with the comment "required for Indexable" and never implemented
+  `Indexable`, so the most random-access type in the library — a pointer
+  with a size — had no `last`, `fetch`, `values_at`, `each_index`,
+  `reverse_each`, `bsearch`, `dig`, `equals?`, `rindex` or `sample`, all of
+  which `Array` has through that same trait. In the other direction
+  `Indexable`'s header claimed its `each` "satisfies Enumerable's abstract
+  def each requirement" — it does not, and SPEC.md II.6 says so and
+  prescribes the pair: `impl Indexable for T`, then `impl Enumerable for T`
+  answering only `type Elem`. The second line was never written for
+  `Array`, so `slice.zip(array)` did not compile ("Array(Int32) does not
+  implement Enumerable, required by `O` in `zip`") and `array.take(2)` did
+  not exist. Both lines exist now, the header says what is true, and six
+  assertions in `bench/std_exercise.iyi` hold them.
 - **A `List` was not equal to itself.** `List` is the shareable value of
   SPEC.md III.4.7 — the thing handed between tasks — and it had no `==`, so
   `Object`'s answered: the constant `false`. `list == list` was **false**,

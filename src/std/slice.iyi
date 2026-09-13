@@ -12,6 +12,8 @@ module std/slice
 
 import std/enumerable
 using std/enumerable::{Enumerable}
+import std/indexable
+using std/indexable::{Indexable}
 
 # `pub`, because an alias is part of a module's surface like anything else: an
 # unexported one is unreachable from a consumer, which R-2 now says out loud.
@@ -443,6 +445,21 @@ pub struct Slice(T)
   end
 end
 
+# The `unsafe_fetch` above has said "required for Indexable" since it was
+# written, and the impl it was written for never was: a `Slice` is a pointer
+# with a size, the most random-access thing in the library, and it had no
+# `last`, `fetch`, `values_at`, `each_index`, `reverse_each`, `bsearch`,
+# `dig`, `equals?`, `rindex` or `sample` while `Array` had all ten through
+# this same trait. Nothing in the file, SPEC.md or CHANGELOG.md said why.
+impl Indexable for Slice(T) forall T
+  type Elem = T
+end
+
+# And the second impl beside it, which is the shape SPEC.md II.6 prescribes:
+# `Indexable` does not open `Enumerable`'s door by itself, so a type that
+# wants both says both. The `each` here is the struct's own walk rather than
+# the trait's `unsafe_fetch` loop, which is one bounds-free read per element
+# either way.
 impl Enumerable for Slice(T) forall T
   type Elem = T
 

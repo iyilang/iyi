@@ -42,6 +42,21 @@
 
 ### Fixed
 
+- **The language server answered "nothing" where the protocol has a
+  word.** Five edges, each probed against a running server. An unknown
+  method came back `result: null`, which a client cannot tell from "there
+  is nothing at that position" — and -32601 is how it learns to stop
+  asking, so the comment that called an empty answer friendlier had it
+  backwards. A frame whose body is not JSON was dropped in silence, and
+  the request inside it was never answered: the client waits forever,
+  where `iyi mcp` has answered -32700 all along. A file the client named
+  that is not there came back -32603 — "this server is broken" — carrying
+  the runtime's own `Error opening file with mode 'r'`, the wording the
+  command line stopped using earlier in this release. A request with no
+  `textDocument` came back with the JSON library's `Missing hash key`. And
+  a request after `shutdown` was half answered instead of refused. They
+  are -32601, -32700, -32602, -32602 and -32600 now, each with a sentence,
+  and five cases in `bench/lsp_session.py` hold them.
 - **The flag an agent branches on was the constant `false`.** `iyi mcp`
   serves `check`, `fix`, `context`, `test` and `doc` as tools, and every
   result said `isError: false` — a missing file, a directory, bytes that

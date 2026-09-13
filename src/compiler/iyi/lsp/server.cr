@@ -69,6 +69,11 @@ module Iyi::Lsp
     @published = {} of String => Array({Int32, Int32, Int32, String, String?})
     @root : String?
     @running = true
+    # Set by `shutdown`. After it, the protocol says every request but
+    # `exit` is answered -32600: a client that keeps asking is asking a
+    # server that has agreed to stop, and an empty answer would read as
+    # "nothing there" instead.
+    @shut_down = false
     @analysis = Analysis.new
     # Messages the reader fiber has queued while a compile ran, and the
     # ids the client cancelled. One thread does the work; the queue is
@@ -270,7 +275,16 @@ module Iyi::Lsp
             nil
           end
         return parsed if parsed
-        # Not JSON: the frame is dropped, the session is not.
+        # Not JSON: the frame is dropped, the session is not — and the
+        # client is told, because the request it is waiting on is inside
+        # that frame and it would wait forever otherwise. `iyi mcp` has
+        # answered -32700 all along; this side said nothing at all.
+        #
+        # Handed back as a message rather than written from here: this
+        # runs on the reader fiber, and every byte on the wire is written
+        # by the loop that handles messages. Two writers would interleave
+        # a header with a body.
+        return JSON.parse(%({"method": "$/parseError"}))
       end
     rescue IO::EOFError
       nil
@@ -312,7 +326,20 @@ module Iyi::Lsp
       id = message["id"]?
       params = message["params"]?
 
+      # After `shutdown` the session is over but the process is not: the
+      # client owes an `exit` and nothing else, and anything it does send
+      # is answered by the code the protocol has for it rather than with
+      # an empty result that reads as an answer.
+      if @shut_down && id && method != "exit"
+        respond_error(id, -32600, "the server has shut down; only `exit` is left")
+        return
+      end
+
       case method
+      when "$/parseError"
+        # The reader could not parse a frame. The id was inside it, so
+        # JSON-RPC's answer carries `null` for one.
+        respond_error(nil, -32700, "parse error: the frame's body is not JSON")
       when "initialize"
         @root = root_of(params)
         @snippets = params.try(&.dig?("capabilities", "textDocument", "completion", "completionItem", "snippetSupport")).try(&.as_bool?) == true
@@ -320,6 +347,7 @@ module Iyi::Lsp
       when "initialized"
         # A notification; nothing to say back.
       when "shutdown"
+        @shut_down = true
         respond_null(id.not_nil!)
       when "exit"
         @running = false
@@ -423,28 +451,60 @@ module Iyi::Lsp
       when "iyi/surface"
         on_delegated(id.not_nil!, params.not_nil!, "doc")
       else
-        # A request we do not speak gets an empty answer rather than an
-        # error, so a chatty client keeps working; a notification is
-        # silence either way.
-        respond_null(id) if id
+        # A notification nobody here speaks is silence, which is what the
+        # protocol asks for. A *request* is not: it used to get an empty
+        # answer, and an empty answer is indistinguishable from "there is
+        # nothing at that position" — the one thing a client must be able
+        # to tell apart, because -32601 is how it learns to stop asking.
+        if id
+          respond_error(id, -32601, "method not found: #{method}")
+        end
       end
     rescue ex
       # A single bad request must not take the session down: the server's
-      # whole value is being there on the next keystroke.
+      # whole value is being there on the next keystroke. What it is told
+      # depends on whose mistake it was — -32603 says *this server* is
+      # broken, and it said that for a file the client named that is not
+      # there, in the runtime's own words ("Error opening file with mode
+      # 'r'"), which is neither true nor actionable.
       if id
-        send(JSON.build do |json|
-          json.object do
-            json.field "jsonrpc", "2.0"
-            json.field "id" { id.to_json(json) }
-            json.field "error" do
-              json.object do
-                json.field "code", -32603
-                json.field "message", ex.message.to_s
-              end
+        case ex
+        when File::Error
+          reason = ex.os_error.try(&.message) || "it could not be read"
+          respond_error(id, -32602, "#{ex.file}: #{reason}")
+        when IO::Error
+          respond_error(id, -32602, ex.os_error.try(&.message) || ex.message.to_s)
+        when KeyError
+          # `params["textDocument"]` on a request that carried none. The
+          # JSON library's wording is `Missing hash key: "textDocument"`.
+          respond_error(id, -32602, "the request is missing #{ex.message.to_s.sub("Missing hash key: ", "")}")
+        else
+          respond_error(id, -32603, ex.message.to_s)
+        end
+      end
+    end
+
+    # One place the protocol's error shape is written, because there were
+    # three and one of them was a constant -32603.
+    private def respond_error(id : JSON::Any?, code : Int32, message : String) : Nil
+      send(JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" do
+            if id
+              id.to_json(json)
+            else
+              json.scalar(nil)
             end
           end
-        end)
-      end
+          json.field "error" do
+            json.object do
+              json.field "code", code
+              json.field "message", message
+            end
+          end
+        end
+      end)
     end
 
     private def capabilities(json : JSON::Builder) : Nil

@@ -50,6 +50,11 @@ class Client:
             return self.wait_for(lambda m: m.get("id") == self.next_id)
         return None
 
+    def raw(self, payload: bytes):
+        """A frame written as-is, for the ones that are not valid JSON."""
+        self.proc.stdin.write(payload)
+        self.proc.stdin.flush()
+
     def request_nowait(self, method, params):
         """A request whose answer is read later — how a cancel gets to
         overtake it."""
@@ -1238,10 +1243,55 @@ def main():
          "import calc/scanner" in parser_moved and clean,
          f"{sum(len(e) for e in changes.values())} edit(s) across {touched}")
 
-    # 49. shutdown/exit: the server leaves when told, not before.
+    # 49-52. What the server says when it cannot answer. Every one of
+    # these used to be an empty result or an "internal error": an unknown
+    # method answered `result: null`, which a client cannot tell from
+    # "nothing at that position" and which is how it learns to stop
+    # asking; a frame that is not JSON was dropped in silence, leaving
+    # the request it carried unanswered forever; a file the client named
+    # that is not there came back -32603 ("this server is broken") in the
+    # runtime's own words, `Error opening file with mode 'r'`; and a
+    # request with no `textDocument` came back with the JSON library's
+    # `Missing hash key`.
+    reply = c.send("nonesuch/method", {})
+    step(49, "an unknown method is method-not-found",
+         reply.get("error", {}).get("code") == -32601
+         and "nonesuch/method" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
+    c.raw(b"Content-Length: 5\r\n\r\n{oops")
+    parse_error = c.wait_for(lambda m: "error" in m)
+    step(50, "a frame that is not JSON is a parse error, not silence",
+         parse_error["error"]["code"] == -32700 and parse_error["id"] is None,
+         json.dumps(parse_error)[:80])
+
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": "file://" + os.path.join(work, "nope.iyi")},
+        "position": {"line": 0, "character": 0}})
+    step(51, "a file the client named that is not there is invalid params",
+         reply.get("error", {}).get("code") == -32602
+         and "No such file" in reply["error"]["message"]
+         and "mode 'r'" not in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
+    reply = c.send("textDocument/hover", {})
+    step(52, "a request with no textDocument names what is missing",
+         reply.get("error", {}).get("code") == -32602
+         and "textDocument" in reply["error"]["message"]
+         and "Missing hash key" not in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
+    # 53. shutdown/exit: the server leaves when told, not before — and
+    # between the two it answers a request with the code the protocol has
+    # for it rather than an empty result.
     c.send("shutdown", {})
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+    step(53, "after shutdown, a request is refused rather than half answered",
+         reply.get("error", {}).get("code") == -32600,
+         json.dumps(reply.get("error"))[:80])
     c.send("exit", {}, wait=False)
-    step(49, "shutdown then exit", c.proc.wait(timeout=10) == 0)
+    step(54, "shutdown then exit", c.proc.wait(timeout=10) == 0)
 
     print("lsp gate: every step held")
 

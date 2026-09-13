@@ -10,7 +10,7 @@ import compiler/syntax/parser
 using compiler/foundation/location::{Location}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, ProcPointer, ProcLiteral, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility}
 using compiler/syntax/visitor::{Visitor}
 using compiler/syntax/parser::{Parser}
 
@@ -339,6 +339,16 @@ pub class Formatter < Visitor
   end
 
   def visit(node : ArrayLiteral) : Bool
+    if @token.type == TokenKind::OP_LSQUARE_RSQUARE
+      write("[]")
+      next_token
+      if of_node = node.of
+        write_keyword(" ", Keyword::OF, " ")
+        skip_space_or_newline
+        accept(of_node)
+      end
+      return false
+    end
     write_token(TokenKind::OP_LSQUARE)
     skip_space_or_newline
     node.elements.each_with_index do |elem, i|
@@ -490,11 +500,24 @@ pub class Formatter < Visitor
   end
 
   def visit(node : Generic) : Bool
+    if node.suffix == Generic::Suffix::Question
+      accept(node.type_vars[0])
+      skip_space
+      write_token(TokenKind::OP_QUESTION)
+      return false
+    end
+    if node.suffix == Generic::Suffix::Bang
+      accept(node.type_vars[0])
+      skip_space
+      write_token(TokenKind::OP_BANG)
+      return false
+    end
     accept(node.name)
     if @token.type == TokenKind::OP_LPAREN
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
       node.type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
         accept(tv)
         skip_space_or_newline
         if @token.type == TokenKind::OP_COMMA
@@ -504,9 +527,6 @@ pub class Formatter < Visitor
       end
       skip_space_or_newline
       write_token(TokenKind::OP_RPAREN)
-    end
-    if node.suffix == Generic::Suffix::Question
-      write_token(TokenKind::OP_QUESTION)
     end
     false
   end
@@ -737,6 +757,7 @@ pub class Formatter < Visitor
 
   def visit(node : Case) : Bool
     write_keyword(Keyword::CASE)
+    skip_space
     if cond = node.cond
       write(" ")
       accept(cond)
@@ -753,6 +774,7 @@ pub class Formatter < Visitor
           write_token(TokenKind::OP_COMMA, " ")
         end
       end
+      skip_space
       if @token.keyword?(Keyword::THEN)
         write_keyword(" ", Keyword::THEN, " ")
         accept(w.body)
@@ -801,6 +823,7 @@ pub class Formatter < Visitor
   private def format_control_keyword(kw : Keyword, exp : ASTNode?) : Nil
     write_keyword(kw)
     if exp && !exp.is_a?(Nop)
+      skip_space
       write(" ")
       accept(exp)
     end
@@ -818,6 +841,7 @@ pub class Formatter < Visitor
       end
       write_token(TokenKind::OP_RPAREN)
     elsif !node.exps.empty?
+      skip_space
       write(" ")
       node.exps.each_with_index do |exp, i|
         accept(exp)
@@ -844,7 +868,7 @@ pub class Formatter < Visitor
   def visit(node : OpAssign) : Bool
     accept(node.target)
     skip_space
-    write(" #{node.op} ")
+    write(" #{node.op}= ")
     next_token_skip_space_or_newline
     accept(node.value)
     false
@@ -893,26 +917,55 @@ pub class Formatter < Visitor
     false
   end
 
+  private def is_unary_op?(type : TokenKind) : Bool
+    type == TokenKind::OP_PLUS || type == TokenKind::OP_MINUS || type == TokenKind::OP_TILDE || type == TokenKind::OP_BANG
+  end
+
+  private def setter?(name : String) : Bool
+    name.ends_with?('=') && name != "==" && name != "!=" && name != "<=" && name != ">=" && name != "===" && name != "<=>" && name != "[]="
+  end
+
   def visit(node : Call) : Bool
-    # Unary operators
-    if node.obj.nil? && node.args.size == 1 && (node.name == "+" || node.name == "-" || node.name == "~")
+    # Unary prefix operators
+    if obj = node.obj
+      if is_unary_op?(@token.type) && node.name == @token.type.to_s && node.args.empty? && !node.has_parentheses && node.named_args.nil? && node.block_arg.nil?
+        write(@token.type.to_s)
+        next_token_skip_space_or_newline
+        accept(obj)
+        return false
+      end
+    end
+
+    if node.obj.nil? && node.args.size == 1 && (node.name == "+" || node.name == "-" || node.name == "~" || node.name == "!")
       write(node.name)
       next_token
       accept(node.args[0])
       return false
     end
 
+    column = @column
     # Binary operators
     if obj = node.obj
       if node.args.size == 1 && is_binary_op?(node.name)
         accept(obj)
+        @lexer.slash_is_regex = false
         skip_space_or_newline
-        op_name = node.name
-        write(" #{op_name} ")
-        next_token_skip_space_or_newline
-        accept(node.args[0])
+        write(" ") unless @wrote_newline
+        write(node.name)
+        next_token
+        found_comment = skip_space
+        if found_comment || @token.type == TokenKind::NEWLINE
+          next_indent = column == 0 ? @indent + 2 : column
+          skip_space_write_line
+          skip_space_or_newline
+          write_indent(next_indent)
+          accept(node.args[0])
+        else
+          write(" ")
+          accept(node.args[0])
+        end
         return false
-      elsif node.name == "[]"
+      elsif node.name == "[]" || node.name == "[]?"
         accept(obj)
         skip_space
         write_token(TokenKind::OP_LSQUARE)
@@ -927,6 +980,13 @@ pub class Formatter < Visitor
         end
         skip_space_or_newline
         write_token(TokenKind::OP_RSQUARE)
+        if node.name == "[]?"
+          skip_space
+          if @token.type == TokenKind::OP_QUESTION
+            write("?")
+            next_token
+          end
+        end
         return false
       elsif node.name == "[]="
         accept(obj)
@@ -953,19 +1013,65 @@ pub class Formatter < Visitor
         return false
       else
         accept(obj)
+        @lexer.slash_is_regex = false
         skip_space
+        if @token.type == TokenKind::NEWLINE || @wrote_newline
+          skip_space_write_line
+          skip_space_or_newline
+          write_indent(@indent + 2)
+        end
         write_token(TokenKind::OP_PERIOD)
         skip_space_or_newline
       end
     end
 
+    if setter?(node.name)
+      write(node.name[0, node.name.size - 1])
+      next_token
+      skip_space
+      next_token
+      write(" =")
+      skip_space
+      if @token.type == TokenKind::NEWLINE
+        next_token_skip_space_or_newline
+        write_line
+        @indent = @indent + 2
+        accept(node.args.last)
+        @indent = @indent - 2
+      else
+        write(" ")
+        accept(node.args.last)
+      end
+      return false
+    end
+
     write(node.name)
     next_token
+    block_formatted = false
     if node.has_parentheses
       skip_space
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
       format_args_list(node.args, node.named_args, node.block_arg)
+      if block = node.block
+        needs_space = !node.args.empty? || (node.named_args ? true : false)
+        needs_comma = false
+        if @token.type == TokenKind::OP_COMMA
+          next_token
+          skip_space_or_newline
+          needs_comma = true
+          needs_space = true
+        end
+        if @token.type == TokenKind::OP_RPAREN
+          skip_space_or_newline
+          write_token(TokenKind::OP_RPAREN)
+          format_block(block, true)
+          return false
+        else
+          format_block(block, needs_space, needs_comma)
+          block_formatted = true
+        end
+      end
       skip_space_or_newline
       write_token(TokenKind::OP_RPAREN)
     elsif !node.args.empty? || node.named_args || node.block_arg
@@ -974,8 +1080,8 @@ pub class Formatter < Visitor
       format_args_list(node.args, node.named_args, node.block_arg)
     end
 
-    if block = node.block
-      format_block(block)
+    if !block_formatted && (block = node.block)
+      format_block(block, true)
     end
 
     false
@@ -985,7 +1091,8 @@ pub class Formatter < Visitor
     name == "+" || name == "-" || name == "*" || name == "/" || name == "//" ||
       name == "%" || name == "==" || name == "!=" || name == "<" || name == "<=" ||
       name == ">" || name == ">=" || name == "<=>" || name == "===" ||
-      name == "<<" || name == ">>" || name == "&" || name == "|" || name == "^"
+      name == "<<" || name == ">>" || name == "&" || name == "|" || name == "^" ||
+      name == "**"
   end
 
   private def format_args_list(args : Array(ASTNode), named_args : Array(NamedArgument)?, block_arg : ASTNode? = nil) : Nil
@@ -1037,7 +1144,18 @@ pub class Formatter < Visitor
     false
   end
 
-  private def format_block(block : Block) : Nil
+  private def clear_object(node : ASTNode) : Nil
+    if node.is_a?(Call)
+      call = node.as(Call)
+      if call.obj.is_a?(Var)
+        call.obj = nil
+      elsif obj = call.obj
+        clear_object(obj)
+      end
+    end
+  end
+
+  private def format_block(block : Block, needs_space : Bool = true, needs_comma : Bool = false) : Nil
     skip_space
     if @token.keyword?(Keyword::DO)
       write_keyword(" ", Keyword::DO)
@@ -1084,11 +1202,25 @@ pub class Formatter < Visitor
       accept(block.body)
       skip_space_or_newline
       write_token(" ", TokenKind::OP_RCURLY)
-    elsif @token.type == TokenKind::OP_AMP
-      # Block shortcut: &.foo
-      write_token(" ", TokenKind::OP_AMP)
-      write_token(TokenKind::OP_PERIOD)
-      accept(block.body)
+    else
+      write(", ") if needs_comma
+      write(" ") if needs_space
+      write_token(TokenKind::OP_AMP)
+      skip_space_or_newline
+      write(".")
+      old_wants = @lexer.wants_def_or_macro_name
+      @lexer.wants_def_or_macro_name = true
+      next_token_skip_space_or_newline
+      @lexer.wants_def_or_macro_name = old_wants
+
+      body = block.body
+      if body.is_a?(Call)
+        call = body.as(Call)
+        clear_object(call)
+        accept(call)
+      else
+        accept(body)
+      end
     end
   end
 
@@ -1100,8 +1232,24 @@ pub class Formatter < Visitor
       write_keyword(Keyword::ABSTRACT, " ")
     end
     write_keyword(Keyword::DEF, " ")
+
+    if receiver = node.receiver
+      skip_space_or_newline
+      accept(receiver)
+      skip_space_or_newline
+      write_token(TokenKind::OP_PERIOD)
+    end
+
+    old_wants = @lexer.wants_def_or_macro_name
+    @lexer.wants_def_or_macro_name = true
+    skip_space_or_newline
     write(node.name)
     next_token
+    @lexer.wants_def_or_macro_name = old_wants
+
+    if @token.type == TokenKind::OP_EQ && node.name.ends_with?('=')
+      next_token
+    end
 
     to_skip = 0
     if @token.type == TokenKind::OP_LPAREN
@@ -1154,15 +1302,26 @@ pub class Formatter < Visitor
       write(" forall ")
       next_token_skip_space_or_newline
       free_vars.each_with_index do |fv, i|
+        skip_space_or_newline
         write(fv)
         next_token_skip_space
         if @token.type == TokenKind::OP_COLON
           write(" : ")
           next_token_skip_space_or_newline
-          write(@token.value)
-          next_token_skip_space
+          while true
+            write(@token.value)
+            next_token
+            if @token.type == TokenKind::OP_COLON_COLON
+              write("::")
+              next_token
+            else
+              break
+            end
+          end
+          skip_space
         end
         if i < free_vars.size - 1
+          skip_space_or_newline
           write_token(TokenKind::OP_COMMA, " ")
         end
       end
@@ -1173,12 +1332,22 @@ pub class Formatter < Visitor
       write(" where ")
       next_token_skip_space
       while true
+        skip_space_or_newline
         write(@token.value)
         next_token_skip_space
         write_token(" ", TokenKind::OP_COLON, " ")
         skip_space_or_newline
-        write(@token.value)
-        next_token_skip_space
+        while true
+          write(@token.value)
+          next_token
+          if @token.type == TokenKind::OP_COLON_COLON
+            write("::")
+            next_token
+          else
+            break
+          end
+        end
+        skip_space
         if @token.type == TokenKind::OP_COMMA
           write(", ")
           next_token_skip_space
@@ -1284,6 +1453,151 @@ pub class Formatter < Visitor
     false
   end
 
+  def visit(node : Union) : Bool
+    has_parens = @token.type == TokenKind::OP_LPAREN
+    write_token(TokenKind::OP_LPAREN) if has_parens
+
+    column = @column
+    node.types.each_with_index do |type, i|
+      if @token.type == TokenKind::OP_QUESTION
+        write_token(TokenKind::OP_QUESTION)
+        break
+      end
+
+      unless i == 0
+        skip_space_or_newline
+        write_token(" ", TokenKind::OP_BAR, " ")
+        skip_space
+
+        if @token.type == TokenKind::NEWLINE
+          write_line
+          write_indent(column)
+          next_token_skip_space_or_newline
+        end
+      end
+
+      accept(type)
+      skip_space
+    end
+
+    write_token(TokenKind::OP_RPAREN) if has_parens
+    false
+  end
+
+  def visit(node : ProcNotation) : Bool
+    has_input_parens = @token.type == TokenKind::OP_LPAREN
+    write_token(TokenKind::OP_LPAREN) if has_input_parens
+
+    if inputs = node.inputs
+      inputs.each_with_index do |input, i|
+        skip_space_or_newline
+        accept(input)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == inputs.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write_token(TokenKind::OP_RPAREN) if has_input_parens
+    end
+
+    skip_space_or_newline
+    write(" ") if node.inputs
+    write_token(TokenKind::OP_MINUS_GT)
+
+    if output = node.output
+      write(" ")
+      skip_space_or_newline
+      accept(output)
+    else
+      skip_space
+    end
+    false
+  end
+
+  def visit(node : ProcPointer) : Bool
+    write_token(TokenKind::OP_MINUS_GT)
+    skip_space_or_newline
+
+    if node.global
+      write_token(TokenKind::OP_COLON_COLON)
+      skip_space_or_newline
+    end
+
+    if obj = node.obj
+      accept(obj)
+      skip_space
+      write_token(TokenKind::OP_PERIOD)
+      skip_space_or_newline
+    end
+
+    write(node.name)
+    next_token_skip_space
+    next_token_skip_space if @token.type == TokenKind::OP_EQ
+
+    if @token.type == TokenKind::OP_LPAREN
+      write("(") unless node.args.empty?
+      next_token_skip_space
+      node.args.each_with_index do |arg, i|
+        accept(arg)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == node.args.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write(")") unless node.args.empty?
+      next_token_skip_space
+    end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    write_token(TokenKind::OP_MINUS_GT)
+    skip_space_or_newline
+    a_def = node.def
+    if @token.type == TokenKind::OP_LPAREN
+      write("(") unless a_def.args.empty?
+      next_token_skip_space_or_newline
+      a_def.args.each_with_index do |arg, i|
+        accept(arg)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == a_def.args.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      check(TokenKind::OP_RPAREN)
+      write(")") unless a_def.args.empty?
+      next_token_skip_space_or_newline
+    end
+    if return_type = a_def.return_type
+      check(TokenKind::OP_COLON)
+      write(" : ")
+      next_token_skip_space_or_newline
+      accept(return_type)
+      skip_space_or_newline
+    end
+    write(" ")
+    if @token.keyword?(Keyword::DO)
+      write_keyword(Keyword::DO)
+    else
+      write_token(TokenKind::OP_LCURLY)
+      write(" ") if a_def.body.is_a?(Nop)
+    end
+    skip_space
+    if @token.type == TokenKind::NEWLINE
+      format_nested(a_def.body)
+    else
+      skip_space_or_newline
+      accept(a_def.body)
+      skip_space
+      write(" ") unless a_def.body.is_a?(Nop)
+      write_token(TokenKind::OP_RCURLY)
+    end
+    false
+  end
+
   def visit(node : ClassDef) : Bool
     if @token.keyword?(Keyword::PUB)
       write_keyword(Keyword::PUB, " ")
@@ -1298,15 +1612,17 @@ pub class Formatter < Visitor
     if type_vars = node.type_vars
       write_token(TokenKind::OP_LPAREN)
       type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
         write(tv)
         next_token
         if i < type_vars.size - 1
+          skip_space_or_newline
           write_token(TokenKind::OP_COMMA, " ")
         end
       end
+      skip_space_or_newline
       write_token(TokenKind::OP_RPAREN)
     end
-
     if superclass = node.superclass
       skip_space_or_newline
       write(" < ")
@@ -1378,13 +1694,30 @@ pub class Formatter < Visitor
     end
     write_keyword(Keyword::TRAIT, " ")
     accept(node.name)
+    if type_vars = node.type_vars
+      write_token(TokenKind::OP_LPAREN)
+      type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
+        write(tv)
+        next_token
+        if i < type_vars.size - 1
+          skip_space_or_newline
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
     if supertraits = node.supertraits
-      write(" : ")
-      next_token_skip_space_or_newline
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_COLON, " ")
+      skip_space_or_newline
       supertraits.each_with_index do |st, i|
         accept(st)
-        if i < supertraits.size - 1
-          write_token(TokenKind::OP_COMMA, " ")
+        skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == supertraits.size - 1
+          next_token_skip_space_or_newline
         end
       end
     end
@@ -1409,18 +1742,30 @@ pub class Formatter < Visitor
     accept(node.target)
 
     if type_vars = node.type_vars
+      skip_space_or_newline
       write(" forall ")
       next_token_skip_space_or_newline
       type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
         write(tv)
         next_token_skip_space
         if @token.type == TokenKind::OP_COLON
           write(" : ")
           next_token_skip_space_or_newline
-          write(@token.value)
-          next_token_skip_space
+          while true
+            write(@token.value)
+            next_token
+            if @token.type == TokenKind::OP_COLON_COLON
+              write("::")
+              next_token
+            else
+              break
+            end
+          end
+          skip_space
         end
         if i < type_vars.size - 1
+          skip_space_or_newline
           write_token(TokenKind::OP_COMMA, " ")
         end
       end

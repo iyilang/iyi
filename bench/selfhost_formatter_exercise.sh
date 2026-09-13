@@ -21,25 +21,43 @@ trap 'rm -rf "$WORK"' EXIT
 # The corpus is an explicit list of files the port currently handles byte-for-byte.
 # It grows deliberately as the formatter port reaches further constructs, and fails
 # if any listed file regresses.
-# 136 .iyi files in the tree (19 in samples/iyi, 17 in src/iyi, 100 in src/std) are not yet in this list.
+# 118 .iyi files in the tree (10 in samples/iyi, 17 in src/iyi, 91 in src/std) are not yet in this list.
 CORPUS=(
   "samples/iyi/calc.iyi"
+  "samples/iyi/collections.iyi"
   "samples/iyi/derive.iyi"
   "samples/iyi/files.iyi"
   "samples/iyi/format.iyi"
+  "samples/iyi/formatting.iyi"
+  "samples/iyi/generics.iyi"
   "samples/iyi/hello.iyi"
+  "samples/iyi/immutable.iyi"
   "samples/iyi/init_order.iyi"
   "samples/iyi/io.iyi"
   "samples/iyi/modules.iyi"
+  "samples/iyi/sessions.iyi"
   "samples/iyi/socket.iyi"
   "samples/iyi/std_collections.iyi"
+  "samples/iyi/std_compress.iyi"
+  "samples/iyi/std_iterator.iyi"
+  "samples/iyi/std_json.iyi"
   "samples/iyi/std_regex.iyi"
   "samples/iyi/std_text.iyi"
   "samples/iyi/std_time.iyi"
+  "samples/iyi/std_util.iyi"
   "samples/iyi/std_yaml.iyi"
   "samples/iyi/webapp.iyi"
   "src/std/bool.iyi"
+  "src/std/cmp.iyi"
+  "src/std/comparable.iyi"
+  "src/std/deque.iyi"
   "src/std/iterable.iyi"
+  "src/std/list.iyi"
+  "src/std/nil.iyi"
+  "src/std/pretty_print.iyi"
+  "src/std/steppable.iyi"
+  "src/std/string_scanner.iyi"
+  "src/std/traits.iyi"
 )
 
 echo "== 1. Building the selfhost formatter exercise driver"
@@ -175,6 +193,17 @@ run_proof "blank line preservation in consume_newlines disabled" \
   "if raw_newlines > 1 && !next_comes_end" \
   "if false && raw_newlines > 1"
 
+run_proof "empty array literal bracket handling bypassed in ArrayLiteral visitor" \
+  "if @token.type == TokenKind::OP_LSQUARE_RSQUARE" \
+  "if false && @token.type == TokenKind::OP_LSQUARE_RSQUARE"
+
+run_proof "method def receiver formatting bypassed in Def visitor" \
+  "if receiver = node.receiver" \
+  "if false && (receiver = node.receiver)"
+
+run_proof "proc notation arrow omitted in ProcNotation visitor" \
+  "write_token(TokenKind::OP_MINUS_GT)" \
+  "# write_token(TokenKind::OP_MINUS_GT)"
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

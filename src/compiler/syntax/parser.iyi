@@ -456,7 +456,16 @@ pub class Parser < Lexer
             if atomic.name.ends_with?('?') || atomic.name.ends_with?('!')
               unexpected_token("site_11")
             end
-            atomic = Var.new(atomic.name).at(atomic)
+            if atomic.obj
+              next_token_skip_space_or_newline
+              atomic.name = "#{atomic.name}="
+              arg = parse_op_assign_no_control
+              atomic.args = [arg]
+              atomic.end_location = arg.end_location
+              return atomic
+            else
+              atomic = Var.new(atomic.name).at(atomic)
+            end
           end
 
           next_token_skip_space_or_newline

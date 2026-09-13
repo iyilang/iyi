@@ -1,0 +1,717 @@
+module compiler/command/daemon
+
+import std/json
+import compiler/command/driver
+
+using std/json::{JSON}
+using compiler/command/driver::{OutputBuffer, Exit}
+
+# Communication frame kinds between daemon and client
+pub DAEMON_FRAME_EXIT   = 0_u8
+pub DAEMON_FRAME_STDOUT = 1_u8
+pub DAEMON_FRAME_STDERR = 2_u8
+
+# Platform limit on UNIX socket path size in sockaddr_un
+# 103 bytes on Darwin (macOS), 107 on Linux
+pub MAX_PATH_SIZE = {% if flag?(:darwin) %}
+                      103
+                    {% elsif flag?(:linux) %}
+                      107
+                    {% else %}
+                      103
+                    {% end %}
+
+# Represents an active build running in the daemon
+pub class DaemonBuild
+  property client : IyiIO?
+  property out_r : Int32
+  property err_r : Int32
+  property pid : Int32
+  property args : Array(String)
+  property cwd : String
+  property open : Int32
+
+  def initialize(
+    @client : IyiIO?,
+    @out_r : Int32,
+    @err_r : Int32,
+    @pid : Int32,
+    @args : Array(String),
+    @cwd : String,
+  )
+    @open = 2
+  end
+
+  def stream(kind : UInt8) : Int32
+    kind == DAEMON_FRAME_STDOUT ? @out_r : @err_r
+  end
+end
+
+# The build daemon command handler: manages starting, connecting,
+# socket path selection, candidate searching, framing, and refusals.
+pub class BuildDaemon
+  property options : Array(String)
+  property stdout : OutputBuffer
+  property stderr : OutputBuffer
+  property exit_code : Int32?
+  property program_name : String
+  property executable_path : String?
+  property cache_dir : String?
+  property daemon_override : String?
+  property daemon_socket : String?
+  property version_description : String
+  property mock_exec : Bool
+  property executed_process : String?
+  property executed_args : Array(String)?
+
+  def initialize(
+    options : Array(String) = [] of String,
+    @stdout : OutputBuffer = OutputBuffer.new,
+    @stderr : OutputBuffer = OutputBuffer.new,
+    @program_name : String = "iyi",
+    @executable_path : String? = nil,
+    @cache_dir : String? = nil,
+    @daemon_override : String? = nil,
+    @daemon_socket : String? = nil,
+    @version_description : String = "iyi 0.12.0",
+    @mock_exec : Bool = false,
+  )
+    @options = options.dup
+    @exit_code = nil
+    @executed_process = nil
+    @executed_args = nil
+  end
+
+  # --- Output and Exit Helpers ---
+
+  def puts(s : String = "") : Nil
+    @stdout.puts(s)
+  end
+
+  def print(s : String) : Nil
+    @stdout.print(s)
+  end
+
+  def print_error(s : String) : Nil
+    @stderr.puts(s)
+  end
+
+  def exit(code : Int32 = 0) : Nil
+    @exit_code = code
+  end
+
+  def abort(message : String, code : Exit = Exit::USAGE_ERROR) : Nil
+    print_error(message)
+    exit(code.value)
+  end
+
+  # --- Subcommand Dispatch ---
+
+  def daemon : Nil
+    subcommand = @options.first?
+    case subcommand
+    when nil, "start"
+      @options.shift?
+      daemon_start
+    when "build"
+      @options.shift
+      daemon_build
+    when "--help", "-h"
+      puts daemon_usage
+      exit(0)
+    else
+      abort "unknown daemon subcommand: #{subcommand}", Exit::USAGE_ERROR
+    end
+  end
+
+  def daemon_usage : String
+    <<-USAGE
+    Usage: #{@program_name} daemon [start|build] [switches]
+
+    Analyses the prelude once and forks a child per build, so a build does
+    not re-analyse it. Start a daemon in one terminal and send builds to it
+    from another:
+
+        #{@program_name} daemon start
+        #{@program_name} daemon build hello.iyi
+
+    Command:
+        start (default)      run the daemon in the foreground
+        build                send a build to a running daemon
+
+    Switches:
+        --socket PATH        socket to listen on / connect to
+
+    Set IYI_DAEMON_SOCKET and an ordinary `#{@program_name} build`
+    is served by that daemon too, falling back to a normal build if it is
+    not there.
+    USAGE
+  end
+
+  # --- Socket Path Length Guard ---
+
+  # The path is checked here, before the exec, and without consuming the
+  # option: `start` hands `--socket` to the server it execs, so the server
+  # needs it, and the guard below runs too late to be the thing the user
+  # reads. Crystal's `UNIXAddress` raises about a file the author never
+  # opened, which is the message this exists to replace.
+  def check_socket_path_length : Nil
+    @options.each_with_index do |opt, i|
+      next unless opt == "--socket"
+      path = @options[i + 1]?
+      next unless path
+      limit = MAX_PATH_SIZE
+      next unless path.bytesize > limit
+      abort "the socket path is #{path.bytesize} bytes and the kernel takes " \
+            "#{limit}: #{path}. A unix socket's path is a fixed field in " \
+            "`sockaddr_un`, so this is the machine's limit rather than " \
+            "this compiler's. Pass a shorter `--socket`, or set TMPDIR to " \
+            "a shorter directory and let the default sit under it",
+        Exit::FAILURE
+    end
+  end
+
+  # --- Socket Path Selection ---
+
+  # `--socket` comes through here. Scans options for `--socket`, extracts and deletes it,
+  # or falls back to the default socket under the cache directory.
+  # Checks the path against the kernel limit and aborts if it is too long.
+  def daemon_socket_path : String
+    path = nil
+    i = 0
+    while i < @options.size
+      if @options[i] == "--socket"
+        if i + 1 < @options.size
+          path = @options[i + 1]
+          @options.delete_at(i)
+          @options.delete_at(i)
+          break
+        end
+      end
+      i = i + 1
+    end
+
+    path ||= BuildDaemon.file_join(effective_cache_dir, "daemon.sock")
+
+    limit = MAX_PATH_SIZE
+    if path.bytesize > limit
+      abort "the socket path is #{path.bytesize} bytes and the kernel takes " \
+            "#{limit}: #{path}. A unix socket's path is a fixed field in " \
+            "`sockaddr_un`, so this is the machine's limit rather than " \
+            "this compiler's. Pass a shorter `--socket`, or set TMPDIR to " \
+            "a shorter directory and let the default sit under it",
+        Exit::FAILURE
+    end
+
+    path
+  end
+
+  # --- Socket from Environment ---
+
+  # Lets `iyi build` go through a daemon without the user retyping the
+  # command: set IYI_DAEMON_SOCKET and ordinary builds are served by it.
+  #
+  # Opt-in, and it falls back to building normally when nothing is listening —
+  # with a line saying so, because a daemon that quietly died should not look
+  # like a daemon that is working.
+  def daemon_socket_from_env(env_socket : String? = nil) : String?
+    socket = env_socket || @daemon_socket || resolve_env("DAEMON_SOCKET")
+    return nil if socket.nil? || socket.empty?
+
+    unless File.exists?(socket)
+      print_error "#{@program_name}: no daemon at #{socket}, building without it"
+      return nil
+    end
+
+    socket
+  end
+
+  # --- Exec Server / Candidate Search ---
+
+  # Hands the server over to the single-threaded daemon binary.
+  def daemon_exec_server : Nil
+    check_socket_path_length
+    return if @exit_code
+
+    # An explicit override is authoritative. Falling back to some other binary
+    # because the named one is missing would run a build against a compiler the
+    # user did not ask for, and say nothing about it.
+    override = @daemon_override || resolve_env("DAEMON")
+    if override && !override.empty?
+      unless is_file?(override)
+        print_error "IYI_DAEMON points at #{override}, which is not a file"
+        exit 1
+        return
+      end
+      args = ["daemon", "start"]
+      @options.each { |opt| args << opt }
+      exec_process(override, args)
+      return
+    end
+
+    server_name = "#{@program_name}-daemon"
+
+    candidates = [] of String
+    if exe = effective_executable_path
+      candidates << BuildDaemon.file_join(BuildDaemon.file_dirname(exe), server_name)
+    end
+    candidates << BuildDaemon.file_join(".build", server_name)
+
+    found_server = nil
+    candidates.each do |candidate|
+      if is_file?(candidate)
+        found_server = candidate
+        break
+      end
+    end
+
+    if server = found_server
+      args = ["daemon", "start"]
+      @options.each { |opt| args << opt }
+      exec_process(server, args)
+      return
+    end
+
+    looked_in = candidates.map { |candidate| "    #{candidate}" }.join("\n")
+    print_error "The build daemon needs a single-threaded compiler, and none was found.\n\nBuild one with:\n    make #{server_name}\n\nLooked in:\n#{looked_in}\n\nSet IYI_DAEMON to point at it directly."
+    exit 1
+  end
+
+  def exec_process(server : String, args : Array(String)) : Nil
+    if @mock_exec
+      @executed_process = server
+      @executed_args = args
+      exit 0
+    else
+      {% if flag?(:darwin) || flag?(:linux) %}
+        args_ptrs = Pointer(Pointer(UInt8)).malloc((args.size + 2).to_u64)
+        args_ptrs[0] = server.to_unsafe
+        args.each_with_index { |a, i| args_ptrs[i + 1] = a.to_unsafe }
+        args_ptrs[args.size + 1] = Pointer(UInt8).new(0_u64)
+        LibC.execvp(server.to_unsafe, args_ptrs)
+        @executed_process = server
+        @executed_args = args
+        exit 0
+      {% else %}
+        @executed_process = server
+        @executed_args = args
+        exit 0
+      {% end %}
+    end
+  end
+
+  # --- Daemon Identity ---
+
+  # Identifies the running server's own executable, so a rebuild is noticed.
+  # The version string alone cannot see it: two builds of the same commit
+  # describe themselves identically, and during development that is the normal
+  # case rather than the exception.
+  def daemon_identity(executable : String? = nil) : String
+    exe = executable || effective_executable_path
+    return "an unknown build" if exe.nil? || exe.empty?
+    return "a deleted build" unless File.exists?(exe)
+
+    {% if flag?(:darwin) %}
+      stat_buf = uninitialized LibC::Stat
+      ret = LibC.stat(exe.to_unsafe, pointerof(stat_buf))
+      return "a deleted build" if ret != 0
+      ns = stat_buf.st_mtimespec.tv_sec.to_i64 * 1_000_000_000_i64 + stat_buf.st_mtimespec.tv_nsec.to_i64
+      "#{stat_buf.st_size}:#{ns}"
+    {% elsif flag?(:linux) %}
+      stat_buf = uninitialized LibC::Stat
+      ret = LibC.stat(exe.to_unsafe, pointerof(stat_buf))
+      return "a deleted build" if ret != 0
+      ns = stat_buf.st_mtime.tv_sec.to_i64 * 1_000_000_000_i64 + stat_buf.st_mtime.tv_nsec.to_i64
+      "#{stat_buf.st_size}:#{ns}"
+    {% else %}
+      "a deleted build"
+    {% end %}
+  end
+
+  # --- Framing Protocol Helpers ---
+
+  def self.write_frame(io : IyiIO, kind : UInt8, bytes : Bytes) : Nil
+    b = kind
+    io.write(pointerof(b), 1)
+    write_u32_le(io, bytes.size)
+    io.write(bytes.to_unsafe, bytes.size)
+    io.flush
+  end
+
+  def self.write_refusal(io : IyiIO, message : String) : Nil
+    message.each_line do |line|
+      write_frame(io, DAEMON_FRAME_STDERR, "#{line}\n".to_slice)
+    end
+    b = DAEMON_FRAME_EXIT
+    io.write(pointerof(b), 1)
+    write_u32_le(io, 1)
+    io.flush
+  end
+
+  def self.write_u32_le(io : IyiIO, val : Int32) : Nil
+    buf = Pointer(UInt8).malloc(4_u64)
+    v = val.to_u64
+    buf[0] = (v & 0xff_u64).to_u8
+    buf[1] = ((v.unsafe_shr(8_u64)) & 0xff_u64).to_u8
+    buf[2] = ((v.unsafe_shr(16_u64)) & 0xff_u64).to_u8
+    buf[3] = ((v.unsafe_shr(24_u64)) & 0xff_u64).to_u8
+    io.write(buf, 4)
+  end
+
+  def self.read_u32_le(io : IyiIO) : Int32
+    s = io.read_bytes(4)
+    return 0 if s.bytesize < 4
+    buf = s.to_unsafe
+    b0 = buf[0].to_i64
+    b1 = buf[1].to_i64 << 8
+    b2 = buf[2].to_i64 << 16
+    b3 = buf[3].to_i64 << 24
+    (b0 | b1 | b2 | b3).to_i32
+  end
+
+  # --- Build / Client Execution ---
+
+  # Returns only when *fallback* is set and no daemon answered; otherwise it
+  # runs the build to completion and exits with the daemon's status.
+  def daemon_build(path : String? = nil, fallback : Bool = false) : Nil
+    socket_path = path || daemon_socket_path
+    return if @exit_code
+
+    client = connect_unix(socket_path)
+    unless client
+      if fallback
+        print_error "#{@program_name}: daemon at #{socket_path} did not answer, building without it"
+        return
+      end
+      abort "no daemon listening on #{socket_path} (start one with `#{@program_name} daemon start`)", Exit::FAILURE
+      return
+    end
+
+    # The child runs a full command line, so put back the subcommand this one
+    # consumed: `crystal daemon build -o x y.cr` is `crystal build -o x y.cr`.
+    json_payload = JSON.build do |json|
+      json.object do
+        json.field("cwd", BuildDaemon.current_dir)
+        json.field("args") do
+          json.array do
+            json.string("build")
+            @options.each { |opt| json.string(opt) }
+          end
+        end
+        json.field("version", @version_description)
+      end
+    end
+    bytes = json_payload.to_slice
+    BuildDaemon.write_u32_le(client, bytes.size)
+    client.write(bytes.to_unsafe, bytes.size)
+    client.flush
+
+    loop do
+      kind_s = client.read_bytes(1)
+      break if kind_s.empty?
+      kind_byte = kind_s.to_unsafe[0]
+
+      case kind_byte
+      when DAEMON_FRAME_EXIT
+        ec = BuildDaemon.read_u32_le(client)
+        exit(ec)
+        client.close
+        return
+      when DAEMON_FRAME_STDOUT, DAEMON_FRAME_STDERR
+        size = BuildDaemon.read_u32_le(client)
+        str = client.read_bytes(size)
+        if kind_byte == DAEMON_FRAME_STDOUT
+          print(str)
+        else
+          print_error(str)
+        end
+      else
+        abort "daemon sent an unknown frame #{kind_byte}", Exit::SOFTWARE_ERROR
+        client.close
+        return
+      end
+    end
+
+    abort "daemon closed the connection without reporting a result", Exit::SOFTWARE_ERROR
+    client.close
+  end
+
+  # --- Start / Server Execution ---
+
+  def daemon_start : Nil
+    daemon_exec_server
+  end
+
+  # Refuses a connection if the daemon executable has been rebuilt or if client version mismatches
+  def check_identity_and_version(started_identity : String, request_version : String?, client_io : IyiIO) : Bool
+    current_id = daemon_identity
+    if current_id != started_identity
+      exe_name = effective_executable_path || "the compiler"
+      msg = "The build daemon started before #{exe_name} was rebuilt,\nso it would compile this with the old one. Restart the daemon."
+      BuildDaemon.write_refusal(client_io, msg)
+      return false
+    end
+
+    if request_version && request_version != @version_description
+      msg = "The build daemon and this client are different compilers.\nDaemon: #{@version_description}\nClient: #{request_version}"
+      BuildDaemon.write_refusal(client_io, msg)
+      return false
+    end
+
+    true
+  end
+
+  # Refuses a client connection with a formatted error message
+  def daemon_refuse(client : IyiIO, message : String) : Nil
+    BuildDaemon.write_refusal(client, message)
+  end
+
+  # Reads a 4-byte size-prefixed JSON request from a client connection
+  def daemon_read_request(client : IyiIO) : JSON::Any
+    size = BuildDaemon.read_u32_le(client)
+    str = client.read_bytes(size)
+    JSON.parse(str)
+  end
+
+  # Completes a build by sending the exit frame and closing the connection
+  def daemon_finish(build : DaemonBuild, exit_code : Int32 = 0) : Bool
+    if client = build.client
+      begin
+        client.write_byte(DAEMON_FRAME_EXIT)
+        BuildDaemon.write_u32_le(client, exit_code)
+        client.flush
+      rescue
+      end
+      client.close
+    end
+    exit_code == 0
+  end
+
+  # --- Helpers ---
+
+  def connect_unix(path : String) : IyiIO?
+    fd = LibC.socket(1, 1, 0)
+    return nil if fd < 0
+
+    ret = -1
+    {% if flag?(:darwin) %}
+      buf = uninitialized UInt8[106]
+      ptr = pointerof(buf).as(UInt8*)
+      ptr[0] = 106_u8
+      ptr[1] = 1_u8
+      i = 0
+      while i < path.bytesize && i < 103
+        ptr[2 + i] = path.to_unsafe[i]
+        i = i + 1
+      end
+      ptr[2 + i] = 0_u8
+      ret = LibC.connect(fd, ptr, 106_u32)
+    {% else %}
+      buf = uninitialized UInt8[110]
+      ptr = pointerof(buf).as(UInt8*)
+      ptr[0] = 1_u8
+      ptr[1] = 0_u8
+      i = 0
+      while i < path.bytesize && i < 107
+        ptr[2 + i] = path.to_unsafe[i]
+        i = i + 1
+      end
+      ptr[2 + i] = 0_u8
+      ret = LibC.connect(fd, ptr, 110_u32)
+    {% end %}
+
+    if ret < 0
+      LibC.close(fd)
+      return nil
+    end
+    IyiIO.new(fd)
+  end
+
+  def effective_cache_dir : String
+    if dir = @cache_dir
+      return dir
+    end
+    if c = resolve_env("CACHE_DIR")
+      return c
+    end
+    if xdg = Program.env("XDG_CACHE_HOME")
+      return BuildDaemon.file_join(xdg, "iyi")
+    end
+    if home = Program.env("HOME")
+      return BuildDaemon.file_join(BuildDaemon.file_join(home, ".cache"), "iyi")
+    end
+    ".iyi"
+  end
+
+  def effective_executable_path : String?
+    if exe = @executable_path
+      return exe
+    end
+    BuildDaemon.system_executable_path
+  end
+
+  def self.file_join(a : String, b : String) : String
+    if a.ends_with?("/")
+      "#{a}#{b}"
+    else
+      "#{a}/#{b}"
+    end
+  end
+
+  def self.file_dirname(path : String) : String
+    idx = path.rindex('/')
+    if idx
+      if idx == 0
+        "/"
+      else
+        path[0, idx]
+      end
+    else
+      "."
+    end
+  end
+
+  def self.current_dir : String
+    buf = uninitialized UInt8[1024]
+    res = LibC.getcwd(pointerof(buf).as(UInt8*), 1024_u64)
+    return "." unless res
+    len = 0
+    while pointerof(buf).as(UInt8*)[len] != 0_u8
+      len = len + 1
+    end
+    String.new(len) { |dst| dst.copy_from(pointerof(buf).as(UInt8*), len) }
+  end
+
+  def self.system_executable_path : String?
+    {% if flag?(:darwin) %}
+      buf = uninitialized UInt8[1024]
+      size = 1024_u32
+      ret = LibC._NSGetExecutablePath(pointerof(buf).as(UInt8*), pointerof(size))
+      return nil if ret != 0
+      res = uninitialized UInt8[1024]
+      r = LibC.realpath(pointerof(buf).as(UInt8*), pointerof(res).as(UInt8*))
+      return nil unless r
+      len = 0
+      while pointerof(res).as(UInt8*)[len] != 0_u8
+        len = len + 1
+      end
+      String.new(len) { |dst| dst.copy_from(pointerof(res).as(UInt8*), len) }
+    {% elsif flag?(:linux) %}
+      buf = uninitialized UInt8[1024]
+      len = LibC.readlink("/proc/self/exe".to_unsafe, pointerof(buf).as(UInt8*), 1024_u64)
+      return nil if len <= 0
+      String.new(len.to_i32) { |dst| dst.copy_from(pointerof(buf).as(UInt8*), len.to_i32) }
+    {% else %}
+      nil
+    {% end %}
+  end
+
+  def is_file?(path : String) : Bool
+    stat_buf = uninitialized LibC::Stat
+    ret = LibC.stat(path.to_unsafe, pointerof(stat_buf))
+    return false if ret != 0
+    {% if flag?(:darwin) %}
+      (stat_buf.st_mode_nlink & 0xF000) == 0x8000
+    {% elsif flag?(:linux) %}
+      (stat_buf.st_mode & 0xF000_u32) == 0x8000_u32
+    {% else %}
+      File.exists?(path)
+    {% end %}
+  end
+
+  def resolve_env(name : String) : String?
+    Program.env("IYI_#{name}") || Program.env("CRYSTAL_#{name}")
+  end
+
+  def format_result : String
+    sb = OutputBuffer.new
+    if ec = @exit_code
+      sb.puts("exit: #{ec}")
+    end
+    if exec_proc = @executed_process
+      args_s = (@executed_args || [] of String).inspect
+      sb.puts("exec: #{exec_proc} #{args_s}")
+    end
+    out_s = @stdout.to_s.strip
+    err_s = @stderr.to_s.strip
+    combined = if !out_s.empty? && !err_s.empty?
+                 "#{out_s}\n#{err_s}"
+               elsif !out_s.empty?
+                 out_s
+               else
+                 err_s
+               end.strip
+    if !combined.empty?
+      sb.puts("output:")
+      sb.puts(combined)
+    end
+    sb.to_s
+  end
+
+  def self.mkdir(path : String) : Nil
+    LibC.mkdir(path.to_unsafe, 0o755)
+  end
+end
+
+lib LibC
+  struct Timespec
+    tv_sec : Int64
+    tv_nsec : Int64
+  end
+
+  {% if flag?(:darwin) %}
+    struct Stat
+      st_dev : Int32
+      st_mode_nlink : Int32
+      st_ino : UInt64
+      st_uid : Int32
+      st_gid : Int32
+      st_rdev : Int32
+      st_pad : Int32
+      st_atimespec : Timespec
+      st_mtimespec : Timespec
+      st_ctimespec : Timespec
+      st_birthtimespec : Timespec
+      st_size : Int64
+      st_blocks : Int64
+      st_blksize : Int32
+      st_flags : Int32
+      st_gen : Int32
+      st_lspare : Int32
+      st_qspare0 : Int64
+      st_qspare1 : Int64
+    end
+
+    fun stat(path : UInt8*, buf : Stat*) : Int32
+    fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
+    fun realpath(path : UInt8*, resolved_path : UInt8*) : UInt8*
+  {% elsif flag?(:linux) %}
+    struct Stat
+      st_dev : UInt64
+      st_ino : UInt64
+      st_nlink : UInt64
+      st_mode : UInt32
+      st_uid : UInt32
+      st_gid : UInt32
+      __pad0 : Int32
+      st_rdev : UInt64
+      st_size : Int64
+      st_blksize : Int64
+      st_blocks : Int64
+      st_atime : Timespec
+      st_mtime : Timespec
+      st_ctime : Timespec
+      __glibc_reserved : Int64[3]
+    end
+
+    fun stat(path : UInt8*, buf : Stat*) : Int32
+    fun readlink(path : UInt8*, buf : UInt8*, bufsiz : UInt64) : Int64
+  {% end %}
+
+  fun socket(domain : Int32, type : Int32, protocol : Int32) : Int32
+  fun connect(fd : Int32, addr : UInt8*, len : UInt32) : Int32
+  fun close(fd : Int32) : Int32
+  fun execvp(file : UInt8*, argv : Pointer(UInt8)*) : Int32
+  fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+  fun mkdir(path : UInt8*, mode : Int32) : Int32
+end

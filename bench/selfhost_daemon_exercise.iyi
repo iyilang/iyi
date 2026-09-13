@@ -1,0 +1,310 @@
+# Dumps what the ported build daemon decides for a corpus of environments
+# and argument vectors: socket path selection, over-limit refusal, candidate
+# search order, identity calculation, and error text.
+#
+# Compared against the shipped daemon in bench/selfhost_daemon_exercise.sh.
+
+import compiler/command/daemon
+import compiler/command/driver
+
+using compiler/command/daemon::{BuildDaemon, DaemonBuild, DAEMON_FRAME_EXIT, DAEMON_FRAME_STDOUT, DAEMON_FRAME_STDERR, MAX_PATH_SIZE}
+using compiler/command/driver::{OutputBuffer, Exit}
+
+module BenchSelfhostDaemonExercise
+  def self.run_case(name : String, & : -> Nil) : Nil
+    puts "=== CASE: #{name} ==="
+    yield
+  end
+
+  def self.dump_frames(file_path : String) : Nil
+    File.open(file_path, "r") do |io|
+      loop do
+        k_str = io.read_bytes(1)
+        break if k_str.empty?
+        kind = k_str.to_unsafe[0].to_i32
+        if kind == DAEMON_FRAME_EXIT.to_i32
+          ec = BuildDaemon.read_u32_le(io)
+          puts "FRAME EXIT: #{ec}"
+          break
+        elsif kind == DAEMON_FRAME_STDOUT.to_i32 || kind == DAEMON_FRAME_STDERR.to_i32
+          sz = BuildDaemon.read_u32_le(io)
+          text = io.read_bytes(sz)
+          kind_name = (kind == DAEMON_FRAME_STDOUT.to_i32 ? "STDOUT" : "STDERR")
+          puts "FRAME #{kind_name} (#{sz} bytes):"
+          print text
+        else
+          puts "FRAME UNKNOWN: #{kind}"
+          break
+        end
+      end
+    end
+  end
+
+  def self.run(work_dir : String) : Nil
+    # 1. Subcommand dispatch & usage
+    run_case("subcommand_default_start") do
+      d = BuildDaemon.new([] of String, program_name: "iyi", mock_exec: true)
+      d.daemon
+      print d.format_result
+    end
+
+    run_case("subcommand_explicit_start") do
+      d = BuildDaemon.new(["start"], program_name: "iyi", mock_exec: true)
+      d.daemon
+      print d.format_result
+    end
+
+    run_case("subcommand_help_long") do
+      d = BuildDaemon.new(["--help"], program_name: "iyi")
+      d.daemon
+      print d.format_result
+    end
+
+    run_case("subcommand_help_short") do
+      d = BuildDaemon.new(["-h"], program_name: "iyi")
+      d.daemon
+      print d.format_result
+    end
+
+    run_case("subcommand_unknown") do
+      d = BuildDaemon.new(["bogus_cmd"], program_name: "iyi")
+      d.daemon
+      print d.format_result
+    end
+
+    run_case("subcommand_unknown_with_args") do
+      d = BuildDaemon.new(["invalid_sub", "--opt"], program_name: "iyi")
+      d.daemon
+      print d.format_result
+    end
+
+    # 2. Socket path selection (daemon_socket_path)
+    run_case("socket_path_default") do
+      cache = BuildDaemon.file_join(work_dir, "cache")
+      d = BuildDaemon.new(["start"], cache_dir: cache)
+      path = d.daemon_socket_path
+      puts "selected: #{path}"
+      puts "remaining options: #{d.options.inspect}"
+      print d.format_result
+    end
+
+    run_case("socket_path_explicit") do
+      sock = BuildDaemon.file_join(work_dir, "custom.sock")
+      d = BuildDaemon.new(["start", "--socket", sock])
+      path = d.daemon_socket_path
+      puts "selected: #{path}"
+      puts "remaining options: #{d.options.inspect}"
+      print d.format_result
+    end
+
+    run_case("socket_path_mixed_options") do
+      sock = BuildDaemon.file_join(work_dir, "mixed.sock")
+      d = BuildDaemon.new(["build", "-o", "out", "app.iyi", "--socket", sock])
+      path = d.daemon_socket_path
+      puts "selected: #{path}"
+      puts "remaining options: #{d.options.inspect}"
+      print d.format_result
+    end
+
+    run_case("socket_path_leading_flag") do
+      sock = BuildDaemon.file_join(work_dir, "leading.sock")
+      d = BuildDaemon.new(["--socket", sock, "start"])
+      path = d.daemon_socket_path
+      puts "selected: #{path}"
+      puts "remaining options: #{d.options.inspect}"
+      print d.format_result
+    end
+
+    # 3. Socket path length check & over-limit refusal
+    run_case("socket_path_exact_limit") do
+      # Make path exact limit length (103 on Darwin, 107 on Linux)
+      base = BuildDaemon.file_join(work_dir, "s")
+      pad = MAX_PATH_SIZE - base.bytesize
+      pad = 0 if pad < 0
+      exact_path = "#{base}#{"a" * pad}"
+      d = BuildDaemon.new(["start", "--socket", exact_path])
+      d.check_socket_path_length
+      puts "length: #{exact_path.bytesize} / #{MAX_PATH_SIZE}"
+      print d.format_result
+    end
+
+    run_case("socket_path_over_limit_by_one") do
+      base = BuildDaemon.file_join(work_dir, "s")
+      pad = MAX_PATH_SIZE - base.bytesize + 1
+      over_path = "#{base}#{"b" * pad}"
+      d = BuildDaemon.new(["start", "--socket", over_path])
+      d.check_socket_path_length
+      print d.format_result
+    end
+
+    run_case("socket_path_way_over_limit") do
+      over_path = "#{work_dir}/#{"x" * 150}"
+      d = BuildDaemon.new(["build", "--socket", over_path, "main.iyi"])
+      d.daemon_socket_path
+      print d.format_result
+    end
+
+    run_case("socket_path_default_over_limit") do
+      long_cache = "#{work_dir}/#{"c" * 120}"
+      d = BuildDaemon.new(["start"], cache_dir: long_cache)
+      d.daemon_socket_path
+      print d.format_result
+    end
+
+    # 4. Socket from Environment (daemon_socket_from_env)
+    run_case("socket_from_env_unset") do
+      d = BuildDaemon.new(program_name: "iyi")
+      res = d.daemon_socket_from_env("")
+      puts "result: #{res ? res : "nil"}"
+      print d.format_result
+    end
+
+    run_case("socket_from_env_nonexistent") do
+      nonexistent = BuildDaemon.file_join(work_dir, "missing.sock")
+      d = BuildDaemon.new(program_name: "iyi")
+      res = d.daemon_socket_from_env(nonexistent)
+      puts "result: #{res ? res : "nil"}"
+      print d.format_result
+    end
+
+    run_case("socket_from_env_existing") do
+      existing = BuildDaemon.file_join(work_dir, "existing.sock")
+      File.write(existing, "")
+      d = BuildDaemon.new(program_name: "iyi")
+      res = d.daemon_socket_from_env(existing)
+      puts "result: #{res ? res : "nil"}"
+      print d.format_result
+    end
+
+    # 5. Candidate Search Order (daemon_exec_server)
+    run_case("exec_server_override_nonexistent") do
+      d = BuildDaemon.new(["start"], program_name: "iyi", daemon_override: "/nonexistent/fake-daemon")
+      d.daemon_exec_server
+      print d.format_result
+    end
+
+    run_case("exec_server_override_existing") do
+      override = BuildDaemon.file_join(work_dir, "custom-bin")
+      File.write(override, "#!/bin/sh\n")
+      d = BuildDaemon.new(["start", "--socket", "custom.sock"], program_name: "iyi", daemon_override: override, mock_exec: true)
+      d.daemon_exec_server
+      print d.format_result
+    end
+
+    run_case("exec_server_candidate_adjacent") do
+      bin_dir = BuildDaemon.file_join(work_dir, "bin_adj")
+      BuildDaemon.mkdir(bin_dir)
+      candidate1 = BuildDaemon.file_join(bin_dir, "iyi-daemon")
+      File.write(candidate1, "#!/bin/sh\n")
+      fake_exe = BuildDaemon.file_join(bin_dir, "iyi")
+      File.write(fake_exe, "#!/bin/sh\n")
+      d = BuildDaemon.new(["start"], program_name: "iyi", executable_path: fake_exe, mock_exec: true)
+      d.daemon_exec_server
+      print d.format_result
+    end
+
+    run_case("exec_server_candidate_dot_build") do
+      bin_dir = BuildDaemon.file_join(work_dir, "bin_build")
+      BuildDaemon.mkdir(bin_dir)
+      fake_exe = BuildDaemon.file_join(bin_dir, "iyi")
+      File.write(fake_exe, "#!/bin/sh\n")
+      dot_build = ".build"
+      candidate2 = BuildDaemon.file_join(dot_build, "iyi-daemon")
+      File.write(candidate2, "#!/bin/sh\n")
+      d = BuildDaemon.new(["start"], program_name: "iyi", executable_path: fake_exe, mock_exec: true)
+      d.daemon_exec_server
+      print d.format_result
+      File.delete(candidate2)
+    end
+
+    run_case("exec_server_none_found") do
+      bin_dir = BuildDaemon.file_join(work_dir, "bin_none")
+      BuildDaemon.mkdir(bin_dir)
+      fake_exe = BuildDaemon.file_join(bin_dir, "iyi")
+      File.write(fake_exe, "#!/bin/sh\n")
+      d = BuildDaemon.new(["start"], program_name: "iyi", executable_path: fake_exe, mock_exec: true)
+      d.daemon_exec_server
+      print d.format_result
+    end
+
+    run_case("exec_server_socket_too_long") do
+      over_path = "#{work_dir}/#{"y" * 150}"
+      d = BuildDaemon.new(["start", "--socket", over_path], program_name: "iyi")
+      d.daemon_exec_server
+      print d.format_result
+    end
+
+    # 6. Daemon Identity (daemon_identity)
+    run_case("identity_unknown") do
+      d = BuildDaemon.new(executable_path: "")
+      puts "identity: #{d.daemon_identity("")}"
+      print d.format_result
+    end
+
+    run_case("identity_deleted") do
+      d = BuildDaemon.new(executable_path: "/nonexistent/deleted_file")
+      puts "identity: #{d.daemon_identity}"
+      print d.format_result
+    end
+
+    run_case("identity_existing") do
+      id_file = BuildDaemon.file_join(work_dir, "ident_file")
+      File.write(id_file, "compiler binary payload\n")
+      d = BuildDaemon.new(executable_path: id_file)
+      id = d.daemon_identity
+      # Check size prefix and non-empty mtime ns
+      idx = id.index(':')
+      if idx
+        size_s = id[0, idx]
+        puts "identity size prefix: #{size_s}"
+        puts "identity has ns: #{id.bytesize > idx + 5}"
+      else
+        puts "identity: #{id}"
+      end
+      print d.format_result
+    end
+
+    # 7. Build Connection Failures (daemon_build)
+    run_case("build_connect_failure_no_fallback") do
+      missing_sock = BuildDaemon.file_join(work_dir, "absent_daemon.sock")
+      d = BuildDaemon.new(["build", "test.iyi", "--socket", missing_sock], program_name: "iyi")
+      d.daemon_build(missing_sock, fallback: false)
+      print d.format_result
+    end
+
+    run_case("build_connect_failure_with_fallback") do
+      missing_sock = BuildDaemon.file_join(work_dir, "absent_daemon.sock")
+      d = BuildDaemon.new(["build", "test.iyi", "--socket", missing_sock], program_name: "iyi")
+      d.daemon_build(missing_sock, fallback: true)
+      print d.format_result
+    end
+
+    # 8. Framing and Refusal Messages
+    run_case("refusal_identity_mismatch") do
+      fake_exe = BuildDaemon.file_join(work_dir, "iyi_ident_mismatch")
+      d = BuildDaemon.new(program_name: "iyi", executable_path: fake_exe)
+      refusal_file = BuildDaemon.file_join(work_dir, "refusal1.out")
+      File.open(refusal_file, "w") do |io|
+        d.check_identity_and_version("old_identity:123", "iyi 0.12.0", io)
+      end
+      dump_frames(refusal_file)
+      print d.format_result
+    end
+
+    run_case("refusal_version_mismatch") do
+      id_file = BuildDaemon.file_join(work_dir, "ident_v")
+      File.write(id_file, "abc")
+      d = BuildDaemon.new(program_name: "iyi", executable_path: id_file, version_description: "iyi 0.12.0")
+      curr_id = d.daemon_identity
+      refusal_file = BuildDaemon.file_join(work_dir, "refusal2.out")
+      File.open(refusal_file, "w") do |io|
+        d.check_identity_and_version(curr_id, "other-compiler 0.1.0", io)
+      end
+      dump_frames(refusal_file)
+      print d.format_result
+    end
+  end
+end
+
+work = Program.args.empty? ? "/tmp" : Program.args[0]
+BenchSelfhostDaemonExercise.run(work)

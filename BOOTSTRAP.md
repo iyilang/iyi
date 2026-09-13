@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **110,105 lines of Crystal and 34,730 lines of iyi**. The
+`src/compiler` is **110,105 lines of Crystal and 35,814 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type
@@ -24,7 +24,7 @@ bindings, and the first slice of code generation:
 | `syntax/ast.iyi`, `visitor.iyi`, `transformer.iyi` | 7,202 | `bench/selfhost_ast_exercise.sh`, five guarded mutation proofs |
 | `syntax/parser.iyi` (no macros) | 4,072 | `bench/selfhost_parser_exercise.sh`: 24 fixtures, 1,609 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
-| `semantic/top_level.iyi`, `semantic/main_visitor.iyi`, `semantic/recursive_struct_checker.iyi` | 2,705 | `bench/selfhost_semantic_exercise.sh`: 37 fixtures (9 declaration fixtures, 39 declarations; 7 typed expression fixtures, 173 typed nodes; 21 error fixtures rejected with identical errors), thirteen guarded mutation proofs. Top-level declarations, method bodies, instance variable type inference across a type, class variable initializers, and recursive struct check |
+| `semantic/top_level.iyi`, `semantic/main_visitor.iyi`, `semantic/recursive_struct_checker.iyi` | 2,996 | `bench/selfhost_semantic_exercise.sh`: 42 fixtures (9 declaration fixtures, 39 declarations; 10 typed expression fixtures, 312 typed nodes; 23 error fixtures rejected with identical errors), sixteen guarded mutation proofs. Top-level declarations, method bodies, instance variable type inference across a type, class variable initializers, recursive struct check, overload resolution by argument types with specificity ranking and autocast ambiguity detection, multiple dispatch over union receivers, and block and closure type inference |
 | `types/*.iyi`, `types.iyi` | 2,123 | `bench/selfhost_types_exercise.sh`: 13 fixtures (7 type declaration fixtures, 66 types identical to the Crystal front end; 6 error fixtures rejected with identical errors), six guarded mutation proofs. Type hierarchy extensions, virtual types and virtual metaclasses, generic class/module/trait instances, tuples, named tuples, procs, pointers, static arrays, union classification and unification, type filtering and is_a? narrowing, type restrictions, and type rendering with full options |
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
 | `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
@@ -51,8 +51,9 @@ is ported and the gate can drive the real one.
 
 What is **not** in iyi: semantic analysis beyond the top-level declaration,
 expression and method body typing passes, instance and class variable type
-inference, and recursive struct check (overload resolution and multiple
-dispatch, block and closure type inference, exception handling typing),
+inference, recursive struct check, overload resolution, multiple dispatch,
+and block and closure type inference (first-class captured proc values and
+exception handling typing),
 TypeNode inspection in macros, and codegen beyond the fun, struct, class,
 virtual dispatch, nilable and block inlining slices (full proc closures,
 exceptions, generics, and the GC interface). That is the

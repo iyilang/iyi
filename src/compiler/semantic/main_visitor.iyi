@@ -7,7 +7,7 @@ import compiler/syntax/visitor
 import compiler/semantic/top_level
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, ProcNotation, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/visitor::{Visitor}
 using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaTypeVar, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
@@ -21,6 +21,8 @@ pub class MainVisitor < Visitor
   property call_target_defs : NodeMap(Def)
   property current_def : Def?
   property current_call_block : Block?
+  property current_block_context_vars : Hash(String, Type)?
+  property current_yield_nodes : Array(Yield)?
 
   def initialize(@program : SemanticProgram)
     @current_type = @program
@@ -30,6 +32,8 @@ pub class MainVisitor < Visitor
     @call_target_defs = NodeMap(Def).new
     @current_def = nil
     @current_call_block = nil
+    @current_block_context_vars = nil
+    @current_yield_nodes = nil
   end
 
   def set_type(node : ASTNode, type : Type) : Type
@@ -472,20 +476,35 @@ pub class MainVisitor < Visitor
   end
 
   def visit(node : Yield) : Bool
+    if yn = @current_yield_nodes
+      yn << node
+    end
     node.exps.each do |exp|
       exp.accept(self)
     end
 
     if blk = @current_call_block
       old_vars = @vars
-      blk_vars = @vars.dup
+      old_scope = @scope
+      blk_vars = if ctx = @current_block_context_vars
+                   ctx.dup
+                 else
+                   @vars.dup
+                 end
+
       i = 0
       while i < blk.args.size
         b_arg = blk.args[i]
         if i < node.exps.size
           arg_t = type_of(node.exps[i])
-          blk_vars[b_arg.name] = arg_t
-          set_type(b_arg, arg_t)
+          current_arg_t = type_of?(b_arg)
+          new_arg_t = if cat = current_arg_t
+                        @program.type_merge(cat, arg_t)
+                      else
+                        arg_t
+                      end
+          blk_vars[b_arg.name] = new_arg_t
+          set_type(b_arg, new_arg_t)
         end
         i = i + 1
       end
@@ -496,7 +515,32 @@ pub class MainVisitor < Visitor
       set_type(blk, blk_type)
       set_type(node, blk_type)
 
+      if ctx = @current_block_context_vars
+        ctx.keys.each do |k|
+          if new_v = @vars[k]?
+            ctx[k] = new_v
+          end
+        end
+      end
+
+      if cd = @current_def
+        if ba = cd.block_arg
+          if r = ba.restriction
+            if r.is_a?(ProcNotation)
+              pn = r.as(ProcNotation)
+              if out_node = pn.output
+                expected_ret = @program.lookup_type_node(out_node, @current_type)
+                unless blk_type.subtype_of?(expected_ret)
+                  raise("expected block to return #{expected_ret.full_name}, not #{blk_type.full_name}")
+                end
+              end
+            end
+          end
+        end
+      end
+
       @vars = old_vars
+      @scope = old_scope
     else
       set_type(node, @program.nil_type)
     end
@@ -559,14 +603,108 @@ pub class MainVisitor < Visitor
     count
   end
 
+  def def_more_specific?(d1 : Def, d2 : Def, args : Array(ASTNode)) : Bool
+    has_strict = false
+    i = 0
+    while i < args.size
+      p1 = d1.args[i]
+      p2 = d2.args[i]
+      t1 = if r1 = p1.restriction
+             @program.lookup_type_node(r1, @current_type)
+           else
+             @program.object_type
+           end
+      t2 = if r2 = p2.restriction
+             @program.lookup_type_node(r2, @current_type)
+           else
+             @program.object_type
+           end
+
+      unless t1.subtype_of?(t2)
+        return false
+      end
+      if t1 != t2
+        has_strict = true
+      end
+      i = i + 1
+    end
+    has_strict
+  end
+
+  def filter_most_specific_overloads(candidates : Array(Def), args : Array(ASTNode)) : Array(Def)
+    if candidates.size <= 1
+      return candidates
+    end
+
+    most_specific = [] of Def
+    candidates.each do |cand|
+      subsumed = false
+      candidates.each do |other|
+        if cand != other && def_more_specific?(other, cand, args)
+          subsumed = true
+          break
+        end
+      end
+      unless subsumed
+        most_specific << cand
+      end
+    end
+
+    if most_specific.empty?
+      candidates
+    else
+      most_specific
+    end
+  end
+
+  def number_literal_matches_type?(literal : NumberLiteral, target_type : Type) : Bool
+    t_name = target_type.full_name
+    if t_name == "Number" || t_name == "Value" || t_name == "Object"
+      return true
+    end
+
+    if target_type.is_a?(UnionType)
+      return target_type.as(UnionType).union_types.any? { |ut| number_literal_matches_type?(literal, ut) }
+    end
+
+    val = literal.value.to_i?
+    return false if val.nil?
+    v = val.as(Int32)
+    case t_name
+    when "Int8"
+      v >= -128 && v <= 127
+    when "UInt8"
+      v >= 0 && v <= 255
+    when "Int16"
+      v >= -32768 && v <= 32767
+    when "UInt16"
+      v >= 0 && v <= 65535
+    when "Int32"
+      true
+    when "UInt32"
+      v >= 0
+    when "Int64", "UInt64", "Int128", "UInt128"
+      v >= 0 || t_name.starts_with?("Int")
+    when "Float32", "Float64"
+      true
+    else
+      false
+    end
+  end
+
   def lookup_method_matching(rec_type : Type, name : String, args : Array(ASTNode), call_node : Call) : Def
     candidates = [] of Def
     visited = Set(String).new
     collect_candidate_defs(rec_type, name, candidates, visited)
 
     if candidates.empty?
-      if call_node.obj
-        raise("undefined method '#{name}' for #{rec_type.full_name}")
+      if obj_node = call_node.obj
+        obj_t = type_of(obj_node)
+        if obj_t.is_a?(UnionType)
+          raise("undefined method '#{name}' for #{rec_type.full_name} (compile-time type is #{obj_t.full_name})")
+        else
+          raise("undefined method '#{name}' for #{rec_type.full_name}")
+        end
       else
         scope_name = if rec_type.is_a?(SemanticProgram)
                        "top-level"
@@ -601,8 +739,8 @@ pub class MainVisitor < Visitor
       raise("wrong number of arguments for '#{method_disp}' (given #{args.size}, expected #{expected_str})\n#{overloads_str}")
     end
 
-    # 2. Check argument type restrictions
-    type_matches = [] of Def
+    # 2. Check exact / subtype argument matches
+    exact_matches = [] of Def
     count_matches.each do |d|
       all_args_match = true
       i = 0
@@ -619,44 +757,117 @@ pub class MainVisitor < Visitor
         i = i + 1
       end
       if all_args_match
-        type_matches << d
+        exact_matches << d
       end
     end
 
-    if type_matches.size > 0
-      return type_matches.first
+    if exact_matches.size > 0
+      most_specific = filter_most_specific_overloads(exact_matches, args)
+      return most_specific.first
     end
 
-    # Type mismatch error reporting
-    mismatch_idx = 0
-    expected_types_list = [] of String
+    # 3. Check autocast matches for literals
+    has_literal_arg = args.any? { |a| a.is_a?(NumberLiteral) }
+    if has_literal_arg
+      autocast_matches = [] of Def
+      autocast_types = [] of String
+      count_matches.each do |d|
+        all_match = true
+        matched_t_name = ""
+        i = 0
+        while i < args.size
+          arg = args[i]
+          arg_t = type_of(arg)
+          param = d.args[i]
+          if r = param.restriction
+            expected_t = @program.lookup_type_node(r, @current_type)
+            if arg_t.subtype_of?(expected_t)
+              # exact subtype match
+            elsif arg.is_a?(NumberLiteral) && number_literal_matches_type?(arg.as(NumberLiteral), expected_t)
+              matched_t_name = expected_t.full_name
+            else
+              all_match = false
+              break
+            end
+          end
+          i = i + 1
+        end
+        if all_match
+          autocast_matches << d
+          autocast_types << matched_t_name
+        end
+      end
+
+      if autocast_matches.size > 1
+        lit_val = ""
+        args.each do |a|
+          if a.is_a?(NumberLiteral)
+            lit_val = a.as(NumberLiteral).value
+            break
+          end
+        end
+        uniq_types = [] of String
+        autocast_types.each do |tn|
+          unless tn.empty? || uniq_types.includes?(tn)
+            uniq_types << tn
+          end
+        end
+        raise("ambiguous call, implicit cast of #{lit_val} matches all of #{uniq_types.join(", ")}")
+      elsif autocast_matches.size == 1
+        return autocast_matches.first
+      end
+    end
+
+    # 4. Error reporting for no matching overload
+    all_same_mismatch = true
+    mismatch_idx = -1
     count_matches.each do |d|
+      first_mismatch = -1
       i = 0
       while i < args.size
-        arg_type = type_of(args[i])
+        arg_t = type_of(args[i])
         param = d.args[i]
         if r = param.restriction
           exp_t = @program.lookup_type_node(r, @current_type)
-          unless arg_type.subtype_of?(exp_t)
-            mismatch_idx = i
-            expected_types_list << exp_t.full_name
+          unless arg_t.subtype_of?(exp_t)
+            first_mismatch = i
             break
           end
         end
         i = i + 1
       end
+      if mismatch_idx == -1
+        mismatch_idx = first_mismatch
+      elsif mismatch_idx != first_mismatch
+        all_same_mismatch = false
+      end
     end
 
-    uniq_exp = [] of String
-    expected_types_list.each do |en|
-      uniq_exp << en unless uniq_exp.includes?(en)
-    end
-    expected_types_str = uniq_exp.join(" or ")
-    actual_type_str = type_of(args[mismatch_idx]).full_name
     method_disp = format_method_display_name(rec_type, name)
     overload_lines = count_matches.map { |d| " - #{format_overload_signature(rec_type, d)}" }
     overloads_str = "Overloads are:\n#{overload_lines.join("\n")}"
-    raise("expected argument ##{mismatch_idx + 1} to '#{method_disp}' to be #{expected_types_str}, not #{actual_type_str}\n\n#{overloads_str}")
+
+    if all_same_mismatch && mismatch_idx != -1
+      expected_types_list = [] of String
+      count_matches.each do |d|
+        param = d.args[mismatch_idx]
+        if r = param.restriction
+          exp_t = @program.lookup_type_node(r, @current_type)
+          expected_types_list << exp_t.full_name
+        end
+      end
+      uniq_exp = [] of String
+      expected_types_list.each do |en|
+        uniq_exp << en unless uniq_exp.includes?(en)
+      end
+      expected_types_str = uniq_exp.join(" or ")
+      actual_type_str = type_of(args[mismatch_idx]).full_name
+      raise("expected argument ##{mismatch_idx + 1} to '#{method_disp}' to be #{expected_types_str}, not #{actual_type_str}\n\n#{overloads_str}")
+    else
+      arg_types_strs = args.map { |a| type_of(a).full_name }
+      plural = (args.size > 1) ? "s" : ""
+      raise("no overload matches '#{method_disp}' with type#{plural} #{arg_types_strs.join(", ")}\n\n#{overloads_str}")
+    end
   end
 
   def type_method_body(target_def : Def, rec_type : Type, args : Array(ASTNode), block : Block?) : Type
@@ -673,6 +884,13 @@ pub class MainVisitor < Visitor
     old_scope = @scope
     old_def = @current_def
     old_block_call = @current_call_block
+    old_block_context_vars = @current_block_context_vars
+    old_yield_nodes = @current_yield_nodes
+
+    if block
+      @current_block_context_vars = @vars.dup
+      @current_yield_nodes = [] of Yield
+    end
 
     new_vars = Hash(String, Type).new
     if rec_type.is_a?(MetaclassType)
@@ -712,10 +930,31 @@ pub class MainVisitor < Visitor
     body.as(ASTNode).accept(self)
     body_type = type_of(body.as(ASTNode))
 
+    if block && (ctx_vars = @current_block_context_vars)
+      ctx_vars.each do |k, new_v|
+        if old_v = old_vars[k]?
+          if old_v != new_v
+            old_vars[k] = @program.type_merge(old_v, new_v)
+          end
+        end
+      end
+    end
+
+    if block
+      final_blk_t = type_of(block)
+      if y_nodes = @current_yield_nodes
+        y_nodes.each do |ynode|
+          set_type(ynode, final_blk_t)
+        end
+      end
+    end
+
     @vars = old_vars
     @scope = old_scope
     @current_def = old_def
     @current_call_block = old_block_call
+    @current_block_context_vars = old_block_context_vars
+    @current_yield_nodes = old_yield_nodes
 
     if rt = target_def.return_type
       declared_ret = @program.lookup_type_node(rt, @current_type)
@@ -763,6 +1002,31 @@ pub class MainVisitor < Visitor
         set_type(node, inst_type)
         return false
       end
+    end
+
+    # Multiple dispatch over a union receiver
+    if rec_type.is_a?(UnionType)
+      union_t = rec_type.as(UnionType)
+      ret_types = [] of Type
+      first_target_def : Def? = nil
+
+      union_t.union_types.each do |ut|
+        target_def = lookup_method_matching(ut, node.name, node.args, node)
+        instantiated_def = target_def.clone
+        ret_t = type_method_body(instantiated_def, ut, node.args, node.block)
+        if first_target_def.nil?
+          first_target_def = instantiated_def
+        end
+        ret_types << ret_t
+      end
+
+      if td = first_target_def
+        @call_target_defs[node] = td
+      end
+
+      merged_ret = @program.type_merge(ret_types)
+      set_type(node, merged_ret)
+      return false
     end
 
     target_def = lookup_method_matching(rec_type, node.name, node.args, node)

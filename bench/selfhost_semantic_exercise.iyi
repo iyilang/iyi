@@ -137,6 +137,27 @@ module BenchSelfhostSemanticExercise
     end
     puts "ok (recursive struct check verified)"
 
+    print "testing overload resolution... "
+    out11 = run_expr_source("def f(x : Int32); 1; end; def f(x : String); 2; end; r1 = f(10); r2 = f(\"a\")")
+    unless out11.includes?("target_def: f: Int32")
+      raise "overload resolution test failed"
+    end
+    puts "ok (overload resolution verified)"
+
+    print "testing multiple dispatch over union receiver... "
+    out12 = run_expr_source("class A; def val : Int32; 10; end; end; class B; def val : String; \"x\"; end; end; x = if true; A.new; else; B.new; end; res = x.val")
+    unless out12.includes?("Call: (Int32 | String)")
+      raise "multiple dispatch test failed"
+    end
+    puts "ok (multiple dispatch over union receiver verified)"
+
+    print "testing block and closure type inference... "
+    out13 = run_expr_source("def run(&); yield 1; yield \"b\"; end; a = 0; run do |x|; a = x; end; final_a = a")
+    unless out13.includes?("Var: (Int32 | String)")
+      raise "block and closure inference test failed"
+    end
+    puts "ok (block and closure type inference verified)"
+
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"
     puts "==============================================================="

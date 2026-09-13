@@ -295,7 +295,7 @@ compare_expr_all() {
   done
   for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     case "$(basename "$err_fixture")" in
-      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*)
+      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*)
         if "$1" "$err_fixture" --expr >/dev/null 2>&1; then
           out_status=1
         fi
@@ -352,8 +352,10 @@ echo "  Parity summary: $((expr_fixture_count - diverged))/$expr_fixture_count t
 
 echo
 echo "== 4. Semantic rejection and error checks"
-err_count=0
+total_err_count=0
+matched_err_count=0
 for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
+  total_err_count=$((total_err_count + 1))
   err_name="bench/fixtures/$(basename "$err_fixture")"
   expected_err=$("$WORK/dump_crystal" "$err_fixture" --expr 2>&1 | grep "^ERROR:" | head -1 | sed 's/^ERROR: //')
   if [ -z "$expected_err" ]; then
@@ -370,7 +372,7 @@ for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     status=1
   elif [ "$expected_err" = "$actual_err" ]; then
     echo "  $err_name: properly rejected ($actual_err)"
-    err_count=$((err_count + 1))
+    matched_err_count=$((matched_err_count + 1))
   else
     echo "  $err_name: ERROR MISMATCH"
     echo "    expected: $expected_err"
@@ -378,7 +380,7 @@ for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     status=1
   fi
 done
-echo "  Parity summary: $((err_count - diverged))/$err_count error fixtures rejected with identical errors"
+echo "  Parity summary: $matched_err_count/$total_err_count error fixtures rejected with identical errors"
 
 prove_decl_mutation() {
   label="$1"
@@ -555,6 +557,21 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_rec_mutation "recursive struct check cycle detection is bypassed" \
   "if target.full_name == current.full_name" \
   "if false && target.full_name == current.full_name"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "overload resolution most specific filter is bypassed" \
+  "most_specific = filter_most_specific_overloads(exact_matches, args)" \
+  "most_specific = exact_matches"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "union receiver multiple dispatch bypasses return type merge" \
+  "merged_ret = @program.type_merge(ret_types)" \
+  "merged_ret = ret_types.first"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "closure variable mutation propagation into enclosing scope is bypassed" \
+  "old_vars[k] = @program.type_merge(old_v, new_v)" \
+  "# old_vars[k] = @program.type_merge(old_v, new_v)"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

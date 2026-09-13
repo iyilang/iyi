@@ -1,0 +1,39 @@
+def process(x : Int32) : Int32
+  x
+end
+
+def process(x : String) : String
+  x
+end
+
+def process(x : Int32, y : Int32) : Int32
+  x
+end
+
+class Animal
+  def speak : String
+    "animal"
+  end
+end
+
+class Dog < Animal
+  def speak : String
+    "woof"
+  end
+end
+
+def identify(a : Animal) : String
+  a.speak
+end
+
+def identify(d : Dog) : String
+  d.speak
+end
+
+r1 = process(10)
+r2 = process("hello")
+r3 = process(1, 2)
+d = Dog.new
+r4 = identify(d)
+a = Animal.new
+r5 = identify(a)

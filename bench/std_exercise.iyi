@@ -418,6 +418,29 @@ assert_true(!list.empty?, "list: empty?")
 assert_eq(list.at(0), 10, "list: at 0")
 assert_eq(list.at(3), 40, "list: at 3")
 assert_eq(list.to_a.size, 4, "list: to_a")
+
+# A `List` is the value SPEC.md III.4.7 hands between tasks, and it answered
+# `Object#==`, which is the constant `false`: `list == list` was false, a
+# list could not be found in a collection of lists, and every `List(Int32)`
+# hashed to the same slot. Both siblings have had element-wise `==` for as
+# long as they have existed.
+same = List.new([10, 20, 30]).appended(40)
+assert_true(list == list, "list: a value equals itself")
+assert_true(list == same, "list: equal elements are one value")
+assert_true(!(list == List.new([10, 20, 30])), "list: different elements differ")
+assert_true([list].includes?(same), "list: findable among lists")
+assert_eq([list, same].uniq.size, 1, "list: uniq folds equal values")
+seen = {} of List(Int32) => String
+seen[list] = "found"
+assert_str(seen[same]? || "missing", "found", "list: a hash key found by value")
+assert_str(List.new([10, 20]).to_s, "List[10, 20]", "list: prints its elements")
+assert_eq(list[0], 10, "list: [] indexes")
+assert_eq(list[-1], 40, "list: [] counts from the end")
+assert_true(list[9]?.nil?, "list: []? answers nil past the end")
+# `Enumerable#join` made the separator mandatory where `Array#join` and
+# `Indexable#join` default it to nothing, so the same call was a compile
+# error on a Slice and a List.
+assert_str(small_seq.join, "314", "enum: join with nothing between")
 puts "== std/derives: Show trait"
 assert_str(s1.show, "Score(10)", "derives: show")
 

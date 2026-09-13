@@ -145,7 +145,7 @@ class String
   # form. *count* stays non-negative: a negative count is not a wrap, it is a
   # mistake, and it raises for that reason rather than being silently clamped.
   def [](start : Int32, count : Int32) : String
-    raise "negative count #{count}" if count < 0
+    raise "negative count: #{count}" if count < 0
     asked = start
     start = @bytesize + start if start < 0
     raise "start #{asked} out of range for a string of #{@bytesize} bytes" if start < 0 || start > @bytesize
@@ -204,7 +204,7 @@ class String
   # multiply below, so the refusal names the string: `"abcd" * 600_000_000`
   # panicked with "arithmetic overflow", which is the machine's adder.
   def *(count : Int32) : String
-    raise "negative count #{count}" if count < 0
+    raise "negative count: #{count}" if count < 0
     return "" if count == 0 || @bytesize == 0
     raise "a string of #{@bytesize} bytes repeated #{count} times is past " \
           "the 2147483647 bytes a string holds" if count > 2147483647 // @bytesize

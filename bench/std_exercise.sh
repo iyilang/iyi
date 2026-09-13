@@ -125,6 +125,59 @@ prove_fails "Enumerable to_h corrupted" no_to_h "enumerable.iyi" "enum: to_h" \
   's/result\[pair\[0\]\] = pair\[1\]/result[pair[0]] = 0/'
 
 echo
+echo "== one mistake, one sentence, whichever tower answers"
+# `first` of an empty receiver, a negative count and a zero step used to be
+# answered by a bare `empty`, by `[]`, and by two different sentences from
+# two towers. A panicking program has no next line to assert on, so these
+# are driven here rather than written into the exercise.
+panics_with() { # panics_with <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  {
+    printf 'module main\n\n'
+    printf 'import std/list\nusing std/list::{List}\n'
+    printf 'import std/enumerable\nusing std/enumerable::{Enumerable}\n'
+    printf 'import std/iterator\nusing std/iterator::{Iterator, ArrayIterator}\n\n'
+    printf 'puts (%s).to_s\n' "$expression"
+  } > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of panicking"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: panicked, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits 1 at "%s"\n' "$label" \
+    "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+
+panics_with "first of an empty list" first_empty "first of an empty collection" \
+  'List(Int32).new([] of Int32).first'
+panics_with "a negative count taken" take_negative "negative count: -1" \
+  'List(Int32).new([1, 2, 3]).take(-1)'
+panics_with "a negative count skipped" skip_negative "negative count: -1" \
+  'List(Int32).new([1, 2, 3]).skip(-1)'
+panics_with "a negative count, lazily" iter_take_negative "negative count: -1" \
+  'ArrayIterator(Int32).new([1, 2, 3]).take(-1).to_a'
+panics_with "a step of nothing" step_zero "step size must be positive" \
+  'ArrayIterator(Int32).new([1, 2, 3]).step(0).to_a'
+panics_with "a step of nothing, eagerly" each_step_zero "step size must be positive" \
+  'List(Int32).new([1, 2, 3]).each_step(0) { |x| x }'
+panics_with "an index past a list" list_index "index 7 out of range for 3 elements" \
+  'List(Int32).new([1, 2, 3])[7]'
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

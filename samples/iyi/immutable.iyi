@@ -102,8 +102,8 @@ puts "two elem types  #{nums.map { |x| x + 1 }.join(",")} / #{words.map { |s| s.
 # This file is the hard case for R-1's contract, not `modules.iyi`: what has to
 # survive the round trip is a generic struct, a 575-line trait with an
 # associated type, and a generic impl that answers it. `mod dump --declarations
-# /tmp/mods/std/list.iyimod` is what the second build reads — the six headers
-# with no bodies, and `impl … for Std::List::List(T) forall T` with its
+# /tmp/mods/std/list.iyimod` is what the second build reads — the twelve
+# headers with no bodies, and `impl … for Std::List::List(T) forall T` with its
 # `type Elem = T`. Every call above is checked against those and against
 # nothing else (SPEC.md IV.1f).
 #

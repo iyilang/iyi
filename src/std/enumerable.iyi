@@ -152,7 +152,7 @@ pub trait Enumerable
 
   def first : Elem
     each { |e| return e }
-    raise "empty"
+    raise "first of an empty collection"
   end
 
   # ---- transforming --------------------------------------------------------
@@ -208,6 +208,12 @@ pub trait Enumerable
   end
 
   def take(n : Int32) : Array(Elem)
+    # A negative prefix is not a prefix. `result.size >= n` holds before the
+    # first element for any negative `n`, so the unchecked form answered `[]`
+    # where `Array#first(-1)` and `Slice.new(-1)` refuse. `first(n)` forwards
+    # here, so this is the one place that has to say so. Zero still answers
+    # `[]`: an empty prefix is a real answer to a real question.
+    raise "negative count: #{n}" if n < 0
     result = [] of Elem
     each do |e|
       return result if result.size >= n
@@ -217,6 +223,9 @@ pub trait Enumerable
   end
 
   def skip(n : Int32) : Array(Elem)
+    # Dropping a negative number of elements is the same mistake as taking one,
+    # and the unchecked form hid it by answering with everything.
+    raise "negative count: #{n}" if n < 0
     result = [] of Elem
     i = 0
     each do |e|
@@ -266,7 +275,12 @@ pub trait Enumerable
     obj
   end
 
-  def join(separator : String) : String
+  # The separator defaults to nothing, the way `Array#join` (src/iyi/array.iyi)
+  # and `Indexable#join` already default it: a name shared with Crystal means
+  # the same thing here (SPEC.md III.1.7a), and `slice.join` has to compile
+  # where `array.join` does. A mandatory separator made the arity of one name
+  # depend on which tower the receiver came from.
+  def join(separator : String = "") : String
     result = ""
     first = true
     each do |e|
@@ -301,7 +315,7 @@ pub trait Enumerable
   def max : Elem where Elem : Cmp
     found = max?
     return found unless found.nil?
-    raise "empty"
+    raise "max of an empty collection"
   end
 
   def min? : Elem? where Elem : Cmp
@@ -316,7 +330,7 @@ pub trait Enumerable
   def min : Elem where Elem : Cmp
     found = min?
     return found unless found.nil?
-    raise "empty"
+    raise "min of an empty collection"
   end
 
   def sum : Elem where Elem : Num
@@ -360,7 +374,7 @@ pub trait Enumerable
   def max_by(& : Elem -> U) : Elem forall U : Cmp
     found = max_by? { |e| yield e }
     return found unless found.nil?
-    raise "empty"
+    raise "max_by of an empty collection"
   end
 
   def group_by(& : Elem -> U) : Hash(U, Array(Elem)) forall U : Hashable
@@ -554,7 +568,7 @@ pub trait Enumerable
   def min_by(& : Elem -> U) : Elem forall U : Cmp
     found = min_by? { |e| yield e }
     return found unless found.nil?
-    raise "empty"
+    raise "min_by of an empty collection"
   end
 
   def max_of?(& : Elem -> U) : U? forall U : Cmp
@@ -570,7 +584,7 @@ pub trait Enumerable
   def max_of(& : Elem -> U) : U forall U : Cmp
     found = max_of? { |e| yield e }
     return found unless found.nil?
-    raise "empty"
+    raise "max_of of an empty collection"
   end
 
   def min_of?(& : Elem -> U) : U? forall U : Cmp
@@ -586,7 +600,7 @@ pub trait Enumerable
   def min_of(& : Elem -> U) : U forall U : Cmp
     found = min_of? { |e| yield e }
     return found unless found.nil?
-    raise "empty"
+    raise "min_of of an empty collection"
   end
 
   def minmax? : Tuple(Elem?, Elem?) where Elem : Cmp
@@ -595,9 +609,16 @@ pub trait Enumerable
     {low, high}
   end
 
+  # Refuses under its own name rather than letting `min`'s refusal surface
+  # from a call the reader never wrote: `minmax` of an empty collection is
+  # `minmax`'s mistake, not `min`'s.
   def minmax : Tuple(Elem, Elem) where Elem : Cmp
-    low = min
-    high = max
+    pair = minmax?
+    low = pair[0]
+    high = pair[1]
+    if low.nil? || high.nil?
+      raise "minmax of an empty collection"
+    end
     {low, high}
   end
 
@@ -627,7 +648,7 @@ pub trait Enumerable
     low = pair[0]
     high = pair[1]
     if low.nil? || high.nil?
-      raise "empty"
+      raise "minmax_by of an empty collection"
     end
     {low, high}
   end
@@ -654,7 +675,7 @@ pub trait Enumerable
     low = pair[0]
     high = pair[1]
     if low.nil? || high.nil?
-      raise "empty"
+      raise "minmax_of of an empty collection"
     end
     {low, high}
   end

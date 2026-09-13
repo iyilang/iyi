@@ -4,6 +4,43 @@
 
 ### Fixed
 
+- **A `List` was not equal to itself.** `List` is the shareable value of
+  SPEC.md III.4.7 — the thing handed between tasks — and it had no `==`, so
+  `Object`'s answered: the constant `false`. `list == list` was **false**,
+  `[list].includes?(list)` was false, `uniq` folded nothing, and every
+  `List(Int32)` hashed to its type id, so a `Hash` keyed by lists put them
+  all in one slot. This is the defect the prelude already diagnosed and
+  fixed for `Tuple`, one library up, written out at `object.iyi:111-120`.
+  `List` now has element-wise `==`, a `hash` that mixes its elements the
+  way `Indexable#hash` does, a `to_s` that prints them (it printed
+  `Std::List::List(Int32)`), and `[]`/`[]?` beside the `at` it had — it was
+  the one sequence in the library that could not be indexed with brackets
+  or asked for an element that might not be there. `Slice` had the other
+  half of the pair: element-wise `==` since it was written, and no `hash`
+  to follow it.
+- **One mistake, six sentences.** Asking an empty collection for its first
+  element panicked with `first of an empty array` (Array), `first of an
+  empty collection` (Indexable) or the bare word `empty` (Enumerable and
+  Iterator, where `max`, `min`, `max_by`, `min_by`, `minmax` and their
+  `_of` and `_by` siblings all raised the same unattributable word). An
+  index past the end said `index 5 out of range for 3 elements` (Array),
+  `index out of bounds: 5 for size 3` (Slice) or `index out of range`
+  (Indexable — naming neither the index nor the size, the one message the
+  mistake could not be read from). A negative count was refused by
+  `Array#first(n)` and answered with `[]` by `Enumerable#take`, which is
+  what `first(n)` forwards to. A zero step said `step size must be
+  positive` from `Enumerable` and `step size must be >= 1` from inside an
+  iterator adaptor the caller never named — the leftover of the
+  `each_slice(0)` sweep two entries down. Each of those is now one
+  sentence, the same one, from whichever tower answers, and `step` refuses
+  at the door the way its neighbours do. `Slice` also called a negative
+  count "out of bounds" and printed an exclusive range as an inclusive one
+  (`0...9` reported as `0..9`, in the one message whose whole subject is
+  the difference), and `Enumerable#join` made the separator mandatory where
+  `Array#join` and `Indexable#join` default it, so `slice.join` was a
+  compile error. Gates: eleven assertions and seven panics across
+  `bench/std_exercise.{iyi,sh}`, and the slice gate's two pinned bounds
+  phrases moved to the wording the three sequences now share.
 - **A refusal that escaped its own handler.** `Command#run`'s `rescue ex :
   IO::Error` clause turned EPIPE into a clean exit and `raise ex`'d
   everything else — and a `raise` inside a rescue clause is not caught by

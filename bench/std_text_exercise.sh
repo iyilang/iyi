@@ -222,10 +222,10 @@ panics_with() { # panics_with <label> <name> <phrase> <expression>
     "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
 }
 
-panics_with "a negative repeat" mul_negative "negative count -3" '"ab" * -3'
+panics_with "a negative repeat" mul_negative "negative count: -3" '"ab" * -3'
 panics_with "a repeat that does not fit" mul_overflow \
   "past the 2147483647 bytes a string holds" '"abcd" * 600_000_000'
-panics_with "a negative slice count" slice_negative "negative count -1" '"abc"[0, -1]'
+panics_with "a negative slice count" slice_negative "negative count: -1" '"abc"[0, -1]'
 panics_with "an index past the end" index_past \
   "out of range for a string of 3 bytes" '"abc"[9]'
 echo

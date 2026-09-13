@@ -43,8 +43,44 @@ pub struct List(T)
     @items.empty?
   end
 
-  def at(index : Int32) : T
+  # ---- indexing ------------------------------------------------------------
+
+  # Indexed with `[]`, because every other sequence here is — `Slice`
+  # (std/slice.iyi:107), the prelude's `Array` (src/iyi/array.iyi:78) and
+  # everything under `Indexable` (std/indexable.iyi:75) — and III.1.7a says a
+  # name shared with Crystal means the same thing here. A negative index
+  # counts from the end, so `list[-1]` is the last element; that rule was
+  # already true through the backing array and unwritten, which is worse than
+  # either answer.
+  #
+  # The out-of-range sentence is raised here rather than left to the store.
+  # The array's wording is the right wording — it names the index asked for
+  # and how many elements there are, and names no receiver, so there is
+  # nothing in it about an array the caller never handed over — but a message
+  # this type promises is this file's, not one inherited by accident from a
+  # field nobody can see.
+  def [](index : Int32) : T
+    asked = index
+    index = @items.size + index if index < 0
+    raise "index #{asked} out of range for #{@items.size} elements" if index < 0 || index >= @items.size
     @items[index]
+  end
+
+  # The nilable partner, which is the one question `[]` cannot answer: "the
+  # element there, or nothing". Without it every caller probing a list past
+  # its end rewrites the bounds rule above by hand against `size`, and two
+  # copies of a rule is one too many.
+  def []?(index : Int32) : T?
+    index = @items.size + index if index < 0
+    return nil if index < 0 || index >= @items.size
+    @items[index]
+  end
+
+  # `at` is the name this file had before `[]`, and samples/iyi/immutable.iyi
+  # is written in it. It stays, spelled out, and delegates — so both names
+  # exist but only one bounds rule does.
+  def at(index : Int32) : T
+    self[index]
   end
 
   # Every operation that would change a sequence returns a new one instead, so
@@ -62,6 +98,85 @@ pub struct List(T)
     copy = @items.dup
     other.each { |x| copy << x }
     List(T).new(copy)
+  end
+
+  # ---- value ---------------------------------------------------------------
+
+  # Two lists are the same value when they hold the same elements in the same
+  # order, which is the whole of what a list is. Until this method, the one
+  # answering was `Object#==` (src/iyi/object.iyi:37-39), the constant
+  # `false` — not even reflexive, so `list == list` was false too, and every
+  # collection that asks said no: `includes?`, `index` and `uniq` all go
+  # through `==`, a list could never be found in a `Hash`, and a `case` over
+  # a list matched no `when`, because a `when` is `===` and `===` is `==`.
+  # That is the failure object.iyi:111-120 wrote up for `Tuple`, reproduced
+  # by the one type III.4.7 added for handing a value between tasks — where
+  # comparing what two tasks produced is the point.
+  #
+  # Sizes first, because that is the cheap half of the answer. No shared-store
+  # fast path like `Slice#same?`: the constructor copies, so two lists never
+  # share a store, and the comparison would pay for every call to fire only
+  # when a list is compared with itself.
+  #
+  # Restricted to `List(T)`, so a list of another element type is unequal by
+  # the prelude's default rather than a compile error — the reasoning
+  # object.iyi:119-120 gives for restricting `Tuple#==` to its own shape.
+  def ==(other : List(T)) : Bool
+    return false if @items.size != other.size
+    i = 0
+    while i < @items.size
+      return false unless @items[i] == other.at(i)
+      i = i + 1
+    end
+    true
+  end
+
+  # Hashing follows equality, or the agreement above buys nothing: a `Hash`
+  # finds a key by its slot first and compares second, so two equal lists in
+  # different slots are still two keys. `Object#hash` answered with the type
+  # id — every `List(Int32)` in one slot, "correct and useless" in exactly
+  # the way object.iyi:20-23 says of a key type that never said how it
+  # hashes.
+  #
+  # Same seed and same mixing as `Indexable#hash` (std/indexable.iyi:384),
+  # wrapping `&*` and `&+` included: that comment records what the checked
+  # operators cost — "arithmetic overflow" as soon as a collection was long
+  # enough for `31 * h` to leave `Int32` — and a hash is a number modulo the
+  # word and nothing else. Sharing the mixing has a second effect worth
+  # having: a list and the array it was built from land in the same slot.
+  def hash : Int32
+    h = @items.size
+    i = 0
+    while i < @items.size
+      h = (31 &* h) &+ @items[i].hash
+      i = i + 1
+    end
+    h
+  end
+
+  # A list prints its elements, like both of its siblings: `Slice[10, 20, 30]`
+  # and the array's `[10, 20, 30]`. Inherited, it printed
+  # `Std::List::List(Int32)`, which object.iyi:7-8 calls what "a value that
+  # has said nothing about itself can honestly print" — and a sequence has
+  # plenty to say, so the default was the type failing to answer.
+  #
+  # The elements are *inspected* rather than printed, which is `Slice#to_s`'s
+  # reasoning (std/slice.iyi:353-364): a list of strings reads back as
+  # `List["pear", "fig"]`, telling a reader the elements are strings, where
+  # printing them loses that with no way to get it back.
+  def to_s : String
+    items = [] of String
+    @items.each { |value| items << value.inspect }
+    "List[" + items.join(", ") + "]"
+  end
+
+  # Written down the same way it prints, because a list has no second form:
+  # the elements inside it are already inspected. Stated rather than left to
+  # `Object#inspect` so it is in this module's exported surface, which is
+  # what a list nested in another collection is asked for — `List[List[1]]`
+  # rather than a type name — and it is how `Slice` states it too.
+  def inspect : String
+    to_s
   end
 end
 

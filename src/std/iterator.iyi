@@ -92,6 +92,10 @@ pub trait Iterator
   end
 
   def take(n : Int32) : TakeIterator(self, Elem)
+    # Refused at the door, where the caller can see it: a negative prefix is
+    # not a prefix, and `Enumerable#take` refuses it in the same words.
+    # Zero still yields nothing, which is what an empty prefix is.
+    raise "negative count: #{n}" if n < 0
     TakeIterator(self, Elem).new(self, n)
   end
 
@@ -104,6 +108,7 @@ pub trait Iterator
   end
 
   def skip(n : Int32) : SkipIterator(self, Elem)
+    raise "negative count: #{n}" if n < 0
     SkipIterator(self, Elem).new(self, n)
   end
 
@@ -157,6 +162,11 @@ pub trait Iterator
   end
 
   def step(n : Int32) : StepIterator(self, Elem)
+    # Refused at the door, the way `each_slice` and `each_cons` above refuse
+    # it, and in the sentence `Enumerable#each_step` uses. `StepIterator` also
+    # refused a zero step, but from a struct the caller never named and with
+    # different words, so the same mistake read as two.
+    raise "step size must be positive" if n <= 0
     StepIterator(self, Elem).new(self, n)
   end
 
@@ -245,7 +255,7 @@ pub trait Iterator
   def first : Elem
     item = self.next
     return item unless item.nil?
-    raise "empty"
+    raise "first of an empty collection"
   end
 
   def max : Elem where Elem : Cmp
@@ -256,7 +266,7 @@ pub trait Iterator
     end
     found = best
     return found unless found.nil?
-    raise "empty"
+    raise "max of an empty collection"
   end
 
   def min : Elem where Elem : Cmp
@@ -267,7 +277,7 @@ pub trait Iterator
     end
     found = best
     return found unless found.nil?
-    raise "empty"
+    raise "min of an empty collection"
   end
 
   def sum : Elem where Elem : Num
@@ -907,7 +917,6 @@ end
 
 pub struct StepIterator(I, T)
   def initialize(@iter : I, @by : Int32)
-    raise "step size must be >= 1" if @by < 1
     @first = true
   end
 

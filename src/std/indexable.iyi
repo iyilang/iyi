@@ -71,10 +71,16 @@ pub trait Indexable
   # ---- indexing ------------------------------------------------------------
 
   # Returns the element at the given index. Negative indices count from the
-  # end, so `a[-1]` returns the last element. Raises when index is out of bounds.
+  # end, so `a[-1]` returns the last element. Raises when index is out of
+  # bounds, naming the index as it was written and the size there was:
+  # `index out of range` on its own told a caller with a computed index
+  # nothing it did not already know, and it was the one message of the three
+  # sequences give from which the mistake could not be read. The wording is
+  # `Array`'s (src/iyi/array.iyi), because one mistake gets one sentence.
   def [](index : Int32) : Elem
+    asked = index
     index = size + index if index < 0
-    raise "index out of range" if index < 0 || index >= size
+    raise "index #{asked} out of range for #{size} elements" if index < 0 || index >= size
     unsafe_fetch(index)
   end
 

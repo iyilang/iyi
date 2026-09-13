@@ -345,7 +345,7 @@ class Array(T)
   # The first `n`, or all of them when there are fewer: a prefix, not a
   # question, so it never panics.
   def first(n : Int32) : Array(T)
-    raise "negative count" if n < 0
+    raise "negative count: #{n}" if n < 0
     count = n < @size ? n : @size
     result = Array(T).new(count)
     index = 0

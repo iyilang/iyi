@@ -128,13 +128,16 @@ EOF
   echo "  probe $label: panicked as expected ($expected_phrase)"
 }
 
+# The wording is `Array`'s, and deliberately: the same mistake on an Array,
+# a Slice, a List and anything `Indexable` used to give three different
+# sentences, and the trait's own named neither the index nor the size.
 prove_panic "oob_positive" \
   's = Slice(Int32).new(5, 1); x = s[10]' \
-  "index out of bounds: 10 for size 5"
+  "index 10 out of range for 5 elements"
 
 prove_panic "oob_negative" \
   's = Slice(Int32).new(5, 1); x = s[-10]' \
-  "index out of bounds: -10 for size 5"
+  "index -10 out of range for 5 elements"
 
 prove_panic "bad_copy_length" \
   'src = Slice(Int32).new(5, 1); dst = Slice(Int32).new(2, 0); src.copy_to(dst)' \

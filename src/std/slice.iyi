@@ -103,10 +103,13 @@ pub struct Slice(T)
     @pointer[index] = value
   end
 
-  # Element access with bounds checking. Supports negative indices counting from the end.
+  # Element access with bounds checking. A negative index counts from the end,
+  # so `s[-1]` is the last element; the message names the index as typed rather
+  # than the wrapped one, and words it exactly as `Array#[]` and
+  # `Indexable#[]` do — the same mistake reads the same way in all three.
   def [](index : Int32) : T
     actual = index < 0 ? index + @size : index
-    raise "index out of bounds: #{index} for size #{@size}" if actual < 0 || actual >= @size
+    raise "index #{index} out of range for #{@size} elements" if actual < 0 || actual >= @size
     @pointer[actual]
   end
 
@@ -121,7 +124,7 @@ pub struct Slice(T)
   def []=(index : Int32, value : T) : T
     raise "cannot write to read-only Slice" if @read_only
     actual = index < 0 ? index + @size : index
-    raise "index out of bounds: #{index} for size #{@size}" if actual < 0 || actual >= @size
+    raise "index #{index} out of range for #{@size} elements" if actual < 0 || actual >= @size
     @pointer[actual] = value
   end
 
@@ -133,6 +136,11 @@ pub struct Slice(T)
 
   # Returns a subslice of *count* elements starting at *start*.
   def [](start : Int32, count : Int32) : Slice(T)
+    # `[]?` tells the two mistakes apart and then answers nil for both, so a
+    # negative count has to be refused by name here, before the nil becomes a
+    # sentence about bounds: in `s[0, -1]` the start is in range and the size
+    # is irrelevant, and a reader sent to check them is sent nowhere.
+    raise "negative count: #{count}" if count < 0
     self[start, count]? || raise "subslice out of bounds: start #{start}, count #{count} for size #{@size}"
   end
 
@@ -146,7 +154,13 @@ pub struct Slice(T)
 
   # Returns a subslice covering *range*.
   def [](range : Range(Int32, Int32)) : Slice(T)
-    self[range]? || raise "range out of bounds: #{range.begin}..#{range.end} for size #{@size}"
+    result = self[range]?
+    return result if result
+    # The one message whose whole subject is the difference between the two
+    # forms has to print the form the caller wrote: `s[0...9]` reported
+    # `0..9`, naming ten elements for a request of nine.
+    dots = range.exclusive? ? "..." : ".."
+    raise "range out of bounds: #{range.begin}#{dots}#{range.end} for size #{@size}"
   end
 
   # Returns a subslice covering *range*, or nil if out of bounds.
@@ -255,7 +269,7 @@ pub struct Slice(T)
     raise "cannot write to read-only Slice" if @read_only
     raise "negative count: #{count}" if count < 0
     actual_start = start < 0 ? start + @size : start
-    raise "index out of bounds: start #{start}, count #{count} for size #{@size}" if actual_start < 0 || actual_start > @size || count > (@size - actual_start)
+    raise "subslice out of bounds: start #{start}, count #{count} for size #{@size}" if actual_start < 0 || actual_start > @size || count > (@size - actual_start)
     i = 0
     while i < count
       @pointer[actual_start + i] = value
@@ -280,8 +294,8 @@ pub struct Slice(T)
     raise "cannot write to read-only Slice" if @read_only
     ai = i < 0 ? i + @size : i
     aj = j < 0 ? j + @size : j
-    raise "index out of bounds: #{i} for size #{@size}" if ai < 0 || ai >= @size
-    raise "index out of bounds: #{j} for size #{@size}" if aj < 0 || aj >= @size
+    raise "index #{i} out of range for #{@size} elements" if ai < 0 || ai >= @size
+    raise "index #{j} out of range for #{@size} elements" if aj < 0 || aj >= @size
     tmp = @pointer[ai]
     @pointer[ai] = @pointer[aj]
     @pointer[aj] = tmp
@@ -408,6 +422,24 @@ pub struct Slice(T)
 
   def ==(other) : Bool
     false
+  end
+
+  # And hashing follows equality, or the `==` above buys nothing: a key is
+  # found by its slot first and compared second, so two slices with equal
+  # contents have to land in one slot. `Object#hash` answered the type id,
+  # which put every `Slice(Int32)` in the same slot — correct and useless.
+  #
+  # Wrapping arithmetic, mixed the way `Indexable#hash` mixes: a hash is a
+  # number modulo the word, and written with the checked `*` this panics with
+  # "arithmetic overflow" as soon as `31 * h` leaves `Int32`.
+  def hash : Int32
+    h = @size
+    i = 0
+    while i < @size
+      h = (31 &* h) &+ @pointer[i].hash
+      i = i + 1
+    end
+    h
   end
 end
 

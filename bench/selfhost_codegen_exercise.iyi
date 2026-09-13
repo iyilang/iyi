@@ -88,8 +88,57 @@ module BenchSelfhostCodegenExercise
     mod.data_layout = tm.data_layout
 
     compile_source_to_module(src, fixture_path, ctx, mod)
-    names = fixture_function_names(src, fixture_path)
-    extract_functions_ir(mod, names)
+
+    io = String::Builder.new
+    mod_str = mod.to_s
+
+    # 1. Module-level custom struct / class types
+    types = [] of String
+    mod_str.each_line do |l|
+      stripped = l.strip
+      if stripped.starts_with?("%") && stripped.includes?(" = type ") && !stripped.starts_with?("%Nil")
+        types << stripped
+      end
+    end
+    types.sorted.each do |t|
+      io << t << "\n"
+    end
+
+    # 2. Module-level type ID globals
+    globals = [] of String
+    mod_str.each_line do |l|
+      stripped = l.strip
+      if stripped.starts_with?("@\"") && stripped.includes?(":type_id\"")
+        globals << stripped
+      end
+    end
+    globals.sorted.each do |g|
+      io << g << "\n"
+    end
+
+    # 3. Module-level declarations (e.g. malloc, memset)
+    decls = [] of String
+    mod_str.each_line do |l|
+      stripped = l.strip
+      if stripped.starts_with?("declare ") && (stripped.includes?("@malloc") || stripped.includes?("@llvm.memset"))
+        decls << stripped.split(" #")[0].strip
+      end
+    end
+    decls.sorted.each do |d|
+      io << d << "\n"
+    end
+
+    # 4. All defined functions across the module
+    all_fns = [] of Function
+    mod.functions.each do |fn|
+      next if fn.first_basic_block.nil?
+      all_fns << fn
+    end
+    sorted_fns = all_fns.sorted_by { |f| f.name }
+    names = sorted_fns.map { |f| f.name }
+    io << extract_functions_ir(mod, names)
+
+    io.to_s.strip
   end
 
   def self.compile_and_emit_obj(fixture_path : String, out_obj_path : String) : Nil

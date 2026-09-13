@@ -303,6 +303,7 @@ pub class CodeGenVisitor < Visitor
       end
     end
   end
+
   def get_ptr_val(vname : String) : LLVMValue
     if p = @param_values[vname]?
       p
@@ -312,7 +313,6 @@ pub class CodeGenVisitor < Visitor
       @context.pointer.null
     end
   end
-
 
   def infer_var_type(vname : String, node : ASTNode) : String
     if node.is_a?(TypeDeclaration)
@@ -1074,11 +1074,13 @@ pub class CodeGenVisitor < Visitor
 end
 
 def emit_custom_types_code(cg : CodeGenVisitor) : Nil
+  return if cg.custom_types.empty?
+
   context = cg.context
   mod = cg.mod
   builder = cg.builder
 
-  # 1. Ensure memset and malloc declarations exist
+  # 1. Ensure memset and malloc declarations exist if needed
   memset_fn = if f = mod.get_function?("llvm.memset.p0.i64")
                 f
               else
@@ -1086,13 +1088,17 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
                 mod.add_function("llvm.memset.p0.i64", m_ty)
               end
 
-  malloc_fn = if f = mod.get_function?("malloc")
-                f
+  has_classes = cg.custom_types.values.any? { |info| !info.is_struct }
+  malloc_fn = if has_classes
+                if f = mod.get_function?("malloc")
+                  f
+                else
+                  mal_ty = LLVMType.function([context.int64], context.pointer, false)
+                  mod.add_function("malloc", mal_ty)
+                end
               else
-                mal_ty = LLVMType.function([context.int64], context.pointer, false)
-                mod.add_function("malloc", mal_ty)
+                mod.get_function?("malloc")
               end
-
   # 2. For each custom type, emit initializer, setters, constructor, and methods
   cg.custom_types.each_value do |info|
     st = cg.llvm_struct_types[info.name]
@@ -1109,24 +1115,114 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       init_fn = mod.add_function(init_fn_name, init_fn_ty)
       init_fn.linkage = LibLLVM::Linkage::Internal
 
-      entry_bb = init_fn.append_basic_block("entry")
-      builder.position_at_end(entry_bb)
       self_param = init_fn.param(0)
+      self_param.name = "self"
+      init_def.args.each_with_index do |a, aidx|
+        init_fn.param(aidx + 1).name = a.name
+      end
+      cg.current_fn = init_fn
+      cg.current_self = self_param
+      cg.current_self_type = info.name
 
-      # Store arguments into fields
-      init_def.args.each_with_index do |arg, aidx|
-        param_val = init_fn.param(aidx + 1)
-        if fidx = info.fields[arg.name]?
-          idx = info.is_struct ? fidx : fidx + 1
-          gep = builder.inbounds_gep(st, self_param, [context.int32.const_int(0), context.int32.const_int(idx)])
-          s_inst = builder.store(param_val, gep)
-          s_inst.alignment = 4
+      cg.param_values.clear
+      cg.var_type_names.clear
+      cg.vars.clear
+      excluded_names = Set(String).new
+
+      byval_args = [] of {Int32, Arg, CustomTypeInfo}
+      init_def.args.each_with_index do |a, aidx|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        cg.var_type_names[a.name] = r_name
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          byval_args << {aidx, a, a_info}
+        else
+          cg.param_values[a.name] = init_fn.param(aidx + 1)
+          excluded_names.add(a.name)
         end
       end
 
-      last_arg = init_def.args.last?
-      ret_val = last_arg ? init_fn.param(init_def.args.size) : context.int32.const_int(0)
-      builder.ret(ret_val)
+      m_locals = cg.collect_local_vars(init_def.body, excluded_names)
+      m_locals.each do |vname, vnode|
+        cg.var_type_names[vname] = cg.infer_var_type(vname, vnode)
+      end
+
+      m_struct_calls = cg.collect_struct_calls(init_def.body)
+      cg.struct_call_temps.clear
+      cg.struct_temp_index = 0
+
+      needs_alloca = !m_locals.empty? || !m_struct_calls.empty? || !byval_args.empty?
+      if needs_alloca
+        alloca_bb = init_fn.append_basic_block("alloca")
+        entry_bb = init_fn.append_basic_block("entry")
+        builder.position_at_end(alloca_bb)
+
+        byval_args.each do |tup|
+          _aidx, a, a_info = tup
+          a_st = cg.llvm_struct_types[a_info.name]
+          a_ptr = builder.alloca(a_st, a.name)
+          a_ptr.alignment = 8
+          cg.vars[a.name] = a_ptr
+        end
+
+        m_locals.each do |vname, _|
+          vt = cg.var_type_names[vname]
+          lt = cg.llvm_type_from_name(vt)
+          ptr = builder.alloca(lt, vname)
+          ptr.alignment = cg.align_of_type(vt)
+          cg.vars[vname] = ptr
+        end
+
+        m_struct_calls.each do |sname|
+          s_st = cg.llvm_struct_types[sname]
+          temp_ptr = builder.alloca(s_st, "")
+          temp_ptr.alignment = 8
+          cg.struct_call_temps << temp_ptr
+        end
+
+        builder.br(entry_bb)
+        builder.position_at_end(entry_bb)
+
+        byval_args.each do |tup|
+          aidx, a, _a_info = tup
+          param_val = init_fn.param(aidx + 1)
+          st_inst = builder.store(param_val, cg.vars[a.name])
+          st_inst.alignment = 4
+        end
+      else
+        entry_bb = init_fn.append_basic_block("entry")
+        builder.position_at_end(entry_bb)
+      end
+
+      cg.terminated = false
+      if b = init_def.body
+        b.accept(cg)
+      end
+
+      if init_def.body.nil?
+        init_def.args.each_with_index do |arg, aidx|
+          param_val = init_fn.param(aidx + 1)
+          fname = arg.name.lstrip('@')
+          if fidx = info.fields[fname]?
+            idx = info.is_struct ? fidx : fidx + 1
+            gep = builder.inbounds_gep(st, self_param, [context.int32.const_int(0), context.int32.const_int(idx)])
+            s_inst = builder.store(param_val, gep)
+            s_inst.alignment = 4
+          end
+        end
+      end
+
+      unless cg.terminated
+        if init_ret_ty.void?
+          builder.ret_void
+        elsif l = cg.last
+          builder.ret(l)
+        else
+          last_arg = init_def.args.last?
+          ret_val = last_arg ? init_fn.param(init_def.args.size) : context.int32.const_int(0)
+          builder.ret(ret_val)
+        end
+        cg.terminated = true
+      end
 
       # Emit constructor *Type::new
       ctor_arg_tys = init_def.args.map { |a| cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
@@ -1140,6 +1236,9 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
 
       ctor_fn = mod.add_function(ctor_name, ctor_fn_ty)
       ctor_fn.linkage = LibLLVM::Linkage::Internal
+      init_def.args.each_with_index do |a, aidx|
+        ctor_fn.param(aidx).name = a.name
+      end
 
       ctor_alloca_bb = ctor_fn.append_basic_block("alloca")
       ctor_entry_bb = ctor_fn.append_basic_block("entry")
@@ -1148,14 +1247,14 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       if info.is_struct
         ret_slot = builder.alloca(st, "_")
         ret_slot.alignment = 8
-        zero_slot = builder.alloca(st, "0")
+        zero_slot = builder.alloca(st, "")
         zero_slot.alignment = 8
         builder.br(ctor_entry_bb)
 
         builder.position_at_end(ctor_entry_bb)
         # Compute size = ptrtoint (ptr getelementptr (%Type, ptr null, i32 1) to i64)
         null_ptr = context.pointer.null
-        size_gep = builder.inbounds_gep(st, null_ptr, [context.int32.const_int(1)])
+        size_gep = builder.gep(st, null_ptr, [context.int32.const_int(1)])
         size_val = builder.ptr_to_int(size_gep, context.int64)
 
         # Call memset
@@ -1185,11 +1284,16 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
 
         builder.position_at_end(ctor_entry_bb)
         null_ptr = context.pointer.null
-        size_gep = builder.inbounds_gep(st, null_ptr, [context.int32.const_int(1)])
+        size_gep = builder.gep(st, null_ptr, [context.int32.const_int(1)])
         size_val = builder.ptr_to_int(size_gep, context.int64)
 
         mal_fn_ty = LLVMType.function([context.int64], context.pointer, false)
-        obj_ptr = builder.call(mal_fn_ty, malloc_fn.to_value, [size_val])
+        mal_fn = if m = malloc_fn
+                   m
+                 else
+                   mod.get_function("malloc")
+                 end
+        obj_ptr = builder.call(mal_fn_ty, mal_fn.to_value, [size_val])
 
         m_fn_ty = LLVMType.function([context.pointer, context.int8, context.int64, context.int1], context.void, false)
         builder.call(m_fn_ty, memset_fn.to_value, [obj_ptr, context.int8.const_int(0), size_val, context.int1.const_int(0)])
@@ -1219,6 +1323,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
 
     # Emit setters for fields
     info.fields.each do |fname, fidx|
+      next unless info.methods.has_key?("#{fname}=")
       ftype = info.field_types[fname]
       setter_name = "*#{info.name}##{fname}=<#{ftype}>:#{ftype}"
       setter_fn_ty = LLVMType.function([context.pointer, cg.llvm_type_from_name(ftype)], cg.llvm_type_from_name(ftype), false)
@@ -1228,7 +1333,9 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       s_entry = s_fn.append_basic_block("entry")
       builder.position_at_end(s_entry)
       self_ptr = s_fn.param(0)
+      self_ptr.name = "self"
       val_param = s_fn.param(1)
+      val_param.name = "val"
       idx = info.is_struct ? fidx : fidx + 1
       gep = builder.inbounds_gep(st, self_ptr, [context.int32.const_int(0), context.int32.const_int(idx)])
       st_inst = builder.store(val_param, gep)
@@ -1264,8 +1371,13 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       m_fn.linkage = LibLLVM::Linkage::Internal
 
       cg.current_fn = m_fn
-      cg.current_self = m_fn.param(0)
+      self_param = m_fn.param(0)
+      self_param.name = "self"
+      cg.current_self = self_param
       cg.current_self_type = info.name
+      mdef.args.each_with_index do |a, aidx|
+        m_fn.param(aidx + 1).name = a.name
+      end
 
       # Prepare parameters and local variables
       cg.param_values.clear

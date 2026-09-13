@@ -63,15 +63,44 @@ visitor.finish
 llvm_mod = visitor.modules[""].mod
 
 if mode == "--dump-ir"
-  names = [] of String
-  File.read(fixture).each_line do |line|
-    if line.strip.starts_with?("fun ")
-      names << line.strip.split("(")[0].sub("fun ", "").strip
+  # 1. Module-level custom struct / class types
+  types = [] of String
+  llvm_mod.to_s.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("%") && stripped.includes?(" = type ") && !stripped.starts_with?("%Nil")
+      types << stripped
     end
   end
+  types.sort.each { |t| puts t }
 
-  names.each do |name|
-    fn = llvm_mod.functions[name]
+  # 2. Module-level type ID globals
+  globals = [] of String
+  llvm_mod.to_s.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("@\"") && stripped.includes?(":type_id\"")
+      globals << stripped
+    end
+  end
+  globals.sort.each { |g| puts g }
+
+  # 3. Module-level declarations (e.g. malloc, memset)
+  decls = [] of String
+  llvm_mod.to_s.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("declare ") && (stripped.includes?("@malloc") || stripped.includes?("@llvm.memset"))
+      decls << stripped.split(" #")[0].strip
+    end
+  end
+  decls.sort.each { |d| puts d }
+
+  # 4. All defined functions across the module (constructors, initializers, methods, funs)
+  fns = [] of LLVM::Function
+  llvm_mod.functions.each do |fn|
+    next if fn.basic_blocks.empty?
+    next if fn.name == "__crystal_main"
+    fns << fn
+  end
+  fns.sort_by!(&.name).each do |fn|
     puts fn.to_s
   end
 elsif mode == "--emit-obj"
@@ -86,7 +115,7 @@ LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
 
 normalize_ir() {
   python3 - "$1" <<'PY'
-import sys
+import sys, re
 
 def norm(raw):
     lines = []
@@ -98,6 +127,15 @@ def norm(raw):
             l = l.split(" #")[0].rstrip(" {") + " {"
         if " ; preds =" in l:
             l = l.split(" ; preds =")[0]
+        # Normalize constant type_id initializer value (host numbering differences)
+        if re.match(r'^@"[^"]+:type_id" = internal constant i32 \d+', l):
+            l = re.sub(r'\d+$', '<ID>', l)
+        # Normalize align on memset pointer argument
+        if "call void @llvm.memset.p0.i64" in l:
+            l = re.sub(r'ptr align \d+ %', 'ptr %', l)
+        # Normalize memset declaration parameter attributes
+        if l.startswith("declare void @llvm.memset.p0.i64"):
+            l = re.sub(r'ptr [a-z0-9_\(\)]+', 'ptr', l)
         l = l.rstrip()
         l = l.replace("[ ", "[").replace(" ]", "]")
         lines.append(l)
@@ -109,6 +147,13 @@ PY
 }
 
 echo
+# Widened IR comparison: covers the complete module emission rather than only
+# the fixture's own `fun` declarations. This compares:
+#   1. Defined custom struct and class types (%Type = type { ... })
+#   2. Type ID globals (@"Type:type_id" = internal constant i32 ...)
+#   3. External allocator declarations (@malloc, @llvm.memset)
+#   4. All defined functions across the module: top-level funs, constructors
+#      (*Type::new), initializers (*Type#initialize), and methods (*Type#method).
 echo "== 3. Textual LLVM IR comparison against the Crystal backend being replaced"
 fixture_count=0
 total_functions=0
@@ -234,6 +279,11 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_cg_mutation "corrupt multiplication opcode to addition" "cg_int_arith.iyi" \
   '@last = is_float ? @builder.fmul(lhs, rhs) : @builder.mul(lhs, rhs)' \
   '@last = is_float ? @builder.fadd(lhs, rhs) : @builder.add(lhs, rhs)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt module-level class type_id global" "cg_classes.iyi" \
+  'tid_global = mod.add_global("#{info.name}:type_id", context.int32)' \
+  'tid_global = mod.add_global("#{info.name}:corrupted_type_id", context.int32)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

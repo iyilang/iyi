@@ -842,6 +842,18 @@ pub class Parser < Lexer
           res = parse_iyi_recover(res).at(location)
           next
         end
+        if @token.type == TokenKind::IDENT && @token.value == "as"
+          next_token_skip_space
+          if @token.type == TokenKind::OP_LPAREN
+            next_token_skip_space_or_newline
+            target_type = parse_bare_proc_type
+            skip_space_or_newline
+            check(TokenKind::OP_RPAREN)
+            next_token_skip_space
+            res = Cast.new(res, target_type).at(location)
+            next
+          end
+        end
 
         name = @token.value.empty? ? @token.type.to_s : @token.value
         next_token

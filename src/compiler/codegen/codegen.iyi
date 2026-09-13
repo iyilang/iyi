@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, ClassDef, Def, Expressions, FunDef, Generic, If, InstanceVar, NilLiteral, NumberLiteral, Path, PointerOf, Return, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, Rescue, Return, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -195,6 +195,15 @@ class LocalVarCollector < Visitor
     end
     true
   end
+
+  def visit(node : Rescue) : Bool
+    if n = node.name
+      unless @excluded.includes?(n)
+        @vars[n] ||= node
+      end
+    end
+    true
+  end
 end
 
 class StructCallCollector < Visitor
@@ -258,6 +267,8 @@ pub class CodeGenVisitor < Visitor
   property current_inlined_block : InlinedBlockContext?
   property inlined_block_contexts : Array(InlinedBlockContext)
   property inlined_block_index : Int32
+  property rescue_block : LLVMBasicBlock?
+  property lib_funs : Hash(Tuple(String, String), Tuple(String, LLVMType))
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -280,6 +291,8 @@ pub class CodeGenVisitor < Visitor
     @current_inlined_block = nil
     @inlined_block_contexts = [] of InlinedBlockContext
     @inlined_block_index = 0
+    @rescue_block = nil
+    @lib_funs = Hash(Tuple(String, String), Tuple(String, LLVMType)).new
   end
 
   def llvm_type_from_name(name : String) : LLVMType
@@ -413,6 +426,14 @@ pub class CodeGenVisitor < Visitor
   def infer_var_type(vname : String, node : ASTNode) : String
     if node.is_a?(TypeDeclaration)
       return node.as(TypeDeclaration).declared_type.to_s
+    end
+
+    if node.is_a?(Rescue)
+      if r_types = node.as(Rescue).types
+        return r_types.first.to_s
+      else
+        return "Exception"
+      end
     end
 
     if node.is_a?(Expressions)
@@ -584,6 +605,9 @@ pub class CodeGenVisitor < Visitor
     fn_ty = LLVMType.function(arg_types, ret_type, false)
     @fn_types[node.name] = fn_ty
     fn = @mod.add_function(node.name, fn_ty)
+    if node.name.starts_with?("__crystal_") && node.name != "__crystal_personality"
+      fn.linkage = LibLLVM::Linkage::Internal
+    end
     @current_fn = fn
     @current_fun_def = node
 
@@ -907,8 +931,23 @@ pub class CodeGenVisitor < Visitor
                  cond_raw
                end
     @builder.cond_br(cond_val, then_bb, else_bb)
-    exit_bb = fn.append_basic_block("exit")
 
+    if node.else.nil? || node.else.is_a?(Nop)
+      # then branch
+      @builder.position_at_end(then_bb)
+      @terminated = false
+      node.then.accept(self)
+      unless @terminated
+        @builder.br(else_bb)
+      end
+
+      # Code continues in else_bb
+      @builder.position_at_end(else_bb)
+      @terminated = false
+      return false
+    end
+
+    exit_bb = fn.append_basic_block("exit")
     # then branch
     @builder.position_at_end(then_bb)
     @terminated = false
@@ -970,6 +1009,216 @@ pub class CodeGenVisitor < Visitor
     false
   end
 
+  def ensure_match_function(cname : String) : Function
+    fn_name = "~match<#{cname}+>"
+    if fn = @mod.get_function?(fn_name)
+      return fn
+    end
+    info = @custom_types[cname]
+    fn_ty = LLVMType.function([@context.int32], @context.int1, false)
+    m_match = @mod.add_function(fn_name, fn_ty)
+    m_match.linkage = LibLLVM::Linkage::Internal
+    m_ent = m_match.append_basic_block("entry")
+    m_b = Builder.new(@context)
+    m_b.position_at_end(m_ent)
+    m_arg = m_match.param(0)
+    m_low = @context.int32.const_int(info.min_type_id)
+    m_high = @context.int32.const_int(info.max_type_id)
+    m_sge = m_b.icmp(LibLLVM::IntPredicate::SGE, m_arg, m_low)
+    m_sle = m_b.icmp(LibLLVM::IntPredicate::SLE, m_arg, m_high)
+    m_and = m_b.build_and(m_sge, m_sle)
+    m_b.ret(m_and)
+    m_b.dispose
+    m_match
+  end
+
+  def visit(node : Cast) : Bool
+    node.obj.accept(self)
+    false
+  end
+
+  def visit(node : ExceptionHandler) : Bool
+    cur_fn = if f = @current_fn
+               f
+             else
+               return false
+             end
+    pers_fn = @mod.get_function("__crystal_personality")
+    cur_fn.personality_function = pers_fn.to_value
+    landing_pad_ty = if st = @llvm_struct_types["landing_pad"]?
+                       st
+                     else
+                       lp_st = @context.struct_named("landing_pad")
+                       lp_st.struct_set_body([@context.pointer, @context.int32])
+                       @llvm_struct_types["landing_pad"] = lp_st
+                       lp_st
+                     end
+
+    rescue_block = cur_fn.append_basic_block("rescue")
+    node_rescues = node.rescues
+    node_ensure = node.ensure
+    node_else = node.else
+    rescue_ensure_block = nil
+    if node_ensure && node_rescues
+      rescue_ensure_block = cur_fn.append_basic_block("rescue_ensure")
+    end
+
+    exit_bb = cur_fn.append_basic_block("exit")
+
+    phi_vals = [] of LLVMValue
+    phi_bbs = [] of LLVMBasicBlock
+
+    old_rescue = @rescue_block
+    @rescue_block = rescue_block
+    @terminated = false
+    node.body.accept(self)
+    body_val = @last
+    @rescue_block = old_rescue
+
+    unless @terminated
+      if node_else
+        node_else.accept(self)
+        if l = @last
+          cur_entry = cur_fn.entry_block || exit_bb
+          phi_vals << l
+          phi_bbs << (@builder.insert_block || cur_entry)
+        end
+      else
+        if l = body_val
+          cur_entry = cur_fn.entry_block || exit_bb
+          phi_vals << l
+          phi_bbs << (@builder.insert_block || cur_entry)
+        end
+      end
+      @builder.br(exit_bb)
+    end
+
+    @builder.position_at_end(rescue_block)
+    lp = @builder.landing_pad(landing_pad_ty, pers_fn.to_value, [] of LLVMValue)
+    unwind_ex_obj = @builder.extract_value(lp, 0)
+    exception_type_id = @builder.extract_value(lp, 1)
+
+    get_ex_fn = @mod.get_function("__crystal_get_exception")
+    get_ex_fn_ty = LLVMType.function([@context.pointer], @context.int64, false)
+    caught_ex_u64 = @builder.call(get_ex_fn_ty, get_ex_fn.to_value, [unwind_ex_obj])
+    caught_ex_ptr = @builder.int_to_ptr(caught_ex_u64, @context.pointer)
+
+    if rescues = node_rescues
+      rescues.each_with_index do |a_rescue, r_idx|
+        this_rescue_bb = cur_fn.append_basic_block("this_rescue")
+        next_rescue_bb = cur_fn.append_basic_block("next_rescue")
+
+        if r_types = a_rescue.types
+          cond : LLVMValue? = nil
+          r_types.each do |r_type_node|
+            tname = r_type_node.to_s
+            type_cond = if (c_info = @custom_types[tname]?) && !c_info.subclasses.empty?
+                          m_match_fn = ensure_match_function(tname)
+                          m_match_fn_ty = LLVMType.function([@context.int32], @context.int1, false)
+                          @builder.call(m_match_fn_ty, m_match_fn.to_value, [exception_type_id])
+                        else
+                          tid_global_name = "#{tname}:type_id"
+                          unless @mod.get_global?(tid_global_name)
+                            g = @mod.add_global(tid_global_name, @context.int32)
+                            tid_val = if c_info = @custom_types[tname]?
+                                        c_info.type_id
+                                      else
+                                        0
+                                      end
+                            g.initializer = @context.int32.const_int(tid_val)
+                            g.global_constant = true
+                            g.linkage = LibLLVM::Linkage::Internal
+                          end
+                          g = @mod.get_global(tid_global_name)
+                          l_tid = @builder.load(@context.int32, g)
+                          l_tid.alignment = 4
+                          @builder.icmp(LibLLVM::IntPredicate::EQ, l_tid, exception_type_id)
+                        end
+            cond = if c = cond
+                     @builder.build_or(c, type_cond)
+                   else
+                     type_cond
+                   end
+          end
+          if c = cond
+            @builder.cond_br(c, this_rescue_bb, next_rescue_bb)
+          else
+            @builder.br(this_rescue_bb)
+          end
+        else
+          @builder.br(this_rescue_bb)
+        end
+
+        @builder.position_at_end(this_rescue_bb)
+        if var_name = a_rescue.name
+          if ptr = @vars[var_name]?
+            s_inst = @builder.store(caught_ex_ptr, ptr)
+            s_inst.alignment = 8
+          end
+        end
+
+        old_res = @rescue_block
+        @rescue_block = rescue_ensure_block
+        @terminated = false
+        a_rescue.body.accept(self)
+        @rescue_block = old_res
+
+        unless @terminated
+          if l = @last
+            phi_vals << l
+            phi_bbs << (@builder.insert_block || this_rescue_bb)
+          end
+          @builder.br(exit_bb)
+        end
+
+        @builder.position_at_end(next_rescue_bb)
+      end
+
+      if ens = node_ensure
+        ens.accept(self)
+      end
+      raise_fn = @mod.get_function("__crystal_raise")
+      raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
+      @builder.call(raise_fn_ty, raise_fn.to_value, [unwind_ex_obj])
+      @builder.unreachable
+    else
+      if ens = node_ensure
+        ens.accept(self)
+      end
+      raise_fn = @mod.get_function("__crystal_raise")
+      raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
+      @builder.call(raise_fn_ty, raise_fn.to_value, [unwind_ex_obj])
+      @builder.unreachable
+    end
+
+    if node_ensure && rescue_ensure_block
+      @builder.position_at_end(rescue_ensure_block)
+      re_lp = @builder.landing_pad(landing_pad_ty, pers_fn.to_value, [] of LLVMValue)
+      re_unwind = @builder.extract_value(re_lp, 0)
+      node_ensure.accept(self)
+      raise_fn = @mod.get_function("__crystal_raise")
+      raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
+      @builder.call(raise_fn_ty, raise_fn.to_value, [re_unwind])
+      @builder.unreachable
+    end
+
+    @builder.position_at_end(exit_bb)
+    if !phi_vals.empty?
+      phi_ty = phi_vals[0].type
+      phi = @builder.phi(phi_ty)
+      @builder.add_incoming(phi, phi_vals, phi_bbs)
+      @last = phi
+    end
+    old_last = @last
+    if ens = node_ensure
+      ens.accept(self)
+    end
+    @last = old_last
+
+    @terminated = false
+    false
+  end
+
   def visit(node : Return) : Bool
     if exp = node.exp
       exp.accept(self)
@@ -986,6 +1235,57 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : Call) : Bool
+    if node.name == "as" && node.args.size == 1 && (as_obj = node.obj)
+      as_obj.accept(self)
+      @terminated = false
+      return false
+    end
+    if node.obj.nil? && node.name == "raise" && node.args.size == 1
+      node.args[0].accept(self)
+      return false unless ex_val = @last
+      arg_tname = if node.args[0].is_a?(Call) && (c_obj = node.args[0].as(Call).obj)
+                    c_obj.to_s
+                  elsif node.args[0].is_a?(Var) && (v_tname = @var_type_names[node.args[0].as(Var).name]?)
+                    v_tname
+                  else
+                    "Exception"
+                  end
+
+      fn_name = "*raise<#{arg_tname}>:NoReturn"
+      fn_ty = LLVMType.function([@context.pointer], @context.void, false)
+      raise_helper = if existing = @mod.get_function?(fn_name)
+                       existing
+                     else
+                       rh = @mod.add_function(fn_name, fn_ty)
+                       rh.linkage = LibLLVM::Linkage::Internal
+                       entry_bb = rh.append_basic_block("entry")
+                       b = Builder.new(@context)
+                       b.position_at_end(entry_bb)
+                       param = rh.param(0)
+                       param.name = "ex"
+                       crystal_raise_fn = @mod.get_function("__crystal_raise")
+                       crystal_raise_ty = LLVMType.function([@context.pointer], @context.void, false)
+                       b.call(crystal_raise_ty, crystal_raise_fn.to_value, [param])
+                       b.unreachable
+                       b.dispose
+                       rh
+                     end
+
+      if rb = @rescue_block
+        if c_fn = @current_fn
+          invoke_out_bb = c_fn.append_basic_block("invoke_out")
+          @builder.invoke(fn_ty, raise_helper.to_value, [ex_val], invoke_out_bb, rb)
+          @builder.position_at_end(invoke_out_bb)
+          @builder.unreachable
+        end
+        @builder.unreachable
+      else
+        @builder.call(fn_ty, raise_helper.to_value, [ex_val])
+        @builder.unreachable
+      end
+      @terminated = true
+      return false
+    end
     if node.obj.nil? && node.name == "pointerof" && node.args.size == 1
       exp = node.args[0]
       vname = exp.is_a?(Var) ? exp.as(Var).name : (exp.is_a?(Call) ? exp.as(Call).name : "")
@@ -1037,6 +1337,25 @@ pub class CodeGenVisitor < Visitor
       # 1. Constructor call: Point.new(x, y) or Counter.new(initial) or Pointer(Int32).new(addr)
       if obj.is_a?(Path) || obj.is_a?(Generic)
         type_name = obj.to_s
+        if entry = @lib_funs[{type_name, node.name}]?
+          c_name, c_fn_ty = entry
+          fn_val = @mod.get_function(c_name)
+          arg_vals = [] of LLVMValue
+          node.args.each do |a|
+            a.accept(self)
+            if l = @last
+              arg_vals << l
+            end
+          end
+          if c_fn_ty.return_type.void?
+            @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
+            @terminated = true
+          else
+            @last = @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
+            @terminated = false
+          end
+          return false
+        end
         if node.name == "new"
           if type_name.includes?("Pointer")
             # Pointer(T).new(addr)
@@ -1580,7 +1899,15 @@ pub class CodeGenVisitor < Visitor
 
     if fn_val = fn
       callee_type = @fn_types[node.name]
-      @last = @builder.call(callee_type, fn_val.to_value, arg_vals)
+      if rb = @rescue_block
+        if c_fn = @current_fn
+          invoke_out_bb = c_fn.append_basic_block("invoke_out")
+          @last = @builder.invoke(callee_type, fn_val.to_value, arg_vals, invoke_out_bb, rb)
+          @builder.position_at_end(invoke_out_bb)
+        end
+      else
+        @last = @builder.call(callee_type, fn_val.to_value, arg_vals)
+      end
     end
 
     @terminated = false
@@ -2040,6 +2367,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   classes = [] of ClassDef
   funs = [] of FunDef
   defs = Hash(String, Def).new
+  libs = [] of LibDef
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
       if e.is_a?(ClassDef)
@@ -2048,6 +2376,8 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
         funs << e.as(FunDef)
       elsif e.is_a?(Def)
         defs[e.as(Def).name] = e.as(Def)
+      elsif e.is_a?(LibDef)
+        libs << e.as(LibDef)
       end
     end
   elsif node.is_a?(ClassDef)
@@ -2056,6 +2386,8 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     funs << node.as(FunDef)
   elsif node.is_a?(Def)
     defs[node.as(Def).name] = node.as(Def)
+  elsif node.is_a?(LibDef)
+    libs << node.as(LibDef)
   end
 
   # Register funs in program
@@ -2081,6 +2413,25 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
 
   cg = CodeGenVisitor.new(context, mod, prog, mv)
   cg.block_methods = defs
+
+  # Process lib definitions
+  libs.each do |ld|
+    lname = ld.name.to_s
+    if b = ld.body
+      exps = b.is_a?(Expressions) ? b.as(Expressions).expressions : [b] of ASTNode
+      exps.each do |exp|
+        if exp.is_a?(FunDef)
+          fd = exp.as(FunDef)
+          c_name = fd.real_name || fd.name
+          c_args = fd.args.map { |a| cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+          c_ret = cg.llvm_type_from_name(fd.return_type ? fd.return_type.to_s : "Void")
+          fn_ty = LLVMType.function(c_args, c_ret, false)
+          cg.lib_funs[{lname, fd.name}] = {c_name, fn_ty}
+          mod.add_function(c_name, fn_ty) unless mod.get_function?(c_name)
+        end
+      end
+    end
+  end
 
   # Process custom types (structs and classes)
   classes.each do |cd|

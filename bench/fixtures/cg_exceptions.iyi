@@ -1,0 +1,107 @@
+class Exception
+end
+
+class MyError < Exception
+  @code : Int32
+
+  def initialize(code : Int32)
+    @code = code
+  end
+
+  def code : Int32
+    @code
+  end
+end
+
+class OtherError < Exception
+  @id : Int32
+
+  def initialize(id : Int32)
+    @id = id
+  end
+
+  def id : Int32
+    @id
+  end
+end
+
+lib LibRunner
+  fun c_personality = __runner_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+  fun c_get_exception = __runner_get_exception(ex : Void*) : UInt64
+  @[Raises]
+  fun c_raise = __runner_raise(ex : Void*) : NoReturn
+end
+
+fun __crystal_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+  LibRunner.c_personality(version, actions, exception_class, exception_object, context)
+end
+
+fun __crystal_get_exception(ex : Void*) : UInt64
+  LibRunner.c_get_exception(ex)
+end
+
+@[Raises]
+fun __crystal_raise(ex : Void*) : NoReturn
+  LibRunner.c_raise(ex)
+end
+
+def raise(ex : Exception) : NoReturn
+  __crystal_raise(ex.as(Void*))
+end
+
+fun test_raise_catch(x : Int32) : Int32
+  begin
+    if x != 0
+      raise MyError.new(x)
+    end
+    100
+  rescue ex : MyError
+    ex.code
+  end
+end
+
+fun test_multi_rescue(kind : Int32, val : Int32) : Int32
+  begin
+    if kind == 1
+      raise MyError.new(val)
+    elsif kind == 2
+      raise OtherError.new(val)
+    end
+    val &* 2
+  rescue ex : MyError
+    ex.code
+  rescue ex : OtherError
+    ex.id &+ 1000
+  rescue ex : Exception
+    9999
+  end
+end
+
+fun test_ensure_both(raise_it : Int32) : Int32
+  y = 0
+  begin
+    if raise_it != 0
+      raise MyError.new(raise_it)
+    end
+    y = 50
+  rescue ex : MyError
+    y = ex.code
+  ensure
+    y = y &+ 5
+  end
+  y
+end
+
+fun test_else_clause(x : Int32) : Int32
+  y = 0
+  begin
+    y = x
+  rescue ex : Exception
+    y = -1
+  else
+    y = y &+ 20
+  ensure
+    y = y &+ 1
+  end
+  y
+end

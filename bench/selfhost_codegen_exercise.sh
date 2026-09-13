@@ -182,6 +182,7 @@ for fixture in "$REPO"/bench/fixtures/cg_*.iyi; do
     echo "  $fixture: identical ($fn_count functions match front end)"
   else
     echo "  FAIL: $fixture diverged from front end:"
+    diverged=$((diverged + 1))
     cat "$WORK/diff_${base}.patch"
     status=1
   fi

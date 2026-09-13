@@ -103,6 +103,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # and native object execution against the frontend iyi is still bootstrapped
     # from, requiring identical emitted IR and execution for every fixture.
     (r"^bench/selfhost_codegen_exercise\.sh$", "the frontend the selfhost codegen is checked against"),
+    # The self-hosting artifact wiring oracle. It verifies that the pure iyi
+    # artifact tool wired behind --selfhost produces output identical to the
+    # frontend across all corpus modules.
+    (r"^bench/selfhost_mod_wiring_exercise\.sh$", "the frontend the selfhost artifact wiring is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

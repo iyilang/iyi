@@ -7,10 +7,11 @@
 # distrusted and disabled.
 class Iyi::Command
   private def mod
+    selfhost = options.delete("--selfhost") != nil
     case options.first?
     when "dump"
       options.shift
-      mod_dump
+      mod_dump(selfhost: selfhost)
     when "diff"
       options.shift
       mod_diff
@@ -42,6 +43,7 @@ class Iyi::Command
         dump --declarations FILE print the iyi declarations a consumer compiles
                                  against, which is what `import` reads instead
                                  of the module's source
+        dump --selfhost FILE     use the pure iyi self-hosted artifact reader
         dump --json FILE         print the module's exported surface as JSON:
                                  exact signatures, types, fields, impls, and
                                  the interface hash they are keyed by
@@ -52,19 +54,28 @@ class Iyi::Command
     USAGE
   end
 
-  private def mod_dump
+  private def mod_dump(selfhost : Bool = false)
     # Not a flag on the command, because it selects between two whole outputs:
     # the file as it is stored, and the file as the compiler reads it. The
     # second exists so that a diagnostic pointing into a `.iyimod` can be
-    # looked at — the text it names is the text this prints.
+    # looked at (the text it names is the text this prints).
     declarations = false
     as_json = false
-    if options.first? == "--declarations"
-      options.shift
-      declarations = true
-    elsif options.first? == "--json"
-      options.shift
-      as_json = true
+
+    loop do
+      case options.first?
+      when "--declarations"
+        options.shift
+        declarations = true
+      when "--json"
+        options.shift
+        as_json = true
+      when "--selfhost"
+        options.shift
+        selfhost = true
+      else
+        break
+      end
     end
 
     filename = options.shift?
@@ -76,6 +87,10 @@ class Iyi::Command
       abort! "no such file: #{filename}", :USAGE_ERROR
     end
 
+    if selfhost
+      run_selfhost_mod_dump(filename, declarations)
+      return
+    end
     begin
       # The one reader that wants the object code. `import` does not — it is a
       # front-end reader and seeks past the section — but a dump that silently
@@ -181,5 +196,36 @@ class Iyi::Command
     IyiMod.read(path)
   rescue ex : IyiMod::Error
     abort! ex.message.to_s, :USAGE_ERROR
+  end
+  private def run_selfhost_mod_dump(filename : String, declarations : Bool) : Nil
+    tool = find_selfhost_mod_tool
+    unless tool
+      abort! "iyi mod: self-host tool not found. Build it with `make iyi-mod` or set IYI_MOD_BIN", :SOFTWARE_ERROR
+    end
+
+    sub = declarations ? "declarations" : "dump"
+    status = Process.run(tool, [sub, filename], output: STDOUT, error: STDERR)
+    exit status.exit_code
+  end
+
+  private def find_selfhost_mod_tool : String?
+    if env = Config.env("MOD_BIN")
+      return env if File.file?(env)
+    end
+
+    tool_name = "iyi-mod"
+    candidates = [] of String
+    if exec = Process.executable_path
+      candidates << File.join(File.dirname(exec), tool_name)
+      candidates << File.join(File.dirname(exec), "selfhost-iyimod")
+    end
+    candidates << File.join(".build", tool_name)
+    candidates << File.join(".build", "selfhost-iyimod")
+
+    if found = candidates.find { |c| File.file?(c) }
+      return found
+    end
+
+    nil
   end
 end

@@ -1,0 +1,40 @@
+# The artifact inspection tool ported from src/compiler/iyi/command/mod.cr.
+#
+# Reads and dumps .iyimod modular compilation artifacts according to SPEC.md Part IV.
+# Used by `iyi mod dump --selfhost` to read artifacts with pure iyi code.
+
+module compiler/tools/mod
+
+import compiler/artifact/iyimod
+using compiler/artifact/iyimod::{IyiMod, Artifact}
+
+module ModTool
+  def self.run : Nil
+    args = Program.args
+    if args.size < 2
+      puts "Usage: iyi-mod [dump|declarations|json] FILE"
+      raise "missing arguments"
+    end
+
+    command = args[0]
+    path = args[1]
+
+    unless File.exists?(path)
+      raise "no such file: " + path
+    end
+
+    art = IyiMod.read(path, true)
+    case command
+    when "dump"
+      print IyiMod.dump_to_s(art)
+    when "declarations"
+      print IyiMod.declarations_to_s(art)
+    when "json"
+      puts IyiMod.to_json(art)
+    else
+      raise "unknown mod subcommand: " + command
+    end
+  end
+end
+
+ModTool.run

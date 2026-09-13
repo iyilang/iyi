@@ -623,6 +623,8 @@ jobs:
 
       - name: The selfhost code generator matches the front end it replaces
         run: bash bench/selfhost_codegen_exercise.sh
+      - name: The wired selfhost artifact reader matches the front end it replaces
+        run: bash bench/selfhost_mod_wiring_exercise.sh
       # What a kernel thread costs that floor, measured before anything is
       # designed on one (GC_DESIGN.md Stages 4, 7, 8, 9; III.4.7's `Share`):
       # raw `clone`, a `tgkill` stop-the-world, a futex join, and the

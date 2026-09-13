@@ -421,6 +421,7 @@ pub class CommandDriver
         dump --declarations FILE print the iyi declarations a consumer compiles
                                  against, which is what `import` reads instead
                                  of the module's source
+        dump --selfhost FILE     use the pure iyi self-hosted artifact reader
         dump --json FILE         print the module's exported surface as JSON:
                                  exact signatures, types, fields, impls, and
                                  the interface hash they are keyed by

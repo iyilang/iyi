@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 33,095 lines of iyi**. The
+`src/compiler` is **109,871 lines of Crystal and 33,155 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type
@@ -29,7 +29,8 @@ bindings, and the first slice of code generation:
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
 | `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
-| `command/driver.iyi` | 1,962 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
+| `tools/mod.iyi` | 59 | `bench/selfhost_mod_wiring_exercise.sh`: 16 modules, 100% byte-for-byte dump and declarations parity, refusal parity on corrupted artifacts, four guarded mutation proofs. Shipped compiler calls it behind `iyi mod dump --selfhost` |
+| `command/driver.iyi` | 1,963 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
 | `command/daemon.iyi` | 717 | `bench/selfhost_daemon_exercise.sh`: 30 scenarios across socket path selection, kernel limit refusal, candidate search order, identity calculation, and error text identical to the shipped daemon, six guarded mutation proofs |
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |
 | `foundation/*.iyi` | 122 | compiled by the above |
@@ -52,10 +53,14 @@ expression and method body typing passes, and the type system (instance
 variable inference beyond local scope, class var initializers, recursive struct
 check), TypeNode inspection in macros, and codegen beyond the first `fun` slice
 (classes, closures, exceptions, generics, and the GC interface). That is the
-109,825. The formatter, macro engine and codegen are partly ported, and their
+109,871. The formatter, macro engine and codegen are partly ported, and their
 rows above say which parts are not.
-Nothing in the build calls any of the ports above yet: each is checked against
-the code it would replace, not used in its place.
+Before this change, nothing in the build called any of the ports above: each
+was checked against the code it would replace, not used in its place. The first
+wiring step is now active: `iyi mod dump --selfhost` routes artifact inspection
+through the pure iyi port (`src/compiler/tools/mod.iyi` and
+`src/compiler/artifact/iyimod.iyi`), proved byte-identical across the entire
+module corpus by `bench/selfhost_mod_wiring_exercise.sh`.
 
 The artifact row proves binary parity: 16 modules across `samples/iyi` and
 `src/std` (80,414 bytes) produce byte-identical `.iyimod` files between Crystal
@@ -105,7 +110,7 @@ rather than a feeling.
 
 **Stage 1.** Crystal compiles iyi sources into a compiler. Blocked on the ten
 components listed above being written in iyi. This is the long pole and it is
-not close: 109,825 lines of it.
+not close: 109,871 lines of it.
 
 **Stage 2.** Stage one compiles the same sources. The first moment iyi is
 written in iyi.

@@ -635,7 +635,7 @@ pub class Formatter < Visitor
       false
     when ModuleDef
       false
-    when Def, ClassDef, LibDef, TraitDef, EnumDef
+    when Def, ClassDef, LibDef, TraitDef, EnumDef, ImplDef
       true
     when VisibilityModifier
       needs_two_lines?(node.exp)
@@ -1052,18 +1052,27 @@ pub class Formatter < Visitor
       check_keyword(Keyword::END)
       write_keyword(Keyword::END)
     elsif @token.type == TokenKind::OP_LCURLY
-      write_token(" ", TokenKind::OP_LCURLY, " ")
+      write_token(" ", TokenKind::OP_LCURLY)
       if !block.args.empty?
-        write_token(TokenKind::OP_BAR)
+        write_token(" ", TokenKind::OP_BAR)
         block.args.each_with_index do |arg, i|
+          skip_space_or_newline
           write(arg.name)
           next_token
           if i < block.args.size - 1
-            write_token(TokenKind::OP_COMMA, " ")
+            skip_space_or_newline
+            if @token.type == TokenKind::OP_COMMA
+              next_token_skip_space_or_newline
+              write(", ")
+            end
           end
         end
+        skip_space_or_newline
         write_token(TokenKind::OP_BAR, " ")
+      else
+        write(" ")
       end
+      skip_space
       accept(block.body)
       skip_space_or_newline
       write_token(" ", TokenKind::OP_RCURLY)
@@ -1086,16 +1095,40 @@ pub class Formatter < Visitor
     write(node.name)
     next_token
 
+    to_skip = 0
     if @token.type == TokenKind::OP_LPAREN
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
       node.args.each_with_index do |arg, i|
+        if node.splat_index == i
+          write_token(TokenKind::OP_STAR)
+          skip_space_or_newline
+        end
         accept(arg)
+        to_skip = to_skip + 1 if @last_arg_is_skip
         skip_space_or_newline
         if @token.type == TokenKind::OP_COMMA
-          write(", ") unless i == node.args.size - 1
+          write(", ") unless i == node.args.size - 1 && node.double_splat.nil? && node.block_arg.nil?
           next_token_skip_space_or_newline
         end
+      end
+      if double_splat = node.double_splat
+        write_token(TokenKind::OP_STAR_STAR)
+        skip_space_or_newline
+        to_skip = to_skip + 1 if at_skip?
+        accept(double_splat)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless node.block_arg.nil?
+          next_token_skip_space_or_newline
+        end
+      end
+      if block_arg = node.block_arg
+        write_token(TokenKind::OP_AMP)
+        skip_space_or_newline
+        to_skip = to_skip + 1 if at_skip?
+        accept(block_arg)
+        skip_space_or_newline
       end
       skip_space_or_newline
       write_token(TokenKind::OP_RPAREN)
@@ -1147,16 +1180,75 @@ pub class Formatter < Visitor
       end
     end
 
+    body = remove_to_skip(node.body, to_skip)
     unless node.abstract
-      format_nested_with_end(node.body)
+      format_nested_with_end(body)
     end
 
     false
   end
 
+  def at_skip? : Bool
+    @token.type == TokenKind::INSTANCE_VAR || @token.type == TokenKind::CLASS_VAR
+  end
+
+  def remove_to_skip(body : ASTNode, to_skip : Int32) : ASTNode
+    if to_skip > 0
+      if body.is_a?(ExceptionHandler)
+        sub_body = remove_to_skip(body.body, to_skip)
+        body.body = sub_body
+        return body
+      end
+
+      if body.is_a?(Expressions)
+        exps = body.expressions
+        if to_skip >= exps.size
+          Nop.new
+        else
+          new_exps = [] of ASTNode
+          i = to_skip
+          while i < exps.size
+            new_exps << exps[i]
+            i = i + 1
+          end
+          if new_exps.size == 0
+            Nop.new
+          elsif new_exps.size == 1
+            new_exps[0]
+          else
+            Expressions.new(new_exps)
+          end
+        end
+      else
+        Nop.new
+      end
+    else
+      body
+    end
+  end
+
   def visit(node : Arg) : Bool
-    write(node.name)
-    next_token
+    @last_arg_is_skip = false
+    if node.name.empty?
+      skip_space_or_newline
+    else
+      at_skip = at_skip?
+      if !at_skip && !node.external_name.empty? && node.external_name != node.name
+        if @token.type == TokenKind::UNDERSCORE
+          write("_")
+        else
+          write(@token.value)
+        end
+        write(" ")
+        next_token_skip_space_or_newline
+      end
+
+      @last_arg_is_skip = at_skip?
+
+      write(@token.value)
+      next_token
+    end
+
     if restriction = node.restriction
       skip_space_or_newline
       write_token(" ", TokenKind::OP_COLON, " ")
@@ -1703,7 +1795,7 @@ pub class Formatter < Visitor
           write_line
         end
       end
-      write_comment(!needs_space, true, next_comes_end)
+      write_comment(!needs_space, true, last)
       true
     else
       false
@@ -1714,14 +1806,20 @@ pub class Formatter < Visitor
     if @token.type == TokenKind::NEWLINE
       raw_newlines = @token.raw.empty? ? 1 : @token.raw.bytesize
       write_line unless @wrote_newline
-      next_token_skip_space
 
-      if (raw_newlines > 1 || @token.type == TokenKind::NEWLINE) && !next_comes_end
+      if raw_newlines > 1 && !next_comes_end
         write_line
         @wrote_double_newlines = true
       end
 
-      skip_space_or_newline(last: next_comes_end, at_least_one: true, next_comes_end: next_comes_end)
+      next_token_skip_space
+
+      if @token.type == TokenKind::NEWLINE && !next_comes_end
+        write_line
+        @wrote_double_newlines = true
+      end
+
+      skip_space_or_newline(last: next_comes_end, at_least_one: true)
     end
   end
 
@@ -1766,7 +1864,7 @@ pub class Formatter < Visitor
       next_token_skip_space
       if consume_newline
         consume_newlines(next_comes_end)
-        skip_space_or_newline(last: next_comes_end, at_least_one: false, next_comes_end: next_comes_end)
+        skip_space_or_newline
       end
     end
   end

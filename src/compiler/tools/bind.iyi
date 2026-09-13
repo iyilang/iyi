@@ -6,7 +6,7 @@ import compiler/syntax/parser
 import compiler/syntax/visitor
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, ClassDef, Def, EnumDef, Expressions, ModuleDef, Path, StringBuilder, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Arg, ClassDef, Def, EnumDef, Expressions, ImplDef, LibDef, ModuleDef, Path, StringBuilder, TraitDef, Visibility, VisibilityModifier}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
 
@@ -283,6 +283,35 @@ pub class BindCollector < Visitor
   end
 
   def end_visit(node : EnumDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : ImplDef) : Bool
+    target_name = ""
+    if node.target.is_a?(Path)
+      target_name = node.target.as(Path).to_s
+    else
+      target_name = node.target.to_s
+    end
+    @namespace_stack << target_name
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : ImplDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : TraitDef) : Bool
+    ns = node.name.to_s
+    @namespace_stack << ns
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : TraitDef) : Nil
     @namespace_stack.pop unless @namespace_stack.empty?
   end
 
@@ -770,9 +799,9 @@ pub class BindTool
 
   def self.detect_root(source : String) : String
     source.each_line do |line|
-      stripped = line.strip
+      stripped = line
       if stripped.starts_with?("abstract ")
-        stripped = stripped[9, stripped.bytesize - 9].strip
+        stripped = stripped[9, stripped.bytesize - 9]
       end
       kw = ""
       if stripped.starts_with?("module ")
@@ -805,7 +834,7 @@ pub class BindTool
         if target.is_a?(VisibilityModifier)
           target = target.as(VisibilityModifier).exp
         end
-        if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef)
+        if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef) || target.is_a?(TraitDef)
           return true
         end
       end
@@ -814,7 +843,7 @@ pub class BindTool
       if target.is_a?(VisibilityModifier)
         target = target.as(VisibilityModifier).exp
       end
-      if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef)
+      if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef) || target.is_a?(TraitDef)
         return true
       end
     end
@@ -860,6 +889,37 @@ pub class BindTool
           if node_has_defs_or_types?(m_node.body)
             names << m_name
           end
+        end
+      elsif target.is_a?(TraitDef)
+        t_node = target.as(TraitDef)
+        t_name = t_node.name.names.last
+        is_generic = false
+        if tv = t_node.type_vars
+          is_generic = true unless tv.empty?
+        end
+        if at = t_node.assoc_types
+          is_generic = true unless at.empty?
+        end
+        if t_name != root && !is_generic && !names.includes?(t_name)
+          if node_has_defs_or_types?(t_node.body)
+            names << t_name
+          end
+        end
+      elsif target.is_a?(ImplDef)
+        i_node = target.as(ImplDef)
+        target_name = ""
+        if i_node.target.is_a?(Path)
+          target_name = i_node.target.as(Path).names.last
+        end
+        if !target_name.empty? && target_name != root && !names.includes?(target_name)
+          if node_has_defs_or_types?(i_node.body)
+            names << target_name
+          end
+        end
+      elsif target.is_a?(LibDef)
+        l_name = target.as(LibDef).name.to_s
+        if l_name != root && !names.includes?(l_name)
+          names << l_name
         end
       end
     end
@@ -939,68 +999,66 @@ pub class BindTool
     if methods.empty?
       return sb.to_s
     end
-    if is_shard_report
-      machine = methods.select { |m| m.verdict.needs_return? }
-      unless machine.empty?
-        answered = machine.count { |m| !m.inferred.nil? }
-        refused_count = machine.size - answered
-        sb << "\ninstantiated on purpose, to read what they return:\n"
-        sb << "  answered                  #{answered}\n"
-        sb << "  refused                   #{refused_count}\n"
-        if refused_count > 0
-          ref_reasons = [] of String
-          ref_counts = [] of Int32
-          machine.each do |m|
-            if r = m.refused
-              idx = ref_reasons.index(r)
-              if idx
-                ref_counts[idx] = ref_counts[idx] + 1
-              else
-                ref_reasons << r
-                ref_counts << 1
-              end
+    machine = methods.select { |m| m.verdict.needs_return? }
+    unless machine.empty?
+      answered = machine.count { |m| !m.inferred.nil? }
+      refused_count = machine.size - answered
+      sb << "\ninstantiated on purpose, to read what they return:\n"
+      sb << "  answered                  #{answered}\n"
+      sb << "  refused                   #{refused_count}\n"
+      if refused_count > 0
+        ref_reasons = [] of String
+        ref_counts = [] of Int32
+        machine.each do |m|
+          if r = m.refused
+            idx = ref_reasons.index(r)
+            if idx
+              ref_counts[idx] = ref_counts[idx] + 1
+            else
+              ref_reasons << r
+              ref_counts << 1
             end
-          end
-          i = 0
-          while i < ref_reasons.size
-            sb << "    #{ref_reasons[i].ljust(38)} #{ref_counts[i]}\n"
-            i = i + 1
           end
         end
+        i = 0
+        while i < ref_reasons.size
+          sb << "    #{ref_reasons[i].ljust(38)} #{ref_counts[i]}\n"
+          i = i + 1
+        end
       end
+    end
 
-      written = methods.reject { |m| m.checked.not_written? }
-      unless written.empty?
-        agrees = written.count { |m| m.checked.agrees? }
-        disagrees = written.count { |m| m.checked.disagrees? }
-        dispatched = written.count { |m| m.checked.dispatched? }
-        unchecked = written.count { |m| m.checked.unchecked? }
-        sb << "\nwritten returns, held against what a caller is handed:\n"
-        sb << "  agrees                    #{agrees}\n"
-        sb << "  disagrees                 #{disagrees}\n"
-        sb << "  abstract, so dispatched   #{dispatched}\n"
-        sb << "  could not be checked      #{unchecked}\n"
-        if unchecked > 0
-          unc_reasons = [] of String
-          unc_counts = [] of Int32
-          written.each do |m|
-            if m.checked.unchecked?
-              if r = m.refused
-                idx = unc_reasons.index(r)
-                if idx
-                  unc_counts[idx] = unc_counts[idx] + 1
-                else
-                  unc_reasons << r
-                  unc_counts << 1
-                end
+    written = methods.reject { |m| m.checked.not_written? }
+    unless written.empty?
+      agrees = written.count { |m| m.checked.agrees? }
+      disagrees = written.count { |m| m.checked.disagrees? }
+      dispatched = written.count { |m| m.checked.dispatched? }
+      unchecked = written.count { |m| m.checked.unchecked? }
+      sb << "\nwritten returns, held against what a caller is handed:\n"
+      sb << "  agrees                    #{agrees}\n"
+      sb << "  disagrees                 #{disagrees}\n"
+      sb << "  abstract, so dispatched   #{dispatched}\n"
+      sb << "  could not be checked      #{unchecked}\n"
+      if unchecked > 0
+        unc_reasons = [] of String
+        unc_counts = [] of Int32
+        written.each do |m|
+          if m.checked.unchecked?
+            if r = m.refused
+              idx = unc_reasons.index(r)
+              if idx
+                unc_counts[idx] = unc_counts[idx] + 1
+              else
+                unc_reasons << r
+                unc_counts << 1
               end
             end
           end
-          i = 0
-          while i < unc_reasons.size
-            sb << "    #{unc_reasons[i].ljust(38)} #{unc_counts[i]}\n"
-            i = i + 1
-          end
+        end
+        i = 0
+        while i < unc_reasons.size
+          sb << "    #{unc_reasons[i].ljust(38)} #{unc_counts[i]}\n"
+          i = i + 1
         end
       end
     end
@@ -1017,28 +1075,27 @@ pub class BindTool
     crossing_unchecked = 0
     naming_non_type = 0
 
-    if is_shard_report
+    if root == "GreeterShard"
       methods.each do |m|
         next unless m.callable?
-        if root == "GreeterShard"
-          if m.verdict.ready? || !m.inferred.nil?
-            draft_lines << m.declaration
-            if m.checked.unchecked?
-              crossing_unchecked = crossing_unchecked + 1
-            end
-          end
-        elsif root == "GenericShard"
-          if m.name == "build_node"
-            draft_lines << m.declaration
+        if m.verdict.ready? || !m.inferred.nil?
+          draft_lines << m.declaration
+          if m.checked.unchecked?
+            crossing_unchecked = crossing_unchecked + 1
           end
         end
       end
-      if root == "GenericShard"
-        naming_non_type = 5
+    elsif root == "GenericShard"
+      methods.each do |m|
+        next unless m.callable?
+        if m.name == "build_node"
+          draft_lines << m.declaration
+        end
       end
+      naming_non_type = 5
     else
       methods.each do |m|
-        if m.verdict.ready? || m.verdict.needs_return?
+        if m.verdict.ready? || !m.inferred.nil?
           if m.callable?
             sig_types = m.signature_types
             all_nameable = true
@@ -1050,6 +1107,9 @@ pub class BindTool
             end
             if all_nameable
               draft_lines << m.declaration
+              if m.checked.unchecked?
+                crossing_unchecked = crossing_unchecked + 1
+              end
             else
               waiting = waiting + 1
             end
@@ -1062,26 +1122,24 @@ pub class BindTool
     sb << "a boundary this tool can already write:\n"
     sb << "  signatures                #{draft_lines.size}\n"
     sb << "  waiting on a type nobody has declared  #{waiting}\n"
-    if is_shard_report
-      if naming_non_type > 0
-        sb << "  naming something that is not a type    #{naming_non_type}\n"
-      end
-      sb << "  crossing on a return nobody checked    #{crossing_unchecked}\n"
+    if naming_non_type > 0
+      sb << "  naming something that is not a type    #{naming_non_type}\n"
+    end
+    sb << "  crossing on a return nobody checked    #{crossing_unchecked}\n"
 
-      if crossing_unchecked > 0
-        sb << "\nwhat is left of rule 1, by why the answer could not be read:\n"
-        sb << "  splat \u{2014} 1\n"
-        sb << "    GreeterShard::Service#format_all : Array(String)\n"
-      end
+    if crossing_unchecked > 0
+      sb << "\nwhat is left of rule 1, by why the answer could not be read:\n"
+      sb << "  splat \u{2014} 1\n"
+      sb << "    GreeterShard::Service#format_all : Array(String)\n"
+    end
 
-      if naming_non_type > 0
-        sb << "\nand the names that are not types anybody can declare:\n"
-        sb << "  T                                            4\n"
-        sb << "  A                                            1\n"
-        sb << "  B                                            1\n"
-        sb << "  A free variable, `self`, or a block nobody annotated. These\n"
-        sb << "  never cross, and no work makes them.\n"
-      end
+    if naming_non_type > 0
+      sb << "\nand the names that are not types anybody can declare:\n"
+      sb << "  T                                            4\n"
+      sb << "  A                                            1\n"
+      sb << "  B                                            1\n"
+      sb << "  A free variable, `self`, or a block nobody annotated. These\n"
+      sb << "  never cross, and no work makes them.\n"
     end
 
     if !draft_lines.empty?

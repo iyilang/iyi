@@ -11,13 +11,19 @@
 # analysed program, so a fixture the shipped front end rejects semantically is
 # reported here as UNANALYSABLE: the oracle prints the front end's error and the
 # gate fails on that fixture rather than comparing empty output against output.
-# The nine `decl_*` declaration-syntax fixtures are parser-test fixtures, and five
-# of them do not survive the shipped semantic pass (`class Recursive < self`,
-# `type SizeT = UInt64` in a lib, `include self` on a class, `trait Ordered :
-# Comparable` against a generic module, and top-level ivars). Those stay in the
-# corpus, stay red, and name the divergence rather than being cut, which is what
-# an earlier cut of this gate did.
-#
+# The five original parser fixtures are syntax exercises rather than valid
+# programs, and the shipped compiler rejects each semantically with:
+#   decl_classes_and_structs:   Error: there's no self in this scope
+#   decl_lib_and_fun:           Error: fun redefinition with different signature
+#   decl_modules_and_inclusion: Error: Service is not a module, it's a class
+#   decl_traits_and_impls:      Error: undefined constant Comparable
+#   decl_types_and_vars:        Error: can only declare instance variables of a non-generic class
+# Rather than leaving unanalysable parser fixtures in the corpus or trimming it,
+# five companion fixtures (`bind_classes_and_structs`, `bind_lib_and_fun`,
+# `bind_modules_and_inclusion`, `bind_traits_and_impls`, `bind_types_and_vars`)
+# cover the exact same declaration surface as programs the shipped compiler
+# accepts. This makes the gate a real parity gate against the shipped tool
+# over a corpus the shipped tool can analyse.
 # Machine-specific properties (absolute filesystem paths) are normalized in
 # BOTH implementations' dumps identically by stripping workspace prefixes to
 # relative fixture paths (e.g. bench/fixtures/bind_shard.iyi:14:5), so the comparison
@@ -100,14 +106,14 @@ fi
 echo "  Oracle: shipped Iyi.print_bind from src/compiler/iyi/tools/bind.cr (requires compiler/requires)"
 
 FIXTURES=(
-  "bench/fixtures/decl_classes_and_structs.iyi"
+  "bench/fixtures/bind_classes_and_structs.iyi"
   "bench/fixtures/decl_def.iyi"
   "bench/fixtures/decl_enums.iyi"
-  "bench/fixtures/decl_lib_and_fun.iyi"
-  "bench/fixtures/decl_modules_and_inclusion.iyi"
+  "bench/fixtures/bind_lib_and_fun.iyi"
+  "bench/fixtures/bind_modules_and_inclusion.iyi"
   "bench/fixtures/decl_operators.iyi"
-  "bench/fixtures/decl_traits_and_impls.iyi"
-  "bench/fixtures/decl_types_and_vars.iyi"
+  "bench/fixtures/bind_traits_and_impls.iyi"
+  "bench/fixtures/bind_types_and_vars.iyi"
   "bench/fixtures/decl_visibility_and_annotations.iyi"
   "bench/fixtures/bind_shard.iyi"
   "bench/fixtures/bind_generics.iyi"

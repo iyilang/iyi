@@ -598,10 +598,9 @@ jobs:
         run: bash bench/selfhost_types_exercise.sh
 
       # Driven against the shipped `Iyi.print_bind` over the full eleven-fixture
-      # corpus. Five fixtures are declaration-syntax cases the shipped semantic
-      # pass itself rejects; the gate names each divergence instead of cutting
-      # the corpus, and stays red until the port and the shipped front end agree.
-      - name: The selfhost bind tool matches the front end's print_bind (6/11 green, 5 unanalysable by the shipped front end)
+      # corpus. A real parity gate against the shipped tool over a corpus the
+      # shipped tool can analyse, with all eleven fixtures matching byte for byte.
+      - name: The selfhost bind tool matches the front end's print_bind (11/11 green parity gate)
         run: bash bench/selfhost_bind_exercise.sh
 
       - name: The selfhost artifact format matches the bytes the front end emits

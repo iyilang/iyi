@@ -16,9 +16,13 @@ require "../mod/installer"
 
 class Iyi::Command
   private def check
+    selfhost = options.delete("--selfhost") != nil
+    parse_only = options.delete("--parse-only") != nil
+
     if options.first?.in?("--help", "-h")
       puts <<-USAGE
         Usage: #{Command.program_name} check [switches] [program file]
+               #{Command.program_name} check --parse-only [--selfhost] [file or directory ...]
                #{Command.program_name} check --affected CHANGED [--affected CHANGED]...
 
         Type-check the program and produce nothing: no codegen, no
@@ -26,6 +30,9 @@ class Iyi::Command
         and `-f json` makes each one data — file, line, column, size,
         message, the SPEC sections it cites, and, when the compiler
         knows the fix, a `suggested_edit` with the exact replacement.
+
+        `--parse-only` checks syntax only without semantic or type analysis.
+        Combine with `--selfhost` to use the pure iyi self-hosted parser.
 
         Every def with a fully written signature is typed even if
         nothing calls it — definition-site typing is the language's
@@ -37,6 +44,15 @@ class Iyi::Command
         named.
         USAGE
       exit
+    end
+
+    if selfhost && !parse_only
+      abort! "iyi check: --selfhost currently requires --parse-only (full self-hosted pipeline is not yet wired)", :USAGE_ERROR
+    end
+
+    if parse_only
+      check_parse_only(selfhost: selfhost)
+      return
     end
 
     # `--affected CHANGED...`: the ripple check. `test --affected` answers
@@ -146,5 +162,156 @@ class Iyi::Command
     nil
   rescue ex : CodeError
     ex
+  end
+
+  private def check_parse_only(selfhost : Bool) : Nil
+    files = options.dup
+    format_stdin = files.size == 1 && files[0] == "-"
+
+    if files.empty?
+      files = Dir["./**/*.iyi"]
+    end
+
+    if selfhost && !find_selfhost_parse_tool
+      abort! "iyi check: self-host parse tool not found. Build it with `make iyi-parse` or set IYI_PARSE_BIN", :SOFTWARE_ERROR
+    end
+
+    status_code = 0
+
+    if format_stdin
+      source = STDIN.gets_to_end
+      code = check_parse_source("STDIN", source, selfhost: selfhost)
+      status_code = code if code != 0
+    else
+      files.each do |filename|
+        if File.file?(filename)
+          source = File.read(filename)
+          code = check_parse_source(filename, source, selfhost: selfhost)
+          status_code = code if code != 0
+        elsif Dir.exists?(filename)
+          dir_files = Dir["#{filename.chomp('/')}/**/*.iyi"]
+          dir_files.each do |df|
+            source = File.read(df)
+            code = check_parse_source(df, source, selfhost: selfhost)
+            status_code = code if code != 0
+          end
+        else
+          print_error "file or directory does not exist: #{filename}"
+          status_code = 1
+        end
+      end
+    end
+
+    exit status_code
+  end
+
+  private def check_parse_source(filename : String, source : String, selfhost : Bool) : Int32
+    if selfhost
+      run_selfhost_parse(filename, source)
+    else
+      begin
+        parser = Iyi::Parser.new(source)
+        parser.filename = (filename == "STDIN") ? "STDIN.iyi" : filename
+        parser.parse
+        0
+      rescue ex : Iyi::SyntaxException
+        print_syntax_error(filename, ex.line_number, ex.column_number, ex.message)
+        1
+      rescue ex
+        print_error "syntax error in '#{filename}': #{ex.message}"
+        1
+      end
+    end
+  end
+
+  private def run_selfhost_parse(filename : String, source : String) : Int32
+    tool = find_selfhost_parse_tool
+    unless tool
+      print_error "iyi check: self-host parse tool not found. Build it with `make iyi-parse` or set IYI_PARSE_BIN"
+      return 1
+    end
+
+    out_io = IO::Memory.new
+    err_io = IO::Memory.new
+
+    args = (filename == "STDIN" || !File.file?(filename)) ? ["-"] : [filename]
+    status = if args == ["-"]
+               Process.run(tool, args, input: IO::Memory.new(source), output: out_io, error: err_io)
+             else
+               Process.run(tool, args, output: out_io, error: err_io)
+             end
+
+    if status.success?
+      0
+    else
+      err_text = err_io.to_s
+      out_text = out_io.to_s
+      combined = "#{err_text}\n#{out_text}"
+      matched = false
+      combined.each_line do |l|
+        next if matched
+        if s_idx = l.index("Syntax error in ")
+          rest = l[(s_idx + 16)..-1]
+          parts = rest.split(':')
+          if parts.size >= 4
+            line_num = parts[1]?.try(&.to_i?) || 1
+            col_num = parts[2]?.try(&.to_i?) || 1
+            msg = parts[3..-1].join(':').strip
+            if site_idx = msg.index("(site_")
+              msg = msg[0...site_idx].strip
+            end
+            print_syntax_error(filename, line_num, col_num, msg)
+            matched = true
+          end
+        elsif s_idx = l.index("SYNTAX ERROR:")
+          rest = l[(s_idx + 13)..-1].strip
+          if at_idx = rest.rindex(" at ")
+            msg = rest[0...at_idx].strip
+            loc = rest[(at_idx + 4)..-1].strip
+            loc_parts = loc.split(':')
+            line_num = loc_parts[0]?.try(&.to_i?) || 1
+            col_num = loc_parts[1]?.try(&.to_i?) || 1
+            if site_idx = msg.index("(site_")
+              msg = msg[0...site_idx].strip
+            end
+            print_syntax_error(filename, line_num, col_num, msg)
+            matched = true
+          end
+        end
+      end
+
+      unless matched
+        err_msg = err_text.strip
+        err_msg = "syntax error in '#{filename}'" if err_msg.empty?
+        print_error err_msg
+      end
+      1
+    end
+  end
+
+  private def find_selfhost_parse_tool : String?
+    if env = Config.env("PARSE_BIN")
+      return env if File.file?(env)
+    end
+
+    tool_name = "iyi-parse"
+    candidates = [] of String
+    if exec = Process.executable_path
+      candidates << File.join(File.dirname(exec), tool_name)
+      candidates << File.join(File.dirname(exec), "selfhost-parser")
+    end
+    candidates << File.join(".build", tool_name)
+    candidates << File.join(".build", "selfhost-parser")
+
+    if found = candidates.find { |c| File.file?(c) }
+      return found
+    end
+
+    nil
+  end
+
+  private def print_syntax_error(filename : String, line : Int32, col : Int32, message : String?)
+    msg = message ? ": #{message}" : ""
+    Iyi.print_error "syntax error in '#{filename}:#{line}:#{col}'#{msg}", @color, leading_error: false
   end
 end

@@ -926,6 +926,10 @@ pub class Parser < Lexer
       node_and_next_token(StringLiteral.new(@token.value).at(location))
     when TokenKind::DELIMITER_START
       parse_delimiter
+    when TokenKind::STRING_ARRAY_START
+      parse_string_array
+    when TokenKind::SYMBOL_ARRAY_START
+      parse_symbol_array
     when TokenKind::SYMBOL
       node_and_next_token(SymbolLiteral.new(@token.value).at(location))
     when TokenKind::OP_DOLLAR_QUESTION
@@ -1222,7 +1226,7 @@ pub class Parser < Lexer
       return nil if current_char.ascii_whitespace?
     when TokenKind::OP_LCURLY
       return nil unless allow_curly
-    when TokenKind::CHAR, TokenKind::STRING, TokenKind::DELIMITER_START,
+    when TokenKind::CHAR, TokenKind::STRING, TokenKind::DELIMITER_START, TokenKind::STRING_ARRAY_START, TokenKind::SYMBOL_ARRAY_START,
          TokenKind::NUMBER, TokenKind::IDENT, TokenKind::SYMBOL,
          TokenKind::INSTANCE_VAR, TokenKind::CLASS_VAR, TokenKind::CONST, TokenKind::GLOBAL,
          TokenKind::OP_DOLLAR_TILDE, TokenKind::OP_DOLLAR_QUESTION, TokenKind::GLOBAL_MATCH_DATA_INDEX,
@@ -4041,6 +4045,54 @@ pub class Parser < Lexer
         StringLiteral.new(str).at(location)
       end
     end
+  end
+
+  def parse_string_array : ASTNode
+    location = @token.location
+    delimiter_state = @token.delimiter_state
+    check(TokenKind::STRING_ARRAY_START)
+    next_string_token(delimiter_state)
+    delimiter_state = @token.delimiter_state
+
+    elements = [] of ASTNode
+    while true
+      case @token.type
+      when TokenKind::STRING
+        elements << StringLiteral.new(@token.value)
+      when TokenKind::SPACE
+        # skip
+      when TokenKind::STRING_ARRAY_END, TokenKind::DELIMITER_END, TokenKind::EOF
+        break
+      end
+      next_string_token(delimiter_state)
+      delimiter_state = @token.delimiter_state
+    end
+    next_token
+    ArrayLiteral.new(elements).at(location)
+  end
+
+  def parse_symbol_array : ASTNode
+    location = @token.location
+    delimiter_state = @token.delimiter_state
+    check(TokenKind::SYMBOL_ARRAY_START)
+    next_string_token(delimiter_state)
+    delimiter_state = @token.delimiter_state
+
+    elements = [] of ASTNode
+    while true
+      case @token.type
+      when TokenKind::STRING
+        elements << SymbolLiteral.new(@token.value)
+      when TokenKind::SPACE
+        # skip
+      when TokenKind::STRING_ARRAY_END, TokenKind::DELIMITER_END, TokenKind::EOF
+        break
+      end
+      next_string_token(delimiter_state)
+      delimiter_state = @token.delimiter_state
+    end
+    next_token
+    ArrayLiteral.new(elements).at(location)
   end
 
   def check(kind : TokenKind) : Nil

@@ -238,30 +238,103 @@ pub class Formatter < Visitor
     false
   end
 
+  def next_string_token : Token
+    @token = @lexer.next_string_token(@token.delimiter_state)
+  end
+
   def visit(node : StringLiteral) : Bool
-    write(@token.raw.empty? ? node.value.inspect : @token.raw)
-    next_token
+    if @token.type == TokenKind::MAGIC_FILE || @token.type == TokenKind::MAGIC_DIR
+      write(@token.raw)
+      next_token
+      return false
+    end
+
+    if @token.type == TokenKind::DELIMITER_START
+      write(@token.raw)
+      next_string_token
+
+      while true
+        case @token.type
+        when TokenKind::STRING
+          write(@token.raw)
+          next_string_token
+        else
+          break
+        end
+      end
+
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      write(@token.raw.empty? ? node.value.inspect : @token.raw)
+      next_token
+    end
+
     false
   end
 
   def visit(node : StringInterpolation) : Bool
     if @token.type == TokenKind::DELIMITER_START
       write(@token.raw)
-      next_token
+      next_string_token
+
+      node.expressions.each do |exp|
+        if exp.is_a?(StringLiteral)
+          while @token.type == TokenKind::STRING
+            write(@token.raw)
+            next_string_token
+          end
+        else
+          if @token.type == TokenKind::INTERPOLATION_START
+            write(@token.raw)
+            next_token_skip_space_or_newline
+            accept(exp)
+            skip_space_or_newline
+            check(TokenKind::OP_RCURLY)
+            write("}")
+            next_string_token
+          else
+            accept(exp)
+          end
+        end
+      end
+
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      node.expressions.each do |exp|
+        accept(exp)
+      end
     end
-    node.expressions.each do |exp|
-      accept(exp)
-    end
-    if @token.type == TokenKind::DELIMITER_END
-      write(@token.raw)
-      next_token
-    end
+
     false
   end
 
   def visit(node : RegexLiteral) : Bool
-    write(@token.raw)
-    next_token
+    if @token.type == TokenKind::DELIMITER_START
+      write(@token.raw)
+      next_string_token
+      while true
+        case @token.type
+        when TokenKind::STRING
+          write(@token.raw)
+          next_string_token
+        else
+          break
+        end
+      end
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      write(@token.raw)
+      next_token
+    end
     false
   end
 
@@ -280,6 +353,7 @@ pub class Formatter < Visitor
     write_token(TokenKind::OP_RSQUARE)
     if of_node = node.of
       write_keyword(" ", Keyword::OF, " ")
+      skip_space_or_newline
       accept(of_node)
     end
     false
@@ -306,6 +380,7 @@ pub class Formatter < Visitor
       write_keyword(" ", Keyword::OF, " ")
       accept(of_entry.key)
       write_token(" ", TokenKind::OP_EQ_GT, " ")
+      skip_space_or_newline
       accept(of_entry.value)
     end
     false
@@ -396,6 +471,7 @@ pub class Formatter < Visitor
   end
 
   def visit(node : Path) : Bool
+    skip_space
     if node.global
       write("::")
       if @token.type == TokenKind::OP_COLON_COLON
@@ -403,6 +479,7 @@ pub class Formatter < Visitor
       end
     end
     node.names.each_with_index do |name, i|
+      skip_space
       write(name)
       next_token
       if i < node.names.size - 1
@@ -491,13 +568,29 @@ pub class Formatter < Visitor
       end
       write_indent(@indent) if @line_output.empty?
       accept(exp)
-      skip_space
+      skip_space(consume_newline: false)
       if @token.type == TokenKind::OP_SEMICOLON
         next_token
-        skip_space
+        skip_space(consume_newline: false)
       end
-      if i < node.expressions.size - 1
-        skip_space_write_line
+      if i == node.expressions.size - 1
+        skip_space_or_newline(last: true, at_least_one: false, next_comes_end: has_paren || has_begin)
+      else
+        next_exp = node.expressions[i + 1]
+        needs_two = needs_two_lines?(exp, next_exp)
+        if needs_two
+          if @wrote_newline
+            write_line unless @wrote_double_newlines
+          elsif !@wrote_double_newlines
+            write_line
+            write_line
+          end
+          @wrote_double_newlines = true
+          found_comment = skip_space_or_newline
+          write_line unless found_comment || @wrote_double_newlines
+        else
+          consume_newlines
+        end
       end
     end
 
@@ -519,7 +612,51 @@ pub class Formatter < Visitor
     false
   end
 
+  def needs_two_lines?(node : ASTNode, next_node : ASTNode) : Bool
+    return false if node.is_a?(Annotation)
+    return false if abstract_def?(node) && abstract_def?(next_node)
+    needs_two_lines?(node) || needs_two_lines?(next_node)
+  end
+
+  def abstract_def?(node : ASTNode) : Bool
+    case node
+    when Def
+      node.abstract
+    when VisibilityModifier
+      abstract_def?(node.exp)
+    else
+      false
+    end
+  end
+
+  def needs_two_lines?(node : ASTNode) : Bool
+    case node
+    when ModuleHeader
+      false
+    when ModuleDef
+      false
+    when Def, ClassDef, LibDef, TraitDef, EnumDef
+      true
+    when VisibilityModifier
+      needs_two_lines?(node.exp)
+    else
+      false
+    end
+  end
+
   def visit(node : If) : Bool
+    if node.ternary
+      accept(node.cond)
+      skip_space_or_newline || write(" ")
+      write_token(TokenKind::OP_QUESTION)
+      skip_space_or_newline || write(" ")
+      accept(node.then)
+      skip_space_or_newline || write(" ")
+      write_token(TokenKind::OP_COLON)
+      skip_space_or_newline || write(" ")
+      accept(node.else)
+      return false
+    end
     visit_if_or_unless(node, Keyword::IF)
     false
   end
@@ -693,6 +830,9 @@ pub class Formatter < Visitor
   end
 
   def visit(node : Assign) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
     accept(node.target)
     skip_space
     write_token(" ", TokenKind::OP_EQ, " ")
@@ -823,6 +963,7 @@ pub class Formatter < Visitor
     next_token
 
     if node.has_parentheses
+      skip_space
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
       format_args_list(node.args, node.named_args)
@@ -830,6 +971,7 @@ pub class Formatter < Visitor
       write_token(TokenKind::OP_RPAREN)
     elsif !node.args.empty? || node.named_args
       write(" ")
+      skip_space
       format_args_list(node.args, node.named_args)
     end
 
@@ -853,20 +995,24 @@ pub class Formatter < Visitor
     args.each do |arg|
       accept(arg)
       count = count + 1
-      skip_space_or_newline
-      if @token.type == TokenKind::OP_COMMA
-        write(", ") unless count == total
-        next_token_skip_space_or_newline
+      if count < total
+        skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ")
+          next_token_skip_space_or_newline
+        end
       end
     end
     if n_args = named_args
       n_args.each do |na|
         accept(na)
         count = count + 1
-        skip_space_or_newline
-        if @token.type == TokenKind::OP_COMMA
-          write(", ") unless count == total
-          next_token_skip_space_or_newline
+        if count < total
+          skip_space
+          if @token.type == TokenKind::OP_COMMA
+            write(", ")
+            next_token_skip_space_or_newline
+          end
         end
       end
     end
@@ -882,6 +1028,7 @@ pub class Formatter < Visitor
   end
 
   private def format_block(block : Block) : Nil
+    skip_space
     if @token.keyword?(Keyword::DO)
       write_keyword(" ", Keyword::DO)
       if !block.args.empty?
@@ -929,7 +1076,10 @@ pub class Formatter < Visitor
   end
 
   def visit(node : Def) : Bool
-    if @token.keyword?(Keyword::ABSTRACT)
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    if @token.keyword?(Keyword::ABSTRACT) || node.abstract
       write_keyword(Keyword::ABSTRACT, " ")
     end
     write_keyword(Keyword::DEF, " ")
@@ -971,17 +1121,34 @@ pub class Formatter < Visitor
           write(@token.value)
           next_token_skip_space
         end
-        if @token.type == TokenKind::OP_COMMA
-          write(", ") unless i == free_vars.size - 1
-          next_token_skip_space_or_newline
+        if i < free_vars.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
         end
       end
     end
 
-    if body = node.body
-      if !body.is_a?(Nop)
-        format_nested_with_end(body)
+    skip_space
+    if @token.type == TokenKind::IDENT && @token.value == "where"
+      write(" where ")
+      next_token_skip_space
+      while true
+        write(@token.value)
+        next_token_skip_space
+        write_token(" ", TokenKind::OP_COLON, " ")
+        skip_space_or_newline
+        write(@token.value)
+        next_token_skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ")
+          next_token_skip_space
+        else
+          break
+        end
       end
+    end
+
+    unless node.abstract
+      format_nested_with_end(node.body)
     end
 
     false
@@ -1018,6 +1185,9 @@ pub class Formatter < Visitor
   end
 
   def visit(node : ClassDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
     if @token.keyword?(Keyword::ABSTRACT)
       write_keyword(Keyword::ABSTRACT, " ")
     end
@@ -1091,15 +1261,21 @@ pub class Formatter < Visitor
 
   private def format_module_path(path : Array(String)) : Nil
     path.each_with_index do |seg, i|
-      write(seg)
-      next_token
-      if i < path.size - 1
+      if i > 0
         write_token(TokenKind::OP_SLASH)
       end
+      skip_space
+      write(seg)
+      @lexer.wants_regex = false
+      @lexer.slash_is_regex = false
+      next_token
     end
   end
 
   def visit(node : TraitDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
     write_keyword(Keyword::TRAIT, " ")
     accept(node.name)
     if supertraits = node.supertraits
@@ -1141,7 +1317,7 @@ pub class Formatter < Visitor
         if @token.type == TokenKind::OP_COLON
           write(" : ")
           next_token_skip_space_or_newline
-          # parse bound
+          write(@token.value)
           next_token_skip_space
         end
         if i < type_vars.size - 1
@@ -1151,12 +1327,6 @@ pub class Formatter < Visitor
     end
 
     format_nested_with_end(node.body)
-    false
-    skip_space_or_newline
-    write_line unless @wrote_newline
-    write_indent(@indent)
-    check_keyword(Keyword::END)
-    write_keyword(Keyword::END)
     false
   end
 
@@ -1173,6 +1343,9 @@ pub class Formatter < Visitor
   end
 
   def visit(node : EnumDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
     write_keyword(Keyword::ENUM, " ")
     accept(node.name)
     if base = node.base_type
@@ -1220,12 +1393,86 @@ pub class Formatter < Visitor
   end
 
   def visit(node : Alias) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
     write_keyword(Keyword::ALIAS, " ")
     accept(node.name)
     write_token(" ", TokenKind::OP_EQ, " ")
     skip_space_or_newline
     accept(node.value)
     false
+  end
+
+  def visit(node : AnnotationDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    write_keyword(Keyword::ANNOTATION, " ")
+    accept(node.name)
+    format_end(@indent)
+    false
+  end
+
+  def visit(node : Annotation) : Bool
+    write_token(TokenKind::OP_AT_LSQUARE)
+    skip_space_or_newline
+    accept(node.path)
+    skip_space_or_newline
+    if @token.type == TokenKind::OP_LPAREN
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      format_args_list(node.args, node.named_args)
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RSQUARE)
+    false
+  end
+
+  def visit(node : Cast) : Bool
+    visit(Call.new(node.obj, "as", node.to))
+  end
+
+  def visit(node : NilableCast) : Bool
+    visit(Call.new(node.obj, "as?", node.to))
+  end
+
+  def visit(node : TypeOf) : Bool
+    visit(Call.new(nil, "typeof", node.expressions))
+  end
+
+  def visit(node : SizeOf) : Bool
+    visit(Call.new(nil, "sizeof", node.exp))
+  end
+
+  def visit(node : InstanceSizeOf) : Bool
+    visit(Call.new(nil, "instance_sizeof", node.exp))
+  end
+
+  def visit(node : AlignOf) : Bool
+    visit(Call.new(nil, "alignof", node.exp))
+  end
+
+  def visit(node : InstanceAlignOf) : Bool
+    visit(Call.new(nil, "instance_alignof", node.exp))
+  end
+
+  def visit(node : OffsetOf) : Bool
+    visit(Call.new(nil, "offsetof", [node.offsetof_type.as(ASTNode), node.offset.as(ASTNode)] of ASTNode))
+  end
+
+  def visit(node : PointerOf) : Bool
+    visit(Call.new(nil, "pointerof", node.exp))
+  end
+
+  def visit(node : IsA) : Bool
+    visit(Call.new(node.obj, "is_a?", node.const))
+  end
+
+  def visit(node : RespondsTo) : Bool
+    visit(Call.new(node.obj, "responds_to?", StringLiteral.new(node.name)))
   end
 
   def visit(node : Include) : Bool
@@ -1406,34 +1653,35 @@ pub class Formatter < Visitor
     @token
   end
 
-  def skip_space : Bool
+  def skip_space(consume_newline : Bool = true) : Bool
     has_space = false
     base_column = @column
-    if @token.type == TokenKind::SPACE
+    while @token.type == TokenKind::SPACE
       next_token
       has_space = true
     end
     if @token.type == TokenKind::COMMENT
       needs_space = has_space && base_column != 0
       write(" ") if needs_space
-      write_comment(!needs_space)
+      write_comment(!needs_space, consume_newline)
       true
     else
       false
     end
   end
 
-  def skip_space_or_newline : Bool
+  def skip_space_or_newline(last : Bool = false, at_least_one : Bool = false, next_comes_end : Bool = false) : Bool
+    just_wrote_line = @wrote_newline
+    base_column = @column
     has_space = false
     newlines = 0
-    base_column = @column
     while true
       case @token.type
       when TokenKind::SPACE
         has_space = true
         next_token
       when TokenKind::NEWLINE
-        newlines = newlines + 1
+        newlines = newlines + (@token.raw.empty? ? 1 : @token.raw.bytesize)
         next_token
       when TokenKind::OP_SEMICOLON
         next_token
@@ -1445,13 +1693,35 @@ pub class Formatter < Visitor
       needs_space = has_space && newlines == 0 && base_column != 0
       if needs_space
         write(" ")
-      elsif newlines > 0
-        write_line unless @wrote_newline
+      elsif last && newlines > 0
+        if newlines > 1
+          write_line if !just_wrote_line && !@wrote_newline
+          write_line
+        elsif !@wrote_newline
+          write_line
+        elsif at_least_one
+          write_line
+        end
       end
-      write_comment(!needs_space)
+      write_comment(!needs_space, true, next_comes_end)
       true
     else
       false
+    end
+  end
+
+  def consume_newlines(next_comes_end : Bool = false) : Nil
+    if @token.type == TokenKind::NEWLINE
+      raw_newlines = @token.raw.empty? ? 1 : @token.raw.bytesize
+      write_line unless @wrote_newline
+      next_token_skip_space
+
+      if (raw_newlines > 1 || @token.type == TokenKind::NEWLINE) && !next_comes_end
+        write_line
+        @wrote_double_newlines = true
+      end
+
+      skip_space_or_newline(last: next_comes_end, at_least_one: true, next_comes_end: next_comes_end)
     end
   end
 
@@ -1461,23 +1731,61 @@ pub class Formatter < Visitor
     found_comment
   end
 
-  def write_comment(needs_indent : Bool = true) : Nil
+  def write_comment(needs_indent : Bool = true, consume_newline : Bool = true, next_comes_end : Bool = false) : Nil
     while @token.type == TokenKind::COMMENT
-      if @line_output.empty? && needs_indent
+      empty_line = @line_output.empty?
+      if empty_line && needs_indent
         write_indent(@indent)
       end
+
       value = @token.value.strip
-      if value.starts_with?("# =>")
-        write(value)
-      else
-        write(value)
+      if value.bytesize > 1
+        raw_after = value[1, value.bytesize - 1]
+        after_val = raw_after.strip
+        if after_val.starts_with?("=>")
+          value = "# => " + after_val[2, after_val.bytesize - 2].strip
+        elsif all_whitespace_or_hash?(after_val)
+          # leave as is
+        else
+          char_1 = value[1]?
+          if char_1 && !whitespace?(char_1)
+            value = "# " + raw_after.strip
+          end
+        end
       end
-      next_token
+
+      if !@last_write.empty?
+        last_b = @last_write.byte_at(@last_write.bytesize - 1)
+        if last_b != 32_u8 && last_b != 9_u8 && last_b != 10_u8 && last_b != 13_u8
+          write(" ")
+        end
+      end
+
       @wrote_comment = true
-      write_line
+      write(value)
+      next_token_skip_space
+      if consume_newline
+        consume_newlines(next_comes_end)
+        skip_space_or_newline(last: next_comes_end, at_least_one: false, next_comes_end: next_comes_end)
+      end
     end
   end
 
+  private def whitespace?(c : Char) : Bool
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+  end
+
+  private def all_whitespace_or_hash?(s : String) : Bool
+    i = 0
+    while i < s.bytesize
+      b = s.byte_at(i)
+      unless b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8 || b == 35_u8
+        return false
+      end
+      i = i + 1
+    end
+    true
+  end
   def write_indent(indent : Int32) : Nil
     i = 0
     while i < indent
@@ -1502,6 +1810,7 @@ pub class Formatter < Visitor
       i = i + 1
     end
     @wrote_newline = false
+    @wrote_double_newlines = false
     @last_write = str
   end
 
@@ -1510,10 +1819,10 @@ pub class Formatter < Visitor
     @line_output.clear
     @column = 0
     @wrote_newline = true
+    @wrote_double_newlines = false
     increment_line
     @last_write = ""
   end
-
   def increment_line : Nil
     @line = @line + 1
     @comment_columns << nil.as(Int32?)
@@ -1543,11 +1852,13 @@ pub class Formatter < Visitor
   end
 
   def write_keyword(before : String, kw : Keyword) : Nil
+    skip_space
     write(before)
     write_keyword(kw)
   end
 
   def write_keyword(before : String, kw : Keyword, after : String) : Nil
+    skip_space
     write(before)
     write_keyword(kw)
     write(after)
@@ -1566,11 +1877,13 @@ pub class Formatter < Visitor
   end
 
   def write_token(before : String, type : TokenKind) : Nil
+    skip_space
     write(before)
     write_token(type)
   end
 
   def write_token(before : String, type : TokenKind, after : String) : Nil
+    skip_space
     write(before)
     write_token(type)
     write(after)

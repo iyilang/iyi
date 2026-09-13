@@ -1,0 +1,51 @@
+class Shape
+  @id : Int32
+
+  def initialize(id : Int32)
+    @id = id
+  end
+
+  def id : Int32
+    @id
+  end
+
+  def area : Int32
+    @id &+ 10
+  end
+end
+
+class Circle < Shape
+  @radius : Int32
+
+  def initialize(id : Int32, radius : Int32)
+    @id = id
+    @radius = radius
+  end
+
+  def area : Int32
+    @radius &* 3
+  end
+end
+
+class Square < Shape
+  @side : Int32
+
+  def initialize(id : Int32, side : Int32)
+    @id = id
+    @side = side
+  end
+
+  def area : Int32
+    @side &* 2
+  end
+end
+
+fun test_virtual_area(kind : Int32, id : Int32, val : Int32) : Int32
+  s = kind == 1 ? Circle.new(id, val) : (kind == 2 ? Square.new(id, val) : Shape.new(id))
+  s.area
+end
+
+fun test_virtual_base_method(kind : Int32, id : Int32, val : Int32) : Int32
+  s = kind == 1 ? Circle.new(id, val) : (kind == 2 ? Square.new(id, val) : Shape.new(id))
+  s.id
+end

@@ -1,0 +1,25 @@
+class Box
+  @val : Int32
+
+  def initialize(val : Int32)
+    @val = val
+  end
+
+  def val : Int32
+    @val
+  end
+end
+
+fun test_nilable_class(flag : Int32, v : Int32) : Int32
+  b = flag == 1 ? Box.new(v) : nil
+  if b
+    b.val
+  else
+    0
+  end
+end
+
+fun test_nil_check(flag : Int32, v : Int32) : Bool
+  b = flag == 1 ? Box.new(v) : nil
+  b.nil?
+end

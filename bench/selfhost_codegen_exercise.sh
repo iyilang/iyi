@@ -130,6 +130,11 @@ def norm(raw):
         # Normalize constant type_id initializer value (host numbering differences)
         if re.match(r'^@"[^"]+:type_id" = internal constant i32 \d+', l):
             l = re.sub(r'\d+$', '<ID>', l)
+        # Normalize virtual hierarchy match range bounds (host numbering differences)
+        if re.match(r'%\d+ = icmp sge i32 %0, \d+', l):
+            l = re.sub(r'\d+$', '<MIN>', l)
+        if re.match(r'%\d+ = icmp sle i32 %0, \d+', l):
+            l = re.sub(r'\d+$', '<MAX>', l)
         # Normalize align on memset pointer argument
         if "call void @llvm.memset.p0.i64" in l:
             l = re.sub(r'ptr align \d+ %', 'ptr %', l)
@@ -284,6 +289,15 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_cg_mutation "corrupt module-level class type_id global" "cg_classes.iyi" \
   'tid_global = mod.add_global("#{info.name}:type_id", context.int32)' \
   'tid_global = mod.add_global("#{info.name}:corrupted_type_id", context.int32)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_cg_mutation "corrupt virtual hierarchy match range predicate" "cg_virtual_dispatch.iyi" \
+  'sge = builder.icmp(LibLLVM::IntPredicate::SGE, arg0, min_val)' \
+  'sge = builder.icmp(LibLLVM::IntPredicate::SLT, arg0, min_val)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt nilable null check predicate" "cg_nilable.iyi" \
+  'res = @builder.icmp(LibLLVM::IntPredicate::EQ, l_nil_tid2, sel)' \
+  'res = @builder.icmp(LibLLVM::IntPredicate::NE, l_nil_tid2, sel)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

@@ -94,7 +94,10 @@ pub class CustomTypeInfo
   property field_order : Array(String)
   property methods : Hash(String, Def)
   property superclass_name : String?
+  property subclasses : Array(String)
   property type_id : Int32
+  property min_type_id : Int32
+  property max_type_id : Int32
 
   def initialize(@name : String, @is_struct : Bool)
     @fields = Hash(String, Int32).new
@@ -102,7 +105,10 @@ pub class CustomTypeInfo
     @field_order = [] of String
     @methods = Hash(String, Def).new
     @superclass_name = nil
+    @subclasses = [] of String
     @type_id = 0
+    @min_type_id = 0
+    @max_type_id = 0
   end
 
   def add_field(fname : String, ftype : String) : Nil
@@ -244,7 +250,7 @@ pub class CodeGenVisitor < Visitor
     when "Void", "Nil", "NoReturn"
       @context.void
     else
-      if name.includes?("Pointer(") || name.ends_with?("*")
+      if name.includes?("Pointer(") || name.ends_with?("*") || name.ends_with?('+') || name.ends_with?('?')
         @context.pointer
       elsif info = @custom_types[name]?
         if info.is_struct
@@ -290,7 +296,7 @@ pub class CodeGenVisitor < Visitor
     when "Int8", "UInt8", "Bool"
       1
     else
-      if type_name.starts_with?("Pointer(") || type_name.ends_with?("*")
+      if type_name.starts_with?("Pointer(") || type_name.ends_with?("*") || type_name.ends_with?('+') || type_name.ends_with?('?')
         8
       elsif info = @custom_types[type_name]?
         if info.is_struct
@@ -314,9 +320,65 @@ pub class CodeGenVisitor < Visitor
     end
   end
 
+  def class_ancestors(cname : String) : Array(String)
+    res = [cname] of String
+    curr = cname
+    while (info = @custom_types[curr]?) && (sc = info.superclass_name)
+      res << sc
+      curr = sc
+    end
+    res
+  end
+
+  def unify_types(t1 : String, t2 : String) : String
+    return t1 if t1 == t2
+    if t2 == "Nil" || t2 == "Void"
+      return (info = @custom_types[t1]?) && !info.is_struct ? "#{t1}?" : t1
+    end
+    if t1 == "Nil" || t1 == "Void"
+      return (info = @custom_types[t2]?) && !info.is_struct ? "#{t2}?" : t2
+    end
+
+    base1 = t1.ends_with?('+') ? t1.rchop('+') : t1
+    base2 = t2.ends_with?('+') ? t2.rchop('+') : t2
+
+    if (info1 = @custom_types[base1]?) && (info2 = @custom_types[base2]?) && !info1.is_struct && !info2.is_struct
+      anc1 = class_ancestors(base1)
+      anc2 = class_ancestors(base2)
+      anc1.each do |a|
+        if anc2.includes?(a)
+          return "#{a}+"
+        end
+      end
+    end
+
+    t1
+  end
+
   def infer_var_type(vname : String, node : ASTNode) : String
     if node.is_a?(TypeDeclaration)
       return node.as(TypeDeclaration).declared_type.to_s
+    end
+
+    if node.is_a?(Expressions)
+      if last_exp = node.as(Expressions).expressions.last?
+        return infer_var_type(vname, last_exp)
+      end
+    end
+
+    if node.is_a?(If)
+      if_n = node.as(If)
+      then_t = infer_var_type(vname, if_n.then)
+      else_t = if els = if_n.else
+                 infer_var_type(vname, els)
+               else
+                 "Nil"
+               end
+      return unify_types(then_t, else_t)
+    end
+
+    if node.is_a?(NilLiteral)
+      return "Nil"
     end
 
     if node.is_a?(Call)
@@ -377,6 +439,49 @@ pub class CodeGenVisitor < Visitor
     end
 
     "Int32"
+  end
+  def assign_class_type_ids : Nil
+    next_id = 1
+    assigned = Set(String).new
+
+    @custom_types.each_value do |info|
+      next if info.is_struct
+      sc_name = info.superclass_name
+      if sc_name.nil? || !@custom_types.has_key?(sc_name)
+        next_id = assign_type_id_node(info.name, next_id, assigned)
+      end
+    end
+  end
+
+  def assign_type_id_node(cname : String, next_id : Int32, assigned : Set(String)) : Int32
+    return next_id if assigned.includes?(cname)
+    info = @custom_types[cname]
+
+    if info.subclasses.empty?
+      id = next_id
+      info.type_id = id
+      info.min_type_id = id
+      info.max_type_id = id
+      assigned.add(cname)
+      id + 1
+    else
+      curr_id = next_id
+      min_id = 0
+      first = true
+      info.subclasses.each do |sub_name|
+        if first
+          min_id = curr_id
+          first = false
+        end
+        curr_id = assign_type_id_node(sub_name, curr_id, assigned)
+      end
+      id = curr_id
+      info.type_id = id
+      info.min_type_id = min_id
+      info.max_type_id = id
+      assigned.add(cname)
+      id + 1
+    end
   end
 
   def collect_local_vars(body : ASTNode?, excluded : Set(String)) : Hash(String, ASTNode)
@@ -475,7 +580,7 @@ pub class CodeGenVisitor < Visitor
         ptr = @builder.alloca(llvm_t, vname)
         if (info = @custom_types[tname]?) && info.is_struct
           ptr.alignment = 8
-        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname == "Int64" || tname == "Float64" || @custom_types.has_key?(tname)
+        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "Float64" || @custom_types.has_key?(tname)
           ptr.alignment = 8
         else
           ptr.alignment = 4
@@ -628,7 +733,7 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : NilLiteral) : Bool
-    @last = @context.void.undef
+    @last = @context.pointer.null
     @terminated = false
     false
   end
@@ -639,9 +744,13 @@ pub class CodeGenVisitor < Visitor
     else_bb = fn.append_basic_block("else")
 
     node.cond.accept(self)
-    return false unless cond_val = @last
+    return false unless cond_raw = @last
+    cond_val = if cond_raw.type.to_s == "ptr" || cond_raw.type.to_s == "pointer"
+                 @builder.icmp(LibLLVM::IntPredicate::NE, cond_raw, @context.pointer.null)
+               else
+                 cond_raw
+               end
     @builder.cond_br(cond_val, then_bb, else_bb)
-
     exit_bb = fn.append_basic_block("exit")
 
     # then branch
@@ -881,6 +990,219 @@ pub class CodeGenVisitor < Visitor
       if obj.is_a?(Var)
         vname = obj.as(Var).name
         vtname = @var_type_names[vname]?
+        if vtname && vtname.ends_with?('+')
+          base_cname = vtname.rchop('+')
+          if base_info = @custom_types[base_cname]?
+            has_sub_override = base_info.subclasses.any? do |sub_name|
+              if stinfo = @custom_types[sub_name]?
+                stinfo.methods.has_key?(node.name)
+              else
+                false
+              end
+            end
+            if base_info.fields.has_key?(node.name) && node.args.empty? && !has_sub_override
+              fidx = base_info.fields[node.name]
+              idx = fidx + 1
+              st = @llvm_struct_types[base_info.name]
+              ftype = base_info.field_types[node.name]
+              ptr = @builder.load(@context.pointer, @vars[vname])
+              gep = @builder.inbounds_gep(st, ptr, [@context.int32.const_int(0), @context.int32.const_int(idx)])
+              l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+              l_inst.alignment = 4
+              @last = l_inst
+              @terminated = false
+              return false
+            end
+
+            sub_targets = base_info.subclasses.select do |sub_name|
+              if stinfo = @custom_types[sub_name]?
+                stinfo.methods.has_key?(node.name)
+              else
+                false
+              end
+            end
+
+            if sub_targets.empty?
+              if m = base_info.methods[node.name]?
+                arg_vals = [] of LLVMValue
+                arg_type_names = [] of String
+                node.args.each do |a|
+                  a.accept(self)
+                  if l = @last
+                    arg_vals << l
+                  end
+                  arg_type_names << (a.is_a?(NumberLiteral) ? "Int32" : "Int32")
+                end
+                ret_tname = m.return_type ? m.return_type.to_s : "Int32"
+                method_fn_name = if arg_type_names.empty?
+                                   "*#{base_info.name}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{base_info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                                 end
+                if method_fn = @mod.get_function?(method_fn_name)
+                  ptr = @builder.load(@context.pointer, @vars[vname])
+                  call_args = [ptr] of LLVMValue
+                  arg_vals.each { |av| call_args << av }
+                  call_ret_ty = llvm_type_from_name(ret_tname)
+                  m_param_tys = call_args.map(&.type)
+                  method_fn_ty = LLVMType.function(m_param_tys, call_ret_ty, false)
+                  call_val = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+                  @last = call_val
+                  @terminated = false
+                  return false
+                end
+              end
+            else
+              if fn = @current_fn
+                arg_vals = [] of LLVMValue
+                arg_type_names = [] of String
+                node.args.each do |a|
+                  a.accept(self)
+                  if l = @last
+                    arg_vals << l
+                  end
+                  arg_type_names << (a.is_a?(NumberLiteral) ? (a.as(NumberLiteral).kind == NumberKind::F64 ? "Float64" : (a.as(NumberLiteral).kind == NumberKind::I64 ? "Int64" : "Int32")) : "Int32")
+                end
+
+                ptr = @builder.load(@context.pointer, @vars[vname])
+                tid_val = @builder.load(@context.int32, ptr)
+                tid_val.alignment = 4
+
+                rev_sub_targets = sub_targets.reversed
+                phi_vals = [] of LLVMValue
+                phi_bbs = [] of BasicBlock
+
+                exit_dispatch_bb = uninitialized BasicBlock
+                exit_created = false
+
+                m_base = base_info.methods[node.name]?
+                ret_tname = if m_base && m_base.return_type
+                              m_base.return_type.to_s
+                            elsif first_sub = sub_targets.first?
+                              sub_m = @custom_types[first_sub].methods[node.name]
+                              sub_m.return_type ? sub_m.return_type.to_s : "Int32"
+                            else
+                              "Int32"
+                            end
+                ret_llvm_type = llvm_type_from_name(ret_tname)
+
+                rev_sub_targets.each do |sub_name|
+                  sub_info = @custom_types[sub_name]
+                  cur_def_bb = fn.append_basic_block("current_def")
+                  next_def_bb = fn.append_basic_block("next_def")
+
+                  sub_tid_global = @mod.get_global("#{sub_name}:type_id")
+                  sub_tid_val = @builder.load(@context.int32, sub_tid_global)
+                  sub_tid_val.alignment = 4
+
+                  cmp = @builder.icmp(LibLLVM::IntPredicate::EQ, sub_tid_val, tid_val)
+                  @builder.cond_br(cmp, cur_def_bb, next_def_bb)
+
+                  if !exit_created
+                    exit_dispatch_bb = fn.append_basic_block("exit")
+                    exit_created = true
+                  end
+
+                  @builder.position_at_end(cur_def_bb)
+                  m = sub_info.methods[node.name]
+                  m_fn_name = if arg_type_names.empty?
+                                "*#{sub_name}##{node.name}:#{ret_tname}"
+                              else
+                                "*#{sub_name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                              end
+                  if m_fn = @mod.get_function?(m_fn_name)
+                    call_args = [ptr] of LLVMValue
+                    arg_vals.each { |av| call_args << av }
+                    m_param_tys = call_args.map(&.type)
+                    m_fn_ty = LLVMType.function(m_param_tys, ret_llvm_type, false)
+                    call_val = @builder.call(m_fn_ty, m_fn.to_value, call_args)
+                    phi_vals << call_val
+                    phi_bbs << (@builder.insert_block || cur_def_bb)
+                    @builder.br(exit_dispatch_bb)
+                  end
+
+                  @builder.position_at_end(next_def_bb)
+                end
+
+                cur_def_base_bb = fn.append_basic_block("current_def")
+                unreach_bb = fn.append_basic_block("next_def")
+
+                match_fn_name = "~match<#{base_info.name}+>"
+                if match_fn = @mod.get_function?(match_fn_name)
+                  match_fn_ty = LLVMType.function([@context.int32], @context.int1, false)
+                  matched = @builder.call(match_fn_ty, match_fn.to_value, [tid_val])
+                  @builder.cond_br(matched, cur_def_base_bb, unreach_bb)
+
+                  @builder.position_at_end(cur_def_base_bb)
+                  base_fn_name = if arg_type_names.empty?
+                                   "*#{base_info.name}+@#{base_info.name}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{base_info.name}+@#{base_info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                                 end
+                  if b_fn = @mod.get_function?(base_fn_name)
+                    call_args = [ptr] of LLVMValue
+                    arg_vals.each { |av| call_args << av }
+                    b_param_tys = call_args.map(&.type)
+                    b_fn_ty = LLVMType.function(b_param_tys, ret_llvm_type, false)
+                    base_call_val = @builder.call(b_fn_ty, b_fn.to_value, call_args)
+                    phi_vals << base_call_val
+                    phi_bbs << (@builder.insert_block || cur_def_base_bb)
+                    @builder.br(exit_dispatch_bb)
+                  end
+
+                  @builder.position_at_end(unreach_bb)
+                  @builder.unreachable
+
+                  @builder.position_at_end(exit_dispatch_bb)
+                  phi = @builder.phi(ret_llvm_type)
+                  @builder.add_incoming(phi, phi_vals, phi_bbs)
+                  @last = phi
+                  @terminated = false
+                  return false
+                end
+              end
+            end
+          end
+        end
+
+        if vtname && vtname.ends_with?('?')
+          base_cname = vtname.rchop('?')
+          if node.name == "nil?" && node.args.empty?
+            unless @mod.get_global?("Nil:type_id")
+              g = @mod.add_global("Nil:type_id", @context.int32)
+              g.initializer = @context.int32.const_int(0)
+              g.global_constant = true
+              g.linkage = LibLLVM::Linkage::Internal
+            end
+            ptr_val = @builder.load(@context.pointer, @vars[vname])
+            l_null = @builder.icmp(LibLLVM::IntPredicate::EQ, ptr_val, @context.pointer.null)
+            l_nil_tid = @builder.load(@context.int32, @mod.get_global("Nil:type_id"))
+            l_nil_tid.alignment = 4
+            l_box_tid = @builder.load(@context.int32, @mod.get_global("#{base_cname}:type_id"))
+            l_box_tid.alignment = 4
+            sel = @builder.select(l_null, l_nil_tid, l_box_tid)
+            l_nil_tid2 = @builder.load(@context.int32, @mod.get_global("Nil:type_id"))
+            l_nil_tid2.alignment = 4
+            res = @builder.icmp(LibLLVM::IntPredicate::EQ, l_nil_tid2, sel)
+            @last = res
+            @terminated = false
+            return false
+          elsif base_info = @custom_types[base_cname]?
+            if base_info.fields.has_key?(node.name) && node.args.empty?
+              fidx = base_info.fields[node.name]
+              idx = fidx + 1
+              st = @llvm_struct_types[base_info.name]
+              ftype = base_info.field_types[node.name]
+              ptr = @builder.load(@context.pointer, @vars[vname])
+              gep = @builder.inbounds_gep(st, ptr, [@context.int32.const_int(0), @context.int32.const_int(idx)])
+              l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+              l_inst.alignment = 4
+              @last = l_inst
+              @terminated = false
+              return false
+            end
+          end
+        end
         if vtname && (info = @custom_types[vtname]?)
           # Field getter: p.x
           if info.fields.has_key?(node.name) && node.args.empty?
@@ -1343,6 +1665,32 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       builder.ret(val_param)
     end
 
+    # Emit virtual match function if class has subclasses and has an overridden method
+    has_any_override = info.subclasses.any? do |sub_name|
+      if sub_info = cg.custom_types[sub_name]?
+        info.methods.keys.any? { |mname| mname != "initialize" && sub_info.methods.has_key?(mname) }
+      else
+        false
+      end
+    end
+    if !info.is_struct && has_any_override
+      fn_name = "~match<#{info.name}+>"
+      unless mod.get_function?(fn_name)
+        fn_ty = LLVMType.function([context.int32], context.int1, false)
+        m_match_fn = mod.add_function(fn_name, fn_ty)
+        m_match_fn.linkage = LibLLVM::Linkage::Internal
+        entry_bb = m_match_fn.append_basic_block("entry")
+        builder.position_at_end(entry_bb)
+        arg0 = m_match_fn.param(0)
+        min_val = context.int32.const_int(info.min_type_id)
+        max_val = context.int32.const_int(info.max_type_id)
+        sge = builder.icmp(LibLLVM::IntPredicate::SGE, arg0, min_val)
+        sle = builder.icmp(LibLLVM::IntPredicate::SLE, arg0, max_val)
+        res = builder.and(sge, sle)
+        builder.ret(res)
+      end
+    end
+
     # Emit custom methods
     info.methods.each do |mname, mdef|
       next if mname == "initialize" || info.fields.has_key?(mname) || (mname.ends_with?("=") && info.fields.has_key?(mname.rchop('=')))
@@ -1361,12 +1709,27 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       m_fn_ty = LLVMType.function(m_arg_tys, m_ret_ty, false)
 
       arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
-      fn_mangled = if arg_type_names.empty?
-                     "*#{info.name}##{mname}:#{ret_tname}"
-                   else
-                     "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
-                   end
+      has_sub_override = !info.subclasses.empty? && info.subclasses.any? do |sub_name|
+        if stinfo = cg.custom_types[sub_name]?
+          stinfo.methods.has_key?(mname)
+        else
+          false
+        end
+      end
 
+      fn_mangled = if has_sub_override
+                     if arg_type_names.empty?
+                       "*#{info.name}+@#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}+@#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   else
+                     if arg_type_names.empty?
+                       "*#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   end
       m_fn = mod.add_function(fn_mangled, m_fn_ty)
       m_fn.linkage = LibLLVM::Linkage::Internal
 
@@ -1521,12 +1884,9 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   cg = CodeGenVisitor.new(context, mod, prog, mv)
 
   # Process custom types (structs and classes)
-  type_id_counter = 1
   classes.each do |cd|
     cname = cd.name.to_s
     info = CustomTypeInfo.new(cname, cd.struct)
-    info.type_id = type_id_counter
-    type_id_counter += 1
     if sc = cd.superclass
       info.superclass_name = sc.to_s
     end
@@ -1550,6 +1910,18 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     end
     cg.custom_types[cname] = info
   end
+  # Populate subclasses
+  cg.custom_types.each_value do |info|
+    if sc_name = info.superclass_name
+      if sc_info = cg.custom_types[sc_name]?
+        sc_info.subclasses << info.name
+      end
+    end
+  end
+
+  # Assign hierarchical class type IDs
+  cg.assign_class_type_ids
+
 
   # Inherit superclass fields for classes
   cg.custom_types.each_value do |info|

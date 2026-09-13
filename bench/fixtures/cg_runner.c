@@ -57,6 +57,14 @@ int32_t class_counter_get(int32_t initial);
 int32_t class_counter_inc(int32_t initial, int32_t by);
 int32_t class_multiplier_scaled(int32_t initial, int32_t factor);
 
+// cg_virtual_dispatch
+int32_t test_virtual_area(int32_t kind, int32_t id, int32_t val);
+int32_t test_virtual_base_method(int32_t kind, int32_t id, int32_t val);
+
+// cg_nilable
+int32_t test_nilable_class(int32_t flag, int32_t v);
+bool test_nil_check(int32_t flag, int32_t v);
+
 int main(void) {
   // Test 1: Integer arithmetic
   int32_t r_add = int_add(10, 32);
@@ -116,6 +124,24 @@ int main(void) {
   int32_t c_inc = class_counter_inc(15, 7);
   int32_t m_scaled = class_multiplier_scaled(10, 5);
   printf("classes: %d %d %d\n", c_get, c_inc, m_scaled);
+
+  // Test 10: Virtual hierarchy dynamic dispatch
+  int32_t v_c_area = test_virtual_area(1, 100, 5);
+  int32_t v_s_area = test_virtual_area(2, 200, 7);
+  int32_t v_b_area = test_virtual_area(3, 300, 0);
+  int32_t v_c_id = test_virtual_base_method(1, 100, 5);
+  int32_t v_s_id = test_virtual_base_method(2, 200, 7);
+  int32_t v_b_id = test_virtual_base_method(3, 300, 0);
+  printf("virtual: %d %d %d %d %d %d\n", v_c_area, v_s_area, v_b_area, v_c_id,
+         v_s_id, v_b_id);
+
+  // Test 11: Nilable values and nil checks
+  int32_t n_val = test_nilable_class(1, 42);
+  int32_t n_zero = test_nilable_class(0, 42);
+  bool n_chk_false = test_nil_check(1, 42);
+  bool n_chk_true = test_nil_check(0, 42);
+  printf("nilable: %d %d %d %d\n", n_val, n_zero, (int)n_chk_false,
+         (int)n_chk_true);
 
   return 0;
 }

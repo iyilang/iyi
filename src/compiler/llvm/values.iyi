@@ -296,6 +296,7 @@ pub struct LLVMValue
   def ==(other : LLVMValue) : Bool
     @unwrap.address == other.unwrap.address
   end
+
   def initializer=(val : LLVMValue) : Nil
     LibLLVM.set_initializer(@unwrap, val.to_unsafe)
   end

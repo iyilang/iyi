@@ -1,0 +1,34 @@
+# The formatter tool ported from src/compiler/iyi/tools/formatter.cr.
+#
+# Formats iyi and Crystal source files according to language rules.
+# Used by `iyi tool format --selfhost` to format code with pure iyi code.
+
+module compiler/tools/format
+
+import compiler/tools/formatter
+using compiler/tools/formatter::{Formatter}
+
+module FormatTool
+  def self.run : Nil
+    args = Program.args
+    if args.empty? || args[0] == "-"
+      source = read_input
+      if source.empty?
+        return
+      end
+      print Formatter.format(source, "STDIN")
+    else
+      path = args[0]
+      unless File.exists?(path)
+        raise "no such file: " + path
+      end
+      source = File.read(path)
+      if source.empty?
+        return
+      end
+      print Formatter.format(source, path)
+    end
+  end
+end
+
+FormatTool.run

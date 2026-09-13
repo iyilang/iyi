@@ -1354,6 +1354,9 @@ pub class CommandDriver
     parser.on("--show-backtrace", "Show backtrace on a bug (used only for debugging)") do
       @error_trace = true
     end
+    parser.on("--selfhost", "Use the pure iyi self-hosted formatter") do
+      @subcommand_options["selfhost"] = "true"
+    end
     files = parser.parse(@options)
     return if @exit_code
     @subcommand_options["check"] = check.to_s

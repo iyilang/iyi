@@ -9,7 +9,7 @@ class Iyi::Command
     includes = [] of String
     check = false
     show_backtrace = false
-
+    selfhost = false
     OptionParser.parse(@options) do |opts|
       opts.banner = <<-USAGE
         Usage: #{Command.program_name} tool format [options] [- | file or directory ...]
@@ -48,6 +48,14 @@ class Iyi::Command
       opts.on("--show-backtrace", "Show backtrace on a bug (used only for debugging)") do
         show_backtrace = true
       end
+
+      opts.on("--selfhost", "Use the pure iyi self-hosted formatter") do
+        selfhost = true
+      end
+    end
+
+    if selfhost && !FormatCommand.find_selfhost_format_tool
+      abort! "iyi tool format: self-host tool not found. Build it with `make iyi-format` or set IYI_FORMAT_BIN", :SOFTWARE_ERROR
     end
 
     files = options
@@ -59,6 +67,7 @@ class Iyi::Command
       check,
       show_backtrace,
       @color,
+      selfhost: selfhost,
     )
     format_command.run
     exit format_command.status_code
@@ -69,6 +78,7 @@ class Iyi::Command
     @files : Array(String)
     @excludes : Array(String)
 
+    @selfhost : Bool
     getter status_code = 0
 
     def initialize(
@@ -79,6 +89,7 @@ class Iyi::Command
       @color : Bool = true,
       # stdio is injectable for testing
       @stdin : IO = STDIN, @stdout : IO = STDOUT, @stderr : IO = STDERR,
+      @selfhost : Bool = false,
     )
       @format_stdin = files.size == 1 && files[0] == "-"
 
@@ -171,7 +182,61 @@ class Iyi::Command
 
     # This method is for mocking `Iyi.format` in test.
     private def format(filename, source)
-      Iyi.format(source, filename: filename, report_warnings: STDERR)
+      if @selfhost
+        run_selfhost_format(filename, source)
+      else
+        Iyi.format(source, filename: filename, report_warnings: STDERR)
+      end
+    end
+
+    private def run_selfhost_format(filename : String, source : String) : String
+      tool = FormatCommand.find_selfhost_format_tool
+      unless tool
+        print_error "iyi tool format: self-host tool not found. Build it with `make iyi-format` or set IYI_FORMAT_BIN"
+        @status_code = 1
+        return source
+      end
+
+      out_io = IO::Memory.new
+      err_io = IO::Memory.new
+
+      args = (filename == "STDIN" || !File.file?(filename)) ? ["-"] : [filename]
+      status = if args == ["-"]
+                 Process.run(tool, args, input: IO::Memory.new(source), output: out_io, error: err_io)
+               else
+                 Process.run(tool, args, output: out_io, error: err_io)
+               end
+
+      if status.success?
+        out_io.to_s
+      else
+        err_msg = err_io.to_s.strip
+        err_msg = "error formatting '#{filename}'" if err_msg.empty?
+        print_error err_msg
+        @status_code = 1
+        source
+      end
+    end
+
+    def self.find_selfhost_format_tool : String?
+      if env = Config.env("FORMAT_BIN")
+        return env if File.file?(env)
+      end
+
+      tool_name = "iyi-format"
+      candidates = [] of String
+      if exec = Process.executable_path
+        candidates << File.join(File.dirname(exec), tool_name)
+        candidates << File.join(File.dirname(exec), "selfhost-formatter")
+      end
+      candidates << File.join(".build", tool_name)
+      candidates << File.join(".build", "selfhost-formatter")
+
+      if found = candidates.find { |c| File.file?(c) }
+        return found
+      end
+
+      nil
     end
 
     private def print_error(msg)

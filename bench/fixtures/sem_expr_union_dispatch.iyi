@@ -1,0 +1,40 @@
+class Cat
+  def speak : String
+    "meow"
+  end
+
+  def legs : Int32
+    4
+  end
+
+  def status : Int32
+    1
+  end
+end
+
+class Bird
+  def speak : String
+    "chirp"
+  end
+
+  def legs : Int32
+    2
+  end
+
+  def status : String
+    "flying"
+  end
+end
+
+def make_pet(flag : Bool)
+  if flag
+    Cat.new
+  else
+    Bird.new
+  end
+end
+
+pet = make_pet(true)
+sound = pet.speak
+count = pet.legs
+stat = pet.status

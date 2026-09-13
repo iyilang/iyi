@@ -1,0 +1,9 @@
+def foo(x : Int32, y : Int32)
+  x
+end
+
+def foo(x : String, y : String)
+  x
+end
+
+foo(1, "a")

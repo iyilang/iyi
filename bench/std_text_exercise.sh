@@ -184,6 +184,51 @@ prove_fails_prelude "wide pad truncated" no_wide "utf8: wide pad bytes" \
   's/^    pad_bytes = padding.bytesize$/    pad_bytes = 1/'
 
 echo
+echo "== the prelude's own String at its edges, which is a panic with a name"
+# `[](start, count)` has said for a long time that a negative count "is not
+# a wrap, it is a mistake"; `*` did not, and `"ab" * -3` answered `""` where
+# Crystal raises. `"abcd" * 600_000_000` answered "arithmetic overflow",
+# which names the machine's adder rather than the string that does not fit.
+# Driven here rather than asserted in the exercise: a panicking program has
+# no next line to check.
+panics_with() { # panics_with <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  printf 'module main\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of panicking"
+    status=1
+    return
+  fi
+  if [ "$code" -ne 1 ]; then
+    echo "  $label: died with exit $code rather than a panic"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$name.out"; then
+    echo "  $label: panicked, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits 1 at "%s"\n' "$label" \
+    "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+
+panics_with "a negative repeat" mul_negative "negative count -3" '"ab" * -3'
+panics_with "a repeat that does not fit" mul_overflow \
+  "past the 2147483647 bytes a string holds" '"abcd" * 600_000_000'
+panics_with "a negative slice count" slice_negative "negative count -1" '"abc"[0, -1]'
+panics_with "an index past the end" index_past \
+  "out of range for a string of 3 bytes" '"abc"[9]'
+echo
 if [ "$status" -eq 0 ]; then
   echo "Text standard library: inspection, cases, conversions, strip, chomp, split,"
   echo "search, sub, transformations, and UTF-8 handling all pass plain and optimised,"

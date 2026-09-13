@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`"ab" * -3` answered `""`.** `String#[](start, count)` has said for a
+  long time that a negative count "is not a wrap, it is a mistake"; `*` said
+  nothing and handed back the empty string, where Crystal raises — one name
+  meaning two things, which is what III.1.7a is about. It refuses by name
+  now, and so does a repeat that does not fit: `"abcd" * 600_000_000`
+  panicked with "arithmetic overflow", naming the machine's adder rather
+  than the string, and the size is a division checked before the multiply.
+  Paid for at the prelude's 3,734-line ceiling by folding `rjust` and
+  `ljust`'s pad-less overloads into a default argument — two methods for one
+  question — so the library is still exactly 3,734 lines. Four edges of the
+  prelude's own `String` are in `bench/std_text_exercise.sh`, which CI
+  reaches through `bench/std_exercise.sh`'s sibling walk.
 - **Three ways a command answered with the compiler's guts instead of a
   sentence.** `iyi daemon start --socket <a path longer than the kernel
   takes>` died with "Path size exceeds the maximum size of 107 bytes

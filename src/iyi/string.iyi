@@ -165,8 +165,9 @@ class String
   # for ASCII and nothing else. `"héllo".rjust(7, '.')` used to answer a
   # string whose own `size` was 6. The pad travels as its own bytes for the
   # same reason — written as one byte, a `'·'` left a lone continuation byte
-  # in the middle of the result.
-  def rjust(width : Int32, pad : Char) : String
+  # in the middle of the result. It defaults rather than living in a second
+  # overload of each, which is two methods for one question.
+  def rjust(width : Int32, pad : Char = ' ') : String
     count = size
     return self if width <= count
     extra = width - count
@@ -182,11 +183,7 @@ class String
     end
   end
 
-  def rjust(width : Int32) : String
-    rjust(width, ' ')
-  end
-
-  def ljust(width : Int32, pad : Char) : String
+  def ljust(width : Int32, pad : Char = ' ') : String
     count = size
     return self if width <= count
     extra = width - count
@@ -202,12 +199,15 @@ class String
     end
   end
 
-  def ljust(width : Int32) : String
-    ljust(width, ' ')
-  end
-
+  # `"ab" * -3` answered `""` where Crystal raises, and III.1.7a says one
+  # name means one thing in both. The size is a division rather than the
+  # multiply below, so the refusal names the string: `"abcd" * 600_000_000`
+  # panicked with "arithmetic overflow", which is the machine's adder.
   def *(count : Int32) : String
-    return "" if count <= 0 || @bytesize == 0
+    raise "negative count #{count}" if count < 0
+    return "" if count == 0 || @bytesize == 0
+    raise "a string of #{@bytesize} bytes repeated #{count} times is past " \
+          "the 2147483647 bytes a string holds" if count > 2147483647 // @bytesize
     total = @bytesize * count
     String.new(total) do |buffer|
       i = 0

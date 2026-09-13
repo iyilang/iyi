@@ -139,7 +139,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # "not a valid Crystal source file" named the wrong one. The line is the
     # choice between them, so it mentions both by necessity.
     (r'ends_with\?\(".iyi"\) \? "iyi" : "Crystal"', "the line that picks which language a file is"),
-    (r"Crystal (caches|runs|takes)", "a sentence about the other language"),
+    (r"Crystal (caches|runs|raises|takes)", "a sentence about the other language"),
     # `iyi migrate` and `iyi bind` are about the other language by
     # definition: a Crystal project, a Crystal file kept as Crystal, the
     # tree's own output compared against what Crystal answered. Their

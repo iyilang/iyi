@@ -4,6 +4,36 @@
 
 ### Fixed
 
+- **Four gates that ran nowhere, and one of them had gone stale in the
+  dark.** `bench/windows_exercise.sh`, `bench/wasm32_exercise.sh`,
+  `bench/sandbox_story.sh` and `bench/wasm_concurrency_probe.sh` were
+  never named in the workflow. Three of them had their *positive* half
+  copied into it by hand — link the exercise, run it, grep the last line —
+  which is the half that cannot fail; the patched-prelude proofs that make
+  them gates ran on nobody's machine. The fourth ran nowhere at all, and
+  its first step had rotted meanwhile: it asserted that wasmtime refuses
+  `-W stack-switching=y`, which is what Cranelift answers on arm64, where
+  the file was written, and not on x86_64, where the same wasmtime 48.0.1
+  accepts the flag and runs the module. That step records what the host
+  answered now, with the reason the answer does not matter (nothing in
+  wasi-sdk can emit the instruction), and the file's iyi-owned check — the
+  compiler refusing `group` for wasm32-wasi — runs even where there is no
+  toolchain, which is what kept the whole file out of CI. All four run
+  now: the Windows collector driver beside the other five collector gates
+  (it needs no Windows — a host run, a cross-compile that stops at the
+  object, three proofs), and the three wasm drivers against the tarball's
+  compiler, because the container that can build a compiler cannot run
+  wasmtime and the runner that runs wasmtime cannot build one. The
+  transcriptions are gone, and so are the four cross-compiled objects they
+  were reading.
+- **`mod context` dropped the flag it was handed.** The context pack is
+  the verb a model calls, and it read `--json` and `--budget` only *before*
+  the path: `iyi mod context file.iyi --json` printed the text pack and
+  exited 0, so whatever was reading JSON found out somewhere else. A
+  second path went the same way, an unknown flag was reported as a missing
+  `.iyi` file, and a directory was "no such file". It reads its arguments
+  the way `mod dump` and `mod diff` do now, and three cases in
+  `bench/verbs_exercise.sh` hold it.
 - **`max` without `max?`.** `std/enumerable` states the library's naming
   rule and names this very pair as the exemplar — `?` is the nilable one,
   the plain name raises, which is what iyi does instead of Crystal's

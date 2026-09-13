@@ -22,31 +22,47 @@ require "../mod/installer"
 
 class Iyi::Command
   private def mod_context
+    # Read from either side of the path, and refuse what is left over. The
+    # loop used to stop at the first word that was not a flag, so
+    # `mod context file.iyi --json` printed the *text* pack and exited 0 —
+    # the flag the caller wrote was dropped on the floor, and a caller
+    # piping that into a JSON reader learns about it somewhere else
+    # entirely. A second path went the same way. `mod dump` and `mod diff`
+    # read their arguments this way for the same reason.
     as_json = false
     budget = nil
-    while option = options.first?
+    filename = nil
+    while option = options.shift?
       case option
       when "--json"
-        options.shift
         as_json = true
       when "--budget"
-        options.shift
         value = options.shift?
         budget = value.try(&.to_i?)
         abort! "--budget takes a token count", :USAGE_ERROR unless budget && budget > 0
+      when .starts_with?('-')
+        abort! "mod context: unknown flag #{option}", :USAGE_ERROR
       else
-        break
+        if filename
+          abort! "unexpected '#{option}' after the .iyi path", :USAGE_ERROR
+        end
+        filename = option
       end
     end
     if as_json && budget
       abort! "--budget shapes the text pack; --json is already data — slice it yourself", :USAGE_ERROR
     end
 
-    filename = options.shift?
     unless filename && filename.ends_with?(".iyi")
       abort! "expected a .iyi file", :USAGE_ERROR
     end
     unless File.file?(filename)
+      # A directory that is there is not a file that is missing: "no such
+      # file" sends the reader to `ls`, where they find it. The sentence is
+      # `doc`'s and `mod dump`'s, because it is the same mistake.
+      if Dir.exists?(filename)
+        abort! "#{filename} is a directory, and a .iyi module is a file", :USAGE_ERROR
+      end
       abort! "no such file: #{filename}", :USAGE_ERROR
     end
     filename = File.expand_path(filename)

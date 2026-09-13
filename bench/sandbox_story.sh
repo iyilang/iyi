@@ -17,7 +17,10 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# Overridable for the same reason `bench/wasm32_exercise.sh` says: in CI the
+# compiler here is the tarball's, because that is the one that runs beside
+# wasmtime.
+IYI="${IYI:-$REPO/bin/iyi}"
 WASI_SDK="${WASI_SDK:-/opt/wasi-sdk}"
 WASMTIME="${WASMTIME:-$HOME/.wasmtime/bin/wasmtime}"
 WORK="$(mktemp -d)"

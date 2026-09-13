@@ -346,20 +346,29 @@ jobs:
           bash bench/io_exercise.sh
           bash bench/socket_exercise.sh
 
-      # The collector's own gates (GC_DESIGN.md Stages 2, 3, 5, 6 and the
+      # The collector's own gates (GC_DESIGN.md Stages 2, 3, 5, 6, 10 and the
       # allocation-pressure trigger). Each drives its exercise plain and
       # optimised, audits what the `-Dgc_iyi` binary asks the machine for,
       # and proves its checks can fail. Found unwired while building the
       # trigger: the collector merged with these gates green on the machine
       # that built it and none of them named in this file — which is the
       # exact defect this file exists to prevent.
-      - name: The collector holds, all five gates
+      #
+      # `windows_exercise.sh` is the sixth, and it was the same defect a
+      # second time: the Windows job below links and runs
+      # `bench/windows_exercise.iyi`, which is the *exercise*, while the
+      # driver that proves those checks can fail ran nowhere. It needs no
+      # Windows — a host run, a cross-compile to `x86_64-windows-msvc` that
+      # stops at the object, and three patched-prelude proofs — so it runs
+      # here, in under two seconds.
+      - name: The collector holds, all six gates
         run: |
           bash bench/arena_exercise.sh
           bash bench/root_exercise.sh
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
           bash bench/collect_trigger.sh
+          bash bench/windows_exercise.sh
 
       # The rebuild loop, held: cheap on both arms, and the artifact
       # read inside its band — the corrected prediction is in SPEC.md.
@@ -851,24 +860,6 @@ jobs:
               ../bench/tls_probe.iyi > tls_probe.link )
           cat cross/tls_probe.link
 
-      # SPEC.md III.12's programs, built here where the compiler is; the
-      # three assertions run in the wasi job below, where the toolchain
-      # already works — this container's glibc is too old for wasmtime.
-      - name: Build the sandbox story's two programs
-        run: |
-          printf 'total = 0\nindex = 1\nwhile index <= 10\n  total = total + index\n  index = index + 1\nend\nputs total\n' > cross/honest.iyi
-          printf 'secret = File.read("/etc/passwd")\nputs secret\n' > cross/theft.iyi
-          ( cd cross && ../bin/iyi build --cross-compile --target wasm32-wasi \
-              -o honest honest.iyi > honest.link )
-          ( cd cross && ../bin/iyi build --cross-compile --target wasm32-wasi \
-              -o theft theft.iyi > theft.link )
-          ( cd cross && ../bin/iyi build --cross-compile --target wasm32-wasi \
-              -o wasm32_exercise ../bench/wasm32_exercise.iyi > wasm32_exercise.link )
-          cat cross/wasm32_exercise.link
-          ( cd cross && ../bin/iyi build --cross-compile --release --target wasm32-wasi \
-              -o wasm32_exercise_rel ../bench/wasm32_exercise.iyi > wasm32_exercise_rel.link )
-          cat cross/wasm32_exercise_rel.link
-
       - uses: actions/upload-artifact@v5
         with:
           name: cross-objects
@@ -1340,14 +1331,25 @@ jobs:
   # clang as the `cc` it names — so the command a person is told to type is the
   # command that is tested.
   wasi-run:
-    needs: cross-objects
+    needs: [cross-objects, binary]
     runs-on: ubuntu-24.04
     name: "An iyi program, run on wasm32-wasi"
     steps:
+      # Checkout first: it clears the workspace, so an artifact downloaded
+      # before it is an artifact deleted by it. The checkout and the
+      # tarball are here so the two drivers below run as drivers rather
+      # than as steps that copy what they do.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v5
         with:
           name: cross-objects
           path: cross
+      - uses: actions/download-artifact@v5
+        with:
+          name: iyi-linux-x86_64
+          path: dist/
 
       - name: Install wasi-sdk and wasmtime
         run: |
@@ -1379,32 +1381,53 @@ jobs:
       # SPEC.md III.12, the sandbox story: an honest program computes
       # through the boundary; a theft of /etc/passwd dies named and
       # empty-handed under a default wasmtime, which preopens nothing; and
-      # the refusal is the prelude's own sentence. The full local form is
-      # `bench/sandbox_story.sh`; these are its three assertions, run here
-      # because this is where the toolchain lives.
-      - name: The sandbox story holds
+      # the refusal is the prelude's own sentence. These were its three
+      # assertions copied into this file by hand, with the driver
+      # `bench/sandbox_story.sh` running nowhere; now the driver runs, with
+      # the tarball's compiler, because that is the one that works beside
+      # wasmtime.
+      #
+      # The concurrency probe follows it for the same reason: it is the
+      # measurement behind SPEC.md III.4's "no concurrency on wasm32-wasi",
+      # and it had never run anywhere either — long enough for its first
+      # step to go stale on an answer that is true on arm64 and false here.
+      - name: The sandbox story and the concurrency wall, driven
         run: |
-          export PATH="/opt/wasi-sdk/bin:$PATH"
-          ( cd cross && eval "$(cat honest.link)" && eval "$(cat theft.link)" )
-          "$HOME/.wasmtime/bin/wasmtime" cross/honest > honest.txt
-          grep -qx '55' honest.txt
-          if "$HOME/.wasmtime/bin/wasmtime" cross/theft > theft.txt 2>&1; then
-            echo "the theft exited 0:"; cat theft.txt; exit 1
-          fi
-          ! grep -q 'root:' theft.txt
-          grep -q 'File is not available on wasm32-wasi' theft.txt
-          echo "sandbox: the theft died named and empty-handed"
+          mkdir -p room && tar -xzf dist/*.tar.gz -C room
+          export IYI="$PWD/room/bin/iyi"
+          bash bench/sandbox_story.sh
+          bash bench/wasm_concurrency_probe.sh
 
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
+  #
+  # The driver rather than a transcription of it. This job used to link and
+  # run `bench/wasm32_exercise.iyi` plain and release and grep for the last
+  # line — which is the first half of `bench/wasm32_exercise.sh`, copied by
+  # hand. The half that was left behind is the half that makes it a gate:
+  # three patched preludes that break reclamation, stack-root discovery and
+  # layout precision, each of which has to make the exercise fail. That
+  # driver ran nowhere.
+  #
+  # It needs a compiler beside wasmtime, and the container that can build
+  # one cannot run wasmtime (its glibc is too old). The tarball crosses
+  # that line: `clean-room` proves it starts on a machine with nothing on
+  # it, so `IYI` points at the tarball's binary and the whole driver —
+  # cross-compile, link with wasi-sdk's clang, run under wasmtime, and the
+  # three proofs — happens here. Two seconds of work, wall clock aside.
   wasm32-collector:
-    needs: cross-objects
+    needs: binary
     runs-on: ubuntu-24.04
     name: "The collector on wasm32-wasi"
     steps:
+      # Checkout first: it clears the workspace, so an artifact downloaded
+      # before it is an artifact deleted by it.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v5
         with:
-          name: cross-objects
-          path: cross
+          name: iyi-linux-x86_64
+          path: dist/
 
       - name: Install wasi-sdk and wasmtime
         run: |
@@ -1414,23 +1437,10 @@ jobs:
           sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
           curl -sSL https://wasmtime.dev/install.sh | bash -s -- --version v48.0.1
 
-      - name: Link and run the wasm32 collector exercise
+      - name: The wasm32 collector gate, driver and proofs
         run: |
-          ln -sf /opt/wasi-sdk/bin/clang /opt/wasi-sdk/bin/cc
-          export PATH="/opt/wasi-sdk/bin:$PATH"
-          ( cd cross && eval "$(cat wasm32_exercise.link)" )
-          "$HOME/.wasmtime/bin/wasmtime" cross/wasm32_exercise > wasm32_exercise.txt
-          cat wasm32_exercise.txt
-          grep -q "all wasm32 collector checks passed" wasm32_exercise.txt
-
-      - name: Link and run the wasm32 collector exercise (release)
-        run: |
-          ln -sf /opt/wasi-sdk/bin/clang /opt/wasi-sdk/bin/cc
-          export PATH="/opt/wasi-sdk/bin:$PATH"
-          ( cd cross && eval "$(cat wasm32_exercise_rel.link)" )
-          "$HOME/.wasmtime/bin/wasmtime" cross/wasm32_exercise_rel > wasm32_exercise_rel.txt
-          cat wasm32_exercise_rel.txt
-          grep -q "all wasm32 collector checks passed" wasm32_exercise_rel.txt
+          mkdir -p room && tar -xzf dist/*.tar.gz -C room
+          IYI="$PWD/room/bin/iyi" bash bench/wasm32_exercise.sh
 
   binary:
     needs: build

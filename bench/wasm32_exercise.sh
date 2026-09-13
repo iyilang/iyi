@@ -10,7 +10,12 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# `IYI`, overridable: the container that can build this compiler cannot run
+# wasmtime, and the runner that runs wasmtime cannot build the compiler. The
+# relocatable tarball crosses that line — `clean-room` proves it starts on a
+# machine with nothing on it — so CI points this at the tarball's binary and
+# the whole driver, proofs included, runs in one place.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

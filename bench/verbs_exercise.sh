@@ -192,6 +192,16 @@ else
   "$IYI" mod dump lib.good --json | sed -n '1,2p'
   status=1
 fi
+# `mod context` read its flags only before the path too, and it is the verb
+# a model calls: `mod context file.iyi --json` printed the text pack and
+# exited 0, so whatever was reading the JSON found out somewhere else.
+if "$IYI" mod context user.iyi --json | head -1 | grep -q '^{'; then
+  echo "  the context pack's flag is read from either side of the path"
+else
+  echo "  mod context --json after the path did not print JSON:"
+  "$IYI" mod context user.iyi --json | sed -n '1,2p'
+  status=1
+fi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" doc binary.iyi
 refuses "doc on a file that declares no module" "declares no module" -- \
@@ -207,6 +217,12 @@ refuses "a second path after the artifact" "unexpected" -- \
 refuses "both of mod dump's outputs at once" "two different outputs" -- \
   "$IYI" mod dump --declarations --json lib.good
 refuses "mod dump on a directory" "is a directory" -- "$IYI" mod dump adir.iyimod
+mkdir -p adir.iyi
+refuses "a second path after the module" "unexpected" -- \
+  "$IYI" mod context user.iyi extra.iyi
+refuses "an unknown flag to the context pack" "unknown flag" -- \
+  "$IYI" mod context --nonesuch user.iyi
+refuses "mod context on a directory" "is a directory" -- "$IYI" mod context adir.iyi
 refuses "a tree with bytes that are not text" "not a valid Crystal source file" -- \
   "$IYI" migrate tree --out "$WORK/migrated"
 refuses "a flag where --out's directory goes" "--check is a flag" -- \

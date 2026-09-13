@@ -933,7 +933,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 109,849 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 13,949-line own prelude + 6,382 in std |
+| Library | 8,161 lines (3,551 of it core) | 13,949-line own prelude + 6,390 in std |
 | Specs | 21,146 lines | 10,040 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -1316,11 +1316,23 @@ this section had wrong or had not reached:
   which removes early exit from `find`, `any?`, `all?`, `none?`, `first`,
   `take`, `take_while`, `empty?`, `index` and `find_value`. It has to be typed
   without being captured, `& : Elem -> Nil`, and yielded. Corrected below.
-- **Dropping `!` made the library more consistent.** Crystal spells two of
-  these `find!` and `index!`, against its own `max?`/`max` and `first?`/`first`
-  convention, only because plain `find` was already taken by the nilable one.
-  With `!` gone (III.1.7) the port uses `find?`/`find` and `index?`/`index`
-  throughout. The naming decision paid here rather than cost.
+- **Dropping `!` cost one thing, and it was `find`.** With `!` out of
+  identifiers (III.1.7) the port first took `?` for the nilable one and the
+  plain name for the one that raises — `find?`/`find`, `index?`/`index` —
+  reading Crystal's `find!` and `index!` as breaking its own `max?`/`max`
+  convention. That reading was wrong. Crystal's rule is that the plain name
+  is the *common* case: `max` raises because an empty collection has no
+  largest element, and `find` answers nil because not finding is the
+  ordinary outcome of a search. Applying the max half to `find` made one
+  name mean two things inside this library — `Enumerable#index` raised
+  while `Indexable#index` and `Array#index` answered nil — which is what
+  III.1.7a exists to keep out, and it put the recoverable answer out of
+  reach: `|| raise` turns a nil into a panic in one expression, while a
+  panic is caught at a task boundary and nowhere else (III.4.3). So `find`
+  and `index` answer nil under their plain names, `find?` and `index?` are
+  gone, and `max?`/`max`, `min?`/`min`, `first?`/`first` and
+  `minmax?`/`minmax` keep their pairs, where the plain name raising is both
+  the common case and Crystal's answer.
 - **A trait needs to require class-level methods, and now can.** `sum` and
   `product` with no argument need an additive and a multiplicative identity,
   and an identity belongs to the type: an empty collection has no element to

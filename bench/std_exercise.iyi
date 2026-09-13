@@ -153,21 +153,22 @@ assert_true(!seq.one? { |x| x == 1 }, "enum: one? false")
 # 9. count
 assert_eq(seq.count { |x| x == 1 }, 2, "enum: count")
 
-# 10. find?
-found_q = seq.find? { |x| x > 5 }
-assert_true(!found_q.nil? && found_q == 9, "enum: find?")
-assert_true(seq.find? { |x| x > 100 }.nil?, "enum: find? nil")
+# 10. find: the element, or nil when nothing matched. It raised until the
+# day this line changed - "not found" is the ordinary outcome of a search,
+# and the panic is one `|| raise` away while the nil was out of reach
+# behind it.
+found_q = seq.find { |x| x > 5 }
+assert_true(!found_q.nil? && found_q == 9, "enum: find")
+assert_true(seq.find { |x| x > 100 }.nil?, "enum: find nil")
+assert_eq(seq.find { |x| x == 9 } || 0, 9, "enum: find answers the element")
+assert_eq(seq.find { |x| x > 5 } || raise("no element matched"), 9,
+  "enum: the panic a caller wants is one `|| raise` away")
 
-# 11. find
-assert_eq(seq.find { |x| x == 9 }, 9, "enum: find")
-
-# 12. index?
-idx_q = seq.index? { |x| x == 4 }
-assert_true(!idx_q.nil? && idx_q == 2, "enum: index?")
-assert_true(seq.index? { |x| x == 100 }.nil?, "enum: index? nil")
-
-# 13. index
-assert_eq(seq.index { |x| x == 4 }, 2, "enum: index")
+# 11. index, the same question about a position
+idx_q = seq.index { |x| x == 4 }
+assert_true(!idx_q.nil? && idx_q == 2, "enum: index")
+assert_true(seq.index { |x| x == 100 }.nil?, "enum: index nil")
+assert_eq(seq.index { |x| x == 4 } || -1, 2, "enum: index answers the position")
 
 # 14. first?
 assert_true(!seq.first?.nil? && seq.first? == 3, "enum: first?")

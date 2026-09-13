@@ -194,7 +194,7 @@ assert_true("reduce? empty", it_red_empty.reduce? { |acc, x| acc + x }.nil?)
 
 # `?` is the nilable one and the plain name raises - the rule
 # `std/enumerable` states and this file keeps for `first?`/`first` and
-# `find?`/`find`. `max` and `min` were written without their halves, so on
+# `first?`/`first`. `max` and `min` were written without their halves, so on
 # an iterator "the largest, if there is one" could only be asked by taking
 # a panic.
 assert_equal("max?", Iterator.of([3, 1, 4]).max?.to_s, "4")
@@ -226,8 +226,8 @@ assert_true("none? false", !Iterator.of([1, 2, 3]).none? { |x| x % 2 == 0 })
 
 puts "iterator: terminals searching"
 assert_equal("find", Iterator.of([10, 20, 30]).find { |x| x > 15 }.to_s, "20")
-assert_equal("find? hit", Iterator.of([10, 20, 30]).find? { |x| x > 15 }.to_s, "20")
-assert_true("find? miss", Iterator.of([10, 20, 30]).find? { |x| x > 100 }.nil?)
+assert_equal("find hit", Iterator.of([10, 20, 30]).find { |x| x > 15 }.to_s, "20")
+assert_true("find miss", Iterator.of([10, 20, 30]).find { |x| x > 100 }.nil?)
 
 assert_equal("first", Iterator.of([42, 99]).first.to_s, "42")
 assert_equal("first? hit", Iterator.of([42, 99]).first?.to_s, "42")

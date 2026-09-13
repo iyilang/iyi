@@ -243,14 +243,14 @@ pub trait Iterator
     true
   end
 
-  def find?(& : Elem -> Bool) : Elem?
+  # Nil when nothing matched, which is what `Enumerable#find`, `Array#find`
+  # and Crystal all answer: not finding is the ordinary outcome of a search,
+  # and a caller who wants the panic writes `|| raise` as the prelude does.
+  # `first?`/`first` below keeps its pair — an exhausted iterator has no
+  # first element, which is a question with no answer.
+  def find(& : Elem -> Bool) : Elem?
     each { |e| return e if yield e }
     nil
-  end
-
-  def find(& : Elem -> Bool) : Elem
-    each { |e| return e if yield e }
-    raise "no element matched"
   end
 
   def first? : Elem?
@@ -274,10 +274,11 @@ pub trait Iterator
     raise "max of an empty collection"
   end
 
-  # The largest, or nil when there is none. `max?`/`max` is the pair
-  # `enumerable.iyi` states the library's naming rule with — `?` is the
-  # nilable one, the plain name raises — and this file already keeps it for
-  # `first?`/`first` and `find?`/`find`. `max` and `min` were written
+  # The largest, or nil when there is none. `max?`/`max` is a real pair:
+  # an empty source has no largest element, so the plain name raising is
+  # the common case, which is also what Crystal answers. This file keeps
+  # the same pair for `first?`/`first`, and answers `find` with nil, where
+  # not finding is the ordinary outcome. `max` and `min` were written
   # without their halves, so on an iterator the question "the largest, if
   # there is one" could only be asked by taking a panic.
   def max? : Elem? where Elem : Cmp

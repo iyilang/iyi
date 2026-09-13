@@ -112,37 +112,44 @@ pub trait Enumerable
 
   # ---- searching -----------------------------------------------------------
   #
-  # Crystal spells these `find` (nilable) and `find!` (raises). With `!` out of
-  # identifiers, the port takes the convention `Enumerable` already uses
-  # everywhere else — `max?`/`max`, `first?`/`first` — and applies it here too:
-  # `?` is the nilable one, the plain name is the one that raises.
+  # `find` and `index` answer nil when nothing matched, which is Crystal's
+  # meaning for both names, `Indexable`'s, `Array`'s and what every other
+  # library spells the same way.
+  #
+  # They raised here for a while, on a rule this trait had stated and
+  # generalised too far: `?` for the nilable one, the plain name for the
+  # one that raises, "the convention `max?`/`max` and `first?`/`first`
+  # already use". Those two are not that rule. Crystal's plain `max` raises
+  # because an empty collection has no largest element — a question with no
+  # answer — and its plain `find` answers nil because *not finding* is the
+  # ordinary outcome of a search. The rule is "the plain name is the common
+  # case", and applying the wrong half of it here made one name mean two
+  # things inside this library: `Enumerable#index` raised while
+  # `Indexable#index` and `Array#index` answered nil, which is the shape
+  # SPEC.md III.1.7a exists to keep out.
+  #
+  # The direction matters too. A caller who wants the panic writes what the
+  # prelude writes — `list.find { … } || raise "no element matched"` — one
+  # expression. A caller handed the panic cannot get back: a panic in this
+  # language is caught at a task boundary and nowhere else (III.4.3), so
+  # the raising default put the recoverable answer out of reach.
+  #
+  # `max?`/`max`, `min?`/`min`, `first?`/`first` and `minmax?`/`minmax` keep
+  # their pairs: there the plain name raising *is* the common case, and it
+  # is what Crystal answers.
 
-  def find?(& : Elem -> Bool) : Elem?
+  def find(& : Elem -> Bool) : Elem?
     each { |e| return e if yield e }
     nil
   end
 
-  def find(& : Elem -> Bool) : Elem
-    each { |e| return e if yield e }
-    raise "no element matched"
-  end
-
-  def index?(& : Elem -> Bool) : Int32?
+  def index(& : Elem -> Bool) : Int32?
     i = 0
     each do |e|
       return i if yield e
       i = i + 1
     end
     nil
-  end
-
-  def index(& : Elem -> Bool) : Int32
-    i = 0
-    each do |e|
-      return i if yield e
-      i = i + 1
-    end
-    raise "no element matched"
   end
 
   def first? : Elem?

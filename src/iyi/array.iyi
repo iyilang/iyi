@@ -188,8 +188,8 @@ class Array(T)
     end
   end
 
-  # The questions a list gets asked with one answer. `find?` is the nil
-  # form, like `[]?` and `last?`: the element, or nil when none answers.
+  # The questions a list gets asked with one answer. `find` answers nil
+  # when none does, the way Crystal's does and `index` below already did.
   def count(& : T -> Bool) : Int32
     total = 0
     each { |value| total = total + 1 if yield value }
@@ -206,7 +206,7 @@ class Array(T)
     true
   end
 
-  def find?(& : T -> Bool) : T?
+  def find(& : T -> Bool) : T?
     each { |value| return value if yield value }
     nil
   end

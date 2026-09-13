@@ -18,6 +18,28 @@
   its 123 lines, and the line in `DELEGATED`. `iyi repl` answers "unknown
   command" now, and `bench/verbs_exercise.sh` holds it there.
 
+### Changed
+
+- **`find` and `index` answer nil.** They raised, under a rule this
+  library stated and generalised one method too far: `?` for the nilable
+  one, the plain name for the one that raises, "the convention `max?`/`max`
+  and `first?`/`first` already use". Those two are not that rule. The rule
+  is that the plain name is the *common* case — `max` raises because an
+  empty collection has no largest element, and `find` answers nil because
+  not finding is the ordinary outcome of a search, which is why Crystal
+  spells the raising ones `find!` and `index!` rather than breaking its own
+  convention. Applying the wrong half made one name mean two things inside
+  this tree: `Enumerable#index` raised while `Indexable#index` and
+  `Array#index` answered nil, and SPEC.md III.1.7a exists to keep exactly
+  that out. It also pointed the one-way door the wrong way: `|| raise "no
+  element matched"` turns a nil into a panic in one expression — the
+  prelude writes that itself in `String#to_i` — while a panic is caught at
+  a task boundary and nowhere else (III.4.3), so the raising default put
+  the recoverable answer out of reach. `find?` and `index?` are gone; the
+  plain names answer nil in `Enumerable`, `Iterator` and the prelude's
+  `Array`, where `find?` was the only spelling. `max?`/`max`, `min?`/`min`,
+  `first?`/`first` and `minmax?`/`minmax` keep their pairs untouched.
+
 ### Fixed
 
 - **The flag an agent branches on was the constant `false`.** `iyi mcp`

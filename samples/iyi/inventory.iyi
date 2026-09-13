@@ -43,10 +43,10 @@ puts items.any? { |item| item.price > 2.0 }   # => true
 puts items.all? { |item| item.quantity > 0 }  # => true
 puts items.max_by { |item| item.price }.name  # => melon
 puts items.min_by { |item| item.total }.name  # => pear, the first of equals
-if pear = items.find? { |item| item.name == "pear" }
+if pear = items.find { |item| item.name == "pear" }
   puts pear.total # => 3.0
 end
-puts items.find? { |item| item.name == "plum" }.inspect # => nil
+puts items.find { |item| item.name == "plum" }.inspect # => nil
 
 # 3. A report, each line numbered.
 items.each_with_index do |item, index|

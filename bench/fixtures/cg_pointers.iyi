@@ -1,0 +1,29 @@
+fun ptr_read_write(x : Int32, val : Int32) : Int32
+  a = x
+  p = pointerof(a)
+  p.value = val
+  a
+end
+
+fun ptr_sum_array(ptr : Int32*, len : Int32) : Int32
+  total = 0
+  i = 0
+  while i < len
+    total = total &+ (ptr + i).value
+    i = i &+ 1
+  end
+  total
+end
+
+fun ptr_diff(ptr : Int32*, offset : Int32) : Int64
+  p2 = ptr + offset
+  p2 - ptr
+end
+
+fun ptr_address_roundtrip(x : Int32) : Int32
+  val = x
+  p = pointerof(val)
+  addr = p.address
+  p2 = Pointer(Int32).new(addr)
+  p2.value
+end

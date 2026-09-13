@@ -296,6 +296,25 @@ pub struct LLVMValue
   def ==(other : LLVMValue) : Bool
     @unwrap.address == other.unwrap.address
   end
+  def initializer=(val : LLVMValue) : Nil
+    LibLLVM.set_initializer(@unwrap, val.to_unsafe)
+  end
+
+  def global_constant=(c : Bool) : Nil
+    LibLLVM.set_global_constant(@unwrap, c ? 1 : 0)
+  end
+
+  def linkage=(l : LibLLVM::Linkage) : Nil
+    LibLLVM.set_linkage(@unwrap, l)
+  end
+
+  def alignment=(bytes : Int32) : Nil
+    LibLLVM.set_alignment(@unwrap, bytes)
+  end
+
+  def alignment : Int32
+    LibLLVM.get_alignment(@unwrap).to_i32
+  end
 end
 
 pub struct LLVMFunction

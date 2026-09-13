@@ -313,6 +313,8 @@ module compiler/llvm/lib_llvm
     fun set_global_constant = LLVMSetGlobalConstant(global_var : ValueRef, is_constant : Bool)
     fun is_thread_local = LLVMIsThreadLocal(global_var : ValueRef) : Bool
     fun set_thread_local = LLVMSetThreadLocal(global_var : ValueRef, is_thread_local : Bool)
+    fun get_alignment = LLVMGetAlignment(val : ValueRef) : UInt
+    fun set_alignment = LLVMSetAlignment(val : ValueRef, bytes : UInt) : Void
 
     # Types
     fun get_type_kind = LLVMGetTypeKind(ty : TypeRef) : TypeKind
@@ -426,6 +428,7 @@ module compiler/llvm/lib_llvm
     fun build_sub = LLVMBuildSub(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_mul = LLVMBuildMul(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_sdiv = LLVMBuildSDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
+    fun build_exact_sdiv = LLVMBuildExactSDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_udiv = LLVMBuildUDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_srem = LLVMBuildSRem(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_urem = LLVMBuildURem(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef

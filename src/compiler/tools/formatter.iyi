@@ -1048,8 +1048,9 @@ pub class Formatter < Visitor
     write(node.name)
     next_token
     block_formatted = false
-    if node.has_parentheses
-      skip_space
+    skip_space
+    has_parens = node.has_parentheses || @token.type == TokenKind::OP_LPAREN
+    if has_parens
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
       format_args_list(node.args, node.named_args, node.block_arg)

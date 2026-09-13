@@ -41,8 +41,8 @@ is ported and the gate can drive the real one.
 What is **not** in iyi: semantic analysis beyond the top-level declaration
 pass (method body typing and type inference, macro expansion, instance and
 class var initializers, recursive struct check, type unification), the macro
-engine, codegen, the formatter, the daemon, and platform support. That is the
-109,825.
+engine, codegen, the daemon, and platform support. That is the 109,825. The
+formatter is partly ported, and its row above says which parts are not.
 Nothing in the build calls any of the ports above yet: each is checked against
 the code it would replace, not used in its place.
 

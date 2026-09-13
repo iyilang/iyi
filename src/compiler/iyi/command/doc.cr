@@ -35,7 +35,7 @@ class Iyi::Command
         end
       IyiMod.surface artifact, STDOUT
     when filename.ends_with?(".iyi")
-      doc_file! filename, ".iyi"
+      doc_file! filename, ".iyi module"
       doc_from_source(File.expand_path(filename))
     when filename == "prelude"
       doc_prelude_index
@@ -59,7 +59,7 @@ class Iyi::Command
   # directory, and that is the fact to hand back.
   private def doc_file!(filename : String, kind : String) : Nil
     return if File.file?(filename)
-    abort! "#{filename} is a directory, and a #{kind} is a file", :USAGE_ERROR if Dir.exists?(filename)
+    abort! "#{filename} is a directory, not a #{kind}", :USAGE_ERROR if Dir.exists?(filename)
     abort! "no such file: #{filename}", :USAGE_ERROR
   end
 

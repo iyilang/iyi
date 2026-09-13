@@ -37,8 +37,16 @@ class Iyi::Command
         puts "#{key}=#{Process.quote(value)}"
       end
     else
+      # iyi: `puts vars[key]?` printed an empty line for a name the table
+      # does not have — indistinguishable from a variable that is set and
+      # empty — and exit 0 told the caller it had been handed a value. The
+      # list of what there is comes off the table itself, so the two cannot
+      # drift apart.
+      if unknown = var_names.find { |name| !vars.has_key?(name) }
+        abort! "env: no such variable: #{unknown}. It prints #{vars.keys.join(", ")}", :USAGE_ERROR
+      end
       var_names.each do |key|
-        puts vars[key]?
+        puts vars[key]
       end
     end
   end

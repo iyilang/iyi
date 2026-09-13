@@ -364,7 +364,7 @@ class Iyi::Command
       exit
     end
     options.unshift "--check"
-    unreachable
+    unreachable "vet"
   end
 
   private def build
@@ -917,6 +917,11 @@ class Iyi::Command
       # mode 'r': '/…/typo.iyi': No such file or directory" — the word Error
       # twice, a mode nobody asked about, and the path spelled out twice over.
       unless File.file?(expanded)
+        # And the second commonest is handing it a directory, which used to
+        # come back as "no such file" about a path that is right there — so
+        # the reader runs `ls`, finds it, and learns nothing. Same sentence
+        # `doc` and `mod` give, because it is the same mistake.
+        abort! "#{filename} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(expanded)
         abort! "no such file: #{filename}", :USAGE_ERROR
       end
       Compiler::Source.new(expanded, File.read(expanded))

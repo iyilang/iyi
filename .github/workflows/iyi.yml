@@ -82,13 +82,21 @@ jobs:
       - run: chmod +x .build/crystal
 
       # Caught by hand once already, on files this fork wrote. `samples` is
-      # here because the formatter knows iyi now: before that it refused every
-      # `.iyi` file, so checking them would have checked nothing. `bench` is
-      # here because it was the one tree of `.iyi` files nothing checked, and
-      # it drifted: `bench/server_load.iyi` had unaligned constants and
-      # under-indented continuations for as long as it had existed.
+      # checked because the formatter knows iyi now: before that it refused
+      # every `.iyi` file, so checking them would have checked nothing, and
+      # `bench` because it was the one tree of `.iyi` files nothing checked
+      # and it had drifted.
+      #
+      # `make format check=1` rather than the directory list this step used
+      # to spell out, so the command a developer runs and the command that
+      # gates the branch are one command. The list behind it is what git
+      # says the repository owns — which is also the fix for a developer
+      # who followed `samples/crystal/kemal`'s own instructions: the
+      # `shards install` that produces put other projects' source in a
+      # `lib/` one directory down, past the formatter's top-level `-e lib`,
+      # and `make format` then failed on code nobody here wrote.
       - name: Formatted
-        run: ./bin/crystal tool format --check src spec samples bench
+        run: make format check=1
 
       - name: iyi's own specs
         run: |

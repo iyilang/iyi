@@ -20,6 +20,38 @@
 
 ### Fixed
 
+- **The verbs nothing had ever probed.** `bench/verbs_exercise.sh` drove
+  seven of the eighteen commands; the other eleven had never been handed a
+  mistake. `iyi fix` on bytes that are not text exited 1 printing **nothing
+  at all** — the compiler's refusal went into the `IO::Memory` `fix` hands
+  it and the process died silently, which is the only thing worse than a
+  refusal in the wrong words. The same verb called a directory a missing
+  file, called an unknown flag a missing file, and fixed the first of two
+  paths while dropping the second at exit 0. `iyi vet` with no file printed
+  `Usage: iyi tool unreachable`, a command nobody typed, because the
+  analysis it delegates to named itself. `iyi env NOPE` printed a blank
+  line at exit 0 — indistinguishable from a variable that is set and empty
+  — and `iyi clear_cache extra` and `iyi mcp --nonesuch` swallowed what
+  they were handed, the second by starting a server the caller had not
+  configured. Each answers with one sentence at a non-zero exit now, and
+  the nine cases are in the gate.
+- **"No such file" about a path that is right there.** Every verb that
+  takes an entry file came through one place — `gather_sources` — and that
+  place said `no such file` for a directory, so the reader ran `ls`, found
+  it, and learned nothing. `run`, `build`, `check` and `vet` now say
+  `<path> is a directory, not a source file`, which is the sentence `doc`,
+  `mod dump`, `mod diff`, `mod context` and `fix` give, all of them
+  unified on `is a directory, not a <thing>`.
+- **`make format` failed on code this repository does not own.** The
+  formatter's `-e lib` default is anchored at the top level, so the
+  `shards install` that `samples/crystal/kemal` asks for put another
+  project's source one directory down and the check walked straight into
+  it: green in CI, red for anyone who had followed the sample. The target
+  formats what git says the repository owns — tracked, plus new files that
+  are not ignored — which keeps `bench/migrate_fixture/lib`, a fixture
+  this repository does own, in the check. CI runs `make format check=1`
+  now rather than its own directory list, so the command that gates the
+  branch and the command a developer runs cannot drift apart again.
 - **Four gates that ran nowhere, and one of them had gone stale in the
   dark.** `bench/windows_exercise.sh`, `bench/wasm32_exercise.sh`,
   `bench/sandbox_story.sh` and `bench/wasm_concurrency_probe.sh` were

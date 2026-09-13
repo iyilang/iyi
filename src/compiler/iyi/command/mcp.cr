@@ -17,7 +17,15 @@ require "json"
 
 class Iyi::Command
   private def mcp
-    if options.first?.in?("--help", "-h")
+    # iyi: this used to look at `options.first?` alone and serve whatever
+    # it did not recognise, so `iyi mcp --nonesuch` reached the read loop
+    # and the agent harness on the other end got a server it never
+    # configured. `--help` and `-h` are the whole of this command line.
+    if unknown = options.find { |option| !option.in?("--help", "-h") }
+      abort! "mcp takes no arguments but --help, and '#{unknown}' is one", :USAGE_ERROR
+    end
+
+    unless options.empty?
       puts <<-USAGE
         Usage: #{Command.program_name} mcp
 

@@ -61,7 +61,7 @@ class Iyi::Command
       # file" sends the reader to `ls`, where they find it. The sentence is
       # `doc`'s and `mod dump`'s, because it is the same mistake.
       if Dir.exists?(filename)
-        abort! "#{filename} is a directory, and a .iyi module is a file", :USAGE_ERROR
+        abort! "#{filename} is a directory, not a .iyi module", :USAGE_ERROR
       end
       abort! "no such file: #{filename}", :USAGE_ERROR
     end

@@ -285,7 +285,17 @@ llvm_ext: $(LLVM_EXT_OBJ)
 
 .PHONY: format
 format: ## Format sources
-	./bin/crystal tool format$(if $(check), --check) src spec samples scripts bench
+# The files this repository owns, which is not the same as the files under
+# these directories: `shards install` in a sample writes other projects'
+# source into a `lib/` beside it, and the formatter's own `-e lib` default
+# is anchored at the top level, so a vendored tree one directory down was
+# walked into and `check=1` failed on code nobody here wrote. Tracked plus
+# new-and-not-ignored is the same rule `bench/identity_floor.py` reads for
+# the same reason, `safe.directory` included: inside the build image the
+# checkout is owned by another user and git 2.35+ refuses `ls-files`
+# without it, which would turn this gate into a crash rather than a check.
+	git -c safe.directory='*' ls-files -z --cached --others --exclude-standard '*.cr' '*.iyi' \
+	  | xargs -0 ./bin/crystal tool format$(if $(check), --check)
 
 .PHONY: generate_data
 generate_data: ## Run generator scripts for Unicode, SSL config, ...

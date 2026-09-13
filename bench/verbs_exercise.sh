@@ -66,7 +66,11 @@ has_trace() { # has_trace <file>
 refuses() { # refuses <label> <phrase> -- <command...>
   local label="$1" phrase="$2"
   shift 3
-  "$@" > "$WORK/out" 2>&1
+  # `< /dev/null`: none of these should read a line, and one of them —
+  # `mcp`, which serves over stdin — would sit there waiting if the
+  # refusal it is being checked for ever went missing. A gate that hangs
+  # is worse than one that fails.
+  "$@" > "$WORK/out" 2>&1 < /dev/null
   local code=$?
   if [ "$code" -eq 0 ]; then
     echo "  $label: exited 0, so nothing was refused"
@@ -126,11 +130,46 @@ refuses "an unknown verb" "unknown command" -- "$IYI" frobnicate
 refuses "the session that was removed" "unknown command" -- "$IYI" repl
 refuses "an unknown flag" "Invalid option" -- "$IYI" build --nonesuch good.iyi
 refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
-refuses "a directory as the entry" "no such file" -- "$IYI" run "$WORK"
+# One sentence for one mistake, from every verb that takes a file: this was
+# "no such file" about a path that is right there, so the reader ran `ls`,
+# found it, and learned nothing. `gather_sources` is the one place they all
+# come through, so `run`, `build`, `check` and `vet` answer alike.
+refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
+refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
 refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run binary.iyi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+
+echo
+echo "== what the verbs that were never here refuse"
+# `fix`, `vet`, `env`, `clear_cache` and `mcp` had no case in this file, and
+# each of them answered a mistake the way the gated verbs used to: `fix` on
+# bytes that are not text exited 1 printing *nothing at all* (the compiler's
+# refusal went into the buffer `fix` gives it and the process died silently);
+# `fix` called a directory a missing file and an unknown flag a missing file,
+# and dropped a second path at exit 0; `vet` with no file printed the usage
+# of `iyi tool unreachable`, a command nobody typed; `iyi env NOPE` printed a
+# blank line at exit 0, which reads as "set, and empty"; `clear_cache` and
+# `mcp` swallowed whatever they were handed, `mcp` by starting a server the
+# caller had not configured.
+refuses "fix on bytes that are not text" "not a valid iyi source file" -- \
+  "$IYI" fix binary.iyi
+refuses "fix on a directory" "is a directory" -- "$IYI" fix "$WORK"
+refuses "an unknown flag to fix" "unknown flag" -- "$IYI" fix --nonesuch good.iyi
+refuses "a second file after fix's" "unexpected" -- "$IYI" fix good.iyi extra.iyi
+refuses "vet with no file" "Usage: $(basename "$IYI") vet" -- "$IYI" vet
+refuses "a variable env does not have" "no such variable" -- "$IYI" env NOPE
+refuses "an argument to clear_cache" "takes no arguments" -- "$IYI" clear_cache extra
+refuses "an argument to the mcp server" "takes no arguments" -- "$IYI" mcp --nonesuch
+# And the flag that was being dropped is read now, from either side.
+if "$IYI" fix good.iyi --json | head -1 | grep -q '^{'; then
+  echo "  fix reads --json after the file, too"
+else
+  echo "  fix --json after the file did not print JSON:"
+  "$IYI" fix good.iyi --json | sed -n '1,2p'
+  status=1
+fi
 
 echo
 echo "== what a damaged artifact says"

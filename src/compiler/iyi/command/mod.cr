@@ -93,7 +93,7 @@ class Iyi::Command
       # sentence says which of the two it is; `no such file` is kept for a
       # path that really is not there.
       if Dir.exists?(filename)
-        abort! "#{filename} is a directory, and a .iyimod is a file", :USAGE_ERROR
+        abort! "#{filename} is a directory, not a .iyimod", :USAGE_ERROR
       end
       abort! "no such file: #{filename}", :USAGE_ERROR
     end
@@ -211,7 +211,7 @@ class Iyi::Command
   private def read_iyimod(path : String) : IyiMod::Artifact
     unless File.file?(path)
       if Dir.exists?(path)
-        abort! "#{path} is a directory, and a .iyimod is a file", :USAGE_ERROR
+        abort! "#{path} is a directory, not a .iyimod", :USAGE_ERROR
       end
       abort! "no such file: #{path}", :USAGE_ERROR
     end

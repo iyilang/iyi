@@ -5,8 +5,12 @@ require "csv"
 
 module Iyi
   class Command
-    private def unreachable
-      config, result = compile_no_codegen "tool unreachable", path_filter: true, unreachable_command: true, allowed_formats: %w[text json csv codecov]
+    # iyi: *verb*, because two commands reach this analysis and the usage
+    # line has to name the one that was typed. `iyi vet` with no file
+    # answered "Usage: iyi tool unreachable [options] ...", which sends the
+    # author to a command they did not run.
+    private def unreachable(verb = "tool unreachable")
+      config, result = compile_no_codegen verb, path_filter: true, unreachable_command: true, allowed_formats: %w[text json csv codecov]
 
       unreachable = UnreachableVisitor.new
 

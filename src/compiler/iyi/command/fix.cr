@@ -17,12 +17,18 @@ require "../lsp/analysis"
 
 class Iyi::Command
   private def fix
+    # Read the flag from either side of the path, the way `mod dump` does.
+    # Looking for it only *before* the filename meant everything the loop
+    # did not recognise fell through to the `File.file?` test below, so
+    # `fix --nonesuch ok.iyi` answered `file '--nonesuch' does not exist`
+    # about a flag, and a second path was dropped without a word: `fix
+    # ok.iyi extra.iyi` fixed the first and exited 0.
     json_mode = false
-    while option = options.first?
+    file = nil
+    while option = options.shift?
       case option
       when "--json"
         json_mode = true
-        options.shift
       when "--help", "-h"
         puts <<-USAGE
           Usage: #{Command.program_name} fix [--json] <file>
@@ -36,14 +42,26 @@ class Iyi::Command
           there as `suggested_edit`, and the file is not touched.
           USAGE
         exit
+      when .starts_with?('-')
+        abort! "fix: unknown flag #{option}", :USAGE_ERROR
       else
-        break
+        if file
+          abort! "unexpected '#{option}' after the file", :USAGE_ERROR
+        end
+        file = option
       end
     end
 
-    file = options.first?
-    abort "fix: which file? Usage: #{Command.program_name} fix [--json] <file>" unless file
-    abort "fix: file '#{file}' does not exist" unless File.file?(file)
+    unless file
+      abort! "fix: which file? Usage: #{Command.program_name} fix [--json] <file>", :USAGE_ERROR
+    end
+    unless File.file?(file)
+      # A directory is there, so "does not exist" was never true of it —
+      # and this verb was the one saying `fix: file 'X' does not exist`
+      # where every other says `no such file`, for the same mistake.
+      abort! "#{file} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(file)
+      abort! "no such file: #{file}", :USAGE_ERROR
+    end
     path = File.expand_path(file)
 
     analysis = Lsp::Analysis.new
@@ -55,6 +73,16 @@ class Iyi::Command
     # generated, and a loop that long deserves a look rather than a run.
     32.times do
       text = File.read(path)
+      unless text.valid_encoding?
+        # `Lsp::Analysis` compiles with `stderr` set to an `IO::Memory`, so
+        # the refusal `Compiler#parse` writes for a file of bytes that are
+        # not text went into that buffer and the process exited 1 with
+        # nothing on the terminal at all — a refusal with no sentence. The
+        # same sentence, said where it can be read; `iyi doc` states it
+        # this way too.
+        abort! "file '#{file}' is not a valid iyi source file: " \
+               "it holds bytes that are not UTF-8 text", :USAGE_ERROR
+      end
       # Definition-site typing is the compiler's own rule now, so this
       # plain compile already reaches uncalled bodies — fix and check
       # cannot disagree about what clean means.

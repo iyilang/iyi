@@ -3,6 +3,109 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unwind.h>
+
+struct RunnerException {
+  struct _Unwind_Exception unwind_exception;
+  void *exception_object;
+  int32_t exception_type_id;
+};
+
+static uint64_t read_uleb128(const uint8_t **p) {
+  uint64_t result = 0;
+  int shift = 0;
+  while (1) {
+    uint8_t b = *(*p)++;
+    result |= ((uint64_t)(b & 0x7f)) << shift;
+    if ((b & 0x80) == 0)
+      break;
+    shift += 7;
+  }
+  return result;
+}
+
+static uint32_t read_uint32(const uint8_t **p) {
+  uint32_t v;
+  __builtin_memcpy(&v, *p, 4);
+  *p += 4;
+  return v;
+}
+
+_Unwind_Reason_Code
+__runner_personality(int version, _Unwind_Action actions,
+                     uint64_t exception_class,
+                     struct _Unwind_Exception *exception_object,
+                     struct _Unwind_Context *context) {
+  uintptr_t start = _Unwind_GetRegionStart(context);
+  uintptr_t ip = _Unwind_GetIP(context);
+  const uint8_t *lsd =
+      (const uint8_t *)_Unwind_GetLanguageSpecificData(context);
+  if (!lsd)
+    return _URC_CONTINUE_UNWIND;
+
+  uintptr_t throw_offset = ip - 1 - start;
+  const uint8_t *p = lsd;
+  uint8_t lp_start_encoding = *p++;
+  if (lp_start_encoding != 0xff) {
+    fprintf(stderr, "Unexpected LPStart encoding: 0x%x\n", lp_start_encoding);
+    exit(1);
+  }
+  if (*p++ != 0xff) {
+    read_uleb128(&p);
+  }
+  uint8_t cs_encoding = *p++;
+  uint64_t cs_table_length = read_uleb128(&p);
+  const uint8_t *cs_table_end = p + cs_table_length;
+
+  while (p < cs_table_end) {
+    uint64_t cs_offset =
+        (cs_encoding == 3) ? read_uint32(&p) : read_uleb128(&p);
+    uint64_t cs_length =
+        (cs_encoding == 3) ? read_uint32(&p) : read_uleb128(&p);
+    uint64_t cs_addr = (cs_encoding == 3) ? read_uint32(&p) : read_uleb128(&p);
+    uint64_t action = read_uleb128(&p);
+
+    if (cs_addr != 0 && cs_offset <= throw_offset &&
+        throw_offset <= cs_offset + cs_length) {
+      if (actions & _UA_SEARCH_PHASE) {
+        return _URC_HANDLER_FOUND;
+      }
+      if (actions & _UA_HANDLER_FRAME) {
+        uintptr_t unwind_ip = start + cs_addr;
+        struct RunnerException *ue = (struct RunnerException *)exception_object;
+        _Unwind_SetGR(context, __builtin_eh_return_data_regno(0),
+                      (uintptr_t)ue);
+        _Unwind_SetGR(context, __builtin_eh_return_data_regno(1),
+                      (uintptr_t)ue->exception_type_id);
+        _Unwind_SetIP(context, unwind_ip);
+        return _URC_INSTALL_CONTEXT;
+      }
+    }
+  }
+  return _URC_CONTINUE_UNWIND;
+}
+
+uint64_t __runner_get_exception(void *ex) {
+  struct RunnerException *ue = (struct RunnerException *)ex;
+  return (uint64_t)(uintptr_t)ue->exception_object;
+}
+
+void __runner_raise(void *ex) {
+  struct RunnerException *ue =
+      (struct RunnerException *)malloc(sizeof(struct RunnerException));
+  ue->unwind_exception.exception_class = 0x4352590000000000ULL;
+  ue->unwind_exception.exception_cleanup = NULL;
+  ue->exception_object = ex;
+  ue->exception_type_id = *(int32_t *)ex;
+  _Unwind_RaiseException(&ue->unwind_exception);
+  abort();
+}
+
+// cg_exceptions
+int32_t test_raise_catch(int32_t x);
+int32_t test_multi_rescue(int32_t kind, int32_t val);
+int32_t test_ensure_both(int32_t raise_it);
+int32_t test_else_clause(int32_t x);
 
 // cg_int_arith
 int32_t int_add(int32_t a, int32_t b);
@@ -155,6 +258,17 @@ int main(void) {
   int32_t blk_loop = test_block_loop(10);
   int32_t blk_pair = test_block_pair(7, 3);
   printf("blocks: %d %d %d %d\n", blk_simp, blk_capt, blk_loop, blk_pair);
+  // Test 13: Exception handling
+  int32_t ex_catch_0 = test_raise_catch(0);
+  int32_t ex_catch_42 = test_raise_catch(42);
+  int32_t ex_multi_0 = test_multi_rescue(0, 5);
+  int32_t ex_multi_1 = test_multi_rescue(1, 10);
+  int32_t ex_multi_2 = test_multi_rescue(2, 20);
+  int32_t ex_ens_0 = test_ensure_both(0);
+  int32_t ex_ens_99 = test_ensure_both(99);
+  int32_t ex_else_7 = test_else_clause(7);
+  printf("exceptions: %d %d %d %d %d %d %d %d\n", ex_catch_0, ex_catch_42,
+         ex_multi_0, ex_multi_1, ex_multi_2, ex_ens_0, ex_ens_99, ex_else_7);
 
   return 0;
 }

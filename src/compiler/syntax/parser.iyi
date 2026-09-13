@@ -1642,6 +1642,7 @@ pub class Parser < Lexer
 
     if @token.type == TokenKind::IDENT
       name = @token.value.to_s
+      push_var_name(name)
       next_token_skip_space
       if @token.type == TokenKind::OP_COLON
         next_token_skip_space_or_newline

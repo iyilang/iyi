@@ -125,7 +125,7 @@ def norm(raw):
         if not l or l.startswith(";") or l.startswith("attributes #"):
             continue
         if l.startswith("define "):
-            l = l.split(" #")[0].rstrip(" {") + " {"
+            l = re.sub(r' #\d+', '', l)
         if " ; preds =" in l:
             l = l.split(" ; preds =")[0]
         # Normalize constant type_id initializer value (host numbering differences)
@@ -305,6 +305,16 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_cg_mutation "corrupt block body evaluation during yield" "cg_blocks.iyi" \
   'inlined.block.body.accept(self)' \
   '# inlined.block.body.accept(self)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt landing pad selector extraction index" "cg_exceptions.iyi" \
+  'exception_type_id = @builder.extract_value(lp, 1)' \
+  'exception_type_id = @builder.extract_value(lp, 0)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt rescue type check predicate EQ to NE" "cg_exceptions.iyi" \
+  '@builder.icmp(LibLLVM::IntPredicate::EQ, l_tid, exception_type_id)' \
+  '@builder.icmp(LibLLVM::IntPredicate::NE, l_tid, exception_type_id)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

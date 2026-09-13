@@ -268,7 +268,8 @@ pub class CodeGenVisitor < Visitor
   property inlined_block_contexts : Array(InlinedBlockContext)
   property inlined_block_index : Int32
   property rescue_block : LLVMBasicBlock?
-  property lib_funs : Hash(Tuple(String, String), Tuple(String, LLVMType))
+  property lib_funs : Hash(Tuple(String, String), Tuple(String, LLVMType, Bool))
+  property needs_value : Bool
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -292,7 +293,8 @@ pub class CodeGenVisitor < Visitor
     @inlined_block_contexts = [] of InlinedBlockContext
     @inlined_block_index = 0
     @rescue_block = nil
-    @lib_funs = Hash(Tuple(String, String), Tuple(String, LLVMType)).new
+    @lib_funs = Hash(Tuple(String, String), Tuple(String, LLVMType, Bool)).new
+    @needs_value = true
   end
 
   def llvm_type_from_name(name : String) : LLVMType
@@ -578,9 +580,14 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : Expressions) : Bool
-    node.expressions.each do |exp|
+    old_needs = @needs_value
+    @needs_value = false
+    last_idx = node.expressions.size - 1
+    node.expressions.each_with_index do |exp, idx|
+      @needs_value = true if old_needs && idx == last_idx
       exp.accept(self)
     end
+    @needs_value = old_needs
     false
   end
 
@@ -600,6 +607,7 @@ pub class CodeGenVisitor < Visitor
                         else
                           "Int32"
                         end
+    @needs_value = (ret_sem_type_name != "Void" && ret_sem_type_name != "Nil" && ret_sem_type_name != "NoReturn")
     ret_type = llvm_type_from_name(ret_sem_type_name)
 
     fn_ty = LLVMType.function(arg_types, ret_type, false)
@@ -741,6 +749,8 @@ pub class CodeGenVisitor < Visitor
     unless @terminated
       if ret_sem_type_name == "Void" || ret_sem_type_name == "Nil"
         @builder.ret_void
+      elsif ret_sem_type_name == "NoReturn"
+        @builder.unreachable
       elsif l = @last
         @builder.ret(l)
       else
@@ -753,6 +763,8 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : Assign) : Bool
+    old_needs = @needs_value
+    @needs_value = true
     if node.target.is_a?(Var)
       var_name = node.target.as(Var).name
       node.value.accept(self)
@@ -793,6 +805,7 @@ pub class CodeGenVisitor < Visitor
         end
       end
     end
+    @needs_value = old_needs
     false
   end
 
@@ -947,16 +960,25 @@ pub class CodeGenVisitor < Visitor
       return false
     end
 
-    exit_bb = fn.append_basic_block("exit")
     # then branch
     @builder.position_at_end(then_bb)
     @terminated = false
     node.then.accept(self)
+    then_terminated = @terminated
     then_val = @last
     then_end = @builder.insert_block || then_bb
-    unless @terminated
-      @builder.br(exit_bb)
+
+    if then_terminated
+      @builder.position_at_end(else_bb)
+      @terminated = false
+      if els = node.else
+        els.accept(self)
+      end
+      return false
     end
+
+    exit_bb = fn.append_basic_block("exit")
+    @builder.br(exit_bb)
 
     # else branch
     @builder.position_at_end(else_bb)
@@ -964,16 +986,17 @@ pub class CodeGenVisitor < Visitor
     if els = node.else
       els.accept(self)
     end
+    else_terminated = @terminated
     else_val = @last
     else_end = @builder.insert_block || else_bb
-    unless @terminated
+    unless else_terminated
       @builder.br(exit_bb)
     end
 
     @builder.position_at_end(exit_bb)
     @terminated = false
 
-    if then_val && else_val && then_val.type.to_s == else_val.type.to_s && !then_val.type.void?
+    if @needs_value && !then_terminated && !else_terminated && then_val && else_val && then_val.type.to_s == else_val.type.to_s && !then_val.type.void?
       phi = @builder.phi(then_val.type)
       @builder.add_incoming(phi, [then_val, else_val], [then_end, else_end])
       @last = phi
@@ -1058,12 +1081,6 @@ pub class CodeGenVisitor < Visitor
     node_rescues = node.rescues
     node_ensure = node.ensure
     node_else = node.else
-    rescue_ensure_block = nil
-    if node_ensure && node_rescues
-      rescue_ensure_block = cur_fn.append_basic_block("rescue_ensure")
-    end
-
-    exit_bb = cur_fn.append_basic_block("exit")
 
     phi_vals = [] of LLVMValue
     phi_bbs = [] of LLVMBasicBlock
@@ -1074,6 +1091,7 @@ pub class CodeGenVisitor < Visitor
     node.body.accept(self)
     body_val = @last
     @rescue_block = old_rescue
+    exit_bb = cur_fn.append_basic_block("exit")
 
     unless @terminated
       if node_else
@@ -1091,6 +1109,10 @@ pub class CodeGenVisitor < Visitor
         end
       end
       @builder.br(exit_bb)
+    end
+    rescue_ensure_block = nil
+    if node_ensure && node_rescues
+      rescue_ensure_block = cur_fn.append_basic_block("rescue_ensure")
     end
 
     @builder.position_at_end(rescue_block)
@@ -1150,11 +1172,19 @@ pub class CodeGenVisitor < Visitor
         end
 
         @builder.position_at_end(this_rescue_bb)
+        saved_var_type = nil
         if var_name = a_rescue.name
           if ptr = @vars[var_name]?
             s_inst = @builder.store(caught_ex_ptr, ptr)
             s_inst.alignment = 8
           end
+          saved_var_type = @var_type_names[var_name]?
+          r_type_name = if r_types = a_rescue.types
+                          r_types.first.to_s
+                        else
+                          "Exception"
+                        end
+          @var_type_names[var_name] = r_type_name
         end
 
         old_res = @rescue_block
@@ -1162,6 +1192,14 @@ pub class CodeGenVisitor < Visitor
         @terminated = false
         a_rescue.body.accept(self)
         @rescue_block = old_res
+
+        if var_name = a_rescue.name
+          if sv = saved_var_type
+            @var_type_names[var_name] = sv
+          else
+            @var_type_names.delete(var_name)
+          end
+        end
 
         unless @terminated
           if l = @last
@@ -1203,7 +1241,7 @@ pub class CodeGenVisitor < Visitor
     end
 
     @builder.position_at_end(exit_bb)
-    if !phi_vals.empty?
+    if @needs_value && !phi_vals.empty?
       phi_ty = phi_vals[0].type
       phi = @builder.phi(phi_ty)
       @builder.add_incoming(phi, phi_vals, phi_bbs)
@@ -1278,7 +1316,6 @@ pub class CodeGenVisitor < Visitor
           @builder.position_at_end(invoke_out_bb)
           @builder.unreachable
         end
-        @builder.unreachable
       else
         @builder.call(fn_ty, raise_helper.to_value, [ex_val])
         @builder.unreachable
@@ -1338,7 +1375,7 @@ pub class CodeGenVisitor < Visitor
       if obj.is_a?(Path) || obj.is_a?(Generic)
         type_name = obj.to_s
         if entry = @lib_funs[{type_name, node.name}]?
-          c_name, c_fn_ty = entry
+          c_name, c_fn_ty, is_noreturn = entry
           fn_val = @mod.get_function(c_name)
           arg_vals = [] of LLVMValue
           node.args.each do |a|
@@ -1349,6 +1386,9 @@ pub class CodeGenVisitor < Visitor
           end
           if c_fn_ty.return_type.void?
             @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
+            if is_noreturn
+              @builder.unreachable
+            end
             @terminated = true
           else
             @last = @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
@@ -2426,7 +2466,8 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
           c_args = fd.args.map { |a| cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
           c_ret = cg.llvm_type_from_name(fd.return_type ? fd.return_type.to_s : "Void")
           fn_ty = LLVMType.function(c_args, c_ret, false)
-          cg.lib_funs[{lname, fd.name}] = {c_name, fn_ty}
+          is_noreturn = (fd.return_type && fd.return_type.to_s == "NoReturn") || false
+          cg.lib_funs[{lname, fd.name}] = {c_name, fn_ty, is_noreturn}
           mod.add_function(c_name, fn_ty) unless mod.get_function?(c_name)
         end
       end
@@ -2509,11 +2550,13 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     cg.llvm_struct_types[info.name] = st
 
     unless info.is_struct
-      # Add type_id constant global
-      tid_global = mod.add_global("#{info.name}:type_id", context.int32)
-      tid_global.initializer = context.int32.const_int(info.type_id)
-      tid_global.global_constant = true
-      tid_global.linkage = LibLLVM::Linkage::Internal
+      if info.subclasses.empty? || info.methods.has_key?("initialize")
+        # Add type_id constant global
+        tid_global = mod.add_global("#{info.name}:type_id", context.int32)
+        tid_global.initializer = context.int32.const_int(info.type_id)
+        tid_global.global_constant = true
+        tid_global.linkage = LibLLVM::Linkage::Internal
+      end
     end
   end
 

@@ -1,0 +1,9 @@
+a = nil
+b = true
+c = false
+d = 42
+e = 100_i64
+f = 3.14
+g = 'z'
+h = "hello"
+i = :my_symbol

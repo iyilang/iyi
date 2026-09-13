@@ -3901,6 +3901,7 @@ pub class Parser < Lexer
     elsif is_const
       syntax_error("expected '=' for constant type declaration", @token.location)
     end
+    push_var(var) unless is_const
     TypeDeclaration.new(var, var_type, value).at(var).at_end(value ? value.end_location : var_type.end_location)
   end
 

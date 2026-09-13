@@ -1,0 +1,17 @@
+def helper(a : Int32, b : Int32) : Int32
+  if true
+    a
+  else
+    b
+  end
+end
+
+class Box
+  def get_val : Int32
+    99
+  end
+end
+
+r1 = helper(1, 2)
+box = Box.new
+r2 = box.get_val

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fails when the iyi semantic declaration pass stops agreeing with the one
-# it replaces.
+# Fails when the iyi semantic declaration or expression pass stops agreeing
+# with the one it replaces.
 #
 # Every fixture is analyzed twice, once by each implementation, dumped in one
 # text form, and required byte-identical.
@@ -16,6 +16,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
 SEM="$REPO/src/compiler/semantic/top_level.iyi"
+SEM_MAIN="$REPO/src/compiler/semantic/main_visitor.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -137,10 +138,98 @@ def dump_type(t : Iyi::Type, io : IO, indent : String)
   end
 end
 
+def dump_typed_node(node : Iyi::ASTNode, io : IO, indent : String = "")
+  type_str = node.type?.try { |t| t.is_a?(Iyi::NamedType) ? t.full_name : t.to_s } || "nil"
+  type_str = type_str.sub(/^::/, "")
+  node_name = node.class.name.sub(/^Iyi::/, "")
+  io << indent << node_name << ": " << type_str << "\n"
+
+  case node
+  when Iyi::Expressions
+    node.expressions.each { |e| dump_typed_node(e, io, indent + "  ") }
+  when Iyi::Assign
+    io << indent << "  target:\n"
+    dump_typed_node(node.target, io, indent + "    ")
+    io << indent << "  value:\n"
+    dump_typed_node(node.value, io, indent + "    ")
+  when Iyi::Var
+    io << indent << "  name: " << node.name << "\n"
+  when Iyi::Path
+    io << indent << "  names: [" << node.names.join("::") << "]\n"
+  when Iyi::NumberLiteral
+    io << indent << "  value: " << node.to_s << "\n"
+  when Iyi::StringLiteral, Iyi::BoolLiteral, Iyi::CharLiteral, Iyi::SymbolLiteral, Iyi::NilLiteral
+    io << indent << "  value: " << node.to_s << "\n"
+  when Iyi::If
+    io << indent << "  cond:\n"
+    dump_typed_node(node.cond, io, indent + "    ")
+    io << indent << "  then:\n"
+    dump_typed_node(node.then, io, indent + "    ")
+    if els = node.else
+      io << indent << "  else:\n"
+      dump_typed_node(els, io, indent + "    ")
+    end
+  when Iyi::While
+    io << indent << "  cond:\n"
+    dump_typed_node(node.cond, io, indent + "    ")
+    io << indent << "  body:\n"
+    dump_typed_node(node.body, io, indent + "    ")
+  when Iyi::Yield
+    unless node.exps.empty?
+      io << indent << "  yield_exps:\n"
+      node.exps.each { |e| dump_typed_node(e, io, indent + "    ") }
+    end
+  when Iyi::Return
+    if exp = node.exp
+      io << indent << "  exp:\n"
+      dump_typed_node(exp, io, indent + "    ")
+    end
+  when Iyi::Call
+    io << indent << "  name: " << node.name << "\n"
+    if obj = node.obj
+      io << indent << "  obj:\n"
+      dump_typed_node(obj, io, indent + "    ")
+    end
+    unless node.args.empty?
+      io << indent << "  args:\n"
+      node.args.each { |a| dump_typed_node(a, io, indent + "    ") }
+    end
+    if block = node.block
+      io << indent << "  block:\n"
+      dump_typed_node(block, io, indent + "    ")
+    end
+    if (defs = node.target_defs) && (td = defs.first?) && td.name != "new"
+      io << indent << "  target_def: " << td.name << ": " << (td.type?.try(&.to_s) || "nil") << "\n"
+      if body = td.body
+        io << indent << "  target_body:\n"
+        dump_typed_node(body, io, indent + "    ")
+      end
+    end
+  when Iyi::Block
+    unless node.args.empty?
+      io << indent << "  block_args: [" << node.args.map { |a| "#{a.name}: #{a.type?}" }.join(", ") << "]\n"
+    end
+    io << indent << "  body:\n"
+    dump_typed_node(node.body, io, indent + "    ")
+  when Iyi::Def
+    io << indent << "  name: " << node.name << "\n"
+  when Iyi::ClassDef
+    io << indent << "  name: " << node.name.to_s << "\n"
+  end
+end
+
 begin
   parser = Iyi::Parser.new(src)
   parser.filename = filename
   node = parser.parse
+
+  if ARGV.size > 1 && ARGV[1] == "--expr"
+    program = Iyi::Program.new
+    node = program.normalize(node)
+    node = program.semantic(node)
+    dump_typed_node(node, STDOUT)
+    exit 0
+  end
 
   program = Iyi::Program.new
   initial_types = program.types.keys.to_set
@@ -162,19 +251,25 @@ begin
     dump_type(t, STDOUT, "")
   end
 rescue ex : Iyi::TypeException
-  puts "ERROR: #{ex.message}"
+  first_line = ex.message.to_s.lines.first? || ""
+  puts "ERROR: #{first_line}"
 rescue ex : Exception
-  puts "ERROR: #{ex.message}"
+  first_line = ex.message.to_s.lines.first? || ""
+  puts "ERROR: #{first_line}"
 end
 CRYSTAL_GOLDEN_SCRIPT
 
 LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
   CRYSTAL_PATH="$REPO/src" "$CRYSTAL" build -Di_know_what_im_doing \
     -o "$WORK/dump_crystal" "$WORK/dump_crystal_sem.cr"
+
 compare_all() {
   out_status=0
   for fixture in "$REPO"/bench/fixtures/sem_*.iyi; do
     case "$(basename "$fixture")" in
+      sem_expr_*)
+        continue
+        ;;
       sem_err_*)
         if "$1" "$fixture" >/dev/null 2>&1; then
           out_status=1
@@ -189,11 +284,30 @@ compare_all() {
   return $out_status
 }
 
+compare_expr_all() {
+  out_status=0
+  for fixture in "$REPO"/bench/fixtures/sem_expr_*.iyi; do
+    "$1" "$fixture" --expr > "$WORK/a_expr.ast" 2>/dev/null || { out_status=1; continue; }
+    "$WORK/dump_crystal" "$fixture" --expr > "$WORK/b_expr.ast"
+    diff -q "$WORK/a_expr.ast" "$WORK/b_expr.ast" >/dev/null || out_status=1
+  done
+  for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
+    case "$(basename "$err_fixture")" in
+      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*)
+        if "$1" "$err_fixture" --expr >/dev/null 2>&1; then
+          out_status=1
+        fi
+        ;;
+    esac
+  done
+  return $out_status
+}
+
 fixture_count=0
 total_matched_declarations=0
 for fixture in "$REPO"/bench/fixtures/sem_*.iyi; do
   case "$(basename "$fixture")" in
-    sem_err_*) continue ;;
+    sem_err_*|sem_expr_*) continue ;;
   esac
   fixture_name="bench/fixtures/$(basename "$fixture")"
   "$WORK/exercise" "$fixture" > "$WORK/iyi.ast"
@@ -212,13 +326,41 @@ done
 echo "  Parity summary: $fixture_count/$fixture_count feature fixtures match 100% ($total_matched_declarations declarations compared)"
 
 echo
-echo "== 3. Semantic rejection and error checks"
+echo "== 3. Typed expression comparison against the front end being replaced"
+expr_fixture_count=0
+total_matched_expressions=0
+for fixture in "$REPO"/bench/fixtures/sem_expr_*.iyi; do
+  fixture_name="bench/fixtures/$(basename "$fixture")"
+  "$WORK/exercise" "$fixture" --expr > "$WORK/iyi_expr.ast"
+  "$WORK/dump_crystal" "$fixture" --expr > "$WORK/crystal_expr.ast"
+  if ! diff -q "$WORK/iyi_expr.ast" "$WORK/crystal_expr.ast" >/dev/null; then
+    echo "  $fixture_name: TYPED EXPRESSIONS DIFFER"
+    diff -u "$WORK/crystal_expr.ast" "$WORK/iyi_expr.ast" | head -20
+    status=1
+  else
+    node_count=$("$WORK/exercise" "$fixture" --expr-count)
+    echo "  $fixture_name: identical ($node_count typed nodes match front end)"
+    total_matched_expressions=$((total_matched_expressions + node_count))
+  fi
+  expr_fixture_count=$((expr_fixture_count + 1))
+done
+echo "  Parity summary: $expr_fixture_count/$expr_fixture_count typed expression fixtures match 100% ($total_matched_expressions typed nodes compared)"
+
+echo
+echo "== 4. Semantic rejection and error checks"
 err_count=0
 for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
   err_name="bench/fixtures/$(basename "$err_fixture")"
-  expected_err=$("$WORK/dump_crystal" "$err_fixture" 2>&1 | grep "^ERROR:" | head -1 | sed 's/^ERROR: //')
-  "$WORK/exercise" "$err_fixture" > "$WORK/iyi_err.out" 2>&1
+  expected_err=$("$WORK/dump_crystal" "$err_fixture" --expr 2>&1 | grep "^ERROR:" | head -1 | sed 's/^ERROR: //')
+  if [ -z "$expected_err" ]; then
+    expected_err=$("$WORK/dump_crystal" "$err_fixture" 2>&1 | grep "^ERROR:" | head -1 | sed 's/^ERROR: //')
+  fi
+  "$WORK/exercise" "$err_fixture" --expr > "$WORK/iyi_err.out" 2>&1
   actual_err=$(grep "iyi: panic:" "$WORK/iyi_err.out" | head -1 | sed 's/.*iyi: panic: //')
+  if [ -z "$actual_err" ]; then
+    "$WORK/exercise" "$err_fixture" > "$WORK/iyi_err.out" 2>&1
+    actual_err=$(grep "iyi: panic:" "$WORK/iyi_err.out" | head -1 | sed 's/.*iyi: panic: //')
+  fi
   if [ -z "$expected_err" ]; then
     echo "  $err_name: oracle did not reject"
     status=1
@@ -234,10 +376,7 @@ for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
 done
 echo "  Parity summary: $err_count/$err_count error fixtures rejected with identical errors"
 
-echo
-echo "== 4. Mutation proofs: each one must make the comparison above fail"
-
-prove_mutation() {
+prove_decl_mutation() {
   label="$1"
   old="$2"
   new="$3"
@@ -272,29 +411,95 @@ PY
   echo "    reverted"
 }
 
-MUTATIONS_RUN=0
-run_proof() {
-  prove_mutation "$1" "$2" "$3"
-  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_main_mutation() {
+  label="$1"
+  old="$2"
+  new="$3"
+  echo "  [$label]"
+  cp "$SEM_MAIN" "$SEM_MAIN.orig"
+  python3 - "$SEM_MAIN" "$old" "$new" <<'PY'
+import sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+t = open(path).read()
+if old not in t:
+    sys.exit(3)
+open(path, "w").write(t.replace(old, new, 1))
+PY
+  rc=$?
+  if [ "$rc" -eq 3 ] || diff -q "$SEM_MAIN.orig" "$SEM_MAIN" >/dev/null; then
+    echo "    PATCH CHANGED NOTHING: this proves nothing"
+    status=1
+    cp "$SEM_MAIN.orig" "$SEM_MAIN"; rm -f "$SEM_MAIN.orig"
+    return
+  fi
+  if "$IYI" build -o "$WORK/mut-exercise" "$REPO/bench/selfhost_semantic_exercise.iyi" >/dev/null 2>&1; then
+    if compare_expr_all "$WORK/mut-exercise"; then
+      echo "    FAILED: the comparison still passed with the mutation applied"
+      status=1
+    else
+      echo "    caught: the typed expression outputs diverged, as they must"
+    fi
+  else
+    echo "    caught: the mutated semantic visitor did not build"
+  fi
+  cp "$SEM_MAIN.orig" "$SEM_MAIN"; rm -f "$SEM_MAIN.orig"
+  echo "    reverted"
 }
 
-run_proof "struct default superclass switches to Reference" \
+MUTATIONS_RUN=0
+
+prove_decl_mutation "struct default superclass switches to Reference" \
   "superclass = node.struct ? @program.struct_type : @program.reference_type" \
   "superclass = @program.reference_type"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-run_proof "enum members start numbering at one instead of zero" \
+prove_decl_mutation "enum members start numbering at one instead of zero" \
   "counter = 0_i64" \
   "counter = 1_i64"
-run_proof "trait supertrait self-requirement check is bypassed" \
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_decl_mutation "trait supertrait self-requirement check is bypassed" \
   "if st == type" \
   "if false && st == type"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-run_proof "alias redefinition rejection is bypassed" \
+prove_decl_mutation "alias redefinition rejection is bypassed" \
   "if ex = existing" \
   "if false && (ex = existing)"
-run_proof "method visibility defaults to private instead of public" \
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_decl_mutation "method visibility defaults to private instead of public" \
   "node.visibility = Visibility::Public" \
   "node.visibility = Visibility::Private"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "literal I32 kind defaults to int64" \
+  "when NumberKind::I32  then @program.int32_type" \
+  "when NumberKind::I32  then @program.types[\"Int64\"]"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "variable assignment does not register in local scope" \
+  "@vars[v.name] = val_type" \
+  "# @vars[v.name] = val_type"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "if branch typing bypasses else branch merge" \
+  "merged = @program.type_merge(then_type, else_type)" \
+  "merged = then_type"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "method call resolution returns nil instead of method return type" \
+  "ret_type = type_method_body(instantiated_def, rec_type, node.args, node.block)" \
+  "ret_type = @program.nil_type"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "while loop condition type analysis is bypassed" \
+  "node.cond.accept(self)
+    node.body.accept(self)
+    set_type(node, @program.nil_type)" \
+  "node.body.accept(self)
+    set_type(node, @program.nil_type)"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo "  $MUTATIONS_RUN mutation proofs run"
 

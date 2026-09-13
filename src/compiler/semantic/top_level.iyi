@@ -96,6 +96,41 @@ pub abstract class Type
   def public? : Bool
     @visibility == Visibility::Public
   end
+
+  def union? : Bool
+    false
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.union?
+      ut = other.as(UnionType)
+      i = 0
+      while i < ut.union_types.size
+        return true if self.subtype_of?(ut.union_types[i])
+        i = i + 1
+      end
+      return false
+    end
+    if self.union?
+      sut = self.as(UnionType)
+      i = 0
+      while i < sut.union_types.size
+        return false unless sut.union_types[i].subtype_of?(other)
+        i = i + 1
+      end
+      return true
+    end
+    if self.is_a?(ModuleType)
+      mod = self.as(ModuleType)
+      p_idx = 0
+      while p_idx < mod.parents.size
+        return true if mod.parents[p_idx].subtype_of?(other)
+        p_idx = p_idx + 1
+      end
+    end
+    false
+  end
 end
 
 pub abstract class NamedType < Type
@@ -169,6 +204,14 @@ pub class MetaclassType < ModuleType
 
   def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @instance_type : Type)
     super(program, namespace, name)
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
   end
 
   def type_desc : String
@@ -350,6 +393,50 @@ pub class AliasType < NamedType
   end
 end
 
+pub class UnionType < Type
+  getter union_types : Array(Type)
+
+  def initialize(program : SemanticProgram, @union_types : Array(Type))
+    super(program, nil, "Union")
+  end
+
+  def union? : Bool
+    true
+  end
+
+  def full_name : String
+    non_nil_names = [] of String
+    has_nil = false
+    i = 0
+    while i < @union_types.size
+      t = @union_types[i]
+      if t.full_name == "Nil"
+        has_nil = true
+      else
+        non_nil_names << t.full_name
+      end
+      i = i + 1
+    end
+    sorted = non_nil_names.sorted
+    if has_nil
+      sorted << "Nil"
+    end
+    "(#{sorted.join(" | ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def ==(other : Type) : Bool
+    if other.union?
+      full_name == other.full_name
+    else
+      false
+    end
+  end
+end
+
 pub class ImplRecord
   getter trait_type : Type
   getter target_type : Type
@@ -391,6 +478,71 @@ pub class SemanticProgram < NonGenericModuleType
 
   def int32_type : ClassType
     @int32_type.as(ClassType)
+  end
+
+  def nil_type : Type
+    @types["Nil"]
+  end
+
+  def bool_type : Type
+    @types["Bool"]
+  end
+
+  def char_type : Type
+    @types["Char"]
+  end
+
+  def string_type : Type
+    @types["String"]
+  end
+
+  def symbol_type : Type
+    @types["Symbol"]
+  end
+
+  def no_return_type : Type
+    @types["NoReturn"]
+  end
+
+  def type_merge(t1 : Type, t2 : Type) : Type
+    return t1 if t1 == t2
+
+    types = [] of Type
+    if t1.union?
+      t1.as(UnionType).union_types.each { |ut| types << ut }
+    else
+      types << t1
+    end
+
+    if t2.union?
+      t2.as(UnionType).union_types.each { |ut| types << ut }
+    else
+      types << t2
+    end
+
+    unique = [] of Type
+    types.each do |t|
+      already = false
+      unique.each do |u|
+        if u == t
+          already = true
+          break
+        end
+      end
+      unless already
+        unique << t
+      end
+    end
+
+    if unique.size == 1
+      unique.first
+    else
+      UnionType.new(self, unique)
+    end
+  end
+
+  def nilable_type(t : Type) : Type
+    type_merge(t, nil_type)
   end
 
   def initial_type_names : Set(String)
@@ -466,6 +618,7 @@ pub class SemanticProgram < NonGenericModuleType
     @types["Array"] = GenericClassType.new(self, self, "Array", ["T"], nil, ref)
     @types["Hash"] = GenericClassType.new(self, self, "Hash", ["K", "V"], nil, ref)
     @types["Error"] = TraitType.new(self, self, "Error")
+    @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
 
     @initial_type_names = @types.keys.to_set
   end

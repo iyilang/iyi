@@ -1,0 +1,336 @@
+module compiler/platform/target
+
+# Target platform error raised when a triple cannot be parsed or normalized.
+pub class TargetError < Exception
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# Target platform model representing architecture, vendor, and environment.
+pub class Target
+  getter architecture : String
+  getter vendor : String
+  getter environment : String
+  getter original_triple : String
+
+  def initialize(target_triple : String)
+    @original_triple = target_triple
+    normalized = Target.normalize_triple(target_triple)
+
+    dash_count = 0
+    i = 0
+    while i < normalized.bytesize
+      if normalized.to_unsafe[i] == 45_u8
+        dash_count = dash_count + 1
+      end
+      i = i + 1
+    end
+
+    if dash_count < 2
+      raise TargetError.new("Invalid target triple: #{normalized}").to_s
+    end
+
+    parts = normalized.split('-')
+    arch = parts[0]
+    vendor = parts[1]
+    env = parts[2]
+    if parts.size > 3
+      env_parts = [] of String
+      idx = 2
+      while idx < parts.size
+        env_parts << parts[idx]
+        idx = idx + 1
+      end
+      env = env_parts.join("-")
+    end
+
+    case arch
+    when "i486", "i586", "i686"
+      arch = "i386"
+    when "amd64"
+      arch = "x86_64"
+    when "arm64"
+      arch = "aarch64"
+    else
+      if arch.starts_with?("arm")
+        arch = "arm"
+      end
+    end
+
+    if env.starts_with?("linux") && env.split('-').size == 1
+      case vendor
+      when "suse", "redhat", "slackware", "amazon", "unknown", "montavista", "mti"
+        env = "#{env}-gnu"
+      end
+    end
+
+    @architecture = arch
+    @vendor = vendor
+    @environment = env
+  end
+
+  # Normalizes standard and aliased target triples into canonical form.
+  pub def self.normalize_triple(target_triple : String) : String
+    lower = target_triple.downcase
+    parts = lower.split('-')
+    if parts.size < 2
+      return lower
+    end
+
+    if parts.size == 2
+      arch = parts[0]
+      rest = parts[1]
+      if rest == "wasi" || rest == "none" || rest == "elf"
+        return "#{arch}-unknown-#{rest}"
+      end
+      if rest.starts_with?("linux") || rest.starts_with?("windows") || rest.starts_with?("win32") || rest.starts_with?("darwin") || rest.starts_with?("freebsd") || rest.starts_with?("openbsd") || rest.starts_with?("netbsd")
+        return "#{arch}-unknown-#{rest}"
+      end
+      return lower
+    end
+
+    if parts.size == 3
+      p1 = parts[0]
+      p2 = parts[1]
+      p3 = parts[2]
+      if p2 == "linux" || p2 == "windows" || p2 == "win32" || p2 == "freebsd" || p2 == "openbsd" || p2 == "netbsd" || p2 == "dragonfly" || p2 == "solaris" || p2 == "darwin" || p2 == "macosx"
+        return "#{p1}-unknown-#{p2}-#{p3}"
+      end
+    end
+
+    lower
+  end
+
+  # Non-raising parser returning nil for invalid target triples.
+  pub def self.parse?(target_triple : String) : Target?
+    normalized = Target.normalize_triple(target_triple)
+    dash_count = 0
+    i = 0
+    while i < normalized.bytesize
+      if normalized.to_unsafe[i] == 45_u8
+        dash_count = dash_count + 1
+      end
+      i = i + 1
+    end
+    if dash_count < 2
+      return nil
+    end
+    Target.new(target_triple)
+  end
+
+  pub def environment_parts : Array(String)
+    @environment.split('-')
+  end
+
+  pub def pointer_bit_width : Int32
+    if @architecture == "aarch64" || @architecture == "x86_64"
+      64
+    elsif @architecture == "arm" || @architecture == "i386" || @architecture == "wasm32"
+      32
+    elsif @architecture == "avr"
+      16
+    else
+      raise TargetError.new("unknown Target#pointer_bit_width for #{@architecture} target architecture").to_s
+    end
+  end
+
+  pub def size_bit_width : Int32
+    pointer_bit_width
+  end
+
+  pub def os_name : String
+    if macos?
+      "darwin"
+    elsif freebsd?
+      "freebsd"
+    elsif dragonfly?
+      "dragonfly"
+    elsif openbsd?
+      "openbsd"
+    elsif netbsd?
+      "netbsd"
+    elsif solaris?
+      "solaris"
+    elsif android?
+      "android"
+    else
+      @environment
+    end
+  end
+
+  pub def executable_extension : String
+    if windows?
+      ".exe"
+    elsif avr?
+      ".elf"
+    else
+      ""
+    end
+  end
+
+  pub def object_extension : String
+    if windows?
+      ".obj"
+    elsif @architecture == "wasm32"
+      ".wasm"
+    else
+      ".o"
+    end
+  end
+
+  pub def macos? : Bool
+    @environment.starts_with?("darwin") || @environment.starts_with?("macos")
+  end
+
+  pub def darwin? : Bool
+    macos?
+  end
+
+  pub def freebsd? : Bool
+    @environment.starts_with?("freebsd")
+  end
+
+  pub def freebsd_version : Int32?
+    idx = find_substring(@environment, "freebsd")
+    if idx
+      start_pos = idx + 7
+      pos = start_pos
+      while pos < @environment.bytesize
+        b = @environment.to_unsafe[pos]
+        if b >= 48_u8 && b <= 57_u8
+          pos = pos + 1
+        else
+          break
+        end
+      end
+      if pos > start_pos && pos < @environment.bytesize && @environment.to_unsafe[pos] == 46_u8
+        num_str = @environment[start_pos, pos - start_pos]
+        return num_str.to_i
+      end
+    end
+    nil
+  end
+
+  pub def dragonfly? : Bool
+    @environment.starts_with?("dragonfly")
+  end
+
+  pub def openbsd? : Bool
+    @environment.starts_with?("openbsd")
+  end
+
+  pub def netbsd? : Bool
+    @environment.starts_with?("netbsd")
+  end
+
+  pub def android? : Bool
+    parts = environment_parts
+    parts.any? { |p| p.starts_with?("android") }
+  end
+
+  pub def linux? : Bool
+    @environment.starts_with?("linux")
+  end
+
+  pub def solaris? : Bool
+    @environment.starts_with?("solaris")
+  end
+
+  pub def wasi? : Bool
+    @environment.starts_with?("wasi")
+  end
+
+  pub def bsd? : Bool
+    freebsd? || netbsd? || openbsd? || dragonfly?
+  end
+
+  pub def unix? : Bool
+    macos? || bsd? || linux? || wasi? || solaris?
+  end
+
+  pub def gnu? : Bool
+    parts = environment_parts
+    parts.any? { |p| p == "gnu" || p == "gnueabi" || p == "gnueabihf" }
+  end
+
+  pub def musl? : Bool
+    parts = environment_parts
+    parts.any? { |p| p == "musl" || p == "musleabi" || p == "musleabihf" }
+  end
+
+  pub def windows? : Bool
+    @environment.starts_with?("win32") || @environment.starts_with?("windows")
+  end
+
+  pub def msvc? : Bool
+    windows? && environment_parts.includes?("msvc")
+  end
+
+  pub def win32? : Bool
+    windows? && (msvc? || gnu?)
+  end
+
+  pub def armhf? : Bool
+    parts = environment_parts
+    parts.any? { |p| p == "gnueabihf" || p == "musleabihf" }
+  end
+
+  pub def avr? : Bool
+    @architecture == "avr"
+  end
+
+  pub def embedded? : Bool
+    parts = environment_parts
+    parts.any? { |p| p == "eabi" || p == "eabihf" }
+  end
+
+  pub def to_s : String
+    "#{@architecture}-#{@vendor}-#{@environment}"
+  end
+
+  pub def ==(other : Target) : Bool
+    if @architecture != other.architecture
+      return false
+    end
+
+    if @vendor != "unknown" && other.vendor != "unknown"
+      if @vendor != other.vendor
+        return false
+      end
+    end
+
+    @environment == other.environment
+  end
+
+  pub def !=(other : Target) : Bool
+    !(self == other)
+  end
+
+  private def find_substring(haystack : String, needle : String, offset : Int32 = 0) : Int32?
+    i = offset
+    n_len = needle.bytesize
+    h_len = haystack.bytesize
+    while i + n_len <= h_len
+      matched = true
+      j = 0
+      while j < n_len
+        if haystack.to_unsafe[i + j] != needle.to_unsafe[j]
+          matched = false
+          break
+        end
+        j = j + 1
+      end
+      if matched
+        return i
+      end
+      i = i + 1
+    end
+    nil
+  end
+end

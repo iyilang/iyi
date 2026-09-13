@@ -1,0 +1,108 @@
+module compiler/platform/flags
+
+import compiler/platform/target
+using compiler/platform/target::{Target}
+
+# Computes implied platform flags and resolves query predicates.
+pub class PlatformFlags
+  # Computes the sorted unique flags implied by a target triple and optional CPU.
+  pub def self.flags_for_target(target : Target, mcpu : String = "") : Array(String)
+    flags = [] of String
+
+    flags << target.architecture
+    flags << target.vendor
+    target.environment_parts.each do |part|
+      flags << part
+    end
+
+    flags << "bits#{target.pointer_bit_width}"
+
+    if target.armhf?
+      flags << "armhf"
+    end
+
+    if target.unix?
+      flags << "unix"
+    end
+    if target.win32?
+      flags << "win32"
+    end
+
+    if target.macos?
+      flags << "darwin"
+    end
+    if target.freebsd?
+      flags << "freebsd"
+      if v = target.freebsd_version
+        flags << "freebsd#{v}"
+      end
+    end
+    if target.netbsd?
+      flags << "netbsd"
+    end
+
+    if target.openbsd?
+      flags << "openbsd"
+      if target.architecture == "aarch64"
+        flags << "branch-protection=bti"
+      elsif target.architecture == "x86_64" || target.architecture == "i386"
+        flags << "cf-protection=branch"
+      end
+    end
+
+    if target.dragonfly?
+      flags << "dragonfly"
+    end
+    if target.solaris?
+      flags << "solaris"
+    end
+    if target.android?
+      flags << "android"
+    end
+
+    if target.bsd?
+      flags << "bsd"
+    end
+
+    if target.avr? && !mcpu.empty?
+      flags << mcpu
+    end
+
+    # Deduplicate entries and sort alphabetically
+    dedup = [] of String
+    flags.each do |f|
+      if !dedup.includes?(f)
+        dedup << f
+      end
+    end
+    dedup.sorted
+  end
+
+  # Returns true if the query flag is in the list.
+  pub def self.has_flag?(flags : Array(String), name : String) : Bool
+    flags.includes?(name)
+  end
+
+  # Returns true if flag exists as boolean, the value if key=value, or false if absent.
+  pub def self.flag_value(flags : Array(String), name : String) : String | Bool
+    i = flags.size - 1
+    while i >= 0
+      flag = flags[i]
+      if flag == name
+        return true
+      end
+      if flag.starts_with?(name)
+        eq_idx = flag.index('=')
+        if eq_idx
+          key = flag[0, eq_idx]
+          if key == name
+            val = flag[eq_idx + 1, flag.bytesize - eq_idx - 1]
+            return val
+          end
+        end
+      end
+      i = i - 1
+    end
+    false
+  end
+end

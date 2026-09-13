@@ -1,0 +1,254 @@
+module compiler/platform/linker
+
+import compiler/platform/target
+using compiler/platform/target::{Target}
+
+# Record of a link annotation attached to a library or function binding.
+pub class LinkAnnotation
+  getter lib : String?
+  getter pkg_config : String?
+  getter ldflags : String?
+  getter static_link : Bool
+  getter framework : String?
+  getter wasm_import_module : String?
+  getter dll : String?
+
+  def initialize(
+    @lib : String? = nil,
+    @pkg_config : String? = nil,
+    @ldflags : String? = nil,
+    @static_link : Bool = false,
+    @framework : String? = nil,
+    @wasm_import_module : String? = nil,
+    @dll : String? = nil,
+  )
+  end
+end
+
+# The result of building a linker command.
+pub class LinkCommandResult
+  getter linker : String
+  getter cmd : String
+  getter objects : Array(String)?
+
+  def initialize(@linker : String, @cmd : String, @objects : Array(String)?)
+  end
+end
+
+# Linker command generator and argument quoter for all supported target platforms.
+pub class Linker
+  # Determines if an argument requires POSIX shell escaping.
+  pub def self.posix_quoting_needed?(arg : String) : Bool
+    if arg.empty?
+      return true
+    end
+    i = 0
+    while i < arg.bytesize
+      b = arg.to_unsafe[i]
+      is_safe = (b >= 48_u8 && b <= 57_u8) ||
+                (b >= 65_u8 && b <= 90_u8) ||
+                (b >= 97_u8 && b <= 122_u8) ||
+                b == 37_u8 || b == 43_u8 || b == 44_u8 || b == 45_u8 ||
+                b == 46_u8 || b == 47_u8 || b == 58_u8 || b == 61_u8 ||
+                b == 64_u8 || b == 95_u8
+      if !is_safe
+        return true
+      end
+      i = i + 1
+    end
+    false
+  end
+
+  # Shell-quotes an argument for POSIX shells.
+  pub def self.quote_posix(arg : String) : String
+    if arg.empty?
+      return "''"
+    end
+    if !posix_quoting_needed?(arg)
+      return arg
+    end
+
+    res = "'"
+    i = 0
+    while i < arg.bytesize
+      b = arg.to_unsafe[i]
+      if b == 39_u8
+        res = res + "'\\''"
+      else
+        res = res + b.unsafe_chr.to_s
+      end
+      i = i + 1
+    end
+    res + "'"
+  end
+
+  # Shell-quotes a list of arguments for POSIX shells.
+  pub def self.quote_posix(args : Array(String)) : String
+    res = [] of String
+    args.each do |a|
+      res << quote_posix(a)
+    end
+    res.join(" ")
+  end
+
+  # Shell-quotes an argument for Windows command lines.
+  pub def self.quote_windows(arg : String) : String
+    need_quotes = arg.empty? || arg.includes?(" ") || arg.includes?("\t")
+    if !need_quotes
+      return arg
+    end
+
+    res = "\""
+    slashes = 0
+    i = 0
+    while i < arg.bytesize
+      b = arg.to_unsafe[i]
+      if b == 92_u8
+        slashes = slashes + 1
+      elsif b == 34_u8
+        k = 0
+        while k <= slashes
+          res = res + "\\"
+          k = k + 1
+        end
+        slashes = 0
+      else
+        slashes = 0
+      end
+      res = res + b.unsafe_chr.to_s
+      i = i + 1
+    end
+    k = 0
+    while k < slashes
+      res = res + "\\"
+      k = k + 1
+    end
+    res + "\""
+  end
+
+  # Shell-quotes a list of arguments for Windows command lines.
+  pub def self.quote_windows(args : Array(String)) : String
+    res = [] of String
+    args.each do |a|
+      res << quote_windows(a)
+    end
+    res.join(" ")
+  end
+
+  # Builds library and search path flags for linking.
+  pub def self.lib_flags(
+    target : Target,
+    library_paths : Array(String) = [] of String,
+    annotations : Array(LinkAnnotation) = [] of LinkAnnotation,
+    cross_compiling : Bool = false,
+    static_build : Bool = false,
+  ) : String
+    if target.msvc?
+      flags = [] of String
+      library_paths.each do |path|
+        flags << quote_windows("/LIBPATH:#{path}")
+      end
+      i = annotations.size - 1
+      while i >= 0
+        ann = annotations[i]
+        if ldflags = ann.ldflags
+          flags << ldflags
+        end
+        if lib_name = ann.lib
+          flags << quote_windows("#{lib_name}.lib")
+        end
+        i = i - 1
+      end
+      return flags.join(" ")
+    else
+      flags = [] of String
+      if static_build
+        flags << "-static"
+      end
+      library_paths.each do |path|
+        flag = "-L#{path}"
+        flags << (cross_compiling && target.windows? ? quote_windows(flag) : quote_posix(flag))
+      end
+      i = annotations.size - 1
+      while i >= 0
+        ann = annotations[i]
+        if ldflags = ann.ldflags
+          flags << ldflags
+        end
+        if lib_name = ann.lib
+          flag = "-l#{lib_name}"
+          flags << (cross_compiling && target.windows? ? quote_windows(flag) : quote_posix(flag))
+        end
+        if framework = ann.framework
+          flags << "-framework"
+          flags << (cross_compiling && target.windows? ? quote_windows(framework) : quote_posix(framework))
+        end
+        i = i - 1
+      end
+      return flags.join(" ")
+    end
+  end
+
+  # Constructs the complete linker command line for the given target and options.
+  pub def self.linker_command(
+    target : Target,
+    object_names : Array(String),
+    output_filename : String,
+    link_flags : String = "",
+    lib_flags : String = "",
+    cross_compiling : Bool = false,
+    debug : Bool = false,
+    mcpu : String = "",
+  ) : LinkCommandResult
+    default_linker = "cc"
+
+    if target.msvc?
+      linker = "cl.exe"
+      obj_arg = quote_windows(object_names)
+      out_arg = quote_windows("/Fe#{output_filename}")
+      link_args = [] of String
+      if debug
+        link_args << "/DEBUG:FULL /PDBALTPATH:%_PDB%"
+      end
+      link_args << "/INCREMENTAL:NO /STACK:0x800000"
+      if !lib_flags.empty?
+        link_args << lib_flags
+      end
+      if !link_flags.empty?
+        link_args << link_flags
+      end
+      args = "/nologo #{obj_arg} #{out_arg} /link #{link_args.join(" ")}"
+      cmd = "#{linker} #{args}"
+      return LinkCommandResult.new(linker, cmd, nil)
+    elsif target.architecture == "wasm32"
+      combined_flags = link_flags.empty? ? " --target=wasm32-wasi" : "#{link_flags} --target=wasm32-wasi"
+      tail = lib_flags.empty? ? "" : " #{lib_flags}"
+      out_arg = quote_posix(output_filename)
+      cmd = %(#{default_linker} "${@}" -o #{out_arg} #{combined_flags}#{tail})
+      return LinkCommandResult.new(default_linker, cmd, object_names)
+    elsif target.avr?
+      m_cpu = mcpu.empty? ? "atmega328p" : mcpu
+      combined_flags = link_flags.empty? ? " --target=avr-unknown-unknown -mmcu=#{m_cpu} -Wl,--gc-sections" : "#{link_flags} --target=avr-unknown-unknown -mmcu=#{m_cpu} -Wl,--gc-sections"
+      tail = lib_flags.empty? ? "" : " #{lib_flags}"
+      out_arg = quote_posix(output_filename)
+      cmd = %(#{default_linker} "${@}" -o #{out_arg} #{combined_flags}#{tail})
+      return LinkCommandResult.new(default_linker, cmd, object_names)
+    elsif target.win32? && target.gnu?
+      combined_flags = link_flags.empty? ? " -Wl,--stack,0x800000" : "#{link_flags} -Wl,--stack,0x800000"
+      tail = lib_flags.empty? ? "" : " #{lib_flags}"
+      obj_arg = quote_windows(object_names)
+      out_arg = quote_windows(output_filename)
+      cmd = %(#{default_linker} #{obj_arg} -o #{out_arg} #{combined_flags}#{tail})
+      return LinkCommandResult.new(default_linker, cmd, nil)
+    else
+      combined_flags = link_flags.empty? ? " -rdynamic" : "#{link_flags} -rdynamic"
+      if target.freebsd? || target.openbsd?
+        combined_flags = "#{combined_flags} -L/usr/local/lib"
+      end
+      tail = lib_flags.empty? ? "" : " #{lib_flags}"
+      out_arg = quote_posix(output_filename)
+      cmd = %(#{default_linker} "${@}" -o #{out_arg} #{combined_flags}#{tail})
+      return LinkCommandResult.new(default_linker, cmd, object_names)
+    end
+  end
+end

@@ -1,0 +1,548 @@
+# Code Generation - Stage 1 Self-hosting Slice: Typed AST to LLVM IR
+#
+# Slice boundary:
+# Emits LLVM IR for top-level `fun` declarations containing:
+# - Integer and float arithmetic (+, -, *, /, //, %, &+, &-, &*, unsafe_div, unsafe_mod,
+#   &, |, ^, <<, >>, unsafe_shl, unsafe_shr)
+# - Integer and float comparisons (<, <=, >, >=, ==, !=)
+# - Local variable allocation (stack alloca), store, and load
+# - Control flow: `if`/`else` branching and phi value merges, and `while` loops
+# - Calls between such `fun` functions
+#
+# Explicitly excluded from this slice:
+# - Classes, structs, and objects
+# - Closures and proc literals
+# - Exception handling (try/catch/raise)
+# - Generics instantiation
+# - Garbage collection interface
+
+module compiler/codegen/codegen
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/parser
+import compiler/syntax/visitor
+import compiler/syntax/token
+import compiler/semantic/top_level
+import compiler/semantic/main_visitor
+import compiler/llvm
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Def, Expressions, FunDef, If, NilLiteral, NumberLiteral, Path, Return, Var, While}
+using compiler/syntax/token::{NumberKind}
+using compiler/syntax/parser::{Parser}
+using compiler/syntax/visitor::{Visitor}
+using compiler/semantic/top_level::{SemanticProgram, Type, ClassType, NonGenericClassType}
+using compiler/semantic/main_visitor::{MainVisitor}
+using compiler/llvm/target::{Target, TargetData, TargetMachine}
+using compiler/llvm/context::{Context}
+using compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Function, BasicBlock}
+using compiler/llvm/module::{Module}
+using compiler/llvm/builder::{Builder}
+
+pub def register_primitive_operators(prog : SemanticProgram) : Nil
+  int_names = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
+  int_names.each do |tname|
+    t = prog.types[tname].as(NonGenericClassType)
+    ["+", "-", "*", "/", "//", "%", "&+", "&-", "&*", "unsafe_div", "unsafe_mod", "&", "|", "^", "<<", ">>", "unsafe_shl", "unsafe_shr"].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], Path.new(tname), nil)
+      t.add_def(d)
+    end
+    ["<", "<=", ">", ">=", "==", "!="].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], Path.new("Bool"), nil)
+      t.add_def(d)
+    end
+    ["-", "~"].each do |op|
+      d = Def.new(op, [] of Arg, Path.new(tname), nil)
+      t.add_def(d)
+    end
+  end
+
+  float_names = ["Float32", "Float64"]
+  float_names.each do |fname|
+    ft = prog.types[fname].as(NonGenericClassType)
+    ["+", "-", "*", "/"].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], Path.new(fname), nil)
+      ft.add_def(d)
+    end
+    ["<", "<=", ">", ">=", "==", "!="].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], Path.new("Bool"), nil)
+      ft.add_def(d)
+    end
+    d_neg = Def.new("-", [] of Arg, Path.new(fname), nil)
+    ft.add_def(d_neg)
+  end
+
+  bool_t = prog.types["Bool"].as(NonGenericClassType)
+  ["==", "!=", "&", "|", "^"].each do |op|
+    d = Def.new(op, [Arg.new("other", restriction: Path.new("Bool"))], Path.new("Bool"), nil)
+    bool_t.add_def(d)
+  end
+  d_not = Def.new("!", [] of Arg, Path.new("Bool"), nil)
+  bool_t.add_def(d_not)
+end
+
+class LocalVarCollector < Visitor
+  getter vars : Hash(String, Var)
+  getter excluded : Set(String)
+
+  def initialize(@excluded : Set(String))
+    @vars = Hash(String, Var).new
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Var)
+      v = node.target.as(Var)
+      unless @excluded.includes?(v.name)
+        @vars[v.name] ||= v
+      end
+    end
+    true
+  end
+end
+
+pub class CodeGenVisitor < Visitor
+  property context : Context
+  property mod : Module
+  property builder : Builder
+  property program : SemanticProgram
+  property main_visitor : MainVisitor
+  property fn_types : Hash(String, LLVMType)
+  property current_fn : Function?
+  property current_fun_def : FunDef?
+  property vars : Hash(String, LLVMValue)
+  property var_types : Hash(String, Type)
+  property param_values : Hash(String, LLVMValue)
+  property last : LLVMValue?
+  property terminated : Bool
+
+  def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
+    @builder = Builder.new(@context)
+    @fn_types = Hash(String, LLVMType).new
+    @current_fn = nil
+    @current_fun_def = nil
+    @vars = Hash(String, LLVMValue).new
+    @var_types = Hash(String, Type).new
+    @param_values = Hash(String, LLVMValue).new
+    @last = nil
+    @terminated = false
+  end
+
+  def llvm_type(t : Type) : LLVMType
+    name = t.full_name
+    case name
+    when "Int8", "UInt8"
+      @context.int8
+    when "Int16", "UInt16"
+      @context.int16
+    when "Int32", "UInt32"
+      @context.int32
+    when "Int64", "UInt64"
+      @context.int64
+    when "Int128", "UInt128"
+      @context.int128
+    when "Float32"
+      @context.float
+    when "Float64"
+      @context.double
+    when "Bool"
+      @context.int1
+    when "Char"
+      @context.int32
+    when "Void", "Nil", "NoReturn"
+      @context.void
+    else
+      @context.int32
+    end
+  end
+
+  def collect_local_vars(body : ASTNode?, excluded : Set(String)) : Hash(String, Var)
+    collector = LocalVarCollector.new(excluded)
+    if b = body
+      b.accept(collector)
+    end
+    collector.vars
+  end
+
+  def visit(node : Expressions) : Bool
+    node.expressions.each do |exp|
+      exp.accept(self)
+    end
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    arg_types = [] of LLVMType
+    node.args.each do |arg|
+      sem_type = if r = arg.restriction
+                   @program.lookup_type_node(r, @program)
+                 else
+                   @main_visitor.type_of(arg)
+                 end
+      arg_types << llvm_type(sem_type)
+    end
+
+    ret_sem_type = if rt = node.return_type
+                     @program.lookup_type_node(rt, @program)
+                   else
+                     @main_visitor.type_of(node)
+                   end
+    ret_type = llvm_type(ret_sem_type)
+
+    fn_ty = LLVMType.function(arg_types, ret_type, false)
+    @fn_types[node.name] = fn_ty
+    fn = @mod.add_function(node.name, fn_ty)
+    @current_fn = fn
+    @current_fun_def = node
+
+    excluded_names = Set(String).new
+    @param_values.clear
+    i = 0
+    while i < node.args.size
+      arg = node.args[i]
+      p = fn.param(i)
+      p.name = arg.name
+      @param_values[arg.name] = p
+      excluded_names.add(arg.name)
+      i = i + 1
+    end
+
+    local_vars = collect_local_vars(node.body, excluded_names)
+
+    if local_vars.empty?
+      entry_bb = fn.append_basic_block("entry")
+      @builder.position_at_end(entry_bb)
+    else
+      alloca_bb = fn.append_basic_block("alloca")
+      entry_bb = fn.append_basic_block("entry")
+
+      @builder.position_at_end(alloca_bb)
+      @vars.clear
+      @var_types.clear
+      local_vars.each do |vname, vnode|
+        vtype = @main_visitor.type_of(vnode)
+        @var_types[vname] = vtype
+        ptr = @builder.alloca(llvm_type(vtype), vname)
+        @vars[vname] = ptr
+      end
+      @builder.br(entry_bb)
+      @builder.position_at_end(entry_bb)
+    end
+
+    @terminated = false
+    if b = node.body
+      b.accept(self)
+    end
+
+    unless @terminated
+      if ret_sem_type.full_name == "Void" || ret_sem_type.full_name == "Nil"
+        @builder.ret_void
+      elsif l = @last
+        @builder.ret(l)
+      else
+        @builder.ret(ret_type.const_int(0))
+      end
+      @terminated = true
+    end
+
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Var)
+      var_name = node.target.as(Var).name
+      node.value.accept(self)
+      if val = @last
+        if ptr = @vars[var_name]?
+          @builder.store(val, ptr)
+        end
+        @last = val
+        @terminated = false
+      end
+    end
+    false
+  end
+
+  def visit(node : Var) : Bool
+    if ptr = @vars[node.name]?
+      v_type = @var_types[node.name]
+      @last = @builder.load(llvm_type(v_type), ptr, "")
+    elsif param = @param_values[node.name]?
+      @last = param
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    t = @main_visitor.type_of(node)
+    if t.full_name == "Float64"
+      @last = @context.double.const_float(node.value.to_f)
+    elsif t.full_name == "Float32"
+      @last = @context.float.const_float(node.value.to_f)
+    elsif t.full_name == "Int64" || t.full_name == "UInt64"
+      @last = @context.int64.const_int(node.value.to_i64, true)
+    else
+      @last = @context.int32.const_int(node.value.to_i, true)
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    @last = @context.int1.const_int(node.value ? 1 : 0)
+    @terminated = false
+    false
+  end
+
+  def visit(node : NilLiteral) : Bool
+    @last = @context.void.undef
+    @terminated = false
+    false
+  end
+
+  def visit(node : If) : Bool
+    return false unless fn = @current_fn
+    then_bb = fn.append_basic_block("then")
+    else_bb = fn.append_basic_block("else")
+
+    node.cond.accept(self)
+    return false unless cond_val = @last
+    @builder.cond_br(cond_val, then_bb, else_bb)
+
+    if_type = @main_visitor.type_of(node)
+    needs_phi = (if_type.full_name != "Nil" && if_type.full_name != "Void")
+
+    exit_bb = fn.append_basic_block("exit")
+
+    # then branch
+    @builder.position_at_end(then_bb)
+    @terminated = false
+    node.then.accept(self)
+    then_val = @last
+    then_end = @builder.insert_block || then_bb
+    unless @terminated
+      @builder.br(exit_bb)
+    end
+
+    # else branch
+    @builder.position_at_end(else_bb)
+    @terminated = false
+    if els = node.else
+      els.accept(self)
+    end
+    else_val = @last
+    else_end = @builder.insert_block || else_bb
+    unless @terminated
+      @builder.br(exit_bb)
+    end
+
+    @builder.position_at_end(exit_bb)
+    @terminated = false
+
+    if needs_phi && then_val && else_val
+      phi = @builder.phi(llvm_type(if_type))
+      @builder.add_incoming(phi, [then_val, else_val], [then_end, else_end])
+      @last = phi
+    end
+
+    false
+  end
+
+  def visit(node : While) : Bool
+    return false unless fn = @current_fn
+    while_bb = fn.append_basic_block("while")
+    body_bb = fn.append_basic_block("body")
+    fail_bb = fn.append_basic_block("fail")
+
+    @builder.br(while_bb)
+
+    @builder.position_at_end(while_bb)
+    @terminated = false
+    node.cond.accept(self)
+    return false unless cond_val = @last
+    @builder.cond_br(cond_val, body_bb, fail_bb)
+
+    @builder.position_at_end(body_bb)
+    @terminated = false
+    node.body.accept(self)
+    unless @terminated
+      @builder.br(while_bb)
+    end
+
+    @builder.position_at_end(fail_bb)
+    @terminated = false
+    @last = @context.void.undef
+    false
+  end
+
+  def visit(node : Return) : Bool
+    if exp = node.exp
+      exp.accept(self)
+      if l = @last
+        @builder.ret(l)
+      else
+        @builder.ret_void
+      end
+    else
+      @builder.ret_void
+    end
+    @terminated = true
+    false
+  end
+
+  def visit(node : Call) : Bool
+    if obj = node.obj
+      # Unary negation
+      if node.args.empty? && node.name == "-"
+        obj.accept(self)
+        return false unless val = @last
+        rec_type = @main_visitor.type_of(obj)
+        if rec_type.full_name == "Float64" || rec_type.full_name == "Float32"
+          @last = @builder.fneg(val)
+        else
+          @last = @builder.neg(val)
+        end
+        @terminated = false
+        return false
+      end
+
+      # Binary primitive operation
+      if node.args.size == 1
+        obj.accept(self)
+        return false unless lhs = @last
+        node.args[0].accept(self)
+        return false unless rhs = @last
+
+        rec_type = @main_visitor.type_of(obj)
+        is_float = rec_type.full_name == "Float64" || rec_type.full_name == "Float32"
+        is_signed = rec_type.full_name.starts_with?("Int")
+
+        case node.name
+        when "+", "&+"
+          @last = is_float ? @builder.fadd(lhs, rhs) : @builder.add(lhs, rhs)
+        when "-", "&-"
+          @last = is_float ? @builder.fsub(lhs, rhs) : @builder.sub(lhs, rhs)
+        when "*", "&*"
+          @last = is_float ? @builder.fmul(lhs, rhs) : @builder.mul(lhs, rhs)
+        when "/", "unsafe_div"
+          @last = is_float ? @builder.fdiv(lhs, rhs) : (is_signed ? @builder.sdiv(lhs, rhs) : @builder.udiv(lhs, rhs))
+        when "%", "unsafe_mod", "//"
+          @last = is_signed ? @builder.srem(lhs, rhs) : @builder.urem(lhs, rhs)
+        when "&"
+          @last = @builder.build_and(lhs, rhs)
+        when "|"
+          @last = @builder.build_or(lhs, rhs)
+        when "^"
+          @last = @builder.build_xor(lhs, rhs)
+        when "<<", "unsafe_shl"
+          @last = @builder.shl(lhs, rhs)
+        when ">>", "unsafe_shr"
+          @last = is_signed ? @builder.ashr(lhs, rhs) : @builder.lshr(lhs, rhs)
+        when "<"
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OLT, lhs, rhs) : (is_signed ? @builder.icmp(LibLLVM::IntPredicate::SLT, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::ULT, lhs, rhs))
+        when "<="
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OLE, lhs, rhs) : (is_signed ? @builder.icmp(LibLLVM::IntPredicate::SLE, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::ULE, lhs, rhs))
+        when ">"
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OGT, lhs, rhs) : (is_signed ? @builder.icmp(LibLLVM::IntPredicate::SGT, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::UGT, lhs, rhs))
+        when ">="
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OGE, lhs, rhs) : (is_signed ? @builder.icmp(LibLLVM::IntPredicate::SGE, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::UGE, lhs, rhs))
+        when "=="
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OEQ, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::EQ, lhs, rhs)
+        when "!="
+          @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::ONE, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::NE, lhs, rhs)
+        end
+
+        @terminated = false
+        return false
+      end
+    end
+
+    # Function call
+    arg_vals = [] of LLVMValue
+    node.args.each do |a|
+      a.accept(self)
+      if l = @last
+        arg_vals << l
+      end
+    end
+
+    fn = @mod.get_function?(node.name)
+    if fn.nil?
+      if td = @main_visitor.target_def?(node)
+        c_args = td.args.map { |a| llvm_type(@main_visitor.type_of(a)) }
+        c_ret = llvm_type(@main_visitor.type_of(node))
+        fn_ty = LLVMType.function(c_args, c_ret, false)
+        @fn_types[node.name] = fn_ty
+        fn = @mod.add_function(node.name, fn_ty)
+      end
+    end
+
+    if fn_val = fn
+      callee_type = @fn_types[node.name]
+      @last = @builder.call(callee_type, fn_val.to_value, arg_vals)
+    end
+
+    @terminated = false
+    false
+  end
+end
+
+pub def compile_source_to_module(src : String, filename : String, context : Context, mod : Module) : CodeGenVisitor
+  parser = Parser.new(src, filename)
+  node = parser.parse
+
+  prog = SemanticProgram.new
+  register_primitive_operators(prog)
+
+  funs = [] of FunDef
+  if node.is_a?(Expressions)
+    node.as(Expressions).expressions.each do |e|
+      if e.is_a?(FunDef)
+        funs << e.as(FunDef)
+      end
+    end
+  elsif node.is_a?(FunDef)
+    funs << node.as(FunDef)
+  end
+
+  # Register definitions in program so calls can resolve
+  funs.each do |fd|
+    cloned_args = fd.args.map { |a| a.clone.as(Arg) }
+    d = Def.new(fd.name, cloned_args, fd.return_type, fd.body)
+    prog.add_def(d)
+  end
+
+  mv = MainVisitor.new(prog)
+  funs.each do |fd|
+    old_vars = mv.vars
+    old_scope = mv.scope
+    new_vars = Hash(String, Type).new
+    fd.args.each do |arg|
+      if r = arg.restriction
+        t = prog.lookup_type_node(r, prog)
+        new_vars[arg.name] = t
+        mv.set_type(arg, t)
+      end
+    end
+    mv.vars = new_vars
+    mv.scope = prog
+    if b = fd.body
+      b.accept(mv)
+      ret_type = if rt = fd.return_type
+                   prog.lookup_type_node(rt, prog)
+                 else
+                   mv.type_of(b)
+                 end
+      mv.set_type(fd, ret_type)
+    end
+    mv.vars = old_vars
+    mv.scope = old_scope
+  end
+
+  cg = CodeGenVisitor.new(context, mod, prog, mv)
+  funs.each do |fd|
+    fd.accept(cg)
+  end
+  cg
+end

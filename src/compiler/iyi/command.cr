@@ -132,11 +132,6 @@ class Iyi::Command
     when command == "eval"
       options.shift
       eval
-    when command == "repl"
-      # iyi: the interpreter slice on the macro evaluator (SPEC.md III.11).
-      # Exact rather than a prefix, so `r` cannot be captured ahead of `run`.
-      options.shift
-      repl
     when command == "run"
       options.shift
       # `--sandbox` re-routes before the native pipeline parses anything:
@@ -155,7 +150,7 @@ class Iyi::Command
       options.shift
       doc
     when command == "test"
-      # Exact, like `repl`: `t` stays `tool`'s.
+      # Exact, like `doc`: `t` stays `tool`'s.
       options.shift
       test
     when command == "vet"

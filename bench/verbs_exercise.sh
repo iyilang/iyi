@@ -118,6 +118,12 @@ cp mods/app/lib.iyimod lib.good
 echo
 echo "== what the command line refuses"
 refuses "an unknown verb" "unknown command" -- "$IYI" frobnicate
+# `repl` was a verb for a while: a session on the macro evaluator, which is
+# the other language's compile-time library, so `"ab" * -3` answered
+# "Negative argument" where this compiler says "negative count: -3". One
+# name, two semantics. It was removed rather than taught the prelude, and
+# this line is what keeps it removed.
+refuses "the session that was removed" "unknown command" -- "$IYI" repl
 refuses "an unknown flag" "Invalid option" -- "$IYI" build --nonesuch good.iyi
 refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "no such file" -- "$IYI" run "$WORK"

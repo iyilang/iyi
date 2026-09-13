@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Removed
+
+- **`iyi repl`.** The session ran on the macro evaluator, which is the
+  other language's compile-time library, so it answered iyi code with
+  that library's sentences: `"ab" * -3` came back `Negative argument`
+  where this compiler says `negative count: -3`, `7 // 0` came back
+  `Division by 0` where the compiler panics `division by zero`, and every
+  error carried `Showing last frame. Use --error-trace for full trace.` —
+  the compiler's own voice, in what is supposed to be a session. One name
+  meaning two things depending on whether it was typed at a prompt or
+  compiled, which is the thing III.1.7a is about, and a second
+  implementation of the semantics, which is what V.11 removed the
+  interpreter for. It is gone rather than taught the prelude: the verb,
+  its 123 lines, and the line in `DELEGATED`. `iyi repl` answers "unknown
+  command" now, and `bench/verbs_exercise.sh` holds it there.
+
 ### Fixed
 
 - **Four gates that ran nowhere, and one of them had gone stale in the

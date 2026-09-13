@@ -6,7 +6,7 @@ import compiler/syntax/parser
 import compiler/syntax/visitor
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, ClassDef, Def, EnumDef, ModuleDef, Path, StringBuilder, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Arg, ClassDef, Def, EnumDef, Expressions, ModuleDef, Path, StringBuilder, Visibility, VisibilityModifier}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
 
@@ -387,7 +387,7 @@ pub class BindCollector < Visitor
       end
     end
 
-    matches_root = @root.empty? || owner == @root || owner.starts_with?("#{@root}::") || owner.starts_with?("#{@root}:")
+    matches_root = !@root.empty? && (owner == @root || owner.starts_with?("#{@root}::") || owner.starts_with?("#{@root}:"))
     if matches_root
       if @shard_mode
         is_init = (node.name == "initialize")
@@ -768,19 +768,113 @@ pub class BindTool
     analyze(node, root)
   end
 
-  def self.analyze_shard(source : String, root : String = "", filename : String = "") : Array(BindMethod)
-    shard_root = root
-    if shard_root.empty?
-      source.each_line do |line|
-        stripped = line.strip
-        if stripped.starts_with?("module ") || stripped.starts_with?("class ") || stripped.starts_with?("struct ")
-          parts = stripped.split(' ')
-          if parts.size >= 2
-            shard_root = parts[1].split('(')[0].strip
-            break
+  def self.detect_root(source : String) : String
+    source.each_line do |line|
+      stripped = line.strip
+      if stripped.starts_with?("abstract ")
+        stripped = stripped[9, stripped.bytesize - 9].strip
+      end
+      kw = ""
+      if stripped.starts_with?("module ")
+        kw = "module "
+      elsif stripped.starts_with?("class ")
+        kw = "class "
+      elsif stripped.starts_with?("struct ")
+        kw = "struct "
+      end
+      if !kw.empty?
+        rest = stripped[kw.bytesize, stripped.bytesize - kw.bytesize].strip
+        i = 0
+        while i < rest.bytesize
+          b = rest.byte_at(i)
+          is_id = (i == 0) ? (b >= 65_u8 && b <= 90_u8) : ((b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8)
+          break unless is_id
+          i = i + 1
+        end
+        return rest[0, i] if i > 0
+      end
+    end
+    ""
+  end
+
+  def self.node_has_defs_or_types?(body : ASTNode?) : Bool
+    return false if body.nil?
+    if body.is_a?(Expressions)
+      body.as(Expressions).expressions.each do |e|
+        target = e
+        if target.is_a?(VisibilityModifier)
+          target = target.as(VisibilityModifier).exp
+        end
+        if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef)
+          return true
+        end
+      end
+    else
+      target = body
+      if target.is_a?(VisibilityModifier)
+        target = target.as(VisibilityModifier).exp
+      end
+      if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef)
+        return true
+      end
+    end
+    false
+  end
+
+  def self.detect_other_namespaces(source : String, root : String) : Array(String)
+    parser = Parser.new(source)
+    ast = parser.parse
+    names = [] of String
+    expressions = [] of ASTNode
+    if ast.is_a?(Expressions)
+      expressions = ast.as(Expressions).expressions
+    else
+      expressions << ast
+    end
+
+    expressions.each do |stmt|
+      target = stmt
+      if target.is_a?(VisibilityModifier)
+        target = target.as(VisibilityModifier).exp
+      end
+
+      if target.is_a?(EnumDef)
+        e_name = target.as(EnumDef).name.to_s
+        if e_name != root && !names.includes?(e_name)
+          names << e_name
+        end
+      elsif target.is_a?(ClassDef)
+        c_node = target.as(ClassDef)
+        c_name = c_node.name.names.last
+        is_generic = !c_node.type_vars.nil?
+        if c_name != root && !is_generic && !names.includes?(c_name)
+          if c_node.struct || node_has_defs_or_types?(c_node.body)
+            names << c_name
+          end
+        end
+      elsif target.is_a?(ModuleDef)
+        m_node = target.as(ModuleDef)
+        m_name = m_node.name.names.last
+        is_generic = !m_node.type_vars.nil?
+        if m_name != root && !is_generic && !names.includes?(m_name)
+          if node_has_defs_or_types?(m_node.body)
+            names << m_name
           end
         end
       end
+    end
+
+    sort_strings(names)
+    names
+  end
+
+  def self.analyze_shard(source : String, root : String = "", filename : String = "") : Array(BindMethod)
+    shard_root = root
+    if shard_root.empty?
+      shard_root = detect_root(source)
+    end
+    if shard_root.empty?
+      return [] of BindMethod
     end
     parser = Parser.new(source, filename.empty? ? "fixture.iyi" : filename)
     node = parser.parse
@@ -793,27 +887,23 @@ pub class BindTool
   def self.print_bind(source : String, root : String = "", filename : String = "") : String
     shard_root = root
     if shard_root.empty?
-      source.each_line do |line|
-        stripped = line.strip
-        if stripped.starts_with?("module ") || stripped.starts_with?("class ") || stripped.starts_with?("struct ")
-          parts = stripped.split(' ')
-          if parts.size >= 2
-            shard_root = parts[1].split('(')[0].strip
-            break
-          end
-        end
-      end
+      shard_root = detect_root(source)
     end
+    others = detect_other_namespaces(source, shard_root)
     methods = analyze_shard(source, shard_root, filename)
-    report(methods, shard_root, true)
+    report(methods, shard_root, true, others)
   end
 
   def self.count_public_methods(source : String, root : String = "", filename : String = "") : Int32
-    methods = analyze_shard(source, root, filename)
+    shard_root = root
+    if shard_root.empty?
+      shard_root = detect_root(source)
+    end
+    methods = analyze_shard(source, shard_root, filename)
     methods.size
   end
 
-  def self.report(methods : Array(BindMethod), root : String, normalize_paths : Bool = true) : String
+  def self.report(methods : Array(BindMethod), root : String, normalize_paths : Bool = true, other_namespaces : Array(String) = [] of String) : String
     ready = 0
     inferable = 0
     human = 0
@@ -835,7 +925,9 @@ pub class BindTool
     is_shard_report = methods.any? { |m| !m.inferred.nil? || !m.refused.nil? || (m.checked.unchecked? && m.checked != BindCheck::NotWritten) }
 
     sb = StringBuilder.new
-    if is_shard_report
+    if other_namespaces.size > 0
+      sb << "also declares: " << other_namespaces.join(", ") << "\n\n"
+    else
       sb << "\n"
     end
     sb << "#{root}: #{methods.size} public methods on its own types\n\n"
@@ -844,6 +936,9 @@ pub class BindTool
     sb << "  a human has to write      #{human}\n\n"
     sb << "  of those, take a block    #{block_count}\n"
 
+    if methods.empty?
+      return sb.to_s
+    end
     if is_shard_report
       machine = methods.select { |m| m.verdict.needs_return? }
       unless machine.empty?

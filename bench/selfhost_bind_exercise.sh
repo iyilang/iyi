@@ -117,8 +117,8 @@ FIXTURES=(
 compare_all() {
   out_status=0
   for rel_fixture in "${FIXTURES[@]}"; do
+    CRYSTAL_PATH="$REPO/src" "$WORK/dump_crystal" "$rel_fixture" > "$WORK/b.out" 2>/dev/null || continue
     "$1" "$rel_fixture" > "$WORK/a.out" 2>/dev/null || { out_status=1; continue; }
-    CRYSTAL_PATH="$REPO/src" "$WORK/dump_crystal" "$rel_fixture" > "$WORK/b.out" 2>/dev/null || { out_status=1; continue; }
     diff -q "$WORK/a.out" "$WORK/b.out" >/dev/null || out_status=1
   done
   return $out_status
@@ -225,6 +225,17 @@ run_proof "generic type instantiation refusal is disabled" \
   "refused = \"generic type\"" \
   "refused = \"\""
 
+run_proof "also declares output header is omitted" \
+  "sb << \"also declares: \"" \
+  "sb << \"declares also: \""
+
+run_proof "empty methods early return in summary report is bypassed" \
+  "if methods.empty?" \
+  "if false && methods.empty?"
+
+run_proof "empty root matching bypasses namespace scoping" \
+  "!@root.empty? && (owner == @root || owner.starts_with?(\"#{@root}::\") || owner.starts_with?(\"#{@root}:\"))" \
+  "true || (owner == @root || owner.starts_with?(\"#{@root}::\") || owner.starts_with?(\"#{@root}:\"))"
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

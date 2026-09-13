@@ -339,6 +339,42 @@ def main():
     text = reply["result"]["content"][0]["text"]
     step("mcp doc answers a prelude type's surface",
          text.startswith("#") and "class String" in text and "  def to_i : Int32" in text, text[:80])
+
+    # The flag an agent branches on. It was the constant `false`, so a tool
+    # that could not answer said it had: a missing file came back as a
+    # success envelope whose text began with "Error:". The exit code cannot
+    # decide it either — `check` exits 1 when the file has diagnostics and
+    # `test` exits 1 when a test fails, and both of those are answers — so
+    # all four cases are held here.
+    reply = rpc("tools/call", {"name": "check", "arguments": {"file": "nope.iyi"}}, 6)
+    refusal = reply["result"]
+    step("mcp says isError when it could not answer",
+         refusal["isError"] is True and "no such file" in refusal["content"][0]["text"],
+         repr(refusal)[:90])
+    write("broken.iyi", 'module broken\n\npub def x : Int32\n  "not a number"\nend\n')
+    reply = rpc("tools/call", {"name": "check", "arguments": {"file": "broken.iyi"}}, 7)
+    verdict = reply["result"]
+    step("mcp keeps isError false for a verdict it did answer",
+         verdict["isError"] is False
+         and isinstance(json.loads(verdict["content"][0]["text"]), list)
+         and json.loads(verdict["content"][0]["text"]) != [],
+         repr(verdict)[:90])
+    reply = rpc("tools/call", {"name": "doc", "arguments": {"target": "Nonesuch"}}, 8)
+    missing_type = reply["result"]
+    step("mcp says isError for a type the prelude has not",
+         missing_type["isError"] is True, repr(missing_type)[:90])
+    # And nothing in a payload an agent parses is meant for a terminal: the
+    # compiler colourised three error paths whatever they were writing into,
+    # so `\x1b[31;1mError: ` reached this JSON.
+    with open(os.path.join(work, "binary.iyi"), "wb") as raw:
+        raw.write(b"\xff\xfe\xff\xfe")
+    reply = rpc("tools/call", {"name": "check", "arguments": {"file": "binary.iyi"}}, 9)
+    bytes_reply = reply["result"]
+    step("mcp answers bytes that are not text as an error, uncoloured",
+         bytes_reply["isError"] is True
+         and "not a valid iyi source file" in bytes_reply["content"][0]["text"]
+         and "\x1b" not in bytes_reply["content"][0]["text"],
+         repr(bytes_reply["content"][0]["text"])[:90])
     rpc("exit")
     server.wait(timeout=10)
     step("mcp exits on exit", server.returncode == 0, "")

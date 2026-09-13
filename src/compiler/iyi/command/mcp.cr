@@ -198,6 +198,31 @@ class Iyi::Command
     text = "[]" if text.blank? && name == "check"
     text = "(exit #{status.exit_code}, no output)" if text.blank?
 
+    # iyi: `isError` was the constant `false`, so a tool that could not
+    # answer said it had. A missing file, a directory, bytes that are not
+    # text and an unknown prelude type all came back as success envelopes
+    # whose text began with "Error:" — and an agent branches on this flag;
+    # that is what it is for.
+    #
+    # The exit code cannot decide it alone: `check` exits 1 when the file
+    # has diagnostics and `test` exits 1 when a test fails, and both of
+    # those are *answers*. So the question asked here is whether the tool
+    # produced the shape it promises. The four JSON tools have answered
+    # when their output parses as JSON — diagnostics, a fix record, a
+    # context pack, a test report — and have refused when it is a sentence.
+    # `doc` promises text, so for it the exit code is the answer.
+    answered =
+      if name == "doc"
+        status.success?
+      else
+        begin
+          JSON.parse(text)
+          true
+        rescue JSON::ParseException
+          false
+        end
+      end
+
     respond_mcp(id) do |json|
       json.field "content" do
         json.array do
@@ -207,7 +232,7 @@ class Iyi::Command
           end
         end
       end
-      json.field "isError", false
+      json.field "isError", !answered
     end
   end
 

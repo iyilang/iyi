@@ -20,6 +20,27 @@
 
 ### Fixed
 
+- **The flag an agent branches on was the constant `false`.** `iyi mcp`
+  serves `check`, `fix`, `context`, `test` and `doc` as tools, and every
+  result said `isError: false` — a missing file, a directory, bytes that
+  are not text, an unknown prelude type and a missing test directory all
+  came back as success envelopes whose text began with "Error:". A harness
+  that reads the protocol's own error flag read them as answers, and for
+  `check`, whose contract is "[] when clean, else the errors as data", it
+  parsed a sentence as JSON. The exit code cannot decide it alone — `check`
+  exits 1 when the file has diagnostics and `test` exits 1 when a test
+  fails, and both of those are answers — so the question asked now is
+  whether the tool produced the shape it promises: the four JSON tools
+  answered when their output parses, `doc` when it exits 0.
+- **Colour in output nobody could see.** Three of the compiler's error
+  paths — a source file that is not text, a linker it cannot execute, a
+  library it cannot find — coloured whatever they were writing into, while
+  the diagnostic path beside them has asked `Colorize.default_enabled?`
+  all along. So `iyi check` down a pipe answered `\e[31;1mError: …`, and
+  those bytes reached the JSON an agent parses, every redirected log and
+  every CI transcript. The same question is asked now, of the streams the
+  compiler was given, which also silences it for the in-memory ones `doc`
+  compiles into. Four cases in `bench/agent_loop.py` hold both halves.
 - **The numbers the docs quote from an instrument had no keeper.**
   `bench/doc_numbers.py` measures the tree and holds every *counted* number
   to it; the eleven scripts that produce the *measured* ones — seconds,

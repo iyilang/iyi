@@ -3011,8 +3011,17 @@ module Iyi
       end
     end
 
+    # iyi: `color?` says whether the *caller* wants colour; this says whether
+    # anything can read it. The three error paths that print through here —
+    # a source file that is not text, a missing linker, a missing library —
+    # colourised whatever they were writing into, so `iyi check` down a pipe
+    # answered `\e[31;1mError: \e[39;22m…`, and those bytes reached a JSON
+    # payload an agent parses (`iyi mcp`'s tool results) and every log a
+    # redirect keeps. The `CodeError` path one screen up has consulted
+    # `Colorize.default_enabled?` all along; this is the same question,
+    # asked of the streams this compiler was actually given.
     private def colorize(obj)
-      obj.colorize.toggle(@color)
+      obj.colorize.toggle(@color && Colorize.default_enabled?(stdout, stderr))
     end
 
     # An LLVM::Module with information to compile it.

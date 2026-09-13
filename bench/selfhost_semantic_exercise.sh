@@ -152,7 +152,7 @@ def dump_typed_node(node : Iyi::ASTNode, io : IO, indent : String = "")
     dump_typed_node(node.target, io, indent + "    ")
     io << indent << "  value:\n"
     dump_typed_node(node.value, io, indent + "    ")
-  when Iyi::Var
+  when Iyi::Var, Iyi::InstanceVar, Iyi::ClassVar
     io << indent << "  name: " << node.name << "\n"
   when Iyi::Path
     io << indent << "  names: [" << node.names.join("::") << "]\n"
@@ -501,6 +501,12 @@ prove_main_mutation "while loop condition type analysis is bypassed" \
     set_type(node, @program.nil_type)"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
+prove_main_mutation "instance variable lookup returns nil instead of inferred type" \
+  "if ivar = target_type.as(ModuleType).lookup_instance_var?(node.name)
+        set_type(node, ivar.type)" \
+  "if ivar = target_type.as(ModuleType).lookup_instance_var?(node.name)
+        set_type(node, @program.nil_type)"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

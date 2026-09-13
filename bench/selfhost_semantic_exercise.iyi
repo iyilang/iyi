@@ -110,6 +110,13 @@ module BenchSelfhostSemanticExercise
     end
     puts "ok (control flow typing verified)"
 
+    print "testing instance variable type inference... "
+    out8 = run_expr_source("class Point; @x = 10; def get_x : Int32; @x; end; end; p = Point.new; res = p.get_x")
+    unless out8.includes?("InstanceVar: Int32") && out8.includes?("target_def: get_x: Int32")
+      raise "instance variable typing test failed"
+    end
+    puts "ok (instance variable type inference verified)"
+
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"
     puts "==============================================================="

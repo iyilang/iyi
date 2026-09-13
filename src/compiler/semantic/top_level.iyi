@@ -5,7 +5,7 @@ import compiler/syntax/ast
 import compiler/syntax/visitor
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, ClassDef, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, Var, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, TypeDeclaration, Var, Visibility, VisibilityModifier}
 using compiler/syntax/visitor::{Visitor}
 
 pub class TypeException < Exception
@@ -150,15 +150,142 @@ pub abstract class NamedType < Type
   end
 end
 
+pub class MetaTypeVar
+  property name : String
+  property var_type : Type?
+  property initializer : ASTNode?
+  property location : Location?
+
+  def initialize(@name : String, @var_type : Type? = nil, @initializer : ASTNode? = nil, @location : Location? = nil)
+  end
+
+  def type : Type
+    if t = @var_type
+      t
+    else
+      raise("untyped MetaTypeVar: #{@name}")
+    end
+  end
+
+  def type? : Type?
+    @var_type
+  end
+end
+
 pub abstract class ModuleType < NamedType
   getter defs : Hash(String, Array(Def))
   getter parents : Array(Type)
+  getter instance_vars : Hash(String, MetaTypeVar)
+  getter class_vars : Hash(String, MetaTypeVar)
   @metaclass : ModuleType?
 
   def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
     super(program, namespace, name)
     @defs = Hash(String, Array(Def)).new
     @parents = [] of Type
+    @instance_vars = Hash(String, MetaTypeVar).new
+    @class_vars = Hash(String, MetaTypeVar).new
+  end
+
+  def lookup_instance_var?(var_name : String) : MetaTypeVar?
+    if iv = @instance_vars[var_name]?
+      return iv
+    end
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          if iv = sc.as(ModuleType).lookup_instance_var?(var_name)
+            return iv
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        if iv = p.as(ModuleType).lookup_instance_var?(var_name)
+          return iv
+        end
+      end
+    end
+    nil
+  end
+
+  def lookup_class_var?(var_name : String) : MetaTypeVar?
+    if self.is_a?(MetaclassType)
+      if it = self.as(MetaclassType).instance_type
+        if it.is_a?(ModuleType)
+          return it.as(ModuleType).lookup_class_var?(var_name)
+        end
+      end
+    end
+    if cv = @class_vars[var_name]?
+      return cv
+    end
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          if cv = sc.as(ModuleType).lookup_class_var?(var_name)
+            return cv
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        if cv = p.as(ModuleType).lookup_class_var?(var_name)
+          return cv
+        end
+      end
+    end
+    nil
+  end
+
+  def all_instance_vars : Hash(String, MetaTypeVar)
+    all_ivars = Hash(String, MetaTypeVar).new
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          sc.as(ModuleType).all_instance_vars.each do |k, v|
+            all_ivars[k] = v
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        p.as(ModuleType).all_instance_vars.each do |k, v|
+          all_ivars[k] = v
+        end
+      end
+    end
+    @instance_vars.each do |k, v|
+      all_ivars[k] = v
+    end
+    all_ivars
+  end
+
+  def all_class_vars : Hash(String, MetaTypeVar)
+    all_cvars = Hash(String, MetaTypeVar).new
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          sc.as(ModuleType).all_class_vars.each do |k, v|
+            all_cvars[k] = v
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        p.as(ModuleType).all_class_vars.each do |k, v|
+          all_cvars[k] = v
+        end
+      end
+    end
+    @class_vars.each do |k, v|
+      all_cvars[k] = v
+    end
+    all_cvars
   end
 
   def module? : Bool
@@ -1141,12 +1268,33 @@ pub class TopLevelVisitor < Visitor
       node.visibility = Visibility::Public
     end
 
+    if node.name == "initialize"
+      node.args.each do |arg|
+        if arg.name.starts_with?("@")
+          if r = arg.restriction
+            arg_type = @program.lookup_type_node(r, @current_type)
+            @current_type.instance_vars[arg.name] = MetaTypeVar.new(arg.name, arg_type)
+          end
+        end
+      end
+    end
+
     target_type.add_def(node)
 
     false
   end
 
   def visit(node : Assign) : Bool
+    if node.target.is_a?(InstanceVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use instance variables at the top level")
+      end
+    end
+    if node.target.is_a?(ClassVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use class variables at the top level")
+      end
+    end
     if node.target.is_a?(Path)
       path = node.target.as(Path)
       scope = lookup_type_def_scope(node, path)
@@ -1161,6 +1309,25 @@ pub class TopLevelVisitor < Visitor
         const.visibility = vis
       end
       scope.add_type(name, const)
+    end
+    false
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    if node.var.is_a?(InstanceVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can only declare instance variables of a non-generic class, not a main (<Program>)")
+      end
+      decl_type = @program.lookup_type_node(node.declared_type, @current_type)
+      ivar_name = node.var.as(InstanceVar).name
+      @current_type.instance_vars[ivar_name] = MetaTypeVar.new(ivar_name, decl_type, node.value)
+    elsif node.var.is_a?(ClassVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use class variables at the top level")
+      end
+      decl_type = @program.lookup_type_node(node.declared_type, @current_type)
+      cvar_name = node.var.as(ClassVar).name
+      @current_type.class_vars[cvar_name] = MetaTypeVar.new(cvar_name, decl_type, node.value)
     end
     false
   end

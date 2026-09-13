@@ -43,9 +43,9 @@ allocator and runtime (`src/iyi/prelude.iyi`), eliminating `libgc` completely.
 
 As measured by `python3 bench/doc_numbers.py`, the compiler source consists of:
 
-* **109,938 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
+* **110,081 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
   and top-level wrappers (`crystal.cr`, `iyi.cr`, `crystal_front.cr`).
-* **34,259 lines of pure iyi** across 44 files in `src/compiler/**/*.iyi`.
+* **34,373 lines of pure iyi** across 45 files in `src/compiler/**/*.iyi`.
 
 ### Verification of the `BOOTSTRAP.md` Claim
 
@@ -68,8 +68,10 @@ harness imported a single ported module and compared its output against a Crysta
 oracle script.
 
 The first wiring steps have now been implemented: `bin/iyi mod dump --selfhost`
-wires `src/compiler/artifact/iyimod.iyi` into the shipped compiler CLI, and
+wires `src/compiler/artifact/iyimod.iyi` into the shipped compiler CLI,
 `bin/iyi tool format --selfhost` wires `src/compiler/tools/formatter.iyi` into
+the shipped compiler CLI, and `bin/iyi check --parse-only --selfhost` wires
+the ported front end (`src/compiler/syntax/parser.iyi` and `lexer.iyi`) into
 the shipped compiler CLI.
 ## 3. Component Inventory and Blockers
 
@@ -85,12 +87,11 @@ the compiler pipeline today:
 
 ### Layer 1: Lexer and AST
 * **`syntax/lexer.iyi`, `syntax/token.iyi` (3,103 lines) vs `src/compiler/iyi/syntax/lexer.cr` (1,939 lines)**
-  * Status: 42 fixtures, 21,034 tokens identical to Crystal frontend.
-  * Blockers: In-memory runtime boundary. Crystal's `Parser` (`parser.cr`)
-    instantiates `Iyi::Lexer` in-process. Replacing `Iyi::Lexer` inside Crystal
-    with `Lexer.iyi` requires an in-process FFI bridge between incompatible
-    runtimes (Boehm GC vs pure-iyi heap) or a token serialization protocol over
-    a pipe. It must be wired together with `Parser.iyi` in pure iyi.
+  * Status: 42 fixtures, 21,034 tokens identical to Crystal frontend. Wired
+    into shipped compiler CLI behind `iyi check --parse-only --selfhost`.
+  * Blockers: In-process runtime boundary for compilation passes (semantic analysis
+    and codegen). Full in-process replacement requires wiring together with `Parser.iyi`
+    in pure iyi.
 * **`syntax/ast.iyi`, `visitor.iyi`, `transformer.iyi` (7,202 lines) vs `src/compiler/iyi/syntax/ast.cr` (4,482 lines)**
   * Status: 104 concrete AST node kinds verified by `bench/selfhost_ast_exercise.sh`.
   * Blockers: Central in-memory data structures. Consumed by semantic analysis
@@ -98,13 +99,15 @@ the compiler pipeline today:
     codegen are ported.
 
 ### Layer 2: Parser and Normalizer
-* **`syntax/parser.iyi` (4,072 lines) vs `src/compiler/iyi/syntax/parser.cr` (7,600 lines)**
-  * Status: 24 fixtures, 1,609 normalized nodes identical to Crystal frontend.
+* **`syntax/parser.iyi` (4,152 lines) vs `src/compiler/iyi/syntax/parser.cr` (7,600 lines)**
+  * Status: 24 fixtures, 1,609 normalized nodes identical to Crystal frontend. Wired
+    into shipped compiler CLI behind `iyi check --parse-only --selfhost`.
   * Blockers:
     1. Macro grammar parsing: `{% if %}`, `{% for %}`, macro expressions are
        handled by `src/compiler/macros/macro_parser.iyi` rather than the main
        grammar.
-    2. Output AST mismatch: Produces `ast.iyi` nodes rather than `ast.cr` nodes.
+    2. Downstream in-process consumer: semantic analysis and codegen must be assembled
+       in pure iyi to consume `ast.iyi` nodes without serialization overhead.
 * **`semantic/normalizer.iyi` (705 lines) vs `src/compiler/iyi/semantic/normalizer.cr` (1,236 lines)**
   * Status: 11 fixtures, 577 normalized nodes identical to Crystal frontend.
   * Blockers: Transforms `ast.iyi` nodes. Blocked on `ast.iyi` and `parser.iyi`.
@@ -328,7 +331,57 @@ Parity summary: 35/35 files match byte-for-byte across stdin, in-place, and pref
 ALL SELFHOST FORMAT WIRING CHECKS PASSED SUCCESSFULLY!
 ```
 
-## 7. Observable Proof of Stage One
+## 7. The Third Wired Component: `iyi check --parse-only --selfhost`
+
+`syntax/parser.iyi` and `syntax/lexer.iyi` were selected as the third component to wire into the
+shipped compiler because:
+
+1. **Clean process boundary:** Front-end syntax checking is a file-in or text-in, verdict-out
+   transform that validates syntax without mutating disk state or executing codegen. It avoids
+   any in-memory runtime or Boehm GC conflict between Crystal and pure iyi.
+2. **Proven 100% parity on real corpus:** All 68 files in the test corpus (the 24 parser syntax
+   fixtures and the 44 sample programs in the samples tree) produce identical verdicts and
+   clean exits (exit code 0, empty output) across files, STDIN, and flag ordering.
+3. **Identical error text on malformed input:** Syntax errors on malformed input exit with
+   status 1 and output byte-identical error messages between the Crystal and self-hosted paths.
+4. **Direct user-facing command:** `iyi check --parse-only [--selfhost] [files...]` extends the
+   shipped `check` command so users and CI can exercise the pure iyi front end on real codebases.
+5. **Preserved default behavior:** Default invocation (`iyi check`) and standard syntax checking
+   (`iyi check --parse-only`) are completely untouched, while `--selfhost` routes execution to
+   the companion tool `iyi-parse`.
+
+### Implementation
+
+1. **Companion tool (`src/compiler/tools/parse.iyi`):**
+   Pure iyi tool that imports `compiler/syntax/parser` and parses source files or standard input.
+2. **Compiler CLI wiring (`src/compiler/iyi/command/check.cr`):**
+   `Iyi::Command#check` accepts `--parse-only` and `--selfhost`. When `--selfhost` is combined
+   with `--parse-only`, `run_selfhost_parse` locates `iyi-parse` beside the compiler binary,
+   in `.build/iyi-parse`, or via `IYI_PARSE_BIN`, and delegates execution.
+3. **Build system (`Makefile`):**
+   Added `.PHONY: iyi-parse` target compiling `$(O)/iyi-parse$(EXE)` using
+   `$(O)/iyi build -o $@ src/compiler/tools/parse.iyi`.
+4. **Differential wiring gate (`bench/selfhost_parser_wiring_exercise.sh`):**
+   Verifies that:
+   * `iyi check --parse-only file` equals `iyi check --parse-only --selfhost file` across all 68 files.
+   * `iyi check --parse-only - < file` equals `iyi check --parse-only --selfhost - < file`.
+   * Flag ordering `iyi check --selfhost --parse-only` works identically.
+   * Syntax error refusal parity on malformed source files with identical exit code (rc=1) and error text.
+   * Five guarded mutation proofs verify that defects in the companion tool, STDIN parsing,
+     tool discovery, flag routing, and status code propagation are caught.
+
+### Measured Parity Summary
+
+Running `bash bench/selfhost_parser_wiring_exercise.sh` confirms:
+
+```
+Parity summary: 68/68 files match byte-for-byte across files, stdin, and flag ordering (100% parity)
+Refusal summary: 5/5 malformed scenarios refused with identical error text and status (rc=1)
+Mutation summary: 5/5 guarded wiring mutations caught and reverted
+ALL SELFHOST PARSER WIRING CHECKS PASSED SUCCESSFULLY!
+```
+
+## 8. Observable Proof of Stage One
 
 Stage One will be demonstrably complete when:
 
@@ -349,7 +402,7 @@ Stage One will be demonstrably complete when:
    The compiled binary `.build/calc-stage1` runs, passes its tests, and matches
    the behavior of the binary compiled by `bin/iyi`.
 6. **Selfhost gate pass:**
-   All fourteen selfhost exercise scripts pass when invoked with `IYI=.build/iyi-stage1`.
+   All seventeen selfhost exercise scripts pass when invoked with `IYI=.build/iyi-stage1`.
 7. **Dependency floor holds:**
    `bash bench/dependency_floor.sh` confirms that binaries produced by Stage One
    continue to link only the platform libc (`libSystem.B.dylib` on darwin).

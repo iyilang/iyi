@@ -1,0 +1,42 @@
+# The syntax check tool ported from the front end.
+#
+# Parses iyi and Crystal source files according to language syntax rules.
+# Used by `iyi check --parse-only --selfhost` to verify syntax with pure iyi code.
+
+module compiler/tools/parse
+
+import compiler/syntax/parser
+using compiler/syntax/parser::{Parser}
+
+module ParseTool
+  def self.run : Nil
+    args = Program.args
+    if args.empty? || (args.size == 1 && args[0] == "-")
+      source = read_input
+      if source.empty?
+        return
+      end
+      parse_source(source, "STDIN.iyi")
+    else
+      i = 0
+      while i < args.size
+        path = args[i]
+        unless File.exists?(path)
+          raise "no such file: " + path
+        end
+        source = File.read(path)
+        unless source.empty?
+          parse_source(source, path)
+        end
+        i = i + 1
+      end
+    end
+  end
+
+  def self.parse_source(source : String, filename : String) : Nil
+    parser = Parser.new(source, filename)
+    parser.parse
+  end
+end
+
+ParseTool.run

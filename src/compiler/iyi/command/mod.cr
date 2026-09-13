@@ -197,6 +197,7 @@ class Iyi::Command
   rescue ex : IyiMod::Error
     abort! ex.message.to_s, :USAGE_ERROR
   end
+
   private def run_selfhost_mod_dump(filename : String, declarations : Bool) : Nil
     tool = find_selfhost_mod_tool
     unless tool

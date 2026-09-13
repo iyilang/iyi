@@ -111,6 +111,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # formatter tool wired behind --selfhost produces output identical to the
     # frontend across all corpus files.
     (r"^bench/selfhost_format_wiring_exercise\.sh$", "the frontend the selfhost formatter wiring is checked against"),
+    # The self-hosting parser wiring oracle. It verifies that the pure iyi
+    # front end wired behind --selfhost produces output identical to the
+    # frontend across the parser fixtures and samples tree.
+    (r"^bench/selfhost_parser_wiring_exercise\.sh$", "the frontend the selfhost parser wiring is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

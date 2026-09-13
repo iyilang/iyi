@@ -1,0 +1,11 @@
+fun float_add(a : Float64, b : Float64) : Float64
+  a + b
+end
+
+fun float_ops(a : Float64, b : Float64) : Float64
+  (a + b) * (a - b) / (a + 1.0)
+end
+
+fun float_neg(a : Float64) : Float64
+  0.0 - a
+end

@@ -469,7 +469,7 @@ pub class MainVisitor < Visitor
 
   def type_method_body(target_def : Def, rec_type : Type, args : Array(ASTNode), block : Block?) : Type
     body = target_def.body
-    if body.nil?
+    if body.nil? || body.is_a?(Nop)
       if rt = target_def.return_type
         return @program.lookup_type_node(rt, @current_type)
       else

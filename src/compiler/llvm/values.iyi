@@ -372,6 +372,10 @@ pub struct LLVMFunction
     LibLLVM.set_function_call_convention(@unwrap, cc)
   end
 
+  def personality_function=(pers_fn : LLVMValue) : Nil
+    LibLLVM.set_personality_fn(@unwrap, pers_fn.to_unsafe)
+  end
+
   def param_count : Int32
     LibLLVM.count_params(@unwrap)
   end

@@ -332,6 +332,25 @@ pub class Builder
     LLVMValue.new(LibLLVM.build_select(@unwrap, cond.to_unsafe, then_val.to_unsafe, else_val.to_unsafe, name.to_unsafe))
   end
 
+  def landing_pad(type : LLVMType, personality : LLVMValue, clauses : Array(LLVMValue) = [] of LLVMValue, name : String = "") : LLVMValue
+    lpad = LibLLVM.build_landing_pad(@unwrap, type.to_unsafe, personality.to_unsafe, clauses.size, name.to_unsafe)
+    LibLLVM.set_cleanup(lpad, 1)
+    clauses.each do |c|
+      LibLLVM.add_clause(lpad, c.to_unsafe)
+    end
+    LLVMValue.new(lpad)
+  end
+
+  def invoke(func_type : LLVMType, func : LLVMValue, args : Array(LLVMValue), then_bb : LLVMBasicBlock, catch_bb : LLVMBasicBlock, name : String = "") : LLVMValue
+    raw_args = args.map { |a| a.to_unsafe }
+    ptr_args = raw_args.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw_args.to_unsafe
+    LLVMValue.new(LibLLVM.build_invoke2(@unwrap, func_type.to_unsafe, func.to_unsafe, ptr_args, args.size, then_bb.to_unsafe, catch_bb.to_unsafe, name.to_unsafe))
+  end
+
+  def extract_value(agg_val : LLVMValue, index : Int32, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_extract_value(@unwrap, agg_val.to_unsafe, index, name.to_unsafe))
+  end
+
   def dispose : Nil
     if !@disposed && @unwrap.address != 0
       LibLLVM.dispose_builder(@unwrap)

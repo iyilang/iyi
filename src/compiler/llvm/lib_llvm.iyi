@@ -398,6 +398,7 @@ module compiler/llvm/lib_llvm
     fun set_linkage = LLVMSetLinkage(val : ValueRef, linkage : Linkage)
     fun get_function_call_convention = LLVMGetFunctionCallConv(fn : ValueRef) : CallConvention
     fun set_function_call_convention = LLVMSetFunctionCallConv(fn : ValueRef, cc : CallConvention)
+    fun set_personality_fn = LLVMSetPersonalityFn(fn : ValueRef, personality_fn : ValueRef)
 
     fun get_entry_basic_block = LLVMGetEntryBasicBlock(fn : ValueRef) : BasicBlockRef
     fun get_first_basic_block = LLVMGetFirstBasicBlock(fn : ValueRef) : BasicBlockRef
@@ -476,6 +477,11 @@ module compiler/llvm/lib_llvm
     fun add_incoming = LLVMAddIncoming(phi_node : ValueRef, incoming_values : ValueRef*, incoming_blocks : BasicBlockRef*, count : UInt)
     fun build_call2 = LLVMBuildCall2(b : BuilderRef, ty : TypeRef, fn : ValueRef, args : ValueRef*, num_args : UInt, name : Char*) : ValueRef
     fun build_select = LLVMBuildSelect(b : BuilderRef, if_cond : ValueRef, then_val : ValueRef, else_val : ValueRef, name : Char*) : ValueRef
+    fun build_invoke2 = LLVMBuildInvoke2(b : BuilderRef, ty : TypeRef, fn : ValueRef, args : ValueRef*, num_args : UInt, then_bb : BasicBlockRef, catch_bb : BasicBlockRef, name : Char*) : ValueRef
+    fun build_landing_pad = LLVMBuildLandingPad(b : BuilderRef, ty : TypeRef, pers_fn : ValueRef, num_clauses : UInt, name : Char*) : ValueRef
+    fun add_clause = LLVMAddClause(landing_pad : ValueRef, clause_val : ValueRef)
+    fun set_cleanup = LLVMSetCleanup(landing_pad : ValueRef, val : Bool)
+    fun build_extract_value = LLVMBuildExtractValue(b : BuilderRef, agg_val : ValueRef, index : UInt, name : Char*) : ValueRef
 
     # Target & TargetMachine & TargetData
     fun get_first_target = LLVMGetFirstTarget : TargetRef

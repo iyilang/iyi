@@ -29,7 +29,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue}
 
 pub struct CallArgs
   property args : Array(ASTNode)?
@@ -978,6 +978,8 @@ pub class Parser < Lexer
           parse_until
         when Keyword::CASE
           parse_case
+        when Keyword::BEGIN
+          parse_begin
         when Keyword::RETURN
           parse_return
         when Keyword::BREAK
@@ -1575,6 +1577,91 @@ pub class Parser < Lexer
     end
 
     Case.new(cond, whens, a_else, is_exhaustive).at(location)
+  end
+
+  def parse_begin : ASTNode
+    location = @token.location
+    set_slash_is_regex(true)
+    next_token_skip_statement_end
+
+    body = parse_expressions
+    skip_statement_end
+
+    rescues : Array(Rescue)? = nil
+    a_else : ASTNode? = nil
+    a_ensure : ASTNode? = nil
+
+    if @token.keyword == Keyword::RESCUE
+      res_list = [] of Rescue
+      while @token.keyword == Keyword::RESCUE
+        res_list << parse_rescue
+      end
+      rescues = res_list
+    end
+
+    if @token.keyword == Keyword::ELSE
+      next_token_skip_statement_end
+      a_else = parse_expressions
+      skip_statement_end
+    end
+
+    if @token.keyword == Keyword::ENSURE
+      next_token_skip_statement_end
+      a_ensure = parse_expressions
+      skip_statement_end
+    end
+
+    check_keyword(Keyword::END)
+    next_token_skip_space
+
+    if rescues || a_ensure || a_else
+      ExceptionHandler.new(body, rescues, a_else, a_ensure).at(location)
+    else
+      body
+    end
+  end
+
+  def parse_rescue : Rescue
+    location = @token.location
+    next_token_skip_space
+
+    name : String? = nil
+    types : Array(ASTNode)? = nil
+
+    if @token.type == TokenKind::IDENT
+      name = @token.value.to_s
+      next_token_skip_space
+      if @token.type == TokenKind::OP_COLON
+        next_token_skip_space_or_newline
+        types = parse_rescue_types
+      end
+    elsif @token.type == TokenKind::CONST || @token.type == TokenKind::OP_COLON_COLON
+      types = parse_rescue_types
+    end
+
+    skip_statement_end
+    body = if @token.keyword == Keyword::END || @token.keyword == Keyword::RESCUE || @token.keyword == Keyword::ELSE || @token.keyword == Keyword::ENSURE
+             Nop.new
+           else
+             b = parse_expressions
+             skip_statement_end
+             b
+           end
+    Rescue.new(body, types, name).at(location)
+  end
+
+  def parse_rescue_types : Array(ASTNode)
+    types = [] of ASTNode
+    while true
+      types << parse_path
+      skip_space
+      if @token.type == TokenKind::OP_BAR
+        next_token_skip_space
+      else
+        break
+      end
+    end
+    types
   end
 
   def when_expression_end : Bool

@@ -140,15 +140,13 @@ the compiler pipeline today:
   * Blockers: Consumed by codegen.
 
 ### Layer 6: Code Generation
-* **`codegen/codegen.iyi` (548 lines) vs `src/compiler/iyi/codegen/*.cr` (15,000+ lines)**
-  * Status: 5 fixtures, 21 functions with identical LLVM IR and execution.
+* **`codegen/codegen.iyi` (2,178 lines) vs `src/compiler/iyi/codegen/*.cr` (15,000+ lines)**
+  * Status: 12 fixtures, 71 functions with identical LLVM IR and execution.
   * Blockers:
-    1. Class layout and heap object allocation.
-    2. Virtual and dynamic method dispatch.
-    3. Closures and proc pointers.
-    4. Exceptions (`raise`, `rescue`, `ensure`, landing pads).
-    5. Generics monomorphization.
-    6. GC interface and runtime integration.
+    1. Closures and proc pointers (block inlining ported; full proc closures require capture analysis and lambda lifting).
+    2. Exceptions (`raise`, `rescue`, `ensure`, landing pads: require unported LibLLVM bindings and runtime unwinding).
+    3. Generics monomorphization.
+    4. GC interface and runtime integration.
 
 ### Layer 7: Artifact Serializer
 * **`artifact/iyimod.iyi` (2,681 lines) vs `src/compiler/iyi/iyimod.cr` (1,348 lines)**

@@ -653,48 +653,48 @@ pub class CodeGenVisitor < Visitor
 
       # 2. Inlined block call allocas
       block_collector.calls.each do |b_call|
-      if blk = b_call.block
-        ctx = InlinedBlockContext.new(blk)
-        b_def = @block_methods[b_call.name]
+        if blk = b_call.block
+          ctx = InlinedBlockContext.new(blk)
+          b_def = @block_methods[b_call.name]
 
-        # 2a. Block arguments
-        blk.args.each do |b_arg|
-          b_arg_tname = @var_type_names[b_arg.name]? || "Int32"
-          llvm_t = llvm_type_from_name(b_arg_tname)
-          ptr = @builder.alloca(llvm_t, b_arg.name)
-          ptr.alignment = 4
-          ctx.block_arg_allocas[b_arg.name] = ptr
+          # 2a. Block arguments
+          blk.args.each do |b_arg|
+            b_arg_tname = @var_type_names[b_arg.name]? || "Int32"
+            llvm_t = llvm_type_from_name(b_arg_tname)
+            ptr = @builder.alloca(llvm_t, b_arg.name)
+            ptr.alignment = 4
+            ctx.block_arg_allocas[b_arg.name] = ptr
+          end
+
+          # 2b. Inlined method parameters
+          actual_arg_idx = 0
+          b_def.args.each do |param|
+            next if param.name == "block" || param.name.starts_with?('&')
+            p_tname = if r = param.restriction
+                        r.to_s
+                      else
+                        "Int32"
+                      end
+            llvm_t = llvm_type_from_name(p_tname)
+            ptr = @builder.alloca(llvm_t, param.name)
+            ptr.alignment = 4
+            ctx.method_param_allocas[param.name] = ptr
+            actual_arg_idx += 1
+          end
+
+          # 2c. Inlined method local variables
+          m_locals = collect_local_vars(b_def.body, Set(String).new)
+          m_locals.each do |mvname, mvnode|
+            next if ctx.method_param_allocas.has_key?(mvname)
+            mv_tname = infer_var_type(mvname, mvnode)
+            llvm_t = llvm_type_from_name(mv_tname)
+            ptr = @builder.alloca(llvm_t, mvname)
+            ptr.alignment = 4
+            ctx.method_local_allocas[mvname] = ptr
+          end
+
+          @inlined_block_contexts << ctx
         end
-
-        # 2b. Inlined method parameters
-        actual_arg_idx = 0
-        b_def.args.each do |param|
-          next if param.name == "block" || param.name.starts_with?('&')
-          p_tname = if r = param.restriction
-                      r.to_s
-                    else
-                      "Int32"
-                    end
-          llvm_t = llvm_type_from_name(p_tname)
-          ptr = @builder.alloca(llvm_t, param.name)
-          ptr.alignment = 4
-          ctx.method_param_allocas[param.name] = ptr
-          actual_arg_idx += 1
-        end
-
-        # 2c. Inlined method local variables
-        m_locals = collect_local_vars(b_def.body, Set(String).new)
-        m_locals.each do |mvname, mvnode|
-          next if ctx.method_param_allocas.has_key?(mvname)
-          mv_tname = infer_var_type(mvname, mvnode)
-          llvm_t = llvm_type_from_name(mv_tname)
-          ptr = @builder.alloca(llvm_t, mvname)
-          ptr.alignment = 4
-          ctx.method_local_allocas[mvname] = ptr
-        end
-
-        @inlined_block_contexts << ctx
-      end
       end
 
       # 2. Unnamed temporaries for struct-by-value call returns

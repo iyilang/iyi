@@ -8,12 +8,12 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 27,079 lines of iyi**. The
+`src/compiler` is **109,825 lines of Crystal and 28,662 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the artifact
-format, the bind tool, the command driver, the formatter, the four foundation
-files, and the LLVM bindings:
+format, the bind tool, the command driver, the formatter, the macro engine, the
+four foundation files, and the LLVM bindings:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -28,6 +28,7 @@ files, and the LLVM bindings:
 | `command/driver.iyi` | 1,962 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |
 | `foundation/*.iyi` | 122 | compiled by the above |
+| `macros/*.iyi` | 1,583 | `bench/selfhost_macros_exercise.sh`: 12 fixtures, 71 expanded nodes identical to the Crystal front end, five guarded mutation proofs. Macro expansion interpreter, argument binding (positional, defaults, splats, double splats, named arguments, blocks), control flow ({% if %}, {% for %}), stringification and macro methods on AST nodes. Still not in the port: TypeNode semantic table inspection, external macro run, and semantic hook callbacks |
 
 The bind row is weaker than the rows above it, and the difference matters.
 Every other gate here compares against the code being replaced. The bind gate
@@ -41,10 +42,10 @@ is ported and the gate can drive the real one.
 
 What is **not** in iyi: semantic analysis beyond the top-level declaration
 and expression and method body typing passes (instance variable inference
-beyond local scope, generics instantiation, macro expansion, class var
-initializers, recursive struct check, full unification), the macro engine,
-codegen, the daemon, and platform support. That is the 109,825. The formatter
-is partly ported, and its row above says which parts are not.
+beyond local scope, generics instantiation, class var initializers, recursive
+struct check, full unification), TypeNode inspection in macros, codegen, the
+daemon, and platform support. That is the 109,825. The formatter and macro engine
+are partly ported, and their rows above say which parts are not.
 Nothing in the build calls any of the ports above yet: each is checked against
 the code it would replace, not used in its place.
 

@@ -1,0 +1,46 @@
+module compiler/macros/ast
+
+import compiler/syntax/ast
+
+using compiler/syntax/ast::{ASTNode, StringBuilder, StringLiteral, SymbolLiteral, Var}
+
+pub class MacroId < ASTNode
+  property value : String
+
+  def initialize(@value : String)
+  end
+
+  def to_macro_id : String
+    @value
+  end
+
+  def clone_without_location : self
+    MacroId.new(@value)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @value
+  end
+
+  def ==(other : self) : Bool
+    @value == other.value
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(MacroId)
+      @value == other.as(MacroId).value
+    elsif other.is_a?(StringLiteral)
+      @value == other.as(StringLiteral).value
+    elsif other.is_a?(SymbolLiteral)
+      @value == other.as(SymbolLiteral).value
+    elsif other.is_a?(Var)
+      @value == other.as(Var).name
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    @value.hash
+  end
+end

@@ -83,6 +83,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # declaration tables against the frontend iyi is still bootstrapped from,
     # requiring identical declarations for every fixture.
     (r"^bench/selfhost_semantic_exercise\.sh$", "the frontend the selfhost semantic visitor is checked against"),
+    # The self-hosting macro engine's oracle. It verifies macro expansion
+    # ASTs against the frontend iyi is still bootstrapped from, requiring
+    # identical expanded ASTs for every fixture.
+    (r"^bench/selfhost_macros_exercise\.sh$", "the frontend the selfhost macro engine is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

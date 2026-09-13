@@ -1,0 +1,613 @@
+module compiler/macros/methods
+
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/macros/ast
+
+using compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, StringBuilder}
+using compiler/syntax/token::{NumberKind}
+using compiler/macros/ast::{MacroId}
+
+pub class MacroMethods
+  def self.truthy?(node : ASTNode) : Bool
+    if node.is_a?(NilLiteral) || node.is_a?(Nop)
+      false
+    elsif node.is_a?(BoolLiteral)
+      node.as(BoolLiteral).value
+    else
+      true
+    end
+  end
+
+  def self.to_macro_id(node : ASTNode) : String
+    if node.is_a?(MacroId)
+      node.as(MacroId).value
+    elsif node.is_a?(StringLiteral)
+      node.as(StringLiteral).value
+    elsif node.is_a?(SymbolLiteral)
+      node.as(SymbolLiteral).value
+    elsif node.is_a?(Var)
+      node.as(Var).name
+    else
+      sb = StringBuilder.new
+      node.to_s(sb)
+      sb.to_s
+    end
+  end
+
+  def self.node_stringify(node : ASTNode) : String
+    if node.is_a?(StringLiteral)
+      node.as(StringLiteral).value
+    elsif node.is_a?(MacroId)
+      node.as(MacroId).value
+    else
+      sb = StringBuilder.new
+      node.to_s(sb)
+      sb.to_s
+    end
+  end
+
+  def self.node_class_name(node : ASTNode) : String
+    if node.is_a?(Call)
+      "Call"
+    elsif node.is_a?(Var)
+      "Var"
+    elsif node.is_a?(Def)
+      "Def"
+    elsif node.is_a?(Arg)
+      "Arg"
+    elsif node.is_a?(ArrayLiteral)
+      "ArrayLiteral"
+    elsif node.is_a?(TupleLiteral)
+      "TupleLiteral"
+    elsif node.is_a?(NamedTupleLiteral)
+      "NamedTupleLiteral"
+    elsif node.is_a?(HashLiteral)
+      "HashLiteral"
+    elsif node.is_a?(NumberLiteral)
+      "NumberLiteral"
+    elsif node.is_a?(StringLiteral)
+      "StringLiteral"
+    elsif node.is_a?(SymbolLiteral)
+      "SymbolLiteral"
+    elsif node.is_a?(BoolLiteral)
+      "BoolLiteral"
+    elsif node.is_a?(NilLiteral)
+      "NilLiteral"
+    elsif node.is_a?(RangeLiteral)
+      "RangeLiteral"
+    elsif node.is_a?(If)
+      "If"
+    elsif node.is_a?(MacroIf)
+      "MacroIf"
+    elsif node.is_a?(MacroFor)
+      "MacroFor"
+    elsif node.is_a?(MacroId)
+      "MacroId"
+    elsif node.is_a?(MacroExpression)
+      "MacroExpression"
+    elsif node.is_a?(MacroLiteral)
+      "MacroLiteral"
+    elsif node.is_a?(MacroVar)
+      "MacroVar"
+    elsif node.is_a?(Expressions)
+      "Expressions"
+    else
+      "ASTNode"
+    end
+  end
+
+  def self.capitalize(s : String) : String
+    if s.empty?
+      ""
+    else
+      sb = StringBuilder.new
+      i = 0
+      while i < s.bytesize
+        c = s.byte_at(i).unsafe_chr
+        if i == 0
+          sb << c.upcase
+        else
+          sb << c.downcase
+        end
+        i = i + 1
+      end
+      sb.to_s
+    end
+  end
+
+  def self.camelcase(s : String) : String
+    sb = StringBuilder.new
+    up = true
+    i = 0
+    while i < s.bytesize
+      c = s.byte_at(i).unsafe_chr
+      if c == '_'
+        up = true
+      elsif up
+        sb << c.upcase
+        up = false
+      else
+        sb << c
+      end
+      i = i + 1
+    end
+    sb.to_s
+  end
+
+  def self.underscore(s : String) : String
+    sb = StringBuilder.new
+    i = 0
+    while i < s.bytesize
+      c = s.byte_at(i).unsafe_chr
+      if c >= 'A' && c <= 'Z'
+        if i > 0
+          sb << "_"
+        end
+        sb << c.downcase
+      else
+        sb << c
+      end
+      i = i + 1
+    end
+    sb.to_s
+  end
+
+  def self.eval_int(node : ASTNode) : Int64
+    if node.is_a?(NumberLiteral)
+      val_str = node.as(NumberLiteral).value
+      val_str.to_i64? || 0_i64
+    else
+      0_i64
+    end
+  end
+
+  def self.ast_equal?(a : ASTNode, b : ASTNode) : Bool
+    if a.is_a?(MacroId) || b.is_a?(MacroId)
+      to_macro_id(a) == to_macro_id(b)
+    elsif a.is_a?(StringLiteral) && b.is_a?(StringLiteral)
+      a.as(StringLiteral).value == b.as(StringLiteral).value
+    elsif a.is_a?(NumberLiteral) && b.is_a?(NumberLiteral)
+      a.as(NumberLiteral).value == b.as(NumberLiteral).value
+    elsif a.is_a?(BoolLiteral) && b.is_a?(BoolLiteral)
+      a.as(BoolLiteral).value == b.as(BoolLiteral).value
+    elsif a.is_a?(NilLiteral) && b.is_a?(NilLiteral)
+      true
+    elsif a.is_a?(Var) && b.is_a?(Var)
+      a.as(Var).name == b.as(Var).name
+    else
+      a == b
+    end
+  end
+
+  def self.interpret_method(
+    receiver : ASTNode?,
+    method : String,
+    args : Array(ASTNode),
+    named_args : Hash(String, ASTNode)? = nil,
+    block : Block? = nil,
+  ) : ASTNode
+    if receiver.nil?
+      case method
+      when "puts", "print", "p", "pp", "debug"
+        return Nop.new
+      when "raise"
+        msg = args.size > 0 ? to_macro_id(args[0]) : "macro raise"
+        raise msg
+      else
+        return Nop.new
+      end
+    end
+
+    rec = receiver.as(ASTNode)
+
+    case method
+    when "id"
+      return MacroId.new(to_macro_id(rec))
+    when "stringify"
+      return StringLiteral.new(node_stringify(rec))
+    when "class_name", "class_desc"
+      return StringLiteral.new(node_class_name(rec))
+    when "=="
+      if args.size > 0
+        return BoolLiteral.new(ast_equal?(rec, args[0]))
+      else
+        return BoolLiteral.new(false)
+      end
+    when "!="
+      if args.size > 0
+        return BoolLiteral.new(!ast_equal?(rec, args[0]))
+      else
+        return BoolLiteral.new(true)
+      end
+    end
+
+    if rec.is_a?(MacroId)
+      mid = rec.as(MacroId)
+      case method
+      when "+"
+        if args.size > 0
+          return MacroId.new(mid.value + to_macro_id(args[0]))
+        else
+          return mid
+        end
+      when "size", "bytesize"
+        return NumberLiteral.new(mid.value.bytesize.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(mid.value.empty?)
+      when "upcase"
+        return MacroId.new(mid.value.upcase)
+      when "downcase"
+        return MacroId.new(mid.value.downcase)
+      when "capitalize"
+        return MacroId.new(capitalize(mid.value))
+      when "camelcase"
+        return MacroId.new(camelcase(mid.value))
+      when "underscore"
+        return MacroId.new(underscore(mid.value))
+      when "starts_with?"
+        prefix = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(mid.value.starts_with?(prefix))
+      when "ends_with?"
+        suffix = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(mid.value.ends_with?(suffix))
+      when "includes?"
+        sub = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(mid.value.includes?(sub))
+      when "[]"
+        if args.size == 1
+          idx = eval_int(args[0]).to_i32
+          if idx >= 0 && idx < mid.value.bytesize
+            return MacroId.new(mid.value.byte_at(idx).unsafe_chr.to_s)
+          else
+            return MacroId.new("")
+          end
+        end
+      end
+      return mid
+    end
+
+    if rec.is_a?(StringLiteral)
+      str = rec.as(StringLiteral)
+      case method
+      when "+"
+        if args.size > 0
+          other_node = args[0]
+          combined = str.value + to_macro_id(other_node)
+          if other_node.is_a?(MacroId)
+            return MacroId.new(combined)
+          else
+            return StringLiteral.new(combined)
+          end
+        else
+          return str
+        end
+      when "size", "bytesize"
+        return NumberLiteral.new(str.value.bytesize.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(str.value.empty?)
+      when "upcase"
+        return StringLiteral.new(str.value.upcase)
+      when "downcase"
+        return StringLiteral.new(str.value.downcase)
+      when "capitalize"
+        return StringLiteral.new(capitalize(str.value))
+      when "camelcase"
+        return StringLiteral.new(camelcase(str.value))
+      when "underscore"
+        return StringLiteral.new(underscore(str.value))
+      when "starts_with?"
+        prefix = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(str.value.starts_with?(prefix))
+      when "ends_with?"
+        suffix = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(str.value.ends_with?(suffix))
+      when "includes?"
+        sub = args.size > 0 ? to_macro_id(args[0]) : ""
+        return BoolLiteral.new(str.value.includes?(sub))
+      when "[]"
+        if args.size == 1
+          idx = eval_int(args[0]).to_i32
+          if idx >= 0 && idx < str.value.bytesize
+            return StringLiteral.new(str.value.byte_at(idx).unsafe_chr.to_s)
+          else
+            return StringLiteral.new("")
+          end
+        end
+      end
+      return str
+    end
+
+    if rec.is_a?(SymbolLiteral)
+      sym = rec.as(SymbolLiteral)
+      case method
+      when "size"
+        return NumberLiteral.new(sym.value.bytesize.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(sym.value.empty?)
+      end
+      return sym
+    end
+
+    if rec.is_a?(NumberLiteral)
+      num = rec.as(NumberLiteral)
+      val = eval_int(num)
+      other_val = args.size > 0 ? eval_int(args[0]) : 0_i64
+      case method
+      when "+"
+        return NumberLiteral.new((val + other_val).to_s, num.kind)
+      when "-"
+        return NumberLiteral.new((val - other_val).to_s, num.kind)
+      when "*"
+        return NumberLiteral.new((val * other_val).to_s, num.kind)
+      when "/"
+        res = other_val != 0_i64 ? (val // other_val) : 0_i64
+        return NumberLiteral.new(res.to_s, num.kind)
+      when "%"
+        res = other_val != 0_i64 ? (val % other_val) : 0_i64
+        return NumberLiteral.new(res.to_s, num.kind)
+      when "<"
+        return BoolLiteral.new(val < other_val)
+      when "<="
+        return BoolLiteral.new(val <= other_val)
+      when ">"
+        return BoolLiteral.new(val > other_val)
+      when ">="
+        return BoolLiteral.new(val >= other_val)
+      when "to_i"
+        return NumberLiteral.new(val.to_s, NumberKind::I32)
+      when "to_s"
+        return StringLiteral.new(val.to_s)
+      end
+      return num
+    end
+
+    if rec.is_a?(BoolLiteral)
+      b = rec.as(BoolLiteral)
+      case method
+      when "!"
+        return BoolLiteral.new(!b.value)
+      end
+      return b
+    end
+
+    if rec.is_a?(ArrayLiteral)
+      arr = rec.as(ArrayLiteral)
+      case method
+      when "size"
+        return NumberLiteral.new(arr.elements.size.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(arr.elements.empty?)
+      when "first"
+        if arr.elements.size > 0
+          return arr.elements[0]
+        else
+          return NilLiteral.new
+        end
+      when "last"
+        if arr.elements.size > 0
+          return arr.elements[arr.elements.size - 1]
+        else
+          return NilLiteral.new
+        end
+      when "[]"
+        if args.size == 1
+          idx = eval_int(args[0]).to_i32
+          if idx < 0
+            idx = arr.elements.size + idx
+          end
+          if idx >= 0 && idx < arr.elements.size
+            return arr.elements[idx]
+          else
+            return NilLiteral.new
+          end
+        end
+      when "+"
+        if args.size > 0 && args[0].is_a?(ArrayLiteral)
+          other_arr = args[0].as(ArrayLiteral)
+          new_elems = [] of ASTNode
+          arr.elements.each { |e| new_elems << e }
+          other_arr.elements.each { |e| new_elems << e }
+          return ArrayLiteral.new(new_elems)
+        end
+      when "join"
+        sep = args.size > 0 ? to_macro_id(args[0]) : ""
+        sb = StringBuilder.new
+        i = 0
+        while i < arr.elements.size
+          if i > 0
+            sb << sep
+          end
+          sb << to_macro_id(arr.elements[i])
+          i = i + 1
+        end
+        return StringLiteral.new(sb.to_s)
+      end
+      return arr
+    end
+
+    if rec.is_a?(TupleLiteral)
+      tup = rec.as(TupleLiteral)
+      case method
+      when "size"
+        return NumberLiteral.new(tup.elements.size.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(tup.elements.empty?)
+      when "first"
+        if tup.elements.size > 0
+          return tup.elements[0]
+        else
+          return NilLiteral.new
+        end
+      when "last"
+        if tup.elements.size > 0
+          return tup.elements[tup.elements.size - 1]
+        else
+          return NilLiteral.new
+        end
+      when "[]"
+        if args.size == 1
+          idx = eval_int(args[0]).to_i32
+          if idx < 0
+            idx = tup.elements.size + idx
+          end
+          if idx >= 0 && idx < tup.elements.size
+            return tup.elements[idx]
+          else
+            return NilLiteral.new
+          end
+        end
+      when "join"
+        sep = args.size > 0 ? to_macro_id(args[0]) : ""
+        sb = StringBuilder.new
+        i = 0
+        while i < tup.elements.size
+          if i > 0
+            sb << sep
+          end
+          sb << to_macro_id(tup.elements[i])
+          i = i + 1
+        end
+        return StringLiteral.new(sb.to_s)
+      end
+      return tup
+    end
+
+    if rec.is_a?(NamedTupleLiteral)
+      nt = rec.as(NamedTupleLiteral)
+      case method
+      when "size"
+        return NumberLiteral.new(nt.entries.size.to_s, NumberKind::I32)
+      when "empty?"
+        return BoolLiteral.new(nt.entries.empty?)
+      when "keys"
+        keys_arr = [] of ASTNode
+        nt.entries.each do |e|
+          keys_arr << MacroId.new(e.key)
+        end
+        return ArrayLiteral.new(keys_arr)
+      when "values"
+        vals_arr = [] of ASTNode
+        nt.entries.each do |e|
+          vals_arr << e.value
+        end
+        return ArrayLiteral.new(vals_arr)
+      when "[]"
+        if args.size == 1
+          k = to_macro_id(args[0])
+          i = 0
+          while i < nt.entries.size
+            if nt.entries[i].key == k
+              return nt.entries[i].value
+            end
+            i = i + 1
+          end
+          return NilLiteral.new
+        end
+      when "has_key?"
+        if args.size == 1
+          k = to_macro_id(args[0])
+          i = 0
+          found = false
+          while i < nt.entries.size
+            if nt.entries[i].key == k
+              found = true
+            end
+            i = i + 1
+          end
+          return BoolLiteral.new(found)
+        else
+          return BoolLiteral.new(false)
+        end
+      end
+      return nt
+    end
+
+    if rec.is_a?(Call)
+      call_node = rec.as(Call)
+      case method
+      when "name"
+        return MacroId.new(call_node.name)
+      when "args"
+        call_args = [] of ASTNode
+        call_node.args.each { |a| call_args << a }
+        return ArrayLiteral.new(call_args)
+      when "receiver", "obj"
+        if o = call_node.obj
+          return o
+        else
+          return NilLiteral.new
+        end
+      when "block"
+        if b = call_node.block
+          return b
+        else
+          return NilLiteral.new
+        end
+      end
+      return call_node
+    end
+
+    if rec.is_a?(Def)
+      def_node = rec.as(Def)
+      case method
+      when "name"
+        return MacroId.new(def_node.name)
+      when "args"
+        d_args = [] of ASTNode
+        def_node.args.each { |a| d_args << a.as(ASTNode) }
+        return ArrayLiteral.new(d_args)
+      when "return_type"
+        if rt = def_node.return_type
+          return rt
+        else
+          return NilLiteral.new
+        end
+      when "body"
+        return def_node.body
+      end
+      return def_node
+    end
+
+    if rec.is_a?(Arg)
+      arg_node = rec.as(Arg)
+      case method
+      when "name"
+        return MacroId.new(arg_node.name)
+      when "default_value"
+        if dv = arg_node.default_value
+          return dv
+        else
+          return NilLiteral.new
+        end
+      end
+      return arg_node
+    end
+
+    if rec.is_a?(Var)
+      var_node = rec.as(Var)
+      case method
+      when "name"
+        return MacroId.new(var_node.name)
+      when "id"
+        return MacroId.new(var_node.name)
+      end
+      return var_node
+    end
+
+    if rec.is_a?(RangeLiteral)
+      rng = rec.as(RangeLiteral)
+      case method
+      when "begin"
+        return rng.from
+      when "end"
+        return rng.to
+      when "excludes_end?"
+        return BoolLiteral.new(rng.exclusive)
+      end
+      return rng
+    end
+
+    rec
+  end
+end

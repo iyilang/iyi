@@ -1,0 +1,7 @@
+macro define_constants(names)
+  {% for name, idx in names %}
+    {{name.id}} = {{idx}};
+  {% end %}
+end
+
+define_constants(["first", "second", "third"])

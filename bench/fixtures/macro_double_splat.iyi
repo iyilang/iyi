@@ -1,0 +1,5 @@
+macro configure_options(name, **opts)
+  {{name.id}} = { {% for k, v in opts %} {{k.id}}: {{v}}, {% end %} }
+end
+
+configure_options(config, timeout: 5000, retries: 3)

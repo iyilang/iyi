@@ -1,0 +1,11 @@
+macro classify(val)
+  {% if val > 10 %}
+    "large"
+  {% elsif val > 0 %}
+    "small"
+  {% else %}
+    "non-positive"
+  {% end %}
+end
+
+classify(7)

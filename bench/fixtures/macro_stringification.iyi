@@ -1,0 +1,5 @@
+macro log_expr(expr)
+  "evaluating: " + {{expr.stringify}} + " (" + {{expr.class_name}} + ")"
+end
+
+log_expr(foo.bar(1, 2))

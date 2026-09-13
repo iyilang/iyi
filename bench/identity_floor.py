@@ -75,6 +75,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # requires the artifacts and dumps identical. The other language is the
     # frontend being compared against.
     (r"^bench/selfhost_iyimod_exercise\.sh$", "the frontend the selfhost artifact format is checked against"),
+    # The self-hosting command driver's oracle. It verifies dispatch, exit
+    # codes, and usage output against the frontend iyi is still bootstrapped
+    # from, requiring identical observables for every command vector.
+    (r"^bench/selfhost_command_exercise\.sh$", "the frontend the selfhost command driver is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.
@@ -129,6 +133,13 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
 # Lines that name Crystal legitimately inside a file that is otherwise iyi's.
 ALLOWED_LINES: list[tuple[str, str]] = [
     (r"--crystal", "the compatibility mode's own flag"),
+    (r"crystal_prelude", "the flag recording a build against Crystal's standard library"),
+    # The ported command driver is checked byte for byte against the driver it
+    # replaces, and that driver prints this sentence. Changing the wording here
+    # would fail `bench/selfhost_command_exercise.sh` rather than rename
+    # anything a user sees: nothing dispatches through this port yet. When it
+    # takes over, this sentence becomes iyi's to write and this entry goes.
+    (r"Cannot initialize Crystal project", "the replaced driver's own wording, held for parity"),
     (r"crystal_front", "the front-end bench binary"),
     (r"CRYSTAL_ONLY", "the list of commands that belong to Crystal"),
     (r"Crystal 1\.", "the upstream version this forked from"),

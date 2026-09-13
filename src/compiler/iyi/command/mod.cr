@@ -197,6 +197,7 @@ class Iyi::Command
   rescue ex : IyiMod::Error
     abort! ex.message.to_s, :USAGE_ERROR
   end
+
   private def run_selfhost_mod_dump(filename : String, declarations : Bool) : Nil
     tool = find_selfhost_mod_tool
     unless tool
@@ -219,13 +220,12 @@ class Iyi::Command
       candidates << File.join(File.dirname(exec), tool_name)
       candidates << File.join(File.dirname(exec), "selfhost-iyimod")
     end
+
     candidates << File.join(".build", tool_name)
     candidates << File.join(".build", "selfhost-iyimod")
 
     if found = candidates.find { |c| File.file?(c) }
       return found
     end
-
-    nil
   end
 end

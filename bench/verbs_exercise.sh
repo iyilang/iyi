@@ -6,7 +6,7 @@
 #
 # Every case here is a mistake a person makes at the command line, and the
 # claim is the same for all of them: the answer is a sentence naming what
-# was asked for, not a stack trace out of the compiler's own guts. Four
+# was asked for, not a stack trace out of the compiler's own guts. Nine
 # defects this file was written for, each found by trying it:
 #
 #   * `iyi daemon start --socket <a path longer than the kernel takes>` died
@@ -23,6 +23,23 @@
 #     iyi-daemon`: the server was looked for before the path was read, so
 #     the refusal named the machine's missing binary rather than the
 #     argument the author had typed wrong.
+#   * `iyi doc` on a `.iyi` of unreadable bytes printed "Unhandled
+#     exception ... (InvalidByteSequenceError)", twelve frames of this
+#     compiler's own files, and an invitation to open an issue against the
+#     *other* language: the guard the entry file has had since the line
+#     above was written was never on the import path, and a `raise` inside
+#     a rescue clause carried every filesystem error past the handler too.
+#   * `iyi doc deep/inner/thing.iyi` printed `module thing` and an empty
+#     surface, exit 0, for a module that exports a documented function: the
+#     name came from the file's basename rather than from its header.
+#   * `iyi doc` on a module that does not compile answered `while importing
+#     "X"` - the wrapper, never the diagnostic inside it.
+#   * `iyi migrate` rewrote bytes that are not text as U+FFFD and reported
+#     `2 files -> 2 modules`, exit 0. A migration copies bytes.
+#   * `iyi migrate tree --out --check` created a directory named `--check`
+#     and exited 0; `mod dump FILE --json` printed prose and exited 0. A
+#     flag missing its value ate the next flag, and a flag after the path
+#     was dropped on the floor.
 #
 # So each case asserts three things: a non-zero exit, a phrase that names the
 # thing, and *no* trace - no "Unhandled exception", no "(SomeError)" tail, no
@@ -56,7 +73,10 @@ refuses() { # refuses <label> <phrase> -- <command...>
     status=1
     return
   fi
-  if ! grep -qF "$phrase" "$WORK/out"; then
+  # `-- "$phrase"`: a refusal about a flag begins with one, and `grep -qF`
+  # read `--out takes a directory` as its own options and failed the case
+  # it was asked to check.
+  if ! grep -qF -- "$phrase" "$WORK/out"; then
     echo "  $label: refused, but not with \"$phrase\""
     sed -n '1,3p' "$WORK/out"
     status=1
@@ -69,7 +89,7 @@ refuses() { # refuses <label> <phrase> -- <command...>
     return
   fi
   printf '  %s: exits %s, "%s"\n' "$label" "$code" \
-    "$(grep -m1 -oF "$phrase" "$WORK/out")"
+    "$(grep -m1 -oF -- "$phrase" "$WORK/out")"
 }
 
 cd "$WORK"
@@ -80,6 +100,10 @@ printf '\377\376\377\376' > binary.iyi
 mkdir -p app mods
 printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > app/lib.iyi
 printf 'module main\n\nimport app/lib\nusing app/lib::{value}\n\nputs value\n' > user.iyi
+printf '# A comment, and then nothing that declares a module.\nputs "hi"\n' > nomodule.iyi
+mkdir -p tree
+printf 'class Ok\nend\n' > tree/ok.cr
+printf 'class X\n\377\376\377\376\nend\n' > tree/bad.cr
 
 echo "== the good path, first"
 if "$IYI" build --emit-iyimod mods -o user user.iyi > build.log 2>&1 && [ "$(./user)" = "7" ]; then
@@ -137,6 +161,76 @@ refuses "a socket path past the kernel's limit, building" "the socket path is" -
   "$IYI" daemon build --socket "$long" -o d1 good.iyi
 refuses "no daemon on a socket that is there to take" "no daemon listening on" -- \
   "$IYI" daemon build --socket "$WORK/absent.sock" -o d2 good.iyi
+
+echo
+echo "== what the other verbs refuse, and what one of them prints"
+# `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,
+# and every one of them failed the standard the verbs above hold to: `doc`
+# on bytes that are not text answered "Unhandled exception ...
+# (InvalidByteSequenceError)", a dozen frames of this compiler's own files
+# and an invitation to file an issue against the other language; `doc` on a
+# module below the search-path root printed an empty surface under a name
+# that does not exist, at exit 0; `migrate` rewrote bytes that are not text
+# as U+FFFD and said "2 files → 2 modules"; `--out --check` created a
+# directory named `--check`; and `mod dump FILE --json` printed prose.
+mkdir -p deep/inner
+printf 'module deep/inner/thing\n\n# A thing.\npub def thing_value : Int32\n  5\nend\n' \
+  > deep/inner/thing.iyi
+printf 'module deep/inner/two\n\nmodule second\n\nputs "two"\n' > deep/inner/two.iyi
+if [ "$("$IYI" doc deep/inner/thing.iyi | head -1)" = "module deep/inner/thing" ] &&
+   "$IYI" doc deep/inner/thing.iyi | grep -q 'pub def thing_value : Int32'; then
+  echo "  a module below the root documents itself, by the name it declares"
+else
+  echo "  doc answered with the wrong module, or with nothing:"
+  "$IYI" doc deep/inner/thing.iyi | sed -n '1,3p'
+  status=1
+fi
+if "$IYI" mod dump lib.good --json | head -1 | grep -q '^{'; then
+  echo "  a flag after the path is read, not discarded"
+else
+  echo "  mod dump --json after the path did not print JSON:"
+  "$IYI" mod dump lib.good --json | sed -n '1,2p'
+  status=1
+fi
+refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
+  "$IYI" doc binary.iyi
+refuses "doc on a file that declares no module" "declares no module" -- \
+  "$IYI" doc nomodule.iyi
+refuses "doc on a module that is not at its own path" "is read from" -- \
+  "$IYI" doc twoheaders.iyi
+refuses "doc on a module that does not compile" "a file declares one module" -- \
+  "$IYI" doc deep/inner/two.iyi
+mkdir -p adir.iyimod
+refuses "doc on a directory" "is a directory" -- "$IYI" doc adir.iyimod
+refuses "a second path after the artifact" "unexpected" -- \
+  "$IYI" mod dump lib.good extra.iyimod
+refuses "both of mod dump's outputs at once" "two different outputs" -- \
+  "$IYI" mod dump --declarations --json lib.good
+refuses "mod dump on a directory" "is a directory" -- "$IYI" mod dump adir.iyimod
+refuses "a tree with bytes that are not text" "not a valid Crystal source file" -- \
+  "$IYI" migrate tree --out "$WORK/migrated"
+refuses "a flag where --out's directory goes" "--check is a flag" -- \
+  "$IYI" migrate tree --out --check
+refuses "a flag where --mods' directory goes" "--mods takes a directory" -- \
+  "$IYI" bind --mods --lib
+# The refusal `migrate` was asked for is the one it did not write: nothing
+# under `--out`, and no directory named after the flag.
+if [ -e "$WORK/migrated" ] || [ -e "$WORK/--check" ]; then
+  echo "  migrate wrote something while refusing"
+  status=1
+else
+  echo "  a refused migration left nothing behind"
+fi
+# A file the process cannot read. `chmod 000` does not bite as root, which
+# is what CI runs as, so the unreadable file here is the kernel's own:
+# `/proc/self/mem` refuses a read at offset 0 for everybody.
+if [ -r /proc/self/mem ]; then
+  ln -sf /proc/self/mem unreadable.iyi
+  refuses "a module the kernel will not hand over" "cannot be read" -- \
+    "$IYI" doc unreadable.iyi
+else
+  echo "  a module the kernel will not hand over: no /proc here, nothing to drive"
+fi
 
 echo
 echo "== proving the trace detector can fail"

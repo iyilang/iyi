@@ -4,6 +4,53 @@
 
 ### Fixed
 
+- **A refusal that escaped its own handler.** `Command#run`'s `rescue ex :
+  IO::Error` clause turned EPIPE into a clean exit and `raise ex`'d
+  everything else — and a `raise` inside a rescue clause is not caught by
+  the later clauses of the same `begin`, so every `File::Error` left the
+  process as a raw `Unhandled exception:` with a backtrace, past the
+  catch-all that exists to prevent exactly that. It is answered in the
+  clause now, as the path and the reason: `Error: prog.iyi: Permission
+  denied`. The read and the lexer inside `import_file` moved inside the
+  guard with it, so an imported module of bytes that are not text says
+  "file 'X' is not a valid iyi source file" at the `import` line that asked
+  for it, the same sentence an entry file has had since the verbs gate was
+  written.
+- **`iyi doc` answered about a module that does not exist.** It took the
+  module's name from its file's basename, so `iyi doc deep/inner/thing.iyi`
+  imported `thing`, resolved nothing of the sort, and printed `module
+  thing` with an empty surface at exit 0 — a documented module reported as
+  exporting nothing. The name comes from the `module` header now, the
+  search path from the directory that header is relative to, and a file
+  whose header is not its path is refused by R-1 rather than half answered.
+  Three more from the same verb: bytes that are not text crashed with
+  twelve frames and an invitation to open an issue against the *other*
+  language; a module that does not compile answered `while importing "X"`,
+  the wrapper rather than the diagnostic inside it (a `TypeException`
+  carries what it wrapped in `inner`, not in `cause`); and a directory
+  named `x.iyimod` was reported as "no such file", which sends the reader
+  to `ls`, where they find it.
+- **`migrate`, `bind` and `mod dump` took what they were not given.**
+  `iyi migrate` read `.cr` files with `File.read`, which substitutes U+FFFD
+  for bytes that are not text and never says so: a file of four stray bytes
+  was *rewritten* and reported as `2 files → 2 modules`, exit 0. A
+  migration copies bytes, so it refuses the file by name. `--out` and
+  `--mods` tested only for end-of-argv, so `iyi migrate tree --out --check`
+  created a directory named `--check` and exited 0; a value that begins
+  with `-` is now named as the flag it is. `iyi mod dump FILE --json`
+  printed prose and exited 0 because flags were read only before the path;
+  both flags are read in either position, a second path is refused by name,
+  and asking for both outputs at once is refused rather than half served.
+  And an artifact the process cannot open said it was damaged and should be
+  rebuilt — the one remedy that cannot fix a permission bit — with the
+  Crystal exception class in the sentence; it says what happened instead.
+- **The gate they should have been in.** `bench/verbs_exercise.sh` covered
+  `build`, `run`, `mod dump` and the daemon, and never invoked `doc`,
+  `migrate` or `bind` — which is how eight defects survived it. Thirteen
+  cases and two answers were added, including the one that proves a refused
+  migration writes nothing. Its own `refuses` helper could not check a
+  phrase beginning with `--`: `grep -qF "$phrase"` read the phrase as its
+  own options, so the two flag cases failed until it grew a `--`.
 - **`"ab" * -3` answered `""`.** `String#[](start, count)` has said for a
   long time that a negative count "is not a wrap, it is a mistake"; `*` said
   nothing and handed back the empty string, where Crystal raises — one name

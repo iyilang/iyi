@@ -55,7 +55,7 @@ class Iyi::Command
       case option
       when "--out"
         options.shift
-        out_dir = options.shift? || abort!("--out takes a directory", :USAGE_ERROR)
+        out_dir = flag_value!("--out", "a directory")
       when "--check"
         options.shift
         check = true
@@ -241,7 +241,7 @@ class Iyi::Command
     # required by another - `base_log_handler.cr` names `HTTP::Handler`
     # and requires nothing.
     (single ? Dir.glob(File.join(src, "**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
-      File.each_line(file) do |line|
+      migrate_source(file).each_line do |line|
         next unless (match = MigrateUnit::REQUIRE.match(line))
         target = match[1] || ""
         required_by_tree << target unless target.starts_with?('.') || target.includes?('*')
@@ -252,13 +252,13 @@ class Iyi::Command
                     abort!("migrate: could not read Crystal's library to see which names it owns", :CODE_ERROR)
 
     tree_roots = Set(String).new
-    files.each { |file| MigrateUnit.collect_roots(file, tree_roots) }
+    files.each { |file| MigrateUnit.collect_roots(migrate_source(file), tree_roots) }
     tree_roots.reject! { |name| library_names.includes?(name) }
 
     notes = Notes.new
     still_crystal.try { |message| notes.add "vendored", message }
     notes.add "vendored", "#{vendored} files under a `lib/` beside a manifest are other projects' source and stayed there; this tree reaches them through its own requires" if vendored > 0
-    units = files.map { |file| MigrateUnit.read(file, src, tree_roots, notes) }
+    units = files.map { |file| MigrateUnit.read(file, migrate_source(file), src, tree_roots, notes) }
     by_source = units.to_h { |unit| {unit.source, unit} }
     by_namespace = {} of String => MigrateUnit
     units.each { |unit| by_namespace[unit.namespace.join("::")] ||= unit unless unit.namespace.empty? }
@@ -706,6 +706,36 @@ class Iyi::Command
     end
   end
 
+  # A flag's value, which is not the flag written after it. `--out` only
+  # tested for the end of argv, so `migrate tree --out --check` took
+  # `--check` for the directory, made one by that name and exited 0.
+  # `bind.cr` calls this for `--mods` and `--lib`, which had it too.
+  private def flag_value!(flag : String, what : String) : String
+    value = options.shift? || abort!("#{flag} takes #{what}", :USAGE_ERROR)
+    if value.starts_with?('-')
+      abort! "#{flag} takes #{what}, and #{value} is a flag", :USAGE_ERROR
+    end
+    value
+  end
+
+  # A file's text, and the one place this verb decides the bytes are text at
+  # all. `File.read` hands back whatever bytes are in the file and never
+  # raises; the rewriting below walks the text character by character, and
+  # every byte sequence that is not UTF-8 comes out of that as U+FFFD - so a
+  # file carrying four stray bytes was written into the output with four
+  # replacement characters where they had been, and the run reported success.
+  # A migration is a copy of what it reads, and a file this is true of does
+  # not compile as Crystal either, so it is refused by name rather than
+  # rewritten.
+  private def migrate_source(file : String) : String
+    text = File.read(file)
+    unless text.valid_encoding?
+      abort! "migrate: file '#{Iyi.relative_filename(file)}' is not a valid Crystal source file: " \
+             "it holds bytes that are not UTF-8 text, and a migration copies the bytes it reads", :USAGE_ERROR
+    end
+    text
+  end
+
   # One name a module exports, and the module.
   record Export, unit : MigrateUnit, name : String
 
@@ -1062,17 +1092,18 @@ class Iyi::Command
                    @lines, @wrappers, @shard_requires, @sidecar)
     end
 
-    # Every root namespace a file declares unqualified: the tree's own.
-    def self.collect_roots(file : String, into : Set(String)) : Nil
-      File.each_line(file) do |line|
+    # Every root namespace a file declares unqualified: the tree's own. Reads
+    # the text the command has already read and checked rather than the file.
+    def self.collect_roots(source : String, into : Set(String)) : Nil
+      source.each_line do |line|
         next unless (match = DECL.match(line)) && (match[1] || "").empty?
         name = match[4] || ""
         into << name unless name.includes?("::") || name.empty?
       end
     end
 
-    def self.read(file : String, root : String, tree_roots : Set(String), notes : Notes) : MigrateUnit
-      all = File.read(file).split('\n')
+    def self.read(file : String, source : String, root : String, tree_roots : Set(String), notes : Notes) : MigrateUnit
+      all = source.split('\n')
       relative = file.lchop(root).lchop('/')
       # A file name is not a module name: `micrate-wrapper.cr` gave
       # `module micrate-wrapper`, which parses as a subtraction and left

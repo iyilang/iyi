@@ -26,7 +26,7 @@ class Iyi::Command
       puts doc_usage
       exit
     when filename.ends_with?(".iyimod")
-      abort! "no such file: #{filename}", :USAGE_ERROR unless File.file?(filename)
+      doc_file! filename, ".iyimod"
       artifact =
         begin
           IyiMod.read(filename)
@@ -35,7 +35,7 @@ class Iyi::Command
         end
       IyiMod.surface artifact, STDOUT
     when filename.ends_with?(".iyi")
-      abort! "no such file: #{filename}", :USAGE_ERROR unless File.file?(filename)
+      doc_file! filename, ".iyi"
       doc_from_source(File.expand_path(filename))
     when filename == "prelude"
       doc_prelude_index
@@ -52,6 +52,15 @@ class Iyi::Command
   private def prelude_type_name?(name : String) : Bool
     return false unless name[0]?.try(&.ascii_uppercase?)
     name.each_char.all? { |char| char.ascii_alphanumeric? || char == '_' || char == ':' }
+  end
+
+  # iyi: "no such file" about a path that is there sends the reader to `ls`,
+  # where they find it and learn nothing. A directory named `x.iyimod` is a
+  # directory, and that is the fact to hand back.
+  private def doc_file!(filename : String, kind : String) : Nil
+    return if File.file?(filename)
+    abort! "#{filename} is a directory, and a #{kind} is a file", :USAGE_ERROR if Dir.exists?(filename)
+    abort! "no such file: #{filename}", :USAGE_ERROR
   end
 
   # The prelude's types, one line each - the kind, the name, the first
@@ -161,8 +170,35 @@ class Iyi::Command
   # `mod context` wears it: a synthetic entry imports the module, the
   # front end runs, and the artifact it emits is the answer.
   private def doc_from_source(filename : String) : Nil
-    module_name = File.basename(filename, ".iyi")
-    module_root = File.dirname(filename)
+    source =
+      begin
+        File.read(filename)
+      rescue ex : IO::Error
+        # The rescue chain in `command.cr` would answer this too, but with
+        # the runtime's own sentence, which names no path: "Input/output
+        # error" on its own is not an answer to `iyi doc <file>`.
+        abort! "#{filename} cannot be read: #{ex.os_error.try(&.message) || "the file could not be read"}", :USAGE_ERROR
+      end
+    unless source.valid_encoding?
+      # The same sentence `Compiler#parse` gives for an entry file, because
+      # it is the same mistake: `iyi doc` on four bytes of garbage printed
+      # "Unhandled exception ... (InvalidByteSequenceError)", a dozen frames
+      # of this compiler's own files, and an invitation to file an issue
+      # against the other language's tracker.
+      abort! "file '#{Iyi.relative_filename(filename)}' is not a valid iyi " \
+             "source file: it holds bytes that are not UTF-8 text", :USAGE_ERROR
+    end
+
+    module_name = doc_module_header(source)
+    unless module_name
+      abort! "#{filename} declares no module, and a module is what `doc` reads", :USAGE_ERROR
+    end
+    module_root = doc_module_root(filename, module_name)
+    unless File.expand_path(File.join(module_root, "#{module_name}.iyi")) == filename
+      abort! "#{filename} declares `module #{module_name}`, and a module's path " \
+             "is its file's path (SPEC.md R-1, IV.6): a module by that name is " \
+             "read from #{module_name}.iyi", :USAGE_ERROR
+    end
 
     emit_dir = File.tempname("iyi-doc", nil)
     Dir.mkdir_p(emit_dir)
@@ -184,7 +220,23 @@ class Iyi::Command
           Compiler::Source.new(entry, File.read(entry)),
           File.join(emit_dir, "unused"))
       rescue ex : Iyi::Error | Iyi::CodeError
-        abort! "#{filename} does not compile alone: #{ex.message.to_s.lines.first?}", :USAGE_ERROR
+        # iyi: the diagnostic, not the wrapper around it. The entry imports
+        # the module, so an error arrives wrapped in `while importing "X"`
+        # (`SemanticVisitor#import_file`) and the first line of *that* names
+        # the file the author has just typed and nothing they can act on:
+        # `iyi doc twoheaders.iyi` answered `does not compile alone: while
+        # importing "twoheaders"` where `iyi run` answered `a file declares
+        # one module, and this one already declares 'main'`.
+        # A `TypeException` carries the error it wrapped in `inner` rather
+        # than in `cause`, which is why both are followed here.
+        deepest = ex
+        loop do
+          nested = deepest.responds_to?(:inner) ? deepest.inner : nil
+          nested ||= deepest.cause
+          break unless nested.is_a?(Iyi::Error | Iyi::CodeError)
+          deepest = nested
+        end
+        abort! "#{filename} does not compile alone: #{deepest.message.to_s.lines.first?}", :USAGE_ERROR
       ensure
         previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
       end
@@ -204,6 +256,31 @@ class Iyi::Command
     ensure
       FileUtils.rm_rf(emit_dir)
     end
+  end
+
+  # iyi: the name a module *declares*, which is its identity. R-1 makes a
+  # module's path its name, and a file's basename is only the last segment
+  # of it: `iyi doc deep/inner/thing.iyi` took the basename, imported
+  # `thing`, resolved nothing of the sort and printed `module thing` with an
+  # empty surface at exit 0 — a documented module reported as exporting
+  # nothing, which is the worst of the three answers a verb can give.
+  private def doc_module_header(source : String) : String?
+    source.each_line do |line|
+      text = line.strip
+      next if text.empty? || text.starts_with?('#')
+      return text.lchop("module").strip if text.starts_with?("module ")
+      break
+    end
+    nil
+  end
+
+  # And the directory that name is read from: `deep/inner/thing` is found
+  # from the directory above `deep`, so the import resolves the module the
+  # file declares rather than another file with the same basename.
+  private def doc_module_root(filename : String, module_name : String) : String
+    root = File.dirname(filename)
+    (module_name.count('/')).times { root = File.dirname(root) }
+    root
   end
 
   private def doc_usage

@@ -1422,8 +1422,16 @@ module Iyi::IyiMod
     # `skip` raised `IO::EOFError` with a stack trace, naming no file and
     # reading as a compiler bug rather than as a damaged file.
     raise Error.new("#{path} is truncated: it ends in the middle of a .iyimod")
+  rescue ex : IO::Error
+    # The file, not the artifact: no permission to it, gone between the
+    # caller's check and this read, or a directory where a file was named.
+    # All of them used to come back as the damaged-artifact sentence, which
+    # prescribed a rebuild that cannot help - a rebuilt file is no more
+    # readable - and carried the exception's class name and the runtime's own
+    # wording, which names this reader's open mode rather than what happened.
+    raise Error.new("#{path} cannot be read: #{ex.os_error.try(&.message) || "it could not be opened"}")
   rescue ex
-    raise Error.new("#{path} is not a readable .iyimod: #{ex.message} (#{ex.class}). " \
+    raise Error.new("#{path} is not a readable .iyimod: #{ex.message || "its bytes are not the ones this reader expects"}. " \
                     "It is damaged, or was written by something that is not this " \
                     "compiler; rebuild it with `--emit-iyimod`")
   end
@@ -1524,8 +1532,13 @@ module Iyi::IyiMod
     # `skip` raised `IO::EOFError` with a stack trace, naming no file and
     # reading as a compiler bug rather than as a damaged file.
     raise Error.new("#{path} is truncated: it ends in the middle of a .iyimod")
+  rescue ex : IO::Error
+    # The same distinction `read_summary` makes: a file this process cannot
+    # open is not a damaged artifact, and the remedy it used to be given -
+    # rebuild it - reads it no better.
+    raise Error.new("#{path} cannot be read: #{ex.os_error.try(&.message) || "it could not be opened"}")
   rescue ex
-    raise Error.new("#{path} is not a readable .iyimod: #{ex.message} (#{ex.class}). " \
+    raise Error.new("#{path} is not a readable .iyimod: #{ex.message || "its bytes are not the ones this reader expects"}. " \
                     "It is damaged, or was written by something that is not this " \
                     "compiler; rebuild it with `--emit-iyimod`")
   end

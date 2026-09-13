@@ -992,8 +992,27 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   private def import_file(node : ImportDecl, filename : String)
-    source = @program.iyi_file_overrides[filename]? || File.read(filename)
-    parser = @program.new_parser(source)
+    # iyi: the read and the lexer are inside the guard, not above it. A
+    # module the process cannot open left `File::AccessDeniedError` to the
+    # runtime, and a module of bytes that are not text left
+    # `InvalidByteSequenceError` there: `iyi doc` on either printed
+    # "Unhandled exception", a dozen frames of this compiler's own files,
+    # and an invitation to file an issue against the other language. An
+    # entry file has answered "file 'X' is not a valid iyi source file"
+    # since the verbs gate was written (`Compiler#parse`); an imported one
+    # answers it too, at the `import` line that asked for it.
+    source =
+      begin
+        @program.iyi_file_overrides[filename]? || File.read(filename)
+      rescue ex : File::Error
+        node.raise "cannot read #{filename}: #{ex.os_error.try(&.message) || ex.message}"
+      end
+    parser =
+      begin
+        @program.new_parser(source)
+      rescue ex : InvalidByteSequenceError
+        node.raise "file '#{Iyi.relative_filename(filename)}' is not a valid iyi source file: #{ex.message}"
+      end
     parser.filename = filename
     parser.wants_doc = @program.wants_doc?
     @iyi_importing << filename

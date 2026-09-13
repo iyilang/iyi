@@ -28,10 +28,13 @@ class Iyi::Command
       case option
       when "--mods"
         options.shift
-        mods = options.shift? || abort!("--mods takes a directory", :USAGE_ERROR)
+        # The flag's value, not whatever flag was written after it: `--mods`
+        # with nothing behind it took `--lib` for a directory name and made
+        # one. `flag_value!` is in migrate.cr, whose `--out` had it too.
+        mods = flag_value!("--mods", "a directory")
       when "--lib"
         options.shift
-        lib_dir = options.shift? || abort!("--lib takes a directory", :USAGE_ERROR)
+        lib_dir = flag_value!("--lib", "a directory")
       when "--help", "-h"
         puts <<-USAGE
           Usage: #{Command.program_name} bind [--lib DIR] [--mods DIR] [SHARD ...]

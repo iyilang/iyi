@@ -57,22 +57,44 @@ class Iyi::Command
     # the file as it is stored, and the file as the compiler reads it. The
     # second exists so that a diagnostic pointing into a `.iyimod` can be
     # looked at — the text it names is the text this prints.
+    #
+    # Read from either side of the path, because that is where a person writes
+    # them: the two flags used to be looked for only *before* the filename, so
+    # `mod dump FILE --json` printed the prose and exited 0 with the flag
+    # discarded, and a second path was dropped without a word.
     declarations = false
     as_json = false
-    if options.first? == "--declarations"
-      options.shift
-      declarations = true
-    elsif options.first? == "--json"
-      options.shift
-      as_json = true
+    filename = nil
+    while option = options.shift?
+      case option
+      when "--declarations"
+        declarations = true
+      when "--json"
+        as_json = true
+      when .starts_with?('-')
+        abort! "mod dump: unknown flag #{option}", :USAGE_ERROR
+      else
+        if filename
+          abort! "unexpected '#{option}' after the .iyimod path", :USAGE_ERROR
+        end
+        filename = option
+      end
     end
 
-    filename = options.shift?
     unless filename
       abort! "expected a .iyimod path", :USAGE_ERROR
     end
+    if declarations && as_json
+      abort! "--declarations and --json are two different outputs; ask for one", :USAGE_ERROR
+    end
 
     unless File.file?(filename)
+      # A directory is there, so "no such file" was not true of it. The
+      # sentence says which of the two it is; `no such file` is kept for a
+      # path that really is not there.
+      if Dir.exists?(filename)
+        abort! "#{filename} is a directory, and a .iyimod is a file", :USAGE_ERROR
+      end
       abort! "no such file: #{filename}", :USAGE_ERROR
     end
 
@@ -110,17 +132,30 @@ class Iyi::Command
     # `git diff`'s spelling, and for its reason: "the interface moved" is an
     # answer rather than a failure, so it is worth an exit code only when
     # somebody has asked for one to branch on.
+    #
+    # Either side of the paths, and nothing left over: a third path used to be
+    # dropped in silence, and `--exit-code` after them went unread.
     exit_code = false
-    if options.first? == "--exit-code"
-      options.shift
-      exit_code = true
+    paths = [] of String
+    while option = options.shift?
+      case option
+      when "--exit-code"
+        exit_code = true
+      when .starts_with?('-')
+        abort! "mod diff: unknown flag #{option}", :USAGE_ERROR
+      else
+        if paths.size == 2
+          abort! "unexpected '#{option}' after the two .iyimod paths", :USAGE_ERROR
+        end
+        paths << option
+      end
     end
 
-    old_path = options.shift?
-    new_path = options.shift?
-    unless old_path && new_path
+    unless paths.size == 2
       abort! "expected two .iyimod paths", :USAGE_ERROR
     end
+    old_path = paths[0]
+    new_path = paths[1]
 
     old_artifact = read_iyimod(old_path)
     new_artifact = read_iyimod(new_path)
@@ -175,6 +210,9 @@ class Iyi::Command
 
   private def read_iyimod(path : String) : IyiMod::Artifact
     unless File.file?(path)
+      if Dir.exists?(path)
+        abort! "#{path} is a directory, and a .iyimod is a file", :USAGE_ERROR
+      end
       abort! "no such file: #{path}", :USAGE_ERROR
     end
 

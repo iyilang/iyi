@@ -282,9 +282,18 @@ class Iyi::Command
     # compiler. The reader closing the pipe is how `head` says it has enough,
     # and every other tool on the machine treats it as the end of the output
     # rather than as a crash with a backtrace and an invitation to file an
-    # issue. Anything else that reaches here still does.
-    raise ex unless ex.os_error == Errno::EPIPE
-    ::exit 0
+    # issue.
+    ::exit 0 if ex.os_error == Errno::EPIPE
+
+    # iyi: and the rest of what the filesystem answers is a sentence too.
+    # This clause used to `raise ex` here, and a `raise` inside a rescue
+    # clause is not caught by the later clauses of the same `begin`: the
+    # catch-all below never saw a `File::Error`, so `iyi doc` on a file
+    # with mode 000 printed "Unhandled exception: Error opening file with
+    # mode 'r' ... (File::AccessDeniedError)" and a dozen frames of this
+    # compiler's own files. A permission bit is not a compiler bug.
+    report_warnings
+    abort! filesystem_sentence(ex), :FAILURE
   rescue ex
     report_warnings
 
@@ -1036,6 +1045,16 @@ class Iyi::Command
       end
     end
     emit_targets
+  end
+
+  # iyi: what the filesystem said, as a sentence about the path the author
+  # named. Crystal's own wording for a `File::Error` is "Error opening file
+  # with mode 'r': '<path>': Permission denied" — it names an argument of
+  # `open(2)` nobody passed, and prefixed with "Error: " it says the word
+  # twice. The path and the reason are the two facts.
+  private def filesystem_sentence(ex : IO::Error) : String
+    reason = ex.os_error.try(&.message) || ex.message.to_s
+    ex.is_a?(File::Error) ? "#{ex.file}: #{reason}" : reason
   end
 
   private def abort!(msg, exit : Command::Exit)

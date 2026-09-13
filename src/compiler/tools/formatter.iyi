@@ -1786,6 +1786,7 @@ pub class Formatter < Visitor
     end
     true
   end
+
   def write_indent(indent : Int32) : Nil
     i = 0
     while i < indent
@@ -1823,6 +1824,7 @@ pub class Formatter < Visitor
     increment_line
     @last_write = ""
   end
+
   def increment_line : Nil
     @line = @line + 1
     @comment_columns << nil.as(Int32?)

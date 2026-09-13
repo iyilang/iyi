@@ -65,6 +65,12 @@ int32_t test_virtual_base_method(int32_t kind, int32_t id, int32_t val);
 int32_t test_nilable_class(int32_t flag, int32_t v);
 bool test_nil_check(int32_t flag, int32_t v);
 
+// cg_blocks
+int32_t test_block_simple(int32_t x);
+int32_t test_block_capture(int32_t x, int32_t factor);
+int32_t test_block_loop(int32_t n);
+int32_t test_block_pair(int32_t a, int32_t b);
+
 int main(void) {
   // Test 1: Integer arithmetic
   int32_t r_add = int_add(10, 32);
@@ -142,6 +148,13 @@ int main(void) {
   bool n_chk_true = test_nil_check(0, 42);
   printf("nilable: %d %d %d %d\n", n_val, n_zero, (int)n_chk_false,
          (int)n_chk_true);
+
+  // Test 12: Blocks and closures
+  int32_t blk_simp = test_block_simple(21);
+  int32_t blk_capt = test_block_capture(10, 5);
+  int32_t blk_loop = test_block_loop(10);
+  int32_t blk_pair = test_block_pair(7, 3);
+  printf("blocks: %d %d %d %d\n", blk_simp, blk_capt, blk_loop, blk_pair);
 
   return 0;
 }

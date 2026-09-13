@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, ClassDef, Def, Expressions, FunDef, Generic, If, InstanceVar, NilLiteral, NumberLiteral, Path, PointerOf, Return, TypeDeclaration, Var, While}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, ClassDef, Def, Expressions, FunDef, Generic, If, InstanceVar, NilLiteral, NumberLiteral, Path, PointerOf, Return, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -118,6 +118,53 @@ pub class CustomTypeInfo
       @field_types[fname] = ftype
       @field_order << fname
     end
+  end
+end
+
+pub class InlinedBlockContext
+  property method_param_allocas : Hash(String, LLVMValue)
+  property method_local_allocas : Hash(String, LLVMValue)
+  property block_arg_allocas : Hash(String, LLVMValue)
+  property block : Block
+  property in_block : Bool
+
+  def initialize(@block : Block)
+    @method_param_allocas = Hash(String, LLVMValue).new
+    @method_local_allocas = Hash(String, LLVMValue).new
+    @block_arg_allocas = Hash(String, LLVMValue).new
+    @in_block = false
+  end
+
+  def resolve_var(vname : String) : LLVMValue?
+    if @in_block
+      if ptr = @block_arg_allocas[vname]?
+        return ptr
+      end
+    else
+      if ptr = @method_param_allocas[vname]?
+        return ptr
+      end
+      if ptr = @method_local_allocas[vname]?
+        return ptr
+      end
+    end
+    nil
+  end
+end
+
+class InlinedBlockCallCollector < Visitor
+  getter calls : Array(Call)
+  property block_methods : Hash(String, Def)
+
+  def initialize(@block_methods : Hash(String, Def))
+    @calls = [] of Call
+  end
+
+  def visit(node : Call) : Bool
+    if node.obj.nil? && @block_methods.has_key?(node.name) && node.block
+      @calls << node
+    end
+    true
   end
 end
 
@@ -207,6 +254,10 @@ pub class CodeGenVisitor < Visitor
   property current_self_type : String?
   property struct_call_temps : Array(LLVMValue)
   property struct_temp_index : Int32
+  property block_methods : Hash(String, Def)
+  property current_inlined_block : InlinedBlockContext?
+  property inlined_block_contexts : Array(InlinedBlockContext)
+  property inlined_block_index : Int32
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -225,6 +276,10 @@ pub class CodeGenVisitor < Visitor
     @current_self_type = nil
     @struct_call_temps = [] of LLVMValue
     @struct_temp_index = 0
+    @block_methods = Hash(String, Def).new
+    @current_inlined_block = nil
+    @inlined_block_contexts = [] of InlinedBlockContext
+    @inlined_block_index = 0
   end
 
   def llvm_type_from_name(name : String) : LLVMType
@@ -563,8 +618,15 @@ pub class CodeGenVisitor < Visitor
 
     @struct_call_temps.clear
     @struct_temp_index = 0
+    block_collector = InlinedBlockCallCollector.new(@block_methods)
+    if b = node.body
+      b.accept(block_collector)
+    end
 
-    if local_vars.empty? && struct_calls.empty?
+    @inlined_block_contexts.clear
+    @inlined_block_index = 0
+
+    if local_vars.empty? && struct_calls.empty? && block_collector.calls.empty?
       entry_bb = fn.append_basic_block("entry")
       @builder.position_at_end(entry_bb)
     else
@@ -587,6 +649,52 @@ pub class CodeGenVisitor < Visitor
           ptr.alignment = 4
         end
         @vars[vname] = ptr
+      end
+
+      # 2. Inlined block call allocas
+      block_collector.calls.each do |b_call|
+      if blk = b_call.block
+        ctx = InlinedBlockContext.new(blk)
+        b_def = @block_methods[b_call.name]
+
+        # 2a. Block arguments
+        blk.args.each do |b_arg|
+          b_arg_tname = @var_type_names[b_arg.name]? || "Int32"
+          llvm_t = llvm_type_from_name(b_arg_tname)
+          ptr = @builder.alloca(llvm_t, b_arg.name)
+          ptr.alignment = 4
+          ctx.block_arg_allocas[b_arg.name] = ptr
+        end
+
+        # 2b. Inlined method parameters
+        actual_arg_idx = 0
+        b_def.args.each do |param|
+          next if param.name == "block" || param.name.starts_with?('&')
+          p_tname = if r = param.restriction
+                      r.to_s
+                    else
+                      "Int32"
+                    end
+          llvm_t = llvm_type_from_name(p_tname)
+          ptr = @builder.alloca(llvm_t, param.name)
+          ptr.alignment = 4
+          ctx.method_param_allocas[param.name] = ptr
+          actual_arg_idx += 1
+        end
+
+        # 2c. Inlined method local variables
+        m_locals = collect_local_vars(b_def.body, Set(String).new)
+        m_locals.each do |mvname, mvnode|
+          next if ctx.method_param_allocas.has_key?(mvname)
+          mv_tname = infer_var_type(mvname, mvnode)
+          llvm_t = llvm_type_from_name(mv_tname)
+          ptr = @builder.alloca(llvm_t, mvname)
+          ptr.alignment = 4
+          ctx.method_local_allocas[mvname] = ptr
+        end
+
+        @inlined_block_contexts << ctx
+      end
       end
 
       # 2. Unnamed temporaries for struct-by-value call returns
@@ -625,7 +733,12 @@ pub class CodeGenVisitor < Visitor
       var_name = node.target.as(Var).name
       node.value.accept(self)
       if val = @last
-        if ptr = @vars[var_name]?
+        ptr = if inlined = @current_inlined_block
+                inlined.resolve_var(var_name) || @vars[var_name]?
+              else
+                @vars[var_name]?
+              end
+        if ptr
           s_inst = @builder.store(val, ptr)
           vtype = @var_type_names[var_name]?
           if vtype && (info = @custom_types[vtype]?) && info.is_struct
@@ -697,6 +810,17 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : Var) : Bool
+    if inlined = @current_inlined_block
+      if ptr = inlined.resolve_var(node.name)
+        v_type_name = @var_type_names[node.name]? || "Int32"
+        llvm_t = llvm_type_from_name(v_type_name)
+        l_inst = @builder.load(llvm_t, ptr, "")
+        @last = l_inst
+        @terminated = false
+        return false
+      end
+    end
+
     if ptr = @vars[node.name]?
       v_type_name = @var_type_names[node.name]? || "Int32"
       llvm_t = llvm_type_from_name(v_type_name)
@@ -709,6 +833,37 @@ pub class CodeGenVisitor < Visitor
       @last = param
     end
     @terminated = false
+    false
+  end
+
+  def visit(node : Yield) : Bool
+    if inlined = @current_inlined_block
+      # 1. First accept all yield expressions and store values
+      exp_values = [] of LLVMValue
+      node.exps.each do |exp|
+        exp.accept(self)
+        if val = @last
+          exp_values << val
+        end
+      end
+
+      # 2. Now assign exp values to block arguments
+      exp_values.each_with_index do |val, i|
+        if block_arg = inlined.block.args[i]?
+          if ptr = inlined.block_arg_allocas[block_arg.name]?
+            s_inst = @builder.store(val, ptr)
+            s_inst.alignment = 4
+          end
+        end
+      end
+
+      # 3. Now execute block body with in_block = true
+      prev_in_block = inlined.in_block
+      inlined.in_block = true
+      inlined.block.body.accept(self)
+      inlined.in_block = prev_in_block
+      @terminated = false
+    end
     false
   end
 
@@ -839,6 +994,43 @@ pub class CodeGenVisitor < Visitor
       end
       @terminated = false
       return false
+    end
+    if node.obj.nil? && (b_def = @block_methods[node.name]?) && node.block
+      if @inlined_block_index < @inlined_block_contexts.size
+        ctx = @inlined_block_contexts[@inlined_block_index]
+        @inlined_block_index += 1
+        # 1. Evaluate call arguments BEFORE entering inlined context
+        arg_vals = [] of LLVMValue
+        node.args.each do |a|
+          a.accept(self)
+          if l = @last
+            arg_vals << l
+          end
+        end
+
+        prev_inlined = @current_inlined_block
+        @current_inlined_block = ctx
+
+        # 2. Store into method parameter allocas
+        actual_arg_idx = 0
+        b_def.args.each do |param|
+          next if param.name == "block" || param.name.starts_with?('&')
+          if actual_arg_idx < arg_vals.size
+            val = arg_vals[actual_arg_idx]
+            if ptr = ctx.method_param_allocas[param.name]?
+              s_inst = @builder.store(val, ptr)
+              s_inst.alignment = 4
+            end
+          end
+          actual_arg_idx += 1
+        end
+
+        # 3. Execute method body
+        b_def.body.accept(self)
+        @current_inlined_block = prev_inlined
+        @terminated = false
+        return false
+      end
     end
 
     if obj = node.obj
@@ -1847,18 +2039,23 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
 
   classes = [] of ClassDef
   funs = [] of FunDef
+  defs = Hash(String, Def).new
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
       if e.is_a?(ClassDef)
         classes << e.as(ClassDef)
       elsif e.is_a?(FunDef)
         funs << e.as(FunDef)
+      elsif e.is_a?(Def)
+        defs[e.as(Def).name] = e.as(Def)
       end
     end
   elsif node.is_a?(ClassDef)
     classes << node.as(ClassDef)
   elsif node.is_a?(FunDef)
     funs << node.as(FunDef)
+  elsif node.is_a?(Def)
+    defs[node.as(Def).name] = node.as(Def)
   end
 
   # Register funs in program
@@ -1883,6 +2080,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   end
 
   cg = CodeGenVisitor.new(context, mod, prog, mv)
+  cg.block_methods = defs
 
   # Process custom types (structs and classes)
   classes.each do |cd|

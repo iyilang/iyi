@@ -8,11 +8,12 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 26,182 lines of iyi**. The
+`src/compiler` is **109,825 lines of Crystal and 27,079 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
-pass of semantic analysis, the artifact format, the bind tool, the command
-driver, the formatter, the four foundation files, and the LLVM bindings:
+and expression and method body typing passes of semantic analysis, the artifact
+format, the bind tool, the command driver, the formatter, the four foundation
+files, and the LLVM bindings:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -20,7 +21,7 @@ driver, the formatter, the four foundation files, and the LLVM bindings:
 | `syntax/ast.iyi`, `visitor.iyi`, `transformer.iyi` | 7,202 | `bench/selfhost_ast_exercise.sh`, five guarded mutation proofs |
 | `syntax/parser.iyi` (no macros) | 4,072 | `bench/selfhost_parser_exercise.sh`: 24 fixtures, 1,609 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
-| `semantic/top_level.iyi` | 1,222 | `bench/selfhost_semantic_exercise.sh`: 20 fixtures (9 feature fixtures, 39 declarations identical to the Crystal front end; 11 error fixtures rejected with identical errors), five guarded mutation proofs |
+| `semantic/top_level.iyi`, `semantic/main_visitor.iyi` | 2,129 | `bench/selfhost_semantic_exercise.sh`: 28 fixtures (9 declaration fixtures, 39 declarations; 5 typed expression fixtures, 100 typed nodes; 14 error fixtures rejected with identical errors), ten guarded mutation proofs |
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
 | `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
@@ -39,10 +40,11 @@ as unproven against `src/compiler/iyi/tools/bind.cr` until semantic analysis
 is ported and the gate can drive the real one.
 
 What is **not** in iyi: semantic analysis beyond the top-level declaration
-pass (method body typing and type inference, macro expansion, instance and
-class var initializers, recursive struct check, type unification), the macro
-engine, codegen, the daemon, and platform support. That is the 109,825. The
-formatter is partly ported, and its row above says which parts are not.
+and expression and method body typing passes (instance variable inference
+beyond local scope, generics instantiation, macro expansion, class var
+initializers, recursive struct check, full unification), the macro engine,
+codegen, the daemon, and platform support. That is the 109,825. The formatter
+is partly ported, and its row above says which parts are not.
 Nothing in the build calls any of the ports above yet: each is checked against
 the code it would replace, not used in its place.
 

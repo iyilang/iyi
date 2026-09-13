@@ -1,0 +1,12 @@
+cond = true
+v1 = if cond
+       1
+     else
+       2
+     end
+v2 = if cond
+       3
+     end
+while cond
+  loop_var = 100
+end

@@ -1,0 +1,5 @@
+x = 10
+y = "abc"
+z = x
+flag : Bool = true
+res = flag

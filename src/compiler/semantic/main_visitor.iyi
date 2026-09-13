@@ -1,0 +1,754 @@
+module compiler/semantic/main_visitor
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/syntax/visitor
+import compiler/semantic/top_level
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, Def, Expressions, If, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/token::{NumberKind}
+using compiler/syntax/visitor::{Visitor}
+using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
+
+pub class MainVisitor < Visitor
+  property program : SemanticProgram
+  property current_type : ModuleType
+  property scope : Type?
+  property vars : Hash(String, Type)
+  property node_types : NodeMap(Type)
+  property call_target_defs : NodeMap(Def)
+  property current_def : Def?
+  property current_call_block : Block?
+
+  def initialize(@program : SemanticProgram)
+    @current_type = @program
+    @scope = nil
+    @vars = Hash(String, Type).new
+    @node_types = NodeMap(Type).new
+    @call_target_defs = NodeMap(Def).new
+    @current_def = nil
+    @current_call_block = nil
+  end
+
+  def set_type(node : ASTNode, type : Type) : Type
+    @node_types[node] = type
+    type
+  end
+
+  def type_of?(node : ASTNode) : Type?
+    @node_types[node]?
+  end
+
+  def type_of(node : ASTNode) : Type
+    if t = @node_types[node]?
+      t
+    else
+      raise("BUG: node has no type: #{node.to_s}")
+    end
+  end
+
+  def target_def?(call : Call) : Def?
+    @call_target_defs[call]?
+  end
+
+  def type_from_literal_kind(kind : NumberKind) : Type
+    case kind
+    when NumberKind::I8   then @program.types["Int8"]
+    when NumberKind::I16  then @program.types["Int16"]
+    when NumberKind::I32  then @program.int32_type
+    when NumberKind::I64  then @program.types["Int64"]
+    when NumberKind::I128 then @program.types["Int128"]
+    when NumberKind::U8   then @program.types["UInt8"]
+    when NumberKind::U16  then @program.types["UInt16"]
+    when NumberKind::U32  then @program.types["UInt32"]
+    when NumberKind::U64  then @program.types["UInt64"]
+    when NumberKind::U128 then @program.types["UInt128"]
+    when NumberKind::F32  then @program.types["Float32"]
+    when NumberKind::F64  then @program.types["Float64"]
+    else
+      @program.int32_type
+    end
+  end
+
+  def visit(node : NilLiteral) : Bool
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    set_type(node, @program.bool_type)
+    false
+  end
+
+  def visit(node : CharLiteral) : Bool
+    set_type(node, @program.char_type)
+    false
+  end
+
+  def visit(node : StringLiteral) : Bool
+    set_type(node, @program.string_type)
+    false
+  end
+
+  def visit(node : SymbolLiteral) : Bool
+    set_type(node, @program.symbol_type)
+    false
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    set_type(node, type_from_literal_kind(node.kind))
+    false
+  end
+
+  def visit(node : Nop) : Bool
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : Var) : Bool
+    if t = @vars[node.name]?
+      set_type(node, t)
+      return false
+    end
+
+    if node.name == "self"
+      if sc = @scope
+        set_type(node, sc)
+        return false
+      else
+        raise("there's no self in this scope")
+      end
+    end
+
+    rec_type : Type = @scope || @current_type
+    all_defs = [] of Def
+    visited = Set(String).new
+    collect_candidate_defs(rec_type, node.name, all_defs, visited)
+    zero_arg = all_defs.find { |d| d.args.empty? || (d.args.first.default_value != nil) }
+    if zero_arg
+      call = Call.new(nil, node.name).at(node)
+      @call_target_defs[call] = zero_arg
+      ret_type = type_method_body(zero_arg, rec_type, [] of ASTNode, nil)
+      set_type(node, ret_type)
+      return false
+    end
+
+    scope_name = if sc = @scope
+                   sc.full_name
+                 else
+                   "top-level"
+                 end
+    raise("undefined local variable or method '#{node.name}' for #{scope_name}")
+  end
+
+  def visit(node : Assign) : Bool
+    node.value.accept(self)
+    val_type = type_of(node.value)
+
+    if node.target.is_a?(Var)
+      v = node.target.as(Var)
+      @vars[v.name] = val_type
+      set_type(v, val_type)
+      set_type(node, val_type)
+    elsif node.target.is_a?(Path)
+      p = node.target.as(Path)
+      set_type(p, val_type)
+      set_type(node, val_type)
+    else
+      set_type(node, val_type)
+    end
+    false
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    decl_type = @program.lookup_type_node(node.declared_type, @current_type)
+    if val = node.value
+      val.accept(self)
+      val_type = type_of(val)
+      unless val_type.subtype_of?(decl_type)
+        raise("expected type #{decl_type.full_name}, got #{val_type.full_name}")
+      end
+      if node.var.is_a?(Var)
+        v = node.var.as(Var)
+        @vars[v.name] = decl_type
+        set_type(v, decl_type)
+      end
+      set_type(node, decl_type)
+    else
+      if node.var.is_a?(Var)
+        v = node.var.as(Var)
+        @vars[v.name] = decl_type
+        set_type(v, decl_type)
+      end
+      set_type(node, decl_type)
+    end
+    false
+  end
+
+  def visit(node : Path) : Bool
+    begin
+      t = @program.lookup_type_path(node, @current_type)
+      if t.const?
+        c = t.as(Const)
+        if c_type = type_of?(c.value)
+          set_type(node, c_type)
+        else
+          c.value.accept(self)
+          c_type = type_of(c.value)
+          set_type(node, c_type)
+        end
+      elsif t.is_a?(ModuleType)
+        set_type(node, t.as(ModuleType).metaclass)
+      else
+        set_type(node, t)
+      end
+    rescue ex : Exception
+      raise("undefined constant #{node.to_s}")
+    end
+    false
+  end
+
+  def visit(node : Expressions) : Bool
+    if node.expressions.empty?
+      set_type(node, @program.nil_type)
+    else
+      last_type = @program.nil_type
+      node.expressions.each do |exp|
+        exp.accept(self)
+        last_type = type_of(exp)
+      end
+      set_type(node, last_type)
+    end
+    false
+  end
+
+  def visit(node : If) : Bool
+    node.cond.accept(self)
+    node.then.accept(self)
+    then_type = type_of(node.then)
+
+    node.else.accept(self)
+    else_type = type_of(node.else)
+
+    merged = @program.type_merge(then_type, else_type)
+    set_type(node, merged)
+    false
+  end
+
+  def visit(node : While) : Bool
+    node.cond.accept(self)
+    node.body.accept(self)
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : Return) : Bool
+    if exp = node.exp
+      exp.accept(self)
+      exp_type = type_of(exp)
+      if cd = @current_def
+        if rt = cd.return_type
+          expected_ret = @program.lookup_type_node(rt, @current_type)
+          unless exp_type.subtype_of?(expected_ret)
+            raise("type mismatch for return type: expected #{expected_ret.full_name}, got #{exp_type.full_name}")
+          end
+        end
+      end
+    end
+    set_type(node, @program.no_return_type)
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    name = node.name.names.last
+    t = @current_type.lookup_type(name)
+    if t && t.is_a?(ClassType)
+      old_type = @current_type
+      @current_type = t.as(ClassType)
+      node.body.accept(self)
+      @current_type = old_type
+    end
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : Def) : Bool
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : Yield) : Bool
+    node.exps.each do |exp|
+      exp.accept(self)
+    end
+
+    if blk = @current_call_block
+      old_vars = @vars
+      blk_vars = @vars.dup
+      i = 0
+      while i < blk.args.size
+        b_arg = blk.args[i]
+        if i < node.exps.size
+          arg_t = type_of(node.exps[i])
+          blk_vars[b_arg.name] = arg_t
+          set_type(b_arg, arg_t)
+        end
+        i = i + 1
+      end
+      @vars = blk_vars
+
+      blk.body.accept(self)
+      blk_type = type_of(blk.body)
+      set_type(blk, blk_type)
+      set_type(node, blk_type)
+
+      @vars = old_vars
+    else
+      set_type(node, @program.nil_type)
+    end
+    false
+  end
+
+  def visit(node : Block) : Bool
+    node.body.accept(self)
+    set_type(node, type_of(node.body))
+    false
+  end
+
+  def collect_candidate_defs(rec_type : Type, name : String, result : Array(Def), visited : Set(String)) : Nil
+    return if visited.includes?(rec_type.full_name)
+    visited.add(rec_type.full_name)
+
+    if rec_type.is_a?(ModuleType)
+      mod = rec_type.as(ModuleType)
+      if list = mod.defs[name]?
+        list.each { |d| result << d }
+      end
+      mod.parents.each do |p|
+        collect_candidate_defs(p, name, result, visited)
+      end
+    end
+  end
+
+  def format_method_display_name(rec_type : Type, name : String) : String
+    if rec_type.is_a?(SemanticProgram)
+      name
+    elsif rec_type.is_a?(MetaclassType)
+      "#{rec_type.as(MetaclassType).instance_type.full_name}.#{name}"
+    else
+      "#{rec_type.full_name}##{name}"
+    end
+  end
+
+  def format_overload_signature(rec_type : Type, d : Def) : String
+    args_strs = d.args.map do |arg|
+      s = arg.name
+      if r = arg.restriction
+        s = "#{s} : #{r.to_s}"
+      end
+      if dv = arg.default_value
+        s = "#{s} = #{dv.to_s}"
+      end
+      s
+    end
+    method_name = format_method_display_name(rec_type, d.name)
+    "#{method_name}(#{args_strs.join(", ")})"
+  end
+
+  def min_args_count(d : Def) : Int32
+    count = 0
+    d.args.each do |arg|
+      if arg.default_value.nil?
+        count = count + 1
+      end
+    end
+    count
+  end
+
+  def lookup_method_matching(rec_type : Type, name : String, args : Array(ASTNode), call_node : Call) : Def
+    candidates = [] of Def
+    visited = Set(String).new
+    collect_candidate_defs(rec_type, name, candidates, visited)
+
+    if candidates.empty?
+      if call_node.obj
+        raise("undefined method '#{name}' for #{rec_type.full_name}")
+      else
+        scope_name = if rec_type.is_a?(SemanticProgram)
+                       "top-level"
+                     else
+                       rec_type.full_name
+                     end
+        raise("undefined local variable or method '#{name}' for #{scope_name}")
+      end
+    end
+
+    # 1. Filter by argument count
+    count_matches = [] of Def
+    candidates.each do |d|
+      min_a = min_args_count(d)
+      max_a = d.args.size
+      if args.size >= min_a && args.size <= max_a
+        count_matches << d
+      end
+    end
+
+    if count_matches.empty?
+      overload_lines = candidates.map { |d| " - #{format_overload_signature(rec_type, d)}" }
+      overloads_str = "Overloads are:\n#{overload_lines.join("\n")}"
+      method_disp = format_method_display_name(rec_type, name)
+      expected_str = if candidates.size == 1
+                       candidates.first.args.size.to_s
+                     else
+                       min_all = candidates.map { |d| min_args_count(d) }.min
+                       max_all = candidates.map { |d| d.args.size }.max
+                       min_all == max_all ? min_all.to_s : "#{min_all}..#{max_all}"
+                     end
+      raise("wrong number of arguments for '#{method_disp}' (given #{args.size}, expected #{expected_str})\n#{overloads_str}")
+    end
+
+    # 2. Check argument type restrictions
+    type_matches = [] of Def
+    count_matches.each do |d|
+      all_args_match = true
+      i = 0
+      while i < args.size
+        arg_type = type_of(args[i])
+        param = d.args[i]
+        if r = param.restriction
+          expected_type = @program.lookup_type_node(r, @current_type)
+          unless arg_type.subtype_of?(expected_type)
+            all_args_match = false
+            break
+          end
+        end
+        i = i + 1
+      end
+      if all_args_match
+        type_matches << d
+      end
+    end
+
+    if type_matches.size > 0
+      return type_matches.first
+    end
+
+    # Type mismatch error reporting
+    mismatch_idx = 0
+    expected_types_list = [] of String
+    count_matches.each do |d|
+      i = 0
+      while i < args.size
+        arg_type = type_of(args[i])
+        param = d.args[i]
+        if r = param.restriction
+          exp_t = @program.lookup_type_node(r, @current_type)
+          unless arg_type.subtype_of?(exp_t)
+            mismatch_idx = i
+            expected_types_list << exp_t.full_name
+            break
+          end
+        end
+        i = i + 1
+      end
+    end
+
+    uniq_exp = [] of String
+    expected_types_list.each do |en|
+      uniq_exp << en unless uniq_exp.includes?(en)
+    end
+    expected_types_str = uniq_exp.join(" or ")
+    actual_type_str = type_of(args[mismatch_idx]).full_name
+    method_disp = format_method_display_name(rec_type, name)
+    overload_lines = count_matches.map { |d| " - #{format_overload_signature(rec_type, d)}" }
+    overloads_str = "Overloads are:\n#{overload_lines.join("\n")}"
+    raise("expected argument ##{mismatch_idx + 1} to '#{method_disp}' to be #{expected_types_str}, not #{actual_type_str}\n\n#{overloads_str}")
+  end
+
+  def type_method_body(target_def : Def, rec_type : Type, args : Array(ASTNode), block : Block?) : Type
+    body = target_def.body
+    if body.nil?
+      if rt = target_def.return_type
+        return @program.lookup_type_node(rt, @current_type)
+      else
+        return @program.nil_type
+      end
+    end
+
+    old_vars = @vars
+    old_scope = @scope
+    old_def = @current_def
+    old_block_call = @current_call_block
+
+    new_vars = Hash(String, Type).new
+    if rec_type.is_a?(MetaclassType)
+      new_vars["self"] = rec_type
+    elsif rec_type.is_a?(SemanticProgram)
+      # No self at top-level
+    else
+      new_vars["self"] = rec_type
+    end
+
+    i = 0
+    while i < target_def.args.size
+      param = target_def.args[i]
+      if i < args.size
+        new_vars[param.name] = type_of(args[i])
+      elsif dv = param.default_value
+        dv.accept(self)
+        new_vars[param.name] = type_of(dv)
+      end
+      i = i + 1
+    end
+
+    @vars = new_vars
+    @scope = rec_type
+    @current_def = target_def
+    @current_call_block = block
+
+    body.as(ASTNode).accept(self)
+    body_type = type_of(body.as(ASTNode))
+
+    @vars = old_vars
+    @scope = old_scope
+    @current_def = old_def
+    @current_call_block = old_block_call
+
+    if rt = target_def.return_type
+      declared_ret = @program.lookup_type_node(rt, @current_type)
+      unless body_type.subtype_of?(declared_ret)
+        raise("type mismatch for return type: expected #{declared_ret.full_name}, got #{body_type.full_name}")
+      end
+      set_type(target_def, declared_ret)
+      declared_ret
+    else
+      set_type(target_def, body_type)
+      body_type
+    end
+  end
+
+  def visit(node : Call) : Bool
+    if node.obj.nil? && node.args.empty? && node.block.nil?
+      if vt = @vars[node.name]?
+        set_type(node, vt)
+        return false
+      end
+    end
+
+    node.args.each do |arg|
+      arg.accept(self)
+    end
+
+    rec_type : Type
+    if obj = node.obj
+      obj.accept(self)
+      rec_type = type_of(obj)
+    else
+      rec_type = @scope || @current_type
+    end
+
+    if node.name == "new" && rec_type.is_a?(MetaclassType)
+      inst_type = rec_type.as(MetaclassType).instance_type
+      if inst_type.is_a?(ClassType)
+        if node.args.size > 0
+          init_def = lookup_method_matching(inst_type, "initialize", node.args, node)
+          type_method_body(init_def, inst_type, node.args, node.block)
+        end
+        set_type(node, inst_type)
+        return false
+      end
+    end
+
+    target_def = lookup_method_matching(rec_type, node.name, node.args, node)
+    instantiated_def = target_def.clone
+    @call_target_defs[node] = instantiated_def
+
+    ret_type = type_method_body(instantiated_def, rec_type, node.args, node.block)
+    set_type(node, ret_type)
+    false
+  end
+end
+
+pub def node_class_name(node : ASTNode) : String
+  if node.is_a?(Expressions)
+    "Expressions"
+  elsif node.is_a?(Assign)
+    "Assign"
+  elsif node.is_a?(Var)
+    "Var"
+  elsif node.is_a?(Path)
+    "Path"
+  elsif node.is_a?(NilLiteral)
+    "NilLiteral"
+  elsif node.is_a?(BoolLiteral)
+    "BoolLiteral"
+  elsif node.is_a?(CharLiteral)
+    "CharLiteral"
+  elsif node.is_a?(NumberLiteral)
+    "NumberLiteral"
+  elsif node.is_a?(StringLiteral)
+    "StringLiteral"
+  elsif node.is_a?(SymbolLiteral)
+    "SymbolLiteral"
+  elsif node.is_a?(If)
+    "If"
+  elsif node.is_a?(While)
+    "While"
+  elsif node.is_a?(Yield)
+    "Yield"
+  elsif node.is_a?(Return)
+    "Return"
+  elsif node.is_a?(Call)
+    "Call"
+  elsif node.is_a?(Block)
+    "Block"
+  elsif node.is_a?(Def)
+    "Def"
+  elsif node.is_a?(ClassDef)
+    "ClassDef"
+  elsif node.is_a?(TypeDeclaration)
+    "TypeDeclaration"
+  elsif node.is_a?(Nop)
+    "Nop"
+  else
+    "ASTNode"
+  end
+end
+
+pub def dump_typed_node(node : ASTNode, visitor : MainVisitor, sb : String::Builder, indent : String = "") : Nil
+  type_str = if t = visitor.type_of?(node)
+               t.full_name
+             else
+               "nil"
+             end
+  node_name = node_class_name(node)
+  sb << indent << node_name << ": " << type_str << "\n"
+
+  if node.is_a?(Expressions)
+    node.as(Expressions).expressions.each do |e|
+      dump_typed_node(e, visitor, sb, "#{indent}  ")
+    end
+  elsif node.is_a?(Assign)
+    asgn = node.as(Assign)
+    sb << indent << "  target:\n"
+    dump_typed_node(asgn.target, visitor, sb, "#{indent}    ")
+    sb << indent << "  value:\n"
+    dump_typed_node(asgn.value, visitor, sb, "#{indent}    ")
+  elsif node.is_a?(Var)
+    sb << indent << "  name: " << node.as(Var).name << "\n"
+  elsif node.is_a?(Path)
+    sb << indent << "  names: [" << node.as(Path).names.join("::") << "]\n"
+  elsif node.is_a?(NumberLiteral)
+    num = node.as(NumberLiteral)
+    sb << indent << "  value: " << num.value
+    case num.kind
+    when NumberKind::I32
+      # no suffix
+    when NumberKind::F64
+      has_dot = false
+      dot_i = 0
+      while dot_i < num.value.bytesize
+        b = num.value.byte_at(dot_i)
+        if b == 46_u8 || b == 101_u8
+          has_dot = true
+          break
+        end
+        dot_i = dot_i + 1
+      end
+      unless has_dot
+        sb << "_" << num.kind.to_s
+      end
+    else
+      sb << "_" << num.kind.to_s
+    end
+    sb << "\n"
+  elsif node.is_a?(StringLiteral) || node.is_a?(BoolLiteral) || node.is_a?(CharLiteral) || node.is_a?(SymbolLiteral) || node.is_a?(NilLiteral)
+    sb << indent << "  value: " << node.to_s << "\n"
+  elsif node.is_a?(If)
+    if_node = node.as(If)
+    sb << indent << "  cond:\n"
+    dump_typed_node(if_node.cond, visitor, sb, "#{indent}    ")
+    sb << indent << "  then:\n"
+    dump_typed_node(if_node.then, visitor, sb, "#{indent}    ")
+    if els = if_node.else
+      sb << indent << "  else:\n"
+      dump_typed_node(els, visitor, sb, "#{indent}    ")
+    end
+  elsif node.is_a?(While)
+    wh = node.as(While)
+    sb << indent << "  cond:\n"
+    dump_typed_node(wh.cond, visitor, sb, "#{indent}    ")
+    sb << indent << "  body:\n"
+    dump_typed_node(wh.body, visitor, sb, "#{indent}    ")
+  elsif node.is_a?(Yield)
+    yd = node.as(Yield)
+    unless yd.exps.empty?
+      sb << indent << "  yield_exps:\n"
+      yd.exps.each do |e|
+        dump_typed_node(e, visitor, sb, "#{indent}    ")
+      end
+    end
+  elsif node.is_a?(Return)
+    ret = node.as(Return)
+    if exp = ret.exp
+      sb << indent << "  exp:\n"
+      dump_typed_node(exp, visitor, sb, "#{indent}    ")
+    end
+  elsif node.is_a?(Call)
+    c = node.as(Call)
+    sb << indent << "  name: " << c.name << "\n"
+    if obj = c.obj
+      sb << indent << "  obj:\n"
+      dump_typed_node(obj, visitor, sb, "#{indent}    ")
+    end
+    unless c.args.empty?
+      sb << indent << "  args:\n"
+      c.args.each do |a|
+        dump_typed_node(a, visitor, sb, "#{indent}    ")
+      end
+    end
+    if blk = c.block
+      sb << indent << "  block:\n"
+      dump_typed_node(blk, visitor, sb, "#{indent}    ")
+    end
+    if (td = visitor.target_def?(c)) && td.name != "new"
+      ret_type_str = if t = visitor.type_of?(td)
+                       t.full_name
+                     else
+                       "nil"
+                     end
+      sb << indent << "  target_def: " << td.name << ": " << ret_type_str << "\n"
+      if body = td.body
+        sb << indent << "  target_body:\n"
+        dump_typed_node(body, visitor, sb, "#{indent}    ")
+      end
+    end
+  elsif node.is_a?(Block)
+    blk = node.as(Block)
+    unless blk.args.empty?
+      args_strs = blk.args.map do |a|
+        t_str = if t = visitor.type_of?(a)
+                  t.full_name
+                else
+                  "nil"
+                end
+        "#{a.name}: #{t_str}"
+      end
+      sb << indent << "  block_args: [" << args_strs.join(", ") << "]\n"
+    end
+    sb << indent << "  body:\n"
+    dump_typed_node(blk.body, visitor, sb, "#{indent}    ")
+  elsif node.is_a?(Def)
+    sb << indent << "  name: " << node.as(Def).name << "\n"
+  elsif node.is_a?(ClassDef)
+    sb << indent << "  name: " << node.as(ClassDef).name.to_s << "\n"
+  end
+end
+
+pub def dump_program_expressions(program : SemanticProgram, node : ASTNode, visitor : MainVisitor) : String
+  sb = String::Builder.new
+  dump_typed_node(node, visitor, sb, "")
+  sb.to_s
+end

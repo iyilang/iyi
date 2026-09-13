@@ -1,10 +1,12 @@
 import compiler/syntax/ast
 import compiler/syntax/parser
 import compiler/semantic/top_level
+import compiler/semantic/main_visitor
 
-using compiler/syntax/ast::{ASTNode}
+using compiler/syntax/ast::{ASTNode, Expressions}
 using compiler/syntax/parser::{Parser}
 using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, dump_program_declarations}
+using compiler/semantic/main_visitor::{MainVisitor, dump_program_expressions}
 
 module BenchSelfhostSemanticExercise
   def self.run_source(src : String, filename : String = "eval.iyi") : String
@@ -14,6 +16,17 @@ module BenchSelfhostSemanticExercise
     visitor = TopLevelVisitor.new(prog)
     node.accept(visitor)
     dump_program_declarations(prog)
+  end
+
+  def self.run_expr_source(src : String, filename : String = "eval.iyi") : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    tl = TopLevelVisitor.new(prog)
+    node.accept(tl)
+    mv = MainVisitor.new(prog)
+    node.accept(mv)
+    dump_program_expressions(prog, node, mv)
   end
 
   def self.count_declarations(src : String, filename : String) : Int32
@@ -32,6 +45,17 @@ module BenchSelfhostSemanticExercise
       pdefs.each_value { |list| count = count + list.size }
     end
     count
+  end
+
+  def self.count_expressions(src : String, filename : String) : Int32
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    tl = TopLevelVisitor.new(prog)
+    node.accept(tl)
+    mv = MainVisitor.new(prog)
+    node.accept(mv)
+    mv.node_types.size
   end
 
   def self.run_all
@@ -72,6 +96,20 @@ module BenchSelfhostSemanticExercise
     end
     puts "ok (aliases and constants verified)"
 
+    print "testing expression typing and calls... "
+    out6 = run_expr_source("def add(a : Int32, b : Int32) : Int32; a; end; res = add(1, 2)")
+    unless out6.includes?("Call: Int32") && out6.includes?("target_def: add: Int32")
+      raise "expression typing and call test failed"
+    end
+    puts "ok (typed expressions and calls verified)"
+
+    print "testing control flow typing... "
+    out7 = run_expr_source("x = if true; 1; else; 2; end; while false; y = 1; end")
+    unless out7.includes?("If: Int32") && out7.includes?("While: Nil")
+      raise "control flow typing test failed"
+    end
+    puts "ok (control flow typing verified)"
+
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"
     puts "==============================================================="
@@ -82,6 +120,14 @@ if Program.args.size > 0
   if Program.args[0] == "-e" && Program.args.size > 1
     source = Program.args[1]
     print BenchSelfhostSemanticExercise.run_source(source, "eval.iyi")
+  elsif Program.args.size > 1 && Program.args[1] == "--expr"
+    filename = Program.args[0]
+    source = File.read(filename)
+    print BenchSelfhostSemanticExercise.run_expr_source(source, filename)
+  elsif Program.args.size > 1 && Program.args[1] == "--expr-count"
+    filename = Program.args[0]
+    source = File.read(filename)
+    puts BenchSelfhostSemanticExercise.count_expressions(source, filename)
   elsif Program.args.size > 1 && Program.args[1] == "--count"
     filename = Program.args[0]
     source = File.read(filename)

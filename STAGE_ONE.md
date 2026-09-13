@@ -322,7 +322,7 @@ In-place parity summary: 35/35 files match byte-for-byte
 Prefix flag summary: 35/35 files match
 clean check parity: 35/35 files pass on both paths
 unformatted check refusal: both paths detect changes (rc=1)
-syntax error properly refused by both (crystal rc=1, selfhost rc=1)
+syntax error properly refused by both (rc=1)
 Mutation proofs: 5/5 guarded mutations caught and reverted
 Parity summary: 35/35 files match byte-for-byte across stdin, in-place, and prefix flags (100% parity)
 ALL SELFHOST FORMAT WIRING CHECKS PASSED SUCCESSFULLY!

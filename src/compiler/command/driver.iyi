@@ -444,8 +444,6 @@ pub class CommandDriver
     To format STDIN to STDOUT, use '-' in place of any path arguments.
 
     Options:
-        --check                  checks that formatting code produces no changes
-        --selfhost               use the pure iyi self-hosted formatter
     USAGE
   end
 
@@ -1355,6 +1353,9 @@ pub class CommandDriver
     end
     parser.on("--show-backtrace", "Show backtrace on a bug (used only for debugging)") do
       @error_trace = true
+    end
+    parser.on("--selfhost", "Use the pure iyi self-hosted formatter") do
+      @subcommand_options["selfhost"] = "true"
     end
     files = parser.parse(@options)
     return if @exit_code

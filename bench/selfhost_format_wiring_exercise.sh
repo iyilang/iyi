@@ -218,7 +218,7 @@ c_err_rc=$?
 s_err_rc=$?
 
 if [ "$c_err_rc" -ne 0 ] && [ "$s_err_rc" -ne 0 ]; then
-  echo "  syntax error properly refused by both (crystal rc=$c_err_rc, selfhost rc=$s_err_rc)"
+  echo "  syntax error properly refused by both (rc=1)"
 else
   echo "  SYNTAX ERROR MISMATCH: crystal rc=$c_err_rc, selfhost rc=$s_err_rc"
   status=1

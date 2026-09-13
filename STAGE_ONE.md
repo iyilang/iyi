@@ -121,15 +121,14 @@ the compiler pipeline today:
 * **`types/*.iyi` (2,123 lines) vs `src/compiler/iyi/types.cr` (3,800+ lines)**
   * Status: 13 fixtures, 66 types verified by `bench/selfhost_types_exercise.sh`.
   * Blockers: Type system operates on iyi types. Blocked on semantic analysis.
-* **`semantic/top_level.iyi`, `semantic/main_visitor.iyi` (2,129 lines) vs `src/compiler/iyi/semantic/*.cr` (25,000+ lines)**
-  * Status: 28 fixtures, 39 declarations, 100 typed nodes, 14 errors.
-  * Blockers: The largest gap in the compiler. Unported components in Crystal:
-    1. Instance variable type inference beyond local scope (`type_inference.cr`).
-    2. Class variable initializers (`class_var_initializer_visitor.cr`).
-    3. Recursive struct check (`recursive_struct_checker.cr`).
-    4. Overload resolution and multiple dispatch (`call.cr`, `overload_resolution.cr`).
-    5. Block and closure type inference.
-    6. Exception handling typing (`exception_handler.cr`).
+* **`semantic/top_level.iyi`, `semantic/main_visitor.iyi`, `semantic/recursive_struct_checker.iyi` (2,705 lines) vs `src/compiler/iyi/semantic/*.cr` (25,000+ lines)**
+  * Status: 37 fixtures, 39 declarations, 173 typed nodes, 21 errors, 13 mutation proofs.
+  * Ported: Instance variable type inference across a type, class variable initializers, recursive struct check.
+  * Blockers: Unported components in Crystal:
+    1. Overload resolution and multiple dispatch (`call.cr`, `overload_resolution.cr`).
+    2. Block and closure type inference.
+    3. Exception handling typing (`exception_handler.cr`).
+    4. `TypeNode` semantic inspection in macros (`src/compiler/iyi/macros/types.cr`).
 
 ### Layer 5: Platform and LLVM C-API
 * **`platform/*.iyi` (698 lines) vs `src/compiler/iyi/codegen/target.cr` and `compiler.cr`**

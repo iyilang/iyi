@@ -7,7 +7,7 @@ import compiler/syntax/visitor
 import compiler/semantic/top_level
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/visitor::{Visitor}
 using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaTypeVar, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
@@ -434,6 +434,33 @@ pub class MainVisitor < Visitor
       @current_type = t.as(ClassType)
       node.body.accept(self)
       @current_type = old_type
+
+      cls = t.as(ClassType)
+      cls.class_vars.each_value do |cvar|
+        if cvar.initializer.nil? && !cvar.type.nilable?
+          raise("class variable '#{cvar.name}' of #{cls.full_name} is not nilable (it's #{cvar.type.full_name}) so it must have an initializer")
+        end
+      end
+    end
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    name = node.name.names.last
+    t = @current_type.lookup_type(name)
+    if t && t.is_a?(ModuleType)
+      old_type = @current_type
+      @current_type = t.as(ModuleType)
+      node.body.accept(self)
+      @current_type = old_type
+
+      mod = t.as(ModuleType)
+      mod.class_vars.each_value do |cvar|
+        if cvar.initializer.nil? && !cvar.type.nilable?
+          raise("class variable '#{cvar.name}' of #{mod.full_name} is not nilable (it's #{cvar.type.full_name}) so it must have an initializer")
+        end
+      end
     end
     set_type(node, @program.nil_type)
     false

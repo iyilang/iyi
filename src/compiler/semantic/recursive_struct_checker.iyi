@@ -1,0 +1,74 @@
+module compiler/semantic/recursive_struct_checker
+
+import compiler/semantic/top_level
+
+using compiler/semantic/top_level::{AliasType, ClassType, ModuleType, NamedType, SemanticProgram, Type}
+
+pub class RecursiveStructChecker
+  property program : SemanticProgram
+
+  def initialize(@program : SemanticProgram)
+  end
+
+  def run : Nil
+    check_types(@program)
+  end
+
+  def check_types(mod : ModuleType) : Nil
+    mod.types.each_value do |t|
+      check_single(t)
+    end
+  end
+
+  def check_single(t : Type) : Nil
+    if t.struct? && !t.abstract?
+      checked = Set(String).new
+      check_recursive_instance_vars(t, t, checked)
+    end
+
+    if t.is_a?(AliasType)
+      al = t.as(AliasType)
+      checked = Set(String).new
+      if al_val = al.aliased_type
+        check_recursive(al, al_val, checked)
+      end
+    end
+
+    if t.is_a?(ModuleType)
+      check_types(t.as(ModuleType))
+    end
+  end
+
+  def check_recursive_instance_vars(target : Type, current : Type, checked : Set(String)) : Nil
+    if checked.includes?(current.full_name)
+      return
+    end
+    checked.add(current.full_name)
+
+    if current.is_a?(ModuleType)
+      mod = current.as(ModuleType)
+      mod.all_instance_vars.each_value do |ivar|
+        if ivar_type = ivar.type?
+          check_recursive(target, ivar_type, checked)
+        end
+      end
+    end
+
+    checked.delete(current.full_name)
+  end
+
+  def check_recursive(target : Type, current : Type, checked : Set(String)) : Nil
+    if target.full_name == current.full_name
+      alias_msg = target.is_a?(AliasType) ? " (recursive aliases are structs)" : ""
+      raise("recursive struct #{target.full_name} detected#{alias_msg}")
+    end
+
+    if checked.includes?(current.full_name)
+      return
+    end
+
+    if current.struct? && !current.abstract?
+      check_recursive_instance_vars(target, current, checked)
+    end
+  end
+end

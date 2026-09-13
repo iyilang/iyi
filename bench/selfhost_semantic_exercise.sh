@@ -17,6 +17,7 @@ IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
 SEM="$REPO/src/compiler/semantic/top_level.iyi"
 SEM_MAIN="$REPO/src/compiler/semantic/main_visitor.iyi"
+SEM_REC="$REPO/src/compiler/semantic/recursive_struct_checker.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -293,7 +294,7 @@ compare_expr_all() {
   done
   for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     case "$(basename "$err_fixture")" in
-      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*)
+      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*)
         if "$1" "$err_fixture" --expr >/dev/null 2>&1; then
           out_status=1
         fi
@@ -446,6 +447,41 @@ PY
   echo "    reverted"
 }
 
+prove_rec_mutation() {
+  label="$1"
+  old="$2"
+  new="$3"
+  echo "  [$label]"
+  cp "$SEM_REC" "$SEM_REC.orig"
+  python3 - "$SEM_REC" "$old" "$new" <<'PY'
+import sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+t = open(path).read()
+if old not in t:
+    sys.exit(3)
+open(path, "w").write(t.replace(old, new, 1))
+PY
+  rc=$?
+  if [ "$rc" -eq 3 ] || diff -q "$SEM_REC.orig" "$SEM_REC" >/dev/null; then
+    echo "    PATCH CHANGED NOTHING: this proves nothing"
+    status=1
+    cp "$SEM_REC.orig" "$SEM_REC"; rm -f "$SEM_REC.orig"
+    return
+  fi
+  if "$IYI" build -o "$WORK/mut-exercise" "$REPO/bench/selfhost_semantic_exercise.iyi" >/dev/null 2>&1; then
+    if compare_expr_all "$WORK/mut-exercise"; then
+      echo "    FAILED: the comparison still passed with the mutation applied"
+      status=1
+    else
+      echo "    caught: the typed expression outputs diverged, as they must"
+    fi
+  else
+    echo "    caught: the mutated semantic visitor did not build"
+  fi
+  cp "$SEM_REC.orig" "$SEM_REC"; rm -f "$SEM_REC.orig"
+  echo "    reverted"
+}
+
 MUTATIONS_RUN=0
 
 prove_decl_mutation "struct default superclass switches to Reference" \
@@ -506,6 +542,16 @@ prove_main_mutation "instance variable lookup returns nil instead of inferred ty
         set_type(node, ivar.type)" \
   "if ivar = target_type.as(ModuleType).lookup_instance_var?(node.name)
         set_type(node, @program.nil_type)"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "class variable non-nilable initializer check is bypassed" \
+  "if cvar.initializer.nil? && !cvar.type.nilable?" \
+  "if false && cvar.initializer.nil?"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_rec_mutation "recursive struct check cycle detection is bypassed" \
+  "if target.full_name == current.full_name" \
+  "if false && target.full_name == current.full_name"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

@@ -440,6 +440,7 @@ pub class CodeGenVisitor < Visitor
 
     "Int32"
   end
+
   def assign_class_type_ids : Nil
     next_id = 1
     assigned = Set(String).new
@@ -1921,7 +1922,6 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
 
   # Assign hierarchical class type IDs
   cg.assign_class_type_ids
-
 
   # Inherit superclass fields for classes
   cg.custom_types.each_value do |info|

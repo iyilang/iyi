@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,938 lines of Crystal and 34,259 lines of iyi**. The
+`src/compiler` is **109,938 lines of Crystal and 34,651 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type
@@ -37,7 +37,7 @@ bindings, and the first slice of code generation:
 | `foundation/*.iyi` | 122 | compiled by the above |
 | `macros/*.iyi` | 1,583 | `bench/selfhost_macros_exercise.sh`: 12 fixtures, 71 expanded nodes identical to the Crystal front end, five guarded mutation proofs. Macro expansion interpreter, argument binding (positional, defaults, splats, double splats, named arguments, blocks), control flow ({% if %}, {% for %}), stringification and macro methods on AST nodes. Still not in the port: TypeNode semantic table inspection, external macro run, and semantic hook callbacks |
 | `platform/*.iyi` | 698 | `bench/selfhost_platform_exercise.sh`: 24 target triples across darwin, linux (gnu/musl), windows (msvc/gnu), wasm32-wasi, freebsd, and openbsd identical to the Crystal front end, malformed triple rejection, six guarded mutation proofs |
-| `codegen/codegen.iyi` | 1,608 | `bench/selfhost_codegen_exercise.sh`: 9 fixtures, 51 functions, 5 struct and class types, 3 type ID globals, and allocator declarations with 100% identical LLVM IR and identical native object execution linked with C driver, seven guarded mutation proofs. Emits LLVM IR for `fun` declarations with integer and float arithmetic, comparisons, local variable allocation and assignments, `if`/`else` (with phi value merges), `while` loops, and inter-function calls; structs (stack allocation, zero-initialization via memset, field accessors, pass-by-value arguments, methods, initializers, and constructors); pointer operations (pointerof, value, value=, ptr + offset, ptr - ptr, address); classes (heap allocation via malloc, zero-initialization via memset, type_id header initialization and type_id global constants, instance variable accessors, single-inheritance field layout, methods, initializers, and constructors). Excluded: virtual hierarchy dynamic dispatch tables, closures, exceptions, generics, and GC interface |
+| `codegen/codegen.iyi` | 1,980 | `bench/selfhost_codegen_exercise.sh`: 11 fixtures, 67 functions, 9 struct and class types, 8 type ID globals, and allocator declarations with 100% identical LLVM IR and identical native object execution linked with C driver, nine guarded mutation proofs. Emits LLVM IR for `fun` declarations with integer and float arithmetic, comparisons, local variable allocation and assignments, `if`/`else` (with phi value merges), `while` loops, and inter-function calls; structs (stack allocation, zero-initialization via memset, field accessors, pass-by-value arguments, methods, initializers, and constructors); pointer operations (pointerof, value, value=, ptr + offset, ptr - ptr, address); classes (heap allocation via malloc, zero-initialization via memset, type_id header initialization and hierarchical type_id global constants, instance variable accessors, single-inheritance field layout, methods, initializers, and constructors); virtual hierarchy dynamic dispatch tables and match functions (`~match<Base+>`); nilable values (nil as null pointer, `nil?` predicate, pointer truthiness checks). Excluded: closures and blocks (require unported closure capture analysis and lambda lifting in semantic analysis), exceptions, generics, and GC interface |
 
 The bind row is weaker than the rows above it, and the difference matters.
 Every other gate here compares against the code being replaced. The bind gate
@@ -52,8 +52,8 @@ is ported and the gate can drive the real one.
 What is **not** in iyi: semantic analysis beyond the top-level declaration,
 expression and method body typing passes, and the type system (instance
 variable inference beyond local scope, class var initializers, recursive struct
-check), TypeNode inspection in macros, and codegen beyond fun, struct, and class slices
-(virtual dispatch tables, closures, exceptions, generics, and the GC interface). That is the
+check), TypeNode inspection in macros, and codegen beyond fun, struct, class, virtual dispatch, and nilable slices
+(closures and blocks, exceptions, generics, and the GC interface). That is the
 109,871. The formatter, macro engine and codegen are partly ported, and their
 rows above say which parts are not.
 Before this change, nothing in the build called any of the ports above: each

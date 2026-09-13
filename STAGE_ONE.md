@@ -45,7 +45,7 @@ As measured by `python3 bench/doc_numbers.py`, the compiler source consists of:
 
 * **109,938 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
   and top-level wrappers (`crystal.cr`, `iyi.cr`, `crystal_front.cr`).
-* **34,259 lines of pure iyi** across 44 files in `src/compiler/**/*.iyi`.
+* **34,651 lines of pure iyi** across 46 files in `src/compiler/**/*.iyi`.
 
 ### Verification of the `BOOTSTRAP.md` Claim
 

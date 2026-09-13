@@ -219,6 +219,11 @@ pub trait Iterator
     count
   end
 
+  # Pulls one element to answer, and that element is gone: an iterator is a
+  # pull, so a predicate over one cannot be free. The block form below reads
+  # as much as it has to and no more. Said here because a method spelled
+  # like a question that quietly takes an element is the kind of thing a
+  # caller finds out from the answer to the *next* question.
   def any? : Bool
     !self.next.nil?
   end
@@ -269,6 +274,21 @@ pub trait Iterator
     raise "max of an empty collection"
   end
 
+  # The largest, or nil when there is none. `max?`/`max` is the pair
+  # `enumerable.iyi` states the library's naming rule with — `?` is the
+  # nilable one, the plain name raises — and this file already keeps it for
+  # `first?`/`first` and `find?`/`find`. `max` and `min` were written
+  # without their halves, so on an iterator the question "the largest, if
+  # there is one" could only be asked by taking a panic.
+  def max? : Elem? where Elem : Cmp
+    best = nil
+    each do |e|
+      current = best
+      best = e if current.nil? || e.gt(current)
+    end
+    best
+  end
+
   def min : Elem where Elem : Cmp
     best = nil
     each do |e|
@@ -278,6 +298,16 @@ pub trait Iterator
     found = best
     return found unless found.nil?
     raise "min of an empty collection"
+  end
+
+  # And the same pair at the other end.
+  def min? : Elem? where Elem : Cmp
+    best = nil
+    each do |e|
+      current = best
+      best = e if current.nil? || e.lt(current)
+    end
+    best
   end
 
   def sum : Elem where Elem : Num

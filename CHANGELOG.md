@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`max` without `max?`.** `std/enumerable` states the library's naming
+  rule and names this very pair as the exemplar — `?` is the nilable one,
+  the plain name raises, which is what iyi does instead of Crystal's
+  `max!`/`index!` now that `!` is out of identifiers (III.1.7) — and
+  `std/iterator` keeps it for `first?`/`first` and `find?`/`find` and then
+  defines `max` and `min` with no halves. On an iterator "the largest, if
+  there is one" could only be asked by taking a panic. Both pairs are whole
+  now, and `Iterator#any?` — the one method in the tower that consumes
+  *part* of its receiver, one element, silently — says so where it is
+  defined.
 - **The two traits were wired to nothing.** `Slice` wrote `unsafe_fetch`
   with the comment "required for Indexable" and never implemented
   `Indexable`, so the most random-access type in the library — a pointer

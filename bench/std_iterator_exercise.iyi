@@ -192,6 +192,16 @@ assert_equal("reduce?", it_red_opt.reduce? { |acc, x| acc + x }.to_s, "10")
 it_red_empty = Iterator.of([] of Int32)
 assert_true("reduce? empty", it_red_empty.reduce? { |acc, x| acc + x }.nil?)
 
+# `?` is the nilable one and the plain name raises - the rule
+# `std/enumerable` states and this file keeps for `first?`/`first` and
+# `find?`/`find`. `max` and `min` were written without their halves, so on
+# an iterator "the largest, if there is one" could only be asked by taking
+# a panic.
+assert_equal("max?", Iterator.of([3, 1, 4]).max?.to_s, "4")
+assert_true("max? empty", Iterator.of([] of Int32).max?.nil?)
+assert_equal("min?", Iterator.of([3, 1, 4]).min?.to_s, "1")
+assert_true("min? empty", Iterator.of([] of Int32).min?.nil?)
+
 puts "iterator: terminals counting"
 it_cnt = Iterator.of([10, 20, 30, 40])
 assert_equal("count", it_cnt.count.to_s, "4")

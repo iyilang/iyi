@@ -1,4 +1,5 @@
 class Cls
 end
+
 struct St < Cls
 end

@@ -1,4 +1,5 @@
 class C
 end
+
 impl C for Int32
 end

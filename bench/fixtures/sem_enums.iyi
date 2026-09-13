@@ -6,15 +6,15 @@ enum Direction
 end
 
 enum HttpStatus
-  Ok = 200
-  BadRequest = 400
-  NotFound = 404
+  Ok            = 200
+  BadRequest    = 400
+  NotFound      = 404
   InternalError = 500
 end
 
 enum Priority : UInt8
-  Low = 1
+  Low      = 1
   Medium
-  High = 10
+  High     = 10
   Critical
 end

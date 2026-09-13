@@ -1,6 +1,6 @@
 DEFAULT_TIMEOUT = 30
-APP_NAME = "iyi_test"
-DEBUG_MODE = true
+APP_NAME        = "iyi_test"
+DEBUG_MODE      = true
 
 module Config
   PORT = 8080

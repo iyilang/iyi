@@ -1,0 +1,291 @@
+import compiler/syntax/ast
+import compiler/syntax/parser
+import compiler/semantic/top_level
+import compiler/semantic/main_visitor
+import compiler/types
+
+using compiler/syntax/ast::{ASTNode}
+using compiler/syntax/parser::{Parser}
+using compiler/semantic/top_level::{AliasType, ClassType, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
+using compiler/types/types::{FloatType, GenericClassInstanceType, IntegerType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType, NilableReferenceUnionType, NilableType, PointerInstanceType, PrimitiveType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualType}
+using compiler/types/type_system::{TypeSystem}
+
+module BenchSelfhostTypesExercise
+  def self.type_kind_name(t : Type) : String
+    if t.is_a?(TupleInstanceType)
+      return "TupleInstanceType"
+    end
+    if t.is_a?(NamedTupleInstanceType)
+      return "NamedTupleInstanceType"
+    end
+    if t.is_a?(ProcInstanceType)
+      return "ProcInstanceType"
+    end
+    if t.is_a?(PointerInstanceType)
+      return "PointerInstanceType"
+    end
+    if t.is_a?(StaticArrayInstanceType)
+      return "StaticArrayInstanceType"
+    end
+    if t.is_a?(GenericClassInstanceType)
+      return "GenericClassInstanceType"
+    end
+    if t.is_a?(VirtualType)
+      return "VirtualType"
+    end
+    if t.is_a?(NilableProcType)
+      return "NilableProcType"
+    end
+    if t.is_a?(NilableReferenceUnionType)
+      return "NilableReferenceUnionType"
+    end
+    if t.is_a?(ReferenceUnionType)
+      return "ReferenceUnionType"
+    end
+    if t.is_a?(NilableType)
+      return "NilableType"
+    end
+    if t.is_a?(MixedUnionType) || t.is_a?(UnionType)
+      return "MixedUnionType"
+    end
+    if t.is_a?(IntegerType)
+      return "IntegerType"
+    end
+    if t.is_a?(FloatType)
+      return "FloatType"
+    end
+    if t.is_a?(PrimitiveType)
+      return "PrimitiveType"
+    end
+
+    case t.name
+    when "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"
+      "IntegerType"
+    when "Float32", "Float64"
+      "FloatType"
+    when "Char", "Bool", "Symbol"
+      "PrimitiveType"
+    when "Nil"
+      "NilType"
+    when "NoReturn"
+      "NoReturnType"
+    when "Void"
+      "VoidType"
+    else
+      if t.is_a?(NonGenericClassType)
+        "NonGenericClassType"
+      elsif t.is_a?(GenericClassType)
+        "GenericClassType"
+      elsif t.is_a?(ClassType)
+        "ClassType"
+      else
+        t.type_desc
+      end
+    end
+  end
+
+  def self.run_types(src : String, filename : String = "eval.iyi") : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    ts = TypeSystem.new(prog)
+    visitor = TopLevelVisitor.new(prog)
+    node.accept(visitor)
+
+    dump_types(prog, ts)
+  end
+
+  def self.dump_types(prog : SemanticProgram, ts : TypeSystem) : String
+    names = prog.types.keys.sorted
+    lines = [] of String
+
+    names.each do |name|
+      unless prog.initial_type_names.includes?(name)
+        t = prog.types[name]
+        if t.is_a?(ClassType)
+          ct = t.as(ClassType)
+          sc = if s = ct.superclass
+                 s.name
+               else
+                 "nil"
+               end
+          lines << "Class: #{name} (superclass: #{sc})"
+          lines << "  virtual: #{ts.render(ts.virtual_type_of(ct))}"
+          lines << "  metaclass: #{ts.render(ts.metaclass_of(ct))}"
+        elsif t.is_a?(AliasType)
+          at = t.as(AliasType)
+          scope = at.namespace || prog
+          aliased = ts.lookup_type_node(at.value, scope)
+          kind = type_kind_name(aliased)
+          lines << "Alias: #{name} = #{ts.render(aliased)} (#{kind})"
+        elsif t.is_a?(EnumType)
+          et = t.as(EnumType)
+          lines << "Enum: #{name} (base: #{et.base_type.name})"
+        elsif t.is_a?(TraitType)
+          lines << "Trait: #{name}"
+        end
+      end
+    end
+
+    result = [] of String
+    lines.each do |l|
+      result << l
+      result << "\n"
+    end
+    result.join("")
+  end
+
+  def self.count_types(src : String, filename : String) : Int32
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    visitor = TopLevelVisitor.new(prog)
+    node.accept(visitor)
+
+    count = 0
+    prog.types.keys.each do |k|
+      unless prog.initial_type_names.includes?(k)
+        count = count + 1
+      end
+    end
+    count
+  end
+
+  def self.run_all : Nil
+    puts "Running Selfhost Types Verification Suite (pure iyi stage 0)"
+    puts "============================================================"
+
+    ts = TypeSystem.new
+    prog = ts.program
+
+    print "testing primitive types and nilable... "
+    unless ts.render(prog.int32_type) == "Int32"
+      raise "int32 render failed"
+    end
+    u_nil = ts.type_merge([prog.int32_type, prog.nil_type] of Type)
+    unless ts.nilable?(u_nil) && ts.render(u_nil) == "(Int32 | Nil)"
+      raise "nilable union failed"
+    end
+    unless ts.render(ts.not_nil_type(u_nil)) == "Int32"
+      raise "not_nil_type failed"
+    end
+    puts "ok (primitives and nilable verified)"
+
+    print "testing union unification and sorting... "
+    u1 = ts.type_merge([prog.int32_type, prog.string_type] of Type)
+    unless ts.render(u1) == "(Int32 | String)"
+      raise "union sorting failed: #{ts.render(u1)}"
+    end
+    u2 = ts.type_merge([prog.string_type, prog.types["Float64"], prog.int32_type, prog.nil_type] of Type)
+    unless ts.render(u2) == "(Float64 | Int32 | String | Nil)"
+      raise "union with nil sorting failed: #{ts.render(u2)}"
+    end
+    u_nr = ts.type_merge([prog.int32_type, prog.no_return_type] of Type)
+    unless ts.render(u_nr) == "Int32"
+      raise "NoReturn elimination failed: #{ts.render(u_nr)}"
+    end
+    puts "ok (union unification and sorting verified)"
+
+    print "testing virtual types and metaclasses... "
+    base_c = NonGenericClassType.new(prog, prog, "BaseCls", prog.reference_type)
+    prog.types["BaseCls"] = base_c
+    sub_c1 = NonGenericClassType.new(prog, prog, "SubCls1", base_c)
+    prog.types["SubCls1"] = sub_c1
+    sub_c2 = NonGenericClassType.new(prog, prog, "SubCls2", base_c)
+    prog.types["SubCls2"] = sub_c2
+
+    merged_subs = ts.type_merge([sub_c1, sub_c2] of Type)
+    unless ts.render(merged_subs) == "BaseCls+"
+      raise "virtual type LCA failed: #{ts.render(merged_subs)}"
+    end
+    unless ts.render(ts.metaclass_of(merged_subs)) == "BaseCls+.class"
+      raise "virtual metaclass render failed"
+    end
+    puts "ok (virtual types and metaclasses verified)"
+
+    print "testing generic instantiation and built-ins... "
+    ary_t = prog.types["Array"].as(GenericClassType)
+    ary_inst = ts.instantiate_generic(ary_t, [prog.int32_type] of Type)
+    unless ts.render(ary_inst) == "Array(Int32)"
+      raise "generic class instantiation failed"
+    end
+    unless ts.render(ary_inst, generic_args: false) == "Array"
+      raise "generic args false failed"
+    end
+
+    tup = ts.tuple_of([prog.int32_type, prog.string_type] of Type)
+    unless ts.render(tup) == "Tuple(Int32, String)"
+      raise "tuple render failed"
+    end
+
+    nt = ts.named_tuple_of([
+      NamedArgumentType.new("x", prog.int32_type),
+      NamedArgumentType.new("y", prog.string_type),
+    ])
+    unless ts.render(nt) == "NamedTuple(x: Int32, y: String)"
+      raise "named tuple render failed"
+    end
+
+    pr = ts.proc_of([prog.int32_type] of Type, prog.string_type)
+    unless ts.render(pr) == "Proc(Int32, String)"
+      raise "proc render failed"
+    end
+
+    ptr = ts.pointer_of(prog.int32_type)
+    unless ts.render(ptr) == "Pointer(Int32)"
+      raise "pointer render failed"
+    end
+
+    sa = ts.static_array_of(prog.types["UInt8"], 16_i64)
+    unless ts.render(sa) == "StaticArray(UInt8, 16)"
+      raise "static array render failed"
+    end
+    puts "ok (generics, tuples, procs, pointers, static arrays verified)"
+
+    print "testing type filtering and narrowing... "
+    f1 = ts.filter_by(u1, prog.int32_type)
+    unless f1 && ts.render(f1) == "Int32"
+      raise "filter_by Int32 failed"
+    end
+    f2 = ts.filter_by(u1, prog.types["Number"])
+    unless f2 && ts.render(f2) == "Int32"
+      raise "filter_by Number failed"
+    end
+    f3 = ts.filter_by(u1, prog.types["Float64"])
+    unless f3.nil?
+      raise "filter_by Float64 expected nil"
+    end
+    puts "ok (type filtering and narrowing verified)"
+
+    print "testing type restrictions... "
+    unless ts.matches_restriction?(prog.int32_type, prog.int32_type)
+      raise "restriction Int32 == Int32 failed"
+    end
+    unless ts.matches_restriction?(prog.int32_type, prog.types["Number"])
+      raise "restriction Int32 <= Number failed"
+    end
+    if ts.matches_restriction?(prog.int32_type, prog.string_type)
+      raise "restriction Int32 <= String should be false"
+    end
+    unless ts.matches_restriction?(u1, ts.type_merge([prog.types["Number"], prog.string_type] of Type))
+      raise "restriction union match failed"
+    end
+    puts "ok (type restrictions verified)"
+
+    puts "============================================================"
+    puts "ALL SELFHOST TYPES CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================"
+  end
+end
+
+if Program.args.size > 0
+  filename = Program.args[0]
+  source = File.read(filename)
+  if Program.args.size > 1 && Program.args[1] == "--count"
+    puts BenchSelfhostTypesExercise.count_types(source, filename)
+  else
+    print BenchSelfhostTypesExercise.run_types(source, filename)
+  end
+else
+  BenchSelfhostTypesExercise.run_all
+end

@@ -1,0 +1,20 @@
+class Box(T)
+end
+
+class Pair(K, V)
+end
+
+class Triple(A, B, C)
+end
+
+alias BoxInt = Box(Int32)
+alias BoxString = Box(String)
+alias NestedBox = Box(Box(Int32))
+alias MyPair = Pair(String, Int32)
+alias MyTriple = Triple(Int32, String, Bool)
+alias IntArray = Array(Int32)
+alias StringArray = Array(String)
+alias StringHash = Hash(String, Int32)
+alias IntPointer = Pointer(Int32)
+alias ByteStaticArray = StaticArray(UInt8, 16)
+alias NestedArray = Array(Array(Int32))

@@ -1,0 +1,673 @@
+module compiler/types/types
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/semantic/top_level
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode, Def, Generic, Path, Visibility}
+using compiler/syntax/token::{NumberKind}
+using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, ImplRecord, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TraitType, Type, TypeException, UnionType}
+
+pub class VirtualType < Type
+  property base_type : Type
+  @metaclass : VirtualMetaclassType?
+
+  def initialize(program : SemanticProgram, @base_type : Type)
+    super(program, nil, "#{@base_type.name}+")
+    @metaclass = nil
+  end
+
+  def virtual? : Bool
+    true
+  end
+
+  def full_name : String
+    "#{@base_type.full_name}+"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "virtual"
+  end
+
+  def struct? : Bool
+    @base_type.struct?
+  end
+
+  def abstract? : Bool
+    @base_type.abstract?
+  end
+
+  def leaf? : Bool
+    false
+  end
+
+  def metaclass : VirtualMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = VirtualMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+
+  def subtypes : Array(Type)
+    result = [] of Type
+    collect_subtypes(@base_type, result)
+    result
+  end
+
+  private def collect_subtypes(type : Type, result : Array(Type)) : Nil
+    unless type.abstract?
+      result << type
+    end
+    if type.is_a?(ClassType)
+      type.as(ClassType).subclasses.each do |sub|
+        collect_subtypes(sub, result)
+      end
+    end
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(VirtualType)
+      return @base_type.subtype_of?(other.as(VirtualType).base_type)
+    end
+    @base_type.subtype_of?(other)
+  end
+
+  def implements?(other : Type) : Bool
+    @base_type.implements?(other)
+  end
+end
+
+pub class VirtualMetaclassType < Type
+  getter instance_type : VirtualType
+
+  def initialize(program : SemanticProgram, @instance_type : VirtualType)
+    super(program, nil, "#{@instance_type.name}.class")
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "virtual_metaclass"
+  end
+
+  def metaclass : ClassType
+    @program.types["Class"].as(ClassType)
+  end
+end
+
+pub abstract class GenericInstanceType < Type
+  property generic_type : Type
+  property type_vars : Hash(String, Type)
+  property type_args : Array(Type)
+
+  def initialize(program : SemanticProgram, @generic_type : Type, @type_vars : Hash(String, Type), @type_args : Array(Type) = [] of Type)
+    super(program, @generic_type.namespace, @generic_type.name)
+  end
+
+  def generic_instance? : Bool
+    true
+  end
+
+  def full_name : String
+    args_strs = @type_args.map(&.full_name)
+    "#{@generic_type.full_name}(#{args_strs.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "generic_instance"
+  end
+end
+
+pub class GenericClassInstanceType < GenericInstanceType
+  property superclass : Type?
+  getter subclasses : Array(Type)
+  @metaclass : GenericClassInstanceMetaclassType?
+
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type), @superclass : Type? = nil)
+    super(program, generic_type, type_vars, type_args)
+    @subclasses = [] of Type
+    @metaclass = nil
+    if sc = @superclass
+      if sc.is_a?(ClassType)
+        sc.as(ClassType).subclasses << self
+      elsif sc.is_a?(GenericClassInstanceType)
+        sc.as(GenericClassInstanceType).subclasses << self
+      end
+    end
+  end
+
+  def class? : Bool
+    !@generic_type.struct?
+  end
+
+  def struct? : Bool
+    @generic_type.struct?
+  end
+
+  def type_desc : String
+    struct? ? "struct" : "class"
+  end
+
+  def metaclass : GenericClassInstanceMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = GenericClassInstanceMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(GenericClassInstanceType)
+      other_gi = other.as(GenericClassInstanceType)
+      if @generic_type == other_gi.generic_type
+        if @type_args.size == other_gi.type_args.size
+          i = 0
+          while i < @type_args.size
+            return false unless @type_args[i] == other_gi.type_args[i]
+            i = i + 1
+          end
+          return true
+        end
+      end
+    elsif other.is_a?(GenericClassType)
+      return @generic_type == other
+    end
+    if sc = @superclass
+      return sc.subtype_of?(other)
+    end
+    false
+  end
+
+  def implements?(other : Type) : Bool
+    subtype_of?(other)
+  end
+end
+
+pub class GenericModuleInstanceType < GenericInstanceType
+  @metaclass : GenericModuleInstanceMetaclassType?
+
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type))
+    super(program, generic_type, type_vars, type_args)
+    @metaclass = nil
+  end
+
+  def module? : Bool
+    true
+  end
+
+  def type_desc : String
+    "module"
+  end
+
+  def metaclass : GenericModuleInstanceMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = GenericModuleInstanceMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+end
+
+pub class GenericTraitInstanceType < GenericInstanceType
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type))
+    super(program, generic_type, type_vars, type_args)
+  end
+
+  def trait? : Bool
+    true
+  end
+
+  def type_desc : String
+    "trait"
+  end
+end
+
+pub class GenericClassInstanceMetaclassType < MetaclassType
+  def initialize(program : SemanticProgram, instance_type : GenericClassInstanceType)
+    super(program, instance_type.namespace, "#{instance_type.name}:Class", instance_type)
+  end
+
+  def generic_instance_type : GenericClassInstanceType
+    @instance_type.as(GenericClassInstanceType)
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub class GenericModuleInstanceMetaclassType < MetaclassType
+  def initialize(program : SemanticProgram, instance_type : GenericModuleInstanceType)
+    super(program, instance_type.namespace, "#{instance_type.name}:Class", instance_type)
+  end
+
+  def generic_instance_type : GenericModuleInstanceType
+    @instance_type.as(GenericModuleInstanceType)
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub class TupleInstanceType < GenericClassInstanceType
+  getter tuple_types : Array(Type)
+
+  def initialize(program : SemanticProgram, @tuple_types : Array(Type))
+    super(program, program.types["Tuple"], Hash(String, Type).new, @tuple_types, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    types_s = @tuple_types.map(&.full_name)
+    "Tuple(#{types_s.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def tuple? : Bool
+    true
+  end
+
+  def size : Int32
+    @tuple_types.size
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(TupleInstanceType)
+      ot = other.as(TupleInstanceType)
+      return false unless @tuple_types.size == ot.tuple_types.size
+      i = 0
+      while i < @tuple_types.size
+        return false unless @tuple_types[i].subtype_of?(ot.tuple_types[i])
+        i = i + 1
+      end
+      return true
+    end
+    super
+  end
+end
+
+pub class NamedArgumentType
+  property name : String
+  property type : Type
+
+  def initialize(@name : String, @type : Type)
+  end
+
+  def to_s : String
+    "#{@name}: #{@type.to_s}"
+  end
+end
+
+pub class NamedTupleInstanceType < GenericClassInstanceType
+  getter entries : Array(NamedArgumentType)
+
+  def initialize(program : SemanticProgram, @entries : Array(NamedArgumentType))
+    args = @entries.map(&.type)
+    super(program, program.types["NamedTuple"], Hash(String, Type).new, args, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    entries_s = @entries.map { |e| "#{e.name}: #{e.type.full_name}" }
+    "NamedTuple(#{entries_s.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def named_tuple? : Bool
+    true
+  end
+
+  def size : Int32
+    @entries.size
+  end
+
+  def name_type(name : String) : Type?
+    i = 0
+    while i < @entries.size
+      if @entries[i].name == name
+        return @entries[i].type
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(NamedTupleInstanceType)
+      ot = other.as(NamedTupleInstanceType)
+      return false unless @entries.size == ot.entries.size
+      i = 0
+      while i < @entries.size
+        entry = @entries[i]
+        other_type = ot.name_type(entry.name)
+        return false if other_type.nil?
+        return false unless entry.type.subtype_of?(other_type)
+        i = i + 1
+      end
+      return true
+    end
+    super
+  end
+end
+
+pub class ProcInstanceType < GenericClassInstanceType
+  getter arg_types : Array(Type)
+  getter return_type : Type
+
+  def initialize(program : SemanticProgram, @arg_types : Array(Type), @return_type : Type)
+    all_args = [] of Type
+    @arg_types.each { |a| all_args << a }
+    all_args << @return_type
+    super(program, program.types["Proc"], Hash(String, Type).new, all_args, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    all_parts = [] of String
+    @arg_types.each { |a| all_parts << a.full_name }
+    all_parts << @return_type.full_name
+    "Proc(#{all_parts.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def proc? : Bool
+    true
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(ProcInstanceType)
+      ot = other.as(ProcInstanceType)
+      return false unless @arg_types.size == ot.arg_types.size
+      i = 0
+      while i < @arg_types.size
+        return false unless ot.arg_types[i].subtype_of?(@arg_types[i])
+        i = i + 1
+      end
+      return @return_type.subtype_of?(ot.return_type)
+    end
+    super
+  end
+end
+
+pub class PointerInstanceType < GenericClassInstanceType
+  getter element_type : Type
+
+  def initialize(program : SemanticProgram, @element_type : Type)
+    super(program, program.types["Pointer"], Hash(String, Type).new, [@element_type] of Type, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    "Pointer(#{@element_type.full_name})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class StaticArrayInstanceType < GenericClassInstanceType
+  getter element_type : Type
+  getter size_int : Int64
+
+  def initialize(program : SemanticProgram, @element_type : Type, @size_int : Int64)
+    super(program, program.types["StaticArray"], Hash(String, Type).new, [@element_type] of Type, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    "StaticArray(#{@element_type.full_name}, #{@size_int})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class NilableType < UnionType
+  getter not_nil_type : Type
+
+  def initialize(program : SemanticProgram, @not_nil_type : Type)
+    super(program, [@not_nil_type, program.nil_type] of Type)
+  end
+
+  def nilable? : Bool
+    true
+  end
+
+  def full_name : String
+    "(#{@not_nil_type.full_name} | Nil)"
+  end
+
+  def to_s : String
+    full_name
+  end
+end
+
+pub class NilableReferenceUnionType < UnionType
+  def nilable? : Bool
+    true
+  end
+end
+
+pub class ReferenceUnionType < UnionType
+  def nilable? : Bool
+    false
+  end
+end
+
+pub class NilableProcType < UnionType
+  getter proc_type : ProcInstanceType
+
+  def initialize(program : SemanticProgram, @proc_type : ProcInstanceType)
+    super(program, [@proc_type, program.nil_type] of Type)
+  end
+
+  def nilable? : Bool
+    true
+  end
+end
+
+pub class MixedUnionType < UnionType
+end
+
+pub abstract class PrimitiveType < ClassType
+  getter bytes : Int32
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, @bytes : Int32)
+    super(program, namespace, name, superclass)
+    @struct = true
+  end
+
+  def primitive? : Bool
+    true
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class IntegerType < PrimitiveType
+  getter rank : Int32
+  getter kind : NumberKind
+  getter signed : Bool
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, bytes : Int32, @rank : Int32, @kind : NumberKind, @signed : Bool)
+    super(program, namespace, name, superclass, bytes)
+  end
+end
+
+pub class FloatType < PrimitiveType
+  getter rank : Int32
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, bytes : Int32, @rank : Int32)
+    super(program, namespace, name, superclass, bytes)
+  end
+end
+
+pub class CharType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 4)
+  end
+end
+
+pub class BoolType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 1)
+  end
+end
+
+pub class SymbolType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 4)
+  end
+end
+
+pub class NilType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 0)
+  end
+end
+
+pub class NoReturnType < NamedType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+  end
+
+  def no_return? : Bool
+    true
+  end
+
+  def subtype_of?(other : Type) : Bool
+    true
+  end
+end
+
+pub class VoidType < NamedType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+  end
+
+  def void? : Bool
+    true
+  end
+end
+
+pub class TypeParameter < Type
+  getter param_name : String
+
+  def initialize(program : SemanticProgram, @param_name : String)
+    super(program, nil, @param_name)
+  end
+
+  def type_parameter? : Bool
+    true
+  end
+end
+
+pub class TypeSplat < Type
+  getter splatted_type : Type
+
+  def initialize(program : SemanticProgram, @splatted_type : Type)
+    super(program, nil, "*#{@splatted_type.name}")
+  end
+
+  def full_name : String
+    "*#{@splatted_type.full_name}"
+  end
+end

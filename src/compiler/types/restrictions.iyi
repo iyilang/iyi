@@ -1,0 +1,134 @@
+module compiler/types/restrictions
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/semantic/top_level
+import compiler/types/types
+import compiler/types/unification
+import compiler/types/filtering
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType}
+using compiler/types/unification::{TypeUnification}
+using compiler/types/filtering::{TypeFiltering}
+
+pub class TypeRestrictions
+  def self.matches_restriction?(program : SemanticProgram, type : Type, restriction : Type) : Bool
+    if type == restriction || type.full_name == restriction.full_name
+      return true
+    end
+
+    if type.subtype_of?(restriction)
+      return true
+    end
+    if implements_trait?(program, type, restriction)
+      return true
+    end
+
+    if type.is_a?(UnionType)
+      u = type.as(UnionType)
+      i = 0
+      while i < u.union_types.size
+        unless matches_restriction?(program, u.union_types[i], restriction)
+          return false
+        end
+        i = i + 1
+      end
+      return true
+    end
+
+    if restriction.is_a?(UnionType)
+      u = restriction.as(UnionType)
+      i = 0
+      while i < u.union_types.size
+        if matches_restriction?(program, type, u.union_types[i])
+          return true
+        end
+        i = i + 1
+      end
+      return false
+    end
+
+    if restriction.is_a?(VirtualType)
+      return matches_restriction?(program, type, restriction.as(VirtualType).base_type)
+    end
+
+    if type.is_a?(VirtualType)
+      return matches_restriction?(program, type.as(VirtualType).base_type, restriction)
+    end
+
+    if type.is_a?(GenericClassInstanceType) && restriction.is_a?(GenericClassType)
+      return type.as(GenericClassInstanceType).generic_type == restriction
+    end
+
+    if type.is_a?(GenericClassInstanceType) && restriction.is_a?(GenericClassInstanceType)
+      g1 = type.as(GenericClassInstanceType)
+      g2 = restriction.as(GenericClassInstanceType)
+      if g1.generic_type == g2.generic_type && g1.type_args.size == g2.type_args.size
+        i = 0
+        while i < g1.type_args.size
+          unless g1.type_args[i] == g2.type_args[i] || g1.type_args[i].full_name == g2.type_args[i].full_name
+            return false
+          end
+          i = i + 1
+        end
+        return true
+      end
+      return false
+    end
+
+    if type.is_a?(TupleInstanceType) && restriction.is_a?(TupleInstanceType)
+      t1 = type.as(TupleInstanceType)
+      t2 = restriction.as(TupleInstanceType)
+      return false unless t1.size == t2.size
+      i = 0
+      while i < t1.size
+        unless matches_restriction?(program, t1.tuple_types[i], t2.tuple_types[i])
+          return false
+        end
+        i = i + 1
+      end
+      return true
+    end
+
+    if type.is_a?(NamedTupleInstanceType) && restriction.is_a?(NamedTupleInstanceType)
+      nt1 = type.as(NamedTupleInstanceType)
+      nt2 = restriction.as(NamedTupleInstanceType)
+      return false unless nt1.size == nt2.size
+      i = 0
+      while i < nt1.size
+        e = nt1.entries[i]
+        t2_t = nt2.name_type(e.name)
+        return false if t2_t.nil?
+        unless matches_restriction?(program, e.type, t2_t)
+          return false
+        end
+        i = i + 1
+      end
+      return true
+    end
+
+    false
+  end
+
+  def self.restrict(program : SemanticProgram, type : Type, restriction : Type) : Type?
+    TypeFiltering.common_descendent(program, type, restriction)
+  end
+
+  def self.implements_trait?(program : SemanticProgram, type : Type, trait_type : Type) : Bool
+    return true if type.subtype_of?(trait_type)
+    i = 0
+    while i < program.impls.size
+      rec = program.impls[i]
+      if (rec.target_type == type || rec.target_type.full_name == type.full_name) &&
+         (rec.trait_type == trait_type || rec.trait_type.full_name == trait_type.full_name)
+        return true
+      end
+      i = i + 1
+    end
+    false
+  end
+end

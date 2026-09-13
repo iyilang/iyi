@@ -1,0 +1,409 @@
+module compiler/types/unification
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/semantic/top_level
+import compiler/types/types
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType}
+
+pub class TypeUnification
+  def self.type_merge(program : SemanticProgram, types : Array(Type)) : Type
+    if types.empty?
+      return program.no_return_type
+    end
+    if types.size == 1
+      return types.first
+    end
+
+    compacted = compact_types(program, types)
+    if compacted.empty?
+      return program.no_return_type
+    end
+    if compacted.size == 1
+      return compacted.first
+    end
+
+    combined = type_combine(program, compacted)
+    union_of(program, combined)
+  end
+
+  def self.type_merge(program : SemanticProgram, t1 : Type, t2 : Type) : Type
+    type_merge(program, [t1, t2] of Type)
+  end
+
+  def self.compact_types(program : SemanticProgram, types : Array(Type)) : Array(Type)
+    flat = [] of Type
+    flatten_types(types, flat)
+
+    all_types = [] of Type
+    i = 0
+    while i < flat.size
+      t = flat[i]
+      # Void becomes Nil in unions
+      if t.full_name == "Void" || t.is_a?(VoidType)
+        t = program.nil_type
+      end
+      # Unwrap aliases
+      if t.alias? && t.is_a?(AliasType)
+        aliased = t.as(AliasType).process_value
+        t = aliased
+      end
+
+      # Add if not duplicate
+      already = false
+      j = 0
+      while j < all_types.size
+        if all_types[j] == t || all_types[j].full_name == t.full_name
+          already = true
+          break
+        end
+        j = j + 1
+      end
+      unless already
+        all_types << t
+      end
+      i = i + 1
+    end
+
+    # Remove NoReturn if more than one type
+    if all_types.size > 1
+      non_nr = [] of Type
+      i = 0
+      while i < all_types.size
+        t = all_types[i]
+        unless t.full_name == "NoReturn" || (t.is_a?(NoReturnType) && t.as(NoReturnType).no_return?)
+          non_nr << t
+        end
+        i = i + 1
+      end
+      all_types = non_nr
+    end
+
+    all_types
+  end
+
+  private def self.flatten_types(types : Array(Type), result : Array(Type)) : Nil
+    i = 0
+    while i < types.size
+      t = types[i]
+      if t.union? && t.is_a?(UnionType)
+        flatten_types(t.as(UnionType).union_types, result)
+      else
+        result << t
+      end
+      i = i + 1
+    end
+  end
+
+  def self.type_combine(program : SemanticProgram, types : Array(Type)) : Array(Type)
+    return types if types.size <= 1
+
+    all_types = [types.first] of Type
+    i = 1
+    while i < types.size
+      t2 = types[i]
+      not_found = true
+      j = 0
+      while j < all_types.size
+        t1 = all_types[j]
+        # Un-virtualize for LCA computation
+        v1 = t1.is_a?(VirtualType) ? t1.as(VirtualType).base_type : t1
+        v2 = t2.is_a?(VirtualType) ? t2.as(VirtualType).base_type : t2
+        ancestor = least_common_ancestor(v1, v2)
+        if ancestor && virtual_root?(ancestor)
+          all_types.delete_at(j)
+          v = virtual_type_of(program, ancestor)
+          all_types << v
+          not_found = false
+          break
+        end
+        j = j + 1
+      end
+      if not_found
+        all_types << t2
+      end
+      i = i + 1
+    end
+
+    all_types
+  end
+
+  def self.virtual_root?(type : Type) : Bool
+    if type.is_a?(VirtualType)
+      return virtual_root?(type.as(VirtualType).base_type)
+    end
+    if type.is_a?(MetaclassType)
+      return virtual_root?(type.as(MetaclassType).instance_type)
+    end
+    if type.is_a?(ClassType)
+      d = type_depth(type)
+      return false if d <= 1
+      case type.name
+      when "Struct", "Number", "Int", "Float"
+        return false
+      else
+        return true
+      end
+    end
+    false
+  end
+
+  def self.type_depth(type : Type) : Int32
+    if type.is_a?(ClassType)
+      ct = type.as(ClassType)
+      if sc = ct.superclass
+        return 1 + type_depth(sc)
+      else
+        return 0
+      end
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return type_depth(type.as(GenericClassInstanceType).generic_type)
+    end
+    if type.is_a?(VirtualType)
+      return type_depth(type.as(VirtualType).base_type)
+    end
+    0
+  end
+
+  def self.class_superclass(type : Type) : Type?
+    if type.is_a?(ClassType)
+      return type.as(ClassType).superclass
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return type.as(GenericClassInstanceType).superclass
+    end
+    nil
+  end
+
+  def self.least_common_ancestor(t1 : Type, t2 : Type) : Type?
+    return t1 if t1 == t2 || t1.full_name == t2.full_name
+
+    b1 = t1.is_a?(VirtualType) ? t1.as(VirtualType).base_type : t1
+    b2 = t2.is_a?(VirtualType) ? t2.as(VirtualType).base_type : t2
+    return b1 if b1 == b2 || b1.full_name == b2.full_name
+
+    if b1.is_a?(MetaclassType) && b2.is_a?(MetaclassType)
+      inst1 = b1.as(MetaclassType).instance_type
+      inst2 = b2.as(MetaclassType).instance_type
+      common = least_common_ancestor(inst1, inst2)
+      return common ? metaclass_of(common) : nil
+    end
+
+    if b1.is_a?(TupleInstanceType) && b2.is_a?(TupleInstanceType)
+      tup1 = b1.as(TupleInstanceType)
+      tup2 = b2.as(TupleInstanceType)
+      return nil unless tup1.size == tup2.size
+      merged = [] of Type
+      i = 0
+      while i < tup1.size
+        m = type_merge(tup1.program, [tup1.tuple_types[i], tup2.tuple_types[i]] of Type)
+        merged << m
+        i = i + 1
+      end
+      return TupleInstanceType.new(tup1.program, merged)
+    end
+
+    if b1.is_a?(NamedTupleInstanceType) && b2.is_a?(NamedTupleInstanceType)
+      nt1 = b1.as(NamedTupleInstanceType)
+      nt2 = b2.as(NamedTupleInstanceType)
+      return nil unless nt1.size == nt2.size
+      merged_entries = [] of NamedArgumentType
+      i = 0
+      while i < nt1.size
+        e1 = nt1.entries[i]
+        t2_type = nt2.name_type(e1.name)
+        return nil if t2_type.nil?
+        m = type_merge(nt1.program, [e1.type, t2_type] of Type)
+        merged_entries << NamedArgumentType.new(e1.name, m)
+        i = i + 1
+      end
+      return NamedTupleInstanceType.new(nt1.program, merged_entries)
+    end
+
+    d1 = type_depth(b1)
+    d2 = type_depth(b2)
+    if d1 > 0 && d2 > 0
+      if d1 == d2
+        sc1 = class_superclass(b1)
+        sc2 = class_superclass(b2)
+        if sc1 && sc2
+          return least_common_ancestor(sc1, sc2)
+        end
+      elsif d1 > d2
+        sc1 = class_superclass(b1)
+        if sc1
+          return least_common_ancestor(sc1, b2)
+        end
+      elsif d1 < d2
+        sc2 = class_superclass(b2)
+        if sc2
+          return least_common_ancestor(b1, sc2)
+        end
+      end
+    end
+
+    if b2.subtype_of?(b1)
+      return b1
+    end
+    if b1.subtype_of?(b2)
+      return b2
+    end
+
+    nil
+  end
+
+  def self.virtual_type_of(program : SemanticProgram, type : Type) : Type
+    if type.is_a?(VirtualType)
+      return type
+    end
+    if type.is_a?(ClassType)
+      ct = type.as(ClassType)
+      if ct.subclasses.empty? && !ct.abstract?
+        return ct
+      end
+      return VirtualType.new(program, ct)
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return VirtualType.new(program, type)
+    end
+    type
+  end
+
+  def self.metaclass_of(type : Type) : Type?
+    if type.is_a?(ModuleType)
+      return type.as(ModuleType).metaclass
+    end
+    if type.is_a?(VirtualType)
+      return type.as(VirtualType).metaclass
+    end
+    nil
+  end
+
+  def self.sort_types_by_name(types : Array(Type)) : Array(Type)
+    # Simple selection sort by full_name
+    sorted = [] of Type
+    types.each { |t| sorted << t }
+    i = 0
+    while i < sorted.size
+      min_idx = i
+      j = i + 1
+      while j < sorted.size
+        if sorted[j].full_name < sorted[min_idx].full_name
+          min_idx = j
+        end
+        j = j + 1
+      end
+      if min_idx != i
+        temp = sorted[i]
+        sorted[i] = sorted[min_idx]
+        sorted[min_idx] = temp
+      end
+      i = i + 1
+    end
+    sorted
+  end
+
+  def self.union_of(program : SemanticProgram, types : Array(Type)) : Type
+    # Deduplicate after combining
+    unique = [] of Type
+    i = 0
+    while i < types.size
+      t = types[i]
+      already = false
+      j = 0
+      while j < unique.size
+        if unique[j] == t || unique[j].full_name == t.full_name
+          already = true
+          break
+        end
+        j = j + 1
+      end
+      unless already
+        unique << t
+      end
+      i = i + 1
+    end
+
+    if unique.size == 1
+      return unique.first
+    end
+
+    non_nil = [] of Type
+    has_nil = false
+    i = 0
+    while i < unique.size
+      t = unique[i]
+      if t.full_name == "Nil" || t.is_a?(NilType)
+        has_nil = true
+      else
+        non_nil << t
+      end
+      i = i + 1
+    end
+
+    sorted_non_nil = sort_types_by_name(non_nil)
+
+    if has_nil
+      all_sorted = [] of Type
+      sorted_non_nil.each { |t| all_sorted << t }
+      all_sorted << program.nil_type
+
+      if all_sorted.size == 2
+        not_nil_t = sorted_non_nil.first
+        if not_nil_t.is_a?(ProcInstanceType)
+          return NilableProcType.new(program, not_nil_t.as(ProcInstanceType))
+        elsif not_nil_t.subtype_of?(program.reference_type) && !not_nil_t.is_a?(VirtualType)
+          if not_nil_t.is_a?(ClassType) && !not_nil_t.as(ClassType).subclasses.empty?
+            return NilableReferenceUnionType.new(program, all_sorted)
+          else
+            return NilableType.new(program, not_nil_t)
+          end
+        elsif not_nil_t.subtype_of?(program.reference_type) && not_nil_t.is_a?(VirtualType)
+          return NilableReferenceUnionType.new(program, all_sorted)
+        else
+          return MixedUnionType.new(program, all_sorted)
+        end
+      end
+
+      # Check if all non-nil are reference types
+      all_ref = true
+      i = 0
+      while i < sorted_non_nil.size
+        unless sorted_non_nil[i].subtype_of?(program.reference_type)
+          all_ref = false
+          break
+        end
+        i = i + 1
+      end
+
+      if all_ref
+        return NilableReferenceUnionType.new(program, all_sorted)
+      else
+        return MixedUnionType.new(program, all_sorted)
+      end
+    else
+      # Check if all are reference types
+      all_ref = true
+      i = 0
+      while i < sorted_non_nil.size
+        unless sorted_non_nil[i].subtype_of?(program.reference_type)
+          all_ref = false
+          break
+        end
+        i = i + 1
+      end
+
+      if all_ref
+        return ReferenceUnionType.new(program, sorted_non_nil)
+      else
+        return MixedUnionType.new(program, sorted_non_nil)
+      end
+    end
+  end
+end

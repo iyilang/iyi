@@ -1,0 +1,8 @@
+alias Point = Tuple(Int32, Int32)
+alias MixedTuple = Tuple(Int32, String, Bool)
+alias NestedTuple = Tuple(Int32, Tuple(String, Bool))
+alias NamedPoint = NamedTuple(x: Int32, y: Int32)
+alias UserRecord = NamedTuple(name: String, age: Int32, active: Bool)
+alias SimpleProc = Proc(Int32, String)
+alias BinaryProc = Proc(Int32, Int32, Bool)
+alias NoArgProc = Proc(String)

@@ -1,0 +1,1 @@
+alias BadArray = Array(Int32, String)

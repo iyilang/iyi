@@ -300,6 +300,11 @@ prove_cg_mutation "corrupt nilable null check predicate" "cg_nilable.iyi" \
   'res = @builder.icmp(LibLLVM::IntPredicate::EQ, l_nil_tid2, sel)' \
   'res = @builder.icmp(LibLLVM::IntPredicate::NE, l_nil_tid2, sel)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt block body evaluation during yield" "cg_blocks.iyi" \
+  'inlined.block.body.accept(self)' \
+  '# inlined.block.body.accept(self)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

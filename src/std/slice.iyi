@@ -14,6 +14,8 @@ import std/enumerable
 using std/enumerable::{Enumerable}
 import std/indexable
 using std/indexable::{Indexable}
+import std/iterator
+using std/iterator::{Iterator}
 
 # `pub`, because an alias is part of a module's surface like anything else: an
 # unexported one is unreachable from a consumer, which R-2 now says out loud.
@@ -469,5 +471,34 @@ impl Enumerable for Slice(T) forall T
       yield @pointer[i]
       i = i + 1
     end
+  end
+end
+
+# The lazy half, which `Slice` had no way into: `std/iterator`'s header says
+# a concrete collection provides its own iterator constructor and names this
+# type twice as one that should, and then the only route from a slice to a
+# lazy chain was `fs.to_a` — copying the whole sequence, which is the cost
+# the tower exists to avoid.
+pub struct SliceIterator(T)
+  def initialize(@slice : Slice(T))
+    @index = 0
+  end
+
+  def next : T?
+    return nil if @index >= @slice.size
+    item = @slice[@index]
+    @index = @index + 1
+    item
+  end
+end
+
+impl Iterator for SliceIterator(T) forall T
+  type Elem = T
+
+  def next : T?
+    return nil if @index >= @slice.size
+    item = @slice[@index]
+    @index = @index + 1
+    item
   end
 end

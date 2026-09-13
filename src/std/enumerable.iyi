@@ -406,6 +406,27 @@ pub trait Enumerable
     result
   end
 
+  # Yields each window of *n* elements, the last one short if the source
+  # does not divide. The block form is the one `each_` promises everywhere
+  # else in this trait — `each`, `each_with_index`, `each_with_object`,
+  # `each_cons_pair`, `each_step` all take one — and these two were the
+  # exception: they materialised `Array(Array(Elem))` and refused a block,
+  # which allocates every window up front, the cost a block exists to
+  # avoid. `Indexable` has had both shapes all along.
+  def each_slice(n : Int32, & : Array(Elem) -> Nil) : Nil
+    raise "slice size must be positive" if n <= 0
+    current = [] of Elem
+    each do |e|
+      current << e
+      if current.size == n
+        yield current
+        current = [] of Elem
+      end
+    end
+    yield current unless current.empty?
+  end
+
+  # And the same windows as an array, for a caller that wants them all.
   def each_slice(n : Int32) : Array(Array(Elem))
     # The same refusal `Indexable#each_slice` makes: a window of zero is a
     # question with no answer, and the three trait towers gave it three
@@ -423,6 +444,18 @@ pub trait Enumerable
     end
     slices << current unless current.empty?
     slices
+  end
+
+  # Yields each overlapping window of *n* elements; nothing when the source
+  # is shorter than one window.
+  def each_cons(n : Int32, & : Array(Elem) -> Nil) : Nil
+    raise "cons size must be positive" if n <= 0
+    window = [] of Elem
+    each do |e|
+      window << e
+      window.shift if window.size > n
+      yield window.dup if window.size == n
+    end
   end
 
   def in_slices_of(n : Int32) : Array(Array(Elem))

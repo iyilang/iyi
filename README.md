@@ -386,9 +386,14 @@ library is 541 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
-quoted with the machine attached; `python3 bench/machine_probe.py` prints the
-pair for yours. The line counts beside them are `wc -l` and do not move, and
-`python3 bench/doc_numbers.py` fails when one of those drifts from the tree.</sup>
+quoted with the machine attached; `python3 bench/machine_probe.py` prints that
+attachment for yours — CPU and cores, memory, OS and kernel, libc, LLVM, the
+compiler's version line with its commit, this checkout's revision, the date and
+the command — beside three timings, a CPU loop and a startup and a front end,
+which say whether a figure moved because the machine did. It refuses by name
+rather than print a timing when the build it times fails. The line counts
+beside them are `wc -l` and do not move, and `python3 bench/doc_numbers.py`
+fails when one of those drifts from the tree.</sup>
 
 ## Getting it
 
@@ -410,7 +415,7 @@ tar -xzf iyi-0.12.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 541 KB prelude, the 171 KB of `src/std` that `import std/...`
+iyi's own 541 KB prelude, the 173 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all

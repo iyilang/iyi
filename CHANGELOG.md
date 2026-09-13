@@ -20,6 +20,48 @@
 
 ### Fixed
 
+- **The numbers the docs quote from an instrument had no keeper.**
+  `bench/doc_numbers.py` measures the tree and holds every *counted* number
+  to it; the eleven scripts that produce the *measured* ones — seconds,
+  megabytes, ratios — run nowhere, so a published figure could stop being
+  true in silence, and four had. `GC_DESIGN.md`'s allocator table named a
+  column `-Dgc_iyi`, a flag the script stopped passing when the flip that
+  table argued for made the collector the default and renamed the bump
+  pointer `-Dgc_none`: the header had swapped meaning with the column
+  beside it, so nobody could re-run the measurement it cites. SPEC.md's own
+  "numbers that are current" table said the compiler was 84,068 lines where
+  the tree has 109,815 and the same file says so forty lines later, said
+  the edit-loop project was 7,208 lines where the generator writes 7,207
+  (in seven places, while README.md said 7,207 in five), and said nine
+  samples of which five rebuild from artifacts where there are
+  twenty-seven and six. `bench/machine_probe.py`, the script README.md
+  points a reader at to attach a machine to a figure, was reporting a
+  *failed* build as a 0.009 s front end: it never read the exit code and it
+  set `IYI_PATH` for a binary that answers `CRYSTAL_PATH` — the same defect
+  two of its siblings had fixed and it had not.
+  `bench/measured_numbers.py` is the keeper for what a shared runner can
+  check: not the seconds, which the same binary reads as 0.048 s and
+  0.109 s minutes apart, but the experiment — that every row, column, size
+  and parameter a sentence quotes is one its instrument still produces. It
+  names, in its own output, the nine figures it cannot check and why.
+  `machine_probe.py` prints the attachment those need: CPU, cores, memory,
+  OS, kernel, libc, LLVM, the compiler's version line with its commit, the
+  checkout's revision, the date and the command — and refuses by name
+  rather than print a timing for a build that failed.
+- **The two things `Enumerable` would not do, and the one `Slice` and
+  `List` could not reach.** `each_` takes a block everywhere in that trait
+  — `each`, `each_with_index`, `each_with_object`, `each_cons_pair`,
+  `each_step` — except `each_slice` and `each_cons`, which refused one and
+  materialised `Array(Array(Elem))` instead: every window allocated up
+  front, which is the cost a block exists to avoid, and a shape `Indexable`
+  had had all along. Both take a block now, and still answer with the array
+  for a caller that wants them all. And `std/iterator`'s header says a
+  concrete collection provides its own iterator constructor and names
+  `Slice` twice as one that should; neither `Slice` nor `List` had one, so
+  the only route from either into the lazy tower was `to_a`, copying the
+  whole sequence — the cost the tower exists to avoid. `SliceIterator` and
+  `ListIterator` live in their own modules, where that header says they
+  belong.
 - **The verbs nothing had ever probed.** `bench/verbs_exercise.sh` drove
   seven of the eighteen commands; the other eleven had never been handed a
   mistake. `iyi fix` on bytes that are not text exited 1 printing **nothing

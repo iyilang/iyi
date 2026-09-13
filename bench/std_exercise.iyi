@@ -14,12 +14,15 @@ import std/enumerable
 import std/list
 import std/derives
 import std/slice
+import std/iterator
 
 using std/traits::{Cmp, Num, Hashable}
 using std/enumerable::{Enumerable}
 using std/list::{List}
 using std/derives::{Show}
-using std/slice::{Slice}
+using std/slice::{Slice, SliceIterator}
+using std/list::{ListIterator}
+using std/iterator::{Iterator}
 
 # ---- Test Types -------------------------------------------------------------
 
@@ -456,6 +459,26 @@ assert_eq(bridged.values_at(0, 2).size, 2, "slice: values_at")
 assert_eq(bridged.zip([1, 2, 3]).size, 3, "slice: zipped with an array")
 assert_eq([1, 2, 3].take(2).size, 2, "array: take, through Enumerable")
 assert_eq([1, 1, 2].tally.size, 2, "array: tally, through Enumerable")
+# `each_` takes a block everywhere in this trait — `each`, `each_with_index`,
+# `each_with_object`, `each_cons_pair`, `each_step` — except these two, which
+# refused one and materialised every window instead: the allocation a block
+# exists to avoid, and a shape `Indexable` had had all along.
+sliced = [] of Int32
+small_seq.each_slice(2) { |window| sliced << window.size }
+assert_eq(sliced.size, 2, "enum: each_slice yields its windows")
+assert_eq(sliced[1], 1, "enum: each_slice's last window is the short one")
+consed = 0
+small_seq.each_cons(2) { |window| consed = consed + 1 }
+assert_eq(consed, 2, "enum: each_cons yields its windows")
+# And the lazy tower, which a `Slice` and a `List` could only reach by
+# copying themselves into an array first — the cost `std/iterator`'s header
+# says the tower exists to avoid, for the two types it names.
+assert_eq(SliceIterator.new(bridged).map { |x| x * 2 }.take(2).to_a.size, 2,
+  "slice: mapped lazily, two taken")
+assert_eq(ListIterator.new(List.new([5, 6, 7])).select { |x| x > 5 }.to_a.size, 2,
+  "list: selected lazily")
+assert_eq(SliceIterator.new(Slice(Int32).new(0)).to_a.size, 0,
+  "slice: an empty source ends at once")
 puts "== std/derives: Show trait"
 assert_str(s1.show, "Score(10)", "derives: show")
 

@@ -116,6 +116,7 @@ def measured() -> dict[str, int]:
         "std": wc(sorted((REPO / "src/std").glob("*.iyi"))),
         "compiler": wc(sorted((REPO / "src/compiler").rglob("*.cr"))),
         "samples": len(sorted((REPO / "samples/iyi").glob("*.iyi"))),
+        "samples_roundtrip": samples_roundtrip(),
         # Bytes on disk, not lines: the docs quote the library's size as a
         # download, which is what a person unpacking the tarball sees.
         "prelude_kb": round(
@@ -158,6 +159,24 @@ def prelude_library_lines() -> int:
     return total
 
 
+def samples_roundtrip() -> int:
+    """The samples `bench/samples_roundtrip.sh` builds a second time from
+    artifacts, with the source of every module they import deleted.
+
+    The script's own list is the authority rather than a count typed beside it:
+    the list names six and two files went on saying five.
+    """
+    text = (REPO / "bench/samples_roundtrip.sh").read_text()
+    m = re.search(r'^SAMPLES="([^"]*)"', text, re.M)
+    if not m:
+        raise SystemExit(
+            "doc_numbers: bench/samples_roundtrip.sh no longer names its samples "
+            'in a `SAMPLES="..."` line, so this check cannot find them and is '
+            "not checking anything"
+        )
+    return len(m.group(1).split())
+
+
 def targets() -> int:
     """Distinct targets CI type-checks the library for.
 
@@ -198,6 +217,11 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude", r"against iyi's own ([\d,]+)-line", "samples/iyi/calc.iyi", 1),
     ("std", r"own prelude \+ ([\d,]+) in std", "SPEC.md", 1),
     ("compiler", r"\| ([\d,]+) lines, Crystal, forked", "SPEC.md", 1),
+    # The other place the compiler's size is stated as current, and the reason
+    # one file disagreed with itself by 25,747 lines: the row above covers the
+    # comparison table, this one the release's own numbers table, and only the
+    # first of them existed.
+    ("compiler", r"\| ([\d,]+) lines, none of it written in iyi", "SPEC.md", 1),
     ("spec_iyi", r"\| ([\d,]+) for iyi \|", "SPEC.md", 1),
     ("prelude_kb", r"library is ([\d,]+) KB on disk", "README.md", 1),
     ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "README.md", 1),
@@ -209,6 +233,22 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 1),
     ("generated", r"edit one module in a ([\d,]+)-line project", "README.md", 1),
     ("generated", r"on the same ([\d,]+) lines", "README.md", 1),
+    # The same generated project, quoted seven more times in SPEC.md — the
+    # numbers table at the top of it included — and every one of the seven said
+    # 7,208 while the generator emitted 7,207. The two rows above name
+    # README.md, so the correction landed there and nowhere else. The file that
+    # states a number most often is the one that most needs a pattern.
+    ("generated", r"rebuild \(30 modules, ([\d,]+) lines\)", "SPEC.md", 1),
+    # Two sites, and the second wraps between "300" and "types", which is why
+    # this matches whitespace rather than a space.
+    ("generated", r"300\s+types, ([\d,]+) lines", "SPEC.md", 2),
+    ("generated", r"30 modules and ([\d,]+) lines", "SPEC.md", 1),
+    ("generated", r"it pays it on a ([\d,]+)-line project", "SPEC.md", 1),
+    ("generated", r"one module edited in a ([\d,]+)-line project", "SPEC.md", 1),
+    ("generated", r"30-module, ([\d,]+)-line project", "SPEC.md", 1),
+    # The same project again as one row of the size sweep, which is where the
+    # figure was right while the seven sentences above it were wrong.
+    ("generated", r"30 modules of 10 types, ([\d,]+) lines", "SPEC.md", 1),
     ("targets", r"compiles for \*\*(\w+) targets\*\*", "README.md", 1),
     ("targets", r"for (\w+) targets and was tested on one", "SPEC.md", 1),
     ("targets", r"Four of the (\w+) now", "SPEC.md", 1),
@@ -219,6 +259,12 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # hyphenated, and `\w+` silently stopped matching the sentence at
     # "twenty-three" rather than reporting the count had moved.
     ("samples", r"\| ([\w-]+) programs:", "README.md", 1),
+    # The same count in SPEC.md's numbers table, where it said 9 — the number
+    # of samples there were when the row was written.
+    ("samples", r"\| samples \| ([\d,]+) programs,", "SPEC.md", 1),
+    # And the other half of that row, which is a count of the roundtrip's list
+    # rather than of the directory, and had drifted the same way.
+    ("samples_roundtrip", r"of which ([\d,]+) rebuild from artifacts", "SPEC.md", 1),
 ]
 
 # The prose spells small numbers as words and should keep doing so, so the

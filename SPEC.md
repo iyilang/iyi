@@ -58,15 +58,15 @@ own reference accepts.
 
 | | |
 |---|---|
-| edit one module, rebuild (30 modules, 7,208 lines) | **iyi 0.13 s**, Crystal 1.17 s, `go build` 0.16 s |
+| edit one module, rebuild (30 modules, 7,207 lines) | **iyi 0.13 s**, Crystal 1.17 s, `go build` 0.16 s |
 | the same edit with no artifacts | 0.23 s, which is what R-1 is worth here |
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 13,949 lines, of which 3,734 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 84,068 lines, none of it written in iyi |
+| compiler | 109,815 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
-| samples | 9, of which 5 rebuild from artifacts with their modules' source deleted |
+| samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
 `python3 bench/incremental.py` and `python3 bench/build_speed.py` print the
@@ -536,7 +536,7 @@ one release compiler on one machine, that is iyi 0.13 s against Go's 0.02 s,
 and the gap is wider than this section records rather than narrower.
 
 `bench/incremental.py` asks the same question of the shape the language is
-designed around — 30 modules, 300 types, 7,208 lines — and the ordering
+designed around — 30 modules, 300 types, 7,207 lines — and the ordering
 reverses: editing one module's body costs **iyi 0.07 s, Go 0.09 s**, Crystal
 0.76 s. The row beneath is what does it: the same edit **without** artifacts is
 0.18 s, so R-1 is worth 0.11 s of a 0.18 s build, and it is worth it by reading
@@ -933,7 +933,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 109,815 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 13,949-line own prelude + 6,289 in std |
+| Library | 8,161 lines (3,551 of it core) | 13,949-line own prelude + 6,382 in std |
 | Specs | 21,146 lines | 10,040 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -6388,7 +6388,7 @@ section's job, which Crystal's existing `.o` reuse already does part of.
 **Read this section knowing how it ends.** The daemon was built to hold
 Crystal's 107,719-line prelude analysed between builds, and it did, and then
 0.1.0 item 3 replaced that prelude with 1,053 lines of iyi and left it nothing
-to hold. Measured again on the edit loop of IV.3a, 30 modules and 7,208 lines,
+to hold. Measured again on the edit loop of IV.3a, 30 modules and 7,207 lines,
 each build checked to produce a program that prints what the edit says it
 should:
 
@@ -6985,7 +6985,7 @@ timed in this document before this section was a *whole* build, and nobody uses
 a language through whole builds.
 
 `bench/incremental.py` builds a project rather than a file: 30 modules, 300
-types, 7,208 lines, written by one generator in iyi, in Crystal and in Go, and
+types, 7,207 lines, written by one generator in iyi, in Crystal and in Go, and
 refused if the three binaries do not print the same number. Then it changes one
 line and builds again. Best of 7, seconds, release compiler, idle machine:
 
@@ -7018,7 +7018,7 @@ headline: being in the same class is.
 **The last row is R-1's argument with a price on it.** The same edit, built
 without artifacts so that all 30 modules are read and analysed from source,
 costs 0.23 s. With the artifacts it costs 0.13 s. **The rule pays 1.8x on the
-loop it was written for**, and it pays it on a 7,208-line project — the figure
+loop it was written for**, and it pays it on a 7,207-line project — the figure
 grows with the code that is *not* being edited, which is the whole of any real
 program.
 
@@ -9959,14 +9959,14 @@ For traceability, since several rules here rest on numbers rather than taste.
 | A first release's prelude is ~3.5k lines | Crystal 0.1.0 shipped 8,161 lines of library, 3,551 of it the core that a prelude is; the rest is `json`/`yaml`/`http` |
 | Self-hosting only gets more expensive | Crystal self-hosted at 24,984 lines of compiler and 8,161 of library, before its 0.1.0; iyi's fork starts at 95,010 and 196,217, and is 87,421 after the interpreter came out (Appendix B.2, V.11) |
 | A second implementation of the language is what an interpreter costs | Crystal's interpreter stops on `samples/iyi/hello.iyi` line 12 at the module header, and 0 of the fork's 153 commits had touched it against 7,840 lines of parser and semantic change (V.11) |
-| The daemon's win did not survive the prelude | it removed prelude analysis, and iyi's prelude is 1,053 lines: one module edited in a 7,208-line project costs 0.18–0.28 s built normally and 0.20–0.24 s through the daemon (IV.1d) |
+| The daemon's win did not survive the prelude | it removed prelude analysis, and iyi's prelude is 1,053 lines: one module edited in a 7,207-line project costs 0.18–0.28 s built normally and 0.20–0.24 s through the daemon (IV.1d) |
 | R-1 pays for lines, not for modules | 30 modules of 10 types buy 1.8x and 300 modules of one type buy 1.4x; a project of 300 five-line modules is a 0.86x *loss*, because reading an artifact costs more than parsing five lines (IV.3a) |
 | One file is one module, and it had to be said | a second `module a/b` header in a file was accepted: the file emitted one artifact under the first name carrying both modules' exports, and the second module had none (IV.6) |
 | A compiled artifact needs its own checksum | one flipped byte in a `.iyimod` built silently 7 times out of 10 and reached the linker the other 3; per-section checksums in format v19 refuse 12 of 12 and name the section (IV.2a) |
 | A prefix is not a parent directory | working in `/tmp/x/crystal` with a cache at `/tmp/x/crystal-cache`, every object file was written to `-cache/…`; the same "No such file or directory" the cleaner race produces, from a different cause (V.10) |
 | A build's cache directory can be deleted underneath it | the cleaner keeps the ten most recently modified directories and runs after every compile; removing one mid-codegen reproduces both failures, the single-threaded path included, and reading the `compiler.lock` the build already holds fixes it (V.10) |
 | A module as the unit of compilation is worth 8x to 9x over Crystal | the same program, the same compiler binary, one module edited: 1.17 s as Crystal, 0.13 s as iyi, against `go build`'s 0.16 s, and 1.29 / 0.16 / 0.19 an hour earlier (IV.3a) |
-| The edit loop is where R-1 pays, and it pays 1.8x | one module edited in a 30-module, 7,208-line project: 0.13 s with artifacts, 0.23 s without, against `go build`'s 0.16 s for the same edit (IV.3a) |
+| The edit loop is where R-1 pays, and it pays 1.8x | one module edited in a 30-module, 7,207-line project: 0.13 s with artifacts, 0.23 s without, against `go build`'s 0.16 s for the same edit (IV.3a) |
 | The path/name mapping needed more than snake_case | `camelcase` drops an underscore before a digit, so `v_1` and `v1` both give `V1`; requiring each group to start with a letter removes that and three sibling collisions (IV.6 #6) |
 | Ten reachable regex literals kept pcre2 on the compiler, not a `require` | `--emit llvm-ir` shows `$Regex:0` through `$Regex:9` expanded in the binary, from four stdlib files the compiler compiles into itself; converting all four leaves `otool -L .build/iyi` at libLLVM, libc++, libgc, libSystem and `nm -u .build/iyi` without any of the thirteen `pcre2_*` symbols it used to leave undefined. An unused constant does not bring it back, because Crystal never instantiates an unreachable one (III.10) |
 | PCRE2's `\s` under `UCP` and `Char#whitespace?` differ at exactly one character | the 20,633-case differential over `parse_flag_definition` first reported 1,114 mismatches and every one of them contained U+0085 NEL; handling NEL by name takes it to 0 (III.10) |

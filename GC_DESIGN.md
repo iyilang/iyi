@@ -86,14 +86,18 @@ rather than asserted because a budget would be a number the gate made
 up.
 
 The default-allocator question now has its measurement (`bench/gc_default.py`,
-release builds, best of five, worst peak RSS of the same five):
+release builds, best of five, worst peak RSS of the same five). The columns
+are the arms that script passes *today*: the flip below renamed both of the
+first two — what was `default` when this was measured is `-Dgc_none` now, and
+what was `-Dgc_iyi` is the default — so the header said, for a while, to run
+a flag the script no longer has:
 
-| workload | default (bump) | `-Dgc_iyi` | `-Dgc_boehm` |
+| workload | default (the collector) | `-Dgc_none` (the bump pointer) | `-Dgc_boehm` |
 |---|---|---|---|
-| arithmetic (no allocation) | 0.038 s / 15 MiB | 0.039 s / 15 MiB | 0.046 s / 15 MiB |
-| live set (8M-element array) | 0.018 s / 66 MiB | 0.017 s / 84 MiB | 0.018 s / 74 MiB |
-| churn (512 MiB, ~64 B live) | 0.125 s / 551 MiB | **0.048 s / 15 MiB** | 0.091 s / 15 MiB |
-| string churn (40k rebuilds) | 0.387 s / 767 MiB | **0.218 s / 34 MiB** | 0.257 s / 15 MiB |
+| arithmetic (no allocation) | 0.039 s / 15 MiB | 0.038 s / 15 MiB | 0.046 s / 15 MiB |
+| live set (8M-element array) | 0.017 s / 84 MiB | 0.018 s / 66 MiB | 0.018 s / 74 MiB |
+| churn (512 MiB, ~64 B live) | **0.048 s / 15 MiB** | 0.125 s / 551 MiB | 0.091 s / 15 MiB |
+| string churn (40k rebuilds) | **0.218 s / 34 MiB** | 0.387 s / 767 MiB | 0.257 s / 15 MiB |
 
 The owned collector wins or ties every time column and holds RSS at the live
 set where the bump pointer holds it at the garbage. The first reading was not

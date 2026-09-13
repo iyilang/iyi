@@ -650,6 +650,17 @@ jobs:
       - name: The numbers the docs state
         run: python3 bench/doc_numbers.py --list
 
+      # And the numbers the docs quote from an instrument rather than from the
+      # tree. A shared runner cannot re-measure a second or a megabyte — the
+      # scripts that produce them refuse an unoptimised compiler, and the same
+      # binary has read 0.048 s and 0.109 s minutes apart on one machine — so
+      # this checks the half that does not move: that the rows, columns, sizes
+      # and parameters a sentence quotes are ones its instrument still
+      # produces. It found a table whose columns named a flag the script had
+      # stopped passing, which is a measurement no reader could repeat.
+      - name: The numbers the docs quote from a measurement
+        run: python3 bench/measured_numbers.py
+
   std:
     needs: build
     runs-on: ubuntu-24.04

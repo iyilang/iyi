@@ -16,6 +16,8 @@ module std/list
 
 import std/enumerable
 using std/enumerable::{Enumerable}
+import std/iterator
+using std/iterator::{Iterator}
 
 # The store is built at construction and never handed out, so no method of this
 # type can be observed to change it. That is what makes the value shareable
@@ -189,5 +191,32 @@ impl Enumerable for List(T) forall T
 
   def each(& : T -> Nil) : Nil
     @items.each { |x| yield x }
+  end
+end
+
+# And the lazy half, for the same reason `std/slice` has one: a `List` could
+# only reach the iterator tower through `to_a`, which copies the sequence
+# the type exists to hand around without copying.
+pub struct ListIterator(T)
+  def initialize(@list : List(T))
+    @index = 0
+  end
+
+  def next : T?
+    return nil if @index >= @list.size
+    item = @list[@index]
+    @index = @index + 1
+    item
+  end
+end
+
+impl Iterator for ListIterator(T) forall T
+  type Elem = T
+
+  def next : T?
+    return nil if @index >= @list.size
+    item = @list[@index]
+    @index = @index + 1
+    item
   end
 end

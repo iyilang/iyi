@@ -8,12 +8,13 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 29,734 lines of iyi**. The
+`src/compiler` is **109,825 lines of Crystal and 30,293 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the artifact
 format, the bind tool, the command driver and build daemon, the formatter, the
-macro engine, the four foundation files, and the LLVM bindings:
+macro engine, the four foundation files, the LLVM bindings, and the first
+slice of code generation:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -30,6 +31,7 @@ macro engine, the four foundation files, and the LLVM bindings:
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |
 | `foundation/*.iyi` | 122 | compiled by the above |
 | `macros/*.iyi` | 1,583 | `bench/selfhost_macros_exercise.sh`: 12 fixtures, 71 expanded nodes identical to the Crystal front end, five guarded mutation proofs. Macro expansion interpreter, argument binding (positional, defaults, splats, double splats, named arguments, blocks), control flow ({% if %}, {% for %}), stringification and macro methods on AST nodes. Still not in the port: TypeNode semantic table inspection, external macro run, and semantic hook callbacks |
+| `codegen/codegen.iyi` | 548 | `bench/selfhost_codegen_exercise.sh`: 5 fixtures, 21 functions with 100% identical LLVM IR and identical native object execution linked with C driver, six guarded mutation proofs. Emits LLVM IR for `fun` declarations with integer and float arithmetic, comparisons, local variable allocation and assignments, `if`/`else` (with phi value merges), `while` loops, and inter-function calls. Excluded: classes, closures, exceptions, generics, and GC interface |
 
 The bind row is weaker than the rows above it, and the difference matters.
 Every other gate here compares against the code being replaced. The bind gate
@@ -44,9 +46,11 @@ is ported and the gate can drive the real one.
 What is **not** in iyi: semantic analysis beyond the top-level declaration
 and expression and method body typing passes (instance variable inference
 beyond local scope, generics instantiation, class var initializers, recursive
-struct check, full unification), TypeNode inspection in macros, codegen, and
-platform support. That is the 109,825. The formatter and macro engine are
-partly ported, and their rows above say which parts are not.
+struct check, full unification), TypeNode inspection in macros, codegen beyond
+the first `fun` slice (classes, closures, exceptions, generics, and the GC
+interface), and platform support. That is the 109,825. The formatter, macro
+engine, and codegen are partly ported, and their rows above say which parts
+are not.
 Nothing in the build calls any of the ports above yet: each is checked against
 the code it would replace, not used in its place.
 

@@ -45,15 +45,15 @@ pub def register_primitive_operators(prog : SemanticProgram) : Nil
   int_names.each do |tname|
     t = prog.types[tname].as(NonGenericClassType)
     ["+", "-", "*", "/", "//", "%", "&+", "&-", "&*", "unsafe_div", "unsafe_mod", "&", "|", "^", "<<", ">>", "unsafe_shl", "unsafe_shr"].each do |op|
-      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], Path.new(tname), nil)
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], nil, nil, nil, Path.new(tname))
       t.add_def(d)
     end
     ["<", "<=", ">", ">=", "==", "!="].each do |op|
-      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], Path.new("Bool"), nil)
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], nil, nil, nil, Path.new("Bool"))
       t.add_def(d)
     end
     ["-", "~"].each do |op|
-      d = Def.new(op, [] of Arg, Path.new(tname), nil)
+      d = Def.new(op, [] of Arg, nil, nil, nil, Path.new(tname))
       t.add_def(d)
     end
   end
@@ -62,23 +62,23 @@ pub def register_primitive_operators(prog : SemanticProgram) : Nil
   float_names.each do |fname|
     ft = prog.types[fname].as(NonGenericClassType)
     ["+", "-", "*", "/"].each do |op|
-      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], Path.new(fname), nil)
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], nil, nil, nil, Path.new(fname))
       ft.add_def(d)
     end
     ["<", "<=", ">", ">=", "==", "!="].each do |op|
-      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], Path.new("Bool"), nil)
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], nil, nil, nil, Path.new("Bool"))
       ft.add_def(d)
     end
-    d_neg = Def.new("-", [] of Arg, Path.new(fname), nil)
+    d_neg = Def.new("-", [] of Arg, nil, nil, nil, Path.new(fname))
     ft.add_def(d_neg)
   end
 
   bool_t = prog.types["Bool"].as(NonGenericClassType)
   ["==", "!=", "&", "|", "^"].each do |op|
-    d = Def.new(op, [Arg.new("other", restriction: Path.new("Bool"))], Path.new("Bool"), nil)
+    d = Def.new(op, [Arg.new("other", restriction: Path.new("Bool"))], nil, nil, nil, Path.new("Bool"))
     bool_t.add_def(d)
   end
-  d_not = Def.new("!", [] of Arg, Path.new("Bool"), nil)
+  d_not = Def.new("!", [] of Arg, nil, nil, nil, Path.new("Bool"))
   bool_t.add_def(d_not)
 end
 
@@ -509,7 +509,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   # Register definitions in program so calls can resolve
   funs.each do |fd|
     cloned_args = fd.args.map { |a| a.clone.as(Arg) }
-    d = Def.new(fd.name, cloned_args, fd.return_type, fd.body)
+    d = Def.new(fd.name, cloned_args, fd.body, nil, nil, fd.return_type)
     prog.add_def(d)
   end
 

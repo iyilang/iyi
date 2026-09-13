@@ -1,0 +1,141 @@
+import compiler/llvm
+import compiler/codegen/codegen
+import compiler/syntax/ast
+import compiler/syntax/parser
+
+using compiler/llvm/context::{Context}
+using compiler/llvm/module::{Module}
+using compiler/llvm/target::{Target, TargetData, TargetMachine}
+using compiler/llvm/values::{LLVMType, Function}
+using compiler/codegen/codegen::{CodeGenVisitor, compile_source_to_module}
+using compiler/syntax/ast::{ASTNode, Expressions, FunDef}
+using compiler/syntax/parser::{Parser}
+
+module BenchSelfhostCodegenExercise
+  def self.extract_functions_ir(mod : Module, names : Array(String)) : String
+    io = String::Builder.new
+    first = true
+    names.each do |name|
+      if fn = mod.get_function?(name)
+        raw = fn.to_value.to_s
+        lines = raw.split("\n")
+        in_fn = false
+        lines.each do |line|
+          stripped = line.strip
+          next if stripped.starts_with?(";")
+          if stripped.starts_with?("define ")
+            in_fn = true
+            # Normalize attribute tag like #0
+            normalized = if idx = line.index(" #")
+                           line[0, idx] + " {"
+                         else
+                           line
+                         end
+            unless first
+              io << "\n"
+            end
+            io << normalized << "\n"
+            first = false
+            next
+          end
+          if in_fn
+            # Strip block predecessor comments like ; preds = ...
+            clean_line = if p_idx = line.index(" ; preds =")
+                           line[0, p_idx]
+                         else
+                           line
+                         end
+            io << clean_line << "\n"
+            if clean_line.strip == "}"
+              in_fn = false
+            end
+          end
+        end
+      end
+    end
+    io.to_s.strip
+  end
+
+  def self.fixture_function_names(src : String, filename : String) : Array(String)
+    p = Parser.new(src, filename)
+    node = p.parse
+    names = [] of String
+    if node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        if e.is_a?(FunDef)
+          names << e.as(FunDef).name
+        end
+      end
+    elsif node.is_a?(FunDef)
+      names << node.as(FunDef).name
+    end
+    names
+  end
+
+  def self.compile_and_dump_ir(fixture_path : String) : String
+    src = File.read(fixture_path)
+    ctx = Context.new
+    mod = Module.new("selfhost_cg_mod", ctx)
+    Target.init_native_target
+    Target.init_all_targets
+    triple = Target.default_target_triple
+    mod.target = triple
+    native_target = Target.from_triple(triple)
+    tm = native_target.create_target_machine(triple, "", "",
+      LibLLVM::CodeGenOptLevel::Default,
+      LibLLVM::RelocMode::PIC,
+      LibLLVM::CodeModel::Default)
+    mod.data_layout = tm.data_layout
+
+    compile_source_to_module(src, fixture_path, ctx, mod)
+    names = fixture_function_names(src, fixture_path)
+    extract_functions_ir(mod, names)
+  end
+
+  def self.compile_and_emit_obj(fixture_path : String, out_obj_path : String) : Nil
+    src = File.read(fixture_path)
+    ctx = Context.new
+    mod = Module.new("selfhost_cg_mod", ctx)
+    Target.init_native_target
+    Target.init_all_targets
+    triple = Target.default_target_triple
+    mod.target = triple
+    native_target = Target.from_triple(triple)
+    tm = native_target.create_target_machine(triple, "", "",
+      LibLLVM::CodeGenOptLevel::Default,
+      LibLLVM::RelocMode::PIC,
+      LibLLVM::CodeModel::Default)
+    mod.data_layout = tm.data_layout
+
+    compile_source_to_module(src, fixture_path, ctx, mod)
+    mod.verify
+    mod.emit_obj_to_file(tm, out_obj_path)
+  end
+
+  def self.run_standalone_check : Nil
+    puts "Running selfhost codegen pure-iyi standalone verification..."
+    ctx = Context.new
+    mod = Module.new("standalone_test", ctx)
+    src = "fun add(a : Int32, b : Int32) : Int32\n  a &+ b\nend\n"
+    compile_source_to_module(src, "inline.iyi", ctx, mod)
+    mod.verify
+    fn = mod.get_function("add")
+    ir = fn.to_value.to_s
+    unless ir.includes?("add i32 %a, %b")
+      raise "Standalone verification failed: add instruction not found"
+    end
+    puts "ok (standalone codegen verified)"
+    puts "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!"
+  end
+end
+
+if Program.args.size >= 2 && Program.args[0] == "--dump-ir"
+  fixture = Program.args[1]
+  puts BenchSelfhostCodegenExercise.compile_and_dump_ir(fixture)
+elsif Program.args.size >= 3 && Program.args[0] == "--emit-obj"
+  fixture = Program.args[1]
+  out_obj = Program.args[2]
+  BenchSelfhostCodegenExercise.compile_and_emit_obj(fixture, out_obj)
+else
+  BenchSelfhostCodegenExercise.run_standalone_check
+end

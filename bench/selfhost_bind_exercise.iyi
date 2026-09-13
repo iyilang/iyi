@@ -185,18 +185,12 @@ if Program.args.size > 0
   if Program.args.size > 1 && Program.args[1] == "--count"
     filename = Program.args[0]
     source = File.read(filename)
-    parser = Parser.new(source, filename)
-    node = parser.parse
-    methods = BindTool.analyze(node, "")
-    puts methods.size
+    puts BindTool.count_public_methods(source, "", filename)
   else
     filename = Program.args[0]
     root = Program.args.size > 1 ? Program.args[1] : ""
     source = File.read(filename)
-    parser = Parser.new(source, filename)
-    node = parser.parse
-    methods = BindTool.analyze(node, root)
-    print BindTool.dump_bind(methods, root)
+    print BindTool.print_bind(source, root, filename)
   end
 else
   BenchSelfhostBindExercise.run_all

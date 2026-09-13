@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **110,081 lines of Crystal and 34,377 lines of iyi**. The
+`src/compiler` is **110,106 lines of Crystal and 34,377 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type

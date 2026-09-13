@@ -43,7 +43,7 @@ allocator and runtime (`src/iyi/prelude.iyi`), eliminating `libgc` completely.
 
 As measured by `python3 bench/doc_numbers.py`, the compiler source consists of:
 
-* **110,081 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
+* **110,106 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
   and top-level wrappers (`crystal.cr`, `iyi.cr`, `crystal_front.cr`).
 * **34,377 lines of pure iyi** across 45 files in `src/compiler/**/*.iyi`.
 

@@ -247,15 +247,40 @@ class Iyi::Command
       err_text = err_io.to_s
       out_text = out_io.to_s
       combined = "#{err_text}\n#{out_text}"
-      if combined =~ /Syntax error in [^:]+:(\d+):(\d+):\s*(.*)/ || combined =~ /SYNTAX ERROR:\s*(.*?)\s+at\s+(\d+):(\d+)/
-        if $1.to_i?
-          line, col, msg = $1.to_i, $2.to_i, $3.strip
-        else
-          msg, line, col = $1.strip, $2.to_i, $3.to_i
+      matched = false
+      combined.each_line do |l|
+        next if matched
+        if s_idx = l.index("Syntax error in ")
+          rest = l[(s_idx + 16)..-1]
+          parts = rest.split(':')
+          if parts.size >= 4
+            line_num = parts[1]?.try(&.to_i?) || 1
+            col_num = parts[2]?.try(&.to_i?) || 1
+            msg = parts[3..-1].join(':').strip
+            if site_idx = msg.index("(site_")
+              msg = msg[0...site_idx].strip
+            end
+            print_syntax_error(filename, line_num, col_num, msg)
+            matched = true
+          end
+        elsif s_idx = l.index("SYNTAX ERROR:")
+          rest = l[(s_idx + 13)..-1].strip
+          if at_idx = rest.rindex(" at ")
+            msg = rest[0...at_idx].strip
+            loc = rest[(at_idx + 4)..-1].strip
+            loc_parts = loc.split(':')
+            line_num = loc_parts[0]?.try(&.to_i?) || 1
+            col_num = loc_parts[1]?.try(&.to_i?) || 1
+            if site_idx = msg.index("(site_")
+              msg = msg[0...site_idx].strip
+            end
+            print_syntax_error(filename, line_num, col_num, msg)
+            matched = true
+          end
         end
-        msg = msg.gsub(/\s*\(site_\d+\)/, "")
-        print_syntax_error(filename, line, col, msg)
-      else
+      end
+
+      unless matched
         err_msg = err_text.strip
         err_msg = "syntax error in '#{filename}'" if err_msg.empty?
         print_error err_msg

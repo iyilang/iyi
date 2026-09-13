@@ -961,18 +961,17 @@ pub class Formatter < Visitor
 
     write(node.name)
     next_token
-
     if node.has_parentheses
       skip_space
       write_token(TokenKind::OP_LPAREN)
       skip_space_or_newline
-      format_args_list(node.args, node.named_args)
+      format_args_list(node.args, node.named_args, node.block_arg)
       skip_space_or_newline
       write_token(TokenKind::OP_RPAREN)
-    elsif !node.args.empty? || node.named_args
+    elsif !node.args.empty? || node.named_args || node.block_arg
       write(" ")
       skip_space
-      format_args_list(node.args, node.named_args)
+      format_args_list(node.args, node.named_args, node.block_arg)
     end
 
     if block = node.block
@@ -989,8 +988,8 @@ pub class Formatter < Visitor
       name == "<<" || name == ">>" || name == "&" || name == "|" || name == "^"
   end
 
-  private def format_args_list(args : Array(ASTNode), named_args : Array(NamedArgument)?) : Nil
-    total = args.size + (named_args ? named_args.size : 0)
+  private def format_args_list(args : Array(ASTNode), named_args : Array(NamedArgument)?, block_arg : ASTNode? = nil) : Nil
+    total = args.size + (named_args ? named_args.size : 0) + (block_arg ? 1 : 0)
     count = 0
     args.each do |arg|
       accept(arg)
@@ -1016,6 +1015,17 @@ pub class Formatter < Visitor
         end
       end
     end
+    if ba = block_arg
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ")
+        next_token_skip_space_or_newline
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_AMP)
+      skip_space_or_newline
+      accept(ba)
+    end
   end
 
   def visit(node : NamedArgument) : Bool
@@ -1034,23 +1044,21 @@ pub class Formatter < Visitor
       if !block.args.empty?
         write_token(" ", TokenKind::OP_BAR)
         block.args.each_with_index do |arg, i|
+          skip_space_or_newline
           write(arg.name)
           next_token
           if i < block.args.size - 1
-            write_token(TokenKind::OP_COMMA, " ")
+            skip_space_or_newline
+            if @token.type == TokenKind::OP_COMMA
+              next_token_skip_space_or_newline
+              write(", ")
+            end
           end
         end
+        skip_space_or_newline
         write_token(TokenKind::OP_BAR)
       end
-      write_line
-      @indent = @indent + 2
-      accept(block.body)
-      @indent = @indent - 2
-      skip_space_or_newline
-      write_line unless @wrote_newline
-      write_indent(@indent)
-      check_keyword(Keyword::END)
-      write_keyword(Keyword::END)
+      format_nested_with_end(block.body)
     elsif @token.type == TokenKind::OP_LCURLY
       write_token(" ", TokenKind::OP_LCURLY)
       if !block.args.empty?

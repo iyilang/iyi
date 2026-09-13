@@ -8,11 +8,11 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 26,065 lines of iyi**. The
+`src/compiler` is **109,825 lines of Crystal and 26,182 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 pass of semantic analysis, the artifact format, the bind tool, the command
-driver, an unfinished formatter, the four foundation files, and the LLVM bindings:
+driver, the formatter, the four foundation files, and the LLVM bindings:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -22,7 +22,7 @@ driver, an unfinished formatter, the four foundation files, and the LLVM binding
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
 | `semantic/top_level.iyi` | 1,222 | `bench/selfhost_semantic_exercise.sh`: 20 fixtures (9 feature fixtures, 39 declarations identical to the Crystal front end; 11 error fixtures rejected with identical errors), five guarded mutation proofs |
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
-| `tools/formatter.iyi` | 1,984 | NOTHING. No gate compares it against the formatter it would replace, and it cannot yet format the smallest sample in the tree: `samples/iyi/hello.iyi` fails at 32:6. `bench/selfhost_formatter_exercise.iyi` is the driver half, waiting on the port |
+| `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
 | `command/driver.iyi` | 1,962 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |

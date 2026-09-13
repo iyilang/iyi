@@ -444,6 +444,8 @@ pub class CommandDriver
     To format STDIN to STDOUT, use '-' in place of any path arguments.
 
     Options:
+        --check                  checks that formatting code produces no changes
+        --selfhost               use the pure iyi self-hosted formatter
     USAGE
   end
 

@@ -270,6 +270,8 @@ iyi-daemon: $(O)/$(IYI_DAEMON_BIN) ## iyi: build iyi's own single-threaded build
 
 .PHONY: iyi-mod
 iyi-mod: $(O)/iyi-mod$(EXE) ## iyi: build the self-hosted artifact inspection tool
+.PHONY: iyi-format
+iyi-format: $(O)/iyi-format$(EXE) ## iyi: build the self-hosted formatter tool
 
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler and manpages)
@@ -542,6 +544,12 @@ $(O)/$(IYI_DAEMON_BIN): $(DEPS) $(SOURCES)
 $(O)/iyi-mod$(EXE): $(O)/iyi$(EXE) src/compiler/tools/mod.iyi src/compiler/artifact/iyimod.iyi
 	@mkdir -p $(O)
 	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/mod.iyi
+	@echo "built $@"
+
+# iyi: the self-hosted formatter tool, built by iyi from pure iyi source.
+$(O)/iyi-format$(EXE): $(O)/iyi$(EXE) src/compiler/tools/format.iyi src/compiler/tools/formatter.iyi
+	@mkdir -p $(O)
+	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/format.iyi
 	@echo "built $@"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time

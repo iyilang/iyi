@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,871 lines of Crystal and 33,155 lines of iyi**. The
+`src/compiler` is **109,938 lines of Crystal and 33,191 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type
@@ -30,6 +30,7 @@ bindings, and the first slice of code generation:
 | `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
 | `tools/mod.iyi` | 59 | `bench/selfhost_mod_wiring_exercise.sh`: 16 modules, 100% byte-for-byte dump and declarations parity, refusal parity on corrupted artifacts, four guarded mutation proofs. Shipped compiler calls it behind `iyi mod dump --selfhost` |
+| `tools/format.iyi` | 36 | `bench/selfhost_format_wiring_exercise.sh`: 35 files, 100% byte-for-byte formatting parity across stdin, in-place, and prefix flags, check mode and refusal parity, five guarded mutation proofs. Shipped compiler calls it behind `iyi tool format --selfhost` |
 | `command/driver.iyi` | 1,963 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
 | `command/daemon.iyi` | 717 | `bench/selfhost_daemon_exercise.sh`: 30 scenarios across socket path selection, kernel limit refusal, candidate search order, identity calculation, and error text identical to the shipped daemon, six guarded mutation proofs |
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |
@@ -56,11 +57,15 @@ check), TypeNode inspection in macros, and codegen beyond the first `fun` slice
 109,871. The formatter, macro engine and codegen are partly ported, and their
 rows above say which parts are not.
 Before this change, nothing in the build called any of the ports above: each
-was checked against the code it would replace, not used in its place. The first
-wiring step is now active: `iyi mod dump --selfhost` routes artifact inspection
+was checked against the code it would replace, not used in its place. Two
+wiring steps are now active: `iyi mod dump --selfhost` routes artifact inspection
 through the pure iyi port (`src/compiler/tools/mod.iyi` and
 `src/compiler/artifact/iyimod.iyi`), proved byte-identical across the entire
-module corpus by `bench/selfhost_mod_wiring_exercise.sh`.
+module corpus by `bench/selfhost_mod_wiring_exercise.sh`; and
+`iyi tool format --selfhost` routes source code formatting through the pure iyi
+port (`src/compiler/tools/format.iyi` and `src/compiler/tools/formatter.iyi`),
+proved byte-identical across all 35 corpus files by
+`bench/selfhost_format_wiring_exercise.sh`.
 
 The artifact row proves binary parity: 16 modules across `samples/iyi` and
 `src/std` (80,414 bytes) produce byte-identical `.iyimod` files between Crystal

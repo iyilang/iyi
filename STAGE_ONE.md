@@ -43,9 +43,9 @@ allocator and runtime (`src/iyi/prelude.iyi`), eliminating `libgc` completely.
 
 As measured by `python3 bench/doc_numbers.py`, the compiler source consists of:
 
-* **109,871 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
+* **109,938 lines of Crystal** across 114 files in `src/compiler/iyi/**/*.cr`
   and top-level wrappers (`crystal.cr`, `iyi.cr`, `crystal_front.cr`).
-* **33,155 lines of pure iyi** across 38 files in `src/compiler/**/*.iyi`.
+* **33,191 lines of pure iyi** across 39 files in `src/compiler/**/*.iyi`.
 
 ### Verification of the `BOOTSTRAP.md` Claim
 
@@ -67,9 +67,10 @@ isolated gate runs in `bench/selfhost_*_exercise.sh` where a standalone test
 harness imported a single ported module and compared its output against a Crystal
 oracle script.
 
-The first wiring step has now been implemented: `bin/iyi mod dump --selfhost`
-wires `src/compiler/artifact/iyimod.iyi` into the shipped compiler CLI.
-
+The first wiring steps have now been implemented: `bin/iyi mod dump --selfhost`
+wires `src/compiler/artifact/iyimod.iyi` into the shipped compiler CLI, and
+`bin/iyi tool format --selfhost` wires `src/compiler/tools/formatter.iyi` into
+the shipped compiler CLI.
 ## 3. Component Inventory and Blockers
 
 Below is the complete status of all twenty ported and unported compiler
@@ -166,8 +167,11 @@ the compiler pipeline today:
   * Blockers: Socket paths and identity only. Does not implement worker fork loop.
 * **`tools/formatter.iyi` (2,090 lines) vs `src/compiler/iyi/tools/formatter.cr` (5,457 lines)**
   * Status: 35 files verified in `bench/selfhost_formatter_exercise.sh`.
-  * Blockers: Incomplete formatting coverage. Still missing alignment (when,
+    Wired into `bin/iyi tool format --selfhost` with 100% byte-for-byte parity across
+    all 35 corpus files verified by `bench/selfhost_format_wiring_exercise.sh`.
+  * Blockers: Incomplete formatting coverage on complex constructs. Still missing alignment (when,
     hash, assign, comments), doc comment formatting, heredoc fixes, and macros.
+    Unblocked for all 35 verified constructs and clean formatting runs.
 * **`tools/bind.iyi` (727 lines) vs `src/compiler/iyi/tools/bind.cr`**
   * Status: 11 fixtures in `bench/selfhost_bind_exercise.sh`.
   * Blockers: Works from parsed AST rather than semantically analyzed types.
@@ -265,7 +269,66 @@ Parity summary: 16/16 modules match byte-for-byte across dump and declarations (
 ALL SELFHOST MOD WIRING CHECKS PASSED SUCCESSFULLY!
 ```
 
-## 6. Observable Proof of Stage One
+## 6. The Second Wired Component: `iyi tool format --selfhost`
+
+`tools/formatter.iyi` was selected as the second component to wire into the
+shipped compiler because:
+
+1. **Clean process boundary:** The formatter is a pure text-to-text transform
+   taking source code in and emitting formatted code out. Like the artifact
+   inspector, it avoids any in-memory object passing or GC runtime conflict
+   between Crystal and iyi.
+2. **Proven 100% byte-for-byte parity:** All 35 files in the formatter corpus
+   (106,026 bytes) produce byte-identical formatted code between the Crystal
+   frontend and the pure iyi implementation.
+3. **Direct user-facing command:** `iyi tool format [options] [files]` is an
+   active user-facing CLI command. Wiring the self-hosted formatter allows users
+   and CI to exercise the pure iyi formatter directly on real codebases today.
+4. **Preserved default behavior:** Default invocation (`iyi tool format`) is
+   completely untouched, while `--selfhost` (or prefix `tool --selfhost format`)
+   routes execution to the companion tool.
+
+### Implementation
+
+1. **Companion tool (`src/compiler/tools/format.iyi`):**
+   Pure iyi tool that imports `compiler/tools/formatter` and formats source
+   from file paths or standard input.
+2. **Compiler CLI wiring (`src/compiler/iyi/command/format.cr` and `command.cr`):**
+   `Iyi::Command#format` and `FormatCommand` accept `--selfhost` (either before or
+   after the `format` subcommand). When present, `run_selfhost_format` locates
+   `iyi-format` beside the compiler binary, in `.build/iyi-format`, or via
+   `IYI_FORMAT_BIN`, and delegates execution.
+3. **Build system (`Makefile`):**
+   Added `.PHONY: iyi-format` target compiling `$(O)/iyi-format$(EXE)` using
+   `$(O)/iyi build src/compiler/tools/format.iyi`.
+4. **Differential wiring gate (`bench/selfhost_format_wiring_exercise.sh`):**
+   Verifies that:
+   * `iyi tool format - < file` equals `iyi tool format --selfhost - < file`.
+   * `iyi tool format file` in-place equals `iyi tool format --selfhost file`.
+   * Prefix flag syntax `iyi tool --selfhost format` works identically.
+   * Check mode (`--check`) parity on both clean files (exit 0) and unformatted files (exit 1).
+   * Syntax error refusal parity on malformed source files (exit 1).
+   * Five guarded mutation proofs verify that defects in the companion tool,
+     the STDIN handler, the delegation output capture, the prefix flag routing,
+     and the check mode status code are caught.
+
+### Measured Parity Summary
+
+Running `bash bench/selfhost_format_wiring_exercise.sh` confirms:
+
+```
+STDIN parity summary: 35/35 files match byte-for-byte
+In-place parity summary: 35/35 files match byte-for-byte
+Prefix flag summary: 35/35 files match
+clean check parity: 35/35 files pass on both paths
+unformatted check refusal: both paths detect changes (rc=1)
+syntax error properly refused by both (crystal rc=1, selfhost rc=1)
+Mutation proofs: 5/5 guarded mutations caught and reverted
+Parity summary: 35/35 files match byte-for-byte across stdin, in-place, and prefix flags (100% parity)
+ALL SELFHOST FORMAT WIRING CHECKS PASSED SUCCESSFULLY!
+```
+
+## 7. Observable Proof of Stage One
 
 Stage One will be demonstrably complete when:
 

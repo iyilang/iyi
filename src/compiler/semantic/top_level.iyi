@@ -103,7 +103,7 @@ pub abstract class Type
 
   def subtype_of?(other : Type) : Bool
     return true if self == other
-    if other.union?
+    if other.is_a?(UnionType)
       ut = other.as(UnionType)
       i = 0
       while i < ut.union_types.size
@@ -112,7 +112,7 @@ pub abstract class Type
       end
       return false
     end
-    if self.union?
+    if self.is_a?(UnionType)
       sut = self.as(UnionType)
       i = 0
       while i < sut.union_types.size

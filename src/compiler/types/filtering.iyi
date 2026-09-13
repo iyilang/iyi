@@ -1,0 +1,192 @@
+module compiler/types/filtering
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/semantic/top_level
+import compiler/types/types
+import compiler/types/unification
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode}
+using compiler/semantic/top_level::{
+  AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType,
+  ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType
+}
+using compiler/types/types::{
+  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
+  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType,
+  NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType,
+  NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType,
+  StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType
+}
+using compiler/types/unification::{TypeUnification}
+
+pub class TypeFiltering
+  def self.filter_by(program : SemanticProgram, type : Type, target : Type) : Type?
+    common_descendent(program, type, target)
+  end
+
+  def self.common_descendent(program : SemanticProgram, type1 : Type, type2 : Type) : Type?
+    if type1 == type2 || type1.full_name == type2.full_name
+      return type1
+    end
+
+    if type1.subtype_of?(type2)
+      return type1
+    end
+
+    if type2.subtype_of?(type1)
+      if type1.is_a?(VirtualType)
+        if type2.is_a?(ClassType) && !type2.as(ClassType).subclasses.empty?
+          return TypeUnification.virtual_type_of(program, type2)
+        else
+          return type2
+        end
+      end
+      return type2
+    end
+
+    if type1.is_a?(UnionType)
+      u = type1.as(UnionType)
+      filtered = [] of Type
+      i = 0
+      while i < u.union_types.size
+        cd = common_descendent(program, u.union_types[i], type2)
+        if cd
+          filtered << cd
+        end
+        i = i + 1
+      end
+      return nil if filtered.empty?
+      return TypeUnification.type_merge(program, filtered)
+    end
+
+    if type2.is_a?(UnionType)
+      u = type2.as(UnionType)
+      filtered = [] of Type
+      i = 0
+      while i < u.union_types.size
+        cd = common_descendent(program, type1, u.union_types[i])
+        if cd
+          filtered << cd
+        end
+        i = i + 1
+      end
+      return nil if filtered.empty?
+      return TypeUnification.type_merge(program, filtered)
+    end
+
+    if type1.is_a?(VirtualType)
+      base = type1.as(VirtualType).base_type
+      if type2.subtype_of?(base)
+        return TypeUnification.virtual_type_of(program, type2)
+      elsif base.subtype_of?(type2)
+        return type1
+      end
+      return nil
+    end
+
+    if type2.is_a?(VirtualType)
+      base = type2.as(VirtualType).base_type
+      if type1.subtype_of?(base)
+        return type1
+      end
+      return nil
+    end
+
+    if type1.is_a?(GenericClassInstanceType) && type2.is_a?(GenericClassInstanceType)
+      g1 = type1.as(GenericClassInstanceType)
+      g2 = type2.as(GenericClassInstanceType)
+      if g1.generic_type == g2.generic_type
+        return g1 if g1 == g2 || g1.full_name == g2.full_name
+      end
+      return nil
+    end
+
+    if type1.is_a?(TupleInstanceType) && type2.is_a?(TupleInstanceType)
+      t1 = type1.as(TupleInstanceType)
+      t2 = type2.as(TupleInstanceType)
+      return t1 if t1.subtype_of?(t2)
+      return nil
+    end
+
+    if type1.is_a?(NamedTupleInstanceType) && type2.is_a?(NamedTupleInstanceType)
+      nt1 = type1.as(NamedTupleInstanceType)
+      nt2 = type2.as(NamedTupleInstanceType)
+      return nt1 if nt1.subtype_of?(nt2)
+      return nil
+    end
+
+    if type1.is_a?(MetaclassType) && type2.is_a?(VirtualMetaclassType)
+      inst1 = type1.as(MetaclassType).instance_type
+      inst2_base = type2.as(VirtualMetaclassType).instance_type.base_type
+      res = common_descendent(program, inst1, inst2_base)
+      return res ? TypeUnification.metaclass_of(res) : nil
+    end
+
+    if type1.is_a?(VirtualMetaclassType) && type2.is_a?(MetaclassType)
+      return common_descendent(program, type2, type1)
+    end
+
+    if type1.is_a?(VirtualMetaclassType) && type2.is_a?(VirtualMetaclassType)
+      inst1 = type1.as(VirtualMetaclassType).instance_type
+      inst2 = type2.as(VirtualMetaclassType).instance_type
+      res = common_descendent(program, inst1, inst2)
+      return res ? TypeUnification.metaclass_of(res) : nil
+    end
+
+    nil
+  end
+
+  def self.filter_by_responds_to(program : SemanticProgram, type : Type, name : String) : Type?
+    if type.is_a?(UnionType)
+      u = type.as(UnionType)
+      filtered = [] of Type
+      i = 0
+      while i < u.union_types.size
+        f = filter_by_responds_to(program, u.union_types[i], name)
+        if f
+          filtered << f
+        end
+        i = i + 1
+      end
+      return nil if filtered.empty?
+      return TypeUnification.type_merge(program, filtered)
+    end
+
+    if type.is_a?(ModuleType)
+      mt = type.as(ModuleType)
+      if mt.defs[name]?
+        return type
+      end
+      i = 0
+      while i < mt.parents.size
+        p = mt.parents[i]
+        if p.is_a?(ModuleType) && p.as(ModuleType).defs[name]?
+          return type
+        end
+        i = i + 1
+      end
+      return nil
+    end
+
+    if type.is_a?(VirtualType)
+      vt = type.as(VirtualType)
+      base = vt.base_type
+      if base.is_a?(ModuleType) && base.as(ModuleType).defs[name]?
+        return type
+      end
+      sub_res = [] of Type
+      vt.subtypes.each do |st|
+        if filter_by_responds_to(program, st, name)
+          sub_res << st
+        end
+      end
+      return nil if sub_res.empty?
+      return TypeUnification.type_merge(program, sub_res)
+    end
+
+    nil
+  end
+end

@@ -1,0 +1,214 @@
+module compiler/types/rendering
+
+import compiler/foundation/location
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/semantic/top_level
+import compiler/types/types
+
+using compiler/foundation/location::{Location}
+using compiler/syntax/ast::{ASTNode}
+using compiler/semantic/top_level::{
+  AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType,
+  MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram,
+  TraitType, Type, UnionType
+}
+using compiler/types/types::{
+  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
+  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType,
+  MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType,
+  NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType,
+  ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType,
+  TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType, VoidType
+}
+
+pub class TypeRenderer
+  def self.render(type : Type, skip_union_parens : Bool = false, generic_args : Bool = true, codegen : Bool = false) : String
+    if type.is_a?(UnionType)
+      return render_union(type.as(UnionType), skip_union_parens, generic_args, codegen)
+    end
+
+    if type.is_a?(VirtualType)
+      vt = type.as(VirtualType)
+      return "#{render(vt.base_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}+"
+    end
+
+    if type.is_a?(VirtualMetaclassType)
+      vm = type.as(VirtualMetaclassType)
+      return "#{render(vm.instance_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}.class"
+    end
+
+    if type.is_a?(GenericClassInstanceMetaclassType)
+      gm = type.as(GenericClassInstanceMetaclassType)
+      return "#{render(gm.generic_instance_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}.class"
+    end
+
+    if type.is_a?(GenericModuleInstanceMetaclassType)
+      gm = type.as(GenericModuleInstanceMetaclassType)
+      return "#{render(gm.generic_instance_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}.class"
+    end
+
+    if type.is_a?(MetaclassType)
+      mt = type.as(MetaclassType)
+      return "#{render(mt.instance_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}.class"
+    end
+
+    if type.is_a?(TupleInstanceType)
+      tup = type.as(TupleInstanceType)
+      elements = tup.tuple_types.map { |t| render(t, skip_union_parens: false, generic_args: generic_args, codegen: codegen) }
+      return "Tuple(#{elements.join(", ")})"
+    end
+
+    if type.is_a?(NamedTupleInstanceType)
+      nt = type.as(NamedTupleInstanceType)
+      entries = nt.entries.map do |e|
+        "#{e.name}: #{render(e.type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}"
+      end
+      return "NamedTuple(#{entries.join(", ")})"
+    end
+
+    if type.is_a?(ProcInstanceType)
+      proc_t = type.as(ProcInstanceType)
+      parts = proc_t.arg_types.map { |a| render(a, skip_union_parens: false, generic_args: generic_args, codegen: codegen) }
+      parts << render(proc_t.return_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)
+      return "Proc(#{parts.join(", ")})"
+    end
+
+    if type.is_a?(PointerInstanceType)
+      ptr = type.as(PointerInstanceType)
+      return "Pointer(#{render(ptr.element_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)})"
+    end
+
+    if type.is_a?(StaticArrayInstanceType)
+      sary = type.as(StaticArrayInstanceType)
+      return "StaticArray(#{render(sary.element_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}, #{sary.size_int})"
+    end
+
+    if type.is_a?(GenericInstanceType)
+      gi = type.as(GenericInstanceType)
+      base_name = gi.generic_type.full_name
+      if generic_args
+        args_s = gi.type_args.map { |a| render(a, skip_union_parens: false, generic_args: true, codegen: codegen) }.join(", ")
+        return "#{base_name}(#{args_s})"
+      else
+        return base_name
+      end
+    end
+
+    if type.is_a?(GenericClassType)
+      gc = type.as(GenericClassType)
+      if generic_args && !gc.type_vars.empty?
+        return "#{gc.full_name}(#{gc.type_vars.join(", ")})"
+      else
+        return gc.full_name
+      end
+    end
+
+    if type.is_a?(GenericModuleType)
+      gm = type.as(GenericModuleType)
+      if generic_args && !gm.type_vars.empty?
+        return "#{gm.full_name}(#{gm.type_vars.join(", ")})"
+      else
+        return gm.full_name
+      end
+    end
+
+    if type.is_a?(GenericTraitType)
+      gt = type.as(GenericTraitType)
+      if generic_args && !gt.type_vars.empty?
+        return "#{gt.full_name}(#{gt.type_vars.join(", ")})"
+      else
+        return gt.full_name
+      end
+    end
+
+    if type.is_a?(TypeParameter)
+      return type.as(TypeParameter).param_name
+    end
+
+    if type.is_a?(TypeSplat)
+      return "*#{render(type.as(TypeSplat).splatted_type, skip_union_parens: false, generic_args: generic_args, codegen: codegen)}"
+    end
+
+    type.full_name
+  end
+
+  private def self.render_union(union : UnionType, skip_union_parens : Bool, generic_args : Bool, codegen : Bool) : String
+    non_nil_rendered = [] of String
+    has_nil = false
+
+    flat = [] of Type
+    flatten_union(union, flat)
+
+    i = 0
+    while i < flat.size
+      t = flat[i]
+      if t.full_name == "Nil"
+        has_nil = true
+      else
+        non_nil_rendered << render(t, skip_union_parens: false, generic_args: generic_args, codegen: codegen)
+      end
+      i = i + 1
+    end
+
+    # Deduplicate rendered strings
+    unique_rendered = [] of String
+    i = 0
+    while i < non_nil_rendered.size
+      s = non_nil_rendered[i]
+      unless unique_rendered.includes?(s)
+        unique_rendered << s
+      end
+      i = i + 1
+    end
+
+    sorted = sort_strings(unique_rendered)
+
+    if has_nil
+      sorted << "Nil"
+    end
+
+    joined = sorted.join(" | ")
+    if skip_union_parens
+      joined
+    else
+      "(#{joined})"
+    end
+  end
+
+  private def self.flatten_union(union : UnionType, result : Array(Type)) : Nil
+    i = 0
+    while i < union.union_types.size
+      t = union.union_types[i]
+      if t.is_a?(UnionType)
+        flatten_union(t.as(UnionType), result)
+      else
+        result << t
+      end
+      i = i + 1
+    end
+  end
+
+  def self.sort_strings(strings : Array(String)) : Array(String)
+    sorted = [] of String
+    strings.each { |s| sorted << s }
+    i = 0
+    while i < sorted.size
+      min_idx = i
+      j = i + 1
+      while j < sorted.size
+        if sorted[j] < sorted[min_idx]
+          min_idx = j
+        end
+        j = j + 1
+      end
+      if min_idx != i
+        temp = sorted[i]
+        sorted[i] = sorted[min_idx]
+        sorted[min_idx] = temp
+      end
+      i = i + 1
+    end
+    sorted
+  end
+end

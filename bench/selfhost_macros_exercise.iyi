@@ -1,0 +1,384 @@
+import compiler/syntax/ast
+import compiler/syntax/visitor
+import compiler/macros/ast
+import compiler/macros/methods
+import compiler/macros/interpreter
+import compiler/macros/macro_parser
+import compiler/macros/engine
+
+using compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
+using compiler/syntax/visitor::{Visitor, NodeCounterVisitor}
+using compiler/macros/ast::{MacroId}
+using compiler/macros/methods::{MacroMethods}
+using compiler/macros/interpreter::{MacroInterpreter}
+using compiler/macros/macro_parser::{MacroParser}
+using compiler/macros/engine::{MacroEngine}
+
+module BenchSelfhostMacrosExercise
+  def self.assert(cond : Bool, msg : String) : Nil
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.escape_s(s : String) : String
+    res = "\""
+    i = 0
+    while i < s.bytesize
+      b = s.byte_at(i)
+      if b == 10_u8
+        res = res + "\\n"
+      elsif b == 13_u8
+        res = res + "\\r"
+      elsif b == 9_u8
+        res = res + "\\t"
+      elsif b == 92_u8
+        res = res + "\\\\"
+      elsif b == 34_u8
+        res = res + "\\\""
+      else
+        res = res + b.unsafe_chr.to_s
+      end
+      i = i + 1
+    end
+    res + "\""
+  end
+
+  def self.dump_ast(node : ASTNode?, indent : Int32 = 0) : String
+    return ("  " * indent) + "nil\n" if node.nil?
+    p = "  " * indent
+    case node
+    when Expressions
+      kw = case node.keyword
+           when Expressions::Keyword::Paren then "paren"
+           when Expressions::Keyword::Begin then "begin"
+           else                                  "none"
+           end
+      s = "#{p}Expressions keyword=#{kw}\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when Nop
+      "#{p}Nop\n"
+    when NilLiteral
+      "#{p}NilLiteral\n"
+    when BoolLiteral
+      "#{p}BoolLiteral value=#{node.value}\n"
+    when NumberLiteral
+      "#{p}NumberLiteral value=\"#{node.value}\" kind=#{node.kind.to_s.downcase}\n"
+    when CharLiteral
+      "#{p}CharLiteral value=#{node.value.ord}\n"
+    when StringLiteral
+      "#{p}StringLiteral value=#{escape_s(node.value)}\n"
+    when StringInterpolation
+      s = "#{p}StringInterpolation\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when SymbolLiteral
+      "#{p}SymbolLiteral value=#{escape_s(node.value)}\n"
+    when Var
+      "#{p}Var name=#{escape_s(node.name)}\n"
+    when InstanceVar
+      "#{p}InstanceVar name=#{escape_s(node.name)}\n"
+    when ClassVar
+      "#{p}ClassVar name=#{escape_s(node.name)}\n"
+    when Global
+      "#{p}Global name=#{escape_s(node.name)}\n"
+    when Path
+      "#{p}Path names=#{node.names.join("::")} global=#{node.global}\n"
+    when ArrayLiteral
+      s = "#{p}ArrayLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when HashLiteral
+      s = "#{p}HashLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry:\n"
+        s += "#{p}    key:\n" + dump_ast(entry.key, indent + 3)
+        s += "#{p}    value:\n" + dump_ast(entry.value, indent + 3)
+      end
+      s
+    when TupleLiteral
+      s = "#{p}TupleLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when NamedTupleLiteral
+      s = "#{p}NamedTupleLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry key=#{escape_s(entry.key)}:\n" + dump_ast(entry.value, indent + 2)
+      end
+      s
+    when RangeLiteral
+      s = "#{p}RangeLiteral exclusive=#{node.exclusive}\n"
+      s += "#{p}  from:\n" + dump_ast(node.from, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when Call
+      s = "#{p}Call name=#{escape_s(node.name)}\n"
+      if obj = node.obj
+        s += "#{p}  obj:\n" + dump_ast(obj, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if named_args = node.named_args
+        s += "#{p}  named_args:\n"
+        named_args.each { |na| s += dump_ast(na, indent + 2) }
+      end
+      if block_arg = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(block_arg, indent + 2)
+      end
+      if block = node.block
+        s += "#{p}  block:\n" + dump_ast(block, indent + 2)
+      end
+      s
+    when NamedArgument
+      s = "#{p}NamedArgument name=#{escape_s(node.name)}:\n"
+      s += dump_ast(node.value, indent + 1)
+      s
+    when Block
+      arg_names = node.args.map(&.name).join(", ")
+      splat = node.splat_index ? node.splat_index.to_s : "none"
+      s = "#{p}Block args=[#{arg_names}] splat=#{splat}:\n"
+      s += dump_ast(node.body, indent + 1)
+      s
+    when Assign
+      s = "#{p}Assign\n"
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when If
+      s = "#{p}If ternary=#{node.ternary}\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when Def
+      receiver_s = node.receiver ? " receiver" : ""
+      abstract_s = node.abstract ? " abstract=true" : ""
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}Def name=#{escape_s(node.name)}#{receiver_s}#{abstract_s}#{splat_s}\n"
+      if r = node.receiver
+        s += "#{p}  receiver:\n" + dump_ast(r, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if ds = node.double_splat
+        s += "#{p}  double_splat:\n" + dump_ast(ds, indent + 2)
+      end
+      if ba = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(ba, indent + 2)
+      end
+      if rt = node.return_type
+        s += "#{p}  return_type:\n" + dump_ast(rt, indent + 2)
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Arg
+      ext_s = (ext = node.external_name) && ext != node.name ? " external_name=#{escape_s(ext)}" : ""
+      s = "#{p}Arg name=#{escape_s(node.name)}#{ext_s}\n"
+      if rest = node.restriction
+        s += "#{p}  restriction:\n" + dump_ast(rest, indent + 2)
+      end
+      if def_val = node.default_value
+        s += "#{p}  default_value:\n" + dump_ast(def_val, indent + 2)
+      end
+      s
+    else
+      "#{p}ASTNode\n"
+    end
+  end
+
+  def self.test_arg_substitution
+    print "testing macro argument substitution... "
+    engine = MacroEngine.new
+    src = %(
+macro add_two(a, b = 10, c = 20)
+  {{a}} + {{b}} + {{c}}
+end
+add_two(5, c: 30)
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(Call), "expansion produces Call")
+    call_node = expanded.as(Call)
+    assert(call_node.name == "+", "outer call is +")
+    puts "ok"
+  end
+
+  def self.test_splats
+    print "testing macro splats and double splats... "
+    engine = MacroEngine.new
+    src = %(
+macro sum_all(*items)
+  0 {% for x in items %} + {{x}} {% end %}
+end
+sum_all(1, 2, 3, 4)
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(Call), "expansion produces Call")
+    puts "ok"
+  end
+
+  def self.test_control_flow
+    print "testing macro control flow (if, unless, elsif, else)... "
+    engine = MacroEngine.new
+    src1 = %(
+macro check_sign(val)
+  {% if val > 0 %}
+    "positive"
+  {% elsif val == 0 %}
+    "zero"
+  {% else %}
+    "negative"
+  {% end %}
+end
+check_sign(5)
+)
+    exp1 = engine.expand(src1)
+    assert(exp1.is_a?(StringLiteral), "if branch produces StringLiteral")
+    assert(exp1.as(StringLiteral).value == "positive", "if branch value matches")
+
+    src2 = %(
+macro check_fallback(flag, val)
+  {% unless flag %}
+    {{val}}
+  {% else %}
+    0
+  {% end %}
+end
+check_fallback(false, 99)
+)
+    exp2 = engine.expand(src2)
+    assert(exp2.is_a?(NumberLiteral), "unless branch produces NumberLiteral")
+    assert(exp2.as(NumberLiteral).value == "99", "unless branch value matches")
+    puts "ok"
+  end
+
+  def self.test_iteration
+    print "testing macro iteration (for over arrays, tuples, named tuples, ranges)... "
+    engine = MacroEngine.new
+    src_range = %(
+macro loop_range(n)
+  0 {% for i in 1..n %} + {{i}} {% end %}
+end
+loop_range(3)
+)
+    exp_range = engine.expand(src_range)
+    assert(exp_range.is_a?(Call), "range loop produces Call chain")
+
+    src_nt = %(
+macro dict_vals(nt)
+  { {% for k, v in nt %} {{k.id}}: {{v}}, {% end %} }
+end
+dict_vals({x: 10, y: 20})
+)
+    exp_nt = engine.expand(src_nt)
+    assert(exp_nt.is_a?(NamedTupleLiteral), "named tuple iteration produces NamedTupleLiteral")
+    puts "ok"
+  end
+
+  def self.test_stringification
+    print "testing macro stringification and identifier methods... "
+    engine = MacroEngine.new
+    src = %(
+macro inspect_expr(e)
+  "expr: " + {{e.stringify}} + " id: " + {{"test_".id + e.id}}
+end
+inspect_expr(my_var)
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(Call), "string concatenation produces Call")
+    puts "ok"
+  end
+
+  def self.test_ast_methods
+    print "testing macro AST node methods... "
+    engine = MacroEngine.new
+    src = %(
+macro get_call_info(c)
+  {
+    name: {{c.name.stringify}},
+    first_arg: {{c.args.first}},
+    size: {{c.args.size}}
+  }
+end
+get_call_info(run(10, 20))
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(NamedTupleLiteral), "AST inspection produces NamedTupleLiteral")
+    puts "ok"
+  end
+
+  def self.test_fresh_vars
+    print "testing macro fresh variable generation... "
+    engine = MacroEngine.new
+    src = %(
+macro make_swap(a, b)
+  %t = {{a}};
+  {{a}} = {{b}};
+  {{b}} = %t
+end
+make_swap(x, y)
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(Expressions), "swap produces Expressions")
+    puts "ok"
+  end
+
+  def self.test_code_generation
+    print "testing macro code and definition generation... "
+    engine = MacroEngine.new
+    src = %(
+macro make_getter(name, val)
+  def {{name.id}}
+    {{val}}
+  end
+end
+make_getter(answer, 42)
+)
+    expanded = engine.expand(src)
+    assert(expanded.is_a?(Def), "def generation produces Def")
+    def_node = expanded.as(Def)
+    assert(def_node.name == "answer", "def name matches")
+    puts "ok"
+  end
+
+  def self.run_all : Nil
+    puts "Running Selfhost Macro Engine Verification Suite (pure iyi stage 0)"
+    puts "============================================================="
+    test_arg_substitution
+    test_splats
+    test_control_flow
+    test_iteration
+    test_stringification
+    test_ast_methods
+    test_fresh_vars
+    test_code_generation
+    puts "============================================================="
+    puts "ALL SELFHOST MACRO CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================="
+  end
+end
+
+if Program.args.size > 0
+  if Program.args.size > 1 && Program.args[1] == "--count"
+    filename = Program.args[0]
+    source = File.read(filename)
+    engine = MacroEngine.new
+    expanded = engine.expand(source)
+    counter = NodeCounterVisitor.new
+    expanded.accept(counter)
+    puts counter.count
+  else
+    filename = Program.args[0]
+    source = File.read(filename)
+    engine = MacroEngine.new
+    expanded = engine.expand(source)
+    print BenchSelfhostMacrosExercise.dump_ast(expanded)
+  end
+else
+  BenchSelfhostMacrosExercise.run_all
+end

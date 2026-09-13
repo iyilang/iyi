@@ -1,0 +1,42 @@
+module compiler/macros/engine
+
+import compiler/syntax/ast
+import compiler/syntax/parser
+import compiler/semantic/normalizer
+import compiler/macros/ast
+import compiler/macros/methods
+import compiler/macros/interpreter
+import compiler/macros/macro_parser
+
+using compiler/syntax/ast::{ASTNode, Call, Macro}
+using compiler/syntax/parser::{Parser}
+using compiler/semantic/normalizer::{Normalizer}
+using compiler/macros/interpreter::{MacroInterpreter}
+using compiler/macros/macro_parser::{MacroParser}
+
+pub class MacroEngine
+  property interpreter : MacroInterpreter
+
+  def initialize
+    @interpreter = MacroInterpreter.new
+  end
+
+  def expand_to_s(a_macro : Macro, call : Call) : String
+    interp = MacroInterpreter.new(call.block)
+    interp.bind_args(a_macro, call)
+    interp.interpret(a_macro.body)
+    interp.to_s
+  end
+
+  def expand(a_macro : Macro, call : Call) : ASTNode
+    expanded_source = expand_to_s(a_macro, call)
+    parser = Parser.new(expanded_source)
+    node = parser.parse
+    Normalizer.new.normalize(node)
+  end
+
+  def expand(source : String) : ASTNode
+    the_macro, the_call = MacroParser.parse_fixture(source)
+    expand(the_macro, the_call)
+  end
+end

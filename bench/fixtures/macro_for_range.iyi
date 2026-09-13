@@ -1,0 +1,5 @@
+macro repeat_add(count, step)
+  0 {% for i in 0...count %} + {{step}} {% end %}
+end
+
+repeat_add(4, 10)

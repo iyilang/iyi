@@ -1,0 +1,9 @@
+macro with_timing(label)
+  start_log({{label}});
+  {{ yield }};
+  end_log({{label}})
+end
+
+with_timing("bench") do
+  run_task
+end

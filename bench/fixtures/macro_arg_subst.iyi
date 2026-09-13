@@ -1,0 +1,5 @@
+macro calculate(a, b = 10, c = 20)
+  {{a}} + {{b}} + {{c}}
+end
+
+calculate(5, c: 30)

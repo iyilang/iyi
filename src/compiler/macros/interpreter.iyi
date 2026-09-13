@@ -1,0 +1,431 @@
+module compiler/macros/interpreter
+
+import compiler/syntax/ast
+import compiler/syntax/token
+import compiler/macros/ast
+import compiler/macros/methods
+
+using compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
+using compiler/syntax/token::{NumberKind}
+using compiler/macros/ast::{MacroId}
+using compiler/macros/methods::{MacroMethods}
+
+pub class MacroInterpreter
+  property vars : Hash(String, ASTNode)
+  property str : StringBuilder
+  property macro_vars : Hash(String, String)
+  property temp_id : Int32
+  property last : ASTNode
+  property block : Block?
+
+  def initialize(@block : Block? = nil)
+    @vars = Hash(String, ASTNode).new
+    @str = StringBuilder.new
+    @macro_vars = Hash(String, String).new
+    @temp_id = 0
+    @last = Nop.new
+  end
+
+  def to_s : String
+    @str.to_s
+  end
+
+  def new_temp_var_name(prefix : String = "__temp_") : String
+    @temp_id = @temp_id + 1
+    "#{prefix}#{@temp_id}"
+  end
+
+  def define_var(name : String, value : ASTNode) : Nil
+    @vars[name] = value
+  end
+
+  def var?(name : String) : Bool
+    @vars.has_key?(name)
+  end
+
+  def bind_args(a_macro : Macro, call : Call) : Nil
+    splat_idx = a_macro.splat_index
+    arg_idx = 0
+    call_idx = 0
+
+    while arg_idx < a_macro.args.size
+      macro_arg = a_macro.args[arg_idx]
+      if s_idx = splat_idx
+        if s_idx == arg_idx
+          splat_elems = [] of ASTNode
+          trailing_count = a_macro.args.size - (s_idx + 1)
+          splat_end = call.args.size - trailing_count
+          splat_end = s_idx if splat_end < s_idx
+
+          k = s_idx
+          while k < splat_end && k < call.args.size
+            splat_elems << call.args[k]
+            k = k + 1
+          end
+          call_idx = k
+          @vars[macro_arg.name] = TupleLiteral.new(splat_elems)
+        else
+          if call_idx < call.args.size
+            @vars[macro_arg.name] = call.args[call_idx]
+            call_idx = call_idx + 1
+          elsif def_val = macro_arg.default_value
+            @vars[macro_arg.name] = def_val.clone
+          end
+        end
+      else
+        if call_idx < call.args.size
+          @vars[macro_arg.name] = call.args[call_idx]
+          call_idx = call_idx + 1
+        elsif def_val = macro_arg.default_value
+          @vars[macro_arg.name] = def_val.clone
+        end
+      end
+      arg_idx = arg_idx + 1
+    end
+
+    if na = call.named_args
+      na.each do |named_arg|
+        a_macro.args.each do |ma|
+          if ma.name == named_arg.name
+            @vars[ma.name] = named_arg.value
+          end
+        end
+      end
+    end
+
+    if ds = a_macro.double_splat
+      ds_entries = [] of NamedTupleLiteral::Entry
+      if na = call.named_args
+        na.each do |named_arg|
+          matched = false
+          a_macro.args.each do |ma|
+            if ma.name == named_arg.name
+              matched = true
+            end
+          end
+          unless matched
+            ds_entries << NamedTupleLiteral::Entry.new(named_arg.name, named_arg.value)
+          end
+        end
+      end
+      @vars[ds.name] = NamedTupleLiteral.new(ds_entries)
+    end
+
+    a_macro.args.each do |ma|
+      if !@vars.has_key?(ma.name) && (dv = ma.default_value)
+        @vars[ma.name] = dv.clone
+      end
+    end
+
+    if ba = a_macro.block_arg
+      if cb = call.block
+        @vars[ba.name] = cb
+      else
+        @vars[ba.name] = Nop.new
+      end
+    end
+  end
+
+  def evaluate(node : ASTNode) : ASTNode
+    if node.is_a?(Var)
+      v = node.as(Var)
+      if val = @vars[v.name]?
+        return val
+      else
+        return v
+      end
+    end
+
+    if node.is_a?(MacroId)
+      return node
+    end
+
+    if node.is_a?(StringLiteral) || node.is_a?(NumberLiteral) || node.is_a?(CharLiteral) || node.is_a?(BoolLiteral) || node.is_a?(NilLiteral) || node.is_a?(SymbolLiteral)
+      return node
+    end
+
+    if node.is_a?(ArrayLiteral)
+      arr = node.as(ArrayLiteral)
+      new_elems = arr.elements.map { |e| evaluate(e) }
+      return ArrayLiteral.new(new_elems)
+    end
+
+    if node.is_a?(TupleLiteral)
+      tup = node.as(TupleLiteral)
+      new_elems = tup.elements.map { |e| evaluate(e) }
+      return TupleLiteral.new(new_elems)
+    end
+
+    if node.is_a?(NamedTupleLiteral)
+      nt = node.as(NamedTupleLiteral)
+      new_entries = nt.entries.map { |e| NamedTupleLiteral::Entry.new(e.key, evaluate(e.value)) }
+      return NamedTupleLiteral.new(new_entries)
+    end
+
+    if node.is_a?(HashLiteral)
+      hl = node.as(HashLiteral)
+      new_entries = hl.entries.map { |e| HashLiteral::Entry.new(evaluate(e.key), evaluate(e.value)) }
+      return HashLiteral.new(new_entries)
+    end
+
+    if node.is_a?(RangeLiteral)
+      rng = node.as(RangeLiteral)
+      return RangeLiteral.new(evaluate(rng.from), evaluate(rng.to), rng.exclusive)
+    end
+
+    if node.is_a?(Assign)
+      asgn = node.as(Assign)
+      target = asgn.target
+      val = evaluate(asgn.value)
+      if target.is_a?(Var)
+        @vars[target.as(Var).name] = val
+      end
+      return val
+    end
+
+    if node.is_a?(Call)
+      cl = node.as(Call)
+      if cl.obj.nil? && cl.args.empty? && (v = @vars[cl.name]?)
+        return v
+      end
+      rec = if o = cl.obj
+              evaluate(o)
+            else
+              nil
+            end
+      eval_args = cl.args.map { |a| evaluate(a) }
+      return MacroMethods.interpret_method(rec, cl.name, eval_args, nil, cl.block)
+    end
+    if node.is_a?(If)
+      if_node = node.as(If)
+      c = evaluate(if_node.cond)
+      if MacroMethods.truthy?(c)
+        return evaluate(if_node.then)
+      else
+        return evaluate(if_node.else)
+      end
+    end
+
+    if node.is_a?(Unless)
+      unl_node = node.as(Unless)
+      c = evaluate(unl_node.cond)
+      if MacroMethods.truthy?(c)
+        return evaluate(unl_node.else)
+      else
+        return evaluate(unl_node.then)
+      end
+    end
+
+    if node.is_a?(And)
+      and_node = node.as(And)
+      l = evaluate(and_node.left)
+      if MacroMethods.truthy?(l)
+        return evaluate(and_node.right)
+      else
+        return l
+      end
+    end
+
+    if node.is_a?(Or)
+      or_node = node.as(Or)
+      l = evaluate(or_node.left)
+      if MacroMethods.truthy?(l)
+        return l
+      else
+        return evaluate(or_node.right)
+      end
+    end
+
+    if node.is_a?(Not)
+      not_node = node.as(Not)
+      v = evaluate(not_node.exp)
+      return BoolLiteral.new(!MacroMethods.truthy?(v))
+    end
+
+    if node.is_a?(StringInterpolation)
+      si = node.as(StringInterpolation)
+      interp_sb = StringBuilder.new
+      si.expressions.each do |e|
+        if e.is_a?(StringLiteral)
+          interp_sb << e.as(StringLiteral).value
+        else
+          ev = evaluate(e)
+          if ev.is_a?(StringLiteral)
+            interp_sb << ev.as(StringLiteral).value
+          elsif ev.is_a?(MacroId)
+            interp_sb << ev.as(MacroId).value
+          else
+            ev.to_s(interp_sb)
+          end
+        end
+      end
+      return StringLiteral.new(interp_sb.to_s)
+    end
+
+    if node.is_a?(Yield)
+      if b = @block
+        return b.body.clone
+      else
+        return Nop.new
+      end
+    end
+    if node.is_a?(Expressions)
+      exps = node.as(Expressions)
+      last_val : ASTNode = Nop.new
+      exps.expressions.each do |e|
+        last_val = evaluate(e)
+      end
+      return last_val
+    end
+
+    node
+  end
+
+  def interpret(node : ASTNode) : ASTNode
+    if node.is_a?(Expressions)
+      exps = node.as(Expressions)
+      exps.expressions.each do |e|
+        interpret(e)
+      end
+      return @last
+    end
+
+    if node.is_a?(MacroLiteral)
+      ml = node.as(MacroLiteral)
+      @str << ml.value
+      @last = Nop.new
+      return @last
+    end
+
+    if node.is_a?(MacroExpression)
+      me = node.as(MacroExpression)
+      val = evaluate(me.exp)
+      if me.output
+        if val.is_a?(MacroId)
+          @str << val.as(MacroId).value
+        elsif val.is_a?(Nop)
+          # nothing
+        else
+          val.to_s(@str)
+        end
+      end
+      @last = val
+      return @last
+    end
+
+    if node.is_a?(MacroIf)
+      mi = node.as(MacroIf)
+      c = evaluate(mi.cond)
+      if MacroMethods.truthy?(c)
+        interpret(mi.then)
+      else
+        interpret(mi.else)
+      end
+      return @last
+    end
+
+    if node.is_a?(MacroFor)
+      mf = node.as(MacroFor)
+      exp_val = evaluate(mf.exp)
+      if exp_val.is_a?(ArrayLiteral) || exp_val.is_a?(TupleLiteral)
+        elems = exp_val.is_a?(ArrayLiteral) ? exp_val.as(ArrayLiteral).elements : exp_val.as(TupleLiteral).elements
+        var1 = mf.vars[0]
+        var2 = mf.vars.size > 1 ? mf.vars[1] : nil
+        i = 0
+        while i < elems.size
+          @vars[var1.name] = elems[i]
+          if v2 = var2
+            @vars[v2.name] = NumberLiteral.new(i.to_s, NumberKind::I32)
+          end
+          interpret(mf.body)
+          i = i + 1
+        end
+        @vars.delete(var1.name)
+        if v2 = var2
+          @vars.delete(v2.name)
+        end
+      elsif exp_val.is_a?(NamedTupleLiteral)
+        entries = exp_val.as(NamedTupleLiteral).entries
+        var1 = mf.vars[0]
+        var2 = mf.vars.size > 1 ? mf.vars[1] : nil
+        var3 = mf.vars.size > 2 ? mf.vars[2] : nil
+        i = 0
+        while i < entries.size
+          @vars[var1.name] = MacroId.new(entries[i].key)
+          if v2 = var2
+            @vars[v2.name] = entries[i].value
+          end
+          if v3 = var3
+            @vars[v3.name] = NumberLiteral.new(i.to_s, NumberKind::I32)
+          end
+          interpret(mf.body)
+          i = i + 1
+        end
+        @vars.delete(var1.name)
+        if v2 = var2
+          @vars.delete(v2.name)
+        end
+        if v3 = var3
+          @vars.delete(v3.name)
+        end
+      elsif exp_val.is_a?(RangeLiteral)
+        rng = exp_val.as(RangeLiteral)
+        from_v = MacroMethods.eval_int(rng.from)
+        to_v = MacroMethods.eval_int(rng.to)
+        excl = rng.exclusive
+        var1 = mf.vars[0]
+        var2 = mf.vars.size > 1 ? mf.vars[1] : nil
+        curr = from_v
+        limit = excl ? to_v : to_v + 1
+        idx = 0
+        while curr < limit
+          @vars[var1.name] = NumberLiteral.new(curr.to_s, NumberKind::I32)
+          if v2 = var2
+            @vars[v2.name] = NumberLiteral.new(idx.to_s, NumberKind::I32)
+          end
+          interpret(mf.body)
+          curr = curr + 1
+          idx = idx + 1
+        end
+        @vars.delete(var1.name)
+        if v2 = var2
+          @vars.delete(v2.name)
+        end
+      end
+      @last = Nop.new
+      return @last
+    end
+
+    if node.is_a?(MacroVar)
+      mv = node.as(MacroVar)
+      key = mv.name
+      temp_name = @macro_vars[key]?
+      unless temp_name
+        temp_name = new_temp_var_name("__temp_")
+        @macro_vars[key] = temp_name
+      end
+      @str << temp_name
+      @last = Var.new(temp_name)
+      return @last
+    end
+
+    if node.is_a?(MacroVerbatim)
+      mv = node.as(MacroVerbatim)
+      mv.exp.to_s(@str)
+      @last = Nop.new
+      return @last
+    end
+
+    if node.is_a?(Yield)
+      if b = @block
+        interpret(b.body)
+      end
+      @last = Nop.new
+      return @last
+    end
+
+    res = evaluate(node)
+    @last = res
+    @last
+  end
+end

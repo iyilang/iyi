@@ -1,0 +1,15 @@
+class Vehicle
+end
+
+class Car < Vehicle
+end
+
+class Truck < Vehicle
+end
+
+class ElectricCar < Car
+end
+
+alias Fleet = Car | Truck
+alias ElectricFleet = ElectricCar | Truck
+alias VehicleOrNil = Vehicle | Nil

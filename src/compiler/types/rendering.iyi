@@ -8,19 +8,8 @@ import compiler/types/types
 
 using compiler/foundation/location::{Location}
 using compiler/syntax/ast::{ASTNode}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType,
-  MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram,
-  TraitType, Type, UnionType
-}
-using compiler/types/types::{
-  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
-  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType,
-  MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType,
-  NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType,
-  ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType,
-  TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType, VoidType
-}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, TraitType, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType, VoidType}
 
 pub class TypeRenderer
   def self.render(type : Type, skip_union_parens : Bool = false, generic_args : Bool = true, codegen : Bool = false) : String

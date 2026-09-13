@@ -11,20 +11,9 @@ import compiler/types/restrictions
 import compiler/types/rendering
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Generic, NamedArgument, NumberLiteral, Path}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType,
-  MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram,
-  TraitType, Type, TypeException, UnionType
-}
-using compiler/types/types::{
-  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
-  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType,
-  MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType,
-  NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType,
-  ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType,
-  TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType, VoidType
-}
+using compiler/syntax/ast::{ASTNode, Call, Generic, Metaclass, NamedArgument, NumberLiteral, Path, ProcNotation, Union}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, TraitType, Type, TypeException, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType, VoidType}
 using compiler/types/unification::{TypeUnification}
 using compiler/types/filtering::{TypeFiltering}
 using compiler/types/restrictions::{TypeRestrictions}
@@ -45,35 +34,55 @@ pub class TypeSystem
       tup.struct = true
       @program.types["Tuple"] = tup
     end
+    @program.initial_type_names.add("Tuple")
 
     unless @program.types["NamedTuple"]?
       nt = GenericClassType.new(@program, @program, "NamedTuple", ["*T"], 0, @program.struct_type)
       nt.struct = true
       @program.types["NamedTuple"] = nt
     end
+    @program.initial_type_names.add("NamedTuple")
 
     unless @program.types["Proc"]?
       pr = GenericClassType.new(@program, @program, "Proc", ["*T", "R"], 0, @program.struct_type)
       pr.struct = true
       @program.types["Proc"] = pr
     end
+    @program.initial_type_names.add("Proc")
 
     unless @program.types["Pointer"]?
       ptr = GenericClassType.new(@program, @program, "Pointer", ["T"], nil, @program.struct_type)
       ptr.struct = true
       @program.types["Pointer"] = ptr
     end
+    @program.initial_type_names.add("Pointer")
 
     unless @program.types["StaticArray"]?
       sa = GenericClassType.new(@program, @program, "StaticArray", ["T", "N"], nil, @program.struct_type)
       sa.struct = true
       @program.types["StaticArray"] = sa
     end
+    @program.initial_type_names.add("StaticArray")
 
     unless @program.types["Union"]?
       un = GenericClassType.new(@program, @program, "Union", ["*T"], 0, @program.struct_type)
       un.struct = true
       @program.types["Union"] = un
+    end
+    @program.initial_type_names.add("Union")
+
+    unless @program.types["Void"]?
+      vd = NonGenericClassType.new(@program, @program, "Void", @program.value_type)
+      vd.struct = true
+      @program.types["Void"] = vd
+    end
+    @program.initial_type_names.add("Void")
+
+    # Ensure primitives are marked struct = true
+    ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128", "Float32", "Float64", "Char", "Bool", "Nil", "Symbol"].each do |pname|
+      if pt = @program.types[pname]?
+        pt.struct = true
+      end
     end
   end
 
@@ -86,7 +95,63 @@ pub class TypeSystem
       return lookup_generic(node.as(Generic), current_type)
     end
 
-    raise TypeException.new("expected type, got #{node.to_s}")
+    if node.is_a?(Call)
+      call = node.as(Call)
+      if call.name == "|"
+        if obj = call.obj
+          t1 = lookup_type_node(obj, current_type)
+          t2 = lookup_type_node(call.args.first, current_type)
+          return type_merge(t1, t2)
+        end
+      elsif call.name == "?"
+        if obj = call.obj
+          t = lookup_type_node(obj, current_type)
+          return type_merge(t, @program.nil_type)
+        end
+      elsif call.name == "+"
+        if obj = call.obj
+          t = lookup_type_node(obj, current_type)
+          return virtual_type_of(t)
+        end
+      end
+    end
+
+    if node.is_a?(Union)
+      u = node.as(Union)
+      types = [] of Type
+      i = 0
+      while i < u.types.size
+        types << lookup_type_node(u.types[i], current_type)
+        i = i + 1
+      end
+      return type_merge(types)
+    end
+
+    if node.is_a?(Metaclass)
+      mc = node.as(Metaclass)
+      base = lookup_type_node(mc.name, current_type)
+      return metaclass_of(base)
+    end
+
+    if node.is_a?(ProcNotation)
+      pn = node.as(ProcNotation)
+      args = [] of Type
+      if inps = pn.inputs
+        i = 0
+        while i < inps.size
+          args << lookup_type_node(inps[i], current_type)
+          i = i + 1
+        end
+      end
+      ret = if out_node = pn.output
+              lookup_type_node(out_node, current_type)
+            else
+              @program.nil_type
+            end
+      return proc_of(args, ret)
+    end
+
+    raise("expected type, got #{node.to_s}")
   end
 
   def lookup_path(path : Path, current_type : ModuleType = @program) : Type
@@ -95,7 +160,7 @@ pub class TypeSystem
       if t
         return t
       end
-      raise TypeException.new("undefined constant #{path.to_s}")
+      raise("undefined constant #{path.to_s}")
     end
 
     first_name = path.names.first
@@ -146,7 +211,7 @@ pub class TypeSystem
     end
 
     if t.nil?
-      raise TypeException.new("undefined constant #{path.to_s}")
+      raise("undefined constant #{path.to_s}")
     end
 
     if path.names.size == 1
@@ -164,14 +229,14 @@ pub class TypeSystem
         curr = nil
       end
       if curr.nil?
-        raise TypeException.new("undefined constant #{path.to_s}")
+        raise("undefined constant #{path.to_s}")
       end
       i = i + 1
     end
     if c = curr
       c
     else
-      raise TypeException.new("undefined constant #{path.to_s}")
+      raise("undefined constant #{path.to_s}")
     end
   end
 
@@ -180,7 +245,7 @@ pub class TypeSystem
 
     if base_type.name == "NamedTuple"
       unless node.type_vars.empty?
-        raise TypeException.new("can only instantiate NamedTuple with named arguments")
+        raise("can only instantiate NamedTuple with named arguments")
       end
       entries = [] of NamedArgumentType
       if named = node.named_args
@@ -188,7 +253,7 @@ pub class TypeSystem
         while i < named.size
           na = named[i]
           if na.value.is_a?(NumberLiteral)
-            raise TypeException.new("can't use number as type for NamedTuple")
+            raise("can't use number as type for NamedTuple")
           end
           arg_t = lookup_type_node(na.value, current_type)
           entries << NamedArgumentType.new(na.name, arg_t)
@@ -204,7 +269,7 @@ pub class TypeSystem
       while i < node.type_vars.size
         tv = node.type_vars[i]
         if tv.is_a?(NumberLiteral)
-          raise TypeException.new("argument to Tuple must be a type, not #{tv.to_s}")
+          raise("argument to Tuple must be a type, not #{tv.to_s}")
         end
         args << lookup_type_node(tv, current_type)
         i = i + 1
@@ -218,7 +283,7 @@ pub class TypeSystem
       while i < node.type_vars.size
         tv = node.type_vars[i]
         if tv.is_a?(NumberLiteral)
-          raise TypeException.new("argument to Union must be a type, not #{tv.to_s}")
+          raise("argument to Union must be a type, not #{tv.to_s}")
         end
         args << lookup_type_node(tv, current_type)
         i = i + 1
@@ -232,22 +297,29 @@ pub class TypeSystem
       while i < node.type_vars.size
         tv = node.type_vars[i]
         if tv.is_a?(NumberLiteral)
-          raise TypeException.new("argument to Proc must be a type, not #{tv.to_s}")
+          raise("argument to Proc must be a type, not #{tv.to_s}")
         end
         args << lookup_type_node(tv, current_type)
         i = i + 1
       end
       if args.empty?
-        raise TypeException.new("argument to Proc must have at least return type")
+        raise("argument to Proc must have at least return type")
       end
       ret_t = args.last
-      arg_ts = args.size > 1 ? args[0, args.size - 1] : [] of Type
+      arg_ts = [] of Type
+      if args.size > 1
+        ai = 0
+        while ai < args.size - 1
+          arg_ts << args[ai]
+          ai = ai + 1
+        end
+      end
       return proc_of(arg_ts, ret_t)
     end
 
     if base_type.name == "Pointer"
       if node.type_vars.size != 1
-        raise TypeException.new("wrong number of type vars for Pointer(T) (given #{node.type_vars.size}, expected 1)")
+        raise("wrong number of type vars for Pointer(T) (given #{node.type_vars.size}, expected 1)")
       end
       elem_t = lookup_type_node(node.type_vars[0], current_type)
       return pointer_of(elem_t)
@@ -255,7 +327,7 @@ pub class TypeSystem
 
     if base_type.name == "StaticArray"
       if node.type_vars.size != 2
-        raise TypeException.new("wrong number of type vars for StaticArray(T, N) (given #{node.type_vars.size}, expected 2)")
+        raise("wrong number of type vars for StaticArray(T, N) (given #{node.type_vars.size}, expected 2)")
       end
       elem_t = lookup_type_node(node.type_vars[0], current_type)
       size_node = node.type_vars[1]
@@ -270,7 +342,7 @@ pub class TypeSystem
       gc = base_type.as(GenericClassType)
       if node.type_vars.size != gc.type_vars.size
         type_vars_str = gc.type_vars.join(", ")
-        raise TypeException.new("wrong number of type vars for #{gc.full_name}(#{type_vars_str}) (given #{node.type_vars.size}, expected #{gc.type_vars.size})")
+        raise("wrong number of type vars for #{gc.full_name}(#{type_vars_str}) (given #{node.type_vars.size}, expected #{gc.type_vars.size})")
       end
       args = [] of Type
       i = 0
@@ -285,7 +357,7 @@ pub class TypeSystem
       gm = base_type.as(GenericModuleType)
       if node.type_vars.size != gm.type_vars.size
         type_vars_str = gm.type_vars.join(", ")
-        raise TypeException.new("wrong number of type vars for #{gm.full_name}(#{type_vars_str}) (given #{node.type_vars.size}, expected #{gm.type_vars.size})")
+        raise("wrong number of type vars for #{gm.full_name}(#{type_vars_str}) (given #{node.type_vars.size}, expected #{gm.type_vars.size})")
       end
       args = [] of Type
       i = 0
@@ -296,7 +368,7 @@ pub class TypeSystem
       return instantiate_generic_module(gm, args)
     end
 
-    raise TypeException.new("#{base_type.full_name} is not a generic type, it's a #{base_type.type_desc}")
+    raise("#{base_type.full_name} is not a generic type, it's a #{base_type.type_desc}")
   end
 
   def instantiate_generic(generic_type : GenericClassType, type_args : Array(Type)) : GenericClassInstanceType
@@ -356,6 +428,7 @@ pub class TypeSystem
   def static_array_of(element_type : Type, size : Int64) : StaticArrayInstanceType
     StaticArrayInstanceType.new(@program, element_type, size)
   end
+
   def metaclass_of(type : Type) : Type
     if m = TypeUnification.metaclass_of(type)
       m

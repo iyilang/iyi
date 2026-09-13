@@ -8,12 +8,7 @@ import compiler/semantic/top_level
 using compiler/foundation/location::{Location}
 using compiler/syntax/ast::{ASTNode, Def, Generic, Path, Visibility}
 using compiler/syntax/token::{NumberKind}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType,
-  GenericTraitType, ImplRecord, MetaclassType, ModuleType, NamedType,
-  NonGenericClassType, NonGenericModuleType, SemanticProgram, TraitType, Type,
-  TypeException, UnionType
-}
+using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, ImplRecord, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TraitType, Type, TypeException, UnionType}
 
 pub class VirtualType < Type
   property base_type : Type

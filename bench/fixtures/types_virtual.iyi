@@ -1,0 +1,26 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+class Puppy < Dog
+end
+
+class Shape
+end
+
+class Circle < Shape
+end
+
+class Rectangle < Shape
+end
+
+alias VAnimal = Dog | Cat
+alias VDog = Dog | Puppy
+alias VShape = Circle | Rectangle
+alias AnimalOrNil = Animal | Nil
+alias DogOrCat = Dog | Cat | Puppy

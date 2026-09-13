@@ -83,6 +83,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # declaration tables against the frontend iyi is still bootstrapped from,
     # requiring identical declarations for every fixture.
     (r"^bench/selfhost_semantic_exercise\.sh$", "the frontend the selfhost semantic visitor is checked against"),
+    # The self-hosting type system's oracle. It verifies type calculation,
+    # unification, and rendered names against the frontend iyi is still
+    # bootstrapped from, requiring identical types for every fixture.
+    (r"^bench/selfhost_types_exercise\.sh$", "the frontend the selfhost type system is checked against"),
     # The self-hosting macro engine's oracle. It verifies macro expansion
     # ASTs against the frontend iyi is still bootstrapped from, requiring
     # identical expanded ASTs for every fixture.

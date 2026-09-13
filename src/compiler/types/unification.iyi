@@ -8,17 +8,8 @@ import compiler/types/types
 
 using compiler/foundation/location::{Location}
 using compiler/syntax/ast::{ASTNode}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType,
-  ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType
-}
-using compiler/types/types::{
-  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
-  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType,
-  NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType, NilableReferenceUnionType,
-  NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType,
-  StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType
-}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType}
 
 pub class TypeUnification
   def self.type_merge(program : SemanticProgram, types : Array(Type)) : Type
@@ -283,6 +274,7 @@ pub class TypeUnification
     end
     type
   end
+
   def self.metaclass_of(type : Type) : Type?
     if type.is_a?(ModuleType)
       return type.as(ModuleType).metaclass
@@ -366,8 +358,16 @@ pub class TypeUnification
         not_nil_t = sorted_non_nil.first
         if not_nil_t.is_a?(ProcInstanceType)
           return NilableProcType.new(program, not_nil_t.as(ProcInstanceType))
+        elsif not_nil_t.subtype_of?(program.reference_type) && !not_nil_t.is_a?(VirtualType)
+          if not_nil_t.is_a?(ClassType) && !not_nil_t.as(ClassType).subclasses.empty?
+            return NilableReferenceUnionType.new(program, all_sorted)
+          else
+            return NilableType.new(program, not_nil_t)
+          end
+        elsif not_nil_t.subtype_of?(program.reference_type) && not_nil_t.is_a?(VirtualType)
+          return NilableReferenceUnionType.new(program, all_sorted)
         else
-          return NilableType.new(program, not_nil_t)
+          return MixedUnionType.new(program, all_sorted)
         end
       end
 

@@ -9,17 +9,8 @@ import compiler/types/unification
 
 using compiler/foundation/location::{Location}
 using compiler/syntax/ast::{ASTNode}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType,
-  ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType
-}
-using compiler/types/types::{
-  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
-  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType,
-  NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType,
-  NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType,
-  StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType
-}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType}
 using compiler/types/unification::{TypeUnification}
 
 pub class TypeFiltering

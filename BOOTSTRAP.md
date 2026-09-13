@@ -8,12 +8,14 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 29,734 lines of iyi**. The
+`src/compiler` is **109,825 lines of Crystal and 31,868 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
-and expression and method body typing passes of semantic analysis, the artifact
-format, the bind tool, the command driver and build daemon, the formatter, the
-macro engine, the four foundation files, and the LLVM bindings:
+and expression and method body typing passes of semantic analysis, the type
+system (unification, generics, virtual types, nilable handling, restrictions,
+narrowing, and rendering), the artifact format, the bind tool, the command
+driver and build daemon, the formatter, the macro engine, the four foundation
+files, and the LLVM bindings:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -22,6 +24,7 @@ macro engine, the four foundation files, and the LLVM bindings:
 | `syntax/parser.iyi` (no macros) | 4,072 | `bench/selfhost_parser_exercise.sh`: 24 fixtures, 1,609 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
 | `semantic/top_level.iyi`, `semantic/main_visitor.iyi` | 2,129 | `bench/selfhost_semantic_exercise.sh`: 28 fixtures (9 declaration fixtures, 39 declarations; 5 typed expression fixtures, 100 typed nodes; 14 error fixtures rejected with identical errors), ten guarded mutation proofs |
+| `types/*.iyi`, `types.iyi` | 2,123 | `bench/selfhost_types_exercise.sh`: 13 fixtures (7 type declaration fixtures, 66 types identical to the Crystal front end; 6 error fixtures rejected with identical errors), six guarded mutation proofs. Type hierarchy extensions, virtual types and virtual metaclasses, generic class/module/trait instances, tuples, named tuples, procs, pointers, static arrays, union classification and unification, type filtering and is_a? narrowing, type restrictions, and type rendering with full options |
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
 | `tools/formatter.iyi` | 2,090 | `bench/selfhost_formatter_exercise.sh`: 17 files, 35,861 bytes identical to the shipped formatter, idempotency on each file, five guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
@@ -41,12 +44,12 @@ tree, so they are not the same tool on the same input. Treat `tools/bind.iyi`
 as unproven against `src/compiler/iyi/tools/bind.cr` until semantic analysis
 is ported and the gate can drive the real one.
 
-What is **not** in iyi: semantic analysis beyond the top-level declaration
-and expression and method body typing passes (instance variable inference
-beyond local scope, generics instantiation, class var initializers, recursive
-struct check, full unification), TypeNode inspection in macros, codegen, and
-platform support. That is the 109,825. The formatter and macro engine are
-partly ported, and their rows above say which parts are not.
+What is **not** in iyi: semantic analysis beyond the top-level declaration,
+expression and method body typing passes, and the type system (instance variable
+inference beyond local scope, class var initializers, recursive struct check),
+TypeNode inspection in macros, codegen, and platform support. That is the
+109,825. The formatter and macro engine are partly ported, and their rows above
+say which parts are not.
 Nothing in the build calls any of the ports above yet: each is checked against
 the code it would replace, not used in its place.
 

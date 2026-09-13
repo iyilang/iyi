@@ -10,17 +10,8 @@ import compiler/types/filtering
 
 using compiler/foundation/location::{Location}
 using compiler/syntax/ast::{ASTNode}
-using compiler/semantic/top_level::{
-  AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType,
-  ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType
-}
-using compiler/types/types::{
-  GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType,
-  GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType,
-  NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType,
-  NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType,
-  StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType
-}
+using compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NonGenericClassType, SemanticProgram, Type, UnionType}
+using compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, NoReturnType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType, VoidType}
 using compiler/types/unification::{TypeUnification}
 using compiler/types/filtering::{TypeFiltering}
 
@@ -126,6 +117,7 @@ pub class TypeRestrictions
   def self.restrict(program : SemanticProgram, type : Type, restriction : Type) : Type?
     TypeFiltering.common_descendent(program, type, restriction)
   end
+
   def self.implements_trait?(program : SemanticProgram, type : Type, trait_type : Type) : Bool
     return true if type.subtype_of?(trait_type)
     i = 0

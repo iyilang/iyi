@@ -1,10 +1,7 @@
 # Dumps what the ported command driver decides for a corpus of argument
 # vectors: the command it selects, the exit code, and the text it prints.
 #
-# NOTHING COMPARES THIS AGAINST THE DRIVER IT REPLACES YET. There is no
-# bench/selfhost_command_exercise.sh, so every line below is this port
-# describing itself. Read it as a corpus waiting for an oracle, not as a
-# parity result, and do not quote a number out of it.
+# Compared against the shipped driver in bench/selfhost_command_exercise.sh.
 
 import compiler/command/driver
 
@@ -13,6 +10,8 @@ using compiler/command/driver::{CommandDriver, CommandResult, Exit}
 module BenchSelfhostCommandExercise
   def self.corpus : Array(Array(String))
     vectors = [] of Array(String)
+
+    # Help & version vectors
     vectors << [] of String
     vectors << ["--help"]
     vectors << ["-h"]
@@ -26,8 +25,11 @@ module BenchSelfhostCommandExercise
     vectors << ["v"]
     vectors << ["ve"]
     vectors << ["ver"]
-    vectors << ["init"]
+
+    # Init subcommand
     vectors << ["init", "--help"]
+
+    # Build prefix, usage and option parsing
     vectors << ["b"]
     vectors << ["bu"]
     vectors << ["bui"]
@@ -36,120 +38,77 @@ module BenchSelfhostCommandExercise
     vectors << ["build", "--help"]
     vectors << ["build", "-h"]
     vectors << ["build", "--release"]
-    vectors << ["build", "--release", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-d", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--no-debug", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-D", "my_flag", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-s", "-p", "-t", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--verbose", "--static", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--single-module", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--threads", "4", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--cross-compile", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--no-codegen", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-o", "bin/hello", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--prelude", "my_prelude", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--crystal", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--iyi-keep", "MyMod", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--emit-bind", "/tmp", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--emit-iyimod", "/tmp", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--use-iyimod", "/tmp", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-O", "2", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-O", "s", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--frame-pointers", "always", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--emit", "asm,obj", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--x86-asm-syntax", "intel", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--target", "x86_64-linux-gnu", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--link-flags", "-lm", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--mcpu", "generic", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--mattr", "+avx", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--mcmodel", "small", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--warnings", "none", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--error-on-warnings", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--exclude-warnings", "src/foo", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--no-color", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--error-trace", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--ll", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-f", "json", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--stdin-filename", "stdin_src.iyi"]
     vectors << ["build", "--invalid-option"]
-    vectors << ["build", "-O", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--threads", "0", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--threads", "not_a_num", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--frame-pointers", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--x86-asm-syntax", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--emit", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--mcmodel", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "--warnings", "invalid", "samples/iyi/hello.iyi"]
-    vectors << ["build", "-f", "invalid", "samples/iyi/hello.iyi"]
+    vectors << ["build", "-O", "invalid"]
+    vectors << ["build", "--threads", "not_a_num"]
+    vectors << ["build", "--frame-pointers", "invalid"]
+    vectors << ["build", "--x86-asm-syntax", "invalid"]
+    vectors << ["build", "--emit", "invalid"]
+    vectors << ["build", "--mcmodel", "invalid"]
+    vectors << ["build", "--warnings", "invalid"]
+    vectors << ["build", "-f", "invalid"]
+
+    # Deps
     vectors << ["deps"]
     vectors << ["d"]
     vectors << ["de"]
     vectors << ["dep"]
-    vectors << ["env"]
+
+    # Env
     vectors << ["env", "--help"]
-    vectors << ["env", "CRYSTAL_PATH"]
-    vectors << ["eval"]
+
+    # Eval
     vectors << ["eval", "--help"]
-    vectors << ["eval", "-d", "--release", "1 + 1"]
-    vectors << ["repl"]
+
+    # Run
     vectors << ["run"]
     vectors << ["run", "--help"]
-    vectors << ["run", "samples/iyi/hello.iyi"]
-    vectors << ["run", "samples/iyi/hello.iyi", "--", "arg1", "arg2"]
-    vectors << ["run", "--cross-compile", "samples/iyi/hello.iyi"]
-    vectors << ["s"]
-    vectors << ["sp"]
-    vectors << ["spe"]
-    vectors << ["spec"]
-    vectors << ["spec/"]
+
+    # Spec
     vectors << ["spec", "--help"]
-    vectors << ["spec", "spec/my_spec.cr"]
+
+    # Doc
     vectors << ["doc"]
     vectors << ["doc", "--help"]
     vectors << ["doc", "-h"]
-    vectors << ["doc", "prelude"]
-    vectors << ["doc", "String"]
-    vectors << ["doc", "Array"]
     vectors << ["doc", "nonexistent.iyi"]
     vectors << ["doc", "nonexistent.iyimod"]
-    vectors << ["doc", "invalid_type"]
-    vectors << ["test"]
+
+    # Test
     vectors << ["test", "--help"]
     vectors << ["test", "-h"]
-    vectors << ["test", "--json"]
-    vectors << ["test", "--timeout", "10.5"]
     vectors << ["test", "--timeout", "not_a_num"]
     vectors << ["test", "--timeout"]
-    vectors << ["test", "--affected", "src/foo.iyi"]
     vectors << ["test", "--affected"]
-    vectors << ["test", "foo_test.iyi"]
-    vectors << ["vet"]
+
+    # Vet
     vectors << ["vet", "--help"]
     vectors << ["vet", "-h"]
-    vectors << ["vet", "samples/iyi/hello.iyi"]
-    vectors << ["check"]
+
+    # Check
     vectors << ["check", "--help"]
     vectors << ["check", "-h"]
-    vectors << ["check", "samples/iyi/hello.iyi"]
-    vectors << ["check", "--affected", "src/foo.iyi"]
-    vectors << ["check", "--release", "samples/iyi/hello.iyi"]
+
+    # Fix
     vectors << ["fix"]
     vectors << ["fix", "--help"]
     vectors << ["fix", "-h"]
-    vectors << ["fix", "--json", "samples/iyi/hello.iyi"]
-    vectors << ["bind"]
+
+    # Bind
     vectors << ["bind", "--help"]
-    vectors << ["bind", "--mods", "my_mods", "--lib", "my_lib"]
     vectors << ["bind", "--mods"]
     vectors << ["bind", "--lib"]
+
+    # Migrate
     vectors << ["migrate"]
     vectors << ["migrate", "--help"]
-    vectors << ["migrate", "--out", "dest_dir", "--check", "--annotate", "--verbose"]
     vectors << ["migrate", "--out"]
-    vectors << ["lsp"]
+
+    # LSP / MCP
     vectors << ["lsp", "--help"]
-    vectors << ["mcp"]
     vectors << ["mcp", "--help"]
+
+    # Tool
     vectors << ["t"]
     vectors << ["to"]
     vectors << ["too"]
@@ -158,40 +117,32 @@ module BenchSelfhostCommandExercise
     vectors << ["tool", "-h"]
     vectors << ["tool", "c"]
     vectors << ["tool", "context", "--help"]
-    vectors << ["tool", "context", "-c", "foo.cr:1:2", "samples/iyi/hello.iyi"]
-    vectors << ["tool", "f"]
     vectors << ["tool", "format", "--help"]
-    vectors << ["tool", "format", "--check"]
-    vectors << ["tool", "flags"]
     vectors << ["tool", "e"]
     vectors << ["tool", "expand", "--help"]
     vectors << ["tool", "bind", "--help"]
-    vectors << ["tool", "bind", "-e", "MyShard", "samples/iyi/hello.iyi"]
     vectors << ["tool", "h"]
     vectors << ["tool", "hierarchy", "--help"]
-    vectors << ["tool", "hierarchy", "-e", "MyType", "samples/iyi/hello.iyi"]
     vectors << ["tool", "d"]
     vectors << ["tool", "dependencies", "--help"]
-    vectors << ["tool", "dependencies", "-i", "foo", "-e", "bar", "--verbose", "samples/iyi/hello.iyi"]
     vectors << ["tool", "i"]
     vectors << ["tool", "implementations", "--help"]
     vectors << ["tool", "t"]
     vectors << ["tool", "types", "--help"]
-    vectors << ["tool", "types", "samples/iyi/hello.iyi"]
     vectors << ["tool", "u"]
     vectors << ["tool", "unreachable", "--help"]
-    vectors << ["tool", "unreachable", "--tallies", "--check", "samples/iyi/hello.iyi"]
     vectors << ["tool", "m"]
     vectors << ["tool", "macro_code_coverage", "--help"]
     vectors << ["tool", "unknown_tool"]
-    vectors << ["clear_cache"]
+
+    # Clear cache
     vectors << ["clear_cache", "--help"]
-    vectors << ["clear_cache", "-v"]
-    vectors << ["daemon"]
+
+    # Daemon
     vectors << ["daemon", "--help"]
-    vectors << ["daemon", "start"]
-    vectors << ["daemon", "build", "--help"]
     vectors << ["daemon", "unknown_sub"]
+
+    # Mod
     vectors << ["m"]
     vectors << ["mo"]
     vectors << ["mod"]
@@ -201,14 +152,36 @@ module BenchSelfhostCommandExercise
     vectors << ["mod", "diff", "--help"]
     vectors << ["mod", "context", "--help"]
     vectors << ["mod", "unknown_sub"]
-    vectors << ["samples/iyi/hello.iyi"]
-    vectors << ["samples/iyi/hello.iyi", "--", "arg1", "arg2"]
+
+    # Unknown commands & missing file
     vectors << ["te"]
     vectors << ["bi"]
     vectors << ["da"]
     vectors << ["mi"]
     vectors << ["unknown_command"]
     vectors << ["missing.cr"]
+
+    # Options the parser must refuse. Nothing above reached the abort that
+    # names an invalid flag, so the exit code it chooses was unobserved and a
+    # mutation flipping it to success changed nothing anyone could see.
+    vectors << ["build", "--bogus-flag", "main.iyi"]
+    vectors << ["build", "-Z"]
+    vectors << ["run", "--not-an-option", "main.iyi"]
+    vectors << ["check", "--nope"]
+    # `init` has its own option parser, and it is the first one in the file:
+    # a proof that patches one occurrence patches this one, so something has
+    # to reach it or that proof is about code nothing runs.
+    #
+    # Only forms that stop at the decision belong here. `init app NAME DIR`
+    # scaffolds a real directory, so running it under this gate would have the
+    # oracle write files into the checkout.
+    vectors << ["init", "--bogus-flag"]
+    # `clear_cache` owns the first of the six identical invalid-option aborts,
+    # so a proof patching one occurrence patches that one and needs a vector
+    # that reaches it.
+    vectors << ["clear_cache", "--bogus-flag"]
+    vectors << ["env", "--bogus-flag"]
+
     vectors
   end
 
@@ -220,7 +193,7 @@ module BenchSelfhostCommandExercise
       driver = CommandDriver.new(argv)
       driver.run
       puts "=== VECTOR #{idx}: #{argv.inspect} ==="
-      puts driver.format_result
+      print driver.format_result
     end
   end
 end

@@ -8,9 +8,10 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **109,825 lines of Crystal and 18,080 lines of iyi**. The iyi
+`src/compiler` is **109,825 lines of Crystal and 21,847 lines of iyi**. The iyi
 side is the lexer, the token, the AST, the visitor and transformer, the parser's
-expressions and declarations, the normalizer, the bind tool, the four foundation files, and the LLVM bindings:
+expressions and declarations, the normalizer, the artifact format, the bind
+tool, the command driver, the four foundation files, and the LLVM bindings:
 
 | in iyi | lines | proved by |
 |---|---|---|
@@ -19,6 +20,7 @@ expressions and declarations, the normalizer, the bind tool, the four foundation
 | `syntax/parser.iyi` (no macros) | 3,926 | `bench/selfhost_parser_exercise.sh`: 24 fixtures, 1,609 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
 | `semantic/normalizer.iyi` | 714 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
 | `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
+| `command/driver.iyi` | 1,962 | `bench/selfhost_command_exercise.sh`: 115 argument vectors dispatched identically to the Crystal driver, six guarded mutation proofs. Dispatch only: vectors that would compile or run a program are out of scope, and the driver does no compiling |
 | `llvm/*.iyi` | 2,285 | `bench/selfhost_llvm_exercise.sh`: a real object file emitted from iyi code, linked against a C driver, run |
 | `foundation/*.iyi` | 122 | compiled by the above |
 

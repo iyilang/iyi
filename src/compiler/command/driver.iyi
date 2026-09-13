@@ -334,6 +334,8 @@ pub class CommandDriver
     under mods/, in dependency order, each against the ones before
     it. Name shards to bind those and what they depend on instead.
     Then `import <name>` in a program built with --crystal --use-iyimod mods;
+    the name is the root namespace spelled for import (`Kemal` is
+    `kemal`, `DB` is `d_b`), and the output says it.
     USAGE
   end
 
@@ -343,7 +345,28 @@ pub class CommandDriver
 
     Write every .cr under SRC as an iyi module under DIR: the
     namespace as the path, the wrapper off, `pub` on the top level,
-    and constant paths rewritten to bare names.
+    relative requires as imports, and every constant path this tree
+    declares as the bare name its module exports, under a `using`
+    line. Import cycles are written as one module; a reopening of a
+    type the tree does not own is kept as Crystal in a `.cr` file
+    beside its module.
+
+    --annotate write the types R-2 wants where the Crystal never had
+              them, read off the calls the compiler resolved in every
+              program the tree has - each entry file, and the spec
+              suite, which is where a library's calls are. A
+              parameter two of them bound differently is left
+              alone and named, with what is missing
+    --check   compile every module written (`check --crystal`) and
+              print the first refusal of each
+    --verbose every note, rather than the first few of each kind
+
+    The modules build with `--crystal`, which is the library the tree
+    was written against; `#{CommandDriver.program_name} bind` puts its shards
+    behind a boundary after that. The whole of it, on a project:
+
+        #{CommandDriver.program_name} migrate src --out iyi --annotate --check
+        cd iyi && #{CommandDriver.program_name} build --crystal -o app <entry>.iyi
     USAGE
   end
 
@@ -374,6 +397,10 @@ pub class CommandDriver
 
     Switches:
         --socket PATH        socket to listen on / connect to
+
+    Set IYI_DAEMON_SOCKET and an ordinary `#{CommandDriver.program_name} build`
+    is served by that daemon too, falling back to a normal build if it is
+    not there.
     USAGE
   end
 
@@ -432,6 +459,7 @@ pub class CommandDriver
 
     DIR  - directory where project will be generated
     NAME - name of project to be generated, default: basename of DIR
+
     USAGE
   end
 
@@ -708,13 +736,8 @@ pub class CommandDriver
     return if @exit_code
     parser = OptionParser.new
     parser.banner = CommandDriver.init_usage
-    parser.invalid_option do |flag|
-      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
-      parser.stop
-    end
     parser.missing_option do |flag|
       abort "Missing option: #{flag}", Exit::USAGE_ERROR
-      parser.stop
     end
     parser.on("-h", "--help", "show this help") do
       puts parser
@@ -723,7 +746,38 @@ pub class CommandDriver
     end
     parser.on("-f", "--force", "force overwrite existing files") { |_| }
     parser.on("-s", "--skip-existing", "skip existing files") { |_| }
+
+    # `Iyi::Init` reads its arguments positionally: whatever is not one of the
+    # switches above is a candidate TYPE, including something spelled like a
+    # flag. So an unrecognised `--bogus-flag` is reported as an invalid TYPE
+    # with the usage attached, not as an invalid option, and this parser has
+    # to hand it over rather than refuse it.
+    rest = [] of String
+    parser.invalid_option do |flag|
+      rest << flag
+    end
+    parser.unknown_args do |before, after|
+      before.each { |a| rest << a }
+    end
     parser.parse(@options)
+    return if @exit_code
+
+    # `Init.run` rescues its own error and prints the sentence itself, with
+    # the usage after it and no `Error:` in front, so this cannot go through
+    # the driver's own error printer.
+    if rest.empty?
+      puts "Cannot initialize Crystal project: Argument TYPE is missing"
+      puts parser
+      exit(1)
+      return
+    end
+
+    skeleton = rest[0]
+    if skeleton != "lib" && skeleton != "app"
+      puts "Cannot initialize Crystal project: Invalid TYPE value: #{skeleton}"
+      puts parser
+      exit(1)
+    end
   end
 
   private def build : Nil
@@ -747,6 +801,21 @@ pub class CommandDriver
       puts parser
       puts ""
       puts "Runtime options (passed to spec runner):"
+      puts "    -e, --example STRING             run examples whose full nested names include STRING"
+      puts "    -l, --line LINE                  run examples whose line matches LINE"
+      puts "        --profile                    Print the 10 slowest specs"
+      puts "        --fail-fast                  abort the run on first failure"
+      puts "        --location file:line         run example at line 'line' in file 'file', multiple allowed"
+      puts "        --tag TAG                    run examples with the specified TAG, or exclude examples by adding ~ before the TAG."
+      puts "        --list-tags                  lists all the tags used."
+      puts "        --order MODE                 run examples in random order by passing MODE as 'random' or to a specific seed by passing MODE as the seed value"
+      puts "        --junit_output OUTPUT_PATH   generate JUnit XML output within the given OUTPUT_PATH"
+      puts "    -h, --help                       show this help"
+      puts "    -v, --verbose                    verbose output"
+      puts "        --tap                        Generate TAP output (Test Anything Protocol)"
+      puts "        --color                      Enabled ANSI colored output"
+      puts "        --no-color                   Disable ANSI colored output"
+      puts "        --dry-run                    Pass all tests without execution"
       exit(0)
       parser.stop
     end
@@ -918,10 +987,14 @@ pub class CommandDriver
       end
     end
 
-    @subcommand_options["json"] = json_mode.to_s
-    if target = @options.shift?
-      @subcommand_options["target"] = target
+    target = @options.shift?
+    unless target
+      @stderr.puts("fix: which file? Usage: #{CommandDriver.program_name} fix [--json] <file>")
+      exit(1)
+      return
     end
+    @subcommand_options["json"] = json_mode.to_s
+    @subcommand_options["target"] = target
   end
 
   private def bind : Nil
@@ -957,6 +1030,10 @@ pub class CommandDriver
       end
     end
 
+    unless File.exists?(lib_dir)
+      abort "bind: nothing under #{lib_dir}/ has a src/<name>.cr", Exit::USAGE_ERROR
+      return
+    end
     @subcommand_options["mods"] = mods
     @subcommand_options["lib"] = lib_dir
     @subcommand_options["shards"] = shards.join(",") unless shards.empty?
@@ -998,11 +1075,15 @@ pub class CommandDriver
       end
     end
 
+    unless src
+      abort "migrate: which tree? Usage: #{CommandDriver.program_name} migrate SRC --out DIR", Exit::USAGE_ERROR
+      return
+    end
     @subcommand_options["out"] = out_dir if out_dir
     @subcommand_options["check"] = check.to_s
     @subcommand_options["annotate"] = annotate.to_s
     @subcommand_options["verbose"] = verbose.to_s
-    @subcommand_options["src"] = src if src
+    @subcommand_options["src"] = src
   end
 
   private def lsp : Nil
@@ -1062,7 +1143,7 @@ pub class CommandDriver
       puts CommandDriver.daemon_usage
       exit(0)
     else
-      abort "unknown daemon command: #{subcommand}", Exit::USAGE_ERROR
+      abort "unknown daemon subcommand: #{subcommand}", Exit::USAGE_ERROR
     end
   end
 
@@ -1109,6 +1190,7 @@ pub class CommandDriver
   end
 
   private def mod_dump : Nil
+    @selected_command = "mod dump"
     declarations = false
     as_json = false
     if first_opt(@options) == "--declarations"
@@ -1120,7 +1202,7 @@ pub class CommandDriver
     end
     filename = @options.shift?
     unless filename
-      abort "mod dump needs a .iyimod file", Exit::USAGE_ERROR
+      abort "expected a .iyimod path", Exit::USAGE_ERROR
       return
     end
     unless File.exists?(filename)
@@ -1134,6 +1216,7 @@ pub class CommandDriver
   end
 
   private def mod_diff : Nil
+    @selected_command = "mod diff"
     exit_code = false
     if first_opt(@options) == "--exit-code"
       @options.shift
@@ -1142,7 +1225,7 @@ pub class CommandDriver
     old_file = @options.shift?
     new_file = @options.shift?
     unless old_file && new_file
-      abort "mod diff needs two .iyimod files", Exit::USAGE_ERROR
+      abort "expected two .iyimod paths", Exit::USAGE_ERROR
       return
     end
     unless File.exists?(old_file)
@@ -1160,14 +1243,15 @@ pub class CommandDriver
   end
 
   private def mod_context : Nil
+    @selected_command = "mod context"
     as_json = false
     if first_opt(@options) == "--json"
       @options.shift
       as_json = true
     end
     filename = @options.shift?
-    unless filename
-      abort "mod context needs a .iyi file", Exit::USAGE_ERROR
+    unless filename && filename.ends_with?(".iyi")
+      abort "expected a .iyi file", Exit::USAGE_ERROR
       return
     end
     unless File.exists?(filename)
@@ -1232,7 +1316,7 @@ pub class CommandDriver
 
   # Tool subcommands:
   private def tool_context : Nil
-    @compiler_options = create_compiler("tool context", cursor_command: true)
+    @compiler_options = create_compiler("tool context", no_codegen: true, cursor_command: true)
   end
 
   private def tool_format : Nil
@@ -1263,6 +1347,12 @@ pub class CommandDriver
       exit(0)
       parser.stop
     end
+    parser.on("--no-color", "Disable colored output") do
+      @color = false
+    end
+    parser.on("--show-backtrace", "Show backtrace on a bug (used only for debugging)") do
+      @error_trace = true
+    end
     files = parser.parse(@options)
     return if @exit_code
     @subcommand_options["check"] = check.to_s
@@ -1276,39 +1366,41 @@ pub class CommandDriver
   end
 
   private def tool_expand : Nil
-    @compiler_options = create_compiler("tool expand", cursor_command: true)
+    @compiler_options = create_compiler("tool expand", no_codegen: true, cursor_command: true)
   end
 
   private def tool_bind : Nil
-    @compiler_options = create_compiler("tool bind", hierarchy: true)
+    @compiler_options = create_compiler("tool bind", no_codegen: true, hierarchy: true)
   end
 
   private def tool_hierarchy : Nil
-    @compiler_options = create_compiler("tool hierarchy", hierarchy: true)
+    @compiler_options = create_compiler("tool hierarchy", no_codegen: true, hierarchy: true)
   end
 
   private def tool_dependencies : Nil
-    @compiler_options = create_compiler("tool dependencies", dependencies: true)
+    @compiler_options = create_compiler("tool dependencies", no_codegen: true, dependencies: true, allowed_formats: ["tree", "flat", "dot", "mermaid"] of String)
   end
 
   private def tool_implementations : Nil
-    @compiler_options = create_compiler("tool implementations", cursor_command: true)
+    @compiler_options = create_compiler("tool implementations", no_codegen: true, cursor_command: true)
   end
 
   private def tool_types : Nil
-    @compiler_options = create_compiler("tool types")
+    @compiler_options = create_compiler("tool types", no_codegen: true)
   end
 
   private def tool_unreachable : Nil
     @compiler_options = create_compiler(
       "tool unreachable",
+      no_codegen: true,
       path_filter: true,
-      unreachable_command: true
+      unreachable_command: true,
+      allowed_formats: ["text", "json", "csv", "codecov"] of String
     )
   end
 
   private def tool_macro_code_coverage : Nil
-    @compiler_options = create_compiler("tool macro_code_coverage")
+    @compiler_options = create_compiler("tool macro_code_coverage", no_codegen: true, path_filter: true, allowed_formats: ["codecov"] of String)
   end
 
   private def create_compiler(
@@ -1391,7 +1483,7 @@ pub class CommandDriver
         when "intel"
           opts.x86_asm_syntax = "intel"
         else
-          abort "Invalid value `#{value}` for x86-asm-syntax", Exit::USAGE_ERROR
+          abort "Invalid value `` for x86-asm-syntax", Exit::USAGE_ERROR
           parser.stop
         end
       end
@@ -1421,7 +1513,13 @@ pub class CommandDriver
       end
     end
 
-    format_desc = "Output format: #{allowed_formats[0]} (default), #{allowed_formats.size > 1 ? allowed_formats[1] : ""}"
+    rest = [] of String
+    i = 1
+    while i < allowed_formats.size
+      rest << allowed_formats[i]
+      i = i + 1
+    end
+    format_desc = "Output format: #{allowed_formats[0]} (default), #{rest.join(", ")}"
     parser.on("-f #{allowed_formats.join("|")}", "--format #{allowed_formats.join("|")}", format_desc) do |f|
       output_format = f
     end
@@ -1841,7 +1939,7 @@ pub class CommandDriver
       sb.puts("  warnings_level: #{opts.warnings_level}")
       sb.puts("  x86_asm_syntax: #{opts.x86_asm_syntax}")
     end
-    if !@subcommand_options.empty?
+    if @exit_code.nil? && !@subcommand_options.empty?
       sb.puts("subcommand_options:")
       keys = @subcommand_options.keys.sorted
       keys.each do |k|

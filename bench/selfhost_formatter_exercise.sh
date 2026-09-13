@@ -12,6 +12,7 @@
 #   bash bench/selfhost_formatter_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 FMT="$REPO/src/compiler/tools/formatter.iyi"

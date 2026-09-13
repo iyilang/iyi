@@ -19,6 +19,7 @@
 #   bash bench/selfhost_command_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -376,7 +377,7 @@ if ! cmp -s "$WORK/iyi.out" "$WORK/crystal.out"; then
   diff -u "$WORK/crystal.out" "$WORK/iyi.out" | head -30
   status=1
 else
-  echo "  Parity summary: $vector_count/$vector_count vectors match identically against the front end"
+  echo "  Parity summary: $((vector_count - diverged))/$vector_count vectors match identically against the front end"
 fi
 
 compare_all() {

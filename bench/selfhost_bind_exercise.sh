@@ -27,6 +27,7 @@
 #   bash bench/selfhost_bind_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -831,6 +832,7 @@ for rel_fixture in "${FIXTURES[@]}"; do
   "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.out"
   if ! diff -u "$WORK/crystal.out" "$WORK/iyi.out" > "$WORK/diff.out"; then
     echo "  $fixture_name: BOUND METHODS DIFFER"
+    diverged=$((diverged + 1))
     cat "$WORK/diff.out"
     status=1
   else
@@ -840,7 +842,7 @@ for rel_fixture in "${FIXTURES[@]}"; do
   fi
   fixture_count=$((fixture_count + 1))
 done
-echo "  Parity summary: $fixture_count/$fixture_count fixtures bind identically ($total_matched_methods total public methods)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count fixtures bind identically ($total_matched_methods total public methods)"
 
 echo
 echo "== 3. Mutation proofs: each one must make the comparison above fail"

@@ -11,6 +11,7 @@
 #   bash bench/selfhost_types_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -178,7 +179,7 @@ for fixture in "$REPO"/bench/fixtures/types_*.iyi; do
   fi
 done
 echo
-echo "  Parity summary: $fixture_count/$fixture_count type fixtures match 100% ($total_matched_types types compared)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count type fixtures match 100% ($total_matched_types types compared)"
 
 echo
 echo "== 3. Semantic type error rejection and error checks"
@@ -204,7 +205,7 @@ for err_fixture in "$REPO"/bench/fixtures/types_err_*.iyi; do
     status=1
   fi
 done
-echo "  Parity summary: $err_count/$err_count error fixtures rejected with identical errors"
+echo "  Parity summary: $((err_count - diverged))/$err_count error fixtures rejected with identical errors"
 
 echo
 echo "== 4. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"

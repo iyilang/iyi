@@ -20,6 +20,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
+diverged=0
 
 echo "== 1. Building and running selfhost parser exercise (plain mode)"
 "$IYI" build -o "$WORK/exercise-plain" "$REPO/bench/selfhost_parser_exercise.iyi"
@@ -583,7 +584,7 @@ for fixture in \
   fixture_count=$((fixture_count + 1))
 done
 
-echo "  Parity summary: $fixture_count/$fixture_count syntax fixtures match 100% ($total_matched_nodes total nodes)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match 100% ($total_matched_nodes total nodes)"
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"

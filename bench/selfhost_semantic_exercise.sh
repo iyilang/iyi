@@ -12,6 +12,7 @@
 #   bash bench/selfhost_semantic_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -314,6 +315,7 @@ for fixture in "$REPO"/bench/fixtures/sem_*.iyi; do
   "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.ast"
   if ! diff -q "$WORK/iyi.ast" "$WORK/crystal.ast" >/dev/null; then
     echo "  $fixture_name: DECLARATIONS DIFFER"
+    diverged=$((diverged + 1))
     diff -u "$WORK/crystal.ast" "$WORK/iyi.ast" | head -20
     status=1
   else
@@ -323,7 +325,7 @@ for fixture in "$REPO"/bench/fixtures/sem_*.iyi; do
   fi
   fixture_count=$((fixture_count + 1))
 done
-echo "  Parity summary: $fixture_count/$fixture_count feature fixtures match 100% ($total_matched_declarations declarations compared)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count feature fixtures match 100% ($total_matched_declarations declarations compared)"
 
 echo
 echo "== 3. Typed expression comparison against the front end being replaced"
@@ -335,6 +337,7 @@ for fixture in "$REPO"/bench/fixtures/sem_expr_*.iyi; do
   "$WORK/dump_crystal" "$fixture" --expr > "$WORK/crystal_expr.ast"
   if ! diff -q "$WORK/iyi_expr.ast" "$WORK/crystal_expr.ast" >/dev/null; then
     echo "  $fixture_name: TYPED EXPRESSIONS DIFFER"
+    diverged=$((diverged + 1))
     diff -u "$WORK/crystal_expr.ast" "$WORK/iyi_expr.ast" | head -20
     status=1
   else
@@ -344,7 +347,7 @@ for fixture in "$REPO"/bench/fixtures/sem_expr_*.iyi; do
   fi
   expr_fixture_count=$((expr_fixture_count + 1))
 done
-echo "  Parity summary: $expr_fixture_count/$expr_fixture_count typed expression fixtures match 100% ($total_matched_expressions typed nodes compared)"
+echo "  Parity summary: $((expr_fixture_count - diverged))/$expr_fixture_count typed expression fixtures match 100% ($total_matched_expressions typed nodes compared)"
 
 echo
 echo "== 4. Semantic rejection and error checks"
@@ -374,7 +377,7 @@ for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     status=1
   fi
 done
-echo "  Parity summary: $err_count/$err_count error fixtures rejected with identical errors"
+echo "  Parity summary: $((err_count - diverged))/$err_count error fixtures rejected with identical errors"
 
 prove_decl_mutation() {
   label="$1"

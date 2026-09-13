@@ -22,6 +22,7 @@
 #   bash bench/selfhost_iyimod_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"

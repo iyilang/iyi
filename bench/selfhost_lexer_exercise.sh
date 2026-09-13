@@ -19,6 +19,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
+diverged=0
 
 echo "== 1. Building and running selfhost lexer exercise (plain mode)"
 "$IYI" build -o "$WORK/exercise-plain" "$REPO/bench/selfhost_lexer_exercise.iyi"
@@ -263,12 +264,13 @@ for fixture in \
     total_matched_tokens=$((total_matched_tokens + count))
   else
     echo "  ERROR: mismatch in $rel"
+    diverged=$((diverged + 1))
     cat "$WORK/diff_$name.txt"
     status=1
   fi
 done
 
-echo "  Parity summary: $fixture_count/$fixture_count syntax fixtures match 100% ($total_matched_tokens total tokens)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match 100% ($total_matched_tokens total tokens)"
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"

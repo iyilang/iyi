@@ -20,6 +20,7 @@
 #   bash bench/selfhost_daemon_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -599,7 +600,7 @@ if ! diff -u "$WORK/crystal.out" "$WORK/iyi.out" > "$WORK/diff.out"; then
   status=1
 else
   total_cases=$(grep -c '^=== CASE:' "$WORK/crystal.out")
-  echo "  Parity summary: $total_cases/$total_cases scenarios match identically against the front end"
+  echo "  Parity summary: $((total_cases - diverged))/$total_cases scenarios match identically against the front end"
 fi
 
 echo

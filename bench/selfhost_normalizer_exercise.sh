@@ -14,6 +14,7 @@
 #   bash bench/selfhost_normalizer_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -590,6 +591,7 @@ for fixture in "$REPO"/bench/fixtures/norm_*.iyi; do
   IYI_PATH="$REPO/src" "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.ast"
   if ! cmp -s "$WORK/iyi.ast" "$WORK/crystal.ast"; then
     echo "  $fixture_name: NORMALISED TREES DIFFER"
+    diverged=$((diverged + 1))
     diff -u "$WORK/crystal.ast" "$WORK/iyi.ast" | head -20
     status=1
   else
@@ -599,7 +601,7 @@ for fixture in "$REPO"/bench/fixtures/norm_*.iyi; do
   fi
   fixture_count=$((fixture_count + 1))
 done
-echo "  Parity summary: $fixture_count/$fixture_count fixtures normalise identically ($total_matched_nodes total nodes)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count fixtures normalise identically ($total_matched_nodes total nodes)"
 
 echo
 echo "== 3. Mutation proofs: each one must make the comparison above fail"

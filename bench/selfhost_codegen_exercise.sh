@@ -14,6 +14,7 @@
 #   bash bench/selfhost_codegen_exercise.sh
 set -u
 status=0
+diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
@@ -185,7 +186,7 @@ for fixture in "$REPO"/bench/fixtures/cg_*.iyi; do
     status=1
   fi
 done
-echo "  Parity summary: $fixture_count/$fixture_count codegen fixtures match 100% ($total_functions functions compared)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count codegen fixtures match 100% ($total_functions functions compared)"
 
 echo
 echo "== 4. Emitted native object linking and C driver execution comparison"

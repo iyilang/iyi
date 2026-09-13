@@ -1,0 +1,47 @@
+class Counter
+  @count : Int32
+
+  def initialize(initial : Int32)
+    @count = initial
+  end
+
+  def count : Int32
+    @count
+  end
+
+  def increment(by : Int32) : Int32
+    @count = @count &+ by
+  end
+end
+
+class Multiplier < Counter
+  @factor : Int32
+
+  def initialize(initial : Int32, factor : Int32)
+    @count = initial
+    @factor = factor
+  end
+
+  def factor : Int32
+    @factor
+  end
+
+  def scaled : Int32
+    @count &* @factor
+  end
+end
+
+fun class_counter_get(initial : Int32) : Int32
+  c = Counter.new(initial)
+  c.count
+end
+
+fun class_counter_inc(initial : Int32, by : Int32) : Int32
+  c = Counter.new(initial)
+  c.increment(by)
+end
+
+fun class_multiplier_scaled(initial : Int32, factor : Int32) : Int32
+  m = Multiplier.new(initial, factor)
+  m.scaled
+end

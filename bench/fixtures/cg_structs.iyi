@@ -1,0 +1,64 @@
+struct Point
+  @x : Int32
+  @y : Int32
+
+  def initialize(x : Int32, y : Int32)
+    @x = x
+    @y = y
+  end
+
+  def x : Int32
+    @x
+  end
+
+  def y : Int32
+    @y
+  end
+
+  def x=(val : Int32)
+    @x = val
+  end
+end
+
+struct Rect
+  @x : Int32
+  @y : Int32
+  @w : Int32
+  @h : Int32
+
+  def initialize(x : Int32, y : Int32, w : Int32, h : Int32)
+    @x = x
+    @y = y
+    @w = w
+    @h = h
+  end
+
+  def w : Int32
+    @w
+  end
+
+  def h : Int32
+    @h
+  end
+end
+
+fun make_point_x(x : Int32, y : Int32) : Int32
+  p = Point.new(x, y)
+  p.x
+end
+
+fun make_point_y(x : Int32, y : Int32) : Int32
+  p = Point.new(x, y)
+  p.y
+end
+
+fun mutate_point_x(x : Int32, y : Int32, new_x : Int32) : Int32
+  p = Point.new(x, y)
+  p.x = new_x
+  p.x
+end
+
+fun rect_area(x : Int32, y : Int32, w : Int32, h : Int32) : Int32
+  r = Rect.new(x, y, w, h)
+  r.w &* r.h
+end

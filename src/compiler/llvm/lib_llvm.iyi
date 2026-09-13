@@ -428,6 +428,7 @@ module compiler/llvm/lib_llvm
     fun build_sub = LLVMBuildSub(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_mul = LLVMBuildMul(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_sdiv = LLVMBuildSDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
+    fun build_exact_sdiv = LLVMBuildExactSDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_udiv = LLVMBuildUDiv(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_srem = LLVMBuildSRem(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef
     fun build_urem = LLVMBuildURem(b : BuilderRef, lhs : ValueRef, rhs : ValueRef, name : Char*) : ValueRef

@@ -93,6 +93,10 @@ pub class Builder
     LLVMValue.new(LibLLVM.build_sdiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
   end
 
+  def exact_sdiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_exact_sdiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
   def udiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
     LLVMValue.new(LibLLVM.build_udiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
   end

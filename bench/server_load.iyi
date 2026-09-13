@@ -22,8 +22,8 @@ module server_load
 import std/socket
 using std/socket::{IyiSocket}
 
-ROUNDS = 200
-STACK_BOUND = 8
+ROUNDS      = 200
+STACK_BOUND =   8
 
 # One connection, server side: park, read, answer, and report the stack
 # it ran on, so the caller can count how many stacks the run used.
@@ -167,10 +167,10 @@ puts "stacks " + distinct.size.to_s
 puts "canary damage " + canary_bad.to_s
 
 raise "FAIL: the poller wrote into " + canary_bad.to_s +
-  " object(s) the collector had handed out" if canary_bad != 0
+      " object(s) the collector had handed out" if canary_bad != 0
 raise "FAIL: a reply was wrong" if bad != 0
 raise "FAIL: served " + tops.size.to_s + " of " + ROUNDS.to_s if tops.size != ROUNDS
 raise "FAIL: nothing was collected, so nothing was proven" if IyiMark.collections == 0_u64
 raise "FAIL: the stacks were not reused - " + distinct.size.to_s + " of them for " +
-  ROUNDS.to_s + " connections" if distinct.size > STACK_BOUND
+      ROUNDS.to_s + " connections" if distinct.size > STACK_BOUND
 puts "every property held"

@@ -66,14 +66,33 @@ sed -e 's/^  property events : Pointer(UInt8)$/  property events : UInt64/' \
     "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
 cmp -s patched/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && {
   echo "the sed found nothing to change"; exit 1; }
-if ! IYI_PATH="$WORK/patched:$REPO/src" "$IYI" build "$REPO/bench/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
+# The one arm here whose defect arrives by timing rather than by counting:
+# the freed chunk has to be handed to a canary *and* the kernel has to write
+# events into it before the run ends. Two hundred connections is enough on
+# every machine that wrote this file and was not enough once on a loaded CI
+# runner, where the hidden buffer was freed (the exercise refuses a run that
+# collected nothing) and simply never reused. Measured on a machine held at
+# sixteen times its cores: at two hundred rounds four of twenty-four runs
+# survived the collector, at a thousand none of twenty-four, at two thousand
+# none of twelve. A run that dies does it in the first collections, so the
+# longer arm still costs about a second and a half. The claim is unchanged;
+# the trials are more.
+mkdir -p load
+# The formatter aligns `ROUNDS` with the constant under it, so the pattern
+# takes the run of spaces that alignment leaves; the `cmp` below is what
+# proves the line was actually found.
+sed -E 's/^ROUNDS[[:space:]]+= 200$/ROUNDS = 2000/' "$REPO/bench/server_load.iyi" > load/server_load.iyi
+cmp -s load/server_load.iyi "$REPO/bench/server_load.iyi" && {
+  echo "the rounds line moved; this proof is running at the plain size"; exit 1; }
+if ! IYI_PATH="$WORK/patched:$REPO/src" "$IYI" build "$WORK/load/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
   cat build-hidden.log; exit 1
 fi
 timeout 300 ./hidden > hidden.txt 2>&1
 code=$?
 if [ "$code" -eq 0 ] || grep -q 'every property held' hidden.txt; then
   echo "a buffer the collector cannot see survived the run, so the run proves nothing:"
-  tail -3 hidden.txt; exit 1
+  grep -E '^(collections|answers|stacks|canary) ' hidden.txt | sed 's/^/  /'
+  tail -2 hidden.txt; exit 1
 fi
 printf '  exits %s\n' "$code"
 

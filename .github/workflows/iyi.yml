@@ -83,9 +83,12 @@ jobs:
 
       # Caught by hand once already, on files this fork wrote. `samples` is
       # here because the formatter knows iyi now: before that it refused every
-      # `.iyi` file, so checking them would have checked nothing.
+      # `.iyi` file, so checking them would have checked nothing. `bench` is
+      # here because it was the one tree of `.iyi` files nothing checked, and
+      # it drifted: `bench/server_load.iyi` had unaligned constants and
+      # under-indented continuations for as long as it had existed.
       - name: Formatted
-        run: ./bin/crystal tool format --check src spec samples
+        run: ./bin/crystal tool format --check src spec samples bench
 
       - name: iyi's own specs
         run: |

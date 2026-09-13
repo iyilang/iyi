@@ -150,15 +150,16 @@ class Iyi::Command
     socket
   end
 
-  # iyi: the one place a socket path is decided, so the one place its length
-  # is checked. A unix socket's path is a fixed field in the kernel's
-  # `sockaddr_un` — 107 bytes on Linux, 103 on darwin — and handing it a
-  # longer one raised Crystal's `ArgumentError` out of `Socket::UNIXAddress`:
-  # `iyi daemon start --socket <long path>` died with "Path size exceeds the
-  # maximum size of 107 bytes (ArgumentError)" and a stack trace through
-  # `src/socket/address.cr`, which names a file the author never opened and
-  # says nothing about the socket they asked for. Every verb that takes
-  # `--socket` comes through here.
+  # iyi: the one place a socket path is decided, and every verb that opens or
+  # connects to a socket comes through here. A unix socket's path is a fixed
+  # field in the kernel's `sockaddr_un` — 107 bytes on Linux, 103 on darwin —
+  # and handing it a longer one raised Crystal's `ArgumentError` out of
+  # `Socket::UNIXAddress`: `iyi daemon start --socket <long path>` died with
+  # "Path size exceeds the maximum size of 107 bytes (ArgumentError)" and a
+  # stack trace through `src/socket/address.cr`, which names a file the author
+  # never opened and says nothing about the socket they asked for. The length
+  # check is `daemon_refuse_long_socket` below, because one verb refuses the
+  # path before it ever decides one.
   private def daemon_socket_path : String
     path = nil
     options.each_with_index do |opt, i|
@@ -170,21 +171,43 @@ class Iyi::Command
     end
     path ||= File.join(CacheDir.instance.dir, "daemon.sock")
 
-    limit = Socket::UNIXAddress::MAX_PATH_SIZE
-    if path.bytesize > limit
-      abort! "the socket path is #{path.bytesize} bytes and the kernel takes " \
-             "#{limit}: #{path}. A unix socket's path is a fixed field in " \
-             "`sockaddr_un`, so this is the machine's limit rather than " \
-             "this compiler's. Pass a shorter `--socket`, or set TMPDIR to " \
-             "a shorter directory and let the default sit under it",
-        :FAILURE
-    end
-
+    daemon_refuse_long_socket(path)
     path
+  end
+
+  # iyi: the same `--socket`, read without being consumed, for the half of
+  # `daemon start` that never opens the socket itself: it execs the server
+  # binary with these arguments, so taking the flag out here would hand the
+  # server a default path and listen somewhere the user did not ask for.
+  private def daemon_socket_option : String?
+    options.each_with_index do |opt, i|
+      return options[i + 1]? if opt == "--socket"
+    end
+    nil
+  end
+
+  private def daemon_refuse_long_socket(path : String) : Nil
+    limit = Socket::UNIXAddress::MAX_PATH_SIZE
+    return if path.bytesize <= limit
+
+    abort! "the socket path is #{path.bytesize} bytes and the kernel takes " \
+           "#{limit}: #{path}. A unix socket's path is a fixed field in " \
+           "`sockaddr_un`, so this is the machine's limit rather than " \
+           "this compiler's. Pass a shorter `--socket`, or set TMPDIR to " \
+           "a shorter directory and let the default sit under it",
+      :FAILURE
   end
 
   private def daemon_start
     {% unless flag?(:without_mt) %}
+      # iyi: the path the user typed is refused here, before a server binary
+      # is looked for. Whether this machine has a single-threaded compiler has
+      # nothing to do with whether a path fits in `sockaddr_un`, and on a
+      # machine without one the answer to a 147-byte `--socket` was a page
+      # about `make iyi-daemon` that never mentioned the socket at all.
+      if socket = daemon_socket_option
+        daemon_refuse_long_socket(socket)
+      end
       daemon_exec_server
     {% else %}
       # Before the socket exists, so that what is recorded is the compiler this

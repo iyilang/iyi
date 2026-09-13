@@ -285,7 +285,7 @@ llvm_ext: $(LLVM_EXT_OBJ)
 
 .PHONY: format
 format: ## Format sources
-	./bin/crystal tool format$(if $(check), --check) src spec samples scripts
+	./bin/crystal tool format$(if $(check), --check) src spec samples scripts bench
 
 .PHONY: generate_data
 generate_data: ## Run generator scripts for Unicode, SSL config, ...

@@ -6,7 +6,7 @@
 #
 # Every case here is a mistake a person makes at the command line, and the
 # claim is the same for all of them: the answer is a sentence naming what
-# was asked for, not a stack trace out of the compiler's own guts. Three
+# was asked for, not a stack trace out of the compiler's own guts. Four
 # defects this file was written for, each found by trying it:
 #
 #   * `iyi daemon start --socket <a path longer than the kernel takes>` died
@@ -18,6 +18,11 @@
 #   * `-o nodir/prog` reached `ld.lld` and came back as "cannot open output
 #     file", from a program the author did not run, after a whole
 #     compilation had been paid for.
+#   * `iyi daemon start --socket <too long>` on a machine with no
+#     single-threaded server binary answered with a page about `make
+#     iyi-daemon`: the server was looked for before the path was read, so
+#     the refusal named the machine's missing binary rather than the
+#     argument the author had typed wrong.
 #
 # So each case asserts three things: a non-zero exit, a phrase that names the
 # thing, and *no* trace - no "Unhandled exception", no "(SomeError)" tail, no
@@ -116,6 +121,18 @@ echo "== what the daemon refuses"
 long="$WORK/$(printf 'd%.0s' $(seq 1 130))/iyi.sock"
 refuses "a socket path past the kernel's limit, starting" "the socket path is" -- \
   "$IYI" daemon start --socket "$long"
+# The same path, on a machine with no server binary to exec. `daemon start`
+# on a multi-threaded compiler hands its arguments to the single-threaded
+# one, and it used to go looking for that binary before it read them: a CI
+# runner without `iyi-daemon` got a page about `make iyi-daemon` and no
+# mention of the socket it had been given. IYI_DAEMON pointed at nothing
+# stands in for that machine.
+refuses "a socket path past the kernel's limit, with no server to exec" "the socket path is" -- \
+  env IYI_DAEMON="$WORK/absent-daemon" "$IYI" daemon start --socket "$long"
+# And the missing server is still named when the path is one the kernel
+# takes, so the case above is an ordering rather than a blanket refusal.
+refuses "a server binary that is not there" "IYI_DAEMON points at" -- \
+  env IYI_DAEMON="$WORK/absent-daemon" "$IYI" daemon start --socket "$WORK/short.sock"
 refuses "a socket path past the kernel's limit, building" "the socket path is" -- \
   "$IYI" daemon build --socket "$long" -o d1 good.iyi
 refuses "no daemon on a socket that is there to take" "no daemon listening on" -- \

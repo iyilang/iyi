@@ -19,15 +19,42 @@
   "cannot open output file" from a program the author did not run, after a
   whole compilation had been paid for; the directory is checked before the
   work starts.
-- **And the verbs have a gate.** `bench/verbs_exercise.sh` drives sixteen
-  mistakes a person makes at the command line — an unknown verb, a missing
-  file, a directory as the entry, two module headers, unreadable bytes, a
-  missing output directory, a truncated artifact, a flipped byte, a source
-  file dumped as an artifact, an artifact directory that is not there, an
-  over-long socket path to three verbs — and asserts the same three things
-  of each: a non-zero exit, a phrase that names what was asked for, and *no*
-  trace. The trace detector is proved against a recording of the daemon
-  crash above, because a check that cannot fail is not a check.
+- **A refusal about the command line waited on the machine.** `iyi daemon
+  start` on an ordinary multi-threaded compiler execs the single-threaded
+  server binary, and it went looking for that binary before it read the
+  arguments it was about to hand over: on a runner with no `iyi-daemon`
+  built, a 147-byte `--socket` came back as a page about `make iyi-daemon`
+  that never mentioned the socket. Whether a path fits in `sockaddr_un` is
+  not a question about this machine, so it is answered first — and reading
+  `--socket` there does not consume it, so the server still gets the flag
+  and still listens where it was told.
+- **And the verbs have a gate.** `bench/verbs_exercise.sh` drives seventeen
+  mistakes a person makes at the command line — an unknown verb, an unknown
+  flag, a missing file, a directory as the entry, two module headers,
+  unreadable bytes, a missing output directory, a truncated artifact dumped
+  and imported, a flipped byte, a source file dumped as an artifact, an
+  artifact directory that is not there, an over-long socket path to three
+  verbs, a server binary that is not there, a daemon that is not listening
+  — and asserts the same three things of each: a non-zero exit, a phrase
+  that names what was asked for, and *no* trace. The trace detector is
+  proved against a recording of the daemon crash above, because a check
+  that cannot fail is not a check.
+- **A proof that raced.** The hidden-buffer arm of `bench/server_load.sh`
+  needs the freed chunk handed to a canary *and* the kernel writing epoll's
+  answers into it before the run ends, and two hundred connections did both
+  on every machine that wrote the file — then, once, on a loaded CI runner,
+  neither: the buffer was freed and simply never reused, so the proof went
+  green and proved nothing. Measured on a machine held at sixteen times its
+  cores, four of twenty-four runs survived at two hundred rounds, none of
+  twenty-four at a thousand, none of twelve at two thousand. That arm runs
+  at two thousand now. The claim is unchanged and so is the cost: a run
+  that dies does it in the first collections.
+- **One tree of `.iyi` files nothing checked.** The formatter gate reads
+  `src spec samples`, so `bench` — thirty-two exercises, the gates
+  themselves — was never checked and had drifted: `bench/server_load.iyi`
+  carried unaligned constants and continuation lines the formatter indents
+  differently. It is formatted, and `bench` is in the gate and in `make
+  format` now.
 - **A range that ends at the type's maximum stepped past it.** The inclusive
   walk was `while value <= @end` followed by `value = value + 1`, so the
   last step left the type on the checked `+` and

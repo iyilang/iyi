@@ -2001,6 +2001,9 @@ end
   {% if flag?(:darwin) %}
     lib LibC
       fun sigaltstack(ss : Void*, oss : Void*) : Int32
+      # thread.iyi declares this one too, and is left out of a `-Dgc_none`
+      # or `-Dgc_boehm` build; the guard is in every build, so it says it.
+      fun sigaction(signal : Int32, action : Void*, previous : Void*) : Int32
     end
   {% end %}
 

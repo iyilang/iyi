@@ -23,13 +23,13 @@ import compiler/platform/linker
 import compiler/loader
 
 using compiler/syntax/parser::{Parser}
-using compiler/syntax/ast::{ASTNode, Expressions, ClassDef, FunDef, Def, LibDef, Arg}
+using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, FunDef, Def, LibDef, Arg}
 using compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
 using compiler/semantic/main_visitor::{MainVisitor}
 using compiler/llvm/context::{Context}
 using compiler/llvm/module::{Module}
-using compiler/codegen/codegen::{compile_declarations_to_module, register_primitive_operators}
+using compiler/codegen/codegen::{append_entry_point, compile_declarations_to_module, register_primitive_operators}
 using compiler/platform/linker::{Linker}
 using compiler/loader::{Loader, ModuleInfo, IyiPath}
 
@@ -102,10 +102,13 @@ pub class Compiler
     funs = [] of FunDef
     defs = Hash(String, Def).new
     libs = [] of LibDef
+    top_level = [] of ASTNode
 
     resolved_modules.each do |mod_info|
-      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs)
+      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, top_level)
     end
+
+    append_entry_point(funs, top_level)
 
     # Register funs in program
     funs.each do |fd|
@@ -147,7 +150,8 @@ pub class Compiler
     )
     mod.data_layout = tm.data_layout
 
-    compile_declarations_to_module(classes, funs, defs, libs, root_filename, ctx, mod, prog, mv)
+    roots = resolved_modules.map { |mi| mi.ast.as(ASTNode) }
+    compile_declarations_to_module(classes, funs, defs, libs, root_filename, ctx, mod, prog, mv, roots)
 
     # 6. Emit: write native object file
     obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
@@ -253,10 +257,11 @@ pub class Compiler
     funs : Array(FunDef),
     defs : Hash(String, Def),
     libs : Array(LibDef),
+    top_level : Array(ASTNode) = [] of ASTNode,
   ) : Nil
     if node.is_a?(Expressions)
       node.as(Expressions).expressions.each do |e|
-        extract_declarations(e, classes, funs, defs, libs)
+        extract_declarations(e, classes, funs, defs, libs, top_level)
       end
     elsif node.is_a?(ClassDef)
       classes << node.as(ClassDef)
@@ -266,6 +271,8 @@ pub class Compiler
       defs[node.as(Def).name] = node.as(Def)
     elsif node.is_a?(LibDef)
       libs << node.as(LibDef)
+    elsif !node.is_a?(Annotation) && !node.is_a?(Nop)
+      top_level << node
     end
   end
 end

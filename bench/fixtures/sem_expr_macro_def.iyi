@@ -1,0 +1,9 @@
+macro make_getter(name, val)
+  def {{name.id}} : Int32
+    {{val}}
+  end
+end
+
+make_getter(status_code, 200)
+
+res = status_code

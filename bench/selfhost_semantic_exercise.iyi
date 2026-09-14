@@ -157,6 +157,12 @@ module BenchSelfhostSemanticExercise
       raise "block and closure inference test failed"
     end
     puts "ok (block and closure type inference verified)"
+    print "testing macro expansion in semantic traversal... "
+    out14 = run_expr_source("macro make_getter(name, val); def {{name.id}} : Int32; {{val}}; end; end; make_getter(status_code, 200); res = status_code")
+    unless out14.includes?("target_def: status_code: Int32") && out14.includes?("Def: Nil")
+      raise "macro expansion in semantic traversal test failed"
+    end
+    puts "ok (macro expansion in semantic traversal verified)"
 
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"

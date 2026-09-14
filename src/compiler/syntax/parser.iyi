@@ -29,7 +29,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, StringBuilder}
 
 pub struct CallArgs
   property args : Array(ASTNode)?
@@ -1017,6 +1017,10 @@ pub class Parser < Lexer
             else
               unexpected_token("expected def, class, or struct after abstract")
             end
+          end
+        when Keyword::MACRO
+          check_not_inside_def("can't define macro") do
+            parse_macro
           end
         when Keyword::DEF
           check_not_inside_def("can't define def") do
@@ -2668,6 +2672,433 @@ pub class Parser < Lexer
     OffsetOf.new(type, offset).at(location).at_end(end_location)
   end
 
+  class MacroBodyScanner
+    property source : String
+    property pos : Int32
+    property len : Int32
+
+    def initialize(@source : String, @pos : Int32 = 0)
+      @len = @source.bytesize
+    end
+
+    def current_char : Char
+      if @pos < @len
+        @source.byte_at(@pos).unsafe_chr
+      else
+        '\0'
+      end
+    end
+
+    def peek_char : Char
+      if @pos + 1 < @len
+        @source.byte_at(@pos + 1).unsafe_chr
+      else
+        '\0'
+      end
+    end
+
+    def next_char : Char
+      c = current_char
+      if @pos < @len
+        @pos = @pos + 1
+      end
+      c
+    end
+
+    def has_more? : Bool
+      @pos < @len
+    end
+
+    def skip_whitespace : Nil
+      while has_more?
+        c = current_char
+        if c == ' ' || c == '\t' || c == '\r' || c == '\n'
+          next_char
+        else
+          break
+        end
+      end
+    end
+
+    def find_matching_delimiter(close_first : Char, close_second : Char) : String
+      start_pos = @pos
+      in_single_quote = false
+      in_double_quote = false
+      escaped = false
+
+      while has_more?
+        c = current_char
+        if escaped
+          escaped = false
+          next_char
+          next
+        end
+
+        if c == '\\'
+          escaped = true
+          next_char
+          next
+        end
+
+        if c == '\'' && !in_double_quote
+          in_single_quote = !in_single_quote
+          next_char
+          next
+        end
+
+        if c == '"' && !in_single_quote
+          in_double_quote = !in_double_quote
+          next_char
+          next
+        end
+
+        if !in_single_quote && !in_double_quote
+          if c == close_first && peek_char == close_second
+            res = @source[start_pos, @pos - start_pos]
+            next_char
+            next_char
+            return res
+          end
+        end
+
+        next_char
+      end
+
+      @source[start_pos, @pos - start_pos]
+    end
+  end
+
+  def self.macro_word_match(source : String, pos : Int32, word : String) : Bool
+    wlen = word.bytesize
+    return false if pos + wlen > source.bytesize
+    return false if source[pos, wlen] != word
+    if pos > 0
+      prev = source.byte_at(pos - 1).unsafe_chr
+      if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_'
+        return false
+      end
+    end
+    if pos + wlen < source.bytesize
+      after = source.byte_at(pos + wlen).unsafe_chr
+      if (after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z') || (after >= '0' && after <= '9') || after == '_' || after == ':'
+        return false
+      end
+    end
+    true
+  end
+
+  def parse_macro_args_helper(param_str : String) : {Array(Arg), Arg?, Arg?, Int32?}
+    args = [] of Arg
+    double_splat : Arg? = nil
+    block_arg : Arg? = nil
+    splat_index : Int32? = nil
+
+    trimmed = param_str.strip
+    if trimmed.empty?
+      return {args, double_splat, block_arg, splat_index}
+    end
+
+    parts = [] of String
+    cur = StringBuilder.new
+    depth = 0
+    in_quotes = false
+    i = 0
+    while i < trimmed.bytesize
+      ch = trimmed.byte_at(i).unsafe_chr
+      if ch == '"'
+        in_quotes = !in_quotes
+      end
+      if !in_quotes
+        if ch == '(' || ch == '[' || ch == '{'
+          depth = depth + 1
+        elsif ch == ')' || ch == ']' || ch == '}'
+          depth = depth - 1
+        elsif ch == ',' && depth == 0
+          parts << cur.to_s.strip
+          cur = StringBuilder.new
+          i = i + 1
+          next
+        end
+      end
+      cur << ch
+      i = i + 1
+    end
+    remaining = cur.to_s.strip
+    if !remaining.empty?
+      parts << remaining
+    end
+
+    idx = 0
+    while idx < parts.size
+      raw = parts[idx]
+      if raw.starts_with?("**")
+        double_splat = Arg.new(raw[2, raw.bytesize - 2].strip)
+      elsif raw.starts_with?("*")
+        splat_index = args.size
+        args << Arg.new(raw[1, raw.bytesize - 1].strip)
+      elsif raw.starts_with?("&")
+        block_arg = Arg.new(raw[1, raw.bytesize - 1].strip)
+      elsif raw.includes?("=")
+        if eq_idx = raw.index('=')
+          aname = raw[0, eq_idx].strip
+          default_expr_str = raw[eq_idx + 1, raw.bytesize - (eq_idx + 1)].strip
+          def_val = Parser.new(default_expr_str).parse
+          args << Arg.new(aname, default_value: def_val)
+        else
+          args << Arg.new(raw)
+        end
+      else
+        args << Arg.new(raw)
+      end
+      idx = idx + 1
+    end
+
+    {args, double_splat, block_arg, splat_index}
+  end
+
+  def parse_macro_body_pieces(scanner : MacroBodyScanner, stop_tags : Array(String)) : {Array(ASTNode), String}
+    pieces = [] of ASTNode
+    lit_sb = StringBuilder.new
+    terminated_by = ""
+    nest = 0
+
+    while scanner.has_more?
+      c = scanner.current_char
+      p = scanner.peek_char
+
+      if c == '{' && p == '{'
+        if !lit_sb.empty?
+          pieces << MacroLiteral.new(lit_sb.to_s)
+          lit_sb = StringBuilder.new
+        end
+        scanner.next_char
+        scanner.next_char
+        expr_text = scanner.find_matching_delimiter('}', '}').strip
+        exp = Parser.new(expr_text).parse
+        pieces << MacroExpression.new(exp, output: true)
+        next
+      end
+
+      if c == '{' && p == '%'
+        scanner.next_char
+        scanner.next_char
+        tag_text = scanner.find_matching_delimiter('%', '}').strip
+
+        should_stop = false
+        stop_tags.each do |st|
+          if tag_text == st || tag_text.starts_with?(st + " ")
+            should_stop = true
+          end
+        end
+
+        if should_stop
+          if !lit_sb.empty?
+            pieces << MacroLiteral.new(lit_sb.to_s)
+            lit_sb = StringBuilder.new
+          end
+          return {pieces, tag_text}
+        end
+
+        if !lit_sb.empty?
+          pieces << MacroLiteral.new(lit_sb.to_s)
+          lit_sb = StringBuilder.new
+        end
+
+        if tag_text.starts_with?("if ")
+          cond_str = tag_text[3, tag_text.bytesize - 3].strip
+          cond = Parser.new(cond_str).parse
+          then_body, stop_reason = parse_macro_control_branches(scanner, cond)
+          pieces << then_body
+        elsif tag_text.starts_with?("unless ")
+          cond_str = tag_text[7, tag_text.bytesize - 7].strip
+          cond = Parser.new(cond_str).parse
+          then_body, stop_reason = parse_macro_control_branches(scanner, cond, is_unless: true)
+          pieces << then_body
+        elsif tag_text.starts_with?("for ")
+          for_content = tag_text[4, tag_text.bytesize - 4].strip
+          if in_idx = for_content.index(" in ")
+            vars_part = for_content[0, in_idx].strip
+            iter_part = for_content[in_idx + 4, for_content.bytesize - (in_idx + 4)].strip
+            loop_vars = [] of Var
+            vars_part.split(",").each do |v|
+              loop_vars << Var.new(v.strip)
+            end
+            iter_exp = Parser.new(iter_part).parse
+            body_nodes, _ = parse_macro_body_pieces(scanner, ["end"])
+            pieces << MacroFor.new(loop_vars, iter_exp, Expressions.new(body_nodes))
+          end
+        elsif tag_text.starts_with?("verbatim")
+          body_nodes, _ = parse_macro_body_pieces(scanner, ["end"])
+          pieces << MacroVerbatim.new(Expressions.new(body_nodes))
+        else
+          exp = Parser.new(tag_text).parse
+          pieces << MacroExpression.new(exp, output: false)
+        end
+        next
+      end
+
+      if c == '%' && scanner.pos + 1 < scanner.len && (p >= 'a' && p <= 'z' || p >= 'A' && p <= 'Z' || p == '_')
+        if !lit_sb.empty?
+          pieces << MacroLiteral.new(lit_sb.to_s)
+          lit_sb = StringBuilder.new
+        end
+        scanner.next_char
+        vname = StringBuilder.new
+        while scanner.has_more?
+          ch = scanner.current_char
+          if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_'
+            vname << ch
+            scanner.next_char
+          else
+            break
+          end
+        end
+        pieces << MacroVar.new(vname.to_s)
+        next
+      end
+
+      if Parser.macro_word_match(scanner.source, scanner.pos, "def") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "class") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "struct") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "module") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "enum") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "case") ||
+         Parser.macro_word_match(scanner.source, scanner.pos, "begin")
+        nest = nest + 1
+      end
+
+      if stop_tags.includes?("macro_end") && Parser.macro_word_match(scanner.source, scanner.pos, "end")
+        if nest > 0
+          nest = nest - 1
+          lit_sb << scanner.next_char
+          lit_sb << scanner.next_char
+          lit_sb << scanner.next_char
+          next
+        else
+          scanner.next_char
+          scanner.next_char
+          scanner.next_char
+          if !lit_sb.empty?
+            pieces << MacroLiteral.new(lit_sb.to_s)
+            lit_sb = StringBuilder.new
+          end
+          return {pieces, "macro_end"}
+        end
+      end
+
+      lit_sb << scanner.next_char
+    end
+
+    if !lit_sb.empty?
+      pieces << MacroLiteral.new(lit_sb.to_s)
+    end
+
+    {pieces, terminated_by}
+  end
+
+  def parse_macro_control_branches(
+    scanner : MacroBodyScanner,
+    cond : ASTNode,
+    is_unless : Bool = false,
+  ) : {MacroIf, String}
+    then_nodes, stop_tag = parse_macro_body_pieces(scanner, ["elsif", "else", "end"])
+    then_ast = Expressions.new(then_nodes)
+    else_ast : ASTNode = Nop.new
+
+    if stop_tag.starts_with?("elsif ")
+      elsif_cond_str = stop_tag[6, stop_tag.bytesize - 6].strip
+      elsif_cond = Parser.new(elsif_cond_str).parse
+      nested_if, final_stop = parse_macro_control_branches(scanner, elsif_cond, is_unless: false)
+      else_ast = nested_if
+      stop_tag = final_stop
+    elsif stop_tag == "else"
+      else_nodes, final_stop = parse_macro_body_pieces(scanner, ["end"])
+      else_ast = Expressions.new(else_nodes)
+      stop_tag = final_stop
+    end
+
+    result_if = if is_unless
+                  MacroIf.new(cond, else_ast, then_ast)
+                else
+                  MacroIf.new(cond, then_ast, else_ast)
+                end
+
+    {result_if, stop_tag}
+  end
+
+  def parse_macro_definition_from(source : String, start_pos : Int32) : {Macro, Int32}
+    scanner = MacroBodyScanner.new(source, start_pos)
+    scanner.skip_whitespace
+
+    start_str = "macro"
+    idx = 0
+    while idx < start_str.bytesize && scanner.has_more?
+      scanner.next_char
+      idx = idx + 1
+    end
+    scanner.skip_whitespace
+
+    name_sb = StringBuilder.new
+    while scanner.has_more?
+      ch = scanner.current_char
+      if ch == '(' || ch == ' ' || ch == '\t' || ch == '\n' || ch == ';'
+        break
+      end
+      name_sb << ch
+      scanner.next_char
+    end
+    macro_name = name_sb.to_s.strip
+    scanner.skip_whitespace
+
+    param_str = ""
+    if scanner.current_char == '('
+      scanner.next_char
+      param_sb = StringBuilder.new
+      depth = 1
+      while scanner.has_more?
+        ch = scanner.next_char
+        if ch == '('
+          depth = depth + 1
+        elsif ch == ')'
+          depth = depth - 1
+          if depth == 0
+            break
+          end
+        end
+        param_sb << ch
+      end
+      param_str = param_sb.to_s
+    end
+
+    args, double_splat, block_arg, splat_index = parse_macro_args_helper(param_str)
+
+    while scanner.has_more?
+      ch = scanner.current_char
+      if ch == '\n' || ch == ';'
+        scanner.next_char
+        break
+      end
+      scanner.next_char
+    end
+
+    pieces, _ = parse_macro_body_pieces(scanner, ["macro_end"])
+    body = Expressions.new(pieces)
+
+    a_macro = Macro.new(macro_name, args, body, double_splat: double_splat, block_arg: block_arg, splat_index: splat_index)
+    {a_macro, scanner.pos}
+  end
+
+  def parse_macro : ASTNode
+    macro_start = @pos - 5
+    while macro_start >= 0 && @source[macro_start, 5] != "macro"
+      macro_start = macro_start - 1
+    end
+    a_macro, end_pos = parse_macro_definition_from(@source, macro_start)
+    @pos = end_pos
+    next_token_skip_space
+    a_macro
+  end
+
   def parse_def(is_abstract : Bool = false) : ASTNode
     a_def = with_isolated_var_scope do
       parse_def_helper(is_abstract)
@@ -4028,6 +4459,10 @@ pub class Parser < Lexer
 
     if @token.type == TokenKind::IDENT
       case @token.keyword
+      when Keyword::MACRO
+        a_macro = parse_macro
+        a_macro.visibility = Visibility::Public
+        return a_macro.at(pub_location)
       when Keyword::DEF
         a_def = parse_def
         a_def.visibility = Visibility::Public

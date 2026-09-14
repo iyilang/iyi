@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Annotation, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -263,13 +263,20 @@ end
 
 class GenericUsageCollector < Visitor
   getter generic_nodes : Array(Generic)
+  getter saw_string : Bool
 
   def initialize
     @generic_nodes = [] of Generic
+    @saw_string = false
   end
 
   def visit(node : Generic) : Bool
     @generic_nodes << node
+    true
+  end
+
+  def visit(node : StringLiteral) : Bool
+    @saw_string = true
     true
   end
 
@@ -864,6 +871,9 @@ pub class CodeGenVisitor < Visitor
     @current_fn = fn
     @current_fun_def = node
 
+    @vars.clear
+    @last = nil
+    @terminated = false
     excluded_names = Set(String).new
     @param_values.clear
     @var_type_names.clear
@@ -2991,6 +3001,38 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
   end
 end
 
+# Wraps top-level statements into __crystal_main and main, the way the shipped
+# backend does. Both the single-file path and the multi-file pipeline call this,
+# so a program's behaviour does not depend on which one compiled it.
+pub def append_entry_point(funs : Array(FunDef), top_level_stmts : Array(ASTNode)) : Nil
+  return if top_level_stmts.empty?
+  return if funs.any? { |f| f.name == "main" }
+  argv_type = Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)
+  init_fun = FunDef.new(
+    "__crystal_main",
+    [
+      Arg.new("argc", restriction: Path.global("Int32")),
+      Arg.new("argv", restriction: argv_type),
+    ],
+    Path.global("Void"),
+    Expressions.new(top_level_stmts)
+  )
+  main_fun = FunDef.new(
+    "main",
+    [
+      Arg.new("argc", restriction: Path.global("Int32")),
+      Arg.new("argv", restriction: argv_type.clone.as(ASTNode)),
+    ],
+    Path.global("Int32"),
+    Expressions.new([
+      Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
+      NumberLiteral.new("0", NumberKind::I32),
+    ] of ASTNode)
+  )
+  funs << init_fun
+  funs << main_fun
+end
+
 pub def compile_source_to_module(src : String, filename : String, context : Context, mod : Module) : CodeGenVisitor
   parser = Parser.new(src, filename)
   node = parser.parse
@@ -3002,6 +3044,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   funs = [] of FunDef
   defs = Hash(String, Def).new
   libs = [] of LibDef
+  top_level_stmts = [] of ASTNode
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
       if e.is_a?(ClassDef)
@@ -3012,6 +3055,10 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
         defs[e.as(Def).name] = e.as(Def)
       elsif e.is_a?(LibDef)
         libs << e.as(LibDef)
+      elsif e.is_a?(Annotation) || e.is_a?(Nop)
+        # ignore annotations and nops
+      else
+        top_level_stmts << e
       end
     end
   elsif node.is_a?(ClassDef)
@@ -3022,8 +3069,11 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     defs[node.as(Def).name] = node.as(Def)
   elsif node.is_a?(LibDef)
     libs << node.as(LibDef)
+  elsif !node.is_a?(Annotation) && !node.is_a?(Nop)
+    top_level_stmts << node
   end
 
+  append_entry_point(funs, top_level_stmts)
   # Register funs in program
   funs.each do |fd|
     cloned_args = fd.args.map { |a| a.clone.as(Arg) }
@@ -3046,7 +3096,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     mv.set_type(fd, ret_type)
   end
 
-  compile_declarations_to_module(classes, funs, defs, libs, filename, context, mod, prog, mv)
+  compile_declarations_to_module(classes, funs, defs, libs, filename, context, mod, prog, mv, [node] of ASTNode)
 end
 
 pub def compile_declarations_to_module(
@@ -3059,6 +3109,7 @@ pub def compile_declarations_to_module(
   mod : Module,
   prog : SemanticProgram,
   mv : MainVisitor,
+  roots : Array(ASTNode) = [] of ASTNode,
 ) : CodeGenVisitor
   cg = CodeGenVisitor.new(context, mod, prog, mv)
   cg.filename = filename
@@ -3119,7 +3170,7 @@ pub def compile_declarations_to_module(
 
   # Instantiate generic types used in the module
   usage_collector = GenericUsageCollector.new
-  node.accept(usage_collector)
+  roots.each { |r| r.accept(usage_collector) }
   usage_collector.generic_nodes.each do |g|
     base_name = g.name.to_s
     if template = generic_templates[base_name]?
@@ -3169,7 +3220,7 @@ pub def compile_declarations_to_module(
     end
   end
   # Predefine String class layout if strings are used
-  has_strings = classes.any? { |cd| cd.name.to_s == "String" } || src.includes?("\"")
+  has_strings = classes.any? { |cd| cd.name.to_s == "String" } || usage_collector.saw_string
   if has_strings
     str_info = if existing_str = cg.custom_types["String"]?
                  existing_str

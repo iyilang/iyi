@@ -19,6 +19,7 @@ IYI="$REPO/bin/iyi"
 COMPILE_TOOL_SRC="$REPO/src/compiler/tools/compile.iyi"
 COMPILER_SRC="$REPO/src/compiler/compiler.iyi"
 LOADER_SRC="$REPO/src/compiler/loader.iyi"
+CODEGEN_SRC="$REPO/src/compiler/codegen/codegen.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -49,6 +50,7 @@ FIXTURES=(
   "bench/fixtures/compile_pointers.iyi"
   "bench/fixtures/compile_multi_import.iyi"
   "bench/fixtures/compile_diamond.iyi"
+  "bench/fixtures/compile_top_level.iyi"
 )
 
 matched=0
@@ -180,6 +182,8 @@ prove_compile_mutation() {
   local target_file="$2"
   local old_pat="$3"
   local new_pat="$4"
+  local test_fixture="${5:-$REPO/bench/fixtures/compile_arith.iyi}"
+  local expected_rc="${6:-26}"
 
   echo "  [$label]"
   cp "$target_file" "$target_file.orig"
@@ -203,7 +207,7 @@ PY
   local test_fixture="${5:-$REPO/bench/fixtures/compile_arith.iyi}"
   local expected_rc="${6:-26}"
   local mut_failed=0
-  if [ "$target_file" = "$COMPILE_TOOL_SRC" ] || [ "$target_file" = "$COMPILER_SRC" ] || [ "$target_file" = "$LOADER_SRC" ]; then
+  if [ "$target_file" = "$COMPILE_TOOL_SRC" ] || [ "$target_file" = "$COMPILER_SRC" ] || [ "$target_file" = "$LOADER_SRC" ] || [ "$target_file" = "$CODEGEN_SRC" ]; then
     rm -f "$REPO/.build/iyi-compile"
     if make -C "$REPO" iyi-compile >/dev/null 2>&1; then
       if "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$test_fixture" >/dev/null 2>&1; then
@@ -275,6 +279,20 @@ prove_compile_mutation "missed import in resolver" \
   "# resolve_file(clean_res, clean_fn)" \
   "$REPO/bench/fixtures/compile_diamond.iyi" \
   "52"
+
+prove_compile_mutation "omitting entry point wrapper for top-level code" \
+  "$CODEGEN_SRC" \
+  "  return if top_level_stmts.empty?" \
+  "  return if true" \
+  "$REPO/bench/fixtures/compile_top_level.iyi" \
+  42
+
+prove_compile_mutation "pipeline drops top-level statements" \
+  "$COMPILER_SRC" \
+  "append_entry_point(funs, top_level)" \
+  "# append_entry_point(funs, top_level)" \
+  "$REPO/bench/fixtures/compile_top_level.iyi" \
+  42
 echo
 if [ "$status" -eq 0 ]; then
   echo "ALL SELFHOST COMPILE CHECKS PASSED!"

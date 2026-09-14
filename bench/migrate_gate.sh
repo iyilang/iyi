@@ -387,6 +387,34 @@ else
   step ok "the source tree is untouched"
 fi
 
+# A file that does not parse was rewritten line by line and noted as a
+# module "left nested" - a finding about the wrong thing - and a relative
+# require of a file the tree does not have was dropped without a word.
+echo "== what is not Crystal yet, and what a require cannot reach"
+mkdir -p "$WORK/broken/src" "$WORK/dangling/src" "$WORK/dangling/other"
+printf 'module Broken\n  def self.a\n    1\n' > "$WORK/broken/src/broken.cr"
+if (cd "$WORK/broken" && "$IYI" migrate src --out out > "$WORK/broken.log" 2>&1); then
+  step fail "a tree with a file that does not parse was migrated"
+else
+  holds "a file that does not parse is refused, at its line" "src/broken.cr:4:1: does not parse as Crystal" "$WORK/broken.log"
+  holds "in the parser's words" "expecting 'end' to close the def" "$WORK/broken.log"
+fi
+if [ -e "$WORK/broken/out" ]; then
+  step fail "and nothing was written"
+else
+  step ok "and nothing was written"
+fi
+printf 'module Other\nend\n' > "$WORK/dangling/other/thing.cr"
+printf 'require "./nope"\nrequire "../other/thing"\nrequire "./sub/*"\nmodule Dangling\nend\n' > "$WORK/dangling/src/dangling.cr"
+if (cd "$WORK/dangling" && "$IYI" migrate src --out out > "$WORK/dangling.log" 2>&1); then
+  holds "a require of a file that is not there is named" 'require "./nope"` names src/nope.cr, which is not there' "$WORK/dangling.log"
+  holds "a require of a file outside the tree is named apart" 'is other/thing.cr, outside the tree' "$WORK/dangling.log"
+  holds "a glob that matches nothing is named" 'require "./sub/*"` matches no .cr the tree has' "$WORK/dangling.log"
+else
+  step fail "a tree with dangling requires did not migrate"
+  tail -5 "$WORK/dangling.log"
+fi
+
 echo "== a required file's top-level code runs before an import's initialiser"
 mkdir -p "$WORK/order"
 cat > "$WORK/order/registry.cr" <<'CR'

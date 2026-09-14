@@ -54,7 +54,16 @@ class Iyi::Command
     end
 
     unless Dir.exists?(lib_dir)
+      # A file that is there is not a directory that is missing: `--lib
+      # shard.yml` answered "no shard.yml/ here; run `shards install`"
+      # about the file the person had just named.
+      abort! "bind: --lib needs the directory `shards install` wrote, and #{lib_dir} is a file", :USAGE_ERROR if File.exists?(lib_dir)
       abort! "bind: no #{lib_dir}/ here; run `shards install` first, or --lib DIR", :USAGE_ERROR
+    end
+    # And the other way: `--mods shard.yml` died of `mkdir`'s own words,
+    # "shard.yml: File exists", which names no flag and blames nothing.
+    if File.exists?(mods) && !Dir.exists?(mods)
+      abort! "bind: --mods needs a directory for the .iyimod files, and #{mods} is a file", :USAGE_ERROR
     end
 
     shards = {} of String => Shard
@@ -85,6 +94,7 @@ class Iyi::Command
         shards.keys
       end
     wanted.each do |name|
+      abort! "bind: the shard name is empty, so it names nothing", :USAGE_ERROR if name.empty?
       abort! "bind: no shard named #{name} under #{lib_dir}/", :USAGE_ERROR unless shards[name]?
     end
 

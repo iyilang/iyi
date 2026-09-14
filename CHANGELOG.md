@@ -42,6 +42,27 @@
 
 ### Fixed
 
+- **`migrate` rewrote a file that does not parse, and dropped a require it
+  could not answer without a word.** A `.cr` with a `def` and no `end` was
+  written through line by line and noted as a module "left nested, which
+  nothing outside can reach" — a finding about the wrong thing, on a file
+  that is not Crystal yet. The tree is refused now, at the file, line and
+  column, in the parser's words: `src/a.cr:4:1: does not parse as Crystal,
+  so there is nothing to migrate yet: expecting 'end' to close the def
+  that began at line 2`. And `require "./nope"` naming a file the tree
+  does not have was dropped from the module silently, which is a module
+  that compiles by accident or refuses in another module's name; it is a
+  note now, one heading with three shapes — not there, outside the tree,
+  a glob that matches nothing. `bench/migrate_gate.sh` holds both.
+
+- **`bind --lib shard.yml` said there was no `shard.yml/` here.** A file
+  where a directory goes was reported as a directory that is missing,
+  with `run \`shards install\`` as the advice; `--mods shard.yml` died of
+  `mkdir`'s own `shard.yml: File exists`, which names no flag; and an
+  empty shard name was `no shard named  under lib/`, the two spaces its
+  whole answer. Each is a sentence about the flag and the file now, in
+  the family's words. `bench/verbs_exercise.sh` holds the three.
+
 - **The language server answered a client's mistakes in its own name, and
   one of them took it down.** A frame whose body is JSON but not an object
   — `[]` — raised outside every rescue, and the server died with a

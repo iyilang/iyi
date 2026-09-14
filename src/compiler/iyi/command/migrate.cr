@@ -222,6 +222,19 @@ class Iyi::Command
     files.reject! { |file| shards_install?(file, src) }
     abort! "migrate: no .cr under #{src}", :USAGE_ERROR if files.empty?
 
+    # A file that does not parse is not Crystal yet, and a rewrite of its
+    # lines is not a module: `module A` with no `end` was written through
+    # and noted as "left nested", a finding about the wrong thing. The
+    # parser says where, in the words a `--crystal` build would use, and
+    # the migration waits for the tree to be a tree.
+    files.each do |file|
+      parser = Parser.new(migrate_source(file))
+      parser.filename = file
+      parser.parse
+    rescue ex : SyntaxException
+      abort! "migrate: #{Iyi.relative_filename(file)}:#{ex.line_number}:#{ex.column_number}: does not parse as Crystal, so there is nothing to migrate yet: #{ex.message}", :CODE_ERROR
+    end
+
     # Which root namespaces are the tree's own, and which belong to the
     # library it is written against. A declaration under a name the library
     # already owns is a reopening (rule 6) whether it is written qualified
@@ -760,6 +773,7 @@ class Iyi::Command
 
     HEADINGS = {
       "cycle"      => "import cycles, written as one module each",
+      "require"    => "relative requires of files the tree does not have, dropped",
       "reopen"     => "reopenings of types this tree does not own, kept as Crystal",
       "collide"    => "one name offered by two modules, the second left qualified",
       "bang"       => "`!` is III.1.7a's: rewritten, and worth reading",
@@ -1528,7 +1542,9 @@ class Iyi::Command
         if match = REQUIRE.match(line)
           target = match[1] || ""
           if target.starts_with?('.')
-            resolve_require(target, by_source).each { |unit| imports << unit.path unless unit.path == path }
+            found = resolve_require(target, by_source)
+            found.each { |unit| imports << unit.path unless unit.path == path }
+            note_unresolved_require(target, notes) if found.empty?
           end
           next # a shard require rides in the header
         end
@@ -1843,6 +1859,25 @@ class Iyi::Command
       else
         file = base.ends_with?(".cr") ? base : base + ".cr"
         (unit = by_source[file]?) ? [unit] : [] of MigrateUnit
+      end
+    end
+
+    # A relative require that names no file of the tree was dropped without
+    # a word, and a module that imports nothing where the Crystal required
+    # something either compiles by accident or refuses in another module's
+    # name. Whether the file is missing or merely outside the tree is worth
+    # the sentence, because the fixes differ.
+    private def note_unresolved_require(target : String, notes : Notes) : Nil
+      base = File.expand_path(target, File.dirname(source))
+      if base.ends_with?("*")
+        notes.add "require", "#{path}: `require \"#{target}\"` matches no .cr the tree has; the line is dropped"
+        return
+      end
+      file = base.ends_with?(".cr") ? base : base + ".cr"
+      if File.file?(file)
+        notes.add "require", "#{path}: `require \"#{target}\"` is #{Iyi.relative_filename(file)}, outside the tree; the line is dropped, and the module does not reach it"
+      else
+        notes.add "require", "#{path}: `require \"#{target}\"` names #{Iyi.relative_filename(file)}, which is not there; the line is dropped"
       end
     end
 

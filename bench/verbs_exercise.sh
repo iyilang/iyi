@@ -502,6 +502,20 @@ refuses "a flag where --out's directory goes" "--check is a flag" -- \
   "$IYI" migrate tree --out --check
 refuses "a flag where --mods' directory goes" "--mods takes a directory" -- \
   "$IYI" bind --mods --lib
+# A file where a directory goes is not a directory that is missing:
+# `--lib shard.yml` said "no shard.yml/ here; run `shards install`" and
+# `--mods shard.yml` died of mkdir's "File exists"; an empty shard name
+# said "no shard named  under lib/", the two spaces its whole answer.
+mkdir -p bindhere/lib/one/src
+printf 'name: one\n' > bindhere/lib/one/shard.yml
+printf 'module One\nend\n' > bindhere/lib/one/src/one.cr
+printf 'name: app\n' > bindhere/shard.yml
+refuses "a file where --lib's directory goes" "and bindhere/shard.yml is a file" -- \
+  "$IYI" bind --lib bindhere/shard.yml
+refuses "a file where --mods' directory goes" "and bindhere/shard.yml is a file" -- \
+  "$IYI" bind --lib bindhere/lib --mods bindhere/shard.yml
+refuses "an empty shard name" "the shard name is empty" -- \
+  "$IYI" bind --lib bindhere/lib --mods "$WORK/bindmods" ""
 # The refusal `migrate` was asked for is the one it did not write: nothing
 # under `--out`, and no directory named after the flag.
 if [ -e "$WORK/migrated" ] || [ -e "$WORK/--check" ]; then

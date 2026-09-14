@@ -252,6 +252,13 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # daemon's version as empty. An allowlist entry wide enough to cover a
     # defect is not an allowlist entry.
     (r"CRYSTAL_#\{name\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
+    # The same fallback, in the sentence that refuses a cache directory.
+    # `Config.env` reads `IYI_CACHE_DIR` and then `CRYSTAL_CACHE_DIR`, so the
+    # refusal names whichever of the two is set: a sentence about
+    # `IYI_CACHE_DIR` read by somebody who set the other one names a variable
+    # they do not have. Backticked or quoted, by the rule above — a bare
+    # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
+    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
     (r"Crystal on the machine|a Crystal\b", "a sentence about the other language"),
     # Comments citing Crystal's own source, DWARF producer strings, and the
     # version banner's "a fork of Crystal X" clause. All name the other

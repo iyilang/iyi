@@ -35,7 +35,9 @@ class Iyi::Command
 
           Apply the compiler's did-you-mean edits to <file>, recompiling
           after each one, until the file is clean or carries an error the
-          compiler has no edit for. Exit 0 when the file ends clean.
+          compiler has no edit for. Exit 0 when the file ends clean. When
+          the remaining error lives in another file of the program, the
+          verb names it (`cause` in `--json`): that is the file to fix next.
 
           To see the edits without applying them, use
           `#{Command.program_name} check -f json`: the same edits travel
@@ -123,6 +125,21 @@ class Iyi::Command
       applied << {diag.line, diag.column, from, replacement}
     end
 
+    # Where the remaining error actually is, when that is another file of
+    # the program's own: `fix main.iyi` with the typo in `app/lib.iyi`
+    # printed main's frame, `undefined method 'helperr'`, and `Did you
+    # mean 'helper'?` - an edit this verb will not make, because it edits
+    # the file it was named, and a sentence that reads as an invitation
+    # to run it again. The deepest frame in another file is where to
+    # point the verb instead - unless that file is the library's, which
+    # is nobody's to fix from here and would be advice to edit the prelude.
+    library = IyiPath.default_paths.map { |entry| File.expand_path(entry) }
+    elsewhere = remaining.try do |diag|
+      diag.related.reverse.find do |(file, _, _, _)|
+        file != path && library.none? { |root| file.starts_with?(root) }
+      end
+    end
+
     if json_mode
       JSON.build(STDOUT) do |json|
         json.object do
@@ -143,6 +160,15 @@ class Iyi::Command
           if remaining
             json.field "remaining", remaining.message
           end
+          if elsewhere
+            json.field "cause" do
+              json.object do
+                json.field "file", elsewhere[0]
+                json.field "line", elsewhere[1]
+                json.field "column", elsewhere[2]
+              end
+            end
+          end
         end
       end
       STDOUT.puts
@@ -152,6 +178,10 @@ class Iyi::Command
       end
       if remaining
         STDERR.puts "#{file}:#{remaining.line}:#{remaining.column}: #{remaining.message}"
+        if elsewhere
+          STDERR.puts "the cause is in #{Iyi.relative_filename(elsewhere[0])}:#{elsewhere[1]}:#{elsewhere[2]}, " \
+                      "which this run does not edit: run `#{Command.program_name} fix #{Iyi.relative_filename(elsewhere[0])}`"
+        end
       elsif applied.empty?
         puts "#{file}: already clean"
       end

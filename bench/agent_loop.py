@@ -136,6 +136,39 @@ def main():
          fixed["clean"] and [a["to"] for a in fixed["applied"]] == ["'/'", "'\\t'"],
          f"applied {[a['to'] for a in fixed['applied']]}")
 
+    # 4a'. the edit that lives in another file. `fix main.iyi` with the
+    # typo in the module main imports printed main's frame, the typo's
+    # message and `Did you mean`, applied nothing, and exited 1 - an
+    # invitation to run it again, forever. It names the file to run it
+    # on now, in prose and in data, and pointing there converges.
+    write("calc/typo.iyi", (
+        "module calc/typo\n\n"
+        "def helper(n : Int32) : Int32\n  n + 1\nend\n\n"
+        "pub def bump(n : Int32) : Int32\n  helperr(n)\nend\n"
+    ))
+    write("bumps.iyi", (
+        "module bumps\n\n"
+        "import calc/typo\nusing calc/typo::{bump}\n\n"
+        "puts bump(1)\n"
+    ))
+    proc = run("fix", "--json", "bumps.iyi", cwd=work)
+    fixed = json.loads(proc.stdout)
+    cause = fixed.get("cause", {})
+    step("fix names the file the remaining error is in",
+         not fixed["clean"] and fixed["applied"] == []
+         and cause.get("file", "").endswith("calc/typo.iyi") and cause.get("line") == 8,
+         f"cause {cause}")
+    proc = run("fix", "bumps.iyi", cwd=work)
+    step("and says so in prose",
+         "the cause is in calc/typo.iyi:8:3" in proc.stderr and "iyi fix calc/typo.iyi" in proc.stderr,
+         proc.stderr.strip().splitlines()[-1])
+    proc = run("fix", "--json", "calc/typo.iyi", cwd=work)
+    fixed = json.loads(proc.stdout)
+    step("and fixing that file converges",
+         fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("helperr", "helper")]
+         and run("check", "bumps.iyi", cwd=work).returncode == 0,
+         f"applied {fixed['applied']}")
+
     # 4b. the blind spot, closed as a language rule: an uncalled body is
     # typed against its declared signature (definition-site typing,
     # R-2's dividend) — by check AND by a plain build; fix converges to

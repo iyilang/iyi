@@ -42,6 +42,18 @@
 
 ### Fixed
 
+- **`fix` on a file whose error is in the module it imports invited itself
+  to be run again.** `iyi fix main.iyi` with the typo in `app/lib.iyi`
+  printed main's frame, `undefined method 'helperr'` and `Did you mean
+  'helper'?`, applied nothing and exited 1 — and never said that the edit
+  it was quoting belongs to a file it does not edit. An agent reads that
+  as "run it again". It names the file now — `the cause is in
+  app/lib.iyi:8:3, which this run does not edit: run iyi fix app/lib.iyi`
+  — and `--json` carries it as `cause` with the file, line and column,
+  which the MCP tool's description says too. Only for a file of the
+  program's own: a frame in the prelude or `std` is nobody's to fix from
+  there, and points at nothing.
+
 - **A panic `std` raised named `std`'s own line.** `each_slice(0)` died
   with `at …/src/std/enumerable.iyi:442` — the library's line, which is
   not where the bug is, and III.1.4 already says so for the prelude: a

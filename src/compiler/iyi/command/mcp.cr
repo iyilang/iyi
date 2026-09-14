@@ -134,7 +134,7 @@ class Iyi::Command
       },
       {
         "name": "fix",
-        "description": "Apply the compiler's own did-you-mean edits to a file, recompiling after each, until clean or an error carries no edit. Returns the edits applied and whether the file ended clean.",
+        "description": "Apply the compiler's own did-you-mean edits to a file, recompiling after each, until clean or an error carries no edit. Returns the edits applied and whether the file ended clean; when the remaining error lives in another file of the program, `cause` names that file and position, and that is the file to call this on next.",
         "inputSchema": {
           "type": "object",
           "properties": {"file": {"type": "string", "description": "path to the .iyi file"}},

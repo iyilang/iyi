@@ -37,16 +37,16 @@ file_floor() {
   case "$1" in
     "array.iyi")       echo "object" ;;
     "atomic.iyi")      echo "link" ;;
-    "concurrency.iyi") echo "codegen" ;;
+    "concurrency.iyi") echo "object" ;;
     "enum.iyi")        echo "link" ;;
     "file.iyi")        echo "object" ;;
-    "float.iyi")       echo "codegen" ;;
+    "float.iyi")       echo "object" ;;
     "hash.iyi")        echo "link" ;;
     "io.iyi")          echo "object" ;;
     "macros.iyi")      echo "link" ;;
     "number.iyi")      echo "object" ;;
     "object.iyi")      echo "object" ;;
-    "prelude.iyi")     echo "object" ;;
+    "prelude.iyi")     echo "link" ;;
     "primitives.iyi")  echo "link" ;;
     "range.iyi")       echo "link" ;;
     "set.iyi")         echo "link" ;;
@@ -202,16 +202,25 @@ prove_fails "syntax corruption in atomic regresses below link floor" \
   's/struct Atomic/struct %%%/' \
   "link"
 
-prove_fails "syntax corruption in prelude regresses below object floor" \
+prove_fails "syntax corruption in prelude regresses below link floor" \
   "prelude.iyi" \
   's|require "./primitives"|require %%%|' \
-  "object"
+  "link"
 
-prove_fails "semantic corruption in prelude regresses below object floor" \
+prove_fails "semantic corruption in prelude regresses below link floor" \
   "prelude.iyi" \
   's/@proc : Proc(Nil)/@proc : UndefinedType9876/' \
+  "link"
+
+prove_fails "syntax corruption in concurrency regresses below object floor" \
+  "concurrency.iyi" \
+  's/class IyiFiber/class %%%/' \
   "object"
 
+prove_fails "syntax corruption in float regresses below object floor" \
+  "float.iyi" \
+  's/struct Float64/struct %%%/' \
+  "object"
 echo "  Mutation summary: $mutations_caught/$mutations_run regressions caught"
 
 echo

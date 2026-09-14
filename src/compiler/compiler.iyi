@@ -24,7 +24,7 @@ import compiler/loader
 import compiler/syntax/token
 
 using compiler/syntax/parser::{Parser}
-using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral}
+using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, ModuleDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral}
 using compiler/syntax/token::{NumberKind}
 using compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
@@ -338,6 +338,9 @@ pub class Compiler
       end
     elsif node.is_a?(ClassDef)
       classes << node.as(ClassDef)
+    elsif node.is_a?(ModuleDef)
+      md = node.as(ModuleDef)
+      classes << ClassDef.new(md.name, md.body, nil, md.type_vars, false, false)
     elsif node.is_a?(FunDef)
       funs << node.as(FunDef)
     elsif node.is_a?(Def)

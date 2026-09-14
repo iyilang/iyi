@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Annotation, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, Cast, CharLiteral, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Annotation, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Break, Call, Cast, CharLiteral, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, Next, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -414,6 +414,8 @@ pub class CodeGenVisitor < Visitor
     @proc_counts = Hash(String, Int32).new
     @filename = ""
     @strings = Hash(String, LLVMValue).new
+    @loop_exit_blocks = [] of LLVMBasicBlock
+    @loop_continue_blocks = [] of LLVMBasicBlock
   end
 
   def proc_type : LLVMType
@@ -587,7 +589,7 @@ pub class CodeGenVisitor < Visitor
     elsif cond_raw.type.void?
       @context.int1.const_int(0)
     else
-      cond_raw
+      @context.int1.const_int(1)
     end
   end
 
@@ -706,7 +708,8 @@ pub class CodeGenVisitor < Visitor
   end
 
   def llvm_type_from_name(name : String) : LLVMType
-    case name
+    clean_name = name.starts_with?("::") ? name[2, name.size - 2] : name
+    case clean_name
     when "Int8", "UInt8"
       @context.int8
     when "Int16", "UInt16"
@@ -728,15 +731,15 @@ pub class CodeGenVisitor < Visitor
     when "Void", "Nil", "NoReturn"
       @context.void
     else
-      if name.starts_with?("Proc(") || name == "->"
+      if clean_name.starts_with?("Proc(") || clean_name == "->"
         proc_type
-      elsif ct = @closure_types[name]?
+      elsif ct = @closure_types[clean_name]?
         ct
-      elsif name.includes?("Pointer(") || name.ends_with?("*") || name.ends_with?('+') || name.ends_with?('?') || name.includes?("::Nil") || name.includes?("| Nil") || name.includes?("Nil |") || name.starts_with?("Tuple(") || name == "T" || name == "U" || name == "K" || name == "V" || name == "E"
+      elsif clean_name.includes?("Pointer(") || clean_name.ends_with?("*") || clean_name.ends_with?('+') || clean_name.ends_with?('?') || clean_name.includes?("::Nil") || clean_name.includes?("|") || clean_name.starts_with?("Tuple(") || clean_name == "T" || clean_name == "U" || clean_name == "K" || clean_name == "V" || clean_name == "E"
         @context.pointer
-      elsif info = @custom_types[name]?
+      elsif info = @custom_types[clean_name]?
         if info.is_struct
-          @llvm_struct_types[name]
+          @llvm_struct_types[clean_name]
         else
           @context.pointer
         end
@@ -892,7 +895,7 @@ pub class CodeGenVisitor < Visitor
       end
       if c.obj.is_a?(Path) || c.obj.is_a?(Generic)
         obj_name = c.obj.to_s
-        if c.name == "new"
+        if c.name == "new" || c.name == "malloc"
           if obj_name.includes?("Pointer")
             elem = element_type_of_pointer(obj_name)
             return "Pointer(#{elem})"
@@ -1109,7 +1112,11 @@ pub class CodeGenVisitor < Visitor
 
     fn_ty = LLVMType.function(arg_types, ret_type, false)
     @fn_types[node.name] = fn_ty
-    fn = @mod.add_function(node.name, fn_ty)
+    fn = if existing = @mod.get_function?(node.name)
+           existing
+         else
+           @mod.add_function(node.name, fn_ty)
+         end
     if node.body && node.name.starts_with?("__crystal_") && node.name != "__crystal_personality"
       fn.linkage = LibLLVM::Linkage::Internal
     end
@@ -1346,6 +1353,23 @@ pub class CodeGenVisitor < Visitor
             end
           end
         end
+      end
+    elsif node.target.is_a?(Call)
+      call = node.target.as(Call)
+      if call.name == "value" && (c_obj = call.obj)
+        c_obj.accept(self)
+        if ptr_val = @last
+          node.value.accept(self)
+          if val = @last
+            s_inst = @builder.store(val, ptr_val)
+            s_inst.alignment = 8
+            @last = val
+            @terminated = false
+          end
+        end
+      elsif c_obj = call.obj
+        setter_call = Call.new(c_obj, "#{call.name}=", [node.value] of ASTNode)
+        setter_call.accept(self)
       end
     end
     @needs_value = old_needs
@@ -1782,8 +1806,8 @@ pub class CodeGenVisitor < Visitor
     else_bb = fn.append_basic_block("else")
 
     node.cond.accept(self)
-    return false unless cond_raw = @last
-    cond_val = ensure_i1_condition(cond_raw)
+    cond_raw = @last
+    cond_val = cond_raw ? ensure_i1_condition(cond_raw) : @context.int1.const_int(0)
     @builder.cond_br(cond_val, then_bb, else_bb)
 
     if node.else.nil? || node.else.is_a?(Nop)
@@ -1819,7 +1843,7 @@ pub class CodeGenVisitor < Visitor
     end
 
     exit_bb = fn.append_basic_block("exit")
-    @builder.br(exit_bb)
+    then_br = @builder.br(exit_bb)
 
     # else branch
     @builder.position_at_end(else_bb)
@@ -1830,33 +1854,58 @@ pub class CodeGenVisitor < Visitor
     else_terminated = @terminated
     else_val = @last
     else_end = @builder.insert_block || else_bb
-    unless else_terminated
-      @builder.br(exit_bb)
-    end
-
-    @builder.position_at_end(exit_bb)
-    @terminated = false
 
     if @needs_value && !then_terminated && !else_terminated && then_val && else_val
       if then_val.type.to_s == else_val.type.to_s && !then_val.type.void?
+        @builder.br(exit_bb)
+        @builder.position_at_end(exit_bb)
         phi = @builder.phi(then_val.type)
         @builder.add_incoming(phi, [then_val, else_val], [then_end, else_end])
         @last = phi
       elsif then_val.type.int? && else_val.type.int?
         target_t = then_val.type.int_width >= else_val.type.int_width ? then_val.type : else_val.type
-        tv = then_val.type.int_width < target_t.int_width ? @builder.zext(then_val, target_t) : then_val
+        tv = then_val
+        if then_val.type.int_width < target_t.int_width
+          @builder.position_before(then_br)
+          tv = @builder.zext(then_val, target_t)
+          @builder.position_at_end(else_end)
+        end
         ev = else_val.type.int_width < target_t.int_width ? @builder.zext(else_val, target_t) : else_val
+        @builder.br(exit_bb)
+        else_end = @builder.insert_block || else_end
+        @builder.position_at_end(exit_bb)
         phi = @builder.phi(target_t)
         @builder.add_incoming(phi, [tv, ev], [then_end, else_end])
         @last = phi
       else
+        @builder.br(exit_bb)
+        @builder.position_at_end(exit_bb)
         @last = nil
       end
     else
+      unless else_terminated
+        @builder.br(exit_bb)
+      end
+      @builder.position_at_end(exit_bb)
       @last = nil
     end
-
+    @terminated = false
     false
+  end
+
+  class BreakCollector < Visitor
+    property has_break : Bool
+
+    def initialize(@has_break : Bool = false)
+    end
+    def visit(node : Break) : Bool
+      @has_break = true
+      false
+    end
+
+    def visit(node : ASTNode) : Bool
+      !@has_break
+    end
   end
 
   def visit(node : While) : Bool
@@ -1864,6 +1913,10 @@ pub class CodeGenVisitor < Visitor
     while_bb = fn.append_basic_block("while")
     body_bb = fn.append_basic_block("body")
     fail_bb = fn.append_basic_block("fail")
+
+    bc = BreakCollector.new
+    node.body.accept(bc)
+    exit_bb = bc.has_break ? fn.append_basic_block("exit") : nil
 
     @builder.br(while_bb)
 
@@ -1876,14 +1929,41 @@ pub class CodeGenVisitor < Visitor
 
     @builder.position_at_end(body_bb)
     @terminated = false
+    if eb = exit_bb
+      @loop_exit_blocks << eb
+    else
+      @loop_exit_blocks << fail_bb
+    end
+    @loop_continue_blocks << while_bb
     node.body.accept(self)
+    @loop_exit_blocks.pop
+    @loop_continue_blocks.pop
     unless @terminated
       @builder.br(while_bb)
     end
 
     @builder.position_at_end(fail_bb)
+    if eb = exit_bb
+      @builder.br(eb)
+      @builder.position_at_end(eb)
+    end
     @terminated = false
     @last = @context.void.undef
+    false
+  end
+  def visit(node : Break) : Bool
+    if exit_bb = @loop_exit_blocks.last?
+      @builder.br(exit_bb)
+    end
+    @terminated = true
+    false
+  end
+
+  def visit(node : Next) : Bool
+    if cont_bb = @loop_continue_blocks.last?
+      @builder.br(cont_bb)
+    end
+    @terminated = true
     false
   end
 
@@ -2133,6 +2213,10 @@ pub class CodeGenVisitor < Visitor
             @builder.ret(@builder.int_to_ptr(l, fn_ret_ty))
           elsif fn_ret_ty.int? && l.type.pointer?
             @builder.ret(@builder.ptr_to_int(l, fn_ret_ty))
+          elsif (fn_ret_ty.float? || fn_ret_ty.double?) && l.type.int?
+            @builder.ret(@builder.si_to_fp(l, fn_ret_ty))
+          elsif fn_ret_ty.float? || fn_ret_ty.double?
+            @builder.ret(fn_ret_ty.const_float(0.0))
           elsif fn_ret_ty.pointer?
             @builder.ret(@context.pointer.null)
           else
@@ -2142,10 +2226,38 @@ pub class CodeGenVisitor < Visitor
           @builder.ret(l)
         end
       else
-        @builder.ret_void
+        if fn_ret_ty = @current_fn_return_type
+          if fn_ret_ty.void?
+            @builder.ret_void
+          elsif fn_ret_ty.int?
+            @builder.ret(fn_ret_ty.const_int(0))
+          elsif fn_ret_ty.float? || fn_ret_ty.double?
+            @builder.ret(fn_ret_ty.const_float(0.0))
+          elsif fn_ret_ty.pointer?
+            @builder.ret(@context.pointer.null)
+          else
+            @builder.ret_void
+          end
+        else
+          @builder.ret_void
+        end
       end
     else
-      @builder.ret_void
+      if fn_ret_ty = @current_fn_return_type
+        if fn_ret_ty.void?
+          @builder.ret_void
+        elsif fn_ret_ty.int?
+          @builder.ret(fn_ret_ty.const_int(0))
+        elsif fn_ret_ty.float? || fn_ret_ty.double?
+          @builder.ret(fn_ret_ty.const_float(0.0))
+        elsif fn_ret_ty.pointer?
+          @builder.ret(@context.pointer.null)
+        else
+          @builder.ret_void
+        end
+      else
+        @builder.ret_void
+      end
     end
     @terminated = true
     false
@@ -2404,6 +2516,32 @@ pub class CodeGenVisitor < Visitor
               else
                 @last = val
               end
+              @terminated = false
+              return false
+            end
+          end
+          if (tinfo = @custom_types[pname]?) && (m = tinfo.methods[node.name]?)
+            arg_vals = [] of LLVMValue
+            node.args.each do |a|
+              a.accept(self)
+              if l = @last
+                arg_vals << l
+              end
+            end
+            arg_type_names = m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+            ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+            method_fn_name = if arg_type_names.empty?
+                               "*#{tinfo.name}##{node.name}:#{ret_tname}"
+                             else
+                               "*#{tinfo.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                             end
+            if method_fn = @mod.get_function?(method_fn_name)
+              call_args = [@context.pointer.null] of LLVMValue
+              arg_vals.each { |av| call_args << av }
+              call_ret_ty = llvm_type_from_name(ret_tname)
+              m_param_tys = call_args.map(&.type)
+              method_fn_ty = LLVMType.function(m_param_tys, call_ret_ty, false)
+              @last = @builder.call(method_fn_ty, method_fn.to_value, call_args)
               @terminated = false
               return false
             end
@@ -3193,8 +3331,15 @@ pub class CodeGenVisitor < Visitor
           elsif rhs.type.int_width < lhs.type.int_width
             rhs = @builder.zext(rhs, lhs.type)
           end
+        elsif lhs.type.pointer? && rhs.type.int?
+          if node.name == "<" || node.name == "<=" || node.name == ">" || node.name == ">=" || node.name == "==" || node.name == "!="
+            rhs = @context.pointer.null
+          end
+        elsif lhs.type.int? && rhs.type.pointer?
+          if node.name == "<" || node.name == "<=" || node.name == ">" || node.name == ">=" || node.name == "==" || node.name == "!="
+            lhs = @context.pointer.null
+          end
         end
-
         case node.name
         when "+", "&+"
           if lhs.type.pointer? && rhs.type.pointer?
@@ -3215,7 +3360,16 @@ pub class CodeGenVisitor < Visitor
             @last = is_float ? @builder.fadd(lhs, rhs) : @builder.add(lhs, rhs)
           end
         when "-", "&-"
-          @last = is_float ? @builder.fsub(lhs, rhs) : @builder.sub(lhs, rhs)
+          if lhs.type.pointer? && rhs.type.pointer?
+            i1 = @builder.ptr_to_int(lhs, @context.int64)
+            i2 = @builder.ptr_to_int(rhs, @context.int64)
+            @last = @builder.sub(i1, i2)
+          elsif lhs.type.pointer?
+            neg_idx = @builder.neg(rhs.type == @context.int64 ? rhs : @builder.sext(rhs, @context.int64))
+            @last = @builder.inbounds_gep(@context.int8, lhs, [neg_idx])
+          else
+            @last = is_float ? @builder.fsub(lhs, rhs) : @builder.sub(lhs, rhs)
+          end
         when "*", "&*"
           @last = is_float ? @builder.fmul(lhs, rhs) : @builder.mul(lhs, rhs)
         when "/", "unsafe_div"
@@ -3229,9 +3383,23 @@ pub class CodeGenVisitor < Visitor
         when "^"
           @last = @builder.build_xor(lhs, rhs)
         when "<<", "unsafe_shl"
-          @last = @builder.shl(lhs, rhs)
+          r_val = if rhs.type.pointer?
+                    @builder.ptr_to_int(rhs, lhs.type)
+                  elsif rhs.type.int? && rhs.type.int_width != lhs.type.int_width
+                    rhs.type.int_width < lhs.type.int_width ? @builder.zext(rhs, lhs.type) : @builder.trunc(rhs, lhs.type)
+                  else
+                    rhs
+                  end
+          @last = @builder.shl(lhs, r_val)
         when ">>", "unsafe_shr"
-          @last = is_signed ? @builder.ashr(lhs, rhs) : @builder.lshr(lhs, rhs)
+          r_val = if rhs.type.pointer?
+                    @builder.ptr_to_int(rhs, lhs.type)
+                  elsif rhs.type.int? && rhs.type.int_width != lhs.type.int_width
+                    rhs.type.int_width < lhs.type.int_width ? @builder.zext(rhs, lhs.type) : @builder.trunc(rhs, lhs.type)
+                  else
+                    rhs
+                  end
+          @last = is_signed ? @builder.ashr(lhs, r_val) : @builder.lshr(lhs, r_val)
         when "<"
           @last = is_float ? @builder.fcmp(LibLLVM::RealPredicate::OLT, lhs, rhs) : (is_signed ? @builder.icmp(LibLLVM::IntPredicate::SLT, lhs, rhs) : @builder.icmp(LibLLVM::IntPredicate::ULT, lhs, rhs))
         when "<="
@@ -3305,6 +3473,65 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
   context = cg.context
   mod = cg.mod
   builder = cg.builder
+
+  # Pre-declare all custom methods so forward/mutual calls resolve
+  cg.custom_types.each_value do |info|
+    info.methods.each do |mname, mdef|
+      next if mname == "initialize" || info.fields.has_key?(mname) || (mname.ends_with?("=") && info.fields.has_key?(mname.rchop('=')))
+      next if !mdef.block_arg.nil? || mdef.uses_block_arg? || CodeGenVisitor.has_yield?(mdef.body)
+
+      m_self_ty = if CodeGenVisitor.primitive_type_name?(info.name)
+                    cg.llvm_type_from_name(info.name)
+                  else
+                    context.pointer
+                  end
+      m_arg_tys = [m_self_ty] of LLVMType
+      mdef.args.each do |a|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          m_arg_tys << cg.llvm_struct_types[r_name]
+        else
+          m_arg_tys << cg.llvm_type_from_name(r_name)
+        end
+      end
+      ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
+      m_ret_ty = cg.llvm_type_from_name(ret_tname)
+      m_fn_ty = LLVMType.function(m_arg_tys, m_ret_ty, false)
+
+      arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      has_sub_override = !info.subclasses.empty? && info.subclasses.any? do |sub_name|
+        if stinfo = cg.custom_types[sub_name]?
+          stinfo.methods.has_key?(mname)
+        else
+          false
+        end
+      end
+
+      fn_mangled = if gname = info.generic_name
+                     if arg_type_names.empty?
+                       "*#{info.name}@#{gname}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}@#{gname}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   elsif has_sub_override
+                     if arg_type_names.empty?
+                       "*#{info.name}+@#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}+@#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   else
+                     if arg_type_names.empty?
+                       "*#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   end
+      unless mod.get_function?(fn_mangled)
+        decl = mod.add_function(fn_mangled, m_fn_ty)
+        decl.linkage = LibLLVM::Linkage::Internal
+      end
+    end
+  end
 
   # 2. For each custom type, emit initializer, setters, constructor, and methods
   cg.custom_types.each_value do |info|
@@ -3449,6 +3676,8 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
           builder.ret(builder.ptr_to_int(l, init_ret_ty))
         elsif init_ret_ty.pointer?
           builder.ret(context.pointer.null)
+        elsif init_ret_ty.float? || init_ret_ty.double?
+          builder.ret(init_ret_ty.const_float(0.0))
         else
           builder.ret(init_ret_ty.const_int(0))
         end
@@ -3679,7 +3908,11 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
                        "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
                      end
                    end
-      m_fn = mod.add_function(fn_mangled, m_fn_ty)
+      m_fn = if existing = mod.get_function?(fn_mangled)
+               existing
+             else
+               mod.add_function(fn_mangled, m_fn_ty)
+             end
       m_fn.linkage = LibLLVM::Linkage::Internal
 
       cg.current_fn = m_fn
@@ -3795,8 +4028,12 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
           builder.ret(builder.int_to_ptr(l, m_ret_ty))
         elsif (l = cg.last) && m_ret_ty.int? && l.type.pointer?
           builder.ret(builder.ptr_to_int(l, m_ret_ty))
+        elsif (l = cg.last) && (m_ret_ty.float? || m_ret_ty.double?) && l.type.int?
+          builder.ret(builder.si_to_fp(l, m_ret_ty))
         elsif m_ret_ty.pointer?
           builder.ret(context.pointer.null)
+        elsif m_ret_ty.float? || m_ret_ty.double?
+          builder.ret(m_ret_ty.const_float(0.0))
         else
           builder.ret(m_ret_ty.const_int(0))
         end
@@ -3810,32 +4047,36 @@ end
 # backend does. Both the single-file path and the multi-file pipeline call this,
 # so a program's behaviour does not depend on which one compiled it.
 pub def append_entry_point(funs : Array(FunDef), top_level_stmts : Array(ASTNode)) : Nil
-  return if top_level_stmts.empty?
-  return if funs.any? { |f| f.name == "main" }
   argv_type = Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)
-  init_fun = FunDef.new(
-    "__crystal_main",
-    [
-      Arg.new("argc", restriction: Path.global("Int32")),
-      Arg.new("argv", restriction: argv_type),
-    ],
-    Path.global("Void"),
-    Expressions.new(top_level_stmts)
-  )
-  main_fun = FunDef.new(
-    "main",
-    [
-      Arg.new("argc", restriction: Path.global("Int32")),
-      Arg.new("argv", restriction: argv_type.clone.as(ASTNode)),
-    ],
-    Path.global("Int32"),
-    Expressions.new([
-      Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
-      NumberLiteral.new("0", NumberKind::I32),
-    ] of ASTNode)
-  )
-  funs << init_fun
-  funs << main_fun
+  unless funs.any? { |f| f.name == "__crystal_main" && !f.body.nil? }
+    init_stmts = top_level_stmts.empty? ? [Nop.new] of ASTNode : top_level_stmts
+    init_fun = FunDef.new(
+      "__crystal_main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: argv_type),
+      ],
+      Path.new("Void"),
+      Expressions.new(init_stmts)
+    )
+    funs << init_fun
+  end
+  unless funs.any? { |f| f.name == "main" }
+    return if top_level_stmts.empty?
+    main_fun = FunDef.new(
+      "main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: argv_type.clone.as(ASTNode)),
+      ],
+      Path.global("Int32"),
+      Expressions.new([
+        Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
+        NumberLiteral.new("0", NumberKind::I32),
+      ] of ASTNode)
+    )
+    funs << main_fun
+  end
 end
 
 pub def compile_source_to_module(src : String, filename : String, context : Context, mod : Module) : CodeGenVisitor
@@ -3959,10 +4200,37 @@ pub def compile_declarations_to_module(
       exps.each do |exp|
         if exp.is_a?(TypeDeclaration)
           td = exp.as(TypeDeclaration)
-          if td.var.is_a?(InstanceVar)
-            fname = td.var.as(InstanceVar).name.lstrip('@')
+          fname = if td.var.is_a?(InstanceVar)
+                    td.var.as(InstanceVar).name.lstrip('@')
+                  elsif td.var.is_a?(Var)
+                    td.var.as(Var).name
+                  else
+                    ""
+                  end
+          unless fname.empty?
             ftype = td.declared_type.to_s
             info.add_field(fname, ftype)
+          end
+        elsif exp.is_a?(Call) && (exp.as(Call).name == "property" || exp.as(Call).name == "getter")
+          call = exp.as(Call)
+          is_prop = call.name == "property"
+          call.args.each do |arg|
+            fname = ""
+            ftype = "Int32"
+            if arg.is_a?(TypeDeclaration)
+              td = arg.as(TypeDeclaration)
+              fname = td.var.is_a?(InstanceVar) ? td.var.as(InstanceVar).name.lstrip('@') : td.var.to_s
+              ftype = td.declared_type.to_s
+            elsif arg.is_a?(Var)
+              fname = arg.as(Var).name
+            end
+            unless fname.empty?
+              info.add_field(fname, ftype)
+              info.methods[fname] = Def.new(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, nil, Path.new(ftype))
+              if is_prop
+                info.methods["#{fname}="] = Def.new("#{fname}=", [Arg.new("value", restriction: Path.new(ftype))] of Arg, Assign.new(InstanceVar.new("@#{fname}"), Var.new("value")), nil, nil, Path.new(ftype))
+              end
+            end
           end
         elsif exp.is_a?(Def)
           d = exp.as(Def)
@@ -4002,11 +4270,39 @@ pub def compile_declarations_to_module(
           exps.each do |exp|
             if exp.is_a?(TypeDeclaration)
               td = exp.as(TypeDeclaration)
-              if td.var.is_a?(InstanceVar)
-                fname = td.var.as(InstanceVar).name.lstrip('@')
+              fname = if td.var.is_a?(InstanceVar)
+                        td.var.as(InstanceVar).name.lstrip('@')
+                      elsif td.var.is_a?(Var)
+                        td.var.as(Var).name
+                      else
+                        ""
+                      end
+              unless fname.empty?
                 raw_type = td.declared_type.to_s
                 ftype = subst[raw_type]? || raw_type
                 info.add_field(fname, ftype)
+              end
+            elsif exp.is_a?(Call) && (exp.as(Call).name == "property" || exp.as(Call).name == "getter")
+              call = exp.as(Call)
+              is_prop = call.name == "property"
+              call.args.each do |arg|
+                fname = ""
+                raw_type = "Int32"
+                if arg.is_a?(TypeDeclaration)
+                  td = arg.as(TypeDeclaration)
+                  fname = td.var.is_a?(InstanceVar) ? td.var.as(InstanceVar).name.lstrip('@') : td.var.to_s
+                  raw_type = td.declared_type.to_s
+                elsif arg.is_a?(Var)
+                  fname = arg.as(Var).name
+                end
+                unless fname.empty?
+                  ftype = subst[raw_type]? || raw_type
+                  info.add_field(fname, ftype)
+                  info.methods[fname] = Def.new(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, nil, Path.new(ftype))
+                  if is_prop
+                    info.methods["#{fname}="] = Def.new("#{fname}=", [Arg.new("value", restriction: Path.new(ftype))] of Arg, Assign.new(InstanceVar.new("@#{fname}"), Var.new("value")), nil, nil, Path.new(ftype))
+                  end
+                end
               end
             elsif exp.is_a?(Def)
               d = exp.as(Def)

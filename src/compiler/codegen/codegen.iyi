@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, Rescue, Return, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -242,6 +242,59 @@ class StructCallCollector < Visitor
   end
 end
 
+class ProcLiteralCollector < Visitor
+  getter proc_literals : Array(ProcLiteral)
+
+  def initialize
+    @proc_literals = [] of ProcLiteral
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    @proc_literals << node
+    false
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+class CapturedVarCollector < Visitor
+  getter captured_vars : Array(String)
+  property outer_vars : Set(String)
+  property local_vars : Set(String)
+
+  def initialize(@outer_vars : Set(String), proc_params : Set(String))
+    @captured_vars = [] of String
+    @local_vars = Set(String).new
+    proc_params.each { |p| @local_vars.add(p) }
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Var)
+      vname = node.target.as(Var).name
+      unless @outer_vars.includes?(vname)
+        @local_vars.add(vname)
+      end
+    end
+    true
+  end
+
+  def visit(node : Var) : Bool
+    vname = node.name
+    if @outer_vars.includes?(vname) && !@local_vars.includes?(vname)
+      unless @captured_vars.includes?(vname)
+        @captured_vars << vname
+      end
+    end
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
 pub class CodeGenVisitor < Visitor
   property context : Context
   property mod : Module
@@ -270,6 +323,13 @@ pub class CodeGenVisitor < Visitor
   property rescue_block : LLVMBasicBlock?
   property lib_funs : Hash(Tuple(String, String), Tuple(String, LLVMType, Bool))
   property needs_value : Bool
+  property proc_type : LLVMType?
+  property proc_literal_allocas : Hash(String, LLVMValue)
+  property closure_env_slots : Hash(String, LLVMValue)
+  property closure_types : Hash(String, LLVMType)
+  property closure_counter : Int32
+  property proc_counts : Hash(String, Int32)
+  property filename : String
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -295,6 +355,88 @@ pub class CodeGenVisitor < Visitor
     @rescue_block = nil
     @lib_funs = Hash(Tuple(String, String), Tuple(String, LLVMType, Bool)).new
     @needs_value = true
+    @proc_type = nil
+    @proc_literal_allocas = Hash(String, LLVMValue).new
+    @closure_env_slots = Hash(String, LLVMValue).new
+    @closure_types = Hash(String, LLVMType).new
+    @closure_counter = 0
+    @proc_counts = Hash(String, Int32).new
+    @filename = ""
+  end
+
+  def proc_type : LLVMType
+    if pt = @proc_type
+      pt
+    else
+      t = @context.struct_named("->")
+      t.struct_set_body([@context.pointer, @context.pointer])
+      @proc_type = t
+      t
+    end
+  end
+
+  def relative_filename : String
+    fn = @filename
+    if idx = fn.index("bench/fixtures/")
+      fn[idx, fn.bytesize - idx]
+    elsif fn.starts_with?("./")
+      fn[2, fn.bytesize - 2]
+    else
+      fn
+    end
+  end
+
+  def parse_proc_type_signature(tname : String) : Tuple(Array(String), String)
+    if tname.starts_with?("Proc(") && tname.ends_with?(")")
+      inner = tname[5, tname.bytesize - 6]
+      parts = inner.split(",").map(&.strip)
+      if parts.size == 1
+        {[] of String, parts[0]}
+      else
+        ret = parts.pop
+        {parts, ret}
+      end
+    else
+      {[] of String, "Int32"}
+    end
+  end
+
+  def infer_proc_return_type(d : Def) : String
+    if rt = d.return_type
+      return rt.to_s
+    end
+    if b = d.body
+      last_exp = if b.is_a?(Expressions)
+                   b.as(Expressions).expressions.last?
+                 else
+                   b
+                 end
+      if last_exp
+        if last_exp.is_a?(NumberLiteral)
+          k = last_exp.as(NumberLiteral).kind
+          return k == NumberKind::F64 ? "Float64" : (k == NumberKind::I64 ? "Int64" : "Int32")
+        elsif last_exp.is_a?(BoolLiteral)
+          return "Bool"
+        elsif last_exp.is_a?(Var)
+          return @var_type_names[last_exp.as(Var).name]? || "Int32"
+        elsif last_exp.is_a?(Call)
+          c = last_exp.as(Call)
+          if c.name == "==" || c.name == "!=" || c.name == "<" || c.name == "<=" || c.name == ">" || c.name == ">="
+            return "Bool"
+          end
+        end
+      end
+    end
+    "Int32"
+  end
+
+  def ensure_malloc : Function
+    if f = @mod.get_function?("malloc")
+      f
+    else
+      mal_ty = LLVMType.function([@context.int64], @context.pointer, false)
+      @mod.add_function("malloc", mal_ty)
+    end
   end
 
   def llvm_type_from_name(name : String) : LLVMType
@@ -320,7 +462,11 @@ pub class CodeGenVisitor < Visitor
     when "Void", "Nil", "NoReturn"
       @context.void
     else
-      if name.includes?("Pointer(") || name.ends_with?("*") || name.ends_with?('+') || name.ends_with?('?')
+      if name.starts_with?("Proc(") || name == "->"
+        proc_type
+      elsif ct = @closure_types[name]?
+        ct
+      elsif name.includes?("Pointer(") || name.ends_with?("*") || name.ends_with?('+') || name.ends_with?('?')
         @context.pointer
       elsif info = @custom_types[name]?
         if info.is_struct
@@ -351,7 +497,7 @@ pub class CodeGenVisitor < Visitor
   def sizeof_type(type_name : String) : LLVMValue
     elem_ty = llvm_type_from_name(type_name)
     null_ptr = @context.pointer.null
-    gep = @builder.inbounds_gep(elem_ty, null_ptr, [@context.int32.const_int(1)])
+    gep = @builder.gep(elem_ty, null_ptr, [@context.int32.const_int(1)])
     @builder.ptr_to_int(gep, @context.int64)
   end
 
@@ -366,7 +512,9 @@ pub class CodeGenVisitor < Visitor
     when "Int8", "UInt8", "Bool"
       1
     else
-      if type_name.starts_with?("Pointer(") || type_name.ends_with?("*") || type_name.ends_with?('+') || type_name.ends_with?('?')
+      if type_name.starts_with?("Proc(") || type_name == "->"
+        8
+      elsif type_name.starts_with?("Pointer(") || type_name.ends_with?("*") || type_name.ends_with?('+') || type_name.ends_with?('?')
         8
       elsif info = @custom_types[type_name]?
         if info.is_struct
@@ -514,8 +662,19 @@ pub class CodeGenVisitor < Visitor
     elsif node.is_a?(NumberLiteral)
       kind = node.as(NumberLiteral).kind
       return kind == NumberKind::F64 ? "Float64" : (kind == NumberKind::I64 ? "Int64" : "Int32")
+    elsif node.is_a?(ProcLiteral)
+      pl = node.as(ProcLiteral)
+      arg_types = pl.def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      ret_type = if rt = pl.def.return_type
+                   rt.to_s
+                 else
+                   infer_proc_return_type(pl.def)
+                 end
+      all_types = [] of String
+      arg_types.each { |at| all_types << at }
+      all_types << ret_type
+      return "Proc(#{all_types.join(", ")})"
     end
-
     "Int32"
   end
 
@@ -646,6 +805,12 @@ pub class CodeGenVisitor < Visitor
       @var_type_names[vname] = tname
     end
 
+    proc_collector = ProcLiteralCollector.new
+    if b = node.body
+      b.accept(proc_collector)
+    end
+    @proc_literal_allocas.clear
+
     struct_calls = collect_struct_calls(node.body)
 
     @struct_call_temps.clear
@@ -658,7 +823,7 @@ pub class CodeGenVisitor < Visitor
     @inlined_block_contexts.clear
     @inlined_block_index = 0
 
-    if local_vars.empty? && struct_calls.empty? && block_collector.calls.empty?
+    if local_vars.empty? && struct_calls.empty? && block_collector.calls.empty? && proc_collector.proc_literals.empty?
       entry_bb = fn.append_basic_block("entry")
       @builder.position_at_end(entry_bb)
     else
@@ -675,12 +840,19 @@ pub class CodeGenVisitor < Visitor
         ptr = @builder.alloca(llvm_t, vname)
         if (info = @custom_types[tname]?) && info.is_struct
           ptr.alignment = 8
-        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "Float64" || @custom_types.has_key?(tname)
+        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "Float64" || tname.starts_with?("Proc(") || tname == "->" || @custom_types.has_key?(tname)
           ptr.alignment = 8
         else
           ptr.alignment = 4
         end
         @vars[vname] = ptr
+      end
+
+      # 1b. Proc literal temporary allocas
+      proc_collector.proc_literals.each do |pl|
+        temp_ptr = @builder.alloca(proc_type, "")
+        temp_ptr.alignment = 8
+        @proc_literal_allocas[pl.object_id.to_s] = temp_ptr
       end
 
       # 2. Inlined block call allocas
@@ -774,11 +946,16 @@ pub class CodeGenVisitor < Visitor
               else
                 @vars[var_name]?
               end
-        if ptr
+        if slot = @closure_env_slots[var_name]?
+          s_inst = @builder.store(val, slot)
+          s_inst.alignment = 4
+        elsif ptr
           s_inst = @builder.store(val, ptr)
           vtype = @var_type_names[var_name]?
           if vtype && (info = @custom_types[vtype]?) && info.is_struct
             s_inst.alignment = 4
+          elsif vtype && (vtype.starts_with?("Proc(") || vtype == "->")
+            s_inst.alignment = 8
           end
         end
         @last = val
@@ -847,6 +1024,15 @@ pub class CodeGenVisitor < Visitor
   end
 
   def visit(node : Var) : Bool
+    if slot = @closure_env_slots[node.name]?
+      v_type_name = @var_type_names[node.name]? || "Int32"
+      llvm_t = llvm_type_from_name(v_type_name)
+      l_inst = @builder.load(llvm_t, slot, "")
+      l_inst.alignment = 4
+      @last = l_inst
+      @terminated = false
+      return false
+    end
     if inlined = @current_inlined_block
       if ptr = inlined.resolve_var(node.name)
         v_type_name = @var_type_names[node.name]? || "Int32"
@@ -901,6 +1087,176 @@ pub class CodeGenVisitor < Visitor
       inlined.in_block = prev_in_block
       @terminated = false
     end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    # 1. Determine captured variables
+    outer_vars = Set(String).new
+    @param_values.each_key { |k| outer_vars.add(k) }
+    @vars.each_key { |k| outer_vars.add(k) }
+
+    proc_params = Set(String).new
+    node.def.args.each { |a| proc_params.add(a.name) }
+
+    c_collector = CapturedVarCollector.new(outer_vars, proc_params)
+    if b = node.def.body
+      b.accept(c_collector)
+    end
+    captured = c_collector.captured_vars
+    is_closure = !captured.empty?
+
+    env_ptr : LLVMValue? = nil
+    closure_ty : LLVMType? = nil
+
+    if is_closure
+      @closure_counter += 1
+      closure_cname = "closure_#{@closure_counter}"
+      field_llvm_tys = captured.map { |cv| llvm_type_from_name(@var_type_names[cv]? || "Int32") }
+      c_struct = @context.struct_named(closure_cname)
+      c_struct.struct_set_body(field_llvm_tys)
+      closure_ty = c_struct
+      @closure_types[closure_cname] = c_struct
+
+      mal_fn = ensure_malloc
+      mal_fn_ty = LLVMType.function([@context.int64], @context.pointer, false)
+      size_val = sizeof_type(closure_cname)
+      allocated_ptr = @builder.call(mal_fn_ty, mal_fn.to_value, [size_val])
+      allocated_ptr.name = ""
+      env_ptr = allocated_ptr
+
+      slots = [] of LLVMValue
+      captured.each_with_index do |cv, idx|
+        slot = @builder.inbounds_gep(c_struct, allocated_ptr, [@context.int32.const_int(0), @context.int32.const_int(idx)])
+        slot.name = "#{cv}#{idx + 1}"
+        slots << slot
+      end
+
+      captured.each_with_index do |cv, idx|
+        slot = slots[idx]
+        cval = if p = @param_values[cv]?
+                 p
+               elsif var_ptr = @vars[cv]?
+                 vt = @var_type_names[cv]? || "Int32"
+                 lt = llvm_type_from_name(vt)
+                 l_inst = @builder.load(lt, var_ptr)
+                 l_inst.alignment = 4
+                 l_inst
+               else
+                 @context.int32.const_int(0)
+               end
+        st = @builder.store(cval, slot)
+        st.alignment = 4
+      end
+    end
+
+    # 2. Build proc function
+    arg_type_names = node.def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+    ret_type_name = if rt = node.def.return_type
+                      rt.to_s
+                    else
+                      infer_proc_return_type(node.def)
+                    end
+    all_type_names = [] of String
+    arg_type_names.each { |at| all_type_names << at }
+    all_type_names << ret_type_name
+    proc_type_str = "Proc(#{all_type_names.join(", ")})"
+
+    loc = node.location
+    line_no = loc ? loc.line_number : 1
+    rel_file = relative_filename
+    proc_fn_name = "~proc#{proc_type_str}@#{rel_file}:#{line_no}"
+    count = (@proc_counts[proc_fn_name]? || 0) + 1
+    @proc_counts[proc_fn_name] = count
+    if count > 1
+      proc_fn_name = "#{proc_fn_name[0, 5]}#{count}#{proc_fn_name[5, proc_fn_name.bytesize - 5]}"
+    end
+
+    fn_param_tys = [] of LLVMType
+    if is_closure
+      fn_param_tys << @context.pointer
+    end
+    arg_type_names.each do |atname|
+      fn_param_tys << llvm_type_from_name(atname)
+    end
+    ret_llvm_ty = llvm_type_from_name(ret_type_name)
+    fn_ty = LLVMType.function(fn_param_tys, ret_llvm_ty, false)
+    proc_fn = @mod.add_function(proc_fn_name, fn_ty)
+    proc_fn.linkage = LibLLVM::Linkage::Internal
+
+    # 3. Emit proc function body
+    saved_bb = @builder.insert_block
+    saved_fn = @current_fn
+    saved_vars = @vars.dup
+    saved_param_values = @param_values.dup
+    saved_var_type_names = @var_type_names.dup
+
+    @current_fn = proc_fn
+    @vars = Hash(String, LLVMValue).new
+    @param_values = Hash(String, LLVMValue).new
+    @var_type_names = Hash(String, String).new
+
+    proc_entry_bb = proc_fn.append_basic_block("entry")
+    @builder.position_at_end(proc_entry_bb)
+
+    if is_closure && closure_ty
+      ctx_p = proc_fn.param(0)
+      captured.each_with_index do |cv, cidx|
+        cslot = @builder.inbounds_gep(closure_ty, ctx_p, [@context.int32.const_int(0), @context.int32.const_int(cidx)])
+        cslot.name = cv
+        @closure_env_slots[cv] = cslot
+        @var_type_names[cv] = saved_var_type_names[cv]? || "Int32"
+      end
+    end
+
+    node.def.args.each_with_index do |a, aidx|
+      p_val = proc_fn.param(is_closure ? aidx + 1 : aidx)
+      p_val.name = a.name
+      @param_values[a.name] = p_val
+      @var_type_names[a.name] = a.restriction ? a.restriction.to_s : "Int32"
+    end
+
+    if b = node.def.body
+      b.accept(self)
+      if l = @last
+        @builder.ret(l)
+      else
+        @builder.ret_void
+      end
+    else
+      @builder.ret_void
+    end
+
+    # Restore outer function state
+    @closure_env_slots.clear
+    @vars = saved_vars
+    @param_values = saved_param_values
+    @var_type_names = saved_var_type_names
+    @current_fn = saved_fn
+    if sbb = saved_bb
+      @builder.position_at_end(sbb)
+    end
+
+    # 4. Store into proc struct temp alloca and load
+    temp_ptr = if a = @proc_literal_allocas[node.object_id.to_s]?
+                 a
+               else
+                 p = @builder.alloca(proc_type, "")
+                 p.alignment = 8
+                 p
+               end
+
+    fn_slot = @builder.inbounds_gep(proc_type, temp_ptr, [@context.int32.const_int(0), @context.int32.const_int(0)])
+    @builder.store(proc_fn.to_value, fn_slot).alignment = 8
+
+    ctx_slot = @builder.inbounds_gep(proc_type, temp_ptr, [@context.int32.const_int(0), @context.int32.const_int(1)])
+    ctx_val = is_closure && env_ptr ? env_ptr : @context.pointer.null
+    @builder.store(ctx_val, ctx_slot).alignment = 8
+
+    l_proc = @builder.load(proc_type, temp_ptr, "")
+    l_proc.alignment = 8
+    @last = l_proc
+    @terminated = false
     false
   end
 
@@ -1468,6 +1824,66 @@ pub class CodeGenVisitor < Visitor
       if obj.is_a?(Var)
         vname = obj.as(Var).name
         vtname = @var_type_names[vname]?
+        if vtname && (vtname.starts_with?("Proc(") || vtname == "->") && node.name == "call"
+          proc_ptr = @vars[vname]?
+          if proc_ptr
+            proc_val = @builder.load(proc_type, proc_ptr, "")
+            proc_val.alignment = 8
+            fun_ptr = @builder.extract_value(proc_val, 0)
+            ctx_ptr = @builder.extract_value(proc_val, 1)
+
+            is_null = @builder.icmp(LibLLVM::IntPredicate::EQ, ctx_ptr, @context.pointer.null)
+            cur_f = @current_fn
+            if cur_f.nil?
+              return false
+            end
+            cf = cur_f
+            ctx_is_null_bb = cf.append_basic_block("ctx_is_null")
+            ctx_is_not_null_bb = cf.append_basic_block("ctx_is_not_null")
+            exit_bb = cf.append_basic_block("exit")
+            @builder.cond_br(is_null, ctx_is_null_bb, ctx_is_not_null_bb)
+
+            arg_vals = [] of LLVMValue
+            node.args.each do |a|
+              a.accept(self)
+              if l = @last
+                arg_vals << l
+              end
+            end
+
+            sig = parse_proc_type_signature(vtname)
+            arg_llvm_tys = sig[0].map { |an| llvm_type_from_name(an) }
+            ret_llvm_ty = llvm_type_from_name(sig[1])
+
+            # ctx_is_null
+            @builder.position_at_end(ctx_is_null_bb)
+            fn_ty_null = LLVMType.function(arg_llvm_tys, ret_llvm_ty, false)
+            call_null = @builder.call(fn_ty_null, fun_ptr, arg_vals)
+            @builder.br(exit_bb)
+
+            # ctx_is_not_null
+            @builder.position_at_end(ctx_is_not_null_bb)
+            not_null_param_tys = [@context.pointer] of LLVMType
+            arg_llvm_tys.each { |t| not_null_param_tys << t }
+            fn_ty_not_null = LLVMType.function(not_null_param_tys, ret_llvm_ty, false)
+            not_null_args = [ctx_ptr] of LLVMValue
+            arg_vals.each { |v| not_null_args << v }
+            call_not_null = @builder.call(fn_ty_not_null, fun_ptr, not_null_args)
+            @builder.br(exit_bb)
+
+            # exit
+            @builder.position_at_end(exit_bb)
+            if ret_llvm_ty.void?
+              @last = nil
+            else
+              phi = @builder.phi(ret_llvm_ty)
+              @builder.add_incoming(phi, [call_null, call_not_null], [ctx_is_null_bb, ctx_is_not_null_bb])
+              @last = phi
+            end
+            @terminated = false
+            return false
+          end
+        end
         if vtname && (vtname.includes?("Pointer") || vtname.ends_with?("*"))
           elem_tname = element_type_of_pointer(vtname)
           elem_llvm_t = llvm_type_from_name(elem_tname)
@@ -2452,6 +2868,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   end
 
   cg = CodeGenVisitor.new(context, mod, prog, mv)
+  cg.filename = filename
   cg.block_methods = defs
 
   # Process lib definitions

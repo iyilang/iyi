@@ -174,6 +174,11 @@ int32_t test_block_capture(int32_t x, int32_t factor);
 int32_t test_block_loop(int32_t n);
 int32_t test_block_pair(int32_t a, int32_t b);
 
+// cg_closures
+int32_t test_closure_single(int32_t x);
+int32_t test_closure_multi(int32_t a, int32_t b);
+int32_t test_closure_call_indirect(int32_t x, int32_t factor);
+
 int main(void) {
   // Test 1: Integer arithmetic
   int32_t r_add = int_add(10, 32);
@@ -269,6 +274,11 @@ int main(void) {
   int32_t ex_else_7 = test_else_clause(7);
   printf("exceptions: %d %d %d %d %d %d %d %d\n", ex_catch_0, ex_catch_42,
          ex_multi_0, ex_multi_1, ex_multi_2, ex_ens_0, ex_ens_99, ex_else_7);
+  // Test 14: Proc closures
+  int32_t cl_single = test_closure_single(32);
+  int32_t cl_multi = test_closure_multi(3, 7);
+  int32_t cl_ind = test_closure_call_indirect(8, 6);
+  printf("closures: %d %d %d\n", cl_single, cl_multi, cl_ind);
 
   return 0;
 }

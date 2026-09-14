@@ -29,7 +29,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral}
 
 pub struct CallArgs
   property args : Array(ASTNode)?
@@ -971,6 +971,8 @@ pub class Parser < Lexer
     when TokenKind::OP_COLON_COLON
       next_token_skip_space_or_newline
       parse_const(true, location)
+    when TokenKind::OP_MINUS_GT
+      parse_fun_literal
     when TokenKind::IDENT
       if kw = @token.keyword
         case kw
@@ -2044,7 +2046,10 @@ pub class Parser < Lexer
   end
 
   def with_lexical_var_scope(&)
-    current_scope = @var_scopes.last.dup
+    current_scope = Set(String).new
+    @var_scopes.last.each do |v|
+      current_scope.add(v)
+    end
     @var_scopes << current_scope
     val = yield
     @var_scopes.pop
@@ -2829,6 +2834,76 @@ pub class Parser < Lexer
     node.at(location).at_end(end_location)
     set_visibility(node)
     node
+  end
+
+  def parse_fun_literal : ASTNode
+    location = @token.location
+    next_token_skip_space_or_newline
+
+    params = [] of Arg
+    return_type : ASTNode? = nil
+
+    if @token.type == TokenKind::OP_LPAREN
+      next_token_skip_space_or_newline
+      while @token.type != TokenKind::OP_RPAREN
+        param = parse_fun_literal_param
+        params << param
+      end
+      next_token_skip_space_or_newline
+    end
+
+    if @token.type == TokenKind::OP_COLON
+      next_token_skip_space_or_newline
+      return_type = parse_bare_proc_type
+      skip_space_or_newline
+    end
+
+    with_lexical_var_scope do
+      params.each { |p| push_var_name(p.name) }
+      end_location : Location? = nil
+      body : ASTNode? = nil
+      if @token.keyword == Keyword::DO
+        next_token_skip_statement_end
+        body = parse_expressions
+        end_location = token_end_location
+        check_keyword(Keyword::END)
+        next_token_skip_space
+      elsif @token.type == TokenKind::OP_LCURLY
+        next_token_skip_statement_end
+        body = preserve_stop_on_do { parse_expressions }
+        end_location = token_end_location
+        check(TokenKind::OP_RCURLY)
+        next_token_skip_space
+      else
+        unexpected_token("expected do or { for proc literal")
+      end
+      a_def = Def.new("->", params, body, nil, nil, return_type)
+      a_def.at(location).at_end(end_location)
+      ProcLiteral.new(a_def).at(location).at_end(end_location)
+    end
+  end
+
+  def parse_fun_literal_param : Arg
+    name = check_ident
+    location = @token.location
+    end_location = token_end_location
+    next_token_skip_space_or_newline
+
+    param_type : ASTNode? = nil
+    if @token.type == TokenKind::OP_COLON
+      next_token_skip_space_or_newline
+      param_type = parse_bare_proc_type
+      end_location = param_type.end_location
+    end
+
+    if @token.type == TokenKind::OP_COMMA
+      next_token_skip_space_or_newline
+    else
+      skip_space_or_newline
+      check(TokenKind::OP_RPAREN)
+    end
+
+    Arg.new(name, nil, param_type, name).at(location).at_end(end_location)
   end
 
   def parse_param(params : Array(Arg), extra_assigns : Array(ASTNode)?, parentheses : Bool, found_default_value : Bool, found_splat : Bool, found_double_splat : Arg?, allow_restrictions : Bool) : ArgExtras

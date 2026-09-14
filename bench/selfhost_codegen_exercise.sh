@@ -54,7 +54,7 @@ program = Iyi::Program.new
 program.define_crystal_constants
 program.iyi_prelude = false
 parser = program.new_parser(src)
-parser.filename = "test.cr"
+parser.filename = fixture
 node = parser.parse
 node = program.normalize(node)
 node = program.semantic(node)
@@ -142,6 +142,8 @@ def norm(raw):
         # Normalize memset declaration parameter attributes
         if l.startswith("declare void @llvm.memset.p0.i64"):
             l = re.sub(r'ptr [a-z0-9_\(\)]+', 'ptr', l)
+        # Normalize proc literal location line number
+        l = re.sub(r'(~procProc\([^)]+\)@[^:]+):\d+', r'\1:<LINE>', l)
         l = l.rstrip()
         l = l.replace("[ ", "[").replace(" ]", "]")
         lines.append(l)
@@ -315,6 +317,11 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_cg_mutation "corrupt rescue type check predicate EQ to NE" "cg_exceptions.iyi" \
   '@builder.icmp(LibLLVM::IntPredicate::EQ, l_tid, exception_type_id)' \
   '@builder.icmp(LibLLVM::IntPredicate::NE, l_tid, exception_type_id)'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt closure environment store" "cg_closures.iyi" \
+  'st = @builder.store(cval, slot)' \
+  '# st = @builder.store(cval, slot)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 

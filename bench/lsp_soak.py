@@ -70,9 +70,13 @@ def main():
     raw(c, b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
     step("body that is not UTF-8", hover_alive(c, uri))
 
+    # -32602, not -32603: the client left out a field it owes, which is
+    # invalid params. -32603 is "this server is broken", and the server
+    # said that here — with the JSON library's `Missing hash key` for a
+    # message — until the session gate's five error cases were written.
     reply = c.send("textDocument/hover", {"textDocument": {"uri": uri}})
     step("request missing its position",
-         reply.get("error", {}).get("code") == -32603 and hover_alive(c, uri))
+         reply.get("error", {}).get("code") == -32602 and hover_alive(c, uri))
 
     reply = c.send("textDocument/hover",
                    {"textDocument": {"uri": uri},

@@ -45,10 +45,18 @@ class Iyi::Command
       when "--affected"
         value = options.shift?
         abort! "--affected takes a changed file", :USAGE_ERROR unless value
+        if Dir.exists?(value)
+          abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
+        end
         affected << value
       when "--help", "-h"
         puts test_usage
         exit
+      when .starts_with?('-')
+        # A flag is a flag: this fell through to the path list and came
+        # back as "no such file or directory: --nonesuch", which sends
+        # the reader looking for a file they did not name.
+        abort! "test: unknown flag #{option}", :USAGE_ERROR
       else
         paths << option
       end
@@ -72,11 +80,19 @@ class Iyi::Command
     end
 
     skipped = 0
+    discount_off = [] of String
     unless affected.empty?
       # A changed file that no longer exists cannot be proven untouched by
       # anything — a deleted import breaks whoever held it, and the closure
       # below can no longer see that. Deletion turns the discount off.
-      if affected.all? { |changed| File.file?(changed) }
+      #
+      # Out loud, though. It used to turn off in silence, so a caller who
+      # mistyped a path got a full run that looked like a selective one —
+      # and the selection is this flag's whole claim: exact, computed by
+      # parsing. A typo and a deletion look the same from here, which is
+      # the other reason to say which file it was.
+      discount_off = affected.reject { |changed| File.file?(changed) }
+      if discount_off.empty?
         changed = affected.map { |changed| File.expand_path(changed) }
         selected = files.select do |file|
           closure = test_import_closure(file)
@@ -119,6 +135,14 @@ class Iyi::Command
           json.field "passed", results.size - failed
           json.field "failed", failed
           json.field "skipped", skipped
+          # The caller asked for a selective run and did not get one. In
+          # data, because the caller that passes `--affected` is usually a
+          # program.
+          unless discount_off.empty?
+            json.field "affected_not_found" do
+              json.array { discount_off.each { |missing| json.scalar missing } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -127,6 +151,10 @@ class Iyi::Command
         next if result[:status] == "pass"
         STDOUT << result[:file] << ": " << result[:status] << '\n'
         result[:output].each_line { |line| STDOUT << "  " << line << '\n' }
+      end
+      unless discount_off.empty?
+        puts "#{discount_off.join(", ")} is not there, so every test ran: " \
+             "a file that is gone cannot be proven untouched by anything"
       end
       tail = skipped.zero? ? "" : ", #{skipped} skipped"
       puts "#{results.size - failed} passed, #{failed} failed#{tail}" + (failed.zero? ? "" : " — a failing test prints above")

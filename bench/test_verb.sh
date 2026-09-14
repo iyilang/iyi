@@ -58,6 +58,37 @@ timeout 30 "$IYI" test --timeout 2 . > hang.txt 2>&1
 status=$?
 [ $status -eq 1 ] || { echo "the hang was not a failure (exit $status, 124 is the harness hanging):"; cat hang.txt; exit 1; }
 grep -q 'hang_test.iyi: hung' hang.txt || { echo "the hang is unnamed:"; cat hang.txt; exit 1; }
+rm hang_test.iyi
+
+step "the discount says when it turns itself off"
+# `--affected` is an exactness claim — "only the tests whose imports reach
+# the change" — and a changed file that is gone turns it off, because a
+# deleted import breaks whoever held it and the closure cannot see that.
+# It used to turn off in silence, so a mistyped path produced a full run
+# that read as a selective one.
+mkdir -p calc
+printf 'module calc/add\n\npub def add(a : Int32, b : Int32) : Int32\n  a + b\nend\n' > calc/add.iyi
+printf 'module main\n\nimport calc/add\nusing calc/add::{add}\n\nraise "bad" if add(1, 2) != 3\n' > add_test.iyi
+printf 'module main\n\nputs "lonely"\n' > lonely_test.iyi
+"$IYI" test --affected calc/add.iyi . > sel.txt 2>&1
+grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel.txt ||
+  { echo "the selection is not exact:"; cat sel.txt; exit 1; }
+"$IYI" test --affected nope.iyi . > off.txt 2>&1
+grep -q 'nope.iyi is not there, so every test ran' off.txt ||
+  { echo "the discount turned off in silence:"; cat off.txt; exit 1; }
+grep -qE '[0-9]+ passed, 0 failed$' off.txt ||
+  { echo "the full run did not happen:"; cat off.txt; exit 1; }
+"$IYI" test --json --affected nope.iyi . > off.json 2>&1
+grep -q '"affected_not_found":\["nope.iyi"\]' off.json ||
+  { echo "the data says nothing about it:"; cat off.json; exit 1; }
+
+step "a flag is a flag, and a directory is not a changed file"
+"$IYI" test --nonesuch . > flag.txt 2>&1
+[ $? -eq 1 ] && grep -q 'unknown flag --nonesuch' flag.txt ||
+  { echo "an unknown flag was read as a path:"; cat flag.txt; exit 1; }
+"$IYI" test --affected . . > dir.txt 2>&1
+[ $? -eq 1 ] && grep -q 'is a directory, not a changed file' dir.txt ||
+  { echo "a directory was accepted as a changed file:"; cat dir.txt; exit 1; }
 
 echo "workdir $WORK"
 echo "test verb gate: every step held"

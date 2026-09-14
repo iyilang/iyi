@@ -1983,8 +1983,15 @@ end
     IYI_SG_SA_FLAGS = 0x08000004_u64
     IYI_SG_UC_SP    = 432_u64
   {% end %}
-  IYI_SG_SIGSEGV   = 11_i32
-  IYI_SG_SIGBUS    =  7_i32
+  IYI_SG_SIGSEGV = 11_i32
+  # 7 is Linux's; darwin's is 10, and a fiber's guard page faults with
+  # it there (KERN_PROTECTION_FAILURE is SIGBUS on darwin), so with 7
+  # the guard heard the main stack run out and not a fiber's.
+  {% if flag?(:darwin) %}
+    IYI_SG_SIGBUS = 10_i32
+  {% else %}
+    IYI_SG_SIGBUS = 7_i32
+  {% end %}
   IYI_SG_ALT_BYTES = 65536_u64
   # How far above the interrupted sp a frame's first touch may land, and
   # how far below: 256 KiB up (a fiber's whole stack), a page down.

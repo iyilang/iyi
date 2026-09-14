@@ -52,6 +52,21 @@
   the same mistake one step removed — is refused once the build knows what
   it read, before the first object is written.
 
+- **`check --affected` on a deleted module answered "all compile".** A
+  deletion is the one change certain to break every importer, and
+  `iyi check --affected app/lib.iyi` with the file gone said `0 consumer(s)
+  checked, all compile`, exit 0 — while `user.iyi` still imported it. The
+  import closure is computed by parsing, and it dropped any import it could
+  not open, so a deleted file was in nobody's closure. An import names a
+  path (SPEC.md R-1), and the path outlives the file: the closure keeps it
+  now, so the importers are selected, compiled alone, and each says `can't
+  find module 'app/lib'`. A changed file that is not there is also said
+  out loud — `app/lib.iyi is not there, so the consumers are whoever
+  imports that path`, `affected_not_found` in `--json` — because a typo
+  and a deletion look the same from here and "0 consumers, all compile" on
+  a typo is a clean verdict about nothing. A directory is refused as a
+  changed file, as `test --affected` already did.
+
 - **`test --timeout 0` killed every test.** Zero and negative deadlines
   were taken, and every test came back `hung: killed at -1.0s` — a verdict
   about the flag, printed as one about the tests, and a run an agent

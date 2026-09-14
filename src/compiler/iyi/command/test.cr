@@ -90,8 +90,10 @@ class Iyi::Command
     discount_off = [] of String
     unless affected.empty?
       # A changed file that no longer exists cannot be proven untouched by
-      # anything — a deleted import breaks whoever held it, and the closure
-      # below can no longer see that. Deletion turns the discount off.
+      # anything. The closure does see a deleted *import* now — an import
+      # names a path, and the path outlives the file — but a test also
+      # depends on what it reads while it runs, and a fixture that is gone
+      # was never in any closure. Deletion turns the discount off.
       #
       # Out loud, though. It used to turn off in silence, so a caller who
       # mistyped a path got a full run that looked like a selective one —
@@ -175,7 +177,12 @@ class Iyi::Command
   # never compiling. Returns nil when the *test itself* does not parse:
   # nothing about it can be proven, so the caller must select it and let
   # its build say what is wrong. An imported file that does not parse is
-  # already in the closure by path, which is all selection needs.
+  # already in the closure by path, which is all selection needs — and so
+  # is one that is not there at all: an import names a path (R-1), and the
+  # path stays named after the file is deleted. `check --affected` on a
+  # deleted module used to answer "0 consumer(s) checked, all compile",
+  # exit 0, about the one change certain to break every importer, because
+  # the closure dropped what it could not open.
   private def test_import_closure(file : String) : Set(String)?
     entry = File.expand_path(file)
     # IV.6 read backwards, the same rule the LSP applies: a file whose
@@ -188,15 +195,15 @@ class Iyi::Command
     entry_imports = test_imports_of(entry)
     return nil unless entry_imports
     closure << entry
-    queue = entry_imports.compact_map do |written|
-      resolved, _name = mod_context_resolve(written, entry_dir, table)
-      resolved ? File.expand_path(resolved) : nil
+    queue = entry_imports.map do |written|
+      named, _name = mod_context_names(written, entry_dir, table)
+      File.expand_path(named)
     end
     while path = queue.pop?
       next unless closure.add?(path)
       (test_imports_of(path) || [] of String).each do |written|
-        resolved, _name = mod_context_resolve(written, entry_dir, table)
-        queue << File.expand_path(resolved) if resolved
+        named, _name = mod_context_names(written, entry_dir, table)
+        queue << File.expand_path(named)
       end
     end
     closure

@@ -287,6 +287,16 @@ class Iyi::Command
   # carries is the in-package path for a package, the written path
   # otherwise.
   private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String})) : {String?, String}
+    candidate, name = mod_context_names(written, entry_dir, table)
+    {File.file?(candidate) ? candidate : nil, name}
+  end
+
+  # The file an import names and the module name it means, whether or not
+  # the file is there. A module's path is its file's path (SPEC.md R-1), so
+  # `import app/lib` names `app/lib.iyi` after the file is deleted exactly
+  # as it did before — which is what lets `check --affected app/lib.iyi`
+  # find the importers a deletion breaks.
+  private def mod_context_names(written : String, entry_dir : String, table : Array({String, String})) : {String, String}
     table.each do |(prefix, checkout)|
       inner =
         if written == prefix
@@ -296,11 +306,9 @@ class Iyi::Command
         else
           next
         end
-      candidate = File.join(checkout, "#{inner}.iyi")
-      return {File.file?(candidate) ? candidate : nil, inner}
+      return {File.join(checkout, "#{inner}.iyi"), inner}
     end
 
-    candidate = File.join(entry_dir, "#{written}.iyi")
-    {File.file?(candidate) ? candidate : nil, written}
+    {File.join(entry_dir, "#{written}.iyi"), written}
   end
 end

@@ -73,6 +73,9 @@ class Iyi::Command
       when "--affected"
         value = options.shift?
         abort! "--affected takes a changed file", :USAGE_ERROR unless value
+        if Dir.exists?(value)
+          abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
+        end
         changed << File.expand_path(value)
       when "-f"
         as_json = options.shift? == "json"
@@ -83,6 +86,13 @@ class Iyi::Command
       end
     end
     abort! "check --affected: name at least one changed file", :USAGE_ERROR if changed.empty?
+
+    # A changed file that is not there is either deleted or mistyped, and
+    # the two look the same from here. Both get the same consumers - the
+    # closure keeps an import's path after its file is gone - and the
+    # verdict says which file it was, because "0 consumer(s) checked, all
+    # compile" on a typo is a clean verdict about nothing.
+    missing = changed.reject { |path| File.file?(path) }.map { |path| Iyi.relative_filename(path) }
 
     consumers = [] of String
     Dir.glob("**/*.iyi") do |candidate|
@@ -114,6 +124,11 @@ class Iyi::Command
               end
             end
           end
+          unless missing.empty?
+            json.field "affected_not_found" do
+              json.array { missing.each { |path| json.string path } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -121,6 +136,9 @@ class Iyi::Command
       failures.each do |(consumer, error)|
         deepest = error.is_a?(TypeException) ? error.deepest_error_message.to_s : error.message.to_s
         puts "#{consumer}: #{deepest.lines.first?}"
+      end
+      unless missing.empty?
+        puts "#{missing.join(", ")} is not there, so the consumers are whoever imports that path"
       end
       verdict = failures.empty? ? "all compile" : "#{failures.size} broke"
       puts "#{consumers.size} consumer(s) checked, #{verdict}"

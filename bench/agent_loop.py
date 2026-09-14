@@ -281,6 +281,23 @@ def main():
     ))
     step("and the repair closes it",
          run("check", "--affected", "calc/add.iyi", cwd=work).returncode == 0, "")
+    # And a deletion, the one change certain to break every importer. It
+    # answered "0 consumer(s) checked, all compile", exit 0, because the
+    # closure dropped an import it could not open; an import names a path,
+    # and the path outlives the file.
+    os.rename(os.path.join(work, "calc/add.iyi"), os.path.join(work, "calc/add.gone"))
+    proc = run("check", "--affected", "calc/add.iyi", cwd=work)
+    step("a deleted module names the importers it breaks",
+         proc.returncode == 1 and "consumer.iyi" in proc.stdout
+         and "calc/add.iyi is not there" in proc.stdout,
+         proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else repr(proc.stderr[:80]))
+    proc = run("check", "--affected", "calc/add.iyi", "--json", cwd=work)
+    report = json.loads(proc.stdout)
+    step("and says so in the data",
+         report.get("affected_not_found") == ["calc/add.iyi"]
+         and any(f["file"] == "consumer.iyi" for f in report["failed"]),
+         f"affected_not_found {report.get('affected_not_found')}")
+    os.rename(os.path.join(work, "calc/add.gone"), os.path.join(work, "calc/add.iyi"))
 
     # 5c. the loop is around a language that can do work now: a pure-iyi
     # tool reads its args, its environment, and the disk — no --crystal

@@ -537,13 +537,13 @@ pub class CodeGenVisitor < Visitor
       false
     end
   end
+
   def self.has_yield?(node : ASTNode?) : Bool
     return false if node.nil?
     yf = YieldFinder.new
     node.accept(yf)
     yf.has_yield
   end
-
 
   def self.parse_u64(s : String) : UInt64
     base = 10_u64
@@ -2574,7 +2574,6 @@ pub class CodeGenVisitor < Visitor
           end
         end
       end
-
 
       # 2. Pointer operations: ptr.value, ptr.value=, ptr + offset, ptr - other, ptr.address
       if obj.is_a?(Var)

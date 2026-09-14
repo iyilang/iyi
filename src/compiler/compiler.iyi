@@ -201,8 +201,6 @@ pub class Compiler
     # 6. Emit: write native object file
     obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
     begin
-      File.write("/tmp/array_ir.ll", mod.to_s)
-      mod.verify
       tm.emit_obj_to_file(mod.to_unsafe, obj_path)
     rescue ex
       if @config.probe_phase

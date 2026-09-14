@@ -35,12 +35,12 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 # 0 = none, 1 = parse, 2 = semantic, 3 = codegen, 4 = object, 5 = link
 file_floor() {
   case "$1" in
-    "array.iyi")       echo "codegen" ;;
+    "array.iyi")       echo "object" ;;
     "atomic.iyi")      echo "object" ;;
-    "concurrency.iyi") echo "semantic" ;;
+    "concurrency.iyi") echo "codegen" ;;
     "enum.iyi")        echo "object" ;;
     "file.iyi")        echo "object" ;;
-    "float.iyi")       echo "semantic" ;;
+    "float.iyi")       echo "codegen" ;;
     "hash.iyi")        echo "object" ;;
     "io.iyi")          echo "object" ;;
     "macros.iyi")      echo "object" ;;
@@ -127,6 +127,7 @@ echo
 echo "== 3. Guarded mutation proofs: verifying the gate goes red when a file regresses"
 
 mutations_caught=0
+mutations_run=0
 
 prove_fails() {
   local label="$1"
@@ -134,6 +135,7 @@ prove_fails() {
   local script="$3"
   local expected_floor="${4:-codegen}"
 
+  mutations_run=$((mutations_run + 1))
   echo "  [$label]"
   # Need to reference $REPO/src/iyi/. so mutation_anchors.py discovers roots
   mkdir -p "$WORK/backup_iyi"
@@ -205,7 +207,7 @@ prove_fails "syntax corruption in prelude regresses below parse floor" \
   's|require "./primitives"|require %%%|' \
   "parse"
 
-echo "  Mutation summary: $mutations_caught/6 regressions caught"
+echo "  Mutation summary: $mutations_caught/$mutations_run regressions caught"
 
 echo
 if [ "$status" -eq 0 ]; then

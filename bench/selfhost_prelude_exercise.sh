@@ -35,22 +35,22 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 # 0 = none, 1 = parse, 2 = semantic, 3 = codegen, 4 = object, 5 = link
 file_floor() {
   case "$1" in
-    "array.iyi")       echo "object" ;;
+    "array.iyi")       echo "link" ;;
     "atomic.iyi")      echo "link" ;;
-    "concurrency.iyi") echo "object" ;;
+    "concurrency.iyi") echo "link" ;;
     "enum.iyi")        echo "link" ;;
-    "file.iyi")        echo "object" ;;
-    "float.iyi")       echo "object" ;;
+    "file.iyi")        echo "link" ;;
+    "float.iyi")       echo "link" ;;
     "hash.iyi")        echo "link" ;;
-    "io.iyi")          echo "object" ;;
+    "io.iyi")          echo "link" ;;
     "macros.iyi")      echo "link" ;;
-    "number.iyi")      echo "object" ;;
-    "object.iyi")      echo "object" ;;
+    "number.iyi")      echo "link" ;;
+    "object.iyi")      echo "link" ;;
     "prelude.iyi")     echo "link" ;;
     "primitives.iyi")  echo "link" ;;
     "range.iyi")       echo "link" ;;
     "set.iyi")         echo "link" ;;
-    "string.iyi")      echo "object" ;;
+    "string.iyi")      echo "link" ;;
     "thread.iyi")      echo "link" ;;
     *)                 echo "none" ;;
   esac
@@ -212,15 +212,45 @@ prove_fails "semantic corruption in prelude regresses below link floor" \
   's/@proc : Proc(Nil)/@proc : UndefinedType9876/' \
   "link"
 
-prove_fails "syntax corruption in concurrency regresses below object floor" \
+prove_fails "syntax corruption in concurrency regresses below link floor" \
   "concurrency.iyi" \
   's/class IyiFiber/class %%%/' \
-  "object"
+  "link"
 
-prove_fails "syntax corruption in float regresses below object floor" \
+prove_fails "syntax corruption in float regresses below link floor" \
   "float.iyi" \
   's/struct Float64/struct %%%/' \
-  "object"
+  "link"
+
+prove_fails "syntax corruption in array regresses below link floor" \
+  "array.iyi" \
+  's/class Array/class %%%/' \
+  "link"
+
+prove_fails "syntax corruption in file regresses below link floor" \
+  "file.iyi" \
+  's/class File/class %%%/' \
+  "link"
+
+prove_fails "syntax corruption in string regresses below link floor" \
+  "string.iyi" \
+  's/class String/class %%%/' \
+  "link"
+
+prove_fails "syntax corruption in number regresses below link floor" \
+  "number.iyi" \
+  's/struct Int32/struct %%%/' \
+  "link"
+
+prove_fails "syntax corruption in object regresses below link floor" \
+  "object.iyi" \
+  's/class Object/class %%%/' \
+  "link"
+
+prove_fails "syntax corruption in io regresses below link floor" \
+  "io.iyi" \
+  's/class IyiIO/class %%%/' \
+  "link"
 echo "  Mutation summary: $mutations_caught/$mutations_run regressions caught"
 
 echo

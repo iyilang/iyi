@@ -42,6 +42,23 @@
 
 ### Fixed
 
+- **`std/time` before year 0 was a day off, and its parser took dates that
+  do not exist.** `Time.utc(-1, 1, 1)` printed `-0002-12-31`: the civil
+  arithmetic is Hinnant's, whose `- 399` makes a truncating division floor
+  for a negative year, and `days_from_civil` floored it a second time — so
+  every date before the era came back one day early from the instant it
+  was written as, while `civil_from_days` (the other direction) was right,
+  which is how the two disagreed. `parse_rfc3339("2024-02-30T00:00:00Z")`
+  answered March 1st, a date nobody wrote, where `Time.utc(2024, 2, 30)`
+  refuses; the parser checks month, day, hour, minute and second the way
+  the constructor does now, keeping RFC 3339's one allowance, the leap
+  second, which reads as the instant it names. `to_rfc3339(12)` and
+  `to_rfc3339(-1)` printed no fraction in silence — 0, 3, 6 or 9, or a
+  refusal — and `DayOfWeek.new(8)` was Sunday, because `to_s` answered
+  Sunday for whatever it did not recognise; a day is one of seven. The
+  exercise round-trips every week from -800 to 800 and drives each
+  refusal.
+
 - **A program the kernel killed was reported in the kernel's words.** An
   infinite recursion runs the stack out and dies of a memory fault, and
   `iyi run` relayed `Process terminated because of an invalid memory

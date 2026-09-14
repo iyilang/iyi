@@ -139,6 +139,30 @@ while day_idx <= 70000_i64
 end
 puts "  #{count} scattered timestamps across years ~1778 to ~2161 round-tripped identically"
 
+# Before year 0, where the algorithm's `- 399` trick used to be floored a
+# second time: `Time.utc(-1, 1, 1)` printed `-0002-12-31`, and every date
+# before the era came back a day off from the one it was written as. Every
+# week of every year from -800 to 800, both directions.
+broken = 0
+y = -800
+while y <= 800
+  m = 1
+  while m <= 12
+    d = 1
+    while d <= Time.days_in_month(y, m)
+      days = Time.days_from_civil(y.to_i64, m, d)
+      broken += 1 if Time.civil_from_days(days) != {y, m, d}
+      d += 7
+    end
+    m += 1
+  end
+  y += 1
+end
+assert_equal(0_i64, broken.to_i64, "civil dates before year 0 must round-trip")
+assert_true(Time.utc(-1, 1, 1).to_rfc3339 == "-0001-01-01T00:00:00Z", "year -1 must print as -0001, on its own first day")
+assert_true(Time.utc(-4713, 11, 24).to_rfc3339 == "-4713-11-24T00:00:00Z", "the Julian Day epoch must survive the trip")
+puts "  every week from -800 to 800 round-trips, and -0001-01-01 is its own day"
+
 # ---------------------------------------------------------------------------
 # Platform clocks
 # ---------------------------------------------------------------------------

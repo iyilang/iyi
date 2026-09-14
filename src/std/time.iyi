@@ -32,6 +32,12 @@ pub struct DayOfWeek
   getter value : Int32
 
   def initialize(@value : Int32)
+    # `DayOfWeek.new(7)` is Sunday; `DayOfWeek.new(-1)` and `new(8)` were
+    # Sunday too, because `to_s` answered "Sunday" for everything it did
+    # not recognise. A day is one of seven.
+    if @value < 1 || @value > 7
+      raise "invalid day of week: #{@value}; Monday is 1 and Sunday is 7"
+    end
   end
 
   Monday    = DayOfWeek.new(1)
@@ -530,7 +536,12 @@ pub struct Time
 
   def self.days_from_civil(y : Int64, m : Int32, d : Int32) : Int64
     y = y - 1_i64 if m <= 2
-    era = floor_div(y >= 0_i64 ? y : y - 399_i64, 400_i64)
+    # `//` truncates, and the `- 399` is the algorithm's own way of making
+    # a truncating division floor for a negative year. `floor_div` on top
+    # of it floored twice: `Time.utc(-1, 1, 1)` printed `-0002-12-31`, one
+    # day early, and every date before year 0 came back a day off from the
+    # instant it had been written as.
+    era = (y >= 0_i64 ? y : y - 399_i64) // 400_i64
     yoe = y - era * 400_i64
     doy = (153_i64 * (m.to_i64 + (m <= 2 ? 9_i64 : -3_i64)) + 2_i64) // 5_i64 + d.to_i64 - 1_i64
     doe = yoe * 365_i64 + yoe // 4_i64 - yoe // 100_i64 + doy
@@ -705,8 +716,12 @@ pub struct Time
       "#{base}.#{Time.pad6(@nanoseconds // 1000)}Z"
     elsif fraction_digits == 9
       "#{base}.#{Time.pad9(@nanoseconds)}Z"
-    else
+    elsif fraction_digits == 0
       "#{base}Z"
+    else
+      # Any other count printed no fraction at all, in silence: `to_rfc3339(12)`
+      # and `to_rfc3339(-1)` both answered as if 0 had been asked.
+      raise "fraction_digits must be 0, 3, 6 or 9, not #{fraction_digits}"
     end
   end
 
@@ -812,6 +827,28 @@ pub struct Time
       end
     else
       raise "invalid timezone designator in RFC 3339: #{tz_char}"
+    end
+
+    # The fields are checked the way `Time.utc` checks them, because they
+    # were not: `2024-02-30T00:00:00Z` parsed, and came back as March 1st -
+    # a date nobody wrote, from a parser that said nothing. One allowance,
+    # RFC 3339's own: `:60` is a leap second, and it is read as the second
+    # after 59, which is the instant it names on every clock that has no
+    # leap seconds.
+    if m < 1 || m > 12
+      raise "invalid month in RFC 3339 string: #{m} in #{str}"
+    end
+    if d < 1 || d > days_in_month(y, m)
+      raise "invalid day in RFC 3339 string: #{d} for year #{y} month #{m} in #{str}"
+    end
+    if h < 0 || h > 23
+      raise "invalid hour in RFC 3339 string: #{h} in #{str}"
+    end
+    if mi < 0 || mi > 59
+      raise "invalid minute in RFC 3339 string: #{mi} in #{str}"
+    end
+    if s < 0 || s > 60
+      raise "invalid second in RFC 3339 string: #{s} in #{str}"
     end
 
     # Convert to UTC by subtracting the offset from local time

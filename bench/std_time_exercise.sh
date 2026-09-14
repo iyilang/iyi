@@ -160,6 +160,57 @@ else
   echo "  the broken RFC 3339 timezone offset was caught (exit $tz_exit)"
 fi
 
+echo
+echo "== what the parser and the formatter refuse"
+# A panicking program has no next line to assert on, so each refusal is
+# its own program. `parse_rfc3339("2024-02-30T00:00:00Z")` used to answer
+# March 1st - a date nobody wrote - where `Time.utc(2024, 2, 30)` refuses;
+# `to_rfc3339(12)` printed no fraction in silence; `DayOfWeek.new(8)` was
+# Sunday.
+time_panics_with() { # time_panics_with <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  printf 'module main\n\nimport std/time\nusing std/time::{Time, Span, DayOfWeek}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of panicking: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: panicked, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits 1 at "%s"\n' "$label" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+time_panics_with "a day the month does not have, parsed" parse_feb30 "invalid day in RFC 3339 string: 30" \
+  'Time.parse_rfc3339("2024-02-30T00:00:00Z").to_rfc3339'
+time_panics_with "a thirteenth month, parsed" parse_m13 "invalid month in RFC 3339 string: 13" \
+  'Time.parse_rfc3339("2024-13-01T00:00:00Z").to_rfc3339'
+time_panics_with "a 25th hour, parsed" parse_h25 "invalid hour in RFC 3339 string: 25" \
+  'Time.parse_rfc3339("2024-01-01T25:00:00Z").to_rfc3339'
+time_panics_with "fraction digits the format cannot print" frac12 "fraction_digits must be 0, 3, 6 or 9, not 12" \
+  'Time.utc(2024, 1, 1).to_rfc3339(12)'
+time_panics_with "an eighth day of the week" dow8 "invalid day of week: 8" \
+  'DayOfWeek.new(8).to_s'
+# And the one RFC 3339 allows that the constructor does not: a leap second
+# is read as the second after 59, not refused.
+printf 'module main\n\nimport std/time\nusing std/time::{Time}\n\nputs Time.parse_rfc3339("2016-12-31T23:59:60Z").to_rfc3339\n' > "$WORK/leap.iyi"
+if [ "$("$IYI" run "$WORK/leap.iyi" 2>&1)" = "2017-01-01T00:00:00Z" ]; then
+  echo "  a leap second is read as the instant it names"
+else
+  echo "  a leap second was not read as the next second:"; "$IYI" run "$WORK/leap.iyi" 2>&1 | sed -n '1,2p'
+  status=1
+fi
+
 # ---------------------------------------------------------------------------
 # Dependency floor audit
 # ---------------------------------------------------------------------------

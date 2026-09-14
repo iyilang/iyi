@@ -3,10 +3,12 @@ module compiler/semantic/top_level
 import compiler/foundation/location
 import compiler/syntax/ast
 import compiler/syntax/visitor
+import compiler/macros/engine
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, TypeDeclaration, Var, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, TypeDeclaration, Var, Visibility, VisibilityModifier}
 using compiler/syntax/visitor::{Visitor}
+using compiler/macros/engine::{MacroEngine}
 
 pub class TypeException < Exception
   getter message : String
@@ -87,6 +89,9 @@ pub abstract class Type
 
   def const? : Bool
     false
+  end
+  def lookup_macro?(name : String) : Macro?
+    nil
   end
 
   def nil_type? : Bool
@@ -191,6 +196,7 @@ pub abstract class ModuleType < NamedType
   getter parents : Array(Type)
   getter instance_vars : Hash(String, MetaTypeVar)
   getter class_vars : Hash(String, MetaTypeVar)
+  getter macros : Hash(String, Array(Macro))
   @metaclass : ModuleType?
 
   def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
@@ -199,6 +205,7 @@ pub abstract class ModuleType < NamedType
     @parents = [] of Type
     @instance_vars = Hash(String, MetaTypeVar).new
     @class_vars = Hash(String, MetaTypeVar).new
+    @macros = Hash(String, Array(Macro)).new
   end
 
   def lookup_instance_var?(var_name : String) : MetaTypeVar?
@@ -319,6 +326,44 @@ pub abstract class ModuleType < NamedType
     if l = list
       l << a_def
     end
+  end
+  def add_macro(a_macro : Macro) : Nil
+    list = @macros[a_macro.name]?
+    if list.nil?
+      list = [] of Macro
+      @macros[a_macro.name] = list
+    end
+    if l = list
+      l << a_macro
+    end
+  end
+
+  def lookup_macro?(name : String) : Macro?
+    if list = @macros[name]?
+      if m = list.last?
+        return m
+      end
+    end
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          if m = sc.as(ModuleType).lookup_macro?(name)
+            return m
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        if m = p.as(ModuleType).lookup_macro?(name)
+          return m
+        end
+      end
+    end
+    if self != @program
+      return @program.lookup_macro?(name)
+    end
+    nil
   end
 
   def include(mod : Type) : Nil
@@ -770,6 +815,8 @@ pub class SemanticProgram < NonGenericModuleType
     @types["Nil"] = NonGenericClassType.new(self, self, "Nil", val)
     @types["Symbol"] = NonGenericClassType.new(self, self, "Symbol", val)
     @types["String"] = NonGenericClassType.new(self, self, "String", ref)
+    @types["Void"] = NonGenericClassType.new(self, self, "Void", val)
+    @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
 
     st = NonGenericClassType.new(self, self, "Struct", val)
     st.abstract = true
@@ -1507,6 +1554,24 @@ pub class TopLevelVisitor < Visitor
     end
 
     @current_type.metaclass.include(type)
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    @current_type.add_macro(node)
+    false
+  end
+
+  def visit(node : Call) : Bool
+    if node.obj.nil?
+      if a_macro = @current_type.lookup_macro?(node.name)
+        engine = MacroEngine.new
+        expanded_ast = engine.expand(a_macro, node)
+        node.expanded = expanded_ast
+        expanded_ast.accept(self)
+        return false
+      end
+    end
     false
   end
 end

@@ -4,12 +4,16 @@ import compiler/foundation/location
 import compiler/syntax/ast
 import compiler/syntax/token
 import compiler/syntax/visitor
+import compiler/syntax/transformer
+import compiler/macros/engine
 import compiler/semantic/top_level
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, ProcNotation, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, Expressions, If, InstanceVar, Macro, ModuleDef, NilLiteral, NodeMap, Nop, NumberLiteral, Path, ProcNotation, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/visitor::{Visitor}
+using compiler/syntax/transformer::{Transformer}
+using compiler/macros/engine::{MacroEngine}
 using compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaTypeVar, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType}
 
 pub class MainVisitor < Visitor
@@ -80,6 +84,33 @@ pub class MainVisitor < Visitor
     set_type(node, @program.nil_type)
     false
   end
+  def visit(node : Macro) : Bool
+    set_type(node, @program.nil_type)
+    false
+  end
+
+  def expand_macro(node : Call) : Bool
+    if exp = node.expanded
+      exp.accept(self)
+      set_type(node, type_of(exp))
+      return true
+    end
+
+    if node.obj.nil?
+      lookup_type = @scope || @current_type
+      if a_macro = lookup_type.lookup_macro?(node.name)
+        engine = MacroEngine.new
+        expanded_ast = engine.expand(a_macro, node)
+        node.expanded = expanded_ast
+        expanded_ast.accept(self)
+        set_type(node, type_of(expanded_ast))
+        return true
+      end
+    end
+
+    false
+  end
+
 
   def visit(node : BoolLiteral) : Bool
     set_type(node, @program.bool_type)
@@ -970,6 +1001,10 @@ pub class MainVisitor < Visitor
   end
 
   def visit(node : Call) : Bool
+    if expand_macro(node)
+      return false
+    end
+
     if node.obj.nil? && node.args.empty? && node.block.nil?
       if vt = @vars[node.name]?
         set_type(node, vt)
@@ -1084,6 +1119,8 @@ pub def node_class_name(node : ASTNode) : String
     "TypeDeclaration"
   elsif node.is_a?(Nop)
     "Nop"
+  elsif node.is_a?(Macro)
+    "Macro"
   else
     "ASTNode"
   end
@@ -1223,8 +1260,35 @@ pub def dump_typed_node(node : ASTNode, visitor : MainVisitor, sb : String::Buil
   end
 end
 
+pub class CleanupTransformer < Transformer
+  def transform(node : Call) : ASTNode
+    if exp = node.expanded
+      exp.transform(self)
+    else
+      super(node)
+    end
+  end
+
+  def transform(node : Expressions) : ASTNode
+    new_exps = [] of ASTNode
+    node.expressions.each do |exp|
+      transformed = exp.transform(self)
+      if transformed.is_a?(Expressions)
+        transformed.as(Expressions).expressions.each do |sub|
+          new_exps << sub
+        end
+      else
+        new_exps << transformed
+      end
+    end
+    node.expressions = new_exps
+    node
+  end
+end
+
 pub def dump_program_expressions(program : SemanticProgram, node : ASTNode, visitor : MainVisitor) : String
   sb = String::Builder.new
-  dump_typed_node(node, visitor, sb, "")
+  cleaned_node = CleanupTransformer.new.transform(node)
+  dump_typed_node(cleaned_node, visitor, sb, "")
   sb.to_s
 end

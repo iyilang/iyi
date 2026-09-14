@@ -29,7 +29,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, StringBuilder}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, MagicConstant, StringBuilder}
 
 pub struct CallArgs
   property args : Array(ASTNode)?
@@ -964,6 +964,24 @@ pub class Parser < Lexer
       node_and_next_token(Call.new(Global.new("$~").at(location), method, [NumberLiteral.new(val, NumberKind::I32)] of ASTNode).at(location))
     when TokenKind::UNDERSCORE
       node_and_next_token(Underscore.new.at(location))
+    when TokenKind::MAGIC_LINE
+      loc = @token.location
+      node_and_next_token(NumberLiteral.new(loc.line_number.to_s, NumberKind::I32).at(loc))
+    when TokenKind::MAGIC_END_LINE
+      syntax_error("__END_LINE__ can only be used in default parameter value", @token.location)
+    when TokenKind::MAGIC_FILE
+      loc = @token.location
+      node_and_next_token(StringLiteral.new(loc.filename.empty? ? "?" : loc.filename).at(loc))
+    when TokenKind::MAGIC_DIR
+      loc = @token.location
+      fn = loc.filename
+      dir = if fn.empty?
+              "?"
+            else
+              idx = fn.rindex('/')
+              idx ? fn[0, idx] : "."
+            end
+      node_and_next_token(StringLiteral.new(dir).at(loc))
     when TokenKind::OP_AT_LSQUARE
       parse_annotation
     when TokenKind::INSTANCE_VAR
@@ -3799,9 +3817,14 @@ pub class Parser < Lexer
       set_slash_is_regex(true)
       next_token_skip_space_or_newline
 
-      @no_type_declaration = @no_type_declaration + 1
-      default_value = parse_op_assign
-      @no_type_declaration = @no_type_declaration - 1
+      if @token.type.magic?
+        default_value = MagicConstant.new(@token.type).at(@token.location)
+        next_token
+      else
+        @no_type_declaration = @no_type_declaration + 1
+        default_value = parse_op_assign
+        @no_type_declaration = @no_type_declaration - 1
+      end
 
       skip_space
     else
@@ -4982,33 +5005,27 @@ pub class Parser < Lexer
     comes_colon_space
   end
 
-  def parse_delimiter : ASTNode
+  def parse_delimiter(want_skip_space : Bool = true) : ASTNode
     location = @token.location
     delimiter_state = @token.delimiter_state
     check(TokenKind::DELIMITER_START)
 
-    next_string_token(delimiter_state)
-    delimiter_state = @token.delimiter_state
-
     pieces = [] of Piece
-    while true
-      case @token.type
-      when TokenKind::STRING
-        pieces << Piece.new(@token.value, @token.line_number)
-      when TokenKind::INTERPOLATION_START
-        next_token_skip_space_or_newline
-        interp_exp = parse_expression
-        skip_space_or_newline
-        check(TokenKind::OP_RCURLY)
-        pieces << Piece.new(interp_exp, @token.line_number)
-      when TokenKind::DELIMITER_END, TokenKind::EOF
-        break
-      end
-      next_string_token(delimiter_state)
-      delimiter_state = @token.delimiter_state
-    end
-    next_token
+    delimiter_state = consume_delimiter(pieces, delimiter_state)
 
+    if want_skip_space && delimiter_state.kind == DelimiterKind::STRING
+      while true
+        passed_backslash_newline = @token.passed_backslash_newline
+        skip_space
+
+        if passed_backslash_newline && @token.type == TokenKind::DELIMITER_START && @token.delimiter_state.kind == DelimiterKind::STRING
+          delimiter_state = @token.delimiter_state
+          delimiter_state = consume_delimiter(pieces, delimiter_state)
+        else
+          break
+        end
+      end
+    end
     has_interp = false
     pieces.each do |p|
       if p.value.is_a?(ASTNode)
@@ -5041,6 +5058,30 @@ pub class Parser < Lexer
         StringLiteral.new(str).at(location)
       end
     end
+  end
+
+  def consume_delimiter(pieces : Array(Piece), delimiter_state : DelimiterState) : DelimiterState
+    next_string_token(delimiter_state)
+    delimiter_state = @token.delimiter_state
+
+    while true
+      case @token.type
+      when TokenKind::STRING
+        pieces << Piece.new(@token.value, @token.line_number)
+      when TokenKind::INTERPOLATION_START
+        next_token_skip_space_or_newline
+        interp_exp = parse_expression
+        skip_space_or_newline
+        check(TokenKind::OP_RCURLY)
+        pieces << Piece.new(interp_exp, @token.line_number)
+      when TokenKind::DELIMITER_END, TokenKind::EOF
+        break
+      end
+      next_string_token(delimiter_state)
+      delimiter_state = @token.delimiter_state
+    end
+    next_token
+    delimiter_state
   end
 
   def parse_string_array : ASTNode

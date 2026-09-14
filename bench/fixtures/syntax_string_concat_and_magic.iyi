@@ -1,0 +1,18 @@
+a = "hello " \
+    "world"
+
+b = "count: #{1} " \
+    "items in #{2} boxes"
+
+c = "part1 " \
+    "part2 " \
+    "part3"
+
+def panic(msg : String, file : String = __FILE__, line : Int32 = __LINE__, dir : String = __DIR__)
+  msg
+end
+
+{% if true %}
+  {% raise "macro error: " \
+           "failed with details" %}
+{% end %}

@@ -36,17 +36,17 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 file_floor() {
   case "$1" in
     "array.iyi")       echo "codegen" ;;
-    "atomic.iyi")      echo "none" ;;
+    "atomic.iyi")      echo "object" ;;
     "concurrency.iyi") echo "semantic" ;;
-    "enum.iyi")        echo "codegen" ;;
+    "enum.iyi")        echo "object" ;;
     "file.iyi")        echo "object" ;;
     "float.iyi")       echo "semantic" ;;
     "hash.iyi")        echo "object" ;;
     "io.iyi")          echo "object" ;;
     "macros.iyi")      echo "object" ;;
     "number.iyi")      echo "object" ;;
-    "object.iyi")      echo "codegen" ;;
-    "prelude.iyi")     echo "none" ;;
+    "object.iyi")      echo "object" ;;
+    "prelude.iyi")     echo "parse" ;;
     "primitives.iyi")  echo "link" ;;
     "range.iyi")       echo "object" ;;
     "set.iyi")         echo "object" ;;
@@ -195,6 +195,15 @@ prove_fails "syntax corruption in primitives regresses below link floor" \
   "primitives.iyi" \
   's/struct Symbol/struct %%%/' \
   "link"
+prove_fails "syntax corruption in atomic regresses below object floor" \
+  "atomic.iyi" \
+  's/struct Atomic/struct %%%/' \
+  "object"
+
+prove_fails "syntax corruption in prelude regresses below parse floor" \
+  "prelude.iyi" \
+  's|require "./primitives"|require %%%|' \
+  "parse"
 
 echo "  Mutation summary: $mutations_caught/6 regressions caught"
 

@@ -270,27 +270,29 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 
 | File | Lines | Floor | Reached |
 |---|---|---|---|
-| `array.iyi` | 507 | semantic | semantic |
-| `atomic.iyi` | 89 | none | none |
-| `concurrency.iyi` | 1946 | parse | parse |
-| `enum.iyi` | 161 | parse | parse |
+| `array.iyi` | 507 | codegen | codegen |
+| `atomic.iyi` | 89 | object | object |
+| `concurrency.iyi` | 1946 | semantic | semantic |
+| `enum.iyi` | 161 | object | object |
 | `file.iyi` | 65 | object | object |
 | `float.iyi` | 718 | semantic | semantic |
 | `hash.iyi` | 175 | object | object |
-| `io.iyi` | 421 | semantic | semantic |
+| `io.iyi` | 421 | object | object |
 | `macros.iyi` | 63 | object | object |
-| `number.iyi` | 240 | semantic | semantic |
-| `object.iyi` | 153 | parse | parse |
-| `prelude.iyi` | 7471 | none | none |
-| `primitives.iyi` | 260 | parse | parse |
+| `number.iyi` | 240 | object | object |
+| `object.iyi` | 153 | object | object |
+| `prelude.iyi` | 7471 | parse | parse |
+| `primitives.iyi` | 260 | link | link |
 | `range.iyi` | 87 | object | object |
-| `set.iyi` | 68 | codegen | codegen |
-| `string.iyi` | 583 | semantic | semantic |
+| `set.iyi` | 68 | object | object |
+| `string.iyi` | 583 | object | object |
 | `thread.iyi` | 942 | link | link |
 
   Phase summary: 17/17 prelude files match or exceed committed floor (0 regressions).
-  `thread.iyi` (942 lines) reaches link. `prelude.iyi` itself still fails to parse, now at line 534
-  on adjacent string literal concatenation inside `{% raise %}` rather than at line 48.
+  Two files (`primitives.iyi`, `thread.iyi`) link. Ten more reach object emission.
+  `prelude.iyi` now parses all 7,471 lines and stops in semantic analysis on
+  `Pointer is not a struct, it's a class`, which is the same struct-flag class of defect
+  that moved four other files this round rather than a new wall.
 
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.

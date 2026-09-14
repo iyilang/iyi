@@ -13,7 +13,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader, Macro, MacroIf, MacroFor, MacroExpression, MacroLiteral, MacroVar, MacroVerbatim}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader, Macro, MacroIf, MacroFor, MacroExpression, MacroLiteral, MacroVar, MacroVerbatim, MagicConstant}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor, NodeCounterVisitor}
 
@@ -511,6 +511,8 @@ module BenchSelfhostParserExercise
       s = "#{p}MacroVerbatim\n"
       s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
       s
+    when MagicConstant
+      "#{p}MagicConstant name=#{node.name.to_s.downcase}\n"
     else
       "#{p}ASTNode\n"
     end
@@ -521,6 +523,10 @@ module BenchSelfhostParserExercise
     p = Parser.new("123; 3.14; 'c'; \"str\"; :sym; true; false; nil; 1..10")
     node = p.parse
     assert(node.is_a?(Expressions), "expressions root")
+    p_concat = Parser.new("\"hello \" \\\n\"world\"")
+    node_concat = p_concat.parse
+    assert(node_concat.is_a?(StringLiteral), "concatenated string is StringLiteral")
+    assert(node_concat.as(StringLiteral).value == "hello world", "concatenated string value matches")
     puts "ok (literals verified)"
   end
 
@@ -607,6 +613,13 @@ module BenchSelfhostParserExercise
     assert(trait_path.global == false, "impl trait path is not global")
     assert(target_path.names.join("::") == "User", "impl target name")
     assert(target_path.global == false, "impl target path is not global")
+    p_magic = Parser.new("def log(file = __FILE__, line = __LINE__, dir = __DIR__); end")
+    node_magic = p_magic.parse
+    def_magic = node_magic.as(Def)
+    assert(def_magic.args[0].default_value.is_a?(MagicConstant), "default value is MagicConstant")
+    assert(def_magic.args[0].default_value.as(MagicConstant).name == TokenKind::MAGIC_FILE, "file is MAGIC_FILE")
+    assert(def_magic.args[1].default_value.as(MagicConstant).name == TokenKind::MAGIC_LINE, "line is MAGIC_LINE")
+    assert(def_magic.args[2].default_value.as(MagicConstant).name == TokenKind::MAGIC_DIR, "dir is MAGIC_DIR")
     puts "ok (declarations verified)"
   end
 
@@ -638,6 +651,7 @@ module BenchSelfhostParserExercise
       "bench/fixtures/decl_types_and_vars.iyi",
       "bench/fixtures/decl_visibility_and_annotations.iyi",
       "bench/fixtures/syntax_macro_control_grammar.iyi",
+      "bench/fixtures/syntax_string_concat_and_magic.iyi",
     ]
 
     total_nodes = 0

@@ -36,7 +36,7 @@ for phrase in \
   "testing call and block parsing... ok (calls and blocks verified)" \
   "testing control expressions (if, unless, while, until, case, modifiers)... ok (control expressions verified)" \
   "testing declaration parsing... ok (declarations verified)" \
-  "testing real syntax fixtures parsing... ok (1715 nodes across 25 fixtures)" \
+  "testing real syntax fixtures parsing... ok (1753 nodes across 26 fixtures)" \
   "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
     echo "  MISSING REPORTED CHECK: '$phrase'"
@@ -549,6 +549,8 @@ def dump_ast(node : Iyi::ASTNode?, indent : Int32 = 0) : String
     s = "#{p}MacroVerbatim\n"
     s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
     s
+  when Iyi::MagicConstant
+    "#{p}MagicConstant name=#{node.name.to_s.downcase}\n"
   else
     "#{p}#{node.class.name}\n"
   end
@@ -605,7 +607,8 @@ for fixture in \
   "$REPO"/bench/fixtures/decl_traits_and_impls.iyi \
   "$REPO"/bench/fixtures/decl_types_and_vars.iyi \
   "$REPO"/bench/fixtures/decl_visibility_and_annotations.iyi \
-  "$REPO"/bench/fixtures/syntax_macro_control_grammar.iyi; do
+  "$REPO"/bench/fixtures/syntax_macro_control_grammar.iyi \
+  "$REPO"/bench/fixtures/syntax_string_concat_and_magic.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   "$WORK/exercise-plain" "$fixture" > "$WORK/iyi.ast"
   "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.ast"
@@ -819,6 +822,44 @@ fi
 cp "$REPO/src/compiler/syntax/parser.iyi.orig" "$REPO/src/compiler/syntax/parser.iyi"
 rm -f "$REPO/src/compiler/syntax/parser.iyi.orig"
 echo "    reverted mutation 9"
+
+# Mutation 10: Break adjacent string concatenation across backslash-newline
+echo "  [mutation 10] altering adjacent string concatenation in parse_delimiter"
+cp "$REPO/src/compiler/syntax/parser.iyi" "$REPO/src/compiler/syntax/parser.iyi.orig"
+sed -i.bak 's/if want_skip_space && delimiter_state[.]kind == DelimiterKind::STRING/if false \&\& want_skip_space/' "$REPO/src/compiler/syntax/parser.iyi" && rm -f "$REPO/src/compiler/syntax/parser.iyi.bak"
+if diff -u "$REPO/src/compiler/syntax/parser.iyi.orig" "$REPO/src/compiler/syntax/parser.iyi" >/dev/null; then
+  echo "    patch did not apply"
+  status=1
+fi
+echo "    patch verified applied in working tree"
+if "$IYI" run "$REPO/bench/selfhost_parser_exercise.iyi" > "$WORK/mut10.log" 2>&1; then
+  echo "    FAILED: exercise still passed with mutation 10"
+  status=1
+else
+  echo "    mutation caught: exercise failed as expected"
+fi
+cp "$REPO/src/compiler/syntax/parser.iyi.orig" "$REPO/src/compiler/syntax/parser.iyi"
+rm -f "$REPO/src/compiler/syntax/parser.iyi.orig"
+echo "    reverted mutation 10"
+
+# Mutation 11: Break magic constant parsing in parse_param
+echo "  [mutation 11] altering magic constant default value parsing in parse_param"
+cp "$REPO/src/compiler/syntax/parser.iyi" "$REPO/src/compiler/syntax/parser.iyi.orig"
+sed -i.bak 's/if @token[.]type[.]magic[?]/if false \&\& @token.type.magic?/' "$REPO/src/compiler/syntax/parser.iyi" && rm -f "$REPO/src/compiler/syntax/parser.iyi.bak"
+if diff -u "$REPO/src/compiler/syntax/parser.iyi.orig" "$REPO/src/compiler/syntax/parser.iyi" >/dev/null; then
+  echo "    patch did not apply"
+  status=1
+fi
+echo "    patch verified applied in working tree"
+if "$IYI" run "$REPO/bench/selfhost_parser_exercise.iyi" > "$WORK/mut11.log" 2>&1; then
+  echo "    FAILED: exercise still passed with mutation 11"
+  status=1
+else
+  echo "    mutation caught: exercise failed as expected"
+fi
+cp "$REPO/src/compiler/syntax/parser.iyi.orig" "$REPO/src/compiler/syntax/parser.iyi"
+rm -f "$REPO/src/compiler/syntax/parser.iyi.orig"
+echo "    reverted mutation 11"
 
 echo
 echo "== Verification clean state confirmed"

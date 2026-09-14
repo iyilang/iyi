@@ -35,22 +35,22 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 # 0 = none, 1 = parse, 2 = semantic, 3 = codegen, 4 = object, 5 = link
 file_floor() {
   case "$1" in
-    "array.iyi")       echo "semantic" ;;
+    "array.iyi")       echo "codegen" ;;
     "atomic.iyi")      echo "none" ;;
     "concurrency.iyi") echo "parse" ;;
     "enum.iyi")        echo "parse" ;;
     "file.iyi")        echo "object" ;;
     "float.iyi")       echo "semantic" ;;
     "hash.iyi")        echo "object" ;;
-    "io.iyi")          echo "semantic" ;;
+    "io.iyi")          echo "object" ;;
     "macros.iyi")      echo "object" ;;
-    "number.iyi")      echo "semantic" ;;
+    "number.iyi")      echo "object" ;;
     "object.iyi")      echo "parse" ;;
     "prelude.iyi")     echo "none" ;;
     "primitives.iyi")  echo "parse" ;;
     "range.iyi")       echo "object" ;;
-    "set.iyi")         echo "codegen" ;;
-    "string.iyi")      echo "semantic" ;;
+    "set.iyi")         echo "object" ;;
+    "string.iyi")      echo "object" ;;
     "thread.iyi")      echo "link" ;;
     *)                 echo "none" ;;
   esac

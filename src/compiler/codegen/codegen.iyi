@@ -579,6 +579,23 @@ pub class CodeGenVisitor < Visitor
         if last_exp.is_a?(Assign)
           if last_exp.target.is_a?(InstanceVar)
             iv = last_exp.target.as(InstanceVar).name.lstrip('@')
+            # The assigned value wins over the declared field type: on a generic
+            # template the field's type is a type variable, and guessing from it
+            # lands on the fallback rather than the instantiated type.
+            val_node = last_exp.value
+            if val_node.is_a?(Var)
+              vname = val_node.as(Var).name
+              # The def's own argument is authoritative and, unlike the var-type
+              # map, is already populated when an instantiation is being emitted.
+              d.args.each do |a|
+                if a.name == vname && (r = a.restriction)
+                  return r.to_s.lstrip(':')
+                end
+              end
+              if vt = @var_type_names[vname]?
+                return vt
+              end
+            end
             if ft = info.field_types[iv]?
               return ft
             end
@@ -3624,8 +3641,8 @@ pub def compile_declarations_to_module(
             info.constants[cname] = assign.value
           end
         end
-    end
       end
+    end
     cg.custom_types[cname] = info
   end
 
@@ -3669,9 +3686,16 @@ pub def compile_declarations_to_module(
                 end
                 Arg.new(a.name, nil, Path.new(spec_r))
               end
-              raw_ret = d.return_type ? d.return_type.to_s : "Int32"
-              spec_ret = subst[raw_ret]? || raw_ret
-              spec_def = Def.new(d.name, spec_args, d.body, nil, nil, Path.new(spec_ret))
+              # A method with no declared return type keeps none: stamping a guess
+              # here overrides the inference that reads the body, and on an
+              # initialize whose parameter is the type variable the guess is wrong.
+              spec_ret_node = if rt = d.return_type
+                                raw_ret = rt.to_s
+                                Path.new(subst[raw_ret]? || raw_ret)
+                              else
+                                nil
+                              end
+              spec_def = Def.new(d.name, spec_args, d.body, nil, nil, spec_ret_node)
               info.methods[d.name] = spec_def
             elsif exp.is_a?(Assign)
               assign = exp.as(Assign)
@@ -3680,7 +3704,7 @@ pub def compile_declarations_to_module(
                 info.constants[cname] = assign.value
               end
             end
-        end
+          end
         end
         cg.custom_types[inst_name] = info
       end

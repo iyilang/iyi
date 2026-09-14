@@ -103,6 +103,17 @@ def main():
     step("the error carries suggested_edit",
          edit is not None and edit["replacement"] == "shout" and edit["size"] == 6,
          f"edit {edit}")
+    # And the error class an agent meets first, the syntax error: its
+    # span is unknown, and `size` was `null` where every type error has
+    # an integer - the one field of the promised five that changed type.
+    write("cut.iyi", "module cut\n\ndef f(\n")
+    proc = run("check", "-f", "json", "cut.iyi", cwd=work)
+    errors = json.loads(proc.stderr)
+    step("a syntax error's size is an integer, like every other's",
+         proc.returncode == 1 and len(errors) == 1
+         and all(isinstance(errors[0][k], int) for k in ("line", "column", "size")),
+         f"{ {k: errors[0].get(k) for k in ('line', 'column', 'size')} }")
+    os.remove(os.path.join(work, "cut.iyi"))  # unparseable files are always "affected"
 
     # 4. fix: applies exactly that edit and converges
     proc = run("fix", "--json", "app.iyi", cwd=work)

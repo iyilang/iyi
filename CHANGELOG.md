@@ -42,6 +42,13 @@
 
 ### Fixed
 
+- **A syntax error's `size` was `null`.** `check -f json` promises "file,
+  line, column, size, message" as data, and a type error's `size` is
+  always an integer; a syntax error's span is unknown and came out as
+  `null` — the one field of the five that changed type, on the error
+  class an agent meets first. It is `0` now, which is what the LSP
+  already made of it.
+
 - **`fix` on a file whose error is in the module it imports invited itself
   to be run again.** `iyi fix main.iyi` with the typo in `app/lib.iyi`
   printed main's frame, `undefined method 'helperr'` and `Did you mean

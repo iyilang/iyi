@@ -69,7 +69,13 @@ module Iyi
         json.field "file", true_filename
         json.field "line", @line_number
         json.field "column", @column_number
-        json.field "size", @size
+        # iyi: `0`, not `null`, where the span is unknown. `-f json`
+        # promises "file, line, column, size, message" as data, and a
+        # type error's size is always an integer; a syntax error's was
+        # `null`, so `e["size"]` arithmetic in an agent's loop broke on
+        # exactly the error class it meets first. Zero is what the LSP
+        # already makes of it.
+        json.field "size", @size || 0
         json.field "message", @message
         if (message = @message) && (refs = Iyi.iyi_spec_references(message))
           json.field "spec" do

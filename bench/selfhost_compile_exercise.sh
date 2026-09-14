@@ -17,6 +17,7 @@ diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 COMPILE_TOOL_SRC="$REPO/src/compiler/tools/compile.iyi"
+CODEGEN_SRC="$REPO/src/compiler/codegen/codegen.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -45,6 +46,7 @@ FIXTURES=(
   "bench/fixtures/compile_struct.iyi"
   "bench/fixtures/compile_class.iyi"
   "bench/fixtures/compile_pointers.iyi"
+  "bench/fixtures/compile_top_level.iyi"
 )
 
 matched=0
@@ -159,6 +161,8 @@ prove_compile_mutation() {
   local target_file="$2"
   local old_pat="$3"
   local new_pat="$4"
+  local test_fixture="${5:-$REPO/bench/fixtures/compile_arith.iyi}"
+  local expected_rc="${6:-26}"
 
   echo "  [$label]"
   cp "$target_file" "$target_file.orig"
@@ -180,16 +184,15 @@ PY
 
   # Run test with mutation applied
   local mut_failed=0
-  if [ "$target_file" = "$COMPILE_TOOL_SRC" ]; then
+  if [ "$target_file" = "$COMPILE_TOOL_SRC" ] || [ "$target_file" = "$CODEGEN_SRC" ]; then
     rm -f "$REPO/.build/iyi-compile"
     if make -C "$REPO" iyi-compile >/dev/null 2>&1; then
-      if "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$REPO/bench/fixtures/compile_arith.iyi" >/dev/null 2>&1; then
+      if "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$test_fixture" >/dev/null 2>&1; then
         set +e
         "$WORK/mut_bin"
         local mut_rc=$?
         set -e
-        # Original expected rc is 26
-        if [ "$mut_rc" -ne 26 ]; then
+        if [ "$mut_rc" -ne "$expected_rc" ]; then
           mut_failed=1
         fi
       else
@@ -208,7 +211,7 @@ PY
       "$WORK/mut_bin"
       local mut_rc=$?
       set -e
-      if [ "$mut_rc" -ne 26 ]; then
+      if [ "$mut_rc" -ne "$expected_rc" ]; then
         mut_failed=1
       fi
     else
@@ -239,6 +242,13 @@ prove_compile_mutation "corrupt arithmetic operation in test fixture" \
   "$REPO/bench/fixtures/compile_arith.iyi" \
   "v1 &- v2" \
   "v1 &+ v2"
+
+prove_compile_mutation "omitting entry point wrapper for top-level code" \
+  "$CODEGEN_SRC" \
+  "unless has_user_main" \
+  "if false && !has_user_main" \
+  "$REPO/bench/fixtures/compile_top_level.iyi" \
+  42
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -46,7 +46,7 @@ file_floor() {
     "macros.iyi")      echo "object" ;;
     "number.iyi")      echo "object" ;;
     "object.iyi")      echo "object" ;;
-    "prelude.iyi")     echo "parse" ;;
+    "prelude.iyi")     echo "object" ;;
     "primitives.iyi")  echo "link" ;;
     "range.iyi")       echo "object" ;;
     "set.iyi")         echo "object" ;;
@@ -200,10 +200,15 @@ prove_fails "syntax corruption in atomic regresses below object floor" \
   's/struct Atomic/struct %%%/' \
   "object"
 
-prove_fails "syntax corruption in prelude regresses below parse floor" \
+prove_fails "syntax corruption in prelude regresses below object floor" \
   "prelude.iyi" \
   's|require "./primitives"|require %%%|' \
-  "parse"
+  "object"
+
+prove_fails "semantic corruption in prelude regresses below object floor" \
+  "prelude.iyi" \
+  's/@proc : Proc(Nil)/@proc : UndefinedType9876/' \
+  "object"
 
 echo "  Mutation summary: $mutations_caught/6 regressions caught"
 

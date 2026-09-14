@@ -52,6 +52,13 @@ class Iyi::Command
 
     files = options
 
+    # `tool format ""` - `"$FILE"` with `FILE` unset - normalised to `./`
+    # and rewrote every source under the working directory, in place. No
+    # path at all means the working directory on purpose; "" is not that.
+    if files.any?(&.empty?)
+      abort! "format takes a path, and '' is not one (no path at all formats the working directory)", :USAGE_ERROR
+    end
+
     format_command = FormatCommand.new(
       files,
       includes,

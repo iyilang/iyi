@@ -52,6 +52,9 @@ class Iyi::Command
       end
     end
 
+    # `.presence`: `fix ""` is `"$FILE"` with `FILE` unset, and it answered
+    # `no such file: ` - a sentence with a hole where the name goes.
+    file = file.presence
     unless file
       abort! "fix: which file? Usage: #{Command.program_name} fix [--json] <file>", :USAGE_ERROR
     end

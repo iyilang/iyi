@@ -81,6 +81,9 @@ class Iyi::Command
       end
     end
 
+    # `.presence`: `mod dump ""` answered `no such file: `, a sentence with
+    # a hole where the name goes.
+    filename = filename.presence
     unless filename
       abort! "expected a .iyimod path", :USAGE_ERROR
     end

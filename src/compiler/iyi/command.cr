@@ -710,6 +710,9 @@ class Iyi::Command
       end
 
       opts.on("--prelude ", "Use given file as prelude") do |prelude|
+        # `--prelude ""` went looking for a file called nothing and answered
+        # with the other language's advice about shards. A name, or nothing.
+        abort! "--prelude takes a file name", :USAGE_ERROR if prelude.empty?
         compiler.prelude = prelude
         specified_prelude = true
       end
@@ -747,6 +750,10 @@ class Iyi::Command
         # iyi: answered here rather than by `Dir.mkdir_p` half an hour into a
         # build. A path that names a file, or a directory nobody may write to,
         # used to arrive as `Unable to create directory` and a stack trace.
+        # And `""`, which is `"$DIR"` with `DIR` unset, arrived as
+        # `--emit-iyimod cannot use : No such file or directory` - a sentence
+        # with a hole where the name goes.
+        abort! "--emit-iyimod takes a directory", :USAGE_ERROR if dir.empty?
         if File.exists?(dir) && !File.directory?(dir)
           abort! "--emit-iyimod needs a directory, and #{dir} is a file", :USAGE_ERROR
         end
@@ -771,6 +778,7 @@ class Iyi::Command
         # loop has none at all, and compiles from source. A *directory* that is
         # not there is a typo, and it used to be ignored: the build compiled
         # every module from source and looked like it had used artifacts.
+        abort! "--use-iyimod takes a directory", :USAGE_ERROR if dir.empty?
         unless File.directory?(dir)
           abort! "--use-iyimod needs a directory of .iyimod files, and there is no #{dir}", :USAGE_ERROR
         end
@@ -948,6 +956,11 @@ class Iyi::Command
 
   private def gather_sources(filenames)
     filenames.map do |filename|
+      # And the third is no name at all: `iyi run "$FILE"` with `FILE`
+      # unset. `File.expand_path("")` is the working directory, so this
+      # answered "Error:  is a directory, not a source file" - a sentence
+      # with a hole in it, about a directory nobody named.
+      abort! "the file name is empty, so it names nothing", :USAGE_ERROR if filename.empty?
       expanded = File.expand_path(filename)
       # iyi: the commonest thing to get wrong about a command is the name of
       # the file, and the answer to it was "Error: Error opening file with

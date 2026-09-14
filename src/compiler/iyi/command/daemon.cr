@@ -170,7 +170,9 @@ class Iyi::Command
         # so `iyi daemon build --socket` talked to a daemon the author had
         # not named. `--out`, `--mods`, `--lib` and `--affected` refuse the
         # same mistake in the same words.
-        if path.nil?
+        # And not `""` either, which is `"$SOCK"` with `SOCK` unset: it
+        # answered "no daemon listening on " and a hole where the path goes.
+        if path.nil? || path.empty?
           abort! "--socket takes a path", :USAGE_ERROR
         elsif path.starts_with?('-')
           abort! "--socket takes a path, and #{path} is a flag", :USAGE_ERROR
@@ -202,7 +204,7 @@ class Iyi::Command
     options.each_with_index do |opt, i|
       next unless opt == "--socket"
       path = options[i + 1]?
-      if path.nil?
+      if path.nil? || path.empty?
         abort! "--socket takes a path", :USAGE_ERROR
       elsif path.starts_with?('-')
         abort! "--socket takes a path, and #{path} is a flag", :USAGE_ERROR

@@ -71,7 +71,9 @@ class Iyi::Command
     while option = options.shift?
       case option
       when "--affected"
-        value = options.shift?
+        # `.presence`: `--affected ""` is `"$FILE"` with `FILE` unset, and
+        # its consumers were whoever imported the working directory.
+        value = options.shift?.presence
         abort! "--affected takes a changed file", :USAGE_ERROR unless value
         if Dir.exists?(value)
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR

@@ -237,6 +237,45 @@ echo "== where a program is written, and where its library is looked for"
 # name nobody typed, or the linker answered "cannot open output file
 # <cwd>: Is a directory" - after a whole compilation had been paid for.
 refuses "an empty -o" "-o takes a path" -- "$IYI" build -o "" good.iyi
+# And every other place `"$VAR"` with `VAR` unset can land. Each answered
+# with a hole where the name goes - `no such file: `, `no daemon listening
+# on `, `Error:  is a directory` - or worse: `tool format ""` normalised to
+# `./` and rewrote every source under the working directory, in place, and
+# `check --affected ""` took the working directory as the changed file.
+refuses "an empty file name" "the file name is empty" -- "$IYI" run ""
+refuses "an empty --emit-iyimod" "--emit-iyimod takes a directory" -- \
+  "$IYI" build --emit-iyimod "" -o p good.iyi
+refuses "an empty --use-iyimod" "--use-iyimod takes a directory" -- \
+  "$IYI" build --use-iyimod "" -o p good.iyi
+refuses "an empty --prelude" "--prelude takes a file name" -- \
+  "$IYI" build --prelude "" -o p good.iyi
+refuses "an empty --affected, checking" "--affected takes a changed file" -- \
+  "$IYI" check --affected ""
+refuses "an empty --affected, testing" "--affected takes a changed file" -- \
+  "$IYI" test --affected "" .
+refuses "an empty test path" "'' is not one" -- "$IYI" test ""
+refuses "an empty file for fix" "which file" -- "$IYI" fix ""
+refuses "an empty .iyimod path" "expected a .iyimod path" -- "$IYI" mod dump ""
+refuses "an empty --socket" "--socket takes a path" -- \
+  "$IYI" daemon build --socket "" -o p good.iyi
+mkdir -p "$WORK/tree"
+printf 'x=1\n' > "$WORK/tree/messy.cr"
+cp "$WORK/tree/messy.cr" "$WORK/tree.keep"
+cd "$WORK/tree"
+refuses "an empty path for format" "'' is not one" -- "$IYI" tool format ""
+cd "$WORK"
+cmp -s "$WORK/tree/messy.cr" "$WORK/tree.keep" ||
+  { echo "  format \"\" rewrote the working directory"; status=1; }
+# And the search path itself. `IYI_PATH=""` is a list with nothing in it,
+# and the note read "Searched, in order:" followed by nothing.
+env IYI_PATH="" "$IYI" build -o lost good.iyi > "$WORK/emptypath.txt" 2>&1
+if grep -q "IYI_PATH is set and empty" "$WORK/emptypath.txt"; then
+  echo "  an empty search path: says so"
+else
+  echo "  an empty search path: a list of nothing, printed as nothing"
+  sed -n '1,8p' "$WORK/emptypath.txt"
+  status=1
+fi
 # And `-o` naming the source itself - one word, typed twice. It read the
 # source, built it, and linked the executable over it: the program's only
 # copy was 12 KB of ELF, exit 0. The module a program imports is the same

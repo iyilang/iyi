@@ -50,7 +50,9 @@ class Iyi::Command
           abort! "--timeout takes seconds to wait, and #{value} is not a wait", :USAGE_ERROR
         end
       when "--affected"
-        value = options.shift?
+        # `.presence`: `--affected ""` is `"$FILE"` with `FILE` unset, and it
+        # ran every test with " is not there" as the reason.
+        value = options.shift?.presence
         abort! "--affected takes a changed file", :USAGE_ERROR unless value
         if Dir.exists?(value)
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
@@ -72,6 +74,10 @@ class Iyi::Command
 
     files = [] of String
     paths.each do |path|
+      # `iyi test ""` - `"$DIR"` with `DIR` unset - answered "no such file
+      # or directory: ", a sentence with a hole where the name goes. No
+      # path at all means the working directory on purpose; "" is not that.
+      abort! "test takes paths, and '' is not one (no path at all runs the working directory)", :USAGE_ERROR if path.empty?
       if File.directory?(path)
         Dir.glob(File.join(path, "**", "*_test.iyi")) { |file| files << file }
       elsif File.file?(path)

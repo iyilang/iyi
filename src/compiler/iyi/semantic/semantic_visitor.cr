@@ -105,8 +105,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         notes << String.build do |note|
           note << "This is a file on the search path, not a library name: "
           note << "iyi's prelude and `std` ship beside the compiler. "
-          note << "Searched, in order:\n"
-          searched.each { |entry| note << "  " << entry << '\n' }
+          if searched.empty?
+            # `IYI_PATH=""` - `"$P"` with `P` unset - is a list with nothing
+            # in it, and "Searched, in order:" followed by nothing read as
+            # a sentence cut off.
+            note << "Nothing was searched: IYI_PATH is set and empty. "
+          else
+            note << "Searched, in order:\n"
+            searched.each { |entry| note << "  " << entry << '\n' }
+          end
           note << "IYI_PATH sets that list, and unsetting it uses the one "
           note << "this compiler was built with"
         end

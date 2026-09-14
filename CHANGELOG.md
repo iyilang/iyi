@@ -42,6 +42,24 @@
 
 ### Fixed
 
+- **An empty argument, wherever a shell can put one.** `"$FILE"` with
+  `FILE` unset lands as `""`, and every place that took one answered with
+  a hole where the name goes — `no such file: `, `no daemon listening on `,
+  `Error:  is a directory, not a source file` — or worse. `iyi tool format
+  ""` normalised to `./` and rewrote every source under the working
+  directory, in place. `iyi check --affected ""` took the working directory
+  as the changed file, and `test --affected ""` ran everything with ` is
+  not there` as its reason. `--prelude ""` went looking for a file called
+  nothing and came back with Crystal's advice about shards. `IYI_PATH=""`
+  is a list with nothing in it, and the missing-prelude note read
+  `Searched, in order:` followed by nothing. Each is a sentence now, the
+  same shape `-o ""` and `IYI_CACHE_DIR=""` already got: the entry file
+  for `run`, `build`, `check` and `vet`; `fix`, `test` and `mod dump`'s
+  file; `--emit-iyimod`, `--use-iyimod`, `--prelude`, `--affected` and
+  `--socket`; `tool format`'s path; and the search-path note says
+  `IYI_PATH is set and empty`. No path at all still means the working
+  directory where it did, on purpose; `""` is not that.
+
 - **`-o` naming the source replaced it with the binary.** `iyi build -o
   good.iyi good.iyi` — one word, typed twice — read the source, built it
   and linked the executable over it: the program's only copy was 12 KB of

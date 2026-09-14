@@ -970,18 +970,20 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 14,125 lines, and its IO is `puts`, `print`,
-  `read_input` and `File`**: integers, booleans, a string, one sequence, one
-  dictionary, one range, and what an `enum` needs — its name, its order, its
-  members and, for a `@[Flags]` one, its bits. `read_input` returns everything
-  on standard input as
-  one string, because there is no `IO` to keep the rest in. `File.read`,
-  `File.write`, `File.exists?` and `File.delete` are the file surface.
-  `samples/iyi/files.iyi` writes, reads and deletes its file. Sockets and
-  format strings are `src/std/` modules, so a program that imports neither
-  carries neither.
-  `--crystal` is the other library and has all of it; everything below this
-  line is about iyi's own.
+- **iyi's own library is 14,125 lines, and its IO is `puts`, `print`, the
+  three standard streams and `File`**: integers, booleans, a string, one
+  sequence, one dictionary, one range, and what an `enum` needs — its
+  name, its order, its members and, for a `@[Flags]` one, its bits.
+  `stdin`, `stdout` and `stderr` are buffered streams: `gets` reads a
+  line (nil at the end), `read_all` the rest, `write` and `flush` go the
+  other way, and `read_input` is `stdin.read_all` under its old name.
+  `File.read`, `File.write`, `File.exists?` and `File.delete` are the
+  whole-file surface, and `File.open(path, "r"|"w")` is the same stream
+  over a file. `samples/iyi/files.iyi` writes, reads and deletes its file;
+  `samples/iyi/io.iyi` reads a line at a time. Sockets and format strings
+  are `src/std/` modules, so a program that imports neither carries
+  neither. `--crystal` is the other library and has all of it; everything
+  below this line is about iyi's own.
 - **The prelude's collections are smaller than Crystal's.** A method is in
   there because a program in this repository needed it, so most of what you
   reach for is not; `src/std/enumerable.iyi` is where the rest is

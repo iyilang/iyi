@@ -69,7 +69,7 @@ fi
 step "dependency floor: runtime stays on platform doorway"
 case "$(uname -s)" in
   Darwin)
-    allowed='___error|__tlv_bootstrap|_madvise|_pipe|_pthread_create|_pthread_kill|_sigaction|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
+    allowed='___error|__tlv_bootstrap|_madvise|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
     added="$(nm -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
       grep -E -cv "^($allowed)\$")"
     extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |

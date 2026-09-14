@@ -99,7 +99,11 @@ trap 'rm -rf "$WORK"' EXIT
 # `connect`, `getsockname`, `listen`, `recv`, `send`, `setsockopt` and `socket`
 # joined with `IyiSocket` (samples/iyi/socket.iyi): on darwin libSystem is the
 # platform interface, while Linux issues raw socket syscalls and names none of them.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+# `sigaltstack` joined with the stack guard (concurrency.iyi, III.1.4): a
+# stack overflow is the program's own panic, said from a handler on an
+# alternate stack, and every darwin program installs one. Linux's is a
+# syscall.
+ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
 ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main"
 
 # What a program may link. The platform libc only.

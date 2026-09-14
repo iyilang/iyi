@@ -2829,6 +2829,7 @@ pub class Call < ASTNode
   property name_location : Location? = nil
   property global : Bool = false
   property iyi_group : Bool = false
+  property expanded : ASTNode? = nil
 
   def initialize(
     @obj : ASTNode? = nil,
@@ -2841,9 +2842,9 @@ pub class Call < ASTNode
     @name_location : Location? = nil,
     @global : Bool = false,
     @iyi_group : Bool = false,
+    @expanded : ASTNode? = nil,
   )
   end
-
   def self.new(obj : ASTNode?, name : String, arg : ASTNode) : Call
     new(obj, name, [arg] of ASTNode)
   end
@@ -2894,9 +2895,9 @@ pub class Call < ASTNode
       @name_location,
       @global,
       @iyi_group,
+      clone_node(@expanded),
     )
   end
-
   def accept_children(visitor) : Nil
     if o = @obj
       o.accept(visitor)

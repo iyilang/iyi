@@ -417,6 +417,24 @@ module Iyi
     assert_syntax_error "x = begin\n  1\n", "expecting 'end' to close the begin that began at line 1"
     assert_syntax_error "unless false\n  1\n", "expecting 'end' to close the unless that began at line 1"
 
+    # iyi: a keyword nothing opened, a closer that is missing, a name that
+    # is missing, and a definition written with another language's keyword
+    # are each a sentence rather than the token the parser wanted.
+    assert_syntax_error "def foo\n  1\nend\nend\n", "unexpected 'end': nothing is open for it to close", 4, 1
+    assert_syntax_error "x = 1\nputs x\nelse\n", "unexpected 'else': no `if` is open for it"
+    assert_syntax_error "case 1\nwhen 1\nend\nwhen 2\n", "unexpected 'when': no `case` is open for it"
+    assert_syntax_error "x = [1, 2\nputs x\n", "expecting token ']', not 'puts'; the array literal that began at line 1 is still open", 2, 1
+    assert_syntax_error "x = {\"a\" => 1\nputs x\n", "expecting token '}', not 'puts'; the hash literal that began at line 1 is still open"
+    assert_syntax_error "foo(1, 2\nputs 1\n", "expecting token ')', not 'puts'; the call that began at line 1 is still open"
+    assert_syntax_error "puts (1 + 2\n", "unterminated parenthesized expression", 1, 6
+    assert_syntax_error "x = [1, )]", "unexpected token: \")\""
+    assert_syntax_error "def 1\nend", "expecting a name after 'def', not '1'"
+    assert_syntax_error "macro 1\nend", "expecting a name after 'macro', not '1'"
+    assert_syntax_error "x = 1\nputs x.", "expecting a method name after '.', not the end of the file"
+    assert_syntax_error "if x == 1 and y\nend", %(unexpected token: "and": `&&` is the spelling here)
+    assert_syntax_error "fn f(x : Int32) : Int32\n  x\nend", %(unexpected token: ":": `fn` is a call here, not a keyword - a function is `def name(args) : Type`)
+    assert_syntax_error "func f(x : Int32)\n  x\nend", "unexpected 'end': nothing is open for it to close - `func` at line 1 is a call here, not a keyword"
+
     # #5856
     assert_syntax_error "def foo=(a,b); end", "setter method 'foo=' cannot have more than one parameter"
     assert_syntax_error "def foo=(a = 1, b = 2); end", "setter method 'foo=' cannot have more than one parameter"

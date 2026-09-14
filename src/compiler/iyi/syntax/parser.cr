@@ -97,8 +97,31 @@ module Iyi
     def parse
       next_token_skip_statement_end
 
-      nodes = parse_expressions.tap { check :EOF }
+      nodes = parse_expressions.tap { iyi_check_eof }
       apply_module_header(nodes)
+    end
+
+    # iyi: what is left once every top-level expression is read is a
+    # keyword nothing opened. "expecting token 'EOF', not 'end'" named the
+    # token the parser wanted, not the one the person had one too many of.
+    private def iyi_check_eof : Nil
+      return if @token.type.eof?
+      if @token.type.ident?
+        case @token.value
+        when Keyword::END
+          if lookalike = @iyi_def_lookalike
+            raise "unexpected 'end': nothing is open for it to close - `#{lookalike[0]}` at line #{lookalike[1].try(&.line_number)} is a call here, not a keyword, and a function is `def name(args) : Type`", @token
+          end
+          raise "unexpected 'end': nothing is open for it to close", @token
+        when Keyword::ELSE, Keyword::ELSIF
+          raise "unexpected '#{@token}': no `if` is open for it", @token
+        when Keyword::WHEN, Keyword::IN
+          raise "unexpected '#{@token}': no `case` is open for it", @token
+        else
+          # Not a keyword with a construct to belong to.
+        end
+      end
+      check :EOF
     end
 
     # iyi: `module app/greeter` scopes everything after it in the file.
@@ -827,7 +850,7 @@ module Iyi
             next
           end
 
-          check AtomicWithMethodCheck
+          iyi_check_name(AtomicWithMethodCheck, "a method name after '.'")
 
           if @token.value == Keyword::IS_A_QUESTION
             atomic = parse_is_a(atomic).at(location)
@@ -1880,7 +1903,7 @@ module Iyi
         return call
       end
 
-      check AtomicWithMethodCheck
+      iyi_check_name(AtomicWithMethodCheck, "a method name after '.'")
 
       if @token.value == Keyword::IS_A_QUESTION
         call = parse_is_a(obj).at(location)
@@ -2695,24 +2718,30 @@ module Iyi
       # ```
       @stop_on_do = false
 
-      while true
-        exps << parse_expression
-        case @token.type
-        when .op_rparen?
-          @wants_regex = false
-          end_location = token_end_location
-          next_token_skip_space
-          break
-        when .newline?, .op_semicolon?
-          next_token_skip_statement_end
-          if @token.type.op_rparen?
+      # iyi: on the unclosed stack, so the file ending inside it says
+      # "unterminated parenthesized expression" at the `(` rather than
+      # "unexpected token: EOF" at the last line. Only the end of the
+      # file is read that way; `unexpected_token_in_atomic` says so.
+      open("parenthesized expression", location) do
+        while true
+          exps << parse_expression
+          case @token.type
+          when .op_rparen?
             @wants_regex = false
             end_location = token_end_location
             next_token_skip_space
             break
+          when .newline?, .op_semicolon?
+            next_token_skip_statement_end
+            if @token.type.op_rparen?
+              @wants_regex = false
+              end_location = token_end_location
+              next_token_skip_space
+              break
+            end
+          else
+            raise "unterminated parenthesized expression", location
           end
-        else
-          raise "unterminated parenthesized expression", location
         end
       end
 
@@ -3469,8 +3498,12 @@ module Iyi
       entries << HashLiteral::Entry.new(first_key, parse_op_assign)
 
       if @token.type.newline?
-        next_token_skip_space_or_newline
-        check :OP_RCURLY
+        # iyi: inside the open, so a `{"a" => 1` with the next line under
+        # it names the literal and its line, as the multi-entry path does.
+        open("hash literal", location) do
+          next_token_skip_space_or_newline
+          check :OP_RCURLY
+        end
         next_token_skip_space
       else
         open("hash literal", location) do
@@ -4051,7 +4084,7 @@ module Iyi
       # cases like: def `, def /, def //
       # that in regular statements states for delimiters
       # here must be treated as method names.
-      name = consume_def_or_macro_name
+      name = consume_def_or_macro_name("macro")
       check_iyi_method_missing name
 
       with_isolated_var_scope do
@@ -5440,6 +5473,12 @@ module Iyi
         named_args = call_args.named_args
         has_parentheses = call_args.has_parentheses
         force_call ||= has_parentheses || (args.try(&.empty?) == false) || (named_args.try(&.empty?) == false)
+        # iyi: `fn f(x : Int32)` is a call to `fn` with a call for its
+        # argument, and parses; what fails is the `: Int32` after it or
+        # the `end` under it, and the sentence for either names this.
+        if !is_var && !has_parentheses && name.in?("fn", "func", "function") && args.try(&.first?).is_a?(Call) && @iyi_def_lookalike.nil?
+          @iyi_def_lookalike = {name, name_location}
+        end
       else
         has_parentheses = false
       end
@@ -7383,16 +7422,26 @@ module Iyi
       :OP_AMP_PLUS, :OP_AMP_MINUS, :OP_AMP_STAR, :OP_AMP_STAR_STAR,
     ] of Token::Kind
 
-    def consume_def_or_macro_name
+    def consume_def_or_macro_name(what : String = "def")
       # Force lexer return if possible a def or macro name
       # cases like: def `, def /, def //
       # that in regular statements states for delimiters
       # here must be treated as method names.
       wants_def_or_macro_name do
         next_token_skip_space_or_newline
-        check DefOrMacroCheck1
+        iyi_check_name(DefOrMacroCheck1, "a name after '#{what}'")
       end
       @token.to_s
+    end
+
+    # iyi: a place that takes a name or an operator, answered as one
+    # sentence rather than the thirty-three tokens it takes: "expecting
+    # any of these tokens: IDENT, CONST, `, <<, <, <=, ==, ..." was the
+    # answer to `def 1` and to `x.` at the end of a line.
+    private def iyi_check_name(token_types : Array(Token::Kind), what : String) : Nil
+      return if token_types.any? { |type| @token.type == type }
+      not_what = @token.type.eof? ? "the end of the file" : "'#{@token}'"
+      raise "expecting #{what}, not #{not_what}", @token
     end
 
     def consume_def_equals_sign_skip_space
@@ -7501,7 +7550,25 @@ module Iyi
     end
 
     def check(token_type : Token::Kind)
-      raise "expecting token '#{token_type}', not '#{@token}'", @token unless token_type == @token.type
+      return if token_type == @token.type
+      # iyi: a closer that is missing names what it would close and where
+      # that began, as a missing `end` does: "expecting token ']', not
+      # 'puts'" pointed at the next line's first word and said nothing
+      # about the `[` two lines up. The upstream sentence stays as its
+      # head, because the parser's specs and every reader know it.
+      if (unclosed = @unclosed_stack.last?) && iyi_closes?(token_type, unclosed.name)
+        raise "expecting token '#{token_type}', not '#{@token}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token
+      end
+      raise "expecting token '#{token_type}', not '#{@token}'", @token
+    end
+
+    private def iyi_closes?(token_type : Token::Kind, name : String) : Bool
+      case token_type
+      when .op_rsquare? then name == "array literal"
+      when .op_rcurly?  then name.in?("hash literal", "tuple literal", "named tuple literal")
+      when .op_rparen?  then name.in?("call", "parenthesized expression")
+      else                   false
+      end
     end
 
     def check_ident(value : Keyword)
@@ -7545,13 +7612,38 @@ module Iyi
       token_str = token.type.eof? ? "EOF" : token.to_s.inspect
       if msg
         raise "unexpected token: #{token_str} (#{msg})", @token
-      else
-        raise "unexpected token: #{token_str}", @token
       end
+      # iyi: the token is not always a slip. `and` and `or` are another
+      # language's spelling, and a `:` after `fn f(x : Int32)` is a
+      # definition written with another language's keyword, which parsed
+      # as a call and then met its return type; both are answered.
+      if token.type.ident? && (spelling = IYI_SPELLINGS[token.value.to_s]?)
+        raise "unexpected token: #{token_str}: #{spelling}", @token
+      end
+      if (lookalike = @iyi_def_lookalike) && lookalike[1].try(&.line_number) == token.line_number
+        raise "unexpected token: #{token_str}: `#{lookalike[0]}` is a call here, not a keyword - a function is `def name(args) : Type`", @token
+      end
+      raise "unexpected token: #{token_str}", @token
     end
 
+    # iyi: spellings from other languages the parser meets as a bare
+    # identifier where no expression may go, and what they are here.
+    IYI_SPELLINGS = {
+      "and" => "`&&` is the spelling here",
+      "or"  => "`||` is the spelling here",
+    }
+
+    # iyi: the first `fn`, `func` or `function` parsed as a command call
+    # with a call for its argument - `fn f(x : Int32)` - and where. It
+    # is what a stray `end` or a `: Type` after the parenthesis is about.
+    @iyi_def_lookalike : {String, Location?}?
+
     def unexpected_token_in_atomic
-      if unclosed = @unclosed_stack.last?
+      # iyi: the file ending inside a literal or a call is what
+      # "unterminated" means. A stray `)` inside an array literal was
+      # read the same way and reported at the `[`, three lines from the
+      # token that is wrong; it is the token now.
+      if @token.type.eof? && (unclosed = @unclosed_stack.last?)
         raise "unterminated #{unclosed.name}", unclosed.location
       end
 

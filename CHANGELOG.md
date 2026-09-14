@@ -42,6 +42,31 @@
 
 ### Fixed
 
+- **The commonest slips in a `.iyi` file were answered with the token the
+  parser wanted.** One `end` too many was `expecting token 'EOF', not
+  'end'`; a `[` or `{` or `(` left open was `expecting token ']', not
+  'puts'` at the next line's first word, with nothing about the line the
+  literal began on, and the file ending inside a parenthesis was
+  `unexpected token: EOF`; `def 1` and `x.` at the end of a line were
+  `expecting any of these tokens: IDENT, CONST, \`, <<, <, <=, ==, ...`,
+  thirty-three of them; and a definition written with another language's
+  keyword — `fn f(x : Int32) : Int32` — parsed as a call to `fn` and
+  failed on its own return type with `unexpected token: ":"`. Each is a
+  sentence now: `unexpected 'end': nothing is open for it to close`,
+  `unexpected 'when': no \`case\` is open for it`, `expecting token ']',
+  not 'puts'; the array literal that began at line 3 is still open`,
+  `unterminated parenthesized expression` at the `(`, `expecting a name
+  after 'def', not '1'`, `expecting a method name after '.', not the end
+  of the file`, and for `fn`, `func` and `function`, that it is a call
+  here and a function is `def name(args) : Type` — said at the `:` or at
+  the stray `end`, whichever the parser meets. `and` and `or` are named
+  as `&&` and `||`; `elif`, `let`, `var`, `println`, `console`, `len`,
+  `str`, `int`, `input` and `null` get the spelling here beside the
+  undefined-method line. A stray `)` inside an array literal was reported
+  as `unterminated array literal` at the `[`; it is the `)` now, and
+  "unterminated" is kept for the file ending inside one. The parser's
+  specs hold every sentence.
+
 - **`migrate` rewrote a file that does not parse, and dropped a require it
   could not answer without a word.** A `.cr` with a `def` and no `end` was
   written through line by line and noted as a module "left nested, which

@@ -262,6 +262,17 @@ describe "Semantic: iyi" do
       assert_error "p 1", "`puts value.inspect` is the spelling here; there is no `p`."
     end
 
+    it "names elsif for elif, and a plain assignment for let" do
+      assert_error "x = true\nif x\n  1\nelif x\n  2\nend", "`elsif` is the spelling here."
+      assert_error "let x = 1", "There is no `let`: a variable is `x = 1`"
+    end
+
+    it "names size, to_s and nil for len, str and null" do
+      assert_error "len(1)", "`.size` is the spelling here"
+      assert_error "str(1)", "`.to_s` is the spelling here"
+      assert_error "x = null", "`nil` is the spelling here"
+    end
+
     it "says the prelude's size rule for a method a prelude type lacks" do
       assert_error <<-CODE, "iyi's prelude has no `split` on String: it is small by rule"
         "a,b".split(",")

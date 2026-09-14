@@ -115,6 +115,17 @@ module Iyi
     "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{sprintf}`.",
     "rand"    => "There is no random number source in the prelude or in `std` yet.",
     "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
+    "let"     => "There is no `let`: a variable is `x = 1`, and its type is the value's.",
+    "var"     => "There is no `var`: a variable is `x = 1`, and its type is the value's.",
+    "elif"    => "`elsif` is the spelling here.",
+    "elseif"  => "`elsif` is the spelling here.",
+    "println" => "`puts` is the spelling here; it ends the line.",
+    "console" => "`puts` is the spelling here; there is no `console`.",
+    "len"     => "`.size` is the spelling here: `xs.size`, `s.size`.",
+    "str"     => "`.to_s` is the spelling here: `1.to_s`.",
+    "int"     => "`.to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
+    "input"   => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no `input`.",
+    "null"    => "`nil` is the spelling here, and it is a type: a value that may be nil is `T?`.",
   }
 
   # A method called on a receiver in Crystal's spelling, and

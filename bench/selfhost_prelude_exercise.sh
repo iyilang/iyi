@@ -37,17 +37,17 @@ file_floor() {
   case "$1" in
     "array.iyi")       echo "semantic" ;;
     "atomic.iyi")      echo "none" ;;
-    "concurrency.iyi") echo "parse" ;;
-    "enum.iyi")        echo "parse" ;;
+    "concurrency.iyi") echo "semantic" ;;
+    "enum.iyi")        echo "codegen" ;;
     "file.iyi")        echo "object" ;;
     "float.iyi")       echo "semantic" ;;
     "hash.iyi")        echo "object" ;;
     "io.iyi")          echo "semantic" ;;
     "macros.iyi")      echo "object" ;;
     "number.iyi")      echo "semantic" ;;
-    "object.iyi")      echo "parse" ;;
+    "object.iyi")      echo "codegen" ;;
     "prelude.iyi")     echo "none" ;;
-    "primitives.iyi")  echo "parse" ;;
+    "primitives.iyi")  echo "link" ;;
     "range.iyi")       echo "object" ;;
     "set.iyi")         echo "codegen" ;;
     "string.iyi")      echo "semantic" ;;
@@ -186,7 +186,17 @@ prove_fails "syntax corruption in range regresses below object floor" \
   's/struct Range/struct %%%/' \
   "object"
 
-echo "  Mutation summary: $mutations_caught/4 regressions caught"
+prove_fails "syntax corruption in enum regresses below codegen floor" \
+  "enum.iyi" \
+  's/struct Enum/struct %%%/' \
+  "codegen"
+
+prove_fails "syntax corruption in primitives regresses below link floor" \
+  "primitives.iyi" \
+  's/struct Symbol/struct %%%/' \
+  "link"
+
+echo "  Mutation summary: $mutations_caught/6 regressions caught"
 
 echo
 if [ "$status" -eq 0 ]; then

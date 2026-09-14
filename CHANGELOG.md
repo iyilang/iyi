@@ -42,6 +42,28 @@
 
 ### Fixed
 
+- **`sprintf` printed the shortest digits, not the value's.** `%.0f` of
+  1e23 answered `100000000000000000000000` where the double is
+  99999999999999991611392; `%.0f` of 2^70, an integer the double holds
+  exactly, answered `1180591620717411300000`; `%.20f` of 0.1 answered
+  twenty zeros where the value's digits are `0.10000000000000000555`; and
+  `%e` of the smallest denormal answered `5.000000e-324` for
+  4.940656e-324 — at the default precision. The fixed and scientific
+  formats took the shortest digits, the ones that round-trip, and padded
+  them with zeros; past the seventeenth there was nothing there. Both are
+  exact now: the value's integer scaled by the power of ten the precision
+  asks for, divided, rounded half to even against the remainder, and
+  rendered — every digit the double has, 2,500 random cases against
+  Python's exact formatting with no disagreement. Precision is capped at
+  400 places, which the printer's bignum holds for the largest double.
+  Two refusals came with it: an argument no specifier took was dropped
+  without a word (`sprintf("%d", 1, 2)`), and is `too many arguments for
+  format string: 2 given, 1 used`; and a numeric verb given something
+  that is not a number printed it as text — `%d` of `"abc"` was `abc` —
+  and is `%d wants a number, and "abc" is a String`. A float under an
+  integer verb is truncated, which is what Ruby, Python and Crystal
+  answer to it.
+
 - **`String#chop` cut a character in half.** `"hé".chop` dropped the last
   *byte*, and answered `h` plus half of `é` — two bytes that are not a
   string, which the next `puts` wrote to the terminal as such. It drops

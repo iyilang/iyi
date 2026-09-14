@@ -96,6 +96,25 @@ raise "format: precision float 0 round down failed" if p9 != "3"
 p10 = sprintf("%.0f", 2.5)
 raise "format: precision float tie to even failed" if p10 != "2"
 
+# The value's digits, every one of them. These printed the shortest
+# digits - the ones that round-trip - padded with zeros: `%.0f` of 1e23
+# answered 100000000000000000000000, `%.20f` of 0.1 twenty zeros, and
+# `%e` of the smallest denormal 5.000000e-324.
+p13 = sprintf("%.0f", 1e23)
+raise "format: exact large failed" if p13 != "99999999999999991611392"
+
+p14 = sprintf("%.3f", 1e22)
+raise "format: exact large zeros failed" if p14 != "10000000000000000000000.000"
+
+p15 = sprintf("%.20f", 0.1)
+raise "format: exact fraction failed" if p15 != "0.10000000000000000555"
+
+p16 = sprintf("%e", 5e-324)
+raise "format: exact denormal failed" if p16 != "4.940656e-324"
+
+p17 = sprintf("%.20e", 1e23)
+raise "format: exact exponent failed" if p17 != "9.99999999999999916114e+22"
+
 p11 = sprintf("%.3s", "cinnabar")
 raise "format: precision string truncate failed" if p11 != "cin"
 

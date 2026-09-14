@@ -40,6 +40,7 @@ module CompileTool
     verbose = false
     probe_phase = false
     single_file = false
+    probe_verify = false
     i = 0
     while i < args.size
       arg = args[i]
@@ -54,6 +55,8 @@ module CompileTool
         probe_phase = true
       when "--single-file"
         single_file = true
+      when "--probe-verify"
+        probe_verify = true
       when "--emit-obj"
         emit_obj_only = true
         i = i + 1
@@ -97,7 +100,7 @@ module CompileTool
       return
     end
 
-    config = CompilerConfig.new(output_file, emit_obj_only, obj_output_file, verbose, nil, probe_phase, single_file)
+    config = CompilerConfig.new(output_file, emit_obj_only, obj_output_file, verbose, nil, probe_phase, single_file, probe_verify)
     compiler = Compiler.new(config)
     compiler.compile(in_file)
   end

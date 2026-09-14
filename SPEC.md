@@ -509,7 +509,7 @@ read as green for as long as nobody ran them together.
 The mechanism is guarded now rather than the two instances fixed: every
 driver that patches a source file compares the patched copy against the
 original and refuses to draw a conclusion when they are identical, across
-seventy-five sites in sixty-two scripts, and patches are anchored on text
+seventy-six sites in sixty-three scripts, and patches are anchored on text
 rather than on line numbers. The AES one is the reason this is recorded here
 rather than only in a commit: an AEAD that accepts a forged tag is worse than
 no AEAD, TLS and QUIC are built on it, and the exercise said it was covered.

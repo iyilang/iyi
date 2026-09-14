@@ -56,6 +56,10 @@ pub struct CompilerConfig
   property target_triple : String?
   property probe_phase : Bool
   property single_file : Bool
+  # Verify the module with LLVM and report, instead of emitting. The shipped
+  # compiler does not verify in its emit path and neither does this one: the
+  # check belongs to bench/selfhost_ir_valid_exercise.sh, which drives this.
+  property probe_verify : Bool
 
   def initialize(
     @output_filename : String = "a.out",
@@ -65,6 +69,7 @@ pub struct CompilerConfig
     @target_triple : String? = nil,
     @probe_phase : Bool = false,
     @single_file : Bool = false,
+    @probe_verify : Bool = false,
   )
   end
 end
@@ -214,14 +219,18 @@ pub class Compiler
       puts "[phase] codegen: pass"
       STDOUT.flush
     end
-    # 6. Emit: write native object file
-    File.write("/tmp/whole_prelude.ll", mod.to_s)
-    is_valid, verify_err = mod.verify_safely
-    if !is_valid
-      STDERR.puts "VERIFY FAILED:\n#{verify_err}"
-    else
-      STDERR.puts "VERIFY PASSED"
+
+    if @config.probe_verify
+      is_valid, verify_err = mod.verify_safely
+      if is_valid
+        puts "[verify] pass"
+      else
+        puts "[verify] fail: " + verify_err
+      end
+      STDOUT.flush
+      return CompileResult.new(@config.output_filename, "", resolved_modules)
     end
+    # 6. Emit: write native object file
     obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
     begin
       tm.emit_obj_to_file(mod.to_unsafe, obj_path)

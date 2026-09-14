@@ -126,6 +126,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # the prelude as a single unit, so it sets the same bootstrap cache
     # variable every other selfhost gate does.
     (r"^bench/selfhost_prelude_whole_exercise\.sh$", "the whole-prelude compilation gate"),
+    # The IR validity gate. It asks LLVM whether each module the pure iyi
+    # backend emits verifies, so it sets the same bootstrap cache variable
+    # every other selfhost gate does.
+    (r"^bench/selfhost_ir_valid_exercise\.sh$", "the selfhost IR validity gate"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

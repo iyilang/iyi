@@ -635,6 +635,12 @@ jobs:
         run: bash bench/selfhost_prelude_exercise.sh
       - name: The selfhost whole-prelude compilation phase gate enforces committed floor
         run: bash bench/selfhost_prelude_whole_exercise.sh
+
+      # Object emission accepting a module does not make the module valid.
+      # This holds the line the emit path deliberately does not, and records
+      # concurrency.iyi and the prelude that requires it as known failures.
+      - name: The selfhost IR the backend emits must verify, not merely emit
+        run: bash bench/selfhost_ir_valid_exercise.sh
       # What a kernel thread costs that floor, measured before anything is
       # designed on one (GC_DESIGN.md Stages 4, 7, 8, 9; III.4.7's `Share`):
       # raw `clone`, a `tgkill` stop-the-world, a futex join, and the

@@ -42,6 +42,12 @@
 
 ### Fixed
 
+- **`String#chop` cut a character in half.** `"hé".chop` dropped the last
+  *byte*, and answered `h` plus half of `é` — two bytes that are not a
+  string, which the next `puts` wrote to the terminal as such. It drops
+  the last character now, however many bytes it is, and `\r\n` still goes
+  as one.
+
 - **`std/time` before year 0 was a day off, and its parser took dates that
   do not exist.** `Time.utc(-1, 1, 1)` printed `-0002-12-31`: the civil
   arithmetic is Hinnant's, whose `- 399` makes a truncating division floor

@@ -96,6 +96,11 @@ raise "string: chomp non-suffix" unless "file.tar".chomp(".gz") == "file.tar"
 raise "string: chop crlf" unless "line\r\n".chop == "line"
 raise "string: chop char" unless "word!".chop == "word"
 raise "string: chop empty" unless "".chop == ""
+# The last character, not the last byte: `"hé".chop` answered `h` plus half
+# of `é`, two bytes that are not a string.
+raise "string: chop multibyte" unless "hé".chop == "h"
+raise "string: chop multibyte, three bytes" unless "a✓".chop == "a"
+raise "string: chop keeps the rest intact" unless "✓✓".chop == "✓"
 
 raise "string: ends_with? char true" unless "hello".ends_with?('o')
 raise "string: ends_with? char false" if "hello".ends_with?('h')

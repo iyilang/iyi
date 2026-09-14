@@ -263,7 +263,14 @@ class ::String
     if bytesize >= 2 && to_unsafe[bytesize - 2] == 13_u8 && to_unsafe[bytesize - 1] == 10_u8
       return byte_slice(0, bytesize - 2)
     end
-    byte_slice(0, bytesize - 1)
+    # The last character, not the last byte: `"hé".chop` cut `é` in half
+    # and answered two bytes that are not a string. A character's trailing
+    # bytes are the ones of the form 10xxxxxx; the cut goes before them.
+    cut = bytesize - 1
+    while cut > 0 && (to_unsafe[cut] & 0xC0_u8) == 0x80_u8
+      cut = cut - 1
+    end
+    byte_slice(0, cut)
   end
 
   def ends_with?(char : Char) : Bool

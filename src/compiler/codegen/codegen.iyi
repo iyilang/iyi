@@ -840,6 +840,7 @@ pub class CodeGenVisitor < Visitor
       @context.pointer.null
     end
   end
+
   def to_i64_index(val : LLVMValue) : LLVMValue
     if val.type.pointer?
       @builder.ptr_to_int(val, @context.int64)
@@ -4450,6 +4451,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
 
   compile_declarations_to_module(classes, funs, defs, libs, filename, context, mod, prog, mv, [node] of ASTNode)
 end
+
 def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode)) : Nil
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
@@ -4505,7 +4507,6 @@ def expand_body_nodes(node : ASTNode) : Array(ASTNode)
   end
   res
 end
-
 
 pub def compile_declarations_to_module(
   classes : Array(ClassDef),

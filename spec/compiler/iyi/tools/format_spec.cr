@@ -69,7 +69,11 @@ describe Iyi::Command::FormatCommand do
     format_command.run
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
-    stderr.to_s.should contain("there's a bug formatting 'STDIN', to show more information, please run:\n\n  $ crystal tool format --show-backtrace -")
+    stderr.to_s.should contain("there's a bug formatting 'STDIN', to show more information, please run:")
+    # iyi: the advice names the binary that was run, whatever it was
+    # called - it used to say `crystal tool format`, a command the reader
+    # may not have.
+    stderr.to_s.should contain("#{File.basename(PROGRAM_NAME)} tool format --show-backtrace -")
   end
 
   it "formats stdin (bug + show-backtrace)" do
@@ -82,7 +86,7 @@ describe Iyi::Command::FormatCommand do
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
     stderr.to_s.should contain("format command test")
-    stderr.to_s.should contain("couldn't format 'STDIN', please report a bug including the contents of it: https://github.com/crystal-lang/crystal/issues")
+    stderr.to_s.should contain("couldn't format 'STDIN', please report a bug including the contents of it: https://github.com/iyilang/iyi/issues")
   end
 
   it "formats files" do
@@ -172,7 +176,8 @@ describe Iyi::Command::FormatCommand do
       format_command = BuggyFormatCommand.new([] of String, color: false, stdin: stdin, stdout: stdout, stderr: stderr)
       format_command.run
       format_command.status_code.should eq(1)
-      stderr.to_s.should contain("there's a bug formatting '#{Path[".", "empty.cr"]}', to show more information, please run:\n\n  $ crystal tool format --show-backtrace '#{Path[".", "empty.cr"]}'")
+      stderr.to_s.should contain("there's a bug formatting '#{Path[".", "empty.cr"]}', to show more information, please run:")
+      stderr.to_s.should contain("#{File.basename(PROGRAM_NAME)} tool format --show-backtrace '#{Path[".", "empty.cr"]}'")
     end
   end
 
@@ -188,7 +193,7 @@ describe Iyi::Command::FormatCommand do
       format_command.run
       format_command.status_code.should eq(1)
       stderr.to_s.should contain("format command test")
-      stderr.to_s.should contain("couldn't format '#{Path[".", "empty.cr"]}', please report a bug including the contents of it: https://github.com/crystal-lang/crystal/issues")
+      stderr.to_s.should contain("couldn't format '#{Path[".", "empty.cr"]}', please report a bug including the contents of it: https://github.com/iyilang/iyi/issues")
     end
   end
 
@@ -262,6 +267,23 @@ describe Iyi::Command::FormatCommand do
       format_command.status_code.should eq(1)
       stdout.to_s.should be_empty
       stderr.to_s.should contain("formatting '#{Path[".", "format.cr"]}' produced changes")
+    end
+  end
+
+  # iyi: a path that is not there is the one case where the check is
+  # certainly not being performed, and it used to print that and exit 0 —
+  # so `iyi tool format --check "$FILE" || exit 1` passed on a typo.
+  it "checks a path that is not there (fails)" do
+    stdin = IO::Memory.new ""
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+
+    with_tempdir do
+      format_command = Iyi::Command::FormatCommand.new(["nosuch.iyi"], check: true, color: false, stdin: stdin, stdout: stdout, stderr: stderr)
+      format_command.run
+      format_command.status_code.should eq(1)
+      stdout.to_s.should be_empty
+      stderr.to_s.should contain("file or directory does not exist: #{Path[".", "nosuch.iyi"]}")
     end
   end
 end

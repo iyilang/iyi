@@ -42,6 +42,20 @@
 
 ### Fixed
 
+- **`iyi tool format --check` passed on a path that is not there.** It
+  printed `file or directory does not exist: ./nosuch.iyi` and exited 0,
+  so `iyi tool format --check "$FILE" || exit 1` — the shape every CI
+  line takes — passed on a typo, which is the one case where the check
+  certainly did not run. It is a failure now, with the same sentence.
+
+- **A crash pointed at the wrong project.** The compiler's catch-all
+  said "you've found a bug in the Crystal compiler" with
+  `crystal-lang/crystal/issues`, and the formatter's told the reader to
+  run `crystal tool format --show-backtrace` — a command they may not
+  have, about a repository that does not ship the binary that just
+  crashed on them. Both name this compiler and `iyilang/iyi` now, and
+  the formatter's advice repeats the name the binary was invoked under.
+
 - **A missing prelude was answered with the other language's advice.**
   `IYI_PATH=/nowhere iyi build x.iyi` printed `can't find file
   'iyi/prelude'` and then asked whether the author had run `shards

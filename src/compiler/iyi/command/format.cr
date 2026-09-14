@@ -126,7 +126,12 @@ class Iyi::Command
         filenames = Dir["#{filename}/**/*.cr"] + Dir["#{filename}/**/*.iyi"]
         format_many filenames
       else
+        # iyi: and a failure, which it was not. `--check` printed this and
+        # exited 0, so `iyi tool format --check "$FILE" || exit 1` passed
+        # on a path that does not exist — the one case where the check is
+        # certainly not being performed.
         print_error "file or directory does not exist: #{filename}"
+        @status_code = 1
       end
     end
 
@@ -159,12 +164,16 @@ class Iyi::Command
       print_error "syntax error in '#{filename}:#{ex.line_number}:#{ex.column_number}': #{ex.message}"
       @status_code = 1
     rescue ex
+      # iyi: this fork's tracker and this fork's command name. The advice
+      # was `crystal tool format --show-backtrace`, which is a command the
+      # reader may not have, about a repository that does not ship the
+      # formatter that just failed on them.
       if @show_backtrace
         ex.inspect_with_backtrace @stderr
         @stderr.puts
-        print_error "couldn't format '#{filename}', please report a bug including the contents of it: https://github.com/crystal-lang/crystal/issues"
+        print_error "couldn't format '#{filename}', please report a bug including the contents of it: https://github.com/iyilang/iyi/issues"
       else
-        print_error "there's a bug formatting '#{filename}', to show more information, please run:\n\n  $ crystal tool format --show-backtrace #{@format_stdin ? "-" : "'#{filename}'"}\n"
+        print_error "there's a bug formatting '#{filename}', to show more information, please run:\n\n  $ #{File.basename(PROGRAM_NAME)} tool format --show-backtrace #{@format_stdin ? "-" : "'#{filename}'"}\n"
       end
       @status_code = 1
     end

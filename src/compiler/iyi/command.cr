@@ -293,7 +293,13 @@ class Iyi::Command
     report_warnings
 
     ex.inspect_with_backtrace STDERR
-    abort! "you've found a bug in the Crystal compiler. Please open an issue, including source code that will allow us to reproduce the bug: https://github.com/crystal-lang/crystal/issues", :SOFTWARE_ERROR
+    # iyi: this fork's tracker, not the upstream project's. Whoever ran
+    # this binary cannot tell which half of it crashed, and the half they
+    # can reach is the one that ships it — `iyilang/iyi` carries the
+    # fork's patches and every line of the compiler it built from.
+    abort! "you've found a bug in the #{Command.program_name} compiler. Please open an issue, " \
+           "including the trace above and source code that will allow us to reproduce it: " \
+           "https://github.com/iyilang/iyi/issues", :SOFTWARE_ERROR
   end
 
   private def tool

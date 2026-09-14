@@ -261,6 +261,12 @@ else
   sed -n '1,8p' "$WORK/lost.txt"
   status=1
 fi
+# And the formatter, asked about a file that is not there. It printed
+# "file or directory does not exist" and exited 0, so a CI line that
+# reads `iyi tool format --check "$FILE"` passed on a path with a typo -
+# the one case where the check certainly did not happen.
+refuses "a format check on a path that is not there" "does not exist" -- \
+  "$IYI" tool format --check nosuch.iyi
 
 echo
 echo "== what the other verbs refuse, and what one of them prints"

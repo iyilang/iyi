@@ -1,0 +1,27 @@
+fun sum_up_to(n : Int32) : Int32
+  i = 1
+  s = 0
+  while i <= n
+    s = s &+ i
+    i = i &+ 1
+  end
+  s
+end
+
+fun gcd(a : Int32, b : Int32) : Int32
+  x = a
+  y = b
+  while y != 0
+    q = x.unsafe_div(y)
+    rem = x &- (q &* y)
+    x = y
+    y = rem
+  end
+  x
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  s1 = sum_up_to(10)
+  g = gcd(48, 18)
+  s1 &- g
+end

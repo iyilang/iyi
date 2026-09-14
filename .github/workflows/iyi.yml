@@ -627,6 +627,10 @@ jobs:
         run: bash bench/selfhost_mod_wiring_exercise.sh
       - name: The wired selfhost formatter matches the front end it replaces
         run: bash bench/selfhost_format_wiring_exercise.sh
+      - name: The wired selfhost parser matches the front end it replaces
+        run: bash bench/selfhost_parser_wiring_exercise.sh
+      - name: The selfhost end-to-end compiler compiles whole programs
+        run: bash bench/selfhost_compile_exercise.sh
       # What a kernel thread costs that floor, measured before anything is
       # designed on one (GC_DESIGN.md Stages 4, 7, 8, 9; III.4.7's `Share`):
       # raw `clone`, a `tgkill` stop-the-world, a futex join, and the

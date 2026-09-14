@@ -274,6 +274,8 @@ iyi-mod: $(O)/iyi-mod$(EXE) ## iyi: build the self-hosted artifact inspection to
 iyi-format: $(O)/iyi-format$(EXE) ## iyi: build the self-hosted formatter tool
 .PHONY: iyi-parse
 iyi-parse: $(O)/iyi-parse$(EXE) ## iyi: build the self-hosted parser/syntax check tool
+.PHONY: iyi-compile
+iyi-compile: $(O)/iyi-compile$(EXE) ## iyi: build the self-hosted end-to-end compiler tool
 
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler and manpages)
@@ -558,6 +560,12 @@ $(O)/iyi-format$(EXE): $(O)/iyi$(EXE) src/compiler/tools/format.iyi src/compiler
 $(O)/iyi-parse$(EXE): $(O)/iyi$(EXE) src/compiler/tools/parse.iyi src/compiler/syntax/parser.iyi
 	@mkdir -p $(O)
 	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/parse.iyi
+	@echo "built $@"
+
+# iyi: the self-hosted end-to-end compiler tool, built by iyi from pure iyi source.
+$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) src/compiler/tools/compile.iyi src/compiler/codegen/codegen.iyi
+	@mkdir -p $(O)
+	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/compile.iyi
 	@echo "built $@"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time

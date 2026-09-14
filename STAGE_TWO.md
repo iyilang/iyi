@@ -247,14 +247,28 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   identical exit code (rc=1) and diagnostic messages against the shipped compiler, and two
   guarded mutation proofs catching wrong resolution order and missed imports.
 ### Hole 3: Prelude Self-Compilation Barrier
-* **Status:** Codegen primitives ported for string literals, user-defined generics, and heap layouts; blocked by macro delimiter mode.
-* **Evidence:** `src/compiler/codegen/codegen.iyi` now emits string literals with private constant pools
-  and Crystal's string struct layout, user-defined generic instantiations with monomorphized constructors
-  and methods, and heap layout maps for instance variable offsets across structs and classes, proven by
-  `bench/selfhost_codegen_exercise.sh` (17 fixtures, 105 functions, 16 mutation proofs). Attempting to compile
-  `src/iyi/prelude.iyi` (7,471 lines) now advances past lexical analysis to line 48:1, where it encounters
-  macro delimiter grammar (`{%`), and `src/iyi/array.iyi` (507 lines) compiles through semantic analysis into codegen.
+* **Status:** Measured gate committed in `bench/selfhost_prelude_exercise.sh`. 3 files reach object emission, 1 reaches codegen, 4 reach semantic analysis; remaining files blocked by macro delimiter mode (`{%`, `{{`).
+* **Evidence:** `bench/selfhost_prelude_exercise.sh` drives `.build/iyi-compile` across all 17 prelude files in `src/iyi/*.iyi` (13,949 lines) and enforces a committed per-file phase floor with four guarded mutation proofs.
 
+| File | Lines | Phase Reached | Current Blocker / Status |
+|---|---|---|---|
+| `macros.iyi` | 63 | object | Cleanly compiles to object code |
+| `range.iyi` | 87 | object | Cleanly compiles to object code |
+| `hash.iyi` | 175 | object | Cleanly compiles to object code |
+| `set.iyi` | 68 | codegen | Compiles through LLVM code generation |
+| `array.iyi` | 507 | semantic | Reaches codegen; stops on missing `__crystal_raise` runtime symbol |
+| `number.iyi` | 240 | semantic | Reaches codegen; stops on missing `__crystal_raise` runtime symbol |
+| `float.iyi` | 718 | semantic | Reaches codegen; stops on AST type extraction |
+| `file.iyi` | 65 | semantic | Reaches codegen; stops on missing `__crystal_personality` runtime symbol |
+| `io.iyi` | 421 | none | Advanced past line 170 return block; stops at line 337 on `{%` |
+| `atomic.iyi` | 89 | none | Stops at line 50 on macro delimiter grammar `{%` |
+| `concurrency.iyi` | 1946 | none | Stops at line 59 on macro delimiter grammar `{%` |
+| `enum.iyi` | 161 | none | Stops at line 57 on macro delimiter grammar `{%` |
+| `object.iyi` | 153 | none | Stops at line 10 on macro expression grammar `{{` |
+| `prelude.iyi` | 7471 | none | Stops at line 48 on macro delimiter grammar `{%` |
+| `primitives.iyi` | 260 | none | Stops at line 64 on macro delimiter grammar `{%` |
+| `string.iyi` | 583 | none | Stops at line 36 on macro delimiter grammar `{%` |
+| `thread.iyi` | 942 | none | Stops at line 60 on macro delimiter grammar `{%` |
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.
 * **Evidence:** `src/compiler/semantic/top_level.iyi` and `main_visitor.iyi` invoke the ported

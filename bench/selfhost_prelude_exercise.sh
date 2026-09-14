@@ -35,20 +35,20 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 # 0 = none, 1 = parse, 2 = semantic, 3 = codegen, 4 = object, 5 = link
 file_floor() {
   case "$1" in
-    "array.iyi")       echo "parse" ;;
+    "array.iyi")       echo "semantic" ;;
     "atomic.iyi")      echo "none" ;;
     "concurrency.iyi") echo "none" ;;
     "enum.iyi")         echo "none" ;;
     "file.iyi")        echo "semantic" ;;
-    "float.iyi")       echo "parse" ;;
-    "hash.iyi")        echo "parse" ;;
+    "float.iyi")       echo "semantic" ;;
+    "hash.iyi")        echo "object" ;;
     "io.iyi")          echo "none" ;;
     "macros.iyi")      echo "object" ;;
-    "number.iyi")      echo "parse" ;;
+    "number.iyi")      echo "semantic" ;;
     "object.iyi")      echo "none" ;;
     "prelude.iyi")     echo "none" ;;
     "primitives.iyi")  echo "none" ;;
-    "range.iyi")       echo "none" ;;
+    "range.iyi")       echo "object" ;;
     "set.iyi")         echo "codegen" ;;
     "string.iyi")      echo "none" ;;
     "thread.iyi")      echo "none" ;;
@@ -176,7 +176,17 @@ prove_fails "semantic corruption in set regresses below codegen floor" \
   's/@entries : Hash(T, Bool)/@entries : UndefinedType12345/' \
   "codegen"
 
-echo "  Mutation summary: $mutations_caught/2 regressions caught"
+prove_fails "syntax corruption in hash regresses below object floor" \
+  "hash.iyi" \
+  's/class Hash/class %%%/' \
+  "object"
+
+prove_fails "syntax corruption in range regresses below object floor" \
+  "range.iyi" \
+  's/struct Range/struct %%%/' \
+  "object"
+
+echo "  Mutation summary: $mutations_caught/4 regressions caught"
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -41,7 +41,31 @@ bindings, and the first slice of code generation:
 | `loader.iyi` | 304 | `bench/selfhost_compile_exercise.sh`: multi-file dependency graph and import resolver with IYI_PATH search and cycle detection, two guarded mutation proofs |
 | `compiler.iyi` | 278 | `bench/selfhost_compile_exercise.sh`: top-level compiler pipeline orchestrator (resolve, parse, normalise, semantic, codegen, emit, link), sharing the entry point wrapper with the single-file path, three guarded mutation proofs |
 | `tools/compile.iyi` | 100 | `bench/selfhost_compile_exercise.sh`: 10 fixtures including multi-file import, diamond dependency and top-level statements, 100% execution parity and dependency floor against the shipped compiler, refusal parity on missing imports, seven guarded mutation proofs |
+| `bench/selfhost_prelude_exercise.sh` | - | `bench/selfhost_prelude_exercise.sh`: 17 prelude files (13,949 lines) phase tracking against committed floor (3 to object, 1 to codegen, 4 to semantic), four guarded mutation proofs |
 
+### Prelude Compilation Status (Hole 3)
+
+The prelude compilation gate (`bench/selfhost_prelude_exercise.sh`) tracks the highest compiler phase reached by each of the 17 prelude files in `src/iyi/*.iyi`:
+
+| File | Lines | Phase Reached | Current Blocker / Status |
+|---|---|---|---|
+| `macros.iyi` | 63 | object | Cleanly compiles to object code |
+| `range.iyi` | 87 | object | Cleanly compiles to object code |
+| `hash.iyi` | 175 | object | Cleanly compiles to object code |
+| `set.iyi` | 68 | codegen | Compiles through LLVM code generation |
+| `array.iyi` | 507 | semantic | Reaches codegen; stops on missing `__crystal_raise` runtime symbol |
+| `number.iyi` | 240 | semantic | Reaches codegen; stops on missing `__crystal_raise` runtime symbol |
+| `float.iyi` | 718 | semantic | Reaches codegen; stops on AST type extraction |
+| `file.iyi` | 65 | semantic | Reaches codegen; stops on missing `__crystal_personality` runtime symbol |
+| `io.iyi` | 421 | none | Advanced past line 170 return block; stops at line 337 on `{%` |
+| `atomic.iyi` | 89 | none | Stops at line 50 on macro delimiter grammar `{%` |
+| `concurrency.iyi` | 1946 | none | Stops at line 59 on macro delimiter grammar `{%` |
+| `enum.iyi` | 161 | none | Stops at line 57 on macro delimiter grammar `{%` |
+| `object.iyi` | 153 | none | Stops at line 10 on macro expression grammar `{{` |
+| `prelude.iyi` | 7471 | none | Stops at line 48 on macro delimiter grammar `{%` |
+| `primitives.iyi` | 260 | none | Stops at line 64 on macro delimiter grammar `{%` |
+| `string.iyi` | 583 | none | Stops at line 36 on macro delimiter grammar `{%` |
+| `thread.iyi` | 942 | none | Stops at line 60 on macro delimiter grammar `{%` |
 The bind gate is now a real parity gate against the shipped `Iyi.print_bind`
 over a corpus the shipped tool can analyse. The oracle consumes a semantically
 analysed program. The five original parser fixtures were syntax exercises rather

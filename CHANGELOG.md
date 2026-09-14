@@ -116,11 +116,16 @@
   install` and whether they were "running the compiler in the same
   directory as your shard.yml" — to a program in a language with no
   shards, whose `require` is refused by a rule three lines earlier in the
-  same file. Under iyi's own library the only things that reach that path
-  are the prelude and `std/...`, both files on the search path, so the
-  search path is what it prints: the entries in order, and that
-  unsetting `IYI_PATH` uses the one the compiler was built with.
-  `--crystal` still gets Crystal's advice, which is right there.
+  same file, and whose `import` is a different node resolved elsewhere.
+  What reaches that path is the prelude this compiler injected, and a
+  prelude is a file on the search path, so the search path is what it
+  prints: the entries in order, and that unsetting `IYI_PATH` uses the one
+  the compiler was built with. The note asks for both halves — an injected
+  prelude require *and* a program whose library is iyi's — because each
+  alone names the wrong language: every prelude require carries that flag,
+  Crystal's included, and a bare `Program` carries iyi's library by
+  default, which is what made a `require` written in a `.cr` file answer
+  with iyi's search path instead of Crystal's advice about shards.
 
 - **`-o` with nothing behind it wrote where it liked.** `-o ""` is what a
   shell makes of `-o "$OUT"` with `OUT` unset, and it meant the current

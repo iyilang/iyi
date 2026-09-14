@@ -86,14 +86,21 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         if relative_to
           message += " relative to '#{relative_to}'"
         end
-      elsif @program.iyi_prelude?
+      elsif node.iyi_prelude? && @program.iyi_prelude?
         # iyi: the other language's advice, in iyi's mouth. A program under
         # iyi's library has no shards and no `shard.yml` — `require` is
-        # refused for it a few lines above — so the only things that reach
-        # here are the prelude and `std/...`, and both are files on the
-        # search path. `IYI_PATH=/nowhere iyi build x.iyi` answered "can't
-        # find file 'iyi/prelude'" and then asked whether the author had
-        # run `shards install`.
+        # refused for it a few lines above, and `import` is a different node
+        # that resolves elsewhere — so the file that reaches here is the
+        # prelude this compiler injected, and it is a file on the search
+        # path. `IYI_PATH=/nowhere iyi build x.iyi` answered "can't find
+        # file 'iyi/prelude'" and then asked whether the author had run
+        # `shards install`.
+        #
+        # Both halves of the condition, because each alone names the wrong
+        # language: the node flag marks every injected prelude require,
+        # Crystal's included, and the program flag is on for any `Program`
+        # that was never told which library it has — which is what made a
+        # `require` written in a `.cr` file answer with iyi's search path.
         searched = @program.iyi_path.entries
         notes << String.build do |note|
           note << "This is a file on the search path, not a library name: "

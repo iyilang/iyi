@@ -42,6 +42,26 @@
 
 ### Fixed
 
+- **`rescue` compiled and never ran.** `begin ... rescue ... end` in an
+  iyi file was accepted, and the program died of the panic with `caught`
+  never printed: an error is a value the caller handles (SPEC.md III.1),
+  and a panic unwinds by registry to a task boundary (III.1.4), through
+  no handler on the way. `ensure` was the quieter half of the same lie —
+  it ran on the ordinary exit and not on the panic, which is the half of
+  cleanup that matters, and III.1.4 already says `defer` is the word. Both
+  are refused now in an iyi file under iyi's library, each sentence naming
+  what to write instead; a `.cr` source keeps its exceptions, and so does
+  the handler `defer` itself lowers to.
+
+- **More of Crystal's spellings are answered with iyi's.** `Time.now`
+  said `undefined constant Time` and nothing about `import std/time`;
+  `printf` and `"%d" % 1` said the prelude is small by rule and offered
+  `--crystal`, when `import std/format` is the answer; `exit`, `gets`,
+  `spawn` outside a group, `rand`, `.try` and `Int32::MAX` said "undefined"
+  and stopped. Each names what this language has — `stdin.gets`,
+  `group do |g| g.spawn`, the literal edges, `if x = a[0]?` — or says
+  plainly that it has nothing yet, which is what `rand` gets.
+
 - **`sprintf` printed the shortest digits, not the value's.** `%.0f` of
   1e23 answered `100000000000000000000000` where the double is
   99999999999999991611392; `%.0f` of 2^70, an integer the double holds

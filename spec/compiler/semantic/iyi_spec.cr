@@ -288,6 +288,73 @@ describe "Semantic: iyi" do
         sleep 0.1
         CODE
     end
+
+    it "names std/time for Time" do
+      assert_error "Time.now", "`Time` lives in `std/time`: write `import std/time`"
+    end
+
+    it "names the literal edges for Int32::MAX" do
+      assert_error "Int32::MAX", "There is no `Int32::MAX`: the edges are the literals, 2147483647 and -2147483648"
+    end
+
+    it "says a program has no exit, and what a failure is" do
+      assert_error "exit 1", "There is no `exit`: a program ends when its last line runs, and a failure is a panic"
+    end
+
+    it "names stdin.gets for gets" do
+      assert_error "line = gets", "`stdin.gets` reads a line"
+    end
+
+    it "names std/format for printf and for String#%" do
+      assert_error %(printf("%d", 1)), "come with `import std/format`"
+      assert_error %("%d" % 1), "`%` on a String is a format string, and it comes with `import std/format`"
+    end
+
+    it "keeps the format hint off a remainder" do
+      exception = expect_raises(Iyi::TypeException) do
+        semantic <<-CODE
+          class Foo
+          end
+
+          Foo.new % 2
+          CODE
+      end
+      exception.to_s.should_not contain("format string")
+    end
+
+    it "says there is no try, and what narrows a nil" do
+      assert_error "x = 1 || nil\nx.try { |v| v }", "There is no `try`: narrow the nil first"
+    end
+  end
+
+  # iyi: `rescue` compiled and never ran - a panic unwinds by registry to a
+  # task boundary, through no handler on the way - and `ensure` ran on the
+  # ordinary exit only. Both are refused in an iyi file; a `.cr` file keeps
+  # them, and so does the handler `defer` lowers to (bench/panics.sh runs it).
+  describe "rescue and ensure" do
+    it "refuses a rescue in an iyi file" do
+      assert_error <<-CODE, "iyi has no exceptions to rescue", filename: "prog.iyi"
+        begin
+          1
+        rescue
+          2
+        end
+        CODE
+    end
+
+    it "refuses an ensure in an iyi file, naming defer" do
+      assert_error <<-CODE, "iyi has no `ensure`", filename: "prog.iyi"
+        begin
+          1
+        ensure
+          2
+        end
+        CODE
+    end
+
+    it "keeps a Crystal file's rescue" do
+      assert_type("begin; 1; rescue; 2; end", filename: "prog.cr") { int32 }
+    end
   end
 
   describe "using conflicts (SPEC.md II.3)" do

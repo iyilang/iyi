@@ -2798,8 +2798,15 @@ module Iyi
       ex = ExceptionHandler.new(@body.clone, @rescues.clone, @else.clone, @ensure.clone)
       ex.implicit = implicit
       ex.suffix = suffix
+      ex.iyi_defer = iyi_defer?
       ex
     end
+
+    # iyi: the handler `defer` lowers to (normalizer.cr, `apply_defers`),
+    # which is the one `ensure` an iyi program may carry: a written
+    # `ensure` is refused, because a panic unwinds by registry and skips
+    # it, and this one is the registry's own pop.
+    property? iyi_defer = false
 
     def_equals_and_hash @body, @rescues, @else, @ensure
 

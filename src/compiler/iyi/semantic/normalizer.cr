@@ -125,11 +125,11 @@ module Iyi
         push = Call.global("__iyi_defer_push", proc_literal).at(deferred)
         pop = Call.new(nil, "__iyi_defer_pop_run", global: true).at(deferred)
         head << push
-        head << ExceptionHandler.new(rest, ensure: pop).at(deferred)
+        head << ExceptionHandler.new(rest, ensure: pop).at(deferred).tap(&.iyi_defer=(true))
       else
         # Crystal's prelude has a real unwinder, so the classic shape —
         # the cleanup inline in the `ensure` — already runs on a panic.
-        head << ExceptionHandler.new(rest, ensure: deferred.exp).at(deferred)
+        head << ExceptionHandler.new(rest, ensure: deferred.exp).at(deferred).tap(&.iyi_defer=(true))
       end
       head
     end
@@ -138,7 +138,7 @@ module Iyi
     # say — has nothing after it to defer past, so all that is left of it is
     # the cleanup itself, still guarded so that it runs on an unwind.
     def transform(node : Defer)
-      ExceptionHandler.new(Nop.new, ensure: node.exp.transform(self)).at(node)
+      ExceptionHandler.new(Nop.new, ensure: node.exp.transform(self)).at(node).tap(&.iyi_defer=(true))
     end
 
     # iyi: the typed group — SPEC.md III.4.9.

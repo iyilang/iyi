@@ -3006,6 +3006,28 @@ module Iyi
     end
 
     def visit(node : ExceptionHandler)
+      # iyi: a `rescue` that never runs, and an `ensure` a panic skips.
+      # `begin ... rescue ... end` compiled, and the program died of the
+      # panic with `caught` never printed: an error is a value the caller
+      # handles (SPEC.md III.1), and a panic unwinds by registry to a task
+      # boundary (III.1.4), through no `rescue` on the way. `ensure` ran on
+      # the ordinary exit and not on the panic, which is the half of
+      # cleanup that matters; `defer` runs on both. Refused in an iyi file
+      # under iyi's library, so a habit from the other language is a
+      # sentence rather than a silent nothing. `.cr` sources keep theirs,
+      # and so does the handler `defer` itself lowers to, which is the
+      # registry's pop and carries the flag that says so.
+      if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+        if node.rescues || node.else
+          node.raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
+                     "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
+                     "Return the error, or read the task's `value`"
+        elsif node.ensure
+          node.raise "iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
+                     "Write `defer`, which runs on return, on `!` and on a panic"
+        end
+      end
+
       # Save old vars to know if new variables are declared inside begin/rescue/else
       before_body_vars = @vars.dup
 

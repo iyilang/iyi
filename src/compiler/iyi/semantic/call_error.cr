@@ -96,22 +96,36 @@ module Iyi
   # reported; a name here is one somebody arriving from Crystal writes
   # first, not a list of everything the prelude lacks.
   IYI_ARRIVAL_CONSTANT_HINTS = {
-    "ARGV" => "The arguments are `Program.args`: an `Array(String)` of what followed the program's name.",
-    "ENV"  => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`; there is no map of the whole environment.",
+    "ARGV"       => "The arguments are `Program.args`: an `Array(String)` of what followed the program's name.",
+    "ENV"        => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`; there is no map of the whole environment.",
+    "Time"       => "`Time` lives in `std/time`: write `import std/time` and `using std/time::{Time}`. The clock is `Time.utc`; there is no `Time.now`.",
+    "Int32::MAX" => "There is no `Int32::MAX`: the edges are the literals, 2147483647 and -2147483648, and arithmetic past them panics rather than wrapping.",
+    "Int32::MIN" => "There is no `Int32::MIN`: the edges are the literals, -2147483648 and 2147483647, and arithmetic past them panics rather than wrapping.",
+    "Int64::MAX" => "There is no `Int64::MAX`: the edge is the literal, 9223372036854775807_i64, and arithmetic past it panics rather than wrapping.",
+    "Int64::MIN" => "There is no `Int64::MIN`: the edge is the literal, -9223372036854775808_i64, and arithmetic past it panics rather than wrapping.",
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
     "p"       => "`puts value.inspect` is the spelling here; there is no `p`.",
     "pp"      => "`puts value.inspect` is the spelling here; there is no `pp`.",
     "require" => "iyi has no `require`: a module is reached with `import`, and `--crystal` gives a program Crystal's library.",
+    "exit"    => "There is no `exit`: a program ends when its last line runs, and a failure is a panic - `raise \"why\"`, or `assert` - which exits 1 with the sentence (SPEC.md III.1.4).",
+    "gets"    => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no bare `gets`.",
+    "printf"  => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{printf}`.",
+    "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{sprintf}`.",
+    "rand"    => "There is no random number source in the prelude or in `std` yet.",
+    "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
   }
 
   # A method called on a receiver in Crystal's spelling, and
   # what the prelude has instead; `/` only where the receiver is an
   # integer.
   IYI_ARRIVAL_METHOD_HINTS = {
-    "not_nil" => "There is no `not_nil!`: `!` propagates an error here (SPEC.md III.1.7a). Narrow the nil first (`if x`) or give it an answer (`x || default`).",
-    "/"       => "Integer division is `//` here (`7 // 2` is 3); `/` is the floats' and answers a `Float64` only for them.",
+    "not_nil"     => "There is no `not_nil!`: `!` propagates an error here (SPEC.md III.1.7a). Narrow the nil first (`if x`) or give it an answer (`x || default`).",
+    "try"         => "There is no `try`: narrow the nil first (`if x = a[0]?`) or give it an answer (`x || default`).",
+    "/"           => "Integer division is `//` here (`7 // 2` is 3); `/` is the floats' and answers a `Float64` only for them.",
+    "%"           => "`%` on a String is a format string, and it comes with `import std/format` (`printf`, `sprintf` and `String#%`).",
+    "gets_to_end" => "`read_all` reads the rest of an IO here; `gets` reads a line.",
   }
 
   # A top-level call whose argument arrived in Crystal's unit: the type
@@ -935,7 +949,12 @@ class Iyi::Call
         msg << '\n' << arrival
       end
       if obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
-        msg << '\n' << arrival if def_name != "/" || owner.is_a?(IntegerType)
+        fits = case def_name
+               when "/" then owner.is_a?(IntegerType)
+               when "%" then owner.to_s == "String"
+               else          true
+               end
+        msg << '\n' << arrival if fits
       elsif obj && !similar_name && !participle && iyi_prelude_type?(owner)
         # iyi: a method Crystal's library has and this one does not, on a
         # type the prelude declares, with nothing near it in spelling:

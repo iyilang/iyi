@@ -33,6 +33,10 @@ class Iyi::Command
         USAGE
       exit
     end
-    Lsp::Server.new.run
+    server = Lsp::Server.new
+    server.run
+    # 0 after a `shutdown`, 1 for an `exit` that skipped it, which is the
+    # protocol's own rule and what a client that reads the code expects.
+    exit server.exit_code
   end
 end

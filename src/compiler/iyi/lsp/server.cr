@@ -74,6 +74,13 @@ module Iyi::Lsp
     # server that has agreed to stop, and an empty answer would read as
     # "nothing there" instead.
     @shut_down = false
+    # Set by `initialize`. Before it, the protocol says a request is
+    # answered -32002 and a notification is dropped, `exit` aside.
+    @initialized = false
+    # What the process exits with: the protocol says 0 after a `shutdown`
+    # and 1 for an `exit` that skipped it, and a client that reads the
+    # code is told which conversation it had.
+    getter exit_code = 0
     @analysis = Analysis.new
     # Messages the reader fiber has queued while a compile ran, and the
     # ids the client cancelled. One thread does the work; the queue is
@@ -274,7 +281,12 @@ module Iyi::Lsp
           rescue
             nil
           end
-        return parsed if parsed
+        # JSON, but not a message: `[]` parsed, and `message["method"]?`
+        # on an array raised outside every rescue - one frame took the
+        # server down with a backtrace. The loop reads a message as an
+        # object; anything else is told so with the protocol's code.
+        return parsed if parsed && parsed.as_h?
+        return JSON.parse(%({"method": "$/invalidRequest"})) if parsed
         # Not JSON: the frame is dropped, the session is not — and the
         # client is told, because the request it is waiting on is inside
         # that frame and it would wait forever otherwise. `iyi mcp` has
@@ -335,12 +347,31 @@ module Iyi::Lsp
         return
       end
 
+      # A request with no `method` is not a method that is missing, it is
+      # not a request; it used to get nothing, and the client waited.
+      if method.nil? && id
+        respond_error(id, -32600, "invalid request: no method")
+        return
+      end
+
+      # Before `initialize`, the protocol's word for a request is -32002,
+      # and a notification is dropped; `exit` is the one thing allowed.
+      # A definition asked before the handshake used to be answered as if
+      # the root were the working directory, which it may not be.
+      unless @initialized || method.in?("initialize", "exit", "$/parseError", "$/invalidRequest")
+        respond_error(id, -32002, "the server is not initialized: `initialize` comes first") if id
+        return
+      end
+
       case method
       when "$/parseError"
         # The reader could not parse a frame. The id was inside it, so
         # JSON-RPC's answer carries `null` for one.
         respond_error(nil, -32700, "parse error: the frame's body is not JSON")
+      when "$/invalidRequest"
+        respond_error(nil, -32600, "invalid request: the frame's body is JSON but not an object")
       when "initialize"
+        @initialized = true
         @root = root_of(params)
         @snippets = params.try(&.dig?("capabilities", "textDocument", "completion", "completionItem", "snippetSupport")).try(&.as_bool?) == true
         respond(id.not_nil!) { |json| capabilities(json) }
@@ -350,6 +381,7 @@ module Iyi::Lsp
         @shut_down = true
         respond_null(id.not_nil!)
       when "exit"
+        @exit_code = @shut_down ? 0 : 1
         @running = false
       when "textDocument/didOpen"
         uri = params.not_nil!["textDocument"]["uri"].as_s
@@ -478,8 +510,20 @@ module Iyi::Lsp
           # `params["textDocument"]` on a request that carried none. The
           # JSON library's wording is `Missing hash key: "textDocument"`.
           respond_error(id, -32602, "the request is missing #{ex.message.to_s.sub("Missing hash key: ", "")}")
+        when NilAssertionError
+          # `params.not_nil!` on a request with no `params` at all: it was
+          # answered -32603 "Nil assertion failed", the server's own words
+          # for the client's omission.
+          respond_error(id, -32602, "the request carries no params, and #{method} takes some")
         else
-          respond_error(id, -32603, ex.message.to_s)
+          # The JSON library's "Expected Hash for #[](key : String), not
+          # String" is a request whose params are the wrong shape, which is
+          # the client's -32602 and not this server's -32603.
+          if ex.message.to_s.starts_with?("Expected ")
+            respond_error(id, -32602, "the request's params are not the shape #{method} takes: #{ex.message}")
+          else
+            respond_error(id, -32603, ex.message.to_s)
+          end
         end
       end
     end

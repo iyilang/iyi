@@ -42,6 +42,22 @@
 
 ### Fixed
 
+- **The language server answered a client's mistakes in its own name, and
+  one of them took it down.** A frame whose body is JSON but not an object
+  — `[]` — raised outside every rescue, and the server died with a
+  backtrace on the one thing its value depends on, being there for the
+  next keystroke. A request with no `params` was `-32603 Nil assertion
+  failed` and one whose params were the wrong shape was `-32603` with the
+  JSON library's sentence: the server blaming itself, in its own words,
+  for the client's omission. A request with no `method` got nothing, and
+  the client waited; a request before `initialize` was answered as if the
+  root were the working directory; and `exit` without `shutdown` exited
+  0. Each has the protocol's own code now — `-32600` for a frame that is
+  no request and for a request with no method, `-32602` for params that
+  are missing or misshapen, `-32002` before the handshake, exit 1 for an
+  `exit` that skipped `shutdown` — and the session goes on after every
+  one of them. `bench/lsp_session.py` holds all six.
+
 - **`iyi doc Int32` had no arithmetic in it.** The surface printer left out
   every primitive, on the rule that what the compiler puts on every type
   (`allocate`) is not the program's to call — and `+`, `-`, `*`, `<`, `==`,

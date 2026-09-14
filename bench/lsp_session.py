@@ -55,6 +55,15 @@ class Client:
         self.proc.stdin.write(payload)
         self.proc.stdin.flush()
 
+    def send_raw_request(self, message, request_id):
+        """A message written as given - a shape the client class would
+        not build, for the ones that are wrong on purpose."""
+        body = json.dumps(message).encode()
+        self.proc.stdin.write(
+            b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+        self.proc.stdin.flush()
+        return self.wait_for(lambda m: m.get("id") == request_id)
+
     def request_nowait(self, method, params):
         """A request whose answer is read later — how a cancel gets to
         overtake it."""
@@ -1281,6 +1290,39 @@ def main():
          and "Missing hash key" not in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
 
+    # 52b. The client's other mistakes, each with the protocol's own code:
+    # a request with no params at all was -32603 "Nil assertion failed"
+    # (the server blaming itself for the client's omission), one whose
+    # params are the wrong shape was -32603 with the JSON library's
+    # sentence, and a frame whose body is JSON but not an object - `[]` -
+    # raised outside every rescue and took the server down, backtrace
+    # and all. A request with no method got nothing, and the client
+    # waited for it.
+    reply = c.send_raw_request({"jsonrpc": "2.0", "id": 9001, "method": "textDocument/hover"}, 9001)
+    step("52b", "a request with no params is invalid params, not the server's fault",
+         reply.get("error", {}).get("code") == -32602
+         and "no params" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+    reply = c.send_raw_request({"jsonrpc": "2.0", "id": 9002, "method": "textDocument/hover", "params": "string"}, 9002)
+    step("52c", "params of the wrong shape are invalid params",
+         reply.get("error", {}).get("code") == -32602
+         and "shape" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+    c.raw(b"Content-Length: 2\r\n\r\n[]")
+    reply = c.wait_for(lambda m: m.get("id") is None and "error" in m)
+    step("52d", "a JSON array is an invalid request, and the session goes on",
+         reply.get("error", {}).get("code") == -32600 and c.proc.poll() is None,
+         json.dumps(reply.get("error"))[:80])
+    reply = c.send_raw_request({"jsonrpc": "2.0", "id": 9003}, 9003)
+    step("52e", "a request with no method is an invalid request",
+         reply.get("error", {}).get("code") == -32600,
+         json.dumps(reply.get("error"))[:80])
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+    step("52f", "and the session is still answering after all four",
+         "error" not in reply or reply["error"].get("code") not in (-32603,),
+         json.dumps(reply)[:60])
+
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.
@@ -1292,6 +1334,20 @@ def main():
          json.dumps(reply.get("error"))[:80])
     c.send("exit", {}, wait=False)
     step(54, "shutdown then exit", c.proc.wait(timeout=10) == 0)
+
+    # 55. A fresh server, asked before the handshake and left without one:
+    # a request before `initialize` is -32002 by the protocol's own code
+    # (it used to be answered as if the root were the working directory),
+    # and an `exit` with no `shutdown` before it exits 1, which is how a
+    # client that reads the code learns which conversation it had.
+    d = Client()
+    reply = d.send("textDocument/hover", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+    step(55, "a request before initialize is told so",
+         reply.get("error", {}).get("code") == -32002,
+         json.dumps(reply.get("error"))[:80])
+    d.send("exit", {}, wait=False)
+    step(56, "exit without shutdown exits 1", d.proc.wait(timeout=10) == 1)
 
     print("lsp gate: every step held")
 

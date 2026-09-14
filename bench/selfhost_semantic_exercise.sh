@@ -295,7 +295,7 @@ compare_expr_all() {
   done
   for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     case "$(basename "$err_fixture")" in
-      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*|sem_err_class_nil*)
+      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*|sem_err_class_nil*|sem_err_class_symbol*)
         if "$1" "$err_fixture" --expr >/dev/null 2>&1; then
           out_status=1
         fi
@@ -518,6 +518,16 @@ prove_decl_mutation "predefined struct Nil is marked as class instead of struct"
   "nil_t.struct = true" \
   "nil_t.struct = false"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_decl_mutation "predefined struct Symbol is marked as class instead of struct" \
+  "sym_t.struct = true" \
+  "sym_t.struct = false"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_decl_mutation "predefined Proc type registration is bypassed" \
+  '@types["Proc"] = proc_t' \
+  '# @types["Proc"] = proc_t'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 
 prove_decl_mutation "union type resolution in lookup_type_node is bypassed" \
   "type_merge(types)" \

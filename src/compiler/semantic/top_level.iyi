@@ -6,7 +6,7 @@ import compiler/syntax/visitor
 import compiler/macros/engine
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, Metaclass, ModuleDef, Nop, NumberLiteral, Path, Self, StringLiteral, TraitDef, TypeDeclaration, Union, Var, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, Metaclass, ModuleDef, Nop, NumberLiteral, Path, ProcNotation, Self, StringLiteral, TraitDef, TypeDeclaration, Union, Var, Visibility, VisibilityModifier}
 using compiler/syntax/visitor::{Visitor}
 using compiler/macros/engine::{MacroEngine}
 
@@ -712,6 +712,14 @@ pub class SemanticProgram < NonGenericModuleType
     @types["NoReturn"]
   end
 
+  def proc_type : Type
+    @types["Proc"]
+  end
+
+  def tuple_type : Type
+    @types["Tuple"]
+  end
+
   def type_merge(t1 : Type, t2 : Type) : Type
     return t1 if t1 == t2
 
@@ -884,7 +892,21 @@ pub class SemanticProgram < NonGenericModuleType
     ptr.struct = true
     @types["Pointer"] = ptr
     @types["Error"] = TraitType.new(self, self, "Error")
-    @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
+    proc_t = GenericClassType.new(self, self, "Proc", ["T", "R"], 0, val)
+    proc_t.struct = true
+    @types["Proc"] = proc_t
+    tup = GenericClassType.new(self, self, "Tuple", ["T"], 0, val)
+    tup.struct = true
+    @types["Tuple"] = tup
+    named_tup = GenericClassType.new(self, self, "NamedTuple", ["T"], nil, val)
+    named_tup.struct = true
+    @types["NamedTuple"] = named_tup
+    slice_t = GenericClassType.new(self, self, "Slice", ["T"], nil, st)
+    slice_t.struct = true
+    @types["Slice"] = slice_t
+    range_t = GenericClassType.new(self, self, "Range", ["B", "E"], nil, st)
+    range_t.struct = true
+    @types["Range"] = range_t
     @initial_type_names = @types.keys.to_set
   end
 
@@ -932,6 +954,8 @@ pub class SemanticProgram < NonGenericModuleType
       end
     elsif node.is_a?(Self)
       current_type
+    elsif node.is_a?(ProcNotation)
+      proc_type
     else
       raise("expected type, got #{node.to_s}")
     end
@@ -965,6 +989,8 @@ pub class SemanticProgram < NonGenericModuleType
       end
     elsif node.is_a?(Self)
       current_type
+    elsif node.is_a?(ProcNotation)
+      proc_type
     else
       nil
     end

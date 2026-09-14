@@ -1,0 +1,18 @@
+struct Pointer(T)
+  def is_ptr_marker : Bool
+    true
+  end
+end
+
+class DeferItem
+  @proc : Proc(Nil)
+
+  def initialize(@proc : Proc(Nil))
+  end
+
+  def proc : Proc(Nil)
+    @proc
+  end
+end
+
+x = 1

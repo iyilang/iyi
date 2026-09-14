@@ -42,6 +42,16 @@
 
 ### Fixed
 
+- **`-o` naming the source replaced it with the binary.** `iyi build -o
+  good.iyi good.iyi` — one word, typed twice — read the source, built it
+  and linked the executable over it: the program's only copy was 12 KB of
+  ELF, at exit 0. The compiler checked for this only on the name it
+  derives itself (`build foo` from a `foo` with no extension); a name the
+  author typed was never asked. It is refused before anything runs now,
+  naming the file it would have replaced, and a module the entry imports —
+  the same mistake one step removed — is refused once the build knows what
+  it read, before the first object is written.
+
 - **A permission gate could not fail as root.**
   `bench/verbs_exercise.sh` drove "an output directory that will not take
   the file" at a `chmod 500` directory, and the write bit does not bite for

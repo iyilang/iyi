@@ -2142,6 +2142,18 @@ module Iyi
         end
       {% end %}
 
+      # iyi: the output must not be a file this build read. The command
+      # layer refuses an entry named as its own output before anything
+      # runs; a module the entry imports, or an artifact it compiled
+      # against, is only known now - and linking the program over either
+      # would replace it in silence, which is what `-o good.iyi good.iyi`
+      # did to its source. Before the first object is written.
+      wanted = File.expand_path(output_filename)
+      if read = program.requires.find { |filename| File.expand_path(filename) == wanted }
+        raise Iyi::Error.new("#{Iyi.relative_filename(read)} is a file this build read, and linking the program " \
+                             "over it would replace it. Name the program something else")
+      end
+
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
         program.codegen node, debug: debug, frame_pointers: frame_pointers,
           single_module: @single_module || @cross_compile || !@emit_targets.none?

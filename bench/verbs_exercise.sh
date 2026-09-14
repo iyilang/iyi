@@ -237,6 +237,18 @@ echo "== where a program is written, and where its library is looked for"
 # name nobody typed, or the linker answered "cannot open output file
 # <cwd>: Is a directory" - after a whole compilation had been paid for.
 refuses "an empty -o" "-o takes a path" -- "$IYI" build -o "" good.iyi
+# And `-o` naming the source itself - one word, typed twice. It read the
+# source, built it, and linked the executable over it: the program's only
+# copy was 12 KB of ELF, exit 0. The module a program imports is the same
+# mistake one step removed, refused once the build knows what it read.
+cp good.iyi good.keep
+refuses "an output that is the source" "the source it would build from" -- \
+  "$IYI" build -o good.iyi good.iyi
+cmp -s good.iyi good.keep || { echo "  the refusal came after the source was replaced"; status=1; }
+cp app/lib.iyi lib.keep
+refuses "an output that is an imported module" "a file this build read" -- \
+  "$IYI" build -o app/lib.iyi user.iyi
+cmp -s app/lib.iyi lib.keep || { echo "  the refusal came after the module was replaced"; status=1; }
 mkdir -p "$WORK/readonly"
 chmod 500 "$WORK/readonly"
 # A directory this process cannot write into. `chmod 500` does not bite as

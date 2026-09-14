@@ -889,6 +889,21 @@ class Iyi::Command
       if output_path.extension.empty?
         output_filename += output_extension
       end
+
+      # iyi: and the same question of a name the author typed. The check
+      # above covers only the name the compiler derives itself, so
+      # `-o good.iyi good.iyi` - one word, typed twice - read the source,
+      # built it and linked the executable over it: the program's only
+      # copy was 12 KB of ELF, exit 0. A module the entry imports is the
+      # same mistake one step removed, and is refused once it is known
+      # (`Compiler#codegen`), before anything is written.
+      if !compiler.no_codegen? && !run
+        expanded = File.expand_path(output_filename)
+        if source = sources.find { |candidate| candidate.filename == expanded }
+          abort! "-o #{output_filename} names #{Iyi.relative_filename(source.filename)}, the source it would build from, " \
+                 "and linking there would replace it. Name the program something else", :USAGE_ERROR
+        end
+      end
     end
 
     output_format ||= allowed_formats[0]

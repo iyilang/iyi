@@ -42,6 +42,14 @@
 
 ### Fixed
 
+- **`help nonesuch` said yes.** `iyi help nonesuch` printed the whole usage
+  and exited 0, which reads as "that is a command", and `iyi help build`
+  printed the same page, as if the verb had no help of its own; `iyi
+  version extra` printed the version and dropped the word, the way
+  `clear_cache extra` used to. A verb's help is the verb's now, a word
+  that is no verb is said to be none, and `version` takes no arguments.
+  Under both names.
+
 - **The stack running out is a panic the program prints itself.** An
   infinite recursion faulted on its guard page, and the fault was the
   kernel's to report: `Segmentation fault`, exit 139, or `iyi run`'s guess

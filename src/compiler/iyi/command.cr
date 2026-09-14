@@ -199,9 +199,25 @@ class Iyi::Command
       options.shift
       mod
     when "help".starts_with?(command), "--help" == command, "-h" == command
+      # `iyi help nonesuch` printed the whole usage and exited 0, which reads
+      # as "yes, that is a command"; `iyi help build` did the same, as if
+      # the verb had no help of its own. A verb's help is the verb's, and a
+      # word that is no verb is said to be none.
+      if (verb = options[1]?) && verb != "help"
+        # A verb's own help, through the same door `iyi <verb> --help` uses.
+        known = USAGE.lines.any? { |line| line.starts_with?("    #{verb} ") }
+        abort! "help: there is no `#{verb}` command. Run `#{Command.program_name} help` for what there is", :USAGE_ERROR unless known
+        Command.new([verb, "--help"]).run
+        exit
+      end
       puts USAGE
       exit
     when "version".starts_with?(command), "--version" == command, "-v" == command
+      # `iyi version extra` printed the version and exited 0 with the extra
+      # word dropped, the way `clear_cache extra` used to.
+      if extra = options[1]?
+        abort! "version takes no arguments, and '#{extra}' is one", :USAGE_ERROR
+      end
       puts Iyi::Config.description
       exit
     when File.file?(command)

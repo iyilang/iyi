@@ -122,6 +122,16 @@ cp mods/app/lib.iyimod lib.good
 echo
 echo "== what the command line refuses"
 refuses "an unknown verb" "unknown command" -- "$IYI" frobnicate
+# `help nonesuch` printed the whole usage and exited 0 - "yes, that is a
+# command" - and `help build` did the same, as if the verb had no help of
+# its own. `version extra` dropped the word.
+refuses "help for a verb that is not one" "there is no" -- "$IYI" help nonesuch
+refuses "version with an argument" "takes no arguments" -- "$IYI" version extra
+if "$IYI" help build 2>/dev/null | head -1 | grep -q '^Usage: iyi build'; then
+  echo "  help for a verb is the verb's own"
+else
+  echo "  help for a verb printed the general usage"; status=1
+fi
 # `repl` was a verb for a while: a session on the macro evaluator, which is
 # the other language's compile-time library, so `"ab" * -3` answered
 # "Negative argument" where this compiler says "negative count: -3". One

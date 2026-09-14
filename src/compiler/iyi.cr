@@ -105,9 +105,30 @@ module Iyi
       puts USAGE
       exit
     when "help", "--help", "-h"
+      # `iyi help nonesuch` printed the whole usage and exited 0, which read
+      # as "yes, that is a command", and `iyi help build` did the same as if
+      # the verb had no help of its own. A verb's help is the verb's.
+      if (verb = options[1]?) && verb != "help"
+        case verb
+        when .in?(DELEGATED)
+          Iyi::Command.run([verb, "--help"])
+        when .in?(CRYSTAL_ONLY)
+          STDERR.puts "iyi has no `#{verb}`: it belongs to Crystal, which this compiler is also built on."
+          exit 1
+        else
+          STDERR.puts "iyi help: there is no `#{verb}` command. Run `iyi help` for what there is."
+          exit 1
+        end
+      end
       puts USAGE
       exit
     when "version", "--version", "-v"
+      # `iyi version extra` printed the version and dropped the word, the way
+      # `clear_cache extra` used to.
+      if extra = options[1]?
+        STDERR.puts "iyi version takes no arguments, and '#{extra}' is one."
+        exit 1
+      end
       puts description
       exit
     when .in?(CRYSTAL_ONLY)

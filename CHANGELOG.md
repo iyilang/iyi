@@ -42,6 +42,21 @@
 
 ### Fixed
 
+- **Two wasm jobs went red on a download.** The day github.com answered
+  504 for one release asset for an hour, `curl -sSL | tar` saved the error
+  page as the tarball and the job died of `gzip: stdin: not in gzip
+  format`; in the other job wasmtime's installer failed inside its pipe and
+  the gate reported `wasmtime not found` — two red jobs about a download,
+  on a commit that changed no wasm. `scripts/install-wasm-toolchain.sh`
+  fetches both halves now: it fails on an HTTP error instead of saving it,
+  retries, falls back to the release API's own asset endpoint (which
+  answered 200 on the same day the download URL answered 504 — the script
+  was run against that outage, and installed), checks that what arrived
+  is the archive it claims to be before extracting, and runs each tool once
+  before saying it is installed. Both jobs restore the toolchain from
+  `actions/cache`, keyed by the script that pins the versions, so a
+  fetched toolchain is fetched once.
+
 - **`rescue` compiled and never ran.** `begin ... rescue ... end` in an
   iyi file was accepted, and the program died of the panic with `caught`
   never printed: an error is a value the caller handles (SPEC.md III.1),

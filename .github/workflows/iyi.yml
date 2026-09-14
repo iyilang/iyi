@@ -1391,16 +1391,32 @@ jobs:
           name: iyi-linux-x86_64
           path: dist/
 
-      - name: Install wasi-sdk and wasmtime
+      # The toolchain, out of a cache when there is one. Both halves are
+      # GitHub release assets, and the day github.com answered 504 for one
+      # of them the error page was saved as the tarball and this step died
+      # of "not in gzip format" - a red job about a download, on a commit
+      # that changed no wasm. The installer fails on an HTTP error instead
+      # of saving it, retries, falls back to the release API's asset
+      # endpoint, and checks what arrived before extracting it; the cache
+      # means a fetched toolchain is fetched once per pinned version, the
+      # key being the script that pins them.
+      - name: Restore the wasm toolchain
+        id: wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/wasm-toolchain
+          key: wasm-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-toolchain.sh') }}
+      - name: Install wasi-sdk and wasmtime (cache miss)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-wasm-toolchain.sh "$HOME/wasm-toolchain"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Put the toolchain where the steps below look
         run: |
-          curl -sSL -o /tmp/wasi-sdk.tar.gz \
-            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
-          sudo mkdir -p /opt/wasi-sdk
-          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
-          # Pinned: the installer's "latest" lookup broke on a release
-          # candidate tag once (it read `{` as the version), and a runner
-          # that cannot fetch its runtime is a red job about nothing.
-          curl -sSL https://wasmtime.dev/install.sh | bash -s -- --version v48.0.1
+          sudo ln -sfn "$HOME/wasm-toolchain/wasi-sdk" /opt/wasi-sdk
+          mkdir -p "$HOME/.wasmtime"
+          ln -sfn "$HOME/wasm-toolchain/wasmtime/bin" "$HOME/.wasmtime/bin"
+          "$HOME/.wasmtime/bin/wasmtime" --version
 
       - name: What the module imports
         run: /opt/wasi-sdk/bin/llvm-nm --undefined-only cross/hello-wasi.wasm
@@ -1469,13 +1485,24 @@ jobs:
           name: iyi-linux-x86_64
           path: dist/
 
-      - name: Install wasi-sdk and wasmtime
+      # The same toolchain the wasi-run job restores, for the same reason.
+      - name: Restore the wasm toolchain
+        id: wasm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/wasm-toolchain
+          key: wasm-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-toolchain.sh') }}
+      - name: Install wasi-sdk and wasmtime (cache miss)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-wasm-toolchain.sh "$HOME/wasm-toolchain"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Put the toolchain where the driver looks
         run: |
-          curl -sSL -o /tmp/wasi-sdk.tar.gz \
-            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
-          sudo mkdir -p /opt/wasi-sdk
-          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
-          curl -sSL https://wasmtime.dev/install.sh | bash -s -- --version v48.0.1
+          sudo ln -sfn "$HOME/wasm-toolchain/wasi-sdk" /opt/wasi-sdk
+          mkdir -p "$HOME/.wasmtime"
+          ln -sfn "$HOME/wasm-toolchain/wasmtime/bin" "$HOME/.wasmtime/bin"
+          "$HOME/.wasmtime/bin/wasmtime" --version
 
       - name: The wasm32 collector gate, driver and proofs
         run: |

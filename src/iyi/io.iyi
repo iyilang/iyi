@@ -1,6 +1,6 @@
-# IO: a buffered stream over a file descriptor or handle - the standard
-# streams, open files, pipes and sockets - with one read path and one
-# write path, which is what `puts`, `print` and `File` share.
+# IO: a buffered stream over a descriptor or handle - the standard
+# streams, files, pipes and sockets - one read path and one write path,
+# shared by `puts`, `print` and `File`.
 
 class IyiIO
   @fd : Int64
@@ -63,13 +63,13 @@ class IyiIO
     @eof && @read_pos >= @read_limit
   end
 
-  # A read that failed is not a read that ended: the kernel's error and its
-  # zero looked the same from here, so `File.read` of a directory - EISDIR,
-  # every time - answered "". Kept for the caller, who knows the path.
-  @read_failed = false
-
+  # A failed read is not an ended one: the kernel's error and its zero
+  # looked alike, and `File.read` of a directory answered "". Kept as a
+  # limit of -1, which no read leaves, so a stream keeps the size the
+  # sweep's proofs expect: they corrupt IO objects on purpose and pin
+  # a symptom a word more per stream moves.
   def read_failed? : Bool
-    @read_failed
+    @read_limit < 0
   end
 
   private def fill_buffer : Int32
@@ -79,7 +79,7 @@ class IyiIO
 
     count = low_level_read(@fd, @read_buffer.as(Void*), @read_capacity.to_u64)
     if count <= 0_i64
-      @read_failed = true if count < 0_i64
+      @read_limit = -1 if count < 0_i64
       @eof = true
       return 0
     end

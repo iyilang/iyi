@@ -1,6 +1,6 @@
-# Files, read and written whole through `File.read` and `File.write`, or
-# opened as an `IyiIO` stream through `File.open`. Paths are NUL-terminated
-# at the call, because iyi's String is not; errors panic with the path.
+# Files, read and written whole by `File.read` and `File.write`, or opened
+# as an `IyiIO` stream by `File.open`. Paths get the NUL the kernel wants
+# at the call, as iyi's String has none; errors panic with the path.
 
 class File
   def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096) : IyiIO

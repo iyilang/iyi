@@ -42,6 +42,14 @@
 
 ### Fixed
 
+- **The directory fix moved a symptom the sweep gate pins.** `IyiIO` had
+  grown a word for "the read failed", and `bench/sweep_exercise.sh`'s
+  "sweep frees the live" proof — a patched prelude that frees live
+  objects, expected to die at a named check — died a word later, at a
+  stream, on every platform. The flag lives in the read limit now, as
+  `-1`, which no read leaves: the stream is the size it was, and the
+  proof dies where it did.
+
 - **A typo in an `import` or a `using` was answered with a rule.** `import
   calc/ad` beside `calc/add.iyi` got the sentence about a module's path
   being its file's path, which read as if the rule were the problem; it

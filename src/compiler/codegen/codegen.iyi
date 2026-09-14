@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Annotation, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -778,6 +778,9 @@ pub class CodeGenVisitor < Visitor
     @current_fn = fn
     @current_fun_def = node
 
+    @vars.clear
+    @last = nil
+    @terminated = false
     excluded_names = Set(String).new
     @param_values.clear
     @var_type_names.clear
@@ -2835,6 +2838,8 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
         defs[e.as(Def).name] = e.as(Def)
       elsif e.is_a?(LibDef)
         libs << e.as(LibDef)
+      elsif e.is_a?(Annotation) || e.is_a?(Nop)
+        # ignore annotations and nops
       else
         top_level_stmts << e
       end
@@ -2847,12 +2852,12 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     defs[node.as(Def).name] = node.as(Def)
   elsif node.is_a?(LibDef)
     libs << node.as(LibDef)
-  else
+  elsif !node.is_a?(Annotation) && !node.is_a?(Nop)
     top_level_stmts << node
   end
 
   has_user_main = funs.any? { |f| f.name == "main" }
-  unless has_user_main
+  if !has_user_main && !top_level_stmts.empty?
     crystal_main = FunDef.new(
       "__crystal_main",
       [

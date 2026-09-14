@@ -245,8 +245,8 @@ prove_compile_mutation "corrupt arithmetic operation in test fixture" \
 
 prove_compile_mutation "omitting entry point wrapper for top-level code" \
   "$CODEGEN_SRC" \
-  "unless has_user_main" \
-  "if false && !has_user_main" \
+  "if !has_user_main && !top_level_stmts.empty?" \
+  "if false && !has_user_main && !top_level_stmts.empty?" \
   "$REPO/bench/fixtures/compile_top_level.iyi" \
   42
 

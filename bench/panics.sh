@@ -259,4 +259,37 @@ case "$data" in
 esac
 step "a panic with nowhere to print says so once, on the error stream"
 
+# ── 9. the site is printed when it is the program's, and not when it is
+#      the library's: a `raise` in the program names its line; a panic
+#      the prelude raises names none, and neither does one `std` raises.
+#      `each_slice(0)` printed `at .../src/std/enumerable.iyi:442`, which
+#      is the library's line and not where the bug is - the prelude's
+#      rule, applied to the other half of the library ──────────────────
+cat > "$work/site.iyi" <<'EOF'
+module site
+
+import std/enumerable
+import std/list
+using std/enumerable::{Enumerable}
+using std/list::{List}
+
+three = List(Int32).new([1, 2, 3])
+puts three.each_slice(0).size
+EOF
+run "$work/site.iyi"
+[ "$code" = 1 ] || fail "std panic exit was $code, wanted 1"
+[ "$out" = "iyi: panic: slice size must be positive" ] || fail "a std panic named a library line:
+$out"
+cat > "$work/index.iyi" <<'EOF'
+module index
+
+a = [1, 2, 3]
+i = 5
+puts a[i]
+EOF
+run "$work/index.iyi"
+[ "$out" = "iyi: panic: index 5 out of range for 3 elements" ] || fail "a prelude panic named a library line:
+$out"
+step "a panic the library raises names no library line, prelude or std"
+
 echo "panics gate: every step held"

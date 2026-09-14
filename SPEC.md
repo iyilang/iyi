@@ -2004,8 +2004,9 @@ language already had:
 
 - **A panic prints once, at the site of the bug** - the message, then
   `  at file:line` for a `raise` in the program's own code (a panic the
-  prelude raises, an index out of range, names no prelude line: that is
-  not where the bug is) - **on the error stream, through a write that
+  library raises — an index out of range in the prelude, a zero slice
+  size in `std` — names no library line: that is not where the bug is)
+  - **on the error stream, through a write that
   cannot fail**. Both halves are load-bearing. A panic is not the
   program's output, so `prog > data.json` finds no panic inside the
   JSON; and the print cannot be allowed to panic, because printing

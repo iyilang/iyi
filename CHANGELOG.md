@@ -42,6 +42,15 @@
 
 ### Fixed
 
+- **A panic `std` raised named `std`'s own line.** `each_slice(0)` died
+  with `at …/src/std/enumerable.iyi:442` — the library's line, which is
+  not where the bug is, and III.1.4 already says so for the prelude: a
+  panic the prelude raises prints no line. The rule reads the path, and
+  the path it read was `src/iyi/` alone. It reads `src/std/` too now, so
+  the two halves of the library that ship beside the compiler answer the
+  same way, and a `raise` in the program's own code still names its line.
+  `bench/panics.sh` holds all three.
+
 - **`--use-iyimod` handed an artifact said the artifact was not there.**
   `--use-iyimod mods/app/lib.iyimod` — the file, where its directory goes —
   answered `there is no mods/app/lib.iyimod` about the artifact the author

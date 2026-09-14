@@ -2824,6 +2824,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   funs = [] of FunDef
   defs = Hash(String, Def).new
   libs = [] of LibDef
+  top_level_stmts = [] of ASTNode
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
       if e.is_a?(ClassDef)
@@ -2834,6 +2835,8 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
         defs[e.as(Def).name] = e.as(Def)
       elsif e.is_a?(LibDef)
         libs << e.as(LibDef)
+      else
+        top_level_stmts << e
       end
     end
   elsif node.is_a?(ClassDef)
@@ -2844,8 +2847,36 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     defs[node.as(Def).name] = node.as(Def)
   elsif node.is_a?(LibDef)
     libs << node.as(LibDef)
+  else
+    top_level_stmts << node
   end
 
+  has_user_main = funs.any? { |f| f.name == "main" }
+  unless has_user_main
+    crystal_main = FunDef.new(
+      "__crystal_main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)),
+      ],
+      Path.global("Void"),
+      Expressions.new(top_level_stmts)
+    )
+    main_fun = FunDef.new(
+      "main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)),
+      ],
+      Path.global("Int32"),
+      Expressions.new([
+        Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
+        NumberLiteral.new("0", NumberKind::I32),
+      ] of ASTNode)
+    )
+    funs << crystal_main
+    funs << main_fun
+  end
   # Register funs in program
   funs.each do |fd|
     cloned_args = fd.args.map { |a| a.clone.as(Arg) }

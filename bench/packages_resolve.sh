@@ -198,6 +198,16 @@ grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:";
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
 grep -q 'allocate' prelude-doc.txt && { echo "the compiler's own method leaked into the doc"; exit 1; }
+# The primitives the prelude declares are the type's own surface: `iyi doc
+# Int32` answered with `abs` and `times` and no `+`, no `<`, no `to_i64`,
+# because every primitive was filtered as if it were `allocate`.
+"$IYI" doc Int32 > int-doc.txt 2>&1 || { cat int-doc.txt; exit 1; }
+grep -q '  def +(other : Int32) : self' int-doc.txt || { echo "Int32's + is missing:"; head -20 int-doc.txt; exit 1; }
+grep -q '  def <(other : Int32) : Bool' int-doc.txt || { echo "Int32's < is missing"; exit 1; }
+grep -q '  def to_i64 : Int64' int-doc.txt || { echo "Int32's to_i64 is missing"; exit 1; }
+grep -q '^  def \(allocate\|crystal_type_id\|crystal_instance_type_id\)' int-doc.txt && { echo "the compiler's own method leaked into Int32's doc"; exit 1; }
+"$IYI" doc Proc > proc-doc.txt 2>&1 || { cat proc-doc.txt; exit 1; }
+grep -q '  def call(\*args : \*T) : R' proc-doc.txt || { echo "Proc's call is missing:"; cat proc-doc.txt; exit 1; }
 "$IYI" doc Nope > nope.txt 2>&1 && { echo "an unknown type was documented"; exit 1; }
 grep -q 'the prelude has no type Nope' nope.txt || { echo "the unknown type was not named:"; cat nope.txt; exit 1; }
 "$IYI" doc prelude > index.txt 2>&1 || { cat index.txt; exit 1; }

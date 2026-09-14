@@ -42,6 +42,16 @@
 
 ### Fixed
 
+- **`iyi doc Int32` had no arithmetic in it.** The surface printer left out
+  every primitive, on the rule that what the compiler puts on every type
+  (`allocate`) is not the program's to call — and `+`, `-`, `*`, `<`, `==`,
+  `to_i64` and `to_f64` are primitives too, declared by the prelude's own
+  `primitives.iyi`, so "what can an Int32 do" was answered with `abs`,
+  `times` and `to_s`. A primitive the prelude declares is the type's own
+  surface now, and the rule keeps out what has no line in any file:
+  `Int32` prints its 115 signatures, `Proc` its `call`, and `allocate` and
+  the two type-id hooks of Crystal's runtime ABI stay out.
+
 - **`help nonesuch` said yes.** `iyi help nonesuch` printed the whole usage
   and exited 0, which reads as "that is a command", and `iyi help build`
   printed the same page, as if the verb had no help of its own; `iyi

@@ -101,7 +101,10 @@ class Iyi::Command
   end
 
   private def in_prelude?(location : Location) : Bool
-    filename = location.filename
+    # `original_filename`, because the number primitives are written by a
+    # macro and a def's location is then the expansion's, a virtual file
+    # whose real one is the prelude's.
+    filename = location.original_filename
     filename.is_a?(String) && (filename.includes?("/src/iyi/") || filename.starts_with?("src/iyi/"))
   end
 
@@ -123,8 +126,11 @@ class Iyi::Command
   # String do": the prelude alone through the front end, the type looked
   # up, its public methods written the way `surface` writes a module's -
   # the header, each method's doc comment and signature, `end`. What the
-  # compiler itself puts on every type (`allocate`, the primitives) is
-  # left out, as the artifact leaves it out.
+  # compiler itself puts on every type (`allocate`, which has no line in
+  # any file) is left out, as the artifact leaves it out; a primitive the
+  # prelude *declares* - `Int32#+`, `<`, `to_i64`, `Proc#call` - is the
+  # type's own surface, and leaving it out answered "what can an Int32
+  # do" with `abs` and `times` and no arithmetic.
   private def doc_prelude_type(name : String) : Nil
     program = doc_prelude_program
     type = program.lookup_path(name.split("::"))
@@ -150,9 +156,12 @@ class Iyi::Command
       side.as?(ModuleType).try &.defs.try &.each_value do |items|
         items.each do |item|
           a_def = item.def
-          next if a_def.body.is_a?(Primitive)
+          if a_def.body.is_a?(Primitive)
+            next unless (location = a_def.location) && in_prelude?(location)
+          end
           next if a_def.visibility.private? || a_def.visibility.protected?
-          next if a_def.name == "allocate" || a_def.name == "initialize" || a_def.name.starts_with?("__")
+          # `allocate` is the compiler's; the two type-id hooks are Crystal's runtime ABI, which the prelude implements and no program calls.
+          next if a_def.name.in?("allocate", "initialize", "crystal_type_id", "crystal_instance_type_id", "class_crystal_instance_type_id") || a_def.name.starts_with?("__")
           signatures << IyiMod.signature(a_def, check_block: false)
         end
       end

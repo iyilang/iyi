@@ -24,7 +24,7 @@ import compiler/loader
 import compiler/syntax/token
 
 using compiler/syntax/parser::{Parser}
-using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral}
+using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral, ImportDecl, Require, Call}
 using compiler/syntax/token::{NumberKind}
 using compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
@@ -51,6 +51,7 @@ pub struct CompilerConfig
   property verbose : Bool
   property target_triple : String?
   property probe_phase : Bool
+  property single_file : Bool
 
   def initialize(
     @output_filename : String = "a.out",
@@ -59,6 +60,7 @@ pub struct CompilerConfig
     @verbose : Bool = false,
     @target_triple : String? = nil,
     @probe_phase : Bool = false,
+    @single_file : Bool = false,
   )
   end
 end
@@ -88,7 +90,11 @@ pub class Compiler
   def compile(root_filename : String) : CompileResult
     # 1. Resolve: discover all dependencies, detect cycles, produce topological order
     resolved_modules = begin
-      @loader.resolve(root_filename)
+      if @config.single_file
+        @loader.resolve_single(root_filename)
+      else
+        @loader.resolve(root_filename)
+      end
     rescue ex
       if @config.probe_phase
         puts "parse: fail: #{ex.to_s}"
@@ -137,9 +143,11 @@ pub class Compiler
 
     begin
       tl = TopLevelVisitor.new(prog)
+      tl.declare_types(classes)
       classes.each do |cd|
         cd.accept(tl)
       end
+      tl.finish
 
       mv = MainVisitor.new(prog)
       funs.each do |fd|
@@ -324,7 +332,7 @@ pub class Compiler
     end
   end
 
-  def self.extract_declarations(
+  pub def self.extract_declarations(
     node : ASTNode,
     classes : Array(ClassDef),
     funs : Array(FunDef),
@@ -368,6 +376,10 @@ pub class Compiler
       end
       cdef.body = Expressions.new(body_nodes)
       classes << cdef
+    elsif node.is_a?(ImportDecl) || node.is_a?(Require)
+      # Module loader directives
+    elsif node.is_a?(Call) && node.as(Call).name == "require"
+      # Module loader directives
     elsif !node.is_a?(Annotation) && !node.is_a?(Nop)
       top_level << node
     end

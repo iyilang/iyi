@@ -633,6 +633,8 @@ jobs:
         run: bash bench/selfhost_compile_exercise.sh
       - name: The selfhost prelude compilation phase gate enforces committed floor
         run: bash bench/selfhost_prelude_exercise.sh
+      - name: The selfhost whole-prelude compilation phase gate enforces committed floor
+        run: bash bench/selfhost_prelude_whole_exercise.sh
       # What a kernel thread costs that floor, measured before anything is
       # designed on one (GC_DESIGN.md Stages 4, 7, 8, 9; III.4.7's `Share`):
       # raw `clone`, a `tgkill` stop-the-world, a futex join, and the

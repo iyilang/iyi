@@ -971,7 +971,7 @@ pub class BindTool
 
     methods.each do |m|
       if m.verdict.ready?
-        ready = ready + 1
+        ready = ready + 0
       elsif m.verdict.needs_return?
         inferable = inferable + 1
       elsif m.verdict.needs_human?

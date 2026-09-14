@@ -6,7 +6,7 @@ import compiler/syntax/visitor
 import compiler/macros/engine
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, Metaclass, ModuleDef, Nop, NumberLiteral, Path, ProcNotation, Self, StringLiteral, TraitDef, TypeDeclaration, Union, Var, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, MacroIf, MacroLiteral, Metaclass, ModuleDef, Nop, NumberLiteral, Path, ProcNotation, Self, StringLiteral, TraitDef, TypeDeclaration, Union, Var, Visibility, VisibilityModifier}
 using compiler/syntax/visitor::{Visitor}
 using compiler/macros/engine::{MacroEngine}
 
@@ -1138,6 +1138,7 @@ pub class TopLevelVisitor < Visitor
       arg_type = @program.lookup_type_node(pi.restriction, pi.owner)
       pi.owner.instance_vars[pi.name] = MetaTypeVar.new(pi.name, arg_type)
     end
+    @pending_ivars.clear
   end
 
   def initialize(@program : SemanticProgram)
@@ -1201,7 +1202,32 @@ pub class TopLevelVisitor < Visitor
     {scope, name, type}
   end
 
+  pub def declare_class(node : ClassDef) : Nil
+    scope, name, existing = lookup_type_def(node, node.name)
+    if existing.nil?
+      type : ClassType
+      if tv = node.type_vars
+        type = GenericClassType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericClassType.new(@program, scope, name)
+      end
+      type.abstract = node.abstract
+      type.struct = node.struct
+      if vis = node.visibility
+        type.visibility = vis
+      end
+      scope.add_type(name, type)
+    end
+  end
+
+  pub def declare_types(classes : Array(ClassDef)) : Nil
+    classes.each do |cd|
+      declare_class(cd)
+    end
+  end
+
   def visit(node : ClassDef) : Bool
+
     scope, name, existing = lookup_type_def(node, node.name)
 
     created_new_type = false
@@ -1272,7 +1298,7 @@ pub class TopLevelVisitor < Visitor
       superclass_display = superclass.full_name
     end
 
-    if node.superclass && !created_new_type && type.superclass != superclass
+    if node.superclass && !created_new_type && !type.superclass.nil? && type.superclass != superclass
       sc_str = superclass ? superclass.full_name : "nil"
       type_sc_str = if prev_sc = type.superclass
                       prev_sc.full_name
@@ -1282,7 +1308,7 @@ pub class TopLevelVisitor < Visitor
       raise("superclass mismatch for class #{type.full_name} (#{sc_str} for #{type_sc_str})")
     end
 
-    if created_new_type && superclass
+    if superclass && (created_new_type || type.superclass.nil?)
       sc_cls = superclass.as(ClassType)
       if node.struct != sc_cls.struct?
         raise("can't make #{node.struct ? "struct" : "class"} '#{node.name.names.last}' inherit #{sc_cls.type_desc} '#{sc_cls.full_name}'")
@@ -1291,10 +1317,11 @@ pub class TopLevelVisitor < Visitor
       if sc_cls.struct? && !sc_cls.abstract?
         raise("can't extend non-abstract struct #{sc_cls.full_name}")
       end
+
+      type.set_superclass(superclass, superclass_display)
     end
 
     if created_new_type
-      type.set_superclass(superclass, superclass_display)
       scope.add_type(name, type)
     end
 
@@ -1302,7 +1329,6 @@ pub class TopLevelVisitor < Visitor
     @current_type = type
     node.body.accept(self)
     @current_type = old_type
-
     false
   end
 
@@ -1627,9 +1653,12 @@ pub class TopLevelVisitor < Visitor
       if @current_type.is_a?(SemanticProgram)
         raise("can only declare instance variables of a non-generic class, not a main (<Program>)")
       end
-      decl_type = @program.lookup_type_node(node.declared_type, @current_type)
       ivar_name = node.var.as(InstanceVar).name
-      @current_type.instance_vars[ivar_name] = MetaTypeVar.new(ivar_name, decl_type, node.value)
+      if decl_type = @program.lookup_type_node?(node.declared_type, @current_type)
+        @current_type.instance_vars[ivar_name] = MetaTypeVar.new(ivar_name, decl_type, node.value)
+      else
+        @pending_ivars << PendingIvar.new(@current_type, ivar_name, node.declared_type)
+      end
     elsif node.var.is_a?(ClassVar)
       if @current_type.is_a?(SemanticProgram)
         raise("can't use class variables at the top level")
@@ -1684,6 +1713,14 @@ pub class TopLevelVisitor < Visitor
         return false
       end
     end
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
     false
   end
 end

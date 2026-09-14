@@ -12,7 +12,7 @@ import compiler/syntax/parser
 import compiler/syntax/ast
 
 using compiler/syntax/parser::{Parser}
-using compiler/syntax/ast::{ASTNode, Expressions, ImportDecl}
+using compiler/syntax/ast::{ASTNode, Expressions, ImportDecl, Require, Call, StringLiteral, MacroIf, MacroLiteral}
 
 lib LibC
   fun exit(status : Int32) : NoReturn
@@ -157,6 +157,14 @@ pub class Loader
     end
     result
   end
+  def resolve_single(root_file : String) : Array(ModuleInfo)
+    cleaned_root = Loader.clean_path(root_file)
+    source = File.read(cleaned_root)
+    parser = Parser.new(source, cleaned_root)
+    ast = parser.parse
+    mod_name = module_display_name(cleaned_root)
+    [ModuleInfo.new(mod_name, cleaned_root, source, ast, [] of String)]
+  end
 
   # Collects all top-level ImportDecl nodes from an AST.
   def self.collect_imports(node : ASTNode, into : Array(ImportDecl)) : Nil
@@ -165,6 +173,39 @@ pub class Loader
     elsif node.is_a?(Expressions)
       node.as(Expressions).expressions.each do |e|
         collect_imports(e, into)
+      end
+    end
+  end
+
+  # Collects all import and require dependency paths from an AST.
+  def self.collect_import_paths(node : ASTNode, into : Array(String)) : Nil
+    if node.is_a?(ImportDecl)
+      into << node.as(ImportDecl).path.join("/")
+    elsif node.is_a?(Require)
+      into << node.as(Require).string
+    elsif node.is_a?(Call)
+      call_node = node.as(Call)
+      if call_node.name == "require" && call_node.args.size == 1
+        if call_node.args[0].is_a?(StringLiteral)
+          into << call_node.args[0].as(StringLiteral).value
+        end
+      end
+    elsif node.is_a?(MacroIf)
+      mif = node.as(MacroIf)
+      collect_import_paths(mif.then, into)
+    elsif node.is_a?(MacroLiteral)
+      ml = node.as(MacroLiteral)
+      lines = ml.value.split('\n')
+      lines.each do |line|
+        trimmed = line.strip
+        if trimmed.starts_with?("require \"") && trimmed.ends_with?("\"") && trimmed.size > 10
+          req_path = trimmed[9, trimmed.size - 10]
+          into << req_path
+        end
+      end
+    elsif node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        collect_import_paths(e, into)
       end
     end
   end
@@ -216,14 +257,13 @@ pub class Loader
     parser = Parser.new(source, clean_fn)
     ast = parser.parse
 
-    import_decls = [] of ImportDecl
-    Loader.collect_imports(ast, import_decls)
+    import_paths = [] of String
+    Loader.collect_import_paths(ast, import_paths)
 
     imported_filenames = [] of String
     relative_dir = Loader.dirname(clean_fn)
 
-    import_decls.each do |decl|
-      mod_path = decl.path.join("/")
+    import_paths.each do |mod_path|
       resolved = @iyi_path.find(mod_path, relative_dir, @header_root)
       unless res_fn = resolved
         STDERR.puts "Error: can't find module '#{mod_path}'. A module's path is its file's path, so this one is `#{mod_path}.iyi`, resolved from the directory of the file being built and then from `IYI_PATH`"

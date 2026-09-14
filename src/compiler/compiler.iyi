@@ -22,10 +22,14 @@ import compiler/platform/target
 import compiler/platform/linker
 import compiler/loader
 import compiler/syntax/token
+import compiler/macros/interpreter
+import compiler/macros/methods
 
 using compiler/syntax/parser::{Parser}
-using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, ModuleDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral, ImportDecl, Require, Call}
 using compiler/syntax/token::{NumberKind}
+using compiler/syntax/ast::{ASTNode, Annotation, Nop, Expressions, ClassDef, ModuleDef, FunDef, Def, LibDef, Arg, EnumDef, Assign, Path, NumberLiteral, ImportDecl, Require, Call, VisibilityModifier, MacroIf, MacroFor, MacroExpression, Alias, ImplDef}
+using compiler/macros/interpreter::{MacroInterpreter}
+using compiler/macros/methods::{MacroMethods}
 using compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
 using compiler/semantic/main_visitor::{MainVisitor}
@@ -104,7 +108,6 @@ pub class Compiler
         raise ex.to_s
       end
     end
-
     if @config.probe_phase
       puts "[phase] parse: pass"
       STDOUT.flush
@@ -212,6 +215,13 @@ pub class Compiler
       STDOUT.flush
     end
     # 6. Emit: write native object file
+    File.write("/tmp/whole_prelude.ll", mod.to_s)
+    is_valid, verify_err = mod.verify_safely
+    if !is_valid
+      STDERR.puts "VERIFY FAILED:\n#{verify_err}"
+    else
+      STDERR.puts "VERIFY PASSED"
+    end
     obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
     begin
       tm.emit_obj_to_file(mod.to_unsafe, obj_path)
@@ -382,6 +392,16 @@ pub class Compiler
       end
       cdef.body = Expressions.new(body_nodes)
       classes << cdef
+    elsif node.is_a?(VisibilityModifier)
+      extract_declarations(node.as(VisibilityModifier).exp, classes, funs, defs, libs, top_level)
+    elsif node.is_a?(MacroIf)
+      mif = node.as(MacroIf)
+      interp = MacroInterpreter.new
+      cond_val = interp.evaluate(mif.cond)
+      branch = MacroMethods.truthy?(cond_val) ? mif.then : mif.else
+      extract_declarations(branch, classes, funs, defs, libs, top_level)
+    elsif node.is_a?(Alias) || node.is_a?(ImplDef) || node.is_a?(MacroFor) || node.is_a?(MacroExpression)
+      # Declarations or compile-time constructs, not top-level runtime code
     elsif node.is_a?(ImportDecl) || node.is_a?(Require)
       # Module loader directives
     elsif node.is_a?(Call) && node.as(Call).name == "require"

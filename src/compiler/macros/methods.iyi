@@ -19,6 +19,17 @@ pub class MacroMethods
     end
   end
 
+  def self.has_flag?(name : String) : Bool
+    case name
+    when "darwin", "macos", "aarch64", "arm64", "unix", "posix", "64"
+      true
+    when "linux", "win32", "windows", "x86_64", "wasm32", "wasi", "gc_none", "gc_boehm", "arm", "i386"
+      false
+    else
+      false
+    end
+  end
+
   def self.to_macro_id(node : ASTNode) : String
     if node.is_a?(MacroId)
       node.as(MacroId).value
@@ -200,6 +211,9 @@ pub class MacroMethods
       when "raise"
         msg = args.size > 0 ? to_macro_id(args[0]) : "macro raise"
         raise msg
+      when "flag?"
+        flag_name = args.size > 0 ? to_macro_id(args[0]).lstrip(':') : ""
+        return BoolLiteral.new(has_flag?(flag_name))
       else
         return Nop.new
       end

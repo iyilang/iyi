@@ -295,7 +295,7 @@ compare_expr_all() {
   done
   for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     case "$(basename "$err_fixture")" in
-      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*)
+      sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*|sem_err_class_nil*)
         if "$1" "$err_fixture" --expr >/dev/null 2>&1; then
           out_status=1
         fi
@@ -404,7 +404,7 @@ PY
     return
   fi
   if "$IYI" build -o "$WORK/mut-exercise" "$REPO/bench/selfhost_semantic_exercise.iyi" >/dev/null 2>&1; then
-    if compare_all "$WORK/mut-exercise"; then
+    if compare_all "$WORK/mut-exercise" && compare_expr_all "$WORK/mut-exercise"; then
       echo "    FAILED: the comparison still passed with the mutation applied"
       status=1
     else
@@ -512,6 +512,16 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_decl_mutation "method visibility defaults to private instead of public" \
   "node.visibility = Visibility::Public" \
   "node.visibility = Visibility::Private"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_decl_mutation "predefined struct Nil is marked as class instead of struct" \
+  "nil_t.struct = true" \
+  "nil_t.struct = false"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_decl_mutation "union type resolution in lookup_type_node is bypassed" \
+  "type_merge(types)" \
+  "types.first"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_main_mutation "literal I32 kind defaults to int64" \

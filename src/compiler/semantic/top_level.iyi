@@ -6,7 +6,7 @@ import compiler/syntax/visitor
 import compiler/macros/engine
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, ModuleDef, Nop, NumberLiteral, Path, StringLiteral, TraitDef, TypeDeclaration, Var, Visibility, VisibilityModifier}
+using compiler/syntax/ast::{ASTNode, Alias, Arg, Assign, Call, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, Generic, ImplDef, Include, InstanceVar, Macro, Metaclass, ModuleDef, Nop, NumberLiteral, Path, Self, StringLiteral, TraitDef, TypeDeclaration, Union, Var, Visibility, VisibilityModifier}
 using compiler/syntax/visitor::{Visitor}
 using compiler/macros/engine::{MacroEngine}
 
@@ -849,10 +849,20 @@ pub class SemanticProgram < NonGenericModuleType
     bool_t = NonGenericClassType.new(self, self, "Bool", val)
     bool_t.struct = true
     @types["Bool"] = bool_t
-    @types["Nil"] = NonGenericClassType.new(self, self, "Nil", val)
-    @types["Symbol"] = NonGenericClassType.new(self, self, "Symbol", val)
+    nil_t = NonGenericClassType.new(self, self, "Nil", val)
+    nil_t.struct = true
+    @types["Nil"] = nil_t
+
+    sym_t = NonGenericClassType.new(self, self, "Symbol", val)
+    sym_t.struct = true
+    @types["Symbol"] = sym_t
+
     @types["String"] = NonGenericClassType.new(self, self, "String", ref)
-    @types["Void"] = NonGenericClassType.new(self, self, "Void", val)
+
+    void_t = NonGenericClassType.new(self, self, "Void", val)
+    void_t.struct = true
+    @types["Void"] = void_t
+
     @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
 
     st = NonGenericClassType.new(self, self, "Struct", val)
@@ -863,13 +873,16 @@ pub class SemanticProgram < NonGenericModuleType
 
     en = NonGenericClassType.new(self, self, "Enum", val)
     en.abstract = true
+    en.struct = true
     @enum_type = en
     @types["Enum"] = en
 
     @types["Class"] = NonGenericClassType.new(self, self, "Class", val)
     @types["Array"] = GenericClassType.new(self, self, "Array", ["T"], nil, ref)
     @types["Hash"] = GenericClassType.new(self, self, "Hash", ["K", "V"], nil, ref)
-    @types["Pointer"] = GenericClassType.new(self, self, "Pointer", ["T"], nil, st)
+    ptr = GenericClassType.new(self, self, "Pointer", ["T"], nil, st)
+    ptr.struct = true
+    @types["Pointer"] = ptr
     @types["Error"] = TraitType.new(self, self, "Error")
     @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
     @initial_type_names = @types.keys.to_set
@@ -905,6 +918,20 @@ pub class SemanticProgram < NonGenericModuleType
       g = node.as(Generic)
       base_type = lookup_type_node(g.name, current_type)
       base_type
+    elsif node.is_a?(Union)
+      u = node.as(Union)
+      types = u.types.map { |t| lookup_type_node(t, current_type) }
+      type_merge(types)
+    elsif node.is_a?(Metaclass)
+      m = node.as(Metaclass)
+      base = lookup_type_node(m.name, current_type)
+      if base.is_a?(ModuleType)
+        base.as(ModuleType).metaclass
+      else
+        raise("#{base.full_name} doesn't have a metaclass")
+      end
+    elsif node.is_a?(Self)
+      current_type
     else
       raise("expected type, got #{node.to_s}")
     end
@@ -916,6 +943,28 @@ pub class SemanticProgram < NonGenericModuleType
     elsif node.is_a?(Generic)
       g = node.as(Generic)
       lookup_type_node?(g.name, current_type)
+    elsif node.is_a?(Union)
+      u = node.as(Union)
+      resolved = [] of Type
+      u.types.each do |subnode|
+        t = lookup_type_node?(subnode, current_type)
+        return nil if t.nil?
+        resolved << t
+      end
+      type_merge(resolved)
+    elsif node.is_a?(Metaclass)
+      m = node.as(Metaclass)
+      if base = lookup_type_node?(m.name, current_type)
+        if base.is_a?(ModuleType)
+          base.as(ModuleType).metaclass
+        else
+          nil
+        end
+      else
+        nil
+      end
+    elsif node.is_a?(Self)
+      current_type
     else
       nil
     end

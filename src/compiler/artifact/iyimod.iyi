@@ -606,7 +606,7 @@ end
 
 pub class IyiMod
   MAGIC               = "IYIMOD\0\0"
-  FORMAT_VERSION      = 51_u32
+  FORMAT_VERSION      = 50_u32
   TOP_LEVEL_CONTAINER = "::"
   MACRO_HOOKS         = ["included", "extended", "inherited", "method_added", "finished"]
 

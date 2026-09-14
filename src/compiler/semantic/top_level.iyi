@@ -1227,7 +1227,6 @@ pub class TopLevelVisitor < Visitor
   end
 
   def visit(node : ClassDef) : Bool
-
     scope, name, existing = lookup_type_def(node, node.name)
 
     created_new_type = false

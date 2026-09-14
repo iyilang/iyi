@@ -1898,6 +1898,7 @@ pub class CodeGenVisitor < Visitor
 
     def initialize(@has_break : Bool = false)
     end
+
     def visit(node : Break) : Bool
       @has_break = true
       false
@@ -1951,6 +1952,7 @@ pub class CodeGenVisitor < Visitor
     @last = @context.void.undef
     false
   end
+
   def visit(node : Break) : Bool
     if exit_bb = @loop_exit_blocks.last?
       @builder.br(exit_bb)

@@ -157,6 +157,7 @@ pub class Loader
     end
     result
   end
+
   def resolve_single(root_file : String) : Array(ModuleInfo)
     cleaned_root = Loader.clean_path(root_file)
     source = File.read(cleaned_root)

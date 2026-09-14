@@ -268,6 +268,33 @@ fi
 refuses "a format check on a path that is not there" "does not exist" -- \
   "$IYI" tool format --check nosuch.iyi
 
+# The cache, which is the one thing here a build trusts without asking.
+# `IYI_CACHE_DIR` pointed at something that cannot be a directory was
+# skipped in silence - it is the first of a list of candidates, and the
+# list falls through - so the build wrote its megabytes into
+# `~/.cache/iyi`, which is the whole thing the variable was set to stop.
+refuses "a cache directory that cannot be one" "IYI_CACHE_DIR is" -- \
+  env IYI_CACHE_DIR="$WORK/good.iyi" "$IYI" build -o cached good.iyi
+# And an empty one, which is what a shell makes of `IYI_CACHE_DIR="$DIR"`
+# with `DIR` unset: `File.expand_path("")` is the working directory, so a
+# build dropped its `.bc` and `.o` files, its linker probe and its link
+# templates beside the source - and `clear_cache`, which is `rm -rf` on
+# that answer, deleted the project. The file left in the directory below
+# is what says so: it was gone, at exit 0.
+refuses "an empty cache directory, building" 'IYI_CACHE_DIR is "" and that names no' -- \
+  env IYI_CACHE_DIR="" "$IYI" build -o cached good.iyi
+mkdir -p "$WORK/keep"
+printf 'notes\n' > "$WORK/keep/NOTES.md"
+cd "$WORK/keep"
+refuses "an empty cache directory, clearing" 'IYI_CACHE_DIR is "" and that names no' -- \
+  env IYI_CACHE_DIR="" "$IYI" clear_cache
+cd "$WORK"
+if [ -f "$WORK/keep/NOTES.md" ]; then
+  echo "  clear_cache left the working directory where it stood"
+else
+  echo "  clear_cache deleted the working directory it was run in"
+  status=1
+fi
 echo
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,

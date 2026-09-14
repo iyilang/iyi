@@ -72,6 +72,20 @@ module Iyi
       dir = @dir
       return dir if dir
 
+      # iyi: a blank one names no directory. `IYI_CACHE_DIR=""` is what a
+      # shell makes of `IYI_CACHE_DIR="$DIR"` with `DIR` unset, and
+      # `File.expand_path("")` is the working directory — so a build wrote
+      # its `.bc` and `.o` files, its linker probe and its link templates
+      # beside the source under names nobody typed, and `clear_cache`,
+      # which is `rm -rf` on this answer, took the whole project with it:
+      # sources, notes and all, exit 0. The same shell accident as `-o ""`,
+      # and the same answer. Quoted in the message because the value is
+      # what is wrong with it and an unquoted one prints as nothing.
+      if (named = Config.env("CACHE_DIR")) && named.blank?
+        raise Iyi::Error.new("#{cache_dir_variable} is #{named.inspect} and that names no directory. " \
+                             "Point it at one, or unset it for #{Iyi::Command.program_name}'s own")
+      end
+
       # Try to use one of these as a cache directory, in order
       candidates = {% begin %}
         [
@@ -94,10 +108,20 @@ module Iyi
         .uniq!
 
       # Return the first one for which we could create a directory
-      candidates.each do |candidate|
+      candidates.each_with_index do |candidate, index|
         Dir.mkdir_p(candidate)
         return @dir = candidate
       rescue File::Error
+        # iyi: unless it is the one the author named. The list below it
+        # is defaults, and falling through defaults is what a default is
+        # for; `IYI_CACHE_DIR` is an instruction. Pointed at a path that
+        # cannot be a directory it was skipped in silence, and the build
+        # went on writing megabytes into `~/.cache/iyi` — which is the
+        # whole thing the variable was set to stop.
+        if index.zero? && Config.env("CACHE_DIR")
+          raise Iyi::Error.new("#{cache_dir_variable} is #{candidate} and that cannot be a directory. " \
+                               "Point it somewhere writable, or unset it for #{Iyi::Command.program_name}'s own")
+        end
         # Try next one
       end
 
@@ -117,6 +141,14 @@ module Iyi
 
       puts msg
       exit 1
+    end
+
+    # Which of the two names above the author actually set: a sentence
+    # about `IYI_CACHE_DIR` read by somebody who set `CRYSTAL_CACHE_DIR`
+    # names a variable they do not have, and this compiler answers under
+    # both names (see `Config.env`).
+    private def cache_dir_variable : String
+      ENV["IYI_CACHE_DIR"]? ? "IYI_CACHE_DIR" : "CRYSTAL_CACHE_DIR"
     end
 
     private def cleanup_dirs(entries)

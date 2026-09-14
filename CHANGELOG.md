@@ -42,6 +42,28 @@
 
 ### Fixed
 
+- **`iyi clear_cache` deleted the project.** `IYI_CACHE_DIR=""` is what a
+  shell makes of `IYI_CACHE_DIR="$DIR"` with `DIR` unset, and
+  `File.expand_path("")` is the working directory: a build dropped its
+  `.bc` and `.o` files, its linker probe and its link templates beside the
+  source under names nobody typed, and `clear_cache` — which is `rm -rf`
+  on that answer — took the directory it was run in, sources and notes and
+  all, at exit 0. The same shell accident as `-o ""` further down this
+  list, and the same answer: a blank one names no directory, so it is
+  refused before anything is written or removed.
+
+- **A cache directory that cannot be one was skipped in silence.**
+  `IYI_CACHE_DIR` is the first of a list of candidates and the list falls
+  through, so pointing it at a file, or at a directory with no write bit,
+  meant the build went on and wrote its megabytes into `~/.cache/iyi` —
+  which is the whole thing the variable was set to stop. The defaults
+  below it still fall through, because falling through defaults is what a
+  default is for; a path the author named is an instruction, and a refusal
+  names it. Both of these refusals spell the variable the author actually set:
+  `CRYSTAL_CACHE_DIR` reads the same (`Config.env`), and a sentence about
+  `IYI_CACHE_DIR` to somebody who set the other one names a variable they
+  do not have.
+
 - **`iyi tool format --check` passed on a path that is not there.** It
   printed `file or directory does not exist: ./nosuch.iyi` and exited 0,
   so `iyi tool format --check "$FILE" || exit 1` — the shape every CI

@@ -176,7 +176,7 @@ module CompileTool
     output_bin : String,
     emit_obj_only : Bool,
     obj_file_override : String?,
-    verbose : Bool
+    verbose : Bool,
   ) : Nil
     ctx = Context.new
     mod_name = module_name_from_path(filename)

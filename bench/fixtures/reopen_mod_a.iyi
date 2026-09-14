@@ -1,0 +1,5 @@
+class ReopenedService
+  def part1 : Int32
+    10
+  end
+end

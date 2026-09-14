@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Annotation, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Break, Call, Cast, CharLiteral, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, Next, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Annotation, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Break, Call, Cast, CharLiteral, ClassDef, ClassVar, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, Next, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -100,6 +100,7 @@ pub class CustomTypeInfo
   property max_type_id : Int32
   property generic_name : String?
   property constants : Hash(String, ASTNode)
+  property class_vars : Hash(String, String)
 
   def initialize(@name : String, @is_struct : Bool)
     if CodeGenVisitor.primitive_type_name?(@name)
@@ -116,6 +117,7 @@ pub class CustomTypeInfo
     @max_type_id = 0
     @generic_name = nil
     @constants = Hash(String, ASTNode).new
+    @class_vars = Hash(String, String).new
   end
 
   def add_field(fname : String, ftype : String) : Nil
@@ -380,6 +382,9 @@ pub class CodeGenVisitor < Visitor
   property proc_counts : Hash(String, Int32)
   property filename : String
   property strings : Hash(String, LLVMValue)
+  property constants : Hash(String, ASTNode)
+  property class_var_globals : Hash(String, LLVMValue)
+  property class_var_types : Hash(String, String)
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -414,6 +419,9 @@ pub class CodeGenVisitor < Visitor
     @proc_counts = Hash(String, Int32).new
     @filename = ""
     @strings = Hash(String, LLVMValue).new
+    @constants = Hash(String, ASTNode).new
+    @class_var_globals = Hash(String, LLVMValue).new
+    @class_var_types = Hash(String, String).new
     @loop_exit_blocks = [] of LLVMBasicBlock
     @loop_continue_blocks = [] of LLVMBasicBlock
   end
@@ -704,6 +712,19 @@ pub class CodeGenVisitor < Visitor
     else
       raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
       @mod.add_function("__crystal_raise", raise_fn_ty)
+    end
+  end
+
+  def nil_type : LLVMType
+    @llvm_struct_types["Nil"]? || @context.struct([] of LLVMType)
+  end
+
+  def llvm_return_type_from_name(name : String) : LLVMType
+    clean_name = name.starts_with?("::") ? name[2, name.size - 2] : name
+    if clean_name == "Void" || clean_name == "Nil" || clean_name == "NoReturn"
+      @context.void
+    else
+      llvm_type_from_name(name)
     end
   end
 
@@ -1371,6 +1392,49 @@ pub class CodeGenVisitor < Visitor
         setter_call = Call.new(c_obj, "#{call.name}=", [node.value] of ASTNode)
         setter_call.accept(self)
       end
+    elsif node.target.is_a?(ClassVar)
+      cvar_name = node.target.as(ClassVar).name
+      node.value.accept(self)
+      if val = @last
+        g = if ctype = @current_self_type
+              @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+            else
+              @class_var_globals[cvar_name]?
+            end
+        unless g
+          cg_name = if ctype = @current_self_type
+                      "#{ctype}:#{cvar_name}"
+                    else
+                      cvar_name
+                    end
+          lt = val.type
+          g = @mod.add_global(cg_name, lt)
+          g.initializer = lt.null
+          g.linkage = LibLLVM::Linkage::Internal
+          @class_var_globals[cvar_name] = g
+          @class_var_globals[cg_name] = g
+        end
+        lt = g.type
+        val_to_store = if lt.int? && val.type.int?
+                         if val.type.int_width > lt.int_width
+                           @builder.trunc(val, lt)
+                         elsif val.type.int_width < lt.int_width
+                           @builder.zext(val, lt)
+                         else
+                           val
+                         end
+                       elsif lt.pointer? && val.type.int?
+                         @builder.int_to_ptr(val, lt)
+                       elsif lt.int? && val.type.pointer?
+                         @builder.ptr_to_int(val, lt)
+                       else
+                         val
+                       end
+        s_inst = @builder.store(val_to_store, g)
+        s_inst.alignment = 8
+        @last = val
+      end
+      @terminated = false
     end
     @needs_value = old_needs
     false
@@ -1397,8 +1461,45 @@ pub class CodeGenVisitor < Visitor
     false
   end
 
+  def visit(node : ClassVar) : Bool
+    cvar_name = node.name
+    g = if ctype = @current_self_type
+          @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+        else
+          @class_var_globals[cvar_name]?
+        end
+    if g
+      tname = if ctype = @current_self_type
+                @class_var_types["#{ctype}:#{cvar_name}"]? || @class_var_types[cvar_name]? || "Int32"
+              else
+                @class_var_types[cvar_name]? || "Int32"
+              end
+      lt = llvm_type_from_name(tname)
+      l_inst = @builder.load(lt, g, "")
+      l_inst.alignment = 8
+      @last = l_inst
+    else
+      @last = @context.pointer.null
+    end
+    @terminated = false
+    false
+  end
+
   def visit(node : PointerOf) : Bool
     exp = node.exp
+    if exp.is_a?(ClassVar)
+      cvar_name = exp.as(ClassVar).name
+      g = if ctype = @current_self_type
+            @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+          else
+            @class_var_globals[cvar_name]?
+          end
+      if g
+        @last = g
+        @terminated = false
+        return false
+      end
+    end
     vname = if exp.is_a?(Var)
               exp.as(Var).name
             elsif exp.is_a?(Call)
@@ -1456,6 +1557,19 @@ pub class CodeGenVisitor < Visitor
         const_node.accept(self)
         return false
       end
+    end
+    if pname.includes?("::")
+      parts = pname.split("::")
+      if parts.size == 2
+        if (ci = @custom_types[parts[0]]?) && (cn = ci.constants[parts[1]]?)
+          cn.accept(self)
+          return false
+        end
+      end
+    end
+    if const_node = @constants[pname]?
+      const_node.accept(self)
+      return false
     end
     @custom_types.each_value do |info|
       if const_node = info.constants[pname]?
@@ -3507,7 +3621,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         end
       end
       ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
-      m_ret_ty = cg.llvm_type_from_name(ret_tname)
+      m_ret_ty = cg.llvm_return_type_from_name(ret_tname)
       m_fn_ty = LLVMType.function(m_arg_tys, m_ret_ty, false)
 
       arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
@@ -3897,7 +4011,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         end
       end
       ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
-      m_ret_ty = cg.llvm_type_from_name(ret_tname)
+      m_ret_ty = cg.llvm_return_type_from_name(ret_tname)
       m_fn_ty = LLVMType.function(m_arg_tys, m_ret_ty, false)
 
       arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
@@ -4201,6 +4315,17 @@ pub def compile_declarations_to_module(
     end
   end
 
+  # Collect top-level constants
+  roots.each do |r|
+    exps = r.is_a?(Expressions) ? r.as(Expressions).expressions : [r] of ASTNode
+    exps.each do |e|
+      if e.is_a?(Assign) && e.as(Assign).target.is_a?(Path)
+        assign = e.as(Assign)
+        cg.constants[assign.target.as(Path).to_s] = assign.value
+      end
+    end
+  end
+
   # Process custom types (structs and classes)
   generic_templates = Hash(String, ClassDef).new
   classes.each do |cd|
@@ -4209,9 +4334,15 @@ pub def compile_declarations_to_module(
       generic_templates[cname] = cd
       next
     end
-    info = CustomTypeInfo.new(cname, cd.struct)
+    info = if existing = cg.custom_types[cname]?
+             existing
+           else
+             c_info = CustomTypeInfo.new(cname, cd.struct)
+             cg.custom_types[cname] = c_info
+             c_info
+           end
     if sc = cd.superclass
-      info.superclass_name = sc.to_s
+      info.superclass_name ||= sc.to_s
     end
 
     # Process body
@@ -4260,11 +4391,13 @@ pub def compile_declarations_to_module(
           if assign.target.is_a?(Path)
             const_name = assign.target.as(Path).to_s
             info.constants[const_name] = assign.value
+            info.constants["#{cname}::#{const_name}"] = assign.value
+            cg.constants[const_name] = assign.value
+            cg.constants["#{cname}::#{const_name}"] = assign.value
           end
         end
       end
     end
-    cg.custom_types[cname] = info
   end
 
   # Instantiate generic types used in the module

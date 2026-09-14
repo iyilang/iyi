@@ -290,9 +290,14 @@ prove_cg_mutation "corrupt multiplication opcode to addition" "cg_int_arith.iyi"
   '@last = is_float ? @builder.fadd(lhs, rhs) : @builder.add(lhs, rhs)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
+# The IR normaliser rewrites every type_id value to <ID>, so no mutation of
+# the value can ever be observed here, and renaming the global is masked by
+# lazy sites that create a correctly named one on demand. This anchors on the
+# global's constness, which the comparison does see: `internal constant`
+# becomes `internal global`.
 prove_cg_mutation "corrupt module-level class type_id global" "cg_classes.iyi" \
-  'tid_global = mod.add_global("#{info.name}:type_id", context.int32)' \
-  'tid_global = mod.add_global("#{info.name}:corrupted_type_id", context.int32)'
+  'tid_global.global_constant = true' \
+  'tid_global.global_constant = false'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_cg_mutation "corrupt virtual hierarchy match range predicate" "cg_virtual_dispatch.iyi" \
   'sge = builder.icmp(LibLLVM::IntPredicate::SGE, arg0, min_val)' \

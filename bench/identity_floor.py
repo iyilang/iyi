@@ -122,6 +122,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # The self-hosting prelude compilation phase gate. It verifies prelude
     # compilation phases reached by the pure iyi compiler against the committed floor.
     (r"^bench/selfhost_prelude_exercise\.sh$", "the selfhost prelude compilation phase gate"),
+    # The whole-prelude compilation gate. It drives the pure iyi compiler over
+    # the prelude as a single unit, so it sets the same bootstrap cache
+    # variable every other selfhost gate does.
+    (r"^bench/selfhost_prelude_whole_exercise\.sh$", "the whole-prelude compilation gate"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

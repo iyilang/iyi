@@ -272,16 +272,16 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 |---|---|---|---|
 | `array.iyi` | 507 | object | object |
 | `atomic.iyi` | 89 | link | link |
-| `concurrency.iyi` | 1946 | codegen | codegen |
+| `concurrency.iyi` | 1946 | object | object |
 | `enum.iyi` | 161 | link | link |
 | `file.iyi` | 65 | object | object |
-| `float.iyi` | 718 | codegen | codegen |
+| `float.iyi` | 718 | object | object |
 | `hash.iyi` | 175 | link | link |
 | `io.iyi` | 421 | object | object |
 | `macros.iyi` | 63 | link | link |
 | `number.iyi` | 240 | object | object |
 | `object.iyi` | 153 | object | object |
-| `prelude.iyi` | 7471 | object | object |
+| `prelude.iyi` | 7471 | link | link |
 | `primitives.iyi` | 260 | link | link |
 | `range.iyi` | 87 | link | link |
 | `set.iyi` | 68 | link | link |
@@ -289,21 +289,39 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 | `thread.iyi` | 942 | link | link |
 
   Phase summary: 17/17 prelude files match or exceed committed floor (0 regressions).
-  Seven files link. Fifteen of seventeen reach object emission or better, and the two
-  that do not (`concurrency.iyi`, `float.iyi`) reach codegen.
+  Every file now reaches object emission or better, and seven link, including
+  `prelude.iyi` itself: 7,471 lines compiled and linked into a binary that carries
+  only `libSystem`. The nine that stop at object are blocked on `__crystal_raise`,
+  which is a runtime function that does not exist yet rather than a compiler defect,
+  and linking any external runtime to satisfy it would break the objective.
 
-  **`prelude.iyi` compiles to object code.** All 7,471 lines parse, pass semantic
-  analysis and emit a native object file. It does not link, because a declaration-only
-  file has no entry point of its own; the shipped compiler links such a file by
-  synthesising one, which the ported pipeline now does too, and a linked prelude
-  binary carries only `libSystem`.
+  **`prelude.iyi` links.** All 7,471 lines parse, pass semantic analysis, emit a
+  native object file, and link into a binary carrying only `libSystem`. A
+  declaration-only file has no entry point of its own; the shipped compiler links
+  such a file by synthesising one, verified by compiling `set.iyi` with both
+  compilers and confirming each produces a binary.
 
-* **Known gap, recorded rather than hidden:** five files that emit object code
-  successfully produce IR that `LLVMVerifyModule` rejects. This was found when a
-  debug `mod.verify` left in the emit path demoted them from object to codegen. The
-  verify call is not in the shipped emit path and was removed, but the underlying
-  invalid IR is real and unfixed. Object emission accepting it does not make it
-  correct, and it is likely to surface as a miscompile before it surfaces as an error.
+* **Whole-prelude compilation.** Every measurement above compiles one file at a
+  time. `bench/selfhost_prelude_whole_exercise.sh` compiles the prelude as a single
+  unit instead, which is the real precursor to stage one. The loader previously
+  ignored `require` entirely and handled only `import`, so per-file measurement was
+  silently compiling each file without its dependencies; it now resolves requires
+  recursively, including inside top-level macro blocks, and pulls all 17 modules
+  into one unit. That unit reaches codegen and stops in object emission.
+
+* **Known gap, recorded rather than hidden:** the IR the backend emits does not
+  always verify. `bench/selfhost_ir_valid_exercise.sh` on branch
+  `selfhost/ir-valid` measures it: 16 of 17 prelude modules and all 18 codegen
+  fixtures verify, with `concurrency.iyi` failing on
+  `Incorrect number of arguments passed to called function`. That branch is not
+  merged yet. Object emission accepting a module does not make the module valid,
+  and invalid IR is likely to surface as a miscompile before it surfaces as an
+  error.
+
+* **What the gate cannot see:** the IR comparison normalises every type_id value
+  to `<ID>`, so no mutation of a type_id value is observable through it. A proof
+  anchored there patches real code and detects nothing. The type_id proof is
+  anchored on the global's constness instead, which the comparison does see.
 
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.

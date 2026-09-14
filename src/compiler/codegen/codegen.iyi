@@ -4423,7 +4423,12 @@ pub def compile_declarations_to_module(
     st.struct_set_body(elem_types)
     cg.llvm_struct_types[info.name] = st
 
-    unless info.is_struct || info.name == "String"
+    # An empty class with no fields and no methods is never allocated and
+    # never dispatched on, and the shipped backend emits no type_id global
+    # for it. The lazy sites below still create one on demand if some
+    # construct turns out to need it.
+    is_empty_shell = info.field_order.empty? && info.methods.empty?
+    unless info.is_struct || info.name == "String" || is_empty_shell
       # Add type_id constant global
       tid_global = mod.add_global("#{info.name}:type_id", context.int32)
       tid_global.initializer = context.int32.const_int(info.type_id)

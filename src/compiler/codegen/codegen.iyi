@@ -3050,7 +3050,18 @@ pub class CodeGenVisitor < Visitor
                   cur_def_bb = fn.append_basic_block("current_def")
                   next_def_bb = fn.append_basic_block("next_def")
 
-                  sub_tid_global = @mod.get_global("#{sub_name}:type_id")
+                  # Create on demand rather than requiring it: the eager loop
+                  # skips a class with no fields and no methods, and such a
+                  # class can still be a dispatch target.
+                  sub_tid_global = if g = @mod.get_global?("#{sub_name}:type_id")
+                                     g
+                                   else
+                                     g2 = @mod.add_global("#{sub_name}:type_id", @context.int32)
+                                     g2.initializer = @context.int32.const_int(sub_info.type_id)
+                                     g2.global_constant = true
+                                     g2.linkage = LibLLVM::Linkage::Internal
+                                     g2
+                                   end
                   sub_tid_val = @builder.load(@context.int32, sub_tid_global)
                   sub_tid_val.alignment = 4
 

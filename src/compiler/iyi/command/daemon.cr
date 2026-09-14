@@ -165,11 +165,27 @@ class Iyi::Command
     options.each_with_index do |opt, i|
       if opt == "--socket"
         path = options[i + 1]?
+        # The flag's value, not the flag after it, and not silence: with
+        # nothing behind it `--socket` fell through to the default path,
+        # so `iyi daemon build --socket` talked to a daemon the author had
+        # not named. `--out`, `--mods`, `--lib` and `--affected` refuse the
+        # same mistake in the same words.
+        if path.nil?
+          abort! "--socket takes a path", :USAGE_ERROR
+        elsif path.starts_with?('-')
+          abort! "--socket takes a path, and #{path} is a flag", :USAGE_ERROR
+        end
         options.delete_at(i, 2)
         break
       end
     end
     path ||= File.join(CacheDir.instance.dir, "daemon.sock")
+
+    # A unix socket is neither of these, and "no daemon listening" about a
+    # directory names the wrong thing: nothing could ever listen there.
+    if Dir.exists?(path)
+      abort! "#{path} is a directory, not a socket", :USAGE_ERROR
+    end
 
     daemon_refuse_long_socket(path)
     path
@@ -179,9 +195,21 @@ class Iyi::Command
   # `daemon start` that never opens the socket itself: it execs the server
   # binary with these arguments, so taking the flag out here would hand the
   # server a default path and listen somewhere the user did not ask for.
+  # The `--socket` value as typed, before the server binary is executed:
+  # whatever is wrong with it is wrong on this side of the exec too, and
+  # the far side reports it as a failure to start a daemon.
   private def daemon_socket_option : String?
     options.each_with_index do |opt, i|
-      return options[i + 1]? if opt == "--socket"
+      next unless opt == "--socket"
+      path = options[i + 1]?
+      if path.nil?
+        abort! "--socket takes a path", :USAGE_ERROR
+      elsif path.starts_with?('-')
+        abort! "--socket takes a path, and #{path} is a flag", :USAGE_ERROR
+      elsif Dir.exists?(path)
+        abort! "#{path} is a directory, not a socket", :USAGE_ERROR
+      end
+      return path
     end
     nil
   end
@@ -217,6 +245,32 @@ class Iyi::Command
 
       path = daemon_socket_path
       Dir.mkdir_p(File.dirname(path))
+
+      # `File.delete?` takes the path from whoever holds it, and it used to
+      # run unconditionally: a second `daemon start` on a live socket
+      # unlinked the first daemon's address and listened on a new one with
+      # the same name. The first daemon went on running — a warm prelude
+      # and a compiler, holding a socket with no name, that no client could
+      # ever reach again and nothing would ever reap.
+      #
+      # Connecting is the only way to ask a unix socket whether anyone is
+      # home. A connection that says nothing is not an error on the other
+      # side (see `daemon_accept`), so this costs the incumbent one accept
+      # and no log line.
+      if File.exists?(path)
+        live = begin
+          UNIXSocket.new(path).close
+          true
+        rescue Socket::Error
+          false
+        end
+
+        if live
+          abort! "a daemon is already listening on #{path}. " \
+                 "Build against it, or give this one its own `--socket`", :FAILURE
+        end
+      end
+
       File.delete?(path)
       server = UNIXServer.new(path)
 
@@ -359,9 +413,43 @@ class Iyi::Command
     private def daemon_accept(server, identity : String, builds : Array(DaemonBuild), &refresh) : Nil
       client = server.accept
 
-      request = daemon_read_request(client)
-      cwd = request["cwd"].as_s
-      args = request["args"].as_a.map(&.as_s)
+      # One client's mistake is one client's mistake. Every read below can
+      # fail on something the daemon does not control — a client killed
+      # mid-frame is `End of file reached`, a length header that does not
+      # match the body is the same, a body that is not JSON is a
+      # `JSON::ParseException`, a request without `cwd` is a `KeyError` —
+      # and none of it was caught, so the exception left `daemon_loop`,
+      # left `main`, and took the daemon down with the analysed prelude
+      # every other client was waiting on. Ctrl-C during a build did it.
+      # So did one connection from anything that probes ports.
+      request = begin
+        daemon_read_request(client)
+      rescue ex : IO::Error | JSON::ParseException | Socket::Error
+        # Not `daemon_refuse`: a client that could not finish a frame is
+        # usually gone, and writing to it raises in turn.
+        STDERR.puts "#{Command.program_name} daemon: a client sent no usable request (#{ex.message}); still listening"
+        STDERR.flush
+        client.close rescue nil
+        return
+      end
+
+      # Connected and said nothing: `daemon start` asking whether this
+      # socket has an incumbent, or a client that was interrupted before it
+      # wrote its first byte. Neither is worth a line in the log.
+      if request.nil?
+        client.close rescue nil
+        return
+      end
+
+      cwd = request["cwd"]?.try(&.as_s?)
+      args = request["args"]?.try(&.as_a?).try(&.map(&.as_s?))
+      if cwd.nil? || args.nil? || args.any?(&.nil?)
+        daemon_refuse(client, "That is not a build request: a daemon takes " \
+                              "{\"cwd\": <path>, \"args\": [<argument>...]}.")
+        client.close rescue nil
+        return
+      end
+      args = args.map(&.not_nil!)
 
       # A daemon holds an analysed prelude *and* the compiler that analysed it.
       # Rebuild the compiler and it would keep serving builds from the old one,
@@ -517,6 +605,12 @@ class Iyi::Command
     "#{info.size}:#{info.modification_time.to_unix_ns}"
   end
 
+  # Writes a refusal and the exit frame. Every byte goes to a socket the
+  # daemon does not own the far end of, so all of it is `rescue`d: a client
+  # that hung up between its request and this answer is EPIPE, and EPIPE
+  # reaching `Command#run` means `::exit 0` — the `mod dump | head` rule,
+  # correct for a command writing to a pipe and fatal for a server writing
+  # to one of its clients. The daemon exited 0, quietly, mid-refusal.
   private def daemon_refuse(client, message : String) : Nil
     message.each_line do |line|
       daemon_frame(client, DAEMON_FRAME_STDERR, "#{line}\n".to_slice)
@@ -524,10 +618,31 @@ class Iyi::Command
     client.write_byte(DAEMON_FRAME_EXIT)
     client.write_bytes(1, IO::ByteFormat::LittleEndian)
     client.flush
+  rescue IO::Error | Socket::Error
+    # Nothing left to tell it. The daemon goes on serving everyone else.
   end
 
-  private def daemon_read_request(client) : JSON::Any
-    size = client.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+  # A build request is a command line and a directory. The largest one this
+  # compiler can be handed is bounded by `ARG_MAX`, two megabytes on Linux
+  # and one on macOS, so eight is past anything real and small enough that
+  # a client claiming it costs the daemon nothing to find out. Without a
+  # bound, `Bytes.new(size)` on a 4 GB header was an `OverflowError` out of
+  # the accept loop, which killed the daemon — the same fault as a
+  # truncated frame, arriving through the allocator.
+  DAEMON_MAX_REQUEST = 8 * 1024 * 1024
+
+  # Nil when the client closed before its first byte, which is a question
+  # ("is anyone listening here?") rather than a malformed request.
+  private def daemon_read_request(client) : JSON::Any?
+    header = Bytes.new(4)
+    first = client.read(header)
+    return nil if first.zero?
+    client.read_fully(header[first, 4 - first]) if first < 4
+
+    size = IO::ByteFormat::LittleEndian.decode(UInt32, header)
+    if size > DAEMON_MAX_REQUEST
+      raise IO::Error.new("a request of #{size} bytes, past the #{DAEMON_MAX_REQUEST} a build request can be")
+    end
     bytes = Bytes.new(size)
     client.read_fully(bytes)
     JSON.parse(String.new(bytes))
@@ -544,6 +659,15 @@ class Iyi::Command
       if fallback
         STDERR.puts "#{Command.program_name}: daemon at #{path} did not answer, building without it"
         return
+      end
+      # A path that is there but is not a socket is a different mistake
+      # from an absent daemon, and it has a different remedy: a daemon
+      # that was killed leaves its socket file behind, and starting a new
+      # one on the same path answers "Address already in use" until the
+      # stale file goes.
+      if (info = File.info?(path)) && !info.type.socket?
+        abort! "#{path} is a file, not a socket: nothing can listen there. " \
+               "Remove it, or pass a `--socket` that is one", :FAILURE
       end
       abort! "no daemon listening on #{path} (start one with `#{Command.program_name} daemon start`)", :FAILURE
     end

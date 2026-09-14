@@ -206,6 +206,29 @@ refuses "a socket path past the kernel's limit, building" "the socket path is" -
   "$IYI" daemon build --socket "$long" -o d1 good.iyi
 refuses "no daemon on a socket that is there to take" "no daemon listening on" -- \
   "$IYI" daemon build --socket "$WORK/absent.sock" -o d2 good.iyi
+# A flag with nothing behind it used to fall through to the default
+# socket, so `iyi daemon build --socket` talked to whatever daemon was
+# running in ~/.cache rather than the one the author meant to name. The
+# three shapes below are the ones a shell produces: no value, the next
+# flag read as a value, and a directory.
+refuses "a --socket with no path, building" "--socket takes a path" -- \
+  "$IYI" daemon build --socket
+refuses "a --socket with no path, starting" "--socket takes a path" -- \
+  "$IYI" daemon start --socket
+refuses "the next flag read as a socket path" "is a flag" -- \
+  "$IYI" daemon build --socket -o d3 good.iyi
+mkdir -p "$WORK/sockdir"
+refuses "a directory named as a socket, building" "is a directory, not a socket" -- \
+  "$IYI" daemon build --socket "$WORK/sockdir" -o d4 good.iyi
+refuses "a directory named as a socket, starting" "is a directory, not a socket" -- \
+  "$IYI" daemon start --socket "$WORK/sockdir"
+# A daemon that was killed leaves its socket file behind. "no daemon
+# listening" is true and useless: a new daemon on that path answers
+# "Address already in use" until the file goes, so the file is the thing
+# to say.
+: > "$WORK/stale.sock"
+refuses "a stale socket file left by a dead daemon" "is a file, not a socket" -- \
+  "$IYI" daemon build --socket "$WORK/stale.sock" -o d5 good.iyi
 
 echo
 echo "== what the other verbs refuse, and what one of them prints"

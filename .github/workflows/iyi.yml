@@ -178,9 +178,11 @@ jobs:
       - run: chmod +x .build/crystal
 
       # Built here so that what runs the samples is the binary a person
-      # downloads, not the compiler under its Crystal name.
-      - name: Build `iyi`
-        run: make -o .build/crystal iyi
+      # downloads, not the compiler under its Crystal name. The daemon's
+      # server binary comes with it: `daemon start` execs it, so the
+      # protocol gate below has nothing to start without it.
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
 
       # Each sample documents a part of the design, so a sample that stops
       # running is a part of the design that stopped working.
@@ -339,6 +341,19 @@ jobs:
       # a recording of that crash.
       - name: What the verbs say when they refuse
         run: bash bench/verbs_exercise.sh
+
+      # And what it does when the client is not a client. Every frame in
+      # this gate used to kill the daemon outright, the analysed prelude
+      # with it: a connection that closes before it speaks (Ctrl-C during
+      # a build), a length header with nothing behind it, a body that is
+      # not JSON, a 4 GB header through the allocator, a request with no
+      # `cwd`, and a refusal written to a client that had already hung up
+      # - EPIPE, which `Command#run` answers with `::exit 0`, so the
+      # daemon exited *successfully* mid-sentence. A second `daemon start`
+      # on a live socket unlinked the first daemon's address and left it
+      # running behind a socket with no name.
+      - name: One client's mistake is one client's mistake
+        run: python3 bench/daemon_protocol.py
 
       # Three gates that existed, passed on the machine that wrote them, and
       # were named in this file by nothing: `format_exercise` (seven proofs
@@ -1101,6 +1116,12 @@ jobs:
 
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
+
+      # The same protocol edges on BSD sockets, where a peer that hangs
+      # up mid-frame surfaces differently from Linux and the EPIPE path
+      # that used to exit the daemon 0 is exactly the same code.
+      - name: One client's mistake is one client's mistake
+        run: python3 bench/daemon_protocol.py
 
       - name: Samples, from artifacts (R-1)
         run: bash bench/samples_roundtrip.sh

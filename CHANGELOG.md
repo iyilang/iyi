@@ -42,6 +42,56 @@
 
 ### Fixed
 
+- **Any malformed frame killed the build daemon.** `daemon_accept` read
+  its request with no rescue, so anything a client could do wrong went
+  wrong all the way out of the accept loop and took the daemon down with
+  the analysed prelude that is the entire reason to run one. Connecting
+  and closing without speaking — `iyi daemon build` under Ctrl-C, or
+  anything that probes a socket — was `Error: End of file reached`,
+  exit 1. A length header with nothing behind it, the same. A body that
+  is not JSON was a `JSON::ParseException` with a stack trace; a 4 GB
+  length header was `Bytes.new(4294967295)` and an `OverflowError`
+  through the allocator; a request without `cwd` was `Missing hash key`.
+  Worst of the set: a refusal written to a client that had already hung
+  up is EPIPE, and EPIPE reaching `Command#run` means `::exit 0` — the
+  `mod dump | head` rule, right for a command writing to a pipe and
+  fatal for a server writing to one of its clients. The daemon exited
+  *successfully*, mid-sentence, and the next build said "no daemon
+  listening". One client's mistake is one client's mistake now: the
+  frame reader has a bound (8 MB, past `ARG_MAX` on both platforms), a
+  request that is not a build request is refused in a sentence, a client
+  that hangs up costs one log line, and a connection that says nothing
+  costs none — `daemon start` asks that way. Nine cases in
+  `bench/daemon_protocol.py`, on Linux and on macOS.
+
+- **A second `iyi daemon start` stole the first one's socket.**
+  `File.delete?(path)` ran unconditionally before `UNIXServer.new`, so
+  the incumbent's address was unlinked and a new daemon listened on a new
+  socket with the same name. The first kept running: a compiler and a
+  warm prelude behind a socket with no name, unreachable by any client
+  and never reaped. It refuses now, naming the path, and a stale socket
+  file left by a killed daemon is still taken over — the difference is
+  whether anyone answers on it.
+
+- **`--socket` with nothing behind it used the default.** `iyi daemon
+  build --socket` talked to whatever daemon was running in `~/.cache`,
+  and `--socket -o out.bin` read the next flag as a path. Both are
+  refused by name, as `--out`, `--mods`, `--lib` and `--affected`
+  already were. A directory named as a socket answered "no daemon
+  listening on <dir>", which is true and points at the wrong thing —
+  nothing can ever listen there — and a stale socket *file* got the same
+  sentence, though its remedy is to remove the file. Both say what they
+  are now.
+
+- **`iyi test --affected` turned its discount off in silence.** A changed
+  file that no longer exists cannot be proven untouched by anything, so
+  the flag correctly falls back to running everything — but it did so
+  without a word, and a mistyped path produced a full run that reads
+  exactly like a selective one. It names the file now, in text and as
+  `affected_not_found` in `--json`. `--affected .` took a directory and
+  did the same thing; `iyi test --nonesuch .` reported a flag as a
+  missing path. Both refuse by name. Two steps in `bench/test_verb.sh`.
+
 - **The language server answered "nothing" where the protocol has a
   word.** Five edges, each probed against a running server. An unknown
   method came back `result: null`, which a client cannot tell from "there

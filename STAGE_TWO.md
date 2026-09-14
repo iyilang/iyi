@@ -173,12 +173,13 @@ counts, what each produces and consumes, and the gate output proving parity:
 * **Crystal equivalent:** `src/compiler/iyi/codegen/*.cr` (15,000+ lines).
 * **Produces:** Native object files (`.o`) containing machine code and LLVM IR modules.
 * **Consumed by:** Linker.
-* **Gate proof:** `bench/selfhost_codegen_exercise.sh` proves 17/17 fixtures match 100%
-  (105 functions) in LLVM IR against Crystal, and emitted object files pass C driver execution 100%.
+* **Gate proof:** `bench/selfhost_codegen_exercise.sh` proves 18/18 fixtures match 100%
+  (108 functions) in LLVM IR against Crystal, and emitted object files pass C driver execution 100%.
 * **Completeness:** Emits functions, structs, struct methods, classes, constructors, instance
   variables, virtual hierarchy dispatch, pointers, exception landing pads, string literals
-  with constant pool reuse, user-defined generic class and struct instantiations, and heap layout
-  maps. Does not emit top-level statements outside functions or runtime garbage collection interface.
+  with constant pool reuse, user-defined generic class and struct instantiations, heap layout
+  maps, and runtime symbol declarations (__crystal_raise, __crystal_personality, __crystal_get_exception).
+  Does not emit top-level statements outside functions or runtime garbage collection interface.
 
 ### Layer 8: Platform Support and Linker
 * **Files:** `src/compiler/platform/target.iyi` (260 lines), `flags.iyi` (184 lines),
@@ -247,14 +248,15 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   identical exit code (rc=1) and diagnostic messages against the shipped compiler, and two
   guarded mutation proofs catching wrong resolution order and missed imports.
 ### Hole 3: Prelude Self-Compilation Barrier
-* **Status:** Codegen primitives ported for string literals, user-defined generics, and heap layouts; blocked by macro delimiter mode.
+* **Status:** Codegen primitives ported for string literals, user-defined generics, heap layouts, and runtime symbols; blocked by macro delimiter mode.
 * **Evidence:** `src/compiler/codegen/codegen.iyi` now emits string literals with private constant pools
   and Crystal's string struct layout, user-defined generic instantiations with monomorphized constructors
-  and methods, and heap layout maps for instance variable offsets across structs and classes, proven by
-  `bench/selfhost_codegen_exercise.sh` (17 fixtures, 105 functions, 16 mutation proofs). Attempting to compile
-  `src/iyi/prelude.iyi` (7,471 lines) now advances past lexical analysis to line 48:1, where it encounters
-  macro delimiter grammar (`{%`), and `src/iyi/array.iyi` (507 lines) compiles through semantic analysis into codegen.
-
+  and methods, heap layout maps for instance variable offsets across structs and classes, and runtime
+  symbol declarations (`__crystal_raise`, `__crystal_personality`, `__crystal_get_exception`), proven by
+  `bench/selfhost_codegen_exercise.sh` (18 fixtures, 108 functions, 19 mutation proofs). Attempting to compile
+  `src/iyi/prelude.iyi` (7,471 lines) advances past lexical analysis to line 48:1, where it encounters
+  macro delimiter grammar (`{%`), and `src/iyi/array.iyi` (507 lines) compiles through semantic analysis
+  and codegen past the `__crystal_raise` runtime symbol wall to parameter resolution (`no such key "other"`).
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.
 * **Evidence:** `src/compiler/semantic/top_level.iyi` and `main_visitor.iyi` invoke the ported

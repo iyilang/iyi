@@ -76,7 +76,7 @@ As measured by `python3 bench/doc_numbers.py` and `git ls-files`, the compiler
 source tree consists of:
 
 * **110,105 lines of Crystal** across 114 files in `src/compiler/**/*.cr` and `src/compiler/*.cr`
-* **37,069 lines of pure iyi** across 49 files in `src/compiler/**/*.iyi` and `src/compiler/*.iyi`
+* **38,005 lines of pure iyi** across 51 files in `src/compiler/**/*.iyi` and `src/compiler/*.iyi`
 
 Below is the complete status of all eleven compiler stages, their exact line
 counts, what each produces and consumes, and the gate output proving parity:
@@ -213,8 +213,9 @@ counts, what each produces and consumes, and the gate output proving parity:
 ### Layer 11: Standalone and Companion Tools
 * **Files:** `src/compiler/tools/formatter.iyi` (2,436 lines), `format.iyi` (34 lines),
   `mod.iyi` (40 lines), `parse.iyi` (42 lines), `bind.iyi` (1,213 lines),
-  `compile.iyi` (245 lines). Total: 4,010 lines across 6 files.
-* **Status:** Four companion tools wired into CLI (`mod`, `format`, `parse`, `compile`).
+  `compile.iyi` (100 lines), `compiler.iyi` (271 lines), `loader.iyi` (304 lines).
+  Total: 4,440 lines across 8 files.
+* **Status:** Five companion tools wired into CLI (`mod`, `format`, `parse`, `compile`, and the `Compiler`/`Loader` pipeline orchestrator).
 
 ## 3. Can a Whole Compiler Be Assembled from the iyi Ports Alone Today?
 
@@ -224,23 +225,26 @@ The investigation identified six specific architectural holes that currently pre
 assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 
 ### Hole 1: Top-Level Compiler Pipeline Orchestrator
-* **Status:** Absent.
-* **Evidence:** In Crystal, `src/compiler/iyi/compiler.cr` (3,186 lines) orchestrates the entire
-  compilation pipeline: `Compiler#compile` coordinates `new_program`, `parse`, `normalize`,
-  `top_level_semantic`, `main_visitor`, `prepare_iyimods`, `codegen`, and `link`.
-  In pure iyi, `src/compiler/command/driver.iyi` line 790 parses options into `CompilerOptions`,
-  but no `src/compiler/iyi.iyi` or `src/compiler/compiler.iyi` class exists to instantiate the
-  pipeline.
+* **Status:** Closed.
+* **Evidence:** `src/compiler/compiler.iyi` (271 lines) implements `Compiler` in pure iyi,
+  orchestrating the full compilation pipeline: recursive import resolution, AST parsing,
+  normalisation via `Normalizer`, semantic declaration extraction and type analysis,
+  LLVM code generation across all modules, object file emission, and platform linking.
+  `src/compiler/tools/compile.iyi` is refactored into a thin CLI wrapper calling `Compiler`.
+  Proved by `bench/selfhost_compile_exercise.sh` across 9 fixtures (including multi-file import
+  and diamond dependencies) with 100% execution parity and dependency floor against the
+  shipped compiler.
 
 ### Hole 2: Multi-File Dependency Graph and Module Resolver
-* **Status:** Absent.
-* **Evidence:** In Crystal, `src/compiler/iyi/loader.cr` and `src/compiler/iyi/iyi_path.cr`
-  manage the recursive import graph, resolving `import std/json` to filesystem paths,
-  preventing circular loading, and tracking required files.
-  In pure iyi, `syntax/parser.iyi`, `semantic/top_level.iyi`, and `codegen/codegen.iyi` only
-  accept an in-memory string or a single file path. There is no loader to traverse imports
-  across multiple files on disk.
-
+* **Status:** Closed.
+* **Evidence:** `src/compiler/loader.iyi` (304 lines) implements `Loader`, `ModuleInfo`, and
+  `IyiPath` in pure iyi, managing the recursive import graph across files. It resolves `import`
+  directives against relative file directories, header roots, and `IYI_PATH` search paths,
+  detects circular import chains with full diagnostic paths, and outputs modules in topological
+  dependency order. Proved by `bench/selfhost_compile_exercise.sh` across multi-file fixtures
+  (`compile_multi_import.iyi`, `compile_diamond.iyi`), refusal parity on missing imports with
+  identical exit code (rc=1) and diagnostic messages against the shipped compiler, and two
+  guarded mutation proofs catching wrong resolution order and missed imports.
 ### Hole 3: Prelude Self-Compilation Barrier
 * **Status:** Blocked by codegen capabilities.
 * **Evidence:** `src/iyi/prelude.iyi` is 13,949 lines of advanced iyi source code. It relies
@@ -282,14 +286,16 @@ To bridge the gap between isolated pass verification and whole-compiler assembly
 implements Candidate 1: compiling complete programs end-to-end using only the ported compiler
 stages through a dedicated helper binary, and proving execution parity against the shipped compiler.
 
-### Implementation: `src/compiler/tools/compile.iyi`
+### Implementation: `src/compiler/compiler.iyi`, `loader.iyi`, and `tools/compile.iyi`
 
-`src/compiler/tools/compile.iyi` (245 lines) glues together five ported stages in pure iyi:
-1. `compiler/syntax/parser`: parses source code into an AST.
-2. `compiler/semantic/top_level`: declares types, methods, structs, and classes.
-3. `compiler/semantic/main_visitor`: types expressions, local variables, and calls.
-4. `compiler/codegen/codegen` and `compiler/llvm`: generates LLVM IR and emits a machine object file (`.o`).
-5. `compiler/platform/target` and `compiler/platform/linker`: constructs the platform linker command
+`src/compiler/tools/compile.iyi` (100 lines) is a thin CLI caller of the `Compiler`
+orchestrator (`src/compiler/compiler.iyi`, 271 lines) and `Loader` (`src/compiler/loader.iyi`, 304 lines):
+1. `compiler/loader`: resolves recursive module dependencies and detects import cycles.
+2. `compiler/syntax/parser`: parses source code into ASTs.
+3. `compiler/semantic/normalizer`: normalises AST nodes across resolved modules.
+4. `compiler/semantic/top_level` and `main_visitor`: declares and types functions, structs, and classes.
+5. `compiler/codegen/codegen` and `compiler/llvm`: generates LLVM IR and emits a machine object file (`.o`).
+6. `compiler/platform/target` and `compiler/platform/linker`: constructs the platform linker command
    and invokes the system linker (`cc`).
 
 The tool is built via the Makefile target:
@@ -302,7 +308,7 @@ producing `.build/iyi-compile`.
 
 ### Measured Execution Parity and Dependency Floor
 
-The differential gate `bench/selfhost_compile_exercise.sh` executes 7 distinct program fixtures
+The differential gate `bench/selfhost_compile_exercise.sh` executes 9 distinct program fixtures
 across both `.build/iyi-compile` and the shipped compiler `.build/iyi build --prelude=empty`:
 
 1. `compile_exit.iyi`: trivial program returning exit code 42 directly from `fun main`.
@@ -314,6 +320,8 @@ across both `.build/iyi-compile` and the shipped compiler `.build/iyi build --pr
    and struct method calculation.
 6. `compile_class.iyi`: heap-allocated class, instance variable mutation, and class method dispatch.
 7. `compile_pointers.iyi`: pointerof, pointer dereference, and in-place variable mutation via pointer.
+8. `compile_multi_import.iyi`: multi-module import combining declarations from two independent imported modules.
+9. `compile_diamond.iyi`: diamond import dependency graph (main imports A and B, both import shared base).
 
 Running `bash bench/selfhost_compile_exercise.sh` produces:
 
@@ -322,7 +330,6 @@ Running `bash bench/selfhost_compile_exercise.sh` produces:
 .build/iyi build -o .build/iyi-compile src/compiler/tools/compile.iyi
 built .build/iyi-compile
   built .build/iyi-compile successfully
-
 == 2. Whole program execution parity: pure iyi compiler vs shipped compiler
   bench/fixtures/compile_exit.iyi: identical execution exit code (rc=42)
   bench/fixtures/compile_arith.iyi: identical execution exit code (rc=26)
@@ -331,10 +338,12 @@ built .build/iyi-compile
   bench/fixtures/compile_struct.iyi: identical execution exit code (rc=42)
   bench/fixtures/compile_class.iyi: identical execution exit code (rc=42)
   bench/fixtures/compile_pointers.iyi: identical execution exit code (rc=42)
-  Parity summary: 7/7 compile fixtures match 100% across execution
+  bench/fixtures/compile_multi_import.iyi: identical execution exit code (rc=42)
+  bench/fixtures/compile_diamond.iyi: identical execution exit code (rc=52)
+  Parity summary: 9/9 compile fixtures match 100% across execution
 
 == 3. Dependency floor verification: pure iyi compiler produces dependency-floor binaries
-  Dependency floor summary: 7/7 binaries link only platform libc (no libgc)
+  Dependency floor summary: 9/9 binaries link only platform libc (no libgc)
 
 == 4. Object emission without linking (--emit-obj)
   --emit-obj successfully wrote object file: /tmp/test_emit.o
@@ -342,7 +351,8 @@ built .build/iyi-compile
 == 5. Malformed input and error refusal checks
   properly refused: malformed syntax rejected (rc=1)
   properly refused: missing input file rejected (rc=1)
-  Refusal summary: 2/2 malformed scenarios refused properly
+  properly refused: missing import rejected with identical exit code (rc=1) and message
+  Refusal summary: 3/3 malformed scenarios refused properly
 
 == 6. Guarded mutation proofs
   [corrupt linker placeholder substitution]
@@ -350,6 +360,10 @@ built .build/iyi-compile
   [corrupt object file output path]
     caught: mutation caused compilation or execution divergence as expected
   [corrupt arithmetic operation in test fixture]
+    caught: mutation caused compilation or execution divergence as expected
+  [wrong resolver resolution order]
+    caught: mutation caused compilation or execution divergence as expected
+  [missed import in resolver]
     caught: mutation caused compilation or execution divergence as expected
 
 ALL SELFHOST COMPILE CHECKS PASSED!

@@ -1,0 +1,5 @@
+import nonexistent/missing_mod
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  0
+end

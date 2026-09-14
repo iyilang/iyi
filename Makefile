@@ -563,7 +563,7 @@ $(O)/iyi-parse$(EXE): $(O)/iyi$(EXE) src/compiler/tools/parse.iyi src/compiler/s
 	@echo "built $@"
 
 # iyi: the self-hosted end-to-end compiler tool, built by iyi from pure iyi source.
-$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) src/compiler/tools/compile.iyi src/compiler/codegen/codegen.iyi
+$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) src/compiler/tools/compile.iyi src/compiler/compiler.iyi src/compiler/loader.iyi src/compiler/codegen/codegen.iyi
 	@mkdir -p $(O)
 	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/compile.iyi
 	@echo "built $@"

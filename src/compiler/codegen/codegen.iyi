@@ -2867,6 +2867,20 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     mv.set_type(fd, ret_type)
   end
 
+  compile_declarations_to_module(classes, funs, defs, libs, filename, context, mod, prog, mv)
+end
+
+pub def compile_declarations_to_module(
+  classes : Array(ClassDef),
+  funs : Array(FunDef),
+  defs : Hash(String, Def),
+  libs : Array(LibDef),
+  filename : String,
+  context : Context,
+  mod : Module,
+  prog : SemanticProgram,
+  mv : MainVisitor,
+) : CodeGenVisitor
   cg = CodeGenVisitor.new(context, mod, prog, mv)
   cg.filename = filename
   cg.block_methods = defs

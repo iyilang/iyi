@@ -17,6 +17,8 @@ diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 COMPILE_TOOL_SRC="$REPO/src/compiler/tools/compile.iyi"
+COMPILER_SRC="$REPO/src/compiler/compiler.iyi"
+LOADER_SRC="$REPO/src/compiler/loader.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -45,6 +47,8 @@ FIXTURES=(
   "bench/fixtures/compile_struct.iyi"
   "bench/fixtures/compile_class.iyi"
   "bench/fixtures/compile_pointers.iyi"
+  "bench/fixtures/compile_multi_import.iyi"
+  "bench/fixtures/compile_diamond.iyi"
 )
 
 matched=0
@@ -150,7 +154,24 @@ else
   echo "  FAIL: missing file was not refused"
   status=1
 fi
-echo "  Refusal summary: $refusals/2 malformed scenarios refused properly"
+
+# 3. Missing import properly refused with identical message and exit code to shipped compiler
+set +e
+"$IYI" build --prelude=empty -o "$WORK/shipped_bad3" "$REPO/bench/fixtures/compile_missing_import.iyi" > "$WORK/shipped_missing.log" 2>&1
+shipped_rc=$?
+"$REPO/.build/iyi-compile" -o "$WORK/bad3" "$REPO/bench/fixtures/compile_missing_import.iyi" > "$WORK/selfhost_missing.log" 2>&1
+selfhost_rc=$?
+set -e
+if [ "$selfhost_rc" -eq "$shipped_rc" ] && [ "$selfhost_rc" -ne 0 ] && \
+   grep -q "can't find module 'nonexistent/missing_mod'" "$WORK/selfhost_missing.log" && \
+   grep -q "can't find module 'nonexistent/missing_mod'" "$WORK/shipped_missing.log"; then
+  echo "  properly refused: missing import rejected with identical exit code (rc=$selfhost_rc) and message"
+  refusals=$((refusals + 1))
+else
+  echo "  FAIL: missing import was not properly refused"
+  status=1
+fi
+echo "  Refusal summary: $refusals/3 malformed scenarios refused properly"
 
 echo
 echo "== 6. Guarded mutation proofs"
@@ -179,17 +200,18 @@ PY
   fi
 
   # Run test with mutation applied
+  local test_fixture="${5:-$REPO/bench/fixtures/compile_arith.iyi}"
+  local expected_rc="${6:-26}"
   local mut_failed=0
-  if [ "$target_file" = "$COMPILE_TOOL_SRC" ]; then
+  if [ "$target_file" = "$COMPILE_TOOL_SRC" ] || [ "$target_file" = "$COMPILER_SRC" ] || [ "$target_file" = "$LOADER_SRC" ]; then
     rm -f "$REPO/.build/iyi-compile"
     if make -C "$REPO" iyi-compile >/dev/null 2>&1; then
-      if "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$REPO/bench/fixtures/compile_arith.iyi" >/dev/null 2>&1; then
+      if "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$test_fixture" >/dev/null 2>&1; then
         set +e
         "$WORK/mut_bin"
         local mut_rc=$?
         set -e
-        # Original expected rc is 26
-        if [ "$mut_rc" -ne 26 ]; then
+        if [ "$mut_rc" -ne "$expected_rc" ]; then
           mut_failed=1
         fi
       else
@@ -208,7 +230,7 @@ PY
       "$WORK/mut_bin"
       local mut_rc=$?
       set -e
-      if [ "$mut_rc" -ne 26 ]; then
+      if [ "$mut_rc" -ne "$expected_rc" ]; then
         mut_failed=1
       fi
     else
@@ -226,20 +248,33 @@ PY
 }
 
 prove_compile_mutation "corrupt linker placeholder substitution" \
-  "$COMPILE_TOOL_SRC" \
+  "$COMPILER_SRC" \
   "\"\\${@}\"" \
   "\"__WRONG_PLACEHOLDER__\""
 
 prove_compile_mutation "corrupt object file output path" \
-  "$COMPILE_TOOL_SRC" \
-  "obj_path = obj_file_override || (output_bin + \".o\")" \
-  "obj_path = obj_file_override || \"/nonexistent/dir/out.o\""
+  "$COMPILER_SRC" \
+  "obj_path = @config.obj_output_filename || (@config.output_filename + \".o\")" \
+  "obj_path = @config.obj_output_filename || \"/nonexistent/dir/out.o\""
 
 prove_compile_mutation "corrupt arithmetic operation in test fixture" \
   "$REPO/bench/fixtures/compile_arith.iyi" \
   "v1 &- v2" \
   "v1 &+ v2"
 
+prove_compile_mutation "wrong resolver resolution order" \
+  "$LOADER_SRC" \
+  "@order << clean_fn" \
+  "@order = [clean_fn] + @order" \
+  "$REPO/bench/fixtures/compile_diamond.iyi" \
+  "52"
+
+prove_compile_mutation "missed import in resolver" \
+  "$LOADER_SRC" \
+  "resolve_file(clean_res, clean_fn)" \
+  "# resolve_file(clean_res, clean_fn)" \
+  "$REPO/bench/fixtures/compile_diamond.iyi" \
+  "52"
 echo
 if [ "$status" -eq 0 ]; then
   echo "ALL SELFHOST COMPILE CHECKS PASSED!"

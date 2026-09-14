@@ -1,0 +1,6 @@
+import multi_mod_a
+import multi_mod_b
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  multi_mod_a_val &+ multi_mod_b_val
+end

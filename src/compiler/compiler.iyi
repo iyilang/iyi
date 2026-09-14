@@ -1,0 +1,271 @@
+# The top-level compiler pipeline orchestrator in pure iyi.
+#
+# Coordinates the full end-to-end compilation chain:
+# 1. Resolve: recursive import graph traversal, cycle detection, topological order
+# 2. Parse: AST parsing of root and all dependencies (performed during resolve)
+# 3. Normalise: AST transformations via Normalizer
+# 4. Semantic: declaration extraction, type registration, semantic analysis
+# 5. Codegen: LLVM code generation across all modules
+# 6. Emit: native object file emission
+# 7. Link: platform linker command construction and execution
+
+module compiler/compiler
+
+import compiler/syntax/parser
+import compiler/syntax/ast
+import compiler/semantic/normalizer
+import compiler/semantic/top_level
+import compiler/semantic/main_visitor
+import compiler/llvm
+import compiler/codegen/codegen
+import compiler/platform/target
+import compiler/platform/linker
+import compiler/loader
+
+using compiler/syntax/parser::{Parser}
+using compiler/syntax/ast::{ASTNode, Expressions, ClassDef, FunDef, Def, LibDef, Arg}
+using compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+using compiler/semantic/main_visitor::{MainVisitor}
+using compiler/llvm/context::{Context}
+using compiler/llvm/module::{Module}
+using compiler/codegen/codegen::{compile_declarations_to_module, register_primitive_operators}
+using compiler/platform/linker::{Linker}
+using compiler/loader::{Loader, ModuleInfo, IyiPath}
+
+alias LLVMTarget = ::Compiler::Llvm::Target::Target
+alias PlatformTarget = ::Compiler::Platform::Target::Target
+
+lib LibC
+  fun system(cmd : UInt8*) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+# Configuration options for the compiler pipeline.
+pub struct CompilerConfig
+  property output_filename : String
+  property emit_obj_only : Bool
+  property obj_output_filename : String?
+  property verbose : Bool
+  property target_triple : String?
+
+  def initialize(
+    @output_filename : String = "a.out",
+    @emit_obj_only : Bool = false,
+    @obj_output_filename : String? = nil,
+    @verbose : Bool = false,
+    @target_triple : String? = nil,
+  )
+  end
+end
+
+# Result metadata returned after a successful compilation.
+pub class CompileResult
+  property output_filename : String
+  property object_filename : String
+  property resolved_modules : Array(ModuleInfo)
+
+  def initialize(
+    @output_filename : String,
+    @object_filename : String,
+    @resolved_modules : Array(ModuleInfo),
+  )
+  end
+end
+
+# The compiler pipeline orchestrator.
+pub class Compiler
+  property config : CompilerConfig
+  property loader : Loader
+
+  def initialize(@config : CompilerConfig = CompilerConfig.new, @loader : Loader = Loader.new)
+  end
+
+  def compile(root_filename : String) : CompileResult
+    # 1. Resolve: discover all dependencies, detect cycles, produce topological order
+    resolved_modules = @loader.resolve(root_filename)
+
+    # 2. Parse is performed during resolution (@loader.resolve parses ASTs)
+
+    # 3. Normalise: run normalizer over each resolved module's AST
+    norm_prog = NormalizerProgram.new
+    normalizer = Normalizer.new(norm_prog)
+    resolved_modules.each do |mod_info|
+      mod_info.ast = mod_info.ast.transform(normalizer)
+    end
+
+    # 4. Semantic: extract declarations in topological order and type-check
+    prog = SemanticProgram.new
+    register_primitive_operators(prog)
+
+    classes = [] of ClassDef
+    funs = [] of FunDef
+    defs = Hash(String, Def).new
+    libs = [] of LibDef
+
+    resolved_modules.each do |mod_info|
+      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs)
+    end
+
+    # Register funs in program
+    funs.each do |fd|
+      cloned_args = fd.args.map { |a| a.clone.as(Arg) }
+      d = Def.new(fd.name, cloned_args, fd.body, nil, nil, fd.return_type)
+      prog.add_def(d)
+    end
+
+    tl = TopLevelVisitor.new(prog)
+    classes.each do |cd|
+      cd.accept(tl)
+    end
+
+    mv = MainVisitor.new(prog)
+    funs.each do |fd|
+      ret_type = if rt = fd.return_type
+                   prog.lookup_type_node(rt, prog)
+                 else
+                   prog.int32_type
+                 end
+      mv.set_type(fd, ret_type)
+    end
+
+    # 5. Codegen: create LLVM context, module, target machine, and compile
+    ctx = Context.new
+    mod_name = Compiler.module_name_from_path(root_filename)
+    mod = Module.new(mod_name, ctx)
+
+    LLVMTarget.init_native_target
+    LLVMTarget.init_all_targets
+    triple = @config.target_triple || LLVMTarget.default_target_triple
+    mod.target = triple
+    native_target = LLVMTarget.from_triple(triple)
+    tm = native_target.create_target_machine(
+      triple, "", "",
+      LibLLVM::CodeGenOptLevel::Default,
+      LibLLVM::RelocMode::PIC,
+      LibLLVM::CodeModel::Default
+    )
+    mod.data_layout = tm.data_layout
+
+    compile_declarations_to_module(classes, funs, defs, libs, root_filename, ctx, mod, prog, mv)
+
+    # 6. Emit: write native object file
+    obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
+    tm.emit_obj_to_file(mod.to_unsafe, obj_path)
+
+    if @config.emit_obj_only
+      if @config.verbose
+        puts "Emitted object file: #{obj_path}"
+      end
+      return CompileResult.new(@config.output_filename, obj_path, resolved_modules)
+    end
+
+    # 7. Link: construct platform linker command and link binary
+    plat_target = PlatformTarget.new(triple)
+    link_result = Linker.linker_command(plat_target, [obj_path], @config.output_filename)
+
+    cmd_template = link_result.cmd
+    quoted_objs = if objs = link_result.objects
+                    Linker.quote_posix(objs)
+                  else
+                    Linker.quote_posix([obj_path])
+                  end
+
+    final_cmd = Compiler.substitute_placeholder(cmd_template, "\"${@}\"", quoted_objs)
+    status = LibC.system(final_cmd.to_unsafe)
+    unless status == 0
+      STDERR.puts "Error: linking failed with exit code #{status}"
+      LibC.exit(status)
+    end
+
+    status = LibC.system(final_cmd.to_unsafe)
+    unless status == 0
+      raise "linking failed with exit code #{status}"
+    end
+
+    # Clean up temporary object file if not explicitly requested
+    if @config.obj_output_filename.nil? && File.exists?(obj_path)
+      File.delete(obj_path)
+    end
+
+    CompileResult.new(@config.output_filename, obj_path, resolved_modules)
+  end
+
+  # --- Helper utilities ---
+
+  def self.last_index_of(s : String, char : Char) : Int32?
+    i = s.size - 1
+    while i >= 0
+      return i if s[i] == char
+      i = i - 1
+    end
+    nil
+  end
+
+  def self.module_name_from_path(fn : String) : String
+    idx = last_index_of(fn, '/')
+    base = if i = idx
+             fn[i + 1, fn.size - i - 1]
+           else
+             fn
+           end
+    if base.ends_with?(".iyi")
+      base[0, base.size - 4]
+    else
+      base
+    end
+  end
+
+  def self.find_sub(s : String, sub : String) : Int32?
+    return nil if sub.size > s.size
+    limit = s.size - sub.size
+    i = 0
+    while i <= limit
+      matched = true
+      j = 0
+      while j < sub.size
+        if s.to_unsafe[i + j] != sub.to_unsafe[j]
+          matched = false
+          break
+        end
+        j = j + 1
+      end
+      return i if matched
+      i = i + 1
+    end
+    nil
+  end
+
+  def self.substitute_placeholder(cmd : String, placeholder : String, replacement : String) : String
+    if idx = find_sub(cmd, placeholder)
+      prefix = cmd[0, idx]
+      suffix_start = idx + placeholder.size
+      suffix = cmd[suffix_start, cmd.size - suffix_start]
+      prefix + replacement + suffix
+    else
+      cmd
+    end
+  end
+
+  def self.extract_declarations(
+    node : ASTNode,
+    classes : Array(ClassDef),
+    funs : Array(FunDef),
+    defs : Hash(String, Def),
+    libs : Array(LibDef),
+  ) : Nil
+    if node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        extract_declarations(e, classes, funs, defs, libs)
+      end
+    elsif node.is_a?(ClassDef)
+      classes << node.as(ClassDef)
+    elsif node.is_a?(FunDef)
+      funs << node.as(FunDef)
+    elsif node.is_a?(Def)
+      defs[node.as(Def).name] = node.as(Def)
+    elsif node.is_a?(LibDef)
+      libs << node.as(LibDef)
+    end
+  end
+end

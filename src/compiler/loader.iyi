@@ -1,0 +1,304 @@
+# Module loader and dependency resolver in pure iyi.
+#
+# Resolves import directives across files, discovering dependencies
+# recursively, checking for import cycles, and producing the topological
+# resolution order required for compilation.
+#
+# Ports the behavior of Crystal's src/compiler/iyi/loader.cr and iyi_path.cr.
+
+module compiler/loader
+
+import compiler/syntax/parser
+import compiler/syntax/ast
+
+using compiler/syntax/parser::{Parser}
+using compiler/syntax/ast::{ASTNode, Expressions, ImportDecl}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# Resolves module import paths against search paths and relative directories.
+pub class IyiPath
+  property entries : Array(String)
+
+  def initialize(entries : Array(String)? = nil)
+    if e = entries
+      @entries = e
+    else
+      @entries = [] of String
+      env_path = Program.env("IYI_PATH") || Program.env("CRYSTAL_PATH")
+      if p = env_path
+        parts = p.split(':')
+        parts.each do |part|
+          cleaned = Loader.clean_path(part)
+          @entries << cleaned unless cleaned.empty?
+        end
+      else
+        @entries << "lib"
+      end
+    end
+  end
+
+  # Determines the project root from an entry file header if it names one:
+  # `module calc/parser` in `/p/calc/parser.iyi` -> `/p`.
+  def self.header_root_of(path : String, text : String) : String?
+    header : String? = nil
+    lines = text.split('\n')
+    lines.each do |line|
+      trimmed = line.strip
+      next if trimmed.empty? || trimmed.starts_with?('#')
+      header = trimmed
+      break
+    end
+    if h = header
+      if h.starts_with?("module ")
+        mod_path = h[7, h.size - 7].strip
+        unless mod_path.empty? || mod_path.includes?(" ")
+          suffix = "/#{mod_path}.iyi"
+          if path.ends_with?(suffix)
+            root = path[0, path.size - suffix.size]
+            return root.empty? ? "/" : root
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  # Finds a module file on disk. Searches relative directory, header root,
+  # and configured IYI_PATH search paths, preferring .iyi over .cr.
+  def find(mod_path : String, relative_to : String? = nil, header_root : String? = nil) : String?
+    candidates = [] of String
+    if mod_path.starts_with?(".")
+      if rel = relative_to
+        candidates << Loader.join(rel, "#{mod_path}.iyi")
+        candidates << Loader.join(rel, "#{mod_path}.cr")
+      else
+        candidates << "#{mod_path}.iyi"
+        candidates << "#{mod_path}.cr"
+      end
+    else
+      if rel = relative_to
+        candidates << Loader.join(rel, "#{mod_path}.iyi")
+        candidates << Loader.join(rel, "#{mod_path}.cr")
+      end
+      if hr = header_root
+        candidates << Loader.join(hr, "#{mod_path}.iyi")
+        candidates << Loader.join(hr, "#{mod_path}.cr")
+      end
+      @entries.each do |entry|
+        candidates << Loader.join(entry, "#{mod_path}.iyi")
+        candidates << Loader.join(entry, "#{mod_path}.cr")
+      end
+    end
+
+    candidates.each do |candidate|
+      cleaned = Loader.clean_path(candidate)
+      return cleaned if File.exists?(cleaned)
+    end
+    nil
+  end
+end
+
+# Metadata and parsed AST for a single loaded module.
+pub class ModuleInfo
+  property name : String
+  property filename : String
+  property source : String
+  property ast : ASTNode
+  property imports : Array(String)
+
+  def initialize(
+    @name : String,
+    @filename : String,
+    @source : String,
+    @ast : ASTNode,
+    @imports : Array(String) = [] of String,
+  )
+  end
+end
+
+# Traverses the import graph from a root entry file, detects cycles,
+# and produces the ordered list of modules in topological dependency order.
+pub class Loader
+  property iyi_path : IyiPath
+  property modules : Hash(String, ModuleInfo)
+  property order : Array(String)
+  property import_stack : Array(String)
+  property header_root : String?
+  property project_root : String?
+
+  def initialize(@iyi_path : IyiPath = IyiPath.new)
+    @modules = Hash(String, ModuleInfo).new
+    @order = [] of String
+    @import_stack = [] of String
+    @header_root = nil
+    @project_root = nil
+  end
+
+  # Resolves all dependencies starting from root_file.
+  # Returns loaded modules in topological order (dependencies before dependents).
+  def resolve(root_file : String) : Array(ModuleInfo)
+    @modules = Hash(String, ModuleInfo).new
+    @order = [] of String
+    @import_stack = [] of String
+    @header_root = nil
+
+    cleaned_root = Loader.clean_path(root_file)
+    @project_root = Loader.dirname(cleaned_root)
+    resolve_file(cleaned_root, nil)
+
+    result = [] of ModuleInfo
+    @order.each do |fn|
+      if info = @modules[fn]?
+        result << info
+      end
+    end
+    result
+  end
+
+  # Collects all top-level ImportDecl nodes from an AST.
+  def self.collect_imports(node : ASTNode, into : Array(ImportDecl)) : Nil
+    if node.is_a?(ImportDecl)
+      into << node.as(ImportDecl)
+    elsif node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        collect_imports(e, into)
+      end
+    end
+  end
+
+  # Computes a display name for diagnostics by stripping project root and extension.
+  def module_display_name(filename : String) : String
+    clean = Loader.clean_path(filename)
+    if pr = @project_root
+      prefix = pr + "/"
+      if clean.starts_with?(prefix)
+        rel = clean[prefix.size, clean.size - prefix.size]
+        return Loader.strip_extension(rel)
+      end
+    end
+    base = Loader.basename(clean)
+    Loader.strip_extension(base)
+  end
+
+  private def resolve_file(filename : String, importing_file : String?) : Nil
+    clean_fn = Loader.clean_path(filename)
+    return if @modules.has_key?(clean_fn)
+
+    if @import_stack.includes?(clean_fn)
+      cycle_start = @import_stack.index(clean_fn) || 0
+      chain = [] of String
+      i = cycle_start
+      while i < @import_stack.size
+        chain << module_display_name(@import_stack[i])
+        i = i + 1
+      end
+      chain << module_display_name(clean_fn)
+
+      STDERR.puts "Error: import cycle\n\n    #{chain.join(" -> ")}\n\n`import` forms a DAG (R-1). A cycle has no initialisation order — a module initialises after every module it imports (SPEC.md III.5 rule 1), and here each would have to go after the other — and it is what makes at most one module able to define any given impl (SPEC.md IV.4). Move what the modules in the cycle share into a module they both import."
+      LibC.exit(1)
+    end
+
+    unless File.exists?(clean_fn)
+      STDERR.puts "Error: input file does not exist: #{clean_fn}"
+      LibC.exit(1)
+    end
+
+    source = File.read(clean_fn)
+    if @header_root.nil?
+      @header_root = IyiPath.header_root_of(clean_fn, source)
+    end
+
+    @import_stack << clean_fn
+
+    parser = Parser.new(source, clean_fn)
+    ast = parser.parse
+
+    import_decls = [] of ImportDecl
+    Loader.collect_imports(ast, import_decls)
+
+    imported_filenames = [] of String
+    relative_dir = Loader.dirname(clean_fn)
+
+    import_decls.each do |decl|
+      mod_path = decl.path.join("/")
+      resolved = @iyi_path.find(mod_path, relative_dir, @header_root)
+      unless res_fn = resolved
+        STDERR.puts "Error: can't find module '#{mod_path}'. A module's path is its file's path, so this one is `#{mod_path}.iyi`, resolved from the directory of the file being built and then from `IYI_PATH`"
+        LibC.exit(1)
+      end
+      clean_res = Loader.clean_path(res_fn)
+      imported_filenames << clean_res
+      resolve_file(clean_res, clean_fn)
+    end
+
+    @import_stack.pop
+    mod_name = module_display_name(clean_fn)
+    info = ModuleInfo.new(mod_name, clean_fn, source, ast, imported_filenames)
+    @modules[clean_fn] = info
+    @order << clean_fn
+  end
+
+  # --- Path utility methods ---
+
+  def self.last_index_of(s : String, c : Char) : Int32?
+    i = s.size - 1
+    while i >= 0
+      return i if s[i] == c
+      i = i - 1
+    end
+    nil
+  end
+
+  def self.dirname(path : String) : String
+    idx = last_index_of(path, '/')
+    if i = idx
+      if i == 0
+        "/"
+      else
+        path[0, i]
+      end
+    else
+      "."
+    end
+  end
+
+  def self.basename(path : String) : String
+    idx = last_index_of(path, '/')
+    if i = idx
+      path[i + 1, path.size - i - 1]
+    else
+      path
+    end
+  end
+
+  def self.join(a : String, b : String) : String
+    if a.empty? || a == "."
+      b
+    elsif a.ends_with?('/')
+      a + b
+    else
+      a + "/" + b
+    end
+  end
+
+  def self.strip_extension(name : String) : String
+    if name.ends_with?(".iyi")
+      name[0, name.size - 4]
+    elsif name.ends_with?(".cr")
+      name[0, name.size - 3]
+    else
+      name
+    end
+  end
+
+  def self.clean_path(path : String) : String
+    s = path
+    while s.starts_with?("./")
+      s = s[2, s.size - 2]
+    end
+    s
+  end
+end

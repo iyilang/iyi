@@ -123,6 +123,19 @@ describe "Semantic: iyi import" do
       end
     end
 
+    # `import calc/ad` beside `calc/add.iyi` is a typo, and the sentence
+    # about the path rule read as if the rule were the problem.
+    it "names the nearest module beside a mistyped import" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dpe\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
+      }) do
+        expect_raises(Iyi::TypeException, /can't find module 'app\/dpe'.*Did you mean `app\/dep`\?/m) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+
     it "says which module exports a name that is imported but not used" do
       with_iyi_modules({
         "main.iyi"    => "module app/main\n\nimport app/dep\n\nvalue\n",

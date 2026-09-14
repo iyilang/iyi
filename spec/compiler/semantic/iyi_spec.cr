@@ -2900,6 +2900,24 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # The other mistake behind "does not export": a name the module does not
+    # have at all. `using calc/add::{ad}` was told to add `pub` to a
+    # declaration that does not exist; the typo gets the nearest exported name.
+    it "tells a name the module lacks from one it did not mark pub" do
+      error = assert_error <<-CODE, "App::Greeter has no `polit`: nothing by that name is declared in `app/greeter`, `pub` or not."
+        module app/greeter
+
+        pub def polite : Int32
+          1
+        end
+
+        module Consumer
+          using app/greeter::{polit}
+        end
+        CODE
+      error.message.should_not(be_nil).should contain "Did you mean `polite`?"
+    end
+
     it "allows a selective `using` of exported names" do
       # `semantic` rather than `assert_type`: a `module app/greeter` header
       # scopes the whole rest of the source into the module, so the last

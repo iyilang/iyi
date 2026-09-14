@@ -214,10 +214,16 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     unless filename
       # iyi: say where it looked. A module's path *is* its file's path (IV.6),
       # and somebody meeting that rule for the first time is owed the mapping
-      # rather than left to infer it from a name in quotes.
+      # rather than left to infer it from a name in quotes. And the nearest
+      # file that is there: `import calc/ad` beside `calc/add.iyi` is a typo,
+      # and the sentence about the rule read as if the rule were the problem.
+      hint = ""
+      if similar = Levenshtein.find(path, import_siblings(path))
+        hint = "\nDid you mean `#{similar}`?"
+      end
       node.raise "can't find module '#{path}'. A module's path is its file's " \
                  "path, so this one is `#{path}.iyi`, resolved from the " \
-                 "directory of the file being built and then from `IYI_PATH`"
+                 "directory of the file being built and then from `IYI_PATH`#{hint}"
     end
 
     # A package module registers under its canonical path — the requirement's
@@ -369,6 +375,31 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     candidates.find do |candidate|
       @program.iyi_file_overrides.has_key?(candidate) || File.file?(candidate)
     end
+  end
+
+  # The module paths that exist in the directory a missing import named,
+  # under the same roots `resolve_import` tries: what `Did you mean` is
+  # chosen from. `calc/ad` looks in every root's `calc/` and answers
+  # `calc/add` for `calc/add.iyi`.
+  private def import_siblings(path : String) : Array(String)
+    roots = [] of String
+    if root = project_root
+      roots << root
+    end
+    if header_root = @program.iyi_header_root
+      roots << header_root
+    end
+    roots.concat(@program.iyi_path.entries)
+
+    dir = File.dirname(path)
+    prefix = dir == "." ? "" : "#{dir}/"
+    siblings = [] of String
+    roots.each do |root|
+      Dir.glob(File.join(root, dir, "*.iyi")) do |file|
+        siblings << prefix + File.basename(file, ".iyi")
+      end
+    end
+    siblings.uniq!
   end
 
   private def project_root : String?

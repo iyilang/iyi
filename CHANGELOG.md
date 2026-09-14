@@ -42,6 +42,18 @@
 
 ### Fixed
 
+- **A typo in an `import` or a `using` was answered with a rule.** `import
+  calc/ad` beside `calc/add.iyi` got the sentence about a module's path
+  being its file's path, which read as if the rule were the problem; it
+  says `Did you mean `calc/add`?` now, chosen from the `.iyi` files in the
+  directory the import named under every root the import would be resolved
+  from, `IYI_PATH` included (`import std/lst` names `std/list`). `using
+  calc/add::{ad}` was told to add `pub` to a declaration that does not
+  exist: the two mistakes behind "does not export" are told apart now — a
+  name the module has and did not mark `pub` keeps the sentence about
+  `pub`, and a name the module does not have at all gets `has no `ad`` and
+  the nearest exported name.
+
 - **`std/socket`'s `recv(-1)` died of arithmetic.** A negative count went
   into a `to_u64` and came back `arithmetic overflow`, a sentence about
   neither the count nor the call. `negative count: -1`, which is what the

@@ -355,10 +355,23 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # R-2b: `using` reaches a module's *exported* names. Reported here rather
     # than left to fail at the point of use, because the selective form names
     # what it wants and the author can be told which of those they cannot have.
+    # Two mistakes hide behind "does not export": a name the module has and
+    # did not mark `pub`, and a name the module does not have at all - a typo,
+    # usually, and `using calc/add::{ad}` was told to add `pub` to a
+    # declaration that does not exist. The typo gets the nearest exported name.
     if names = node.names
       unexported = names.reject { |name| used_type.exported_name?(name) }
       unless unexported.empty?
-        node.raise "#{used_type} does not export #{unexported.map { |name| "`#{name}`" }.join(", ")}. `using` reaches only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
+        declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
+        if absent.empty?
+          node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. `using` reaches only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
+        else
+          hint = ""
+          if (exported = used_type.exported_names) && (similar = Levenshtein.find(absent.first, exported.to_a))
+            hint = "\nDid you mean `#{similar}`?"
+          end
+          node.raise "#{used_type} has no #{absent.map { |name| "`#{name}`" }.join(", ")}: nothing by that name is declared in `#{written}`, `pub` or not.#{hint}"
+        end
       end
     end
 

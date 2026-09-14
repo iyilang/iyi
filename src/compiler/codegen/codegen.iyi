@@ -32,7 +32,7 @@ import compiler/semantic/main_visitor
 import compiler/llvm
 
 using compiler/foundation/location::{Location}
-using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, TypeDeclaration, Var, While, Yield}
+using compiler/syntax/ast::{ASTNode, Arg, Assign, Block, BoolLiteral, Call, Cast, ClassDef, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, LibDef, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Rescue, Return, StringLiteral, TypeDeclaration, Var, While, Yield}
 using compiler/syntax/token::{NumberKind}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor}
@@ -98,6 +98,7 @@ pub class CustomTypeInfo
   property type_id : Int32
   property min_type_id : Int32
   property max_type_id : Int32
+  property generic_name : String?
 
   def initialize(@name : String, @is_struct : Bool)
     @fields = Hash(String, Int32).new
@@ -109,6 +110,7 @@ pub class CustomTypeInfo
     @type_id = 0
     @min_type_id = 0
     @max_type_id = 0
+    @generic_name = nil
   end
 
   def add_field(fname : String, ftype : String) : Nil
@@ -259,6 +261,23 @@ class ProcLiteralCollector < Visitor
   end
 end
 
+class GenericUsageCollector < Visitor
+  getter generic_nodes : Array(Generic)
+
+  def initialize
+    @generic_nodes = [] of Generic
+  end
+
+  def visit(node : Generic) : Bool
+    @generic_nodes << node
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
 class CapturedVarCollector < Visitor
   getter captured_vars : Array(String)
   property outer_vars : Set(String)
@@ -330,6 +349,7 @@ pub class CodeGenVisitor < Visitor
   property closure_counter : Int32
   property proc_counts : Hash(String, Int32)
   property filename : String
+  property strings : Hash(String, LLVMValue)
 
   def initialize(@context : Context, @mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @builder = Builder.new(@context)
@@ -362,6 +382,7 @@ pub class CodeGenVisitor < Visitor
     @closure_counter = 0
     @proc_counts = Hash(String, Int32).new
     @filename = ""
+    @strings = Hash(String, LLVMValue).new
   end
 
   def proc_type : LLVMType
@@ -373,6 +394,53 @@ pub class CodeGenVisitor < Visitor
       @proc_type = t
       t
     end
+  end
+
+  def llvm_string_type(bytesize : Int32) : LLVMType
+    @context.struct([
+      @context.int32,
+      @context.int32,
+      @context.int32,
+      @context.int8.array(bytesize + 1),
+    ])
+  end
+
+  def build_string_constant(str : String) : LLVMValue
+    if existing = @strings[str]?
+      return existing
+    end
+
+    name = if str.bytesize > 18
+             str[0, 19] + "..."
+           else
+             str
+           end
+    io = String::Builder.new
+    io << "'"
+    name.each_char do |ch|
+      if ch == '@'
+        io << '.'
+      else
+        io << ch
+      end
+    end
+    io << "'"
+    glob_name = io.to_s
+
+    str_ty = llvm_string_type(str.bytesize)
+    global = @mod.add_global(glob_name, str_ty)
+    global.linkage = LibLLVM::Linkage::Private
+    global.global_constant = true
+
+    init_val = @context.const_struct([
+      @context.int32.const_int(1),
+      @context.int32.const_int(str.bytesize),
+      @context.int32.const_int(str.size),
+      @context.const_string(str, true),
+    ])
+    global.initializer = init_val
+    @strings[str] = global
+    global
   end
 
   def relative_filename : String
@@ -436,6 +504,15 @@ pub class CodeGenVisitor < Visitor
     else
       mal_ty = LLVMType.function([@context.int64], @context.pointer, false)
       @mod.add_function("malloc", mal_ty)
+    end
+  end
+
+  def ensure_memset : Function
+    if f = @mod.get_function?("llvm.memset.p0.i64")
+      f
+    else
+      m_ty = LLVMType.function([@context.pointer, @context.int8, @context.int64, @context.int1], @context.void, false)
+      @mod.add_function("llvm.memset.p0.i64", m_ty)
     end
   end
 
@@ -606,6 +683,9 @@ pub class CodeGenVisitor < Visitor
     if node.is_a?(NilLiteral)
       return "Nil"
     end
+    if node.is_a?(StringLiteral)
+      return "String"
+    end
 
     if node.is_a?(Call)
       c = node.as(Call)
@@ -626,6 +706,12 @@ pub class CodeGenVisitor < Visitor
         end
       elsif c.name == "address"
         return "Int64"
+      elsif c.obj.is_a?(StringLiteral)
+        if c.name == "to_unsafe"
+          return "Pointer(UInt8)"
+        elsif c.name == "bytesize" || c.name == "length" || c.name == "size"
+          return "Int32"
+        end
       elsif c.obj.is_a?(Var)
         rec_vname = c.obj.as(Var).name
         if rec_tname = @var_type_names[rec_vname]?
@@ -683,7 +769,7 @@ pub class CodeGenVisitor < Visitor
     assigned = Set(String).new
 
     @custom_types.each_value do |info|
-      next if info.is_struct
+      next if info.is_struct || info.name == "String"
       sc_name = info.superclass_name
       if sc_name.nil? || !@custom_types.has_key?(sc_name)
         next_id = assign_type_id_node(info.name, next_id, assigned)
@@ -692,7 +778,7 @@ pub class CodeGenVisitor < Visitor
   end
 
   def assign_type_id_node(cname : String, next_id : Int32, assigned : Set(String)) : Int32
-    return next_id if assigned.includes?(cname)
+    return next_id if assigned.includes?(cname) || cname == "String"
     info = @custom_types[cname]
 
     if info.subclasses.empty?
@@ -973,7 +1059,8 @@ pub class CodeGenVisitor < Visitor
               if cur_self = @current_self
                 gep = @builder.inbounds_gep(st, cur_self, [@context.int32.const_int(0), @context.int32.const_int(idx)])
                 s_inst = @builder.store(val, gep)
-                s_inst.alignment = 4
+                ftype = info.field_types[ivar_name]? || "Int32"
+                s_inst.alignment = align_of_type(ftype)
                 @last = val
                 @terminated = false
               end
@@ -997,7 +1084,7 @@ pub class CodeGenVisitor < Visitor
           if cur_self = @current_self
             gep = @builder.inbounds_gep(st, cur_self, [@context.int32.const_int(0), @context.int32.const_int(idx)])
             l_inst = @builder.load(llvm_type_from_name(ftype), gep)
-            l_inst.alignment = 4
+            l_inst.alignment = align_of_type(ftype)
             @last = l_inst
             @terminated = false
           end
@@ -1283,6 +1370,12 @@ pub class CodeGenVisitor < Visitor
 
   def visit(node : NilLiteral) : Bool
     @last = @context.pointer.null
+    @terminated = false
+    false
+  end
+
+  def visit(node : StringLiteral) : Bool
+    @last = build_string_constant(node.value)
     @terminated = false
     false
   end
@@ -1681,12 +1774,30 @@ pub class CodeGenVisitor < Visitor
     end
     if node.obj.nil? && node.name == "pointerof" && node.args.size == 1
       exp = node.args[0]
-      vname = exp.is_a?(Var) ? exp.as(Var).name : (exp.is_a?(Call) ? exp.as(Call).name : "")
-      if ptr = @vars[vname]?
-        @last = ptr
+      if exp.is_a?(InstanceVar)
+        ivar_name = exp.as(InstanceVar).name.lstrip('@')
+        if ctype = @current_self_type
+          if info = @custom_types[ctype]?
+            if fidx = info.fields[ivar_name]?
+              idx = info.is_struct ? fidx : fidx + 1
+              st = @llvm_struct_types[info.name]
+              if cur_self = @current_self
+                gep = @builder.inbounds_gep(st, cur_self, [@context.int32.const_int(0), @context.int32.const_int(idx)])
+                @last = gep
+                @terminated = false
+                return false
+              end
+            end
+          end
+        end
+      else
+        vname = exp.is_a?(Var) ? exp.as(Var).name : (exp.is_a?(Call) ? exp.as(Call).name : "")
+        if ptr = @vars[vname]?
+          @last = ptr
+        end
+        @terminated = false
+        return false
       end
-      @terminated = false
-      return false
     end
     if node.obj.nil? && (b_def = @block_methods[node.name]?) && node.block
       if @inlined_block_index < @inlined_block_contexts.size
@@ -1783,17 +1894,44 @@ pub class CodeGenVisitor < Visitor
               arg_type_names << (a.is_a?(NumberLiteral) ? (a.as(NumberLiteral).kind == NumberKind::F64 ? "Float64" : (a.as(NumberLiteral).kind == NumberKind::I64 ? "Int64" : "Int32")) : "Int32")
             end
 
-            ctor_name = if arg_type_names.empty?
-                          "*#{info.name}::new:#{info.name}"
+            ctor_name = if gname = info.generic_name
+                          if arg_type_names.empty?
+                            "*#{info.name}@#{gname}::new:#{info.name}"
+                          else
+                            "*#{info.name}@#{gname}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                          end
                         else
-                          "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                          if arg_type_names.empty?
+                            "*#{info.name}::new:#{info.name}"
+                          else
+                            "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                          end
                         end
 
             if ctor_fn = @mod.get_function?(ctor_name)
               call_ret_ty = info.is_struct ? @llvm_struct_types[info.name] : @context.pointer
-              ctor_arg_tys = arg_vals.map(&.type)
+              call_args = if info.generic_name
+                            tid_class_global_name = "#{info.name}.class:type_id"
+                            tid_class_global = if g = @mod.get_global?(tid_class_global_name)
+                                                 g
+                                               else
+                                                 cg_g = @mod.add_global(tid_class_global_name, @context.int32)
+                                                 cg_g.initializer = @context.int32.const_int(info.type_id + 44)
+                                                 cg_g.global_constant = true
+                                                 cg_g.linkage = LibLLVM::Linkage::Internal
+                                                 cg_g
+                                               end
+                            l_tid = @builder.load(@context.int32, tid_class_global)
+                            l_tid.alignment = 4
+                            c_args = [l_tid] of LLVMValue
+                            arg_vals.each { |av| c_args << av }
+                            c_args
+                          else
+                            arg_vals
+                          end
+              ctor_arg_tys = call_args.map(&.type)
               ctor_fn_ty = LLVMType.function(ctor_arg_tys, call_ret_ty, false)
-              call_val = @builder.call(ctor_fn_ty, ctor_fn.to_value, arg_vals)
+              call_val = @builder.call(ctor_fn_ty, ctor_fn.to_value, call_args)
 
               if info.is_struct
                 # Struct by value: store to temporary alloca, load from temporary alloca
@@ -2001,7 +2139,7 @@ pub class CodeGenVisitor < Visitor
                   end
                   arg_type_names << (a.is_a?(NumberLiteral) ? "Int32" : "Int32")
                 end
-                ret_tname = m.return_type ? m.return_type.to_s : "Int32"
+                ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
                 method_fn_name = if arg_type_names.empty?
                                    "*#{base_info.name}##{node.name}:#{ret_tname}"
                                  else
@@ -2045,7 +2183,7 @@ pub class CodeGenVisitor < Visitor
 
                 m_base = base_info.methods[node.name]?
                 ret_tname = if m_base && m_base.return_type
-                              m_base.return_type.to_s
+                              m_base.return_type.to_s.lstrip(':')
                             elsif first_sub = sub_targets.first?
                               sub_m = @custom_types[first_sub].methods[node.name]
                               sub_m.return_type ? sub_m.return_type.to_s : "Int32"
@@ -2178,10 +2316,16 @@ pub class CodeGenVisitor < Visitor
             idx = info.is_struct ? fidx : fidx + 1
             st = @llvm_struct_types[info.name]
             ftype = info.field_types[node.name]
-            ptr = info.is_struct ? @vars[vname] : @builder.load(@context.pointer, @vars[vname])
+            ptr = if info.is_struct
+                    @vars[vname]
+                  else
+                    p_inst = @builder.load(@context.pointer, @vars[vname])
+                    p_inst.alignment = 8
+                    p_inst
+                  end
             gep = @builder.inbounds_gep(st, ptr, [@context.int32.const_int(0), @context.int32.const_int(idx)])
             l_inst = @builder.load(llvm_type_from_name(ftype), gep)
-            l_inst.alignment = 4
+            l_inst.alignment = align_of_type(ftype)
             @last = l_inst
             @terminated = false
             return false
@@ -2227,15 +2371,29 @@ pub class CodeGenVisitor < Visitor
               end
             end
 
-            ret_tname = m.return_type ? m.return_type.to_s : "Int32"
-            method_fn_name = if arg_type_names.empty?
-                               "*#{info.name}##{node.name}:#{ret_tname}"
+            ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+            method_fn_name = if gname = info.generic_name
+                               if arg_type_names.empty?
+                                 "*#{info.name}@#{gname}##{node.name}:#{ret_tname}"
+                               else
+                                 "*#{info.name}@#{gname}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                               end
                              else
-                               "*#{info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                               if arg_type_names.empty?
+                                 "*#{info.name}##{node.name}:#{ret_tname}"
+                               else
+                                 "*#{info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                               end
                              end
 
             if method_fn = @mod.get_function?(method_fn_name)
-              ptr = info.is_struct ? @vars[vname] : @builder.load(@context.pointer, @vars[vname])
+              ptr = if info.is_struct
+                      @vars[vname]
+                    else
+                      p_inst = @builder.load(@context.pointer, @vars[vname])
+                      p_inst.alignment = 8
+                      p_inst
+                    end
               call_args = [ptr] of LLVMValue
               arg_vals.each { |av| call_args << av }
               call_ret_ty = llvm_type_from_name(ret_tname)
@@ -2378,25 +2536,6 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
   mod = cg.mod
   builder = cg.builder
 
-  # 1. Ensure memset and malloc declarations exist if needed
-  memset_fn = if f = mod.get_function?("llvm.memset.p0.i64")
-                f
-              else
-                m_ty = LLVMType.function([context.pointer, context.int8, context.int64, context.int1], context.void, false)
-                mod.add_function("llvm.memset.p0.i64", m_ty)
-              end
-
-  has_classes = cg.custom_types.values.any? { |info| !info.is_struct }
-  malloc_fn = if has_classes
-                if f = mod.get_function?("malloc")
-                  f
-                else
-                  mal_ty = LLVMType.function([context.int64], context.pointer, false)
-                  mod.add_function("malloc", mal_ty)
-                end
-              else
-                mod.get_function?("malloc")
-              end
   # 2. For each custom type, emit initializer, setters, constructor, and methods
   cg.custom_types.each_value do |info|
     st = cg.llvm_struct_types[info.name]
@@ -2408,7 +2547,11 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       init_ret_ty = cg.llvm_type_from_name(init_def.args.empty? ? "Nil" : (init_def.args.last.restriction ? init_def.args.last.restriction.to_s : "Int32"))
       init_fn_ty = LLVMType.function(init_arg_tys, init_ret_ty, false)
       arg_type_names = init_def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
-      init_fn_name = "*#{info.name}#initialize<#{arg_type_names.join(", ")}>:#{arg_type_names.last? || "Nil"}"
+      init_fn_name = if gname = info.generic_name
+                       "*#{info.name}@#{gname}#initialize<#{arg_type_names.join(", ")}>:#{arg_type_names.last? || "Nil"}"
+                     else
+                       "*#{info.name}#initialize<#{arg_type_names.join(", ")}>:#{arg_type_names.last? || "Nil"}"
+                     end
 
       init_fn = mod.add_function(init_fn_name, init_fn_ty)
       init_fn.linkage = LibLLVM::Linkage::Internal
@@ -2504,7 +2647,8 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
             idx = info.is_struct ? fidx : fidx + 1
             gep = builder.inbounds_gep(st, self_param, [context.int32.const_int(0), context.int32.const_int(idx)])
             s_inst = builder.store(param_val, gep)
-            s_inst.alignment = 4
+            ftype = info.field_types[fname]? || "Int32"
+            s_inst.alignment = cg.align_of_type(ftype)
           end
         end
       end
@@ -2523,19 +2667,38 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
       end
 
       # Emit constructor *Type::new
-      ctor_arg_tys = init_def.args.map { |a| cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+      ctor_arg_tys = [] of LLVMType
+      if info.generic_name
+        ctor_arg_tys << context.int32
+      end
+      init_def.args.each { |a| ctor_arg_tys << cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
       ctor_ret_ty = info.is_struct ? st : context.pointer
       ctor_fn_ty = LLVMType.function(ctor_arg_tys, ctor_ret_ty, false)
-      ctor_name = if arg_type_names.empty?
-                    "*#{info.name}::new:#{info.name}"
+      ctor_name = if gname = info.generic_name
+                    if arg_type_names.empty?
+                      "*#{info.name}@#{gname}::new:#{info.name}"
+                    else
+                      "*#{info.name}@#{gname}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                    end
                   else
-                    "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                    if arg_type_names.empty?
+                      "*#{info.name}::new:#{info.name}"
+                    else
+                      "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                    end
                   end
 
       ctor_fn = mod.add_function(ctor_name, ctor_fn_ty)
       ctor_fn.linkage = LibLLVM::Linkage::Internal
-      init_def.args.each_with_index do |a, aidx|
-        ctor_fn.param(aidx).name = a.name
+      if info.generic_name
+        ctor_fn.param(0).name = "self"
+        init_def.args.each_with_index do |a, aidx|
+          ctor_fn.param(aidx + 1).name = a.name
+        end
+      else
+        init_def.args.each_with_index do |a, aidx|
+          ctor_fn.param(aidx).name = a.name
+        end
       end
 
       ctor_alloca_bb = ctor_fn.append_basic_block("alloca")
@@ -2557,7 +2720,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
 
         # Call memset
         m_fn_ty = LLVMType.function([context.pointer, context.int8, context.int64, context.int1], context.void, false)
-        builder.call(m_fn_ty, memset_fn.to_value, [zero_slot, context.int8.const_int(0), size_val, context.int1.const_int(0)])
+        builder.call(m_fn_ty, cg.ensure_memset.to_value, [zero_slot, context.int8.const_int(0), size_val, context.int1.const_int(0)])
 
         l_zero = builder.load(st, zero_slot)
         l_zero.alignment = 4
@@ -2567,7 +2730,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         # Call initialize(ptr %_, args...)
         init_args = [ret_slot] of LLVMValue
         init_def.args.each_with_index do |_, aidx|
-          init_args << ctor_fn.param(aidx)
+          init_args << ctor_fn.param(info.generic_name ? aidx + 1 : aidx)
         end
         builder.call(init_fn_ty, init_fn.to_value, init_args)
 
@@ -2581,20 +2744,29 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         builder.br(ctor_entry_bb)
 
         builder.position_at_end(ctor_entry_bb)
+        if info.generic_name
+          tid_class_global_name = "#{info.name}.class:type_id"
+          tid_class_global = if g = mod.get_global?(tid_class_global_name)
+                               g
+                             else
+                               cg_g = mod.add_global(tid_class_global_name, context.int32)
+                               cg_g.initializer = context.int32.const_int(info.type_id + 44)
+                               cg_g.global_constant = true
+                               cg_g.linkage = LibLLVM::Linkage::Internal
+                               cg_g
+                             end
+          l_cid = builder.load(context.int32, tid_class_global)
+          l_cid.alignment = 4
+        end
         null_ptr = context.pointer.null
         size_gep = builder.gep(st, null_ptr, [context.int32.const_int(1)])
         size_val = builder.ptr_to_int(size_gep, context.int64)
 
         mal_fn_ty = LLVMType.function([context.int64], context.pointer, false)
-        mal_fn = if m = malloc_fn
-                   m
-                 else
-                   mod.get_function("malloc")
-                 end
-        obj_ptr = builder.call(mal_fn_ty, mal_fn.to_value, [size_val])
+        obj_ptr = builder.call(mal_fn_ty, cg.ensure_malloc.to_value, [size_val])
 
         m_fn_ty = LLVMType.function([context.pointer, context.int8, context.int64, context.int1], context.void, false)
-        builder.call(m_fn_ty, memset_fn.to_value, [obj_ptr, context.int8.const_int(0), size_val, context.int1.const_int(0)])
+        builder.call(m_fn_ty, cg.ensure_memset.to_value, [obj_ptr, context.int8.const_int(0), size_val, context.int1.const_int(0)])
 
         # Store type_id at index 0
         tid_gep = builder.inbounds_gep(st, obj_ptr, [context.int32.const_int(0), context.int32.const_int(0)])
@@ -2610,7 +2782,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         # Call initialize(loaded_ptr, args...)
         init_args = [loaded_ptr] of LLVMValue
         init_def.args.each_with_index do |_, aidx|
-          init_args << ctor_fn.param(aidx)
+          init_args << ctor_fn.param(info.generic_name ? aidx + 1 : aidx)
         end
         builder.call(init_fn_ty, init_fn.to_value, init_args)
 
@@ -2680,7 +2852,7 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
           m_arg_tys << cg.llvm_type_from_name(r_name)
         end
       end
-      ret_tname = mdef.return_type ? mdef.return_type.to_s : "Int32"
+      ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
       m_ret_ty = cg.llvm_type_from_name(ret_tname)
       m_fn_ty = LLVMType.function(m_arg_tys, m_ret_ty, false)
 
@@ -2693,7 +2865,13 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
         end
       end
 
-      fn_mangled = if has_sub_override
+      fn_mangled = if gname = info.generic_name
+                     if arg_type_names.empty?
+                       "*#{info.name}@#{gname}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}@#{gname}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   elsif has_sub_override
                      if arg_type_names.empty?
                        "*#{info.name}+@#{info.name}##{mname}:#{ret_tname}"
                      else
@@ -2854,6 +3032,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   end
   tl = TopLevelVisitor.new(prog)
   classes.each do |cd|
+    next if (tvars = cd.type_vars) && !tvars.empty?
     cd.accept(tl)
   end
 
@@ -2892,8 +3071,13 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
   end
 
   # Process custom types (structs and classes)
+  generic_templates = Hash(String, ClassDef).new
   classes.each do |cd|
     cname = cd.name.to_s
+    if (tvars = cd.type_vars) && !tvars.empty?
+      generic_templates[cname] = cd
+      next
+    end
     info = CustomTypeInfo.new(cname, cd.struct)
     if sc = cd.superclass
       info.superclass_name = sc.to_s
@@ -2917,6 +3101,73 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
       end
     end
     cg.custom_types[cname] = info
+  end
+
+  # Instantiate generic types used in the module
+  usage_collector = GenericUsageCollector.new
+  node.accept(usage_collector)
+  usage_collector.generic_nodes.each do |g|
+    base_name = g.name.to_s
+    if template = generic_templates[base_name]?
+      type_args = g.type_vars.map(&.to_s)
+      inst_name = "#{base_name}(#{type_args.join(", ")})"
+      unless cg.custom_types.has_key?(inst_name)
+        info = CustomTypeInfo.new(inst_name, template.struct)
+        if tvars = template.type_vars
+          info.generic_name = "#{base_name}(#{tvars.join(", ")})"
+          subst = Hash(String, String).new
+          tvars.each_with_index { |tv, idx| subst[tv] = type_args[idx] }
+        else
+          subst = Hash(String, String).new
+        end
+
+        if b = template.body
+          exps = b.is_a?(Expressions) ? b.as(Expressions).expressions : [b] of ASTNode
+          exps.each do |exp|
+            if exp.is_a?(TypeDeclaration)
+              td = exp.as(TypeDeclaration)
+              if td.var.is_a?(InstanceVar)
+                fname = td.var.as(InstanceVar).name.lstrip('@')
+                raw_type = td.declared_type.to_s
+                ftype = subst[raw_type]? || raw_type
+                info.add_field(fname, ftype)
+              end
+            elsif exp.is_a?(Def)
+              d = exp.as(Def)
+              spec_args = d.args.map do |a|
+                fname = a.name.lstrip('@')
+                raw_r = a.restriction ? a.restriction.to_s : "Int32"
+                spec_r = subst[raw_r]? || raw_r
+                if a.name.starts_with?('@')
+                  info.add_field(fname, spec_r)
+                end
+                Arg.new(a.name, nil, Path.new(spec_r))
+              end
+              raw_ret = d.return_type ? d.return_type.to_s : "Int32"
+              spec_ret = subst[raw_ret]? || raw_ret
+              spec_def = Def.new(d.name, spec_args, d.body, nil, nil, Path.new(spec_ret))
+              info.methods[d.name] = spec_def
+            end
+          end
+        end
+        cg.custom_types[inst_name] = info
+      end
+    end
+  end
+  # Predefine String class layout if strings are used
+  has_strings = classes.any? { |cd| cd.name.to_s == "String" } || src.includes?("\"")
+  if has_strings
+    str_info = if existing_str = cg.custom_types["String"]?
+                 existing_str
+               else
+                 si = CustomTypeInfo.new("String", false)
+                 cg.custom_types["String"] = si
+                 si
+               end
+    str_info.type_id = 1
+    str_info.add_field("bytesize", "Int32")
+    str_info.add_field("length", "Int32")
+    str_info.add_field("c", "UInt8")
   end
   # Populate subclasses
   cg.custom_types.each_value do |info|
@@ -2967,7 +3218,7 @@ pub def compile_source_to_module(src : String, filename : String, context : Cont
     cg.llvm_struct_types[info.name] = st
 
     unless info.is_struct
-      if info.subclasses.empty? || info.methods.has_key?("initialize")
+      if (info.subclasses.empty? || info.methods.has_key?("initialize")) && info.name != "String"
         # Add type_id constant global
         tid_global = mod.add_global("#{info.name}:type_id", context.int32)
         tid_global.initializer = context.int32.const_int(info.type_id)

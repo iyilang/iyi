@@ -179,6 +179,17 @@ int32_t test_closure_single(int32_t x);
 int32_t test_closure_multi(int32_t a, int32_t b);
 int32_t test_closure_call_indirect(int32_t x, int32_t factor);
 
+// cg_strings
+int32_t test_string_literal(void);
+int32_t test_string_pool(void);
+
+// cg_generics
+int32_t test_box_int(void);
+int64_t test_box_int64(void);
+
+// cg_layouts
+int32_t test_layout_offsets(void);
+
 int main(void) {
   // Test 1: Integer arithmetic
   int32_t r_add = int_add(10, 32);
@@ -279,6 +290,17 @@ int main(void) {
   int32_t cl_multi = test_closure_multi(3, 7);
   int32_t cl_ind = test_closure_call_indirect(8, 6);
   printf("closures: %d %d %d\n", cl_single, cl_multi, cl_ind);
+  // Test 15: Strings
+  int32_t s_lit = test_string_literal();
+  int32_t s_pool = test_string_pool();
+  printf("strings: %d %d\n", s_lit, s_pool);
+  // Test 16: Generics
+  int32_t b_int = test_box_int();
+  int64_t b_i64 = test_box_int64();
+  printf("generics: %d %lld\n", b_int, (long long)b_i64);
+  // Test 17: Layouts
+  int32_t l_off = test_layout_offsets();
+  printf("layouts: %d\n", l_off);
 
   return 0;
 }

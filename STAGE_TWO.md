@@ -173,11 +173,12 @@ counts, what each produces and consumes, and the gate output proving parity:
 * **Crystal equivalent:** `src/compiler/iyi/codegen/*.cr` (15,000+ lines).
 * **Produces:** Native object files (`.o`) containing machine code and LLVM IR modules.
 * **Consumed by:** Linker.
-* **Gate proof:** `bench/selfhost_codegen_exercise.sh` proves 13/13 fixtures match 100%
-  (85 functions) in LLVM IR against Crystal, and emitted object files pass C driver execution 100%.
+* **Gate proof:** `bench/selfhost_codegen_exercise.sh` proves 17/17 fixtures match 100%
+  (105 functions) in LLVM IR against Crystal, and emitted object files pass C driver execution 100%.
 * **Completeness:** Emits functions, structs, struct methods, classes, constructors, instance
-  variables, virtual hierarchy dispatch, pointers, and exception landing pads. Does not emit
-  top-level statements outside functions or string constants.
+  variables, virtual hierarchy dispatch, pointers, exception landing pads, string literals
+  with constant pool reuse, user-defined generic class and struct instantiations, and heap layout
+  maps. Does not emit top-level statements outside functions or runtime garbage collection interface.
 
 ### Layer 8: Platform Support and Linker
 * **Files:** `src/compiler/platform/target.iyi` (260 lines), `flags.iyi` (184 lines),
@@ -242,15 +243,13 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   across multiple files on disk.
 
 ### Hole 3: Prelude Self-Compilation Barrier
-* **Status:** Blocked by codegen capabilities.
-* **Evidence:** `src/iyi/prelude.iyi` is 13,949 lines of advanced iyi source code. It relies
-  heavily on user-defined generics (`Array(T)`, `Hash(K, V)`, `Pointer(T)`), fibers, thread
-  wrappers, string manipulation, and runtime memory layouts.
-  `src/compiler/codegen/codegen.iyi` line 19 explicitly excludes generic instantiation beyond
-  `Pointer(T)`, string constant emission, and heap object layout maps. Attempting to compile
-  `src/iyi/prelude.iyi` with `codegen.iyi` fails because the required codegen primitives are
-  not yet ported.
-
+* **Status:** Codegen primitives ported for string literals, user-defined generics, and heap layouts; blocked by macro delimiter mode.
+* **Evidence:** `src/compiler/codegen/codegen.iyi` now emits string literals with private constant pools
+  and Crystal's string struct layout, user-defined generic instantiations with monomorphized constructors
+  and methods, and heap layout maps for instance variable offsets across structs and classes, proven by
+  `bench/selfhost_codegen_exercise.sh` (17 fixtures, 105 functions, 16 mutation proofs). Attempting to compile
+  `src/iyi/prelude.iyi` (7,471 lines) now advances past lexical analysis to line 48:1, where it encounters
+  macro delimiter grammar (`{%`), and `src/iyi/array.iyi` (507 lines) compiles through semantic analysis into codegen.
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Unwired.
 * **Evidence:** While `src/compiler/macros/` expands macros standalone in `selfhost_macros_exercise.sh`,

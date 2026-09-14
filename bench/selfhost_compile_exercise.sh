@@ -51,6 +51,7 @@ FIXTURES=(
   "bench/fixtures/compile_multi_import.iyi"
   "bench/fixtures/compile_diamond.iyi"
   "bench/fixtures/compile_top_level.iyi"
+  "bench/fixtures/compile_no_top_level.iyi"
 )
 
 matched=0
@@ -311,6 +312,13 @@ prove_compile_mutation "pipeline drops top-level statements" \
   "# append_entry_point(funs, top_level)" \
   "$REPO/bench/fixtures/compile_top_level.iyi" \
   42
+
+prove_compile_mutation "pipeline drops default entry point for declaration-only program" \
+  "$COMPILER_SRC" \
+  "top_level << Nop.new" \
+  "# top_level << Nop.new" \
+  "$REPO/bench/fixtures/compile_no_top_level.iyi" \
+  0
 echo
 if [ "$status" -eq 0 ]; then
   echo "ALL SELFHOST COMPILE CHECKS PASSED!"

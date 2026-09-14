@@ -52,6 +52,7 @@ module CompileTool
       when "--probe-phase"
         probe_phase = true
       when "--emit-obj"
+        emit_obj_only = true
         i = i + 1
         if i < args.size
           obj_output_file = args[i]

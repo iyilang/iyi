@@ -78,6 +78,18 @@ else
     "$(grep -m1 "cannot connect to 127.0.0.1:" "$WORK/refused.out" | sed 's/^iyi: panic: //')"
 fi
 
+echo "== a negative count is refused by name"
+# `recv(-1)` died of "arithmetic overflow" on a `to_u64`, a sentence about
+# neither the count nor the call.
+printf 'module main\n\nimport std/socket\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port)\nputs l.accept.recv(-1).inspect\n' > "$WORK/negative.iyi"
+if "$IYI" run "$WORK/negative.iyi" > "$WORK/negative.out" 2>&1; then
+  echo "  a negative count was taken"; status=1
+elif ! grep -q "negative count: -1" "$WORK/negative.out"; then
+  echo "  a negative count was refused, but not by name:"; sed 's/^/    /' "$WORK/negative.out"; status=1
+else
+  echo "  recv(-1): exits 1 at \"$(grep -m1 'negative count' "$WORK/negative.out" | sed 's/^iyi: panic: //')\""
+fi
+
 echo
 echo "== the checks fail when the socket mechanism is broken"
 prove_fails() {

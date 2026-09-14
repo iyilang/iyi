@@ -105,6 +105,9 @@ pub class IyiSocket
   # --- Reading and Writing ---
 
   def read(max_bytes : Int32 = 4096) : String
+    # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
+    # neither the count nor the call; the enumerable's sentence for it.
+    raise "negative count: #{max_bytes}" if max_bytes < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     count = IyiSocket.__sys_recv(@fd, buffer, max_bytes.to_u64)
     raise "cannot read from socket" if count < 0_i64
@@ -116,6 +119,7 @@ pub class IyiSocket
   end
 
   def read(buffer : Pointer(UInt8), count : Int32) : Int32
+    raise "negative count: #{count}" if count < 0
     n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
     raise "cannot read from socket" if n < 0_i64
     n.to_i32

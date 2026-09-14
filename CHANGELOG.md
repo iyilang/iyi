@@ -42,6 +42,11 @@
 
 ### Fixed
 
+- **`std/socket`'s `recv(-1)` died of arithmetic.** A negative count went
+  into a `to_u64` and came back `arithmetic overflow`, a sentence about
+  neither the count nor the call. `negative count: -1`, which is what the
+  library says for one everywhere else.
+
 - **`File.read` of a directory answered an empty file.** `open` takes a
   directory and `read` refuses it with EISDIR, and the refusal read as the
   end of the file: `File.read("adir")` was `""`, exit 0, from a call that

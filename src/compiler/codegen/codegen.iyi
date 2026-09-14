@@ -3135,7 +3135,17 @@ pub class CodeGenVisitor < Visitor
             l_null = @builder.icmp(LibLLVM::IntPredicate::EQ, ptr_val, @context.pointer.null)
             l_nil_tid = @builder.load(@context.int32, @mod.get_global("Nil:type_id"))
             l_nil_tid.alignment = 4
-            l_box_tid = @builder.load(@context.int32, @mod.get_global("#{base_cname}:type_id"))
+            box_tid_g = if g = @mod.get_global?("#{base_cname}:type_id")
+                          g
+                        else
+                          g2 = @mod.add_global("#{base_cname}:type_id", @context.int32)
+                          tid_val = (c_info = @custom_types[base_cname]?) ? c_info.type_id : 0
+                          g2.initializer = @context.int32.const_int(tid_val)
+                          g2.global_constant = true
+                          g2.linkage = LibLLVM::Linkage::Internal
+                          g2
+                        end
+            l_box_tid = @builder.load(@context.int32, box_tid_g)
             l_box_tid.alignment = 4
             sel = @builder.select(l_null, l_nil_tid, l_box_tid)
             l_nil_tid2 = @builder.load(@context.int32, @mod.get_global("Nil:type_id"))
@@ -3788,7 +3798,15 @@ def emit_custom_types_code(cg : CodeGenVisitor) : Nil
 
         # Store type_id at index 0
         tid_gep = builder.inbounds_gep(st, obj_ptr, [context.int32.const_int(0), context.int32.const_int(0)])
-        tid_global = mod.get_global("#{info.name}:type_id")
+        tid_global = if g = mod.get_global?("#{info.name}:type_id")
+                       g
+                     else
+                       g2 = mod.add_global("#{info.name}:type_id", context.int32)
+                       g2.initializer = context.int32.const_int(info.type_id)
+                       g2.global_constant = true
+                       g2.linkage = LibLLVM::Linkage::Internal
+                       g2
+                     end
         tid_val = builder.load(context.int32, tid_global)
         tid_val.alignment = 4
         s_tid = builder.store(tid_val, tid_gep)
@@ -4403,14 +4421,12 @@ pub def compile_declarations_to_module(
     st.struct_set_body(elem_types)
     cg.llvm_struct_types[info.name] = st
 
-    unless info.is_struct
-      if (info.subclasses.empty? || info.methods.has_key?("initialize")) && info.name != "String"
-        # Add type_id constant global
-        tid_global = mod.add_global("#{info.name}:type_id", context.int32)
-        tid_global.initializer = context.int32.const_int(info.type_id)
-        tid_global.global_constant = true
-        tid_global.linkage = LibLLVM::Linkage::Internal
-      end
+    unless info.is_struct || info.name == "String"
+      # Add type_id constant global
+      tid_global = mod.add_global("#{info.name}:type_id", context.int32)
+      tid_global.initializer = context.int32.const_int(info.type_id)
+      tid_global.global_constant = true
+      tid_global.linkage = LibLLVM::Linkage::Internal
     end
   end
 

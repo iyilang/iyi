@@ -4,7 +4,7 @@ import compiler/syntax/ast
 import compiler/syntax/token
 import compiler/macros/ast
 
-using compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, StringBuilder}
+using compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Underscore, Unless, Until, Var, While, StringBuilder}
 using compiler/syntax/token::{NumberKind}
 using compiler/macros/ast::{MacroId}
 
@@ -92,6 +92,12 @@ pub class MacroMethods
       "MacroVar"
     elsif node.is_a?(Expressions)
       "Expressions"
+    elsif node.is_a?(TypeDeclaration)
+      "TypeDeclaration"
+    elsif node.is_a?(Path)
+      "Path"
+    elsif node.is_a?(Generic)
+      "Generic"
     else
       "ASTNode"
     end
@@ -219,6 +225,15 @@ pub class MacroMethods
         return BoolLiteral.new(!ast_equal?(rec, args[0]))
       else
         return BoolLiteral.new(true)
+      end
+    when "is_a?"
+      if args.size > 0
+        target = to_macro_id(args[0])
+        actual = node_class_name(rec)
+        matched = (actual == target) || (target == "ASTNode") || (target == "Node")
+        return BoolLiteral.new(matched)
+      else
+        return BoolLiteral.new(false)
       end
     end
 
@@ -607,7 +622,22 @@ pub class MacroMethods
       end
       return rng
     end
-
+    if rec.is_a?(TypeDeclaration)
+      td = rec.as(TypeDeclaration)
+      case method
+      when "var"
+        return td.var
+      when "type"
+        return td.declared_type
+      when "value"
+        if v = td.value
+          return v
+        else
+          return NilLiteral.new
+        end
+      end
+      return td
+    end
     rec
   end
 end

@@ -42,6 +42,37 @@
 
 ### Fixed
 
+- **A missing prelude was answered with the other language's advice.**
+  `IYI_PATH=/nowhere iyi build x.iyi` printed `can't find file
+  'iyi/prelude'` and then asked whether the author had run `shards
+  install` and whether they were "running the compiler in the same
+  directory as your shard.yml" — to a program in a language with no
+  shards, whose `require` is refused by a rule three lines earlier in the
+  same file. Under iyi's own library the only things that reach that path
+  are the prelude and `std/...`, both files on the search path, so the
+  search path is what it prints: the entries in order, and that
+  unsetting `IYI_PATH` uses the one the compiler was built with.
+  `--crystal` still gets Crystal's advice, which is right there.
+
+- **`-o` with nothing behind it wrote where it liked.** `-o ""` is what a
+  shell makes of `-o "$OUT"` with `OUT` unset, and it meant the current
+  directory: the program landed beside its source under a name nobody
+  typed, or `ld.lld: error: cannot open output file <cwd>: Is a
+  directory` after a whole compilation had been paid for. It takes a
+  path now. An output directory that exists but will not take the file
+  was the same three lines of linker, for a permission bit; that is a
+  sentence before the compile starts, like the missing-directory case
+  beside it.
+
+- **A one-sample perf budget failed a commit that touched no
+  allocator.** `bench/arena_exercise.sh` asserts the size-class arena
+  costs no more than 2.5× a bump pointer measured in the same run, which
+  is the right shape — a regression multiplies — but it compared single
+  samples, and a shared three-core darwin runner gave the bump pointer
+  its best run (13 ns) next to one of the arena's worst (44). It takes
+  the minimum of three runs of each now, which is this repository's
+  answer to noise everywhere else it measures time.
+
 - **Any malformed frame killed the build daemon.** `daemon_accept` read
   its request with no rescue, so anything a client could do wrong went
   wrong all the way out of the accept loop and took the daemon down with

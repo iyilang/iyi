@@ -690,6 +690,14 @@ class Iyi::Command
           compiler.no_codegen = true
         end
         opts.on("-o FILE", "--output FILE", "Output path. If a directory, the filename is derived from the first source file (default: ./)") do |an_output_filename|
+          # `-o ""` is what a shell produces from `-o "$OUT"` with `OUT`
+          # unset, and it used to mean the current directory - the
+          # program was written beside its source under a name nobody
+          # typed, or, when that name was taken, `ld.lld: error: cannot
+          # open output file <cwd>: Is a directory`.
+          if an_output_filename.empty?
+            abort! "-o takes a path", :USAGE_ERROR
+          end
           opt_output_filename = an_output_filename
           specified_output = true
         end
@@ -897,6 +905,14 @@ class Iyi::Command
       directory = File.dirname(output_filename)
       unless Dir.exists?(directory)
         abort! "there is no #{directory} to write #{File.basename(output_filename)} into", :USAGE_ERROR
+      end
+
+      # The same sentence for a directory that is there and will not take
+      # the file. `-o ro/prog` under a mode-500 directory was three lines
+      # of `ld.lld: error: cannot open output file`, once per link
+      # attempt, for a permission bit.
+      unless File.writable?(directory)
+        abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
     end
 

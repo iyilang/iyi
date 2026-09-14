@@ -307,7 +307,40 @@ echo "  price of a heap that can hand memory back."
 # So the gate is the ratio, and the ratio is what a regression crosses -
 # not a target to tune to, and checked rather than eyeballed because
 # nobody reads a printed number twice.
+#
+# Of the *minimum* of three runs each, which is the same answer this
+# repository gives noise everywhere else (`bench/daemon_full_build.py`:
+# "build time has a floor and noise only ever adds"). One sample per arm
+# failed a darwin runner at 44 ns against a 13 ns bump - 3.4x - on a
+# commit that touched neither allocator: a shared three-core box that
+# happened to give the bump pointer its best run and the arena one of its
+# worst. A regression multiplies every run, so it survives a minimum; a
+# runner's weather does not.
 ALLOCATION_RATIO=${ALLOCATION_RATIO:-25}
+ALLOCATION_RUNS=${ALLOCATION_RUNS:-3}
+
+min_ns() { # binary, awk-selectable line
+  local binary="$1" pattern="$2" best="" value=""
+  local run=1
+  while [ "$run" -le "$ALLOCATION_RUNS" ]; do
+    value="$("$binary" 2>/dev/null | grep -m1 "$pattern" | awk '{ print $2 }')"
+    case "$value" in
+      '' | *[!0-9]*) : ;;
+      *) if [ -z "$best" ] || [ "$value" -lt "$best" ]; then best="$value"; fi ;;
+    esac
+    run=$((run + 1))
+  done
+  printf '%s' "$best"
+}
+
+if [ -x "$WORK/exercise-default-release" ] && [ -x "$WORK/exercise-gc-release" ]; then
+  bump_rel="$(min_ns "$WORK/exercise-default-release" '^ *speed:')"
+  arena_rel="$(min_ns "$WORK/exercise-gc-release" '^ *speed:')"
+  pair_rel="$(min_ns "$WORK/exercise-gc-release" 'alloc+free')"
+  printf '  best of %s: bump %s ns, arena %s ns, pair %s ns\n' \
+    "$ALLOCATION_RUNS" "${bump_rel:-?}" "${arena_rel:-?}" "${pair_rel:-?}"
+fi
+
 ratio_holds() { # name arena bump
   [ -n "$2" ] && [ -n "$3" ] && [ "$3" -gt 0 ] || return 0
   if [ $(( $2 * 10 )) -gt $(( $3 * ALLOCATION_RATIO )) ]; then

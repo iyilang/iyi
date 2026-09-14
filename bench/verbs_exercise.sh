@@ -231,6 +231,38 @@ refuses "a stale socket file left by a dead daemon" "is a file, not a socket" --
   "$IYI" daemon build --socket "$WORK/stale.sock" -o d5 good.iyi
 
 echo
+echo "== where a program is written, and where its library is looked for"
+# `-o ""` is what `-o "$OUT"` produces with `OUT` unset. It used to mean
+# the current directory: the program landed beside its source under a
+# name nobody typed, or the linker answered "cannot open output file
+# <cwd>: Is a directory" - after a whole compilation had been paid for.
+refuses "an empty -o" "-o takes a path" -- "$IYI" build -o "" good.iyi
+mkdir -p "$WORK/readonly"
+chmod 500 "$WORK/readonly"
+refuses "an output directory that will not take the file" "no permission to write there" -- \
+  "$IYI" build -o "$WORK/readonly/prog" good.iyi
+chmod 700 "$WORK/readonly"
+# And the library the program compiles against. With IYI_PATH pointed
+# somewhere empty, the prelude is not found - and the answer was Crystal's
+# advice about `shards install` and `shard.yml`, to an author whose
+# language has neither and whose `require` is refused two lines earlier in
+# the same file. What is wrong is the search path, so the search path is
+# what it prints.
+env IYI_PATH="$WORK/nowhere" "$IYI" build -o lost good.iyi > "$WORK/lost.txt" 2>&1
+if grep -q 'shards install' "$WORK/lost.txt"; then
+  echo "  a missing prelude: answered with the other language's advice"
+  sed -n '1,8p' "$WORK/lost.txt"
+  status=1
+elif grep -q "iyi's prelude and \`std\` ship beside the compiler" "$WORK/lost.txt" &&
+     grep -q "$WORK/nowhere" "$WORK/lost.txt"; then
+  echo "  a missing prelude: names the search path it looked down"
+else
+  echo "  a missing prelude: said neither what was searched nor why"
+  sed -n '1,8p' "$WORK/lost.txt"
+  status=1
+fi
+
+echo
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,
 # and every one of them failed the standard the verbs above hold to: `doc`

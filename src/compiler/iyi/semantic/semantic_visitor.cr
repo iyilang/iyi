@@ -86,6 +86,23 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         if relative_to
           message += " relative to '#{relative_to}'"
         end
+      elsif @program.iyi_prelude?
+        # iyi: the other language's advice, in iyi's mouth. A program under
+        # iyi's library has no shards and no `shard.yml` — `require` is
+        # refused for it a few lines above — so the only things that reach
+        # here are the prelude and `std/...`, and both are files on the
+        # search path. `IYI_PATH=/nowhere iyi build x.iyi` answered "can't
+        # find file 'iyi/prelude'" and then asked whether the author had
+        # run `shards install`.
+        searched = @program.iyi_path.entries
+        notes << String.build do |note|
+          note << "This is a file on the search path, not a library name: "
+          note << "iyi's prelude and `std` ship beside the compiler. "
+          note << "Searched, in order:\n"
+          searched.each { |entry| note << "  " << entry << '\n' }
+          note << "IYI_PATH sets that list, and unsetting it uses the one "
+          note << "this compiler was built with"
+        end
       else
         notes << <<-NOTE
           If you're trying to require a shard:

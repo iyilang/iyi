@@ -98,6 +98,10 @@ module Iyi
     # daemon's own directory.
     property current_dir : String
 
+    # What was searched, in order. A "can't find file" that does not name
+    # the path it looked down is a question rather than an answer.
+    getter entries : Array(String)
+
     def initialize(@entries : Array(String) = IyiPath.default_paths, codegen_target = Config.host_target)
       add_target_path(codegen_target)
       @current_dir = Dir.current

@@ -325,14 +325,14 @@
   the linker again: `ld.lld: error: <file>:1: unknown directive: garbage`,
   about a source the author had not touched, until somebody guessed at
   `clear_cache`. A cached object whose first four bytes are not this
-  target's is a miss now — ELF, Mach-O thin or fat either endianness, or
-  wasm — and the unit recompiles, on one line saying which file and why.
-  COFF opens with a machine number rather than a fixed magic, so a
-  Windows object keeps the size rule and nothing more: a guess that
-  refused a good object would recompile the world on every build, which is
-  why `bench/verbs_exercise.sh` asserts both halves, the corrupted object
-  that is rebuilt and the `--stats` line that says an intact cache is
-  reused whole.
+  target's is a miss now — ELF, Mach-O thin or fat either endianness,
+  wasm, and COFF by the one thing its first two bytes must be, the
+  target's machine number (`64 86` for x86_64, `64 aa` for aarch64, read
+  off what LLVM writes) — and the unit recompiles, on one line saying
+  which file and why. A guess that refused a good object would recompile
+  the world on every build, which is why `bench/verbs_exercise.sh`
+  asserts both halves, the corrupted object that is rebuilt and the
+  `--stats` line that says an intact cache is reused whole.
 
 - **The MCP server answered two mistakes with the wrong one.** A
   `tools/call` with no `name` came back `unknown tool: ` — a sentence

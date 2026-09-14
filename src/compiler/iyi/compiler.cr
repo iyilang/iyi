@@ -3209,11 +3209,11 @@ module Iyi
       end
 
       # Four bytes: whether what the cache holds under `object_name` has
-      # the shape of an object file for this target. Formats whose first
-      # bytes are not a fixed magic - COFF opens with a machine number -
-      # are judged by the size rule above and nothing more, because a
-      # guess that refuses a good object would recompile the world on
-      # every build.
+      # the shape of an object file for this target. COFF has no fixed
+      # magic, so it is judged by the one thing its first two bytes must
+      # be, the target's machine number; a guess that refused a good object
+      # would recompile the world on every build, so that is the whole of
+      # the COFF test.
       private def object_file_intact? : Bool
         header = Bytes.new(4)
         # `read_fully?` rather than `read`, which is allowed to answer with
@@ -3231,7 +3231,10 @@ module Iyi
         elsif target.architecture == "wasm32"
           header == "\0asm".to_slice
         elsif target.windows?
-          true
+          # IMAGE_FILE_MACHINE_AMD64 and _ARM64, little-endian, which is what
+          # LLVM writes first for these two targets (`win.obj` begins `64 86`).
+          machine = IO::ByteFormat::LittleEndian.decode(UInt16, header)
+          target.architecture == "aarch64" ? machine == 0xaa64_u16 : machine == 0x8664_u16
         else
           header == "\x7fELF".to_slice
         end

@@ -76,6 +76,17 @@ module BenchSelfhostLexerExercise
     tokens
   end
 
+  def self.consume_macro_tokens(lexer : Lexer, tokens : Array(Token))
+    state = MacroState.default
+    while true
+      tok = Token.new
+      tok.copy_from(lexer.next_macro_token(state, false))
+      tokens << tok
+      break if tok.type == TokenKind::MACRO_END || tok.type == TokenKind::EOF
+      state = tok.macro_state
+    end
+  end
+
   def self.test_keywords
     print "testing all 67 keywords... "
     kw_names = [
@@ -344,6 +355,29 @@ module BenchSelfhostLexerExercise
     puts " tokens across fixtures)"
   end
 
+  def self.test_macro_tokens
+    print "testing macro tokens and modes... "
+    source = "hello \\{% raise \"msg\" %} {% if cond %} body {% end %}"
+    lexer = Lexer.new(source)
+    state = MacroState.default
+
+    tok1 = lexer.next_macro_token(state)
+    assert(tok1.type == TokenKind::MACRO_LITERAL, "expected literal")
+    assert(tok1.value == "hello ", "literal text")
+
+    tok2 = lexer.next_macro_token(tok1.macro_state)
+    assert(tok2.type == TokenKind::MACRO_LITERAL, "expected escaped delimiter literal")
+    assert(tok2.value == "{% ", "escaped delimiter value")
+
+    tok3 = lexer.next_macro_token(tok2.macro_state)
+    assert(tok3.type == TokenKind::MACRO_LITERAL, "expected literal body")
+
+    tok4 = lexer.next_macro_token(tok3.macro_state)
+    assert(tok4.type == TokenKind::MACRO_CONTROL_START, "expected {%")
+
+    puts "ok (macro tokens verified)"
+  end
+
   def self.run_all
     puts "============================================================"
     puts "Running Selfhost Lexer Verification Suite (pure iyi stage 0)"
@@ -360,6 +394,7 @@ module BenchSelfhostLexerExercise
     test_locations
     test_boundaries
     test_syntax_fixtures
+    test_macro_tokens
     puts "============================================================"
     puts "ALL SELFHOST LEXER CHECKS PASSED SUCCESSFULLY!"
     puts "============================================================"

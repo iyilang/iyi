@@ -8,7 +8,7 @@ and `bash bench/dependency_floor.sh`, not estimated.
 
 ## Where this actually stands
 
-`src/compiler` is **110,105 lines of Crystal and 38,288 lines of iyi**. The
+`src/compiler` is **110,105 lines of Crystal and 39,650 lines of iyi**. The
 iyi side is the lexer, the token, the AST, the visitor and transformer, the
 parser's expressions and declarations, the normalizer, the top-level declaration
 and expression and method body typing passes of semantic analysis, the type
@@ -20,9 +20,9 @@ bindings, and the first slice of code generation:
 
 | in iyi | lines | proved by |
 |---|---|---|
-| `syntax/lexer.iyi`, `syntax/token.iyi` | 3,103 | `bench/selfhost_lexer_exercise.sh`: 42 fixtures, 21,034 tokens identical to the Crystal front end |
-| `syntax/ast.iyi`, `visitor.iyi`, `transformer.iyi` | 7,202 | `bench/selfhost_ast_exercise.sh`, five guarded mutation proofs |
-| `syntax/parser.iyi` (no macros) | 4,072 | `bench/selfhost_parser_exercise.sh`: 24 fixtures, 1,609 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
+| `syntax/lexer.iyi`, `syntax/token.iyi` | 3,467 | `bench/selfhost_lexer_exercise.sh`: 43 fixtures, 21,168 tokens identical to the Crystal front end, six guarded mutation proofs |
+| `syntax/ast.iyi`, `visitor.iyi`, `transformer.iyi` | 7,216 | `bench/selfhost_ast_exercise.sh`, five guarded mutation proofs |
+| `syntax/parser.iyi` | 5,130 | `bench/selfhost_parser_exercise.sh`: 25 fixtures, 1,677 normalised nodes identical to the Crystal front end, nine guarded mutation proofs |
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
 | `semantic/top_level.iyi`, `semantic/main_visitor.iyi`, `semantic/recursive_struct_checker.iyi` | 2,996 | `bench/selfhost_semantic_exercise.sh`: 42 fixtures (9 declaration fixtures, 39 declarations; 10 typed expression fixtures, 312 typed nodes; 23 error fixtures rejected with identical errors), sixteen guarded mutation proofs. Top-level declarations, method bodies, instance variable type inference across a type, class variable initializers, recursive struct check, overload resolution by argument types with specificity ranking and autocast ambiguity detection, multiple dispatch over union receivers, and block and closure type inference |
 | `types/*.iyi`, `types.iyi` | 2,123 | `bench/selfhost_types_exercise.sh`: 13 fixtures (7 type declaration fixtures, 66 types identical to the Crystal front end; 6 error fixtures rejected with identical errors), six guarded mutation proofs. Type hierarchy extensions, virtual types and virtual metaclasses, generic class/module/trait instances, tuples, named tuples, procs, pointers, static arrays, union classification and unification, type filtering and is_a? narrowing, type restrictions, and type rendering with full options |
@@ -87,18 +87,18 @@ type checker, which remain in Crystal. Once semantic analysis lands in iyi,
 the artifact writer can be plugged directly into the front-end AST walk.
 
 The parser is the one thing in between. Expressions and declarations are
-ported, 3,868 lines of iyi against the 7,600 of
+ported, 5,130 lines of iyi against the 7,384 of
 `src/compiler/iyi/syntax/parser.cr`, and `bench/selfhost_parser_exercise.sh`
-requires every one of twenty-four syntax fixtures to produce a normalised tree
-identical to the frontend's, 1,609 nodes in all. Declarations here means `def`
+requires every one of twenty-five syntax fixtures to produce a normalised tree
+identical to the frontend's, 1,677 nodes in all. Declarations here means `def`
 in its argument and return-type forms, `class`, `struct`, `module`, `enum`,
 `trait`, `impl` with `forall`, `annotation`, `lib` and `fun`, type and
-variable declarations, `alias`, inclusion and visibility.
+variable declarations, `alias`, inclusion, visibility, and macro control grammar
+(`{% if %}`, `{% elsif %}`, `{% else %}`, `{% unless %}`, `{% for %}`, `{% begin %}`,
+`{% verbatim %}`, and `{{ ... }}`).
 
-What is still not parsed is the macro grammar, which is a separate lexer mode
-rather than more of the same grammar and belongs with the macro engine. Nothing
-in the build calls the iyi parser yet: it is checked against the Crystal one,
-not used in place of it. Porting the rest is what closes stage one.
+Macro control grammar modes are parsed and lexed by the pure iyi front end,
+supported by `next_macro_token` in `syntax/lexer.iyi`.
 
 ## The stages
 

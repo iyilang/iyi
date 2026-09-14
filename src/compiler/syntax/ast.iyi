@@ -1545,6 +1545,18 @@ pub class Expressions < ASTNode
     end
   end
 
+  def self.concat(node : ASTNode, exps : ASTNode) : ASTNode
+    if exps.is_a?(Expressions)
+      arr = [node] of ASTNode
+      exps.as(Expressions).expressions.each { |e| arr << e }
+      Expressions.new(arr)
+    elsif exps.is_a?(Nop)
+      node
+    else
+      Expressions.new([node, exps])
+    end
+  end
+
   def clone_without_location : self
     Expressions.new(clone_nodes(@expressions), @keyword)
   end

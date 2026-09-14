@@ -273,19 +273,26 @@ pub struct DelimiterState
   end
 end
 
+pub enum MacroKeywordState
+  AbstractDef
+  Other
+end
+
 pub struct MacroState
   property whitespace : Bool
   property nest : Int32
   property control_nest : Int32
+  property delimiter_state : DelimiterState?
   property beginning_of_line : Bool
   property yields : Bool
   property comment : Bool
+  property heredocs : Array(DelimiterState)?
 
-  def initialize(@whitespace : Bool = true, @nest : Int32 = 0, @control_nest : Int32 = 0, @beginning_of_line : Bool = true, @yields : Bool = false, @comment : Bool = false)
+  def initialize(@whitespace : Bool = true, @nest : Int32 = 0, @control_nest : Int32 = 0, @delimiter_state : DelimiterState? = nil, @beginning_of_line : Bool = true, @yields : Bool = false, @comment : Bool = false, @heredocs : Array(DelimiterState)? = nil)
   end
 
   def self.default : MacroState
-    MacroState.new(true, 0, 0, true, false, false)
+    MacroState.new(true, 0, 0, nil, true, false, false, nil)
   end
 end
 

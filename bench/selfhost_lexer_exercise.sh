@@ -41,6 +41,7 @@ for phrase in \
   "testing location tracking (line, column)... ok (locations verified)" \
   "testing boundary conditions (empty, comments only, whitespace only)... ok (boundaries verified)" \
   "testing real syntax fixtures tokenization... ok (1285 tokens across fixtures)" \
+  "testing macro tokens and modes... ok (macro tokens verified)" \
   "ALL SELFHOST LEXER CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
     echo "  MISSING REPORT: '$phrase'"
@@ -252,7 +253,8 @@ for fixture in \
   "$REPO"/samples/iyi/app/formal.iyi \
   "$REPO"/samples/iyi/app/greeter.iyi \
   "$REPO"/samples/iyi/boot/config.iyi \
-  "$REPO"/samples/iyi/boot/registry.iyi; do
+  "$REPO"/samples/iyi/boot/registry.iyi \
+  "$REPO"/bench/fixtures/macro_tokens.iyi; do
   name="$(basename "$fixture")"
   rel="${fixture#$REPO/}"
   "$WORK/dump_crystal" "$fixture" > "$WORK/golden_$name.txt"
@@ -407,6 +409,28 @@ fi
 cp "$REPO/src/compiler/syntax/lexer.iyi.orig" "$REPO/src/compiler/syntax/lexer.iyi"
 rm -f "$REPO/src/compiler/syntax/lexer.iyi.orig"
 echo "    reverted mutation 5"
+
+# Mutation 6: Alter macro control delimiter start recognition in next_macro_token
+echo "  [mutation 6] altering macro control start recognition in next_macro_token"
+cp "$REPO/src/compiler/syntax/lexer.iyi" "$REPO/src/compiler/syntax/lexer.iyi.orig"
+sed -i.bak 's/next_char(TokenKind::MACRO_CONTROL_START)/next_char(TokenKind::MACRO_EXPRESSION_START)/' "$REPO/src/compiler/syntax/lexer.iyi" && rm -f "$REPO/src/compiler/syntax/lexer.iyi.bak"
+if diff -u "$REPO/src/compiler/syntax/lexer.iyi.orig" "$REPO/src/compiler/syntax/lexer.iyi" >/dev/null; then
+  echo "  ERROR: patch was not applied!"
+  rm -f "$REPO/src/compiler/syntax/lexer.iyi.orig"
+  exit 1
+fi
+echo "    patch verified applied in working tree"
+if "$IYI" run "$REPO/bench/selfhost_lexer_exercise.iyi" > "$WORK/mut6.log" 2>&1; then
+  echo "  ERROR: exercise unexpectedly passed with mutated macro control start!"
+  cp "$REPO/src/compiler/syntax/lexer.iyi.orig" "$REPO/src/compiler/syntax/lexer.iyi"
+  rm -f "$REPO/src/compiler/syntax/lexer.iyi.orig"
+  exit 1
+else
+  echo "    exercise correctly failed on mutated macro control start"
+fi
+cp "$REPO/src/compiler/syntax/lexer.iyi.orig" "$REPO/src/compiler/syntax/lexer.iyi"
+rm -f "$REPO/src/compiler/syntax/lexer.iyi.orig"
+echo "    reverted mutation 6"
 echo
 echo "== Verification clean state confirmed"
 "$WORK/exercise-release" >/dev/null

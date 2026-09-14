@@ -13,7 +13,7 @@ using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
 using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
 using compiler/syntax/lexer::{Lexer}
-using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader}
+using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader, Macro, MacroIf, MacroFor, MacroExpression, MacroLiteral, MacroVar, MacroVerbatim}
 using compiler/syntax/parser::{Parser}
 using compiler/syntax/visitor::{Visitor, NodeCounterVisitor}
 
@@ -474,6 +474,43 @@ module BenchSelfhostParserExercise
       s = "#{p}Metaclass\n"
       s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
       s
+    when Macro
+      s = "#{p}Macro name=#{escape_s(node.name)}\n"
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when MacroIf
+      s = "#{p}MacroIf\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when MacroFor
+      vars_s = node.vars.map { |v| v.name }.join(", ")
+      s = "#{p}MacroFor vars=[#{vars_s}]\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when MacroExpression
+      s = "#{p}MacroExpression output=#{node.output}\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when MacroLiteral
+      "#{p}MacroLiteral value=#{escape_s(node.value)}\n"
+    when MacroVar
+      s = "#{p}MacroVar name=#{escape_s(node.name)}\n"
+      if exps = node.exps
+        s += "#{p}  exps:\n"
+        exps.each { |e| s += dump_ast(e, indent + 2) }
+      end
+      s
+    when MacroVerbatim
+      s = "#{p}MacroVerbatim\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s
     else
       "#{p}ASTNode\n"
     end
@@ -600,6 +637,7 @@ module BenchSelfhostParserExercise
       "bench/fixtures/decl_traits_and_impls.iyi",
       "bench/fixtures/decl_types_and_vars.iyi",
       "bench/fixtures/decl_visibility_and_annotations.iyi",
+      "bench/fixtures/macro_control_grammar.iyi",
     ]
 
     total_nodes = 0

@@ -27,7 +27,7 @@ import compiler/syntax/ast
 using compiler/foundation/location::{Location}
 using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
-using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
+using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
 using compiler/syntax/lexer::{Lexer}
 using compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, StringBuilder}
 
@@ -93,6 +93,7 @@ pub class Parser < Lexer
   property inside_trait_or_impl : Bool
   property inside_c_struct : Bool
   property no_type_declaration : Int32
+  property in_macro_expression : Bool
 
   def self.parse(str : String, string_pool : StringPool? = nil, var_scopes : Array(Set(String)) = [Set(String).new]) : ASTNode
     new(str, "", string_pool, var_scopes).parse
@@ -117,6 +118,7 @@ pub class Parser < Lexer
     @inside_trait_or_impl = false
     @inside_c_struct = false
     @no_type_declaration = 0
+    @in_macro_expression = false
   end
 
   def token_end_location : Location
@@ -928,6 +930,10 @@ pub class Parser < Lexer
       parse_array_literal
     when TokenKind::OP_LCURLY
       parse_hash_or_tuple_literal
+    when TokenKind::OP_LCURLY_LCURLY
+      parse_percent_macro_expression
+    when TokenKind::OP_LCURLY_PERCENT
+      parse_percent_macro_control
     when TokenKind::NUMBER
       @wants_regex = false
       node_and_next_token(NumberLiteral.new(@token.value, @token.number_kind).at(location))
@@ -1147,6 +1153,7 @@ pub class Parser < Lexer
   end
 
   def var?(name : String) : Bool
+    return true if @in_macro_expression
     return true if name == "self"
     i = @var_scopes.size - 1
     while i >= 0
@@ -1491,6 +1498,10 @@ pub class Parser < Lexer
     next_token_skip_space_or_newline
 
     cond = parse_op_assign_no_control(allow_suffix: false)
+    parse_unless_after_condition(cond, location)
+  end
+
+  def parse_unless_after_condition(cond : ASTNode, location : Location) : ASTNode
     set_slash_is_regex(true)
     skip_statement_end
 
@@ -2866,6 +2877,12 @@ pub class Parser < Lexer
       c = scanner.current_char
       p = scanner.peek_char
 
+      if c == '\\' && (p == '{' || p == '%')
+        scanner.next_char
+        lit_sb << scanner.next_char
+        next
+      end
+
       if c == '{' && p == '{'
         if !lit_sb.empty?
           pieces << MacroLiteral.new(lit_sb.to_s)
@@ -3089,14 +3106,375 @@ pub class Parser < Lexer
   end
 
   def parse_macro : ASTNode
-    macro_start = @pos - 5
-    while macro_start >= 0 && @source[macro_start, 5] != "macro"
-      macro_start = macro_start - 1
+    location = @token.location
+    consume_def_or_macro_name
+
+    name = ""
+    if @token.type == TokenKind::CONST
+      syntax_error("macro can't have a receiver", @token.location)
+    elsif @token.type == TokenKind::IDENT
+      check_valid_def_name
+      name = @token.value
+      equals_sign, _ = consume_def_equals_sign
+      name = "#{name}=" if equals_sign
+      skip_space
+    else
+      check_valid_def_op_name
+      name = @token.value.empty? ? @token.type.to_s : @token.value
+      next_token_skip_space
     end
-    a_macro, end_pos = parse_macro_definition_from(@source, macro_start)
-    @pos = end_pos
+
+    params = [] of Arg
+    splat_index : Int32? = nil
+    double_splat : Arg? = nil
+    block_arg : Arg? = nil
+    if @token.type == TokenKind::OP_LPAREN
+      next_token_skip_space_or_newline
+      index = 0
+      found_default_value = false
+      found_splat = false
+
+      while @token.type != TokenKind::OP_RPAREN
+        extras = parse_param(params, nil, true, found_default_value, found_splat, double_splat, false)
+        if !found_default_value && extras.default_value
+          found_default_value = true
+        end
+        if splat_index.nil? && extras.splat
+          splat_index = index
+          found_splat = true
+        end
+        if extras.double_splat
+          double_splat = params.pop
+        end
+        if block_arg = extras.block_arg
+          check(TokenKind::OP_RPAREN)
+          break
+        elsif @token.type == TokenKind::OP_COMMA
+          next_token_skip_space_or_newline
+        else
+          skip_space_or_newline
+          check(TokenKind::OP_RPAREN)
+        end
+        index = index + 1
+      end
+      next_token
+    elsif @token.type == TokenKind::IDENT || @token.type == TokenKind::OP_STAR
+      if @token.keyword == Keyword::END
+        unexpected_token("expected ';' or newline")
+      else
+        unexpected_token("parentheses are mandatory for macro parameters")
+      end
+    end
+
+    if @token.keyword == Keyword::END
+      end_location = token_end_location
+      body = Expressions.new
+      next_token_skip_space
+    else
+      body, end_location = parse_macro_body(location)
+    end
+
+    node = Macro.new(name, params, body, double_splat: double_splat, block_arg: block_arg, splat_index: splat_index).at(location)
+    set_visibility(node)
+    node
+  end
+
+  def parse_percent_macro_expression : ASTNode
+    if @in_macro_expression
+      syntax_error("can't nest macro expressions", @token.location)
+    end
+
+    set_slash_is_regex(true)
+    location = @token.location
+    macro_exp = parse_macro_expression
+    check_macro_expression_end
+    end_location = token_end_location
+    next_token
+    MacroExpression.new(macro_exp).at(location).at_end(end_location)
+  end
+
+  def parse_macro_expression : ASTNode
+    next_token_skip_space_or_newline
+    parse_expression_inside_macro
+  end
+
+  def check_macro_expression_end : Nil
+    check(TokenKind::OP_RCURLY)
+    next_token
+    check(TokenKind::OP_RCURLY)
+  end
+
+  def parse_expression_inside_macro : ASTNode
+    @in_macro_expression = true
+    exp = case @token.type
+          when TokenKind::OP_STAR
+            next_token_skip_space
+            e = parse_expression
+            Splat.new(e).at(e.location)
+          when TokenKind::OP_STAR_STAR
+            next_token_skip_space
+            e = parse_expression
+            DoubleSplat.new(e).at(e.location)
+          else
+            parse_expression
+          end
+    skip_space_or_newline
+    @in_macro_expression = false
+    exp
+  end
+
+  def parse_percent_macro_control : ASTNode
+    if @in_macro_expression
+      syntax_error("can't nest macro expressions", @token.location)
+    end
+
+    macro_control = parse_macro_control(@token.location)
+    if macro_control
+      skip_space_or_newline
+      check(TokenKind::OP_PERCENT_RCURLY)
+      next_token_skip_space
+      macro_control
+    else
+      unexpected_token("unexpected token in macro control")
+    end
+  end
+
+  def parse_macro_control(start_location : Location, macro_state : MacroState = MacroState.default) : ASTNode?
+    location = @token.location
+    next_token_skip_space_or_newline
+
+    case @token.keyword
+    when Keyword::FOR
+      next_token_skip_space
+
+      vars = [] of Var
+      while true
+        var_name = case @token.type
+                   when TokenKind::UNDERSCORE
+                     "_"
+                   when TokenKind::IDENT
+                     @token.value
+                   else
+                     unexpected_token("expecting ident or underscore")
+                   end
+        vars << Var.new(var_name).at(@token.location)
+
+        next_token_skip_space
+        if @token.type == TokenKind::OP_COMMA
+          next_token_skip_space
+        else
+          break
+        end
+      end
+
+      check_keyword(Keyword::IN)
+      next_token_skip_space
+
+      exp = parse_expression_inside_macro
+
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      macro_state.control_nest = macro_state.control_nest + 1
+      body, _ = parse_macro_body(start_location, macro_state)
+      macro_state.control_nest = macro_state.control_nest - 1
+
+      check_keyword(Keyword::END)
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      return MacroFor.new(vars, exp, body).at(location)
+    when Keyword::IF
+      return parse_macro_if(start_location, macro_state).at(location)
+    when Keyword::UNLESS
+      return parse_macro_if(start_location, macro_state, is_unless: true).at(location)
+    when Keyword::BEGIN
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      macro_state.control_nest = macro_state.control_nest + 1
+      body, _ = parse_macro_body(start_location, macro_state)
+      macro_state.control_nest = macro_state.control_nest - 1
+
+      check_keyword(Keyword::END)
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      return MacroIf.new(BoolLiteral.new(true), body).at(location)
+    when Keyword::ELSE, Keyword::ELSIF, Keyword::END
+      return nil
+    when Keyword::VERBATIM
+      next_token_skip_space
+      unless @token.keyword == Keyword::DO
+        unexpected_token("expecting 'do'")
+      end
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      macro_state.control_nest = macro_state.control_nest + 1
+      body, _ = parse_macro_body(start_location, macro_state)
+      macro_state.control_nest = macro_state.control_nest - 1
+
+      check_keyword(Keyword::END)
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      return MacroVerbatim.new(body).at(location)
+    else
+      # normal expression inside macro control
+    end
+
+    @in_macro_expression = true
+    exps = parse_expressions
+    @in_macro_expression = false
+
+    MacroExpression.new(exps, output: false).at(location)
+  end
+
+  def parse_macro_if(start_location : Location, macro_state : MacroState, check_end : Bool = true, is_unless : Bool = false) : ASTNode
+    location = @token.location
     next_token_skip_space
-    a_macro
+
+    @in_macro_expression = true
+    cond = parse_op_assign
+    @in_macro_expression = false
+
+    if @token.type != TokenKind::OP_PERCENT_RCURLY && check_end
+      @in_macro_expression = true
+      node = if is_unless
+               parse_unless_after_condition(cond, location)
+             else
+               parse_if_after_condition(cond, location, true)
+             end
+      skip_statement_end
+      exps = parse_expressions
+      @in_macro_expression = false
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      exps = Expressions.concat(node, exps)
+      return MacroExpression.new(exps, output: false).at(location)
+    end
+
+    check(TokenKind::OP_PERCENT_RCURLY)
+
+    macro_state.control_nest = macro_state.control_nest + 1
+    a_then, _ = parse_macro_body(start_location, macro_state)
+    macro_state.control_nest = macro_state.control_nest - 1
+
+    a_else : ASTNode = Nop.new
+
+    case @token.keyword
+    when Keyword::ELSE
+      next_token_skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+
+      macro_state.control_nest = macro_state.control_nest + 1
+      a_else, _ = parse_macro_body(start_location, macro_state)
+      macro_state.control_nest = macro_state.control_nest - 1
+
+      if check_end
+        check_keyword(Keyword::END)
+        next_token_skip_space
+        check(TokenKind::OP_PERCENT_RCURLY)
+      end
+    when Keyword::ELSIF
+      if is_unless
+        syntax_error("unexpected elsif in unless", @token.location)
+      end
+      start_loc = @token.location
+      a_else = parse_macro_if(start_location, macro_state, false).at(start_loc)
+
+      if check_end
+        check_keyword(Keyword::END)
+        next_token_skip_space
+        check(TokenKind::OP_PERCENT_RCURLY)
+      end
+    when Keyword::END
+      if check_end
+        next_token_skip_space
+        check(TokenKind::OP_PERCENT_RCURLY)
+      end
+    else
+      unexpected_token("expected else, elsif, or end in macro if")
+    end
+
+    if is_unless
+      MacroIf.new(cond, a_else, a_then).at(location)
+    else
+      MacroIf.new(cond, a_then, a_else).at(location)
+    end
+  end
+
+  def parse_macro_body(start_location : Location, macro_state : MacroState = MacroState.default) : {ASTNode, Location?}
+    skip_whitespace = check_macro_skip_whitespace
+    set_slash_is_regex(true)
+
+    pieces = [] of ASTNode
+
+    while true
+      next_macro_token(macro_state, skip_whitespace)
+      macro_state = @token.macro_state
+
+      skip_whitespace = false
+
+      case @token.type
+      when TokenKind::MACRO_LITERAL
+        pieces << MacroLiteral.new(@token.value).at(@token.location)
+      when TokenKind::MACRO_EXPRESSION_START
+        location = @token.location
+        exp = MacroExpression.new(parse_macro_expression).at(location)
+        check_macro_expression_end
+        skip_whitespace = check_macro_skip_whitespace
+        pieces << exp
+      when TokenKind::MACRO_CONTROL_START
+        macro_control = parse_macro_control(start_location, macro_state)
+        if macro_control
+          skip_space_or_newline
+          check(TokenKind::OP_PERCENT_RCURLY)
+          pieces << macro_control
+          skip_whitespace = check_macro_skip_whitespace
+        else
+          return {Expressions.from(pieces), @token.location}
+        end
+      when TokenKind::MACRO_VAR
+        macro_var_name = @token.value
+        loc = @token.location
+        macro_var_exps : Array(ASTNode)? = nil
+        if @token.type == TokenKind::OP_LCURLY
+          macro_var_exps = parse_macro_var_exps
+        end
+        pieces << MacroVar.new(macro_var_name, macro_var_exps).at(loc)
+      when TokenKind::MACRO_END
+        break
+      when TokenKind::EOF
+        syntax_error("unterminated macro", start_location)
+      else
+        unexpected_token
+      end
+    end
+
+    end_location = token_end_location
+    next_token
+
+    {Expressions.from(pieces), end_location}
+  end
+
+  def parse_macro_var_exps : Array(ASTNode)
+    next_token
+
+    exps = [] of ASTNode
+    while @token.type != TokenKind::OP_RCURLY
+      exps << parse_expression_inside_macro
+      skip_space
+      case @token.type
+      when TokenKind::OP_COMMA
+        next_token_skip_space
+      when TokenKind::OP_RCURLY
+        break
+      else
+        unexpected_token("expecting ',' or '}'")
+      end
+    end
+    exps
   end
 
   def parse_def(is_abstract : Bool = false) : ASTNode
@@ -3895,6 +4273,10 @@ pub class Parser < Lexer
         members << Assign.new(class_var, value).at(class_var)
       when TokenKind::OP_AT_LSQUARE
         members << parse_annotation
+      when TokenKind::OP_LCURLY_LCURLY
+        members << parse_percent_macro_expression
+      when TokenKind::OP_LCURLY_PERCENT
+        members << parse_percent_macro_control
       when TokenKind::NEWLINE, TokenKind::OP_SEMICOLON
         skip_statement_end
       else
@@ -4187,6 +4569,10 @@ pub class Parser < Lexer
     case @token.type
     when TokenKind::OP_AT_LSQUARE
       parse_annotation
+    when TokenKind::OP_LCURLY_LCURLY
+      parse_percent_macro_expression
+    when TokenKind::OP_LCURLY_PERCENT
+      parse_percent_macro_control
     when TokenKind::IDENT
       kw = @token.keyword
       case kw

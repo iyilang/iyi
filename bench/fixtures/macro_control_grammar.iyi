@@ -1,0 +1,39 @@
+{% if flag?(:linux) %}
+  a = 1
+{% elsif flag?(:darwin) %}
+  a = 2
+{% else %}
+  a = 3
+{% end %}
+
+{% unless flag?(:win32) %}
+  b = 4
+{% end %}
+
+{% for x, i in [10, 20] %}
+  c_{{ i }} = {{ x }}
+{% end %}
+
+{% begin %}
+  d = 5
+{% end %}
+
+{% verbatim do %}
+  def unexpanded
+    {{not_expanded}}
+  end
+{% end %}
+
+{% ints = %w(Int8 Int16 Int32) %}
+
+class MacroHost
+  {% for name in ints %}
+    def test_{{ name.id }}
+      {{ name }}
+    end
+  {% end %}
+end
+
+macro with_escaped(*args)
+  \{% raise "disabled" %}
+end

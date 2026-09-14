@@ -76,7 +76,7 @@ As measured by `python3 bench/doc_numbers.py` and `git ls-files`, the compiler
 source tree consists of:
 
 * **110,105 lines of Crystal** across 114 files in `src/compiler/**/*.cr` and `src/compiler/*.cr`
-* **38,005 lines of pure iyi** across 51 files in `src/compiler/**/*.iyi` and `src/compiler/*.iyi`
+* **39,650 lines of pure iyi** across 51 files in `src/compiler/**/*.iyi` and `src/compiler/*.iyi`
 
 Below is the complete status of all eleven compiler stages, their exact line
 counts, what each produces and consumes, and the gate output proving parity:
@@ -90,14 +90,14 @@ counts, what each produces and consumes, and the gate output proving parity:
 * **Completeness:** Complete for all compiler layers.
 
 ### Layer 1: Lexer and Token
-* **Files:** `src/compiler/syntax/lexer.iyi` (2,752 lines), `src/compiler/syntax/token.iyi` (351 lines).
-  Total: 3,103 lines.
+* **Files:** `src/compiler/syntax/lexer.iyi` (2,776 lines), `src/compiler/syntax/token.iyi` (691 lines).
+  Total: 3,467 lines.
 * **Crystal equivalent:** `src/compiler/iyi/syntax/lexer.cr` (1,939 lines), `token.cr` (179 lines).
 * **Produces:** Token stream with locations, keywords, operators, literals, and delimiters.
 * **Consumed by:** `Parser.new(source, filename).parse`.
-* **Gate proof:** `bench/selfhost_lexer_exercise.sh` proves 42/42 syntax fixtures match
-  Crystal token streams byte-for-byte (21,034 tokens).
-* **Completeness:** Complete for language syntax. Does not parse macro delimiter mode.
+* **Gate proof:** `bench/selfhost_lexer_exercise.sh` proves 43/43 syntax fixtures match
+  Crystal token streams byte-for-byte (21,168 tokens), with six guarded mutation proofs.
+* **Completeness:** Complete for language syntax and macro lexing modes.
 
 ### Layer 2: AST, Visitors, and Transformers
 * **Files:** `src/compiler/syntax/ast.iyi` (2,374 lines), `visitor.iyi` (233 lines),
@@ -247,14 +247,14 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   identical exit code (rc=1) and diagnostic messages against the shipped compiler, and two
   guarded mutation proofs catching wrong resolution order and missed imports.
 ### Hole 3: Prelude Self-Compilation Barrier
-* **Status:** Codegen primitives ported for string literals, user-defined generics, and heap layouts; blocked by macro delimiter mode.
-* **Evidence:** `src/compiler/codegen/codegen.iyi` now emits string literals with private constant pools
-  and Crystal's string struct layout, user-defined generic instantiations with monomorphized constructors
-  and methods, and heap layout maps for instance variable offsets across structs and classes, proven by
-  `bench/selfhost_codegen_exercise.sh` (17 fixtures, 105 functions, 16 mutation proofs). Attempting to compile
-  `src/iyi/prelude.iyi` (7,471 lines) now advances past lexical analysis to line 48:1, where it encounters
-  macro delimiter grammar (`{%`), and `src/iyi/array.iyi` (507 lines) compiles through semantic analysis into codegen.
-
+* **Status:** Macro control and delimiter grammar ported; line 48 roadblock eliminated.
+* **Evidence:** `src/compiler/syntax/lexer.iyi` and `parser.iyi` now support macro delimiter and
+  control grammar (`{% if %}`, `{% elsif %}`, `{% else %}`, `{% unless %}`, `{% for %}`, `{% begin %}`,
+  `{% verbatim %}`, and `{{ ... }}`), proven by `bench/selfhost_parser_exercise.sh` (25 syntax fixtures,
+  1,677 normalized nodes matching Crystal frontend 100%, nine mutation proofs) and `bench/selfhost_lexer_exercise.sh`
+  (43 fixtures, 21,168 tokens, six mutation proofs). Attempting to compile `src/iyi/prelude.iyi`
+  (7,471 lines) now cleanly parses past line 48 and advances 486 lines further to line 534:12,
+  where it encounters adjacent string literal concatenation in `{% raise ... %}` (`unexpected token: DELIMITER_START (site_9)`).
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.
 * **Evidence:** `src/compiler/semantic/top_level.iyi` and `main_visitor.iyi` invoke the ported

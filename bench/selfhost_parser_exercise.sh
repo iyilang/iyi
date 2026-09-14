@@ -36,7 +36,7 @@ for phrase in \
   "testing call and block parsing... ok (calls and blocks verified)" \
   "testing control expressions (if, unless, while, until, case, modifiers)... ok (control expressions verified)" \
   "testing declaration parsing... ok (declarations verified)" \
-  "testing real syntax fixtures parsing... ok (1647 nodes across 24 fixtures)" \
+  "testing real syntax fixtures parsing... ok (1715 nodes across 25 fixtures)" \
   "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
     echo "  MISSING REPORTED CHECK: '$phrase'"
@@ -512,6 +512,43 @@ def dump_ast(node : Iyi::ASTNode?, indent : Int32 = 0) : String
     s = "#{p}Metaclass\n"
     s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
     s
+  when Iyi::Macro
+    s = "#{p}Macro name=#{escape_s(node.name)}\n"
+    if !node.args.empty?
+      s += "#{p}  args:\n"
+      node.args.each { |a| s += dump_ast(a, indent + 2) }
+    end
+    s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+    s
+  when Iyi::MacroIf
+    s = "#{p}MacroIf\n"
+    s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+    s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+    s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+    s
+  when Iyi::MacroFor
+    vars_s = node.vars.map(&.name).join(", ")
+    s = "#{p}MacroFor vars=[#{vars_s}]\n"
+    s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+    s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+    s
+  when Iyi::MacroExpression
+    s = "#{p}MacroExpression output=#{node.output?}\n"
+    s += dump_ast(node.exp, indent + 1)
+    s
+  when Iyi::MacroLiteral
+    "#{p}MacroLiteral value=#{escape_s(node.value)}\n"
+  when Iyi::MacroVar
+    s = "#{p}MacroVar name=#{escape_s(node.name)}\n"
+    if exps = node.exps
+      s += "#{p}  exps:\n"
+      exps.each { |e| s += dump_ast(e, indent + 2) }
+    end
+    s
+  when Iyi::MacroVerbatim
+    s = "#{p}MacroVerbatim\n"
+    s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+    s
   else
     "#{p}#{node.class.name}\n"
   end
@@ -567,7 +604,8 @@ for fixture in \
   "$REPO"/bench/fixtures/decl_operators.iyi \
   "$REPO"/bench/fixtures/decl_traits_and_impls.iyi \
   "$REPO"/bench/fixtures/decl_types_and_vars.iyi \
-  "$REPO"/bench/fixtures/decl_visibility_and_annotations.iyi; do
+  "$REPO"/bench/fixtures/decl_visibility_and_annotations.iyi \
+  "$REPO"/bench/fixtures/macro_control_grammar.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   "$WORK/exercise-plain" "$fixture" > "$WORK/iyi.ast"
   "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.ast"

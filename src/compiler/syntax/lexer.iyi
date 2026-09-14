@@ -9,7 +9,7 @@ pub import compiler/syntax/token
 using compiler/foundation/location::{Location}
 using compiler/foundation/errors::{SyntaxException}
 using compiler/foundation/string_pool::{StringPool}
-using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
+using compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState, MacroKeywordState}
 
 pub class Lexer
   property doc_enabled : Bool
@@ -321,7 +321,12 @@ pub class Lexer
   end
 
   def peek_not_ident_part_or_end_next_char : Bool
-    !ident_part_or_end?(peek_next_char) && peek_next_char != ':'
+    if !ident_part_or_end?(peek_next_char) && peek_next_char != ':'
+      next_char
+      true
+    else
+      false
+    end
   end
 
   def closing_char(char : Char = current_char) : Char
@@ -2296,18 +2301,162 @@ pub class Lexer
     false
   end
 
+  def skip_macro_whitespace : Nil
+    while current_char.ascii_whitespace?
+      if current_char == '\n'
+        incr_line_number(1)
+      end
+      next_char
+    end
+  end
+
+  def check_macro_skip_whitespace : Bool
+    if current_char == '\\' && peek_next_char.ascii_whitespace?
+      next_char
+      true
+    else
+      false
+    end
+  end
+
+  def lookahead_macro_keyword(&block : -> MacroKeywordState?) : MacroKeywordState?
+    old_pos = @pos
+    old_line = @line_number
+    old_column = @column_number
+    res = yield
+    if res.nil?
+      @pos = old_pos
+      @line_number = old_line
+      @column_number = old_column
+    end
+    res
+  end
+
+  def macro_starts_with_keyword?(beginning_of_line : Bool) : MacroKeywordState?
+    case current_char
+    when 'a'
+      case next_char
+      when 'b'
+        if char_sequence?('s', 't', 'r', 'a', 'c', 't') && next_char.ascii_whitespace?
+          case next_char
+          when 'd'
+            if char_sequence?('e', 'f') && peek_not_ident_part_or_end_next_char
+              return MacroKeywordState::AbstractDef
+            end
+          when 'c'
+            if char_sequence?('l', 'a', 's', 's') && peek_not_ident_part_or_end_next_char
+              return MacroKeywordState::Other
+            end
+          when 's'
+            if char_sequence?('t', 'r', 'u', 'c', 't') && peek_not_ident_part_or_end_next_char
+              return MacroKeywordState::Other
+            end
+          end
+        end
+      when 'n'
+        if char_sequence?('n', 'o', 't', 'a', 't', 'i', 'o', 'n') && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      end
+    when 'b'
+      if char_sequence?('e', 'g', 'i', 'n') && peek_not_ident_part_or_end_next_char
+        return MacroKeywordState::Other
+      end
+    when 'c'
+      case next_char
+      when 'a'
+        if char_sequence?('s', 'e') && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      when 'l'
+        if char_sequence?('a', 's', 's') && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      end
+    when 'd'
+      case next_char
+      when 'o'
+        if peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      when 'e'
+        if next_char == 'f' && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      end
+    when 'f'
+      if char_sequence?('u', 'n') && peek_not_ident_part_or_end_next_char
+        return MacroKeywordState::Other
+      end
+    when 'i'
+      if beginning_of_line && next_char == 'f' && peek_not_ident_part_or_end_next_char
+        return MacroKeywordState::Other
+      end
+    when 'l'
+      if char_sequence?('i', 'b') && peek_not_ident_part_or_end_next_char
+        return MacroKeywordState::Other
+      end
+    when 'm'
+      case next_char
+      when 'a'
+        if char_sequence?('c', 'r', 'o') && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      when 'o'
+        if char_sequence?('d', 'u', 'l', 'e') && peek_not_ident_part_or_end_next_char
+          return MacroKeywordState::Other
+        end
+      end
+    when 's'
+      case next_char
+      when 'e'
+        if char_sequence?('l', 'e', 'c', 't') && !ident_part_or_end?(peek_next_char)
+          next_char
+          return MacroKeywordState::Other
+        end
+      when 't'
+        if char_sequence?('r', 'u', 'c', 't') && !ident_part_or_end?(peek_next_char)
+          next_char
+          return MacroKeywordState::Other
+        end
+      end
+    when 'u'
+      if next_char == 'n'
+        case next_char
+        when 'i'
+          if char_sequence?('o', 'n') && peek_not_ident_part_or_end_next_char
+            return MacroKeywordState::Other
+          end
+        when 'l'
+          if beginning_of_line && char_sequence?('e', 's', 's') && peek_not_ident_part_or_end_next_char
+            return MacroKeywordState::Other
+          end
+        when 't'
+          if beginning_of_line && char_sequence?('i', 'l') && peek_not_ident_part_or_end_next_char
+            return MacroKeywordState::Other
+          end
+        end
+      end
+    when 'w'
+      if beginning_of_line && char_sequence?('h', 'i', 'l', 'e') && peek_not_ident_part_or_end_next_char
+        return MacroKeywordState::Other
+      end
+    end
+    nil
+  end
+
   def next_macro_token(macro_state : MacroState, skip_whitespace : Bool = false) : Token
     reset_token
     nest = macro_state.nest
     control_nest = macro_state.control_nest
     whitespace = macro_state.whitespace
+    delimiter_state = macro_state.delimiter_state
     beginning_of_line = macro_state.beginning_of_line
     comment = macro_state.comment
+    yields = false
 
     if skip_whitespace
-      while current_char == ' ' || current_char == '\t'
-        next_char
-      end
+      skip_macro_whitespace
     end
 
     @token.line_number = @line_number
@@ -2319,44 +2468,253 @@ pub class Lexer
       return @token
     end
 
-    if current_char == '{'
-      case peek_next_char
-      when '{'
-        next_char
-        next_char(TokenKind::MACRO_EXPRESSION_START)
-        @token.macro_state = MacroState.new(whitespace, nest, control_nest, false, false, false)
-        return @token
-      when '%'
-        next_char
-        next_char(TokenKind::MACRO_CONTROL_START)
-        @token.macro_state = MacroState.new(whitespace, nest, control_nest, false, false, false)
-        return @token
-      end
-    end
+    if current_char == '\\' && peek_next_char == '{'
+      beginning_of_line = false
+      next_char
+      start_pos = current_pos
+      if next_char == '%'
+        char = next_char_check_line
+        while char.ascii_whitespace?
+          char = next_char_check_line
+        end
 
-    if current_char == '%' && Lexer.ident_start?(peek_next_char)
-      next_char # skip %
-      m_start = current_pos
-      while Lexer.ident_part?(next_char)
+        case char
+        when 'e'
+          if char_sequence?('n', 'd') && !ident_part_or_end?(peek_next_char)
+            next_char
+            nest = nest - 1
+          end
+        when 'f'
+          if char_sequence?('o', 'r') && !ident_part_or_end?(peek_next_char)
+            next_char
+            nest = nest + 1
+          end
+        when 'i'
+          if next_char == 'f' && !ident_part_or_end?(peek_next_char)
+            next_char
+            nest = nest + 1
+          end
+        when 'u'
+          if char_sequence?('n', 'l', 'e', 's', 's') && !ident_part_or_end?(peek_next_char)
+            next_char
+            nest = nest + 1
+          end
+        end
       end
-      @token.type = TokenKind::MACRO_VAR
-      @token.value = string_range_from_pool(m_start)
-      @token.macro_state = MacroState.new(whitespace, nest, control_nest, false, false, false)
+
+      @token.type = TokenKind::MACRO_LITERAL
+      @token.value = string_range(start_pos)
+      @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+      set_token_raw_from_start(start_pos)
       return @token
     end
 
-    # Macro literal text chunk
-    while current_char != '\0' && current_char != '{' && current_char != '%'
-      if current_char == '\n'
-        incr_line_number(1)
-      end
+    if current_char == '\\' && peek_next_char == '%'
+      beginning_of_line = false
       next_char
+      next_char(TokenKind::MACRO_LITERAL)
+      @token.value = "%"
+      @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+      @token.raw = "%"
+      return @token
+    end
+
+    if current_char == '{'
+      next_char
+      case current_char
+      when '{'
+        beginning_of_line = false
+        next_char(TokenKind::MACRO_EXPRESSION_START)
+        @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+        return @token
+      when '%'
+        beginning_of_line = false
+        next_char(TokenKind::MACRO_CONTROL_START)
+        @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+        return @token
+      end
+    end
+
+    if comment || (delimiter_state.nil? && current_char == '#')
+      comment = true
+      char = current_char
+      if current_char == '#'
+        char = next_char
+      end
+      while true
+        case char
+        when '\n'
+          comment = false
+          beginning_of_line = true
+          whitespace = true
+          next_char
+          incr_line_number(1)
+          @token.line_number = @line_number
+          @token.column_number = @column_number
+          break
+        when '{'
+          break
+        when '\\'
+          if peek_next_char == '{'
+            break
+          else
+            char = next_char
+          end
+        when '\0'
+          raise_syntax_error("unterminated macro")
+        else
+          char = next_char
+        end
+      end
+      @token.type = TokenKind::MACRO_LITERAL
+      @token.value = string_range(start_pos)
+      @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+      set_token_raw_from_start(start_pos)
+      return @token
+    end
+
+    if delimiter_state.nil? && current_char == '%' && Lexer.ident_start?(peek_next_char) && lookahead { delimiter_state_for_percent_literal }.nil?
+      char = next_char
+      m_start = current_pos
+      while Lexer.ident_part?(char)
+        char = next_char
+      end
+      beginning_of_line = false
+      @token.type = TokenKind::MACRO_VAR
+      @token.value = string_range_from_pool(m_start)
+      @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
+      return @token
+    end
+
+    if delimiter_state.nil? && current_char == 'e'
+      if next_char == 'n'
+        beginning_of_line = false
+        case next_char
+        when 'd'
+          if whitespace && !ident_part_or_end?(peek_next_char) && peek_next_char != ':'
+            if nest == 0 && control_nest == 0
+              next_char(TokenKind::MACRO_END)
+              @token.macro_state = MacroState.default
+              return @token
+            else
+              nest = nest - 1
+              whitespace = current_char.ascii_whitespace?
+              next_char
+            end
+          end
+        when 'u'
+          if whitespace && next_char == 'm' && !ident_part_or_end?(next_char)
+            char = current_char
+            nest = nest + 1
+            whitespace = true
+          end
+        end
+      else
+        whitespace = false
+        beginning_of_line = false
+      end
+    end
+
+    char = current_char
+    until char == '{' || char == '\0' ||
+          (char == '\\' && (peek_next_char == '{' || peek_next_char == '%')) ||
+          (whitespace && delimiter_state.nil? && char == 'e')
+      case char
+      when '\n'
+        incr_line_number(1)
+        whitespace = true
+        beginning_of_line = true
+        char = next_char
+        next
+      when '\\'
+        char = next_char
+        if ds = delimiter_state
+          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+            char = next_char
+          elsif char == '\\'
+            char = next_char
+          end
+          whitespace = false
+        else
+          whitespace = false
+        end
+        next
+      when '\'', '"'
+        if ds = delimiter_state
+          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+            delimiter_state = nil
+          end
+        else
+          delimiter_state = DelimiterState.new(DelimiterKind::STRING, char.to_s, char.to_s)
+        end
+        whitespace = false
+      when '%'
+        whitespace = false
+        if delimiter_state.nil?
+          del_state = lookahead { delimiter_state_for_percent_literal }
+          if del_state
+            delimiter_state = del_state
+          elsif Lexer.ident_start?(peek_next_char)
+            break
+          end
+        end
+      when '#'
+        if delimiter_state
+          whitespace = false
+        else
+          break
+        end
+      when '}'
+        if ds = delimiter_state
+          if ds.the_end == "}"
+            if ds.open_count == 0
+              delimiter_state = nil
+            else
+              delimiter_state = ds.with_open_count_delta(-1)
+            end
+          end
+        end
+      else
+        if ds = delimiter_state
+          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+            if ds.open_count == 0
+              delimiter_state = nil
+            else
+              delimiter_state = ds.with_open_count_delta(-1)
+            end
+          elsif (ds.nest.bytesize == 1 && ds.nest.byte_at(0) == char.ord) || ds.nest == char.to_s
+            delimiter_state = ds.with_open_count_delta(1)
+          end
+        elsif whitespace
+          kw = lookahead_macro_keyword { macro_starts_with_keyword?(beginning_of_line) }
+          if kw
+            char = current_char
+            if kw != MacroKeywordState::AbstractDef
+              nest = nest + 1
+            end
+            beginning_of_line = false
+            next
+          end
+        end
+
+        if char == '=' && peek_next_char.ascii_whitespace?
+          whitespace = false
+          beginning_of_line = true
+        else
+          whitespace = char.ascii_whitespace? || char == ';' || char == '(' || char == '[' || char == '{'
+          if beginning_of_line && !whitespace
+            beginning_of_line = false
+          end
+        end
+      end
+      char = next_char
     end
 
     @token.type = TokenKind::MACRO_LITERAL
     @token.value = string_range(start_pos)
-    @token.macro_state = MacroState.new(whitespace, nest, control_nest, false, false, false)
+    @token.macro_state = MacroState.new(whitespace, nest, control_nest, delimiter_state, beginning_of_line, yields, comment, nil)
     set_token_raw_from_start(start_pos)
+
     @token
   end
 

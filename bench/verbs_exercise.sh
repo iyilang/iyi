@@ -295,6 +295,53 @@ else
   echo "  clear_cache deleted the working directory it was run in"
   status=1
 fi
+# And a cached object that is not an object. A build killed between
+# `emit_obj` and `rename`, a full disk, or another build's cleanup
+# deleting this one's directory mid-codegen (which is why
+# `CacheDir#directory_in_use?` exists) leaves bytes the linker cannot
+# read - and every later build linked them again: `ld.lld: error:
+# <file>:1: unknown directive: garbage`, until somebody thought of
+# `clear_cache`. The empty case was already guarded; these were not.
+mkdir -p "$WORK/cache"
+env IYI_CACHE_DIR="$WORK/cache" "$IYI" build -o cached1 good.iyi > cache1.txt 2>&1 ||
+  { echo "  a build with its own cache directory failed:"; cat cache1.txt; status=1; }
+corrupted=0
+for object in $(find "$WORK/cache" -name '*.o' | head -3); do
+  printf 'garbage' > "$object"
+  corrupted=$((corrupted + 1))
+done
+truncate -s 2 "$(find "$WORK/cache" -name '*.o' | tail -1)" 2>/dev/null
+if [ "$corrupted" -eq 0 ]; then
+  echo "  the cache held no objects to corrupt, so this case checked nothing"
+  status=1
+elif env IYI_CACHE_DIR="$WORK/cache" "$IYI" build -o cached2 good.iyi > cache2.txt 2>&1 &&
+     [ "$(./cached2)" = "ok" ]; then
+  if grep -q 'is not an object file; compiling it again' cache2.txt; then
+    echo "  a corrupted cached object: recompiled, and said so"
+  else
+    echo "  a corrupted cached object: recompiled in silence"
+    status=1
+  fi
+else
+  echo "  a corrupted cached object: the build could not recover"
+  sed -n '1,4p' cache2.txt
+  status=1
+fi
+# The other half of that rule, and the expensive way to get it wrong: a
+# header test that refused objects this compiler wrote would pass every
+# case above and recompile the world on every build. `--stats` is where
+# the cache answers for itself, and it has to say all of them, which is
+# also what says the build above repaired what it refused.
+if env IYI_CACHE_DIR="$WORK/cache" "$IYI" build -s -o cached3 good.iyi > cache3.txt 2>&1 &&
+   grep -q 'all previous .o files were reused' cache3.txt &&
+   ! grep -q 'is not an object file' cache3.txt; then
+  echo "  an intact cache: every object reused, none refused"
+else
+  echo "  an intact cache: objects were refused, or not reused"
+  grep -n 'reused\|not an object file' cache3.txt | sed -n '1,4p'
+  status=1
+fi
+
 echo
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,

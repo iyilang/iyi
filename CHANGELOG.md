@@ -64,6 +64,25 @@
   `IYI_CACHE_DIR` to somebody who set the other one names a variable they
   do not have.
 
+- **A corrupted object in the cache was linked forever.** The cache
+  guarded one shape of damage — a `.o` of zero bytes, "if the user
+  cancelled a previous compilation" — and the cache produces others: a
+  process killed between `emit_obj` and `File.rename`, a full disk,
+  another build's cleanup deleting this one's directory mid-codegen, which
+  is why `CacheDir#directory_in_use?` exists. What those leave is a short
+  file, or a file of something else, and every later build handed it to
+  the linker again: `ld.lld: error: <file>:1: unknown directive: garbage`,
+  about a source the author had not touched, until somebody guessed at
+  `clear_cache`. A cached object whose first four bytes are not this
+  target's is a miss now — ELF, Mach-O thin or fat either endianness, or
+  wasm — and the unit recompiles, on one line saying which file and why.
+  COFF opens with a machine number rather than a fixed magic, so a
+  Windows object keeps the size rule and nothing more: a guess that
+  refused a good object would recompile the world on every build, which is
+  why `bench/verbs_exercise.sh` asserts both halves, the corrupted object
+  that is rebuilt and the `--stats` line that says an intact cache is
+  reused whole.
+
 - **`iyi tool format --check` passed on a path that is not there.** It
   printed `file or directory does not exist: ./nosuch.iyi` and exited 0,
   so `iyi tool format --check "$FILE" || exit 1` — the shape every CI

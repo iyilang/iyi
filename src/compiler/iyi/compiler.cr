@@ -3108,6 +3108,23 @@ module Iyi
         # it might be that the .o file is empty
         return true if File.size(object_name) == 0
 
+        # iyi: or that it is short, or that it is not an object at all.
+        # The line above guards the one corruption this cache was known
+        # to produce; the cache produces others. A directory deleted
+        # mid-codegen by another build's cleanup (see
+        # `CacheDir#directory_in_use?`, which exists because that
+        # happened), a full disk, a killed process between `emit_obj` and
+        # `File.rename` - each leaves bytes that are not an object, and
+        # every later build linked them: `ld.lld: error: <file>:1:
+        # unknown directive: garbage`, forever, until somebody thought to
+        # run `clear_cache`. A cache is a cache. Anything in it that we
+        # did not write is a miss.
+        unless object_file_intact?
+          STDERR.puts "#{Iyi::Command.program_name}: #{object_name} was in the cache but is not an object file; compiling it again"
+          STDERR.flush
+          return true
+        end
+
         memory_io = IO::Memory.new(memory_buffer.to_slice)
 
         changed = File.open(bc_name) { |bc_file| !IO.same_content?(bc_file, memory_io) }
@@ -3177,6 +3194,37 @@ module Iyi
 
       def temporary_object_name
         Iyi.relative_filename("#{@output_dir}/#{object_filename}.tmp")
+      end
+
+      # Four bytes: whether what the cache holds under `object_name` has
+      # the shape of an object file for this target. Formats whose first
+      # bytes are not a fixed magic - COFF opens with a machine number -
+      # are judged by the size rule above and nothing more, because a
+      # guess that refuses a good object would recompile the world on
+      # every build.
+      private def object_file_intact? : Bool
+        header = Bytes.new(4)
+        # `read_fully?` rather than `read`, which is allowed to answer with
+        # fewer bytes than it was asked for: a short read is not a verdict
+        # about the four bytes, and the four bytes are the question.
+        return false unless File.open(object_name, "rb") { |file| file.read_fully?(header) }
+
+        target = compiler.codegen_target
+        if target.macos?
+          # Mach-O, thin or fat, either endianness.
+          {0xfeedfacf_u32, 0xcffaedfe_u32,
+           0xfeedface_u32, 0xcefaedfe_u32,
+           0xcafebabe_u32, 0xbebafeca_u32}
+            .includes?(IO::ByteFormat::BigEndian.decode(UInt32, header))
+        elsif target.architecture == "wasm32"
+          header == "\0asm".to_slice
+        elsif target.windows?
+          true
+        else
+          header == "\x7fELF".to_slice
+        end
+      rescue File::Error
+        false
       end
 
       def bc_name

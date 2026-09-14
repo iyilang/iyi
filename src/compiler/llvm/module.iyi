@@ -5,7 +5,7 @@ import compiler/llvm/memory_buffer
 import compiler/llvm/target
 import compiler/llvm/values
 import compiler/llvm/context
-using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
 using compiler/llvm/memory_buffer::{MemoryBuffer}
 using compiler/llvm/target::{Target, TargetData, TargetMachine}
 using compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
@@ -20,7 +20,7 @@ pub class Module
   end
 
   def self.new(name : String, context : Context) : Module
-    mod = LibLLVM.module_create_with_name_in_context(name.to_unsafe, context.to_unsafe)
+    mod = LibLLVM.module_create_with_name_in_context(to_c_str(name), context.to_unsafe)
     if mod.address == 0
       raise "Could not create LLVM module '#{name}'"
     end
@@ -44,7 +44,7 @@ pub class Module
   end
 
   def name=(name : String) : Nil
-    LibLLVM.set_module_identifier(@unwrap, name.to_unsafe, name.bytesize.to_u64)
+    LibLLVM.set_module_identifier(@unwrap, to_c_str(name), name.bytesize.to_u64)
   end
 
   def target : String
@@ -53,7 +53,7 @@ pub class Module
   end
 
   def target=(triple : String) : Nil
-    LibLLVM.set_target(@unwrap, triple.to_unsafe)
+    LibLLVM.set_target(@unwrap, to_c_str(triple))
   end
 
   def data_layout : String
@@ -95,7 +95,7 @@ pub class Module
   end
 
   def add_function(name : String, function_type : Type) : Function
-    fn = LibLLVM.add_function(@unwrap, name.to_unsafe, function_type.to_unsafe)
+    fn = LibLLVM.add_function(@unwrap, to_c_str(name), function_type.to_unsafe)
     if fn.address == 0
       raise "Could not add function '#{name}' to module"
     end
@@ -104,9 +104,9 @@ pub class Module
 
   def get_function?(name : String) : Function?
     fn = {% if LibLLVM::IS_LT_200 %}
-           LibLLVM.get_named_function(@unwrap, name.to_unsafe)
+           LibLLVM.get_named_function(@unwrap, to_c_str(name))
          {% else %}
-           LibLLVM.get_named_function_with_length(@unwrap, name.to_unsafe, name.bytesize.to_u64)
+           LibLLVM.get_named_function_with_length(@unwrap, to_c_str(name), name.bytesize.to_u64)
          {% end %}
     if fn.address != 0
       Function.new(fn)
@@ -135,7 +135,7 @@ pub class Module
   end
 
   def add_global(name : String, type : Type) : Value
-    g = LibLLVM.add_global(@unwrap, type.to_unsafe, name.to_unsafe)
+    g = LibLLVM.add_global(@unwrap, type.to_unsafe, to_c_str(name))
     if g.address == 0
       raise "Could not add global '#{name}' to module"
     end
@@ -144,9 +144,9 @@ pub class Module
 
   def get_global?(name : String) : Value?
     g = {% if LibLLVM::IS_LT_200 %}
-          LibLLVM.get_named_global(@unwrap, name.to_unsafe)
+          LibLLVM.get_named_global(@unwrap, to_c_str(name))
         {% else %}
-          LibLLVM.get_named_global_with_length(@unwrap, name.to_unsafe, name.bytesize.to_u64)
+          LibLLVM.get_named_global_with_length(@unwrap, to_c_str(name), name.bytesize.to_u64)
         {% end %}
     if g.address != 0
       Value.new(g)
@@ -175,7 +175,7 @@ pub class Module
   end
 
   def write_bitcode_to_file(path : String) : Nil
-    rc = LibLLVM.write_bitcode_to_file(@unwrap, path.to_unsafe)
+    rc = LibLLVM.write_bitcode_to_file(@unwrap, to_c_str(path))
     if rc != 0
       raise "Could not write bitcode to file '#{path}'"
     end

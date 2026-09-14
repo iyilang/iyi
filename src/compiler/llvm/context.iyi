@@ -2,7 +2,7 @@ module compiler/llvm/context
 
 import compiler/llvm/lib_llvm
 import compiler/llvm/values
-using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
 using compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
 
 pub class Context
@@ -88,7 +88,7 @@ pub class Context
   end
 
   def struct_named(name : String) : Type
-    Type.new(LibLLVM.struct_create_named(@unwrap, name.to_unsafe))
+    Type.new(LibLLVM.struct_create_named(@unwrap, to_c_str(name)))
   end
 
   def const_string(str : String, null_terminated : Bool = true) : Value

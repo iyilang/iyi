@@ -1,7 +1,7 @@
 module compiler/llvm/values
 
 import compiler/llvm/lib_llvm
-using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
 
 pub struct LLVMType
   getter unwrap : LibLLVM::TypeRef
@@ -261,7 +261,7 @@ pub struct LLVMValue
   end
 
   def name=(name : String) : Nil
-    LibLLVM.set_value_name(@unwrap, name.to_unsafe)
+    LibLLVM.set_value_name(@unwrap, to_c_str(name))
   end
 
   def constant? : Bool
@@ -338,7 +338,7 @@ pub struct LLVMFunction
   end
 
   def name=(name : String) : Nil
-    LibLLVM.set_value_name(@unwrap, name.to_unsafe)
+    LibLLVM.set_value_name(@unwrap, to_c_str(name))
   end
 
   def type : LLVMType
@@ -404,7 +404,7 @@ pub struct LLVMFunction
 
   def append_basic_block(name : String = "") : LLVMBasicBlock
     ctx = LibLLVM.get_type_context(LibLLVM.type_of(@unwrap))
-    bb = LibLLVM.append_basic_block_in_context(ctx, @unwrap, name.to_unsafe)
+    bb = LibLLVM.append_basic_block_in_context(ctx, @unwrap, to_c_str(name))
     if bb.address == 0
       raise "Could not append basic block '#{name}' to function"
     end

@@ -52,6 +52,8 @@ FIXTURES=(
   "bench/fixtures/compile_diamond.iyi"
   "bench/fixtures/compile_top_level.iyi"
   "bench/fixtures/compile_no_top_level.iyi"
+  "bench/fixtures/compile_cross_const.iyi"
+  "bench/fixtures/compile_reopen_class.iyi"
 )
 
 matched=0

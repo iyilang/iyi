@@ -2,7 +2,7 @@ module compiler/llvm/target
 
 import compiler/llvm/lib_llvm
 import compiler/llvm/memory_buffer
-using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+using compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
 using compiler/llvm/memory_buffer::{MemoryBuffer}
 
 pub struct Target
@@ -167,7 +167,7 @@ pub struct Target
   def self.from_triple(triple : String) : Target
     target_ref = Pointer(Void).new(0_u64)
     err_msg = Pointer(UInt8).new(0_u64)
-    rc = LibLLVM.get_target_from_triple(triple.to_unsafe, pointerof(target_ref), pointerof(err_msg))
+    rc = LibLLVM.get_target_from_triple(to_c_str(triple), pointerof(target_ref), pointerof(err_msg))
     if rc != 0
       err = string_and_dispose(err_msg)
       raise "Could not find target for triple '#{triple}': #{err}"
@@ -181,7 +181,7 @@ pub struct Target
   end
 
   def self.normalize_triple(triple : String) : String
-    ptr = LibLLVM.normalize_target_triple(triple.to_unsafe)
+    ptr = LibLLVM.normalize_target_triple(to_c_str(triple))
     string_and_dispose(ptr)
   end
 
@@ -206,7 +206,7 @@ pub struct Target
                             opt_level : LibLLVM::CodeGenOptLevel = LibLLVM::CodeGenOptLevel::Default,
                             reloc : LibLLVM::RelocMode = LibLLVM::RelocMode::PIC,
                             code_model : LibLLVM::CodeModel = LibLLVM::CodeModel::Default) : TargetMachine
-    tm = LibLLVM.create_target_machine(@unwrap, triple.to_unsafe, cpu.to_unsafe, features.to_unsafe,
+    tm = LibLLVM.create_target_machine(@unwrap, to_c_str(triple), to_c_str(cpu), to_c_str(features),
       opt_level, reloc, code_model)
     if tm.address == 0
       raise "Could not create target machine for triple '#{triple}'"
@@ -294,7 +294,7 @@ pub class TargetMachine
 
   def emit_to_file(mod_ref : LibLLVM::ModuleRef, filename : String, file_type : LibLLVM::CodeGenFileType) : Nil
     err_msg = Pointer(UInt8).new(0_u64)
-    rc = LibLLVM.target_machine_emit_to_file(@unwrap, mod_ref, filename.to_unsafe, file_type, pointerof(err_msg))
+    rc = LibLLVM.target_machine_emit_to_file(@unwrap, mod_ref, to_c_str(filename), file_type, pointerof(err_msg))
     if rc != 0
       err = string_and_dispose(err_msg)
       raise "TargetMachine emit to file '#{filename}' failed: #{err}"

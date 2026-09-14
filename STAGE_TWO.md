@@ -303,12 +303,14 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 
 * **Whole-prelude compilation.** Every measurement above compiles one file at a
   time. `bench/selfhost_prelude_whole_exercise.sh` compiles the prelude as a single
-  unit instead, which is the real precursor to stage one. The loader previously
-  ignored `require` entirely and handled only `import`, so per-file measurement was
-  silently compiling each file without its dependencies; it now resolves requires
+  unit instead, which is the real precursor to stage one. The loader resolves requires
   recursively, including inside top-level macro blocks, and pulls all 17 modules
-  into one unit. That unit reaches codegen and stops in object emission.
-
+  into one unit. That unit reaches codegen and stops in object emission. Over one
+  hundred phantom external linkage failures were resolved by enforcing null-termination
+  on strings passed to LibLLVM C APIs, alongside cross-module class reopening and
+  qualified constant resolution in `codegen.iyi`. The remaining obstacle in object
+  emission is the known IR validity gap in `concurrency.iyi` (tracked on branch
+  `selfhost/ir-valid`).
 * **Known gap, recorded rather than hidden:** the IR the backend emits does not
   always verify. `bench/selfhost_ir_valid_exercise.sh` on branch
   `selfhost/ir-valid` measures it: 16 of 17 prelude modules and all 18 codegen

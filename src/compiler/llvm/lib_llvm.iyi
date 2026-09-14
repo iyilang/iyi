@@ -566,3 +566,10 @@ pub def string_and_dispose(ptr : UInt8*) : String
   LibLLVM.dispose_message(ptr)
   s
 end
+
+pub def to_c_str(s : String) : UInt8*
+  p = Pointer(UInt8).malloc(s.bytesize.to_u64 + 1_u64)
+  p.copy_from(s.to_unsafe, s.bytesize)
+  p[s.bytesize] = 0_u8
+  p
+end

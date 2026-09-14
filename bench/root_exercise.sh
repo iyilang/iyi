@@ -176,7 +176,7 @@ case "$(uname -s)" in
     fi
     ;;
   *)
-    allowed_symbols="__error _tlv_bootstrap madvise pipe pthread_create pthread_kill sigaction sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap pthread_get_stackaddr_np pthread_self write"
+    allowed_symbols="__error _tlv_bootstrap madvise pipe pthread_create pthread_kill sigaction sigaltstack sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap pthread_get_stackaddr_np pthread_self write"
     ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"

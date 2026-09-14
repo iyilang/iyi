@@ -114,7 +114,7 @@ if [ -f "$WORK/mark" ]; then
   # and bench/dependency_floor.sh's, not marking's.
   extra="$(undefined_symbols "$WORK/mark" | grep -vxF -e clock_gettime -e exit -e mmap -e munmap -e write \
     -e pthread_self -e pthread_get_stackaddr_np -e _dyld_get_image_header -e _dyld_get_image_vmaddr_slide \
-    -e kqueue -e kevent -e clock_gettime_nsec_np -e __error -e _tlv_bootstrap -e pthread_kill -e pthread_create -e sysctlbyname -e pipe -e sigaction -e madvise \
+    -e kqueue -e kevent -e clock_gettime_nsec_np -e __error -e _tlv_bootstrap -e pthread_kill -e pthread_create -e sysctlbyname -e pipe -e sigaction -e sigaltstack -e madvise \
     -e open -e openat -e close -e read -e unlink -e chmod \
     -e ITM_deregisterTMCloneTable -e ITM_registerTMCloneTable -e _cxa_finalize -e _gmon_start__ -e _libc_start_main || true)"
   if [ -n "$extra" ]; then

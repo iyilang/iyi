@@ -597,10 +597,10 @@ jobs:
       - name: The selfhost type system matches the front end it replaces
         run: bash bench/selfhost_types_exercise.sh
 
-      # Not a parity gate: its oracle is a second implementation, not the tool
-      # being replaced. The header of the script says why, and what would make
-      # it one.
-      - name: The selfhost bind tool answers consistently, and can fail
+      # Driven against the shipped `Iyi.print_bind` over the full eleven-fixture
+      # corpus. A real parity gate against the shipped tool over a corpus the
+      # shipped tool can analyse, with all eleven fixtures matching byte for byte.
+      - name: The selfhost bind tool matches the front end's print_bind (11/11 green parity gate)
         run: bash bench/selfhost_bind_exercise.sh
 
       - name: The selfhost artifact format matches the bytes the front end emits

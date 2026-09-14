@@ -1,0 +1,28 @@
+lib LibBindSample
+  fun sample_puts(s : UInt8*) : Int32
+  fun sample_exit(status : Int32) : Void
+  fun sample_printf(fmt : UInt8*, ...) : Int32
+  fun get_time = "time"(t : Void*) : Int64
+  type SizeT = UInt64
+
+  struct TimeVal
+    tv_sec : Int64
+    tv_usec : Int64
+  end
+
+  union ValueHolder
+    as_int : Int32
+    as_float : Float32
+  end
+
+  enum SeekMode
+    Set     = 0
+    Current = 1
+    End     = 2
+  end
+  $errno : Int32
+end
+
+fun standalone_add(a : Int32, b : Int32) : Int32
+  return a + b
+end

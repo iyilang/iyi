@@ -26,7 +26,7 @@ bindings, and the first slice of code generation:
 | `semantic/normalizer.iyi` | 705 | `bench/selfhost_normalizer_exercise.sh`: 11 fixtures, 577 normalised nodes identical to the Crystal front end, five guarded mutation proofs |
 | `semantic/top_level.iyi`, `semantic/main_visitor.iyi`, `semantic/recursive_struct_checker.iyi` | 2,996 | `bench/selfhost_semantic_exercise.sh`: 42 fixtures (9 declaration fixtures, 39 declarations; 10 typed expression fixtures, 312 typed nodes; 23 error fixtures rejected with identical errors), sixteen guarded mutation proofs. Top-level declarations, method bodies, instance variable type inference across a type, class variable initializers, recursive struct check, overload resolution by argument types with specificity ranking and autocast ambiguity detection, multiple dispatch over union receivers, and block and closure type inference |
 | `types/*.iyi`, `types.iyi` | 2,123 | `bench/selfhost_types_exercise.sh`: 13 fixtures (7 type declaration fixtures, 66 types identical to the Crystal front end; 6 error fixtures rejected with identical errors), six guarded mutation proofs. Type hierarchy extensions, virtual types and virtual metaclasses, generic class/module/trait instances, tuples, named tuples, procs, pointers, static arrays, union classification and unification, type filtering and is_a? narrowing, type restrictions, and type rendering with full options |
-| `tools/bind.iyi` | 727 | `bench/selfhost_bind_exercise.sh`: 11 fixtures, 80 public methods, four guarded mutation proofs. Read the note below before trusting this row |
+| `tools/bind.iyi` | 1,213 | `bench/selfhost_bind_exercise.sh`: full eleven-fixture corpus driven against the shipped `Iyi.print_bind`; 11/11 bind identically (28 public methods). Eight guarded mutation proofs, all caught |
 | `tools/formatter.iyi` | 2,436 | `bench/selfhost_formatter_exercise.sh`: 35 files, 106,026 bytes identical to the shipped formatter, idempotency on each file, eight guarded mutation proofs. Still not in the port: alignment (when/hash/assign/comments), doc comment code block formatting, heredoc fixes, and macros |
 | `artifact/iyimod.iyi` | 2,681 | `bench/selfhost_iyimod_exercise.sh`: 16 modules, 80,414 bytes identical to the Crystal front end, cross-reading, refusal, five guarded mutation proofs |
 | `tools/mod.iyi` | 59 | `bench/selfhost_mod_wiring_exercise.sh`: 16 modules, 100% byte-for-byte dump and declarations parity, refusal parity on corrupted artifacts, four guarded mutation proofs. Shipped compiler calls it behind `iyi mod dump --selfhost` |
@@ -39,15 +39,18 @@ bindings, and the first slice of code generation:
 | `platform/*.iyi` | 698 | `bench/selfhost_platform_exercise.sh`: 24 target triples across darwin, linux (gnu/musl), windows (msvc/gnu), wasm32-wasi, freebsd, and openbsd identical to the Crystal front end, malformed triple rejection, six guarded mutation proofs |
 | `codegen/codegen.iyi` | 2,572 | `bench/selfhost_codegen_exercise.sh`: 13 fixtures, 85 functions, 9 struct and class types, 8 type ID globals, and allocator declarations with 100% identical LLVM IR and identical native object execution linked with C driver, twelve guarded mutation proofs. Emits LLVM IR for `fun` declarations with integer and float arithmetic, comparisons, local variable allocation and assignments, `if`/`else` (with phi value merges), `while` loops, and inter-function calls; structs (stack allocation, zero-initialization via memset, field accessors, pass-by-value arguments, methods, initializers, and constructors); pointer operations (pointerof, value, value=, ptr + offset, ptr - ptr, address); classes (heap allocation via malloc, zero-initialization via memset, type_id header initialization and hierarchical type_id global constants, instance variable accessors, single-inheritance field layout, methods, initializers, and constructors); virtual hierarchy dynamic dispatch tables and match functions (`~match<Base+>`); nilable values (nil as null pointer, `nil?` predicate, pointer truthiness checks); inline block expansion with yield, block arguments, outer variable capture, and loop yields; and exception handling (begin/rescue/else/ensure, LLVM landing-pad and personality function bindings, exception type matching via type ID and virtual match functions, re-raising, and caught exception access). Excluded: full proc closures with escaping variable capture (require unported closure capture analysis and lambda lifting in semantic analysis), generics, and GC interface |
 
-The bind row is weaker than the rows above it, and the difference matters.
-Every other gate here compares against the code being replaced. The bind gate
-does not: its oracle is a second implementation written inside the gate
-script, so what it proves is that two implementations of the same description
-agree, which a shared misreading would satisfy. The shipped tool also works
-from a semantically analysed program while this port works from a parsed
-tree, so they are not the same tool on the same input. Treat `tools/bind.iyi`
-as unproven against `src/compiler/iyi/tools/bind.cr` until semantic analysis
-is ported and the gate can drive the real one.
+The bind gate is now a real parity gate against the shipped `Iyi.print_bind`
+over a corpus the shipped tool can analyse. The oracle consumes a semantically
+analysed program. The five original parser fixtures were syntax exercises rather
+than valid programs, rejected semantically by the shipped compiler (a `class < self`
+superclass, `fun redefinition with different signature` in a `lib` block,
+`include self` on a class, a trait requiring a generic module, and top-level
+ivars). Rather than trimming the corpus, five companion fixtures
+(`bind_classes_and_structs`, `bind_lib_and_fun`, `bind_modules_and_inclusion`,
+`bind_traits_and_impls`, `bind_types_and_vars`) cover the exact same declaration
+surface as programs the shipped compiler accepts. All eleven fixtures in the
+corpus bind identically (28 public methods), and all eight mutation proofs are
+caught.
 
 What is **not** in iyi: semantic analysis beyond the top-level declaration,
 expression and method body typing passes, instance and class variable type

@@ -119,6 +119,7 @@ pub class Compiler
 
     tl = TopLevelVisitor.new(prog)
     classes.each do |cd|
+      next if (tvars = cd.type_vars) && !tvars.empty?
       cd.accept(tl)
     end
 

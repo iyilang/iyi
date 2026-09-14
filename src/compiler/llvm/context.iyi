@@ -99,6 +99,12 @@ pub class Context
     {% end %}
   end
 
+  def const_struct(values : Array(Value), packed : Bool = false) : Value
+    raw = values.map { |v| v.to_unsafe }
+    ptr = raw.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw.to_unsafe
+    Value.new(LibLLVM.const_struct_in_context(@unwrap, ptr, values.size, packed ? 1 : 0))
+  end
+
   def dispose : Nil
     if !@disposed && @owned && @unwrap.address != 0
       LibLLVM.dispose_context(@unwrap)

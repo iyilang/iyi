@@ -1,0 +1,20 @@
+class Box(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+fun test_box_int : Int32
+  b = Box(Int32).new(42)
+  b.value
+end
+
+fun test_box_int64 : Int64
+  b = Box(Int64).new(100_i64)
+  b.value
+end

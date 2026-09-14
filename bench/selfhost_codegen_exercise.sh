@@ -323,6 +323,21 @@ prove_cg_mutation "corrupt closure environment store" "cg_closures.iyi" \
   'st = @builder.store(cval, slot)' \
   '# st = @builder.store(cval, slot)'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt string literal constant global name delimiter" "cg_strings.iyi" \
+  "io << \"'\"" \
+  "io << \"$\""
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt generic constructor name mangling" "cg_generics.iyi" \
+  '"*#{info.name}@#{gname}::new<#{arg_type_names.join(", ")}>:#{info.name}"' \
+  '"*#{info.name}@#{gname}::corrupted_new<#{arg_type_names.join(", ")}>:#{info.name}"'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt class field offset index shift" "cg_layouts.iyi" \
+  'idx = info.is_struct ? fidx : fidx + 1' \
+  'idx = info.is_struct ? fidx : fidx + 5'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

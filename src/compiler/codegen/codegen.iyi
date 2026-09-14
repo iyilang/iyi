@@ -1788,7 +1788,7 @@ pub class CodeGenVisitor < Visitor
                        b = Builder.new(@context)
                        b.position_at_end(entry_bb)
                        param = rh.param(0)
-                       param.name = "ex"
+                       param.name = arg_tname == "String" ? "msg" : "ex"
                        crystal_raise_fn = ensure_crystal_raise
                        crystal_raise_ty = LLVMType.function([@context.pointer], @context.void, false)
                        b.call(crystal_raise_ty, crystal_raise_fn.to_value, [param])

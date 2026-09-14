@@ -1,4 +1,5 @@
 #include <math.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -90,7 +91,13 @@ uint64_t __runner_get_exception(void *ex) {
   return (uint64_t)(uintptr_t)ue->exception_object;
 }
 
+static jmp_buf g_raise_env;
+static int g_catch_raise = 0;
+
 void __runner_raise(void *ex) {
+  if (g_catch_raise) {
+    longjmp(g_raise_env, 1);
+  }
   struct RunnerException *ue =
       (struct RunnerException *)malloc(sizeof(struct RunnerException));
   ue->unwind_exception.exception_class = 0x4352590000000000ULL;
@@ -189,6 +196,9 @@ int64_t test_box_int64(void);
 
 // cg_layouts
 int32_t test_layout_offsets(void);
+
+// cg_raise
+int32_t test_direct_raise(int32_t code);
 
 int main(void) {
   // Test 1: Integer arithmetic
@@ -301,6 +311,17 @@ int main(void) {
   // Test 17: Layouts
   int32_t l_off = test_layout_offsets();
   printf("layouts: %d\n", l_off);
+  // Test 18: Raise path and runtime symbols
+  int32_t r_pos = test_direct_raise(10);
+  int32_t r_raised = 0;
+  g_catch_raise = 1;
+  if (setjmp(g_raise_env) == 0) {
+    test_direct_raise(-1);
+  } else {
+    r_raised = 1;
+  }
+  g_catch_raise = 0;
+  printf("raise: %d %d\n", r_pos, r_raised);
 
   return 0;
 }

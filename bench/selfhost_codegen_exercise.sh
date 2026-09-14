@@ -338,6 +338,21 @@ prove_cg_mutation "corrupt class field offset index shift" "cg_layouts.iyi" \
   'idx = info.is_struct ? fidx : fidx + 1' \
   'idx = info.is_struct ? fidx : fidx + 5'
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt runtime raise symbol resolution" "cg_raise.iyi" \
+  'crystal_raise_fn = ensure_crystal_raise' \
+  'crystal_raise_fn = ensure_crystal_personality'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt runtime personality symbol resolution" "cg_exceptions.iyi" \
+  'pers_fn = ensure_crystal_personality' \
+  'pers_fn = ensure_crystal_raise'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_cg_mutation "corrupt runtime get_exception symbol resolution" "cg_exceptions.iyi" \
+  'get_ex_fn = ensure_crystal_get_exception' \
+  'get_ex_fn = ensure_crystal_raise'
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

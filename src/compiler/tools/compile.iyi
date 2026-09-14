@@ -1,0 +1,245 @@
+# The end-to-end self-host compiler tool.
+#
+# Compiles whole iyi programs using ONLY the ported compiler stages:
+# 1. Parser (compiler/syntax/parser)
+# 2. Semantic Analysis (compiler/semantic/top_level, compiler/semantic/main_visitor)
+# 3. LLVM Code Generation (compiler/codegen/codegen, compiler/llvm)
+# 4. Target & Linker (compiler/platform/target, compiler/platform/linker)
+#
+# Produces an executable binary linking only the platform libc.
+
+module compiler/tools/compile
+
+import compiler/syntax/parser
+import compiler/semantic/top_level
+import compiler/semantic/main_visitor
+import compiler/llvm
+import compiler/codegen/codegen
+import compiler/platform/target
+import compiler/platform/linker
+
+using compiler/syntax/parser::{Parser}
+using compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, TypeException}
+using compiler/semantic/main_visitor::{MainVisitor}
+using compiler/llvm/context::{Context}
+using compiler/llvm/module::{Module}
+using compiler/codegen/codegen::{compile_source_to_module}
+using compiler/platform/linker::{Linker}
+
+alias LLVMTarget = Compiler::Llvm::Target::Target
+alias PlatformTarget = Compiler::Platform::Target::Target
+
+lib LibC
+  fun system(cmd : UInt8*) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+module CompileTool
+  def self.last_index_of(s : String, char : Char) : Int32?
+    i = s.size - 1
+    while i >= 0
+      return i if s[i] == char
+      i = i - 1
+    end
+    nil
+  end
+
+  def self.module_name_from_path(fn : String) : String
+    idx = last_index_of(fn, '/')
+    base = if i = idx
+             fn[i + 1, fn.size - i - 1]
+           else
+             fn
+           end
+    if base.ends_with?(".iyi")
+      base[0, base.size - 4]
+    else
+      base
+    end
+  end
+
+  def self.find_sub(s : String, sub : String) : Int32?
+    return nil if sub.size > s.size
+    limit = s.size - sub.size
+    i = 0
+    while i <= limit
+      matched = true
+      j = 0
+      while j < sub.size
+        if s.to_unsafe[i + j] != sub.to_unsafe[j]
+          matched = false
+          break
+        end
+        j = j + 1
+      end
+      return i if matched
+      i = i + 1
+    end
+    nil
+  end
+
+  def self.substitute_placeholder(cmd : String, placeholder : String, replacement : String) : String
+    if idx = find_sub(cmd, placeholder)
+      prefix = cmd[0, idx]
+      suffix_start = idx + placeholder.size
+      suffix = cmd[suffix_start, cmd.size - suffix_start]
+      prefix + replacement + suffix
+    else
+      cmd
+    end
+  end
+
+  def self.print_usage : Nil
+    puts "Usage: iyi-compile [options] <source-file.iyi>"
+    puts ""
+    puts "Options:"
+    puts "    -o <filename>       Output executable filename (default: a.out)"
+    puts "    --emit-obj <file>   Emit object file only without linking"
+    puts "    -v, --verbose       Print linker command"
+    puts "    -h, --help          Show this help message"
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.empty?
+      print_usage
+      LibC.exit(1)
+      return
+    end
+
+    input_file : String? = nil
+    output_file = "a.out"
+    emit_obj_only = false
+    obj_output_file : String? = nil
+    verbose = false
+
+    i = 0
+    while i < args.size
+      arg = args[i]
+      case arg
+      when "-h", "--help"
+        print_usage
+        LibC.exit(0)
+        return
+      when "-v", "--verbose"
+        verbose = true
+      when "--emit-obj"
+        emit_obj_only = true
+        i = i + 1
+        if i < args.size
+          obj_output_file = args[i]
+        else
+          STDERR.puts "Error: --emit-obj requires a filename"
+          LibC.exit(1)
+          return
+        end
+      when "-o"
+        i = i + 1
+        if i < args.size
+          output_file = args[i]
+        else
+          STDERR.puts "Error: -o requires a filename"
+          LibC.exit(1)
+          return
+        end
+      else
+        if arg.starts_with?("-")
+          STDERR.puts "Error: unknown option: #{arg}"
+          LibC.exit(1)
+          return
+        else
+          input_file = arg
+        end
+      end
+      i = i + 1
+    end
+
+    unless in_file = input_file
+      STDERR.puts "Error: no input file specified"
+      LibC.exit(1)
+      return
+    end
+
+    unless File.exists?(in_file)
+      STDERR.puts "Error: input file does not exist: #{in_file}"
+      LibC.exit(1)
+      return
+    end
+
+    source = File.read(in_file)
+    compile_file(in_file, source, output_file, emit_obj_only, obj_output_file, verbose)
+  end
+
+  def self.compile_file(
+    filename : String,
+    source : String,
+    output_bin : String,
+    emit_obj_only : Bool,
+    obj_file_override : String?,
+    verbose : Bool
+  ) : Nil
+    ctx = Context.new
+    mod_name = module_name_from_path(filename)
+    mod = Module.new(mod_name, ctx)
+
+    LLVMTarget.init_native_target
+    LLVMTarget.init_all_targets
+    triple = LLVMTarget.default_target_triple
+    mod.target = triple
+    native_target = LLVMTarget.from_triple(triple)
+    tm = native_target.create_target_machine(
+      triple, "", "",
+      LibLLVM::CodeGenOptLevel::Default,
+      LibLLVM::RelocMode::PIC,
+      LibLLVM::CodeModel::Default
+    )
+    mod.data_layout = tm.data_layout
+
+    # 1. Parse and compile source to LLVM module using pure iyi pipeline
+    compile_source_to_module(source, filename, ctx, mod)
+
+    # 2. Emit object file
+    obj_path = obj_file_override || (output_bin + ".o")
+    tm.emit_obj_to_file(mod.to_unsafe, obj_path)
+
+    if emit_obj_only
+      if verbose
+        puts "Emitted object file: #{obj_path}"
+      end
+      return
+    end
+
+    # 3. Construct linker command using platform linker
+    plat_target = PlatformTarget.new(triple)
+    link_result = Linker.linker_command(plat_target, [obj_path], output_bin)
+
+    cmd_template = link_result.cmd
+    quoted_objs = if objs = link_result.objects
+                    Linker.quote_posix(objs)
+                  else
+                    Linker.quote_posix([obj_path])
+                  end
+
+    # Replace "${@}" placeholder in POSIX linker command template
+    final_cmd = substitute_placeholder(cmd_template, "\"${@}\"", quoted_objs)
+
+    if verbose
+      puts "[linker] #{final_cmd}"
+    end
+
+    # 4. Invoke system linker to produce executable
+    status = LibC.system(final_cmd.to_unsafe)
+    unless status == 0
+      STDERR.puts "Error: linking failed with exit code #{status}"
+      LibC.exit(status)
+      return
+    end
+
+    # Clean up temporary object file if not explicitly requested
+    if obj_file_override.nil? && File.exists?(obj_path)
+      File.delete(obj_path)
+    end
+  end
+end
+
+CompileTool.run

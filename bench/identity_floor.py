@@ -115,6 +115,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # front end wired behind --selfhost produces output identical to the
     # frontend across the parser fixtures and samples tree.
     (r"^bench/selfhost_parser_wiring_exercise\.sh$", "the frontend the selfhost parser wiring is checked against"),
+    # The self-hosting end-to-end compiler oracle. It verifies whole-program
+    # compilation, execution parity, and dependency floors against the
+    # frontend iyi is still bootstrapped from.
+    (r"^bench/selfhost_compile_exercise\.sh$", "the frontend the selfhost compiler is checked against"),
     # The UUID exercise records a spelling iyi cannot have: `v1!`..`v8!` are
     # the other language's names, and `!` is an iyi operator. Naming the
     # language there is the whole point of the note.

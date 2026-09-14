@@ -780,6 +780,12 @@ class Iyi::Command
         # every module from source and looked like it had used artifacts.
         abort! "--use-iyimod takes a directory", :USAGE_ERROR if dir.empty?
         unless File.directory?(dir)
+          # A file that is there is not a directory that is missing: `--use-iyimod
+          # mods/app/lib.iyimod` answered "there is no mods/app/lib.iyimod" about
+          # the artifact the author had just been looking at.
+          if File.exists?(dir)
+            abort! "--use-iyimod needs a directory of .iyimod files, and #{dir} is a file", :USAGE_ERROR
+          end
           abort! "--use-iyimod needs a directory of .iyimod files, and there is no #{dir}", :USAGE_ERROR
         end
         compiler.use_iyimod = dir

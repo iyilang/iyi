@@ -42,6 +42,12 @@
 
 ### Fixed
 
+- **`--use-iyimod` handed an artifact said the artifact was not there.**
+  `--use-iyimod mods/app/lib.iyimod` — the file, where its directory goes —
+  answered `there is no mods/app/lib.iyimod` about the artifact the author
+  had just been looking at. A file that is there is not a directory that is
+  missing; the sentence says which it is.
+
 - **An empty argument, wherever a shell can put one.** `"$FILE"` with
   `FILE` unset lands as `""`, and every place that took one answered with
   a hole where the name goes — `no such file: `, `no daemon listening on `,

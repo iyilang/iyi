@@ -184,6 +184,10 @@ cp lib.good mods/app/lib.iyimod
 refuses "a source file dumped as an artifact" "is not a .iyimod" -- "$IYI" mod dump user.iyi
 refuses "an artifact directory that is not there" "needs a directory of .iyimod files" -- \
   "$IYI" build --use-iyimod "$WORK/nodir" -o u3 user.iyi
+# The artifact itself, where its directory goes: "there is no
+# mods/app/lib.iyimod", about the file the author had just been looking at.
+refuses "an artifact where --use-iyimod's directory goes" "is a file" -- \
+  "$IYI" build --use-iyimod mods/app/lib.iyimod -o u4 user.iyi
 
 echo
 echo "== what the daemon refuses"

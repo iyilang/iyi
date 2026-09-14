@@ -83,6 +83,19 @@
   that is rebuilt and the `--stats` line that says an intact cache is
   reused whole.
 
+- **The MCP server answered two mistakes with the wrong one.** A
+  `tools/call` with no `name` came back `unknown tool: ` — a sentence
+  about a tool whose name is nothing, which reads as a tool this server
+  has and the caller misspelled. What was missing was the field, so the
+  field is what it says, with the five names an agent may have meant. A
+  request with no `method` at all came back `-32601 method not found`,
+  which tells a client to ask for something else; JSON-RPC spells "what
+  you sent is not a request" `-32600`, and the two mean different things
+  to the code reading them. An unknown tool name carries the catalogue
+  too, because a caller that guessed wrong has no other way to learn the
+  five and the list is five words long. `bench/agent_loop.py` holds all
+  three.
+
 - **`iyi tool format --check` passed on a path that is not there.** It
   printed `file or directory does not exist: ./nosuch.iyi` and exited 0,
   so `iyi tool format --check "$FILE" || exit 1` — the shape every CI

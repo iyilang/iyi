@@ -52,7 +52,19 @@ class Iyi::Command
         end
 
       id = message["id"]?
-      case message["method"]?.try(&.as_s?)
+      method = message["method"]?.try(&.as_s?)
+
+      # A request with no `method` is not a method that is missing: it is
+      # not a request. JSON-RPC has a code for each and they mean
+      # different things to a client - -32601 says "ask for something
+      # else", -32600 says "what you sent is not a request at all".
+      if method.nil? && id
+        STDOUT.puts %({"jsonrpc": "2.0", "id": #{id.to_json}, "error": {"code": -32600, "message": "invalid request: no method"}})
+        STDOUT.flush
+        next
+      end
+
+      case method
       when "initialize"
         respond_mcp(id) do |json|
           json.field "protocolVersion", message.dig?("params", "protocolVersion").try(&.as_s?) || "2025-06-18"
@@ -83,7 +95,15 @@ class Iyi::Command
           end
         end
       when "tools/call"
-        name = message.dig?("params", "name").try(&.as_s?) || ""
+        # A call with no `name` came back "unknown tool: " - a sentence
+        # about a tool whose name is nothing, which reads as a tool this
+        # server has and the caller misspelled. What is missing is the
+        # field, so the field is what it says.
+        name = message.dig?("params", "name").try(&.as_s?)
+        if name.nil? || name.empty?
+          mcp_tool_error(id, "tools/call needs a name: #{mcp_tool_names.join(", ")}")
+          next
+        end
         arguments = message.dig?("params", "arguments")
         mcp_call(id, name, arguments)
       when "exit", "shutdown"
@@ -153,6 +173,12 @@ class Iyi::Command
     ]
     JSON
 
+  # The names, read from the catalogue above: a list typed twice is a
+  # list that goes out of date once.
+  private def mcp_tool_names : Array(String)
+    JSON.parse(MCP_TOOLS).as_a.compact_map { |tool| tool["name"]?.try(&.as_s?) }
+  end
+
   private def mcp_call(id, name : String, arguments : JSON::Any?) : Nil
     file = arguments.try(&.dig?("file")).try(&.as_s?)
 
@@ -183,7 +209,10 @@ class Iyi::Command
         return mcp_tool_error(id, "doc needs a target: a .iyi module, a .iyimod artifact, or a prelude type's name") unless target
         ["doc", target]
       else
-        return mcp_tool_error(id, "unknown tool: #{name}")
+        # With the catalogue, because a caller that guessed a name wrong
+        # has no other way to learn the five from an error, and the list
+        # is five words long.
+        return mcp_tool_error(id, "unknown tool: #{name}. This server has #{mcp_tool_names.join(", ")}")
       end
 
     stdout = IO::Memory.new

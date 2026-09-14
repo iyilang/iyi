@@ -375,6 +375,34 @@ def main():
          and "not a valid iyi source file" in bytes_reply["content"][0]["text"]
          and "\x1b" not in bytes_reply["content"][0]["text"],
          repr(bytes_reply["content"][0]["text"])[:90])
+
+    # What a malformed request gets told. An agent writes these by
+    # accident - a field left out of a template, a tool name guessed -
+    # and the answer has to say which mistake it was. A call with no
+    # `name` came back "unknown tool: ", a sentence about a tool called
+    # nothing, and a request with no `method` came back -32601 ("ask for
+    # something else") where JSON-RPC means -32600 ("that is not a
+    # request").
+    reply = rpc("tools/call", {"arguments": {}}, 10)
+    nameless = reply["result"]
+    step("mcp names the missing field, not a tool called nothing",
+         nameless["isError"] is True
+         and "tools/call needs a name" in nameless["content"][0]["text"]
+         and "check" in nameless["content"][0]["text"],
+         repr(nameless["content"][0]["text"])[:90])
+    reply = rpc("tools/call", {"name": "nonesuch", "arguments": {}}, 11)
+    unknown = reply["result"]
+    step("mcp lists its tools when one is guessed wrong",
+         unknown["isError"] is True
+         and "unknown tool: nonesuch" in unknown["content"][0]["text"]
+         and "context" in unknown["content"][0]["text"],
+         repr(unknown["content"][0]["text"])[:90])
+    server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 12}) + "\n")
+    server.stdin.flush()
+    methodless = json.loads(server.stdout.readline())
+    step("mcp tells a non-request from an unknown method",
+         methodless.get("error", {}).get("code") == -32600,
+         repr(methodless)[:90])
     rpc("exit")
     server.wait(timeout=10)
     step("mcp exits on exit", server.returncode == 0, "")

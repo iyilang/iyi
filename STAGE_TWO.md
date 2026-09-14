@@ -270,37 +270,53 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
 
 | File | Lines | Floor | Reached |
 |---|---|---|---|
-| `array.iyi` | 507 | object | object |
+| `array.iyi` | 507 | link | link |
 | `atomic.iyi` | 89 | link | link |
-| `concurrency.iyi` | 1946 | object | object |
+| `concurrency.iyi` | 1946 | link | link |
 | `enum.iyi` | 161 | link | link |
-| `file.iyi` | 65 | object | object |
-| `float.iyi` | 718 | object | object |
+| `file.iyi` | 65 | link | link |
+| `float.iyi` | 718 | link | link |
 | `hash.iyi` | 175 | link | link |
-| `io.iyi` | 421 | object | object |
+| `io.iyi` | 421 | link | link |
 | `macros.iyi` | 63 | link | link |
-| `number.iyi` | 240 | object | object |
-| `object.iyi` | 153 | object | object |
+| `number.iyi` | 240 | link | link |
+| `object.iyi` | 153 | link | link |
 | `prelude.iyi` | 7471 | link | link |
 | `primitives.iyi` | 260 | link | link |
 | `range.iyi` | 87 | link | link |
 | `set.iyi` | 68 | link | link |
-| `string.iyi` | 583 | object | object |
+| `string.iyi` | 583 | link | link |
 | `thread.iyi` | 942 | link | link |
 
   Phase summary: 17/17 prelude files match or exceed committed floor (0 regressions).
-  Every file now reaches object emission or better, and seven link, including
-  `prelude.iyi` itself: 7,471 lines compiled and linked into a binary that carries
-  only `libSystem`. The nine that stop at object are blocked on `__crystal_raise`,
-  which is a runtime function that does not exist yet rather than a compiler defect,
-  and linking any external runtime to satisfy it would break the objective.
+  All 17 prelude files in `src/iyi/*.iyi` (13,949 lines) now reach link into binaries
+  carrying only `libSystem`. The eight files that previously stopped at object emission
+  (`array.iyi`, `concurrency.iyi`, `file.iyi`, `float.iyi`, `io.iyi`, `number.iyi`,
+  `object.iyi`, `string.iyi`) were blocked on `__crystal_raise` and `__crystal_personality`.
 
-  **`prelude.iyi` links.** All 7,471 lines parse, pass semantic analysis, emit a
-  native object file, and link into a binary carrying only `libSystem`. A
-  declaration-only file has no entry point of its own; the shipped compiler links
-  such a file by synthesising one, verified by compiling `set.iyi` with both
-  compilers and confirming each produces a binary.
+  **Native raise runtime:** The tree now carries a native pure-iyi unwinding runtime
+  (`Compiler.append_raise_runtime`, `__crystal_raise`, `__crystal_personality`,
+  `__crystal_get_exception`) targeting the DWARF / Itanium Exception Handling ABI. It
+  uses the platform unwinder (`_Unwind_RaiseException`, `_Unwind_GetRegionStart`,
+  `_Unwind_GetIP`, `_Unwind_GetLanguageSpecificData`, `_Unwind_SetGR`, `_Unwind_SetIP`),
+  which macOS and Linux both ship as part of libc/libSystem. It allocates a 48-byte
+  exception packet with the Crystal exception class identifier, packs the exception
+  object and its 32-bit type ID, parses the function's LSDA call-site table during
+  two-phase unwinding, sets return data registers 0 and 1, and transfers control to
+  landing pads.
 
+  **What it provides:**
+  - Intra-program raise and rescue with single and multiple rescue blocks.
+  - Exact exception type ID matching against class type hierarchies.
+  - Ensure blocks executed during normal exit and during unwind.
+  - Re-raising unhandled exceptions out to caller frames.
+  - 100% execution parity against the shipped compiler, verified by `bench/fixtures/compile_raise.iyi`.
+  - Dependency floor compliance: binaries link only `libSystem` (no Boehm GC, no external libunwind, no libstdc++).
+
+  **What it deliberately does not:**
+  - Cross-language C++ exception interop or foreign exception translation.
+  - Stack backtrace symbolication or demangling.
+  - External runtime dependencies beyond platform libc/libSystem.
 * **Whole-prelude compilation.** Every measurement above compiles one file at a
   time. `bench/selfhost_prelude_whole_exercise.sh` compiles the prelude as a single
   unit instead, which is the real precursor to stage one. The loader previously

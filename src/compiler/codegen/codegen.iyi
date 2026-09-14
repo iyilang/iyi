@@ -371,6 +371,7 @@ pub class CodeGenVisitor < Visitor
   property inlined_block_index : Int32
   property rescue_block : LLVMBasicBlock?
   property lib_funs : Hash(Tuple(String, String), Tuple(String, LLVMType, Bool))
+  property lib_fun_return_types : Hash(Tuple(String, String), String)
   property needs_value : Bool
   property proc_type : LLVMType?
   property proc_literal_allocas : Hash(String, LLVMValue)
@@ -405,6 +406,7 @@ pub class CodeGenVisitor < Visitor
     @inlined_block_index = 0
     @rescue_block = nil
     @lib_funs = Hash(Tuple(String, String), Tuple(String, LLVMType, Bool)).new
+    @lib_fun_return_types = Hash(Tuple(String, String), String).new
     @needs_value = true
     @proc_type = nil
     @proc_literal_allocas = Hash(String, LLVMValue).new
@@ -684,7 +686,7 @@ pub class CodeGenVisitor < Visitor
     if f = @mod.get_function?("__crystal_personality")
       f
     else
-      pers_fn_ty = LLVMType.function([] of LLVMType, @context.int32, true)
+      pers_fn_ty = LLVMType.function([@context.int32, @context.int32, @context.int64, @context.pointer, @context.pointer], @context.int32, true)
       @mod.add_function("__crystal_personality", pers_fn_ty)
     end
   end
@@ -885,6 +887,9 @@ pub class CodeGenVisitor < Visitor
     if node.is_a?(StringLiteral)
       return "String"
     end
+    if node.is_a?(Cast)
+      return node.as(Cast).to.to_s
+    end
 
     if node.is_a?(Call)
       c = node.as(Call)
@@ -895,6 +900,9 @@ pub class CodeGenVisitor < Visitor
       end
       if c.obj.is_a?(Path) || c.obj.is_a?(Generic)
         obj_name = c.obj.to_s
+        if rt = @lib_fun_return_types[{obj_name, c.name}]?
+          return rt
+        end
         if c.name == "new" || c.name == "malloc"
           if obj_name.includes?("Pointer")
             elem = element_type_of_pointer(obj_name)
@@ -903,6 +911,8 @@ pub class CodeGenVisitor < Visitor
             return obj_name
           end
         end
+      elsif c.name == "as" && c.args.size == 1
+        return c.args[0].to_s
       elsif c.name == "address"
         return "Int64"
       elsif c.obj.is_a?(StringLiteral)
@@ -946,7 +956,7 @@ pub class CodeGenVisitor < Visitor
           end
         end
       end
-      if (c.name == "+" || c.name == "-" || c.name == "*" || c.name == "/" || c.name == "//" || c.name == "%") && c.args.size == 1 && (co = c.obj)
+      if (c.name == "+" || c.name == "-" || c.name == "*" || c.name == "/" || c.name == "//" || c.name == "%" || c.name == "&+" || c.name == "&-" || c.name == "&*" || c.name == "|" || c.name == "&" || c.name == "^" || c.name == "<<" || c.name == ">>" || c.name == "unsafe_shl" || c.name == "unsafe_shr") && c.args.size == 1 && (co = c.obj)
         lt = infer_var_type(vname, co)
         rt = infer_var_type(vname, c.args[0])
         if lt == "Float64" || rt == "Float64"
@@ -966,12 +976,18 @@ pub class CodeGenVisitor < Visitor
           return "Float64"
         elsif c.name == "to_f32"
           return "Float32"
-        elsif c.name == "to_i64" || c.name == "to_u64"
+        elsif c.name == "to_u64"
+          return "UInt64"
+        elsif c.name == "to_i64"
           return "Int64"
-        elsif c.name == "to_i" || c.name == "to_i32" || c.name == "to_u32"
+        elsif c.name == "to_u32"
+          return "UInt32"
+        elsif c.name == "to_i" || c.name == "to_i32"
           return "Int32"
-        elsif c.name == "to_u8" || c.name == "to_i8"
+        elsif c.name == "to_u8"
           return "UInt8"
+        elsif c.name == "to_i8"
+          return "Int8"
         end
       end
     elsif node.is_a?(PointerOf)
@@ -1189,7 +1205,7 @@ pub class CodeGenVisitor < Visitor
         ptr = @builder.alloca(llvm_t, vname)
         if (info = @custom_types[tname]?) && info.is_struct
           ptr.alignment = 8
-        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "Float64" || tname.starts_with?("Proc(") || tname == "->" || @custom_types.has_key?(tname)
+        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "UInt64" || tname == "Int128" || tname == "UInt128" || tname == "Float64" || tname.starts_with?("Proc(") || tname == "->" || @custom_types.has_key?(tname)
           ptr.alignment = 8
         else
           ptr.alignment = 4
@@ -4194,7 +4210,9 @@ pub def compile_declarations_to_module(
           c_ret = cg.llvm_type_from_name(fd.return_type ? fd.return_type.to_s : "Void")
           fn_ty = LLVMType.function(c_args, c_ret, false)
           is_noreturn = (fd.return_type && fd.return_type.to_s == "NoReturn") || false
+          ret_type_str = fd.return_type ? fd.return_type.to_s : "Void"
           cg.lib_funs[{lname, fd.name}] = {c_name, fn_ty, is_noreturn}
+          cg.lib_fun_return_types[{lname, fd.name}] = ret_type_str
           mod.add_function(c_name, fn_ty) unless mod.get_function?(c_name)
         end
       end

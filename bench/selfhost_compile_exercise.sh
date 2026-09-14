@@ -52,6 +52,7 @@ FIXTURES=(
   "bench/fixtures/compile_diamond.iyi"
   "bench/fixtures/compile_top_level.iyi"
   "bench/fixtures/compile_no_top_level.iyi"
+  "bench/fixtures/compile_raise.iyi"
 )
 
 matched=0
@@ -319,6 +320,34 @@ prove_compile_mutation "pipeline drops default entry point for declaration-only 
   "# top_level << Nop.new" \
   "$REPO/bench/fixtures/compile_no_top_level.iyi" \
   0
+
+prove_compile_mutation "corrupt runtime __crystal_raise entry point" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  "p64[4] = ex.address" \
+  "p64[4] = 0_u64" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  38
+
+prove_compile_mutation "corrupt runtime __crystal_personality entry point" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  "return 6" \
+  "return 8" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  38
+
+prove_compile_mutation "corrupt runtime __crystal_get_exception entry point" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  "p64[4]" \
+  "p64[0]" \
+  "$REPO/bench/fixtures/compile_raise.iyi" \
+  38
+
+prove_compile_mutation "pipeline supplies raise runtime when missing" \
+  "$COMPILER_SRC" \
+  "Compiler.append_raise_runtime(classes, funs, defs, libs, top_level)" \
+  "# Compiler.append_raise_runtime(classes, funs, defs, libs, top_level)" \
+  "$REPO/bench/fixtures/compile_implicit_raise.iyi" \
+  42
 echo
 if [ "$status" -eq 0 ]; then
   echo "ALL SELFHOST COMPILE CHECKS PASSED!"

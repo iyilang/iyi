@@ -1,0 +1,27 @@
+class Exception
+end
+
+class MyError < Exception
+  @code : Int32
+
+  def initialize(code : Int32)
+    @code = code
+  end
+
+  def code : Int32
+    @code
+  end
+end
+
+def raise(ex : Exception) : NoReturn
+  __crystal_raise(ex.as(Void*))
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  begin
+    raise MyError.new(42)
+    0
+  rescue ex : MyError
+    ex.code
+  end
+end

@@ -42,6 +42,22 @@
 
 ### Fixed
 
+- **The stack running out is a panic the program prints itself.** An
+  infinite recursion faulted on its guard page, and the fault was the
+  kernel's to report: `Segmentation fault`, exit 139, or `iyi run`'s guess
+  that a memory fault is "nearly always the stack". A handler on an
+  alternate signal stack — per thread, because the stack that overflowed
+  has no room to run anything — reads the faulting address and the
+  interrupted stack pointer, and a fault at the stack's own edge is `iyi:
+  panic: stack overflow: the stack ran out, which is infinite or very
+  deep recursion`, exit 1, on the main stack, a fiber's and a thread's.
+  No defers run, on a stack that is gone, which is what Go and Rust
+  answer the same fault. A fault anywhere else is handed back to the
+  signal — a `Pointer` at nothing still dies of what it did, and `iyi
+  run` still explains that death in iyi's words, now without guessing
+  at the stack. Linux and darwin, with or without the collector;
+  Windows and wasm32 keep the driver's sentence.
+
 - **The directory fix moved a symptom the sweep gate pins.** `IyiIO` had
   grown a word for "the read failed", and `bench/sweep_exercise.sh`'s
   "sweep frees the live" proof — a patched prelude that frees live
@@ -6137,7 +6153,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 13,949-line library and nothing else. Every other
+  written against iyi's own 14,125-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

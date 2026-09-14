@@ -453,17 +453,19 @@ class Iyi::Command
   # kernel's terms - "Process terminated because of an invalid memory
   # access" - and for an iyi program, which outside `Pointer` cannot reach
   # memory it does not own, that sends a reader hunting for a null
-  # dereference in a language whose nil is a type. What a memory fault
-  # nearly always is here: the stack ran out. What it otherwise is: a
-  # `Pointer` the program wrote, or ours. Every other signal is named,
-  # because "an unhandled signal" is a sentence with the fact left out.
+  # dereference in a language whose nil is a type. The stack running out
+  # is the program's own panic now (`IyiStackGuard`, on the targets with a
+  # runtime), so a fault that reaches here is a `Pointer` the program
+  # wrote, a stack on a target with no guard, or ours. Every other signal
+  # is named, because "an unhandled signal" is a sentence with the fact
+  # left out.
   def self.death_sentence(status : Process::Status) : String
     case status.exit_reason
     when .bad_memory_access?, .access_violation?
       "the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory " \
-      "it does not own, so this is nearly always the stack running out: infinite or very deep " \
-      "recursion. If the program uses `Pointer`, that is the other place to look; if neither, " \
-      "it is a bug in #{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
+      "it does not own: if the program uses `Pointer`, that is the place to look, and on a target " \
+      "without iyi's runtime it can also be the stack running out. If neither, it is a bug in " \
+      "#{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
     else
       if signal = status.exit_signal?
         "the program was killed by signal #{signal} (#{status.description.lchop("Process ")})"

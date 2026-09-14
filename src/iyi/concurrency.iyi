@@ -1944,3 +1944,174 @@ class IyiSendSelect(T)
     node.is_a?(IyiSendNode(T)) && node.delivered?
   end
 end
+
+# ── Stack overflow: a guard-page fault is a sentence, not a signal ──────
+#
+# A fiber stack has a guard page under it, and the main thread's stack has
+# the kernel's; running off either is a fault, and a fault was the kernel's
+# to report - "Segmentation fault" from the shell, or the driver's guess
+# about a memory fault from `iyi run`. What the fault nearly always *is*
+# for an iyi program, which outside `Pointer` cannot reach memory it does
+# not own, is the stack running out, and the program can say so itself:
+# a handler on an alternate stack, since the one that overflowed has no
+# room to run anything, reads the faulting address and the interrupted
+# stack pointer and, when the fault is at the stack's own edge, prints
+# `iyi: panic: stack overflow` through the one write a panic uses and
+# exits 1. No unwinding - the defers cannot run on a stack that is gone -
+# which is what Go and Rust answer for the same fault. A fault anywhere
+# else is not this handler's to explain: it hands the signal back to its
+# default disposition and returns, the instruction faults again, and the
+# process dies of the signal it would have died of, so the driver's
+# sentence about a memory fault still stands for what it describes.
+#
+# The edge is the distance from the interrupted stack pointer: a frame is
+# carved below it (`sub rsp`, a pre-indexed `stp`) and touched within a
+# page or two, and a fault farther than 256 KiB above the pointer is not
+# a frame. Linux by raw syscall and darwin by libSystem, the same split
+# the rest of this file makes; Windows keeps its own report.
+{% unless flag?(:win32) %}
+  {% if flag?(:x86_64) %}
+    IYI_SG_SYS_RT_SIGACTION = 13_i64
+    IYI_SG_SYS_SIGALTSTACK  = 131_i64
+    # SA_SIGINFO | SA_ONSTACK | SA_RESTORER: the restorer the stop's
+    # handler names, for the same reason it does.
+    IYI_SG_SA_FLAGS = 0x0C000004_u64
+    IYI_SG_UC_SP    = 160_u64
+  {% elsif flag?(:linux) %}
+    IYI_SG_SYS_RT_SIGACTION = 134_i64
+    IYI_SG_SYS_SIGALTSTACK  = 132_i64
+    IYI_SG_SA_FLAGS = 0x08000004_u64
+    IYI_SG_UC_SP    = 432_u64
+  {% end %}
+  IYI_SG_SIGSEGV   = 11_i32
+  IYI_SG_SIGBUS    =  7_i32
+  IYI_SG_ALT_BYTES = 65536_u64
+  # How far above the interrupted sp a frame's first touch may land, and
+  # how far below: 256 KiB up (a fiber's whole stack), a page down.
+  IYI_SG_ABOVE = 262144_u64
+  IYI_SG_BELOW =   4096_u64
+
+  {% if flag?(:darwin) %}
+    lib LibC
+      fun sigaltstack(ss : Void*, oss : Void*) : Int32
+    end
+  {% end %}
+
+  module IyiStackGuard
+    @@installed = false
+
+    def self.address_of_handler(proc : Proc(Int32, Void*, Void*, Nil)) : UInt64
+      Pointer(UInt64).new(pointerof(proc).address).value
+    end
+
+    def self.handler_entry : UInt64
+      address_of_handler(->(signal : Int32, info : Void*, context : Void*) { IyiStackGuard.faulted(signal, info.address, context.address) })
+    end
+
+    # Per thread: an alternate stack for the handler to run on, because the
+    # stack that overflowed cannot; the handler itself once per process.
+    def self.install : Nil
+      {% if flag?(:darwin) %}
+        alt = LibC.mmap(Pointer(Void).new(0_u64), IYI_SG_ALT_BYTES, 3, 4098, -1, 0_i64)
+        return if alt.address &+ 1_u64 == 0_u64
+        # darwin's stack_t: ss_sp, ss_size, ss_flags.
+        stack = Pointer(UInt64).malloc(3_u64)
+        stack[0] = alt.address
+        stack[1] = IYI_SG_ALT_BYTES
+        stack[2] = 0_u64
+        return if LibC.sigaltstack(stack.as(Void*), Pointer(Void).new(0_u64)) != 0
+        return if @@installed
+        @@installed = true
+        action = Pointer(UInt64).malloc(2_u64)
+        action[0] = handler_entry
+        # SA_SIGINFO (0x40) | SA_ONSTACK (0x01), in the high half.
+        action[1] = 0x0000004100000000_u64
+        LibC.sigaction(IYI_SG_SIGSEGV, action.as(Void*), Pointer(Void).new(0_u64))
+        LibC.sigaction(IYI_SG_SIGBUS, action.as(Void*), Pointer(Void).new(0_u64))
+      {% else %}
+        alt = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, IYI_SG_ALT_BYTES.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+        return if alt < 0 && alt >= -4095
+        # The kernel's stack_t: ss_sp, ss_flags, ss_size.
+        stack = Pointer(UInt64).malloc(3_u64)
+        stack[0] = alt.to_u64
+        stack[1] = 0_u64
+        stack[2] = IYI_SG_ALT_BYTES
+        return if __iyi_conc_syscall3(IYI_SG_SYS_SIGALTSTACK, stack.address.to_i64, 0_i64, 0_i64) < 0
+        return if @@installed
+        @@installed = true
+        action = Pointer(UInt64).malloc(4_u64)
+        action[0] = handler_entry
+        action[1] = IYI_SG_SA_FLAGS
+        {% if flag?(:x86_64) %}
+          action[2] = __iyi_sg_sigreturn_address
+        {% else %}
+          action[2] = 0_u64
+        {% end %}
+        action[3] = 0_u64
+        __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, IYI_SG_SIGSEGV.to_i64, action.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+        __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, IYI_SG_SIGBUS.to_i64, action.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+      {% end %}
+    end
+
+    # The fault's address and the stack pointer it interrupted, from the
+    # kernel's own structs; nothing here allocates or takes a lock.
+    def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
+      {% if flag?(:darwin) %}
+        address = Pointer(UInt64).new(info + 24_u64).value
+        mcontext = Pointer(UInt64).new(context + 48_u64).value
+        sp = Pointer(UInt64).new(mcontext + 264_u64).value
+      {% else %}
+        address = Pointer(UInt64).new(info + 16_u64).value
+        sp = Pointer(UInt64).new(context + IYI_SG_UC_SP).value
+      {% end %}
+      if address &+ IYI_SG_BELOW >= sp && address <= sp &+ IYI_SG_ABOVE
+        say("iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n")
+        __iyi_exit(1)
+      end
+      # Not the stack's edge: the signal's default action, on the retry.
+      {% if flag?(:darwin) %}
+        action = Pointer(UInt64).malloc(2_u64)
+        action[0] = 0_u64
+        action[1] = 0_u64
+        LibC.sigaction(signal, action.as(Void*), Pointer(Void).new(0_u64))
+      {% else %}
+        action = Pointer(UInt64).malloc(4_u64)
+        action[0] = 0_u64
+        action[1] = 0_u64
+        action[2] = 0_u64
+        action[3] = 0_u64
+        __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, signal.to_i64, action.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+      {% end %}
+    end
+
+    # One descriptor, no stream, no error: the panic's own write.
+    def self.say(text : String) : Nil
+      written = 0_i64
+      total = text.bytesize.to_i64
+      while written < total
+        n = __iyi_write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
+        break if n <= 0_i64
+        written = written + n
+      end
+    end
+  end
+
+  {% if flag?(:x86_64) %}
+    @[NoInline]
+    @[Naked]
+    fun __iyi_sg_sigreturn : Nil
+      asm("movq $$15, %rax
+           syscall" :::: "volatile")
+    end
+
+    @[NoInline]
+    @[Naked]
+    fun __iyi_sg_sigreturn_address : UInt64
+      asm("leaq __iyi_sg_sigreturn(%rip), %rax
+           retq" :::: "volatile")
+      0_u64
+    end
+  {% end %}
+
+  IyiStackGuard.install
+{% end %}

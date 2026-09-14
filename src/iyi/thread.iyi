@@ -590,6 +590,11 @@
     # clone asm (or pthread) performs.
     def self.run(line : UInt64) : Nil
       @@line = line
+      # An alternate signal stack is a thread's own, so a stack overflow on
+      # this thread has somewhere to say so (`IyiStackGuard`).
+      {% unless flag?(:win32) %}
+        IyiStackGuard.install
+      {% end %}
       {% if flag?(:darwin) %}
         here = uninitialized UInt64
         IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)

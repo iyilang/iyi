@@ -138,12 +138,15 @@ refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
 refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run binary.iyi
-# A program the kernel killed. `iyi run` relayed the kernel's own words -
-# "Process terminated because of an invalid memory access" - about a
-# language with no null to dereference, so the reader hunted for one.
-# What that fault nearly always is: the stack ran out.
+# A program that ran out of stack says so itself now - `iyi: panic: stack
+# overflow`, from a handler on an alternate stack (bench/panics.sh holds
+# it on every stack). What the kernel still kills, `iyi run` explains in
+# iyi's words rather than relaying "Process terminated because of an
+# invalid memory access" about a language with no null to dereference.
 printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\nputs down(0)\n' > deep.iyi
-refuses "a program that ran out of stack" "stack running out" -- "$IYI" run deep.iyi
+refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
+printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
+refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
 

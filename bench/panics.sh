@@ -292,4 +292,40 @@ run "$work/index.iyi"
 $out"
 step "a panic the library raises names no library line, prelude or std"
 
+# ── 10. the stack running out is a panic the program prints itself: on
+#      the main stack, on a fiber's (its guard page), on a thread's (its
+#      own alternate signal stack) - and a fault that is not the stack's
+#      edge is left to the signal, so a memory fault stays a memory fault.
+#      This was "Segmentation fault" from the shell and exit 139 ───────
+for where in main fiber thread; do
+  case "$where" in
+    main)   body='puts down(0)' ;;
+    fiber)  body='group do |g|
+  g.spawn { down(0) }
+end' ;;
+    thread) body='t = IyiThread.start { down(0); nil }
+t.join' ;;
+  esac
+  printf 'module deep_%s\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\n%s\n' "$where" "$body" > "$work/deep_$where.iyi"
+  run "$work/deep_$where.iyi"
+  [ "$code" = 1 ] || fail "stack overflow on the $where stack exited $code, wanted 1 (139 is the signal, unhandled)"
+  [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+    fail "stack overflow on the $where stack said:
+$out"
+done
+cat > "$work/wild.iyi" <<'EOF'
+module wild
+
+p = Pointer(Int32).new(16_u64)
+puts p.value
+EOF
+set +e
+"$IYI" build -o "$work/wild" "$work/wild.iyi" > /dev/null 2>&1
+"$work/wild" > "$work/wild.out" 2>&1
+code=$?
+set -e
+[ "$code" = 139 ] || fail "a wild pointer exited $code, wanted the signal (139): the guard claimed a fault that is not the stack's"
+grep -q "stack overflow" "$work/wild.out" && fail "a wild pointer was called a stack overflow"
+step "the stack running out is a panic on every stack, and a wild pointer is not"
+
 echo "panics gate: every step held"

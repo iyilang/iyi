@@ -42,6 +42,13 @@ class Iyi::Command
         value = options.shift?
         abort! "--timeout takes seconds", :USAGE_ERROR unless value
         timeout = value.to_f? || abort! "--timeout takes seconds, not '#{value}'", :USAGE_ERROR
+        # `0` and `-1` were taken and every test came back "hung: killed
+        # at -1.0s" - a verdict about the flag, printed as one about the
+        # tests. A wait is a positive number of seconds; `inf` overflows
+        # the span it becomes, and `nan` is not a number of anything.
+        unless timeout.finite? && timeout > 0
+          abort! "--timeout takes seconds to wait, and #{value} is not a wait", :USAGE_ERROR
+        end
       when "--affected"
         value = options.shift?
         abort! "--affected takes a changed file", :USAGE_ERROR unless value

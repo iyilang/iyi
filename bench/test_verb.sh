@@ -90,6 +90,17 @@ step "a flag is a flag, and a directory is not a changed file"
 [ $? -eq 1 ] && grep -q 'is a directory, not a changed file' dir.txt ||
   { echo "a directory was accepted as a changed file:"; cat dir.txt; exit 1; }
 
+step "a timeout is a wait, so zero and less are refused"
+# `--timeout 0` and `--timeout -1` were taken, and every test came back
+# "hung: killed at -1.0s" - a verdict about the flag, printed as one about
+# the tests, and a run an agent computing its budget could produce.
+for wait in 0 -1 inf nan; do
+  "$IYI" test --timeout "$wait" . > wait.txt 2>&1
+  [ $? -eq 1 ] && grep -q -- "$wait is not a wait" wait.txt ||
+    { echo "--timeout $wait was taken as a deadline:"; cat wait.txt; exit 1; }
+done
+grep -q 'hung' wait.txt && { echo "the refusal ran a test first:"; cat wait.txt; exit 1; }
+
 echo "workdir $WORK"
 echo "test verb gate: every step held"
 exit 0

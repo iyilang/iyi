@@ -52,6 +52,13 @@
   the same mistake one step removed — is refused once the build knows what
   it read, before the first object is written.
 
+- **`test --timeout 0` killed every test.** Zero and negative deadlines
+  were taken, and every test came back `hung: killed at -1.0s` — a verdict
+  about the flag, printed as one about the tests, and a run an agent
+  computing a deadline from a budget can produce. A wait is a positive,
+  finite number of seconds; `0`, `-1`, `inf` and `nan` are refused by
+  name.
+
 - **A permission gate could not fail as root.**
   `bench/verbs_exercise.sh` drove "an output directory that will not take
   the file" at a `chmod 500` directory, and the write bit does not bite for

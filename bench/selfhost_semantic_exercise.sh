@@ -573,6 +573,11 @@ prove_main_mutation "closure variable mutation propagation into enclosing scope 
   "old_vars[k] = @program.type_merge(old_v, new_v)" \
   "# old_vars[k] = @program.type_merge(old_v, new_v)"
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_main_mutation "macro expansion in semantic traversal is bypassed" \
+  "if expand_macro(node)" \
+  "if false && expand_macro(node)"
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

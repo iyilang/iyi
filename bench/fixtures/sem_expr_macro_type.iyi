@@ -1,0 +1,12 @@
+macro make_struct(name, val)
+  struct {{name.id}}
+    def value : Int32
+      {{val}}
+    end
+  end
+end
+
+make_struct(MyPoint, 99)
+
+p = MyPoint.new
+res = p.value

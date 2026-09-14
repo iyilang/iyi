@@ -42,6 +42,20 @@
 
 ### Fixed
 
+- **A program the kernel killed was reported in the kernel's words.** An
+  infinite recursion runs the stack out and dies of a memory fault, and
+  `iyi run` relayed `Process terminated because of an invalid memory
+  access` — a sentence that sends a reader hunting for a null dereference
+  in a language whose nil is a type. `iyi test` was worse: the test came
+  back `fail` with nothing under it, the one failure that printed no
+  evidence from the verb whose contract is that a failure prints its own.
+  Both say what a memory fault nearly always is for an iyi program — the
+  stack running out, infinite or very deep recursion — and what it is
+  otherwise: a `Pointer` the program wrote, or a bug in the runtime that
+  is ours. Any other signal is named rather than called "an unhandled
+  signal". `test --json` carries the sentence in `output`; a `--crystal`
+  program keeps Crystal's own handler and its own words.
+
 - **A syntax error's `size` was `null`.** `check -f json` promises "file,
   line, column, size, message" as data, and a type error's `size` is
   always an integer; a syntax error's span is unknown and came out as

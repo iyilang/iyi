@@ -266,7 +266,15 @@ class Iyi::Command
       select
       when status = done.receive
         verdict = status.success? ? "pass" : "fail"
-        {file: file, status: verdict, seconds: elapsed(started), output: status.success? ? "" : output.to_s}
+        # A test the kernel killed printed "fail" and nothing under it -
+        # the one failure with no evidence of its own, and the one an
+        # infinite recursion produces. The death is the evidence.
+        evidence = output.to_s
+        unless status.success? || status.exit_reason.normal?
+          evidence += "\n" unless evidence.empty? || evidence.ends_with?('\n')
+          evidence += Command.death_sentence(status) + "\n"
+        end
+        {file: file, status: verdict, seconds: elapsed(started), output: status.success? ? "" : evidence}
       when timeout(deadline.seconds)
         process.terminate(graceful: false)
         done.receive

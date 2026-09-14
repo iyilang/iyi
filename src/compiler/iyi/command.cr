@@ -448,6 +448,31 @@ class Iyi::Command
     {config, result}
   end
 
+  # iyi: what a program's death says, when the kernel ended it rather than
+  # the program exiting. `Process::Status#description` speaks in the
+  # kernel's terms - "Process terminated because of an invalid memory
+  # access" - and for an iyi program, which outside `Pointer` cannot reach
+  # memory it does not own, that sends a reader hunting for a null
+  # dereference in a language whose nil is a type. What a memory fault
+  # nearly always is here: the stack ran out. What it otherwise is: a
+  # `Pointer` the program wrote, or ours. Every other signal is named,
+  # because "an unhandled signal" is a sentence with the fact left out.
+  def self.death_sentence(status : Process::Status) : String
+    case status.exit_reason
+    when .bad_memory_access?, .access_violation?
+      "the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory " \
+      "it does not own, so this is nearly always the stack running out: infinite or very deep " \
+      "recursion. If the program uses `Pointer`, that is the other place to look; if neither, " \
+      "it is a bug in #{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
+    else
+      if signal = status.exit_signal?
+        "the program was killed by signal #{signal} (#{status.description.lchop("Process ")})"
+      else
+        status.description
+      end
+    end
+  end
+
   private def execute(output_filename, run_args, compiler, *, error_on_exit = false)
     time = @time && !@progress_tracker.stats?
     status, elapsed_time = @progress_tracker.stage("Execute") do
@@ -502,7 +527,14 @@ class Iyi::Command
     end
 
     unless status.exit_reason.normal?
-      STDERR.puts status.description
+      # iyi: in iyi's own words when the program is iyi's. A `--crystal`
+      # program carries Crystal's runtime, which catches the fault itself
+      # and exits saying so; only a program under iyi's library dies here.
+      if compiler.prelude == "iyi/prelude"
+        STDERR.puts "#{Command.program_name}: #{Command.death_sentence(status)}"
+      else
+        STDERR.puts status.description
+      end
       STDERR.flush
     end
 

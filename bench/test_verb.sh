@@ -101,6 +101,21 @@ for wait in 0 -1 inf nan; do
 done
 grep -q 'hung' wait.txt && { echo "the refusal ran a test first:"; cat wait.txt; exit 1; }
 
+step "a test the kernel killed says what killed it"
+# An infinite recursion is a memory fault, and a memory fault was "fail"
+# with nothing under it - the one failure that printed no evidence, from
+# the verb whose contract is that a failure prints its own.
+printf 'module deep_test\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\nputs down(0)\n' > deep_test.iyi
+"$IYI" test deep_test.iyi > deep.txt 2>&1
+[ $? -eq 1 ] || { echo "a test that died was not a failure:"; cat deep.txt; exit 1; }
+grep -q 'deep_test.iyi: fail' deep.txt || { echo "the dead test is unnamed:"; cat deep.txt; exit 1; }
+grep -q 'memory fault' deep.txt && grep -q 'recursion' deep.txt ||
+  { echo "the death is not the evidence:"; cat deep.txt; exit 1; }
+"$IYI" test --json deep_test.iyi > deep.json 2>&1
+grep -q '"status":"fail"' deep.json && grep -q 'memory fault' deep.json ||
+  { echo "the data says nothing about the death:"; cat deep.json; exit 1; }
+rm deep_test.iyi
+
 echo "workdir $WORK"
 echo "test verb gate: every step held"
 exit 0

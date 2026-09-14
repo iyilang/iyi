@@ -1,9 +1,6 @@
-# Files: file operations and File.open returning IyiIO.
-#
-# Files can be read and written whole through File.read and File.write,
-# or opened as an IyiIO stream through File.open. Paths are NUL-terminated
-# at the call because iyi's String is not, and the buffer dies with the
-# call. Errors panic with the path in the message.
+# Files, read and written whole through `File.read` and `File.write`, or
+# opened as an `IyiIO` stream through `File.open`. Paths are NUL-terminated
+# at the call, because iyi's String is not; errors panic with the path.
 
 class File
   def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096) : IyiIO
@@ -29,7 +26,9 @@ class File
     raise "cannot read #{path}" if fd < 0_i64
     io = IyiIO.new(fd, 4096, false)
     defer io.close
-    io.read_all
+    text = io.read_all
+    raise "cannot read #{path}: it is a directory, or the read failed" if io.read_failed?
+    text
   end
 
   def self.write(path : String, contents : String) : Nil
@@ -43,9 +42,7 @@ class File
 
   def self.exists?(path : String) : Bool
     fd = __iyi_open_read(c_path(path))
-    if fd < 0
-      return false
-    end
+    return false if fd < 0
     __iyi_close(fd)
     true
   end

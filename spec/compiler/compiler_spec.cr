@@ -425,6 +425,25 @@ describe "Compiler" do
         exception.should_not be_nil
       end
     end
+
+    # `open` takes a directory and `read` refuses it, and the refusal read
+    # as the end of an empty file: `File.read("adir")` was "", exit 0.
+    it "refuses to read a directory rather than answering an empty file" do
+      with_tempdir("iyi-file-directory") do
+        Dir.mkdir("adir")
+        File.write "dir.iyi", <<-'IYI'
+          puts File.read("adir").size
+          IYI
+        source = Iyi::Compiler::Source.new(
+          File.expand_path("dir.iyi"), File.read("dir.iyi"))
+        iyi_compiler.compile(source, File.expand_path("dir"))
+
+        error = IO::Memory.new
+        status = Process.run(File.expand_path("dir"), error: error)
+        status.success?.should be_false
+        error.to_s.should contain "cannot read adir: it is a directory"
+      end
+    end
   end
 
   # iyi: the concurrency runtime — SPEC.md III.4, Linux only. The bench gate

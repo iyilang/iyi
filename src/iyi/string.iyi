@@ -235,16 +235,12 @@ class String
     "\"" + self + "\""
   end
 
-  # The number this string spells, asked for by `samples/iyi/calc`, which reads
-  # a token's text and needs the integer behind it.
-  #
-  # Raises on anything that is not a number, which is what Crystal's `to_i`
-  # does — the same name has to mean the same thing in both libraries
-  # (SPEC.md III.1.7a), and a silent 0 for `"oops"` is the kind of answer that
-  # is wrong twice.
-  # An optional sign and decimal digits, the whole string; a text that is
-  # not that is a mistake in `to_i` and a nil in `to_i?`, the pair `[]`
-  # and `[]?` are.
+  # The number this string spells - an optional sign and decimal digits, the
+  # whole string - asked for by `samples/iyi/calc`, which reads a token's text
+  # and needs the integer behind it. Raises on anything else, as Crystal's
+  # `to_i` does: the same name means the same thing in both libraries (SPEC.md
+  # III.1.7a), and a silent 0 for `"oops"` is an answer that is wrong twice.
+  # `to_i?` answers nil for the same text, the pair `[]` and `[]?` are.
   def to_i : Int32
     to_i? || raise "not a number: #{inspect}"
   end
@@ -258,10 +254,10 @@ class String
     return nil if empty?
 
     index = 0
-    negative = false
-    if self[0] == '-'
+    negative = self[0] == '-'
+    if negative || self[0] == '+'
+      # A sign alone is not a number; `+5` is one, as it is for `to_f`.
       return nil if @bytesize == 1
-      negative = true
       index = 1
     end
 

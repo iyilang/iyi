@@ -45,6 +45,10 @@ assert_int("0".to_i, 0, "number: zero reads")
 assert_int("-0".to_i, 0, "number: minus zero reads")
 assert_int("123".to_i, 123, "number: a number reads")
 assert_int("-123".to_i, -123, "number: a negative reads")
+# `+5` is a number in every library, and it was nil here while `"+5".to_f`
+# and `std/text`'s `to_i?(base)` read it - one name, two answers.
+assert_int("+123".to_i, 123, "number: a plus sign reads")
+assert_true("+".to_i? == nil, "number: a lone plus is nil")
 
 # ---- 2. What does not fit says so
 assert_true("2147483648".to_i? == nil, "number: max plus one is nil")

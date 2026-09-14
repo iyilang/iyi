@@ -42,6 +42,18 @@
 
 ### Fixed
 
+- **`File.read` of a directory answered an empty file.** `open` takes a
+  directory and `read` refuses it with EISDIR, and the refusal read as the
+  end of the file: `File.read("adir")` was `""`, exit 0, from a call that
+  had failed. `IyiIO` keeps a failed read apart from an ended one now, and
+  `File.read` says `cannot read adir: it is a directory, or the read
+  failed`. Paid for in prose, so the library sits on its ceiling still.
+
+- **`"+5".to_i` was not a number.** The prelude's `to_i?` took `-` and
+  refused `+`, while `"+5".to_f` and `std/text`'s `to_i?(base)` read it —
+  one name, two answers, in the library whose rule is that a name means
+  one thing. A leading `+` reads; a `+` alone is nil, as `-` alone is.
+
 - **Two wasm jobs went red on a download.** The day github.com answered
   504 for one release asset for an hour, `curl -sSL | tar` saved the error
   page as the tarball and the job died of `gzip: stdin: not in gzip

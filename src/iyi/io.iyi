@@ -1,9 +1,6 @@
-# IO: stream abstraction over file descriptors with buffering.
-#
-# Offers buffered reading and writing over any file descriptor or handle:
-# standard streams (stdin, stdout, stderr), open files, pipes, and sockets.
-# Replaces the old monolithic read_input and unifies puts and print into
-# one write path.
+# IO: a buffered stream over a file descriptor or handle - the standard
+# streams, open files, pipes and sockets - with one read path and one
+# write path, which is what `puts`, `print` and `File` share.
 
 class IyiIO
   @fd : Int64
@@ -66,6 +63,15 @@ class IyiIO
     @eof && @read_pos >= @read_limit
   end
 
+  # A read that failed is not a read that ended: the kernel's error and its
+  # zero looked the same from here, so `File.read` of a directory - EISDIR,
+  # every time - answered "". Kept for the caller, who knows the path.
+  @read_failed = false
+
+  def read_failed? : Bool
+    @read_failed
+  end
+
   private def fill_buffer : Int32
     return 0 if @closed || @eof
     @read_pos = 0
@@ -73,6 +79,7 @@ class IyiIO
 
     count = low_level_read(@fd, @read_buffer.as(Void*), @read_capacity.to_u64)
     if count <= 0_i64
+      @read_failed = true if count < 0_i64
       @eof = true
       return 0
     end

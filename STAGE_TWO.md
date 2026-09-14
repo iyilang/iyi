@@ -317,6 +317,25 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   - Cross-language C++ exception interop or foreign exception translation.
   - Stack backtrace symbolication or demangling.
   - External runtime dependencies beyond platform libc/libSystem.
+
+  **Where it does not apply, measured rather than assumed.** The runtime is injected
+  by `Compiler.append_raise_runtime` only when the program being compiled does not
+  already define `__crystal_raise`. `src/iyi/prelude.iyi` DOES define one, at line
+  7159, and it is a panic stub that prints "which cannot happen" and exits. So a
+  program built against the real prelude does not get the working runtime, and
+  raising through it does not work:
+
+  ```
+  require "iyi/prelude"
+  begin; raise "boom"; rescue; print "rescued\n"; end
+  ```
+
+  compiles cleanly and dies with SIGTRAP, printing nothing. The parity claim above
+  rests on `bench/fixtures/compile_raise.iyi`, which supplies its own exception
+  hierarchy and `raise` and therefore takes the injected path. Exceptions work for
+  that shape and do not yet work for prelude programs. Closing this means making the
+  prelude's own `raise` the real one rather than a stub, and the compile gate needs a
+  fixture on the prelude path so the distinction cannot be lost again.
 * **Whole-prelude compilation.** Every measurement above compiles one file at a
   time. `bench/selfhost_prelude_whole_exercise.sh` compiles the prelude as a single
   unit instead, which is the real precursor to stage one. The loader resolves requires

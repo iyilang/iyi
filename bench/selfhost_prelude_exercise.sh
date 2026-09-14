@@ -36,20 +36,20 @@ echo "== 2. Measuring prelude compilation phases against committed floor"
 file_floor() {
   case "$1" in
     "array.iyi")       echo "codegen" ;;
-    "atomic.iyi")      echo "object" ;;
+    "atomic.iyi")      echo "link" ;;
     "concurrency.iyi") echo "semantic" ;;
-    "enum.iyi")        echo "object" ;;
+    "enum.iyi")        echo "link" ;;
     "file.iyi")        echo "object" ;;
     "float.iyi")       echo "semantic" ;;
-    "hash.iyi")        echo "object" ;;
+    "hash.iyi")        echo "link" ;;
     "io.iyi")          echo "object" ;;
-    "macros.iyi")      echo "object" ;;
+    "macros.iyi")      echo "link" ;;
     "number.iyi")      echo "object" ;;
     "object.iyi")      echo "object" ;;
     "prelude.iyi")     echo "parse" ;;
     "primitives.iyi")  echo "link" ;;
-    "range.iyi")       echo "object" ;;
-    "set.iyi")         echo "object" ;;
+    "range.iyi")       echo "link" ;;
+    "set.iyi")         echo "link" ;;
     "string.iyi")      echo "object" ;;
     "thread.iyi")      echo "link" ;;
     *)                 echo "none" ;;
@@ -166,46 +166,46 @@ prove_fails() {
   fi
 }
 
-prove_fails "syntax corruption in set regresses below codegen floor" \
+prove_fails "syntax corruption in set regresses below link floor" \
   "set.iyi" \
   's/class Set/class %%%/' \
-  "codegen"
+  "link"
 
-prove_fails "semantic corruption in set regresses below codegen floor" \
+prove_fails "semantic corruption in set regresses below link floor" \
   "set.iyi" \
   's/@entries : Hash(T, Bool)/@entries : UndefinedType12345/' \
-  "codegen"
+  "link"
 
-prove_fails "syntax corruption in hash regresses below object floor" \
+prove_fails "syntax corruption in hash regresses below link floor" \
   "hash.iyi" \
   's/class Hash/class %%%/' \
-  "object"
+  "link"
 
-prove_fails "syntax corruption in range regresses below object floor" \
+prove_fails "syntax corruption in range regresses below link floor" \
   "range.iyi" \
   's/struct Range/struct %%%/' \
-  "object"
+  "link"
 
-prove_fails "syntax corruption in enum regresses below codegen floor" \
+prove_fails "syntax corruption in enum regresses below link floor" \
   "enum.iyi" \
   's/struct Enum/struct %%%/' \
-  "codegen"
+  "link"
 
 prove_fails "syntax corruption in primitives regresses below link floor" \
   "primitives.iyi" \
   's/struct Symbol/struct %%%/' \
   "link"
-prove_fails "syntax corruption in atomic regresses below object floor" \
+prove_fails "syntax corruption in atomic regresses below link floor" \
   "atomic.iyi" \
   's/struct Atomic/struct %%%/' \
-  "object"
+  "link"
 
 prove_fails "syntax corruption in prelude regresses below parse floor" \
   "prelude.iyi" \
   's|require "./primitives"|require %%%|' \
   "parse"
 
-echo "  Mutation summary: $mutations_caught/6 regressions caught"
+echo "  Mutation summary: $mutations_caught/8 regressions caught"
 
 echo
 if [ "$status" -eq 0 ]; then

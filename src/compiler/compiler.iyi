@@ -121,7 +121,9 @@ pub class Compiler
     resolved_modules.each do |mod_info|
       Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, top_level)
     end
-
+    if top_level.empty? && funs.none? { |f| f.name == "main" }
+      top_level << Nop.new
+    end
     append_entry_point(funs, top_level)
 
     # Register funs in program

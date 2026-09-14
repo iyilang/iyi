@@ -42,6 +42,18 @@
 
 ### Fixed
 
+- **A permission gate could not fail as root.**
+  `bench/verbs_exercise.sh` drove "an output directory that will not take
+  the file" at a `chmod 500` directory, and the write bit does not bite for
+  root — which is what CI runs as, in a container. So the build wrote its
+  program there, exited 0, and the arm reported "nothing was refused" on
+  every run since it was added, about a compiler that was answering
+  correctly. The directory is the first one `access(W_OK)` refuses now,
+  which is the question the compiler asks: the mode-500 one where the bit
+  binds, a read-only filesystem where it does not. The unreadable-module
+  case further down the same file reads `/proc/self/mem` for the same
+  reason.
+
 - **`iyi clear_cache` deleted the project.** `IYI_CACHE_DIR=""` is what a
   shell makes of `IYI_CACHE_DIR="$DIR"` with `DIR` unset, and
   `File.expand_path("")` is the working directory: a build dropped its

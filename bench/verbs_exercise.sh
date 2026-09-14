@@ -239,8 +239,27 @@ echo "== where a program is written, and where its library is looked for"
 refuses "an empty -o" "-o takes a path" -- "$IYI" build -o "" good.iyi
 mkdir -p "$WORK/readonly"
 chmod 500 "$WORK/readonly"
-refuses "an output directory that will not take the file" "no permission to write there" -- \
-  "$IYI" build -o "$WORK/readonly/prog" good.iyi
+# A directory this process cannot write into. `chmod 500` does not bite as
+# root, which is what CI runs as (see the unreadable module further down,
+# which is `/proc/self/mem` for the same reason): the build really did
+# write its program there, exited 0, and this arm failed every run since it
+# was added. So the directory is the first one `access(W_OK)` refuses,
+# which is the question the compiler asks - the mode-500 one where the bit
+# binds, a read-only filesystem where it does not.
+unwritable=""
+for candidate in "$WORK/readonly" /sys /proc; do
+  if [ -d "$candidate" ] && [ ! -w "$candidate" ]; then
+    unwritable="$candidate"
+    break
+  fi
+done
+if [ -n "$unwritable" ]; then
+  refuses "an output directory that will not take the file ($unwritable)" \
+    "no permission to write there" -- "$IYI" build -o "$unwritable/prog" good.iyi
+else
+  echo "  an output directory that will not take the file: nothing here refuses"
+  echo "  this process, so this case had nothing to drive"
+fi
 chmod 700 "$WORK/readonly"
 # And the library the program compiles against. With IYI_PATH pointed
 # somewhere empty, the prelude is not found - and the answer was Crystal's

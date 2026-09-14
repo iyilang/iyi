@@ -254,7 +254,7 @@ for fixture in \
   "$REPO"/samples/iyi/app/greeter.iyi \
   "$REPO"/samples/iyi/boot/config.iyi \
   "$REPO"/samples/iyi/boot/registry.iyi \
-  "$REPO"/bench/fixtures/macro_tokens.iyi; do
+  "$REPO"/bench/fixtures/lexmode_macro_tokens.iyi; do
   name="$(basename "$fixture")"
   rel="${fixture#$REPO/}"
   "$WORK/dump_crystal" "$fixture" > "$WORK/golden_$name.txt"

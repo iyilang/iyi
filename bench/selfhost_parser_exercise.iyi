@@ -637,7 +637,7 @@ module BenchSelfhostParserExercise
       "bench/fixtures/decl_traits_and_impls.iyi",
       "bench/fixtures/decl_types_and_vars.iyi",
       "bench/fixtures/decl_visibility_and_annotations.iyi",
-      "bench/fixtures/macro_control_grammar.iyi",
+      "bench/fixtures/syntax_macro_control_grammar.iyi",
     ]
 
     total_nodes = 0

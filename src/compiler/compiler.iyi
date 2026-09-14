@@ -48,6 +48,7 @@ pub struct CompilerConfig
   property obj_output_filename : String?
   property verbose : Bool
   property target_triple : String?
+  property probe_phase : Bool
 
   def initialize(
     @output_filename : String = "a.out",
@@ -55,6 +56,7 @@ pub struct CompilerConfig
     @obj_output_filename : String? = nil,
     @verbose : Bool = false,
     @target_triple : String? = nil,
+    @probe_phase : Bool = false,
   )
   end
 end
@@ -83,9 +85,22 @@ pub class Compiler
 
   def compile(root_filename : String) : CompileResult
     # 1. Resolve: discover all dependencies, detect cycles, produce topological order
-    resolved_modules = @loader.resolve(root_filename)
+    resolved_modules = begin
+      @loader.resolve(root_filename)
+    rescue ex
+      if @config.probe_phase
+        puts "parse: fail: #{ex.to_s}"
+        puts "reached: none"
+        return CompileResult.new(@config.output_filename, "", [] of ModuleInfo)
+      else
+        raise ex.to_s
+      end
+    end
 
-    # 2. Parse is performed during resolution (@loader.resolve parses ASTs)
+    if @config.probe_phase
+      puts "[phase] parse: pass"
+      STDOUT.flush
+    end
 
     # 3. Normalise: run normalizer over each resolved module's AST
     norm_prog = NormalizerProgram.new
@@ -93,7 +108,6 @@ pub class Compiler
     resolved_modules.each do |mod_info|
       mod_info.ast = mod_info.ast.transform(normalizer)
     end
-
     # 4. Semantic: extract declarations in topological order and type-check
     prog = SemanticProgram.new
     register_primitive_operators(prog)
@@ -117,20 +131,34 @@ pub class Compiler
       prog.add_def(d)
     end
 
-    tl = TopLevelVisitor.new(prog)
-    classes.each do |cd|
-      next if (tvars = cd.type_vars) && !tvars.empty?
-      cd.accept(tl)
+    begin
+      tl = TopLevelVisitor.new(prog)
+      classes.each do |cd|
+        cd.accept(tl)
+      end
+
+      mv = MainVisitor.new(prog)
+      funs.each do |fd|
+        ret_type = if rt = fd.return_type
+                     prog.lookup_type_node(rt, prog)
+                   else
+                     prog.int32_type
+                   end
+        mv.set_type(fd, ret_type)
+      end
+    rescue ex
+      if @config.probe_phase
+        puts "semantic: fail: #{ex.to_s}"
+        puts "reached: parse"
+        return CompileResult.new(@config.output_filename, "", resolved_modules)
+      else
+        raise ex.to_s
+      end
     end
 
-    mv = MainVisitor.new(prog)
-    funs.each do |fd|
-      ret_type = if rt = fd.return_type
-                   prog.lookup_type_node(rt, prog)
-                 else
-                   prog.int32_type
-                 end
-      mv.set_type(fd, ret_type)
+    if @config.probe_phase
+      puts "[phase] semantic: pass"
+      STDOUT.flush
     end
 
     # 5. Codegen: create LLVM context, module, target machine, and compile
@@ -152,15 +180,47 @@ pub class Compiler
     mod.data_layout = tm.data_layout
 
     roots = resolved_modules.map { |mi| mi.ast.as(ASTNode) }
-    compile_declarations_to_module(classes, funs, defs, libs, root_filename, ctx, mod, prog, mv, roots)
+    begin
+      compile_declarations_to_module(classes, funs, defs, libs, root_filename, ctx, mod, prog, mv, roots)
+    rescue ex
+      if @config.probe_phase
+        puts "codegen: fail: #{ex.to_s}"
+        puts "reached: semantic"
+        return CompileResult.new(@config.output_filename, "", resolved_modules)
+      else
+        raise ex.to_s
+      end
+    end
 
+    if @config.probe_phase
+      puts "[phase] codegen: pass"
+      STDOUT.flush
+    end
     # 6. Emit: write native object file
     obj_path = @config.obj_output_filename || (@config.output_filename + ".o")
-    tm.emit_obj_to_file(mod.to_unsafe, obj_path)
+    begin
+      tm.emit_obj_to_file(mod.to_unsafe, obj_path)
+    rescue ex
+      if @config.probe_phase
+        puts "object: fail: #{ex.to_s}"
+        puts "reached: codegen"
+        return CompileResult.new(@config.output_filename, "", resolved_modules)
+      else
+        raise ex.to_s
+      end
+    end
+
+    if @config.probe_phase
+      puts "[phase] object: pass"
+      STDOUT.flush
+    end
 
     if @config.emit_obj_only
       if @config.verbose
         puts "Emitted object file: #{obj_path}"
+      end
+      if @config.probe_phase
+        puts "reached: object"
       end
       return CompileResult.new(@config.output_filename, obj_path, resolved_modules)
     end
@@ -178,16 +238,24 @@ pub class Compiler
 
     final_cmd = Compiler.substitute_placeholder(cmd_template, "\"${@}\"", quoted_objs)
     status = LibC.system(final_cmd.to_unsafe)
+    if @config.probe_phase
+      if status == 0
+        puts "[phase] link: pass"
+        puts "reached: link"
+      else
+        puts "link: fail: platform linker returned #{status}"
+        puts "reached: object"
+      end
+      if @config.obj_output_filename.nil? && File.exists?(obj_path)
+        File.delete(obj_path)
+      end
+      return CompileResult.new(@config.output_filename, obj_path, resolved_modules)
+    end
+
     unless status == 0
       STDERR.puts "Error: linking failed with exit code #{status}"
       LibC.exit(status)
     end
-
-    status = LibC.system(final_cmd.to_unsafe)
-    unless status == 0
-      raise "linking failed with exit code #{status}"
-    end
-
     # Clean up temporary object file if not explicitly requested
     if @config.obj_output_filename.nil? && File.exists?(obj_path)
       File.delete(obj_path)

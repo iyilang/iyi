@@ -20,6 +20,7 @@ module CompileTool
     puts "Options:"
     puts "    -o <filename>       Output executable filename (default: a.out)"
     puts "    --emit-obj <file>   Emit object file only without linking"
+    puts "    --probe-phase       Probe and print compilation phases reached"
     puts "    -v, --verbose       Print linker command"
     puts "    -h, --help          Show this help message"
   end
@@ -37,7 +38,7 @@ module CompileTool
     emit_obj_only = false
     obj_output_file : String? = nil
     verbose = false
-
+    probe_phase = false
     i = 0
     while i < args.size
       arg = args[i]
@@ -48,8 +49,9 @@ module CompileTool
         return
       when "-v", "--verbose"
         verbose = true
+      when "--probe-phase"
+        probe_phase = true
       when "--emit-obj"
-        emit_obj_only = true
         i = i + 1
         if i < args.size
           obj_output_file = args[i]
@@ -91,7 +93,7 @@ module CompileTool
       return
     end
 
-    config = CompilerConfig.new(output_file, emit_obj_only, obj_output_file, verbose)
+    config = CompilerConfig.new(output_file, emit_obj_only, obj_output_file, verbose, nil, probe_phase)
     compiler = Compiler.new(config)
     compiler.compile(in_file)
   end

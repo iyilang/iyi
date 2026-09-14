@@ -605,7 +605,7 @@ for fixture in \
   "$REPO"/bench/fixtures/decl_traits_and_impls.iyi \
   "$REPO"/bench/fixtures/decl_types_and_vars.iyi \
   "$REPO"/bench/fixtures/decl_visibility_and_annotations.iyi \
-  "$REPO"/bench/fixtures/macro_control_grammar.iyi; do
+  "$REPO"/bench/fixtures/syntax_macro_control_grammar.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   "$WORK/exercise-plain" "$fixture" > "$WORK/iyi.ast"
   "$WORK/dump_crystal" "$fixture" > "$WORK/crystal.ast"

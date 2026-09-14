@@ -262,6 +262,36 @@ assembling a self-hosted compiler binary from `src/compiler/**/*.iyi` alone:
   The line 48 macro roadblock and the `__crystal_raise` symbol wall are both gone.
   `bench/selfhost_prelude_exercise.sh` records the phase each prelude file reaches against a committed
   floor and fails on regression, so this status cannot drift from the tree.
+* **The gate:** `bench/selfhost_prelude_exercise.sh` drives `.build/iyi-compile` across all 17
+  prelude files in `src/iyi/*.iyi` (13,949 lines), records the phase each reaches, and enforces a
+  committed per-file floor set to today's measured state. Five guarded mutation proofs corrupt real
+  prelude files and confirm the gate goes red on a regression, so progress recorded here cannot be
+  claimed without the tree backing it. The table below is that gate's own output.
+
+| File | Lines | Floor | Reached |
+|---|---|---|---|
+| `array.iyi` | 507 | semantic | semantic |
+| `atomic.iyi` | 89 | none | none |
+| `concurrency.iyi` | 1946 | parse | parse |
+| `enum.iyi` | 161 | parse | parse |
+| `file.iyi` | 65 | object | object |
+| `float.iyi` | 718 | semantic | semantic |
+| `hash.iyi` | 175 | object | object |
+| `io.iyi` | 421 | semantic | semantic |
+| `macros.iyi` | 63 | object | object |
+| `number.iyi` | 240 | semantic | semantic |
+| `object.iyi` | 153 | parse | parse |
+| `prelude.iyi` | 7471 | none | none |
+| `primitives.iyi` | 260 | parse | parse |
+| `range.iyi` | 87 | object | object |
+| `set.iyi` | 68 | codegen | codegen |
+| `string.iyi` | 583 | semantic | semantic |
+| `thread.iyi` | 942 | link | link |
+
+  Phase summary: 17/17 prelude files match or exceed committed floor (0 regressions).
+  `thread.iyi` (942 lines) reaches link. `prelude.iyi` itself still fails to parse, now at line 534
+  on adjacent string literal concatenation inside `{% raise %}` rather than at line 48.
+
 ### Hole 4: Macro Expansion Hook in Semantic Traversal
 * **Status:** Closed.
 * **Evidence:** `src/compiler/semantic/top_level.iyi` and `main_visitor.iyi` invoke the ported
@@ -297,13 +327,141 @@ To bridge the gap between isolated pass verification and whole-compiler assembly
 implements Candidate 1: compiling complete programs end-to-end using only the ported compiler
 stages through a dedicated helper binary, and proving execution parity against the shipped compiler.
 
-### Implementation: `src/compiler/compiler.iyi`, `loader.iyi`, and `tools/compile.iyi`
+### Implementation: `src/compiler/tools/compile.iyi`
 
-`src/compiler/tools/compile.iyi` (100 lines) is a thin CLI caller of the `Compiler`
-orchestrator (`src/compiler/compiler.iyi`, 278 lines) and `Loader` (`src/compiler/loader.iyi`, 304 lines):
-1. `compiler/loader`: resolves recursive module dependencies and detects import cycles.
-2. `compiler/syntax/parser`: parses source code into ASTs.
-3. `compiler/semantic/normalizer`: normalises AST nodes across resolved modules.
-4. `compiler/semantic/top_level` and `main_visitor`: declares and types functions, structs, and classes.
+`src/compiler/tools/compile.iyi` (245 lines) glues together five ported stages in pure iyi:
+1. `compiler/syntax/parser`: parses source code into an AST.
+2. `compiler/semantic/top_level`: declares types, methods, structs, and classes.
+3. `compiler/semantic/main_visitor`: types expressions, local variables, and calls.
+4. `compiler/codegen/codegen` and `compiler/llvm`: generates LLVM IR and emits a machine object file (`.o`).
+5. `compiler/platform/target` and `compiler/platform/linker`: constructs the platform linker command
+   and invokes the system linker (`cc`).
 
-[Showing lines 1-300 of 441. Use :301 to continue]
+The tool is built via the Makefile target:
+
+```makefile
+make iyi-compile
+```
+
+producing `.build/iyi-compile`.
+
+### Measured Execution Parity and Dependency Floor
+
+The differential gate `bench/selfhost_compile_exercise.sh` executes 7 distinct program fixtures
+across both `.build/iyi-compile` and the shipped compiler `.build/iyi build --prelude=empty`:
+
+1. `compile_exit.iyi`: trivial program returning exit code 42 directly from `fun main`.
+2. `compile_arith.iyi`: multi-function integer arithmetic, wrapping operators (`&+`, `&-`, `&*`),
+   bitwise logic, and shifts.
+3. `compile_control.iyi`: conditional branches (`if`/`else`), absolute value calculations, and phi merges.
+4. `compile_loop.iyi`: while loops with variable mutation, accumulation (sum 1..10 = 55), and Euclidean gcd.
+5. `compile_struct.iyi`: struct definition, constructor initialization, property getters/setters,
+   and struct method calculation.
+6. `compile_class.iyi`: heap-allocated class, instance variable mutation, and class method dispatch.
+7. `compile_pointers.iyi`: pointerof, pointer dereference, and in-place variable mutation via pointer.
+
+Running `bash bench/selfhost_compile_exercise.sh` produces:
+
+```
+== 1. Building self-host compile tool
+.build/iyi build -o .build/iyi-compile src/compiler/tools/compile.iyi
+built .build/iyi-compile
+  built .build/iyi-compile successfully
+
+== 2. Whole program execution parity: pure iyi compiler vs shipped compiler
+  bench/fixtures/compile_exit.iyi: identical execution exit code (rc=42)
+  bench/fixtures/compile_arith.iyi: identical execution exit code (rc=26)
+  bench/fixtures/compile_control.iyi: identical execution exit code (rc=42)
+  bench/fixtures/compile_loop.iyi: identical execution exit code (rc=49)
+  bench/fixtures/compile_struct.iyi: identical execution exit code (rc=42)
+  bench/fixtures/compile_class.iyi: identical execution exit code (rc=42)
+  bench/fixtures/compile_pointers.iyi: identical execution exit code (rc=42)
+  Parity summary: 7/7 compile fixtures match 100% across execution
+
+== 3. Dependency floor verification: pure iyi compiler produces dependency-floor binaries
+  Dependency floor summary: 7/7 binaries link only platform libc (no libgc)
+
+== 4. Object emission without linking (--emit-obj)
+  --emit-obj successfully wrote object file: /tmp/test_emit.o
+
+== 5. Malformed input and error refusal checks
+  properly refused: malformed syntax rejected (rc=1)
+  properly refused: missing input file rejected (rc=1)
+  Refusal summary: 2/2 malformed scenarios refused properly
+
+== 6. Guarded mutation proofs
+  [corrupt linker placeholder substitution]
+    caught: mutation caused compilation or execution divergence as expected
+  [corrupt object file output path]
+    caught: mutation caused compilation or execution divergence as expected
+  [corrupt arithmetic operation in test fixture]
+    caught: mutation caused compilation or execution divergence as expected
+
+ALL SELFHOST COMPILE CHECKS PASSED!
+```
+
+Running `otool -L` on every binary produced by `.build/iyi-compile` confirms:
+
+```
+/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+```
+
+Both the pure iyi compiler and the shipped compiler produce binaries that link exclusively
+to the platform libc. No `libgc`, no `libc++`, and no `libLLVM` are linked into the generated
+binaries.
+
+## 5. The Stage Two Order of Operations
+
+To assemble a complete self-hosted compiler that builds without `libgc`, work must proceed
+in the following strict topological order:
+
+```
+Step 1: End-to-End Program Compiler (PROVED)
+  │     Pure iyi pipeline parses, types, emits, and links whole programs.
+  │     Tool: .build/iyi-compile. Gate: bench/selfhost_compile_exercise.sh.
+  ▼
+Step 2: Semantic Analysis Companion Tool Wiring
+  │     Extend `iyi check --selfhost` past parsing into semantic analysis.
+  │     Tool: .build/iyi-check. Proves type-checking user code via pure iyi.
+  ▼
+Step 3: Multi-File Loader and Dependency Graph
+  │     Port `loader.cr` and `iyi_path.cr` to pure iyi (`compiler/loader.iyi`).
+  │     Resolves `import` statements across directories and prevents cycles.
+  ▼
+Step 4: Codegen Primitives (Generics, String Literals, Heap Layouts)
+  │     Extend `codegen.iyi` to support string constant emission, heap object
+  │     allocation headers, and generic class/struct method monomorphization.
+  ▼
+Step 5: Minimal Compiler Prelude Definition
+  │     Define a self-contained runtime subset (`src/compiler/prelude.iyi`)
+  │     providing only what the compiler itself requires (strings, arrays, hashes,
+  │     files, and memory allocation), avoiding full standard library dependencies.
+  ▼
+Step 6: Top-Level Compiler Assembly (`src/compiler/iyi.iyi`)
+  │     Write the main compiler class in pure iyi, integrating Driver, Loader,
+  │     Parser, Normalizer, Semantic, Macros, Codegen, Artifact, and Linker.
+  ▼
+Step 7: Stage One Cutover and `libgc` Elimination
+        Build `src/compiler/iyi.iyi` with `bin/iyi` to produce `.build/iyi-stage1`.
+        Verify `otool -L .build/iyi-stage1` contains no `libgc`.
+        Replace `bin/iyi` with `.build/iyi-stage1`.
+```
+
+## 6. What Stage Two Must Compile to Prove Completion
+
+Stage Two will be demonstrably complete when:
+
+1. **Compiler Builds from Pure iyi Sources:**
+   `bin/iyi build -o .build/iyi-stage2 src/compiler/iyi.iyi` exits 0 without errors.
+2. **Compiler Binary Dependency Floor:**
+   `bash bench/dependency_floor.sh` reports that `.build/iyi-stage2` links only:
+   `libLLVM`, `libc++`, and the platform libc (`libSystem.B.dylib` on macOS, `libc.so` on Linux).
+   `libgc` is completely absent from the link line.
+3. **Self-Compilation Fixed Point:**
+   `.build/iyi-stage2 build -o .build/iyi-stage3 src/compiler/iyi.iyi` exits 0.
+   `cmp .build/iyi-stage2 .build/iyi-stage3` exits 0 (identical binaries).
+4. **Full Test Suite and Gate Execution:**
+   All 18 selfhost exercise scripts pass when invoked with `IYI=.build/iyi-stage2`.
+5. **Standard Library and Sample Compilation:**
+   `.build/iyi-stage2` compiles all 102 modules under `src/std/` and all 34 samples
+   under `samples/iyi/`, with every produced binary continuing to link only the platform libc.

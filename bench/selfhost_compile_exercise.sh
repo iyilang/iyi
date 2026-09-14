@@ -173,7 +173,25 @@ else
   echo "  FAIL: missing import was not properly refused"
   status=1
 fi
-echo "  Refusal summary: $refusals/3 malformed scenarios refused properly"
+
+# 4. Undefined type inside a generic class refused, as the shipped compiler does.
+# A pass that skipped generic classes made this compile cleanly while the shipped
+# compiler rejected it, so the refusal is compared rather than assumed.
+set +e
+"$IYI" build --no-codegen "$REPO/bench/fixtures/compile_undefined_type.iyi" > "$WORK/shipped_undef.log" 2>&1
+shipped_undef_rc=$?
+"$REPO/.build/iyi-compile" -o "$WORK/bad4" "$REPO/bench/fixtures/compile_undefined_type.iyi" > "$WORK/selfhost_undef.log" 2>&1
+selfhost_undef_rc=$?
+set -e
+if [ "$selfhost_undef_rc" -ne 0 ] && [ "$shipped_undef_rc" -ne 0 ] && \
+   grep -q "UndefinedTypeInGeneric" "$WORK/selfhost_undef.log"; then
+  echo "  properly refused: undefined type in a generic class rejected (rc=$selfhost_undef_rc), as the shipped compiler does (rc=$shipped_undef_rc)"
+  refusals=$((refusals + 1))
+else
+  echo "  FAIL: undefined type in a generic class was not refused (iyi rc=$selfhost_undef_rc, shipped rc=$shipped_undef_rc)"
+  status=1
+fi
+echo "  Refusal summary: $refusals/4 malformed scenarios refused properly"
 
 echo
 echo "== 6. Guarded mutation proofs"

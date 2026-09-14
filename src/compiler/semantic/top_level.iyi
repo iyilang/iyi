@@ -450,12 +450,25 @@ end
 pub class NonGenericClassType < ClassType
 end
 
+pub class TypeParameterType < Type
+  def initialize(program : SemanticProgram, name : String)
+    super(program, nil, name)
+  end
+end
+
 pub class GenericClassType < ClassType
   getter type_vars : Array(String)
   property splat_index : Int32?
 
   def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil, superclass : Type? = nil)
     super(program, namespace, name, superclass)
+  end
+
+  def lookup_type(name : String) : Type?
+    if @type_vars.includes?(name)
+      return TypeParameterType.new(@program, name)
+    end
+    super(name)
   end
 end
 
@@ -468,6 +481,13 @@ pub class GenericModuleType < ModuleType
 
   def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil)
     super(program, namespace, name)
+  end
+
+  def lookup_type(name : String) : Type?
+    if @type_vars.includes?(name)
+      return TypeParameterType.new(@program, name)
+    end
+    super(name)
   end
 end
 
@@ -786,6 +806,7 @@ pub class SemanticProgram < NonGenericModuleType
     @types["Object"] = obj
 
     val = NonGenericClassType.new(self, self, "Value", obj)
+    val.struct = true
     @value_type = val
     @types["Value"] = val
 
@@ -794,26 +815,40 @@ pub class SemanticProgram < NonGenericModuleType
     @types["Reference"] = ref
 
     num = NonGenericClassType.new(self, self, "Number", val)
+    num.struct = true
     @types["Number"] = num
 
     int_t = NonGenericClassType.new(self, self, "Int", num)
+    int_t.struct = true
     @types["Int"] = int_t
 
     i32 = NonGenericClassType.new(self, self, "Int32", int_t)
+    i32.struct = true
     @int32_type = i32
     @types["Int32"] = i32
 
     ["Int8", "UInt8", "Int16", "UInt16", "UInt32", "Int64", "UInt64", "Int128", "UInt128"].each do |tname|
-      @types[tname] = NonGenericClassType.new(self, self, tname, int_t)
+      t = NonGenericClassType.new(self, self, tname, int_t)
+      t.struct = true
+      @types[tname] = t
     end
 
     flt = NonGenericClassType.new(self, self, "Float", num)
+    flt.struct = true
     @types["Float"] = flt
-    @types["Float32"] = NonGenericClassType.new(self, self, "Float32", flt)
-    @types["Float64"] = NonGenericClassType.new(self, self, "Float64", flt)
+    f32 = NonGenericClassType.new(self, self, "Float32", flt)
+    f32.struct = true
+    @types["Float32"] = f32
+    f64 = NonGenericClassType.new(self, self, "Float64", flt)
+    f64.struct = true
+    @types["Float64"] = f64
 
-    @types["Char"] = NonGenericClassType.new(self, self, "Char", val)
-    @types["Bool"] = NonGenericClassType.new(self, self, "Bool", val)
+    char_t = NonGenericClassType.new(self, self, "Char", val)
+    char_t.struct = true
+    @types["Char"] = char_t
+    bool_t = NonGenericClassType.new(self, self, "Bool", val)
+    bool_t.struct = true
+    @types["Bool"] = bool_t
     @types["Nil"] = NonGenericClassType.new(self, self, "Nil", val)
     @types["Symbol"] = NonGenericClassType.new(self, self, "Symbol", val)
     @types["String"] = NonGenericClassType.new(self, self, "String", ref)
@@ -834,9 +869,9 @@ pub class SemanticProgram < NonGenericModuleType
     @types["Class"] = NonGenericClassType.new(self, self, "Class", val)
     @types["Array"] = GenericClassType.new(self, self, "Array", ["T"], nil, ref)
     @types["Hash"] = GenericClassType.new(self, self, "Hash", ["K", "V"], nil, ref)
+    @types["Pointer"] = GenericClassType.new(self, self, "Pointer", ["T"], nil, st)
     @types["Error"] = TraitType.new(self, self, "Error")
     @types["NoReturn"] = NonGenericClassType.new(self, self, "NoReturn", val)
-
     @initial_type_names = @types.keys.to_set
   end
 

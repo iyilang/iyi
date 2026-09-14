@@ -999,7 +999,7 @@ pub class Parser < Lexer
         when Keyword::CASE
           parse_case
         when Keyword::BEGIN
-          parse_begin
+          check_type_declaration { parse_begin }
         when Keyword::RETURN
           parse_return
         when Keyword::BREAK
@@ -1176,7 +1176,7 @@ pub class Parser < Lexer
     @var_scopes.last.add(name)
   end
 
-  def parse_call_args(stop_on_do_after_space : Bool = false) : CallArgs?
+  def parse_call_args(stop_on_do_after_space : Bool = false, allow_curly : Bool = false, control : Bool = false) : CallArgs?
     case @token.type
     when TokenKind::OP_LCURLY
       nil
@@ -1235,14 +1235,14 @@ pub class Parser < Lexer
       if @token.keyword == Keyword::DO
         return CallArgs.new(nil, nil, nil, nil, stop_on_do_after_space, token_end_location, false)
       end
-      parse_call_args_space_consumed
+      parse_call_args_space_consumed(allow_curly, false, control)
     else
       nil
     end
   end
 
-  def parse_call_args_space_consumed(allow_curly : Bool = false, allow_beginless_range : Bool = false) : CallArgs?
-    if @token.keyword == Keyword::DO || @token.keyword == Keyword::END || @token.type == TokenKind::EOF
+  def parse_call_args_space_consumed(allow_curly : Bool = false, allow_beginless_range : Bool = false, control : Bool = false) : CallArgs?
+    if @token.keyword == Keyword::DO || (@token.keyword == Keyword::END && !next_comes_colon_space?) || @token.type == TokenKind::EOF
       return nil
     end
 
@@ -1278,7 +1278,7 @@ pub class Parser < Lexer
     end
 
     args = [] of ASTNode
-    @stop_on_do = true
+    @stop_on_do = true unless control
     named_args : Array(NamedArgument)? = nil
     block_arg : ASTNode? = nil
     block : Block? = nil
@@ -1719,7 +1719,7 @@ pub class Parser < Lexer
   def parse_return : ASTNode
     location = @token.location
     next_token
-    call_args = preserve_stop_on_do { parse_call_args }
+    call_args = preserve_stop_on_do { parse_call_args(allow_curly: true, control: true) }
     exp : ASTNode? = nil
     if call_args
       if a = call_args.args
@@ -1734,7 +1734,7 @@ pub class Parser < Lexer
   def parse_break : ASTNode
     location = @token.location
     next_token
-    call_args = preserve_stop_on_do { parse_call_args }
+    call_args = preserve_stop_on_do { parse_call_args(allow_curly: true, control: true) }
     exp : ASTNode? = nil
     if call_args
       if a = call_args.args
@@ -1749,7 +1749,7 @@ pub class Parser < Lexer
   def parse_next : ASTNode
     location = @token.location
     next_token
-    call_args = preserve_stop_on_do { parse_call_args }
+    call_args = preserve_stop_on_do { parse_call_args(allow_curly: true, control: true) }
     exp : ASTNode? = nil
     if call_args
       if a = call_args.args
@@ -1764,7 +1764,7 @@ pub class Parser < Lexer
   def parse_yield : ASTNode
     location = @token.location
     next_token
-    call_args = preserve_stop_on_do { parse_call_args }
+    call_args = preserve_stop_on_do { parse_call_args(allow_curly: true, control: true) }
     exps = [] of ASTNode
     if call_args
       if a = call_args.args

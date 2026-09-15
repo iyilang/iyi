@@ -1,0 +1,134 @@
+# Exception hierarchy and raise mechanisms for iyi standard library.
+
+module std/exception
+
+pub import std/system_error
+class ::Class
+  def name : String
+    {{ @type.name.stringify }}
+  end
+end
+
+class ::Exception
+  struct CallStack
+    getter printable_backtrace : Array(String)
+
+    def initialize(@printable_backtrace : Array(String) = [] of String)
+    end
+
+    def self.empty : self
+      new([] of String)
+    end
+  end
+
+  getter message : String?
+  getter cause : ::Exception?
+  property callstack : CallStack?
+
+  def initialize(@message : String? = nil, @cause : ::Exception? = nil)
+  end
+
+  def backtrace : Array(String)
+    if bt = backtrace?
+      bt
+    else
+      raise "backtrace is nil"
+    end
+  end
+
+  def backtrace? : Array(String)?
+    if cs = @callstack
+      cs.printable_backtrace
+    else
+      nil
+    end
+  end
+
+  def to_s : String
+    @message || self.class.name
+  end
+
+  def inspect : String
+    msg = @message ? ":#{@message}" : ""
+    "#<#{self.class.name}#{msg}>"
+  end
+
+  def inspect_with_backtrace : String
+    msg = "#{message} (#{self.class.name})\n"
+    if bt = backtrace?
+      bt.each do |frame|
+        msg = msg + "  from " + frame + "\n"
+      end
+    end
+    if c = @cause
+      msg = msg + "Caused by: " + c.inspect_with_backtrace
+    end
+    msg
+  end
+end
+
+class ::IndexError < ::Exception
+  def initialize(message : String = "Index out of bounds")
+    super(message)
+  end
+end
+
+class ::ArgumentError < ::Exception
+  def initialize(message : String = "Argument error")
+    super(message)
+  end
+end
+
+class ::InvalidByteSequenceError < ::Exception
+  def initialize(message : String = "Invalid byte sequence in UTF-8 string")
+    super(message)
+  end
+end
+
+class ::KeyError < ::Exception
+  def initialize(message : String = "Missing key")
+    super(message)
+  end
+end
+
+class ::DivisionByZeroError < ::Exception
+  def initialize(message : String = "Division by 0")
+    super(message)
+  end
+end
+
+class ::OverflowError < ::Exception
+  def initialize(message : String = "Arithmetic overflow")
+    super(message)
+  end
+end
+
+class ::NotImplementedError < ::Exception
+  def initialize(feature : String)
+    super("Not Implemented: #{feature}")
+  end
+end
+
+class ::NilAssertionError < ::Exception
+  def initialize(message : String = "Nil assertion failed")
+    super(message)
+  end
+end
+
+class ::RuntimeError < ::Exception
+  include SystemError
+  extend SystemError::ClassMethods
+
+  def initialize(@message : String? = nil, @cause : ::Exception? = nil)
+    super(@message, @cause)
+  end
+end
+
+pub def raise(exception : ::Exception, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
+  msg = exception.message || exception.class.name
+  raise(msg, file, line)
+end
+
+pub def raise_without_backtrace(exception : ::Exception) : NoReturn
+  raise(exception)
+end

@@ -1,4 +1,8 @@
-# Exercises `std/math`: sqrt, sin/cos, huge-arg reduction that does not panic.
+# Exercises `std/math`: sqrt, sin/cos, the exact frexp/ldexp, pow's edges,
+# the logarithms at powers of ten, the inverse trigonometric and
+# hyperbolic functions at their extremes, gamma, erf, and the Float32
+# overloads. The expected values are Python's (its libm's), to 1e-13
+# relative unless the answer is exact.
 #
 # Run via:
 #     ./bin/iyi run bench/std_math_exercise.iyi
@@ -13,8 +17,27 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# The two print alike: NaN, an infinity, a signed zero and an exact value
+# all come out of the shortest round-tripping decimal.
+def assert_same(expected : Float64, actual : Float64, msg : String) : Nil
+  assert_str(expected.to_s, actual.to_s, msg)
+end
+
+def assert_close(expected : Float64, actual : Float64, msg : String) : Nil
+  tolerance = 1.0e-13
+  ok = if expected == 0.0
+         actual.abs <= 1.0e-300
+       else
+         ((actual - expected) / expected).abs <= tolerance
+       end
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless ok
+end
+
 import std/math
 using std/math::{Math}
+
+INF = 1.0 / 0.0
+NAN = 0.0 / 0.0
 
 puts "== sqrt"
 assert_true Math.sqrt(4.0) == 2.0, "sqrt 4"
@@ -24,9 +47,224 @@ puts "  llvm.sqrt of 4 is 2"
 puts "\n== sincos"
 assert_true Math.sin(0.0) == 0.0, "sin 0"
 assert_true Math.cos(0.0) == 1.0, "cos 0"
+assert_same -0.0, Math.sin(-0.0), "sin(-0.0) keeps the sign"
+assert_close 1.2246467991473532e-16, Math.sin(Math::PI), "sin(pi)"
+assert_close -2.4492935982947064e-16, Math.sin(2.0 * Math::PI), "sin(2pi)"
+assert_close 1.633123935319537e+16, Math.tan(Math::PI / 2.0), "tan(pi/2)"
+assert_close -0.34999350217129294, Math.sin(1.0e6), "sin(1e6)"
+assert_close 0.9367521275331447, Math.cos(1.0e6), "cos(1e6)"
+assert_close -0.4875060250875107, Math.sin(1.0e10), "sin(1e10)"
+assert_close 0.8582727931702359, Math.sin(1.0e15), "sin(1e15)"
 huge = Math.sin(1.0e22)
 assert_true huge == huge, "sin(1e22) is finite"
 assert_true huge.abs <= 1.0, "on the circle"
-puts "  sin/cos of 0; 1e22 stays finite"
+puts "  sin/cos of 0, pi, 1e6, 1e10, 1e15; 1e22 stays finite"
+
+puts "\n== frexp and ldexp"
+m, e = Math.frexp(2.2250738585072014e-308)
+assert_true m == 0.5 && e == -1021, "frexp of the smallest normal"
+m, e = Math.frexp(1.0e-300)
+assert_close 0.6696928794914171, m, "frexp(1e-300) mantissa"
+assert_true e == -996, "frexp(1e-300) exponent"
+m, e = Math.frexp(1.0e-17)
+assert_close 0.7205759403792794, m, "frexp(1e-17) mantissa"
+assert_true e == -56, "frexp(1e-17) exponent"
+m, e = Math.frexp(5.0e-324)
+assert_true m == 0.5 && e == -1073, "frexp of the smallest subnormal"
+m, e = Math.frexp(-1.0e308)
+assert_close -0.5562684646268004, m, "frexp(-1e308) mantissa"
+assert_true e == 1024, "frexp(-1e308) exponent"
+assert_same 5.0e-324, Math.ldexp(1.0, -1074), "ldexp to the smallest subnormal"
+assert_same 1.0e-323, Math.ldexp(0.75, -1073), "ldexp rounding into the subnormals"
+assert_same 8.98846567431158e+307, Math.ldexp(1.0, 1023), "ldexp(1, 1023)"
+assert_same INF, Math.ldexp(1.0, 1024), "ldexp past the top"
+assert_same -0.0, Math.ldexp(-1.0, -2000), "ldexp below the bottom keeps the sign"
+puts "  frexp lands in [0.5, 1) for subnormals and every band; ldexp rounds once"
+
+puts "\n== log, log2, log10"
+assert_close -708.3964185322641, Math.log(2.2250738585072014e-308), "log of the smallest normal"
+assert_close -690.7755278982137, Math.log(1.0e-300), "log(1e-300)"
+assert_close -345.38776394910684, Math.log(1.0e-150), "log(1e-150)"
+assert_close -161.1809565095832, Math.log(1.0e-70), "log(1e-70)"
+assert_close -39.14394658089878, Math.log(1.0e-17), "log(1e-17)"
+assert_close 1.0000000000000237e-300, Math.exp(Math.log(1.0e-300)), "exp(log(1e-300))"
+assert_same -1022.0, Math.log2(2.2250738585072014e-308), "log2 of the smallest normal"
+assert_same -1074.0, Math.log2(5.0e-324), "log2 of the smallest subnormal"
+assert_same 10.0, Math.log2(1024.0), "log2(1024)"
+[{1000.0, 3.0}, {1.0e6, 6.0}, {1.0e15, 15.0}, {0.1, -1.0}, {0.001, -3.0}, {1.0e-7, -7.0}, {1.0e300, 300.0}, {1.0e-300, -300.0}, {1.0e-70, -70.0}].each do |pair|
+  assert_same pair[1], Math.log10(pair[0]), "log10(#{pair[0]})"
+end
+assert_close 0.3010299956639812, Math.log10(2.0), "log10(2)"
+assert_same -INF, Math.log10(0.0), "log10(0)"
+assert_same NAN, Math.log10(-1.0), "log10(-1)"
+puts "  log is right in every band; log2 and log10 are exact at their powers"
+
+puts "\n== exp, exp2, expm1, log1p"
+assert_same 1.7976931348622732e+308, Math.exp(709.782712893384), "exp at the last finite argument"
+assert_same INF, Math.exp(709.7827128933841), "exp one past it"
+assert_same 5.0e-324, Math.exp(-745.0), "exp(-745) is the smallest subnormal"
+assert_same 1.0e-323, Math.exp(-744.0), "exp(-744)"
+assert_same INF, Math.exp2(1024.0), "exp2(1024)"
+assert_same 5.0e-324, Math.exp2(-1074.0), "exp2(-1074)"
+assert_same 1024.0, Math.exp2(10.0), "exp2(10)"
+assert_close 1448.1546878700494, Math.exp2(10.5), "exp2(10.5)"
+assert_close 1.0000005000001665e-6, Math.expm1(1.0e-6), "expm1(1e-6)"
+assert_close 0.6487212707001282, Math.expm1(0.5), "expm1(0.5)"
+assert_close -0.3934693402873666, Math.expm1(-0.5), "expm1(-0.5)"
+assert_close 9.999500033330834e-5, Math.log1p(1.0e-4), "log1p(1e-4)"
+assert_close 0.4054651081081644, Math.log1p(0.5), "log1p(0.5)"
+assert_close 18.420680753952364, Math.log1p(1.0e8), "log1p(1e8)"
+assert_same -INF, Math.log1p(-1.0), "log1p(-1)"
+puts "  exp's edges, exp2 exact at whole numbers, expm1/log1p near zero"
+
+puts "\n== pow"
+assert_same INF, Math.pow(2.0, 1024.0), "2^1024"
+assert_same INF, Math.pow(10.0, 309.0), "10^309"
+assert_same 1.0, Math.pow(-1.0, INF), "(-1)^inf"
+assert_same INF, Math.pow(-2.0, INF), "(-2)^inf"
+assert_same 0.0, Math.pow(0.5, INF), "0.5^inf"
+assert_same 0.0, Math.pow(2.0, -INF), "2^-inf"
+assert_same INF, Math.pow(INF, INF), "inf^inf"
+assert_same INF, Math.pow(2.0, 1.0e19), "2^1e19"
+assert_same INF, Math.pow(-2.0, 1.0e19), "(-2)^1e19"
+assert_same 1.0, Math.pow(-1.0, 1.0e300), "(-1)^1e300"
+assert_same -0.0, Math.pow(-INF, -3.0), "(-inf)^-3 is a negative zero"
+assert_same -INF, Math.pow(-0.0, -3.0), "(-0)^-3"
+assert_same NAN, Math.pow(-8.0, 1.0 / 3.0), "a negative base to a fraction"
+assert_same 8.98846567431158e+307, Math.pow(2.0, 1023.0), "2^1023"
+assert_same 3.6893488147419103e+19, Math.pow(2.0, 65.0), "2^65"
+assert_same 1.2676506002282294e+30, Math.pow(2.0, 100.0), "2^100"
+assert_same 1.0e+100, Math.pow(10.0, 100.0), "10^100"
+assert_same 1.0e+300, Math.pow(10.0, 300.0), "10^300"
+assert_same 1.0e-300, Math.pow(10.0, -300.0), "10^-300"
+assert_same 5.153775207320113e+47, Math.pow(3.0, 100.0), "3^100"
+assert_same 5.0e-324, Math.pow(2.0, -1074.0), "2^-1074"
+assert_same 1.4142135623730951, Math.pow(2.0, 0.5), "2^0.5"
+assert_same 1.0e-5, Math.pow(1.0e-10, 0.5), "1e-10^0.5"
+assert_same 1.0e150, Math.pow(1.0e300, 0.5), "1e300^0.5"
+assert_close 129.64181424216494, Math.pow(7.0, 2.5), "7^2.5"
+assert_close 4.482679184808753, Math.pow(1.5, 3.7), "1.5^3.7"
+puts "  pow: the C99 special cases, exact whole powers, halves as roots"
+
+puts "\n== atan, atan2, asin, acos"
+assert_close 1.5707963267948966, Math.atan(1.0e155), "atan(1e155)"
+assert_close 1.5707963267948966, Math.atan(1.0e300), "atan(1e300)"
+assert_close 1.5707963267948966, Math.atan(INF), "atan(inf)"
+assert_close 0.7853981633974483, Math.atan(1.0), "atan(1)"
+assert_close -1.2490457723982544, Math.atan(-3.0), "atan(-3)"
+assert_close 0.7853981633974483, Math.atan2(INF, INF), "atan2(inf, inf)"
+assert_close -2.356194490192345, Math.atan2(-INF, -INF), "atan2(-inf, -inf)"
+assert_same NAN, Math.atan2(1.0, NAN), "atan2(1, nan)"
+assert_close 3.141592653589793, Math.atan2(0.0, -0.0), "atan2(0.0, -0.0)"
+assert_close -3.141592653589793, Math.atan2(-0.0, -1.0), "atan2(-0.0, -1)"
+assert_same -0.0, Math.atan2(-0.0, 0.0), "atan2(-0.0, 0.0)"
+assert_same -0.0, Math.atan2(-1.0, INF), "atan2(-1, inf)"
+assert_close 3.141592653589793, Math.atan2(1.0, -INF), "atan2(1, -inf)"
+assert_close -2.356194490192345, Math.atan2(-1.0, -1.0), "atan2(-1, -1)"
+assert_same NAN, Math.asin(2.0), "asin(2)"
+assert_same NAN, Math.acos(2.0), "acos(2)"
+assert_close 0.5235987755982989, Math.asin(0.5), "asin(0.5)"
+assert_close 1.0471975511965979, Math.acos(0.5), "acos(0.5)"
+assert_close 3.141592653589793, Math.acos(-1.0), "acos(-1)"
+assert_close 0.0014142136802445852, Math.acos(0.999999), "acos near 1"
+puts "  atan saturates at pi/2; atan2 reads the signs of zeros and infinities; asin/acos refuse |x| > 1"
+
+puts "\n== the hyperbolic functions and hypot, cbrt"
+assert_close 1.414213562373095e+200, Math.hypot(1.0e200, 1.0e200), "hypot(1e200, 1e200)"
+assert_close 1.414213562373095e-200, Math.hypot(1.0e-200, 1.0e-200), "hypot(1e-200, 1e-200)"
+assert_same 5.0, Math.hypot(3.0, 4.0), "hypot(3, 4)"
+assert_same INF, Math.hypot(INF, NAN), "hypot(inf, nan)"
+assert_same 1.0, Math.tanh(1000.0), "tanh(1000)"
+assert_same -1.0, Math.tanh(-1000.0), "tanh(-1000)"
+assert_close 0.7615941559557649, Math.tanh(1.0), "tanh(1)"
+assert_close 1.0e-8, Math.tanh(1.0e-8), "tanh(1e-8)"
+assert_close -23.7189981105004, Math.asinh(-1.0e10), "asinh(-1e10)"
+assert_close 691.4686750787737, Math.asinh(1.0e300), "asinh(1e300)"
+assert_close 1.0e-8, Math.asinh(1.0e-8), "asinh(1e-8)"
+assert_close 0.881373587019543, Math.asinh(1.0), "asinh(1)"
+assert_close 691.4686750787737, Math.acosh(1.0e300), "acosh(1e300)"
+assert_close 0.00141421344446382, Math.acosh(1.000001), "acosh near 1"
+assert_same NAN, Math.acosh(0.5), "acosh(0.5)"
+assert_close -3.8002011672501994, Math.atanh(-0.999), "atanh(-0.999)"
+assert_close 1.0000000000003333e-6, Math.atanh(1.0e-6), "atanh(1e-6)"
+assert_same INF, Math.atanh(1.0), "atanh(1)"
+assert_close 1.0e-10, Math.sinh(1.0e-10), "sinh(1e-10)"
+assert_close 1.1752011936438014, Math.sinh(1.0), "sinh(1)"
+assert_close 1.1169973830808555e+308, Math.sinh(710.0), "sinh(710)"
+assert_close 1.1169973830808555e+308, Math.cosh(710.0), "cosh(710)"
+assert_close 9.999999999999872e+99, Math.cbrt(1.0e300), "cbrt(1e300)"
+assert_close 1.0000000000000128e-100, Math.cbrt(1.0e-300), "cbrt(1e-300)"
+assert_same 3.0, Math.cbrt(27.0), "cbrt(27)"
+assert_same -2.0, Math.cbrt(-8.0), "cbrt(-8)"
+assert_close 1.7031839360032601e-108, Math.cbrt(5.0e-324), "cbrt of the smallest subnormal"
+puts "  none of them overflow, underflow or cancel at the extremes"
+
+puts "\n== gamma, lgamma"
+assert_same INF, Math.gamma(INF), "gamma(inf)"
+assert_same NAN, Math.gamma(-INF), "gamma(-inf)"
+assert_same NAN, Math.gamma(0.0), "gamma(0)"
+assert_same NAN, Math.gamma(-1.0), "gamma(-1)"
+assert_same NAN, Math.gamma(-100.0), "gamma(-100)"
+assert_same 2.0, Math.gamma(3.0), "gamma(3)"
+assert_same 24.0, Math.gamma(5.0), "gamma(5)"
+assert_same 362880.0, Math.gamma(10.0), "gamma(10)"
+assert_close 4.269068009004705e+304, Math.gamma(170.0), "gamma(170)"
+assert_close 7.257415615307998e+306, Math.gamma(171.0), "gamma(171)"
+assert_same INF, Math.gamma(172.0), "gamma(172)"
+assert_close 1.7724538509055159, Math.gamma(0.5), "gamma(0.5)"
+assert_close 1.3293403881791372, Math.gamma(2.5), "gamma(2.5)"
+assert_close -0.9453087204829417, Math.gamma(-2.5), "gamma(-2.5)"
+assert_close 9.320963104082718e+156, Math.gamma(100.5), "gamma(100.5)"
+assert_close 5.56209241456e+305, Math.gamma(170.5), "gamma(170.5)"
+assert_close 99999.42279422554, Math.gamma(1.0e-5), "gamma(1e-5)"
+assert_close 857.9336698258575, Math.lgamma(200.0), "lgamma(200)"
+assert_close 5905.220423209181, Math.lgamma(1000.0), "lgamma(1000)"
+assert_close 220258509288.81058, Math.lgamma(1.0e10), "lgamma(1e10)"
+assert_close 0.5723649429247004, Math.lgamma(0.5), "lgamma(0.5)"
+assert_close 24.924132002217277, Math.lgamma(14.9), "lgamma(14.9)"
+assert_close -0.05624371649767457, Math.lgamma(-2.5), "lgamma(-2.5)"
+assert_same INF, Math.lgamma(-1.0), "lgamma at a pole"
+puts "  whole arguments are factorials, the poles are NaN, lgamma goes past the overflow"
+
+puts "\n== erf, erfc"
+assert_same 0.0, Math.erf(0.0), "erf(0)"
+assert_close 0.8427007929497149, Math.erf(1.0), "erf(1)"
+assert_close 0.5204998778130465, Math.erf(0.5), "erf(0.5)"
+assert_close 0.9953222650189527, Math.erf(2.0), "erf(2)"
+assert_close 0.9999779095030014, Math.erf(3.0), "erf(3)"
+assert_close -0.9661051464753108, Math.erf(-1.5), "erf(-1.5)"
+assert_same 1.0, Math.erfc(0.0), "erfc(0)"
+assert_close 0.15729920705028513, Math.erfc(1.0), "erfc(1)"
+assert_close 2.209049699858544e-05, Math.erfc(3.0), "erfc(3)"
+assert_close 2.088487583762545e-45, Math.erfc(10.0), "erfc(10)"
+assert_close 5.663192408856143e-296, Math.erfc(26.0), "erfc(26)"
+assert_close 1.8427007929497148, Math.erfc(-1.0), "erfc(-1)"
+puts "  erf to 1e-15, erfc without the cancellation"
+
+puts "\n== fma, min, max, gcd"
+assert_same -5.366162204393472e+15, Math.fma(1.0e16, 1.0e16, -1.0e32), "fma is fused"
+assert_same 5.551115123125783e-17, Math.fma(0.1, 10.0, -1.0), "fma(0.1, 10, -1)"
+assert_same -0.0, Math.min(-0.0, 0.0), "min(-0.0, 0.0)"
+assert_same -0.0, Math.min(0.0, -0.0), "min(0.0, -0.0)"
+assert_same 0.0, Math.max(-0.0, 0.0), "max(-0.0, 0.0)"
+assert_same 1.0, Math.min(NAN, 1.0), "min(nan, 1)"
+assert_same 1.0, Math.min(1.0, NAN), "min(1, nan)"
+assert_same 1.0, Math.max(NAN, 1.0), "max(nan, 1)"
+assert_same 1.0, Math.max(1.0, NAN), "max(1, nan)"
+assert_true Math.gcd(-2147483648, 6) == 2, "gcd(Int32::MIN, 6)"
+assert_true Math.gcd(6, -2147483648) == 2, "gcd(6, Int32::MIN)"
+assert_true Math.gcd(-9223372036854775808_i64, 6_i64) == 2_i64, "gcd(Int64::MIN, 6)"
+assert_true Math.gcd(12, 18) == 6, "gcd(12, 18)"
+assert_true Math.lcm(-4, 6) == 12, "lcm(-4, 6)"
+puts "  fma rounds once; min/max symmetric in NaN and the zeros; gcd at the minimum"
+
+puts "\n== the Float32 overloads"
+assert_str "0.84147096", Math.sin(1.0_f32).to_s, "sin(1_f32)"
+assert_str "1.0", Math.min(1.0_f32, 2.0_f32).to_s, "min of singles"
+assert_str "Infinity", Math.exp(100.0_f32).to_s, "exp(100_f32)"
+assert_str "Infinity", Math.pow(2.0_f32, 200.0_f32).to_s, "pow(2_f32, 200_f32)"
+assert_str "-Infinity", Math.sinh(-100.0_f32).to_s, "sinh(-100_f32)"
+assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
+puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
 puts "\nALL CHECKS PASSED"

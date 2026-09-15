@@ -1,10 +1,21 @@
 module std/math
 
+# std/int for the small integers' comparisons and negation in gcd; std/float
+# for the Float32 overloads: `to_f64`, the comparisons, and a `to_f32` that
+# rounds a double past the single's range to its infinity.
+import std/int
+import std/float
+
+# llvm.fma.f64 is one instruction where the target has it and libm's fma
+# elsewhere, so the library is named.
+@[Link("m")]
 lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64 llvm.fma.f64
   fun sqrt_f64 = "llvm.sqrt.f64"(x : Float64) : Float64
   fun sqrt_f32 = "llvm.sqrt.f32"(x : Float32) : Float32
   fun copysign_f64 = "llvm.copysign.f64"(mag : Float64, sgn : Float64) : Float64
   fun copysign_f32 = "llvm.copysign.f32"(mag : Float32, sgn : Float32) : Float32
+  fun fma_f64 = "llvm.fma.f64"(a : Float64, b : Float64, c : Float64) : Float64
+  fun fma_f32 = "llvm.fma.f32"(a : Float32, b : Float32, c : Float32) : Float32
 end
 
 pub struct Math
@@ -14,10 +25,17 @@ pub struct Math
   LOG2  = 0.693147180559945309417
   LOG10 =  2.30258509299404568402
 
-  private P1          =     1.57079632673412561417
-  private P2          = 6.07710050630396597660e-11
-  private P3          = 6.12323399573676588613e-17
+  private HALF_PI     =     1.57079632679489661923
+  private QUARTER_PI  =     0.78539816339744830962
   private INV_HALF_PI = 0.636619772367581343075535
+
+  # pi/2 in three parts. The first two carry 33 bits each, so q times
+  # either is exact for q below 2^20 on its own, and the products are
+  # taken with a fused multiply-add below so that they are exact for any
+  # q; the third carries the rest to 1e-37.
+  private P1 =     1.57079632673412561417
+  private P2 = 6.07710050630396597660e-11
+  private P3 = 2.02226624879595063154e-21
 
   private def self.sin_taylor(r : Float64) : Float64
     r2 = r * r
@@ -56,7 +74,17 @@ pub struct Math
     return {0.0, 1.0} if q_f.abs >= 9223372036854775808.0
     q = q_f.to_i64
     q_f = q.to_f64
-    r = ((x - q_f * P1) - q_f * P2) - q_f * P3
+    # Each product q * P is taken as a rounded part and its exact error,
+    # so nothing is lost until the three parts themselves run out at
+    # q * 1e-37; the chain of subtractions below is what limits x to
+    # about 1e15 for a full-precision answer.
+    p1 = q_f * P1
+    p1e = fma(q_f, P1, 0.0 - p1)
+    p2 = q_f * P2
+    p2e = fma(q_f, P2, 0.0 - p2)
+    p3 = q_f * P3
+    p3e = fma(q_f, P3, 0.0 - p3)
+    r = (((((x - p1) - p1e) - p2) - p2e) - p3) - p3e
     s_r = sin_taylor(r)
     c_r = cos_taylor(r)
     quad = (q % 4_i64 + 4_i64) % 4_i64
@@ -72,8 +100,8 @@ pub struct Math
   end
 
   def self.sin(value : Float64) : Float64
-    return 0.0 if value == 0.0
-    return 0.0 / 0.0 if value != value || (value != 0.0 && value == 2.0 * value)
+    return value if value == 0.0
+    return 0.0 / 0.0 if value != value || value == 2.0 * value
     sincos_reduced(value)[0]
   end
 
@@ -87,7 +115,7 @@ pub struct Math
 
   def self.cos(value : Float64) : Float64
     return 1.0 if value == 0.0
-    return 0.0 / 0.0 if value != value || (value != 0.0 && value == 2.0 * value)
+    return 0.0 / 0.0 if value != value || value == 2.0 * value
     sincos_reduced(value)[1]
   end
 
@@ -100,11 +128,14 @@ pub struct Math
   end
 
   def self.tan(value : Float64) : Float64
-    sin(value) / cos(value)
+    return value if value == 0.0
+    return 0.0 / 0.0 if value != value || value == 2.0 * value
+    s, c = sincos_reduced(value)
+    s / c
   end
 
   def self.tan(value : Float32) : Float32
-    sin(value) / cos(value)
+    tan(value.to_f64).to_f32
   end
 
   def self.tan(value) : Float64
@@ -124,14 +155,19 @@ pub struct Math
   end
 
   def self.cbrt(value : Float64) : Float64
-    return 0.0 if value == 0.0
-    return 0.0 / 0.0 if value != value
-    return value if value != 0.0 && value == 2.0 * value
+    return value if value == 2.0 * value || value != value
     neg = value < 0.0
     v = neg ? 0.0 - value : value
-    res = pow(v, 1.0 / 3.0)
-    v3 = res * res * res
-    res = res * (v3 + 2.0 * v) / (2.0 * v3 + v)
+    # v = m * 2^e with e a multiple of three, so the root is taken of a
+    # number in [0.5, 4) and scaled back exactly.
+    m, e = frexp(v)
+    r = (e % 3 + 3) % 3
+    m = m * (r == 0 ? 1.0 : (r == 1 ? 2.0 : 4.0))
+    e = e - r
+    res = exp(log(m) / 3.0)
+    res3 = res * res * res
+    res = res * (res3 + 2.0 * m) / (2.0 * res3 + m)
+    res = ldexp(res, e // 3)
     if v <= 2.0e14 && v == v.to_i64.to_f64
       iv = v.to_i64
       ir = (res + 0.5).to_i64
@@ -182,15 +218,16 @@ pub struct Math
     exp(value.to_f64)
   end
 
+  # 2^value: the whole part of `value` is an exact scaling, only the
+  # fraction goes through `exp`, so every integer power of two is exact and
+  # 2^1024 is the infinity it should be.
   def self.exp2(value : Float64) : Float64
     return 0.0 / 0.0 if value != value
-    return 1.0 if value == 0.0
-    int_val = value.to_i64
-    if int_val.to_f64 == value && int_val >= -1022_i64 && int_val <= 1023_i64
-      ldexp(1.0, int_val.to_i32)
-    else
-      exp(value * LOG2)
-    end
+    return 1.0 / 0.0 if value >= 1024.0
+    return 0.0 if value < -1075.0
+    whole = value.floor
+    frac = value - whole
+    ldexp(frac == 0.0 ? 1.0 : exp(frac * LOG2), whole.to_i32)
   end
 
   def self.exp2(value : Float32) : Float32
@@ -201,12 +238,19 @@ pub struct Math
     exp2(value.to_f64)
   end
 
+  # exp(value) - 1 without the cancellation: a series near zero, and for
+  # the rest of |value| < 1 Kahan's (u - 1) * value / log(u) with u =
+  # exp(value), whose rounding of u cancels between the two factors.
   def self.expm1(value : Float64) : Float64
-    if value.abs < 1.0e-5
-      value + 0.5 * value * value
-    else
-      exp(value) - 1.0
+    return value if value == 0.0 || value != value
+    if value.abs < 1.0e-4
+      x = value
+      return x + x * x * (1.0 / 2.0 + x * (1.0 / 6.0 + x * (1.0 / 24.0 + x * (1.0 / 120.0 + x * (1.0 / 720.0 + x * (1.0 / 5040.0))))))
     end
+    return exp(value) - 1.0 if value.abs >= 1.0
+    u = exp(value)
+    return value if u == 1.0
+    (u - 1.0) * value / log(u)
   end
 
   def self.expm1(value : Float32) : Float32
@@ -219,10 +263,24 @@ pub struct Math
 
   private SQRT2_INV = 0.7071067811865475244
 
+  # log of a mantissa in [sqrt(1/2), sqrt(2)), by the series in
+  # (m - 1) / (m + 1).
+  private def self.log_mantissa(m : Float64) : Float64
+    z = (m - 1.0) / (m + 1.0)
+    z2 = z * z
+    s = 0.0
+    j = 9
+    while j >= 0
+      s = s * z2 + 1.0 / (2 * j + 1).to_f64
+      j = j - 1
+    end
+    2.0 * z * s
+  end
+
   def self.log(value : Float64) : Float64
     return 0.0 / 0.0 if value != value || value < 0.0
     return 0.0 - (1.0 / 0.0) if value == 0.0
-    return 1.0 / 0.0 if value == 2.0 * value && value > 0.0
+    return 1.0 / 0.0 if value == 2.0 * value
     return 0.0 if value == 1.0
 
     m, k = frexp(value)
@@ -230,17 +288,7 @@ pub struct Math
       m = m * 2.0
       k = k - 1
     end
-
-    z = (m - 1.0) / (m + 1.0)
-    z2 = z * z
-
-    s = 0.0
-    j = 9
-    while j >= 0
-      s = s * z2 + 1.0 / (2 * j + 1).to_f64
-      j = j - 1
-    end
-    ln_m = 2.0 * z * s
+    ln_m = log_mantissa(m)
     k_f = k.to_f64
     k_f * LN2_HI + (k_f * LN2_LO + ln_m)
   end
@@ -261,8 +309,16 @@ pub struct Math
     log(value.to_f64, base.to_f64)
   end
 
+  # The binary exponent is the answer's whole part outright, so a power of
+  # two answers its exponent exactly.
   def self.log2(value : Float64) : Float64
-    log(value) / LOG2
+    return log(value) if value != value || value <= 0.0 || value == 2.0 * value
+    m, k = frexp(value)
+    if m < SQRT2_INV
+      m = m * 2.0
+      k = k - 1
+    end
+    k.to_f64 + log_mantissa(m) * INV_LN2
   end
 
   def self.log2(value : Float32) : Float32
@@ -273,8 +329,14 @@ pub struct Math
     log2(value.to_f64)
   end
 
+  # log(value) / log(10), and when the answer is within rounding of a whole
+  # number n whose 10^n is `value` itself, exactly n: log10(1000.0) is 3.0.
   def self.log10(value : Float64) : Float64
-    log(value) / LOG10
+    res = log(value) / LOG10
+    return res if res != res || res == 2.0 * res
+    n = res.round
+    return res if n == res || (res - n).abs > 1.0e-9 || n < -323.0 || n > 308.0
+    ten_to(n.to_i32) == value ? n : res
   end
 
   def self.log10(value : Float32) : Float32
@@ -285,12 +347,20 @@ pub struct Math
     log10(value.to_f64)
   end
 
+  # log(1 + value) without the cancellation: a series near zero, and past
+  # it Kahan's log(u) * value / (u - 1) with u = 1 + value.
   def self.log1p(value : Float64) : Float64
-    if value.abs < 1.0e-5
-      value - 0.5 * value * value
-    else
-      log(1.0 + value)
+    return value if value == 0.0 || value != value
+    return 0.0 / 0.0 if value < -1.0
+    return 0.0 - (1.0 / 0.0) if value == -1.0
+    if value.abs < 1.0e-4
+      x = value
+      return x - x * x * (1.0 / 2.0 - x * (1.0 / 3.0 - x * (1.0 / 4.0 - x * (1.0 / 5.0 - x * (1.0 / 6.0 - x * (1.0 / 7.0))))))
     end
+    u = 1.0 + value
+    return value if u == 1.0
+    return log(u) if u == 2.0 * u
+    log(u) * value / (u - 1.0)
   end
 
   def self.log1p(value : Float32) : Float32
@@ -301,43 +371,123 @@ pub struct Math
     log1p(value.to_f64)
   end
 
-  def self.pow(base : Float64, exp : Float64) : Float64
-    return 1.0 if exp == 0.0
-    return 1.0 if base == 1.0
-    return 0.0 / 0.0 if base != base || exp != exp
-    return base if exp == 1.0
-    return base * base if exp == 2.0
+  # The product of two double-doubles, rounded to a double-double. Once
+  # the high part has overflowed or underflowed it is answered as it is:
+  # the low part of an infinity or a zero means nothing.
+  private def self.dd_mul(ah : Float64, al : Float64, bh : Float64, bl : Float64) : {Float64, Float64}
+    p = ah * bh
+    return {p, 0.0} if p == 2.0 * p
+    pe = fma(ah, bh, 0.0 - p) + (ah * bl + al * bh)
+    s = p + pe
+    {s, pe - (s - p)}
+  end
 
-    if base == 0.0
-      if exp > 0.0
-        return 0.0
-      else
-        return 1.0 / 0.0
+  private TWO_500     =  3.273390607896142e150
+  private TWO_NEG_500 = 3.054936363499605e-151
+
+  # A double-double kept within 2^-500..2^500 in magnitude, the power of
+  # two taken out of it added to `scale`: the product of two such never
+  # overflows or underflows.
+  private def self.rescale(h : Float64, l : Float64, scale : Int32) : {Float64, Float64, Int32}
+    a = h.abs
+    return {h, l, scale} if a == 0.0 || (a < TWO_500 && a > TWO_NEG_500)
+    m, k = frexp(h)
+    {m, ldexp(l, 0 - k), scale + k}
+  end
+
+  # base^e for e >= 1 by repeated squaring in double-double, answered as
+  # hi + lo times 2^scale, so that the answer is the correctly rounded
+  # power in all but the rarest ties: 2^1023 and 10^300 come out as the
+  # literals do, and 2^-1074 is reached from the same product. Past a
+  # scale of 4000 either way the answer is an infinity or a zero, and the
+  # remaining bits of e could only take it further.
+  private def self.pow_whole(base : Float64, e : Int64) : {Float64, Float64, Int32}
+    hi = 1.0
+    lo = 0.0
+    scale = 0
+    bh, bl, bscale = rescale(base, 0.0, 0)
+    while true
+      if (e & 1_i64) != 0_i64
+        hi, lo = dd_mul(hi, lo, bh, bl)
+        hi, lo, scale = rescale(hi, lo, scale + bscale)
+        return {hi, lo, scale} if scale > 4000 || scale < -4000
       end
+      e = e >> 1
+      break if e == 0_i64
+      bh, bl = dd_mul(bh, bl, bh, bl)
+      bh, bl, bscale = rescale(bh, bl, bscale * 2)
+      return {hi, lo, scale + bscale} if bscale > 4000 || bscale < -4000
+    end
+    {hi, lo, scale}
+  end
+
+  # 1 / (hi + lo), refined once from the rounded 1 / hi.
+  private def self.dd_recip(hi : Float64, lo : Float64) : Float64
+    q = 1.0 / hi
+    return q if hi == 2.0 * hi || q == 2.0 * q
+    q + q * (fma(0.0 - q, hi, 1.0) - q * lo)
+  end
+
+  # base^e for a whole e of either sign, from `pow_whole`.
+  private def self.pow_signed(base : Float64, e : Int64) : Float64
+    hi, lo, scale = pow_whole(base, e < 0_i64 ? 0_i64 - e : e)
+    e > 0_i64 ? ldexp(hi, scale) : ldexp(dd_recip(hi, lo), 0 - scale)
+  end
+
+  # The double nearest 10^n.
+  private def self.ten_to(n : Int32) : Float64
+    return 1.0 if n == 0
+    pow_signed(10.0, n.to_i64)
+  end
+
+  def self.pow(base : Float64, exp : Float64) : Float64
+    return 1.0 if exp == 0.0 || base == 1.0
+    return 0.0 / 0.0 if base != base || exp != exp
+
+    abs_base = base.abs
+    # An infinite exponent, or one so large that no base other than 1 keeps
+    # the answer finite and nonzero: past 2^63 the exponent is an even
+    # whole number, so the base's sign does not matter either.
+    if exp.abs >= 9223372036854775808.0
+      return 1.0 if abs_base == 1.0
+      grows = (abs_base > 1.0) == (exp > 0.0)
+      return grows ? 1.0 / 0.0 : 0.0
     end
 
     int_exp = exp.to_i64
     is_int = int_exp.to_f64 == exp
+    odd = is_int && (int_exp & 1_i64) != 0_i64
 
+    if base == 0.0
+      if exp < 0.0
+        return odd ? copysign(1.0 / 0.0, base) : 1.0 / 0.0
+      end
+      return odd ? base : 0.0
+    end
+    if abs_base == 2.0 * abs_base
+      if exp < 0.0
+        return odd && base < 0.0 ? copysign(0.0, base) : 0.0
+      end
+      return odd && base < 0.0 ? base : 1.0 / 0.0
+    end
     if base < 0.0
       return 0.0 / 0.0 unless is_int
-      pos_res = pow(0.0 - base, exp)
-      return (int_exp & 1_i64) != 0_i64 ? 0.0 - pos_res : pos_res
+      pos_res = pow(abs_base, exp)
+      return odd ? 0.0 - pos_res : pos_res
     end
 
-    if is_int && int_exp >= -64_i64 && int_exp <= 64_i64
-      b = int_exp < 0_i64 ? 1.0 / base : base
-      e = int_exp < 0_i64 ? 0_i64 - int_exp : int_exp
-      res = 1.0
-      while e > 0_i64
-        res = res * b if (e & 1_i64) != 0_i64
-        b = b * b
-        e = e >> 1_i64
-      end
-      return res
-    end
+    return base if exp == 1.0
+    return pow_signed(base, int_exp) if is_int
 
-    exp(exp * log(base))
+    # A fractional exponent: the whole part by squaring, the fraction by
+    # exp(f * log(base)), where only the small f amplifies the error of the
+    # logarithm. A half is a square root.
+    frac = exp - int_exp.to_f64
+    part = frac.abs == 0.5 ? sqrt(base) : exp(frac.abs * log(base))
+    part = 1.0 / part if frac < 0.0
+    return part if int_exp == 0_i64
+    hi, lo, scale = pow_whole(base, int_exp < 0_i64 ? 0_i64 - int_exp : int_exp)
+    ldexp((int_exp > 0_i64 ? hi : dd_recip(hi, lo)) * part, int_exp > 0_i64 ? scale : 0 - scale)
   end
 
   def self.pow(base : Float32, exp : Float32) : Float32
@@ -356,57 +506,82 @@ pub struct Math
     LibLLVMMath.copysign_f32(mag, sgn)
   end
 
+  # a * b + c with one rounding.
   def self.fma(a : Float64, b : Float64, c : Float64) : Float64
-    a * b + c
+    LibLLVMMath.fma_f64(a, b, c)
   end
 
   def self.fma(a : Float32, b : Float32, c : Float32) : Float32
-    (a.to_f64 * b.to_f64 + c.to_f64).to_f32
+    LibLLVMMath.fma_f32(a, b, c)
   end
 
+  # The smaller, with the number when one side is NaN, and -0.0 over 0.0.
   def self.min(a : Float64, b : Float64) : Float64
-    a < b ? a : b
+    return b if a != a
+    return a if b != b
+    return a if a < b
+    return b if b < a
+    copysign(1.0, a) < 0.0 ? a : b
   end
 
   def self.min(a : Float32, b : Float32) : Float32
-    a < b ? a : b
+    return b if a != a
+    return a if b != b
+    return a if a < b
+    return b if b < a
+    copysign(1.0_f32, a) < 0.0_f32 ? a : b
   end
 
+  # The larger, with the number when one side is NaN, and 0.0 over -0.0.
   def self.max(a : Float64, b : Float64) : Float64
-    a > b ? a : b
+    return b if a != a
+    return a if b != b
+    return a if a > b
+    return b if b > a
+    copysign(1.0, a) < 0.0 ? b : a
   end
 
   def self.max(a : Float32, b : Float32) : Float32
-    a > b ? a : b
+    return b if a != a
+    return a if b != b
+    return a if a > b
+    return b if b > a
+    copysign(1.0_f32, a) < 0.0_f32 ? b : a
   end
 
-  def self.atan(value : Float64) : Float64
-    return 0.0 if value == 0.0
-    neg = value < 0.0
-    val = neg ? 0.0 - value : value
-
+  # atan of a value in [0, 1]: the angle is halved until it is small, then
+  # a series, then doubled back.
+  private def self.atan_unit(val : Float64) : Float64
     reductions = 0
-    while val > 0.05
+    while val > 0.125
       val = val / (1.0 + sqrt(1.0 + val * val))
       reductions = reductions + 1
     end
 
     v2 = val * val
-    p3 = v2 * val
-    p5 = p3 * v2
-    p7 = p5 * v2
-    p9 = p7 * v2
-    p11 = p9 * v2
-    p13 = p11 * v2
-    res = val - p3 / 3.0 + p5 / 5.0 - p7 / 7.0 + p9 / 9.0 - p11 / 11.0 + p13 / 13.0
+    s = 1.0 / 19.0
+    s = s * v2 - 1.0 / 17.0
+    s = s * v2 + 1.0 / 15.0
+    s = s * v2 - 1.0 / 13.0
+    s = s * v2 + 1.0 / 11.0
+    s = s * v2 - 1.0 / 9.0
+    s = s * v2 + 1.0 / 7.0
+    s = s * v2 - 1.0 / 5.0
+    s = s * v2 + 1.0 / 3.0
+    res = val - v2 * val * s
 
-    factor = 1.0
     while reductions > 0
-      factor = factor * 2.0
+      res = res * 2.0
       reductions = reductions - 1
     end
-    res = res * factor
-    neg ? 0.0 - res : res
+    res
+  end
+
+  def self.atan(value : Float64) : Float64
+    return value if value == 0.0 || value != value
+    val = value.abs
+    res = val > 1.0 ? HALF_PI - atan_unit(1.0 / val) : atan_unit(val)
+    value < 0.0 ? 0.0 - res : res
   end
 
   def self.atan(value : Float32) : Float32
@@ -417,24 +592,30 @@ pub struct Math
     atan(value.to_f64)
   end
 
+  # The angle of (x, y), with the zeros' and infinities' signs read the
+  # way C's atan2 reads them: atan2(0.0, -0.0) is pi, atan2(-0.0, -1.0) is
+  # -pi, atan2(inf, inf) is pi/4.
   def self.atan2(y : Float64, x : Float64) : Float64
-    if x > 0.0
-      atan(y / x)
-    elsif x < 0.0
-      if y >= 0.0
-        atan(y / x) + PI
-      else
-        atan(y / x) - PI
-      end
-    else
-      if y > 0.0
-        PI / 2.0
-      elsif y < 0.0
-        0.0 - (PI / 2.0)
-      else
-        0.0
-      end
+    return 0.0 / 0.0 if x != x || y != y
+    y_neg = copysign(1.0, y) < 0.0
+    x_neg = copysign(1.0, x) < 0.0
+    if y == 0.0
+      return x_neg ? copysign(PI, y) : y
     end
+    if x == 0.0
+      return copysign(HALF_PI, y)
+    end
+    if y == 2.0 * y
+      if x == 2.0 * x
+        return copysign(x_neg ? 3.0 * QUARTER_PI : QUARTER_PI, y)
+      end
+      return copysign(HALF_PI, y)
+    end
+    if x == 2.0 * x
+      return x_neg ? copysign(PI, y) : copysign(0.0, y)
+    end
+    return atan(y / x) if x > 0.0
+    y_neg ? atan(y / x) - PI : atan(y / x) + PI
   end
 
   def self.atan2(y : Float32, x : Float32) : Float32
@@ -446,7 +627,10 @@ pub struct Math
   end
 
   def self.asin(value : Float64) : Float64
-    atan2(value, sqrt(1.0 - value * value))
+    return 0.0 / 0.0 if value != value || value.abs > 1.0
+    return value if value == 0.0
+    return copysign(HALF_PI, value) if value.abs == 1.0
+    atan2(value, sqrt((1.0 - value) * (1.0 + value)))
   end
 
   def self.asin(value : Float32) : Float32
@@ -458,7 +642,10 @@ pub struct Math
   end
 
   def self.acos(value : Float64) : Float64
-    atan2(sqrt(1.0 - value * value), value)
+    return 0.0 / 0.0 if value != value || value.abs > 1.0
+    return 0.0 if value == 1.0
+    return PI if value == -1.0
+    2.0 * atan(sqrt((1.0 - value) / (1.0 + value)))
   end
 
   def self.acos(value : Float32) : Float32
@@ -469,8 +656,28 @@ pub struct Math
     acos(value.to_f64)
   end
 
+  # exp(v) / 2 for v >= 709, where exp itself would overflow but the
+  # hyperbolic function has not yet: exp(v - log 2), with the high part of
+  # log 2 subtracted exactly (v's last bit is 2^-43, LN2_HI's 2^-33) and
+  # the low part applied as the factor exp(-LN2_LO).
+  private def self.half_exp(v : Float64) : Float64
+    exp(v - LN2_HI) * (1.0 - LN2_LO)
+  end
+
   def self.sinh(value : Float64) : Float64
-    (exp(value) - exp(0.0 - value)) / 2.0
+    return value if value == 0.0 || value != value || value == 2.0 * value
+    v = value.abs
+    res = 0.0
+    if v < 1.0e-4
+      v2 = v * v
+      res = v + v * v2 * (1.0 / 6.0 + v2 * (1.0 / 120.0 + v2 * (1.0 / 5040.0)))
+    elsif v >= 709.0
+      res = half_exp(v)
+    else
+      t = expm1(v)
+      res = 0.5 * (t + t / (t + 1.0))
+    end
+    value < 0.0 ? 0.0 - res : res
   end
 
   def self.sinh(value : Float32) : Float32
@@ -482,7 +689,11 @@ pub struct Math
   end
 
   def self.cosh(value : Float64) : Float64
-    (exp(value) + exp(0.0 - value)) / 2.0
+    return 0.0 / 0.0 if value != value
+    v = value.abs
+    return half_exp(v) if v >= 709.0
+    e = exp(v)
+    0.5 * (e + 1.0 / e)
   end
 
   def self.cosh(value : Float32) : Float32
@@ -494,7 +705,19 @@ pub struct Math
   end
 
   def self.tanh(value : Float64) : Float64
-    sinh(value) / cosh(value)
+    return value if value == 0.0 || value != value
+    v = value.abs
+    res = 0.0
+    if v < 1.0e-4
+      v2 = v * v
+      res = v - v * v2 * (1.0 / 3.0 - v2 * (2.0 / 15.0 - v2 * (17.0 / 315.0)))
+    elsif v >= 22.0
+      res = 1.0
+    else
+      t = expm1(2.0 * v)
+      res = t / (t + 2.0)
+    end
+    value < 0.0 ? 0.0 - res : res
   end
 
   def self.tanh(value : Float32) : Float32
@@ -506,7 +729,18 @@ pub struct Math
   end
 
   def self.asinh(value : Float64) : Float64
-    log(value + sqrt(value * value + 1.0))
+    return value if value == 0.0 || value != value || value == 2.0 * value
+    v = value.abs
+    res = 0.0
+    if v < 1.0e-4
+      v2 = v * v
+      res = v - v * v2 * (1.0 / 6.0 - v2 * (3.0 / 40.0 - v2 * (5.0 / 112.0)))
+    elsif v > 1.0e8
+      res = log(v) + LOG2
+    else
+      res = log1p(v + v * v / (1.0 + sqrt(1.0 + v * v)))
+    end
+    value < 0.0 ? 0.0 - res : res
   end
 
   def self.asinh(value : Float32) : Float32
@@ -518,7 +752,12 @@ pub struct Math
   end
 
   def self.acosh(value : Float64) : Float64
-    log(value + sqrt(value * value - 1.0))
+    return 0.0 / 0.0 if value != value || value < 1.0
+    return 0.0 if value == 1.0
+    return value if value == 2.0 * value
+    return log(value) + LOG2 if value > 1.0e8
+    t = value - 1.0
+    log1p(t + sqrt(t * (t + 2.0)))
   end
 
   def self.acosh(value : Float32) : Float32
@@ -530,7 +769,19 @@ pub struct Math
   end
 
   def self.atanh(value : Float64) : Float64
-    0.5 * log((1.0 + value) / (1.0 - value))
+    return value if value == 0.0 || value != value
+    v = value.abs
+    return 0.0 / 0.0 if v > 1.0
+    res = 0.0
+    if v == 1.0
+      res = 1.0 / 0.0
+    elsif v < 1.0e-4
+      v2 = v * v
+      res = v + v * v2 * (1.0 / 3.0 + v2 * (1.0 / 5.0 + v2 * (1.0 / 7.0)))
+    else
+      res = 0.5 * log1p(2.0 * v / (1.0 - v))
+    end
+    value < 0.0 ? 0.0 - res : res
   end
 
   def self.atanh(value : Float32) : Float32
@@ -541,8 +792,21 @@ pub struct Math
     atanh(value.to_f64)
   end
 
+  # sqrt(x^2 + y^2) scaled by the larger magnitude, so that neither square
+  # overflows or underflows on its own.
   def self.hypot(x : Float64, y : Float64) : Float64
-    sqrt(x * x + y * y)
+    a = x.abs
+    b = y.abs
+    return 1.0 / 0.0 if a == 2.0 * a && a > 0.0 || b == 2.0 * b && b > 0.0
+    return 0.0 / 0.0 if a != a || b != b
+    if b > a
+      t = a
+      a = b
+      b = t
+    end
+    return a if b == 0.0
+    r = b / a
+    a * sqrt(1.0 + r * r)
   end
 
   def self.hypot(x : Float32, y : Float32) : Float32
@@ -553,100 +817,193 @@ pub struct Math
     hypot(x.to_f64, y.to_f64)
   end
 
+  private EXP_MASK  = 0x7FF0000000000000_u64
+  private REST_MASK = 0x800FFFFFFFFFFFFF_u64
+  private TWO_54    =    18014398509481984.0
+
+  # value * 2^exponent, with one rounding: the exponent field is rewritten
+  # outright, and a result that lands among the subnormals is scaled down
+  # from a normal one in a single step.
   def self.ldexp(value : Float64, exponent : Int32) : Float64
-    return value if value == 0.0 || exponent == 0
-    exp = exponent
-    res = value
-    while exp > 500
-      res = res * (2.0 ** 500)
-      exp = exp - 500
+    return value if value == 0.0 || exponent == 0 || value != value || value == 2.0 * value
+    m, e = frexp(value)
+    step = exponent > 2200 ? 2200 : (exponent < -2200 ? -2200 : exponent)
+    e = e + step
+    return copysign(1.0 / 0.0, value) if e > 1024
+    return copysign(0.0, value) if e < -1075
+    rest = IyiFloatText.bits_of(m) & REST_MASK
+    if e >= -1021
+      IyiFloatText.from_bits(rest | (e + 1022).to_i64.to_u64.unsafe_shl(52_u64))
+    else
+      IyiFloatText.from_bits(rest | (e + 1076).to_i64.to_u64.unsafe_shl(52_u64)) / TWO_54
     end
-    while exp < -500
-      res = res * (2.0 ** -500)
-      exp = exp + 500
-    end
-    res * (2.0 ** exp)
   end
 
+  # value as m * 2^e with m in [0.5, 1) (or 0, NaN or an infinity as it
+  # came, with 0), read from the bits: a subnormal is first scaled up by
+  # 2^54 so that it has an exponent field of its own.
   def self.frexp(value : Float64) : {Float64, Int32}
-    return {0.0, 0} if value == 0.0
-    return {value, 0} if value != value || (value != 0.0 && value == 2.0 * value)
-    neg = value < 0.0
-    v = neg ? 0.0 - value : value
-    exp = 0
-    while v >= 1.0e64
-      v = v * (2.0 ** -256)
-      exp = exp + 256
+    return {value, 0} if value == 0.0 || value != value || value == 2.0 * value
+    bits = IyiFloatText.bits_of(value)
+    adjust = 0
+    if (bits & EXP_MASK) == 0_u64
+      bits = IyiFloatText.bits_of(value * TWO_54)
+      adjust = -54
     end
-    while v >= 1.0e16
-      v = v * (2.0 ** -64)
-      exp = exp + 64
-    end
-    while v >= 1.0
-      v = v / 2.0
-      exp = exp + 1
-    end
-    while v < 1.0e-64 && v > 0.0
-      v = v * (2.0 ** 256)
-      exp = exp - 256
-    end
-    while v < 1.0e-16 && v > 0.0
-      v = v * (2.0 ** 64)
-      exp = exp - 64
-    end
-    while v < 0.5 && v > 0.0
-      v = v * 2.0
-      exp = exp - 1
-    end
-    {neg ? 0.0 - v : v, exp}
+    biased = (bits & EXP_MASK).unsafe_shr(52_u64).to_i64.to_i32
+    m = IyiFloatText.from_bits((bits & REST_MASK) | 0x3FE0000000000000_u64)
+    {m, biased - 1022 + adjust}
   end
 
+  private TWO_OVER_SQRT_PI = 1.12837916709551257390
+  private ONE_OVER_SQRT_PI = 0.56418958354775628695
+
+  # exp(-x^2) with x^2 taken to double precision and a half, so the
+  # rounding of the square does not reach the answer for large x.
+  private def self.exp_neg_square(x : Float64) : Float64
+    x2 = x * x
+    x2e = fma(x, x, 0.0 - x2)
+    exp(0.0 - x2) * (1.0 - x2e)
+  end
+
+  # erfc(x) for x >= 1 by its continued fraction (Lentz's evaluation).
+  private def self.erfc_fraction(x : Float64) : Float64
+    f = x
+    c = x
+    d = 0.0
+    n = 1
+    while n <= 1000
+      a = n.to_f64 * 0.5
+      d = x + a * d
+      d = 1.0e-300 if d == 0.0
+      c = x + a / c
+      c = 1.0e-300 if c == 0.0
+      d = 1.0 / d
+      delta = c * d
+      f = f * delta
+      break if (delta - 1.0).abs < 1.0e-16
+      n = n + 1
+    end
+    exp_neg_square(x) * ONE_OVER_SQRT_PI / f
+  end
+
+  # The error function: an alternating series below 1, a series of
+  # positive terms times exp(-x^2) up to 2.5, and 1 - erfc past it.
   def self.erf(value : Float64) : Float64
-    neg = value < 0.0
-    x = neg ? 0.0 - value : value
-    p = 0.3275911
-    a1 = 0.254829592
-    a2 = -0.284496736
-    a3 = 1.421413741
-    a4 = -1.453152027
-    a5 = 1.061405429
-    t = 1.0 / (1.0 + p * x)
-    poly = t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))))
-    y = 1.0 - poly * exp(0.0 - x * x)
-    neg ? 0.0 - y : y
+    return value if value == 0.0 || value != value
+    x = value.abs
+    res = 0.0
+    if x < 1.0
+      x2 = x * x
+      term = x
+      sum = x
+      n = 1
+      while true
+        term = 0.0 - term * x2 / n.to_f64
+        t = term / (2 * n + 1).to_f64
+        sum = sum + t
+        break if t.abs < 1.0e-17 * sum
+        n = n + 1
+      end
+      res = TWO_OVER_SQRT_PI * sum
+    elsif x < 2.5
+      x2 = x * x
+      term = x
+      sum = x
+      n = 1
+      while true
+        term = term * 2.0 * x2 / (2 * n + 1).to_f64
+        sum = sum + term
+        break if term < 1.0e-17 * sum
+        n = n + 1
+      end
+      res = TWO_OVER_SQRT_PI * exp_neg_square(x) * sum
+    elsif x < 6.0
+      res = 1.0 - erfc_fraction(x)
+    else
+      res = 1.0
+    end
+    value < 0.0 ? 0.0 - res : res
   end
 
+  # 1 - erf(value), kept accurate where erf is close to 1: from 1 up it is
+  # the continued fraction, and erfc(10) is 2.09e-45 rather than 0.
   def self.erfc(value : Float64) : Float64
-    1.0 - erf(value)
+    return 0.0 / 0.0 if value != value
+    return 2.0 - erfc(0.0 - value) if value < 0.0
+    return 1.0 - erf(value) if value < 1.0
+    return 0.0 if value > 27.5
+    erfc_fraction(value)
   end
 
   def self.gamma(value : Float64) : Float64
     tgamma(value)
   end
 
+  private HALF_LOG_TAU = 0.91893853320467274178
+
+  # log|gamma(value)|: Stirling's series from 15 up, the logarithm of
+  # gamma below it, and the reflection formula for negative arguments; the
+  # poles at the non-positive whole numbers answer +infinity.
   def self.lgamma(value : Float64) : Float64
-    log(tgamma(value).abs)
+    return value if value != value
+    return 1.0 / 0.0 if value == 2.0 * value
+    return 1.0 / 0.0 if value <= 0.0 && value == value.floor
+    if value < 0.0
+      s = sin(PI * value).abs
+      return log(PI / s) - lgamma(1.0 - value)
+    end
+    return log(tgamma(value).abs) if value < 15.0
+    v = value
+    iv = 1.0 / v
+    iv2 = iv * iv
+    series = iv * (1.0 / 12.0 - iv2 * (1.0 / 360.0 - iv2 * (1.0 / 1260.0 - iv2 * (1.0 / 1680.0 - iv2 * (1.0 / 1188.0 - iv2 * (691.0 / 360360.0))))))
+    (v - 0.5) * log(v) - v + HALF_LOG_TAU + series
   end
 
+  # gamma: a whole argument up to 171 is its factorial, taken exactly as
+  # far as the double allows; the poles answer NaN, past 171.62 the answer
+  # is infinite, and the rest is Lanczos's approximation with Godfrey's
+  # g = 607/128 and fifteen terms (good to a few 1e-16), reflected for
+  # arguments below a half.
   def self.tgamma(value : Float64) : Float64
-    # Lanczos approximation
-    return 1.0 if value == 1.0 || value == 2.0
+    return value if value != value
+    return value if value == 2.0 * value && value > 0.0
+    return 0.0 / 0.0 if value == 2.0 * value
+    return 0.0 / 0.0 if value <= 0.0 && value == value.floor
+    return 1.0 / 0.0 if value > 171.7
+    if value == value.floor
+      res = 1.0
+      k = 2.0
+      while k < value
+        res = res * k
+        k = k + 1.0
+      end
+      return res
+    end
     if value < 0.5
       PI / (sin(PI * value) * tgamma(1.0 - value))
     else
-      z = value - 1.0
-      x = 0.99999999999980993
-      p0 = 676.5203681218851
-      p1 = -1259.1392167224028
-      p2 = 771.32342877765313
-      p3 = -176.61502916214059
-      p4 = 12.507343278686905
-      p5 = -0.13857109583111912
-      p6 = 9.9843695780195716e-6
-      p7 = 1.5056327351493116e-7
-      x = x + p0 / (z + 1.0) + p1 / (z + 2.0) + p2 / (z + 3.0) + p3 / (z + 4.0) + p4 / (z + 5.0) + p5 / (z + 6.0) + p6 / (z + 7.0) + p7 / (z + 8.0)
-      t = z + 7.5
-      sqrt(2.0 * PI) * pow(t, z + 0.5) * exp(0.0 - t) * x
+      v = value
+      ser = 0.99999999999999709182
+      ser = ser + 57.156235665862923517 / (v + 1.0)
+      ser = ser - 59.597960355475491248 / (v + 2.0)
+      ser = ser + 14.136097974741747174 / (v + 3.0)
+      ser = ser - 0.49191381609762019978 / (v + 4.0)
+      ser = ser + 0.33994649984811888699e-4 / (v + 5.0)
+      ser = ser + 0.46523628927048575665e-4 / (v + 6.0)
+      ser = ser - 0.98374475304879564677e-4 / (v + 7.0)
+      ser = ser + 0.15808870322491248884e-3 / (v + 8.0)
+      ser = ser - 0.21026444172410488319e-3 / (v + 9.0)
+      ser = ser + 0.21743961811521264320e-3 / (v + 10.0)
+      ser = ser - 0.16431810653676389022e-3 / (v + 11.0)
+      ser = ser + 0.84418223983852743293e-4 / (v + 12.0)
+      ser = ser - 0.26190838401581408670e-4 / (v + 13.0)
+      ser = ser + 0.36899182659531622704e-5 / (v + 14.0)
+      t = v + 5.2421875
+      # t^(v + 0.5) alone overflows before gamma does; the halves do not.
+      half = pow(t, 0.5 * (v + 0.5)) * exp(-0.5 * t)
+      sqrt(TAU) * ser / v * half * half
     end
   end
 
@@ -689,18 +1046,21 @@ pub struct Math
     end
   end
 
-  def self.gcd(a : Int, b : Int) : Int
-    x = a.abs
-    y = b.abs
+  # Euclid on the non-positive side, where every magnitude fits, the
+  # type's minimum included: gcd(-2147483648, 6) is 2. Only gcd(minimum,
+  # 0), whose answer does not fit, overflows.
+  def self.gcd(a : ::Int, b : ::Int) : ::Int
+    x = a > 0 ? -a : a
+    y = b > 0 ? -b : b
     while y != 0
       t = y
       y = x % y
       x = t
     end
-    x
+    -x
   end
 
-  def self.lcm(a : Int, b : Int) : Int
+  def self.lcm(a : ::Int, b : ::Int) : ::Int
     return (a - a) if a == 0 || b == 0
     (a.abs // gcd(a, b)) * b.abs
   end

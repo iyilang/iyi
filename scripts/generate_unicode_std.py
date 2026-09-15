@@ -121,13 +121,15 @@ def literal(name: str, comment: str, values: list[int]) -> str:
         lines.append(text[:cut])
         text = text[cut:]
     out = [f"  # {comment}"]
+    prefix = f"  {name} = "
+    pad = " " * len(prefix)
     if len(lines) == 1:
-        out.append(f'  {name} = "{lines[0]}"')
+        out.append(f'{prefix}"{lines[0]}"')
     else:
-        out.append(f'  {name} = "{lines[0]}" \\')
+        out.append(f'{prefix}"{lines[0]}" \\')
         for line in lines[1:-1]:
-            out.append(f'    "{line}" \\')
-        out.append(f'    "{lines[-1]}"')
+            out.append(f'{pad}"{line}" \\')
+        out.append(f'{pad}"{lines[-1]}"')
     return "\n".join(out)
 
 

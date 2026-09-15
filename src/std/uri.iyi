@@ -462,9 +462,9 @@ pub class URI
   private def self.keep?(b : UInt8, level : Int32) : Bool
     return true if unreserved?(b)
     case level
-    when 0 then reserved?(b)   # encode: RFC 3986 reserved characters pass
-    when 1 then b == 47_u8     # encode_path: '/' separates segments
-    else        false          # encode_path_segment, encode_www_form
+    when 0 then reserved?(b) # encode: RFC 3986 reserved characters pass
+    when 1 then b == 47_u8   # encode_path: '/' separates segments
+    else        false        # encode_path_segment, encode_www_form
     end
   end
 

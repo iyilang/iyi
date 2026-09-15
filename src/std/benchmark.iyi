@@ -12,7 +12,6 @@ import std/format
 using std/format::{sprintf, printf}
 
 pub class Benchmark
-
   module BM
     class Tms
       getter utime : Float64
@@ -320,5 +319,4 @@ pub class Benchmark
     t1 = Std::Time::Time.monotonic
     t1 - t0
   end
-
 end

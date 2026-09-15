@@ -172,6 +172,7 @@ pub struct Complex
   def round(digits : Int32 = 0) : Complex
     Complex.new(@real.round(digits), @imag.round(digits))
   end
+
   def exp : Complex
     r = Math.exp(@real)
     Complex.new(r * Math.cos(@imag), r * Math.sin(@imag))
@@ -195,7 +196,6 @@ pub struct Complex
          end
     Complex.new(re, @imag >= 0.0 ? im : 0.0 - im)
   end
-
 end
 
 struct ::Number

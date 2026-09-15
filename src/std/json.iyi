@@ -1228,16 +1228,16 @@ pub class PullParser
 
   # Where the reader is inside the grammar, one entry per open container plus
   # the root: what may come next.
-  ARRAY_FIRST   = 0 # after '[': a value or ']'
-  ARRAY_VALUE   = 1 # after a value: ',' or ']'
-  ARRAY_COMMA   = 2 # after ',': a value
-  OBJECT_FIRST  = 3 # after '{': a key or '}'
-  OBJECT_KEY    = 4 # after a key: ':'
-  OBJECT_COLON  = 5 # after ':': a value
-  OBJECT_VALUE  = 6 # after a value: ',' or '}'
-  OBJECT_COMMA  = 7 # after ',': a key
-  ROOT          = 8 # the document's one value
-  ROOT_DONE     = 9 # after it: the end of the input
+  ARRAY_FIRST  = 0 # after '[': a value or ']'
+  ARRAY_VALUE  = 1 # after a value: ',' or ']'
+  ARRAY_COMMA  = 2 # after ',': a value
+  OBJECT_FIRST = 3 # after '{': a key or '}'
+  OBJECT_KEY   = 4 # after a key: ':'
+  OBJECT_COLON = 5 # after ':': a value
+  OBJECT_VALUE = 6 # after a value: ',' or '}'
+  OBJECT_COMMA = 7 # after ',': a key
+  ROOT         = 8 # the document's one value
+  ROOT_DONE    = 9 # after it: the end of the input
 
   @lexer : Lexer
   getter kind : Kind
@@ -1856,7 +1856,7 @@ pub class Builder
     set_state(OBJECT_VALUE)
     write_indent
     write_escaped_string(name)
-    @buffer.append(58_u8) # ':'
+    @buffer.append(58_u8)                         # ':'
     @buffer.append(32_u8) unless @indent_str.nil? # ' '
   end
 

@@ -253,4 +253,26 @@ each_collected = [] of Int32
 Iterator.of([1, 2, 3]).each { |x| each_collected << x }
 assert_equal("each", each_collected.to_s, "[1, 2, 3]")
 
+# ---- 8. Sources other than arrays -------------------------------------------
+
+puts "iterator: sources"
+assert_equal("range inclusive", Iterator.of(1..5).to_a.to_s, "[1, 2, 3, 4, 5]")
+assert_equal("range exclusive", Iterator.of(1...5).to_a.to_s, "[1, 2, 3, 4]")
+assert_equal("range empty", Iterator.of(5..1).to_a.to_s, "[]")
+assert_equal("range lazy", Iterator.of(1..1000000).select { |x| x % 7 == 0 }.take(3).to_a.to_s, "[7, 14, 21]")
+# Stops at the end instead of stepping past it: the step after the last
+# element would overflow, as `Range#each` in the prelude already knows.
+assert_equal("range at the top", Iterator.of(2147483645..2147483647).count.to_s, "3")
+
+hash_src = {"a" => 1, "b" => 2, "c" => 3}
+assert_equal("of_keys", Iterator.of_keys(hash_src).to_a.to_s, "[\"a\", \"b\", \"c\"]")
+assert_equal("of_values sum", Iterator.of_values(hash_src).sum.to_s, "6")
+assert_equal("of_entries", Iterator.of_entries(hash_src).map { |kv| kv[0] + kv[1].to_s }.to_a.to_s, "[\"a1\", \"b2\", \"c3\"]")
+# The snapshot is taken when the iterator is built: a key added afterwards
+# is not yielded, and the walk does not copy the table again per element.
+it_keys = Iterator.of_keys(hash_src)
+hash_src["d"] = 4
+assert_equal("of_keys snapshot", it_keys.count.to_s, "3")
+assert_equal("of_keys empty", Iterator.of_keys({} of String => Int32).count.to_s, "0")
+
 puts "all iterator checks passed"

@@ -1,0 +1,32 @@
+# Exercises `std/math`: sqrt, sin/cos, huge-arg reduction that does not panic.
+#
+# Run via:
+#     ./bin/iyi run bench/std_math_exercise.iyi
+
+module bench/std_math_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/math
+using std/math::{Math}
+
+puts "== sqrt"
+assert_true Math.sqrt(4.0) == 2.0, "sqrt 4"
+assert_true Math.sqrt(0.0) == 0.0, "sqrt 0"
+puts "  llvm.sqrt of 4 is 2"
+
+puts "\n== sincos"
+assert_true Math.sin(0.0) == 0.0, "sin 0"
+assert_true Math.cos(0.0) == 1.0, "cos 0"
+huge = Math.sin(1.0e22)
+assert_true huge == huge, "sin(1e22) is finite"
+assert_true huge.abs <= 1.0, "on the circle"
+puts "  sin/cos of 0; 1e22 stays finite"
+
+puts "\nALL CHECKS PASSED"

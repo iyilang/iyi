@@ -1,0 +1,30 @@
+# Exercises `std/uri`: RFC 3986 parse of scheme, host and path.
+#
+# Run via:
+#     ./bin/iyi run bench/std_uri_exercise.iyi
+
+module bench/std_uri_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/uri
+using std/uri::{URI}
+
+puts "== parse"
+u = URI.parse("https://ex.com/a")
+assert_str "https", u.scheme.to_s, "scheme"
+assert_true u.host == "ex.com", "host"
+assert_str "/a", u.path, "path"
+puts "  https://ex.com/a"
+
+puts "\n== refuse"
+assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
+puts "  a space in the reference is refused"
+
+puts "\nALL CHECKS PASSED"

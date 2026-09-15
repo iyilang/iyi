@@ -88,13 +88,14 @@ for phrase in \
   "iterator: terminals predicates" \
   "iterator: terminals searching" \
   "iterator: terminals traits" \
-  "iterator: each"; do
+  "iterator: each" \
+  "iterator: sources"; do
   grep -q "$phrase" "$WORK/iterator-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  all 26 iterator sections reported"
+[ "$status" -eq 0 ] && echo "  all 27 iterator sections reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -165,9 +166,13 @@ prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \
 # 7. FlatMap broken (fails to yield sub-arrays)
 prove_fails "flat_map flattening broken" broken_flat_map "assertion failed for flat_map" \
   's/@current_sub = @func\.call(item)/@current_sub = [] of U/'
+
+# 8. Range iterator broken (yields the exclusive end)
+prove_fails "range end broken" broken_range "assertion failed for range exclusive" \
+  's/elsif !@range\.exclusive? \&\& val == @range\.end/elsif val == @range.end/'
 echo
 if [ "$status" -eq 0 ]; then
-  echo "Iterator: all 26 sections pass plain and release, and each check is"
+  echo "Iterator: all 27 sections pass plain and release, and each check is"
   echo "proven to fail when its mechanism is broken."
 else
   echo "Iterator: something above failed."

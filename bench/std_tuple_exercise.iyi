@@ -1,0 +1,30 @@
+# Exercises `std/tuple`: Tuple first, last, empty?, equality.
+#
+# Run via:
+#     ./bin/iyi run bench/std_tuple_exercise.iyi
+
+module bench/std_tuple_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/tuple
+
+puts "== size"
+assert_true ({1, 2}).size == 2, "pair"
+assert_true ({1, 2, 3}).size == 3, "triple"
+assert_true ({1, 2}).empty? == false, "not empty"
+puts "  size (prelude) and empty?"
+
+puts "\n== first"
+assert_true ({7, 8}).first == 7, "first"
+assert_true ({7, 8}).last == 8, "last"
+assert_true ({1, 2}) == ({1, 2}), "equal"
+puts "  first, last, =="
+
+puts "\nALL CHECKS PASSED"

@@ -1,0 +1,178 @@
+# Exercises `std/eiy`: templates compiled into the program.
+#
+# Proves:
+#   * `Eiy.render` of bench/std_eiy_exercise.eiy — output tags, `if`, a block,
+#     `<%-` and `-%>` trimming, a comment, an escaped tag, quotes, backslashes,
+#     `#{` and UTF-8 text — is the expected text, byte for byte.
+#   * `Eiy.embed` into an `Eiy::Buffer` and into `stdout` prints the same text.
+#   * `Eiy.def_to_s` in a class defines `to_s` and `to_s(io)` from the template.
+#   * `Eiy::Lexer` token types, values, trimming flags and positions, with the
+#     column counted in characters on a line with non-ASCII text.
+#   * `Eiy.process_string` is the generated source, exactly; `process_file` of
+#     the template is `process_string` of its text; `process_string?` and
+#     `next_token?` answer nil on a tag that is never closed and `error` says
+#     where; `Eiy.locate` finds a template beside its caller.
+#
+# Run via:
+#     ./bin/iyi run bench/std_eiy_exercise.iyi
+
+module bench/std_eiy_exercise
+
+import std/eiy
+using std/eiy::{Eiy}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  if !cond
+    raise "ASSERTION FAILED: #{msg}"
+  end
+end
+
+def assert_text(expected : String, actual : String, msg : String) : Nil
+  if expected != actual
+    puts "expected (#{expected.bytesize} bytes):"
+    puts expected
+    puts "actual (#{actual.bytesize} bytes):"
+    puts actual
+    raise "ASSERTION FAILED: #{msg}"
+  end
+end
+
+EXPECTED = "Merhaba dünya!\n" \
+           "  shown: 3 \"quoted\" \\ \#{raw} <tag>\n" \
+           "<% not a tag %>\n" \
+           "  - çay (4 bytes)\n" \
+           "  - kahve (5 bytes)\n" \
+           "☕ 2 çeşit\n"
+
+class Menu
+  getter name : String
+  getter show : Bool
+  getter items : Array(String)
+
+  def initialize(@name : String, @show : Bool, @items : Array(String))
+  end
+
+  Eiy.def_to_s("std_eiy_exercise.eiy")
+end
+
+# ---------------------------------------------------------------------------
+# render
+# ---------------------------------------------------------------------------
+
+puts "== render"
+name = "dünya"
+show = true
+items = ["çay", "kahve"]
+rendered = Eiy.render("std_eiy_exercise.eiy")
+assert_text(EXPECTED, rendered, "render of the template")
+puts "  render: #{rendered.bytesize} bytes, byte for byte"
+
+# ---------------------------------------------------------------------------
+# embed
+# ---------------------------------------------------------------------------
+
+puts "== embed"
+buffer = Eiy::Buffer.new
+Eiy.embed("std_eiy_exercise.eiy", buffer)
+assert_text(EXPECTED, buffer.to_s, "embed into a Buffer")
+puts "  embed: into a Buffer, the same text"
+puts "  embed: into stdout, between the rules"
+puts "  ----"
+Eiy.embed("std_eiy_exercise.eiy", stdout)
+puts "  ----"
+
+# ---------------------------------------------------------------------------
+# def_to_s
+# ---------------------------------------------------------------------------
+
+puts "== def_to_s"
+menu = Menu.new("Ayşe", false, ["su"])
+menu_expected = "Merhaba Ayşe!\n" \
+                "<% not a tag %>\n" \
+                "  - su (2 bytes)\n" \
+                "☕ 1 çeşit\n"
+assert_text(menu_expected, menu.to_s, "def_to_s to_s")
+menu_buffer = Eiy::Buffer.new
+menu.to_s(menu_buffer)
+assert_text(menu_expected, menu_buffer.to_s, "def_to_s to_s(io)")
+assert_text(menu_expected, "#{menu}", "def_to_s under interpolation")
+puts "  def_to_s: to_s and to_s(io) agree, and `if` took the other branch"
+
+# ---------------------------------------------------------------------------
+# lexer tokens
+# ---------------------------------------------------------------------------
+
+puts "== lexer tokens"
+lexer = Eiy::Lexer.new("ab\nçç <%= x %>\n<%- y -%>z<%% w -%>")
+
+token = lexer.next_token
+assert_true(token.string?, "token 1 is text")
+assert_text("ab\nçç ", token.value, "token 1 value")
+assert_true(token.line_number == 1 && token.column_number == 1, "token 1 at 1:1, not #{token.line_number}:#{token.column_number}")
+
+token = lexer.next_token
+assert_true(token.output?, "token 2 is an output tag")
+assert_text(" x ", token.value, "token 2 value")
+assert_true(token.line_number == 2 && token.column_number == 7, "token 2 at 2:7 (columns are characters), not #{token.line_number}:#{token.column_number}")
+assert_true(!token.suppress_leading? && !token.suppress_trailing?, "token 2 trims nothing")
+
+token = lexer.next_token
+assert_true(token.string?, "token 3 is text")
+assert_text("\n", token.value, "token 3 value")
+assert_true(token.line_number == 2 && token.column_number == 12, "token 3 at 2:12, not #{token.line_number}:#{token.column_number}")
+
+token = lexer.next_token
+assert_true(token.control?, "token 4 is a control tag")
+assert_text(" y ", token.value, "token 4 value")
+assert_true(token.line_number == 3 && token.column_number == 4, "token 4 at 3:4, not #{token.line_number}:#{token.column_number}")
+assert_true(token.suppress_leading? && token.suppress_trailing?, "token 4 trims both sides")
+
+token = lexer.next_token
+assert_true(token.string?, "token 5 is text")
+assert_text("z", token.value, "token 5 value")
+assert_true(token.line_number == 3 && token.column_number == 10, "token 5 at 3:10, not #{token.line_number}:#{token.column_number}")
+
+token = lexer.next_token
+assert_true(token.string?, "token 6, an escaped tag, is text")
+assert_text("<% w -%>", token.value, "token 6 is the tag itself")
+assert_true(!token.suppress_leading? && !token.suppress_trailing?, "an escaped tag trims nothing")
+
+token = lexer.next_token
+assert_true(token.eof?, "token 7 is the end")
+assert_true(lexer.next_token.eof?, "and so is every token after it")
+assert_true(lexer.error.nil?, "no error on a well-formed template")
+puts "  lexer: 6 tokens, positions in lines and character columns"
+
+# ---------------------------------------------------------------------------
+# generated source and the runtime API
+# ---------------------------------------------------------------------------
+
+puts "== generated source"
+generated = Eiy.process_string("a \"q\" \\ \#{b\t\n<%= v %>c<% if t %>d<% end %>", "t.eiy", "out")
+generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
+                     "#<loc:push>out.print((#<loc:\"t.eiy\",2,4> v \n))#<loc:pop>\n" \
+                     "out.print(\"c\")\n" \
+                     "#<loc:push>#<loc:\"t.eiy\",2,12> if t \n#<loc:pop>\n" \
+                     "out.print(\"d\")\n" \
+                     "#<loc:push>#<loc:\"t.eiy\",2,23> end \n#<loc:pop>\n"
+assert_text(generated_expected, generated, "process_string output")
+
+template_path = Eiy.locate("std_eiy_exercise.eiy", __FILE__)
+assert_true(template_path.ends_with?("bench/std_eiy_exercise.eiy"), "locate puts the template beside its caller: #{template_path}")
+assert_text("/abs/t.eiy", Eiy.locate("/abs/t.eiy", "/elsewhere/main.iyi"), "locate keeps an absolute path")
+assert_text("t.eiy", Eiy.locate("t.eiy", "main.iyi"), "locate with a caller in the current directory")
+from_file = Eiy.process_file(template_path, "io")
+assert_text(Eiy.process_string(File.read(template_path), template_path, "io"), from_file, "process_file is process_string of the file")
+maybe_from_file = Eiy.process_file?(template_path, "io")
+assert_true(!maybe_from_file.nil? && maybe_from_file == from_file, "process_file? agrees with process_file")
+assert_true(Eiy.process_string?("ok\n <%= 1 +", "open.eiy").nil?, "process_string? answers nil for an open tag")
+assert_true(Eiy.process_string?("<% x", "open.eiy").nil?, "process_string? answers nil for an open control tag")
+assert_true(!Eiy.process_string?("closed <%= 1 %>", "closed.eiy").nil?, "process_string? answers for a closed tag")
+
+open_lexer = Eiy::Lexer.new("çay <%% never")
+assert_true(open_lexer.next_token.string?, "text before the open tag lexes")
+assert_true(open_lexer.next_token?.nil?, "next_token? answers nil at the open tag")
+assert_text("unterminated <%% tag at line 1, column 5", open_lexer.error || "(no error)", "the lexer's sentence")
+puts "  generated source exact; process_file, locate, process_string? and the lexer's error all answer"
+
+puts "ALL CHECKS PASSED"

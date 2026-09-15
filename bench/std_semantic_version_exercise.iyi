@@ -1,0 +1,29 @@
+# Exercises `std/semantic_version`: SemVer 2.0 parse and refuse.
+#
+# Run via:
+#     ./bin/iyi run bench/std_semantic_version_exercise.iyi
+
+module bench/std_semantic_version_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/semantic_version
+using std/semantic_version::{SemanticVersion}
+
+puts "== parse"
+v = SemanticVersion.parse("1.2.3")
+assert_true v.major == 1 && v.minor == 2 && v.patch == 3, "fields"
+puts "  1.2.3"
+
+puts "\n== refuse"
+assert_true SemanticVersion.parse?("1.0").nil?, "two fields are not a version"
+assert_true SemanticVersion.parse?("01.0.0").nil?, "leading zero"
+puts "  1.0 and 01.0.0 refused"
+
+puts "\nALL CHECKS PASSED"

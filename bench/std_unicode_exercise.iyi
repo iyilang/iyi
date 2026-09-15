@@ -1,0 +1,31 @@
+# Exercises `std/unicode`: Unicode general categories and UTF-8 validity.
+#
+# Run via:
+#     ./bin/iyi run bench/std_unicode_exercise.iyi
+
+module bench/std_unicode_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/unicode
+using std/unicode::{Unicode}
+
+puts "== letter"
+assert_true Unicode.letter?('A'), "A"
+assert_true Unicode.letter?('é'), "é"
+assert_true !Unicode.letter?('1'), "digit"
+assert_true Unicode.number?('3'), "3 is a number"
+puts "  letter? and number?"
+
+puts "\n== valid"
+assert_true Unicode.valid?("café"), "utf-8"
+assert_true Unicode.ascii?('A'), "ascii"
+puts "  valid UTF-8 and ascii?"
+
+puts "\nALL CHECKS PASSED"

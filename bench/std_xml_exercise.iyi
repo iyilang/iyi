@@ -1,0 +1,358 @@
+# Exercises `std/xml`: the parser, the tree, the serializer and the
+# reference helpers.
+#
+# Proves:
+#   * A document with UTF-8 text and attributes, namespaces, CDATA, comments,
+#     processing instructions, entity and character references and an internal
+#     DTD reads into the tree it describes, byte for byte, and
+#     `parse(to_xml).to_xml` is the same text.
+#   * Navigation: `root`, `find`, `find_all`, `path`, `[]`/`[]?` by exact
+#     name, `Attribute#namespace_uri`, `element_children`, `inner_xml`.
+#   * `escape`, `escape_attribute`, `unescape` and `unescape?`: round trips,
+#     astral characters, and the refusals `unescape` shares with the parser.
+#   * Every refusal in the module header, each with its sentence, its line and
+#     its column, through `parse?` and `Parser#error`.
+#   * A billion-laughs document and a too-deep one are refused, and an
+#     external entity is never read.
+#   * A differential block of documents, serialized here for
+#     `bench/std_xml_exercise.sh` to compare with another XML library.
+#
+# Run via:
+#     ./bin/iyi run bench/std_xml_exercise.iyi
+
+module bench/std_xml_exercise
+
+import std/xml
+using std/xml::{Document, Node, NodeType, Parser, Attribute, Namespace}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_equal(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg} (expected #{expected.inspect}, got #{actual.inspect})" unless expected == actual
+end
+
+def refused(source : String, sentence : String) : Nil
+  parser = Parser.new(source)
+  doc = parser.parse?
+  raise "ASSERTION FAILED: accepted #{source.inspect}" unless doc.nil?
+  assert_equal(sentence, parser.error, "refusal of #{source.inspect}")
+  raise "ASSERTION FAILED: parse? and parse disagree on #{source.inspect}" unless Std::Xml.parse?(source).nil?
+  puts "  #{parser.error}"
+end
+
+# ---------------------------------------------------------------------------
+# Round trip
+# ---------------------------------------------------------------------------
+
+puts "== round trip"
+source = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
+         "<!-- menu, with accents -->\n" +
+         "<?xml-stylesheet href=\"menu.css\" type=\"text/css\"?>\n" +
+         "<!DOCTYPE menu [\n" +
+         "  <!ENTITY cafe \"caf&#xE9;\">\n" +
+         "  <!ENTITY sign \"&cafe; &amp; bar &#38;#38; grill\">\n" +
+         "  <!ELEMENT menu ANY>\n" +
+         "  <!ATTLIST menu note CDATA \"a > b\">\n" +
+         "]>\n" +
+         "<menu xmlns=\"urn:menu\" xmlns:p=\"urn:price\" p:currency=\"EUR\" title='Chez \"Ren&#233;\" &amp; fils' xml:lang=\"fr\">\n" +
+         "  <item id=\"1\" p:cost=\"3.50\">Caf\u{E9} cr\u{E8}me \u{1F600} &lt;hot&gt; &sign;</item>\n" +
+         "  <item id=\"2\">\r\n    <p:note>&#x1F377; vin &#233; &#10;tab&#9;end</p:note>\r\n  </item>\n" +
+         "  <raw><![CDATA[<not> & markup ]]]]></raw>\n" +
+         "  <!-- a comment - with dashes -->\n" +
+         "  <?render mode=\"fast\" ?>\n" +
+         "  <empty/><also></also>\n" +
+         "  <ns xmlns=\"\"><child/></ns>\n" +
+         "  <\u{E9}l\u{E9}ment \u{E9}=\"\u{E9}\"/>\n" +
+         "</menu>\n"
+
+doc = Std::Xml.parse(source)
+assert_equal("1.0", doc.version, "version")
+assert_equal("UTF-8", doc.encoding, "encoding")
+assert_true(doc.standalone == true, "standalone")
+assert_true(doc.children.size == 3, "three top-level nodes, DOCTYPE not kept")
+assert_true(doc.children[0].node_type == NodeType::Comment, "first top-level node is the comment")
+assert_equal(" menu, with accents ", doc.children[0].content, "comment text")
+assert_true(doc.children[1].node_type.pi?, "second top-level node is the PI")
+assert_equal("xml-stylesheet", doc.children[1].name, "PI target")
+assert_equal("href=\"menu.css\" type=\"text/css\"", doc.children[1].content, "PI content")
+
+menu = doc.root
+assert_equal("menu", menu.name, "root name")
+assert_equal("urn:menu", menu.namespace_uri, "default namespace")
+assert_equal("Chez \"René\" & fils", menu["title"], "attribute with references")
+assert_equal("EUR", menu["p:currency"], "prefixed attribute by exact name")
+assert_true(menu["currency"]?.nil?, "local name alone does not match")
+assert_true(menu.[]?("nope").nil?, "missing attribute is nil")
+assert_equal("urn:price", menu.attributes[0].namespace_uri, "attribute namespace resolved")
+assert_equal("", menu.attributes[1].namespace_uri, "unprefixed attribute has no namespace")
+assert_equal("http://www.w3.org/XML/1998/namespace", menu.attributes[2].namespace_uri, "xml: prefix is bound")
+assert_equal("fr", menu["xml:lang"], "xml:lang")
+
+items = menu.find_all("item")
+assert_true(items.size == 2, "two items")
+first = items[0]
+assert_equal("Café crème 😀 <hot> café & bar & grill", first.text, "text with UTF-8, references and a DTD entity")
+assert_true(first.text.bytesize == 43, "text bytes are the document's bytes (#{first.text.bytesize})")
+assert_equal("3.50", first["p:cost"], "prefixed attribute on item")
+assert_equal("/menu/item[1]", first.path, "path of the first item")
+assert_equal("/menu/item[2]", items[1].path, "path of the second item")
+note = items[1].find("note")
+assert_true(!note.nil?, "find by local name")
+if !note.nil?
+  assert_equal("p:note", note.name, "prefixed element name")
+  assert_equal("urn:price", note.namespace_uri, "prefixed element namespace")
+  assert_equal("\u{1F377} vin é \ntab\tend", note.text, "character references decoded")
+  assert_equal("/menu/item[2]/p:note[1]", note.path, "nested path")
+end
+raw = menu.find("raw")
+assert_true(!raw.nil?, "raw")
+if !raw.nil?
+  assert_true(raw.children[0].node_type.cdata?, "CDATA node")
+  assert_equal("<not> & markup ]]", raw.text, "CDATA kept verbatim")
+end
+ns = menu.find("ns")
+assert_true(!ns.nil? && ns.namespace.nil?, "xmlns=\"\" undeclares the default namespace")
+if !ns.nil?
+  child = ns.find("child")
+  assert_true(!child.nil? && child.namespace_uri == "", "the undeclaration is inherited")
+end
+accented = menu.find("élément")
+assert_true(!accented.nil?, "non-ASCII element name")
+if !accented.nil?
+  assert_equal("é", accented["é"], "non-ASCII attribute name and value")
+end
+assert_true(menu.element_children.size == 7, "seven element children (#{menu.element_children.size})")
+assert_true(menu.children.size == 18, "eighteen child nodes with whitespace text (#{menu.children.size})")
+comment = menu.children[7]
+assert_true(comment.node_type.comment?, "comment inside the element")
+assert_equal(" a comment - with dashes ", comment.content, "comment with single dashes")
+assert_true(menu.children[9].node_type.pi?, "PI inside the element")
+assert_equal("mode=\"fast\" ", menu.children[9].content, "PI content kept as written")
+
+written = doc.to_xml
+again = Std::Xml.parse(written)
+assert_equal(written, again.to_xml, "parse(to_xml).to_xml is a fixed point")
+assert_equal(first.text, again.root.find_all("item")[0].text, "text survives the round trip")
+assert_equal("<item id=\"1\" p:cost=\"3.50\">Café crème 😀 &lt;hot&gt; café &amp; bar &amp; grill</item>", first.to_xml, "element serialized")
+assert_equal("<p:note>🍷 vin é \ntab\tend</p:note>", items[1].inner_xml.strip, "inner_xml")
+assert_true(written.includes?("title=\"Chez &quot;René&quot; &amp; fils\""), "attribute serialized with &quot;")
+assert_true(written.includes?("<empty/><also/>"), "empty elements written as <a/>")
+assert_true(written.includes?("<ns xmlns=\"\"><child/></ns>"), "undeclaration written back")
+assert_true(written.starts_with?("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<!-- menu, with accents -->\n<?xml-stylesheet href=\"menu.css\" type=\"text/css\"?>\n<menu "), "declaration and top-level nodes")
+assert_true(!written.includes?("\r"), "line ends normalised")
+
+built = Node.new_element("doc")
+built.namespaces << Namespace.new("q", "urn:q")
+built.set_attribute("q:k", "v")
+built.set_attribute("plain", "1 < 2")
+built.add_child(Node.new_text("a & b"))
+built.add_child(Node.new_comment("c"))
+assert_equal("urn:q", built.attributes[0].namespace_uri, "set_attribute resolves the prefix")
+built.set_attribute("plain", "2")
+assert_equal("2", built["plain"], "set_attribute replaces")
+assert_equal("<doc xmlns:q=\"urn:q\" q:k=\"v\" plain=\"2\">a &amp; b<!--c--></doc>", built.to_xml, "built tree serialized")
+assert_equal("/doc", built.path, "path of a parentless element")
+assert_true(NodeType::Element.to_s == "Element" && NodeType::CData.cdata?, "NodeType is an enum")
+puts "  the document reads, navigates and writes back as itself: #{written.bytesize} bytes, #{menu.children.size} child nodes"
+
+# ---------------------------------------------------------------------------
+# Escaping
+# ---------------------------------------------------------------------------
+
+puts "\n== escaping"
+plain = "Café 😀 & <b> \"q\" 'a' \t\n"
+assert_equal("Café 😀 &amp; &lt;b&gt; \"q\" 'a' \t\n", Std::Xml.escape(plain), "escape")
+assert_equal("Café 😀 &amp; &lt;b&gt; &quot;q&quot; 'a' &#9;&#10;", Std::Xml.escape_attribute(plain), "escape_attribute")
+assert_equal("a\r", Std::Xml.unescape(Std::Xml.escape("a\r")), "carriage return escaped as &#13;")
+assert_equal(plain, Std::Xml.unescape(Std::Xml.escape(plain)), "unescape(escape(text)) is text")
+assert_equal(plain, Std::Xml.unescape(Std::Xml.escape_attribute(plain)), "unescape(escape_attribute(text)) is text")
+assert_true(Std::Xml.escape("nothing to do").bytesize == 13, "escape copies nothing when nothing needs escaping")
+assert_equal("😀 é A B &lt;", Std::Xml.unescape("&#x1F600; &#233; &#65; &#x42; &amp;lt;"), "astral, decimal, hex, and one pass only")
+assert_equal("é\u{FFFD}", Std::Xml.unescape("&#xE9;&#xFFFD;"), "the last BMP characters allowed")
+assert_true(Std::Xml.unescape?("&bogus;").nil?, "unescape? of an undefined entity is nil")
+assert_true(Std::Xml.unescape?("&#xD800;").nil?, "unescape? of a surrogate is nil")
+assert_true(Std::Xml.unescape?("&amp").nil?, "unescape? of an unterminated reference is nil")
+assert_true(Std::Xml.unescape?("&#xZZ;").nil?, "unescape? of non-digits is nil")
+assert_true(Std::Xml.unescape?("&#99999999999999999999;").nil?, "unescape? of a huge reference is nil, not a panic")
+assert_equal("plain", Std::Xml.unescape?("plain") || "", "unescape? without references")
+puts "  escape, escape_attribute, unescape and unescape? agree with each other and with the parser"
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+puts "\n== refusals"
+refused("<a>&bogus;</a>", "undefined entity reference &bogus; at line 1, column 4")
+refused("<a>\n  <b>x &amp y</b></a>", "unterminated entity reference &amp: expected ';' at line 2, column 8")
+refused("<a>&;</a>", "empty entity reference at line 1, column 4")
+refused("<a>&#xD800;</a>", "character reference &#xD800; is not an XML character at line 1, column 4")
+refused("<a>&#1;</a>", "character reference &#1; is not an XML character at line 1, column 4")
+refused("<a>&#0;</a>", "character reference &#0; is not an XML character at line 1, column 4")
+refused("<a>&#x110000;</a>", "character reference &#x110000; is not an XML character at line 1, column 4")
+refused("<a>&#99999999999999999999;</a>", "character reference &#99999999999999999999; is not an XML character at line 1, column 4")
+refused("<a>&#xFFFE;</a>", "character reference &#xFFFE; is not an XML character at line 1, column 4")
+refused("<a>&#xZZ;</a>", "invalid character reference '&#xZZ;' at line 1, column 4")
+refused("<a>&#;</a>", "invalid character reference '&#;' at line 1, column 4")
+refused("<a b=\"&#X41;\"/>", "invalid character reference '&#X41;' at line 1, column 7")
+refused("<a>&#65 </a>", "unterminated character reference &#65: expected ';' at line 1, column 4")
+refused("<a><!-- x -- y --></a>", "'--' is not allowed inside a comment at line 1, column 11")
+refused("<a><!-- x --->", "'--' is not allowed inside a comment at line 1, column 11")
+refused("<a>x ]]> y</a>", "']]>' is not allowed in text at line 1, column 6")
+refused("<a>caf\u{E9} \u{1}</a>", "control character U+0001 is not allowed at line 1, column 9")
+refused("<a b=\"\u{1F}\"/>", "control character U+001F is not allowed at line 1, column 7")
+refused("<a b=\"x<y\"/>", "raw '<' is not allowed in an attribute value at line 1, column 8")
+refused("<a b=\"1\" b=\"2\"/>", "attribute 'b' given twice on <a> at line 1, column 10")
+refused("<a b=\"1\"c=\"2\"/>", "expected whitespace before the next attribute of <a> at line 1, column 9")
+refused("<a b=1/>", "attribute value must be quoted at line 1, column 6")
+refused("<a b/>", "expected '=' after the attribute name 'b' at line 1, column 5")
+refused("<a b=\"1", "unclosed attribute value at line 1, column 6")
+refused("<x:a/>", "namespace prefix 'x' of <x:a> is not declared at line 1, column 1")
+refused("<a x:b=\"1\"/>", "namespace prefix 'x' of attribute 'x:b' on <a> is not declared at line 1, column 1")
+refused("<a xmlns:x=\"\"/>", "namespace prefix 'x' cannot be bound to an empty uri at line 1, column 4")
+refused("<a/><b/>", "a second root element at line 1, column 5")
+refused("<a></b>", "mismatched closing tag: expected </a>, got </b> at line 1, column 4")
+refused("<a><b></a>", "mismatched closing tag: expected </b>, got </a> at line 1, column 7")
+refused("<a>\n<b>", "unclosed element <b> at line 2, column 1")
+refused("<a", "unclosed start tag <a> at line 1, column 1")
+refused("<a></a", "expected '>' to end the closing tag </a> at line 1, column 7")
+refused("<a><!-- open", "unclosed comment at line 1, column 4")
+refused("<a><![CDATA[ open", "unclosed CDATA section at line 1, column 4")
+refused("<a><?pi open", "unclosed processing instruction at line 1, column 4")
+refused("<a><?xml version=\"1.0\"?></a>", "processing instruction target 'xml' is reserved at line 1, column 4")
+refused("<a><?XML?></a>", "processing instruction target 'XML' is reserved at line 1, column 4")
+refused("<1a/>", "expected a name, found '1' at line 1, column 2")
+refused("<a>\u{1}</a>", "control character U+0001 is not allowed at line 1, column 4")
+refused("</a>", "closing tag outside the root element at line 1, column 1")
+refused("text", "text outside the root element at line 1, column 1")
+refused("<a/> tail", "text outside the root element at line 1, column 6")
+refused("<![CDATA[x]]><a/>", "CDATA is only allowed inside an element at line 1, column 1")
+refused("", "document has no root element at line 1, column 1")
+refused("<!-- only -->", "document has no root element at line 1, column 14")
+refused(" <?xml version=\"1.0\"?><a/>", "processing instruction target 'xml' is reserved at line 1, column 2")
+refused("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a/>", "encoding 'ISO-8859-1' is not supported: the input is read as UTF-8 at line 1, column 1")
+refused("<?xml version=\"1.0\" standalone=\"maybe\"?><a/>", "standalone must be 'yes' or 'no', not 'maybe' at line 1, column 39")
+refused("<?xml version=\"1.0\" foo=\"1\"?><a/>", "'foo' is not an XML declaration attribute at line 1, column 28")
+refused("<?xml version=1.0?><a/>", "expected a quoted value at line 1, column 15")
+refused("<?xml version=\"1.0\"", "unclosed XML declaration at line 1, column 1")
+refused("<!DOCTYPE a SYSTEM \"http://example.org/a.dtd\"><a/>", "external DTD subset refused: no SYSTEM or PUBLIC identifier is read at line 1, column 13")
+refused("<!DOCTYPE a PUBLIC \"-//X//DTD//EN\" \"a.dtd\"><a/>", "external DTD subset refused: no SYSTEM or PUBLIC identifier is read at line 1, column 13")
+refused("<!DOCTYPE a [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><a>&xxe;</a>", "external entity 'xxe' refused: no SYSTEM or PUBLIC identifier is read at line 1, column 27")
+refused("<!DOCTYPE a [<!ENTITY % p \"x\"> %p;]><a/>", "parameter entity references are not supported at line 1, column 32")
+refused("<!DOCTYPE a [<!ENTITY e \"<b/>\">]><a>&e;</a>", "markup inside the value of entity 'e' is not supported at line 1, column 26")
+refused("<!DOCTYPE a [<!ENTITY e \"x &amp y\">]><a>&e;</a>", "unterminated entity reference &amp: expected ';' at line 1, column 28")
+refused("<!DOCTYPE a [<!ENTITY e \"&#38;\">]><a>&e;</a>", "unterminated reference & in the value of entity 'e': expected ';' at line 1, column 38")
+refused("<!DOCTYPE a [<!ENTITY e \"&#xD800;\">]><a/>", "character reference &#xD800; is not an XML character at line 1, column 26")
+refused("<!DOCTYPE a [<!ENTITY e \"&nope;\">]><a>&e;</a>", "undefined entity reference &nope; at line 1, column 39")
+refused("<!DOCTYPE a [<!ENTITY e \"x\">", "unclosed DOCTYPE internal subset at line 1, column 1")
+refused("<!DOCTYPE a [ junk ]><a/>", "unexpected text in the DOCTYPE internal subset at line 1, column 15")
+refused("<!DOCTYPE a [<!ENTITY e \"x\">]", "unclosed DOCTYPE at line 1, column 1")
+refused("<a/><!DOCTYPE a>", "DOCTYPE must come before the root element at line 1, column 5")
+refused("<!DOCTYPE a><!DOCTYPE a><a/>", "a second DOCTYPE at line 1, column 13")
+refused("\u{FEFF}<a>\u{E9}\u{E9}&x;</a>", "undefined entity reference &x; at line 1, column 6")
+assert_true(Std::Xml.parse("<!DOCTYPE a [<!ENTITY e \"1\"><!ENTITY e \"2\">]><a>&e;</a>").root.text == "1", "the first declaration of an entity wins")
+assert_true(Std::Xml.parse("<!DOCTYPE a [<!ENTITY % p \"x\"><!ENTITY e \"y\">]><a>&e;</a>").root.text == "y", "a parameter entity declaration is read past")
+assert_true(Std::Xml.parse("\u{FEFF}<a/>").root.name == "a", "a byte order mark is read past")
+assert_true(Std::Xml.parse("<a b=\"x\ty\nz\"/>").root["b"] == "x y z", "attribute value normalisation")
+assert_true(Std::Xml.parse("<a b='say \"hi\"'/>").root["b"] == "say \"hi\"", "single-quoted attribute")
+assert_true(Std::Xml.parse("<a>\r\nx\ry</a>").root.text == "\nx\ny", "line ends normalised in text")
+puts "  every refusal names what was refused, and where"
+
+# ---------------------------------------------------------------------------
+# Limits
+# ---------------------------------------------------------------------------
+
+puts "\n== limits"
+laughs = "<?xml version=\"1.0\"?>\n<!DOCTYPE lolz [\n <!ENTITY lol \"lol\">\n <!ENTITY lol1 \"&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;\">\n" +
+         " <!ENTITY lol2 \"&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;\">\n" +
+         " <!ENTITY lol3 \"&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;\">\n" +
+         " <!ENTITY lol4 \"&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;\">\n" +
+         " <!ENTITY lol5 \"&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;\">\n" +
+         " <!ENTITY lol6 \"&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;\">\n" +
+         " <!ENTITY lol7 \"&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;\">\n" +
+         " <!ENTITY lol8 \"&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;\">\n" +
+         " <!ENTITY lol9 \"&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;\">\n]>\n<lolz>&lol9;</lolz>"
+refused(laughs, "entity expansion limit of 1000 exceeded at &lol; at line 14, column 7")
+refused("<!DOCTYPE a [<!ENTITY a \"&b;\"><!ENTITY b \"&a;\">]><a>&a;</a>", "entity &a; expands more than 10 levels deep at line 1, column 53")
+refused("<!DOCTYPE a [<!ENTITY a \"&a;\">]><a>&a;</a>", "entity &a; expands more than 10 levels deep at line 1, column 36")
+small = Parser.new("<!DOCTYPE a [<!ENTITY e \"x\">]><a>&e;&e;&e;</a>", max_expansions: 2)
+assert_true(small.parse?.nil?, "a custom expansion limit")
+assert_equal("entity expansion limit of 2 exceeded at &e; at line 1, column 40", small.error, "custom limit sentence")
+assert_true(Std::Xml.parse("<!DOCTYPE a [<!ENTITY e \"x\">]><a>&e;&e;&e;</a>", max_entity_expansions: 3).root.text == "xxx", "three expansions under a limit of three")
+
+deep_open = [] of String
+deep_close = [] of String
+i = 0
+while i < 300
+  deep_open << "<d>"
+  deep_close << "</d>"
+  i = i + 1
+end
+deep = deep_open.join("") + deep_close.join("")
+refused(deep, "elements nested deeper than 256 at line 1, column 769")
+shallow = Std::Xml.parse(deep, max_depth: 300)
+assert_true(shallow.root.find_all("d").size == 299, "300 levels under a limit of 300")
+assert_true(Std::Xml.parse?(deep, max_depth: 299).nil?, "and refused one level lower")
+puts "  billion laughs stops at the 1001st expansion, recursion at depth 10, nesting at #{256}"
+
+# ---------------------------------------------------------------------------
+# Differential block: read by bench/std_xml_exercise.sh
+# ---------------------------------------------------------------------------
+
+puts "\n== differential"
+decl = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+docs = [
+  decl + "<a/>",
+  decl + "<a></a>\n",
+  decl + "<a>caf\u{E9} cr\u{E8}me \u{1F600} \u{4E2D}\u{6587}</a>\n",
+  decl + "<a b=\"caf\u{E9}\" c=\"\u{1F600}\"/>\n",
+  decl + "<a b='say \"hi\"' c=\"it's\"/>\n",
+  decl + "<a b=\"1 &lt; 2 &amp; 3 &gt; 2 &quot;q&quot; &apos;s&apos;\"/>\n",
+  decl + "<a>1 &lt; 2 &amp; 3 &gt; 2 &quot;q&quot; &apos;s&apos;</a>\n",
+  decl + "<a>&#65;&#x42;&#233;&#xE9;&#x1F600;&#128512;</a>\n",
+  decl + "<a b=\"&#65;&#x42;&#233;&#xE9;&#x1F600;\"/>\n",
+  decl + "<a b=\"tab&#9;nl&#10;cr&#13;end\"/>\n",
+  decl + "<a b=\"tab\tnl\nend\"/>\n",
+  decl + "<a>tab\tnl\ncr&#13;end</a>\n",
+  decl + "<a>\r\n  <b>x\r\ny</b>\r\n</a>\r\n",
+  decl + "<a><![CDATA[<b> & </b> ]] ]]></a>\n",
+  decl + "<a><![CDATA[]]></a>\n",
+  decl + "<a><!-- a comment --><!----><!-- - --></a>\n",
+  decl + "<!-- before --><a/><!-- after -->\n",
+  decl + "<?pi?><?pi2 with content ?><a><?inner x=\"1\"?></a>\n",
+  decl + "<a xmlns=\"urn:a\"><b/><c xmlns=\"urn:c\"><d/></c><e xmlns=\"\"><f/></e></a>\n",
+  decl + "<x:a xmlns:x=\"urn:x\" xmlns:y=\"urn:y\" y:k=\"v\" k=\"w\"><y:b x:k=\"1\"/></x:a>\n",
+  decl + "<a xmlns:x=\"urn:x\"><b xmlns:x=\"urn:x2\"><x:c/></b><x:c/></a>\n",
+  decl + "<a k=\"1\" xmlns=\"urn:a\" j=\"2\"/>\n",
+  decl + "<a xml:lang=\"en\" xml:space=\"preserve\"> x </a>\n",
+  decl + "<a>\n  <b>\n    <c>\n      <d>deep</d>\n    </c>\n  </b>\n</a>\n",
+  decl + "<a>mixed <b>bold</b> and <i>italic</i> text<br/>tail</a>\n",
+  decl + "<a-b.c_d1><e.f/><g-h/><i_j/><k1/></a-b.c_d1>\n",
+  decl + "<\u{E9}l\u{E9}ment \u{E9}=\"\u{E9}\"><\u{4E2D}\u{6587}/></\u{E9}l\u{E9}ment>\n",
+  decl + "<a>   </a>\n",
+  decl + "<a>a]]b]>c</a>\n",
+  decl + "<a>--></a>\n",
+  decl + "<a b=\"--&gt;\"/>\n",
+  decl + "<a>&amp;lt;&amp;#65;</a>\n",
+  decl + "<a>\u{7F}\u{80}\u{9F}\u{FFFD}\u{10FFFF}</a>\n",
+  "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<a/>\n",
+  "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<a/>\n",
+  "<?xml version='1.0' encoding='UTF-8'?><a/>",
+  "\u{FEFF}" + decl + "<a>bom</a>\n",
+  decl + "<a>" + "x" * 5000 + "</a>\n",
+  decl + "<catalog>\n  <book id=\"bk101\">\n    <author>Gambardella, Matthew</author>\n    <title>XML Developer's Guide</title>\n    <price>44.95</price>\n  </book>\n  <book id=\"bk102\">\n    <author>Ralls, Kim</author>\n    <title>Midnight Rain</title>\n    <price>5.95</price>\n  </book>\n</catalog>\n",
+  decl + "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"10\" height=\"10\"><use xlink:href=\"#a\"/><text x=\"1\">\u{2192}</text></svg>\n",
+]
+i = 0
+while i < docs.size
+  puts "--- doc #{i + 1}"
+  stdout.write(docs[i])
+  puts "\n--- iyi #{i + 1}"
+  stdout.write(Std::Xml.parse(docs[i]).to_xml)
+  puts "--- end"
+  i = i + 1
+end
+puts "  #{docs.size} documents serialized for the differential"
+
+puts "\nALL CHECKS PASSED"

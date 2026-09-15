@@ -1,0 +1,31 @@
+# Exercises `std/bool`: eager | & ^, to_unsafe, and a hash that tells true from false.
+#
+# Run via:
+#     ./bin/iyi run bench/std_bool_exercise.iyi
+
+module bench/std_bool_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/bool
+
+puts "== operators"
+assert_true (true | false) == true, "or"
+assert_true (true & false) == false, "and"
+assert_true (true ^ true) == false, "xor"
+assert_true true.to_unsafe == 1, "unsafe true"
+assert_true false.to_unsafe == 0, "unsafe false"
+puts "  |, &, ^, to_unsafe"
+
+puts "\n== hash"
+assert_true true.hash != false.hash, "two keys"
+assert_true true.hash == true.hash, "stable true"
+puts "  true and false hash apart"
+
+puts "\nALL CHECKS PASSED"

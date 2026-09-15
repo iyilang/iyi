@@ -1,0 +1,31 @@
+# Exercises `std/number`: Number#abs, sign, zero? on Int32.
+#
+# Run via:
+#     ./bin/iyi run bench/std_number_exercise.iyi
+
+module bench/std_number_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/number
+
+puts "== abs"
+assert_true (-7).abs == 7, "abs"
+assert_true 7.abs == 7, "abs pos"
+assert_true 3.abs2 == 9, "abs2"
+puts "  abs, abs2"
+
+puts "\n== sign"
+assert_true (-2).sign == -1, "neg"
+assert_true 0.sign == 0, "zero"
+assert_true 4.sign == 1, "pos"
+assert_true 0.zero?, "zero?"
+puts "  sign and zero?"
+
+puts "\nALL CHECKS PASSED"

@@ -1,0 +1,39 @@
+# Exercises `std/html`: escape, unescape, named and numeric references.
+#
+# Run via:
+#     ./bin/iyi run bench/std_html_exercise.iyi
+
+module bench/std_html_exercise
+
+import std/html
+using std/html::{HTML}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+puts "== escape"
+assert_str("&amp;&lt;&gt;&quot;&#39;", HTML.escape("&<>\"'"), "the five")
+assert_str("plain", HTML.escape("plain"), "nothing to escape")
+assert_str("café &amp; bar", HTML.escape("café & bar"), "UTF-8 left alone, & escaped")
+puts "  &, <, >, quote and apostrophe; UTF-8 bytes kept"
+
+puts "\n== unescape"
+assert_str("&<>\"'", HTML.unescape("&amp;&lt;&gt;&quot;&#39;"), "the five named")
+assert_str("A", HTML.unescape("&#65;"), "decimal")
+assert_str("A", HTML.unescape("&#x41;"), "hex")
+assert_str("é", HTML.unescape("&eacute;"), "named Latin-1")
+assert_str("€", HTML.unescape("&euro;"), "named euro")
+assert_str("😀", HTML.unescape("&#x1F600;"), "astral numeric")
+replacement = HTML.unescape("&#99999999999999999999;")
+assert_true(replacement.bytesize == 3 && replacement.to_unsafe[0] == 0xEF_u8, "a long decimal becomes U+FFFD, not a panic")
+assert_true(HTML.unescape("&#x110000;").bytesize == 3, "past U+10FFFF is U+FFFD")
+assert_str("&unknown;", HTML.unescape("&unknown;"), "unknown named entity is kept")
+assert_str("a <b> & c \"d\" 'e' café", HTML.unescape(HTML.escape("a <b> & c \"d\" 'e' café")), "escape then unescape")
+puts "  named, decimal, hex, astral, overflow, unknown, round trip"
+
+puts "\nALL CHECKS PASSED"

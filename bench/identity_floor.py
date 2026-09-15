@@ -38,7 +38,10 @@ REPO = Path(__file__).resolve().parent.parent
 ALLOWED_PATHS: list[tuple[str, str]] = [
     # Crystal's standard library. A `--crystal` program compiles against it,
     # and so does the compiler, which is a Crystal program (SPEC.md B.2).
-    (r"^src/(?!compiler/|iyi/)", "Crystal's standard library"),
+    # `src/std/` is iyi's own library and is not in this exemption: a std
+    # module that says "conforming to Crystal's X" is exactly what this gate
+    # exists to catch, and forty-five of them arrived that way once.
+    (r"^src/(?!compiler/|iyi/|std/)", "Crystal's standard library"),
     (r"^spec/std/", "that library's own specs"),
     (r"^spec/primitives/", "that library's primitives specs"),
     # Crystal's compiler, tested as Crystal: these suites assert Crystal's
@@ -139,7 +142,8 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # "not a valid Crystal source file" named the wrong one. The line is the
     # choice between them, so it mentions both by necessity.
     (r'ends_with\?\(".iyi"\) \? "iyi" : "Crystal"', "the line that picks which language a file is"),
-    (r"Crystal (caches|runs|raises|takes)", "a sentence about the other language"),
+    (r"Crystal (caches|runs|raises|takes|answers|defines)", "a sentence about the other language"),
+    (r"shared with Crystal", "the one-name rule (SPEC.md III.1.7a) naming the other language"),
     # `iyi migrate` and `iyi bind` are about the other language by
     # definition: a Crystal project, a Crystal file kept as Crystal, the
     # tree's own output compared against what Crystal answered. Their
@@ -306,9 +310,6 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # may not write down. Same table, same language, one predicate apart.
     (r"crystal_types|crystal_requires|crystal_private", "what a --crystal consumer already has, carried by name"),
     (r"a \*Crystal\* source", "a sentence about the other language"),
-    # Deliberate compatibility alias for templates written against Crystal's
-    # ECR, not iyi's own name for the module.
-    (r"pub alias ECR = Std::Eiy::Eiy", "compatibility alias for templates written against Crystal's ECR"),
 ]
 
 PATH_RES = [(re.compile(p), why) for p, why in ALLOWED_PATHS]

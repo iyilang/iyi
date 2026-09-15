@@ -178,6 +178,57 @@ panics_with "an index past a list" list_index "index 7 out of range for 3 elemen
   'List(Int32).new([1, 2, 3])[7]'
 
 echo
+echo "== the library is iyi all the way down"
+# Two modules reach the platform themselves and were written before the rule:
+# `socket` (raw syscalls on Linux, libSystem on darwin, SPEC.md III.9) and
+# `time` (the clocks). `math` may name the three LLVM hardware intrinsics
+# `llvm.sqrt`, `llvm.copysign` and `llvm.fma` (the instruction, not libm).
+# Every other module is iyi over the prelude's own intrinsics: no `lib`,
+# no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
+# else is a dependency being taken on without a word.
+reaching=""
+for source in "$REPO"/src/std/*.iyi; do
+  name="$(basename "$source" .iyi)"
+  case "$name" in socket|time) continue ;; esac
+  if [ "$name" = math ]; then
+    grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" \
+      | grep -vE 'llvm\.(sqrt|copysign|fma)\.' > "$WORK/reach.$name" || true
+  else
+    grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" > "$WORK/reach.$name" || true
+  fi
+  if [ -s "$WORK/reach.$name" ]; then
+    reaching="$reaching $name"
+    echo "  std/$name reaches past the prelude:"
+    sed 's/^/    /' "$WORK/reach.$name"
+  fi
+done
+if [ -n "$reaching" ]; then
+  echo "  FAIL: a std module other than socket and time binds something"
+  status=1
+else
+  echo "  every module but socket and time is iyi over the prelude's intrinsics"
+fi
+
+echo
+echo "== every module has its own exercise"
+# A module `iyi check` accepts is not a module that works: a generic body
+# nobody instantiates is never typed. The exercise is what instantiates it.
+ungated=""
+for source in "$REPO"/src/std/*.iyi; do
+  name="$(basename "$source" .iyi)"
+  case "$name" in traits|cmp|enumerable|list|derives) continue ;; esac # this file's own
+  gate="$REPO/bench/std_${name}_exercise.sh"
+  case "$name" in format|socket) gate="$REPO/bench/${name}_exercise.sh" ;; esac # named before the prefix
+  [ -f "$gate" ] || ungated="$ungated $name"
+done
+if [ -n "$ungated" ]; then
+  echo "  FAIL: no bench/std_<name>_exercise.sh for:$ungated"
+  status=1
+else
+  echo "  each module under src/std has a bench/std_<name>_exercise.sh"
+fi
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

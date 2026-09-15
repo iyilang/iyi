@@ -1,0 +1,32 @@
+# Exercises `std/colorize`: ANSI SGR wrapping, gated by Colorize.enabled.
+#
+# Run via:
+#     ./bin/iyi run bench/std_colorize_exercise.iyi
+
+module bench/std_colorize_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/colorize
+using std/colorize::{Colorize}
+
+puts "== disabled"
+Colorize.enabled = false
+assert_str "hi", "hi".colorize.red.to_s, "no wrap when off"
+puts "  plain text when disabled"
+
+puts "\n== enabled"
+Colorize.enabled = true
+painted = "hi".colorize.red.to_s
+assert_true painted != "hi", "wraps"
+assert_true painted.includes?("31"), "red is 31"
+assert_true painted.includes?("hi"), "keeps the text"
+puts "  red SGR when enabled"
+
+puts "\nALL CHECKS PASSED"

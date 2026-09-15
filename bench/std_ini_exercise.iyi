@@ -1,0 +1,28 @@
+# Exercises `std/ini`: INI.parse of top-level keys and sections.
+#
+# Run via:
+#     ./bin/iyi run bench/std_ini_exercise.iyi
+
+module bench/std_ini_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/ini
+using std/ini::{INI}
+
+puts "== parse"
+doc = INI.parse("k=v\n[s]\na=b\n")
+assert_str "v", doc[""]["k"], "top"
+assert_str "b", doc["s"]["a"], "section"
+built = INI.build(doc)
+assert_true built.includes?("k=v"), "build top"
+assert_true built.includes?("[s]"), "build section"
+puts "  parse and build"
+
+puts "\nALL CHECKS PASSED"

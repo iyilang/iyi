@@ -1,0 +1,130 @@
+# Exercises `std/gc`: the program's window onto iyi's own collector.
+#
+# Proves:
+#   * `malloc`, `malloc_atomic` and `realloc` hand out zeroed heap words;
+#     `realloc` keeps the bytes; `free` hands a chunk back so `is_heap_ptr`
+#     stops answering true for it.
+#   * `is_heap_ptr` answers true for a chunk's start and its interior, and
+#     false for null, a stack address and a freed chunk.
+#   * `stats` moves the way the collector does: `bytes_since_collection`
+#     climbs with allocation and is zero right after `collect`; `collections`
+#     counts every collection; the sweep after garbage reports bytes freed;
+#     `mapped_bytes` is at least one arena and only grows.
+#   * `disable` holds the trigger through allocation that would have
+#     collected; `enable` lets it run again; `collect` works while disabled.
+#
+# bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
+# the compile-time refusal, and breaks copies of the module to prove the
+# checks can fail.
+#
+#     ./bin/iyi run bench/std_gc_exercise.iyi
+
+module bench/std_gc_exercise
+
+import std/gc
+using std/gc::{GC}
+
+def check(cond : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless cond
+end
+
+# Enough garbage to cross the trigger's budget several times over.
+def churn(rounds : Int32) : Int32
+  kept = 0
+  i = 0
+  while i < rounds
+    s = "garbage #{i} " * 8
+    kept += s.bytesize
+    i += 1
+  end
+  kept
+end
+
+# ---------------------------------------------------------------------------
+puts "== raw words"
+p = GC.malloc(64)
+check(p.address != 0_u64, "malloc answers a word")
+bytes = p.as(Pointer(UInt8))
+zeroed = true
+i = 0
+while i < 64
+  zeroed = false if bytes[i] != 0_u8
+  i += 1
+end
+check(zeroed, "malloc zeroes the chunk")
+i = 0
+while i < 64
+  bytes[i] = (i + 1).to_u8
+  i += 1
+end
+q = GC.realloc(p, 4096)
+check(q.address != 0_u64, "realloc answers a word")
+qb = q.as(Pointer(UInt8))
+kept = true
+i = 0
+while i < 64
+  kept = false if qb[i] != (i + 1).to_u8
+  i += 1
+end
+check(kept, "realloc keeps the first 64 bytes")
+check(qb[4095] == 0_u8, "realloc zeroes the new tail")
+a = GC.malloc_atomic(32)
+check(a.address != 0_u64 && a.as(Pointer(UInt8))[31] == 0_u8, "malloc_atomic answers a zeroed word")
+check(GC.malloc(0).address != 0_u64, "malloc(0) still answers a word")
+puts "  malloc, malloc_atomic and realloc answer zeroed words; realloc keeps the bytes"
+
+# ---------------------------------------------------------------------------
+puts "== heap pointers"
+check(GC.is_heap_ptr(q), "a chunk's start is a heap pointer")
+check(GC.is_heap_ptr(Pointer(Void).new(q.address + 100_u64)), "a byte inside the chunk is a heap pointer")
+check(!GC.is_heap_ptr(Pointer(Void).new(0_u64)), "null is not")
+local = 7
+check(!GC.is_heap_ptr(pointerof(local).as(Void*)), "a stack address is not")
+check(GC.is_heap_ptr(a), "an atomic chunk is, before free")
+GC.free(a)
+check(!GC.is_heap_ptr(a), "a freed chunk is not")
+GC.free(Pointer(Void).new(0_u64))
+big = GC.malloc(1_000_000)
+check(GC.is_heap_ptr(big), "a large mapping is a heap pointer")
+GC.free(big)
+check(!GC.is_heap_ptr(big), "a freed large mapping is not")
+puts "  start and interior answer true; null, the stack and a freed chunk answer false"
+
+# ---------------------------------------------------------------------------
+puts "== stats move with the collector"
+s0 = GC.stats
+check(s0.mapped_bytes >= 16_777_216_u64, "at least one arena is mapped (#{s0.mapped_bytes})")
+c0 = s0.collections
+churn(300_000)
+s1 = GC.stats
+check(s1.collections > c0, "churn crossed the trigger: collections #{c0} -> #{s1.collections}")
+check(s1.mapped_bytes >= s0.mapped_bytes, "mapped_bytes never shrinks below the first arena")
+churn(1_000)
+check(GC.stats.bytes_since_collection > 0_u64, "bytes_since_collection climbs after allocation")
+c1 = GC.stats.collections
+GC.collect
+s2 = GC.stats
+check(s2.collections == c1 + 1_u64, "collect counts one collection (#{c1} -> #{s2.collections})")
+check(s2.bytes_since_collection == 0_u64, "bytes_since_collection is zero right after collect")
+check(s2.bytes_freed_by_last_sweep > 0_u64, "the sweep after churn freed bytes (#{s2.bytes_freed_by_last_sweep})")
+check(s2.bytes_kept_by_last_sweep > 0_u64, "the sweep kept the live program (#{s2.bytes_kept_by_last_sweep})")
+check(s2.to_s.includes?("collections=#{s2.collections}"), "to_s names the fields")
+puts "  #{s2.to_s}"
+puts "  bytes_since_collection climbs and resets, collections count, the sweep reports freed and kept"
+
+# ---------------------------------------------------------------------------
+puts "== disable holds the trigger"
+GC.disable
+c2 = GC.stats.collections
+churn(300_000)
+check(GC.stats.collections == c2, "no collection ran while disabled (#{c2} -> #{GC.stats.collections})")
+check(GC.stats.bytes_since_collection > 0_u64, "allocation still counted while disabled")
+GC.collect
+check(GC.stats.collections == c2 + 1_u64, "collect runs while disabled")
+GC.enable
+c3 = GC.stats.collections
+churn(300_000)
+check(GC.stats.collections > c3, "the trigger runs again after enable (#{c3} -> #{GC.stats.collections})")
+puts "  disabled: 300k allocations, no collection; collect still runs; enabled: the trigger runs again"
+
+puts "ALL CHECKS PASSED"

@@ -1,0 +1,120 @@
+# The set algebra of `std/set`, exercised and proven.
+#
+#     ./bin/iyi run bench/std_set_exercise.iyi
+#
+# Two parts. The first asserts the algebra on sets a person can read. The
+# second prints, for 200 pairs of sets drawn by a fixed linear congruential
+# generator, every operator and relation as a line the gate script compares
+# against python3 computing the same pairs with its own `set`: the oracle
+# is the other implementation, not this file's expectations.
+
+module bench/std_set_exercise
+
+import std/set
+import std/enumerable
+using std/enumerable::{Enumerable}
+
+def assert_true(label : String, condition : Bool) : Nil
+  raise "assertion failed for #{label}: expected true, got false" unless condition
+end
+
+def assert_equal(label : String, actual : String, expected : String) : Nil
+  raise "assertion failed for #{label}: expected #{expected}, got #{actual}" if actual != expected
+end
+
+# ---- 1. The algebra, by hand -----------------------------------------------
+
+puts "set: operators"
+a = [1, 2, 3, 4].to_set
+b = [3, 4, 5].to_set
+assert_equal("union |", (a | b).to_s, "Set{1, 2, 3, 4, 5}")
+assert_equal("union +", (a + b).to_s, "Set{1, 2, 3, 4, 5}")
+assert_equal("union order is the receiver's first", (b | a).to_s, "Set{3, 4, 5, 1, 2}")
+assert_equal("intersection", (a & b).to_s, "Set{3, 4}")
+assert_equal("difference", (a - b).to_s, "Set{1, 2}")
+assert_equal("symmetric difference", (a ^ b).to_s, "Set{1, 2, 5}")
+assert_equal("operands untouched", a.to_s + " " + b.to_s, "Set{1, 2, 3, 4} Set{3, 4, 5}")
+empty = Set(Int32).new
+assert_equal("union with empty", (a | empty).to_s, a.to_s)
+assert_equal("intersection with empty", (a & empty).to_s, "Set{}")
+assert_equal("symmetric difference with self", (a ^ a).to_s, "Set{}")
+
+puts "set: relations"
+sub = [2, 3].to_set
+assert_true("subset_of?", sub.subset_of?(a))
+assert_true("subset_of? self", a.subset_of?(a))
+assert_true("subset_of? not", !a.subset_of?(sub))
+assert_true("empty is a subset of everything", empty.subset_of?(a) && empty.subset_of?(empty))
+assert_true("proper_subset_of?", sub.proper_subset_of?(a))
+assert_true("proper_subset_of? self is not proper", !a.proper_subset_of?(a))
+assert_true("subset_of? same size, different member", ![1, 2, 3, 9].to_set.subset_of?(a))
+assert_true("superset_of?", a.superset_of?(sub) && a.superset_of?(a))
+assert_true("proper_superset_of?", a.proper_superset_of?(sub) && !a.proper_superset_of?(a))
+assert_true("disjoint?", sub.disjoint?([7, 8].to_set))
+assert_true("disjoint? not", !a.disjoint?(b))
+assert_true("two empty sets are disjoint", empty.disjoint?(Set(Int32).new))
+assert_true("intersects?", a.intersects?(b) && !a.intersects?([9].to_set))
+
+puts "set: equality and hashing"
+assert_true("== ignores order", a == [4, 3, 2, 1].to_set)
+assert_true("== sees a missing member", !(a == sub))
+assert_true("== sees an extra member", !(sub == a))
+assert_true("hash follows ==", a.hash == [4, 3, 2, 1].to_set.hash)
+lookup = {} of Set(Int32) => String
+lookup[[1, 2].to_set] = "pair"
+assert_equal("a set as a hash key", lookup[[2, 1].to_set], "pair")
+assert_true("== sees a different member of the same size", !(a == [1, 2, 3, 9].to_set))
+
+puts "set: building"
+built = Set(String).new
+built << "x" << "y" << "x"
+assert_equal("<< chains and dedups", built.to_s, "Set{\"x\", \"y\"}")
+built.concat(["y", "z"].to_set)
+assert_equal("concat", built.to_s, "Set{\"x\", \"y\", \"z\"}")
+copy = built.dup
+copy << "w"
+assert_equal("dup is a copy", built.size.to_s + " " + copy.size.to_s, "3 4")
+
+puts "set: enumerable"
+assert_equal("map", a.map { |x| x * 10 }.to_s, "[10, 20, 30, 40]")
+assert_equal("select", a.select { |x| x.even? }.to_s, "[2, 4]")
+assert_equal("sum", a.sum.to_s, "10")
+assert_equal("min max", a.min.to_s + " " + a.max.to_s, "1 4")
+assert_equal("count", a.count { |x| x > 2 }.to_s, "2")
+assert_equal("to_a keeps insertion order", (b | a).to_a.to_s, "[3, 4, 5, 1, 2]")
+assert_true("includes?", a.includes?(3) && !a.includes?(30))
+
+# ---- 2. The same algebra against python3 ------------------------------------
+#
+# A linear congruential generator both sides can write in three lines:
+# `seed = (seed * 1103515245 + 12345) mod 2^31`. Each pair draws two sizes
+# 0..9 and that many members 0..15, so overlaps and empties come up often.
+# The gate diffs these lines against the python program in the script.
+
+puts "set: algebra vs python3"
+seed = 42_i64
+draw = ->(bound : Int32) : Int32 {
+  seed = (seed * 1103515245_i64 + 12345_i64) % 2147483648_i64
+  ((seed >> 8) % bound.to_i64).to_i32
+}
+pair = 0
+while pair < 200
+  x = Set(Int32).new
+  y = Set(Int32).new
+  nx = draw.call(10)
+  ny = draw.call(10)
+  nx.times { x << draw.call(16) }
+  ny.times { y << draw.call(16) }
+  sorted_x = x.to_a.sorted
+  sorted_y = y.to_a.sorted
+  puts "pair #{pair}: #{sorted_x} #{sorted_y}"
+  puts "  | #{(x | y).to_a.sorted}"
+  puts "  & #{(x & y).to_a.sorted}"
+  puts "  - #{(x - y).to_a.sorted}"
+  puts "  ^ #{(x ^ y).to_a.sorted}"
+  puts "  <= #{x.subset_of?(y)} < #{x.proper_subset_of?(y)} >= #{x.superset_of?(y)} > #{x.proper_superset_of?(y)}"
+  puts "  disjoint #{x.disjoint?(y)} == #{x == y}"
+  pair = pair + 1
+end
+
+puts "all set checks passed"

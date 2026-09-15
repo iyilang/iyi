@@ -1,0 +1,29 @@
+# Exercises `std/int`: the rest of the integer tower: UInt16, Int8.
+#
+# Run via:
+#     ./bin/iyi run bench/std_int_exercise.iyi
+
+module bench/std_int_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/int
+
+puts "== add"
+assert_true 1_u16 + 2_u16 == 3_u16, "u16"
+assert_true 1_i8 + 2_i8 == 3_i8, "i8"
+assert_true 1_u32 + 1_u32 == 2_u32, "u32"
+puts "  UInt16, Int8, UInt32 add"
+
+puts "\n== bits"
+assert_true 3_u16.popcount == 2, "popcount 0b11"
+assert_true 1_u16.bit_length == 1, "bit_length"
+puts "  popcount and bit_length"
+
+puts "\nALL CHECKS PASSED"

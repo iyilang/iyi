@@ -1,0 +1,25 @@
+# Exercises `std/box`: heap box holding a value.
+#
+# Run via:
+#     ./bin/iyi run bench/std_box_exercise.iyi
+
+module bench/std_box_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/box
+using std/box::{Box}
+
+puts "== box"
+b = Box(Int32).new(41)
+assert_true b.object == 41, "stored"
+assert_true Box(Int32).unbox(Box(Int32).box(41)) == 41, "box then unbox"
+puts "  new, object, box/unbox"
+
+puts "\nALL CHECKS PASSED"

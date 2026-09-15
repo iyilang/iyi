@@ -1,0 +1,31 @@
+# Exercises `std/string_pool`: interned strings: the same bytes become one object.
+#
+# Run via:
+#     ./bin/iyi run bench/std_string_pool_exercise.iyi
+
+module bench/std_string_pool_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/string_pool
+using std/string_pool::{StringPool}
+
+puts "== intern"
+pool = StringPool.new
+a = pool.get("hello")
+b = pool.get("hello")
+c = pool.get("world")
+assert_true pool.size == 2, "two distinct"
+assert_true a.bytesize == 5, "bytes"
+assert_str "hello", a, "text"
+assert_str "hello", b, "again"
+assert_str "world", c, "other"
+puts "  interned hello/world"
+
+puts "\nALL CHECKS PASSED"

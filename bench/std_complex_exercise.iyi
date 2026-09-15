@@ -1,0 +1,32 @@
+# Exercises `std/complex`: Complex abs, arithmetic, exp.
+#
+# Run via:
+#     ./bin/iyi run bench/std_complex_exercise.iyi
+
+module bench/std_complex_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/complex
+using std/complex::{Complex}
+
+puts "== abs"
+z = Complex.new(3.0, 4.0)
+assert_true z.abs == 5.0, "3-4-5"
+assert_true z.abs2 == 25.0, "abs2"
+puts "  hypot of 3+4i is 5"
+
+puts "\n== arithmetic"
+s = z + Complex.new(1.0, 1.0)
+assert_true s.real == 4.0 && s.imag == 5.0, "add"
+e = Complex.new(0.0, 0.0).exp
+assert_true e.real == 1.0 && e.imag == 0.0, "e^0"
+puts "  add and e^0"
+
+puts "\nALL CHECKS PASSED"

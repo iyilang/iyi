@@ -1,0 +1,95 @@
+# Exercises `std/yaml`: YAML 1.2 core schema, `Any`, dump, anchors, merge.
+#
+# Run via:
+#     ./bin/iyi run bench/std_yaml_exercise.iyi
+
+module bench/std_yaml_exercise
+
+import std/yaml
+using std/yaml::{YAML, Any, Parser}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def refused(source : String, sentence : String) : Nil
+  parser = Parser.new(source)
+  docs = parser.parse_all
+  err = parser.error
+  raise "ASSERTION FAILED: accepted #{source.inspect}" if err.nil?
+  assert_str(sentence, err, "refusal of #{source.inspect}")
+  raise "ASSERTION FAILED: parse? answered a value for #{source.inspect}" unless YAML.parse?(source).nil?
+  puts "  #{err}"
+end
+
+puts "== scalars and collections"
+doc = YAML.parse("a: 1\nb: [true, null, hello]\n")
+assert_true(doc.size == 2, "two keys")
+assert_true(doc["a"].as_i == 1_i64, "integer")
+assert_true(doc["b"][0].as_bool, "true")
+assert_true(doc["b"][1].null?, "null")
+assert_str("hello", doc["b"][2].as_s, "plain string")
+assert_true(YAML.parse("~").null?, "~ is null")
+assert_true(YAML.parse("").null?, "empty stream is a null document")
+assert_str("yes", YAML.parse("yes").as_s, "yes is a string in 1.2")
+assert_true(YAML.parse("0x10").as_i == 16_i64, "hex")
+assert_true(YAML.parse("0o10").as_i == 8_i64, "octal")
+assert_true(YAML.parse("1.5").as_f == 1.5, "float")
+assert_true(YAML.parse(".inf").as_f > 1.0e300, "+inf")
+quoted = YAML.parse("\"caf\\xE9 \\u2603\"")
+assert_str("café ☃", quoted.as_s, "quoted escapes")
+assert_true(quoted.as_s.bytesize == 9, "quoted is UTF-8")
+folded = YAML.parse(">\n  hello\n  world\n")
+assert_str("hello world\n", folded.as_s, "folded scalar")
+literal = YAML.parse("|\n  hello\n  world\n")
+assert_str("hello\nworld\n", literal.as_s, "literal scalar")
+puts "  integers, floats, null, 1.2 strings, quotes, folded and literal"
+
+puts "\n== dump round trip"
+again = YAML.parse(YAML.dump(doc))
+assert_true(again == doc, "dump reads back")
+assert_true(YAML.dump(doc).starts_with?("a: 1"), "dump is block YAML")
+assert_true(YAML.parse(YAML.dump(Any.new(nil))).null?, "dumped null")
+puts "  dump reads back as the same Any"
+
+puts "\n== anchors, aliases, merge"
+anchored = YAML.parse("x: &a [1, 2]\ny: *a\n")
+assert_true(anchored["x"] == anchored["y"], "alias equals the anchored value")
+assert_true(anchored["y"][0].as_i == 1_i64, "alias contents")
+merged = YAML.parse("a: &base {x: 1, y: 2}\nb: {<<: *base, y: 9, z: 3}\n")
+assert_true(merged["b"]["x"].as_i == 1_i64, "merged x")
+assert_true(merged["b"]["y"].as_i == 9_i64, "an explicit key wins over a merged one")
+assert_true(merged["b"]["z"].as_i == 3_i64, "merged z")
+won = YAML.parse("{y: 9, <<: {y: 2, x: 1}, z: 3}\n")
+assert_true(won["y"].as_i == 9_i64, "explicit before merge still wins")
+assert_true(won["x"].as_i == 1_i64, "merge fills the rest")
+puts "  alias, merge, explicit key wins either side of <<"
+
+puts "\n== streams and typed keys"
+docs = YAML.parse_all("1\n---\n2\n")
+assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "two documents")
+keys = YAML.parse("1: one\ntrue: x\n")
+assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
+assert_str("x", keys[Any.new(true)].as_s, "boolean key")
+h = Hash(Any, Int32).new
+h[YAML.parse("a: 1")] = 7
+assert_true(h[YAML.parse("a: 1")]? == 7, "Any hashes with ==")
+puts "  parse_all, integer and boolean keys, Any as a Hash key"
+
+puts "\n== what the reader refuses"
+refused("a: 1\na: 2\n", "duplicate key \"a\" at line 2, column 1")
+refused("\"unterminated\n", "unterminated quoted string at line 1, column 1")
+refused("\thello: 1\n", "tab used for indentation at line 1, column 1")
+refused("{a: 1, a: 2}\n", "duplicate key \"a\" at line 1, column 8")
+refused("[1, 1", "unterminated flow sequence at line 1, column 1")
+refused("*nope\n", "unknown anchor *nope at line 1, column 1")
+refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
+refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
+refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
+puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles"
+
+puts "\nALL CHECKS PASSED"

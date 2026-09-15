@@ -1,0 +1,386 @@
+# Exercises `std/io`: `Memory`, the `IyiIO` additions, `Sized`, `Delimited`,
+# `MultiWriter`, `Hexdump` and `ByteFormat`.
+#
+# Proves:
+#   * `Memory` is an `IyiIO`: write/print/puts/<< land in it, read_bytes,
+#     read_byte, read_char, read_line, gets, read_all, lines and each_line read
+#     it back, pos=/rewind/clear move the cursor, close refuses further reads.
+#   * The additions work on a descriptor stream too (a file read four bytes at
+#     a time): read_byte, read_char, lines, each_line, `IyiIO.copy` with and
+#     without a limit.
+#   * `ByteFormat` round-trips negative, minimum and maximum Int32/Int64,
+#     UInt64 and UInt8 through pointers and through a `Memory`, and prints
+#     every encoding as hex for the gate to compare with python3's `struct`.
+#   * `Sized` and `Delimited` are byte-exact on UTF-8 input, a delimiter that
+#     partially matches is handled, and the inner stream continues past a
+#     consumed delimiter.
+#   * `Hexdump` lines are exact for a full line, a short line and empty input.
+#   * `MultiWriter` writes to every stream, `Memory` included.
+#
+# Run via:
+#     ./bin/iyi run bench/std_io_exercise.iyi
+
+module bench/std_io_exercise
+
+import std/io
+using std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  if !cond
+    raise "ASSERTION FAILED: #{msg}"
+  end
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  if expected != actual
+    raise "ASSERTION FAILED: #{msg} (expected #{expected.inspect}, got #{actual.inspect})"
+  end
+end
+
+def assert_int(expected : Int64, actual : Int64, msg : String) : Nil
+  if expected != actual
+    raise "ASSERTION FAILED: #{msg} (expected #{expected}, got #{actual})"
+  end
+end
+
+def hex_of(bytes : Pointer(UInt8), count : Int32) : String
+  digits = "0123456789abcdef".to_unsafe
+  hexed = Pointer(UInt8).malloc((count * 2).to_u64)
+  i = 0
+  while i < count
+    hexed[i * 2] = digits[(bytes[i].to_i32 >> 4) & 0x0f]
+    hexed[i * 2 + 1] = digits[bytes[i].to_i32 & 0x0f]
+    i = i + 1
+  end
+  String.new(count * 2) { |t| t.copy_from(hexed, count * 2) }
+end
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+puts "== memory"
+mem = Memory.new
+mem.puts("first line")
+mem.print("second")
+mem.write(" line\n")
+mem << "third " << 3 << "\n"
+mem.write_byte(0xc3_u8)
+mem.write_byte(0xa9_u8)
+assert_int(33_i64, mem.size.to_i64, "Memory#size counts bytes")
+assert_int(33_i64, mem.pos.to_i64, "the cursor sits after the last write")
+assert_str("first line\nsecond line\nthird 3\né", mem.to_s, "Memory#to_s is everything written")
+assert_true(mem.eof?, "a Memory written to its end is at eof")
+
+mem.rewind
+assert_int(0_i64, mem.pos.to_i64, "rewind puts the cursor at the start")
+assert_true(!mem.eof?, "rewound, not at eof")
+assert_str("first line\n", mem.read_line.to_s, "read_line keeps the line end")
+assert_str("second line", mem.gets(true).to_s, "gets(chomp) drops the line end")
+assert_str("third", mem.read_bytes(5).to_s, "read_bytes takes exactly the count")
+b = mem.read_byte
+assert_true(b == 32_u8, "read_byte answers the space")
+assert_str("3\n", mem.read_bytes(2).to_s, "read_bytes continues")
+c = mem.read_char
+assert_true(c == 'é', "read_char decodes a two-byte character")
+assert_true(mem.read_byte.nil?, "read_byte answers nil at the end")
+assert_true(mem.read_line.nil?, "read_line answers nil at the end")
+assert_str("", mem.read_all, "read_all at the end is empty")
+
+mem.pos = 11
+assert_str("second line\nthird 3\né", mem.read_all, "pos= moves the cursor; read_all takes the rest")
+mem.rewind
+assert_true(mem.lines(true) == ["first line", "second line", "third 3", "é"], "lines(chomp) splits every line")
+mem.rewind
+count = 0
+mem.each_line do |line|
+  count = count + 1
+end
+assert_int(4_i64, count.to_i64, "each_line yields every line")
+
+mem.pos = 6
+mem.write("LINE")
+assert_str("first LINE\nsecond line\nthird 3\né", mem.to_s, "a write at the cursor overwrites")
+mem.clear
+assert_true(mem.empty?, "clear empties the buffer")
+assert_int(0_i64, mem.size.to_i64, "cleared size")
+
+given = Memory.new("héllo\r\nwörld")
+assert_int(14_i64, given.size.to_i64, "Memory.new(text) copies the bytes")
+assert_str("héllo", given.read_line(true).to_s, "chomp drops CR LF")
+assert_str("wörld", given.read_line(true).to_s, "the last line has no line end")
+assert_true(given.read_line(true).nil?, "then nil")
+given.rewind
+assert_str("héllo\r\nwörld", given.read_all, "read_all after rewind")
+assert_true(!given.closed?, "open until closed")
+given.close
+assert_true(given.closed?, "closed? after close")
+assert_true(given.eof?, "closed is eof")
+
+emoji = Memory.new("a€🎉")
+assert_true(emoji.read_char == 'a', "read_char ascii")
+assert_true(emoji.read_char == '€', "read_char three bytes")
+assert_true(emoji.read_char == '🎉', "read_char four bytes")
+assert_true(emoji.read_char.nil?, "read_char nil at the end")
+puts "  write, print, puts, <<, write_byte, read_bytes, read_byte, read_char, read_line, gets, read_all, lines, each_line, pos=, rewind, clear, close verified"
+
+# ---------------------------------------------------------------------------
+# A descriptor stream, read four bytes at a time
+# ---------------------------------------------------------------------------
+
+puts "\n== descriptor stream"
+path = "/tmp/std_io_exercise_#{Program.args.size}.txt"
+File.write(path, "alpha\nb\u00e9\u0442\u0430\ngamma\n")
+file = File.open(path, "r", 4)
+assert_true(file.read_byte == 97_u8, "read_byte on a file")
+assert_true(file.read_char == 'l', "read_char on a file")
+assert_str("pha\n", file.read_line.to_s, "read_line continues")
+assert_true(file.read_char == 'b', "read_char across the buffer")
+assert_true(file.read_char == 'é', "a two-byte character split across buffers")
+assert_true(file.read_char == '\u0442', "another")
+assert_true(file.read_char == '\u0430', "and another")
+assert_true(file.lines(true) == ["", "gamma"], "lines(chomp) on a file")
+file.close
+
+sink = Memory.new
+file = File.open(path, "r", 4)
+moved = IyiIO.copy(file, sink)
+file.close
+assert_int(20_i64, moved, "copy answers the bytes moved")
+assert_str("alpha\nb\u00e9\u0442\u0430\ngamma\n", sink.to_s, "copy moves every byte")
+
+sink = Memory.new
+file = File.open(path, "r", 4)
+moved = IyiIO.copy(file, sink, 7)
+assert_int(7_i64, moved, "copy with a limit stops at the limit")
+assert_str("alpha\nb", sink.to_s, "the limited copy")
+seen = [] of String
+file.each_line(true) do |line|
+  seen << line
+end
+file.close
+assert_true(seen == ["\u00e9\u0442\u0430", "gamma"], "each_line continues after the limited copy")
+File.delete(path)
+puts "  read_byte, read_char, read_line, lines, each_line and IyiIO.copy verified on a file read four bytes at a time"
+
+# ---------------------------------------------------------------------------
+# ByteFormat
+# ---------------------------------------------------------------------------
+
+puts "\n== byte format"
+buffer = Pointer(UInt8).malloc(8_u64)
+
+int32s = [0, 1, -1, 2, -2, 127, -128, 255, 256, 2147483647, -2147483648, 305419896, -1234567891]
+int32s.each do |v|
+  ByteFormat::LittleEndian.encode(v, buffer)
+  puts "  LE Int32 #{v} #{hex_of(buffer, 4)}"
+  assert_int(v.to_i64, ByteFormat::LittleEndian.decode_int32(buffer).to_i64, "LE Int32 round trip of #{v}")
+  ByteFormat::BigEndian.encode(v, buffer)
+  puts "  BE Int32 #{v} #{hex_of(buffer, 4)}"
+  assert_int(v.to_i64, ByteFormat::BigEndian.decode_int32(buffer).to_i64, "BE Int32 round trip of #{v}")
+
+  io = Memory.new
+  ByteFormat::LittleEndian.encode(v, io)
+  ByteFormat::BigEndian.encode(v, io)
+  assert_int(8_i64, io.size.to_i64, "two Int32 encodings are eight bytes")
+  io.rewind
+  assert_int(v.to_i64, ByteFormat::LittleEndian.decode_int32(io).to_i64, "LE Int32 through a Memory: #{v}")
+  assert_int(v.to_i64, ByteFormat::BigEndian.decode_int32(io).to_i64, "BE Int32 through a Memory: #{v}")
+end
+
+int64s = [0_i64, 1_i64, -1_i64, 2_i64, -2_i64, 2147483648_i64, -2147483649_i64, 9223372036854775807_i64, -9223372036854775808_i64, 81985529216486895_i64, -81985529216486895_i64]
+int64s.each do |v|
+  ByteFormat::LittleEndian.encode(v, buffer)
+  puts "  LE Int64 #{v} #{hex_of(buffer, 8)}"
+  assert_int(v, ByteFormat::LittleEndian.decode_int64(buffer), "LE Int64 round trip of #{v}")
+  ByteFormat::BigEndian.encode(v, buffer)
+  puts "  BE Int64 #{v} #{hex_of(buffer, 8)}"
+  assert_int(v, ByteFormat::BigEndian.decode_int64(buffer), "BE Int64 round trip of #{v}")
+
+  io = Memory.new
+  ByteFormat::LittleEndian.encode(v, io)
+  ByteFormat::BigEndian.encode(v, io)
+  io.rewind
+  assert_int(v, ByteFormat::LittleEndian.decode_int64(io), "LE Int64 through a Memory: #{v}")
+  assert_int(v, ByteFormat::BigEndian.decode_int64(io), "BE Int64 through a Memory: #{v}")
+end
+
+uint64s = [0_u64, 1_u64, 255_u64, 256_u64, 4294967295_u64, 4294967296_u64, 9223372036854775807_u64, 9223372036854775808_u64, 18446744073709551615_u64, 81985529216486895_u64]
+uint64s.each do |v|
+  ByteFormat::LittleEndian.encode(v, buffer)
+  puts "  LE UInt64 #{v} #{hex_of(buffer, 8)}"
+  assert_true(v == ByteFormat::LittleEndian.decode_uint64(buffer), "LE UInt64 round trip of #{v}")
+  ByteFormat::BigEndian.encode(v, buffer)
+  puts "  BE UInt64 #{v} #{hex_of(buffer, 8)}"
+  assert_true(v == ByteFormat::BigEndian.decode_uint64(buffer), "BE UInt64 round trip of #{v}")
+
+  io = Memory.new
+  ByteFormat::LittleEndian.encode(v, io)
+  ByteFormat::BigEndian.encode(v, io)
+  io.rewind
+  assert_true(v == ByteFormat::LittleEndian.decode_uint64(io), "LE UInt64 through a Memory: #{v}")
+  assert_true(v == ByteFormat::BigEndian.decode_uint64(io), "BE UInt64 through a Memory: #{v}")
+end
+
+uint8s = [0_u8, 1_u8, 127_u8, 128_u8, 254_u8, 255_u8]
+uint8s.each do |v|
+  ByteFormat::LittleEndian.encode(v, buffer)
+  puts "  LE UInt8 #{v} #{hex_of(buffer, 1)}"
+  assert_true(v == ByteFormat::LittleEndian.decode_uint8(buffer), "LE UInt8 round trip of #{v}")
+  ByteFormat::BigEndian.encode(v, buffer)
+  puts "  BE UInt8 #{v} #{hex_of(buffer, 1)}"
+  assert_true(v == ByteFormat::BigEndian.decode_uint8(buffer), "BE UInt8 round trip of #{v}")
+
+  io = Memory.new
+  ByteFormat::LittleEndian.encode(v, io)
+  ByteFormat::BigEndian.encode(v, io)
+  io.rewind
+  assert_true(v == ByteFormat::LittleEndian.decode_uint8(io), "LE UInt8 through a Memory: #{v}")
+  assert_true(v == ByteFormat::BigEndian.decode_uint8(io), "BE UInt8 through a Memory: #{v}")
+end
+
+# The bytes of one value in both orders are each other's reverse, and the
+# aliases name the formats they stand for.
+ByteFormat::SystemEndian.encode(305419896, buffer)
+system_hex = hex_of(buffer, 4)
+ByteFormat::NetworkEndian.encode(305419896, buffer)
+network_hex = hex_of(buffer, 4)
+assert_str("12345678", network_hex, "NetworkEndian is big-endian")
+assert_true(system_hex == "78563412" || system_hex == "12345678", "SystemEndian is one of the two")
+puts "  SystemEndian #{system_hex} NetworkEndian #{network_hex}"
+
+# A stream that runs out mid-value is refused with a sentence, proven by the
+# shell gate; here the decode of exactly enough bytes succeeds.
+exact = Memory.new
+ByteFormat::BigEndian.encode(-1234567891, exact)
+exact.rewind
+assert_int(-1234567891_i64, ByteFormat::BigEndian.decode_int32(exact).to_i64, "a stream with exactly four bytes decodes")
+assert_true(exact.eof?, "and is then at its end")
+puts "  Int32, Int64, UInt64 and UInt8 round-trip in both byte orders through pointers and a Memory"
+
+# ---------------------------------------------------------------------------
+# Sized and Delimited
+# ---------------------------------------------------------------------------
+
+puts "\n== sized and delimited"
+source = Memory.new("héllo--wörld--rest\nline two\n")
+first = Delimited.new(source, "--")
+first_got = first.read_all
+assert_str("héllo", first_got, "Delimited stops before the delimiter, byte-exact on UTF-8")
+puts "  delimited: #{first_got}"
+assert_true(first.eof?, "a consumed Delimited is at eof")
+assert_true(first.read_byte.nil?, "and answers nil")
+second = Delimited.new(source, "--")
+assert_str("wörld", second.read_all, "the inner stream continued past the first delimiter")
+puts "  delimited: wörld"
+third = Delimited.new(source, "--")
+assert_str("rest\n", third.read_line.to_s, "read_line on a Delimited without a delimiter in reach")
+assert_str("line two\n", third.read_line.to_s, "the second line")
+assert_true(third.read_line.nil?, "then nil: the delimiter never came")
+assert_true(third.eof?, "eof without a delimiter")
+assert_true(source.eof?, "the inner stream is drained")
+puts "  delimited: rest, line two"
+
+tricky = Delimited.new(Memory.new("abababcXYZ"), "ababc")
+assert_str("ab", tricky.read_all, "a partial match that restarts is content")
+tricky = Delimited.new(Memory.new("aaab"), "aab")
+assert_str("a", tricky.read_all, "a repeated prefix restarts the match")
+tail = Memory.new("ab-")
+tricky = Delimited.new(tail, "--")
+assert_str("ab-", tricky.read_all, "a held prefix at the end of the stream is content")
+assert_true(tail.eof?, "and the inner stream is drained")
+tricky = Delimited.new(Memory.new("--tail"), "--")
+assert_str("", tricky.read_all, "a delimiter at the start answers nothing")
+inner = Memory.new("héllo--wörld")
+head = Delimited.new(inner, "--")
+assert_str("hé", head.read_bytes(3), "read_bytes on a Delimited counts bytes")
+assert_str("llo", head.read_all, "the rest up to the delimiter")
+assert_str("wörld", inner.read_all, "the inner stream after the delimiter")
+puts "  delimiter partial matches, held prefixes and empty content handled"
+
+sized_source = Memory.new("héllo wörld\nsecond\n")
+sized = Sized.new(sized_source, 6)
+assert_int(6_i64, sized.remaining.to_i64, "remaining starts at the limit")
+assert_str("héllo", sized.read_all, "Sized stops at the byte limit, inside no character")
+assert_int(0_i64, sized.remaining.to_i64, "remaining reaches zero")
+assert_true(sized.eof?, "a spent Sized is at eof")
+assert_true(sized.read_byte.nil?, "and answers nil")
+assert_str(" wörld\nsecond\n", sized_source.read_all, "the inner stream continues")
+puts "  sized: héllo"
+
+sized_source = Memory.new("one\ntwo\nthree")
+sized = Sized.new(sized_source, 8)
+assert_str("one", sized.read_line(true).to_s, "read_line on a Sized")
+assert_true(sized.read_byte == 116_u8, "read_byte on a Sized")
+assert_str("wo\n", sized.read_bytes(10), "read_bytes on a Sized is cut to the limit")
+assert_true(sized.read_line.nil?, "spent")
+assert_str("three", sized_source.read_all, "the rest is the inner stream's")
+generous = Sized.new(Memory.new("ab"), 100)
+assert_str("ab", generous.read_all, "a limit past the stream answers the stream")
+assert_int(98_i64, generous.remaining.to_i64, "remaining counts what was read")
+assert_true(generous.eof?, "eof follows the inner stream")
+puts "  Sized read_all, read_line, read_byte, read_bytes and remaining verified"
+
+# ---------------------------------------------------------------------------
+# Hexdump
+# ---------------------------------------------------------------------------
+
+puts "\n== hexdump"
+dumped = Memory.new
+Hexdump.new(dumped).dump("Hello, iyi!\u0000\u00ff")
+expected_short = "00000000  48 65 6c 6c 6f 2c 20 69  79 69 21 00 c3 bf        |Hello, iyi!...|\n"
+assert_str(expected_short, dumped.to_s, "a short line pads the hex columns")
+print dumped.to_s
+
+dumped = Memory.new
+bytes = Pointer(UInt8).malloc(40_u64)
+i = 0
+while i < 40
+  bytes[i] = ((i * 7 + 30) % 256).to_u8
+  i = i + 1
+end
+Hexdump.new(dumped).dump(bytes, 40)
+lines = dumped.to_s.lines
+assert_int(3_i64, lines.size.to_i64, "forty bytes are three lines")
+assert_str("00000000  1e 25 2c 33 3a 41 48 4f  56 5d 64 6b 72 79 80 87  |.%,3:AHOV]dkry..|", lines[0], "a full line")
+assert_str("00000010  8e 95 9c a3 aa b1 b8 bf  c6 cd d4 db e2 e9 f0 f7  |................|", lines[1], "the second line's offset is 10")
+assert_str("00000020  fe 05 0c 13 1a 21 28 2f                           |.....!(/|", lines[2], "the last eight bytes")
+print dumped.to_s
+
+dumped = Memory.new
+Hexdump.new(dumped).dump(Memory.new("from an IO"))
+assert_str("00000000  66 72 6f 6d 20 61 6e 20  49 4f                    |from an IO|\n", dumped.to_s, "dump reads an IyiIO to its end")
+dumped = Memory.new
+Hexdump.new(dumped).dump("")
+assert_str("", dumped.to_s, "nothing dumps as nothing")
+Hexdump.new(stdout).dump("to stdout")
+puts "  hexdump lines verified: full, short, an IO source and empty input"
+
+# ---------------------------------------------------------------------------
+# MultiWriter
+# ---------------------------------------------------------------------------
+
+puts "\n== multi writer"
+left = Memory.new
+right = Memory.new
+both = MultiWriter.new([left, right, stdout] of IyiIO)
+both.puts("  multi: to three streams")
+both << "  multi: chained " << 42 << "\n"
+both.write_byte(0x20_u8)
+both.print("multi: printed\n")
+both.flush
+assert_str(left.to_s, right.to_s, "both memories hold the same bytes")
+assert_str("  multi: to three streams\n  multi: chained 42\n multi: printed\n", left.to_s, "the bytes are what was written")
+assert_true(both.eof?, "a writer has nothing to read")
+assert_true(!both.closed?, "open until closed")
+both.close
+assert_true(both.closed?, "closed? after close")
+assert_true(!left.closed?, "closing the MultiWriter leaves its streams open")
+# A MultiWriter is itself an IyiIO: a Hexdump can print through it.
+left.clear
+right.clear
+Hexdump.new(MultiWriter.new([left, right] of IyiIO)).dump("ab")
+assert_str("00000000  61 62                                             |ab|\n", right.to_s, "a Hexdump through a MultiWriter")
+puts "  MultiWriter puts, <<, write_byte, print, flush, close and use as an IyiIO verified"
+
+puts "\nALL CHECKS PASSED"

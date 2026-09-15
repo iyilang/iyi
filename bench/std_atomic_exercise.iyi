@@ -1,0 +1,215 @@
+# Exercises `std/atomic`: the weaker and bitwise verbs on `Atomic(T)`.
+#
+# Proves:
+#   * Every verb, on each of the four admitted `T`, answers what the word
+#     held before and leaves what it should.
+#   * `compare_and_set_*` exchanges only when the word holds `expected`,
+#     and answers the word and the outcome either way.
+#   * `max`/`min` are signed on Int32/Int64 and unsigned on UInt8/UInt64.
+#   * Four threads adding through `add_relaxed`, `add_acq_rel` and a
+#     `compare_and_set_acq_rel` retry loop lose nothing.
+#   * A payload published under `set_release` is whole when `get_acquire`
+#     sees the flag.
+#
+# bench/std_atomic_exercise.sh drives it, reads the instruction each verb
+# emitted off the LLVM IR, and breaks copies of the module to prove the
+# checks can fail.
+#
+#     ./bin/iyi run bench/std_atomic_exercise.iyi
+
+module bench/std_atomic_exercise
+
+import std/atomic
+
+def check(cond : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless cond
+end
+
+# A word four threads share: an `Atomic(T)` in a class's field lives at
+# one address, and every thread's instruction lands on it.
+class Shared
+  getter count : Atomic(Int64)
+  getter flag : Atomic(UInt8)
+  getter payload : Atomic(UInt64)
+
+  def initialize
+    @count = Atomic(Int64).new(0_i64)
+    @flag = Atomic(UInt8).new(0_u8)
+    @payload = Atomic(UInt64).new(0_u64)
+  end
+end
+
+THREADS = 4
+PER_THREAD = 250_000
+
+# ---------------------------------------------------------------------------
+puts "== single-thread verbs"
+
+i32 = Atomic(Int32).new(5)
+check(i32.add_relaxed(1) == 5 && i32.get_relaxed == 6, "Int32 add_relaxed")
+check(i32.add_acquire(1) == 6 && i32.get_acquire == 7, "Int32 add_acquire")
+check(i32.add_release(1) == 7, "Int32 add_release")
+check(i32.add_acq_rel(1) == 8 && i32.get == 9, "Int32 add_acq_rel")
+check(i32.sub_relaxed(2) == 9 && i32.sub_acquire(2) == 7 && i32.sub_release(2) == 5 && i32.sub_acq_rel(2) == 3, "Int32 sub_*")
+check(i32.get == 1, "Int32 after four subs")
+check(i32.swap_relaxed(10) == 1 && i32.swap_acquire(20) == 10 && i32.swap_release(30) == 20 && i32.swap_acq_rel(40) == 30, "Int32 swap_*")
+i32.set_relaxed(-4)
+check(i32.get_relaxed == -4, "Int32 set_relaxed")
+i32.set_release(-8)
+check(i32.get_acquire == -8, "Int32 set_release")
+
+i64 = Atomic(Int64).new(-1_i64)
+check(i64.add_relaxed(3_i64) == -1_i64 && i64.add_acq_rel(3_i64) == 2_i64, "Int64 add")
+check(i64.sub_release(1_i64) == 5_i64 && i64.swap_acquire(9_i64) == 4_i64, "Int64 sub/swap")
+i64.set_release(100_i64)
+check(i64.get_acquire == 100_i64 && i64.get_relaxed == 100_i64, "Int64 set/get")
+check(i64.add_acquire(0_i64) == 100_i64 && i64.add_release(0_i64) == 100_i64, "Int64 add_acquire/release")
+check(i64.sub_relaxed(0_i64) == 100_i64 && i64.sub_acquire(0_i64) == 100_i64 && i64.sub_acq_rel(0_i64) == 100_i64, "Int64 sub_*")
+check(i64.swap_relaxed(100_i64) == 100_i64 && i64.swap_release(100_i64) == 100_i64 && i64.swap_acq_rel(100_i64) == 100_i64, "Int64 swap_*")
+i64.set_relaxed(7_i64)
+check(i64.get == 7_i64, "Int64 set_relaxed")
+
+u8 = Atomic(UInt8).new(250_u8)
+check(u8.add_relaxed(5_u8) == 250_u8 && u8.get_relaxed == 255_u8, "UInt8 add_relaxed to 255")
+check(u8.add_acquire(1_u8) == 255_u8 && u8.get_acquire == 0_u8, "UInt8 add wraps at the word")
+check(u8.sub_relaxed(1_u8) == 0_u8 && u8.get == 255_u8, "UInt8 sub wraps at the word")
+check(u8.swap_acq_rel(1_u8) == 255_u8 && u8.swap_relaxed(2_u8) == 1_u8 && u8.swap_acquire(3_u8) == 2_u8 && u8.swap_release(4_u8) == 3_u8, "UInt8 swap_*")
+check(u8.add_release(0_u8) == 4_u8 && u8.add_acq_rel(0_u8) == 4_u8, "UInt8 add_release/acq_rel")
+check(u8.sub_acquire(0_u8) == 4_u8 && u8.sub_release(0_u8) == 4_u8 && u8.sub_acq_rel(0_u8) == 4_u8, "UInt8 sub_*")
+u8.set_relaxed(9_u8)
+u8.set_release(10_u8)
+check(u8.get == 10_u8, "UInt8 set_*")
+
+u64 = Atomic(UInt64).new(0_u64)
+check(u64.sub_relaxed(1_u64) == 0_u64 && u64.get == 18446744073709551615_u64, "UInt64 sub wraps at the word")
+check(u64.add_acq_rel(1_u64) == 18446744073709551615_u64 && u64.get_acquire == 0_u64, "UInt64 add wraps at the word")
+check(u64.add_relaxed(0_u64) == 0_u64 && u64.add_acquire(0_u64) == 0_u64 && u64.add_release(0_u64) == 0_u64, "UInt64 add_*")
+check(u64.sub_acquire(0_u64) == 0_u64 && u64.sub_release(0_u64) == 0_u64 && u64.sub_acq_rel(0_u64) == 0_u64, "UInt64 sub_*")
+check(u64.swap_relaxed(1_u64) == 0_u64 && u64.swap_acquire(2_u64) == 1_u64 && u64.swap_release(3_u64) == 2_u64 && u64.swap_acq_rel(4_u64) == 3_u64, "UInt64 swap_*")
+u64.set_relaxed(5_u64)
+check(u64.get_relaxed == 5_u64, "UInt64 set_relaxed")
+u64.set_release(6_u64)
+check(u64.get == 6_u64, "UInt64 set_release")
+puts "  add, sub, swap, get and set at every ordering, on Int32, Int64, UInt8 and UInt64"
+
+# ---------------------------------------------------------------------------
+puts "== compare_and_set at each ordering"
+
+cas = Atomic(Int64).new(1_i64)
+r = cas.compare_and_set_relaxed(1_i64, 2_i64)
+check(r[0] == 1_i64 && r[1] && cas.get == 2_i64, "relaxed: exchanged when expected held")
+r = cas.compare_and_set_relaxed(1_i64, 3_i64)
+check(r[0] == 2_i64 && !r[1] && cas.get == 2_i64, "relaxed: refused when it did not")
+r = cas.compare_and_set_acquire(2_i64, 3_i64)
+check(r[0] == 2_i64 && r[1] && cas.get == 3_i64, "acquire: exchanged")
+r = cas.compare_and_set_acquire(9_i64, 4_i64)
+check(r[0] == 3_i64 && !r[1], "acquire: refused")
+r = cas.compare_and_set_release(3_i64, 4_i64)
+check(r[0] == 3_i64 && r[1] && cas.get == 4_i64, "release: exchanged")
+r = cas.compare_and_set_release(9_i64, 5_i64)
+check(r[0] == 4_i64 && !r[1], "release: refused")
+r = cas.compare_and_set_acq_rel(4_i64, 5_i64)
+check(r[0] == 4_i64 && r[1] && cas.get == 5_i64, "acq_rel: exchanged")
+r = cas.compare_and_set_acq_rel(9_i64, 6_i64)
+check(r[0] == 5_i64 && !r[1] && cas.get == 5_i64, "acq_rel: refused")
+
+cas32 = Atomic(Int32).new(1)
+check(cas32.compare_and_set_relaxed(1, 2)[1] && cas32.compare_and_set_acquire(2, 3)[1] && cas32.compare_and_set_release(3, 4)[1] && cas32.compare_and_set_acq_rel(4, 5)[1] && cas32.get == 5, "Int32 chain")
+cas8 = Atomic(UInt8).new(1_u8)
+check(cas8.compare_and_set_relaxed(1_u8, 2_u8)[1] && cas8.compare_and_set_acquire(2_u8, 3_u8)[1] && cas8.compare_and_set_release(3_u8, 4_u8)[1] && cas8.compare_and_set_acq_rel(4_u8, 5_u8)[1] && cas8.get == 5_u8, "UInt8 chain")
+cas64 = Atomic(UInt64).new(1_u64)
+check(cas64.compare_and_set_relaxed(1_u64, 2_u64)[1] && cas64.compare_and_set_acquire(2_u64, 3_u64)[1] && cas64.compare_and_set_release(3_u64, 4_u64)[1] && cas64.compare_and_set_acq_rel(4_u64, 5_u64)[1] && cas64.get == 5_u64, "UInt64 chain")
+puts "  exchanged when the word held expected, refused with the word when it did not, at all four orderings"
+
+# ---------------------------------------------------------------------------
+puts "== bitwise verbs"
+
+b = Atomic(Int32).new(0b1100)
+check(b.and(0b1010) == 0b1100 && b.get == 0b1000, "and")
+check(b.bitwise_or(0b0011) == 0b1000 && b.get == 0b1011, "bitwise_or")
+check(b.xor(0b0110) == 0b1011 && b.get == 0b1101, "xor")
+check(b.nand(0b0101) == 0b1101 && b.get == -6, "nand: ~(0b1101 & 0b0101) is -6")
+b64 = Atomic(Int64).new(-8_i64)
+check(b64.and(6_i64) == -8_i64 && b64.bitwise_or(1_i64) == 0_i64 && b64.xor(3_i64) == 1_i64 && b64.nand(2_i64) == 2_i64 && b64.get == -3_i64, "Int64 and/or/xor/nand")
+b8 = Atomic(UInt8).new(0xF0_u8)
+check(b8.and(0x3C_u8) == 0xF0_u8 && b8.bitwise_or(0x03_u8) == 0x30_u8 && b8.xor(0xFF_u8) == 0x33_u8 && b8.nand(0xFF_u8) == 0xCC_u8 && b8.get == 0x33_u8, "UInt8 and/or/xor/nand")
+bu = Atomic(UInt64).new(0xFF00_u64)
+check(bu.and(0x0FF0_u64) == 0xFF00_u64 && bu.bitwise_or(0x000F_u64) == 0x0F00_u64 && bu.xor(0x0F0F_u64) == 0x0F0F_u64 && bu.nand(0_u64) == 0_u64 && bu.get == 18446744073709551615_u64, "UInt64 and/or/xor/nand")
+
+m32 = Atomic(Int32).new(5)
+check(m32.max(-3) == 5 && m32.get == 5, "Int32 max keeps the larger, signed")
+check(m32.min(-3) == 5 && m32.get == -3, "Int32 min takes the smaller, signed")
+m64 = Atomic(Int64).new(-1_i64)
+check(m64.max(-2_i64) == -1_i64 && m64.get == -1_i64 && m64.min(-2_i64) == -1_i64 && m64.get == -2_i64, "Int64 max/min signed")
+check(m64.max(3_i64) == -2_i64 && m64.get == 3_i64, "Int64 max moves up")
+m8 = Atomic(UInt8).new(1_u8)
+check(m8.max(255_u8) == 1_u8 && m8.get == 255_u8, "UInt8 max is unsigned: 255 beats 1")
+check(m8.min(128_u8) == 255_u8 && m8.get == 128_u8, "UInt8 min is unsigned: 128 under 255")
+mu = Atomic(UInt64).new(1_u64)
+check(mu.max(18446744073709551615_u64) == 1_u64 && mu.get == 18446744073709551615_u64, "UInt64 max is unsigned: 2^64-1 beats 1")
+check(mu.min(2_u64) == 18446744073709551615_u64 && mu.get == 2_u64, "UInt64 min is unsigned")
+check(mu.min(9_u64) == 2_u64 && mu.get == 2_u64, "UInt64 min keeps the smaller")
+puts "  and, nand, bitwise_or, xor answer the word before; max/min are signed on IntN and unsigned on UIntN"
+
+# ---------------------------------------------------------------------------
+puts "== fences"
+Atomic.fence
+Atomic.fence_acquire
+Atomic.fence_release
+Atomic.fence_acq_rel
+puts "  fence, fence_acquire, fence_release and fence_acq_rel each emitted (the driver reads them off the IR)"
+
+# ---------------------------------------------------------------------------
+puts "== four threads counting"
+
+shared = Shared.new
+threads = Array(IyiThread).new
+t = 0
+while t < THREADS
+  threads << IyiThread.start do
+    n = 0
+    while n < PER_THREAD
+      shared.count.add_relaxed(1_i64)
+      shared.count.add_acq_rel(1_i64)
+      # A retry loop: the failed exchange hands back the word it saw.
+      seen = shared.count.get_relaxed
+      loop do
+        outcome = shared.count.compare_and_set_acq_rel(seen, seen + 1_i64)
+        break if outcome[1]
+        seen = outcome[0]
+      end
+      n += 1
+    end
+    nil
+  end
+  t += 1
+end
+threads.each { |th| th.join }
+expected = (THREADS * PER_THREAD * 3).to_i64
+check(shared.count.get == expected, "#{THREADS} threads x #{PER_THREAD} x 3 verbs: counted #{shared.count.get}, expected #{expected}")
+puts "  #{THREADS} threads, #{PER_THREAD} rounds each of add_relaxed, add_acq_rel and a compare_and_set_acq_rel loop: #{shared.count.get} of #{expected}, nothing lost"
+
+# ---------------------------------------------------------------------------
+puts "== release publishes, acquire sees"
+# The writer fills the payload with a relaxed store, then raises the flag
+# with a release store; the reader spins on an acquire load of the flag,
+# and the payload it then reads is whole. Fifty handoffs.
+handoffs = 0
+while handoffs < 50
+  box = Shared.new
+  writer = IyiThread.start do
+    box.payload.set_relaxed(0xDEADBEEF_u64 + handoffs.to_u64)
+    box.flag.set_release(1_u8)
+    nil
+  end
+  spins = 0_i64
+  while box.flag.get_acquire == 0_u8
+    spins += 1_i64
+  end
+  check(box.payload.get_relaxed == 0xDEADBEEF_u64 + handoffs.to_u64, "payload whole after the flag was seen (handoff #{handoffs})")
+  writer.join
+  handoffs += 1
+end
+puts "  50 handoffs: the payload was whole every time the acquire load saw the release store"
+
+puts "ALL CHECKS PASSED"

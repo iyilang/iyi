@@ -1,8 +1,8 @@
-# Big integer standard library exercise.
+# Big number standard library exercise.
 #
 #   ./bin/iyi run bench/std_big_exercise.iyi
 #
-# Exercises the entire BigInt surface provided by std/big:
+# Exercises the surface of std/big — BigInt, BigDecimal, BigRational:
 # 1. Construction and conversions (Int64, Int32, to_big, bases 2..36, hex/bin/oct prefixes, to_i64, to_i32).
 # 2. Basic arithmetic (+ - * // % **) and divmod.
 # 3. Division corner cases: divisor larger than dividend, exact division, division by one, negative operand signs.
@@ -12,11 +12,17 @@
 # 7. Modular exponentiation (pow_mod) via binary square-and-multiply.
 # 8. Algebraic identities sweep: distributive, division theorem, anti-commutativity over 5000 random pairs.
 # 9. Karatsuba crossover measurement and correctness.
+# 10. Hashing: values of any size hash, hash agrees with == (scales, unreduced fractions), Hash lookups.
+# 11. BigDecimal: exact + - *, / rounded half away from zero with exact quotients kept short, //, %,
+#     cmp, string round trips; every result is also printed as an `oracle` line for the driver to
+#     check against python3's decimal module.
+# 12. BigRational: reduction, sign, inverse, powers, + - * /, cmp; `oracle` lines for fractions.Fraction.
+# 13. Base round trips 2..36; `oracle` lines for int(digits, base).
 #
 # Every section prints a progress line and raises on mismatch.
 
 import std/big
-using std/big::{BigInt}
+using std/big::{BigInt, BigDecimal, BigRational}
 
 # 1. Construction and Integer Conversions
 raise "construct: zero" unless BigInt.zero.zero?
@@ -305,7 +311,7 @@ end
 
 puts "    algebraic identities: 5000 random pairs verified across all operations"
 
-# 10. Karatsuba Crossover Measurement
+# 9. Karatsuba Crossover Measurement
 # Verify Karatsuba threshold correctness
 k_test_a = prng.random_big(70)
 k_test_b = prng.random_big(70)
@@ -314,5 +320,153 @@ raise "karatsuba: product non-zero" if k_prod.zero?
 raise "karatsuba: exact division" unless (k_prod // k_test_a) == k_test_b
 
 puts "    karatsuba: crossover threshold 64 limbs (2048 bits) verified"
+
+# 10. Hashing: any size hashes, and hash agrees with ==
+two64 = BigInt.new("18446744073709551615")
+huge = BigInt.new("123456789012345678901234567890123456789012345678901234567890")
+raise "hash: two limbs" unless two64.hash == BigInt.new("0xffffffffffffffff").hash
+raise "hash: sixty digits" unless huge.hash == (huge + 1 - 1).hash
+raise "hash: product order" unless (two64 * huge).hash == (huge * two64).hash
+raise "hash: negative differs" unless huge.hash != (-huge).hash
+raise "hash: neighbour differs" unless huge.hash != (huge + 1).hash
+raise "hash: distinct" unless 1.to_big.hash != 2.to_big.hash && 0.to_big.hash != 1.to_big.hash
+raise "hash: zero" unless 0.to_big.hash == (huge - huge).hash
+raise "hash: key is hash" unless huge.hash_key == huge.hash
+int_table = Hash(BigInt, String).new
+int_table[two64] = "two64"
+int_table[huge] = "huge"
+int_table[-huge] = "-huge"
+raise "hash: lookup two64" unless int_table[BigInt.new("18446744073709551615")] == "two64"
+raise "hash: lookup huge" unless int_table[BigInt.new(huge.to_s)] == "huge"
+raise "hash: lookup negative" unless int_table[BigInt.new("-" + huge.to_s)] == "-huge"
+raise "hash: lookup miss" unless int_table[huge + 1]?.nil?
+
+d110 = BigDecimal.new("1.10")
+raise "hash: decimal scale agreement" unless d110 == BigDecimal.new("1.1") && d110.hash == BigDecimal.new("1.1").hash
+raise "hash: decimal many zeros" unless d110.hash == BigDecimal.new("1.100000").hash
+raise "hash: decimal exponent form" unless d110.hash == BigDecimal.new("11e-1").hash && d110 == BigDecimal.new("11e-1")
+raise "hash: decimal negative scale" unless BigDecimal.new("1e2").hash == BigDecimal.new("100").hash
+raise "hash: decimal distinct" unless d110.hash != BigDecimal.new("1.2").hash
+raise "hash: decimal zero" unless BigDecimal.new("0.000").hash == BigDecimal.zero.hash
+dec_table = Hash(BigDecimal, Int32).new
+dec_table[d110] = 1
+dec_table[BigDecimal.new("2.5")] = 2
+raise "hash: decimal lookup" unless dec_table[BigDecimal.new("1.1000")] == 1 && dec_table[BigDecimal.new("25e-1")] == 2
+raise "hash: decimal lookup miss" unless dec_table[BigDecimal.new("1.11")]?.nil?
+
+half = BigRational.new(1, 2)
+raise "hash: rational reduced" unless half.hash == BigRational.new(2, 4).hash && half == BigRational.new(2, 4)
+raise "hash: rational signs" unless half.hash == BigRational.new(-3, -6).hash
+raise "hash: rational distinct" unless half.hash != BigRational.new(1, 3).hash
+rat_table = Hash(BigRational, Int32).new
+rat_table[half] = 1
+raise "hash: rational lookup" unless rat_table[BigRational.new("50/100")] == 1
+
+puts "    hashing: two-limb and sixty-digit BigInt, BigDecimal across scales, BigRational reduced, Hash lookups verified"
+
+# 11. Decimal arithmetic: exact + - *, rounded /, and the oracle lines the
+# driver checks against python3's decimal module.
+raise "decimal: exact division is short" unless (BigDecimal.new("1") / BigDecimal.new("4")).to_s == "0.25"
+raise "decimal: exact integer quotient" unless (BigDecimal.new("6") / BigDecimal.new("3")).to_s == "2"
+raise "decimal: div rounds half away" unless (BigDecimal.new("2") / BigDecimal.new("3")).to_s == "0.66666666666666666667"
+raise "decimal: div rounds half away negative" unless (BigDecimal.new("-2") / BigDecimal.new("3")).to_s == "-0.66666666666666666667"
+raise "decimal: div keeps precision" unless (BigDecimal.new("1") / BigDecimal.new("3")).to_s == "0.33333333333333333333"
+raise "decimal: div precision 5" unless BigDecimal.new("1").div(BigDecimal.new("3"), 5).to_s == "0.33333"
+raise "decimal: div precision 0 half up" unless BigDecimal.new("5").div(BigDecimal.new("2"), 0).to_s == "3"
+raise "decimal: div precision 0 half down" unless BigDecimal.new("-5").div(BigDecimal.new("2"), 0).to_s == "-3"
+raise "decimal: div precision 40" unless BigDecimal.new("1").div(BigDecimal.new("7"), 40).to_s == "0.1428571428571428571428571428571428571429"
+raise "decimal: div by int" unless (BigDecimal.new("10") / 4).to_s == "2.5" && (BigDecimal.new("10") / 4_i64).to_s == "2.5"
+raise "decimal: zero prints 0" unless BigDecimal.new("0.00").to_s == "0" && (BigDecimal.new("1.0") - BigDecimal.new("1.0")).to_s == "0" && BigDecimal.zero.to_s == "0"
+raise "decimal: keeps written scale" unless (BigDecimal.new("1.10") + BigDecimal.new("2.20")).to_s == "3.30"
+raise "decimal: exponent forms" unless BigDecimal.new("1.5e3").to_s == "1500" && BigDecimal.new("123.456e-2").to_s == "1.23456"
+raise "decimal: to_big_i truncates" unless BigDecimal.new("-7.9").to_big_i == -7 && BigDecimal.new("7.9").to_i32 == 7
+raise "decimal: to_f64" unless BigDecimal.new("0.5").to_f64 == 0.5
+raise "decimal: int overloads" unless (BigDecimal.new("1.5") + 1).to_s == "2.5" && (BigDecimal.new("1.5") - 1_i64).to_s == "0.5" && (BigDecimal.new("1.5") * 2).to_s == "3.0"
+raise "decimal: rational to decimal" unless BigRational.new(1, 4).to_big_d.to_s == "0.25"
+
+dec_pairs = [
+  ["1.10", "1.1"], ["0.1", "0.2"], ["123456789.123456789", "987654321.987654321"],
+  ["-1.5", "2.25"], ["1", "3"], ["2", "3"], ["-2", "3"], ["2", "-3"], ["1", "4"], ["6", "3"],
+  ["100", "10"], ["1.00", "2"], ["12345678901234567890.12345", "0.0001"],
+  ["-0.001", "0.001"], ["1e5", "2.5"], ["0", "7.5"], ["99999999999999999999.99999999999999999999", "0.00000000000000000001"],
+  ["-8", "3"], ["8", "-3"], ["-8", "-3"], ["1", "0"], ["7", "1e-3"],
+]
+dec_pairs.each do |pair|
+  da = BigDecimal.new(pair[0])
+  db = BigDecimal.new(pair[1])
+  puts "oracle dec: #{pair[0]} + #{pair[1]} = #{da + db}"
+  puts "oracle dec: #{pair[0]} - #{pair[1]} = #{da - db}"
+  puts "oracle dec: #{pair[0]} * #{pair[1]} = #{da * db}"
+  unless db.zero?
+    puts "oracle dec: #{pair[0]} / #{pair[1]} = #{da / db}"
+    puts "oracle dec: #{pair[0]} // #{pair[1]} = #{da // db}"
+    puts "oracle dec: #{pair[0]} % #{pair[1]} = #{da % db}"
+  end
+  puts "oracle cmp: #{pair[0]} <=> #{pair[1]} = #{da <=> db}"
+  raise "decimal: round trip #{pair[0]}" unless BigDecimal.new(da.to_s) == da && BigDecimal.new(da.to_s).hash == da.hash
+  raise "decimal: round trip #{pair[1]}" unless BigDecimal.new(db.to_s) == db
+  raise "decimal: order agrees with cmp" unless (da < db) == ((da <=> db) < 0) && (da == db) == ((da <=> db) == 0)
+end
+plain = ["1.10", "-0.001", "123456789.123456789", "12345.678901234567890123456789", "42"]
+plain.each do |s|
+  raise "decimal: to_s byte for byte #{s}" unless BigDecimal.new(s).to_s == s
+end
+
+puts "    decimal arithmetic: exact + - *, rounded and exact /, //, %, cmp, round trips verified"
+
+# 12. Rational arithmetic: every result reduced, oracle lines for fractions.Fraction
+r64 = BigRational.new(6, 4)
+raise "rational: reduced" unless r64.numerator == 3 && r64.denominator == 2
+raise "rational: sign in numerator" unless BigRational.new(3, -9).numerator == -1 && BigRational.new(3, -9).denominator == 3
+raise "rational: both negative" unless BigRational.new(-3, -9).to_s == "1/3"
+raise "rational: integer prints plain" unless BigRational.new("10/5").to_s == "2" && BigRational.new(0, 5).to_s == "0"
+raise "rational: zero has denominator one" unless BigRational.new(0, 5).denominator == 1
+raise "rational: inverse" unless BigRational.new(2, 3).inv.to_s == "3/2"
+raise "rational: negative power" unless (BigRational.new(2, 3) ** -2).to_s == "9/4"
+raise "rational: int overloads" unless (BigRational.new(1, 2) + 1).to_s == "3/2" && (BigRational.new(1, 2) * 4_i64).to_s == "2" && (BigRational.new(1, 2) / 2.to_big).to_s == "1/4"
+raise "rational: to_big_i truncates" unless BigRational.new(-7, 2).to_big_i == -3
+raise "rational: to_f64" unless BigRational.new(1, 4).to_f64 == 0.25
+
+rat_pairs = [
+  ["6/4", "1/6"], ["-3/-9", "2/3"], ["3/-9", "1/2"], ["1/3", "1/6"], ["2/3", "4/9"],
+  ["123456789/987654321", "987654321/123456789"], ["0/5", "7/3"], ["-7/2", "7/2"],
+  ["18446744073709551615/3", "3/18446744073709551615"], ["1/1000000000000000000000", "1000000000000000000000/1"],
+  ["-1/2", "-1/3"], ["5/1", "0/1"],
+]
+rat_pairs.each do |pair|
+  ra_r = BigRational.new(pair[0])
+  rb_r = BigRational.new(pair[1])
+  puts "oracle rat: #{pair[0]} + #{pair[1]} = #{ra_r + rb_r}"
+  puts "oracle rat: #{pair[0]} - #{pair[1]} = #{ra_r - rb_r}"
+  puts "oracle rat: #{pair[0]} * #{pair[1]} = #{ra_r * rb_r}"
+  puts "oracle rat: #{pair[0]} / #{pair[1]} = #{ra_r / rb_r}" unless rb_r.zero?
+  puts "oracle rat: #{pair[0]} ** 3 = #{ra_r ** 3}"
+  puts "oracle rat: #{pair[0]} ** -2 = #{ra_r ** -2}" unless ra_r.zero?
+  puts "oracle rat: #{pair[0]} <=> #{pair[1]} = #{ra_r <=> rb_r}"
+  raise "rational: round trip #{pair[0]}" unless BigRational.new(ra_r.to_s) == ra_r
+  raise "rational: denominator positive" unless ra_r.denominator.positive? && rb_r.denominator.positive?
+  raise "rational: reduced result" unless (ra_r + rb_r).numerator.gcd((ra_r + rb_r).denominator) == 1
+end
+
+puts "    rational arithmetic: reduction, sign, inverse, powers, + - * /, cmp, round trips verified"
+
+# 13. Base round trips 2..36, with oracle lines python3 checks with int(digits, base)
+base_values = [huge, -BigInt.new("98765432109876543210"), 255.to_big, 36.to_big, 35.to_big, 1.to_big, 0.to_big, (-1).to_big, two64]
+base = 2
+while base <= 36
+  base_values.each do |v|
+    digits = v.to_s(base)
+    raise "base: round trip #{base}" unless BigInt.new(digits, base) == v
+  end
+  puts "oracle base: #{base} #{huge.to_s(base)} = #{huge}"
+  puts "oracle base: #{base} #{(-two64).to_s(base)} = #{-two64}"
+  base = base + 1
+end
+raise "base: 36 digits" unless 35.to_big.to_s(36) == "z" && 36.to_big.to_s(36) == "10"
+raise "base: 2 digits" unless 5.to_big.to_s(2) == "101" && (-5).to_big.to_s(2) == "-101"
+raise "base: 16 pads limbs" unless two64.to_s(16) == "ffffffffffffffff" && (two64 + 1).to_s(16) == "10000000000000000"
+raise "base: 10 pads chunks" unless BigInt.new("1000000000000000000").to_s == "1000000000000000000"
+
+puts "    base round trips: every base 2..36 parses what it printed, digits oracle-checked"
 
 puts "all std/big checks passed"

@@ -1,0 +1,10 @@
+Merhaba <%= name %>!
+<%- if show -%>
+  shown: <%= 1 + 2 %> "quoted" \ #{raw} <tag>
+<%- end -%>
+<%# a comment, printed nowhere -%>
+<%% not a tag %>
+<% items.each do |item| -%>
+  - <%= item %> (<%= item.bytesize %> bytes)
+<% end -%>
+☕ <%= items.size %> çeşit

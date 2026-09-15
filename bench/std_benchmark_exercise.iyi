@@ -1,0 +1,32 @@
+# Exercises `std/benchmark`: wall-clock measure of a block.
+#
+# Run via:
+#     ./bin/iyi run bench/std_benchmark_exercise.iyi
+
+module bench/std_benchmark_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/benchmark
+using std/benchmark::{Benchmark}
+
+puts "== measure"
+tms = Benchmark.measure("spin") do
+  i = 0
+  while i < 1000
+    i += 1
+  end
+end
+assert_str "spin", tms.label, "label"
+assert_true tms.real >= 0.0, "real"
+span = Benchmark.realtime { 1 }
+assert_true span.total_seconds >= 0.0, "realtime"
+puts "  measure label and non-negative real time"
+
+puts "\nALL CHECKS PASSED"

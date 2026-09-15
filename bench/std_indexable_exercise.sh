@@ -57,13 +57,14 @@ echo
 echo "== every section reported"
 for section in "array surface: all passed" \
                "minimal sequence surface: all passed" \
-               "empty collection handling: all passed"; do
+               "empty collection handling: all passed" \
+               "mutable surface: all passed"; do
   if ! grep -q "$section" "$WORK/exercise.out" 2>/dev/null; then
     echo "  MISSING: $section"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  array surface, minimal sequence, and empty collection all reported"
+[ "$status" -eq 0 ] && echo "  array surface, minimal sequence, empty collection and mutable surface all reported"
 
 echo
 echo "== the same program with release optimisation"
@@ -109,11 +110,18 @@ run_probe() {
   return 0
 }
 
-run_probe "positive index out of range" probe_positive_out_of_range "out of range"
-run_probe "negative index out of range" probe_negative_out_of_range "out of range"
-run_probe "empty collection first" probe_empty_first "empty"
-run_probe "empty collection last" probe_empty_last "empty"
+run_probe "positive index out of range" probe_positive_out_of_range "index 10 out of range for 5 elements"
+run_probe "negative index out of range" probe_negative_out_of_range "index -10 out of range for 5 elements"
+run_probe "trait index out of range" probe_trait_out_of_range "index 7 out of range for 5 elements"
+run_probe "empty collection first" probe_empty_first "first of an empty collection"
+run_probe "empty collection last" probe_empty_last "last of an empty collection"
 run_probe "empty collection sample" probe_empty_sample "empty"
+run_probe "update out of range" probe_update_out_of_range "index 5 out of range for 5 elements"
+run_probe "swap out of range" probe_swap_out_of_range "index -6 out of range for 5 elements"
+run_probe "fill negative count" probe_fill_negative_count "negative count: -1"
+run_probe "fill past the end" probe_fill_past_end "index 6 out of range for 5 elements"
+run_probe "insert out of range" probe_insert_out_of_range "index 2 out of range for 1 elements"
+run_probe "delete_at out of range" probe_delete_at_out_of_range "index -2 out of range for 1 elements"
 
 echo
 echo "== failure proofs: checks fail when Indexable is broken"
@@ -156,6 +164,14 @@ prove_fails "bsearch binary search" broken_bsearch "assertion failed: bsearch fo
 # 4. Break values_at: skip last element
 prove_fails "values_at lookup" broken_values "expected .10,50,30., got" \
   's/while i < indexes.size/while i < indexes.size - 1/'
+
+# 5. Break rotate_in_place: the middle reversal skipped leaves the copy wrong
+prove_fails "rotate_in_place reversal" broken_rotate "expected .3,2,10,101,4., got" \
+  's/reverse_between(k, size - 1)/# middle reversal removed/'
+
+# 6. Break delete_if: keep everything
+prove_fails "delete_if compaction" broken_delete_if "expected .1,3,5,99., got" \
+  's/unsafe_set_size(kept)/unsafe_set_size(size)/'
 
 echo
 if [ "$status" -eq 0 ]; then

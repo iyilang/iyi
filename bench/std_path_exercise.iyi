@@ -1,0 +1,178 @@
+# Exercises `std/path`: `Path` on POSIX and Windows names.
+#
+# Proves:
+#   * normalize, dirname, basename, extension, stem, parts, parents on a
+#     corpus, printed as `oracle` lines the shell script replays through
+#     python3's posixpath.
+#   * join and `/`, with an anchored right-hand side winning.
+#   * relative_to on a corpus (replayed through posixpath.relpath), and
+#     the two refusals: different anchors, a base that climbs through `..`.
+#   * expand under an explicit base and under `PWD`, `home:` under `HOME`.
+#   * Windows kind: drive, root, UNC share, rooted-but-not-absolute,
+#     case-insensitive equality and hashing.
+#   * Cmp: sorted, <, ==.
+#
+# Run via:
+#     ./bin/iyi run bench/std_path_exercise.iyi
+
+module bench/std_path_exercise
+
+import std/path
+using std/path::{Path}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg} (expected #{expected.inspect}, got #{actual.inspect})" if expected != actual
+end
+
+# ---------------------------------------------------------------------------
+# Lexical corpus, checked here against known values and replayed by the
+# script through python3 (posixpath.normpath / relpath).
+# ---------------------------------------------------------------------------
+
+puts "== normalize corpus"
+corpus = [
+  "a/b/../c/./d/", "/a/../../b", "../../a", "a/../..", "", ".", "/", "a", "/a",
+  "a/./b", "./a", "a/", "a//b///c", "/a/b/c/..", "..", "../..", "a/b/../../..",
+  "/..", "/./", "x/y/z/../../w", "./././a", "a/b/.", "/a/./b/../c/",
+]
+corpus.each do |name|
+  n = Path.posix(name).normalize.to_s
+  puts "oracle normpath\t#{name}\t#{n}"
+end
+assert_str("a/c/d", Path.posix("a/b/../c/./d/").normalize.to_s, "normalize folds . and ..")
+assert_str("/b", Path.posix("/a/../../b").normalize.to_s, ".. under the root is dropped")
+assert_str("../../a", Path.posix("../../a").normalize.to_s, "leading .. of a relative path stays")
+assert_str("..", Path.posix("a/../..").normalize.to_s, "a/../.. is ..")
+assert_str(".", Path.posix("").normalize.to_s, "empty normalizes to .")
+assert_str("/a/b", Path.posix("//a//b//").normalize.to_s, "repeated separators collapse")
+puts "  #{corpus.size} names normalized"
+
+puts "\n== components"
+rows = [
+  {"/a/b/", "/a", "b", "", "b"},
+  {"/", "/", "/", "", "/"},
+  {"a", ".", "a", "", "a"},
+  {"/a", "/", "a", "", "a"},
+  {"a.tar.gz", ".", "a.tar.gz", ".gz", "a.tar"},
+  {".bashrc", ".", ".bashrc", "", ".bashrc"},
+  {"foo.", ".", "foo.", "", "foo."},
+  {"/x/y.txt", "/x", "y.txt", ".txt", "y"},
+  {"", ".", "", "", ""},
+  {"a/b/c.d.e", "a/b", "c.d.e", ".e", "c.d"},
+  {"/a//b//", "/a", "b", "", "b"},
+]
+rows.each do |row|
+  p = Path.posix(row[0])
+  assert_str(row[1], p.dirname, "dirname of #{row[0].inspect}")
+  assert_str(row[2], p.basename, "basename of #{row[0].inspect}")
+  assert_str(row[3], p.extension, "extension of #{row[0].inspect}")
+  assert_str(row[4], p.stem, "stem of #{row[0].inspect}")
+  puts "oracle dirname\t#{row[0]}\t#{p.dirname}"
+end
+assert_str("a", Path.posix("a.txt").basename(".txt"), "basename strips a suffix")
+assert_str(".txt", Path.posix(".txt").basename(".txt"), "a suffix that is the whole name stays")
+assert_str("/|a|b|c", Path.posix("/a//b/c/").parts.join("|"), "parts with the root first")
+assert_str("a|b", Path.posix("a/b").parts.join("|"), "parts of a relative path")
+assert_str("/,/a,/a/b", Path.posix("/a/b/c").parents.map { |p| p.to_s }.join(","), "parents of an absolute path, outermost first")
+assert_str(".,a,a/b", Path.posix("a/b/c").parents.map { |p| p.to_s }.join(","), "parents of a relative path start at .")
+assert_str("", Path.posix("/").parents.map { |p| p.to_s }.join(","), "the root has no parent")
+assert_str("/a", Path.posix("/a/b").parent.to_s, "parent")
+seen = 0
+Path.posix("/a/b").each_part { |part| seen += 1 }
+assert_true(seen == 3, "each_part yields every part")
+puts "  #{rows.size} rows of dirname/basename/extension/stem, parts and parents agree"
+
+puts "\n== join"
+joins = [
+  {"a", "b", "a/b"}, {"a/", "b", "a/b"}, {"a", "/b", "/b"}, {"a", "", "a"},
+  {"", "b", "b"}, {"/", "b", "/b"}, {"a/b", "../c", "a/b/../c"},
+]
+joins.each do |row|
+  assert_str(row[2], Path.posix(row[0]).join(row[1]).to_s, "join #{row[0].inspect} #{row[1].inspect}")
+  puts "oracle join\t#{row[0]}\t#{row[1]}\t#{row[2]}"
+end
+assert_str("a/b/c", Path["a", "b", "c"].to_s, "Path[a, b, c]")
+assert_str("usr/local/bin", (Path.posix("usr") / "local" / Path.posix("bin")).to_s, "/ joins")
+assert_str("/a/c", Path.posix("/a/b").sibling("c").to_s, "sibling")
+assert_str("x/y/z", Path.posix("x").join(["y", "z"]).to_s, "join an array")
+puts "  #{joins.size} joins, Path[], /, sibling verified"
+
+puts "\n== relative_to"
+rels = [
+  {"/a/b/c", "/a/d", "../b/c"}, {"/a/b", "/a/b", "."}, {"a/b", "a", "b"},
+  {"a", "a/b/c", "../.."}, {"/a/b/c", "/", "a/b/c"}, {"/", "/a/b", "../.."},
+  {"a/b/../c", "a", "c"}, {"x/y", "z/w", "../../x/y"},
+]
+rels.each do |row|
+  assert_str(row[2], Path.posix(row[0]).relative_to(row[1]).to_s, "relative_to #{row[0].inspect} #{row[1].inspect}")
+  puts "oracle relpath\t#{row[0]}\t#{row[1]}\t#{row[2]}"
+end
+assert_true(Path.posix("/a").relative_to?("b").nil?, "absolute against relative has no relative path")
+assert_true(Path.posix("a/b").relative_to?("../c").nil?, "a base that climbs through .. is refused")
+assert_true(Path.posix("a/b").relative_to?(Path.posix("c/../../d")).nil?, "a base that normalizes into .. is refused")
+assert_true(Path.windows("C:\\a").relative_to?("D:\\a").nil?, "different drives have no relative path")
+puts "  #{rels.size} relative paths and 4 refusals verified"
+
+puts "\n== expand"
+assert_str("/x/b", Path.posix("a/../b").expand("/x").to_s, "expand under a base")
+assert_str("/x/b", Path.posix("a/../b").expand(Path.posix("/x")).to_s, "expand under a Path base")
+assert_str("/a/b", Path.posix("/a/./b").expand("/ignored").to_s, "an absolute path ignores the base")
+home = Program.env("HOME")
+raise "HOME is not set" if home.nil?
+pwd = Program.env("PWD")
+raise "PWD is not set" if pwd.nil?
+assert_str(home + "/x", Path.posix("~/x").expand(home: true).to_s, "~ expands from HOME")
+assert_str(home, Path.posix("~").expand(home: true).to_s, "~ alone is HOME")
+assert_str("/cwd/~/x", Path.posix("~/x").expand("/cwd").to_s, "~ is a name unless home: true")
+assert_str(Path.posix(pwd).join("z").normalize.to_s, Path.posix("z").expand.to_s, "no base reads PWD")
+puts "  base, Path base, absolute, ~, PWD verified"
+
+puts "\n== windows kind"
+w = Path.windows("C:\\a\\..\\b")
+assert_str("C:\\b", w.normalize.to_s, "drive path normalizes")
+assert_str("C:", w.drive.to_s, "drive")
+assert_str("\\", w.root.to_s, "root")
+assert_str("C:\\", w.anchor.to_s, "anchor")
+assert_true(Path.windows("C:\\a").absolute?, "C:\\a is absolute")
+assert_true(!Path.windows("C:a").absolute?, "C:a is drive-relative, not absolute")
+assert_true(!Path.windows("\\a").absolute?, "\\a is rooted, not absolute")
+assert_str("\\", Path.windows("\\a").root.to_s, "\\a has a root and no drive")
+assert_true(Path.windows("\\a").drive.nil?, "\\a has no drive")
+unc = Path.windows("\\\\server\\share\\x\\y")
+assert_str("\\\\server\\share", unc.drive.to_s, "UNC share is the drive")
+assert_str("\\", unc.root.to_s, "UNC root")
+assert_true(unc.absolute?, "UNC path with a root is absolute")
+assert_true(!Path.windows("\\\\server\\share").absolute?, "a bare UNC share has no root")
+assert_str("\\\\server\\share\\|x|y", unc.parts.join("|"), "UNC parts")
+assert_str("\\\\server\\share\\x", unc.dirname, "UNC dirname")
+assert_str("C:\\", Path.windows("C:\\a").dirname, "dirname under a drive root")
+assert_str("C:..", Path.windows("C:a\\..\\..").normalize.to_s, "drive-relative .. stays")
+assert_str("C:\\a", Path.windows("C:\\..\\a").normalize.to_s, ".. under a drive root is dropped")
+assert_str("a\\b", Path.windows("a").join("b").to_s, "windows join")
+assert_str("a/b", Path.windows("a/b").to_s, "/ is a separator on windows too")
+assert_str("x|y", Path.windows("x/y").parts.join("|"), "/ splits windows parts")
+assert_str("C:/a", Path.windows("C:\\a").to_posix.to_s, "to_posix turns \\ into /")
+assert_str("/a/b", Path.posix("/a/b").to_windows.to_s, "to_windows keeps the name")
+assert_true(Path.posix("/a/b").to_windows.windows?, "to_windows changes the kind")
+assert_true(Path.windows("C:\\A") == Path.windows("c:\\a"), "windows names fold case")
+assert_true(Path.posix("/a") != Path.windows("/a"), "kinds differ")
+h = Hash(Path, Int32).new
+h[Path.windows("C:\\A")] = 1
+assert_true(h[Path.windows("c:\\a")]? == 1, "hash folds case on windows")
+puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
+
+puts "\n== path comparison via Cmp"
+assert_true(Path.posix("a") < Path.posix("b"), "Path <")
+assert_true(Path.posix("b") > Path.posix("a"), "Path >")
+assert_str("a,b,c", [Path.posix("c"), Path.posix("a"), Path.posix("b")].sorted.map { |p| p.to_s }.join(","), "sorted")
+assert_true((Path.posix("a") <=> Path.posix("a")) == 0, "<=> equal")
+assert_str("Path[\"a\"]", Path.posix("a").inspect, "inspect")
+assert_true(Path.posix("").empty?, "empty?")
+assert_true(Path.new("x").native?, "Path.new is native")
+puts "  <, >, <=>, sorted, inspect verified"
+
+puts "\nALL CHECKS PASSED"

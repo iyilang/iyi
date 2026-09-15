@@ -1,0 +1,29 @@
+# Exercises `std/static_array`: fixed-size stack array new, size, index.
+#
+# Run via:
+#     ./bin/iyi run bench/std_static_array_exercise.iyi
+
+module bench/std_static_array_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/static_array
+
+puts "== new"
+a = StaticArray(Int32, 3).new(9)
+assert_true a.size == 3, "size"
+assert_true a[0] == 9 && a[2] == 9, "filled"
+puts "  three 9s"
+
+puts "\n== index"
+a[1] = 4
+assert_true a[1] == 4, "put"
+puts "  put"
+
+puts "\nALL CHECKS PASSED"

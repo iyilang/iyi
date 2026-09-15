@@ -1,0 +1,105 @@
+# Exercises `std/enum`: the rest of `Enum`, added to the prelude's.
+#
+# Proves:
+#   * Every conversion the value has answers the member's value in that type.
+#   * `+`/`-` step by value, `^` takes the bits in exactly one, `<=>`
+#     orders by value, `clone` is the same member.
+#   * `from_value`/`parse` answer what their nil halves answer, and their
+#     failure is a panic that names the value or the text (the driver runs
+#     those).
+#   * `valid?` and `each` treat a flags enum as the prelude does: `each`
+#     walks `values` (no None, no All); `valid?` accepts a member or None,
+#     refuses a combination and All.
+#   * `to_s(io)` / `inspect(io)` write what `to_s` / `inspect` answer.
+#
+# bench/std_enum_exercise.sh drives it and breaks copies of the module to
+# prove the checks can fail.
+#
+#     ./bin/iyi run bench/std_enum_exercise.iyi
+
+module bench/std_enum_exercise
+
+import std/enum
+
+def check(cond : Bool, what : String) : Nil
+  raise "ASSERTION FAILED: #{what}" unless cond
+end
+
+enum Level
+  Debug
+  Info
+  Warn
+  Error
+end
+
+@[Flags]
+enum Mode
+  Read
+  Write
+  Append
+end
+
+# ---------------------------------------------------------------------------
+puts "== conversions"
+w = Level::Warn
+check(w.to_i == 2 && w.to_i32 == 2 && w.to_i64 == 2_i64, "signed conversions of Warn are 2")
+check(w.to_u8 == 2_u8 && w.to_u64 == 2_u64, "unsigned conversions of Warn are 2")
+check(w.to_f64 == 2.0, "to_f64 of Warn is 2.0")
+check(Level::Debug.to_i == 0 && Level::Error.to_u64 == 3_u64, "Debug is 0, Error is 3")
+check((Mode::Read | Mode::Append).to_i == 5, "Read|Append converts to 5")
+puts "  to_i, to_i32, to_i64, to_u8, to_u64 and to_f64 answer the value"
+
+# ---------------------------------------------------------------------------
+puts "== arithmetic and order"
+check(Level::Info + 1 == Level::Warn, "Info + 1 is Warn")
+check(Level::Warn - 2 == Level::Debug, "Warn - 2 is Debug")
+check((Level::Error + 3).value == 6, "Error + 3 names no member and keeps the value 6")
+check((Mode::Read | Mode::Write) ^ Mode::Write == Mode::Read, "(Read|Write) ^ Write is Read")
+check(Mode::Read ^ Mode::Append == (Mode::Read | Mode::Append), "Read ^ Append is Read|Append")
+check((Level::Debug <=> Level::Info) == -1 && (Level::Info <=> Level::Info) == 0 && (Level::Error <=> Level::Warn) == 1, "<=> orders by value")
+check(Level::Info.clone == Level::Info, "clone is the same member")
+puts "  + and - step by value, ^ takes the bits in one, <=> is -1/0/1, clone is itself"
+
+# ---------------------------------------------------------------------------
+puts "== from_value and parse"
+check(Level.from_value(2) == Level::Warn, "from_value(2) is Warn")
+check(Level.from_value(0_i64) == Level::Debug, "from_value(0_i64) is Debug")
+check(Level.parse("warn") == Level::Warn && Level.parse("WARN") == Level::Warn && Level.parse("Warn") == Level::Warn, "parse is lenient about case")
+check(Mode.from_value(4) == Mode::Append, "flags from_value(4) is Append")
+check(Mode.parse("write") == Mode::Write, "flags parse")
+puts "  from_value and parse answer the member; the driver proves their refusals"
+
+# ---------------------------------------------------------------------------
+puts "== flags: valid? and each agree with the prelude"
+check(Level.valid?(Level::Warn) && !Level.valid?(Level.new(9)), "plain: a member is valid, 9 is not")
+check(Mode.valid?(Mode::Read) && Mode.valid?(Mode::Append), "flags: a single member is valid")
+check(Mode.valid?(Mode::None), "flags: None is valid, as from_value? says")
+check(!Mode.valid?(Mode::Read | Mode::Write), "flags: a combination is not a member")
+check(!Mode.valid?(Mode::All), "flags: All is not a member")
+check(Mode.from_value?(Mode::All.value).nil? && Mode.from_value?(0).to_s == "None", "the prelude's from_value? says the same")
+check((Mode::Read | Mode::Write).includes?(Mode::Write), "includes? is the question for a bit")
+
+seen = [] of String
+Level.each { |m| seen << m.to_s }
+check(seen == ["Debug", "Info", "Warn", "Error"], "plain each walks every member in order (#{seen})")
+seen = [] of String
+Mode.each { |m| seen << m.to_s }
+check(seen == ["Read", "Write", "Append"], "flags each walks the members, not None or All (#{seen})")
+check(seen == Mode.names, "each agrees with names")
+puts "  valid? = from_value? as a Bool; each walks values; None/All are the compiler's, not members"
+
+# ---------------------------------------------------------------------------
+puts "== io spellings"
+# Written straight to STDOUT on one line; the driver requires the line.
+print "  io: "
+Level::Warn.to_s(STDOUT)
+print "|"
+Mode::None.inspect(STDOUT)
+print "|"
+(Mode::Read | Mode::Append).to_s(STDOUT)
+print "|"
+Level.new(9).inspect(STDOUT)
+print "\n"
+puts "  to_s(io) and inspect(io) write what to_s and inspect answer"
+
+puts "ALL CHECKS PASSED"

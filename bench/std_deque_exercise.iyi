@@ -1,0 +1,205 @@
+# The ring buffer of `std/deque`, exercised and proven.
+#
+#     ./bin/iyi run bench/std_deque_exercise.iyi
+#
+# Two parts. The first asserts, on deques a person can read, the ends, the
+# indices, the wraparound, growth while wrapped, rotation, insertion and
+# deletion on both sides of the middle, the trait surface, and that a
+# vacated slot is zeroed. The second drives 3,000 operations chosen by a
+# fixed linear congruential generator and prints the deque after each
+# hundred; the gate script diffs those lines against python3 driving its
+# `collections.deque` with the same choices.
+
+module bench/std_deque_exercise
+
+import std/deque
+using std/deque::{Deque}
+import std/enumerable
+using std/enumerable::{Enumerable}
+
+def assert_true(label : String, condition : Bool) : Nil
+  raise "assertion failed for #{label}: expected true, got false" unless condition
+end
+
+def assert_equal(label : String, actual : String, expected : String) : Nil
+  raise "assertion failed for #{label}: expected #{expected}, got #{actual}" if actual != expected
+end
+
+# ---- 1. By hand -------------------------------------------------------------
+
+puts "deque: ends"
+d = Deque(Int32).new
+assert_true("empty", d.empty? && d.size == 0 && d.capacity == 0)
+d.push(1).push(2) << 3
+assert_equal("push", d.to_s, "Deque{1, 2, 3}")
+d.unshift(0)
+assert_equal("unshift", d.to_s, "Deque{0, 1, 2, 3}")
+assert_equal("first last", d.first.to_s + " " + d.last.to_s, "0 3")
+assert_equal("pop", d.pop.to_s, "3")
+assert_equal("shift", d.shift.to_s, "0")
+assert_equal("after pop and shift", d.to_s, "Deque{1, 2}")
+assert_equal("pop?", d.pop?.to_s, "2")
+assert_equal("shift?", d.shift?.to_s, "1")
+assert_true("pop? empty", d.pop?.nil? && d.shift?.nil? && d.first?.nil? && d.last?.nil?)
+d.concat([1, 2, 3, 4, 5])
+d.pop(2)
+assert_equal("pop(n)", d.to_s, "Deque{1, 2, 3}")
+d.shift(1)
+assert_equal("shift(n)", d.to_s, "Deque{2, 3}")
+d.pop(10)
+assert_true("pop(n) past the end empties", d.empty?)
+
+puts "deque: indices"
+d = Deque(Int32).new([10, 20, 30, 40])
+assert_equal("[]", d[0].to_s + " " + d[3].to_s + " " + d[-1].to_s + " " + d[-4].to_s, "10 40 40 10")
+assert_true("[]?", d[4]?.nil? && d[-5]?.nil? && d[2]? == 30)
+d[1] = 21
+d[-1] = 41
+assert_equal("[]=", d.to_s, "Deque{10, 21, 30, 41}")
+assert_equal("index", d.index(30).to_s, "2")
+assert_true("includes?", d.includes?(41) && !d.includes?(40))
+
+puts "deque: wraparound and growth"
+w = Deque(Int32).new(4)
+w.push(1).push(2).push(3).push(4)
+assert_equal("full at capacity", w.to_s + " " + w.capacity.to_s, "Deque{1, 2, 3, 4} 4")
+w.shift
+w.shift
+w.push(5)
+w.push(6)
+assert_equal("wrapped", w.to_s + " " + w.capacity.to_s, "Deque{3, 4, 5, 6} 4")
+assert_equal("wrapped indices", w[0].to_s + " " + w[-1].to_s, "3 6")
+w.push(7)
+assert_equal("grown while wrapped", w.to_s + " " + w.capacity.to_s, "Deque{3, 4, 5, 6, 7} 8")
+w.unshift(2)
+w.unshift(1)
+w.unshift(0)
+assert_equal("unshift wraps at the front", w.to_s + " " + w.capacity.to_s, "Deque{0, 1, 2, 3, 4, 5, 6, 7} 8")
+w.unshift(-1)
+assert_equal("grown from the front", w.to_s + " " + w.capacity.to_s, "Deque{-1, 0, 1, 2, 3, 4, 5, 6, 7} 16")
+# The other growth path: the head run shorter than the wrapped tail.
+h = Deque(Int32).new(4)
+h.push(1).push(2).push(3).push(4)
+h.shift(3)
+h.push(5).push(6).push(7)
+assert_equal("head shorter than tail", h.to_s, "Deque{4, 5, 6, 7}")
+h.push(8)
+assert_equal("grown with the head moved", h.to_s + " " + h.capacity.to_s, "Deque{4, 5, 6, 7, 8} 8")
+assert_equal("sized constructor", Deque(Int32).new(3, 9).to_s, "Deque{9, 9, 9}")
+assert_equal("block constructor", Deque(Int32).new(3) { |i| i * i }.to_s, "Deque{0, 1, 4}")
+
+puts "deque: rotation"
+r = Deque(Int32).new([1, 2, 3, 4, 5])
+r.rotate_in_place
+assert_equal("rotate_in_place", r.to_s, "Deque{2, 3, 4, 5, 1}")
+r.rotate_in_place(-2)
+assert_equal("rotate_in_place negative", r.to_s, "Deque{5, 1, 2, 3, 4}")
+r.rotate_in_place(5)
+assert_equal("rotate_in_place by size", r.to_s, "Deque{5, 1, 2, 3, 4}")
+r.rotate_in_place(3)
+assert_equal("rotate_in_place the long way", r.to_s, "Deque{3, 4, 5, 1, 2}")
+assert_equal("rotated copy", r.rotated(1).to_s + " " + r.to_s, "Deque{4, 5, 1, 2, 3} Deque{3, 4, 5, 1, 2}")
+r.pop
+r.rotate_in_place(1)
+assert_equal("rotate with room", r.to_s, "Deque{4, 5, 1, 3}")
+r.rotate_in_place(3)
+assert_equal("rotate with room, the long way", r.to_s, "Deque{3, 4, 5, 1}")
+
+puts "deque: insert and delete"
+m = Deque(Int32).new([1, 2, 3, 4, 5, 6])
+m.insert(1, 10)
+assert_equal("insert near the front", m.to_s, "Deque{1, 10, 2, 3, 4, 5, 6}")
+m.insert(6, 60)
+assert_equal("insert near the back", m.to_s, "Deque{1, 10, 2, 3, 4, 5, 60, 6}")
+m.insert(0, 0)
+m.insert(9, 99)
+m.insert(-1, 100)
+assert_equal("insert at the ends", m.to_s, "Deque{0, 1, 10, 2, 3, 4, 5, 60, 6, 99, 100}")
+assert_equal("delete_at near the front", m.delete_at(2).to_s + " " + m.to_s, "10 Deque{0, 1, 2, 3, 4, 5, 60, 6, 99, 100}")
+assert_equal("delete_at near the back", m.delete_at(7).to_s + " " + m.to_s, "6 Deque{0, 1, 2, 3, 4, 5, 60, 99, 100}")
+assert_equal("delete_at the ends", m.delete_at(0).to_s + " " + m.delete_at(-1).to_s + " " + m.to_s, "0 100 Deque{1, 2, 3, 4, 5, 60, 99}")
+c = Deque(Int32).new(4)
+c.push(1).push(2).push(3).push(4)
+c.shift(2)
+c.push(5).push(6)
+c.insert(2, 42)
+assert_equal("insert into a wrapped deque", c.to_s, "Deque{3, 4, 42, 5, 6}")
+assert_equal("delete from a wrapped deque", c.delete_at(2).to_s + " " + c.to_s, "42 Deque{3, 4, 5, 6}")
+
+puts "deque: traits and copies"
+t = Deque(Int32).new([3, 1, 2])
+assert_equal("map", t.map { |x| x * 10 }.to_s, "[30, 10, 20]")
+assert_equal("select", t.select { |x| x > 1 }.to_s, "[3, 2]")
+assert_equal("sum min max", t.sum.to_s + " " + t.min.to_s + " " + t.max.to_s, "6 1 3")
+assert_equal("join", t.join(","), "3,1,2")
+assert_equal("to_a", t.to_a.to_s, "[3, 1, 2]")
+t.swap(0, 2)
+assert_equal("swap", t.to_s, "Deque{2, 1, 3}")
+t.reverse_in_place
+assert_equal("reverse_in_place", t.to_s, "Deque{3, 1, 2}")
+t.fill(7, 1, 2)
+assert_equal("fill", t.to_s, "Deque{3, 7, 7}")
+assert_true("== same", t == Deque(Int32).new([3, 7, 7]))
+assert_true("== different", !(t == Deque(Int32).new([3, 7])))
+u = t.dup
+u.push(8)
+assert_equal("dup is a copy", t.size.to_s + " " + u.size.to_s, "3 4")
+assert_equal("+", (t + u).to_s, "Deque{3, 7, 7, 3, 7, 7, 8}")
+t.clear
+assert_true("clear", t.empty? && t.size == 0)
+t.push(1)
+assert_equal("usable after clear", t.to_s, "Deque{1}")
+
+puts "deque: vacated slots"
+# `unsafe_fetch` reads past the size without checking, which is the one
+# way to see the slot: after a pop or shift it reads as zero, not as the
+# element that was there.
+v = Deque(Int32).new([5, 6, 7])
+v.pop
+assert_equal("pop zeroes its slot", v.unsafe_fetch(2).to_s, "0")
+v.shift
+assert_equal("shift zeroes its slot", v.unsafe_fetch(-1).to_s, "0")
+v.push(8).push(9)
+v.delete_at(1)
+assert_equal("delete_at zeroes the vacated slot", v.to_s + " " + v.unsafe_fetch(2).to_s, "Deque{6, 9} 0")
+
+# ---- 2. Churn against python3 -----------------------------------------------
+#
+# `seed = (seed * 1103515245 + 12345) mod 2^31`, the same generator on both
+# sides. Each step draws an operation; the value pushed is the step number.
+# Growth is forced by a run of pushes early on, and the pops keep the size
+# from running away, so the ring wraps and grows many times over.
+
+puts "deque: churn vs python3"
+seed = 7_i64
+draw = ->(bound : Int32) : Int32 {
+  seed = (seed * 1103515245_i64 + 12345_i64) % 2147483648_i64
+  ((seed >> 8) % bound.to_i64).to_i32
+}
+q = Deque(Int32).new
+step = 0
+while step < 3000
+  op = draw.call(10)
+  case op
+  when 0, 1, 2
+    q.push(step)
+  when 3
+    q.unshift(step)
+  when 4, 5
+    q.pop?
+  when 6
+    q.shift?
+  when 7
+    q.rotate_in_place(draw.call(7) - 3) unless q.empty?
+  when 8
+    q.insert(draw.call(q.size + 1), step)
+  else
+    q.delete_at(draw.call(q.size)) unless q.empty?
+  end
+  if step % 100 == 99
+    puts "step #{step}: size #{q.size} #{q.to_a}"
+  end
+  step = step + 1
+end
+
+puts "all deque checks passed"

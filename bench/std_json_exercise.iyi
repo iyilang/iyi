@@ -1,0 +1,455 @@
+# Exercises `std/json`: `JSON.parse` / `parse?`, `Any`, `PullParser`,
+# `Builder`, `JSON.build`, `JSON.to_json` / `from_json` and the `ToJSON` trait.
+#
+# Proves:
+#   * A document with nesting, every escape (including \u00e9 and a surrogate
+#     pair), and every number shape (-0, 1e20, an integer past Int64) reads
+#     into the values the header promises.
+#   * `to_json` and `to_pretty_json` write the text back, byte for byte.
+#   * The pull parser walks a document event by event, skips, finds a key,
+#     and re-emits raw text.
+#   * The builder writes nested documents, plain, indented and ASCII-only.
+#   * `==` and `hash` agree (an integer equals the float with its value, an
+#     object's key order does not matter), `dig` and `dig?` walk paths.
+#   * Every prelude scalar, arrays, hashes and a `ToJSON` type write through
+#     `JSON.to_json`; `from_json` reads them back and refuses what does not fit.
+#   * Every malformed input is refused with its exact sentence and location.
+#   * A corpus, re-emitted compact and pretty, for the shell gate to compare
+#     against another implementation byte for byte.
+#
+# Run via:
+#     ./bin/iyi run bench/std_json_exercise.iyi
+
+module bench/std_json_exercise
+
+import std/json
+using std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_text(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def refused_with(input : String, sentence : String) : Nil
+  parser = Parser.new(input)
+  parser.parse
+  failure = parser.error
+  raise "ASSERTION FAILED: #{input.inspect} was accepted; expected #{sentence.inspect}" if failure.nil?
+  assert_text(sentence, failure, "refusal of #{input.inspect}")
+  raise "ASSERTION FAILED: parse? answered a value for #{input.inspect}" unless JSON.parse?(input).nil?
+  puts "  #{input.inspect} -> #{failure}"
+end
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+puts "== parse corpus"
+text = "{\n  \"name\": \"iyi \\\"quoted\\\" \\u00e9 \\ud83d\\ude00 tab\\t nl\\n slash\\/ end\",\n" +
+       "  \"items\": [1.25, 42, -7, 12345678901234567890, 1e20, -0, 1E2, true, false, null, [], {}],\n" +
+       "  \"nested\": {\"deep\": {\"list\": [{\"x\": \"y\"}, 2, [3, [4]]]}},\n" +
+       "  \"unicode\": \"caf\u00e9 \\u0041\\u00e9\\u20ac\\ud834\\udd1e\"\n}"
+doc = JSON.parse(text)
+assert_text("object", doc.kind, "root kind")
+assert_true(doc.size == 4, "root has four keys")
+name = doc["name"].as_s
+assert_text("iyi \"quoted\" \u00e9 \u{1F600} tab\t nl\n slash/ end", name, "escapes decoded")
+assert_true(name.bytesize == 40, "decoded name is 40 bytes")
+items = doc["items"]
+assert_true(items.size == 12, "twelve items")
+assert_true(items[0].as_f == 1.25 && items[0].kind == "float", "1.25 is a float")
+assert_true(items[1].as_i64 == 42_i64 && items[1].as_i == 42 && items[1].kind == "integer", "42 is an integer")
+assert_true(items[2].as_i == -7, "-7")
+assert_true(items[3].kind == "float" && items[3].as_f == 12345678901234567890.0, "an integer past Int64 is read as the nearest double")
+assert_true(items[4].as_f == 1.0e20, "1e20")
+assert_true(items[5].kind == "integer" && items[5].as_i64 == 0_i64, "-0 is the integer 0")
+assert_true(items[6].as_f == 100.0, "1E2")
+assert_true(items[7].as_bool && !items[8].as_bool, "true and false")
+assert_true(items[9].as_nil.nil? && items[9].kind == "null", "null")
+assert_true(items[10].as_a.size == 0 && items[11].as_h.size == 0, "empty array and object")
+assert_true(items[-1].size == 0, "negative index counts from the end")
+assert_true(items[12]?.nil? && items["x"]?.nil? && doc["missing"]?.nil? && doc[0]?.nil?, "[]? answers nil off the end and across kinds")
+assert_true(items[1].as_i? == 42 && items[0].as_i?.nil? && items[1].as_s?.nil? && items[0].as_bool?.nil?, "as_x? answers nil for another kind")
+assert_true(items[1].as_f? == 42.0 && items[1].size?.nil?, "an integer reads as a float; a scalar has no size?")
+assert_text("y", doc.dig("nested", "deep", "list", 0, "x").as_s, "dig through objects and arrays")
+assert_true(doc.dig("nested", "deep", "list", 2, 1, 0).as_i == 4, "dig into nested arrays")
+assert_true(doc.dig?("nested", "deep", "nope").nil? && doc.dig?("nested", 0).nil?, "dig? answers nil for a missing path")
+assert_text("caf\u00e9 A\u00e9\u20ac\u{1D11E}", doc["unicode"].as_s, "raw UTF-8, BMP escapes and a surrogate pair")
+assert_true(JSON.parse(" \t\n 7 \r\n").as_i == 7, "whitespace around the root value")
+assert_true(JSON.parse("\"\"").as_s == "", "an empty string")
+assert_true(JSON.parse("9223372036854775807").as_i64 == 9223372036854775807_i64, "Int64 max")
+assert_true(JSON.parse("-9223372036854775808").as_i64 == -9223372036854775808_i64, "Int64 min")
+assert_true(JSON.parse("9223372036854775808").kind == "float", "one past Int64 max is a float")
+assert_true(JSON.parse("0.1").as_f == 0.1 && JSON.parse("1.7976931348623157e308").as_f == 1.7976931348623157e308, "doubles read exactly")
+assert_true(JSON.parse?("[1, 2]").as(Any).size == 2, "parse? answers the value for a document")
+puts "  name, items, nested, unicode: every value as the header promises"
+
+# ---------------------------------------------------------------------------
+# Writing
+# ---------------------------------------------------------------------------
+
+puts "\n== to_json and to_pretty_json"
+compact = doc.to_json
+assert_text("{\"name\":\"iyi \\\"quoted\\\" \u00e9 \u{1F600} tab\\t nl\\n slash/ end\"," +
+            "\"items\":[1.25,42,-7,1.2345678901234567e+19,1.0e+20,0,100.0,true,false,null,[],{}]," +
+            "\"nested\":{\"deep\":{\"list\":[{\"x\":\"y\"},2,[3,[4]]]}}," +
+            "\"unicode\":\"caf\u00e9 A\u00e9\u20ac\u{1D11E}\"}", compact, "compact text")
+again = JSON.parse(compact)
+assert_true(again == doc, "re-parsed text equals the document")
+assert_true(again.hash == doc.hash, "and hashes the same")
+assert_text(compact, again.to_json, "and writes the same text")
+assert_text(compact, doc.to_s, "to_s is to_json")
+assert_text(compact, doc.inspect, "inspect is to_json")
+pretty = JSON.parse("{\"a\":[1,{\"b\":null},[]],\"c\":{}}").to_pretty_json
+assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  ],\n  \"c\": {}\n}", pretty, "pretty text")
+assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")
+assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
+assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
+assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
+assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
+puts "  compact, pretty (two spaces and a tab), ascii-only and every escape written back"
+
+# ---------------------------------------------------------------------------
+# Pull parser
+# ---------------------------------------------------------------------------
+
+puts "\n== pull parser walk"
+pull = PullParser.new("{\"a\": [1, 2.5, \"s\"], \"b\": {\"c\": null, \"d\": true}, \"e\": -3}")
+events = [] of String
+pull.read_object do |key|
+  events << "key #{key}"
+  if key == "a"
+    pull.read_array do
+      k = pull.kind
+      if k.int?
+        events << "int #{pull.read_int}"
+      elsif k.float?
+        events << "float #{pull.read_float}"
+      elsif k.string?
+        events << "string #{pull.read_string}"
+      end
+    end
+  elsif key == "b"
+    events << "raw #{pull.read_raw}"
+  else
+    events << "float #{pull.read_float}"
+  end
+end
+assert_true(pull.kind.eof?, "EOF after the root object")
+assert_text("key a|int 1|float 2.5|string s|key b|raw {\"c\":null,\"d\":true}|key e|float -3.0", events.join("|"), "events")
+
+pull = PullParser.new("{\"skip\": [1, [2, {\"x\": [3]}]], \"want\": \"here\", \"tail\": null}")
+found = ""
+pull.on_key("want") do
+  found = pull.read_string
+end
+assert_text("here", found, "on_key skips to the key")
+assert_true(pull.kind.eof?, "on_key reads the whole object")
+
+pull = PullParser.new("[null, false, 7, 7.5, \"q\", [1], {\"k\": 1}]")
+assert_true(pull.kind.begin_array?, "begin_array")
+pull.read_begin_array
+assert_true(pull.read_null?, "read_null? takes a null")
+assert_true(!pull.read_null?, "and answers false on a bool")
+assert_true(pull.kind.bool? && !pull.read_bool, "false")
+assert_true(pull.line_number == 1 && pull.column_number == 15, "location of the next value")
+assert_true(pull.read_int == 7_i64, "7")
+assert_true(pull.read_float == 7.5, "7.5")
+assert_text("q", pull.read_string, "q")
+assert_true(pull.kind.begin_array?, "a nested array")
+pull.skip
+assert_true(pull.kind.begin_object?, "a nested object")
+assert_text("{\"k\":1}", pull.read_any.to_json, "read_any")
+assert_true(pull.kind.end_array?, "end_array")
+pull.read_end_array
+assert_true(pull.kind.eof?, "eof")
+pull = PullParser.new("[[[1]]]")
+pull.max_nesting = 3
+assert_text("[[[1]]]", pull.read_raw, "three levels within a limit of three")
+assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
+puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
+
+# ---------------------------------------------------------------------------
+# Builder
+# ---------------------------------------------------------------------------
+
+puts "\n== builder"
+built = JSON.build do |b|
+  b.object do
+    b.field("a", 1)
+    b.field("b", 2_i64)
+    b.field("c", 2.5)
+    b.field("d", "x\"y")
+    b.field("e", true)
+    b.field("f", nil)
+    b.field("g", Any.new([Any.new(1)] of Any))
+    b.field("h") do
+      b.array do
+        b.null
+        b.bool(false)
+        b.number(3)
+        b.number(4_i64)
+        b.number(255_u8)
+        b.number(18446744073709551615_u64)
+        b.number(0.5)
+        b.string("s")
+        b.raw("{\"raw\":true}")
+        b.array { }
+        b.object { }
+      end
+    end
+  end
+end
+assert_text("{\"a\":1,\"b\":2,\"c\":2.5,\"d\":\"x\\\"y\",\"e\":true,\"f\":null,\"g\":[1],\"h\":[null,false,3,4,255,18446744073709551615,0.5,\"s\",{\"raw\":true},[],{}]}", built, "built text")
+indented = JSON.build(4) do |b|
+  b.array do
+    b.number(1)
+    b.object do
+      b.field("k")
+      b.string("v")
+    end
+  end
+end
+assert_text("[\n    1,\n    {\n        \"k\": \"v\"\n    }\n]", indented, "indented by four")
+assert_text("[\n--1\n]", JSON.build("--") { |b| b.array { b.number(1) } }, "indented by a string")
+assert_text("null", JSON.build { |b| b.null }, "a bare null")
+ascii = Builder.new
+ascii.ascii_only = true
+ascii.string("\u00e9")
+assert_text("\"\\u00e9\"", ascii.to_s, "ascii_only on a builder")
+deep = Builder.new
+deep.max_nesting = 2
+deep.start_array
+deep.start_array
+deep.end_array
+deep.end_array
+assert_text("[[]]", deep.to_s, "two levels within a limit of two")
+puts "  fields of every type, nested containers, raw text, indentation and ascii-only"
+
+# ---------------------------------------------------------------------------
+# Equality, hash, dig
+# ---------------------------------------------------------------------------
+
+puts "\n== equality and hash"
+same = [
+  {"[1]", "[1]"},
+  {"[1, [2, {\"a\": null}]]", "[1, [2, {\"a\": null}]]"},
+  {"{\"a\": 1, \"b\": [true]}", "{\"b\": [true], \"a\": 1}"},
+  {"1", "1.0"},
+  {"[1e3]", "[1000]"},
+  {"-0", "0.0"},
+  {"\"\u00e9\"", "\"\\u00e9\""},
+  {"null", "null"},
+  {"{}", "{}"},
+  {"[]", "[]"},
+]
+same.each do |pair|
+  left = JSON.parse(pair[0])
+  right = JSON.parse(pair[1])
+  assert_true(left == right, "#{pair[0]} == #{pair[1]}")
+  assert_true(left.hash == right.hash, "#{pair[0]} and #{pair[1]} hash the same")
+end
+different = [
+  {"[1]", "[2]"},
+  {"[1]", "[1, 1]"},
+  {"[1]", "{\"0\": 1}"},
+  {"{\"a\": 1}", "{\"b\": 1}"},
+  {"{\"a\": 1}", "{\"a\": 1, \"b\": 1}"},
+  {"1", "\"1\""},
+  {"1", "1.5"},
+  {"9007199254740993", "9007199254740992.0"},
+  {"true", "false"},
+  {"null", "false"},
+  {"null", "0"},
+  {"\"a\"", "\"b\""},
+]
+different.each do |pair|
+  assert_true(!(JSON.parse(pair[0]) == JSON.parse(pair[1])), "#{pair[0]} != #{pair[1]}")
+end
+counts = {} of Any => Int32
+["1", "1.0", "[1]", "[1.0]", "{\"a\":[1]}", "{\"a\":[1.0]}", "\"1\""].each do |t|
+  key = JSON.parse(t)
+  counts[key] = (counts[key]? || 0) + 1
+end
+assert_true(counts.size == 4, "Any as a hash key: four distinct values")
+assert_true(counts[JSON.parse("1")] == 2 && counts[JSON.parse("[1]")] == 2 && counts[JSON.parse("{\"a\":[1]}")] == 2, "each equal pair counted twice")
+puts "  #{same.size} equal pairs hash alike, #{different.size} unequal pairs differ, Any keys a Hash"
+
+# ---------------------------------------------------------------------------
+# to_json and from_json over prelude values and a ToJSON type
+# ---------------------------------------------------------------------------
+
+struct Point
+  @x : Int32
+  @y : Float64
+
+  def initialize(@x : Int32, @y : Float64)
+  end
+end
+
+impl ToJSON for Point
+  def to_json(json : Builder) : Nil
+    json.object do
+      json.field("x", @x)
+      json.field("y", @y)
+    end
+  end
+end
+
+puts "\n== to_json and from_json"
+assert_text("null", JSON.to_json(nil), "nil")
+assert_text("true", JSON.to_json(true), "Bool")
+assert_text("-5", JSON.to_json(-5), "Int32")
+assert_text("-9223372036854775808", JSON.to_json(-9223372036854775808_i64), "Int64")
+assert_text("200", JSON.to_json(200_u8), "UInt8")
+assert_text("18446744073709551615", JSON.to_json(18446744073709551615_u64), "UInt64")
+assert_text("2.5", JSON.to_json(2.5), "Float64")
+assert_text("\"a\\nb\"", JSON.to_json("a\nb"), "String")
+assert_text("[1,2]", JSON.to_json([1_u8, 2_u8]), "Array(UInt8)")
+assert_text("[[1],[]]", JSON.to_json([[1_i64], [] of Int64]), "Array(Array(Int64))")
+assert_text("{\"k\":[1.5],\"m\":[]}", JSON.to_json({"k" => [1.5], "m" => [] of Float64}), "Hash(String, Array(Float64))")
+assert_text("{\"1\":true}", JSON.to_json({1 => true}), "Hash with an integer key is written by to_s")
+assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
+assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
+assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")
+
+assert_true(JSON.from_json("null", Nil).nil?, "Nil")
+assert_true(JSON.from_json(" true ", Bool), "Bool")
+assert_true(JSON.from_json("-2147483648", Int32) == -2147483648, "Int32 min")
+assert_true(JSON.from_json("9223372036854775807", Int64) == 9223372036854775807_i64, "Int64 max")
+assert_true(JSON.from_json("255", UInt8) == 255_u8, "UInt8 max")
+assert_true(JSON.from_json("9223372036854775807", UInt64) == 9223372036854775807_u64, "UInt64")
+assert_true(JSON.from_json("7", Float64) == 7.0 && JSON.from_json("7.5", Float64) == 7.5, "Float64 from an integer or a float")
+assert_text("\u00e9", JSON.from_json("\"\\u00e9\"", String), "String")
+assert_text("[1,{\"a\":2.5}]", JSON.from_json("[1, {\"a\": 2.5}]", Any).to_json, "Any")
+ints = JSON.from_json("[1, 2, 3]", Array(Int32))
+assert_true(ints.size == 3 && ints[2] == 3, "Array(Int32)")
+nested = JSON.from_json("[[1], [], [2, 3]]", Array(Array(Int64)))
+assert_true(nested.size == 3 && nested[2][1] == 3_i64, "Array(Array(Int64))")
+floats = JSON.from_json("{\"a\": 1.5, \"b\": 2}", Hash(String, Float64))
+assert_true(floats["a"] == 1.5 && floats["b"] == 2.0, "Hash(String, Float64)")
+strings = JSON.from_json("{\"k\": [\"v\", \"w\"]}", Hash(String, Array(String)))
+assert_true(strings["k"][1] == "w", "Hash(String, Array(String))")
+puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes and a ToJSON struct"
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+puts "\n== what the reader refuses"
+refused_with("", "empty JSON input at line 1, column 1")
+refused_with("  \n ", "empty JSON input at line 1, column 1")
+refused_with("{\"a\": \"unterminated", "unterminated string at line 1, column 7")
+refused_with("\"abc\\", "unterminated string after backslash at line 1, column 5")
+refused_with("{\"a\": 1,]", "expected string key in object at line 1, column 9")
+refused_with("{\"a\" 1}", "expected ':' after object key at line 1, column 6")
+refused_with("{\"a\": 1 \"b\": 2}", "expected ',' or '}' in object at line 1, column 9")
+refused_with("[1 2]", "expected ',' or ']' in array at line 1, column 4")
+refused_with("{\"a\": 1} garbage", "bare identifier 'garbage' at line 1, column 10")
+refused_with("[1] [2]", "unexpected '[' after JSON root value at line 1, column 5")
+refused_with("[1]]", "unexpected ']' after JSON root value at line 1, column 4")
+refused_with("1 2", "unexpected number 2 after JSON root value at line 1, column 3")
+refused_with("[1, 2,]", "trailing comma in array at line 1, column 6")
+refused_with("{\"a\": 1,}", "trailing comma in object at line 1, column 8")
+refused_with("{\"a\": 1, \"a\": 2}", "duplicate key 'a' at line 1, column 10")
+refused_with("[\"\\q\"]", "invalid escape sequence '\\q' at line 1, column 3")
+refused_with("[\"\\ud83d\"]", "lone high surrogate \\ud83d without low surrogate at line 1, column 3")
+refused_with("[\"\\ud83d\\u0041\"]", "invalid surrogate pair: expected low surrogate (0xDC00..0xDFFF), got \\u41 at line 1, column 9")
+refused_with("[\"\\ude00\"]", "lone low surrogate \\ude00 without preceding high surrogate at line 1, column 3")
+refused_with("[\"\\u12\"]", "invalid hex digit '\"' in \\u escape sequence at line 1, column 7")
+refused_with("[\"\\u12", "unterminated \\u escape sequence: expected 4 hexadecimal digits at line 1, column 3")
+refused_with("[\"a\tb\"]", "unescaped control character (ASCII 9) in string at line 1, column 4")
+refused_with("[0123]", "leading zero not allowed in number at line 1, column 3")
+refused_with("[-]", "expected digit after minus sign in number at line 1, column 3")
+refused_with("[1.]", "expected at least one digit after decimal point at line 1, column 4")
+refused_with("[1e]", "expected at least one digit in exponent at line 1, column 4")
+refused_with("[1.2.3]", "unexpected character '.' in number at line 1, column 5")
+refused_with("[0x12]", "unexpected character 'x' in number at line 1, column 3")
+refused_with("[1.5e999]", "number 1.5e999 out of range at line 1, column 2")
+refused_with("[NaN]", "bare identifier 'NaN' at line 1, column 2")
+refused_with("[Infinity]", "bare identifier 'Infinity' at line 1, column 2")
+refused_with("[nul]", "bare identifier 'nul' at line 1, column 2")
+refused_with("[truex]", "bare identifier 'truex' at line 1, column 2")
+refused_with("[1, @]", "unexpected character '@' at line 1, column 5")
+refused_with("[1,\n 2,\n \u00e9]", "unexpected byte 195 at line 3, column 2")
+refused_with("{1: 2}", "expected string key in object at line 1, column 2")
+refused_with("[1,", "unexpected end of input at line 1, column 4")
+refused_with("{\"a\":", "unexpected end of input at line 1, column 6")
+refused_with("]", "unexpected ']' at line 1, column 1")
+refused_with(":", "unexpected ':' at line 1, column 1")
+refused_with("[\"\u00e9\u00e9\", 1 x]", "bare identifier 'x' at line 1, column 10")
+deep_text = "[" * 513 + "]" * 513
+refused_with(deep_text, "nesting depth of 513 exceeds maximum depth 512 at line 1, column 513")
+assert_true(JSON.parse("[" * 512 + "]" * 512).size == 1, "512 levels are read")
+puts "  #{44} malformed inputs, each refused with its sentence and location"
+
+# ---------------------------------------------------------------------------
+# Differential corpus: re-emitted for the shell gate to compare against the
+# other implementation. The array is read by bench/std_json_exercise.sh, one
+# document per line between the two marker comments; only `\"` and `\\` are
+# escapes of the source, every other backslash is the document's own.
+# ---------------------------------------------------------------------------
+
+# corpus-begin
+corpus = [
+  "null",
+  "true",
+  "false",
+  "0",
+  "-0",
+  "42",
+  "-9223372036854775808",
+  "9223372036854775807",
+  "1.5",
+  "-0.0",
+  "0.1",
+  "1e20",
+  "1E2",
+  "2.5e-3",
+  "1e-7",
+  "123456.789",
+  "1.7976931348623157e308",
+  "5e-324",
+  "100.0",
+  "\"\"",
+  "\"plain\"",
+  "\"esc \\\" \\\\ \\/ \\b \\f \\n \\r \\t\"",
+  "\"\\u00e9\\u20ac\\ud83d\\ude00\"",
+  "\"\\u0000\\u001f\\u007f\"",
+  "\"raw \u00e9 \u20ac \u{1F600}\"",
+  "\"\\u0041\\u005a\"",
+  "[]",
+  "{}",
+  "[1, 2, 3]",
+  "[[]]",
+  "[[[[]]]]",
+  "[{}, [], {\"a\": {}}]",
+  "{\"a\": 1}",
+  "{\"b\": 2, \"a\": 1, \"c\": 0}",
+  "{\"a\": [1, {\"b\": [2, {\"c\": [3]}]}]}",
+  "[null, true, false, 0, 1.5, \"s\", [], {}]",
+  "{\"name\": \"iyi\", \"tags\": [\"a\", \"b\"], \"count\": 3, \"ratio\": 0.75, \"ok\": true, \"none\": null}",
+  "{\"\": \"empty key\", \" \": \"space key\", \"\\\"\": \"quote key\"}",
+  "  [ 1 ,\t2 ]  ",
+  "{\"deep\": {\"deeper\": {\"deepest\": {\"bottom\": [[[[1.0e+3]]]]}}}}",
+  "[-1, -1.5, -1e5, -1.5e-5]",
+  "[\"\\u00e9\", \"\u00e9\"]",
+  "{\"x\": \"a\\nb\\tc\"}",
+]
+# corpus-end
+
+puts "\n== differential corpus"
+corpus.each do |d|
+  value = JSON.parse(d)
+  compact = value.to_json
+  puts "oracle json\t#{compact}"
+  puts compact
+  puts value.to_pretty_json
+end
+puts "== end differential"
+puts "  #{corpus.size} documents re-emitted compact and pretty"
+
+puts "\nALL CHECKS PASSED"

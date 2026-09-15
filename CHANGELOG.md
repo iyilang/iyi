@@ -4,6 +4,19 @@
 
 ### Removed
 
+- **The Crystal socket stack that landed beside `IyiSocket`.** TCP, UDP,
+  UNIX, `getaddrinfo` and a second `Socket` type were 1,699 lines of the
+  other language's library, and they broke the dependency floor. The
+  module is the blocking `IyiSocket` it was, over raw syscalls on Linux
+  and libSystem on darwin. `bench/socket_exercise.sh` holds it.
+
+- **Twelve std modules the prelude already owns.** `annotations`,
+  `comparable`, `empty`, `env`, `errno`, `exception`, `iterable`,
+  `kernel`, `nil`, `reference_storage`, `steppable` and `symbol` were
+  empty shims, exception classes in a language without exceptions, or
+  names the compiler has already refused (`p`, `pp`, `ENV`, `try`,
+  `not_nil!`). They are gone rather than taught a second meaning.
+
 - **`iyi repl`.** The session ran on the macro evaluator, which is the
   other language's compile-time library, so it answered iyi code with
   that library's sentences: `"ab" * -3` came back `Negative argument`
@@ -19,6 +32,17 @@
   command" now, and `bench/verbs_exercise.sh` holds it there.
 
 ### Changed
+
+- **`src/std` is iyi over the prelude.** JSON, YAML, XML, HTML, path, IO,
+  unicode, big and the rest of the library bind nothing: no `lib`, no
+  `fun`, no `asm`, no `@[Link]`, except `socket` and `time` (the
+  platform, on purpose) and `math`'s LLVM hardware instructions
+  (`llvm.sqrt`, `llvm.copysign`). `Math` is a `pub struct`
+  with class methods; `Complex` and `Benchmark` import it. `sin(1e22)`
+  answers a point on the circle instead of panicking. Every module has a
+  `bench/std_<name>_exercise.sh` that builds plain and `--release` and
+  proves a broken copy is caught. `bench/std_exercise.sh` holds both
+  rules.
 
 - **`find` and `index` answer nil.** They raised, under a rule this
   library stated and generalised one method too far: `?` for the nilable
@@ -41,6 +65,20 @@
   `first?`/`first` and `minmax?`/`minmax` keep their pairs untouched.
 
 ### Fixed
+
+- **A sibling `Std::Tuple` hid the prelude's `::Tuple`.** Looking `Tuple`
+  up from `Std::Enumerable` walked to `Std` first, found the sibling
+  unit, and the import wall refused a name the file never meant. Lookup
+  skips a module namespace the writing file does not reach, so `::Tuple`
+  is found; a name nothing else resolves is still refused with the
+  wall's sentence. `spec/compiler/iyi_import_spec.cr` holds it.
+
+- **A `case` over `Array(Any) | Hash(Any, Any)` sent an Array to the Hash
+  arm.** The object-header census walked `ClassType`s; `Array(Any)` is a
+  `GenericClassInstanceType` and was laid out headless while
+  `object_type_id` still read the word under the object. The census asks
+  the same two shapes it lays out. `spec/compiler/codegen/iyi_object_type_id_spec.cr`
+  holds both that case and a `Foo(Int32)+` virtual call.
 
 - **The commonest slips in a `.iyi` file were answered with the token the
   parser wanted.** One `end` too many was `expecting token 'EOF', not

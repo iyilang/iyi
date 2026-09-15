@@ -58,3 +58,6 @@ __pycache__/
 /samples/crystal/kemal/app_artifact
 /samples/crystal/kemal/app_artifact.iyi
 /samples/crystal/kemal/*.log
+
+# The compiler's local cache when IYI_CACHE_DIR is unset.
+/.iyi/

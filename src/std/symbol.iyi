@@ -1,0 +1,94 @@
+module std/symbol
+
+import std/traits
+using std/traits::{Cmp}
+
+struct ::Symbol
+  # Compares symbol with other based on string ordering.
+  def <=>(other : Symbol) : Int32
+    s1 = to_s
+    s2 = other.to_s
+    return 0 if s1 == s2
+    s1 < s2 ? -1 : 1
+  end
+
+  def <(other : Symbol) : ::Bool
+    (self <=> other) < 0
+  end
+
+  def <=(other : Symbol) : ::Bool
+    (self <=> other) <= 0
+  end
+
+  def >(other : Symbol) : ::Bool
+    (self <=> other) > 0
+  end
+
+  def >=(other : Symbol) : ::Bool
+    (self <=> other) >= 0
+  end
+
+  def inspect : String
+    val = to_s
+    if Symbol.needs_quotes?(val)
+      ":\"" + val + "\""
+    else
+      ":" + val
+    end
+  end
+
+  def inspect(io : IyiIO) : ::Nil
+    io.print(inspect)
+  end
+
+  def to_s(io : IyiIO) : ::Nil
+    io.print(to_s)
+  end
+
+  def clone : Symbol
+    self
+  end
+
+  def self.needs_quotes?(string : String) : ::Bool
+    case string
+    when "+", "-", "*", "&+", "&-", "&*", "/", "//", "==", "<", "<=", ">", ">=", "!", "!=", "=~", "!~"
+      false
+    when "&", "|", "^", "~", "**", "&**", ">>", "<<", "%", "[]", "<=>", "===", "[]?", "[]="
+      false
+    when "_"
+      false
+    else
+      needs_quotes_for_named_argument?(string)
+    end
+  end
+
+  def self.needs_quotes_for_named_argument?(string : String) : ::Bool
+    return true if string.empty? || string == "_"
+
+    first_byte = string.to_unsafe[0]
+    # starts with digit 0..9 (48..57)
+    return true if first_byte >= 48_u8 && first_byte <= 57_u8
+
+    index = 0
+    while index < string.bytesize
+      byte = string.to_unsafe[index]
+      # ascii alphanumeric or '_'
+      is_alpha = (byte >= 97_u8 && byte <= 122_u8) || (byte >= 65_u8 && byte <= 90_u8) || (byte >= 48_u8 && byte <= 57_u8) || byte == 95_u8
+      return true unless is_alpha
+      index = index + 1
+    end
+    false
+  end
+
+  def self.quote_for_named_argument(string : String) : String
+    if needs_quotes_for_named_argument?(string)
+      "\"" + string + "\""
+    else
+      string
+    end
+  end
+
+  def self.quote_for_named_argument(io : IyiIO, string : String) : ::Nil
+    io << quote_for_named_argument(string)
+  end
+end

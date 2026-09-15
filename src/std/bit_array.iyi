@@ -1,0 +1,362 @@
+# Compact array data structure storing bits as booleans.
+#
+# Internally stored as 64-bit unsigned integers. Zero external C library dependencies.
+
+module std/bit_array
+
+import std/slice
+using std/slice::{Slice}
+
+struct ::BitArray
+  getter size : Int32
+  @bits : Pointer(UInt64)
+
+  private def malloc_size : Int32
+    (@size + 63) // 64
+  end
+
+  private def bytesize : Int32
+    (@size + 7) // 8
+  end
+
+  def initialize(size : Int, initial : Bool = false)
+    s = size.to_i
+    raise "Negative bit array size: #{s}" if s < 0
+    @size = s
+    words = malloc_size
+    fill_word = initial ? 0xffffffffffffffff_u64 : 0_u64
+    @bits = Pointer(UInt64).malloc(words.to_u64)
+    i = 0
+    while i < words
+      @bits[i] = fill_word
+      i += 1
+    end
+    clear_unused_bits if initial
+  end
+
+  def self.new(size : Int, & : Int32 -> _) : self
+    arr = new(size)
+    i = 0
+    s = size.to_i
+    while i < s
+      arr.unsafe_put(i, true) if yield i
+      i += 1
+    end
+    arr
+  end
+
+  private def clear_unused_bits : Nil
+    rem = @size % 64
+    if rem != 0
+      mask = 1_u64.unsafe_shl(rem.to_u64) - 1_u64
+      @bits[malloc_size - 1] = @bits[malloc_size - 1] & mask
+    end
+  end
+
+  def empty? : Bool
+    @size == 0
+  end
+
+  def unsafe_fetch(index : Int) : Bool
+    idx = index.to_i
+    word_idx = idx // 64
+    sub_idx = idx % 64
+    mask = 1_u64.unsafe_shl(sub_idx.to_u64)
+    (@bits[word_idx] & mask) != 0_u64
+  end
+
+  def unsafe_put(index : Int, value : Bool) : Bool
+    idx = index.to_i
+    word_idx = idx // 64
+    sub_idx = idx % 64
+    mask = 1_u64.unsafe_shl(sub_idx.to_u64)
+    if value
+      @bits[word_idx] = @bits[word_idx] | mask
+    else
+      inv_mask = mask ^ 0xffffffffffffffff_u64
+      @bits[word_idx] = @bits[word_idx] & inv_mask
+    end
+    value
+  end
+
+  def [](index : Int) : Bool
+    idx = index.to_i
+    idx += @size if idx < 0
+    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    unsafe_fetch(idx)
+  end
+
+  def []?(index : Int) : Bool?
+    idx = index.to_i
+    idx += @size if idx < 0
+    return nil if idx < 0 || idx >= @size
+    unsafe_fetch(idx)
+  end
+
+  def []=(index : Int, value : Bool) : Bool
+    idx = index.to_i
+    idx += @size if idx < 0
+    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    unsafe_put(idx, value)
+  end
+
+  def first : Bool
+    raise "Empty BitArray" if @size == 0
+    unsafe_fetch(0)
+  end
+
+  def first? : Bool?
+    return nil if @size == 0
+    unsafe_fetch(0)
+  end
+
+  def last : Bool
+    raise "Empty BitArray" if @size == 0
+    unsafe_fetch(@size - 1)
+  end
+
+  def last? : Bool?
+    return nil if @size == 0
+    unsafe_fetch(@size - 1)
+  end
+
+  def toggle(index : Int) : Nil
+    idx = index.to_i
+    idx += @size if idx < 0
+    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    word_idx = idx // 64
+    sub_idx = idx % 64
+    mask = 1_u64.unsafe_shl(sub_idx.to_u64)
+    @bits[word_idx] = @bits[word_idx] ^ mask
+  end
+
+  def invert : Nil
+    words = malloc_size
+    i = 0
+    while i < words
+      @bits[i] = @bits[i] ^ 0xffffffffffffffff_u64
+      i += 1
+    end
+    clear_unused_bits
+  end
+
+  def fill(value : Bool) : self
+    fill_word = value ? 0xffffffffffffffff_u64 : 0_u64
+    words = malloc_size
+    i = 0
+    while i < words
+      @bits[i] = fill_word
+      i += 1
+    end
+    clear_unused_bits if value
+    self
+  end
+
+  def fill(value : Bool, start : Int, count : Int) : self
+    s = start.to_i
+    s += @size if s < 0
+    c = count.to_i
+    return self if c <= 0
+    raise "Start out of bounds" if s < 0 || s > @size
+    limit = (s + c > @size) ? @size : (s + c)
+    i = s
+    while i < limit
+      unsafe_put(i, value)
+      i += 1
+    end
+    self
+  end
+
+  def all? : Bool
+    return true if @size == 0
+    full_words = @size // 64
+    i = 0
+    while i < full_words
+      return false if @bits[i] != 0xffffffffffffffff_u64
+      i += 1
+    end
+    rem = @size % 64
+    if rem > 0
+      mask = 1_u64.unsafe_shl(rem.to_u64) - 1_u64
+      return false if (@bits[full_words] & mask) != mask
+    end
+    true
+  end
+
+  def any? : Bool
+    words = malloc_size
+    i = 0
+    while i < words
+      return true if @bits[i] != 0_u64
+      i += 1
+    end
+    false
+  end
+
+  def none? : Bool
+    !any?
+  end
+
+  def one? : Bool
+    count(true) == 1
+  end
+
+  def includes?(obj : Bool) : Bool
+    obj ? any? : !all?
+  end
+
+  def count(item : Bool) : Int32
+    ones = 0
+    i = 0
+    while i < @size
+      ones += 1 if unsafe_fetch(i)
+      i += 1
+    end
+    item ? ones : (@size - ones)
+  end
+
+  def count : Int32
+    @size
+  end
+
+  def index(obj : Bool, offset : Int = 0) : Int32?
+    off = offset.to_i
+    off += @size if off < 0
+    return nil if off < 0 || off >= @size
+    i = off
+    while i < @size
+      return i if unsafe_fetch(i) == obj
+      i += 1
+    end
+    nil
+  end
+
+  def rindex(obj : Bool, offset : Int = @size - 1) : Int32?
+    off = offset.to_i
+    off += @size if off < 0
+    return nil if off < 0 || off >= @size
+    i = off
+    while i >= 0
+      return i if unsafe_fetch(i) == obj
+      i -= 1
+    end
+    nil
+  end
+
+  def each(& : Bool -> Nil) : Nil
+    i = 0
+    while i < @size
+      yield unsafe_fetch(i)
+      i += 1
+    end
+  end
+
+  def each_with_index(offset : Int = 0, & : (Bool, Int32) -> Nil) : Nil
+    i = 0
+    off = offset.to_i
+    while i < @size
+      yield unsafe_fetch(i), off + i
+      i += 1
+    end
+  end
+
+  def reverse_in_place : self
+    return self if @size <= 1
+    left = 0
+    right = @size - 1
+    while left < right
+      b_left = unsafe_fetch(left)
+      b_right = unsafe_fetch(right)
+      unsafe_put(left, b_right)
+      unsafe_put(right, b_left)
+      left += 1
+      right -= 1
+    end
+    self
+  end
+
+  def rotate_in_place(n : Int = 1) : self
+    return self if @size <= 1
+    k = n.to_i % @size
+    k += @size if k < 0
+    return self if k == 0
+
+    dup_copy = dup
+    i = 0
+    while i < @size
+      src_idx = (i + k) % @size
+      unsafe_put(i, dup_copy.unsafe_fetch(src_idx))
+      i += 1
+    end
+    self
+  end
+
+  def dup : self
+    copy = BitArray.new(@size)
+    words = malloc_size
+    i = 0
+    while i < words
+      copy.@bits[i] = @bits[i]
+      i += 1
+    end
+    copy
+  end
+
+  def clone : self
+    dup
+  end
+
+  def to_slice : Std::Slice::Bytes
+    Std::Slice::Bytes.new(@bits.as(Pointer(UInt8)), bytesize)
+  end
+
+  def ==(other : BitArray) : Bool
+    return false unless @size == other.size
+    words = malloc_size
+    i = 0
+    while i < words
+      return false unless @bits[i] == other.@bits[i]
+      i += 1
+    end
+    true
+  end
+
+  def ==(other) : Bool
+    false
+  end
+
+  def hash(hasher)
+    hasher = @size.hash(hasher)
+    words = malloc_size
+    i = 0
+    while i < words
+      hasher = @bits[i].hash(hasher)
+      i += 1
+    end
+    hasher
+  end
+
+  def to_s(io) : Nil
+    io.write(to_s)
+  end
+
+  def to_s : String
+    res = "BitArray["
+    i = 0
+    while i < @size
+      res = res + (unsafe_fetch(i) ? "1" : "0")
+      i += 1
+    end
+    res + "]"
+  end
+
+  def inspect(io : IO) : Nil
+    to_s(io)
+  end
+
+  def inspect : String
+    to_s
+  end
+end
+
+pub alias BitArray = ::BitArray

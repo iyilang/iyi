@@ -1,0 +1,4 @@
+module std/empty
+
+# Crystal's `empty.cr` provides a minimal entrypoint without the standard library.
+# In iyi, `std/empty` represents an empty standard module.

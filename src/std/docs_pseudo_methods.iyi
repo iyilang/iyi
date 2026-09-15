@@ -1,0 +1,55 @@
+# Documentation pseudo-methods for iyi.
+#
+# Documents pseudo-methods that are implemented directly by the compiler
+# and cannot be redefined at runtime.
+
+module std/docs_pseudo_methods
+
+{% skip_file unless flag?(:docs) %}
+
+def __crystal_pseudo_typeof(*expression) : Class
+end
+
+def __crystal_pseudo_sizeof(type : Class) : Int32
+end
+
+def __crystal_pseudo_instance_sizeof(type : Class) : Int32
+end
+
+def __crystal_pseudo_alignof(type : Class) : Int32
+end
+
+def __crystal_pseudo_instance_alignof(type : Class) : Int32
+end
+
+def __crystal_pseudo_pointerof(variable : T) : Pointer(T) forall T
+end
+
+def __crystal_pseudo_offsetof(type : Class, offset) : Int32
+end
+
+class ::Object
+  def __crystal_pseudo_not : Bool
+  end
+
+  def __crystal_pseudo_is_a?(type : Class) : Bool
+  end
+
+  def __crystal_pseudo_nil? : Bool
+  end
+
+  def __crystal_pseudo_as(type : Class)
+  end
+
+  def __crystal_pseudo_as?(type : Class)
+  end
+
+  def __crystal_pseudo_responds_to?(name : Symbol) : Bool
+  end
+end
+
+struct ::CRYSTAL_PSEUDO__NoReturn
+end
+
+struct ::CRYSTAL_PSEUDO__Void
+end

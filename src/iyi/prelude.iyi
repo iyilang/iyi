@@ -235,13 +235,10 @@ end
     end
   end
 {% elsif flag?(:darwin) %}
-  # iyi: macOS is not a fallback that happened to work; it is a chosen branch,
-  # because it is the machine most developers sit in front of. Apple documents
-  # libSystem as the only supported interface and raw syscalls as explicitly
-  # not a stable ABI on Darwin, so binding `write` and `exit` here is Apple's
-  # rule rather than a compromise this design settled for: libSystem ships
-  # with the machine, it is not something a person installs, and Go links it
-  # on darwin for the same reason (CGO_ENABLED=0 buys nothing there either).
+  # iyi: macOS is not a fallback that happened to work; it is a chosen branch because it is the development workstation machine.
+  # Apple documents libSystem as the only supported interface and raw syscalls as explicitly not a stable ABI on Darwin.
+  # Binding write, exit, backtrace and backtrace_symbols_fd here is Apple's platform rule rather than a compromise settled for.
+  # libSystem ships with macOS, it is not something a person installs, and Go links it on darwin for the exact same reason.
   lib LibC
     fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
     fun read(fd : Int32, buf : Void*, count : UInt64) : Int64
@@ -250,6 +247,8 @@ end
     fun close(fd : Int32) : Int32
     fun unlink(path : UInt8*) : Int32
     fun exit(status : Int32) : NoReturn
+    fun backtrace(buffer : Void**, size : Int32) : Int32
+    fun backtrace_symbols_fd(buffer : Void**, size : Int32, fd : Int32) : Void
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -7279,20 +7278,21 @@ end
 # the group boundary re-raises in the owner, which is where III.1.4
 # says a panic is caught. `NoReturn` is a type-system fact `.or_panic`
 # depends on (III.1.3): the fiber never resumes.
-# The panic's own write: one descriptor, no stream object, no error.
-#
-# Both halves are the same lesson. `print` goes through `IyiIO`, whose
-# write *raises* when the descriptor refuses - a closed pipe, `head`
-# gone - so a panic printed that way panicked, printed again, and
-# recursed until the stack ended: `iyi run prog | head -3` died of
-# "invalid memory access" whose entire cause was the message about the
-# broken pipe. And reaching for `stdout`/`STDERR` here is worse than
-# raising, because `raise` is reachable from the prelude's own early
-# code, before those globals are built - trying it flushed twenty-two
-# zero bytes into the front of every program's output.
-#
-# Descriptor 2, because a panic is not the program's output: `prog >
-# data.json` must not find a panic inside the JSON.
+class IyiPanic
+  @@resolver : Proc(Pointer(Void*), Int32, Nil)? = nil
+
+  def self.resolver=(r : Proc(Pointer(Void*), Int32, Nil)?) : Nil
+    @@resolver = r
+  end
+
+  def self.resolver
+    @@resolver
+  end
+end
+
+# The panic's own write: descriptor 2 directly, no stream object, no error.
+# `print` goes through `IyiIO`, whose write raises when a pipe closes, and
+# reaching for `stdout`/`STDERR` flushes zeros if called before globals exist.
 private def __iyi_say(text : String) : Nil
   written = 0_i64
   total = text.bytesize.to_i64
@@ -7304,6 +7304,10 @@ private def __iyi_say(text : String) : Nil
 end
 
 def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
+  {% if flag?(:darwin) %}
+    callstack = uninitialized Void*[64]
+    count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
+  {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
   __iyi_say("\n")
@@ -7318,6 +7322,15 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     __iyi_say(line.to_s)
     __iyi_say("\n")
   end
+  {% if flag?(:darwin) %}
+    if r = IyiPanic.resolver
+      r.call(count > 1 ? pointerof(callstack).as(Void**) + 1 : pointerof(callstack).as(Void**), count > 1 ? count - 1 : count)
+    elsif count > 1
+      LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**) + 1, count - 1, 2)
+    elsif count == 1
+      LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**), 1, 2)
+    end
+  {% end %}
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     IyiScheduler.panic_current(message)
   {% else %}
@@ -7327,19 +7340,16 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
 end
 
 # The one word a test needs, and no framework under it (`iyi test`): a
-# false condition is a panic naming the site, which is a program printing
-# what failed and exiting 1 - the contract every gate in `bench/` already
-# runs on. The message is the sentence a failure prints; without one, the
-# site is the sentence.
+# false condition is a panic naming the site, exiting 1 - the contract every
+# gate in `bench/` runs on. The message is the sentence a failure prints;
+# without one, the site is the sentence.
 def assert(condition : Bool, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
   return if condition
   raise(message.empty? ? "assertion failed" : "assertion failed: " + message, file, line)
 end
 
-# What a failed `.as` names. `.as` reaches an iyi program through one door
-# only — `select`'s expansion casts the winning arm's value — and a failed
-# cast there is a compiler bug, so this is a panic wearing the constant's
-# name, not an exception type.
+# A failed `.as` in `select` expansion is a compiler bug; this panic carries
+# the constant's name rather than an exception type.
 class TypeCastError
   @message : String
 
@@ -7362,19 +7372,9 @@ def loop(& : -> Nil) : Nil
   end
 end
 
-# The program's own name-plate: arguments and environment, read on
-# demand from what already exists — no captured state, no boot order to
-# get wrong. `ARGC_UNSAFE`/`ARGV_UNSAFE` are the compiler's predefined
-# constants, initialised from `main`'s own parameters before anything
-# else runs (codegen/const.cr); `environ` is the C runtime's exported
-# global. A first draft captured argv in class variables from `main` and
-# read zeros: `__crystal_main` runs the class-variable initialisers
-# *after* `main`'s prologue stored, wiping it — symbols do not have that
-# ordering problem.
-#
-# On wasm32 there is no environment to read and `env` answers nil for
-# every name: the sandbox story (SPEC.md III.12) is that the runtime
-# hands the program nothing, and an absent surface beats a permission.
+# The program's arguments and environment, read on demand from what exists.
+# ARGC_UNSAFE/ARGV_UNSAFE are initialized before main runs; environ is from C.
+# On wasm32 there is no environment to read and env answers nil for every name.
 {% unless flag?(:wasm32) %}
   lib LibIyiEnv
     $environ : UInt8**

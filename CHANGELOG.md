@@ -71,6 +71,13 @@
   then died on a missing command. The oracle is python3 now, the same
   encoding `hexdump -C` prints. `bench/std_io_exercise.sh` holds it.
 
+- **Two shards that declared the same root wrote one artifact, and the
+  second overwrote the first.** The name on disk is the namespace, so
+  `alpha` and `beta` both saying `module Shared` both wrote
+  `mods/shared.iyimod` and `iyi bind` exited 0. The second is refused:
+  `beta also declares Shared, and alpha already wrote mods/shared.iyimod`.
+  `bench/bind_roundtrip.sh` holds it.
+
 - **A sibling `Std::Tuple` hid the prelude's `::Tuple`.** Looking `Tuple`
   up from `Std::Enumerable` walked to `Std` first, found the sibling
   unit, and the import wall refused a name the file never meant. Lookup

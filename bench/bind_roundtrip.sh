@@ -806,5 +806,25 @@ if [ -f out-source.txt ] && [ -f out-artifact.txt ]; then
   fi
 fi
 
+echo "== two shards that declare the same root"
+CLASH="$WORK/clash"
+mkdir -p "$CLASH/lib/alpha/src" "$CLASH/lib/beta/src"
+printf 'module Shared\n  def self.a\n    1\n  end\nend\n' > "$CLASH/lib/alpha/src/alpha.cr"
+printf 'name: alpha\n' > "$CLASH/lib/alpha/shard.yml"
+printf 'module Shared\n  def self.b\n    2\n  end\nend\n' > "$CLASH/lib/beta/src/beta.cr"
+printf 'name: beta\n' > "$CLASH/lib/beta/shard.yml"
+if (cd "$CLASH" && "$IYI" bind --lib lib --mods mods > "$CLASH/bind.log" 2>&1); then
+  echo "  two shards named Shared both bound, so one artifact is two shards"
+  sed 's/^/    /' "$CLASH/bind.log"
+  status=1
+elif grep -q "also declares Shared, and" "$CLASH/bind.log" &&
+     [ -f "$CLASH/mods/shared.iyimod" ]; then
+  echo "  the second is refused and the first still stands"
+else
+  echo "  the clash was not named:"
+  sed 's/^/    /' "$CLASH/bind.log"
+  status=1
+fi
+
 echo "workdir $WORK"
 exit $status

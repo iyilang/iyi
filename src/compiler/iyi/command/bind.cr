@@ -21,6 +21,11 @@
 # verbs — so a failure is the step's own message and the artifacts of the
 # shards before it stand.
 class Iyi::Command
+  # Which shard wrote which artifact this run. Two shards that declare
+  # the same root would otherwise share one file; see the check in
+  # `bind_boundary`.
+  @bind_owners = {} of String => String
+
   private def bind
     mods = "mods"
     lib_dir = "lib"
@@ -65,6 +70,12 @@ class Iyi::Command
     if File.exists?(mods) && !Dir.exists?(mods)
       abort! "bind: --mods needs a directory for the .iyimod files, and #{mods} is a file", :USAGE_ERROR
     end
+
+    # Artifact name is the root namespace, so two shards that both declare
+    # `Shared` both write `mods/shared.iyimod`. The second used to overwrite
+    # the first and exit 0. The owner is the shard that bound it, and a
+    # later shard that would write the same file is refused.
+    @bind_owners = {} of String => String
 
     shards = {} of String => Shard
     Dir.each_child(lib_dir) do |name|
@@ -261,6 +272,12 @@ class Iyi::Command
     bind_log = File.join(mods_path, "#{artifact}.bind.log")
     fill_log = File.join(mods_path, "#{artifact}.fill.log")
     drop_path = File.join(mods_path, "#{artifact}.drop")
+    owners = @bind_owners ||= {} of String => String
+    if (owner = owners[artifact]?) && owner != shard.name
+      return Boundary.new(root, artifact, false, false, [] of String,
+        "#{shard.name} also declares #{root}, and #{owner} already wrote #{mods}/#{artifact}.iyimod",
+        [] of String)
+    end
 
     # Discovery is this run's, not the last one's: a shard fixed since then
     # binds whole, and a person who deleted a line gets it retried.
@@ -317,6 +334,7 @@ class Iyi::Command
       }
     end
 
+    owners[artifact] = shard.name if bound
     Boundary.new(root, artifact, bound, macros, dropped, message, others)
   end
 

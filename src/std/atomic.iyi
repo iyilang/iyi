@@ -1,0 +1,290 @@
+# Crystal-compatible Atomic API — full memory orderings, bitwise operations,
+# and Atomic::Flag.
+#
+# Complements iyi's core sequentially-consistent Atomic(T) with
+# Crystal's standard-library atomic orderings and flag surface.
+
+module std/atomic
+pub alias Atomic = ::Atomic
+
+pub enum AtomicOrdering
+  Relaxed                = 0
+  Acquire                = 1
+  Release                = 2
+  AcquireRelease         = 3
+  SequentiallyConsistent = 4
+
+  def relaxed? : Bool
+    value == 0
+  end
+
+  def acquire? : Bool
+    value == 1
+  end
+
+  def release? : Bool
+    value == 2
+  end
+
+  def acquire_release? : Bool
+    value == 3
+  end
+
+  def sequentially_consistent? : Bool
+    value == 4
+  end
+end
+
+pub alias Ordering = AtomicOrdering
+
+struct IyiAtomic
+  @[Primitive(:fence)]
+  def self.fence(order : Symbol, singlethread : Bool) : Nil
+  end
+
+  @[Primitive(:load)]
+  def self.load(ptr : Pointer(T), order : Symbol, volatile : Bool) : T forall T
+  end
+
+  @[Primitive(:store)]
+  def self.store(ptr : Pointer(T), value : T, order : Symbol, volatile : Bool) : Nil forall T
+  end
+
+  @[Primitive(:rmw)]
+  def self.rmw(op : Symbol, ptr : Pointer(T), value : T, order : Symbol, volatile : Bool) : T forall T
+  end
+
+  @[Primitive(:cmpxchg)]
+  def self.cmpxchg(ptr : Pointer(T), cmp : T, new : T, success_order : Symbol, failure_order : Symbol) : {T, Bool} forall T
+  end
+end
+
+pub def fence(ordering : Ordering = Ordering::SequentiallyConsistent) : Nil
+  case ordering.value
+  when 0 then nil
+  when 1 then IyiAtomic.fence(:acquire, false)
+  when 2 then IyiAtomic.fence(:release, false)
+  when 3 then IyiAtomic.fence(:acquire_release, false)
+  else        IyiAtomic.fence(:sequentially_consistent, false)
+  end
+end
+
+struct ::Atomic(T)
+  alias Ordering = Std::Atomic::AtomicOrdering
+
+  def self.fence(ordering : Ordering = Ordering::SequentiallyConsistent) : Nil
+    Std::Atomic.fence(ordering)
+  end
+
+  private def as_ptr
+    {% if T == Bool %}
+      pointerof(@value).as(Pointer(UInt8))
+    {% else %}
+      pointerof(@value)
+    {% end %}
+  end
+
+  private def cast_in(val : T)
+    {% if T == Bool %}
+      val ? 1_u8 : 0_u8
+    {% else %}
+      val
+    {% end %}
+  end
+
+  private def cast_out(val) : T
+    {% if T == Bool %}
+      val != 0_u8
+    {% else %}
+      val
+    {% end %}
+  end
+
+  def get(ordering : Ordering) : T
+    res = case ordering.value
+          when 0 then IyiAtomic.load(as_ptr, :monotonic, false)
+          when 1 then IyiAtomic.load(as_ptr, :acquire, false)
+          else        IyiAtomic.load(as_ptr, :sequentially_consistent, false)
+          end
+    cast_out(res)
+  end
+
+  def set(value : T, ordering : Ordering) : T
+    case ordering.value
+    when 0 then IyiAtomic.store(as_ptr, cast_in(value), :monotonic, false)
+    when 2 then IyiAtomic.store(as_ptr, cast_in(value), :release, false)
+    else        IyiAtomic.store(as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+    value
+  end
+
+  def lazy_get : T
+    get(Ordering::Relaxed)
+  end
+
+  def lazy_set(value : T) : T
+    set(value, Ordering::Relaxed)
+  end
+
+  def swap(value : T, ordering : Ordering) : T
+    res = case ordering.value
+          when 0 then IyiAtomic.rmw(:xchg, as_ptr, cast_in(value), :monotonic, false)
+          when 1 then IyiAtomic.rmw(:xchg, as_ptr, cast_in(value), :acquire, false)
+          when 2 then IyiAtomic.rmw(:xchg, as_ptr, cast_in(value), :release, false)
+          when 3 then IyiAtomic.rmw(:xchg, as_ptr, cast_in(value), :acquire_release, false)
+          else        IyiAtomic.rmw(:xchg, as_ptr, cast_in(value), :sequentially_consistent, false)
+          end
+    cast_out(res)
+  end
+
+  def add(value : T, ordering : Ordering) : T
+    {% raise "Atomic(Bool) does not support add: arithmetic verbs belong to integer atomics" if T == Bool %}
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:add, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:add, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:add, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:add, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:add, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def sub(value : T, ordering : Ordering) : T
+    {% raise "Atomic(Bool) does not support sub: arithmetic verbs belong to integer atomics" if T == Bool %}
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:sub, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:sub, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:sub, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:sub, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:sub, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def and(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:and, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:and, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:and, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:and, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:and, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def nand(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:nand, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:nand, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:nand, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:nand, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:nand, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def xor(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:xor, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:xor, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:xor, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:xor, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:xor, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  # Language note: in iyi, `.or` is a reserved language keyword for error recovery
+  # (`expr.or { fallback }`). To avoid parser conflict while providing full bitwise
+  # atomic operations, bitwise OR is exposed as `bitwise_or`.
+  def bitwise_or(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:or, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:or, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:or, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:or, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:or, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def max(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:max, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:max, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:max, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:max, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:max, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def min(value : T, ordering : Ordering = Ordering::SequentiallyConsistent) : T
+    case ordering.value
+    when 0 then IyiAtomic.rmw(:min, as_ptr, cast_in(value), :monotonic, false)
+    when 1 then IyiAtomic.rmw(:min, as_ptr, cast_in(value), :acquire, false)
+    when 2 then IyiAtomic.rmw(:min, as_ptr, cast_in(value), :release, false)
+    when 3 then IyiAtomic.rmw(:min, as_ptr, cast_in(value), :acquire_release, false)
+    else        IyiAtomic.rmw(:min, as_ptr, cast_in(value), :sequentially_consistent, false)
+    end
+  end
+
+  def compare_and_set(expected : T, desired : T, success_ordering : Ordering, failure_ordering : Ordering) : Tuple(T, Bool)
+    exp = cast_in(expected)
+    des = cast_in(desired)
+    res = case {success_ordering.value, failure_ordering.value}
+          when {0, 0}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :monotonic, :monotonic)
+          when {1, 0}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :acquire, :monotonic)
+          when {1, 1}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :acquire, :acquire)
+          when {2, 0}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :release, :monotonic)
+          when {2, 1}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :release, :acquire)
+          when {3, 0}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :acquire_release, :monotonic)
+          when {3, 1}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :acquire_release, :acquire)
+          when {4, 0}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :sequentially_consistent, :monotonic)
+          when {4, 1}
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :sequentially_consistent, :acquire)
+          else
+            IyiAtomic.cmpxchg(as_ptr, exp, des, :sequentially_consistent, :sequentially_consistent)
+          end
+    {cast_out(res[0]), res[1]}
+  end
+end
+
+struct ::Atomic(T)
+  struct Flag
+    @value : Atomic(Bool)
+
+    def initialize
+      @value = Atomic(Bool).new(false)
+    end
+
+    def test_and_set : Bool
+      @value.swap(true) == false
+    end
+
+    def clear : Nil
+      @value.set(false)
+      nil
+    end
+  end
+end
+
+pub struct AtomicFlag
+  @value : Atomic(Bool)
+
+  def initialize
+    @value = Atomic(Bool).new(false)
+  end
+
+  def test_and_set : Bool
+    @value.swap(true) == false
+  end
+
+  def clear : Nil
+    @value.set(false)
+    nil
+  end
+end
+
+pub alias Flag = AtomicFlag

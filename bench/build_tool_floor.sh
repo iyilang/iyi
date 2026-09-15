@@ -66,6 +66,20 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # Allowlists: each entry has a stated reason in the header above.
 ALLOWED_BUILD_TOOLS="c++ cc crystal git llvm-config"
 ALLOWED_RUNTIME_TOOLS="cc dsymutil git ldd pkg-config wasmtime"
+
+# Tools reached only by auxiliary targets: docs, lint, spec, packaging. These
+# are not dependencies of iyi, because nobody needs them to build the compiler
+# or to build a program with it. They are still listed, because an unlisted
+# tool appearing anywhere is what this gate exists to notice, and "it is only
+# in the docs target" is a judgement for a reader to make rather than a reason
+# to stay silent.
+#
+#   asciidoctor  renders the man pages in `docs`
+#   gzip         compresses them
+#   grep, ldd    used by `lint` and by the install checks
+#   shellcheck   lints the shell scripts
+ALLOWED_AUX_TOOLS="asciidoctor grep gzip ldd shellcheck"
+
 FORBIDDEN_TOOLS="ar strip python python3 ruby perl nasm yasm"
 
 unexpected() {
@@ -139,13 +153,40 @@ KNOWN_BUILTINS = {
 }
 MAKE_MACROS = {"$(call", "$(if", "$(error", "$(warning", "#"}
 
+# Every recipe, not a chosen few. Scoping discovery to a hardcoded target list
+# means a tool invoked from a target nobody listed is invisible, which is the
+# one thing this gate exists to catch: `smoke-probe:` calling `sha256sum` kept
+# the gate green until this scanned all of them. The allowlist does the
+# narrowing; discovery must not.
+SHELL_KEYWORDS = {
+    "for", "if", "then", "else", "elif", "fi", "do", "done", "while", "case",
+    "esac", "in", "return", "local", "read", "set", "unset", "shift", "eval",
+    "source", ".", "[", "[[", "trap", "wait", "time",
+}
+
+# A tool needed to produce the compiler is a dependency of iyi. A tool needed
+# only by `docs`, `lint`, `spec` or `package` is a dependency of working on
+# iyi, which is a different claim and belongs in its own list. Both are
+# discovered; only the bucket differs.
+found_aux = {}
+
 in_target = False
+bucket = found_build
 for idx, line in joined_lines:
     if not line.startswith("\t") and not line.startswith(" "):
-        if any(line.startswith(t) for t in COMPILER_TARGETS):
-            in_target = True
-        else:
-            in_target = False
+        stripped = line.strip()
+        in_target = (
+            ":" in stripped
+            and not stripped.startswith("#")
+            and not stripped.startswith(".PHONY")
+            and "=" not in stripped.split(":", 1)[0]
+        )
+        if in_target:
+            bucket = (
+                found_build
+                if any(stripped.startswith(t) for t in COMPILER_TARGETS)
+                else found_aux
+            )
     elif in_target and line.startswith("\t"):
         cmd_str = line.strip().lstrip("@-").strip()
         if cmd_str.startswith("#"):
@@ -179,14 +220,28 @@ for idx, line in joined_lines:
                 continue
             if "=" in tok:
                 continue
+            # A flag is not a tool. `install -d`, `mkdir -m`, `make -B` were
+            # being recorded as dependencies named `-d`, `-m` and `-B`.
+            if tok.startswith("-"):
+                continue
+            # Nor is a file mode (`install -m 0755`) or an included makefile.
+            if tok.isdigit() or tok.endswith(".mk"):
+                continue
+            # Nor an argument: a destination path, a completion file, an
+            # automatic variable. `install -m 644 etc/completion.bash
+            # $(DESTDIR)$(DATADIR)/...` was being read as three dependencies.
+            if tok.startswith("$"):
+                continue
+            if "/" in tok and not tok.startswith("./bin/"):
+                continue
             clean = tok.strip("\"'()")
             if clean.startswith("./bin/crystal") or clean == "crystal":
                 found_build.setdefault("crystal", []).append(f"Makefile:{idx}")
                 break
-            elif clean in KNOWN_BUILTINS:
+            elif clean in KNOWN_BUILTINS or clean in SHELL_KEYWORDS:
                 break
             elif clean:
-                found_build.setdefault(clean, []).append(f"Makefile:{idx}")
+                bucket.setdefault(clean, []).append(f"Makefile:{idx}")
                 break
 
 # 2. Check src/llvm/
@@ -210,16 +265,40 @@ for t in sorted(found_build):
     locs = " ".join(found_build[t][:3])
     count = len(found_build[t])
     print(f"TOOL:{t}:{count}:{locs}")
+
+for t in sorted(found_aux):
+    if t in found_build:
+        continue
+    locs = " ".join(found_aux[t][:3])
+    count = len(found_aux[t])
+    print(f"AUX:{t}:{count}:{locs}")
 PYEOF
 )"
 
 found_build_tools=""
+found_aux_tools=""
 while IFS=: read -r prefix tool count locs; do
-  [ "$prefix" = "TOOL" ] || continue
-  found_build_tools="$found_build_tools $tool"
-  printf '  %-14s (%2d sites)  %s\n' "$tool" "$count" "$locs"
+  case "$prefix" in
+    TOOL)
+      found_build_tools="$found_build_tools $tool"
+      printf '  %-14s (%2d sites)  %s\n' "$tool" "$count" "$locs"
+      ;;
+    AUX)
+      found_aux_tools="$found_aux_tools $tool"
+      ;;
+  esac
 done <<< "$build_scan"
 found_build_tools="$(echo $found_build_tools | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+found_aux_tools="$(echo $found_aux_tools | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+
+if [ -n "$(echo $found_aux_tools)" ]; then
+  echo
+  echo "== 1b. Tools used only by auxiliary targets (docs, lint, spec, package)"
+  echo "       Not required to build the compiler, so not a dependency of iyi."
+  for t in $found_aux_tools; do
+    printf '  %s\n' "$t"
+  done
+fi
 
 echo
 echo "== 2. Tools the compiler invokes at RUNTIME to build a user's program"
@@ -308,6 +387,12 @@ report "build tools" \
 report "runtime tools" \
   "$(unexpected "$ALLOWED_RUNTIME_TOOLS" "$found_runtime_tools")" \
   "Each runtime tool must be recorded in ALLOWED_RUNTIME_TOOLS with its reason (SPEC.md III.9, III.10)."
+
+report "auxiliary tools" \
+  "$(unexpected "$ALLOWED_AUX_TOOLS" "$found_aux_tools")" \
+  "A tool reached from any target must be recorded. Auxiliary ones go in
+ALLOWED_AUX_TOOLS with their reason; they are not dependencies of iyi, but an
+unrecorded one is a dependency nobody decided to take on."
 
 # Failure in the other direction: stale allowlist entries
 missing_build="$(unexpected "$found_build_tools" "$ALLOWED_BUILD_TOOLS")"

@@ -1,8 +1,10 @@
 module compiler/command/driver
 
 import std/option_parser
+import compiler/platform/target
 
 using std/option_parser::{OptionParser}
+using compiler/platform/target::{Target}
 
 # What a command invocation exits with.
 pub enum Exit
@@ -167,8 +169,19 @@ end
 
 # The command driver ported from src/compiler/iyi/command.cr.
 pub class CommandDriver
+  IYI_VERSION = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
+  BASE_VERSION = {{ read_file("#{__DIR__}/../../VERSION").chomp }}
+
+  {% begin %}
+    {% llvm_config = env("LLVM_CONFIG") || "llvm-config" %}
+    {% llvm_ver = env("IYI_CONFIG_LLVM_VERSION") || env("LLVM_VERSION") || `#{llvm_config.id} --version 2> /dev/null || true`.strip.stringify %}
+    {% raw_triple = env("IYI_CONFIG_TARGET") || env("TARGET") || `#{llvm_config.id} --host-target 2> /dev/null || true`.strip.stringify %}
+    LLVM_VERSION = {{ llvm_ver }}
+    CONFIG_TARGET = {{ raw_triple }}
+  {% end %}
+
   @@program_name = "iyi"
-  @@version_description = "iyi 0.12.0\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
+  @@version_description : String? = nil
 
   def self.program_name : String
     @@program_name
@@ -182,8 +195,49 @@ pub class CommandDriver
     @@program_name == "crystal" ? "Crystal" : "iyi"
   end
 
+  def self.version : String
+    @@program_name == "iyi" ? IYI_VERSION : BASE_VERSION
+  end
+
+  def self.release_mode? : Bool
+    {{ flag?(:release) }}
+  end
+
+  def self.llvm_version : String
+    LLVM_VERSION
+  end
+
+  def self.default_target : String
+    target = Target.parse?(CONFIG_TARGET)
+    if target
+      target.to_s
+    else
+      CONFIG_TARGET
+    end
+  end
+
+  def self.default_version_description : String
+    sb = OutputBuffer.new
+    sb.print("#{CommandDriver.language_name} #{CommandDriver.version}")
+    unless release_mode?
+      sb.print("\n\nThe compiler was not built in release mode.")
+    end
+    unless LLVM_VERSION.empty?
+      sb.print("\n\nLLVM: #{LLVM_VERSION}")
+    end
+    target_str = default_target
+    unless target_str.empty?
+      sb.print("\nDefault target: #{target_str}")
+    end
+    sb.puts("")
+    sb.to_s
+  end
+
   def self.version_description : String
-    @@version_description
+    if override = @@version_description
+      return override
+    end
+    default_version_description
   end
 
   def self.version_description=(desc : String) : Nil

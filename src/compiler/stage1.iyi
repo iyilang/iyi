@@ -19,7 +19,6 @@ lib LibC
 end
 def run_driver : Nil
   CommandDriver.program_name = "iyi"
-  CommandDriver.version_description = "iyi 0.12.0\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
   driver = CommandDriver.new(Program.args)
   result = driver.run
   stdout_text = result.stdout_output

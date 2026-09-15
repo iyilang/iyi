@@ -103,8 +103,17 @@ trap 'rm -rf "$WORK"' EXIT
 # stack overflow is the program's own panic, said from a handler on an
 # alternate stack, and every darwin program installs one. Linux's is a
 # syscall.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
-ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main"
+# `environ` joined when the std exercises started calling `Program.env`
+# (`std/colorize` reads `NO_COLOR`/`TERM`, `std/path` reads `HOME`/`PWD`).
+# The prelude walks the C runtime's exported global, which on darwin is
+# libSystem and on Linux is the one libc data symbol env has. Samples
+# never asked, so the name was invisible until the exercises did.
+# `pthread_join` joined with `IyiThread.join` on darwin: `pthread_create`
+# was already on the list for the collector's helpers, and an exercise
+# that starts a thread and waits for it names the other half. Linux's
+# join is a futex.
+ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main environ"
 
 # What a program may link. The platform libc only.
 ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"

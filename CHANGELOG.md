@@ -84,6 +84,13 @@
   The fixtures are `pack/box`, a path the library does not own.
   `spec/compiler/iyimod_spec.cr` holds it.
 
+- **The std exercises named `environ` and, on darwin, `pthread_join`.**
+  Samples never called `Program.env` or joined a thread, so the floor
+  did not see them. `std/colorize` and `std/path` walk the C runtime's
+  `environ`; `IyiThread.join` on darwin is libSystem's `pthread_join`,
+  the other half of `pthread_create` the collector already named.
+  `bench/dependency_floor.sh` holds it.
+
 - **A sibling `Std::Tuple` hid the prelude's `::Tuple`.** Looking `Tuple`
   up from `Std::Enumerable` walked to `Std` first, found the sibling
   unit, and the import wall refused a name the file never meant. Lookup

@@ -13,17 +13,20 @@
 #
 # What the reader refuses, each with the line and column it stopped at:
 # anything that is not a JSON document (bare words, leading zeros, a trailing
-# comma, a raw control character or a lone surrogate inside a string, an
-# invalid escape, text after the root value, nesting past 512 levels, a
-# number too large for a Float64) and an object that names the same key twice.
-# `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
+# comma, a raw control character, invalid UTF-8 or a lone surrogate inside a
+# string, an invalid escape, a byte order mark, text after the root value,
+# nesting past 512 levels, a number too large for a Float64) and an object
+# that names the same key twice, in `JSON.parse` and in the `PullParser`
+# alike. `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
 #
 # What the writer refuses: `NaN` and `Infinity`, which are not JSON numbers;
 # a value where an object key is due, a field outside an object, a second
-# value at the document root, and a container closed that was never opened.
+# value at the document root, a container closed that was never opened, and
+# `to_s` of a document with a container still open or no value written.
 # Every control byte under 0x20 and the byte 0x7f are written as `\u00XX`;
 # `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`, with a
-# surrogate pair past the basic plane.
+# surrogate pair past the basic plane, and bytes that are not a code point
+# as `\ufffd`.
 #
 # `ToJSON` is the trait a type implements to be written by `JSON.to_json`;
 # `Any` implements it, and so do the prelude's scalars, arrays and hashes
@@ -98,6 +101,49 @@ class StringBuffer
       target.copy_from(ptr, len)
     end
   end
+end
+
+# The length of the well-formed UTF-8 sequence that starts at *at*, or,
+# negated, the length of the maximal ill-formed subpart there: the bytes that
+# could still have begun a well-formed sequence, at least the one byte. An
+# overlong form, a surrogate and anything past U+10FFFF are ill-formed.
+def utf8_sequence_at(bytes : Pointer(UInt8), size : Int32, at : Int32) : Int32
+  lead = bytes[at]
+  return 1 if lead < 0x80_u8
+  need = 0
+  low = 0x80_u8
+  high = 0xBF_u8
+  if lead >= 0xC2_u8 && lead <= 0xDF_u8
+    need = 1
+  elsif lead == 0xE0_u8
+    need = 2
+    low = 0xA0_u8
+  elsif lead == 0xED_u8
+    need = 2
+    high = 0x9F_u8
+  elsif lead >= 0xE1_u8 && lead <= 0xEF_u8
+    need = 2
+  elsif lead == 0xF0_u8
+    need = 3
+    low = 0x90_u8
+  elsif lead == 0xF4_u8
+    need = 3
+    high = 0x8F_u8
+  elsif lead >= 0xF1_u8 && lead <= 0xF3_u8
+    need = 3
+  else
+    return -1
+  end
+  taken = 1
+  while taken <= need
+    return 0 - taken if at + taken >= size
+    byte = bytes[at + taken]
+    return 0 - taken if byte < low || byte > high
+    low = 0x80_u8
+    high = 0xBF_u8
+    taken = taken + 1
+  end
+  taken
 end
 
 # A type that can write itself into a `Builder`. `JSON.to_json` accepts any
@@ -637,6 +683,8 @@ class Lexer
         consume_bare_identifier(tok_line, tok_col)
       elsif b >= 32_u8 && b < 127_u8
         fail("unexpected character '#{b.unsafe_chr}'", tok_line, tok_col)
+      elsif b == 0xEF_u8 && @pos + 2 < @bytesize && @bytes[@pos + 1] == 0xBB_u8 && @bytes[@pos + 2] == 0xBF_u8
+        fail("unexpected UTF-8 byte order mark", tok_line, tok_col)
       else
         fail("unexpected byte #{b}", tok_line, tok_col)
       end
@@ -697,6 +745,8 @@ class Lexer
         break
       elsif b < 32_u8
         return fail("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
+      elsif b >= 128_u8
+        return unless take_utf8_sequence
       else
         advance
       end
@@ -797,6 +847,10 @@ class Lexer
         end
       elsif b < 32_u8
         return fail("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
+      elsif b >= 128_u8
+        from = @pos
+        return unless take_utf8_sequence
+        @string_buffer.append(@input[from, @pos - from])
       else
         @string_buffer.append(b)
         advance
@@ -804,6 +858,27 @@ class Lexer
     end
 
     fail("unterminated string", line, col)
+  end
+
+  # Passes over the UTF-8 sequence at the current byte and answers true, or
+  # records why the bytes there are not one (RFC 8259 §8.1: a document is
+  # UTF-8) and answers false.
+  private def take_utf8_sequence : Bool
+    b = current_byte
+    length = utf8_sequence_at(@bytes, @bytesize, @pos)
+    if length < 0
+      if b >= 0xC2_u8 && b <= 0xF4_u8
+        fail("malformed UTF-8 sequence starting with byte #{b} in string", @line_number, @column_number)
+      else
+        fail("invalid UTF-8 byte #{b} in string", @line_number, @column_number)
+      end
+      return false
+    end
+    while length > 0
+      advance
+      length = length - 1
+    end
+    true
   end
 
   # Four hex digits, or -1 after recording why not.
@@ -1476,13 +1551,24 @@ pub class PullParser
     read_end_array
   end
 
+  # Yields each key of the object the reader is on, with the reader at its
+  # value. A key named twice is refused, as `JSON.parse` refuses it.
   def read_object(& : String -> Nil) : Nil
     read_begin_object
+    seen = {} of String => Bool
     while @kind != Kind::EndObject
-      key = read_object_key
-      yield key
+      yield read_object_key(seen)
     end
     read_end_object
+  end
+
+  # The key the reader is on, refused when `seen` already holds it, where
+  # the key is rather than where its value is.
+  private def read_object_key(seen : Hash(String, Bool)) : String
+    parse_error("duplicate key '#{@string_value}'") if @kind == Kind::String && seen.has_key?(@string_value)
+    key = read_object_key
+    seen[key] = true
+    key
   end
 
   # Passes over the value the reader is on, whole.
@@ -1494,12 +1580,9 @@ pub class PullParser
       end
       read_end_array
     elsif @kind == Kind::BeginObject
-      read_begin_object
-      while @kind != Kind::EndObject
-        read_object_key
+      read_object do |_key|
         skip
       end
-      read_end_object
     else
       read_next
     end
@@ -1518,8 +1601,9 @@ pub class PullParser
   def on_key(key : String, & : -> Nil) : Nil
     read_begin_object
     found = false
+    seen = {} of String => Bool
     while @kind != Kind::EndObject
-      current_key = read_object_key
+      current_key = read_object_key(seen)
       if current_key == key
         found = true
         yield
@@ -1553,7 +1637,6 @@ pub class PullParser
     elsif @kind == Kind::BeginObject
       obj = {} of String => Any
       read_object do |k|
-        parse_error("duplicate key '#{k}'") if obj.has_key?(k)
         obj[k] = read_any
       end
       Any.new(obj)
@@ -1764,24 +1847,25 @@ pub class Builder
         i = i + 1
       elsif @ascii_only && b >= 128_u8
         # Decode the UTF-8 sequence and write the code point as \uXXXX, or as
-        # a surrogate pair past the basic plane.
-        if (b & 0xE0_u8) == 0xC0_u8 && i + 1 < len
-          cp = ((b.to_i & 0x1F) << 6) | (bytes[i + 1].to_i & 0x3F)
-          write_hex_u4(cp)
+        # a surrogate pair past the basic plane. Bytes that are not a code
+        # point are written as U+FFFD, one per ill-formed subpart, so the
+        # output stays ASCII.
+        length = utf8_sequence_at(bytes, len, i)
+        if length < 0
+          write_hex_u4(0xFFFD)
+          i = i - length
+        elsif length == 2
+          write_hex_u4(((b.to_i & 0x1F) << 6) | (bytes[i + 1].to_i & 0x3F))
           i = i + 2
-        elsif (b & 0xF0_u8) == 0xE0_u8 && i + 2 < len
-          cp = ((b.to_i & 0x0F) << 12) | ((bytes[i + 1].to_i & 0x3F) << 6) | (bytes[i + 2].to_i & 0x3F)
-          write_hex_u4(cp)
+        elsif length == 3
+          write_hex_u4(((b.to_i & 0x0F) << 12) | ((bytes[i + 1].to_i & 0x3F) << 6) | (bytes[i + 2].to_i & 0x3F))
           i = i + 3
-        elsif (b & 0xF8_u8) == 0xF0_u8 && i + 3 < len
+        else
           cp = ((b.to_i & 0x07) << 18) | ((bytes[i + 1].to_i & 0x3F) << 12) | ((bytes[i + 2].to_i & 0x3F) << 6) | (bytes[i + 3].to_i & 0x3F)
           sub = cp - 0x10000
           write_hex_u4(0xD800 + (sub >> 10))
           write_hex_u4(0xDC00 + (sub & 0x3FF))
           i = i + 4
-        else
-          @buffer.append(b)
-          i = i + 1
         end
       else
         @buffer.append(b)
@@ -1900,7 +1984,18 @@ pub class Builder
     null
   end
 
+  # Whether no value has been written yet.
+  def empty? : Bool
+    state == ROOT
+  end
+
+  # The document's text. A container still open or no value written at all
+  # is not a document, and is refused.
   def to_s : String
+    st = state
+    raise "to_s with an array still open" if st == ARRAY_FIRST || st == ARRAY_NEXT
+    raise "to_s with an object still open" if st == OBJECT_FIRST || st == OBJECT_NEXT || st == OBJECT_VALUE
+    raise "to_s with no value written" if st == ROOT
     @buffer.to_s
   end
 end
@@ -1924,7 +2019,8 @@ pub struct JSON
   end
 
   # Text written through a `Builder` the block is handed. `indent` is a
-  # count of spaces or the string one level is indented by.
+  # count of spaces or the string one level is indented by. A block that
+  # writes no value, or leaves a container open, is refused.
   def self.build(indent : String | Int32 | Nil = nil, & : Builder -> Nil) : String
     builder = Builder.new
     if indent.is_a?(Int32)
@@ -1933,6 +2029,7 @@ pub struct JSON
       builder.indent = indent.as(String)
     end
     yield builder
+    raise "build wrote no value" if builder.empty?
     builder.to_s
   end
 
@@ -1987,13 +2084,27 @@ pub struct JSON
     end
   end
 
+  # A key that is not a string is written by its `to_s`; `nil` as `"null"`,
+  # the word a JSON null is.
   def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
     b.object do
       val.each do |k, v|
-        b.field(k.to_s)
+        b.field(key_text(k))
         write_value(v, b)
       end
     end
+  end
+
+  private def self.key_text(key : Nil) : String
+    "null"
+  end
+
+  private def self.key_text(key : String) : String
+    key
+  end
+
+  private def self.key_text(key) : String
+    key.to_s
   end
 
   def self.write_value(val : T, b : Builder) : Nil forall T : ToJSON
@@ -2035,10 +2146,49 @@ pub struct JSON
     v.to_u8
   end
 
+  # An integer past Int64 reaches the reader as a float that still carries
+  # its digits; those are read here, so the whole UInt64 range comes back.
   def self.read_value(pull : PullParser, type : UInt64.class) : UInt64
-    v = pull.read_int
-    raise "integer #{v} out of UInt64 range" if v < 0_i64
-    v.to_u64
+    if pull.kind.int?
+      v = pull.read_int
+      raise "integer #{v} out of UInt64 range" if v < 0_i64
+      return v.to_u64
+    end
+    raw = pull.raw_value
+    if pull.kind.float? && integer_digits?(raw)
+      v = digits_to_u64?(raw) || raise "integer #{raw} out of UInt64 range"
+      pull.read_next
+      return v
+    end
+    pull.read_int.to_u64
+  end
+
+  # Whether the number's text is an integer literal: an optional minus and
+  # digits, no fraction or exponent.
+  private def self.integer_digits?(raw : String) : Bool
+    bytes = raw.to_unsafe
+    i = bytes[0] == 45_u8 ? 1 : 0
+    return false if i >= raw.bytesize
+    while i < raw.bytesize
+      return false unless bytes[i] >= 48_u8 && bytes[i] <= 57_u8
+      i = i + 1
+    end
+    true
+  end
+
+  # The UInt64 these digits spell, or nil when they do not fit.
+  private def self.digits_to_u64?(raw : String) : UInt64?
+    bytes = raw.to_unsafe
+    return nil if bytes[0] == 45_u8
+    val = 0_u64
+    i = 0
+    while i < raw.bytesize
+      d = (bytes[i] - 48_u8).to_u64
+      return nil if val > 1844674407370955161_u64 || (val == 1844674407370955161_u64 && d > 5_u64)
+      val = val * 10_u64 + d
+      i = i + 1
+    end
+    val
   end
 
   def self.read_value(pull : PullParser, type : Float64.class) : Float64
@@ -2065,13 +2215,9 @@ pub struct JSON
 
   def self.read_value(pull : PullParser, type : Hash(String, V).class) : Hash(String, V) forall V
     h = Hash(String, V).new
-    pull.read_begin_object
-    while !pull.kind.end_object?
-      k = pull.read_object_key
-      raise "duplicate key '#{k}' at line #{pull.line_number}, column #{pull.column_number}" if h.has_key?(k)
+    pull.read_object do |k|
       h[k] = read_value(pull, V)
     end
-    pull.read_end_object
     h
   end
 end

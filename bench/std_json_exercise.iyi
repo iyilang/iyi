@@ -107,6 +107,7 @@ pretty = JSON.parse("{\"a\":[1,{\"b\":null},[]],\"c\":{}}").to_pretty_json
 assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  ],\n  \"c\": {}\n}", pretty, "pretty text")
 assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")
 assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
+assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\\u00e9\\ufffd\\ufffd\\ud83d\\ude00\"]", Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any).to_ascii_json, "ascii-only writes bytes that are not a code point as \\ufffd, one per ill-formed subpart")
 assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
 assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
 assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
@@ -169,6 +170,10 @@ assert_true(pull.kind.eof?, "eof")
 pull = PullParser.new("[[[1]]]")
 pull.max_nesting = 3
 assert_text("[[[1]]]", pull.read_raw, "three levels within a limit of three")
+pull = PullParser.new("{\"a\": {\"x\": 1}, \"b\": {\"x\": 2}, \"x\": 3}")
+pull.skip
+assert_true(pull.kind.eof?, "skip over objects whose keys repeat only across objects")
+assert_text("{\"x\":[1],\"y\":{\"x\":2}}", JSON.from_json("{\"x\": [1], \"y\": {\"x\": 2}}", Any).to_json, "read_any with a key repeated in a nested object")
 assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
 puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
 
@@ -222,7 +227,9 @@ ascii.string("\u00e9")
 assert_text("\"\\u00e9\"", ascii.to_s, "ascii_only on a builder")
 deep = Builder.new
 deep.max_nesting = 2
+assert_true(deep.empty?, "a fresh builder is empty")
 deep.start_array
+assert_true(!deep.empty?, "and is not once a container is open")
 deep.start_array
 deep.end_array
 deep.end_array
@@ -312,6 +319,7 @@ assert_text("[1,2]", JSON.to_json([1_u8, 2_u8]), "Array(UInt8)")
 assert_text("[[1],[]]", JSON.to_json([[1_i64], [] of Int64]), "Array(Array(Int64))")
 assert_text("{\"k\":[1.5],\"m\":[]}", JSON.to_json({"k" => [1.5], "m" => [] of Float64}), "Hash(String, Array(Float64))")
 assert_text("{\"1\":true}", JSON.to_json({1 => true}), "Hash with an integer key is written by to_s")
+assert_text("{\"null\":1}", JSON.to_json({nil => 1}), "Hash with a nil key is written as \"null\"")
 assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
 assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
 assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")
@@ -322,6 +330,10 @@ assert_true(JSON.from_json("-2147483648", Int32) == -2147483648, "Int32 min")
 assert_true(JSON.from_json("9223372036854775807", Int64) == 9223372036854775807_i64, "Int64 max")
 assert_true(JSON.from_json("255", UInt8) == 255_u8, "UInt8 max")
 assert_true(JSON.from_json("9223372036854775807", UInt64) == 9223372036854775807_u64, "UInt64")
+assert_true(JSON.from_json("18446744073709551615", UInt64) == 18446744073709551615_u64, "UInt64 max, past what Int64 holds")
+assert_true(JSON.from_json(JSON.to_json(18446744073709551615_u64), UInt64) == 18446744073709551615_u64, "UInt64 max round-trips through to_json")
+big = JSON.from_json("[0, 9223372036854775808, 18446744073709551615]", Array(UInt64))
+assert_true(big.size == 3 && big[1] == 9223372036854775808_u64 && big[2] == 18446744073709551615_u64, "Array(UInt64) past Int64")
 assert_true(JSON.from_json("7", Float64) == 7.0 && JSON.from_json("7.5", Float64) == 7.5, "Float64 from an integer or a float")
 assert_text("\u00e9", JSON.from_json("\"\\u00e9\"", String), "String")
 assert_text("[1,{\"a\":2.5}]", JSON.from_json("[1, {\"a\": 2.5}]", Any).to_json, "Any")
@@ -375,6 +387,15 @@ refused_with("[nul]", "bare identifier 'nul' at line 1, column 2")
 refused_with("[truex]", "bare identifier 'truex' at line 1, column 2")
 refused_with("[1, @]", "unexpected character '@' at line 1, column 5")
 refused_with("[1,\n 2,\n \u00e9]", "unexpected byte 195 at line 3, column 2")
+refused_with("\u{FEFF}[1]", "unexpected UTF-8 byte order mark at line 1, column 1")
+refused_with("[1, \u{FEFF}2]", "unexpected UTF-8 byte order mark at line 1, column 5")
+refused_with("\"\xff\xfe\"", "invalid UTF-8 byte 255 in string at line 1, column 2")
+refused_with("[\"ab\xc0\x80\"]", "invalid UTF-8 byte 192 in string at line 1, column 5")
+refused_with("[\"\u00e9\x80\"]", "invalid UTF-8 byte 128 in string at line 1, column 4")
+refused_with("[\"a\\n\xe9A\"]", "malformed UTF-8 sequence starting with byte 233 in string at line 1, column 6")
+refused_with("[\"a\\nb\xf0\x9f\"]", "malformed UTF-8 sequence starting with byte 240 in string at line 1, column 7")
+refused_with("[\"\xed\xa0\x80\"]", "malformed UTF-8 sequence starting with byte 237 in string at line 1, column 3")
+assert_true(JSON.parse("[\"\xed\x9f\xbf\xf4\x8f\xbf\xbf\"]")[0].as_s.bytesize == 7, "U+D7FF and U+10FFFF, the edges of what is well-formed, are read")
 refused_with("{1: 2}", "expected string key in object at line 1, column 2")
 refused_with("[1,", "unexpected end of input at line 1, column 4")
 refused_with("{\"a\":", "unexpected end of input at line 1, column 6")
@@ -384,7 +405,7 @@ refused_with("[\"\u00e9\u00e9\", 1 x]", "bare identifier 'x' at line 1, column 1
 deep_text = "[" * 513 + "]" * 513
 refused_with(deep_text, "nesting depth of 513 exceeds maximum depth 512 at line 1, column 513")
 assert_true(JSON.parse("[" * 512 + "]" * 512).size == 1, "512 levels are read")
-puts "  #{44} malformed inputs, each refused with its sentence and location"
+puts "  #{52} malformed inputs, each refused with its sentence and location"
 
 # ---------------------------------------------------------------------------
 # Differential corpus: re-emitted for the shell gate to compare against the

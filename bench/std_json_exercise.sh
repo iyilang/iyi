@@ -5,7 +5,9 @@
 #
 # Proves the exercise holds plain and --release, the compact corpus round-trips
 # through python3's json, what the reader refuses is refused in the program,
-# and a copy that stops treating a repeated object key as a mistake is caught.
+# what the pull parser, the builder and from_json refuse by panic is refused
+# in a small program each, and a copy that stops treating a repeated object
+# key as a mistake is caught, in the parser and in the pull parser.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,7 +30,7 @@ build_and_run() {
   fi
   "$WORK/$name" >"$WORK/$name.out" 2>&1
   local exit_code=$?
-  grep -v '^[{["0-9tfn-]' "$WORK/$name.out" | grep -v '^  ' | sed 's/^/  /' || true
+  grep -av '^[{["0-9tfn-]' "$WORK/$name.out" | grep -av '^  ' | sed 's/^/  /' || true
   if [ "$exit_code" -ne 0 ]; then
     echo "$label: exited $exit_code"
     tail -8 "$WORK/$name.out"
@@ -40,7 +42,7 @@ build_and_run() {
 
 echo "== the std/json exercise, plain build"
 build_and_run "plain" json-plain
-if ! grep -q "ALL CHECKS PASSED" "$WORK/json-plain.out" 2>/dev/null; then
+if ! grep -aq "ALL CHECKS PASSED" "$WORK/json-plain.out" 2>/dev/null; then
   echo "plain: missing pass sentinel"
   status=1
 fi
@@ -48,7 +50,7 @@ fi
 echo
 echo "== every json section reported"
 for phrase in "== parse corpus" "== to_json and to_pretty_json" "== pull parser walk" "== builder" "== equality and hash" "== to_json and from_json" "== what the reader refuses" "== differential corpus"; do
-  if ! grep -q "$phrase" "$WORK/json-plain.out" 2>/dev/null; then
+  if ! grep -aq "$phrase" "$WORK/json-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
@@ -57,7 +59,7 @@ done
 
 echo
 echo "== compact corpus against python3 json"
-grep '^oracle json' "$WORK/json-plain.out" | cut -f2- > "$WORK/compact.iyi.txt"
+grep -a '^oracle json' "$WORK/json-plain.out" | cut -f2- > "$WORK/compact.iyi.txt"
 if [ "$(wc -l < "$WORK/compact.iyi.txt")" -lt 20 ]; then
   echo "  the corpus shrank ($(wc -l < "$WORK/compact.iyi.txt") compact lines)"
   status=1
@@ -86,10 +88,67 @@ fi
 echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "release" json-release --release >/dev/null
-if ! grep -q "ALL CHECKS PASSED" "$WORK/json-release.out" 2>/dev/null; then
+if ! grep -aq "ALL CHECKS PASSED" "$WORK/json-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
   status=1
 fi
+
+echo
+echo "== what the pull parser, the builder and from_json refuse, by name"
+refuses() { # refuses <label> <name> <phrase> <statements>
+  local label="$1" name="$2" phrase="$3" statements="$4"
+  printf 'module main\n\nimport std/json\n\nusing std/json::{JSON, Any, PullParser, Builder}\n\n%s\n' \
+    "$statements" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    tail -2 "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+    "$(grep -m1 -o "$phrase.*" "$WORK/$name.out")"
+}
+refuses "one past UInt64 max" u64_over "integer 18446744073709551616 out of UInt64 range" \
+  'puts JSON.from_json("18446744073709551616", UInt64)'
+refuses "a negative integer past Int64 into UInt64" u64_neg_big "integer -9223372036854775809 out of UInt64 range" \
+  'puts JSON.from_json("-9223372036854775809", UInt64)'
+refuses "a negative integer into UInt64" u64_neg "integer -1 out of UInt64 range" \
+  'puts JSON.from_json("-1", UInt64)'
+refuses "a fraction into UInt64" u64_frac "expected int, got Float at line 1, column 1" \
+  'puts JSON.from_json("1.5", UInt64)'
+refuses "an exponent into UInt64" u64_exp "expected int, got Float at line 1, column 1" \
+  'puts JSON.from_json("1e3", UInt64)'
+refuses "a repeated key in read_object" pull_dup "duplicate key 'a' at line 1, column 8" \
+  'p = PullParser.new("{\"a\":1,\"a\":2}"); p.read_object { |k| p.skip }; puts p.kind'
+refuses "a repeated key in on_key" onkey_dup "duplicate key 'a' at line 1, column 8" \
+  'p = PullParser.new("{\"a\":1,\"a\":2}"); p.on_key("b") { p.skip }; puts p.kind'
+refuses "a repeated key skipped over" skip_dup "duplicate key 'a' at line 1, column 10" \
+  'p = PullParser.new("[{\"a\":{},\"a\":2}]"); p.skip; puts p.kind'
+refuses "a repeated key into a Hash" hash_dup "duplicate key 'a' at line 1, column 8" \
+  'puts JSON.from_json("{\"a\":1,\"a\":2}", Hash(String, Int32)).size'
+refuses "to_s with an array still open" open_array "to_s with an array still open" \
+  'b = Builder.new; b.start_array; b.number(1); puts b.to_s'
+refuses "to_s with an object still open" open_object "to_s with an object still open" \
+  'b = Builder.new; b.start_object; b.field("k"); puts b.to_s'
+refuses "to_s with no value written" no_value "to_s with no value written" \
+  'puts Builder.new.to_s'
+refuses "a build that wrote nothing" build_empty "build wrote no value" \
+  'puts JSON.build { |b| }'
+refuses "a build that left an array open" build_open "to_s with an array still open" \
+  'puts JSON.build { |b| b.start_array }'
 
 echo
 echo "== proving the checks can fail when a repeated key is accepted"
@@ -108,12 +167,34 @@ if [ $? -ne 0 ]; then
 elif IYI_PATH="$WORK/patched_dup:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_json_exercise.iyi" >"$WORK/dup.out" 2>&1; then
   echo "  the exercise PASSED with duplicate keys accepted"
   status=1
-elif ! grep -q "duplicate key" "$WORK/dup.out"; then
+elif ! grep -aq "duplicate key" "$WORK/dup.out"; then
   echo "  failed, but not at the duplicate-key check:"
-  grep -m1 panic "$WORK/dup.out" || sed -n '1,8p' "$WORK/dup.out"
+  grep -am1 panic "$WORK/dup.out" || sed -n '1,8p' "$WORK/dup.out"
   status=1
 else
   echo "  a repeated object key is caught"
+fi
+
+echo
+echo "== proving the pull parser's own check is what refuses a repeated key"
+mkdir -p "$WORK/patched_pull/std"
+python3 - <<PY
+src = open("$REPO/src/std/json.iyi").read()
+old = "parse_error(\\"duplicate key '#{@string_value}'\\") if @kind == Kind::String && seen.has_key?(@string_value)"
+new = "parse_error(\\"duplicate key '#{@string_value}'\\") if false"
+if old not in src:
+    raise SystemExit("patch site missing")
+open("$WORK/patched_pull/std/json.iyi", "w").write(src.replace(old, new, 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the patch did not apply"
+  status=1
+elif ! IYI_PATH="$WORK/patched_pull:$REPO/src:$REPO/samples/iyi" "$IYI" run "$WORK/pull_dup.iyi" >"$WORK/pull_dup.patched.out" 2>&1; then
+  echo "  read_object still refused the repeated key with its check removed:"
+  grep -m1 panic "$WORK/pull_dup.patched.out" || sed -n '1,4p' "$WORK/pull_dup.patched.out"
+  status=1
+else
+  echo "  with the check removed read_object yields the repeated key, so the check is what refuses it"
 fi
 
 echo

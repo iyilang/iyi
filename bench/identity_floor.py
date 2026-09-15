@@ -306,6 +306,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # may not write down. Same table, same language, one predicate apart.
     (r"crystal_types|crystal_requires|crystal_private", "what a --crystal consumer already has, carried by name"),
     (r"a \*Crystal\* source", "a sentence about the other language"),
+    # Deliberate compatibility alias for templates written against Crystal's
+    # ECR, not iyi's own name for the module.
+    (r"pub alias ECR = Std::Eiy::Eiy", "compatibility alias for templates written against Crystal's ECR"),
 ]
 
 PATH_RES = [(re.compile(p), why) for p, why in ALLOWED_PATHS]

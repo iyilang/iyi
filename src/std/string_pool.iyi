@@ -1,0 +1,150 @@
+# String pool implementation for iyi.
+#
+# Preserves strings in a pool to reuse instances of common strings
+# instead of creating new duplicates.
+
+module std/string_pool
+
+import std/text
+import std/slice
+using std/slice::{Bytes}
+pub alias Bytes = Std::Slice::Bytes
+
+class ::StringPool
+  getter size : Int32
+  getter capacity : Int32
+  @hashes : Pointer(UInt64)
+  @values : Pointer(String)
+
+  def initialize(initial_capacity : Int32 = 8)
+    cap = 8
+    while cap < initial_capacity
+      cap *= 2
+    end
+    @capacity = cap
+    @hashes = Pointer(UInt64).malloc(@capacity.to_u64)
+    @values = Pointer(String).malloc(@capacity.to_u64)
+    i = 0
+    while i < @capacity
+      @hashes[i] = 0_u64
+      @values[i] = ""
+      i += 1
+    end
+    @size = 0
+  end
+
+  def empty? : Bool
+    @size == 0
+  end
+
+  def get(slice : Bytes) : String
+    get(slice.to_unsafe, slice.size)
+  end
+
+  def get?(slice : Bytes) : String?
+    get?(slice.to_unsafe, slice.size)
+  end
+
+  def get(str : String) : String
+    get(str.to_unsafe, str.bytesize)
+  end
+
+  def get?(str : String) : String?
+    get?(str.to_unsafe, str.bytesize)
+  end
+
+  def get(str : Pointer(UInt8), len : Int32) : String
+    h = compute_hash(str, len)
+    if existing = find_entry(h, str, len)
+      return existing
+    end
+
+    if @size >= @capacity // 4 * 3
+      rehash
+    end
+
+    entry = String.new(len) do |buffer|
+      buffer.copy_from(str, len)
+    end
+
+    insert_hash_and_value(h, entry)
+    @size += 1
+    entry
+  end
+
+  def get?(str : Pointer(UInt8), len : Int32) : String?
+    h = compute_hash(str, len)
+    find_entry(h, str, len)
+  end
+
+  def rehash : Nil
+    old_cap = @capacity
+    old_hashes = @hashes
+    old_values = @values
+
+    @capacity = old_cap * 2
+    @hashes = Pointer(UInt64).malloc(@capacity.to_u64)
+    @values = Pointer(String).malloc(@capacity.to_u64)
+    i = 0
+    while i < @capacity
+      @hashes[i] = 0_u64
+      @values[i] = ""
+      i += 1
+    end
+
+    i = 0
+    while i < old_cap
+      h = old_hashes[i]
+      if h != 0_u64
+        insert_hash_and_value(h, old_values[i])
+      end
+      i += 1
+    end
+  end
+
+  private def find_entry(h : UInt64, str : Pointer(UInt8), len : Int32) : String?
+    mask = (@capacity - 1).to_u64
+    index = (h & mask).to_i32
+    next_probe = 1_u64
+    while (cur_h = @hashes[index]) != 0_u64
+      if cur_h == h && @values[index].bytesize == len
+        match = true
+        v_ptr = @values[index].to_unsafe
+        j = 0
+        while j < len
+          if str[j] != v_ptr[j]
+            match = false
+            break
+          end
+          j += 1
+        end
+        return @values[index] if match
+      end
+      index = ((index.to_u64 + next_probe) & mask).to_i32
+      next_probe += 1_u64
+    end
+    nil
+  end
+
+  private def insert_hash_and_value(h : UInt64, entry : String) : Nil
+    mask = (@capacity - 1).to_u64
+    index = (h & mask).to_i32
+    next_probe = 1_u64
+    while @hashes[index] != 0_u64
+      index = ((index.to_u64 + next_probe) & mask).to_i32
+      next_probe += 1_u64
+    end
+    @hashes[index] = h
+    @values[index] = entry
+  end
+
+  private def compute_hash(str : Pointer(UInt8), len : Int32) : UInt64
+    h = 14695981039346656037_u64
+    i = 0
+    while i < len
+      h = (h ^ str[i].to_u64) &* 1099511628211_u64
+      i += 1
+    end
+    h | 0x8000000000000000_u64
+  end
+end

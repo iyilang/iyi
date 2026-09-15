@@ -1,0 +1,1090 @@
+# Datagram sockets: UDP networking for iyi
+#
+# A native UDP socket with numeric IP resolution (IPv4 dotted-decimal, IPv6, and localhost).
+#
+# Address resolution:
+# getaddrinfo is the standard route in libc, but on Linux it pulls in libc.so,
+# dynamic NSS modules (libnss_dns, libnss_files), and resolver state, which destroys
+# the zero-undefined-symbol dependency floor (SPEC.md III.9).
+# By parsing numeric IPv4 dotted-decimal and IPv6 strings (and mapping "localhost" to
+# 127.0.0.1) in pure iyi arithmetic without libc, Linux programs retain raw syscall
+# purity (zero undefined symbols) and Darwin programs only link standard socket symbols
+# provided by libSystem.
+#
+# Concurrency and QUIC:
+# UDP is connectionless and datagram-oriented. Protocols such as QUIC run entirely over
+# UDP and require timeouts and non-blocking operation for connection loss timers, keepalives,
+# and packet scheduling.
+# In iyi's concurrency architecture (SPEC.md III.4), fibers run on scheduler worker threads.
+# Standard blocking socket calls would stall an entire worker thread.
+# Non-blocking mode (@non_blocking) and kernel receive timeouts (read_timeout= via SO_RCVTIMEO)
+# provide non-blocking and timed receive semantics. Full event-loop integration with III.4
+# (group/Channel) will register the non-blocking fd with the runtime poller (kqueue on Darwin,
+# epoll on Linux), parking the calling fiber when EAGAIN is encountered.
+
+module std/udp
+
+pub import std/slice
+using std/slice::{Bytes, Slice}
+
+pub alias Bytes = Std::Slice::Bytes
+
+# An IPv4 address represented as four octets.
+pub struct IPv4Address
+  getter b0 : UInt8
+  getter b1 : UInt8
+  getter b2 : UInt8
+  getter b3 : UInt8
+
+  def initialize(@b0 : UInt8, @b1 : UInt8, @b2 : UInt8, @b3 : UInt8)
+  end
+
+  def to_s : String
+    "#{@b0}.#{@b1}.#{@b2}.#{@b3}"
+  end
+end
+
+# An incoming datagram with payload bytes and remote peer origin.
+pub struct Datagram
+  getter data : Bytes
+  getter host : String
+  getter port : Int32
+
+  def initialize(@data : Bytes, @host : String, @port : Int32)
+  end
+
+  def to_tuple : Tuple(Bytes, String, Int32)
+    {@data, @host, @port}
+  end
+
+  def [](i : Int32)
+    if i == 0
+      @data
+    elsif i == 1
+      @host
+    else
+      @port
+    end
+  end
+
+  # Decodes payload bytes as a String.
+  def text : String
+    String.new(@data.size) do |target|
+      target.copy_from(@data.to_unsafe, @data.size)
+    end
+  end
+
+  def to_s : String
+    text
+  end
+end
+
+pub class UdpSocket
+  getter fd : Int32
+  getter family : Int32
+  @closed : Bool
+  @non_blocking : Bool
+  @read_timeout : Int32
+  @write_timeout : Int32
+
+  def initialize(fd : Int32 = -1, @family : Int32 = 2)
+    if fd < 0
+      @fd = UdpSocket.__sys_socket(@family)
+      raise "cannot create UDP socket" if @fd < 0
+    else
+      @fd = fd
+    end
+    @closed = false
+    @non_blocking = false
+    @read_timeout = 0
+    @write_timeout = 0
+  end
+
+  def to_unsafe : Int32
+    @fd
+  end
+
+  # --- Factory Constructors ---
+
+  # Creates an unbound UDP client socket.
+  def self.client(family : Int32 = 2) : UdpSocket
+    fd = __sys_socket(family)
+    raise "cannot create UDP socket" if fd < 0
+    UdpSocket.new(fd, family)
+  end
+
+  # Creates an unbound IPv6 UDP client socket.
+  def self.client_v6 : UdpSocket
+    client(AF_INET6)
+  end
+
+  # Creates an unbound UDP socket.
+  def self.open(family : Int32 = 2) : UdpSocket
+    client(family)
+  end
+
+  # Creates an unbound UDP socket.
+  def self.unbound(family : Int32 = 2) : UdpSocket
+    client(family)
+  end
+
+  # Binds a UDP socket to the specified host and port.
+  # Automatically detects whether host is an IPv4 or IPv6 address.
+  def self.bind(host : String, port : Int32) : UdpSocket
+    addr, addrlen, family = make_sockaddr(host, port)
+    fd = __sys_socket(family)
+    raise "cannot create UDP socket" if fd < 0
+
+    __sys_set_reuseaddr(fd)
+
+    if __sys_bind(fd, addr, addrlen) < 0
+      __iyi_close(fd.to_i64)
+      raise "cannot bind UDP socket to #{host}:#{port}"
+    end
+
+    UdpSocket.new(fd, family)
+  end
+
+  # Binds a UDP socket to 0.0.0.0 and the specified port.
+  def self.bind(port : Int32) : UdpSocket
+    bind("0.0.0.0", port)
+  end
+
+  # Binds an IPv6 UDP socket to [::] and the specified port.
+  def self.bind6(port : Int32) : UdpSocket
+    bind("::", port)
+  end
+
+  # --- Sending Datagrams ---
+
+  # Sends bytes to a destination host and port.
+  def send_to(bytes : Bytes, host : String, port : Int32) : Int32
+    addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
+    res = UdpSocket.__sys_sendto(@fd, bytes.to_unsafe, bytes.size.to_u64, 0, addr, addrlen)
+    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    res.to_i32
+  end
+
+  # Sends string contents as a datagram to a destination host and port.
+  def send_to(str : String, host : String, port : Int32) : Int32
+    send_to(Bytes.new(str.to_unsafe, str.bytesize), host, port)
+  end
+
+  # Sends a raw buffer to a destination host and port.
+  def send_to(buffer : Pointer(UInt8), count : Int32, host : String, port : Int32) : Int32
+    addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
+    res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
+    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    res.to_i32
+  end
+
+  # --- Receiving Datagrams ---
+
+  # Receives a datagram into a newly allocated Bytes slice up to max_bytes.
+  # Returns {payload, peer_host, peer_port}.
+  # Raises if an error occurs, or if the receive timed out / would block.
+  def receive_from(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)
+    buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    flags = @non_blocking ? MSG_DONTWAIT : 0
+
+    count = 0_i64
+    while true
+      count = UdpSocket.__sys_recvfrom(@fd, buffer, max_bytes.to_u64, flags, addr, pointerof(len))
+      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
+    end
+    if count < 0_i64
+      if UdpSocket.__is_eagain(count)
+        if @non_blocking
+          raise "receive would block"
+        else
+          raise "receive timed out"
+        end
+      else
+        raise "cannot receive from UDP socket"
+      end
+    end
+
+    bytes = Bytes.new(count.to_i32)
+    bytes.to_unsafe.copy_from(buffer, count.to_i32)
+    host, port = UdpSocket.format_address(addr)
+    {bytes, host, port}
+  end
+
+  # Receives a datagram into a caller-supplied Bytes buffer.
+  # Returns {subslice_of_received_bytes, peer_host, peer_port}.
+  def receive_from(buffer : Bytes) : Tuple(Bytes, String, Int32)
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    flags = @non_blocking ? MSG_DONTWAIT : 0
+
+    count = 0_i64
+    while true
+      count = UdpSocket.__sys_recvfrom(@fd, buffer.to_unsafe, buffer.size.to_u64, flags, addr, pointerof(len))
+      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
+    end
+    if count < 0_i64
+      if UdpSocket.__is_eagain(count)
+        if @non_blocking
+          raise "receive would block"
+        else
+          raise "receive timed out"
+        end
+      else
+        raise "cannot receive from UDP socket"
+      end
+    end
+
+    host, port = UdpSocket.format_address(addr)
+    {buffer[0, count.to_i32], host, port}
+  end
+
+  # Receives a datagram, or returns nil if non-blocking or timed out with no data.
+  def receive_from?(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)?
+    buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    flags = @non_blocking ? MSG_DONTWAIT : 0
+
+    count = 0_i64
+    while true
+      count = UdpSocket.__sys_recvfrom(@fd, buffer, max_bytes.to_u64, flags, addr, pointerof(len))
+      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
+    end
+    if count < 0_i64
+      if UdpSocket.__is_eagain(count)
+        return nil
+      else
+        raise "cannot receive from UDP socket"
+      end
+    end
+
+    bytes = Bytes.new(count.to_i32)
+    bytes.to_unsafe.copy_from(buffer, count.to_i32)
+    host, port = UdpSocket.format_address(addr)
+    {bytes, host, port}
+  end
+
+  # Receives into a buffer, returning nil on timeout or would block.
+  def receive_from?(buffer : Bytes) : Tuple(Bytes, String, Int32)?
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    flags = @non_blocking ? MSG_DONTWAIT : 0
+
+    count = 0_i64
+    while true
+      count = UdpSocket.__sys_recvfrom(@fd, buffer.to_unsafe, buffer.size.to_u64, flags, addr, pointerof(len))
+      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
+    end
+    if count < 0_i64
+      if UdpSocket.__is_eagain(count)
+        return nil
+      else
+        raise "cannot receive from UDP socket"
+      end
+    end
+
+    host, port = UdpSocket.format_address(addr)
+    {buffer[0, count.to_i32], host, port}
+  end
+
+  # Receives a Datagram struct containing data, host, and port.
+  def receive_datagram(max_bytes : Int32 = 65536) : Datagram
+    data, host, port = receive_from(max_bytes)
+    Datagram.new(data, host, port)
+  end
+
+  # Receives a Datagram struct, or nil if timed out or would block.
+  def receive_datagram?(max_bytes : Int32 = 65536) : Datagram?
+    res = receive_from?(max_bytes)
+    return nil if res.nil?
+    Datagram.new(res[0], res[1], res[2])
+  end
+
+  # --- Connected Socket Helpers ---
+
+  # Connects the UDP socket to a remote host and port (sets default peer).
+  def connect(host : String, port : Int32) : Nil
+    addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
+    res = UdpSocket.__sys_connect(@fd, addr, addrlen)
+    raise "cannot connect UDP socket to #{host}:#{port}" if res < 0
+  end
+
+  # Sends bytes to the connected peer.
+  def send(bytes : Bytes) : Int32
+    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
+    raise "cannot send on UDP socket" if res < 0_i64
+    res.to_i32
+  end
+
+  # Sends string to the connected peer.
+  def send(str : String) : Int32
+    send(Bytes.new(str.to_unsafe, str.bytesize))
+  end
+
+  # Receives payload bytes from the connected peer.
+  def receive(max_bytes : Int32 = 65536) : Bytes
+    data, _, _ = receive_from(max_bytes)
+    data
+  end
+
+  # Receives payload bytes from the connected peer, or nil on timeout.
+  def receive?(max_bytes : Int32 = 65536) : Bytes?
+    res = receive_from?(max_bytes)
+    return nil if res.nil?
+    res[0]
+  end
+
+  # --- Metadata and Lifecycle ---
+
+  # Reads back the locally bound port assigned by the OS.
+  def local_port : Int32
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    raise "cannot get local port" if res < 0
+
+    (addr[2].to_i32 << 8) | addr[3].to_i32
+  end
+
+  # Reads back the locally bound IP address.
+  def local_address : String
+    addr = Pointer(UInt8).malloc(28_u64)
+    len = 28_u32
+    res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    raise "cannot get local address" if res < 0
+
+    host, _ = UdpSocket.format_address(addr)
+    host
+  end
+
+  # Closes the socket file descriptor.
+  def close : Nil
+    if @fd >= 0
+      __iyi_close(@fd.to_i64)
+      @fd = -1
+      @closed = true
+    end
+  end
+
+  def closed? : Bool
+    @fd < 0 || @closed
+  end
+
+  # --- Buffer Sizes ---
+
+  # Returns the current receive buffer size (SO_RCVBUF).
+  def receive_buffer_size : Int32
+    UdpSocket.__sys_get_buffer_size(@fd, SOL_SOCKET, SO_RCVBUF)
+  end
+
+  # Sets the receive buffer size (SO_RCVBUF).
+  def receive_buffer_size=(size : Int32) : Nil
+    res = UdpSocket.__sys_set_buffer_size(@fd, SOL_SOCKET, SO_RCVBUF, size)
+    raise "cannot set receive buffer size" if res < 0
+  end
+
+  # Returns the current send buffer size (SO_SNDBUF).
+  def send_buffer_size : Int32
+    UdpSocket.__sys_get_buffer_size(@fd, SOL_SOCKET, SO_SNDBUF)
+  end
+
+  # Sets the send buffer size (SO_SNDBUF).
+  def send_buffer_size=(size : Int32) : Nil
+    res = UdpSocket.__sys_set_buffer_size(@fd, SOL_SOCKET, SO_SNDBUF, size)
+    raise "cannot set send buffer size" if res < 0
+  end
+
+  # --- Timeouts and Non-Blocking Mode ---
+
+  getter read_timeout : Int32
+
+  # Sets the socket receive timeout in milliseconds. 0 disables timeout.
+  def read_timeout=(ms : Int32) : Nil
+    @read_timeout = ms
+    res = UdpSocket.__sys_set_timeout(@fd, SO_RCVTIMEO, ms)
+    raise "cannot set read timeout" if res < 0
+  end
+
+  getter write_timeout : Int32
+
+  # Sets the socket send timeout in milliseconds. 0 disables timeout.
+  def write_timeout=(ms : Int32) : Nil
+    @write_timeout = ms
+    res = UdpSocket.__sys_set_timeout(@fd, SO_SNDTIMEO, ms)
+    raise "cannot set write timeout" if res < 0
+  end
+
+  # Sets whether receive calls operate in non-blocking mode.
+  def non_blocking=(flag : Bool) : Nil
+    @non_blocking = flag
+  end
+
+  def non_blocking? : Bool
+    @non_blocking
+  end
+
+  # Polls whether the socket is readable within timeout_ms milliseconds.
+  # Returns true if a datagram is ready to be read, false on timeout.
+  def poll_read(timeout_ms : Int32 = 0) : Bool
+    UdpSocket.__sys_poll_read(@fd, timeout_ms)
+  end
+
+  # --- Address Parsing and Formatting ---
+
+  def self.parse_ipv4(host : String) : IPv4Address
+    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"
+    return IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8) if host == "0.0.0.0" || host == ""
+
+    parts = 0
+    curr = 0
+    has_digit = false
+    bytes = Pointer(UInt8).malloc(4_u64)
+    index = 0
+    len = host.bytesize
+
+    while index < len
+      ch = host[index]
+      if ch == '.'
+        raise "cannot resolve address: #{host}" unless has_digit
+        raise "cannot resolve address: #{host}" if curr > 255 || parts >= 4
+        bytes[parts] = curr.to_u8
+        parts = parts + 1
+        curr = 0
+        has_digit = false
+      elsif ch >= '0' && ch <= '9'
+        curr = curr * 10 + (ch.ord - 48)
+        has_digit = true
+      else
+        raise "cannot resolve address: #{host}"
+      end
+      index = index + 1
+    end
+
+    raise "cannot resolve address: #{host}" unless has_digit
+    raise "cannot resolve address: #{host}" if curr > 255
+    raise "cannot resolve address: #{host}" unless parts == 3
+    bytes[3] = curr.to_u8
+
+    IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])
+  end
+
+  private def self.parse_hex_group(str : String) : Int32
+    val = 0
+    i = 0
+    while i < str.bytesize
+      ch = str[i]
+      d = if ch >= '0' && ch <= '9'
+            ch.ord - 48
+          elsif ch >= 'a' && ch <= 'f'
+            ch.ord - 97 + 10
+          elsif ch >= 'A' && ch <= 'F'
+            ch.ord - 65 + 10
+          else
+            raise "invalid hex character in IPv6 address: #{ch}"
+          end
+      val = (val << 4) | d
+      i = i + 1
+    end
+    raise "hex group out of range in IPv6 address" if val > 65535
+    val
+  end
+
+  # Parses an IPv6 string into a 16-byte buffer in network byte order.
+  def self.parse_ipv6(host : String) : Pointer(UInt8)
+    bytes = Pointer(UInt8).malloc(16_u64)
+    i = 0
+    while i < 16
+      bytes[i] = 0_u8
+      i = i + 1
+    end
+
+    return bytes if host == "::"
+
+    # Find "::" if present
+    double_colon = -1
+    idx = 0
+    while idx < host.bytesize - 1
+      if host[idx] == ':' && host[idx + 1] == ':'
+        double_colon = idx
+        break
+      end
+      idx = idx + 1
+    end
+
+    left_groups = [] of Int32
+    right_groups = [] of Int32
+
+    if double_colon >= 0
+      left_str = double_colon > 0 ? host[0, double_colon] : ""
+      right_start = double_colon + 2
+      right_len = host.bytesize - right_start
+      right_str = right_len > 0 ? host[right_start, right_len] : ""
+
+      if left_str.bytesize > 0
+        curr = ""
+        j = 0
+        while j < left_str.bytesize
+          if left_str[j] == ':'
+            left_groups << parse_hex_group(curr)
+            curr = ""
+          else
+            curr = curr + left_str[j].to_s
+          end
+          j = j + 1
+        end
+        left_groups << parse_hex_group(curr) if curr.bytesize > 0
+      end
+
+      if right_str.bytesize > 0
+        curr = ""
+        j = 0
+        while j < right_str.bytesize
+          if right_str[j] == ':'
+            right_groups << parse_hex_group(curr)
+            curr = ""
+          else
+            curr = curr + right_str[j].to_s
+          end
+          j = j + 1
+        end
+        right_groups << parse_hex_group(curr) if curr.bytesize > 0
+      end
+
+      zero_count = 8 - (left_groups.size + right_groups.size)
+      raise "invalid IPv6 address: #{host}" if zero_count < 0
+
+      out_idx = 0
+      j = 0
+      while j < left_groups.size
+        g = left_groups[j]
+        bytes[out_idx] = ((g >> 8) & 255).to_u8
+        bytes[out_idx + 1] = (g & 255).to_u8
+        out_idx = out_idx + 2
+        j = j + 1
+      end
+
+      out_idx = out_idx + (zero_count * 2)
+
+      j = 0
+      while j < right_groups.size
+        g = right_groups[j]
+        bytes[out_idx] = ((g >> 8) & 255).to_u8
+        bytes[out_idx + 1] = (g & 255).to_u8
+        out_idx = out_idx + 2
+        j = j + 1
+      end
+    else
+      curr = ""
+      j = 0
+      groups = [] of Int32
+      while j < host.bytesize
+        if host[j] == ':'
+          groups << parse_hex_group(curr)
+          curr = ""
+        else
+          curr = curr + host[j].to_s
+        end
+        j = j + 1
+      end
+      groups << parse_hex_group(curr) if curr.bytesize > 0
+      raise "invalid IPv6 address: #{host}" if groups.size != 8
+
+      out_idx = 0
+      j = 0
+      while j < 8
+        g = groups[j]
+        bytes[out_idx] = ((g >> 8) & 255).to_u8
+        bytes[out_idx + 1] = (g & 255).to_u8
+        out_idx = out_idx + 2
+        j = j + 1
+      end
+    end
+
+    bytes
+  end
+
+  def self.make_sockaddr_in(ip : IPv4Address, port : Int32) : Pointer(UInt8)
+    buffer = Pointer(UInt8).malloc(16_u64)
+    i = 0
+    while i < 16
+      buffer[i] = 0_u8
+      i = i + 1
+    end
+
+    {% if flag?(:darwin) %}
+      buffer[0] = 16_u8 # sin_len = 16
+      buffer[1] = 2_u8  # sin_family = AF_INET (2)
+    {% else %}
+      buffer[0] = 2_u8 # sin_family = AF_INET (2)
+      buffer[1] = 0_u8
+    {% end %}
+
+    buffer[2] = ((port >> 8) & 255).to_u8
+    buffer[3] = (port & 255).to_u8
+
+    buffer[4] = ip.b0
+    buffer[5] = ip.b1
+    buffer[6] = ip.b2
+    buffer[7] = ip.b3
+
+    buffer
+  end
+
+  def self.make_sockaddr_in6(v6_bytes : Pointer(UInt8), port : Int32) : Pointer(UInt8)
+    buffer = Pointer(UInt8).malloc(28_u64)
+    i = 0
+    while i < 28
+      buffer[i] = 0_u8
+      i = i + 1
+    end
+
+    {% if flag?(:darwin) %}
+      buffer[0] = 28_u8 # sin6_len = 28
+      buffer[1] = 30_u8 # sin6_family = AF_INET6 (30 on Darwin)
+    {% else %}
+      buffer[0] = 10_u8 # sin6_family = AF_INET6 (10 on Linux)
+      buffer[1] = 0_u8
+    {% end %}
+
+    buffer[2] = ((port >> 8) & 255).to_u8
+    buffer[3] = (port & 255).to_u8
+
+    # bytes 4..7: flowinfo = 0
+    i = 0
+    while i < 16
+      buffer[8 + i] = v6_bytes[i]
+      i = i + 1
+    end
+    # bytes 24..27: scope_id = 0
+
+    buffer
+  end
+
+  def self.make_sockaddr(host : String, port : Int32)
+    if host.includes?(":")
+      v6_bytes = parse_ipv6(host)
+      {make_sockaddr_in6(v6_bytes, port), SOCKADDR_IN6_SIZE, AF_INET6}
+    else
+      ip = parse_ipv4(host)
+      {make_sockaddr_in(ip, port), SOCKADDR_IN_SIZE, 2}
+    end
+  end
+
+  def self.format_address(addr : Pointer(UInt8)) : Tuple(String, Int32)
+    port = (addr[2].to_i32 << 8) | addr[3].to_i32
+    family = {% if flag?(:darwin) %} addr[1].to_i32 {% else %} addr[0].to_i32 {% end %}
+    is_v6 = {% if flag?(:darwin) %} family == 30 {% else %} family == 10 {% end %}
+
+    host = if is_v6
+             # Check for ::1 loopback
+             is_loopback = true
+             j = 0
+             while j < 15
+               if addr[8 + j] != 0_u8
+                 is_loopback = false
+                 break
+               end
+               j = j + 1
+             end
+             if is_loopback && addr[23] == 1_u8
+               "::1"
+             else
+               parts = [] of String
+               k = 0
+               while k < 8
+                 offset = 8 + k * 2
+                 w = (addr[offset].to_i32 << 8) | addr[offset + 1].to_i32
+                 parts << w.to_s(16)
+                 k = k + 1
+               end
+               res = parts[0]
+               m = 1
+               while m < parts.size
+                 res = res + ":" + parts[m]
+                 m = m + 1
+               end
+               res
+             end
+           else
+             "#{addr[4]}.#{addr[5]}.#{addr[6]}.#{addr[7]}"
+           end
+    {host, port}
+  end
+
+  # --- Platform System Call Bindings ---
+
+  {% if flag?(:darwin) %}
+    AF_INET6          =     30
+    SOL_SOCKET        = 0xffff
+    SO_REUSEADDR      = 0x0004
+    SO_RCVBUF         = 0x1002
+    SO_SNDBUF         = 0x1001
+    SO_RCVTIMEO       = 0x1006
+    SO_SNDTIMEO       = 0x1005
+    MSG_DONTWAIT      =   0x80
+    SOCKADDR_IN_SIZE  = 16_u32
+    SOCKADDR_IN6_SIZE = 28_u32
+
+    lib LibC
+      fun socket(domain : Int32, type : Int32, protocol : Int32) : Int32
+      fun bind(fd : Int32, addr : Void*, addrlen : UInt32) : Int32
+      fun connect(fd : Int32, addr : Void*, addrlen : UInt32) : Int32
+      fun send(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
+      fun sendto(fd : Int32, buf : Void*, len : UInt64, flags : Int32, addr : Void*, addrlen : UInt32) : Int64
+      fun recvfrom(fd : Int32, buf : Void*, len : UInt64, flags : Int32, addr : Void*, addrlen : UInt32*) : Int64
+      fun getsockname(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
+      fun setsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32) : Int32
+      fun getsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32*) : Int32
+      fun kqueue : Int32
+      fun kevent(kq : Int32, changelist : Void*, nchanges : Int32, eventlist : Void*, nevents : Int32, timeout : Void*) : Int32
+      fun close(fd : Int32) : Int32
+      fun __error : Int32*
+    end
+
+    def self.__sys_socket(domain : Int32 = 2) : Int32
+      LibC.socket(domain, 2, 0)
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
+      LibC.bind(fd, addr.as(Void*), len)
+    end
+
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
+      LibC.connect(fd, addr.as(Void*), len)
+    end
+
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      LibC.send(fd, buf.as(Void*), len, 0)
+    end
+
+    def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : UInt32) : Int64
+      LibC.sendto(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
+    end
+
+    def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+      LibC.recvfrom(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
+    end
+
+    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibC.getsockname(fd, addr.as(Void*), addrlen)
+    end
+
+    def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
+      val = size
+      LibC.setsockopt(fd, level, optname, pointerof(val).as(Void*), 4_u32)
+    end
+
+    def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
+      val = 0_i32
+      len = 4_u32
+      res = LibC.getsockopt(fd, level, optname, pointerof(val).as(Void*), pointerof(len))
+      raise "cannot get buffer size" if res < 0
+      val
+    end
+
+    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      val = 1_i32
+      LibC.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, pointerof(val).as(Void*), 4_u32)
+    end
+
+    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
+      sec = (ms // 1000).to_i64
+      usec = ((ms % 1000) * 1000).to_i32
+      tv = Pointer(UInt8).malloc(16_u64)
+      i = 0; while i < 16
+        tv[i] = 0_u8; i = i + 1
+      end
+      tv.as(Pointer(Int64)).value = sec
+      Pointer(Int32).new(tv.address + 8_u64).value = usec
+      LibC.setsockopt(fd, SOL_SOCKET, optname, tv.as(Void*), 16_u32)
+    end
+
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+      kq = LibC.kqueue
+      return false if kq < 0
+
+      change = Pointer(UInt8).malloc(32_u64)
+      i = 0; while i < 32
+        change[i] = 0_u8; i = i + 1
+      end
+      change.as(Pointer(UInt64)).value = fd.to_u64
+      # EVFILT_READ is -1 (0xFFFF), EV_ADD is 1
+      change[8] = 0xFF_u8
+      change[9] = 0xFF_u8
+      change[10] = 0x01_u8
+      change[11] = 0x00_u8
+
+      null_ptr = Pointer(Void).new(0_u64)
+      reg = LibC.kevent(kq, change.as(Void*), 1, null_ptr, 0, null_ptr)
+      if reg < 0
+        LibC.close(kq)
+        return false
+      end
+
+      event = Pointer(UInt8).malloc(32_u64)
+      i = 0; while i < 32
+        event[i] = 0_u8; i = i + 1
+      end
+
+      sec = (timeout_ms // 1000).to_i64
+      nsec = ((timeout_ms % 1000) * 1_000_000).to_i64
+      ts = Pointer(UInt8).malloc(16_u64)
+      ts.as(Pointer(Int64)).value = sec
+      Pointer(Int64).new(ts.address + 8_u64).value = nsec
+
+      nev = LibC.kevent(kq, null_ptr, 0, event.as(Void*), 1, ts.as(Void*))
+      LibC.close(kq)
+      nev > 0
+    end
+
+    def self.__is_eagain(res : Int64) : Bool
+      res < 0_i64 && LibC.__error.value == 35
+    end
+
+    def self.__is_eintr(res : Int64) : Bool
+      res < 0_i64 && LibC.__error.value == 4
+    end
+  {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+    AF_INET6        = 10
+    SOL_SOCKET         = 1
+    SO_REUSEADDR       = 2
+    SO_RCVBUF          = 8
+    SO_SNDBUF          = 7
+    SO_RCVTIMEO        = 20
+    SO_SNDTIMEO        = 21
+    MSG_DONTWAIT       = 0x40
+    SOCKADDR_IN_SIZE   = 16_i64
+    SOCKADDR_IN6_SIZE  = 28_i64
+
+    {% if flag?(:x86_64) %}
+      SYS_SOCKET        =  41_i64
+      SYS_CONNECT       =  42_i64
+      SYS_SENDTO        =  44_i64
+      SYS_RECVFROM      =  45_i64
+      SYS_BIND          =  49_i64
+      SYS_GETSOCKNAME   =  51_i64
+      SYS_SETSOCKOPT    =  54_i64
+      SYS_GETSOCKOPT    =  55_i64
+      SYS_EPOLL_CREATE1 = 291_i64
+      SYS_EPOLL_CTL     = 233_i64
+      SYS_EPOLL_PWAIT   = 281_i64
+      EPOLL_DATA_OFFSET =   4_u64
+    {% else %}
+      SYS_SOCKET        = 198_i64
+      SYS_BIND          = 200_i64
+      SYS_CONNECT       = 203_i64
+      SYS_GETSOCKNAME   = 204_i64
+      SYS_SENDTO        = 206_i64
+      SYS_RECVFROM      = 207_i64
+      SYS_SETSOCKOPT    = 208_i64
+      SYS_GETSOCKOPT    = 209_i64
+      SYS_EPOLL_CREATE1 =  20_i64
+      SYS_EPOLL_CTL     =  21_i64
+      SYS_EPOLL_PWAIT   =  22_i64
+      EPOLL_DATA_OFFSET =   8_u64
+    {% end %}
+
+    def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    def self.__sys5(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c), "{r10}"(d), "{r8}"(e)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c), "{x3}"(d), "{x4}"(e)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    def self.__sys6(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c), "{r10}"(d), "{r8}"(e), "{r9}"(f)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c), "{x3}"(d), "{x4}"(e), "{x5}"(f)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    def self.__sys_socket(domain : Int32 = 2) : Int32
+      __sys3(SYS_SOCKET, domain.to_i64, 2_i64, 0_i64).to_i32
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int64) : Int32
+      __sys3(SYS_BIND, fd.to_i64, addr.address.to_i64, len).to_i32
+    end
+
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : Int64) : Int32
+      __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, len).to_i32
+    end
+
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0_i64, 0_i64, 0_i64)
+    end
+
+    def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Int64) : Int64
+      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, flags.to_i64, addr.address.to_i64, addrlen)
+    end
+
+    def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+      __sys6(SYS_RECVFROM, fd.to_i64, buf.address.to_i64, len.to_i64, flags.to_i64, addr.address.to_i64, addrlen.address.to_i64)
+    end
+
+    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      __sys3(SYS_GETSOCKNAME, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
+    end
+
+    def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
+      val = size
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, level.to_i64, optname.to_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
+      val = 0_i32
+      len = 4_u32
+      res = __sys5(SYS_GETSOCKOPT, fd.to_i64, level.to_i64, optname.to_i64, pointerof(val).address.to_i64, pointerof(len).address.to_i64).to_i32
+      raise "cannot get buffer size" if res < 0
+      val
+    end
+
+    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      val = 1_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, SOL_SOCKET.to_i64, SO_REUSEADDR.to_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
+      sec = (ms // 1000).to_i64
+      usec = ((ms % 1000) * 1000).to_i64
+      tv = Pointer(UInt8).malloc(16_u64)
+      tv.as(Pointer(Int64)).value = sec
+      Pointer(Int64).new(tv.address + 8_u64).value = usec
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, SOL_SOCKET.to_i64, optname.to_i64, tv.address.to_i64, 16_i64).to_i32
+    end
+
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+      epfd = __sys3(SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
+      return false if epfd < 0_i64
+
+      event = Pointer(UInt8).malloc(16_u64)
+      i = 0; while i < 16; event[i] = 0_u8; i = i + 1; end
+      # EPOLLIN is 1
+      event.as(Pointer(UInt32)).value = 1_u32
+      Pointer(UInt64).new(event.address + EPOLL_DATA_OFFSET).value = fd.to_u64
+
+      ctl = __sys6(SYS_EPOLL_CTL, epfd, 1_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      if ctl < 0_i64
+        __iyi_close(epfd)
+        return false
+      end
+
+      events = Pointer(UInt8).malloc(16_u64)
+      count = __sys6(SYS_EPOLL_PWAIT, epfd, events.address.to_i64, 1_i64, timeout_ms.to_i64, 0_i64, 8_i64)
+      __iyi_close(epfd)
+      count > 0_i64
+    end
+
+    def self.__is_eagain(res : Int64) : Bool
+      res == -11_i64 # -EAGAIN / -EWOULDBLOCK on Linux
+    end
+
+    def self.__is_eintr(res : Int64) : Bool
+      res == -4_i64 # -EINTR on Linux
+    end
+
+  {% else %}
+    AF_INET6          =     10
+    SOL_SOCKET        =      1
+    SO_REUSEADDR      =      2
+    SO_RCVBUF         =      8
+    SO_SNDBUF         =      7
+    SO_RCVTIMEO       =     20
+    SO_SNDTIMEO       =     21
+    MSG_DONTWAIT      =   0x40
+    SOCKADDR_IN_SIZE  = 16_i64
+    SOCKADDR_IN6_SIZE = 28_i64
+
+    def self.__sys_socket(domain : Int32 = 2) : Int32
+      raise "UdpSocket is not supported on this platform"
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len) : Int32
+      -1
+    end
+
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len) : Int32
+      -1
+    end
+
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      -1_i64
+    end
+
+    def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen) : Int64
+      -1_i64
+    end
+
+    def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+      -1_i64
+    end
+
+    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      -1
+    end
+
+    def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+      false
+    end
+
+    def self.__is_eagain(res : Int64) : Bool
+      false
+    end
+
+    def self.__is_eintr(res : Int64) : Bool
+      false
+    end
+  {% end %}
+end

@@ -96,7 +96,7 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     (r"^bench/(incremental|build_speed)/", "the generators those benches drive"),
     (r"^spec/(debug|spec_helper\.cr)", "the spec harness driving both binaries"),
     (r"^bin/check-compiler-flag$", "builds the compatibility binary twice"),
-    (r"^bench/(machine_probe|dependency_floor)", "measures the compatibility binary and its libraries"),
+    (r"^bench/(machine_probe|dependency_floor|build_tool_floor)", "measures the compatibility binary, its libraries, and build tools"),
     (r"^spec/compiler/util_spec\.cr$", "specs Crystal's own util module"),
     (r"^samples/iyi/", "programs whose comments compare iyi with Crystal"),
 ]

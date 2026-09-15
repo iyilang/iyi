@@ -1,0 +1,161 @@
+# Garbage Collector interface for iyi runtime.
+#
+# Provides memory allocation, statistics, and GC control wrappers.
+
+module std/gc
+
+module ::GC
+  struct Stats
+    getter heap_size : UInt64
+    getter free_bytes : UInt64
+    getter unmapped_bytes : UInt64
+    getter bytes_since_gc : UInt64
+    getter total_bytes : UInt64
+
+    def initialize(@heap_size : UInt64, @free_bytes : UInt64, @unmapped_bytes : UInt64, @bytes_since_gc : UInt64, @total_bytes : UInt64)
+    end
+
+    def copy_with(heap_size = @heap_size, free_bytes = @free_bytes, unmapped_bytes = @unmapped_bytes, bytes_since_gc = @bytes_since_gc, total_bytes = @total_bytes) : Stats
+      Stats.new(heap_size, free_bytes, unmapped_bytes, bytes_since_gc, total_bytes)
+    end
+
+    def clone : Stats
+      Stats.new(@heap_size, @free_bytes, @unmapped_bytes, @bytes_since_gc, @total_bytes)
+    end
+  end
+
+  record ProfStats,
+    heap_size : UInt64,
+    free_bytes : UInt64,
+    unmapped_bytes : UInt64,
+    bytes_since_gc : UInt64,
+    bytes_before_gc : UInt64,
+    non_gc_bytes : UInt64,
+    gc_no : UInt64,
+    markers_m1 : UInt64,
+    bytes_reclaimed_since_gc : UInt64,
+    reclaimed_bytes_before_gc : UInt64,
+    expl_freed_bytes_since_gc : UInt64,
+    obtained_from_os_bytes : UInt64
+
+  # Allocates and clears size bytes of memory.
+  def self.malloc(size : Int) : Void*
+    __crystal_malloc64(size.to_u64)
+  end
+
+  # Allocates size bytes of pointer-free memory.
+  def self.malloc_atomic(size : Int) : Void*
+    __crystal_malloc_atomic64(size.to_u64)
+  end
+
+  # Reallocates memory previously allocated by malloc.
+  def self.realloc(pointer : Void*, size : Int) : Void*
+    __crystal_realloc64(pointer, size.to_u64)
+  end
+
+  # Frees memory if supported by the active allocator.
+  def self.free(pointer : Void*) : Nil
+    return if pointer.address == 0_u64
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.free(pointer)
+    {% elsif flag?(:gc_boehm) %}
+      LibGC.free(pointer)
+    {% end %}
+  end
+
+  # Runs a collection cycle.
+  def self.collect : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiMark.collect
+    {% elsif flag?(:gc_boehm) %}
+      LibGC.collect
+    {% end %}
+  end
+
+  # Enables collection.
+  def self.enable : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiMark.auto = true
+    {% elsif flag?(:gc_boehm) %}
+      LibGC.enable
+    {% end %}
+  end
+
+  # Disables collection.
+  def self.disable : Nil
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiMark.auto = false
+    {% elsif flag?(:gc_boehm) %}
+      LibGC.disable
+    {% end %}
+  end
+
+  # Returns whether the pointer points to a live chunk on the GC heap.
+  def self.is_heap_ptr(pointer : Void*) : Bool
+    return false if pointer.address == 0_u64
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiRoots.base_of(pointer.address) != 0_u64
+    {% elsif flag?(:gc_boehm) %}
+      LibGC.is_heap_ptr(pointer) != 0
+    {% else %}
+      raise "GC.is_heap_ptr is not supported without an active garbage collector"
+    {% end %}
+  end
+
+  # Limits max heap size. The iyi collector uses dynamic pressure budgets
+  # rather than a static heap size ceiling.
+  def self.max_heap_size=(size : UInt64) : UInt64
+    raise "GC.max_heap_size= is not supported by the active collector"
+  end
+
+  # Returns current GC allocation statistics.
+  def self.stats : Stats
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      mapped = 0_u64
+      arena = IyiHeap.first_arena
+      while arena != 0_u64
+        mapped += IyiHeap::MAP
+        arena = IyiHeap.arena_next(arena)
+      end
+      large = IyiHeap.first_large
+      while large != 0_u64
+        mapped += IyiHeap.large_mapped(large)
+        large = IyiHeap.large_next(large)
+      end
+      total = IyiHeap.allocated_word.value.get
+      freed = IyiMark.bytes_freed
+      since_gc = IyiMark.allocated_since
+      Stats.new(mapped, freed, 0_u64, since_gc, total)
+    {% else %}
+      Stats.new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+    {% end %}
+  end
+
+  # Returns profiling statistics.
+  def self.prof_stats : ProfStats
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      s = stats
+      ProfStats.new(
+        s.heap_size,
+        s.free_bytes,
+        s.unmapped_bytes,
+        s.bytes_since_gc,
+        0_u64,
+        0_u64,
+        IyiMark.collections,
+        0_u64,
+        IyiMark.bytes_freed,
+        0_u64,
+        0_u64,
+        s.heap_size
+      )
+    {% else %}
+      ProfStats.new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+    {% end %}
+  end
+
+  # Marks execution of a syscall block.
+  def self.syscall(&proc : ->) : Nil
+    proc.call
+  end
+end

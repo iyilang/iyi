@@ -1,47 +1,17 @@
-# Complete Benchmark standard library module for iyi.
+# Timing a block: wall-clock ips and bm, using std/time.
 #
-# Provides methods for benchmarking code execution time and throughput (IPS),
-# giving detailed reports on real and CPU execution time.
-#
-# Pure iyi implementation with zero external C library dependencies.
 module std/benchmark
 
 pub import std/time
 using std/time::{Time, Span}
 pub alias Time = Std::Time::Time
 pub alias Span = Std::Time::Span
+import std/math
+using std/math::{Math}
 import std/format
 using std/format::{sprintf, printf}
 
-lib ::LibMath
-  fun sqrt = "llvm.sqrt.f64"(val : Float64) : Float64
-end
-
-module ::Math
-  def self.sqrt(val : Float64) : Float64
-    ::LibMath.sqrt(val)
-  end
-end
-
-module ::GC
-  struct Stats
-    getter total_bytes : UInt64
-
-    def initialize(@total_bytes : UInt64 = 0_u64)
-    end
-  end
-
-  def self.collect : Nil
-    IyiMark.collect
-  end
-
-  def self.stats : Stats
-    Stats.new(0_u64)
-  end
-end
-
-module ::Benchmark
-  extend self
+pub class Benchmark
 
   module BM
     class Tms
@@ -264,7 +234,6 @@ module ::Benchmark
 
       private def run_warmup : Nil
         @items.each do |item|
-          GC.collect
           count = 0_u64
           t0 = Std::Time::Time.monotonic
           target = t0 + @warmup_time
@@ -279,7 +248,6 @@ module ::Benchmark
 
       private def run_calculation : Nil
         @items.each do |item|
-          GC.collect
           measurements = [] of Float64
           bytes = 0_i64
           cycles = 0_i64
@@ -289,9 +257,8 @@ module ::Benchmark
 
           while true
             sub_t0 = Std::Time::Time.monotonic
-            bytes_taken = Benchmark.memory do
-              item.call_for_100ms
-            end
+            bytes_taken = 0_i64
+            item.call_for_100ms
             sub_t1 = Std::Time::Time.monotonic
             bytes += bytes_taken
             cycles += item.cycles
@@ -320,14 +287,14 @@ module ::Benchmark
     end
   end
 
-  def bm(&)
+  def self.bm(&)
     report = BM::Job.new
     yield report
     report.execute
     report
   end
 
-  def ips(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false, &)
+  def self.ips(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false, &)
     job = IPS::Job.new(calculation, warmup, interactive)
     yield job
     job.execute
@@ -335,11 +302,11 @@ module ::Benchmark
     job
   end
 
-  def ips(calculation = 5, warmup = 2, interactive = false, &)
+  def self.ips(calculation = 5, warmup = 2, interactive = false, &)
     ips(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64), !!interactive) { |job| yield job }
   end
 
-  def measure(label : String = "", &) : BM::Tms
+  def self.measure(label : String = "", &) : BM::Tms
     t0 = Std::Time::Time.monotonic
     yield
     t1 = Std::Time::Time.monotonic
@@ -347,18 +314,11 @@ module ::Benchmark
     BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, label)
   end
 
-  def realtime(&) : Std::Time::Span
+  def self.realtime(&) : Std::Time::Span
     t0 = Std::Time::Time.monotonic
     yield
     t1 = Std::Time::Time.monotonic
     t1 - t0
   end
 
-  def memory(&) : Int64
-    before = GC.stats.total_bytes
-    yield
-    (GC.stats.total_bytes - before).to_i64
-  end
 end
-
-pub alias Benchmark = ::Benchmark

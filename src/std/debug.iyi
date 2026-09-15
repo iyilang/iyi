@@ -1,0 +1,348 @@
+# Debug symbols and backtrace resolution for iyi programs.
+#
+# Resolves instruction addresses to source locations (file:line:column)
+# and function names by reading the program's own DWARF sections natively,
+# without external libraries or foreign dependencies.
+#
+# Supported platforms:
+#   Darwin (macOS): Mach-O binary and companion .dwarf / .dSYM bundle
+#
+# Linux ELF and Windows PE readers: not yet built.
+
+module std/debug
+
+lib LibC
+  struct DlInfo
+    dli_fname : UInt8*
+    dli_fbase : Void*
+    dli_sname : UInt8*
+    dli_saddr : Void*
+  end
+
+  fun dladdr(addr : Void*, info : DlInfo*) : Int32
+  fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
+  fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
+  fun mmap(addr : Void*, len : UInt64, prot : Int32, flags : Int32, fd : Int32, offset : Int64) : Void*
+  fun munmap(addr : Void*, len : UInt64) : Int32
+  fun open(path : UInt8*, oflag : Int32, ...) : Int32
+  fun close(fd : Int32) : Int32
+  fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
+  fun _dyld_get_image_vmaddr_slide(index : Int32) : Int64
+end
+
+struct DwarfResolver
+  private def self.say(text : String) : Nil
+    written = 0_i64
+    total = text.bytesize.to_i64
+    while written < total
+      n = LibC.write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
+      break if n <= 0_i64
+      written = written + n
+    end
+  end
+
+  def self.read_uleb128(cursor_ptr : Pointer(Pointer(UInt8))) : UInt64
+    result = 0_u64
+    shift = 0_i32
+    cursor = cursor_ptr.value
+    while true
+      b = cursor.value.to_u64
+      cursor = cursor + 1_i64
+      result = result | ((b & 0x7f_u64).unsafe_shl(shift))
+      break if (b & 0x80_u64) == 0_u64
+      shift = shift + 7
+    end
+    cursor_ptr.value = cursor
+    result
+  end
+
+  def self.read_sleb128(cursor_ptr : Pointer(Pointer(UInt8))) : Int64
+    result = 0_i64
+    shift = 0_i32
+    cursor = cursor_ptr.value
+    b = 0_u8
+    while true
+      b = cursor.value
+      cursor = cursor + 1_i64
+      result = result | ((b.to_i64 & 0x7f_i64).unsafe_shl(shift))
+      shift = shift + 7
+      break if (b & 0x80_u8) == 0_u8
+    end
+    cursor_ptr.value = cursor
+    if (shift < 64) && ((b & 0x40_u8) != 0_u8)
+      result = result | ((-1_i64).unsafe_shl(shift))
+    end
+    result
+  end
+
+  def self.resolve_line(target_ip : UInt64, debug_line_ptr : Pointer(UInt8), debug_line_size : Int64) : String?
+    cu_cursor = debug_line_ptr
+    cu_end = debug_line_ptr + debug_line_size
+
+    while cu_cursor.address < cu_end.address
+      unit_len = (cu_cursor.as(Pointer(Int32)).value) & 0xffffffff_i64
+      break if unit_len == 0_i64
+      unit_finish = cu_cursor + 4_i64 + unit_len
+      version = (cu_cursor + 4).value.to_i32 | ((cu_cursor + 5).value.to_i32.unsafe_shl(8))
+      header_len = (cu_cursor + 6).as(Pointer(Int32)).value & 0xffffffff_i64
+      program_start = cu_cursor + 10_i64 + header_len
+
+      min_inst_len = (cu_cursor + 10).value.to_u64
+      raw_lb = (version >= 4 ? (cu_cursor + 13).value : (cu_cursor + 12).value).to_i32
+      line_base = raw_lb > 127 ? raw_lb - 256 : raw_lb
+      line_range = (version >= 4 ? (cu_cursor + 14).value : (cu_cursor + 13).value).to_i32
+      opcode_base = (version >= 4 ? (cu_cursor + 15).value : (cu_cursor + 14).value).to_i32
+
+      # Directories
+      cursor = cu_cursor + 16_i64 + (opcode_base - 1).to_i64
+      dirs = [] of String
+      dirs << ""
+      while cursor.value != 0_u8
+        d_len = 0
+        while (cursor + d_len).value != 0_u8
+          d_len = d_len + 1
+        end
+        d_name = String.new(d_len) { |dst| dst.copy_from(cursor, d_len) }
+        dirs << d_name
+        cursor = cursor + d_len.to_i64 + 1_i64
+      end
+      cursor = cursor + 1_i64
+
+      # Files: each entry has filename, dir_idx, mtime, length
+      files = [] of {String, Int32}
+      files << {"", 0}
+      while cursor.value != 0_u8
+        f_len = 0
+        while (cursor + f_len).value != 0_u8
+          f_len = f_len + 1
+        end
+        f_name = String.new(f_len) { |dst| dst.copy_from(cursor, f_len) }
+        cursor = cursor + f_len.to_i64 + 1_i64
+        dir_idx = read_uleb128(pointerof(cursor)).to_i32
+        read_uleb128(pointerof(cursor))
+        read_uleb128(pointerof(cursor))
+        files << {f_name, dir_idx}
+      end
+
+      # Statement program
+      prog_cursor = program_start
+      address = 0_u64
+      file_idx = 1
+      line = 1
+      column = 0
+
+      prev_address = 0_u64
+      prev_file = 1
+      prev_line = 1
+      prev_col = 0
+
+      while prog_cursor.address < unit_finish.address
+        opcode = prog_cursor.value.to_i32
+        prog_cursor = prog_cursor + 1_i64
+
+        if opcode >= opcode_base
+          adjusted = opcode - opcode_base
+          addr_adv = ((adjusted // line_range).to_u64) &* min_inst_len
+          line_adv = line_base + (adjusted % line_range)
+          address = address &+ addr_adv
+          line = line + line_adv
+
+          if target_ip >= prev_address && target_ip < address && prev_address != 0_u64
+            f_entry = prev_file < files.size ? files[prev_file] : {"??", 0}
+            d_name = f_entry[1] < dirs.size ? dirs[f_entry[1]] : ""
+            full_path = d_name.empty? ? f_entry[0] : (d_name + "/" + f_entry[0])
+            return full_path + ":" + prev_line.to_s + ":" + prev_col.to_s
+          end
+
+          prev_address = address
+          prev_file = file_idx
+          prev_line = line
+          prev_col = column
+        elsif opcode == 0
+          ext_len = read_uleb128(pointerof(prog_cursor)).to_i64
+          ext_end = prog_cursor + ext_len
+          ext_op = prog_cursor.value.to_i32
+          prog_cursor = prog_cursor + 1_i64
+
+          if ext_op == 1 # DW_LNE_end_sequence
+            if target_ip >= prev_address && target_ip < address && prev_address != 0_u64
+              f_entry = prev_file < files.size ? files[prev_file] : {"??", 0}
+              d_name = f_entry[1] < dirs.size ? dirs[f_entry[1]] : ""
+              full_path = d_name.empty? ? f_entry[0] : (d_name + "/" + f_entry[0])
+              return full_path + ":" + prev_line.to_s + ":" + prev_col.to_s
+            end
+            address = 0_u64
+            file_idx = 1
+            line = 1
+            column = 0
+            prev_address = 0_u64
+          elsif ext_op == 2 # DW_LNE_set_address
+            address = prog_cursor.as(Pointer(UInt64)).value
+            prog_cursor = ext_end
+          else
+            prog_cursor = ext_end
+          end
+        else
+          case opcode
+          when 1 # DW_LNS_copy
+            if target_ip >= prev_address && target_ip < address && prev_address != 0_u64
+              f_entry = prev_file < files.size ? files[prev_file] : {"??", 0}
+              d_name = f_entry[1] < dirs.size ? dirs[f_entry[1]] : ""
+              full_path = d_name.empty? ? f_entry[0] : (d_name + "/" + f_entry[0])
+              return full_path + ":" + prev_line.to_s + ":" + prev_col.to_s
+            end
+            prev_address = address
+            prev_file = file_idx
+            prev_line = line
+            prev_col = column
+          when 2 # DW_LNS_advance_pc
+            adv = read_uleb128(pointerof(prog_cursor)) &* min_inst_len
+            address = address &+ adv
+          when 3 # DW_LNS_advance_line
+            adv = read_sleb128(pointerof(prog_cursor)).to_i32
+            line = line + adv
+          when 4 # DW_LNS_set_file
+            file_idx = read_uleb128(pointerof(prog_cursor)).to_i32
+          when 5 # DW_LNS_set_column
+            column = read_uleb128(pointerof(prog_cursor)).to_i32
+          when 6 # DW_LNS_negate_stmt
+          when 7 # DW_LNS_set_basic_block
+          when 8 # DW_LNS_const_add_pc
+            adjusted = 255 - opcode_base
+            adv = ((adjusted // line_range).to_u64) &* min_inst_len
+            address = address &+ adv
+          when 9 # DW_LNS_fixed_advance_pc
+            adv = (prog_cursor.value.to_u64) | ((prog_cursor + 1).value.to_u64.unsafe_shl(8))
+            prog_cursor = prog_cursor + 2_i64
+            address = address &+ adv
+          else
+          end
+        end
+      end
+
+      cu_cursor = unit_finish
+    end
+
+    nil
+  end
+
+  def self.resolve_frames(frames : Pointer(Void*), count : Int32) : Nil
+    {% if flag?(:darwin) %}
+      slide = LibC._dyld_get_image_vmaddr_slide(0).to_u64
+
+      path_buf = uninitialized UInt8[1024]
+      ptr = pointerof(path_buf).as(UInt8*)
+      size = 1024_u32
+      LibC._NSGetExecutablePath(ptr, pointerof(size))
+      len = 0
+      while ptr[len] != 0_u8
+        len = len + 1
+      end
+      exe_path = String.new(len) { |dst| dst.copy_from(ptr, len) }
+
+      # Companion DWARF file paths
+      dwarf_path = exe_path + ".dwarf"
+      fd = LibC.open(dwarf_path.to_unsafe, 0)
+      if fd < 0
+        last_slash = -1
+        si = 0
+        while si < len
+          last_slash = si if ptr[si] == 47_u8
+          si = si + 1
+        end
+        base_name = last_slash >= 0 ? exe_path[last_slash + 1, len - (last_slash + 1)] : exe_path
+        dwarf_path = exe_path + ".dSYM/Contents/Resources/DWARF/" + base_name
+        fd = LibC.open(dwarf_path.to_unsafe, 0)
+      end
+
+      debug_line_ptr = Pointer(UInt8).new(0_u64)
+      debug_line_size = 0_i64
+      m = Pointer(Void).new(0_u64)
+      fsize = 0_i64
+
+      if fd >= 0
+        fsize = LibC.lseek(fd, 0_i64, 2)
+        m = LibC.mmap(Pointer(Void).new(0_u64), fsize.to_u64, 1, 1, fd, 0_i64)
+        LibC.close(fd)
+        if m.address != 0_u64 && m.address != 0xffffffffffffffff_u64
+          base = m.as(Pointer(UInt8))
+          ncmds = (base + 16).as(Pointer(Int32)).value
+          cmd_offset = 32_i64
+          ci = 0
+          while ci < ncmds
+            cmd_ptr = base + cmd_offset
+            cmd = cmd_ptr.as(Pointer(Int32)).value
+            cmd_size = (cmd_ptr + 4).as(Pointer(Int32)).value
+            if cmd == 0x19 # LC_SEGMENT_64
+              nsects = (cmd_ptr + 64).as(Pointer(Int32)).value
+              sect_ptr = cmd_ptr + 72_i64
+              si = 0
+              while si < nsects
+                sect_name = String.new(16) { |dst| dst.copy_from(sect_ptr, 16) }
+                if sect_name.starts_with?("__debug_line")
+                  debug_line_size = (sect_ptr + 40).as(Pointer(Int64)).value
+                  sect_file_offset = (sect_ptr + 48).as(Pointer(Int32)).value
+                  debug_line_ptr = base + sect_file_offset.to_i64
+                end
+                sect_ptr = sect_ptr + 80_i64
+                si = si + 1
+              end
+            end
+            cmd_offset = cmd_offset + cmd_size.to_i64
+            ci = ci + 1
+          end
+        end
+      end
+
+      info = uninitialized LibC::DlInfo
+      i = 0
+      while i < count
+        raw_pc = (frames + i).value.address
+        ip = raw_pc - slide
+
+        fn_name = ""
+        if LibC.dladdr(Pointer(Void).new(raw_pc), pointerof(info)) != 0 && info.dli_sname.address != 0_u64
+          sname = info.dli_sname
+          slen = 0
+          while (sname + slen).value != 0_u8
+            slen = slen + 1
+          end
+          fn_name = String.new(slen) { |dst| dst.copy_from(sname, slen) }
+        end
+
+        lookup_ip = ip > 4_u64 ? ip - 4_u64 : ip
+        location = debug_line_ptr.address != 0_u64 ? resolve_line(lookup_ip, debug_line_ptr, debug_line_size) : nil
+
+        line_out = i.to_s + "   "
+        line_out = line_out + (fn_name.empty? ? "[0x" + raw_pc.to_s(16) + "]" : fn_name)
+        if loc = location
+          line_out = line_out + " at " + loc
+        else
+          line_out = line_out + " [0x" + raw_pc.to_s(16) + "]"
+        end
+        line_out = line_out + "\n"
+        say(line_out)
+
+        i = i + 1
+      end
+
+      if m.address != 0_u64 && m.address != 0xffffffffffffffff_u64
+        LibC.munmap(m, fsize.to_u64)
+      end
+    {% else %}
+      # Fallback for platforms without native DWARF reader yet
+      i = 0
+      while i < count
+        raw_pc = (frames + i).value.address
+        line_out = i.to_s + "   [0x" + raw_pc.to_s(16) + "]\n"
+        say(line_out)
+        i = i + 1
+      end
+    {% end %}
+  end
+end
+
+# Install hook automatically on import
+IyiPanic.resolver = ->(frames : Pointer(Void*), count : Int32) {
+  DwarfResolver.resolve_frames(frames, count)
+}

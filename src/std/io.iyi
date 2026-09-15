@@ -1,0 +1,706 @@
+# IO: stream extensions, in-memory IO, adapters, formats, and utilities.
+#
+# Extends the prelude's IyiIO with seek, pos, rewind, byte operations,
+# IO::Memory, IO::Sized, IO::Delimited, IO::MultiWriter, IO::Hexdump, and
+# IO::ByteFormat without external C libraries.
+
+module std/io
+
+{% if flag?(:darwin) || flag?(:linux) %}
+  lib LibC
+    fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
+  end
+{% end %}
+
+pub enum Seek : Int32
+  Set     = 0
+  Current = 1
+  End     = 2
+end
+
+pub class Error < Exception
+  getter message : String
+
+  def initialize(@message : String)
+  end
+end
+
+pub class EOFError < Error
+  def initialize(message : String = "End of file reached")
+    super(message)
+  end
+end
+
+pub class TimeoutError < Error
+  def initialize(message : String = "IO operation timed out")
+    super(message)
+  end
+end
+
+class ::IyiIO
+  def seek(offset : Int64, whence : Std::Io::Seek = Std::Io::Seek::Set) : Int64
+    flush if @write_pos > 0
+    # Clear read buffer on seek
+    @read_pos = 0
+    @read_limit = 0
+    @eof = false
+
+    w = whence.value
+    {% if flag?(:darwin) || flag?(:linux) %}
+      res = Std::Io::LibC.lseek(@fd.to_i32, offset, w)
+      if res < 0_i64
+        raise "Seek failed on fd #{@fd}"
+      end
+      res
+    {% else %}
+      0_i64
+    {% end %}
+  end
+
+  def pos : Int64
+    seek(0_i64, Std::Io::Seek::Current)
+  end
+
+  def rewind : Nil
+    seek(0_i64, Std::Io::Seek::Set)
+  end
+
+  def read_byte : UInt8?
+    raise "cannot read from closed IO" if @closed
+    if @read_pos < @read_limit
+      b = @read_buffer[@read_pos]
+      @read_pos = @read_pos + 1
+      return b
+    end
+    return nil if @eof
+    fill_buffer
+    if @read_pos < @read_limit
+      b = @read_buffer[@read_pos]
+      @read_pos = @read_pos + 1
+      b
+    else
+      nil
+    end
+  end
+
+  def write_byte(byte : UInt8) : Nil
+    b = byte
+    write(pointerof(b), 1)
+  end
+
+  def read_char : Char?
+    b = read_byte
+    return nil unless b
+    # ASCII fast path
+    if b < 128_u8
+      return b.unsafe_chr
+    end
+    # Multi-byte UTF-8 sequence
+    if (b & 0xe0_u8) == 0xc0_u8
+      b2 = read_byte
+      return nil unless b2
+      code = ((b.to_i32 & 0x1f) << 6) | (b2.to_i32 & 0x3f)
+      code.unsafe_chr
+    elsif (b & 0xf0_u8) == 0xe0_u8
+      b2 = read_byte
+      b3 = read_byte
+      return nil unless b2 && b3
+      code = ((b.to_i32 & 0x0f) << 12) | ((b2.to_i32 & 0x3f) << 6) | (b3.to_i32 & 0x3f)
+      code.unsafe_chr
+    elsif (b & 0xf8_u8) == 0xf0_u8
+      b2 = read_byte
+      b3 = read_byte
+      b4 = read_byte
+      return nil unless b2 && b3 && b4
+      code = ((b.to_i32 & 0x07) << 18) | ((b2.to_i32 & 0x3f) << 12) | ((b3.to_i32 & 0x3f) << 6) | (b4.to_i32 & 0x3f)
+      code.unsafe_chr
+    else
+      b.unsafe_chr
+    end
+  end
+
+  def read_fully(slice : Pointer(UInt8), count : Int32) : Int32
+    return 0 if count <= 0
+    total = 0
+    while total < count
+      avail = @read_limit - @read_pos
+      if avail > 0
+        needed = count - total
+        to_copy = avail < needed ? avail : needed
+        (slice + total).copy_from(@read_buffer + @read_pos, to_copy)
+        total = total + to_copy
+        @read_pos = @read_pos + to_copy
+      else
+        break if @eof
+        filled = fill_buffer
+        break if filled <= 0
+      end
+    end
+    total
+  end
+
+  def gets_to_end : String
+    read_all
+  end
+
+  def lines(chomp : Bool = false) : Array(String)
+    res = [] of String
+    while line = read_line(chomp)
+      res << line
+    end
+    res
+  end
+
+  def each_line(chomp : Bool = false, &block : String -> Nil) : Nil
+    while line = read_line(chomp)
+      yield line
+    end
+  end
+
+  def copy(dst : IyiIO, limit : Int64? = nil) : Int64
+    IyiIO.copy(self, dst, limit)
+  end
+
+  def self.copy(src : IyiIO, dst : IyiIO, limit : Int64? = nil) : Int64
+    buf_size = 4096
+    buf = Pointer(UInt8).malloc(buf_size.to_u64)
+    total = 0_i64
+
+    while true
+      to_read = buf_size
+      if limit
+        rem = limit - total
+        break if rem <= 0_i64
+        to_read = rem < buf_size.to_i64 ? rem.to_i : buf_size
+      end
+
+      got = src.read_fully(buf, to_read)
+      break if got <= 0
+      dst.write(buf, got)
+      total = total + got.to_i64
+    end
+    dst.flush
+    total
+  end
+
+  def <<(val) : self
+    print(val)
+    self
+  end
+end
+
+pub class Memory
+  getter bytesize : Int32
+  getter pos : Int32
+
+  @buffer : Pointer(UInt8)
+  @capacity : Int32
+  @closed : Bool
+  @resizeable : Bool
+  @writable : Bool
+
+  def initialize(capacity : Int32 = 64)
+    cap = capacity < 16 ? 16 : capacity
+    @capacity = cap
+    @buffer = Pointer(UInt8).malloc(cap.to_u64)
+    @bytesize = 0
+    @pos = 0
+    @closed = false
+    @resizeable = true
+    @writable = true
+  end
+
+  def initialize(str : String)
+    len = str.bytesize
+    @capacity = len < 16 ? 16 : len
+    @buffer = Pointer(UInt8).malloc(@capacity.to_u64)
+    @buffer.copy_from(str.to_unsafe, len)
+    @bytesize = len
+    @pos = 0
+    @closed = false
+    @resizeable = false
+    @writable = false
+  end
+
+  def size : Int32
+    @bytesize
+  end
+
+  def empty? : Bool
+    @bytesize == 0
+  end
+
+  def closed? : Bool
+    @closed
+  end
+
+  def close : Nil
+    @closed = true
+  end
+
+  def clear : Nil
+    @bytesize = 0
+    @pos = 0
+  end
+
+  def rewind : Nil
+    @pos = 0
+  end
+
+  def pos=(new_pos : Int32)
+    raise "Position out of bounds" if new_pos < 0 || new_pos > @bytesize
+    @pos = new_pos
+  end
+
+  def seek(offset : Int64, whence : Seek = Seek::Set) : Nil
+    target = case whence
+             when Seek::Set     then offset
+             when Seek::Current then @pos.to_i64 + offset
+             when Seek::End     then @bytesize.to_i64 + offset
+             else                    offset
+             end
+    raise "Invalid seek position: #{target}" if target < 0_i64 || target > @bytesize.to_i64
+    @pos = target.to_i
+  end
+
+  def to_slice : Pointer(UInt8)
+    @buffer
+  end
+
+  def to_s : String
+    String.new(@bytesize) do |target|
+      target.copy_from(@buffer, @bytesize)
+    end
+  end
+
+  def inspect(io : IyiIO) : Nil
+    io.write("#<IO::Memory:")
+    io.write(to_s)
+    io.write(">")
+  end
+
+  def read_byte : UInt8?
+    raise "cannot read from closed IO" if @closed
+    return nil if @pos >= @bytesize
+    b = @buffer[@pos]
+    @pos = @pos + 1
+    b
+  end
+
+  def read_bytes(count : Int32) : String
+    raise "cannot read from closed IO" if @closed
+    return "" if count <= 0 || @pos >= @bytesize
+    avail = @bytesize - @pos
+    to_read = count < avail ? count : avail
+    res = String.new(to_read) do |target|
+      target.copy_from(@buffer + @pos, to_read)
+    end
+    @pos = @pos + to_read
+    res
+  end
+
+  def read_all : String
+    read_bytes(@bytesize - @pos)
+  end
+
+  def read_line(chomp : Bool = false) : String?
+    raise "cannot read from closed IO" if @closed
+    return nil if @pos >= @bytesize
+
+    start_pos = @pos
+    found = -1
+    i = @pos
+    while i < @bytesize
+      if @buffer[i] == 10_u8
+        found = i
+        break
+      end
+      i = i + 1
+    end
+
+    if found >= 0
+      take = found - start_pos + 1
+      @pos = found + 1
+      len = take
+      if chomp
+        len = len - 1 if len > 0 && @buffer[start_pos + len - 1] == 10_u8
+        len = len - 1 if len > 0 && @buffer[start_pos + len - 1] == 13_u8
+      end
+      String.new(len) do |target|
+        target.copy_from(@buffer + start_pos, len)
+      end
+    else
+      take = @bytesize - start_pos
+      @pos = @bytesize
+      len = take
+      if chomp
+        len = len - 1 if len > 0 && @buffer[start_pos + len - 1] == 10_u8
+        len = len - 1 if len > 0 && @buffer[start_pos + len - 1] == 13_u8
+      end
+      String.new(len) do |target|
+        target.copy_from(@buffer + start_pos, len)
+      end
+    end
+  end
+
+  def gets(chomp : Bool = false) : String?
+    read_line(chomp)
+  end
+
+  def gets_to_end : String
+    read_all
+  end
+
+  def write_byte(byte : UInt8) : Nil
+    b = byte
+    write(pointerof(b), 1)
+  end
+
+  def write(bytes : Pointer(UInt8), count : Int32) : Nil
+    raise "cannot write to closed IO" if @closed
+    raise "IO::Memory is not writable" unless @writable
+    return if count <= 0
+
+    needed = @pos + count
+    if needed > @capacity
+      raise "IO::Memory is not resizeable" unless @resizeable
+      new_cap = @capacity * 2
+      while new_cap < needed
+        new_cap = new_cap * 2
+      end
+      @buffer = @buffer.realloc(new_cap.to_u64)
+      @capacity = new_cap
+    end
+
+    (@buffer + @pos).copy_from(bytes, count)
+    @pos = @pos + count
+    if @pos > @bytesize
+      @bytesize = @pos
+    end
+  end
+
+  def write(text : String) : Nil
+    write(text.to_unsafe, text.bytesize)
+  end
+
+  def write_line(text : String = "") : Nil
+    write(text)
+    write("\n")
+  end
+
+  def print(val) : Nil
+    write(val.to_s)
+  end
+
+  def puts(val) : Nil
+    write(val.to_s)
+    write("\n")
+  end
+
+  def puts : Nil
+    write("\n")
+  end
+
+  def flush : Nil
+  end
+
+  def <<(val) : self
+    print(val)
+    self
+  end
+end
+
+pub class Sized(T)
+  getter read_limit : Int64
+  getter total_read : Int64
+
+  @io : T
+  @closed : Bool
+
+  def initialize(@io : T, @read_limit : Int64)
+    @total_read = 0_i64
+    @closed = false
+  end
+
+  def remaining : Int64
+    rem = @read_limit - @total_read
+    rem < 0_i64 ? 0_i64 : rem
+  end
+
+  def read_byte : UInt8?
+    return nil if remaining <= 0_i64
+    b = @io.read_byte
+    if b
+      @total_read = @total_read + 1_i64
+    end
+    b
+  end
+
+  def read_bytes(count : Int32) : String
+    return "" if count <= 0 || remaining <= 0_i64
+    rem = remaining
+    to_read = count.to_i64 < rem ? count : rem.to_i
+    res = @io.read_bytes(to_read)
+    @total_read = @total_read + res.bytesize.to_i64
+    res
+  end
+
+  def read_all : String
+    read_bytes(remaining.to_i)
+  end
+
+  def close : Nil
+    @closed = true
+  end
+
+  def closed? : Bool
+    @closed
+  end
+end
+
+pub class Delimited(T)
+  @io : T
+  @delimiter : String
+  @closed : Bool
+
+  def initialize(@io : T, @delimiter : String)
+    @closed = false
+  end
+
+  def read_all : String
+    res = ""
+    delim_len = @delimiter.bytesize
+    delim_ptr = @delimiter.to_unsafe
+
+    while b = @io.read_byte
+      res = res + b.unsafe_chr.to_s
+      if res.bytesize >= delim_len
+        # check if ending matches delimiter
+        ends_with_delim = true
+        k = 0
+        r_ptr = res.to_unsafe
+        r_len = res.bytesize
+        while k < delim_len
+          if r_ptr[r_len - delim_len + k] != delim_ptr[k]
+            ends_with_delim = false
+            break
+          end
+          k = k + 1
+        end
+        if ends_with_delim
+          # Strip delimiter
+          return res[0, r_len - delim_len]
+        end
+      end
+    end
+    res
+  end
+
+  def close : Nil
+    @closed = true
+  end
+end
+
+pub class MultiWriter(T)
+  @writers : Array(T)
+
+  def initialize(@writers : Array(T))
+  end
+
+  def write(bytes : Pointer(UInt8), count : Int32) : Nil
+    @writers.each do |w|
+      w.write(bytes, count)
+    end
+  end
+
+  def write(text : String) : Nil
+    @writers.each do |w|
+      w.write(text)
+    end
+  end
+
+  def print(val) : Nil
+    @writers.each do |w|
+      w.print(val)
+    end
+  end
+
+  def puts(val) : Nil
+    @writers.each do |w|
+      w.puts(val)
+    end
+  end
+
+  def puts : Nil
+    @writers.each do |w|
+      w.puts
+    end
+  end
+
+  def flush : Nil
+    @writers.each do |w|
+      w.flush
+    end
+  end
+
+  def <<(val) : self
+    print(val)
+    self
+  end
+end
+
+pub class Hexdump
+  @io : IyiIO
+
+  def initialize(@io : IyiIO)
+  end
+
+  def dump(bytes : Pointer(UInt8), count : Int32) : Nil
+    offset = 0
+    while offset < count
+      chunk = count - offset
+      chunk = chunk > 16 ? 16 : chunk
+
+      # Print 8-digit hex offset
+      @io.write(format_hex8(offset))
+      @io.write("  ")
+
+      # Print hex bytes
+      i = 0
+      while i < 16
+        if i == 8
+          @io.write(" ")
+        end
+        if i < chunk
+          b = bytes[offset + i]
+          @io.write(format_hex2(b))
+          @io.write(" ")
+        else
+          @io.write("   ")
+        end
+        i = i + 1
+      end
+
+      # Print ASCII printable characters
+      @io.write(" |")
+      j = 0
+      while j < chunk
+        b = bytes[offset + j]
+        if b >= 32_u8 && b <= 126_u8
+          @io.write(b.unsafe_chr.to_s)
+        else
+          @io.write(".")
+        end
+        j = j + 1
+      end
+      @io.write("|\n")
+
+      offset = offset + chunk
+    end
+    @io.flush
+  end
+
+  private def format_hex8(val : Int32) : String
+    hex_chars = "0123456789abcdef"
+    buf = Pointer(UInt8).malloc(8_u64)
+    v = val.to_u64
+    i = 7
+    while i >= 0
+      buf[i] = hex_chars.to_unsafe[(v & 0x0f_u64).to_i]
+      v = v.unsafe_shr(4_u64)
+      i = i - 1
+    end
+    String.new(8) { |t| t.copy_from(buf, 8) }
+  end
+
+  private def format_hex2(b : UInt8) : String
+    hex_chars = "0123456789abcdef"
+    buf = Pointer(UInt8).malloc(2_u64)
+    buf[0] = hex_chars.to_unsafe[b.to_i32 >> 4]
+    buf[1] = hex_chars.to_unsafe[b.to_i32 & 0x0f]
+    String.new(2) { |t| t.copy_from(buf, 2) }
+  end
+end
+
+pub struct ByteFormat
+  pub struct LittleEndian
+    def self.encode_int32(val : Int32, buf : Pointer(UInt8)) : Nil
+      v = val.to_u64
+      buf[0] = (v & 0xff_u64).to_u8
+      buf[1] = (v.unsafe_shr(8_u64) & 0xff_u64).to_u8
+      buf[2] = (v.unsafe_shr(16_u64) & 0xff_u64).to_u8
+      buf[3] = (v.unsafe_shr(24_u64) & 0xff_u64).to_u8
+    end
+
+    def self.decode_int32(buf : Pointer(UInt8)) : Int32
+      b0 = buf[0].to_i64
+      b1 = buf[1].to_i64 << 8
+      b2 = buf[2].to_i64 << 16
+      b3 = buf[3].to_i64 << 24
+      (b0 | b1 | b2 | b3).to_i32
+    end
+
+    def self.encode_int64(val : Int64, buf : Pointer(UInt8)) : Nil
+      v = val.to_u64
+      i = 0
+      while i < 8
+        buf[i] = (v & 0xff_u64).to_u8
+        v = v.unsafe_shr(8_u64)
+        i = i + 1
+      end
+    end
+
+    def self.decode_int64(buf : Pointer(UInt8)) : Int64
+      res = 0_i64
+      i = 7
+      while i >= 0
+        res = (res << 8) | buf[i].to_i64
+        i = i - 1
+      end
+      res
+    end
+  end
+
+  pub struct BigEndian
+    def self.encode_int32(val : Int32, buf : Pointer(UInt8)) : Nil
+      v = val.to_u64
+      buf[0] = (v.unsafe_shr(24_u64) & 0xff_u64).to_u8
+      buf[1] = (v.unsafe_shr(16_u64) & 0xff_u64).to_u8
+      buf[2] = (v.unsafe_shr(8_u64) & 0xff_u64).to_u8
+      buf[3] = (v & 0xff_u64).to_u8
+    end
+
+    def self.decode_int32(buf : Pointer(UInt8)) : Int32
+      b0 = buf[0].to_i64 << 24
+      b1 = buf[1].to_i64 << 16
+      b2 = buf[2].to_i64 << 8
+      b3 = buf[3].to_i64
+      (b0 | b1 | b2 | b3).to_i32
+    end
+
+    def self.encode_int64(val : Int64, buf : Pointer(UInt8)) : Nil
+      v = val.to_u64
+      i = 7
+      while i >= 0
+        buf[i] = (v & 0xff_u64).to_u8
+        v = v.unsafe_shr(8_u64)
+        i = i - 1
+      end
+    end
+
+    def self.decode_int64(buf : Pointer(UInt8)) : Int64
+      res = 0_i64
+      i = 0
+      while i < 8
+        res = (res << 8) | buf[i].to_i64
+        i = i + 1
+      end
+      res
+    end
+  end
+
+  pub alias SystemEndian = LittleEndian
+  pub alias NetworkEndian = BigEndian
+end
+
+pub alias IO = ::IyiIO

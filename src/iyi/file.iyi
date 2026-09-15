@@ -1,6 +1,5 @@
-# Files, read and written whole by `File.read` and `File.write`, or opened
-# as an `IyiIO` stream by `File.open`. Paths get the NUL the kernel wants
-# at the call, as iyi's String has none; errors panic with the path.
+# Files: `read`/`write` whole, `open` as an `IyiIO`. Paths get the NUL
+# the kernel wants; errors panic with the path.
 
 class File
   def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096) : IyiIO
@@ -41,17 +40,20 @@ class File
   end
 
   def self.exists?(path : String) : Bool
-    fd = __iyi_open_read(c_path(path))
-    return false if fd < 0
-    __iyi_close(fd)
-    true
+    {% if flag?(:wasm32) %}
+      raise "File.exists? is not available on wasm32-wasi: path_open needs a preopened directory fd"
+    {% else %}
+      fd = __iyi_open_read(c_path(path))
+      return false if fd < 0
+      __iyi_close(fd)
+      true
+    {% end %}
   end
 
   def self.delete(path : String) : Nil
     raise "cannot delete #{path}" if __iyi_unlink(c_path(path)) < 0
   end
 
-  # The kernel wants a NUL it can walk. iyi's strings do not carry one.
   private def self.c_path(path : String) : UInt8*
     n = path.bytesize
     buffer = Pointer(UInt8).malloc((n + 1).to_u64)

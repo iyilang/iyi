@@ -498,9 +498,7 @@ end
     read.to_i64
   end
 
-  # WASI's `path_open` takes a preopened directory fd, a rights bitfield and
-  # a path. This prelude has none of those, and pretending a relative path
-  # opens would be a silent wrong answer. File methods raise through these.
+  # path_open needs a preopened directory fd this prelude does not have.
   def __iyi_open_read(path : UInt8*) : Int64
     raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
   end

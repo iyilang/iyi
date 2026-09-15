@@ -66,6 +66,12 @@
 
 ### Fixed
 
+- **`File.exists?` on wasm32-wasi panicked with `File.read`'s sentence.**
+  The predicate went through `path_open`, which this prelude does not
+  have, and the panic named File rather than `exists?`. It is refused
+  as `File.exists?` now, the way `File.delete` already was.
+  `bench/sandbox_story.sh` holds it.
+
 - **The std/io exercise asked `hexdump -C` for an oracle the CI image does
   not have.** The dump itself was already checked by the program; the gate
   then died on a missing command. The oracle is python3 now, the same

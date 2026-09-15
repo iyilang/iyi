@@ -1,0 +1,135 @@
+# Complete NamedTuple standard library extensions for iyi.
+#
+# Builds upon std/tuple and implements Crystal's full NamedTuple specification.
+
+module std/named_tuple
+
+import std/tuple
+
+struct ::NamedTuple
+  # Creates a named tuple from keyword options.
+  def self.new(**options : **T)
+    options
+  end
+
+  # Returns the value for *key*, or raises KeyError if missing.
+  def [](key : Symbol)
+    fetch(key) { raise "Missing named tuple key: #{key.inspect}" }
+  end
+
+  # Returns the value for string *key*, or raises KeyError if missing.
+  def [](key : String)
+    fetch(key) { raise "Missing named tuple key: #{key.inspect}" }
+  end
+
+  # Returns the value for *key*, or nil if missing.
+  def []?(key : Symbol)
+    fetch(key, nil)
+  end
+
+  def []?(key : String)
+    fetch(key, nil)
+  end
+
+  # Fetches value for *key*, returning *default_value* if missing.
+  def fetch(key : Symbol, default_value)
+    fetch(key) { default_value }
+  end
+
+  def fetch(key : String, default_value)
+    fetch(key) { default_value }
+  end
+
+  # Fetches value for *key*, or yields to block if missing.
+  def fetch(key : Symbol, &block)
+    {% for k in T.keys %}
+      return self[:{{k.id}}] if key == :{{k.id}}
+    {% end %}
+    yield key
+  end
+
+  def fetch(key : String, &block)
+    {% for k in T.keys %}
+      return self[:{{k.id}}] if key == "{{k.id}}"
+    {% end %}
+    yield key
+  end
+
+  # Returns true if the named tuple has the given string key.
+  def has_key?(key : String) : Bool
+    {% for k in T.keys %}
+      return true if key == "{{k.id}}"
+    {% end %}
+    false
+  end
+
+  # Yields each key symbol in order.
+  def each_key(& : Symbol -> Nil) : Nil
+    {% for k in T.keys %}
+      yield :{{k.id}}
+    {% end %}
+  end
+
+  # Yields each key, value, and integer index.
+  def each_with_index(offset : Int = 0, &) : Nil
+    i = offset.to_i
+    {% for k in T.keys %}
+      yield :{{k.id}}, self[:{{k.id}}], i
+      i += 1
+    {% end %}
+  end
+
+  # Merges another named tuple with self. Entries in *other* overwrite matching keys.
+  def merge(other : NamedTuple)
+    merge(**other)
+  end
+
+  def merge(**other : **U) forall U
+    {% begin %}
+      {
+        {% for k in T.keys %}
+          {% unless U.keys.includes?(k) %}
+            {{k.id}}: self[:{{k.id}}],
+          {% end %}
+        {% end %}
+        {% for k in U.keys %}
+          {{k.id}}: other[:{{k.id}}],
+        {% end %}
+      }
+    {% end %}
+  end
+
+  # Merges self into other.
+  def reverse_merge(other : NamedTuple)
+    other.merge(self)
+  end
+
+  # Deep clone of this named tuple.
+  def clone
+    {% begin %}
+      {
+        {% for k in T.keys %}
+          {{k.id}}: self[:{{k.id}}].clone,
+        {% end %}
+      }
+    {% end %}
+  end
+
+  # Converts this named tuple into an Array of {Symbol, Value} pairs.
+  def to_a
+    arr = [] of {Symbol, typeof(values[0])}
+    {% for k in T.keys %}
+      arr << {:{{k.id}}, self[:{{k.id}}]}
+    {% end %}
+    arr
+  end
+
+  # Converts this named tuple into a Hash.
+  def to_h
+    h = {} of Symbol => typeof(values[0])
+    {% for k in T.keys %}
+      h[:{{k.id}}] = self[:{{k.id}}]
+    {% end %}
+    h
+  end
+end

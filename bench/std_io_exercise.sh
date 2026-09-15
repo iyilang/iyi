@@ -10,8 +10,8 @@
 #     trips, Sized/Delimited byte-exact on UTF-8, Hexdump lines, MultiWriter.
 #   * Every ByteFormat encoding the program prints (negative, minimum, maximum
 #     Int32/Int64, UInt64, UInt8, both byte orders) equals python3 `struct`'s.
-#   * The Hexdump lines the program prints equal `hexdump -C`'s for the same
-#     bytes.
+#   * The Hexdump lines the program prints equal python3's `hexdump -C` for the
+#     same bytes.
 #   * The Delimited and Sized answers on UTF-8 input are the exact bytes.
 #   * Negative proofs: a patched copy of the module that breaks the two's
 #     complement, the delimiter match, or the line end is caught by name.
@@ -20,7 +20,7 @@
 #     malformed UTF-8, a read after close - each a panic with a sentence.
 #   * Dependency floor: the exercise binary asks the machine for nothing new.
 #
-# Needs bin/iyi, python3, hexdump, `nm`, and `otool` on Darwin or `readelf` on
+# Needs bin/iyi, python3, `nm`, and `otool` on Darwin or `readelf` on
 # Linux. Exits non-zero if any check fails.
 set -u
 
@@ -108,7 +108,7 @@ done
 [ "$status" -eq 0 ] && echo "  memory, descriptor stream, byte format, sized/delimited, hexdump and multi writer all reported"
 
 # ---------------------------------------------------------------------------
-# Oracles: python3's struct for every encoding, hexdump -C for every dump
+# Oracles: python3's struct for every encoding, python3's hexdump -C for every dump
 # ---------------------------------------------------------------------------
 
 echo
@@ -141,13 +141,36 @@ for needed in "LE Int32 -1 ffffffff" "BE Int32 -2147483648 80000000" "LE Int64 -
 done
 
 echo
-echo "== every Hexdump line against hexdump -C"
+echo "== every Hexdump line against python3's hexdump -C"
 grep -E '^[0-9a-f]{8}  ' "$WORK/exercise-io.out" > "$WORK/dumps.iyi.txt"
-{
-  printf 'Hello, iyi!\0\303\277' | hexdump -Cv | sed '$d'
-  python3 -c 'import sys; sys.stdout.buffer.write(bytes((i * 7 + 30) % 256 for i in range(40)))' | hexdump -Cv | sed '$d'
-  printf 'to stdout' | hexdump -Cv | sed '$d'
-} > "$WORK/dumps.oracle.txt"
+python3 - "$WORK/dumps.oracle.txt" <<'PY'
+import sys
+
+def dump_c(data: bytes) -> str:
+    if not data:
+        return ""
+    lines = []
+    for offset in range(0, len(data), 16):
+        chunk = data[offset:offset + 16]
+        n = len(chunk)
+        parts = []
+        for i in range(16):
+            if i == 8:
+                parts.append("")
+            parts.append(f"{chunk[i]:02x}" if i < n else "  ")
+        ascii_str = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+        lines.append(f"{offset:08x}  {' '.join(parts)}  |{ascii_str}|")
+    return "\n".join(lines) + "\n"
+
+chunks = [
+    b"Hello, iyi!\x00\xc3\xbf",
+    bytes((i * 7 + 30) % 256 for i in range(40)),
+    b"to stdout",
+]
+with open(sys.argv[1], "w") as out:
+    for chunk in chunks:
+        out.write(dump_c(chunk))
+PY
 if [ "$(wc -l < "$WORK/dumps.iyi.txt")" -ne 5 ]; then
   echo "  expected five dump lines on stdout, found $(wc -l < "$WORK/dumps.iyi.txt")"
   status=1
@@ -163,7 +186,7 @@ echo
 echo "== Delimited and Sized answers, byte-exact"
 for line in "  delimited: héllo" "  delimited: wörld" "  sized: héllo"; do
   if grep -qxF -- "$line" "$WORK/exercise-io.out"; then
-    printf '  %s\n' "$(printf '%s' "$line" | od -An -c | tr -s ' ' | sed 's/^ //')"
+    printf '%s\n' "$line"
   else
     echo "  MISSING line: $line"
     status=1

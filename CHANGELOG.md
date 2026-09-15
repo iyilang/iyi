@@ -66,6 +66,11 @@
 
 ### Fixed
 
+- **The std/io exercise asked `hexdump -C` for an oracle the CI image does
+  not have.** The dump itself was already checked by the program; the gate
+  then died on a missing command. The oracle is python3 now, the same
+  encoding `hexdump -C` prints. `bench/std_io_exercise.sh` holds it.
+
 - **A sibling `Std::Tuple` hid the prelude's `::Tuple`.** Looking `Tuple`
   up from `Std::Enumerable` walked to `Std` first, found the sibling
   unit, and the import wall refused a name the file never meant. Lookup

@@ -6,16 +6,15 @@ module std/math
 import std/int
 import std/float
 
-# llvm.fma.f64 is one instruction where the target has it and libm's fma
-# elsewhere, so the library is named.
-@[Link("m")]
-lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64 llvm.fma.f64
+# The two hardware instructions this module names. A fused multiply-add
+# is not among them: `llvm.fma.f64` is one instruction on aarch64 and a
+# call into libm on the x86-64 baseline, and the floor (SPEC.md III.9)
+# links no libm, so the exact product below is Dekker's, in iyi.
+lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64
   fun sqrt_f64 = "llvm.sqrt.f64"(x : Float64) : Float64
   fun sqrt_f32 = "llvm.sqrt.f32"(x : Float32) : Float32
   fun copysign_f64 = "llvm.copysign.f64"(mag : Float64, sgn : Float64) : Float64
   fun copysign_f32 = "llvm.copysign.f32"(mag : Float32, sgn : Float32) : Float32
-  fun fma_f64 = "llvm.fma.f64"(a : Float64, b : Float64, c : Float64) : Float64
-  fun fma_f32 = "llvm.fma.f32"(a : Float32, b : Float32, c : Float32) : Float32
 end
 
 pub struct Math
@@ -79,11 +78,11 @@ pub struct Math
     # q * 1e-37; the chain of subtractions below is what limits x to
     # about 1e15 for a full-precision answer.
     p1 = q_f * P1
-    p1e = fma(q_f, P1, 0.0 - p1)
+    p1e = prod_err(q_f, P1, p1)
     p2 = q_f * P2
-    p2e = fma(q_f, P2, 0.0 - p2)
+    p2e = prod_err(q_f, P2, p2)
     p3 = q_f * P3
-    p3e = fma(q_f, P3, 0.0 - p3)
+    p3e = prod_err(q_f, P3, p3)
     r = (((((x - p1) - p1e) - p2) - p2e) - p3) - p3e
     s_r = sin_taylor(r)
     c_r = cos_taylor(r)
@@ -377,7 +376,7 @@ pub struct Math
   private def self.dd_mul(ah : Float64, al : Float64, bh : Float64, bl : Float64) : {Float64, Float64}
     p = ah * bh
     return {p, 0.0} if p == 2.0 * p
-    pe = fma(ah, bh, 0.0 - p) + (ah * bl + al * bh)
+    pe = prod_err(ah, bh, p) + (ah * bl + al * bh)
     s = p + pe
     {s, pe - (s - p)}
   end
@@ -425,7 +424,8 @@ pub struct Math
   private def self.dd_recip(hi : Float64, lo : Float64) : Float64
     q = 1.0 / hi
     return q if hi == 2.0 * hi || q == 2.0 * q
-    q + q * (fma(0.0 - q, hi, 1.0) - q * lo)
+    qh = q * hi
+    q + q * (((1.0 - qh) - prod_err(q, hi, qh)) - q * lo)
   end
 
   # base^e for a whole e of either sign, from `pow_whole`.
@@ -506,13 +506,46 @@ pub struct Math
     LibLLVMMath.copysign_f32(mag, sgn)
   end
 
-  # a * b + c with one rounding.
+  # a * b + c with the product taken exactly: its rounding error is
+  # recovered by Dekker's split and folded into the sum, so `fma(1e16,
+  # 1e16, -1e32)` is the digits a plain `a * b + c` throws away. The last
+  # two additions can each round, which a hardware fma would not; that is
+  # the width of the difference, and it is rare.
   def self.fma(a : Float64, b : Float64, c : Float64) : Float64
-    LibLLVMMath.fma_f64(a, b, c)
+    p = a * b
+    return p + c if p != p || p == 2.0 * p || c != c || c == 2.0 * c
+    e = prod_err(a, b, p)
+    s = p + c
+    bb = s - p
+    t = (p - (s - bb)) + (c - bb)
+    s + (t + e)
   end
 
+  # In double, where the product of two singles is exact.
   def self.fma(a : Float32, b : Float32, c : Float32) : Float32
-    LibLLVMMath.fma_f32(a, b, c)
+    (a.to_f64 * b.to_f64 + c.to_f64).to_f32
+  end
+
+  # The rounding error of `p = a * b`: the exact product is `p + err`.
+  # Veltkamp's split at 2^27 + 1, Dekker's product; a factor past 2^996
+  # would overflow the split, so it is brought down by 2^-64 and the
+  # error taken back up.
+  private def self.prod_err(a : Float64, b : Float64, p : Float64) : Float64
+    return 0.0 if p != p || p == 2.0 * p || p == 0.0
+    scale = 1.0
+    if a.abs > 6.7e299 || b.abs > 6.7e299
+      a = a * 5.421010862427522e-20
+      b = b * 5.421010862427522e-20
+      p = p * 5.421010862427522e-20 * 5.421010862427522e-20
+      scale = 1.8446744073709552e19 * 1.8446744073709552e19
+    end
+    ta = a * 134217729.0
+    ah = ta - (ta - a)
+    al = a - ah
+    tb = b * 134217729.0
+    bh = tb - (tb - b)
+    bl = b - bh
+    (((ah * bh - p) + ah * bl + al * bh) + al * bl) * scale
   end
 
   # The smaller, with the number when one side is NaN, and -0.0 over 0.0.
@@ -862,7 +895,7 @@ pub struct Math
   # rounding of the square does not reach the answer for large x.
   private def self.exp_neg_square(x : Float64) : Float64
     x2 = x * x
-    x2e = fma(x, x, 0.0 - x2)
+    x2e = prod_err(x, x, x2)
     exp(0.0 - x2) * (1.0 - x2e)
   end
 

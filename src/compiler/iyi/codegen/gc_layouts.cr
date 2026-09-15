@@ -195,10 +195,16 @@ class Iyi::CodeGenVisitor
     end
   end
 
+  # The classes asked are the ones the census lays out
+  # (`collect_gc_layout_entries`): a plain class and an instantiated generic.
+  # `Array(Any)` is the second and not a `ClassType`; a reference union it
+  # is a member of - the one a `case` over `Nil | ... | Array(Any) |
+  # Hash(Any, Any)` narrows to once the value arms are ruled out -
+  # dispatches it by the word under the object, so the word must be there.
   private def iyi_headed_types : Set(Type)
     headed = Set(Type).new
     @program.llvm_id.each_type do |type|
-      next unless type.is_a?(ClassType) && type.virtual_type_made?
+      next unless iyi_headed_candidate?(type) && type.virtual_type_made?
       headed << type
       type.all_subclasses.each { |sub| headed << sub }
     end
@@ -208,12 +214,16 @@ class Iyi::CodeGenVisitor
       next unless union.is_a?(ReferenceUnionType) || union.is_a?(NilableReferenceUnionType)
       union.union_types.each do |member|
         member = member.remove_alias
-        next unless member.is_a?(ClassType)
+        next unless iyi_headed_candidate?(member)
         headed << member
         member.all_subclasses.each { |sub| headed << sub }
       end
     end
     headed
+  end
+
+  private def iyi_headed_candidate?(type : Type) : Bool
+    type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
   end
 
   # The census, on `IYI_HEADER_CENSUS=1`: the decision above printed to

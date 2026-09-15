@@ -1,0 +1,508 @@
+# `Deque`, double-ended queue over a circular ring buffer.
+#
+# A `Deque(T)` provides O(1) amortized insertions and removals at both ends
+# (`push`, `pop`, `shift`, `unshift`), random-access indexing (`[]`, `[]=`)
+# with negative index resolution, rotation, and arbitrary insertion and deletion.
+#
+# Implementation details:
+#   * Backed by a contiguous `Pointer(T)` circular buffer with `@capacity`.
+#   * `@start` tracks the buffer index of logical element 0.
+#   * When `@size == @capacity`, insertion reallocates the buffer (doubling capacity).
+#   * If elements wrap around the buffer boundary during reallocation, the wrapped
+#     elements are shifted to preserve contiguous logical indexing.
+#   * Implements `Std::Indexable::Indexable` by defining `size : Int32` and
+#     `unsafe_fetch(index : Int32) : T`, which grants 20+ query and sequence methods.
+
+module std/deque
+
+import std/indexable
+using std/indexable::{Indexable, IndexableMutable}
+import std/enumerable
+using std/enumerable::{Enumerable}
+
+pub class Deque(T)
+  @buffer : Pointer(T)
+  @capacity : Int32
+  @size : Int32
+  @start : Int32
+
+  # Creates an empty deque with zero capacity.
+  def initialize
+    @start = 0
+    @size = 0
+    @capacity = 0
+    @buffer = Pointer(T).new(0_u64)
+  end
+
+  # Creates an empty deque with the specified initial capacity.
+  def initialize(initial_capacity : Int32)
+    raise "negative capacity" if initial_capacity < 0
+    @start = 0
+    @size = 0
+    @capacity = initial_capacity
+    @buffer = initial_capacity == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(initial_capacity.to_u64)
+  end
+
+  # Creates a deque of the given size filled with value.
+  def initialize(size : Int32, value : T)
+    raise "negative size" if size < 0
+    @start = 0
+    @size = size
+    @capacity = size
+    @buffer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
+    i = 0
+    while i < size
+      @buffer[i] = value
+      i = i + 1
+    end
+  end
+
+  # Creates a deque of the given size by yielding each index.
+  def self.new(size : Int32, & : Int32 -> T) : Deque(T)
+    raise "negative size" if size < 0
+    deq = Deque(T).new(size)
+    i = 0
+    while i < size
+      deq.push(yield i)
+      i = i + 1
+    end
+    deq
+  end
+
+  # Creates a deque initialized with elements from an array.
+  def self.new(items : Array(T)) : Deque(T)
+    deq = Deque(T).new(items.size)
+    items.each { |x| deq.push(x) }
+    deq
+  end
+
+  # Number of elements currently in the deque.
+  def size : Int32
+    @size
+  end
+
+  # Allocated capacity of the internal circular buffer.
+  def capacity : Int32
+    @capacity
+  end
+
+  # Returns true when the deque contains zero elements.
+  def empty? : Bool
+    @size == 0
+  end
+
+  # Internal uncheck-indexed buffer lookup.
+  def internal_fetch(index : Int32) : T
+    idx = @start + index
+    idx = idx - @capacity if idx >= @capacity
+    @buffer[idx]
+  end
+
+  # Internal uncheck-indexed buffer assignment.
+  def unsafe_put(index : Int32, value : T) : T
+    idx = @start + index
+    idx = idx - @capacity if idx >= @capacity
+    @buffer[idx] = value
+    value
+  end
+
+  # Indexed element access with negative index resolution (e.g. `d[-1]`).
+  # Raises if index is out of bounds.
+  def [](index : Int32) : T
+    orig = index
+    index = @size + index if index < 0
+    raise "index out of range: #{orig} for size #{@size}" if index < 0 || index >= @size
+    internal_fetch(index)
+  end
+
+  # Nilable indexed element access.
+  def []?(index : Int32) : T?
+    index = @size + index if index < 0
+    return nil if index < 0 || index >= @size
+    internal_fetch(index)
+  end
+
+  # Indexed assignment with negative index resolution.
+  def []=(index : Int32, value : T) : T
+    orig = index
+    index = @size + index if index < 0
+    raise "index out of range: #{orig} for size #{@size}" if index < 0 || index >= @size
+    unsafe_put(index, value)
+  end
+
+  # Returns the first element without removing it. Raises if empty.
+  def first : T
+    raise "empty deque" if @size == 0
+    internal_fetch(0)
+  end
+
+  # Returns the first element, or nil if empty.
+  def first? : T?
+    @size == 0 ? nil : internal_fetch(0)
+  end
+
+  # Returns the last element without removing it. Raises if empty.
+  def last : T
+    raise "empty deque" if @size == 0
+    internal_fetch(@size - 1)
+  end
+
+  # Returns the last element, or nil if empty.
+  def last? : T?
+    @size == 0 ? nil : internal_fetch(@size - 1)
+  end
+
+  # Appends value to the end of the deque.
+  def push(value : T) : Deque(T)
+    ensure_capacity_for(1)
+    idx = @start + @size
+    idx = idx - @capacity if idx >= @capacity
+    @buffer[idx] = value
+    @size = @size + 1
+    self
+  end
+
+  # Alias for `push`.
+  def <<(value : T) : Deque(T)
+    push(value)
+  end
+
+  # Removes and returns the last element. Raises if empty.
+  def pop : T
+    raise "empty deque" if @size == 0
+    @size = @size - 1
+    idx = @start + @size
+    idx = idx - @capacity if idx >= @capacity
+    @buffer[idx]
+  end
+
+  # Removes and returns the last element, or nil if empty.
+  def pop? : T?
+    @size == 0 ? nil : pop
+  end
+
+  # Removes up to n elements from the end.
+  def pop(n : Int32) : Nil
+    raise "negative count" if n < 0
+    count = n > @size ? @size : n
+    i = 0
+    while i < count
+      pop
+      i = i + 1
+    end
+  end
+
+  # Prepends value to the beginning of the deque.
+  def unshift(value : T) : Deque(T)
+    ensure_capacity_for(1)
+    @start = @start - 1
+    @start = @start + @capacity if @start < 0
+    @buffer[@start] = value
+    @size = @size + 1
+    self
+  end
+
+  # Removes and returns the first element. Raises if empty.
+  def shift : T
+    raise "empty deque" if @size == 0
+    val = @buffer[@start]
+    @size = @size - 1
+    @start = @start + 1
+    @start = @start - @capacity if @start >= @capacity
+    val
+  end
+
+  # Removes and returns the first element, or nil if empty.
+  def shift? : T?
+    @size == 0 ? nil : shift
+  end
+
+  # Removes up to n elements from the beginning.
+  def shift(n : Int32) : Nil
+    raise "negative count" if n < 0
+    count = n > @size ? @size : n
+    i = 0
+    while i < count
+      shift
+      i = i + 1
+    end
+  end
+
+  # Rotates elements in place by n steps.
+  # Positive n rotates front elements to the back; negative rotates back to front.
+  def rotate(n : Int32 = 1) : Deque(T)
+    return self if @size <= 1
+    steps = n % @size
+    steps = steps + @size if steps < 0
+    return self if steps == 0
+
+    if @size == @capacity
+      @start = (@start + steps) % @capacity
+    else
+      half = @size / 2
+      if steps <= half
+        i = 0
+        while i < steps
+          push(shift)
+          i = i + 1
+        end
+      else
+        rem = @size - steps
+        i = 0
+        while i < rem
+          unshift(pop)
+          i = i + 1
+        end
+      end
+    end
+    self
+  end
+
+  # Inserts value before the given index.
+  def insert(index : Int32, value : T) : Deque(T)
+    orig = index
+    index = @size + 1 + index if index < 0
+    raise "index out of range: #{orig} for size #{@size}" if index < 0 || index > @size
+    return unshift(value) if index == 0
+    return push(value) if index == @size
+
+    ensure_capacity_for(1)
+    rindex = @start + index
+    rindex = rindex - @capacity if rindex >= @capacity
+
+    if index > @size / 2
+      # Shift elements right
+      dst = @start + @size
+      dst = dst - @capacity if dst >= @capacity
+      loop do
+        src = dst - 1
+        src = src + @capacity if src < 0
+        @buffer[dst] = @buffer[src]
+        break if src == rindex
+        dst = src
+      end
+    else
+      # Shift elements left
+      @start = @start - 1
+      @start = @start + @capacity if @start < 0
+      rindex = rindex - 1
+      rindex = rindex + @capacity if rindex < 0
+      dst = @start
+      loop do
+        src = dst + 1
+        src = src - @capacity if src >= @capacity
+        @buffer[dst] = @buffer[src]
+        break if src == rindex
+        dst = src
+      end
+    end
+
+    @buffer[rindex] = value
+    @size = @size + 1
+    self
+  end
+
+  # Deletes element at index and shifts remaining elements to close the gap.
+  def delete_at(index : Int32) : T
+    orig = index
+    index = @size + index if index < 0
+    raise "index out of range: #{orig} for size #{@size}" if index < 0 || index >= @size
+    return shift if index == 0
+    return pop if index == @size - 1
+
+    rindex = @start + index
+    rindex = rindex - @capacity if rindex >= @capacity
+    value = @buffer[rindex]
+
+    if index > @size / 2
+      # Shift following elements left
+      dst = rindex
+      finish = @start + @size - 1
+      finish = finish - @capacity if finish >= @capacity
+      loop do
+        src = dst + 1
+        src = src - @capacity if src >= @capacity
+        @buffer[dst] = @buffer[src]
+        break if src == finish
+        dst = src
+      end
+    else
+      # Shift preceding elements right
+      dst = rindex
+      finish = @start
+      @start = @start + 1
+      @start = @start - @capacity if @start >= @capacity
+      loop do
+        src = dst - 1
+        src = src + @capacity if src < 0
+        @buffer[dst] = @buffer[src]
+        break if src == finish
+        dst = src
+      end
+    end
+
+    @size = @size - 1
+    value
+  end
+
+  # Appends all elements of other to self.
+  def concat(other : Deque(T)) : Deque(T)
+    i = 0
+    while i < other.size
+      push(other.internal_fetch(i))
+      i = i + 1
+    end
+    self
+  end
+
+  # Appends all elements of array to self.
+  def concat(items : Array(T)) : Deque(T)
+    items.each { |x| push(x) }
+    self
+  end
+
+  # Returns a new Deque containing elements of self followed by other.
+  def +(other : Deque(T)) : Deque(T)
+    copy = dup
+    copy.concat(other)
+    copy
+  end
+
+  # Removes all elements from the deque.
+  def clear : Deque(T)
+    @size = 0
+    @start = 0
+    self
+  end
+
+  # Creates a shallow copy of the deque.
+  def dup : Deque(T)
+    copy = Deque(T).new(@size)
+    i = 0
+    while i < @size
+      copy.push(internal_fetch(i))
+      i = i + 1
+    end
+    copy
+  end
+
+  # Converts elements into a newly allocated Array.
+  def to_a : Array(T)
+    arr = Array(T).new(@size)
+    i = 0
+    while i < @size
+      arr << internal_fetch(i)
+      i = i + 1
+    end
+    arr
+  end
+
+  # Compares two deques for size and element equality.
+  def ==(other : Deque(T)) : Bool
+    return false unless @size == other.size
+    i = 0
+    while i < @size
+      return false unless internal_fetch(i) == other.internal_fetch(i)
+      i = i + 1
+    end
+    true
+  end
+
+  # Yields each element sequentially from front to back.
+  def each(& : T -> Nil) : Nil
+    i = 0
+    while i < @size
+      yield internal_fetch(i)
+      i = i + 1
+    end
+  end
+
+  # String representation: `Deque{1, 2, 3}`.
+  def to_s : String
+    parts = [] of String
+    i = 0
+    while i < @size
+      parts << internal_fetch(i).inspect
+      i = i + 1
+    end
+    "Deque{" + parts.join(", ") + "}"
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  # Internal capacity reservation.
+  private def ensure_capacity_for(count : Int32) : Nil
+    return if @size + count <= @capacity
+    new_cap = @capacity == 0 ? 4 : @capacity * 2
+    while new_cap < @size + count
+      new_cap = new_cap * 2
+    end
+    resize_to(new_cap)
+  end
+
+  # Reallocates buffer and shifts wrapped elements if necessary.
+  private def resize_to(new_cap : Int32) : Nil
+    old_cap = @capacity
+    @capacity = new_cap
+    if old_cap == 0
+      @buffer = Pointer(T).malloc(new_cap.to_u64)
+      return
+    end
+
+    @buffer = @buffer.realloc(new_cap.to_u64)
+    finish = @start + @size
+    if finish > old_cap
+      wrapped_count = finish - old_cap
+      if old_cap - @start >= @start
+        # Shift wrapped items forward to old_cap ... old_cap + wrapped_count
+        i = 0
+        while i < wrapped_count
+          @buffer[old_cap + i] = @buffer[i]
+          i = i + 1
+        end
+      else
+        # Shift head items to new_cap - to_move ... new_cap
+        to_move = old_cap - @start
+        new_start = new_cap - to_move
+        i = 0
+        while i < to_move
+          @buffer[new_start + i] = @buffer[@start + i]
+          i = i + 1
+        end
+        @start = new_start
+      end
+    end
+  end
+end
+
+impl Indexable for Deque(T) forall T
+  type Elem = T
+
+  def unsafe_fetch(index : Int32) : T
+    internal_fetch(index)
+  end
+end
+
+impl IndexableMutable for Deque(T) forall T
+  type Elem = T
+
+  def unsafe_put(index : Int32, value : T) : T
+    idx = @start + index
+    idx = idx - @capacity if idx >= @capacity
+    @buffer[idx] = value
+  end
+end
+
+impl Enumerable for Deque(T) forall T
+  type Elem = T
+
+  def each(& : T -> Nil) : Nil
+    i = 0
+    while i < @size
+      yield internal_fetch(i)
+      i = i + 1
+    end
+  end
+end

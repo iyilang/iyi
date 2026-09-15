@@ -14,13 +14,79 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/http
-using std/http::{HTTP}
+import std/socket
+using std/http::{HTTP, Response}
+using std/socket::{IyiSocket}
+
+# The server side of one connection: the request text, headers and the
+# body `Content-Length` promises, read until both have arrived.
+def read_request(conn : IyiSocket) : String
+  buf = ""
+  while true
+    if split = HTTP.find_headers_end(buf)
+      need = 0
+      HTTP.split_crlf(buf[0, split]).each do |line|
+        colon = line.index(':')
+        next unless colon
+        if HTTP.same_name?(line[0, colon], "Content-Length")
+          need = line[colon + 1, line.bytesize - colon - 1].strip.to_i
+        end
+      end
+      break if buf.bytesize - split - 4 >= need
+    end
+    chunk = conn.read(4096)
+    break if chunk.bytesize == 0
+    buf = buf + chunk
+  end
+  buf
+end
+
+# The request line: what comes before the first CRLF.
+def first_line(req : String) : String
+  p = req.to_unsafe
+  i = 0
+  while i + 1 < req.bytesize
+    return req[0, i] if p[i] == 13_u8 && p[i + 1] == 10_u8
+    i = i + 1
+  end
+  req
+end
+
+# `text` as chunks of eight bytes, sizes in hexadecimal, a zero chunk last.
+def chunked(text : String) : String
+  out = ""
+  i = 0
+  while i < text.bytesize
+    n = text.bytesize - i
+    n = 8 if n > 8
+    out = out + n.to_s + "\r\n" + text[i, n] + "\r\n"
+    i = i + n
+  end
+  out + "0\r\n\r\n"
+end
 
 puts "== request"
 req = HTTP.format_request("GET", "/", "127.0.0.1")
-assert_true req.starts_with?("GET / HTTP/1.1"), "method line"
-assert_true req.includes?("Host: 127.0.0.1"), "host"
+assert_true req.starts_with?("GET / HTTP/1.1\r\n"), "method line"
+assert_true req.includes?("Host: 127.0.0.1\r\n"), "host"
+assert_true req.includes?("Connection: close\r\n"), "connection close"
+assert_true !req.includes?("Content-Length"), "a GET with no body has no length"
+assert_true req.ends_with?("\r\n\r\n"), "an empty body ends the request at the blank line"
 puts "  GET request text"
+
+req = HTTP.format_request("POST", "/items", "127.0.0.1:8080", "{\"a\":1}", {"Content-Type" => "application/json", "X-Token" => "abc"})
+assert_true req.starts_with?("POST /items HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n"), "host with a port"
+assert_true req.includes?("Content-Type: application/json\r\n"), "a caller's header"
+assert_true req.includes?("X-Token: abc\r\n"), "a second caller's header"
+assert_true req.includes?("Content-Length: 7\r\n"), "the body's length"
+assert_true req.ends_with?("\r\n\r\n{\"a\":1}"), "the body after the blank line"
+puts "  POST with headers and a body"
+
+req = HTTP.format_request("POST", "/items", "127.0.0.1")
+assert_true req.includes?("Content-Length: 0\r\n"), "a POST with nothing to say still says so"
+req = HTTP.format_request("DELETE", "/items/1", "127.0.0.1")
+assert_true !req.includes?("Content-Length"), "a DELETE with no body has no length"
+puts "  Content-Length follows the method and the body"
 
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
@@ -28,6 +94,95 @@ assert_true resp.status == 200, "status"
 assert_str "OK", resp.reason, "reason"
 assert_str "hi!\n", resp.body, "body"
 assert_str "4", resp.headers["Content-Length"], "length header"
+assert_true resp.success?, "2xx is success"
 puts "  status, headers, body"
+
+resp = HTTP.parse_response("HTTP/1.1 200 OK\r\ncontent-length:  3 \r\nx-kind: lower\r\n\r\nabcdef")
+assert_str "abc", resp.body, "a lowercase content-length still bounds the body"
+assert_str "3", resp.header("Content-Length") || "", "a header by any case"
+assert_str "lower", resp.header("X-KIND") || "", "a header asked for in another case"
+assert_true resp.header("X-Missing").nil?, "a header that is not there is nil"
+puts "  header names are read without regard to case, and trimmed"
+
+resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4;ext=1\r\ndefg\r\n0\r\nX-Trailer: t\r\n\r\n")
+assert_str "abcdefg", resp.body, "a chunked body arrives joined"
+puts "  a chunked body is joined, extensions and trailers dropped"
+
+resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true)
+assert_str "", resp.body, "a HEAD answer has the headers of a body it does not carry"
+assert_str "99", resp.header("Content-Length") || "", "and the length is still readable"
+resp = HTTP.parse_response("HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n")
+assert_true resp.status == 204 && resp.body == "", "a 204 has no body whatever the headers say"
+resp = HTTP.parse_response("HTTP/1.1 404 Not Found\r\n\r\n")
+assert_true !resp.success?, "a 404 is not success"
+assert_str "Not Found", resp.reason, "reason with a space"
+resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
+assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
+puts "  HEAD, 204 and a status with no reason"
+
+puts "\n== over a socket"
+# The server runs on a thread, and a thread's block may capture only what
+# is Share (III.4.4): the listener's descriptor is a number, and what the
+# server read comes back inside the answer it writes, so nothing mutable
+# is shared.
+listener = IyiSocket.listen(0)
+port = listener.local_port
+fd = listener.to_unsafe
+server = IyiThread.start do
+  l = IyiSocket.new(fd)
+  i = 0
+  while i < 5
+    conn = l.accept
+    saw = read_request(conn)
+    line = first_line(saw)
+    reply = if i == 0
+              "HTTP/1.1 200 OK\r\ncontent-length: #{saw.bytesize}\r\n\r\n" + saw
+            elsif i == 1
+              "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n" + chunked(saw)
+            elsif i == 2
+              "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Request-Line: #{line}\r\n\r\n"
+            elsif i == 3
+              "HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw
+            else
+              has_length = saw.includes?("Content-Length") ? "yes" : "no"
+              "HTTP/1.1 204 No Content\r\nX-Request-Line: #{line}\r\nX-Request-Has-Length: #{has_length}\r\n\r\n"
+            end
+    conn.write(reply)
+    conn.close
+    i = i + 1
+  end
+  nil
+end
+
+base = "http://127.0.0.1:#{port}"
+r = HTTP.get("#{base}/items?x=1")
+assert_true r.status == 200, "GET status"
+assert_true r.body.starts_with?("GET /items?x=1 HTTP/1.1\r\n"), "GET line with the query"
+assert_true r.body.includes?("Host: 127.0.0.1:#{port}\r\n"), "Host names the port when it is not 80"
+assert_true !r.body.includes?("Content-Length"), "GET carried no length"
+assert_str r.body.bytesize.to_s, r.header("Content-Length") || "", "GET length by any case"
+r = HTTP.post("#{base}/items", "{\"a\":1}", {"Content-Type" => "application/json"})
+assert_true r.status == 201, "POST status"
+assert_true r.body.starts_with?("POST /items HTTP/1.1\r\n"), "POST line, through a chunked answer"
+assert_true r.body.includes?("Content-Type: application/json\r\n"), "POST carried the caller's header"
+assert_true r.body.includes?("Content-Length: 7\r\n"), "POST carried the body's length"
+assert_true r.body.ends_with?("\r\n\r\n{\"a\":1}"), "POST carried the body"
+r = HTTP.head("#{base}/items")
+assert_true r.status == 200, "HEAD status"
+assert_str "", r.body, "HEAD body"
+assert_str "99", r.header("Content-Length") || "", "HEAD length"
+assert_str "HEAD /items HTTP/1.1", r.header("X-Request-Line") || "", "HEAD line"
+r = HTTP.put("#{base}/items/1", "v=2", {"X-Token" => "abc"})
+assert_true r.status == 200, "PUT status"
+assert_true r.body.starts_with?("PUT /items/1 HTTP/1.1\r\n"), "PUT line"
+assert_true r.body.includes?("X-Token: abc\r\n") && r.body.ends_with?("Content-Length: 3\r\n\r\nv=2"), "PUT carried the header and the body"
+r = HTTP.delete("#{base}/items/9")
+assert_true r.status == 204 && r.success?, "DELETE status"
+assert_str "", r.body, "DELETE body"
+assert_str "DELETE /items/9 HTTP/1.1", r.header("X-Request-Line") || "", "DELETE line"
+assert_str "no", r.header("X-Request-Has-Length") || "", "DELETE carried no length"
+server.join
+listener.close
+puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
 puts "\nALL CHECKS PASSED"

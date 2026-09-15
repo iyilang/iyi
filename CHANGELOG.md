@@ -14,6 +14,20 @@
   Crystal's library gets from OpenSSL, PCRE, zlib, GMP and getaddrinfo
   is still not here, on purpose.
 
+- **`std/http` speaks the verbs, and reads what a server actually sends.**
+  `HTTP.get`, `head`, `post`, `put`, `delete` and the `request` under
+  them carry a caller's headers and a body; `Host` names the port when
+  it is not 80; `Content-Length` is written for a `POST` or `PUT` even
+  when the body is empty. A response's headers are read by name without
+  regard to case (`Response#header`), a chunked body arrives joined, a
+  `HEAD`, `204` or `304` carries no body whatever its headers say, and a
+  `Content-Length` or a status that is not a number is refused by name
+  rather than the prelude's. A method or header that would break the
+  request's own lines — a space in the method, a line break in a value,
+  a caller's `Content-Length` — is refused before anything is written.
+  `bench/std_http_exercise.sh` holds it, five verbs against a server on
+  a thread.
+
 ### Removed
 
 - **The Crystal socket stack that landed beside `IyiSocket`.** TCP, UDP,

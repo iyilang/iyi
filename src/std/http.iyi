@@ -1,10 +1,14 @@
 # HTTP/1.1 over the blocking socket, written in iyi.
 #
-# `HTTP.get` speaks `http://` only, to a numeric IPv4 host or
-# `localhost` — the same addresses `IyiSocket` will open. TLS is not
-# in 0.x. `format_request` / `parse_response` are the text; `get`
+# `HTTP.get`, `head`, `post`, `put`, `delete` and the `request` under
+# them speak `http://` only, to a numeric IPv4 host or `localhost` —
+# the same addresses `IyiSocket` will open. TLS is not in 0.x. A
+# request carries the caller's headers and body; the response's headers
+# are read by name without regard to case, and a chunked body arrives
+# joined. `format_request` / `parse_response` are the text; `request`
 # writes one and reads the other. A status line that is not HTTP is
-# refused with the first line.
+# refused with the first line, and a header that would break the
+# request's own lines is refused before it is written.
 
 module std/http
 
@@ -21,42 +25,109 @@ pub struct Response
 
   def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String)
   end
+
+  # A header by name, as the server spelled it or otherwise: a field
+  # name is case-insensitive (RFC 9110 §5.1), and `content-length` is as
+  # common on the wire as `Content-Length`.
+  def header(name : String) : String?
+    @headers.each do |key, value|
+      return value if HTTP.same_name?(key, name)
+    end
+    nil
+  end
+
+  def success? : Bool
+    @status >= 200 && @status < 300
+  end
 end
 
 pub struct HTTP
-  def self.format_request(method : String, path : String, host : String, body : String = "") : String
+  # The request as it goes on the wire. `Host`, `Connection` and
+  # `Content-Length` are the request's own lines; a caller's header of
+  # that name is refused rather than sent twice. A body's length is
+  # always written for the methods a body belongs to, so `POST` with
+  # nothing to say still says `Content-Length: 0`.
+  def self.format_request(method : String, path : String, host : String, body : String = "", headers : Hash(String, String) = {} of String => String) : String
+    raise "HTTP: not a method: #{method.inspect}" unless token?(method)
+    raise "HTTP: not a request path: #{path.inspect}" if path.bytesize == 0 || has_space_or_break?(path)
+    raise "HTTP: not a host: #{host.inspect}" if host.bytesize == 0 || has_space_or_break?(host)
     req = "#{method} #{path} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
-    if body.bytesize > 0
+    headers.each do |name, value|
+      raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
+      raise "HTTP: header #{name} contains a line break" if has_break?(value)
+      if same_name?(name, "Host") || same_name?(name, "Connection") || same_name?(name, "Content-Length")
+        raise "HTTP: #{name} is the request's own header"
+      end
+      req = req + name + ": " + value + "\r\n"
+    end
+    if body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH")
       req = req + "Content-Length: #{body.bytesize}\r\n"
     end
     req + "\r\n" + body
   end
 
-  def self.parse_response(text : String) : Response
+  # The response as it came off the wire. `head` says the request was a
+  # `HEAD`, whose answer carries the headers of a body it does not send.
+  def self.parse_response(text : String, head : Bool = false) : Response
     split_at = find_headers_end(text)
     raise "HTTP: no header terminator" unless split_at
-    head = text[0, split_at]
+    head_text = text[0, split_at]
     body = text[split_at + 4, text.bytesize - split_at - 4]
-    lines = split_crlf(head)
+    lines = split_crlf(head_text)
     raise "HTTP: empty response" if lines.size == 0
     status, reason = parse_status(lines[0])
     headers = {} of String => String
     i = 1
     while i < lines.size
       line = lines[i]
+      i = i + 1
       next if line.bytesize == 0
       colon = line.index(':')
       raise "HTTP: header without a colon: #{line}" unless colon
       name = line[0, colon]
+      raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
       val = line[colon + 1, line.bytesize - colon - 1]
-      headers[name] = trim_l(val)
-      i = i + 1
+      headers[name] = trim(val)
     end
-    if cl = headers["Content-Length"]?
-      n = cl.to_i
+    response = Response.new(status, reason, headers, "")
+    return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
+    if te = response.header("Transfer-Encoding")
+      body = decode_chunked(body) if same_name?(trim(te), "chunked")
+    elsif cl = response.header("Content-Length")
+      n = cl.to_i?
+      raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n && n >= 0
       body = body[0, n] if n < body.bytesize
     end
     Response.new(status, reason, headers, body)
+  end
+
+  # A chunked body (RFC 9112 §7.1) as one string: each chunk's size line
+  # is hexadecimal, extensions after `;` are ignored, and a zero-length
+  # chunk ends it. What follows the last chunk is trailers, which nothing
+  # here reads.
+  def self.decode_chunked(text : String) : String
+    p = text.to_unsafe
+    n = text.bytesize
+    out = ""
+    i = 0
+    while true
+      line_end = find_crlf(text, i)
+      raise "HTTP: chunked body ends inside a chunk size" unless line_end
+      size_text = text[i, line_end - i]
+      if semi = size_text.index(';')
+        size_text = size_text[0, semi]
+      end
+      size = parse_hex(trim(size_text))
+      raise "HTTP: not a chunk size: #{size_text.inspect}" unless size
+      i = line_end + 2
+      break if size == 0
+      raise "HTTP: chunked body ends inside a chunk" if i + size > n
+      out = out + text[i, size]
+      i = i + size
+      raise "HTTP: a chunk is not followed by CRLF" unless i + 1 < n && p[i] == 13_u8 && p[i + 1] == 10_u8
+      i = i + 2
+    end
+    out
   end
 
   def self.find_headers_end(text : String) : Int32?
@@ -91,7 +162,9 @@ pub struct HTTP
     lines
   end
 
-  def self.get(url : String) : Response
+  # One request, one answer, one connection: the answer is read to the
+  # server's close, which `Connection: close` asks for.
+  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response
     uri = URI.parse(url)
     scheme = uri.scheme
     raise "HTTP: TLS is not in 0.x; use http://" if scheme == "https"
@@ -105,16 +178,128 @@ pub struct HTTP
     end
     port = uri.port
     port = 80 unless port
+    host_line = port == 80 ? host : "#{host}:#{port}"
+    text = format_request(method, path, host_line, body, headers)
     sock = IyiSocket.connect(host, port)
     defer sock.close
-    sock.write(format_request("GET", path, host))
+    sock.write(text)
     buf = ""
     while true
       chunk = sock.read(4096)
       break if chunk.bytesize == 0
       buf = buf + chunk
     end
-    parse_response(buf)
+    parse_response(buf, same_name?(method, "HEAD"))
+  end
+
+  def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response
+    request("GET", url, headers)
+  end
+
+  def self.head(url : String, headers : Hash(String, String) = {} of String => String) : Response
+    request("HEAD", url, headers)
+  end
+
+  def self.post(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response
+    request("POST", url, headers, body)
+  end
+
+  def self.put(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response
+    request("PUT", url, headers, body)
+  end
+
+  def self.delete(url : String, headers : Hash(String, String) = {} of String => String) : Response
+    request("DELETE", url, headers)
+  end
+
+  # Two field names for the same field: ASCII case is the only difference
+  # a name may carry.
+  def self.same_name?(a : String, b : String) : Bool
+    return false unless a.bytesize == b.bytesize
+    pa = a.to_unsafe
+    pb = b.to_unsafe
+    i = 0
+    while i < a.bytesize
+      ca = pa[i]
+      cb = pb[i]
+      ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8
+      cb = cb + 32_u8 if cb >= 65_u8 && cb <= 90_u8
+      return false unless ca == cb
+      i = i + 1
+    end
+    true
+  end
+
+  # A token (RFC 9110 §5.6.2): what a method or a field name is made of.
+  private def self.token?(text : String) : Bool
+    return false if text.bytesize == 0
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      c = p[i]
+      letter = (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+      digit = c >= 48_u8 && c <= 57_u8
+      mark = c == 33_u8 || (c >= 35_u8 && c <= 39_u8) || c == 42_u8 || c == 43_u8 ||
+             c == 45_u8 || c == 46_u8 || c == 94_u8 || c == 95_u8 || c == 96_u8 ||
+             c == 124_u8 || c == 126_u8
+      return false unless letter || digit || mark
+      i = i + 1
+    end
+    true
+  end
+
+  private def self.has_break?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return true if p[i] == 13_u8 || p[i] == 10_u8
+      i = i + 1
+    end
+    false
+  end
+
+  private def self.has_space_or_break?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return true if p[i] == 13_u8 || p[i] == 10_u8 || p[i] == 32_u8 || p[i] == 9_u8
+      i = i + 1
+    end
+    false
+  end
+
+  private def self.find_crlf(text : String, from : Int32) : Int32?
+    p = text.to_unsafe
+    n = text.bytesize
+    i = from
+    while i + 1 < n
+      return i if p[i] == 13_u8 && p[i + 1] == 10_u8
+      i = i + 1
+    end
+    nil
+  end
+
+  private def self.parse_hex(text : String) : Int32?
+    return nil if text.bytesize == 0
+    p = text.to_unsafe
+    value = 0
+    i = 0
+    while i < text.bytesize
+      c = p[i]
+      digit = if c >= 48_u8 && c <= 57_u8
+                (c - 48_u8).to_i32
+              elsif c >= 97_u8 && c <= 102_u8
+                (c - 87_u8).to_i32
+              elsif c >= 65_u8 && c <= 70_u8
+                (c - 55_u8).to_i32
+              else
+                return nil
+              end
+      return nil if value > 0x7FFFFFF
+      value = value * 16 + digit
+      i = i + 1
+    end
+    value
   end
 
   private def self.parse_status(line : String) : {Int32, String}
@@ -124,21 +309,25 @@ pub struct HTTP
     raise "HTTP: not a status line: #{line}" unless sp1
     rest = line[sp1 + 1, line.bytesize - sp1 - 1]
     sp2 = rest.index(' ')
-    if sp2
-      {rest[0, sp2].to_i, rest[sp2 + 1, rest.bytesize - sp2 - 1]}
-    else
-      {rest.to_i, ""}
-    end
+    code_text = sp2 ? rest[0, sp2] : rest
+    code = code_text.to_i?
+    raise "HTTP: not a status line: #{line}" unless code && code_text.bytesize == 3
+    reason = sp2 ? rest[sp2 + 1, rest.bytesize - sp2 - 1] : ""
+    {code, reason}
   end
 
-  private def self.trim_l(s : String) : String
-    i = 0
-    n = s.bytesize
-    while i < n
-      ch = s[i]
-      break unless ch == ' ' || ch == '\t'
-      i = i + 1
+  # Without the blanks at either end (RFC 9112 §5.1: field values are
+  # trimmed of the whitespace around them).
+  private def self.trim(s : String) : String
+    p = s.to_unsafe
+    first = 0
+    last = s.bytesize
+    while first < last && (p[first] == 32_u8 || p[first] == 9_u8)
+      first = first + 1
     end
-    s[i, n - i]
+    while last > first && (p[last - 1] == 32_u8 || p[last - 1] == 9_u8)
+      last = last - 1
+    end
+    s[first, last - first]
   end
 end

@@ -1,0 +1,333 @@
+module std/int
+
+{% begin %}
+  {% ints = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128) %}
+  {% all_types = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128 Float32 Float64) %}
+  {% prelude_nums = %w(Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64 Float64) %}
+  {% non_prelude_types = %w(Int128 UInt128 Float32) %}
+  {% prelude_ints = %w(Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64) %}
+  {% non_prelude_ints = %w(Int128 UInt128) %}
+  {% binaries = %w(+ - *) %}
+
+  {% extra_convs = {
+       to_i8: "Int8", to_i16: "Int16", to_i128: "Int128",
+       to_u: "UInt32", to_u16: "UInt16", to_u32: "UInt32", to_u128: "UInt128",
+       to_f32: "Float32",
+     } %}
+
+  {% all_convs = {
+       to_i: "Int32", to_i8: "Int8", to_i16: "Int16", to_i32: "Int32", to_i64: "Int64", to_i128: "Int128",
+       to_u: "UInt32", to_u8: "UInt8", to_u16: "UInt16", to_u32: "UInt32", to_u64: "UInt64", to_u128: "UInt128",
+       to_f: "Float64", to_f32: "Float32", to_f64: "Float64",
+     } %}
+
+  {% for t in prelude_nums %}
+    struct ::{{ t.id }}
+      {% for name, target in extra_convs %}
+        @[::Primitive(:convert)]
+        def {{ name.id }} : {{ target.id }}
+        end
+
+        @[::Primitive(:unchecked_convert)]
+        def {{ name.id }}! : {{ target.id }}
+        end
+      {% end %}
+
+      {% for t2 in non_prelude_types %}
+        {% for op in %w(== != < <= > >=) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ t2.id }}) : ::Bool
+          end
+        {% end %}
+      {% end %}
+    end
+  {% end %}
+
+  {% for t in non_prelude_types %}
+    struct ::{{ t.id }}
+      {% for name, target in all_convs %}
+        @[::Primitive(:convert)]
+        def {{ name.id }} : {{ target.id }}
+        end
+
+        @[::Primitive(:unchecked_convert)]
+        def {{ name.id }}! : {{ target.id }}
+        end
+      {% end %}
+
+      {% for t2 in all_types %}
+        {% for op in %w(== != < <= > >=) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ t2.id }}) : ::Bool
+          end
+        {% end %}
+      {% end %}
+    end
+  {% end %}
+
+  {% for int in prelude_ints %}
+    struct ::{{ int.id }}
+      {% for int2 in non_prelude_ints %}
+        {% for op in binaries %}
+          @[::Primitive(:binary)]
+          @[Raises]
+          def {{ op.id }}(other : {{ int2.id }}) : self
+          end
+
+          @[::Primitive(:binary)]
+          def &{{ op.id }}(other : {{ int2.id }}) : self
+          end
+        {% end %}
+
+        {% for op in %w(| & ^ unsafe_shl unsafe_shr unsafe_div unsafe_mod) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ int2.id }}) : self
+          end
+        {% end %}
+      {% end %}
+    end
+  {% end %}
+
+  {% for int in non_prelude_ints %}
+    struct ::{{ int.id }}
+      {% for int2 in ints %}
+        {% for op in binaries %}
+          @[::Primitive(:binary)]
+          @[Raises]
+          def {{ op.id }}(other : {{ int2.id }}) : self
+          end
+
+          @[::Primitive(:binary)]
+          def &{{ op.id }}(other : {{ int2.id }}) : self
+          end
+        {% end %}
+
+        {% for op in %w(| & ^ unsafe_shl unsafe_shr unsafe_div unsafe_mod) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ int2.id }}) : self
+          end
+        {% end %}
+      {% end %}
+    end
+  {% end %}
+{% end %}
+
+struct ::Int8
+  MIN = -128_i8
+  MAX =  127_i8
+end
+
+struct ::UInt8
+  MIN =   0_u8
+  MAX = 255_u8
+end
+
+struct ::Int16
+  MIN = -32768_i16
+  MAX =  32767_i16
+end
+
+struct ::UInt16
+  MIN =     0_u16
+  MAX = 65535_u16
+end
+
+struct ::Int32
+  MIN = -2147483648_i32
+  MAX =  2147483647_i32
+end
+
+struct ::UInt32
+  MIN =          0_u32
+  MAX = 4294967295_u32
+end
+
+struct ::Int64
+  MIN = -9223372036854775808_i64
+  MAX =  9223372036854775807_i64
+end
+
+struct ::UInt64
+  MIN =                    0_u64
+  MAX = 18446744073709551615_u64
+end
+
+struct ::Int128
+  MIN = -170141183460469231731687303715884105728_i128
+  MAX =  170141183460469231731687303715884105727_i128
+end
+
+struct ::UInt128
+  MIN =                                       0_u128
+  MAX = 340282366920938463463374607431768211455_u128
+end
+
+struct ::Int
+  def integer? : ::Bool
+    true
+  end
+
+  def ~ : self
+    self ^ -1
+  end
+
+  def <=>(other : Int) : Int32
+    self < other ? -1 : (self > other ? 1 : 0)
+  end
+
+  def even? : ::Bool
+    (self & 1) == 0
+  end
+
+  def odd? : ::Bool
+    (self & 1) != 0
+  end
+
+  def times(& : Int32 -> ::Nil) : ::Nil
+    i = 0
+    while i < self
+      yield i
+      i = i + 1
+    end
+  end
+
+  def upto(to, & : self -> ::Nil) : ::Nil
+    cur = self
+    while cur <= to
+      yield cur
+      cur = cur + 1
+    end
+  end
+
+  def downto(to, & : self -> ::Nil) : ::Nil
+    cur = self
+    while cur >= to
+      yield cur
+      cur = cur - 1
+    end
+  end
+
+  def tdiv(other : Int) : self
+    self // other
+  end
+
+  def tmod(other : Int) : self
+    self % other
+  end
+
+  def remainder(other : Int) : self
+    self % other
+  end
+
+  def fdiv(other : Int) : Float64
+    to_f64 / other.to_f64
+  end
+
+  def gcd(other : Int) : self
+    a = self.abs
+    b = other.abs
+    while b != 0
+      t = b
+      b = a % b
+      a = t
+    end
+    a
+  end
+
+  def lcm(other : Int) : self
+    return (self - self) if self == 0 || other == 0
+    (self.abs // gcd(other)) * other.abs
+  end
+
+  def popcount : Int32
+    count = 0
+    temp = self
+    while temp != 0
+      count = count + (temp & 1).to_i32
+      temp = temp.unsafe_shr(1)
+    end
+    count
+  end
+
+  def trailing_zeros_count : Int32
+    return 0 if self == 0
+    count = 0
+    temp = self
+    while (temp & 1) == 0
+      count = count + 1
+      temp = temp.unsafe_shr(1)
+    end
+    count
+  end
+
+  def leading_zeros_count : Int32
+    bits = sizeof(self) * 8
+    return bits if self == 0
+    count = 0
+    i = bits - 1
+    while i >= 0
+      if ((self.unsafe_shr(i)) & 1) != 0
+        break
+      end
+      count = count + 1
+      i = i - 1
+    end
+    count
+  end
+
+  def bit_length : Int32
+    sizeof(self) * 8 - leading_zeros_count
+  end
+
+  def bit(n : Int32) : Int32
+    (self.unsafe_shr(n) & 1).to_i32
+  end
+
+  def bits_set?(mask : Int) : ::Bool
+    (self & mask) == mask
+  end
+
+  def all_bits_set?(mask : Int) : ::Bool
+    bits_set?(mask)
+  end
+
+  def no_bits_set?(mask : Int) : ::Bool
+    (self & mask) == 0
+  end
+
+  def any_bits_set?(mask : Int) : ::Bool
+    (self & mask) != 0
+  end
+
+  def digits(base : Int = 10) : Array(Int32)
+    b = base.to_i32
+    raise "Invalid base: #{b}" if b < 2
+    return [0] if self == 0
+    res = [] of Int32
+    temp = self.abs
+    while temp > 0
+      res << (temp % b).to_i32
+      temp = temp // b
+    end
+    res
+  end
+
+  def chr : ::Char
+    to_u8.unsafe_chr
+  end
+
+  def to_s(io : IyiIO) : ::Nil
+    io.print(to_s)
+  end
+end
+
+{% for conv, t in {
+                    to_i8: "Int8", to_i16: "Int16", to_i32: "Int32", to_i64: "Int64", to_i128: "Int128",
+                    to_u8: "UInt8", to_u16: "UInt16", to_u32: "UInt32", to_u64: "UInt64", to_u128: "UInt128",
+                  } %}
+  struct ::{{ t.id }}
+    def self.new(value) : self
+      value.{{ conv.id }}
+    end
+  end
+{% end %}

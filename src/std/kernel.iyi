@@ -1,0 +1,73 @@
+# Kernel methods and top-level utilities.
+
+module std/kernel
+
+# Inspects object to standard output followed by newline. Returns object.
+pub def p(object : T) : T forall T
+  puts object.inspect
+  object
+end
+
+# Inspects each object to standard output. Returns objects tuple.
+pub def p(*objects : *T) : Tuple(*T) forall T
+  {% for i in 0...T.size %}
+    p objects[{{i}}]
+  {% end %}
+  objects
+end
+
+# Pretty prints object to standard output. Returns object.
+pub def pp(object : T) : T forall T
+  puts object.inspect
+  object
+end
+
+# Pretty prints each object to standard output. Returns objects tuple.
+pub def pp(*objects : *T) : Tuple(*T) forall T
+  {% for i in 0...T.size %}
+    pp objects[{{i}}]
+  {% end %}
+  objects
+end
+
+# Prints objects followed by a newline.
+pub def puts_all(*objects : *T) : Nil forall T
+  {% for i in 0...T.size %}
+    print objects[{{i}}].to_s
+    print "\n"
+  {% end %}
+end
+
+# Prints objects without trailing newline.
+pub def print_all(*objects : *T) : Nil forall T
+  {% for i in 0...T.size %}
+    print objects[{{i}}].to_s
+  {% end %}
+end
+
+# Repeatedly executes the block until break.
+pub def loop(& : -> Nil) : Nil
+  while true
+    yield
+  end
+end
+
+# Terminates execution immediately, optionally printing message to stderr.
+pub def abort(message : String? = nil, status : Int32 = 1) : NoReturn
+  if message
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    nl = "\n"
+    __iyi_write(2, nl.to_unsafe.as(Void*), 1_u64)
+  end
+  __iyi_exit(status)
+end
+
+# Pauses the current fiber or thread for the specified duration.
+pub def sleep(seconds : Number) : Nil
+  if seconds <= 0
+    return
+  end
+  target_ns = __iyi_monotonic_ns + (seconds.to_f64 * 1_000_000_000.0).to_i64
+  while __iyi_monotonic_ns < target_ns
+  end
+end

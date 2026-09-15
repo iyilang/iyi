@@ -1,4 +1,5 @@
-# Exercises `std/unicode`: Unicode general categories and UTF-8 validity.
+# Exercises `std/unicode`: Unicode general categories, case mapping and
+# UTF-8 validity.
 #
 # Run via:
 #     ./bin/iyi run bench/std_unicode_exercise.iyi
@@ -27,5 +28,22 @@ puts "\n== valid"
 assert_true Unicode.valid?("café"), "utf-8"
 assert_true Unicode.ascii?('A'), "ascii"
 puts "  valid UTF-8 and ascii?"
+
+puts "\n== case"
+# The Turkic rule is a question about `i` itself, so an ASCII-only string
+# gets the same answer as one with a non-ASCII character in it.
+turkic = Unicode::CaseOptions::Turkic
+assert_str "İ", Unicode.upcase("i", turkic), "turkic upcase of an ascii string"
+assert_str "ı", Unicode.downcase("I", turkic), "turkic downcase of an ascii string"
+assert_str "İÜ", Unicode.upcase("iü", turkic), "turkic upcase beside a non-ascii letter"
+assert_str "I", Unicode.upcase("i"), "plain upcase of i"
+# The titlecase digraphs have no row in the upcase table; their uppercase
+# is the capital digraph before them, and their titlecase is themselves.
+assert_str "Ǆ", Unicode.upcase("ǅ"), "upcase of the Dž digraph"
+assert_str "ǇǊǱ", Unicode.upcase("ǈǋǲ"), "upcase of the Lj, Nj and Dz digraphs"
+assert_true Unicode.upcase('ǅ') == 'Ǆ', "char upcase of the Dž digraph"
+assert_true Unicode.titlecase('ǅ') == 'ǅ', "titlecase of the Dž digraph is itself"
+assert_str "ǆ", Unicode.downcase("ǅ"), "downcase of the Dž digraph"
+puts "  turkic i on ascii, and the titlecase digraphs"
 
 puts "\nALL CHECKS PASSED"

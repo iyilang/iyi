@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercises `std/unicode`: Unicode general categories and UTF-8 validity.
+# Exercises `std/unicode`: Unicode general categories, case mapping and
+# UTF-8 validity.
 #
 #     bash bench/std_unicode_exercise.sh
 set -u
@@ -42,7 +43,7 @@ fi
 
 echo
 echo "== every unicode section reported"
-for phrase in "== letter" "== valid"; do
+for phrase in "== letter" "== valid" "== case"; do
   if ! grep -q "$phrase" "$WORK/unicode-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -60,24 +61,45 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-python3 - <<PY
+# mutate <label> <old> <new>: patches a copy of std/unicode.iyi and expects
+# the exercise to fail against it.
+mutate() {
+  local label="$1" old="$2" new="$3"
+  local dir="$WORK/patched-${label// /-}"
+  mkdir -p "$dir/std"
+  if ! OLD="$old" NEW="$new" DST="$dir/std/unicode.iyi" python3 - <<PY
+import os
 from pathlib import Path
 src = Path("$REPO/src/std/unicode.iyi").read_text()
-old = 'in_category?(letter_table, char.ord)'
+old = os.environ["OLD"]
 if old not in src:
-    raise SystemExit("patch site missing")
-Path("$WORK/patched/std/unicode.iyi").write_text(src.replace(old, 'false', 1))
+    raise SystemExit("patch site missing: " + old)
+Path(os.environ["DST"]).write_text(src.replace(old, os.environ["NEW"], 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_unicode_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
-else
-  echo "  a broken unicode is caught"
-fi
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$dir:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_unicode_exercise.iyi" >"$dir/out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  else
+    printf '  %s: caught at "%s"\n' "$label" \
+      "$(grep -m1 'ASSERTION FAILED' "$dir/out" | sed 's/^.*ASSERTION FAILED: //')"
+  fi
+}
+
+mutate "letter category" 'in_category?(letter_table, char.ord)' 'false'
+# The ASCII fast path answering before the Turkic option is consulted
+mutate "turkic ignored on ascii" \
+  'return text.upcase if !options.turkic? && ascii_only?(text)' \
+  'return text.upcase if ascii_only?(text)'
+mutate "turkic downcase ignored on ascii" \
+  'return text.downcase if !options.turkic? && ascii_only?(text)' \
+  'return text.downcase if ascii_only?(text)'
+# The titlecase digraphs with no uppercase again
+mutate "digraph upcase missing" \
+  'return cp - 1 if cp == 0x1C5 || cp == 0x1C8 || cp == 0x1CB || cp == 0x1F2' \
+  ''
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -78,6 +78,12 @@ raise "string: blank? empty" unless "".blank?
 raise "string: blank? false" if "  a  ".blank?
 raise "string: presence blank" unless "   ".presence.nil?
 raise "string: presence non-blank" unless "word".presence == "word"
+# `\v` and `\f` are the whitespace `ascii_whitespace?` names, so `blank?`,
+# `lstrip` and `rstrip` look through them too.
+raise "string: blank? vertical tab and form feed" unless "\v\f".blank?
+raise "string: lstrip vertical tab" unless "\v\fa\v\f".lstrip.bytesize == 3
+raise "string: rstrip form feed" unless "\v\fa\v\f".rstrip.bytesize == 3
+raise "string: lstrip rstrip control whitespace" unless "\v\fa\v\f".lstrip.rstrip == "a"
 
 raise "string: lstrip" unless "  hi  ".lstrip == "hi  "
 raise "string: lstrip char" unless "===test===".lstrip('=') == "test==="
@@ -179,6 +185,11 @@ puts "    substitution: sub and gsub with string, char, and block overloads veri
 raise "string: tr direct" unless "hello".tr("el", "ip") == "hippo"
 raise "string: tr short target" unless "hello".tr("aeiou", "*") == "h*ll*"
 raise "string: tr empty target" unless "hello".tr("el", "") == "ho"
+# `a-z` names a run in either set, and a `-` at an end is itself.
+raise "string: tr range" unless "hello".tr("a-y", "b-z") == "ifmmp"
+raise "string: tr range deleted" unless "hello".tr("a-y", "") == ""
+raise "string: tr leading dash" unless "a-b".tr("-a", "+x") == "x+b"
+raise "string: tr trailing dash" unless "a-b".tr("b-", "y+") == "a+y"
 raise "string: delete char" unless "hello world".delete('o') == "hell wrld"
 raise "string: delete chars" unless "hello world".delete("aeiou") == "hll wrld"
 raise "string: squeeze all" unless "yellow  moon".squeeze == "yelow mon"
@@ -284,6 +295,13 @@ raise "utf8: delete char" unless "a☃b".delete('☃') == "ab"
 raise "utf8: squeeze char" unless "a☃☃b".squeeze('☃') == "a☃b"
 raise "utf8: count char" unless "a☃b☃".count('☃') == 2
 raise "utf8: tr char" unless "a☃b".tr("☃", "x") == "axb"
+# The block forms were the two the fix missed: narrowed to one byte,
+# `'☃'` panicked with "arithmetic overflow" and `'é'` matched nothing.
+raise "utf8: sub char block" unless "a☃b☃".sub('☃') { |c| "x" } == "axb☃"
+raise "utf8: sub char block two bytes" unless "héllo".sub('é') { |c| "[#{c}]" } == "h[é]llo"
+raise "utf8: gsub char block" unless "a☃b☃".gsub('☃') { |c| "x" } == "axbx"
+raise "utf8: gsub char block two bytes" unless "aÿbÿ".gsub('ÿ') { |c| "<#{c}>" } == "a<ÿ>b<ÿ>"
+raise "utf8: tr range to one" unless "abc".tr("a-c", "é") == "ééé"
 raise "utf8: center width" unless "héllo".center(9, '.').size == 9
 raise "utf8: center content" unless "héllo".center(9, '.') == "..héllo.."
 raise "utf8: center multi-byte pad" unless "héllo".center(9, "·").size == 9

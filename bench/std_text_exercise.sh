@@ -129,6 +129,20 @@ prove_fails "string substitution broken" no_sub "string: sub str" \
 prove_fails "utf8 reverse broken" no_reverse "utf8: reverse content" \
   's/def reverse : String/def reverse : String; return "broken"/'
 
+# 12. The block forms narrowing a character to one byte again
+prove_fails "sub char block narrowed" no_sub_block "utf8: sub char block" \
+  's/idx + text.bytesize, bytesize - idx - text.bytesize/idx + 1, bytesize - idx - 1/'
+prove_fails "gsub char block narrowed" no_gsub_block "utf8: gsub char block" \
+  's/^    s_len = text.bytesize$/    s_len = 1/'
+
+# 13. tr with `a-z` as three plain characters
+prove_fails "tr range not expanded" no_tr_range "string: tr range" \
+  's/^      if chars\[i\] == .-. \&\& i > 0 \&\& i + 1 < chars.size$/      if false/'
+
+# 14. Whitespace as the prelude counts it, without \v and \f
+prove_fails "control whitespace kept" no_vt "string: blank? vertical tab and form feed" \
+  's/unsafe_chr.ascii_whitespace?/unsafe_chr.whitespace?/'
+
 # The two the prelude owns: `Char#to_s` encodes and `String#each_char`
 # decodes, and they are its own because the prelude counts code points in
 # `size` and has to agree with itself. Patched where they live.
@@ -228,6 +242,37 @@ panics_with "a repeat that does not fit" mul_overflow \
 panics_with "a negative slice count" slice_negative "negative count: -1" '"abc"[0, -1]'
 panics_with "an index past the end" index_past \
   "out of range for a string of 3 bytes" '"abc"[9]'
+
+echo
+echo "== what std/text refuses, which is a panic with its own sentence"
+refuses() { # refuses <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  printf 'module main\n\nimport std/text\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+    "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+
+refuses "a tr range that runs backwards" tr_backwards \
+  "text: tr range c-a runs backwards" '"abc".tr("c-a", "x")'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Text standard library: inspection, cases, conversions, strip, chomp, split,"

@@ -133,10 +133,14 @@ struct ::Char
 end
 
 class ::String
+  # The whitespace `blank?`, `lstrip` and `rstrip` look through is the one
+  # `Char#ascii_whitespace?` names, `\v` and `\f` included. `strip` with no
+  # argument is the prelude's, and stops at `\r`: `lstrip.rstrip` is the
+  # one that agrees with these.
   def blank? : Bool
     i = 0
     while i < bytesize
-      return false unless to_unsafe[i].unsafe_chr.whitespace?
+      return false unless to_unsafe[i].unsafe_chr.ascii_whitespace?
       i = i + 1
     end
     true
@@ -148,7 +152,7 @@ class ::String
 
   def lstrip : String
     i = 0
-    while i < bytesize && to_unsafe[i].unsafe_chr.whitespace?
+    while i < bytesize && to_unsafe[i].unsafe_chr.ascii_whitespace?
       i = i + 1
     end
     byte_slice(i, bytesize - i)
@@ -190,7 +194,7 @@ class ::String
 
   def rstrip : String
     last = bytesize
-    while last > 0 && to_unsafe[last - 1].unsafe_chr.whitespace?
+    while last > 0 && to_unsafe[last - 1].unsafe_chr.ascii_whitespace?
       last = last - 1
     end
     byte_slice(0, last)
@@ -432,18 +436,14 @@ class ::String
     byte_slice(0, idx) + repl + byte_slice(idx + search.bytesize, bytesize - idx - search.bytesize)
   end
 
+  # The character's own bytes, as the non-block form asks: narrowed to one
+  # byte, `'☃'` panicked with "arithmetic overflow" and `'é'` matched nothing.
   def sub(search : Char, & : Char -> String) : String
-    wanted = search.ord.to_u8
-    ptr = to_unsafe
-    i = 0
-    while i < bytesize
-      if ptr[i] == wanted
-        repl = yield search
-        return byte_slice(0, i) + repl + byte_slice(i + 1, bytesize - i - 1)
-      end
-      i = i + 1
-    end
-    self
+    text = search.to_s
+    idx = index(text)
+    return self unless idx
+    repl = yield search
+    byte_slice(0, idx) + repl + byte_slice(idx + text.bytesize, bytesize - idx - text.bytesize)
   end
 
   def gsub(search : String, replacement : String) : String
@@ -478,22 +478,18 @@ class ::String
   end
 
   def gsub(search : Char, & : Char -> String) : String
-    wanted = search.ord.to_u8
-    ptr = to_unsafe
+    text = search.to_s
+    idx = index(text)
+    return self unless idx
+
     result = ""
     start = 0
-    i = 0
-    found = false
-    while i < bytesize
-      if ptr[i] == wanted
-        found = true
-        result = result + byte_slice(start, i - start)
-        result = result + yield search
-        start = i + 1
-      end
-      i = i + 1
+    s_len = text.bytesize
+    while (idx = index(text, start))
+      result = result + byte_slice(start, idx - start)
+      result = result + yield search
+      start = idx + s_len
     end
-    return self unless found
     result = result + byte_slice(start, bytesize - start)
     result
   end
@@ -514,15 +510,13 @@ class ::String
 
   # Mapped per character. The 256-entry byte table this used could not hold
   # a character above ASCII: `"a☃".tr("☃", "x")` answered `"axxx"`, one `x`
-  # per byte of the character it was asked to replace once.
+  # per byte of the character it was asked to replace once. Both sets name
+  # runs the way the other library does: `a-z` is the twenty-six letters,
+  # and a `-` at either end is itself.
   def tr(from : String, to : String) : String
-    return delete(from) if to.empty?
     return self if from.empty?
-
-    sources = [] of String
-    from.each_char { |c| sources << c.to_s }
-    targets = [] of String
-    to.each_char { |c| targets << c.to_s }
+    sources = tr_set(from)
+    targets = tr_set(to)
 
     result = ""
     each_char do |c|
@@ -530,14 +524,42 @@ class ::String
       at = sources.index(text)
       if at == nil
         result = result + text
-      else
-        found = at || 0
+      elsif !targets.empty?
         # A `to` shorter than `from` repeats its last character, which is the
-        # rule the other library follows.
+        # rule the other library follows; an empty one deletes the character.
+        found = at || 0
         result = result + (found < targets.size ? targets[found] : targets[targets.size - 1])
       end
     end
     result
+  end
+
+  # The characters *set* names, one string each: a `-` between two of them
+  # is the run from the first to the second, and one that runs backwards
+  # is a mistake rather than an empty run.
+  private def tr_set(set : String) : Array(String)
+    chars = set.chars
+    named = [] of String
+    i = 0
+    while i < chars.size
+      if chars[i] == '-' && i > 0 && i + 1 < chars.size
+        low = chars[i - 1].ord
+        high = chars[i + 1].ord
+        if high < low
+          raise "text: tr range #{chars[i - 1]}-#{chars[i + 1]} runs backwards"
+        end
+        cp = low + 1
+        while cp <= high
+          named << cp.unsafe_chr.to_s
+          cp = cp + 1
+        end
+        i = i + 2
+      else
+        named << chars[i].to_s
+        i = i + 1
+      end
+    end
+    named
   end
 
   def delete(char : Char) : String

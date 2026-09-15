@@ -1936,6 +1936,10 @@ pub struct Unicode
   # ---------------------------------------------------------------------
 
   private def self.simple_upcase(cp : Int32) : Int32
+    # The titlecase digraphs `ǅ`, `ǈ`, `ǋ` and `ǲ` (category Lt) sit between
+    # their capital and small forms and have no row in the table; their
+    # uppercase is the capital one before them.
+    return cp - 1 if cp == 0x1C5 || cp == 0x1C8 || cp == 0x1CB || cp == 0x1F2
     table = upcase_table
     at = search_range(table, 3, cp)
     return cp + table.to_unsafe[at + 2] if at >= 0
@@ -2123,9 +2127,11 @@ pub struct Unicode
   end
 
   # The string in uppercase, full mappings: `"straße"` is `"STRASSE"`.
+  # An ASCII-only string is the prelude's `upcase`, unless the Turkic rule
+  # is on, which is a question about `i` itself.
   def self.upcase(text : String, options : CaseOptions = CaseOptions::None) : String
     check_utf8(text)
-    return text.upcase if ascii_only?(text)
+    return text.upcase if !options.turkic? && ascii_only?(text)
     points = Array(Int32).new(text.size)
     text.each_char do |char|
       upcase(char, options) { |part| points << part.ord }
@@ -2141,7 +2147,7 @@ pub struct Unicode
   def self.downcase(text : String, options : CaseOptions = CaseOptions::None) : String
     check_utf8(text)
     return foldcase(text) if options.fold?
-    return text.downcase if ascii_only?(text)
+    return text.downcase if !options.turkic? && ascii_only?(text)
     source = codepoints(text)
     points = Array(Int32).new(source.size)
     index = 0

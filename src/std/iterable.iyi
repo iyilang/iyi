@@ -1,0 +1,38 @@
+module std/iterable
+
+import std/iterator
+using std/iterator::{Iterator}
+
+# The Iterable trait provides convenience methods to collection types
+# that provide an `each` method returning an Iterator.
+pub trait Iterable
+  type Iter
+
+  # Must return an Iterator over the elements in this collection.
+  abstract def each : Iter
+
+  # Returns an Iterator that cycles indefinitely over the collection.
+  def cycle
+    each.cycle
+  end
+
+  # Returns an Iterator that cycles n times over the collection.
+  def cycle(n : Int32)
+    each.cycle(n)
+  end
+
+  # Returns an Iterator yielding every n-th element.
+  def each_step(n : Int32)
+    each.step(n)
+  end
+
+  # Returns an Iterator skipping offset elements, then yielding every n-th element.
+  def each_step(n : Int32, *, offset : Int32)
+    each.skip(offset).step(n)
+  end
+
+  # Returns an Iterator yielding pairs of element and its index.
+  def each_with_index(offset : Int32 = 0)
+    each.with_index(offset)
+  end
+end

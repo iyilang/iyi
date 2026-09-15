@@ -225,6 +225,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # "not a valid Crystal source file" named the wrong one. The line is the
     # choice between them, so it mentions both by necessity.
     (r'ends_with\?\(".iyi"\) \? "iyi" : "Crystal"', "the line that picks which language a file is"),
+    # The command driver's language mode split: the compatibility binary
+    # names Crystal in its banners and usage, and stage one names iyi.
+    (r'@@program_name == "crystal" \? "Crystal" : "iyi"', "the line that picks the command driver's language name"),
     (r"Crystal (caches|runs|takes)", "a sentence about the other language"),
     # `iyi migrate` and `iyi bind` are about the other language by
     # definition: a Crystal project, a Crystal file kept as Crystal, the

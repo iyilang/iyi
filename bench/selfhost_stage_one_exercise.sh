@@ -23,7 +23,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
-export CRYSTAL_CACHE_DIR="${CRYSTAL_CACHE_DIR:-/tmp/iyi-s1e-cache}"
+export IYI_CACHE_DIR="${IYI_CACHE_DIR:-/tmp/iyi-s1e-cache}"
 
 echo "== 1. Building the stage-one executable from src/compiler/stage1.iyi"
 cd "$REPO"
@@ -41,9 +41,9 @@ echo "  built .build/iyi-stage1 successfully"
 
 echo
 echo "== 2. Dependency floor on the stage-one binary itself"
-libs="$(otool -L "$REPO/.build/iyi-stage1" 2>/dev/null | awk 'NR>2 {print $1}' | grep -v '^$')"
+libs="$(otool -L "$REPO/.build/iyi-stage1" 2>/dev/null | awk 'NR>1 {print $1}' | grep -v '^$')"
 echo "$libs" | sed 's/^/    /'
-if echo "$libs" | grep -qv '/usr/lib/libSystem.B.dylib'; then
+if [ -z "$libs" ] || echo "$libs" | grep -qv '/usr/lib/libSystem.B.dylib'; then
   echo "  FLOOR BROKEN: the stage-one binary links more than the platform libc"
   status=1
 else
@@ -77,13 +77,13 @@ probe_stage1() {
   local ok=1
   # version answers
   "$REPO/.build/iyi-stage1" version > "$out" 2>&1 || ok=0
-  grep -q "Crystal 1.22.0-dev" "$out" || ok=0
+  grep -q "iyi 0.12.0" "$out" || ok=0
   # help answers with the command banner
   "$REPO/.build/iyi-stage1" help > "$out" 2>&1 || ok=0
-  grep -q "Usage: crystal \[command\]" "$out" || ok=0
+  grep -q "Usage: iyi \[command\]" "$out" || ok=0
   # tool usage answers
   "$REPO/.build/iyi-stage1" tool > "$out" 2>&1 || ok=0
-  grep -q "Usage: crystal tool" "$out" || ok=0
+  grep -q "Usage: iyi tool" "$out" || ok=0
   # unknown command is refused with exit 1
   "$REPO/.build/iyi-stage1" definitely_not_a_command > "$out" 2>&1
   [ "$?" -eq 1 ] || ok=0
@@ -121,18 +121,19 @@ mutations_run=0
 
 mutations_run=$((mutations_run + 1))
 echo "  [version banner severed from the driver]"
+MUT_TARGET="$REPO/src/compiler/command/driver.iyi"
 mkdir -p "$WORK/backup"
-cp "$ENTRY" "$WORK/backup/stage1.iyi"
+cp "$MUT_TARGET" "$WORK/backup/driver.iyi"
 sed -e 's|puts CommandDriver.version_description|puts "mutated"|' \
-  "$REPO/src/compiler/stage1.iyi" > "$WORK/mutated_stage1.iyi"
-if cmp -s "$REPO/src/compiler/stage1.iyi" "$WORK/mutated_stage1.iyi"; then
+  "$MUT_TARGET" > "$WORK/mutated_driver.iyi"
+if cmp -s "$MUT_TARGET" "$WORK/mutated_driver.iyi"; then
   echo "    FAIL: patch did not change the file"
   status=1
 else
-  cp "$WORK/mutated_stage1.iyi" "$REPO/src/compiler/stage1.iyi"
+  cp "$WORK/mutated_driver.iyi" "$MUT_TARGET"
   "$BOOTSTRAP" build -o "$REPO/.build/iyi-stage1" "$ENTRY" > "$WORK/mut_build.log" 2>&1 || true
   mut_phase="$(probe_stage1)"
-  cp "$WORK/backup/stage1.iyi" "$REPO/src/compiler/stage1.iyi"
+  cp "$WORK/backup/driver.iyi" "$MUT_TARGET"
   "$BOOTSTRAP" build -o "$REPO/.build/iyi-stage1" "$ENTRY" > /dev/null 2>&1 || true
   mut_rank="$(phase_rank "$mut_phase")"
   if [ "$mut_rank" -lt "$floor_rank" ]; then

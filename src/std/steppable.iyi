@@ -1,0 +1,88 @@
+module std/steppable
+
+import std/iterator
+using std/iterator::{Iterator}
+
+# Implements a step method for iterating from a value.
+pub class NumericStepIterator(T)
+  @current : T
+  @limit : T?
+  @step : T
+  @exclusive : ::Bool
+  @at_start : ::Bool
+  @reached_end : ::Bool
+
+  def initialize(@current : T, @limit : T?, @step : T, @exclusive : ::Bool)
+    @at_start = true
+    @reached_end = false
+  end
+
+  def next : T?
+    return nil if @reached_end
+    limit = @limit
+
+    if @at_start
+      @at_start = false
+      if !limit.nil?
+        sign = (limit <=> @current)
+        if sign == 0
+          @reached_end = true
+          return @exclusive ? nil : @current
+        end
+        step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
+        if sign != step_sign
+          @reached_end = true
+          return nil
+        end
+      end
+      return @current
+    end
+
+    next_val = @current + @step
+    if !limit.nil?
+      step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
+      cmp = (next_val <=> limit)
+      if step_sign > 0
+        if cmp > 0 || (cmp == 0 && @exclusive)
+          @reached_end = true
+          return nil
+        end
+      else
+        if cmp < 0 || (cmp == 0 && @exclusive)
+          @reached_end = true
+          return nil
+        end
+      end
+    end
+
+    @current = next_val
+    @current
+  end
+
+  def sum(initial : U) : U forall U
+    acc = initial
+    while !(item = self.next).nil?
+      acc = acc + item
+    end
+    acc
+  end
+end
+
+impl Iterator for NumericStepIterator(T) forall T
+  type Elem = T
+end
+
+pub trait Steppable
+  # Iterates from self to limit incrementing by step_val on each iteration.
+  def step(*, to limit = nil, by step_val, exclusive : ::Bool = false, & : self -> ::Nil) : ::Nil
+    iter = self.step(to: limit, by: step_val, exclusive: exclusive)
+    while !(item = iter.next).nil?
+      yield item
+    end
+  end
+
+  # Returns an Iterator that iterates from self to limit by step_val.
+  def step(*, to limit = nil, by step_val, exclusive : ::Bool = false) : NumericStepIterator(self)
+    NumericStepIterator(self).new(self, limit, step_val, exclusive)
+  end
+end

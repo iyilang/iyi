@@ -271,9 +271,35 @@ module std/int
     # the infinities are refused. The prelude's own five (`to_i`, `to_i32`,
     # `to_i64`, `to_u8`, `to_u64`) still check before truncating.
     {% for conv in convs %}
-      @[::Primitive(:unchecked_convert)]
-      def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
-      end
+      {% if conv[1] == "Int128" || conv[1] == "UInt128" %}
+        # Not the instruction: a double to a 128-bit integer is a call
+        # into compiler-rt (`__fixdfti`) on aarch64, which the floor
+        # (SPEC.md III.9) does not link. The mantissa and exponent are
+        # read off the bits and shifted into place instead; the caller
+        # has already refused what does not fit.
+        def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
+          bits = IyiFloatText.bits_of(self)
+          biased = ((bits >> 52) & 0x7ff_u64).to_i32
+          return 0_{{ conv[1] == "Int128" ? "i128".id : "u128".id }} if biased < 1023
+          mantissa = ((bits & 0xfffffffffffff_u64) | 0x10000000000000_u64).to_u128
+          shift = biased - 1075
+          magnitude = shift >= 0 ? mantissa << shift : mantissa >> (0 - shift)
+          {% if conv[1] == "Int128" %}
+            if (bits >> 63) == 1_u64
+              return -170141183460469231731687303715884105728_i128 if magnitude == (1_u128 << 127)
+              0_i128 - magnitude.to_i128
+            else
+              magnitude.to_i128
+            end
+          {% else %}
+            magnitude
+          {% end %}
+        end
+      {% else %}
+        @[::Primitive(:unchecked_convert)]
+        def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
+        end
+      {% end %}
 
       {% unless prelude_convs.includes?(conv[0]) %}
         def {{ conv[0].id }} : {{ conv[1].id }}

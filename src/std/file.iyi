@@ -1,0 +1,643 @@
+# File: comprehensive file operations, metadata inspection, and manipulation.
+#
+# Extends the prelude's core File with File::Info, File::Type, File::Permissions,
+# path queries, permissions, timestamps, symlinks, and iteration without external C libraries.
+
+module std/file
+
+import std/path
+using std/path::{Path}
+
+{% if flag?(:darwin) %}
+  lib LibC
+    struct Timespec
+      tv_sec : Int64
+      tv_nsec : Int64
+    end
+
+    struct Stat
+      st_dev : Int32
+      st_mode_nlink : Int32
+      st_ino : UInt64
+      st_uid : Int32
+      st_gid : Int32
+      st_rdev : Int32
+      st_pad : Int32
+      st_atimespec : Timespec
+      st_mtimespec : Timespec
+      st_ctimespec : Timespec
+      st_birthtimespec : Timespec
+      st_size : Int64
+      st_blocks : Int64
+      st_blksize : Int32
+      st_flags : Int32
+      st_gen : Int32
+      st_lspare : Int32
+      st_qspare0 : Int64
+      st_qspare1 : Int64
+    end
+
+    fun stat = stat64(path : UInt8*, buf : Stat*) : Int32
+    fun lstat = lstat64(path : UInt8*, buf : Stat*) : Int32
+    fun fstat = fstat64(fd : Int32, buf : Stat*) : Int32
+    fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32
+    fun link(oldpath : UInt8*, newpath : UInt8*) : Int32
+    fun symlink(target : UInt8*, linkpath : UInt8*) : Int32
+    fun readlink(path : UInt8*, buf : UInt8*, bufsiz : UInt64) : Int64
+    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
+    fun chmod(path : UInt8*, mode : Int32) : Int32
+    fun chown(path : UInt8*, owner : UInt32, group : UInt32) : Int32
+    fun truncate(path : UInt8*, length : Int64) : Int32
+    fun ftruncate(fd : Int32, length : Int64) : Int32
+    fun access(path : UInt8*, mode : Int32) : Int32
+    fun utimes(path : UInt8*, times : Void*) : Int32
+  end
+{% elsif flag?(:win32) %}
+  lib LibKernel32
+    fun MoveFileA(oldpath : UInt8*, newpath : UInt8*) : Int32
+    fun CreateHardLinkA(newpath : UInt8*, oldpath : UInt8*, sec : Void*) : Int32
+    fun CreateSymbolicLinkA(linkpath : UInt8*, target : UInt8*, flags : UInt32) : Int32
+  end
+{% else %}
+  lib LibC
+    struct Timespec
+      tv_sec : Int64
+      tv_nsec : Int64
+    end
+
+    struct Stat
+      st_dev : UInt64
+      st_ino : UInt64
+      st_nlink : UInt64
+      st_mode : Int32
+      st_uid : Int32
+      st_gid : Int32; st_pad0 : Int32
+      st_rdev : UInt64
+      st_size : Int64
+      st_blksize : Int64
+      st_blocks : Int64
+      st_atime : Timespec
+      st_mtime : Timespec
+      st_ctime : Timespec
+      _glibc_reserved0 : Int64; _glibc_reserved1 : Int64; _glibc_reserved2 : Int64
+    end
+
+    fun stat(path : UInt8*, buf : Stat*) : Int32
+    fun lstat(path : UInt8*, buf : Stat*) : Int32
+    fun fstat(fd : Int32, buf : Stat*) : Int32
+    fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32
+    fun link(oldpath : UInt8*, newpath : UInt8*) : Int32
+    fun symlink(target : UInt8*, linkpath : UInt8*) : Int32
+    fun readlink(path : UInt8*, buf : UInt8*, bufsiz : UInt64) : Int64
+    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
+    fun chmod(path : UInt8*, mode : Int32) : Int32
+    fun chown(path : UInt8*, owner : UInt32, group : UInt32) : Int32
+    fun truncate(path : UInt8*, length : Int64) : Int32
+    fun ftruncate(fd : Int32, length : Int64) : Int32
+    fun access(path : UInt8*, mode : Int32) : Int32
+  end
+{% end %}
+private def c_path(path : String) : UInt8*
+  n = path.bytesize
+  buffer = Pointer(UInt8).malloc((n + 1).to_u64)
+  buffer.copy_from(path.to_unsafe, n)
+  buffer[n] = 0_u8
+  buffer
+end
+
+class ::File
+  SEPARATOR        = '/'
+  SEPARATOR_STRING = "/"
+  using std/path::{Path}
+
+  enum Type : UInt8
+    File            = 0
+    Directory       = 1
+    Symlink         = 2
+    Socket          = 3
+    Pipe            = 4
+    CharacterDevice = 5
+    BlockDevice     = 6
+    Unknown         = 7
+
+    def file? : Bool
+      value == 0_u8
+    end
+
+    def directory? : Bool
+      value == 1_u8
+    end
+
+    def symlink? : Bool
+      value == 2_u8
+    end
+
+    def socket? : Bool
+      value == 3_u8
+    end
+
+    def pipe? : Bool
+      value == 4_u8
+    end
+
+    def character_device? : Bool
+      value == 5_u8
+    end
+
+    def block_device? : Bool
+      value == 6_u8
+    end
+
+    def device? : Bool
+      character_device? || block_device?
+    end
+  end
+
+  struct Permissions
+    getter value : Int32
+
+    def initialize(@value : Int32)
+    end
+
+    def to_i : Int32
+      @value
+    end
+
+    def owner_read? : Bool
+      (@value & 0o400) != 0
+    end
+
+    def owner_write? : Bool
+      (@value & 0o200) != 0
+    end
+
+    def owner_execute? : Bool
+      (@value & 0o100) != 0
+    end
+
+    def group_read? : Bool
+      (@value & 0o040) != 0
+    end
+
+    def group_write? : Bool
+      (@value & 0o020) != 0
+    end
+
+    def group_execute? : Bool
+      (@value & 0o010) != 0
+    end
+
+    def other_read? : Bool
+      (@value & 0o004) != 0
+    end
+
+    def other_write? : Bool
+      (@value & 0o002) != 0
+    end
+
+    def other_execute? : Bool
+      (@value & 0o001) != 0
+    end
+
+    def to_s(io : IO) : Nil
+      io.write(owner_read? ? "r" : "-")
+      io.write(owner_write? ? "w" : "-")
+      io.write(owner_execute? ? "x" : "-")
+      io.write(group_read? ? "r" : "-")
+      io.write(group_write? ? "w" : "-")
+      io.write(group_execute? ? "x" : "-")
+      io.write(other_read? ? "r" : "-")
+      io.write(other_write? ? "w" : "-")
+      io.write(other_execute? ? "x" : "-")
+    end
+
+    def to_s : String
+      res = ""
+      res = res + (owner_read? ? "r" : "-")
+      res = res + (owner_write? ? "w" : "-")
+      res = res + (owner_execute? ? "x" : "-")
+      res = res + (group_read? ? "r" : "-")
+      res = res + (group_write? ? "w" : "-")
+      res = res + (group_execute? ? "x" : "-")
+      res = res + (other_read? ? "r" : "-")
+      res = res + (other_write? ? "w" : "-")
+      res = res + (other_execute? ? "x" : "-")
+      res
+    end
+  end
+
+  struct Flags
+    getter value : Int32
+
+    def initialize(@value : Int32 = 0)
+    end
+
+    def set_user? : Bool
+      (@value & 1) != 0
+    end
+
+    def set_group? : Bool
+      (@value & 2) != 0
+    end
+
+    def sticky? : Bool
+      (@value & 4) != 0
+    end
+  end
+
+  struct Info
+    getter size : Int64
+    getter permissions : Permissions
+    getter type : Type
+    getter flags : Flags
+    getter modification_time : Int64
+    getter owner_id : String
+    getter group_id : String
+    getter dev : Int64
+    getter ino : UInt64
+
+    def initialize(@size : Int64, @permissions : Permissions, @type : Type,
+                   @flags : Flags, @modification_time : Int64,
+                   @owner_id : String, @group_id : String,
+                   @dev : Int64 = 0_i64, @ino : UInt64 = 0_u64)
+    end
+
+    def file? : Bool
+      @type.file?
+    end
+
+    def directory? : Bool
+      @type.directory?
+    end
+
+    def symlink? : Bool
+      @type.symlink?
+    end
+
+    def readable? : Bool
+      @permissions.owner_read?
+    end
+
+    def writable? : Bool
+      @permissions.owner_write?
+    end
+
+    def executable? : Bool
+      @permissions.owner_execute?
+    end
+
+    def same_file?(other : Info) : Bool
+      @dev == other.dev && @ino == other.ino
+    end
+  end
+
+  def self.info(path : String | Path, follow_symlinks : Bool = true) : Info
+    res = info?(path, follow_symlinks)
+    if res
+      res
+    else
+      raise "File not found: #{path.to_s}"
+    end
+  end
+
+  def self.info?(path : String | Path, follow_symlinks : Bool = true) : Info?
+    p = path.to_s
+    {% if flag?(:darwin) %}
+      stat_buf = uninitialized Std::File::LibC::Stat
+      ret = if follow_symlinks
+              Std::File::LibC.stat(c_path(p), pointerof(stat_buf))
+            else
+              Std::File::LibC.lstat(c_path(p), pointerof(stat_buf))
+            end
+      return nil if ret != 0
+
+      mode_int = stat_buf.st_mode_nlink.to_i64 & 0xffff_i64
+      perms = Permissions.new((mode_int & 0o777_i64).to_i32)
+
+      file_type = case mode_int & 0o170000_i64
+                  when 0o100000_i64 then Type::File
+                  when 0o040000_i64 then Type::Directory
+                  when 0o120000_i64 then Type::Symlink
+                  when 0o140000_i64 then Type::Socket
+                  when 0o010000_i64 then Type::Pipe
+                  when 0o020000_i64 then Type::CharacterDevice
+                  when 0o060000_i64 then Type::BlockDevice
+                  else                   Type::Unknown
+                  end
+
+      flag_val = 0
+      flag_val = flag_val | 1 if (mode_int & 0o4000_i64) != 0
+      flag_val = flag_val | 2 if (mode_int & 0o2000_i64) != 0
+      flag_val = flag_val | 4 if (mode_int & 0o1000_i64) != 0
+      file_flags = Flags.new(flag_val)
+
+      mtime = stat_buf.st_mtimespec.tv_sec
+      owner = stat_buf.st_uid.to_s
+      group = stat_buf.st_gid.to_s
+      dev = stat_buf.st_dev.to_i64
+      ino = stat_buf.st_ino
+
+      Info.new(stat_buf.st_size, perms, file_type, file_flags, mtime, owner, group, dev, ino)
+    {% elsif flag?(:linux) %}
+      stat_buf = uninitialized Std::File::LibC::Stat
+      ret = if follow_symlinks
+              Std::File::LibC.stat(c_path(p), pointerof(stat_buf))
+            else
+              Std::File::LibC.lstat(c_path(p), pointerof(stat_buf))
+            end
+      return nil if ret != 0
+
+      mode_int = stat_buf.st_mode.to_i64 & 0xffff_i64
+      perms = Permissions.new((mode_int & 0o777_i64).to_i32)
+
+      file_type = case mode_int & 0o170000_i64
+                  when 0o100000_i64 then Type::File
+                  when 0o040000_i64 then Type::Directory
+                  when 0o120000_i64 then Type::Symlink
+                  when 0o140000_i64 then Type::Socket
+                  when 0o010000_i64 then Type::Pipe
+                  when 0o020000_i64 then Type::CharacterDevice
+                  when 0o060000_i64 then Type::BlockDevice
+                  else                   Type::Unknown
+                  end
+
+      flag_val = 0
+      flag_val = flag_val | 1 if (mode_int & 0o4000_i64) != 0
+      flag_val = flag_val | 2 if (mode_int & 0o2000_i64) != 0
+      flag_val = flag_val | 4 if (mode_int & 0o1000_i64) != 0
+      file_flags = Flags.new(flag_val)
+
+      mtime = stat_buf.st_mtime.tv_sec
+      owner = stat_buf.st_uid.to_s
+      group = stat_buf.st_gid.to_s
+      dev = stat_buf.st_dev.to_i64
+      ino = stat_buf.st_ino
+
+      Info.new(stat_buf.st_size, perms, file_type, file_flags, mtime, owner, group, dev, ino)
+    {% else %}
+      nil
+    {% end %}
+  end
+
+  def self.size(path : String | Path) : Int64
+    info(path).size
+  end
+
+  def self.file?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.file? : false
+  end
+
+  def self.directory?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.directory? : false
+  end
+
+  def self.symlink?(path : String | Path) : Bool
+    inf = info?(path, follow_symlinks: false)
+    inf ? inf.symlink? : false
+  end
+
+  def self.readable?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.readable? : false
+  end
+
+  def self.writable?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.writable? : false
+  end
+
+  def self.executable?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.executable? : false
+  end
+
+  def self.empty?(path : String | Path) : Bool
+    inf = info?(path)
+    inf ? inf.size == 0_i64 : true
+  end
+
+  def self.same?(path1 : String | Path, path2 : String | Path) : Bool
+    i1 = info?(path1)
+    i2 = info?(path2)
+    return false unless i1 && i2
+    i1.same_file?(i2)
+  end
+
+  def self.same_content?(path1 : String | Path, path2 : String | Path) : Bool
+    p1 = path1.to_s
+    p2 = path2.to_s
+    return false unless File.exists?(p1) && File.exists?(p2)
+    s1 = size(p1)
+    s2 = size(p2)
+    return false if s1 != s2
+    File.read(p1) == File.read(p2)
+  end
+
+  def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
+    p = path.to_s
+    if !File.exists?(p)
+      File.write(p, "")
+    else
+      # Update mtime if utimes available or open append
+      f = File.open(p, "w")
+      f.close
+    end
+  end
+
+  def self.touch?(path : String | Path, time : Int64 = 0_i64) : Bool
+    touch(path, time)
+    true
+  end
+
+  def self.rename(old_path : String | Path, new_path : String | Path) : Nil
+    o = old_path.to_s
+    n = new_path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.rename(c_path(o), c_path(n)) != 0
+        raise "Cannot rename #{o} to #{n}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.MoveFileA(c_path(o), c_path(n)) == 0
+        raise "Cannot rename #{o} to #{n}"
+      end
+    {% end %}
+  end
+
+  def self.link(old_path : String | Path, new_path : String | Path) : Nil
+    o = old_path.to_s
+    n = new_path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.link(c_path(o), c_path(n)) != 0
+        raise "Cannot link #{o} to #{n}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.CreateHardLinkA(c_path(n), c_path(o), Pointer(Void).new(0_u64)) == 0
+        raise "Cannot link #{o} to #{n}"
+      end
+    {% end %}
+  end
+
+  def self.symlink(old_path : String | Path, new_path : String | Path) : Nil
+    o = old_path.to_s
+    n = new_path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.symlink(c_path(o), c_path(n)) != 0
+        raise "Cannot symlink #{o} to #{n}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.CreateSymbolicLinkA(c_path(n), c_path(o), 0_u32) == 0
+        raise "Cannot symlink #{o} to #{n}"
+      end
+    {% end %}
+  end
+
+  def self.readlink(path : String | Path) : String
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      buf = Pointer(UInt8).malloc(4096_u64)
+      res = Std::File::LibC.readlink(c_path(p), buf, 4096_u64)
+      if res <= 0_i64
+        raise "Cannot readlink: #{p}"
+      end
+      String.new(res.to_i) { |t| t.copy_from(buf, res.to_i) }
+    {% else %}
+      ""
+    {% end %}
+  end
+
+  def self.real_path(path : String | Path) : String
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      buf = Pointer(UInt8).malloc(4096_u64)
+      res = Std::File::LibC.realpath(c_path(p), buf)
+      if res.address == 0_u64
+        raise "Cannot resolve realpath for #{p}"
+      end
+      len = 0
+      while res[len] != 0_u8
+        len = len + 1
+      end
+      String.new(len) { |t| t.copy_from(res, len) }
+    {% else %}
+      p
+    {% end %}
+  end
+
+  def self.chmod(path : String | Path, mode : Int32) : Nil
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.chmod(c_path(p), mode) != 0
+        raise "Cannot chmod #{p}"
+      end
+    {% end %}
+  end
+
+  def self.chown(path : String | Path, uid : Int32, gid : Int32) : Nil
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.chown(c_path(p), uid.to_u32, gid.to_u32) != 0
+        raise "Cannot chown #{p}"
+      end
+    {% end %}
+  end
+
+  def self.truncate(path : String | Path, size : Int64 = 0_i64) : Nil
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if Std::File::LibC.truncate(c_path(p), size) != 0
+        raise "Cannot truncate #{p}"
+      end
+    {% end %}
+  end
+
+  def self.basename(path : String | Path, suffix : String? = nil) : String
+    Path.new(path.to_s).basename(suffix)
+  end
+
+  def self.dirname(path : String | Path) : String
+    Path.new(path.to_s).dirname
+  end
+
+  def self.extname(path : String | Path) : String
+    Path.new(path.to_s).extension
+  end
+
+  def self.expand_path(path : String | Path, base : String? = nil) : String
+    Path.new(path.to_s).expand(base, home: true).to_s
+  end
+
+  def self.join(*parts : String | Path) : String
+    p = Path.new("")
+    parts.each do |part|
+      p = p.join(part.to_s)
+    end
+    p.to_s
+  end
+
+  def self.join(parts : Array(String)) : String
+    p = Path.new("")
+    parts.each do |part|
+      p = p.join(part)
+    end
+    p.to_s
+  end
+
+  def self.read_lines(path : String | Path) : Array(String)
+    content = File.read(path.to_s)
+    res = [] of String
+    len = content.bytesize
+    ptr = content.to_unsafe
+    line_start = 0
+    i = 0
+    while i < len
+      if ptr[i] == 10_u8
+        line_len = i - line_start
+        # Strip CR if CRLF
+        line_len = line_len - 1 if line_len > 0 && ptr[line_start + line_len - 1] == 13_u8
+        res << String.new(line_len) { |t| t.copy_from(ptr + line_start, line_len) }
+        line_start = i + 1
+      end
+      i = i + 1
+    end
+    if line_start < len
+      rem_len = len - line_start
+      rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
+      res << String.new(rem_len) { |t| t.copy_from(ptr + line_start, rem_len) }
+    end
+    res
+  end
+
+  def self.each_line(path : String | Path, &block : String -> Nil) : Nil
+    lines = read_lines(path)
+    lines.each do |l|
+      yield l
+    end
+  end
+
+  def self.match?(path : String | Path, pattern : String) : Bool
+    Path.match_pattern(pattern, path.to_s)
+  end
+
+  @@temp_counter = 1000_u64
+
+  def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
+    tmpdir = "/tmp"
+    {% if flag?(:win32) %}
+      tmpdir = "C:\\Windows\\Temp"
+    {% end %}
+    @@temp_counter = @@temp_counter + 1_u64
+    path = tmpdir + "/" + prefix + "_" + @@temp_counter.to_s + suffix
+    File.write(path, "")
+    path
+  end
+
+  def self.tempfile(prefix : String = "tmp", suffix : String = "", &block : String -> Nil) : Nil
+    p = tempfile(prefix, suffix)
+    defer File.delete(p)
+    yield p
+  end
+end
+
+pub alias File = ::File

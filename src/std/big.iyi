@@ -1,0 +1,2218 @@
+# Arbitrary-precision integers — BigInt
+#
+# Fully native arbitrary-precision arithmetic over 32-bit limbs stored in UInt64.
+# Does not bind GMP or any external C library (SPEC.md III.9, III.10).
+#
+# Representation:
+# Sign-magnitude representation where:
+#   @sign : Int32 (-1 for negative, 0 for zero, 1 for positive)
+#   @limbs : Array(UInt64) (little-endian: limbs[0] is least significant)
+#
+# Each limb stores a 32-bit digit (0 <= limb < 2^32) held in a UInt64 word.
+# Using UInt64 avoids the prelude's broken UInt32 and guarantees that 32x32-bit
+# limb products and additions never overflow 64-bit machine registers.
+#
+# Algorithms:
+# - Addition and Subtraction: O(n) schoolbook carry-propagate and borrow-propagate.
+# - Multiplication:
+#     * Schoolbook multiplication O(n*m) below Karatsuba threshold.
+#     * Karatsuba multiplication O(n^1.585) above the crossover threshold.
+# - Division and Modulo:
+#     * O(n) single-limb division when divisor is 1 limb.
+#     * Knuth Algorithm D (TAOCP Vol. 2, Sec. 4.3.1) for multi-limb divisor.
+#     * Consistent with prelude Int32: division truncates towards zero,
+#       and remainder (%) follows the sign of the dividend.
+# - Modular Exponentiation:
+#     * pow_mod via binary square-and-multiply.
+# - Bitwise Operations:
+#     * Two's complement semantics over infinite sign extension.
+
+module std/big
+
+import std/traits
+using std/traits::{Cmp, Num, Hashable}
+
+pub struct BigInt
+  getter sign : Int32
+  getter limbs : Array(UInt64)
+
+  # Crossover point above which Karatsuba multiplication is used.
+  # Empirically measured: schoolbook is faster below 64 limbs (2048 bits)
+  # due to zero allocation overhead in its flat result buffer.
+  KARATSUBA_THRESHOLD = 64
+
+  # Raw constructor from sign and limbs. Trims leading zero limbs to enforce
+  # the canonical representation invariant: zero has empty limbs and sign 0.
+  def initialize(sign : Int32, limbs : Array(UInt64))
+    while limbs.size > 0 && limbs.last == 0_u64
+      limbs.pop
+    end
+    if limbs.empty?
+      @sign = 0
+      @limbs = limbs
+    else
+      @sign = sign < 0 ? -1 : (sign > 0 ? 1 : 0)
+      @limbs = limbs
+    end
+  end
+
+  # Canonical constant for zero.
+  def self.zero : BigInt
+    BigInt.new(0, Array(UInt64).new)
+  end
+
+  # Canonical constant for one.
+  def self.one : BigInt
+    arr = Array(UInt64).new(1)
+    arr << 1_u64
+    BigInt.new(1, arr)
+  end
+
+  # Constructs a BigInt from an Int64.
+  def self.new(val : Int64) : BigInt
+    return BigInt.zero if val == 0_i64
+    if val < 0_i64
+      sign = -1
+      mag = val == -9223372036854775808_i64 ? 0x8000000000000000_u64 : (-val).to_u64
+    else
+      sign = 1
+      mag = val.to_u64
+    end
+    limbs = Array(UInt64).new(2)
+    limbs << (mag & 0xFFFFFFFF_u64)
+    high = mag.unsafe_shr(32_u64)
+    limbs << high if high > 0_u64
+    BigInt.new(sign, limbs)
+  end
+
+  # Constructs a BigInt from an Int32.
+  def self.new(val : Int32) : BigInt
+    new(val.to_i64)
+  end
+
+  # Parses a BigInt from a string in the given base (2..36, default 10).
+  # Supports leading whitespace, optional sign ('+' or '-'), and base prefixes
+  # (0x/0X for hex, 0b/0B for binary, 0o/0O for octal).
+  def self.new(str : String, base : Int32 = 10) : BigInt
+    parse(str, base)
+  end
+
+  # Parses a hexadecimal string (with or without '0x' prefix).
+  def self.from_hex(str : String) : BigInt
+    parse(str, 16)
+  end
+
+  # Parses a string with full error checking.
+  def self.parse(str : String, base : Int32 = 10) : BigInt
+    raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36
+
+    bytes = str.to_unsafe
+    start_idx = 0
+    end_idx = str.bytesize - 1
+    while start_idx <= end_idx && (bytes[start_idx] == 32_u8 || bytes[start_idx] == 9_u8 || bytes[start_idx] == 10_u8 || bytes[start_idx] == 13_u8)
+      start_idx = start_idx + 1
+    end
+    while end_idx >= start_idx && (bytes[end_idx] == 32_u8 || bytes[end_idx] == 9_u8 || bytes[end_idx] == 10_u8 || bytes[end_idx] == 13_u8)
+      end_idx = end_idx - 1
+    end
+
+    raise "invalid BigInt: empty string" if start_idx > end_idx
+
+    # Sign check
+    sign = 1
+    if bytes[start_idx] == 45_u8 # '-'
+      sign = -1
+      start_idx = start_idx + 1
+    elsif bytes[start_idx] == 43_u8 # '+'
+      start_idx = start_idx + 1
+    end
+
+    raise "invalid BigInt: string has sign only" if start_idx > end_idx
+
+    actual_base = base
+    # Prefix check if base is 10 or 16
+    if start_idx + 1 <= end_idx && bytes[start_idx] == 48_u8 # '0'
+      prefix_char = bytes[start_idx + 1]
+      if (prefix_char == 120_u8 || prefix_char == 88_u8) && (base == 10 || base == 16) # 'x' or 'X'
+        actual_base = 16
+        start_idx = start_idx + 2
+      elsif (prefix_char == 98_u8 || prefix_char == 66_u8) && (base == 10 || base == 2) # 'b' or 'B'
+        actual_base = 2
+        start_idx = start_idx + 2
+      elsif (prefix_char == 111_u8 || prefix_char == 79_u8) && (base == 10 || base == 8) # 'o' or 'O'
+        actual_base = 8
+        start_idx = start_idx + 2
+      end
+    end
+
+    raise "invalid BigInt: empty digits after prefix" if start_idx > end_idx
+
+    # Parse digits
+    result = BigInt.zero
+    radix_big = BigInt.new(actual_base.to_i64)
+
+    # For base 10, parse in chunks of 9 digits to accelerate parsing
+    if actual_base == 10
+      chunk_val = 0_u64
+      chunk_len = 0
+      idx = start_idx
+      while idx <= end_idx
+        byte = bytes[idx]
+        if byte == 95_u8 # '_'
+          idx = idx + 1
+          next
+        end
+        raise "invalid BigInt digit: #{byte.unsafe_chr}" if byte < 48_u8 || byte > 57_u8
+        digit = (byte - 48_u8).to_u64
+        chunk_val = chunk_val * 10_u64 + digit
+        chunk_len = chunk_len + 1
+        if chunk_len == 9
+          result = result * 1000000000_i64 + chunk_val.to_i64
+          chunk_val = 0_u64
+          chunk_len = 0
+        end
+        idx = idx + 1
+      end
+      if chunk_len > 0
+        multiplier = 1_i64
+        c = 0
+        while c < chunk_len
+          multiplier = multiplier * 10_i64
+          c = c + 1
+        end
+        result = result * multiplier + chunk_val.to_i64
+      end
+    elsif actual_base == 16
+      # Parse hex in chunks of 8 characters (32 bits per limb)
+      chunk_val = 0_u64
+      chunk_len = 0
+      idx = start_idx
+      while idx <= end_idx
+        byte = bytes[idx]
+        if byte == 95_u8
+          idx = idx + 1
+          next
+        end
+        digit = -1
+        if byte >= 48_u8 && byte <= 57_u8
+          digit = (byte - 48_u8).to_i32
+        elsif byte >= 97_u8 && byte <= 102_u8
+          digit = (byte - 97_u8 + 10_u8).to_i32
+        elsif byte >= 65_u8 && byte <= 70_u8
+          digit = (byte - 65_u8 + 10_u8).to_i32
+        end
+        raise "invalid BigInt hex digit: #{byte.unsafe_chr}" if digit < 0
+        result = (result << 4) | BigInt.new(digit.to_i64)
+        idx = idx + 1
+      end
+    elsif actual_base == 2
+      # Parse binary in bits
+      idx = start_idx
+      while idx <= end_idx
+        byte = bytes[idx]
+        if byte == 95_u8
+          idx = idx + 1
+          next
+        end
+        raise "invalid BigInt binary digit: #{byte.unsafe_chr}" if byte != 48_u8 && byte != 49_u8
+        bit = (byte - 48_u8).to_i64
+        result = (result << 1) | BigInt.new(bit)
+        idx = idx + 1
+      end
+    else
+      # General base parsing
+      idx = start_idx
+      while idx <= end_idx
+        byte = bytes[idx]
+        if byte == 95_u8
+          idx = idx + 1
+          next
+        end
+        digit = -1
+        if byte >= 48_u8 && byte <= 57_u8
+          digit = (byte - 48_u8).to_i32
+        elsif byte >= 97_u8 && byte <= 122_u8
+          digit = (byte - 97_u8 + 10_u8).to_i32
+        elsif byte >= 65_u8 && byte <= 90_u8
+          digit = (byte - 65_u8 + 10_u8).to_i32
+        end
+        raise "invalid BigInt digit: #{byte.unsafe_chr} for base #{actual_base}" if digit < 0 || digit >= actual_base
+        result = result * radix_big + BigInt.new(digit.to_i64)
+        idx = idx + 1
+      end
+    end
+
+    sign < 0 ? result.negate : result
+  end
+
+  # Number of limbs currently allocated.
+  def size : Int32
+    @limbs.size
+  end
+
+  # Returns true if this number is zero.
+  def zero? : Bool
+    @sign == 0
+  end
+
+  # Returns true if this number is strictly positive (> 0).
+  def positive? : Bool
+    @sign > 0
+  end
+
+  # Returns true if this number is strictly negative (< 0).
+  def negative? : Bool
+    @sign < 0
+  end
+
+  # Returns true if this number is even.
+  def even? : Bool
+    @limbs.empty? || (@limbs[0] & 1_u64) == 0_u64
+  end
+
+  # Returns true if this number is odd.
+  def odd? : Bool
+    !even?
+  end
+
+  # Returns the absolute value of self.
+  def abs : BigInt
+    @sign < 0 ? BigInt.new(1, @limbs.dup) : self
+  end
+
+  # Returns the negated value of self (-self).
+  def negate : BigInt
+    return self if zero?
+    BigInt.new(-@sign, @limbs.dup)
+  end
+
+  def - : BigInt
+    negate
+  end
+
+  def + : BigInt
+    self
+  end
+
+  # Magnitude comparison: compares |self| and |other|.
+  # Returns -1 if |self| < |other|, 0 if |self| == |other|, 1 if |self| > |other|.
+  def cmp_abs(other : BigInt) : Int32
+    if @limbs.size != other.limbs.size
+      return @limbs.size < other.limbs.size ? -1 : 1
+    end
+    i = @limbs.size - 1
+    while i >= 0
+      if @limbs[i] != other.limbs[i]
+        return @limbs[i] < other.limbs[i] ? -1 : 1
+      end
+      i = i - 1
+    end
+    0
+  end
+
+  # Full three-way comparison between self and other.
+  def cmp(other : BigInt) : Int32
+    if @sign != other.sign
+      return @sign < other.sign ? -1 : 1
+    end
+    return 0 if @sign == 0
+    c = cmp_abs(other)
+    @sign > 0 ? c : -c
+  end
+
+  def <=>(other : BigInt) : Int32
+    cmp(other)
+  end
+
+  def ==(other : BigInt) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : BigInt) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : BigInt) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : BigInt) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : BigInt) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : BigInt) : Bool
+    cmp(other) >= 0
+  end
+
+  # Comparison overloads for Int64 and Int32
+  def cmp(other : Int64) : Int32
+    cmp(BigInt.new(other))
+  end
+
+  def ==(other : Int64) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : Int64) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : Int64) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : Int64) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : Int64) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : Int64) : Bool
+    cmp(other) >= 0
+  end
+
+  def cmp(other : Int32) : Int32
+    cmp(other.to_i64)
+  end
+
+  def ==(other : Int32) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : Int32) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : Int32) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : Int32) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : Int32) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : Int32) : Bool
+    cmp(other) >= 0
+  end
+
+  # Addition
+  def +(other : BigInt) : BigInt
+    return other if zero?
+    return self if other.zero?
+    if @sign == other.sign
+      res_limbs = add_abs_limbs(@limbs, other.limbs)
+      BigInt.new(@sign, res_limbs)
+    else
+      c = cmp_abs(other)
+      if c == 0
+        BigInt.zero
+      elsif c > 0
+        res_limbs = sub_abs_limbs(@limbs, other.limbs)
+        BigInt.new(@sign, res_limbs)
+      else
+        res_limbs = sub_abs_limbs(other.limbs, @limbs)
+        BigInt.new(other.sign, res_limbs)
+      end
+    end
+  end
+
+  def +(other : Int64) : BigInt
+    self + BigInt.new(other)
+  end
+
+  def +(other : Int32) : BigInt
+    self + BigInt.new(other.to_i64)
+  end
+
+  # Subtraction
+  def -(other : BigInt) : BigInt
+    self + other.negate
+  end
+
+  def -(other : Int64) : BigInt
+    self - BigInt.new(other)
+  end
+
+  def -(other : Int32) : BigInt
+    self - BigInt.new(other.to_i64)
+  end
+
+  private def add_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
+    n = a.size > b.size ? a.size : b.size
+    res = Array(UInt64).new(n + 1)
+    carry = 0_u64
+    i = 0
+    while i < n
+      va = i < a.size ? a[i] : 0_u64
+      vb = i < b.size ? b[i] : 0_u64
+      sum = va + vb + carry
+      res << (sum & 0xFFFFFFFF_u64)
+      carry = sum.unsafe_shr(32_u64)
+      i = i + 1
+    end
+    res << carry if carry > 0_u64
+    res
+  end
+
+  private def sub_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
+    res = Array(UInt64).new(a.size)
+    borrow = 0_u64
+    i = 0
+    while i < a.size
+      va = a[i]
+      vb = i < b.size ? b[i] : 0_u64
+      sub = vb + borrow
+      if va >= sub
+        res << (va - sub)
+        borrow = 0_u64
+      else
+        res << (va + 0x100000000_u64 - sub)
+        borrow = 1_u64
+      end
+      i = i + 1
+    end
+    res
+  end
+
+  # Multiplication
+  def *(other : BigInt) : BigInt
+    return BigInt.zero if zero? || other.zero?
+    sign = @sign == other.sign ? 1 : -1
+
+    res_limbs = if @limbs.size < KARATSUBA_THRESHOLD || other.limbs.size < KARATSUBA_THRESHOLD
+                  mul_schoolbook(@limbs, other.limbs)
+                else
+                  mul_karatsuba(@limbs, other.limbs, KARATSUBA_THRESHOLD)
+                end
+    BigInt.new(sign, res_limbs)
+  end
+
+  def *(other : Int64) : BigInt
+    self * BigInt.new(other)
+  end
+
+  def *(other : Int32) : BigInt
+    self * BigInt.new(other.to_i64)
+  end
+
+  private def mul_schoolbook(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
+    n = a.size
+    m = b.size
+    res_size = n + m
+    res = Array(UInt64).new(res_size) { 0_u64 }
+    i = 0
+    while i < n
+      a_limb = a[i]
+      if a_limb != 0_u64
+        carry = 0_u64
+        j = 0
+        while j < m
+          prod = a_limb * b[j] + res[i + j] + carry
+          res[i + j] = prod & 0xFFFFFFFF_u64
+          carry = prod.unsafe_shr(32_u64)
+          j = j + 1
+        end
+        k = i + m
+        while carry > 0_u64
+          sum = res[k] + carry
+          res[k] = sum & 0xFFFFFFFF_u64
+          carry = sum.unsafe_shr(32_u64)
+          k = k + 1
+        end
+      end
+      i = i + 1
+    end
+    while res.size > 0 && res.last == 0_u64
+      res.pop
+    end
+    res
+  end
+
+  private def slice_limbs(a : Array(UInt64), start : Int32, count : Int32) : Array(UInt64)
+    res = Array(UInt64).new(count)
+    i = 0
+    while i < count
+      idx = start + i
+      res << (idx < a.size ? a[idx] : 0_u64)
+      i = i + 1
+    end
+    while res.size > 0 && res.last == 0_u64
+      res.pop
+    end
+    res
+  end
+
+  private def shift_limbs_left(a : Array(UInt64), k : Int32) : Array(UInt64)
+    return a if a.empty? || k <= 0
+    res = Array(UInt64).new(a.size + k) { 0_u64 }
+    i = 0
+    while i < a.size
+      res[i + k] = a[i]
+      i = i + 1
+    end
+    res
+  end
+
+  private def mul_karatsuba(a : Array(UInt64), b : Array(UInt64), threshold : Int32) : Array(UInt64)
+    if a.size < threshold || b.size < threshold || a.empty? || b.empty?
+      return mul_schoolbook(a, b)
+    end
+
+    n = a.size > b.size ? a.size : b.size
+    k = (n + 1) // 2
+
+    x0 = slice_limbs(a, 0, k)
+    x1 = slice_limbs(a, k, a.size - k)
+    y0 = slice_limbs(b, 0, k)
+    y1 = slice_limbs(b, k, b.size - k)
+
+    z0 = mul_karatsuba(x0, y0, threshold)
+    z2 = mul_karatsuba(x1, y1, threshold)
+
+    xsum = add_abs_limbs(x0, x1)
+    ysum = add_abs_limbs(y0, y1)
+    z1_raw = mul_karatsuba(xsum, ysum, threshold)
+    z1 = sub_abs_limbs(sub_abs_limbs(z1_raw, z0), z2)
+
+    z2_shifted = shift_limbs_left(z2, 2 * k)
+    z1_shifted = shift_limbs_left(z1, k)
+    add_abs_limbs(add_abs_limbs(z2_shifted, z1_shifted), z0)
+  end
+
+  # Division and Modulo: Knuth Algorithm D
+  # Returns {quotient, remainder}.
+  # Division truncates towards zero; remainder follows the sign of the dividend (self).
+  def divmod(other : BigInt) : ::Tuple(BigInt, BigInt)
+    raise "division by zero" if other.zero?
+    return {BigInt.zero, BigInt.zero} if zero?
+
+    q_sign = @sign == other.sign ? 1 : -1
+    r_sign = @sign # remainder sign follows dividend
+
+    c = cmp_abs(other)
+    if c < 0
+      return {BigInt.zero, self}
+    elsif c == 0
+      arr = Array(UInt64).new(1)
+      arr << 1_u64
+      return {BigInt.new(q_sign, arr), BigInt.zero}
+    end
+
+    # Single-limb divisor optimization: O(m) division
+    if other.limbs.size == 1
+      v0 = other.limbs[0]
+      q_limbs = Array(UInt64).new(@limbs.size)
+      rem = 0_u64
+      i = @limbs.size - 1
+      while i >= 0
+        cur = rem.unsafe_shl(32_u64) | @limbs[i]
+        q_limbs << cur.unsafe_div(v0)
+        rem = cur.unsafe_mod(v0)
+        i = i - 1
+      end
+      left = 0
+      right = q_limbs.size - 1
+      while left < right
+        tmp_swap = q_limbs[left]
+        q_limbs[left] = q_limbs[right]
+        q_limbs[right] = tmp_swap
+        left = left + 1
+        right = right - 1
+      end
+      r_limbs = Array(UInt64).new(1)
+      r_limbs << rem if rem > 0_u64
+      q = BigInt.new(q_sign, q_limbs)
+      r = BigInt.new(r_sign, r_limbs)
+      return {q, r}
+    end
+
+    # Knuth Algorithm D for n >= 2 limbs
+    n = other.limbs.size
+    m = @limbs.size - n
+
+    # Step D1: Normalize divisor so that most significant bit of high limb is 1
+    v_high = other.limbs.last
+    s = 0_u64
+    tmp = v_high
+    while tmp < 0x80000000_u64
+      tmp = tmp.unsafe_shl(1_u64)
+      s = s + 1_u64
+    end
+
+    u_prime = shift_left_limbs(@limbs, s)
+    v_prime = shift_left_limbs(other.limbs, s)
+
+    while u_prime.size < m + n + 1
+      u_prime << 0_u64
+    end
+
+    q_limbs = Array(UInt64).new(m + 1) { 0_u64 }
+    vn1 = v_prime[n - 1]
+    vn2 = v_prime[n - 2]
+
+    # Steps D2 through D7: Loop on j from m down to 0
+    j = m
+    while j >= 0
+      ujn = u_prime[j + n]
+      ujn1 = u_prime[j + n - 1]
+      ujn2 = u_prime[j + n - 2]
+
+      # Step D3: Calculate quotient estimate q_hat
+      numerator = ujn.unsafe_shl(32_u64) | ujn1
+      if ujn == vn1
+        q_hat = 0xFFFFFFFF_u64
+        r_hat = ujn.unsafe_shl(32_u64) | ujn1
+        r_hat = r_hat - q_hat * vn1
+      else
+        q_hat = numerator.unsafe_div(vn1)
+        r_hat = numerator.unsafe_mod(vn1)
+      end
+
+      # Refine q_hat
+      while q_hat > 0xFFFFFFFF_u64 || (r_hat < 0x100000000_u64 && q_hat * vn2 > (r_hat.unsafe_shl(32_u64) | ujn2))
+        q_hat = q_hat - 1_u64
+        r_hat = r_hat + vn1
+      end
+
+      # Step D4: Multiply and subtract u_prime[j..j+n] -= q_hat * v_prime
+      borrow = 0_u64
+      k = 0
+      while k < n
+        p = q_hat * v_prime[k] + borrow
+        p_low = p & 0xFFFFFFFF_u64
+        borrow = p.unsafe_shr(32_u64)
+
+        u_val = u_prime[j + k]
+        if u_val >= p_low
+          u_prime[j + k] = u_val - p_low
+        else
+          u_prime[j + k] = u_val + 0x100000000_u64 - p_low
+          borrow = borrow + 1_u64
+        end
+        k = k + 1
+      end
+
+      u_val = u_prime[j + n]
+      if u_val >= borrow
+        u_prime[j + n] = u_val - borrow
+        negative = false
+      else
+        u_prime[j + n] = u_val + 0x100000000_u64 - borrow
+        negative = true
+      end
+
+      # Step D5 & D6: Add back if q_hat was 1 too large
+      if negative
+        q_hat = q_hat - 1_u64
+        carry = 0_u64
+        k = 0
+        while k < n
+          sum = u_prime[j + k] + v_prime[k] + carry
+          u_prime[j + k] = sum & 0xFFFFFFFF_u64
+          carry = sum.unsafe_shr(32_u64)
+          k = k + 1
+        end
+        u_prime[j + n] = (u_prime[j + n] + carry) & 0xFFFFFFFF_u64
+      end
+
+      q_limbs[j] = q_hat
+      j = j - 1
+    end
+
+    # Step D8: Unnormalize remainder by shifting right by s
+    rem_limbs = Array(UInt64).new(n)
+    k = 0
+    while k < n
+      rem_limbs << u_prime[k]
+      k = k + 1
+    end
+    unnorm_rem = shift_right_limbs(rem_limbs, s)
+
+    q = BigInt.new(q_sign, q_limbs)
+    r = BigInt.new(r_sign, unnorm_rem)
+    {q, r}
+  end
+
+  def //(other : BigInt) : BigInt
+    divmod(other)[0]
+  end
+
+  def //(other : Int64) : BigInt
+    self // BigInt.new(other)
+  end
+
+  def //(other : Int32) : BigInt
+    self // BigInt.new(other.to_i64)
+  end
+
+  def %(other : BigInt) : BigInt
+    divmod(other)[1]
+  end
+
+  def %(other : Int64) : BigInt
+    self % BigInt.new(other)
+  end
+
+  def %(other : Int32) : BigInt
+    self % BigInt.new(other.to_i64)
+  end
+
+  private def shift_left_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
+    return limbs.dup if bits == 0_u64
+    res = Array(UInt64).new(limbs.size + 1)
+    carry = 0_u64
+    rshift = 32_u64 - bits
+    i = 0
+    while i < limbs.size
+      val = limbs[i]
+      new_val = ((val.unsafe_shl(bits)) | carry) & 0xFFFFFFFF_u64
+      carry = val.unsafe_shr(rshift)
+      res << new_val
+      i = i + 1
+    end
+    res << carry if carry > 0_u64
+    res
+  end
+
+  private def shift_right_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
+    return limbs.dup if bits == 0_u64
+    res = Array(UInt64).new(limbs.size) { 0_u64 }
+    carry = 0_u64
+    lshift = 32_u64 - bits
+    i = limbs.size - 1
+    while i >= 0
+      val = limbs[i]
+      new_val = (val.unsafe_shr(bits)) | carry
+      carry = (val.unsafe_shl(lshift)) & 0xFFFFFFFF_u64
+      res[i] = new_val
+      i = i - 1
+    end
+    while res.size > 0 && res.last == 0_u64
+      res.pop
+    end
+    res
+  end
+
+  # Exponentiation by squaring: a ** exp
+  def **(exp : Int32) : BigInt
+    self ** exp.to_i64
+  end
+
+  def **(exp : Int64) : BigInt
+    raise "negative exponent: #{exp}" if exp < 0_i64
+    return BigInt.one if exp == 0_i64
+    return BigInt.zero if zero?
+
+    res = BigInt.one
+    base = self
+    e = exp
+    while e > 0_i64
+      res = res * base if (e & 1_i64) == 1_i64
+      e = e // 2_i64
+      base = base * base if e > 0_i64
+    end
+    res
+  end
+
+  def **(exp : BigInt) : BigInt
+    raise "negative exponent: #{exp}" if exp.negative?
+    return BigInt.one if exp.zero?
+    return BigInt.zero if zero?
+
+    res = BigInt.one
+    base = self
+    e = exp
+    while !e.zero?
+      res = res * base if e.odd?
+      e = e >> 1
+      base = base * base if !e.zero?
+    end
+    res
+  end
+
+  # Greatest Common Divisor (Euclidean algorithm)
+  def gcd(other : BigInt) : BigInt
+    a = self.abs
+    b = other.abs
+    while !b.zero?
+      rem = a % b
+      a = b
+      b = rem
+    end
+    a
+  end
+
+  def gcd(other : Int64) : BigInt
+    gcd(BigInt.new(other))
+  end
+
+  def gcd(other : Int32) : BigInt
+    gcd(BigInt.new(other.to_i64))
+  end
+
+  # Least Common Multiple
+  def lcm(other : BigInt) : BigInt
+    return BigInt.zero if zero? || other.zero?
+    (self.abs // gcd(other)) * other.abs
+  end
+
+  def lcm(other : Int64) : BigInt
+    lcm(BigInt.new(other))
+  end
+
+  def lcm(other : Int32) : BigInt
+    lcm(BigInt.new(other.to_i64))
+  end
+
+  # Bitwise NOT (~a = -a - 1 in two's complement)
+  def ~ : BigInt
+    -(self + 1_i64)
+  end
+
+  def abs2 : BigInt
+    self * self
+  end
+
+  def to_big_i : BigInt
+    self
+  end
+
+  # Modular exponentiation: (self ** exp) % mod
+  # Essential for RSA/DH and cryptography.
+  def pow_mod(exp : BigInt, mod : BigInt) : BigInt
+    raise "modulo by zero" if mod.zero?
+    raise "modulus must be positive" if mod.negative?
+    raise "negative exponent in pow_mod: #{exp}" if exp.negative?
+    return BigInt.zero if mod == 1_i64
+
+    # Ensure base is non-negative modulo mod
+    base = self % mod
+    base = base + mod if base.negative?
+
+    result = BigInt.one % mod
+    e = exp
+    while !e.zero?
+      if e.odd?
+        result = (result * base) % mod
+      end
+      e = e >> 1
+      base = (base * base) % mod if !e.zero?
+    end
+    result
+  end
+
+  def pow_mod(exp : Int64, mod : Int64) : BigInt
+    pow_mod(BigInt.new(exp), BigInt.new(mod))
+  end
+
+  def pow_mod(exp : Int32, mod : Int32) : BigInt
+    pow_mod(BigInt.new(exp.to_i64), BigInt.new(mod.to_i64))
+  end
+
+  # Bitwise Left Shift: a << count
+  def <<(count : Int32) : BigInt
+    return self >> (-count) if count < 0
+    return self if count == 0 || zero?
+
+    limb_shift = count // 32
+    bit_shift = (count % 32).to_u64
+
+    res_limbs = Array(UInt64).new(@limbs.size + limb_shift + 1)
+    # Prepend zero limbs
+    i = 0
+    while i < limb_shift
+      res_limbs << 0_u64
+      i = i + 1
+    end
+
+    if bit_shift == 0_u64
+      i = 0
+      while i < @limbs.size
+        res_limbs << @limbs[i]
+        i = i + 1
+      end
+    else
+      carry = 0_u64
+      rshift = 32_u64 - bit_shift
+      i = 0
+      while i < @limbs.size
+        val = @limbs[i]
+        new_val = ((val.unsafe_shl(bit_shift)) | carry) & 0xFFFFFFFF_u64
+        carry = val.unsafe_shr(rshift)
+        res_limbs << new_val
+        i = i + 1
+      end
+      res_limbs << carry if carry > 0_u64
+    end
+
+    BigInt.new(@sign, res_limbs)
+  end
+
+  # Bitwise Right Shift (arithmetic): a >> count
+  def >>(count : Int32) : BigInt
+    return self << (-count) if count < 0
+    return self if count == 0 || zero?
+
+    if positive?
+      limb_shift = count // 32
+      return BigInt.zero if limb_shift >= @limbs.size
+
+      bit_shift = (count % 32).to_u64
+      res_size = @limbs.size - limb_shift
+      res_limbs = Array(UInt64).new(res_size) { 0_u64 }
+
+      if bit_shift == 0_u64
+        i = 0
+        while i < res_size
+          res_limbs[i] = @limbs[i + limb_shift]
+          i = i + 1
+        end
+      else
+        carry = 0_u64
+        lshift = 32_u64 - bit_shift
+        i = @limbs.size - 1
+        while i >= limb_shift
+          val = @limbs[i]
+          new_val = (val.unsafe_shr(bit_shift)) | carry
+          carry = (val.unsafe_shl(lshift)) & 0xFFFFFFFF_u64
+          res_limbs[i - limb_shift] = new_val
+          i = i - 1
+        end
+      end
+      BigInt.new(1, res_limbs)
+    else
+      # Two's complement arithmetic right shift for negative numbers: floor(self / 2^count)
+      # For a < 0, let a = -m.
+      # If m is divisible by 2^count, result is -(m >> count).
+      # Otherwise, result is -((m >> count) + 1).
+      m = abs
+      shifted = m >> count
+      # Check if lower bits of m are non-zero
+      limb_shift = count // 32
+      bit_shift = count % 32
+      has_remainder = false
+      i = 0
+      while i < limb_shift && i < m.limbs.size
+        if m.limbs[i] != 0_u64
+          has_remainder = true
+          break
+        end
+        i = i + 1
+      end
+      if !has_remainder && limb_shift < m.limbs.size && bit_shift > 0
+        mask = (1_u64.unsafe_shl(bit_shift.to_u64)) - 1_u64
+        has_remainder = (m.limbs[limb_shift] & mask) != 0_u64
+      end
+
+      if has_remainder
+        -(shifted + BigInt.one)
+      else
+        -shifted
+      end
+    end
+  end
+
+  # Helper: bitwise magnitude operation with sign inversion
+  protected def twos_mag : BigInt
+    abs - BigInt.one
+  end
+
+  # Bitwise AND (&) with two's complement semantics
+  def &(other : BigInt) : BigInt
+    if positive? && other.positive?
+      n = @limbs.size < other.limbs.size ? @limbs.size : other.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        res << (@limbs[i] & other.limbs[i])
+        i = i + 1
+      end
+      BigInt.new(1, res)
+    elsif positive? && other.negative?
+      # a & (~mb)
+      mb = other.twos_mag
+      n = @limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        b_limb = i < mb.limbs.size ? mb.limbs[i] : 0_u64
+        res << (@limbs[i] & (b_limb ^ 0xFFFFFFFF_u64))
+        i = i + 1
+      end
+      BigInt.new(1, res)
+    elsif negative? && other.positive?
+      other & self
+    elsif negative? && other.negative?
+      # (~ma) & (~mb) = ~(ma | mb) = -((ma | mb) + 1)
+      ma = twos_mag
+      mb = other.twos_mag
+      n = ma.limbs.size > mb.limbs.size ? ma.limbs.size : mb.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < ma.limbs.size ? ma.limbs[i] : 0_u64
+        vb = i < mb.limbs.size ? mb.limbs[i] : 0_u64
+        res << (va | vb)
+        i = i + 1
+      end
+      -(BigInt.new(1, res) + BigInt.one)
+    else
+      BigInt.zero
+    end
+  end
+
+  # Bitwise OR (|) with two's complement semantics
+  def |(other : BigInt) : BigInt
+    return other if zero?
+    return self if other.zero?
+
+    if positive? && other.positive?
+      n = @limbs.size > other.limbs.size ? @limbs.size : other.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < @limbs.size ? @limbs[i] : 0_u64
+        vb = i < other.limbs.size ? other.limbs[i] : 0_u64
+        res << (va | vb)
+        i = i + 1
+      end
+      BigInt.new(1, res)
+    elsif positive? && other.negative?
+      # a | (~mb) = ~ (mb & ~a) = -((mb & ~a) + 1)
+      mb = other.twos_mag
+      n = mb.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < @limbs.size ? @limbs[i] : 0_u64
+        vb = mb.limbs[i]
+        res << (vb & (va ^ 0xFFFFFFFF_u64))
+        i = i + 1
+      end
+      -(BigInt.new(1, res) + BigInt.one)
+    elsif negative? && other.positive?
+      other | self
+    else
+      # (~ma) | (~mb) = ~(ma & mb) = -((ma & mb) + 1)
+      ma = twos_mag
+      mb = other.twos_mag
+      n = ma.limbs.size < mb.limbs.size ? ma.limbs.size : mb.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        res << (ma.limbs[i] & mb.limbs[i])
+        i = i + 1
+      end
+      -(BigInt.new(1, res) + BigInt.one)
+    end
+  end
+
+  # Bitwise XOR (^) with two's complement semantics
+  def ^(other : BigInt) : BigInt
+    return other if zero?
+    return self if other.zero?
+
+    if positive? && other.positive?
+      n = @limbs.size > other.limbs.size ? @limbs.size : other.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < @limbs.size ? @limbs[i] : 0_u64
+        vb = i < other.limbs.size ? other.limbs[i] : 0_u64
+        res << (va ^ vb)
+        i = i + 1
+      end
+      BigInt.new(1, res)
+    elsif positive? && other.negative?
+      # a ^ (~mb) = ~(a ^ mb) = -((a ^ mb) + 1)
+      mb = other.twos_mag
+      n = @limbs.size > mb.limbs.size ? @limbs.size : mb.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < @limbs.size ? @limbs[i] : 0_u64
+        vb = i < mb.limbs.size ? mb.limbs[i] : 0_u64
+        res << (va ^ vb)
+        i = i + 1
+      end
+      -(BigInt.new(1, res) + BigInt.one)
+    elsif negative? && other.positive?
+      other ^ self
+    else
+      # (~ma) ^ (~mb) = ma ^ mb
+      ma = twos_mag
+      mb = other.twos_mag
+      n = ma.limbs.size > mb.limbs.size ? ma.limbs.size : mb.limbs.size
+      res = Array(UInt64).new(n)
+      i = 0
+      while i < n
+        va = i < ma.limbs.size ? ma.limbs[i] : 0_u64
+        vb = i < mb.limbs.size ? mb.limbs[i] : 0_u64
+        res << (va ^ vb)
+        i = i + 1
+      end
+      BigInt.new(1, res)
+    end
+  end
+
+  # Converts this BigInt to a string in the given base (default 10).
+  # Bases 2..36 supported. Digits above 9 are lowercase 'a'..'z'.
+  def to_s(base : Int32) : String
+    raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36
+    return "0" if zero?
+
+    prefix = @sign < 0 ? "-" : ""
+
+    if base == 16
+      # Hex conversion: 8 hex characters per 32-bit limb
+      res = prefix
+      i = @limbs.size - 1
+      first = true
+      while i >= 0
+        limb = @limbs[i]
+        s = limb.to_s(16)
+        if first
+          res = res + s
+          first = false
+        else
+          pad = 8 - s.size
+          p = 0
+          while p < pad
+            res = res + "0"
+            p = p + 1
+          end
+          res = res + s
+        end
+        i = i - 1
+      end
+      return res
+    elsif base == 2
+      # Binary conversion
+      res = prefix
+      i = @limbs.size - 1
+      first = true
+      while i >= 0
+        limb = @limbs[i]
+        s = limb.to_s(2)
+        if first
+          res = res + s
+          first = false
+        else
+          pad = 32 - s.size
+          p = 0
+          while p < pad
+            res = res + "0"
+            p = p + 1
+          end
+          res = res + s
+        end
+        i = i - 1
+      end
+      return res
+    elsif base == 10
+      # Chunked division by 10^9 (9 decimal digits per chunk)
+      chunks = Array(UInt64).new
+      cur = abs
+      ten_to_nine = BigInt.new(1000000000_i64)
+
+      while !cur.zero?
+        qr = cur.divmod(ten_to_nine)
+        cur = qr[0]
+        rem_big = qr[1]
+        rem_val = rem_big.limbs.empty? ? 0_u64 : rem_big.limbs[0]
+        chunks << rem_val
+      end
+
+      res = prefix
+      i = chunks.size - 1
+      first = true
+      while i >= 0
+        chunk = chunks[i]
+        s = chunk.to_s
+        if first
+          res = res + s
+          first = false
+        else
+          pad = 9 - s.size
+          p = 0
+          while p < pad
+            res = res + "0"
+            p = p + 1
+          end
+          res = res + s
+        end
+        i = i - 1
+      end
+      return res
+    else
+      # General base conversion: repeated single-limb division
+      radix_u64 = base.to_u64
+      digits = Array(Char).new
+      cur = abs
+      while !cur.zero?
+        qr = cur.divmod(BigInt.new(base.to_i64))
+        cur = qr[0]
+        rem_big = qr[1]
+        rem_val = rem_big.limbs.empty? ? 0 : rem_big.limbs[0].to_i32
+        char = rem_val < 10 ? (48 + rem_val).chr : (97 + (rem_val - 10)).chr
+        digits << char
+      end
+      res = prefix
+      i = digits.size - 1
+      while i >= 0
+        res = res + digits[i].to_s
+        i = i - 1
+      end
+      return res
+    end
+  end
+
+  def to_s : String
+    to_s(10)
+  end
+
+  # Converts to Int64 if the value fits, or nil if it overflows.
+  def to_i64? : Int64?
+    return 0_i64 if zero?
+    return nil if @limbs.size > 2
+
+    if @limbs.size == 1
+      val = @limbs[0].to_i64
+      return @sign < 0 ? -val : val
+    end
+
+    # limbs.size == 2
+    high = @limbs[1]
+    low = @limbs[0]
+    if @sign > 0
+      return nil if high > 0x7FFFFFFF_u64
+      uval = (high.unsafe_shl(32_u64)) | low
+      uval.to_i64
+    else
+      return nil if high > 0x80000000_u64
+      return nil if high == 0x80000000_u64 && low > 0_u64
+      if high == 0x80000000_u64 && low == 0_u64
+        return -9223372036854775808_i64
+      end
+      uval = (high.unsafe_shl(32_u64)) | low
+      0_i64 - uval.to_i64
+    end
+  end
+
+  # Converts to Int64, raising an overflow error if the value exceeds Int64 range.
+  def to_i64 : Int64
+    to_i64? || raise "BigInt overflow: #{self} does not fit in Int64"
+  end
+
+  # Converts to Int32 if the value fits, or nil if it overflows.
+  def to_i32? : Int32?
+    return 0 if zero?
+    return nil if @limbs.size > 1
+
+    val = @limbs[0]
+    if @sign > 0
+      return nil if val > 0x7FFFFFFF_u64
+      val.to_i32
+    else
+      return nil if val > 0x80000000_u64
+      return -2147483648 if val == 0x80000000_u64
+      0 - val.to_i32
+    end
+  end
+
+  # Converts to Int32, raising an overflow error if the value exceeds Int32 range.
+  def to_i32 : Int32
+    to_i32? || raise "BigInt overflow: #{self} does not fit in Int32"
+  end
+
+  def to_i : Int32
+    to_i32
+  end
+
+  def to_big : BigInt
+    self
+  end
+
+  def to_big_d : BigDecimal
+    BigDecimal.new(self, 0)
+  end
+
+  def to_big_r : BigRational
+    BigRational.new(self, BigInt.one)
+  end
+
+  def to_big_f : BigFloat
+    BigFloat.new(self)
+  end
+
+  # 32-bit hash value combining sign and limb bits
+  def hash : Int32
+    return 0 if zero?
+    h = @sign
+    i = 0
+    while i < @limbs.size
+      limb = @limbs[i]
+      h = ((h.unsafe_shl(5)) - h) ^ (limb & 0x7FFFFFFF_u64).to_i32
+      i = i + 1
+    end
+    h
+  end
+
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Cmp for BigInt
+  def cmp(other : self) : Int32
+    self.cmp(other)
+  end
+end
+
+impl Num for BigInt
+  def self.zero : self
+    BigInt.new(0, Array(UInt64).new)
+  end
+
+  def self.one : self
+    arr = Array(UInt64).new(1)
+    arr << 1_u64
+    BigInt.new(1, arr)
+  end
+
+  def add(other : self) : self
+    self + other
+  end
+
+  def mul(other : self) : self
+    self * other
+  end
+end
+
+impl Hashable for BigInt
+  def hash_key : Int32
+    self.hash
+  end
+end
+
+pub struct BigDecimal
+  getter value : BigInt
+  getter scale : Int32
+
+  def initialize(@value : BigInt, @scale : Int32 = 0)
+  end
+
+  def initialize(num : Int32 = 0, scale : Int32 = 0)
+    @value = BigInt.new(num.to_i64)
+    @scale = scale
+  end
+
+  def initialize(num : Int64, scale : Int32 = 0)
+    @value = BigInt.new(num)
+    @scale = scale
+  end
+
+  def initialize(str : String)
+    raise "empty BigDecimal string" if str.empty?
+    negative = false
+    idx = 0
+    len = str.bytesize
+    ptr = str.to_unsafe
+
+    if ptr[0] == 45_u8 # '-'
+      negative = true
+      idx = 1
+    elsif ptr[0] == 43_u8 # '+'
+      idx = 1
+    end
+
+    digits = [] of Char
+    decimal_point = -1
+    exp = 0
+    exp_negative = false
+    has_exp = false
+
+    while idx < len
+      byte = ptr[idx]
+      if byte == 46_u8 # '.'
+        raise "multiple decimal points" if decimal_point >= 0 || has_exp
+        decimal_point = digits.size
+      elsif byte == 101_u8 || byte == 69_u8 # 'e' or 'E'
+        has_exp = true
+        idx = idx + 1
+        if idx < len && ptr[idx] == 45_u8 # '-'
+          exp_negative = true
+          idx = idx + 1
+        elsif idx < len && ptr[idx] == 43_u8 # '+'
+          idx = idx + 1
+        end
+        exp_digits = 0
+        while idx < len
+          eb = ptr[idx]
+          if eb >= 48_u8 && eb <= 57_u8
+            exp_digits = exp_digits * 10 + (eb - 48_u8).to_i32
+          else
+            raise "invalid exponent character"
+          end
+          idx = idx + 1
+        end
+        exp = exp_negative ? -exp_digits : exp_digits
+        break
+      elsif byte >= 48_u8 && byte <= 57_u8
+        digits << byte.to_i32.chr
+      else
+        raise "invalid BigDecimal character"
+      end
+      idx = idx + 1
+    end
+
+    raise "no digits in BigDecimal" if digits.empty?
+
+    digit_str = digits.join("")
+    frac_len = decimal_point >= 0 ? (digits.size - decimal_point) : 0
+    final_scale = frac_len - exp
+
+    val = BigInt.new(digit_str)
+    @value = negative ? -val : val
+    @scale = final_scale
+  end
+
+  def self.zero : BigDecimal
+    BigDecimal.new(BigInt.zero, 0)
+  end
+
+  def self.one : BigDecimal
+    BigDecimal.new(BigInt.one, 0)
+  end
+
+  def zero? : Bool
+    @value.zero?
+  end
+
+  def positive? : Bool
+    @value.positive?
+  end
+
+  def negative? : Bool
+    @value.negative?
+  end
+
+  def abs : BigDecimal
+    BigDecimal.new(@value.abs, @scale)
+  end
+
+  def negate : BigDecimal
+    BigDecimal.new(-@value, @scale)
+  end
+
+  def - : BigDecimal
+    negate
+  end
+
+  def + : BigDecimal
+    self
+  end
+
+  protected def self.align(a : BigDecimal, b : BigDecimal) : ::Tuple(BigInt, BigInt, Int32)
+    if a.scale == b.scale
+      {a.value, b.value, a.scale}
+    elsif a.scale > b.scale
+      diff = a.scale - b.scale
+      factor = BigInt.new(10_i64) ** diff
+      {a.value, b.value * factor, a.scale}
+    else
+      diff = b.scale - a.scale
+      factor = BigInt.new(10_i64) ** diff
+      {a.value * factor, b.value, b.scale}
+    end
+  end
+
+  def +(other : BigDecimal) : BigDecimal
+    tup = BigDecimal.align(self, other)
+    BigDecimal.new(tup[0] + tup[1], tup[2])
+  end
+
+  def +(other : Int32 | Int64) : BigDecimal
+    self + BigDecimal.new(other)
+  end
+
+  def -(other : BigDecimal) : BigDecimal
+    tup = BigDecimal.align(self, other)
+    BigDecimal.new(tup[0] - tup[1], tup[2])
+  end
+
+  def -(other : Int32 | Int64) : BigDecimal
+    self - BigDecimal.new(other)
+  end
+
+  def *(other : BigDecimal) : BigDecimal
+    BigDecimal.new(@value * other.value, @scale + other.scale)
+  end
+
+  def *(other : Int32 | Int64) : BigDecimal
+    self * BigDecimal.new(other)
+  end
+
+  def /(other : BigDecimal) : BigDecimal
+    raise "division by zero" if other.zero?
+    prec = 20
+    scaled_val = @value * (BigInt.new(10_i64) ** prec)
+    quot = scaled_val // other.value
+    BigDecimal.new(quot, @scale - other.scale + prec)
+  end
+
+  def /(other : Int32 | Int64) : BigDecimal
+    self / BigDecimal.new(other)
+  end
+
+  def //(other : BigDecimal) : BigDecimal
+    raise "division by zero" if other.zero?
+    tup = BigDecimal.align(self, other)
+    BigDecimal.new(tup[0] // tup[1], 0)
+  end
+
+  def %(other : BigDecimal) : BigDecimal
+    raise "division by zero" if other.zero?
+    tup = BigDecimal.align(self, other)
+    BigDecimal.new(tup[0] % tup[1], tup[2])
+  end
+
+  def cmp(other : BigDecimal) : Int32
+    if @value.sign != other.value.sign
+      return @value.sign < other.value.sign ? -1 : 1
+    end
+    tup = BigDecimal.align(self, other)
+    tup[0].cmp(tup[1])
+  end
+
+  def <=>(other : BigDecimal) : Int32
+    cmp(other)
+  end
+
+  def ==(other : BigDecimal) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : BigDecimal) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : BigDecimal) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : BigDecimal) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : BigDecimal) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : BigDecimal) : Bool
+    cmp(other) >= 0
+  end
+
+  def to_s : String
+    return "0.0" if zero? && @scale == 1
+    return "0" if zero?
+    v_str = @value.abs.to_s
+    prefix = negative? ? "-" : ""
+
+    if @scale <= 0
+      zeros = ""
+      i = 0
+      while i < -@scale
+        zeros = zeros + "0"
+        i = i + 1
+      end
+      prefix + v_str + zeros
+    elsif v_str.size <= @scale
+      leading_zeros = ""
+      i = 0
+      while i < (@scale - v_str.size)
+        leading_zeros = leading_zeros + "0"
+        i = i + 1
+      end
+      prefix + "0." + leading_zeros + v_str
+    else
+      split_pos = v_str.size - @scale
+      int_part = v_str[0, split_pos]
+      frac_part = v_str[split_pos, @scale]
+      prefix + int_part + "." + frac_part
+    end
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  def to_big_d : BigDecimal
+    self
+  end
+
+  def to_big_i : BigInt
+    @scale <= 0 ? @value * (BigInt.new(10_i64) ** (-@scale)) : @value // (BigInt.new(10_i64) ** @scale)
+  end
+
+  def to_f64 : Float64
+    to_s.to_f
+  end
+
+  def to_f : Float64
+    to_f64
+  end
+
+  def to_i64 : Int64
+    to_big_i.to_i64
+  end
+
+  def to_i32 : Int32
+    to_big_i.to_i32
+  end
+
+  def hash : Int32
+    @value.hash ^ @scale
+  end
+
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Cmp for BigDecimal
+  def cmp(other : self) : Int32
+    self.cmp(other)
+  end
+end
+
+impl Num for BigDecimal
+  def self.zero : self
+    BigDecimal.new(BigInt.zero, 0)
+  end
+
+  def self.one : self
+    BigDecimal.new(BigInt.one, 0)
+  end
+
+  def add(other : self) : self
+    self + other
+  end
+
+  def mul(other : self) : self
+    self * other
+  end
+end
+
+impl Hashable for BigDecimal
+  def hash_key : Int32
+    self.hash
+  end
+end
+
+pub struct BigRational
+  getter numerator : BigInt
+  getter denominator : BigInt
+
+  def initialize(numerator : BigInt, denominator : BigInt)
+    raise "division by zero" if denominator.zero?
+    if denominator.negative?
+      numerator = -numerator
+      denominator = -denominator
+    end
+    if numerator.zero?
+      @numerator = BigInt.zero
+      @denominator = BigInt.one
+    else
+      g = numerator.abs.gcd(denominator)
+      @numerator = numerator // g
+      @denominator = denominator // g
+    end
+  end
+
+  def initialize(num : Int64 = 0_i64, den : Int64 = 1_i64)
+    initialize(BigInt.new(num), BigInt.new(den))
+  end
+
+  def initialize(num : Int32, den : Int32 = 1)
+    initialize(BigInt.new(num.to_i64), BigInt.new(den.to_i64))
+  end
+
+  def initialize(str : String)
+    slash_idx = str.index('/')
+    if slash_idx
+      n_str = str[0, slash_idx]
+      d_str = str[slash_idx + 1, str.bytesize - slash_idx - 1]
+      initialize(BigInt.new(n_str), BigInt.new(d_str))
+    else
+      initialize(BigInt.new(str), BigInt.one)
+    end
+  end
+
+  def self.zero : BigRational
+    BigRational.new(BigInt.zero, BigInt.one)
+  end
+
+  def self.one : BigRational
+    BigRational.new(BigInt.one, BigInt.one)
+  end
+
+  def zero? : Bool
+    @numerator.zero?
+  end
+
+  def positive? : Bool
+    @numerator.positive?
+  end
+
+  def negative? : Bool
+    @numerator.negative?
+  end
+
+  def abs : BigRational
+    BigRational.new(@numerator.abs, @denominator)
+  end
+
+  def negate : BigRational
+    BigRational.new(-@numerator, @denominator)
+  end
+
+  def - : BigRational
+    negate
+  end
+
+  def + : BigRational
+    self
+  end
+
+  def inv : BigRational
+    raise "division by zero in inv" if @numerator.zero?
+    BigRational.new(@denominator, @numerator)
+  end
+
+  def +(other : BigRational) : BigRational
+    BigRational.new(@numerator * other.denominator + other.numerator * @denominator, @denominator * other.denominator)
+  end
+
+  def +(other : Int32 | Int64 | BigInt) : BigRational
+    self + BigRational.new(other.to_big_i, BigInt.one)
+  end
+
+  def -(other : BigRational) : BigRational
+    BigRational.new(@numerator * other.denominator - other.numerator * @denominator, @denominator * other.denominator)
+  end
+
+  def -(other : Int32 | Int64 | BigInt) : BigRational
+    self - BigRational.new(other.to_big_i, BigInt.one)
+  end
+
+  def *(other : BigRational) : BigRational
+    BigRational.new(@numerator * other.numerator, @denominator * other.denominator)
+  end
+
+  def *(other : Int32 | Int64 | BigInt) : BigRational
+    self * BigRational.new(other.to_big_i, BigInt.one)
+  end
+
+  def /(other : BigRational) : BigRational
+    raise "division by zero" if other.zero?
+    BigRational.new(@numerator * other.denominator, @denominator * other.numerator)
+  end
+
+  def /(other : Int32 | Int64 | BigInt) : BigRational
+    self / BigRational.new(other.to_big_i, BigInt.one)
+  end
+
+  def **(exp : Int32) : BigRational
+    if exp == 0
+      BigRational.one
+    elsif exp > 0
+      BigRational.new(@numerator ** exp, @denominator ** exp)
+    else
+      BigRational.new(@denominator ** (-exp), @numerator ** (-exp))
+    end
+  end
+
+  def cmp(other : BigRational) : Int32
+    (@numerator * other.denominator).cmp(other.numerator * @denominator)
+  end
+
+  def <=>(other : BigRational) : Int32
+    cmp(other)
+  end
+
+  def ==(other : BigRational) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : BigRational) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : BigRational) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : BigRational) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : BigRational) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : BigRational) : Bool
+    cmp(other) >= 0
+  end
+
+  def to_s : String
+    @denominator == 1_i64 ? @numerator.to_s : "#{@numerator}/#{@denominator}"
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  def to_big_r : BigRational
+    self
+  end
+
+  def to_big_i : BigInt
+    @numerator // @denominator
+  end
+
+  def to_big_d : BigDecimal
+    BigDecimal.new(@numerator) / BigDecimal.new(@denominator)
+  end
+
+  def to_f64 : Float64
+    to_big_d.to_f64
+  end
+
+  def hash : Int32
+    @numerator.hash ^ @denominator.hash
+  end
+
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Cmp for BigRational
+  def cmp(other : self) : Int32
+    self.cmp(other)
+  end
+end
+
+impl Num for BigRational
+  def self.zero : self
+    BigRational.new(BigInt.zero, BigInt.one)
+  end
+
+  def self.one : self
+    BigRational.new(BigInt.one, BigInt.one)
+  end
+
+  def add(other : self) : self
+    self + other
+  end
+
+  def mul(other : self) : self
+    self * other
+  end
+end
+
+impl Hashable for BigRational
+  def hash_key : Int32
+    self.hash
+  end
+end
+
+pub struct BigFloat
+  getter dec : BigDecimal
+
+  def initialize(@dec : BigDecimal)
+  end
+
+  def initialize(str : String)
+    @dec = BigDecimal.new(str)
+  end
+
+  def initialize(num : BigInt)
+    @dec = BigDecimal.new(num, 0)
+  end
+
+  def initialize(num : BigRational)
+    @dec = num.to_big_d
+  end
+
+  def initialize(num : Float64)
+    @dec = BigDecimal.new(num.to_s)
+  end
+
+  def initialize(num : Int32)
+    @dec = BigDecimal.new(num, 0)
+  end
+
+  def initialize(num : Int64)
+    @dec = BigDecimal.new(num, 0)
+  end
+
+  def self.zero : BigFloat
+    BigFloat.new(BigDecimal.zero)
+  end
+
+  def self.one : BigFloat
+    BigFloat.new(BigDecimal.one)
+  end
+
+  def zero? : Bool
+    @dec.zero?
+  end
+
+  def positive? : Bool
+    @dec.positive?
+  end
+
+  def negative? : Bool
+    @dec.negative?
+  end
+
+  def abs : BigFloat
+    BigFloat.new(@dec.abs)
+  end
+
+  def negate : BigFloat
+    BigFloat.new(@dec.negate)
+  end
+
+  def - : BigFloat
+    negate
+  end
+
+  def + : BigFloat
+    self
+  end
+
+  def +(other : BigFloat) : BigFloat
+    BigFloat.new(@dec + other.dec)
+  end
+
+  def -(other : BigFloat) : BigFloat
+    BigFloat.new(@dec - other.dec)
+  end
+
+  def *(other : BigFloat) : BigFloat
+    BigFloat.new(@dec * other.dec)
+  end
+
+  def /(other : BigFloat) : BigFloat
+    BigFloat.new(@dec / other.dec)
+  end
+
+  def cmp(other : BigFloat) : Int32
+    @dec.cmp(other.dec)
+  end
+
+  def <=>(other : BigFloat) : Int32
+    cmp(other)
+  end
+
+  def ==(other : BigFloat) : Bool
+    cmp(other) == 0
+  end
+
+  def !=(other : BigFloat) : Bool
+    cmp(other) != 0
+  end
+
+  def <(other : BigFloat) : Bool
+    cmp(other) < 0
+  end
+
+  def <=(other : BigFloat) : Bool
+    cmp(other) <= 0
+  end
+
+  def >(other : BigFloat) : Bool
+    cmp(other) > 0
+  end
+
+  def >=(other : BigFloat) : Bool
+    cmp(other) >= 0
+  end
+
+  def to_s : String
+    @dec.to_s
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  def to_f64 : Float64
+    @dec.to_f64
+  end
+
+  def to_big_f : BigFloat
+    self
+  end
+
+  def to_big_d : BigDecimal
+    @dec
+  end
+
+  def to_big_i : BigInt
+    @dec.to_big_i
+  end
+
+  def hash : Int32
+    @dec.hash
+  end
+
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Cmp for BigFloat
+  def cmp(other : self) : Int32
+    self.cmp(other)
+  end
+end
+
+impl Num for BigFloat
+  def self.zero : self
+    BigFloat.new(BigDecimal.new(BigInt.zero, 0))
+  end
+
+  def self.one : self
+    BigFloat.new(BigDecimal.new(BigInt.one, 0))
+  end
+
+  def add(other : self) : self
+    self + other
+  end
+
+  def mul(other : self) : self
+    self * other
+  end
+end
+
+impl Hashable for BigFloat
+  def hash_key : Int32
+    self.hash
+  end
+end
+
+struct ::Int64
+  def to_big : Std::Big::BigInt
+    Std::Big::BigInt.new(self)
+  end
+
+  def to_big_i : Std::Big::BigInt
+    to_big
+  end
+
+  def to_big_d : Std::Big::BigDecimal
+    Std::Big::BigDecimal.new(self, 0)
+  end
+
+  def to_big_r : Std::Big::BigRational
+    Std::Big::BigRational.new(self, 1_i64)
+  end
+
+  def to_big_f : Std::Big::BigFloat
+    Std::Big::BigFloat.new(self)
+  end
+
+  def +(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big + other
+  end
+
+  def -(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big - other
+  end
+
+  def *(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big * other
+  end
+
+  def ==(other : Std::Big::BigInt) : Bool
+    other == self
+  end
+
+  def <=>(other : Std::Big::BigInt) : Int32
+    to_big <=> other
+  end
+end
+
+struct ::Int32
+  def to_big : Std::Big::BigInt
+    Std::Big::BigInt.new(self.to_i64)
+  end
+
+  def to_big_i : Std::Big::BigInt
+    to_big
+  end
+
+  def to_big_d : Std::Big::BigDecimal
+    Std::Big::BigDecimal.new(self, 0)
+  end
+
+  def to_big_r : Std::Big::BigRational
+    Std::Big::BigRational.new(self, 1)
+  end
+
+  def to_big_f : Std::Big::BigFloat
+    Std::Big::BigFloat.new(self)
+  end
+
+  def +(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big + other
+  end
+
+  def -(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big - other
+  end
+
+  def *(other : Std::Big::BigInt) : Std::Big::BigInt
+    to_big * other
+  end
+
+  def ==(other : Std::Big::BigInt) : Bool
+    other == self
+  end
+
+  def <=>(other : Std::Big::BigInt) : Int32
+    to_big <=> other
+  end
+end
+
+class ::String
+  def to_big_i : Std::Big::BigInt
+    Std::Big::BigInt.new(self)
+  end
+
+  def to_big_d : Std::Big::BigDecimal
+    Std::Big::BigDecimal.new(self)
+  end
+
+  def to_big_r : Std::Big::BigRational
+    Std::Big::BigRational.new(self)
+  end
+
+  def to_big_f : Std::Big::BigFloat
+    Std::Big::BigFloat.new(self)
+  end
+end

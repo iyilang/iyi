@@ -1,0 +1,61 @@
+module std/number
+
+enum RoundingMode
+  TIES_EVEN
+  TIES_AWAY
+  TO_ZERO
+  TO_POSITIVE
+  TO_NEGATIVE
+end
+
+struct ::Number
+  def self.zero : self
+    new(0)
+  end
+
+  def self.additive_identity : self
+    zero
+  end
+
+  def self.multiplicative_identity : self
+    new(1)
+  end
+
+  def + : self
+    self
+  end
+
+  def abs : self
+    self < 0 ? -self : self
+  end
+
+  def abs2 : self
+    self * self
+  end
+
+  def sign : Int32
+    self < 0 ? -1 : (self == 0 ? 0 : 1)
+  end
+
+  def zero? : ::Bool
+    self == 0
+  end
+
+  def positive? : ::Bool
+    self > 0
+  end
+
+  def negative? : ::Bool
+    self < 0
+  end
+
+  def divmod(number)
+    q = (self // number)
+    r = self % number
+    {q, r}
+  end
+
+  def round(mode : RoundingMode = RoundingMode::TIES_EVEN) : self
+    round
+  end
+end

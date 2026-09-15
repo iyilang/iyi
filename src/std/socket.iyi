@@ -94,6 +94,7 @@ pub class IyiSocket
   end
 
   def accept : IyiSocket
+    raise "socket is closed" if @fd < 0
     addr = Pointer(UInt8).malloc(16_u64)
     len = 16_u32
     client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
@@ -108,6 +109,7 @@ pub class IyiSocket
     # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
     # neither the count nor the call; the enumerable's sentence for it.
     raise "negative count: #{max_bytes}" if max_bytes < 0
+    raise "socket is closed" if @fd < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     count = IyiSocket.__sys_recv(@fd, buffer, max_bytes.to_u64)
     raise "cannot read from socket" if count < 0_i64
@@ -120,6 +122,7 @@ pub class IyiSocket
 
   def read(buffer : Pointer(UInt8), count : Int32) : Int32
     raise "negative count: #{count}" if count < 0
+    raise "socket is closed" if @fd < 0
     n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
     raise "cannot read from socket" if n < 0_i64
     n.to_i32
@@ -134,6 +137,9 @@ pub class IyiSocket
   end
 
   def write(contents : String) : Int32
+    # Checked before the loop: `write("")` on a closed socket has nothing
+    # to send and answered 0 where `write("x")` refused.
+    raise "socket is closed" if @fd < 0
     written = 0
     total = contents.bytesize
     bytes = contents.to_unsafe
@@ -146,6 +152,7 @@ pub class IyiSocket
   end
 
   def write(buffer : Pointer(UInt8), count : Int32) : Int32
+    raise "socket is closed" if @fd < 0
     written = 0
     while written < count
       n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
@@ -177,6 +184,7 @@ pub class IyiSocket
   end
 
   def local_port : Int32
+    raise "socket is closed" if @fd < 0
     addr = Pointer(UInt8).malloc(16_u64)
     len = 16_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
@@ -188,6 +196,7 @@ pub class IyiSocket
   end
 
   def local_address : String
+    raise "socket is closed" if @fd < 0
     addr = Pointer(UInt8).malloc(16_u64)
     len = 16_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
@@ -198,6 +207,10 @@ pub class IyiSocket
 
   # --- Address and Struct Construction ---
 
+  # Dotted-decimal IPv4 only: four octets of 0 to 255, no leading zero
+  # (`"010.1.1.1"` is refused; glibc's `inet_aton` reads `010` as octal 8,
+  # CVE-2021-29921, so it must not quietly be 10 here), plus `localhost`.
+  # The refusal inspects the host so a stray space shows.
   def self.parse_ip(host : String) : IPv4Address
     return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"
     return IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8) if host == "0.0.0.0" || host == ""
@@ -212,8 +225,8 @@ pub class IyiSocket
     while index < len
       ch = host[index]
       if ch == '.'
-        raise "cannot resolve address: #{host}" unless has_digit
-        raise "cannot resolve address: #{host}" if curr > 255 || parts >= 4
+        raise "cannot resolve address: #{host.inspect}" unless has_digit
+        raise "cannot resolve address: #{host.inspect}" if curr > 255 || parts >= 4
         bytes[parts] = curr.to_u8
         parts = parts + 1
         curr = 0
@@ -222,18 +235,21 @@ pub class IyiSocket
         # Bounded while it accumulates: `"999999999999.1.1.1"` left `Int32`
         # on the checked `*` and died of "arithmetic overflow" instead of
         # saying which address it could not resolve.
-        raise "cannot resolve address: #{host}" if curr > 255
+        raise "cannot resolve address: #{host.inspect}" if curr > 255
+        raise "cannot resolve address: #{host.inspect}: an octet with a leading zero is not decimal" if has_digit && curr == 0
         curr = curr * 10 + (ch.ord - 48)
         has_digit = true
+      elsif ch == ':'
+        raise "cannot resolve address: #{host.inspect}: IPv6 is not supported, and a port is a separate argument"
       else
-        raise "cannot resolve address: #{host}"
+        raise "cannot resolve address: #{host.inspect}"
       end
       index = index + 1
     end
 
-    raise "cannot resolve address: #{host}" unless has_digit
-    raise "cannot resolve address: #{host}" if curr > 255
-    raise "cannot resolve address: #{host}" unless parts == 3
+    raise "cannot resolve address: #{host.inspect}" unless has_digit
+    raise "cannot resolve address: #{host.inspect}" if curr > 255
+    raise "cannot resolve address: #{host.inspect}" unless parts == 3
     bytes[3] = curr.to_u8
 
     IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])

@@ -28,6 +28,12 @@ puts "  RFC 4648, with padding"
 puts "\n== decode"
 assert_str "hi", Base64.decode("aGk="), "pad"
 assert_str "hello world", Base64.decode(Base64.encode("hello world")), "round trip"
+# What stays lenient next to the refusals the gate drives: missing or
+# partial padding, and whitespace anywhere, including between the `=`.
+assert_str "A", Base64.decode("QQ"), "missing padding"
+assert_str "A", Base64.decode("QQ="), "partial padding"
+assert_str "ABCA", Base64.decode("QUJD\nQQ=\n=\n"), "whitespace between groups and padding"
+assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
 puts "  decode and round trip"
 
 puts "\nALL CHECKS PASSED"

@@ -3,7 +3,11 @@
 # `encode` is the alphabet with `+` `/` and `=` padding, no line
 # breaks (RFC 4648 §4). `urlsafe_encode` uses `-` `_` and the same
 # padding. `decode` accepts both alphabets, ignores ASCII whitespace,
-# and panics on a byte that is neither.
+# and panics on a byte that is neither. Missing padding is allowed
+# (`"QQ"` is `"A"`), but nothing is dropped without a word: data after
+# the padding, data inside it (`"QU=JD"`), more `=` than the group
+# needs, and a final group of one character (`"Q"`, which cannot encode a
+# byte) are each refused.
 
 module std/base64
 
@@ -24,14 +28,31 @@ pub struct Base64
     o = 0
     acc = 0
     bits = 0
+    chars = 0
+    pads = 0
+    pads_needed = 0
     i = 0
     while i < n
       b = src[i]
       i = i + 1
       next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8
-      break if b == 61_u8 # '='
+      if b == 61_u8 # '='
+        if pads == 0
+          raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
+          raise "base64: padding with no group to close" if bits == 0
+          pads_needed = bits == 4 ? 2 : 1
+        end
+        pads = pads + 1
+        raise "base64: excess padding" if pads > pads_needed
+        next
+      end
       v = value_of(b)
       raise "base64: invalid byte #{b}" if v < 0
+      if pads > 0
+        raise "base64: discontinuous padding" if pads < pads_needed
+        raise "base64: data after padding"
+      end
+      chars = chars + 1
       acc = (acc << 6) | v
       bits = bits + 6
       if bits >= 8
@@ -40,6 +61,7 @@ pub struct Base64
         o = o + 1
       end
     end
+    raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
     String.new(o) { |dst| dst.copy_from(buf, o) }
   end
 

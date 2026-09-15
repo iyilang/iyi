@@ -122,6 +122,20 @@ assert_true(emoji.read_char == 'a', "read_char ascii")
 assert_true(emoji.read_char == '€', "read_char three bytes")
 assert_true(emoji.read_char == '🎉', "read_char four bytes")
 assert_true(emoji.read_char.nil?, "read_char nil at the end")
+# The edges of what a lead byte's first continuation may be: the smallest
+# three- and four-byte characters, the last before the surrogates, and
+# U+10FFFF. One past each is refused (see the gate).
+edges = Memory.new
+edges.write_byte(0xe0_u8); edges.write_byte(0xa0_u8); edges.write_byte(0x80_u8)
+edges.write_byte(0xf0_u8); edges.write_byte(0x90_u8); edges.write_byte(0x80_u8); edges.write_byte(0x80_u8)
+edges.write_byte(0xed_u8); edges.write_byte(0x9f_u8); edges.write_byte(0xbf_u8)
+edges.write_byte(0xf4_u8); edges.write_byte(0x8f_u8); edges.write_byte(0xbf_u8); edges.write_byte(0xbf_u8)
+edges.rewind
+assert_true(edges.read_char == '\u0800', "read_char E0 A0 80 is U+0800")
+assert_true(edges.read_char == '\u{10000}', "read_char F0 90 80 80 is U+10000")
+assert_true(edges.read_char == '\ud7ff', "read_char ED 9F BF is U+D7FF")
+assert_true(edges.read_char == '\u{10ffff}', "read_char F4 8F BF BF is U+10FFFF")
+assert_true(edges.read_char.nil?, "read_char nil after the edges")
 puts "  write, print, puts, <<, write_byte, read_bytes, read_byte, read_char, read_line, gets, read_all, lines, each_line, pos=, rewind, clear, close verified"
 
 # ---------------------------------------------------------------------------

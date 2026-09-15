@@ -147,7 +147,9 @@ echo "== what is not a port, and what is not an address"
 # here. `listen(70000)` used to pack the port into sixteen bits without
 # asking and bind 4464; `-1` bound 65535. The address parser accumulated
 # digits unbounded, so a long run of them left `Int32` and panicked about
-# arithmetic rather than naming the address it could not resolve.
+# arithmetic rather than naming the address it could not resolve; it read
+# `"010.1.1.1"` as 10.1.1.1 where glibc reads 8.1.1.1 (octal); and its
+# sentence did not inspect the host, so `" 1.2.3.4"` looked valid.
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
   printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
@@ -183,12 +185,60 @@ refuses "an address with too many digits" addr_long "cannot resolve address" \
   "IyiSocket.connect(\"999999999999.1.1.1\", 80).to_unsafe"
 refuses "an octet past 255" addr_octet "cannot resolve address" \
   "IyiSocket.connect(\"256.1.1.1\", 80).to_unsafe"
+refuses "an octet with a leading zero" addr_octal "cannot resolve address: \"010.1.1.1\": an octet with a leading zero" \
+  "IyiSocket.connect(\"010.1.1.1\", 80).to_unsafe"
+refuses "a one-digit leading zero" addr_octal_short "cannot resolve address: \"01.2.3.4\"" \
+  "IyiSocket.connect(\"01.2.3.4\", 80).to_unsafe"
+refuses "a host with a leading space, shown inspected" addr_space "cannot resolve address: \" 1.2.3.4\"" \
+  "IyiSocket.parse_ip(\" 1.2.3.4\").b0"
+refuses "a host with a trailing space, shown inspected" addr_tspace "cannot resolve address: \"1.2.3.4 \"" \
+  "IyiSocket.parse_ip(\"1.2.3.4 \").b0"
+refuses "an IPv6 address, named as such" addr_v6 "cannot resolve address: \"::1\": IPv6 is not supported" \
+  "IyiSocket.parse_ip(\"::1\").b0"
+
+echo
+echo "== a closed socket says so"
+
+# `close` sets the descriptor to -1 and `closed?` knows it, but each call on
+# a closed socket blamed the syscall ("cannot read from socket"), and
+# `write("")` had nothing to send and answered 0.
+refuses_after_close() { # refuses_after_close <label> <name> <statements on a closed connection c and listener l>
+  local label="$1" name="$2" body="$3"
+  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port)\nc.close\nl.close\n%s\n' \
+    "$body" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -q "socket is closed" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with 'socket is closed'"
+    tail -2 "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "socket is closed"\n' "$label" "$code"
+}
+refuses_after_close "a read after close" closed_read 'puts c.read(10).inspect'
+refuses_after_close "a write after close" closed_write 'puts c.write("x")'
+refuses_after_close "an empty write after close" closed_write_empty 'puts c.write("")'
+refuses_after_close "local_port after close" closed_port 'puts c.local_port'
+refuses_after_close "accept after close" closed_accept 'puts l.accept.closed?'
 
 echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer, and"
   echo "refused connections all verified, a port and an address are checked before"
-  echo "they are packed, and every check is proved to fail when broken."
+  echo "they are packed, a closed socket says so, and every check is proved to fail"
+  echo "when broken."
 else
   echo "Sockets: something above failed."
 fi

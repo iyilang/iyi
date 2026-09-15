@@ -17,7 +17,9 @@
 #     complement, the delimiter match, or the line end is caught by name.
 #   * What the module refuses: a negative count, a position past the buffer, a
 #     write to a reader, a read from a writer, a decode that runs out of bytes,
-#     malformed UTF-8, a read after close - each a panic with a sentence.
+#     malformed UTF-8 (a stray continuation byte, a lead byte that is not one,
+#     an overlong form, a surrogate, a code point past U+10FFFF), a read after
+#     close - each a panic with a sentence.
 #   * Dependency floor: the exercise binary asks the machine for nothing new.
 #
 # Needs bin/iyi, python3, `nm`, and `otool` on Darwin or `readelf` on
@@ -332,6 +334,53 @@ io_panics_with "a continuation byte that is not one" utf8_follow "malformed UTF-
   'm = Memory.new
 m.write_byte(0xc3_u8)
 m.write_byte(0x41_u8)
+m.rewind
+puts m.read_char'
+# Each of these decoded before (C0 80 to U+0000, ED A0 80 to a surrogate,
+# F4 90 80 80 and F7 BF BF BF to code points past U+10FFFF): the first
+# continuation byte is held to the range its lead allows.
+io_panics_with "an overlong two-byte lead (C0)" utf8_overlong2 "malformed UTF-8: byte 192 cannot begin a character" \
+  'm = Memory.new
+m.write_byte(0xc0_u8)
+m.write_byte(0x80_u8)
+m.rewind
+puts m.read_char'
+io_panics_with "an overlong three-byte form (E0 80)" utf8_overlong3 "malformed UTF-8: byte 128 cannot continue a character starting with byte 224" \
+  'm = Memory.new
+m.write_byte(0xe0_u8)
+m.write_byte(0x80_u8)
+m.write_byte(0x80_u8)
+m.rewind
+puts m.read_char'
+io_panics_with "an overlong four-byte form (F0 80)" utf8_overlong4 "malformed UTF-8: byte 128 cannot continue a character starting with byte 240" \
+  'm = Memory.new
+m.write_byte(0xf0_u8)
+m.write_byte(0x80_u8)
+m.write_byte(0x80_u8)
+m.write_byte(0x80_u8)
+m.rewind
+puts m.read_char'
+io_panics_with "a surrogate (ED A0)" utf8_surrogate "malformed UTF-8: byte 160 cannot continue a character starting with byte 237" \
+  'm = Memory.new
+m.write_byte(0xed_u8)
+m.write_byte(0xa0_u8)
+m.write_byte(0x80_u8)
+m.rewind
+puts m.read_char'
+io_panics_with "a code point past U+10FFFF (F4 90)" utf8_past_max "malformed UTF-8: byte 144 cannot continue a character starting with byte 244" \
+  'm = Memory.new
+m.write_byte(0xf4_u8)
+m.write_byte(0x90_u8)
+m.write_byte(0x80_u8)
+m.write_byte(0x80_u8)
+m.rewind
+puts m.read_char'
+io_panics_with "a lead byte past F4" utf8_lead_f7 "malformed UTF-8: byte 247 cannot begin a character" \
+  'm = Memory.new
+m.write_byte(0xf7_u8)
+m.write_byte(0xbf_u8)
+m.write_byte(0xbf_u8)
+m.write_byte(0xbf_u8)
 m.rewind
 puts m.read_char'
 

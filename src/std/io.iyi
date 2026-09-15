@@ -47,22 +47,34 @@ class ::IyiIO
   end
 
   # The next UTF-8 code point, or nil at the end. A lead byte that is not
-  # one, a continuation byte that is not one, or a sequence the stream ends
-  # inside is refused.
+  # one (a continuation byte, C0/C1, F5 and above), a continuation byte that
+  # is not one, or a sequence the stream ends inside is refused. The first
+  # continuation byte is held to the range its lead allows (Unicode Table
+  # 3-7), so an overlong form, a surrogate and a code point past U+10FFFF
+  # are refused at the byte that gives them away, not decoded into a Char
+  # outside Unicode.
   def read_char : Char?
     lead = read_byte
     return nil unless lead
     return lead.unsafe_chr if lead < 128_u8
 
-    if (lead & 0xe0_u8) == 0xc0_u8
+    first_lo = 0x80_u8
+    first_hi = 0xbf_u8
+    if lead < 0xc2_u8
+      raise "malformed UTF-8: byte #{lead} cannot begin a character"
+    elsif lead <= 0xdf_u8
       code = (lead.to_i32 & 0x1f)
       needed = 1
-    elsif (lead & 0xf0_u8) == 0xe0_u8
+    elsif lead <= 0xef_u8
       code = (lead.to_i32 & 0x0f)
       needed = 2
-    elsif (lead & 0xf8_u8) == 0xf0_u8
+      first_lo = 0xa0_u8 if lead == 0xe0_u8
+      first_hi = 0x9f_u8 if lead == 0xed_u8
+    elsif lead <= 0xf4_u8
       code = (lead.to_i32 & 0x07)
       needed = 3
+      first_lo = 0x90_u8 if lead == 0xf0_u8
+      first_hi = 0x8f_u8 if lead == 0xf4_u8
     else
       raise "malformed UTF-8: byte #{lead} cannot begin a character"
     end
@@ -70,9 +82,11 @@ class ::IyiIO
     while needed > 0
       follow = read_byte
       raise "truncated UTF-8: the stream ended inside a character starting with byte #{lead}" unless follow
-      raise "malformed UTF-8: byte #{follow} cannot continue a character starting with byte #{lead}" if (follow & 0xc0_u8) != 0x80_u8
+      raise "malformed UTF-8: byte #{follow} cannot continue a character starting with byte #{lead}" if follow < first_lo || follow > first_hi
       code = (code << 6) | (follow.to_i32 & 0x3f)
       needed = needed - 1
+      first_lo = 0x80_u8
+      first_hi = 0xbf_u8
     end
     code.unsafe_chr
   end

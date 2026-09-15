@@ -2,6 +2,12 @@
 # Exercises `std/base64`.
 #
 #     bash bench/std_base64_exercise.sh
+#
+# Proves the exercise holds plain and --release, that a broken encoder is
+# caught, and what `decode` refuses: a byte outside the alphabet, data after
+# the padding, data inside it, more `=` than the group needs, `=` with no
+# group to close, and a final group of one character - each a panic with a
+# sentence, where before the data was silently dropped.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -78,6 +84,41 @@ elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/benc
 else
   echo "  a broken base64 is caught"
 fi
+
+echo
+echo "== what decode refuses"
+refuses() { # refuses <label> <name> <phrase> <text>
+  local label="$1" name="$2" phrase="$3" text="$4"
+  printf 'module main\n\nimport std/base64\nusing std/base64::{Base64}\n\nputs Base64.decode(%s).inspect\n' "$text" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+refuses "a byte outside the alphabet" bad_byte "base64: invalid byte 42" '"QU*JD"'
+refuses "data after the padding" after_pad "base64: data after padding" '"QQ==QQ=="'
+refuses "data inside the padding" inside_pad "base64: discontinuous padding" '"QU=JD"'
+refuses "more padding than the group needs" excess_pad "base64: excess padding" '"QQ==="'
+refuses "padding after a full group" full_pad "base64: padding with no group to close" '"QUJD="'
+refuses "a lone character" lone_char "base64: 1 data characters, 1 more than a multiple of 4" '"Q"'
+refuses "a final group of one character" dangling "base64: 5 data characters, 1 more than a multiple of 4" '"QUJDR"'
+refuses "a padded lone character" padded_lone "base64: 1 data characters, 1 more than a multiple of 4" '"Q="'
 
 echo
 if [ "$status" -eq 0 ]; then

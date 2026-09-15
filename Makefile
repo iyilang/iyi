@@ -171,10 +171,27 @@ else
   colorize = $(shell printf "\033[33m%s\033[0m\n" "$1" >&2)
 endif
 
+# The C++ runtime is needed for two independent reasons, and dropping it
+# requires both to be absent.
+#
+#   1. `llvm_ext.cc`, the shim, which only has bodies below LLVM 18.
+#   2. A statically linked LLVM. `libLLVM*.a` carries its own C++ symbols, so
+#      linking the archives pulls in `std::__1::future_error` and a pile of
+#      error-category vtables. A shared `libLLVM.dylib` resolves those inside
+#      itself and asks nothing of us.
+#
+# The first version of this checked only the shim and broke CI, which builds
+# against a static LLVM: locally the dylib hid the requirement completely.
+LLVM_SHARED_MODE := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --shared-mode 2> /dev/null))
+
 DEPS = $(LLVM_EXT_OBJ)
+NEEDS_CXX_RUNTIME = 1
 ifneq ($(LLVM_VERSION),)
   ifeq ($(shell test $(firstword $(subst ., ,$(LLVM_VERSION))) -ge 18; echo $$?),0)
     DEPS =
+    ifeq ($(LLVM_SHARED_MODE),shared)
+      NEEDS_CXX_RUNTIME =
+    endif
   endif
 endif
 

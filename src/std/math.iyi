@@ -1,0 +1,703 @@
+module std/math
+
+lib ::LibLLVMMMath
+  fun sqrt_f64 = "llvm.sqrt.f64"(x : Float64) : Float64
+  fun sqrt_f32 = "llvm.sqrt.f32"(x : Float32) : Float32
+  fun copysign_f64 = "llvm.copysign.f64"(mag : Float64, sgn : Float64) : Float64
+  fun copysign_f32 = "llvm.copysign.f32"(mag : Float32, sgn : Float32) : Float32
+end
+
+module ::Math
+  extend self
+  PI    =  3.14159265358979323846
+  TAU   = 6.283185307179586476925
+  E     =  2.71828182845904523536
+  LOG2  = 0.693147180559945309417
+  LOG10 =  2.30258509299404568402
+
+  private P1          =     1.57079632673412561417
+  private P2          = 6.07710050630396597660e-11
+  private P3          = 6.12323399573676588613e-17
+  private INV_HALF_PI = 0.636619772367581343075535
+
+  private def sin_taylor(r : Float64) : Float64
+    r2 = r * r
+    s = 1.0 / 355687428096000.0
+    s = s * r2 - 1.0 / 1307674368000.0
+    s = s * r2 + 1.0 / 6227020800.0
+    s = s * r2 - 1.0 / 39916800.0
+    s = s * r2 + 1.0 / 362880.0
+    s = s * r2 - 1.0 / 5040.0
+    s = s * r2 + 1.0 / 120.0
+    s = s * r2 - 1.0 / 6.0
+    s = s * r2 + 1.0
+    r * s
+  end
+
+  private def cos_taylor(r : Float64) : Float64
+    r2 = r * r
+    s = 1.0 / 20922789888000.0
+    s = s * r2 - 1.0 / 87178291200.0
+    s = s * r2 + 1.0 / 479001600.0
+    s = s * r2 - 1.0 / 3628800.0
+    s = s * r2 + 1.0 / 40320.0
+    s = s * r2 - 1.0 / 720.0
+    s = s * r2 + 1.0 / 24.0
+    s = s * r2 - 1.0 / 2.0
+    s = s * r2 + 1.0
+    s
+  end
+
+  private def sincos_reduced(x : Float64) : {Float64, Float64}
+    scaled = x * INV_HALF_PI
+    q = (scaled + (scaled >= 0.0 ? 0.5 : -0.5)).to_i64
+    q_f = q.to_f64
+    r = ((x - q_f * P1) - q_f * P2) - q_f * P3
+    s_r = sin_taylor(r)
+    c_r = cos_taylor(r)
+    quad = (q % 4_i64 + 4_i64) % 4_i64
+    if quad == 0_i64
+      {s_r, c_r}
+    elsif quad == 1_i64
+      {c_r, 0.0 - s_r}
+    elsif quad == 2_i64
+      {0.0 - s_r, 0.0 - c_r}
+    else
+      {0.0 - c_r, s_r}
+    end
+  end
+
+  def sin(value : Float64) : Float64
+    return 0.0 if value == 0.0
+    return 0.0 / 0.0 if value != value || (value != 0.0 && value == 2.0 * value)
+    sincos_reduced(value)[0]
+  end
+
+  def sin(value : Float32) : Float32
+    sin(value.to_f64).to_f32
+  end
+
+  def sin(value) : Float64
+    sin(value.to_f64)
+  end
+
+  def cos(value : Float64) : Float64
+    return 1.0 if value == 0.0
+    return 0.0 / 0.0 if value != value || (value != 0.0 && value == 2.0 * value)
+    sincos_reduced(value)[1]
+  end
+
+  def cos(value : Float32) : Float32
+    cos(value.to_f64).to_f32
+  end
+
+  def cos(value) : Float64
+    cos(value.to_f64)
+  end
+
+  def tan(value : Float64) : Float64
+    sin(value) / cos(value)
+  end
+
+  def tan(value : Float32) : Float32
+    sin(value) / cos(value)
+  end
+
+  def tan(value) : Float64
+    tan(value.to_f64)
+  end
+
+  def sqrt(value : Float64) : Float64
+    LibLLVMMMath.sqrt_f64(value)
+  end
+
+  def sqrt(value : Float32) : Float32
+    LibLLVMMMath.sqrt_f32(value)
+  end
+
+  def sqrt(value) : Float64
+    sqrt(value.to_f64)
+  end
+
+  def cbrt(value : Float64) : Float64
+    return 0.0 if value == 0.0
+    return 0.0 / 0.0 if value != value
+    return value if value != 0.0 && value == 2.0 * value
+    neg = value < 0.0
+    v = neg ? 0.0 - value : value
+    res = pow(v, 1.0 / 3.0)
+    v3 = res * res * res
+    res = res * (v3 + 2.0 * v) / (2.0 * v3 + v)
+    if v <= 2.0e14 && v == v.to_i64.to_f64
+      iv = v.to_i64
+      ir = (res + 0.5).to_i64
+      if ir * ir * ir == iv
+        res = ir.to_f64
+      end
+    end
+    neg ? 0.0 - res : res
+  end
+
+  def cbrt(value : Float32) : Float32
+    cbrt(value.to_f64).to_f32
+  end
+
+  def cbrt(value) : Float64
+    cbrt(value.to_f64)
+  end
+
+  private INV_LN2 = 1.442695040888963407359924681
+  private LN2_HI  =            0.6931471803691238
+  private LN2_LO  =        1.9082149292705877e-10
+
+  def exp(value : Float64) : Float64
+    return 0.0 / 0.0 if value != value
+    return 1.0 / 0.0 if value > 709.782712893384
+    return 0.0 if value < -745.1332191019412
+    return 1.0 if value == 0.0
+
+    scaled = value * INV_LN2
+    k = (scaled + (scaled >= 0.0 ? 0.5 : -0.5)).to_i32
+    k_f = k.to_f64
+    r = (value - k_f * LN2_HI) - k_f * LN2_LO
+
+    poly = 1.0
+    i = 14
+    while i >= 1
+      poly = 1.0 + (r / i.to_f64) * poly
+      i = i - 1
+    end
+    ldexp(poly, k)
+  end
+
+  def exp(value : Float32) : Float32
+    exp(value.to_f64).to_f32
+  end
+
+  def exp(value) : Float64
+    exp(value.to_f64)
+  end
+
+  def exp2(value : Float64) : Float64
+    return 0.0 / 0.0 if value != value
+    return 1.0 if value == 0.0
+    int_val = value.to_i64
+    if int_val.to_f64 == value && int_val >= -1022_i64 && int_val <= 1023_i64
+      ldexp(1.0, int_val.to_i32)
+    else
+      exp(value * LOG2)
+    end
+  end
+
+  def exp2(value : Float32) : Float32
+    exp2(value.to_f64).to_f32
+  end
+
+  def exp2(value) : Float64
+    exp2(value.to_f64)
+  end
+
+  def expm1(value : Float64) : Float64
+    if value.abs < 1.0e-5
+      value + 0.5 * value * value
+    else
+      exp(value) - 1.0
+    end
+  end
+
+  def expm1(value : Float32) : Float32
+    expm1(value.to_f64).to_f32
+  end
+
+  def expm1(value) : Float64
+    expm1(value.to_f64)
+  end
+
+  private SQRT2_INV = 0.7071067811865475244
+
+  def log(value : Float64) : Float64
+    return 0.0 / 0.0 if value != value || value < 0.0
+    return 0.0 - (1.0 / 0.0) if value == 0.0
+    return 1.0 / 0.0 if value == 2.0 * value && value > 0.0
+    return 0.0 if value == 1.0
+
+    m, k = frexp(value)
+    if m < SQRT2_INV
+      m = m * 2.0
+      k = k - 1
+    end
+
+    z = (m - 1.0) / (m + 1.0)
+    z2 = z * z
+
+    s = 0.0
+    j = 9
+    while j >= 0
+      s = s * z2 + 1.0 / (2 * j + 1).to_f64
+      j = j - 1
+    end
+    ln_m = 2.0 * z * s
+    k_f = k.to_f64
+    k_f * LN2_HI + (k_f * LN2_LO + ln_m)
+  end
+
+  def log(value : Float32) : Float32
+    log(value.to_f64).to_f32
+  end
+
+  def log(value) : Float64
+    log(value.to_f64)
+  end
+
+  def log(value : Float64, base : Float64) : Float64
+    log(value) / log(base)
+  end
+
+  def log(value, base) : Float64
+    log(value.to_f64, base.to_f64)
+  end
+
+  def log2(value : Float64) : Float64
+    log(value) / LOG2
+  end
+
+  def log2(value : Float32) : Float32
+    log2(value.to_f64).to_f32
+  end
+
+  def log2(value) : Float64
+    log2(value.to_f64)
+  end
+
+  def log10(value : Float64) : Float64
+    log(value) / LOG10
+  end
+
+  def log10(value : Float32) : Float32
+    log10(value.to_f64).to_f32
+  end
+
+  def log10(value) : Float64
+    log10(value.to_f64)
+  end
+
+  def log1p(value : Float64) : Float64
+    if value.abs < 1.0e-5
+      value - 0.5 * value * value
+    else
+      log(1.0 + value)
+    end
+  end
+
+  def log1p(value : Float32) : Float32
+    log1p(value.to_f64).to_f32
+  end
+
+  def log1p(value) : Float64
+    log1p(value.to_f64)
+  end
+
+  def pow(base : Float64, exp : Float64) : Float64
+    return 1.0 if exp == 0.0
+    return 1.0 if base == 1.0
+    return 0.0 / 0.0 if base != base || exp != exp
+    return base if exp == 1.0
+    return base * base if exp == 2.0
+
+    if base == 0.0
+      if exp > 0.0
+        return 0.0
+      else
+        return 1.0 / 0.0
+      end
+    end
+
+    int_exp = exp.to_i64
+    is_int = int_exp.to_f64 == exp
+
+    if base < 0.0
+      return 0.0 / 0.0 unless is_int
+      pos_res = pow(0.0 - base, exp)
+      return (int_exp & 1_i64) != 0_i64 ? 0.0 - pos_res : pos_res
+    end
+
+    if is_int && int_exp >= -64_i64 && int_exp <= 64_i64
+      b = int_exp < 0_i64 ? 1.0 / base : base
+      e = int_exp < 0_i64 ? 0_i64 - int_exp : int_exp
+      res = 1.0
+      while e > 0_i64
+        res = res * b if (e & 1_i64) != 0_i64
+        b = b * b
+        e = e >> 1_i64
+      end
+      return res
+    end
+
+    exp(exp * log(base))
+  end
+
+  def pow(base : Float32, exp : Float32) : Float32
+    pow(base.to_f64, exp.to_f64).to_f32
+  end
+
+  def pow(base, exp) : Float64
+    pow(base.to_f64, exp.to_f64)
+  end
+
+  def copysign(mag : Float64, sgn : Float64) : Float64
+    LibLLVMMMath.copysign_f64(mag, sgn)
+  end
+
+  def copysign(mag : Float32, sgn : Float32) : Float32
+    LibLLVMMMath.copysign_f32(mag, sgn)
+  end
+
+  def fma(a : Float64, b : Float64, c : Float64) : Float64
+    a * b + c
+  end
+
+  def fma(a : Float32, b : Float32, c : Float32) : Float32
+    (a.to_f64 * b.to_f64 + c.to_f64).to_f32
+  end
+
+  def min(a : Float64, b : Float64) : Float64
+    a < b ? a : b
+  end
+
+  def min(a : Float32, b : Float32) : Float32
+    a < b ? a : b
+  end
+
+  def max(a : Float64, b : Float64) : Float64
+    a > b ? a : b
+  end
+
+  def max(a : Float32, b : Float32) : Float32
+    a > b ? a : b
+  end
+
+  def atan(value : Float64) : Float64
+    return 0.0 if value == 0.0
+    neg = value < 0.0
+    val = neg ? 0.0 - value : value
+
+    reductions = 0
+    while val > 0.05
+      val = val / (1.0 + sqrt(1.0 + val * val))
+      reductions = reductions + 1
+    end
+
+    v2 = val * val
+    p3 = v2 * val
+    p5 = p3 * v2
+    p7 = p5 * v2
+    p9 = p7 * v2
+    p11 = p9 * v2
+    p13 = p11 * v2
+    res = val - p3 / 3.0 + p5 / 5.0 - p7 / 7.0 + p9 / 9.0 - p11 / 11.0 + p13 / 13.0
+
+    factor = 1.0
+    while reductions > 0
+      factor = factor * 2.0
+      reductions = reductions - 1
+    end
+    res = res * factor
+    neg ? 0.0 - res : res
+  end
+
+  def atan(value : Float32) : Float32
+    atan(value.to_f64).to_f32
+  end
+
+  def atan(value) : Float64
+    atan(value.to_f64)
+  end
+
+  def atan2(y : Float64, x : Float64) : Float64
+    if x > 0.0
+      atan(y / x)
+    elsif x < 0.0
+      if y >= 0.0
+        atan(y / x) + PI
+      else
+        atan(y / x) - PI
+      end
+    else
+      if y > 0.0
+        PI / 2.0
+      elsif y < 0.0
+        0.0 - (PI / 2.0)
+      else
+        0.0
+      end
+    end
+  end
+
+  def atan2(y : Float32, x : Float32) : Float32
+    atan2(y.to_f64, x.to_f64).to_f32
+  end
+
+  def atan2(y, x) : Float64
+    atan2(y.to_f64, x.to_f64)
+  end
+
+  def asin(value : Float64) : Float64
+    atan2(value, sqrt(1.0 - value * value))
+  end
+
+  def asin(value : Float32) : Float32
+    asin(value.to_f64).to_f32
+  end
+
+  def asin(value) : Float64
+    asin(value.to_f64)
+  end
+
+  def acos(value : Float64) : Float64
+    atan2(sqrt(1.0 - value * value), value)
+  end
+
+  def acos(value : Float32) : Float32
+    acos(value.to_f64).to_f32
+  end
+
+  def acos(value) : Float64
+    acos(value.to_f64)
+  end
+
+  def sinh(value : Float64) : Float64
+    (exp(value) - exp(0.0 - value)) / 2.0
+  end
+
+  def sinh(value : Float32) : Float32
+    sinh(value.to_f64).to_f32
+  end
+
+  def sinh(value) : Float64
+    sinh(value.to_f64)
+  end
+
+  def cosh(value : Float64) : Float64
+    (exp(value) + exp(0.0 - value)) / 2.0
+  end
+
+  def cosh(value : Float32) : Float32
+    cosh(value.to_f64).to_f32
+  end
+
+  def cosh(value) : Float64
+    cosh(value.to_f64)
+  end
+
+  def tanh(value : Float64) : Float64
+    sinh(value) / cosh(value)
+  end
+
+  def tanh(value : Float32) : Float32
+    tanh(value.to_f64).to_f32
+  end
+
+  def tanh(value) : Float64
+    tanh(value.to_f64)
+  end
+
+  def asinh(value : Float64) : Float64
+    log(value + sqrt(value * value + 1.0))
+  end
+
+  def asinh(value : Float32) : Float32
+    asinh(value.to_f64).to_f32
+  end
+
+  def asinh(value) : Float64
+    asinh(value.to_f64)
+  end
+
+  def acosh(value : Float64) : Float64
+    log(value + sqrt(value * value - 1.0))
+  end
+
+  def acosh(value : Float32) : Float32
+    acosh(value.to_f64).to_f32
+  end
+
+  def acosh(value) : Float64
+    acosh(value.to_f64)
+  end
+
+  def atanh(value : Float64) : Float64
+    0.5 * log((1.0 + value) / (1.0 - value))
+  end
+
+  def atanh(value : Float32) : Float32
+    atanh(value.to_f64).to_f32
+  end
+
+  def atanh(value) : Float64
+    atanh(value.to_f64)
+  end
+
+  def hypot(x : Float64, y : Float64) : Float64
+    sqrt(x * x + y * y)
+  end
+
+  def hypot(x : Float32, y : Float32) : Float32
+    hypot(x.to_f64, y.to_f64).to_f32
+  end
+
+  def hypot(x, y) : Float64
+    hypot(x.to_f64, y.to_f64)
+  end
+
+  def ldexp(value : Float64, exponent : Int32) : Float64
+    return value if value == 0.0 || exponent == 0
+    exp = exponent
+    res = value
+    while exp > 500
+      res = res * (2.0 ** 500)
+      exp = exp - 500
+    end
+    while exp < -500
+      res = res * (2.0 ** -500)
+      exp = exp + 500
+    end
+    res * (2.0 ** exp)
+  end
+
+  def frexp(value : Float64) : {Float64, Int32}
+    return {0.0, 0} if value == 0.0
+    return {value, 0} if value != value || (value != 0.0 && value == 2.0 * value)
+    neg = value < 0.0
+    v = neg ? 0.0 - value : value
+    exp = 0
+    while v >= 1.0e64
+      v = v * (2.0 ** -256)
+      exp = exp + 256
+    end
+    while v >= 1.0e16
+      v = v * (2.0 ** -64)
+      exp = exp + 64
+    end
+    while v >= 1.0
+      v = v / 2.0
+      exp = exp + 1
+    end
+    while v < 1.0e-64 && v > 0.0
+      v = v * (2.0 ** 256)
+      exp = exp - 256
+    end
+    while v < 1.0e-16 && v > 0.0
+      v = v * (2.0 ** 64)
+      exp = exp - 64
+    end
+    while v < 0.5 && v > 0.0
+      v = v * 2.0
+      exp = exp - 1
+    end
+    {neg ? 0.0 - v : v, exp}
+  end
+
+  def erf(value : Float64) : Float64
+    neg = value < 0.0
+    x = neg ? 0.0 - value : value
+    p = 0.3275911
+    a1 = 0.254829592
+    a2 = -0.284496736
+    a3 = 1.421413741
+    a4 = -1.453152027
+    a5 = 1.061405429
+    t = 1.0 / (1.0 + p * x)
+    poly = t * (a1 + t * (a2 + t * (a3 + t * (a4 + t * a5))))
+    y = 1.0 - poly * exp(0.0 - x * x)
+    neg ? 0.0 - y : y
+  end
+
+  def erfc(value : Float64) : Float64
+    1.0 - erf(value)
+  end
+
+  def gamma(value : Float64) : Float64
+    tgamma(value)
+  end
+
+  def lgamma(value : Float64) : Float64
+    log(tgamma(value).abs)
+  end
+
+  def tgamma(value : Float64) : Float64
+    # Lanczos approximation
+    return 1.0 if value == 1.0 || value == 2.0
+    if value < 0.5
+      PI / (sin(PI * value) * tgamma(1.0 - value))
+    else
+      z = value - 1.0
+      x = 0.99999999999980993
+      p0 = 676.5203681218851
+      p1 = -1259.1392167224028
+      p2 = 771.32342877765313
+      p3 = -176.61502916214059
+      p4 = 12.507343278686905
+      p5 = -0.13857109583111912
+      p6 = 9.9843695780195716e-6
+      p7 = 1.5056327351493116e-7
+      x = x + p0 / (z + 1.0) + p1 / (z + 2.0) + p2 / (z + 3.0) + p3 / (z + 4.0) + p4 / (z + 5.0) + p5 / (z + 6.0) + p6 / (z + 7.0) + p7 / (z + 8.0)
+      t = z + 7.5
+      sqrt(2.0 * PI) * pow(t, z + 0.5) * exp(0.0 - t) * x
+    end
+  end
+
+  def besselj0(value : Float64) : Float64
+    # Series expansion for small/medium values
+    x = value.abs
+    if x < 5.0
+      term = 1.0
+      sum = 1.0
+      k = 1
+      while k <= 25
+        term = term * (0.0 - x * x / (4.0 * k.to_f64 * k.to_f64))
+        sum = sum + term
+        break if term.abs < 1.0e-15
+        k = k + 1
+      end
+      sum
+    else
+      # Asymptotic expansion
+      sqrt(2.0 / (PI * x)) * cos(x - PI / 4.0)
+    end
+  end
+
+  def besselj1(value : Float64) : Float64
+    x = value.abs
+    if x < 5.0
+      term = x / 2.0
+      sum = term
+      k = 1
+      while k <= 25
+        term = term * (0.0 - x * x / (4.0 * k.to_f64 * (k.to_f64 + 1.0)))
+        sum = sum + term
+        break if term.abs < 1.0e-15
+        k = k + 1
+      end
+      value < 0.0 ? 0.0 - sum : sum
+    else
+      res = sqrt(2.0 / (PI * x)) * cos(x - 3.0 * PI / 4.0)
+      value < 0.0 ? 0.0 - res : res
+    end
+  end
+
+  def gcd(a : Int, b : Int) : Int
+    x = a.abs
+    y = b.abs
+    while y != 0
+      t = y
+      y = x % y
+      x = t
+    end
+    x
+  end
+
+  def lcm(a : Int, b : Int) : Int
+    return (a - a) if a == 0 || b == 0
+    (a.abs // gcd(a, b)) * b.abs
+  end
+end

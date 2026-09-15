@@ -1,0 +1,364 @@
+# Complete Benchmark standard library module for iyi.
+#
+# Provides methods for benchmarking code execution time and throughput (IPS),
+# giving detailed reports on real and CPU execution time.
+#
+# Pure iyi implementation with zero external C library dependencies.
+module std/benchmark
+
+pub import std/time
+using std/time::{Time, Span}
+pub alias Time = Std::Time::Time
+pub alias Span = Std::Time::Span
+import std/format
+using std/format::{sprintf, printf}
+
+lib ::LibMath
+  fun sqrt = "llvm.sqrt.f64"(val : Float64) : Float64
+end
+
+module ::Math
+  def self.sqrt(val : Float64) : Float64
+    ::LibMath.sqrt(val)
+  end
+end
+
+module ::GC
+  struct Stats
+    getter total_bytes : UInt64
+
+    def initialize(@total_bytes : UInt64 = 0_u64)
+    end
+  end
+
+  def self.collect : Nil
+    IyiMark.collect
+  end
+
+  def self.stats : Stats
+    Stats.new(0_u64)
+  end
+end
+
+module ::Benchmark
+  extend self
+
+  module BM
+    class Tms
+      getter utime : Float64
+      getter stime : Float64
+      getter cutime : Float64
+      getter cstime : Float64
+      getter real : Float64
+      getter label : String
+
+      def initialize(@utime : Float64, @stime : Float64, @cutime : Float64, @cstime : Float64, @real : Float64, @label : String = "")
+      end
+
+      def total : Float64
+        utime + stime + cutime + cstime
+      end
+
+      def to_s(io) : Nil
+        io.write(to_s)
+      end
+
+      def to_s : String
+        Std::Format.sprintf("  %.6f   %.6f   %.6f (  %.6f)", utime, stime, total, real)
+      end
+    end
+
+    class Job
+      def initialize
+        @reports = [] of {String, ->}
+        @label_width = 0
+      end
+
+      def report(label : String = " ", &block : ->) : Nil
+        @label_width = label.size if label.size > @label_width
+        @reports << {label, block}
+      end
+
+      def execute : Nil
+        if @label_width > 0
+          print " " * @label_width
+        end
+        puts "       user     system      total        real"
+
+        @reports.each do |report|
+          label, block = report
+          print label
+          diff = @label_width - label.size + 1
+          if diff > 0
+            print " " * diff
+          end
+          print Benchmark.measure(label, &block)
+          puts
+        end
+      end
+    end
+  end
+
+  module IPS
+    class Entry
+      property label : String
+      property action : ->
+      property cycles : Int32 = 0
+      property size : Int32 = 0
+      property mean : Float64 = 0.0
+      property variance : Float64 = 0.0
+      property stddev : Float64 = 0.0
+      property relative_stddev : Float64 = 0.0
+      property slower : Float64 = 1.0
+      property bytes_per_op : UInt64 = 0_u64
+
+      @ran : Bool = false
+
+      def initialize(@label : String, @action : ->)
+        @cycles = 0
+        @size = 0
+        @mean = 0.0
+        @variance = 0.0
+        @stddev = 0.0
+        @relative_stddev = 0.0
+        @slower = 1.0
+        @bytes_per_op = 0_u64
+      end
+
+      def ran? : Bool
+        @ran
+      end
+
+      def call : Nil
+        action.call
+      end
+
+      def call_for_100ms : Nil
+        i = 0
+        c = cycles
+        while i < c
+          action.call
+          i += 1
+        end
+      end
+
+      def set_cycles(duration : Std::Time::Span, iterations : UInt64) : Nil
+        ms = duration.total_milliseconds
+        if ms <= 0.0
+          @cycles = 1
+        else
+          @cycles = ((iterations.to_f / ms) * 100.0).to_i
+        end
+        @cycles = 1 if @cycles <= 0
+      end
+
+      def calculate_stats(samples : Array(Float64)) : Nil
+        @ran = true
+        @size = samples.size
+        s = 0.0
+        samples.each { |v| s += v }
+        @mean = samples.empty? ? 0.0 : (s / @size.to_f)
+
+        v_sum = 0.0
+        m = @mean
+        samples.each do |v|
+          diff = v - m
+          v_sum += diff * diff
+        end
+        @variance = samples.empty? ? 0.0 : (v_sum / @size.to_f)
+        @stddev = Math.sqrt(@variance)
+        @relative_stddev = @mean > 0.0 ? (100.0 * (@stddev / @mean)) : 0.0
+      end
+
+      def human_mean : String
+        m = mean
+        if m >= 1_000_000_000.0
+          Std::Format.sprintf("%7.2fG", m / 1_000_000_000.0)
+        elsif m >= 1_000_000.0
+          Std::Format.sprintf("%7.2fM", m / 1_000_000.0)
+        elsif m >= 1_000.0
+          Std::Format.sprintf("%7.2fk", m / 1_000.0)
+        else
+          Std::Format.sprintf("%7.2f", m)
+        end
+      end
+
+      def human_iteration_time : String
+        m = mean
+        return "       -" if m <= 0.0
+        it = 1.0 / m
+        if it >= 1.0
+          Std::Format.sprintf("%7.2fs", it)
+        elsif it >= 0.001
+          Std::Format.sprintf("%6.2fms", it * 1000.0)
+        elsif it >= 0.000001
+          Std::Format.sprintf("%6.2fµs", it * 1_000_000.0)
+        else
+          Std::Format.sprintf("%6.2fns", it * 1_000_000_000.0)
+        end
+      end
+
+      def human_compare : String
+        if slower <= 1.0001 && slower >= 0.9999
+          "fastest"
+        else
+          Std::Format.sprintf("%5.2f× slower", slower)
+        end
+      end
+    end
+
+    class Job
+      getter items : Array(Entry)
+      @warmup_time : Std::Time::Span
+      @calculation_time : Std::Time::Span
+      @interactive : Bool
+
+      def initialize(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false)
+        @calculation_time = calculation
+        @warmup_time = warmup
+        @interactive = interactive
+        @items = [] of Entry
+      end
+
+      def self.new(calculation = 5, warmup = 2, interactive = false)
+        new(Time.seconds(calculation.to_i64), Time.seconds(warmup.to_i64), !!interactive)
+      end
+
+      def report(label : String = "", &action : ->) : Entry
+        item = Entry.new(label, action)
+        @items << item
+        item
+      end
+
+      def execute : Nil
+        run_warmup
+        run_calculation
+        run_comparison
+      end
+
+      def report : Nil
+        max_label = 0
+        @items.each { |it| max_label = it.label.size if it.label.size > max_label }
+
+        ran = ran_items
+        ran.each do |item|
+          diff = max_label - item.label.size
+          pad = diff > 0 ? (" " * diff) : ""
+          b_op = Std::Format.sprintf("%dB/op", item.bytes_per_op)
+          Std::Format.printf("%s%s %s (%s) (±%5.2f%%)  %s  %s\n",
+            pad,
+            item.label,
+            item.human_mean,
+            item.human_iteration_time,
+            item.relative_stddev,
+            b_op,
+            item.human_compare)
+        end
+      end
+
+      private def ran_items : Array(Entry)
+        res = [] of Entry
+        @items.each { |it| res << it if it.ran? }
+        res
+      end
+
+      private def run_warmup : Nil
+        @items.each do |item|
+          GC.collect
+          count = 0_u64
+          t0 = Std::Time::Time.monotonic
+          target = t0 + @warmup_time
+          while Std::Time::Time.monotonic < target
+            item.call
+            count += 1
+          end
+          t1 = Std::Time::Time.monotonic
+          item.set_cycles(t1 - t0, count)
+        end
+      end
+
+      private def run_calculation : Nil
+        @items.each do |item|
+          GC.collect
+          measurements = [] of Float64
+          bytes = 0_i64
+          cycles = 0_i64
+
+          t0 = Std::Time::Time.monotonic
+          target = t0 + @calculation_time
+
+          while true
+            sub_t0 = Std::Time::Time.monotonic
+            bytes_taken = Benchmark.memory do
+              item.call_for_100ms
+            end
+            sub_t1 = Std::Time::Time.monotonic
+            bytes += bytes_taken
+            cycles += item.cycles
+            sec = (sub_t1 - sub_t0).total_seconds
+            sec = 0.000001 if sec <= 0.0
+            measurements << (item.cycles.to_f / sec)
+            break if Std::Time::Time.monotonic >= target
+          end
+
+          item.calculate_stats(measurements)
+          item.bytes_per_op = cycles > 0 ? (bytes.to_f / cycles.to_f).to_u64 : 0_u64
+        end
+      end
+
+      private def run_comparison : Nil
+        ran = ran_items
+        return if ran.empty?
+        fastest_mean = 0.0
+        ran.each do |it|
+          fastest_mean = it.mean if it.mean > fastest_mean
+        end
+        ran.each do |item|
+          item.slower = item.mean > 0.0 ? (fastest_mean / item.mean) : 1.0
+        end
+      end
+    end
+  end
+
+  def bm(&)
+    report = BM::Job.new
+    yield report
+    report.execute
+    report
+  end
+
+  def ips(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false, &)
+    job = IPS::Job.new(calculation, warmup, interactive)
+    yield job
+    job.execute
+    job.report
+    job
+  end
+
+  def ips(calculation = 5, warmup = 2, interactive = false, &)
+    ips(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64), !!interactive) { |job| yield job }
+  end
+
+  def measure(label : String = "", &) : BM::Tms
+    t0 = Std::Time::Time.monotonic
+    yield
+    t1 = Std::Time::Time.monotonic
+    real = (t1 - t0).total_seconds
+    BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, label)
+  end
+
+  def realtime(&) : Std::Time::Span
+    t0 = Std::Time::Time.monotonic
+    yield
+    t1 = Std::Time::Time.monotonic
+    t1 - t0
+  end
+
+  def memory(&) : Int64
+    before = GC.stats.total_bytes
+    yield
+    (GC.stats.total_bytes - before).to_i64
+  end
+end
+
+pub alias Benchmark = ::Benchmark

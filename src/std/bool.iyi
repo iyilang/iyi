@@ -1,0 +1,60 @@
+module std/bool
+
+import std/traits
+using std/traits::{Cmp}
+
+struct ::Bool
+  # Bitwise OR. Returns true if this bool or other is true, otherwise false.
+  def |(other : ::Bool) : ::Bool
+    self ? true : other
+  end
+
+  # Bitwise AND. Returns true if this bool and other are true, otherwise false.
+  def &(other : ::Bool) : ::Bool
+    self ? other : false
+  end
+
+  # Exclusive OR. Returns true if this bool is different from other, otherwise false.
+  def ^(other : ::Bool) : ::Bool
+    self != other
+  end
+
+  # Returns 1 for true and 0 for false.
+  def to_unsafe : Int32
+    self ? 1 : 0
+  end
+
+  # Appends "true" for true and "false" for false to the given IO.
+  def to_s(io : IyiIO) : ::Nil
+    io.print(to_s)
+  end
+
+  def clone : ::Bool
+    self
+  end
+
+  # Three-way comparison. false < true.
+  def <=>(other : ::Bool) : Int32
+    self == other ? 0 : (self ? 1 : -1)
+  end
+
+  def <(other : ::Bool) : ::Bool
+    !self && other
+  end
+
+  def <=(other : ::Bool) : ::Bool
+    !self || other
+  end
+
+  def >(other : ::Bool) : ::Bool
+    self && !other
+  end
+
+  def >=(other : ::Bool) : ::Bool
+    self || !other
+  end
+
+  def hash : Int32
+    self ? 1231 : 1237
+  end
+end

@@ -47,14 +47,29 @@ folded = YAML.parse(">\n  hello\n  world\n")
 assert_str("hello world\n", folded.as_s, "folded scalar")
 literal = YAML.parse("|\n  hello\n  world\n")
 assert_str("hello\nworld\n", literal.as_s, "literal scalar")
-puts "  integers, floats, null, 1.2 strings, quotes, folded and literal"
+entries = YAML.parse("- |\n  x\n- >-\n  y\n  z\n- 2\n")
+assert_true(entries.size == 3, "block scalars as sequence entries do not eat the next entry")
+assert_str("x\n", entries[0].as_s, "literal entry")
+assert_str("y z", entries[1].as_s, "folded entry")
+assert_true(entries[2].as_i == 2_i64, "the entry after a block scalar")
+assert_str("x\ny\n", YAML.parse("- |\n  x\n  y")[0].as_s, "a literal entry ending the stream without a line break")
+assert_str("a b", YAML.parse("- a\n  b\n- 2\n")[0].as_s, "a plain scalar folded inside a sequence entry")
+assert_str("x\ny\n", YAML.parse("a:\n  - |\n    x\n    y\n  - 2\n")["a"][0].as_s, "a literal entry in a nested sequence")
+assert_str("1", YAML.parse("!<tag:yaml.org,2002:str> 1\n").as_s, "a verbatim core tag")
+puts "  integers, floats, null, 1.2 strings, quotes, folded, literal and verbatim tags"
 
 puts "\n== dump round trip"
 again = YAML.parse(YAML.dump(doc))
 assert_true(again == doc, "dump reads back")
 assert_true(YAML.dump(doc).starts_with?("a: 1"), "dump is block YAML")
 assert_true(YAML.parse(YAML.dump(Any.new(nil))).null?, "dumped null")
-puts "  dump reads back as the same Any"
+assert_str("\"- a\"\n", YAML.dump(Any.new("- a")), "a string that looks like a sequence entry is quoted")
+assert_str("\"? a\"\n", YAML.dump(Any.new("? a")), "a string that looks like an explicit key is quoted")
+assert_str("- a", YAML.parse(YAML.dump(Any.new([Any.new("- a")] of Any)))[0].as_s, "an entry-like string reads back inside a sequence")
+merge_key = YAML.parse("\"<<\": 1\n")
+assert_str("\"<<\": 1\n", YAML.dump(merge_key), "the merge key is quoted when dumped as a plain key")
+assert_true(YAML.parse(YAML.dump(merge_key)) == merge_key, "a quoted << key reads back")
+puts "  dump reads back as the same Any; entry-like strings and << are quoted"
 
 puts "\n== anchors, aliases, merge"
 anchored = YAML.parse("x: &a [1, 2]\ny: *a\n")
@@ -67,7 +82,10 @@ assert_true(merged["b"]["z"].as_i == 3_i64, "merged z")
 won = YAML.parse("{y: 9, <<: {y: 2, x: 1}, z: 3}\n")
 assert_true(won["y"].as_i == 9_i64, "explicit before merge still wins")
 assert_true(won["x"].as_i == 1_i64, "merge fills the rest")
-puts "  alias, merge, explicit key wins either side of <<"
+rooted = YAML.parse("&a {b: 1}\n")
+assert_true(rooted.size == 1 && rooted["b"].as_i == 1_i64, "an anchor before a flow mapping at the root")
+assert_true(YAML.parse("!!map {a: 1}\n")["a"].as_i == 1_i64, "a tag before a flow mapping at the root")
+puts "  alias, merge, explicit key wins either side of <<, properties on a root flow mapping"
 
 puts "\n== streams and typed keys"
 docs = YAML.parse_all("1\n---\n2\n")
@@ -90,6 +108,22 @@ refused("*nope\n", "unknown anchor *nope at line 1, column 1")
 refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
 refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
 refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
-puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles"
+refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")
+refused("a: b\u0001c\n", "control character U+0001 is not allowed at line 1, column 5")
+refused("a: b\u007Fc\n", "control character U+007F is not allowed at line 1, column 5")
+refused("a:\n    b: 1\n  c: 2\n", "bad indentation of a mapping entry at line 3, column 3")
+refused("  a: 1\n b: 2\n", "bad indentation of a mapping entry at line 2, column 2")
+refused("a:\n    - 1\n  - 2\n", "bad indentation of a sequence entry at line 3, column 3")
+refused("- a:\n      - 1\n    - 2\n", "bad indentation of a sequence entry at line 3, column 5")
+refused("- 1\nfoo: 2\n", "bad indentation of a mapping entry at line 2, column 1")
+refused("%YAML 1.2\na: 1\n", "expected '---' after a directive at line 2, column 1")
+refused("!!seq {a: 1}\n", "!!seq on a mapping at line 1, column 7")
+refused("\"\\uD800\"\n", "surrogate code point \\uD800 in escape at line 1, column 2")
+refused("- a: b: c\n", "a mapping value is not allowed here at line 1, column 7")
+refused("!<tag:yaml.org,2002:foo> 1\n", "unknown tag !<tag:yaml.org,2002:foo> at line 1, column 1")
+laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
+refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
+puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles,"
+puts "  control characters, stray entries, directives, tags, surrogates, alias expansion"
 
 puts "\nALL CHECKS PASSED"

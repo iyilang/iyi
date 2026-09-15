@@ -37,14 +37,18 @@
 #
 # What it refuses, each with a sentence that says where:
 #   a tab in indentation, a control character, a quoted string that does
-#   not close, a flow collection that does not close, an unknown escape,
-#   a mapping entry or sequence entry at an indentation that belongs to
-#   nothing, text after a value on its line, a value whose text is not a
-#   node, a duplicate key (the second spelling of a key is a mistake, not
-#   an override), an alias to an anchor that is not defined or is still
-#   being built (a cycle), a merge whose value is not a mapping or a
+#   not close, a flow collection that does not close, an unknown escape or
+#   an escape that names a surrogate, a mapping entry or sequence entry at
+#   an indentation that belongs to nothing, text after a value on its
+#   line, a value whose text is not a node, a duplicate key (the second
+#   spelling of a key is a mistake, not an override), an alias to an
+#   anchor that is not defined or is still being built (a cycle), aliases
+#   that together expand to more than ALIAS_NODE_LIMIT nodes (the
+#   "billion laughs" stream), a merge whose value is not a mapping or a
 #   sequence of mappings, an explicit `?` key, an anchor on a key, a tag it
-#   does not know, and nesting past DEPTH_LIMIT levels.
+#   does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
+#   the core tags are known), a directive not followed by `---`, and
+#   nesting past DEPTH_LIMIT levels.
 #
 # `YAML.parse?` answers nil for any of these; `YAML.parse` panics with the
 # sentence. `YAML.dump` writes a value back as block YAML that this parser
@@ -571,6 +575,9 @@ end
 # loop returns as soon as one is recorded; nothing is raised inside.
 pub class Parser
   DEPTH_LIMIT = 256
+  # How many nodes aliases may add to a stream, counted as they are
+  # expanded; the sentence below spells the same number.
+  ALIAS_NODE_LIMIT = 1_000_000_i64
 
   @bytes : Pointer(UInt8)
   @size : Int32
@@ -586,6 +593,13 @@ pub class Parser
   @error : String?
   @anchors : Hash(String, Any)
   @open_anchors : Array(String)
+  # Nodes read so far, and per anchor how many nodes its value holds
+  # (measured between opening and closing it); an alias adds that many
+  # to `@nodes` and to `@expanded`, which is what ALIAS_NODE_LIMIT bounds.
+  @nodes : Int64
+  @expanded : Int64
+  @anchor_sizes : Hash(String, Int64)
+  @open_sizes : Array(Int64)
   @depth : Int32
   @buffer : ByteBuffer
 
@@ -600,6 +614,10 @@ pub class Parser
     @error = nil
     @anchors = Hash(String, Any).new
     @open_anchors = [] of String
+    @nodes = 0_i64
+    @expanded = 0_i64
+    @anchor_sizes = Hash(String, Int64).new
+    @open_sizes = [] of Int64
     @depth = 0
     @buffer = ByteBuffer.new
     split_lines
@@ -615,7 +633,7 @@ pub class Parser
     implicit_allowed = true
     while true
       skip_directives_and_blank
-      return docs if @error
+      return nil if @error
       break if @line >= @starts.size
       explicit = false
       node = Any.new(nil)
@@ -640,11 +658,10 @@ pub class Parser
         node = parse_block_node(-1, false)
       end
       return nil if @error
-      # A top-level scalar leaves us on its last line; a mapping or
-      # sequence already stepped past its last entry. Either way the next
-      # document starts on a later line.
-      @line = @line + 1 if @line < @starts.size && !marker?(@line, 45_u8) && !marker?(@line, 46_u8)
+      # Every node leaves `@line` on the first line after it, so the next
+      # document starts here or on a later blank-free line.
       @anchors = Hash(String, Any).new
+      @anchor_sizes = Hash(String, Int64).new
       docs << node
       implicit_allowed = false
       skip_blank_lines
@@ -656,7 +673,7 @@ pub class Parser
         @line = @line + 1
         implicit_allowed = true
       elsif !marker?(@line, 45_u8)
-        fail("unexpected content", @heads[@line])
+        refuse_stray(@line)
         return nil
       end
     end
@@ -666,15 +683,18 @@ pub class Parser
   # ------------------------------------------------------------------
   # Lines
 
+  # The first control character is remembered and refused once every
+  # line is known, since the sentence needs the line table to say where.
   private def split_lines : Nil
     at = 0
     at = 3 if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
+    control = -1
     while at <= @size
       start = at
       while at < @size && @bytes[at] != 10_u8 && @bytes[at] != 13_u8
         b = @bytes[at]
-        if (b < 32_u8 && b != 9_u8) || b == 127_u8
-          fail("control character", at) unless @error
+        if control < 0 && ((b < 32_u8 && b != 9_u8) || b == 127_u8)
+          control = at
         end
         at = at + 1
       end
@@ -698,6 +718,17 @@ pub class Parser
       else
         break
       end
+    end
+    if control >= 0
+      b = @bytes[control].to_i32
+      digits = "0123456789ABCDEF"
+      name = String.new(4) do |t|
+        t[0] = 48_u8
+        t[1] = 48_u8
+        t[2] = digits.to_unsafe[b >> 4]
+        t[3] = digits.to_unsafe[b & 15]
+      end
+      fail("control character U+#{name} is not allowed", control)
     end
   end
 
@@ -754,6 +785,18 @@ pub class Parser
     fail("tab used for indentation", @heads[line]) if @tabbed[line]
   end
 
+  # A line at an indentation that belongs to nothing: a sequence entry or
+  # mapping entry, named as such, or plain text.
+  private def refuse_stray(line : Int32) : Nil
+    if sequence_entry?(line)
+      fail("bad indentation of a sequence entry", @heads[line])
+    elsif key_colon(line) >= 0
+      fail("bad indentation of a mapping entry", @heads[line])
+    else
+      fail("unexpected content", @heads[line])
+    end
+  end
+
   # ------------------------------------------------------------------
   # Positions and errors
 
@@ -801,7 +844,7 @@ pub class Parser
     return if @error
     at = skip_blank(pos)
     return if at >= @ends[@line] || (@bytes[at] == 35_u8 && (at == pos || at > @heads[@line]))
-    if @bytes[at] == 58_u8 && value_indicator?(at, false)
+    if @bytes[at] == 58_u8 && value_indicator?(at, false, @ends[@line])
       fail("a mapping value is not allowed here", at)
     else
       fail("unexpected content", at)
@@ -810,9 +853,9 @@ pub class Parser
 
   # A `:` that ends a key: followed by blank or line end, or in flow
   # context by a flow indicator.
-  private def value_indicator?(pos : Int32, flow : Bool) : Bool
+  private def value_indicator?(pos : Int32, flow : Bool, finish : Int32) : Bool
     return false unless @bytes[pos] == 58_u8
-    return true if pos + 1 >= @ends[@line]
+    return true if pos + 1 >= finish
     n = @bytes[pos + 1]
     return true if blank_byte?(n)
     flow && (n == 44_u8 || n == 93_u8 || n == 125_u8 || n == 91_u8 || n == 123_u8)
@@ -827,20 +870,25 @@ pub class Parser
     pos + 1 >= @ends[line] || blank_byte?(@bytes[pos + 1])
   end
 
-  # Where the key's `:` is on this line, or -1. Quoted keys close on the
+  # Where the key's `:` is on this line, or -1. Anchors and tags in front
+  # are skipped (whether they are properties of the key or of a flow
+  # collection is settled by what follows them). Quoted keys close on the
   # same line; a plain key runs to the first `: ` that is not inside a
   # comment.
   private def key_colon(line : Int32) : Int32
     pos = @heads[line]
     finish = @ends[line]
+    while pos < finish && (@bytes[pos] == 38_u8 || @bytes[pos] == 33_u8)
+      pos = skip_blank(@bytes[pos] == 38_u8 ? name_end(pos + 1, finish) : tag_end(pos, finish))
+    end
     return -1 if pos >= finish
     b = @bytes[pos]
     if b == 34_u8 || b == 39_u8
-      close = closing_quote_on_line(pos)
+      close = closing_quote_on_line(pos, finish)
       return -1 if close < 0
       at = skip_blank(close + 1)
       return -1 if at >= finish
-      return (at == close + 1 || true) && value_indicator?(at, false) ? at : -1
+      return value_indicator?(at, false, finish) ? at : -1
     end
     return -1 if b == 91_u8 || b == 123_u8 || b == 35_u8 || b == 124_u8 || b == 62_u8
     return -1 if b == 45_u8 && (pos + 1 >= finish || blank_byte?(@bytes[pos + 1]))
@@ -848,16 +896,15 @@ pub class Parser
     while at < finish
       c = @bytes[at]
       return -1 if c == 35_u8 && at > pos && blank_byte?(@bytes[at - 1])
-      return at if c == 58_u8 && value_indicator?(at, false)
+      return at if c == 58_u8 && value_indicator?(at, false, finish)
       at = at + 1
     end
     -1
   end
 
-  private def closing_quote_on_line(pos : Int32) : Int32
+  private def closing_quote_on_line(pos : Int32, finish : Int32) : Int32
     quote = @bytes[pos]
     at = pos + 1
-    finish = @ends[@line]
     while at < finish
       c = @bytes[at]
       if quote == 34_u8 && c == 92_u8
@@ -883,7 +930,9 @@ pub class Parser
   # indented past `parent`; a sequence at `parent`'s own indentation is
   # taken when `sequence_at_parent` says so (the value of a mapping key).
   # A line that is not indented past `parent` is left where it is and the
-  # node is null.
+  # node is null. Every node, scalar or collection, leaves `@line` on the
+  # first line after it, so a caller never guesses whether the line it is
+  # on was consumed.
   private def parse_block_node(parent : Int32, sequence_at_parent : Bool) : Any
     skip_blank_lines
     return Any.new(nil) if @error
@@ -910,7 +959,8 @@ pub class Parser
   # A node whose first token is at `pos` on the current line: properties,
   # then an alias, a quoted or plain scalar, a flow collection, a block
   # scalar, or (after properties alone) the block node on the lines below.
-  # Ends by requiring the rest of the line to be empty.
+  # Requires the rest of the value's last line to be empty and steps past
+  # it.
   private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool) : Any
     anchor = nil.as(String?)
     tag = nil.as(String?)
@@ -921,14 +971,14 @@ pub class Parser
         fail("a second anchor", pos) unless anchor.nil?
         return Any.new(nil) if @error
         anchor_pos = pos
-        finish = name_end(pos + 1)
+        finish = name_end(pos + 1, @ends[@line])
         anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
         fail("an anchor with no name", pos) if !anchor.nil? && anchor.empty?
         return Any.new(nil) if @error
         pos = skip_blank(finish)
       elsif b == 33_u8 # !
-        finish = name_end(pos)
-        tag = String.new(finish - pos) { |t| t.copy_from(@bytes + pos, finish - pos) }
+        finish = tag_end(pos, @ends[@line])
+        tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
         return Any.new(nil) if @error
         pos = skip_blank(finish)
@@ -943,29 +993,31 @@ pub class Parser
       @line = @line + 1
       value = parse_block_node(parent, sequence_at_parent)
       value = apply_tag(tag, value, anchor_pos)
-    elsif key_colon(@line) >= 0 && @heads[@line] != pos
-      # Wait: key_colon looks from the line's head; with properties in
-      # front the head is not where the key is. Re-check from `pos`.
-      saved = @heads[@line]
-      @heads[@line] = pos
-      is_key = key_colon(@line) >= 0
-      @heads[@line] = saved
-      if is_key
-        fail("an anchor or tag on a mapping key is not supported", anchor_pos)
-        return Any.new(nil)
+    else
+      if pos != anchor_pos
+        # Properties in front of what would otherwise be a key: `&a k: v`.
+        # key_colon looks from the line's head; look from the properties.
+        saved = @heads[@line]
+        @heads[@line] = anchor_pos
+        is_key = key_colon(@line) >= 0
+        @heads[@line] = saved
+        if is_key
+          fail("an anchor or tag on a mapping key is not supported", anchor_pos)
+          return Any.new(nil)
+        end
       end
       value = parse_inline_value(pos, parent, tag)
-    else
-      value = parse_inline_value(pos, parent, tag)
+      @line = @line + 1 unless @error
     end
     close_anchor(anchor, value)
     value
   end
 
   private def parse_inline_value(pos : Int32, parent : Int32, tag : String?) : Any
+    @nodes = @nodes + 1
     b = @bytes[pos]
     if b == 42_u8 # *
-      finish = name_end(pos + 1)
+      finish = name_end(pos + 1, @ends[@line])
       name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
       value = resolve_alias(name, pos)
       expect_line_end(finish)
@@ -1008,6 +1060,7 @@ pub class Parser
   end
 
   private def parse_block_sequence(indent : Int32) : Any
+    @nodes = @nodes + 1
     items = [] of Any
     result = Any.new(items)
     enter(@heads[@line])
@@ -1020,22 +1073,20 @@ pub class Parser
       at = indent_of(@line)
       break if at < indent
       if at > indent
-        fail("bad indentation of a sequence entry", @heads[@line])
+        refuse_stray(@line)
         break
       end
       break unless sequence_entry?(@line)
       dash = @heads[@line]
-      dash_line = @line
-      saved_head = dash
       pos = skip_blank(dash + 1)
       if pos >= @ends[@line] || @bytes[pos] == 35_u8
         @line = @line + 1
         items << parse_block_node(indent, false)
       else
+        dash_line = @line
         @heads[@line] = pos
         items << parse_block_node(indent, false)
-        @heads[dash_line] = saved_head
-        @line = @line + 1 if @line == dash_line
+        @heads[dash_line] = dash
       end
       break if @error
     end
@@ -1044,6 +1095,7 @@ pub class Parser
   end
 
   private def parse_block_mapping(indent : Int32) : Any
+    @nodes = @nodes + 1
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
     result = Any.new(pairs)
@@ -1057,7 +1109,7 @@ pub class Parser
       at = indent_of(@line)
       break if at < indent
       if at > indent
-        fail("bad indentation of a mapping entry", @heads[@line])
+        refuse_stray(@line)
         break
       end
       key_pos = @heads[@line]
@@ -1111,16 +1163,6 @@ pub class Parser
         pairs[key] = value
       end
       break if @error
-      # The value ends on this line (inline) or leaves us on a more
-      # indented leftover (a nested scalar). The next mapping entry is
-      # a later line.
-      if @line < @starts.size
-        if @heads[@line] == key_pos
-          @line = @line + 1
-        elsif indent_of(@line) > indent
-          @line = @line + 1
-        end
-      end
     end
     leave
     result
@@ -1153,16 +1195,40 @@ pub class Parser
   # ------------------------------------------------------------------
   # Scalars
 
-  # The end of an anchor, alias or tag name: blank, line end, or a flow
-  # indicator.
-  private def name_end(pos : Int32) : Int32
-    finish = @ends[@line]
+  # The end of an anchor, alias or tag name on a line ending at `finish`:
+  # blank, line end, or a flow indicator.
+  private def name_end(pos : Int32, finish : Int32) : Int32
     while pos < finish
       b = @bytes[pos]
       break if blank_byte?(b) || b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8
       pos = pos + 1
     end
     pos
+  end
+
+  # The end of the tag at `pos` (a `!`): a verbatim `!<...>` runs to its
+  # `>`, whatever is inside; any other tag is a name.
+  private def tag_end(pos : Int32, finish : Int32) : Int32
+    return name_end(pos, finish) unless pos + 1 < finish && @bytes[pos + 1] == 60_u8
+    at = pos + 2
+    while at < finish
+      return at + 1 if @bytes[at] == 62_u8
+      at = at + 1
+    end
+    finish
+  end
+
+  # The tag's text; the verbatim spelling of a core tag,
+  # `!<tag:yaml.org,2002:str>`, is read as its `!!str` shorthand. Any
+  # other tag keeps its spelling, so the refusal echoes it whole.
+  private def tag_text(pos : Int32, finish : Int32) : String
+    text = String.new(finish - pos) { |t| t.copy_from(@bytes + pos, finish - pos) }
+    prefix = "!<tag:yaml.org,2002:"
+    if text.starts_with?(prefix) && text.ends_with?(">") && text.bytesize > prefix.bytesize + 1
+      short = "!!" + text[prefix.bytesize, text.bytesize - prefix.bytesize - 1]
+      return short if known_tag?(short)
+    end
+    text
   end
 
   private def known_tag?(tag : String) : Bool
@@ -1275,7 +1341,7 @@ pub class Parser
     while at < finish
       b = @bytes[at]
       break if b == 35_u8 && at > pos && blank_byte?(@bytes[at - 1])
-      break if b == 58_u8 && value_indicator?(at, flow)
+      break if b == 58_u8 && value_indicator?(at, flow, finish)
       break if flow && (b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8)
       at = at + 1
     end
@@ -1438,8 +1504,13 @@ pub class Parser
       point = point * 16 + d
       i = i + 1
     end
-    if point > 0x10FFFF || (point >= 0xD800 && point <= 0xDFFF)
+    if point > 0x10FFFF
       fail("escape past the last code point", at)
+      return at + 2
+    end
+    if point >= 0xD800 && point <= 0xDFFF
+      written = String.new(2 + digits) { |t| t.copy_from(@bytes + at, 2 + digits) }
+      fail("surrogate code point #{written} in escape", at)
       return at + 2
     end
     @buffer.codepoint(point)
@@ -1615,7 +1686,7 @@ pub class Parser
       item = parse_flow_node(pos)
       break if @error
       pos = skip_flow_space(@flow_end)
-      if pos >= 0 && @bytes[pos] == 58_u8 && value_indicator?(pos, true)
+      if pos >= 0 && @bytes[pos] == 58_u8 && value_indicator?(pos, true, @ends[@line])
         # `[key: value]`: a one-pair mapping.
         pair = Hash(Any, Any).new
         pos = skip_flow_space(pos + 1)
@@ -1679,7 +1750,7 @@ pub class Parser
         fail("an explicit '?' key is not supported", pos)
         break
       end
-      merge = b == 60_u8 && pos + 2 < @ends[@line] && @bytes[pos + 1] == 60_u8 && value_indicator?(pos + 2, true)
+      merge = b == 60_u8 && pos + 2 < @ends[@line] && @bytes[pos + 1] == 60_u8 && value_indicator?(pos + 2, true, @ends[@line])
       key = parse_flow_node(pos)
       break if @error
       kk = key.kind
@@ -1698,7 +1769,7 @@ pub class Parser
         break
       end
       value = Any.new(nil)
-      if @bytes[pos] == 58_u8 && (value_indicator?(pos, true) || @bytes[key_pos] == 34_u8 || @bytes[key_pos] == 39_u8)
+      if @bytes[pos] == 58_u8 && (value_indicator?(pos, true, @ends[@line]) || @bytes[key_pos] == 34_u8 || @bytes[key_pos] == 39_u8)
         pos = skip_flow_space(pos + 1)
         if pos < 0
           fail("unterminated flow mapping", opener)
@@ -1744,14 +1815,14 @@ pub class Parser
       b = @bytes[pos]
       if b == 38_u8
         anchor_pos = pos
-        finish = name_end(pos + 1)
+        finish = name_end(pos + 1, @ends[@line])
         anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
         fail("an anchor with no name", pos) if !anchor.nil? && anchor.empty?
         return Any.new(nil) if @error
         pos = skip_flow_space(finish)
       elsif b == 33_u8
-        finish = name_end(pos)
-        tag = String.new(finish - pos) { |t| t.copy_from(@bytes + pos, finish - pos) }
+        finish = tag_end(pos, @ends[@line])
+        tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
         return Any.new(nil) if @error
         pos = skip_flow_space(finish)
@@ -1764,6 +1835,7 @@ pub class Parser
       end
     end
     open_anchor(anchor)
+    @nodes = @nodes + 1
     b = @bytes[pos]
     value = Any.new(nil)
     if b == 91_u8
@@ -1773,7 +1845,7 @@ pub class Parser
     elsif b == 34_u8 || b == 39_u8
       value = Any.new(parse_quoted(pos, -1, true))
     elsif b == 42_u8
-      finish = name_end(pos + 1)
+      finish = name_end(pos + 1, @ends[@line])
       name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
       value = resolve_alias(name, pos)
       @flow_end = finish
@@ -1799,15 +1871,26 @@ pub class Parser
   # Anchors and depth
 
   private def open_anchor(name : String?) : Nil
-    @open_anchors << name unless name.nil?
+    return if name.nil?
+    @open_anchors << name
+    @open_sizes << @nodes
   end
 
   private def close_anchor(name : String?, value : Any) : Nil
     return if name.nil?
-    @open_anchors.pop if @open_anchors.size > 0
-    @anchors[name] = value unless @error
+    started = @nodes
+    if @open_anchors.size > 0
+      @open_anchors.pop
+      started = @open_sizes.pop
+    end
+    return if @error
+    @anchors[name] = value
+    @anchor_sizes[name] = @nodes - started
   end
 
+  # The anchored value, shared; the nodes it holds count as read again,
+  # and once aliases have added ALIAS_NODE_LIMIT nodes the stream is
+  # refused rather than built.
   private def resolve_alias(name : String, pos : Int32) : Any
     if name.empty?
       fail("an alias with no name", pos)
@@ -1820,6 +1903,13 @@ pub class Parser
     found = @anchors[name]?
     if found.nil?
       fail("unknown anchor *#{name}", pos)
+      return Any.new(nil)
+    end
+    size = @anchor_sizes[name]
+    @nodes = @nodes + size
+    @expanded = @expanded + size
+    if @expanded > ALIAS_NODE_LIMIT
+      fail("alias expansion past 1,000,000 nodes", pos)
       return Any.new(nil)
     end
     found
@@ -1936,6 +2026,10 @@ class Emitter
     text
   end
 
+  # Plain when the parser would read it back as the same string: not an
+  # indicator, not `- `/`? ` (an entry), not `<<` (a merge as a key), not
+  # a document marker, no `: ` or ` #` inside, and not a value of another
+  # kind.
   private def plain_safe?(text : String) : Bool
     size = text.bytesize
     return false if size == 0
@@ -1943,10 +2037,11 @@ class Emitter
     first = bytes[0]
     return false if blank_byte?(first) || blank_byte?(bytes[size - 1])
     if first == 45_u8 || first == 63_u8 || first == 58_u8
-      return false if size == 1
+      return false if size == 1 || blank_byte?(bytes[1])
     elsif indicator?(first)
       return false
     end
+    return false if text == "<<"
     return false if text.starts_with?("---") || text.starts_with?("...")
     i = 0
     while i < size

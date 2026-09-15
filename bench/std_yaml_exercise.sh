@@ -83,6 +83,30 @@ else
 fi
 
 echo
+echo "== proving the checks can fail when alias expansion is unbounded"
+mkdir -p "$WORK/patched_alias/std"
+SRC="$REPO/src/std/yaml.iyi" DST="$WORK/patched_alias/std/yaml.iyi" python3 - <<'PY'
+import os
+from pathlib import Path
+src = Path(os.environ["SRC"]).read_text()
+old = "if @expanded > ALIAS_NODE_LIMIT"
+new = "if @expanded > ALIAS_NODE_LIMIT && false"
+if old not in src:
+    raise SystemExit("patch site missing")
+Path(os.environ["DST"]).parent.mkdir(parents=True, exist_ok=True)
+Path(os.environ["DST"]).write_text(src.replace(old, new, 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_alias:$REPO/src:$REPO/samples/iyi" timeout 60 "$IYI" run "$REPO/bench/std_yaml_exercise.iyi" >"$WORK/alias.out" 2>&1; then
+  echo "  the exercise PASSED with alias expansion unbounded"
+  status=1
+else
+  echo "  unbounded alias expansion is caught"
+fi
+
+echo
 if [ "$status" -eq 0 ]; then
   echo "the std/yaml exercise holds"
 else

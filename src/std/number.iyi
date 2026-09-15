@@ -72,19 +72,28 @@ struct ::Float64
       ceil
     elsif mode == Std::Number::RoundingMode::ToNegative
       floor
-    elsif mode == Std::Number::RoundingMode::TiesAway
-      round
     else
-      f = floor
-      d = self - f
-      if d < 0.5
-        f
-      elsif d > 0.5
-        f + 1.0
-      else
-        even = (f / 2.0).floor * 2.0
-        even == f ? f : f + 1.0
-      end
+      # The magnitude is rounded, then the sign put back. Its fraction is
+      # the magnitude less its floor, exact for every double under 2^53
+      # (under 1 the floor is zero; above it the two are within a factor of
+      # two), and the fraction decides: under a half the floor, over it the
+      # next integer, and at a half the mode. Adding 0.5 first rounded the
+      # sum itself: 0.49999999999999994 + 0.5 is 1.0, and 4503599627370497.0
+      # + 0.5 is 4503599627370498.0, so the prelude's `round` moves both.
+      a = abs
+      f = a.floor
+      d = a - f
+      r = if d < 0.5
+            f
+          elsif d > 0.5
+            f + 1.0
+          elsif mode == Std::Number::RoundingMode::TiesAway
+            f + 1.0
+          else
+            even = (f / 2.0).floor * 2.0
+            even == f ? f : f + 1.0
+          end
+      self < 0.0 ? 0.0 - r : r
     end
   end
 end

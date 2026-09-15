@@ -6,23 +6,30 @@
 # to land on. This module declares the `@[Primitive]` matrix for it the way
 # the prelude does for `Float64` - arithmetic, comparisons and conversions
 # against every numeric type, instructions and nothing underneath - and
-# gives it `abs`, `floor`, `ceil`, `round`, `trunc`, unary `-`, `%`,
+# gives it `abs`, `floor`, `ceil`, `round`, `trunc`, unary `-`, `%`, `//`,
 # `remainder`, `<=>`, `nan?`, `infinite?`, `finite?`, the constants `NAN`,
 # `INFINITY`, `MIN`, `MAX`, `EPSILON`, `MIN_POSITIVE`, and a printer of its
 # own: the shortest decimal that reads back as the same *single*, on the
 # prelude's exact bignum, so `0.1_f32` prints `0.1` and `Float32::MAX`
 # prints `3.4028235e+38`. `Float64` gets the same constants, `trunc`, unary
-# `-`, `%`, `remainder`, `<=>` and the three predicates.
+# `-`, `%`, `//`, `remainder`, `<=>` and the three predicates.
 #
 # Mixed arithmetic answers the receiver's type, as the prelude's does:
 # `1_u16 + 1.5_f32` is a `Float32`, `1.5 + 1.5_f32` a `Float64`, and
-# `1.5_f32 + 1.5` a `Float32` (computed in double, then narrowed).
+# `1.5_f32 + 1.5` a `Float32` (computed in double, then narrowed). A single
+# compared with an integer is compared exactly, on the double it is:
+# `16777217 == 16777216.0_f32` is false.
 #
 # `%` is the floored modulo, its sign the divisor's, as `Float#%` has meant
-# where the name comes from; `remainder` is the truncated one, its sign the
-# dividend's. Both are exact: no `x - y * q` that rounds. Either by zero
-# panics "modulo by zero". A conversion to an integer that does not fit
-# (NaN, infinity, out of range) panics "arithmetic overflow".
+# where the name comes from, and so is the zero it answers: `-0.0 % 1.0` is
+# `0.0`; `remainder` is the truncated one, its sign the dividend's; `//` is
+# the floored quotient, so `divmod` answers what Python's does. All exact:
+# no `x - y * q` that rounds. Either by zero panics "modulo by zero" or
+# "division by zero". A conversion to an integer truncates and then refuses
+# what the truncation does not hold ("arithmetic overflow"): `255.5_f32.to_u8`
+# is 255, NaN and the infinities are refused. Narrowing a double to a
+# single overflows to the infinity of its sign, as the single's own
+# arithmetic does, and so does `2.0_f32 ** 128`.
 module std/float
 
 import std/int
@@ -38,14 +45,36 @@ import std/number
        {"to_u64", "UInt64"}, {"to_u128", "UInt128"},
      ] %}
 
-  struct ::Float32
-    {% for conv in int_convs %}
-      @[::Primitive(:convert)]
-      @[Raises]
-      def {{ conv[0].id }} : {{ conv[1].id }}
-      end
-    {% end %}
+  # A single whose truncation fits the integer, decided on the double it
+  # is exactly: see `float_limits` in std/int, which these repeat for the
+  # single's own conversions.
+  {% float_limits = {
+       "Int8"    => "128.0",
+       "Int16"   => "32768.0",
+       "Int32"   => "2147483648.0",
+       "Int64"   => "9223372036854775808.0",
+       "Int128"  => "170141183460469231731687303715884105728.0",
+       "UInt8"   => "256.0",
+       "UInt16"  => "65536.0",
+       "UInt32"  => "4294967296.0",
+       "UInt64"  => "18446744073709551616.0",
+       "UInt128" => "340282366920938463463374607431768211456.0",
+     } %}
+  {% float_refuse_low = {
+       "Int8"    => "wide <= -129.0",
+       "Int16"   => "wide <= -32769.0",
+       "Int32"   => "wide <= -2147483649.0",
+       "Int64"   => "wide < -9223372036854775808.0",
+       "Int128"  => "wide < -170141183460469231731687303715884105728.0",
+       "UInt8"   => "wide <= -1.0",
+       "UInt16"  => "wide <= -1.0",
+       "UInt32"  => "wide <= -1.0",
+       "UInt64"  => "wide <= -1.0",
+       "UInt128" => "wide <= -1.0",
+     } %}
+  {% wide_ints = %w(Int64 UInt64 Int128 UInt128) %}
 
+  struct ::Float32
     @[::Primitive(:convert)]
     def to_f : Float64
     end
@@ -58,13 +87,50 @@ import std/number
     def to_f32 : Float32
     end
 
-    {% for num in nums + %w(Float32) %}
+    # Truncated first, then refused if the truncation does not fit:
+    # `255.5_f32.to_u8` is 255 and `(-0.5_f32).to_u8` is 0. The instruction
+    # is std/int's, on the double every single is exactly.
+    {% for conv in int_convs %}
+      def {{ conv[0].id }} : {{ conv[1].id }}
+        wide = to_f64
+        if wide != wide || {{ float_refuse_low[conv[1]].id }} || wide >= {{ float_limits[conv[1]].id }}
+          raise "arithmetic overflow"
+        end
+        wide.unsafe_{{ conv[0].id }}
+      end
+    {% end %}
+
+    {% for num in %w(Float64 Float32) %}
       {% for op in %w(== != < <= > >=) %}
         @[::Primitive(:binary)]
         def {{ op.id }}(other : {{ num.id }}) : Bool
         end
       {% end %}
+    {% end %}
 
+    # Against an integer, exact: on the double the single is exactly,
+    # which holds every integer under 64 bits exactly too, and through
+    # std/int's exact `<=>` for the wider ones - the prelude's own `Int64 ==
+    # Float64` is not exact. `16777217 == 16777216.0_f32` was true, the
+    # integer rounded to a single first.
+    {% for int in ints %}
+      {% if wide_ints.includes?(int) %}
+        {% for pair in [{"==", "c == 0"}, {"!=", "c != 0"}, {"<", "c == 1"}, {"<=", "c == 1 || c == 0"}, {">", "c == -1"}, {">=", "c == -1 || c == 0"}] %}
+          def {{ pair[0].id }}(other : {{ int.id }}) : Bool
+            c = other <=> to_f64
+            {{ pair[1].id }}
+          end
+        {% end %}
+      {% else %}
+        {% for op in %w(== != < <= > >=) %}
+          def {{ op.id }}(other : {{ int.id }}) : Bool
+            to_f64 {{ op.id }} other.to_f64
+          end
+        {% end %}
+      {% end %}
+    {% end %}
+
+    {% for num in nums + %w(Float32) %}
       {% for op in %w(+ - *) %}
         @[::Primitive(:binary)]
         def {{ op.id }}(other : {{ num.id }}) : self
@@ -83,18 +149,20 @@ import std/number
 
   {% for num in nums %}
     struct ::{{ num.id }}
-      @[::Primitive(:convert)]
-      @[Raises]
-      def to_f32 : Float32
-      end
-
-      {% for op in %w(== != < <= > >=) %}
-        @[::Primitive(:binary)]
-        def {{ op.id }}(other : Float32) : Bool
-        end
-      {% end %}
-
       {% if num == "Float64" %}
+        # The instruction, unchecked: a double past the single's range
+        # narrows to the infinity of its sign, as `Float32::MAX * 2.0_f32`
+        # answers. It used to panic "arithmetic overflow" here alone.
+        @[::Primitive(:unchecked_convert)]
+        def to_f32 : Float32
+        end
+
+        {% for op in %w(== != < <= > >=) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : Float32) : Bool
+          end
+        {% end %}
+
         {% for op in %w(+ - *) %}
           @[::Primitive(:binary)]
           def {{ op.id }}(other : Float32) : self
@@ -105,6 +173,18 @@ import std/number
         def fdiv(other : Float32) : self
         end
       {% else %}
+        @[::Primitive(:convert)]
+        @[Raises]
+        def to_f32 : Float32
+        end
+
+        # The single's exact comparison, with the sides swapped.
+        {% for pair in [{"==", "=="}, {"!=", "!="}, {"<", ">"}, {"<=", ">="}, {">", "<"}, {">=", "<="}] %}
+          def {{ pair[0].id }}(other : Float32) : Bool
+            other {{ pair[1].id }} self
+          end
+        {% end %}
+
         {% for op in %w(+ - *) %}
           @[::Primitive(:binary)]
           def {{ op.id }}(other : Float32) : Float32
@@ -187,13 +267,35 @@ import std/number
       end
 
       # The floored modulo, the divisor's sign: `-7.5 % 2.0` is 0.5,
-      # `7.5 % -2.0` is -0.5.
+      # `7.5 % -2.0` is -0.5, and a zero takes the divisor's sign too -
+      # `-0.0 % 1.0` is `0.0` - where it used to keep the dividend's.
       def %(other : {{ name.id }}) : {{ name.id }}
         r = remainder(other)
-        if r != 0.0{{ sfx.id }} && (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
+        if r == 0.0{{ sfx.id }}
+          return other < 0.0{{ sfx.id }} ? -0.0{{ sfx.id }} : 0.0{{ sfx.id }}
+        end
+        if (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
           r = r + other
         end
         r
+      end
+
+      # The floored quotient, `divmod`'s other half: `7.5 // 2.0` is 3.0
+      # and `-7.5 // 2.0` is -4.0. The exact remainder is taken off first
+      # so the division is of a multiple of the divisor; it can still round,
+      # so the quotient is floored and nudged up past a half. A zero
+      # quotient has the sign of the division.
+      def //(other : {{ name.id }}) : {{ name.id }}
+        raise "division by zero" if other == 0.0{{ sfx.id }}
+        r = remainder(other)
+        q = (self - r) / other
+        if r != 0.0{{ sfx.id }} && (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
+          q = q - 1.0{{ sfx.id }}
+        end
+        return q if q != q
+        return self / other * 0.0{{ sfx.id }} if q == 0.0{{ sfx.id }}
+        f = q.floor
+        q - f > 0.5{{ sfx.id }} ? f + 1.0{{ sfx.id }} : f
       end
 
       # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is

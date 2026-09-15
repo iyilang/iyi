@@ -15,11 +15,19 @@
 #
 # What it refuses: arithmetic that leaves the type panics with "arithmetic
 # overflow" (the `&+` family wraps instead); a conversion that does not fit
-# panics the same way, and the `to_i8?` family answers nil instead; `//` and
+# panics the same way, and the `to_i8?` family answers nil instead; a double
+# converts by truncating first, so `127.9.to_i8` is 127 and `(-0.5).to_u16`
+# is 0, and what is refused is a truncation the type does not hold; `//` and
 # `%` by zero panic "division by zero" / "modulo by zero"; `digits` of a
 # negative number, a base under 2, a `chr` outside 0..127, and a `to_s` base
 # outside 2..36 are refused with a sentence. There is no `Int32::MAX`: the
 # edges of a type are its literals, and that holds for every type here.
+#
+# Against a double every integer compares exactly, `<=>` included:
+# `9007199254740993_i128 == 9007199254740992.0` is false. The prelude's own
+# four (`Int32`, `Int64`, `UInt8`, `UInt64`) keep the prelude's `==` family,
+# which rounds `Int64` and `UInt64` to the double first; their `<=>` here
+# is exact.
 module std/int
 
 {% begin %}
@@ -62,6 +70,34 @@ module std/int
        {"to_u64", "UInt64"}, {"to_u128", "UInt128"},
      ] %}
   {% prelude_convs = %w(to_i to_i32 to_i64 to_u8 to_u64) %}
+  # A double whose truncation fits the type: past `float_limits[T]` (the
+  # type's largest value plus one, exact in a double) it does not, and below
+  # `float_refuse_low[T]` it does not either - the largest value under the
+  # smallest of the type, where that is a double, else the smallest itself.
+  {% float_limits = {
+       "Int8"    => "128.0",
+       "Int16"   => "32768.0",
+       "Int32"   => "2147483648.0",
+       "Int64"   => "9223372036854775808.0",
+       "Int128"  => "170141183460469231731687303715884105728.0",
+       "UInt8"   => "256.0",
+       "UInt16"  => "65536.0",
+       "UInt32"  => "4294967296.0",
+       "UInt64"  => "18446744073709551616.0",
+       "UInt128" => "340282366920938463463374607431768211456.0",
+     } %}
+  {% float_refuse_low = {
+       "Int8"    => "self <= -129.0",
+       "Int16"   => "self <= -32769.0",
+       "Int32"   => "self <= -2147483649.0",
+       "Int64"   => "self < -9223372036854775808.0",
+       "Int128"  => "self < -170141183460469231731687303715884105728.0",
+       "UInt8"   => "self <= -1.0",
+       "UInt16"  => "self <= -1.0",
+       "UInt32"  => "self <= -1.0",
+       "UInt64"  => "self <= -1.0",
+       "UInt128" => "self <= -1.0",
+     } %}
 
   # --- the primitive matrix ---------------------------------------------
   {% for from in types %}
@@ -134,9 +170,42 @@ module std/int
       {% end %}
 
       {% unless prelude.includes?(from[0]) %}
-        {% for op in %w(== != < <= > >=) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : Float64) : Bool
+        {% if from[1] < 64 %}
+          # Every value of the type is a double exactly, so the double's own
+          # comparison is the exact one.
+          {% for op in %w(== != < <= > >=) %}
+            def {{ op.id }}(other : Float64) : Bool
+              to_f64 {{ op.id }} other
+            end
+          {% end %}
+        {% else %}
+          # A value this wide may not be a double: `9007199254740993_i128 ==
+          # 9007199254740992.0` was true, the integer rounded to the double
+          # before the comparison. `<=>` below compares exactly.
+          def ==(other : Float64) : Bool
+            (self <=> other) == 0
+          end
+
+          def !=(other : Float64) : Bool
+            (self <=> other) != 0
+          end
+
+          def <(other : Float64) : Bool
+            (self <=> other) == -1
+          end
+
+          def <=(other : Float64) : Bool
+            c = self <=> other
+            c == -1 || c == 0
+          end
+
+          def >(other : Float64) : Bool
+            (self <=> other) == 1
+          end
+
+          def >=(other : Float64) : Bool
+            c = self <=> other
+            c == 1 || c == 0
           end
         {% end %}
 
@@ -152,15 +221,33 @@ module std/int
           to_f64 / other
         end
       {% end %}
+
+      # Exact for every width: the double is placed against the type's
+      # edges, then its floor - one of the type, once inside them - against
+      # the value, then its fraction decides a tie. nil when the double is
+      # NaN, as `Float64#<=>` answers. The prelude's `Int64 == Float64` is
+      # not exact, and is the prelude's to mend; this one is.
+      def <=>(other : Float64) : Int32?
+        return nil if other != other
+        return -1 if other >= {{ float_limits[from[0]].id }}
+        return 1 if other < {{ (from[2] ? mins[from[0]] : "0").id }}.0
+        whole = other.floor
+        {% conv = convs.find { |c| c[1] == from[0] } %}
+        as_int = whole.unsafe_{{ conv[0].id }}
+        return -1 if self < as_int
+        return 1 if self > as_int
+        other > whole ? -1 : 0
+      end
     end
   {% end %}
 
   struct ::Float64
     {% for from in types %}
       {% unless prelude.includes?(from[0]) %}
-        {% for op in %w(== != < <= > >=) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ from[0].id }}) : Bool
+        # The integer's comparison, exact, with the sides swapped.
+        {% for pair in [{"==", "=="}, {"!=", "!="}, {"<", ">"}, {"<=", ">="}, {">", "<"}, {">=", "<="}] %}
+          def {{ pair[0].id }}(other : {{ from[0].id }}) : Bool
+            other {{ pair[1].id }} self
           end
         {% end %}
 
@@ -176,11 +263,24 @@ module std/int
       {% end %}
     {% end %}
 
+    # The conversions to the integers the prelude does not reach. The
+    # unchecked form is the instruction, for every target; the checked
+    # form truncates first and refuses what the truncation does not hold:
+    # `127.9.to_i8` is 127 and `(-0.5).to_u16` is 0, where the range was
+    # once checked on the untruncated value and both were refused. NaN and
+    # the infinities are refused. The prelude's own five (`to_i`, `to_i32`,
+    # `to_i64`, `to_u8`, `to_u64`) still check before truncating.
     {% for conv in convs %}
+      @[::Primitive(:unchecked_convert)]
+      def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
+      end
+
       {% unless prelude_convs.includes?(conv[0]) %}
-        @[::Primitive(:convert)]
-        @[Raises]
         def {{ conv[0].id }} : {{ conv[1].id }}
+          if self != self || {{ float_refuse_low[conv[1]].id }} || self >= {{ float_limits[conv[1]].id }}
+            raise "arithmetic overflow"
+          end
+          unsafe_{{ conv[0].id }}
         end
       {% end %}
     {% end %}

@@ -223,6 +223,14 @@ assert_true(t_retracted == t_base, "Time - Span roundtrip")
 
 elapsed = t_advanced - t_base
 assert_equal(10_i64 * 86400_i64 + 3_i64 * 3600_i64, elapsed.to_i, "Time - Time")
+
+# The edges of the seconds: a sum that fits is answered, not refused, and
+# the module's own overflow refusals are proved by the gate's programs.
+assert_equal(9223372036854775807_i64, (Span.seconds(9223372036854775806_i64) + Span.seconds(1_i64)).to_i, "Span + up to Int64::MAX")
+assert_equal(-9223372036854775808_i64, (Span.seconds(-9223372036854775807_i64) - Span.seconds(1_i64)).to_i, "Span - down to Int64::MIN")
+assert_equal(9223372036854720000_i64, Span.days(106751991167300_i64).to_i, "Span.days at the last day that fits")
+assert_equal(9223372036854775807_i64, (-Span.seconds(-9223372036854775807_i64)).to_i, "-Span at the edge")
+assert_equal(Time::MAX_SECONDS - Time::MIN_SECONDS, (Time.unix(Time::MAX_SECONDS) - Time.unix(Time::MIN_SECONDS)).to_i, "Time - Time across the whole range")
 puts "  Span accessors, operators (+, -, -@, cmp) and Time arithmetic verified"
 
 # ---------------------------------------------------------------------------
@@ -250,6 +258,31 @@ assert_equal(Time.utc(2024, 2, 29, 15, 30, 45).to_unix, p4.to_unix, "parse_rfc33
 
 p5 = Time.parse_rfc3339("2024-02-29 15:30:45Z")
 assert_equal(p1.to_unix, p5.to_unix, "parse_rfc3339 with space separator")
+
+# The parser reads what the formatter writes: a negative year, a year of
+# five or more digits, and the first and last seconds the type holds, whose
+# years are Int32's own edges. `12345-06-07T08:09:10Z` was written and then
+# refused as "invalid RFC 3339 format delimiters".
+t_wide = Time.utc(12345, 6, 7, 8, 9, 10)
+assert_true(t_wide.to_rfc3339 == "12345-06-07T08:09:10Z", "a five-digit year prints")
+assert_true(Time.parse_rfc3339(t_wide.to_rfc3339) == t_wide, "a five-digit year round-trips")
+assert_true(Time.parse_rfc3339("-0001-01-01T00:00:00Z") == Time.utc(-1, 1, 1), "year -0001 round-trips")
+t_first = Time.unix(Time::MIN_SECONDS)
+t_last = Time.unix(Time::MAX_SECONDS)
+assert_true(t_first.to_rfc3339 == "-2147483648-01-01T00:00:00Z", "the first second prints its year")
+assert_true(t_last.to_rfc3339 == "2147483647-12-31T23:59:59Z", "the last second prints its year")
+assert_true(Time.parse_rfc3339(t_first.to_rfc3339) == t_first, "the first second round-trips")
+assert_true(Time.parse_rfc3339(t_last.to_rfc3339) == t_last, "the last second round-trips")
+assert_equal(2147483647_i64, t_last.year.to_i64, "the last second's year")
+assert_equal(-2147483648_i64, t_first.year.to_i64, "the first second's year")
+
+# The widest offsets the grammar allows, in both spellings; `+24:00` and
+# `+99:99` are refused by the gate's programs.
+p6 = Time.parse_rfc3339("2024-02-29T23:59:00+23:59")
+assert_equal(Time.utc(2024, 2, 29, 0, 0, 0).to_unix, p6.to_unix, "parse_rfc3339 +23:59")
+p7 = Time.parse_rfc3339("2024-02-29T00:00:00-2359")
+assert_equal(Time.utc(2024, 2, 29, 23, 59, 0).to_unix, p7.to_unix, "parse_rfc3339 -2359")
+puts "  the years -0001, 12345 and Int32's edges round-trip, and offsets reach 23:59"
 puts "  to_rfc3339 (0, 3, 6, 9 digits) and parse_rfc3339 (UTC, offsets, fractions) verified"
 
 # ---------------------------------------------------------------------------

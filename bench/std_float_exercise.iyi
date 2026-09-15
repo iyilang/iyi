@@ -1,4 +1,5 @@
-# Exercises `std/float`: Float32 arithmetic and constants.
+# Exercises `std/float`: Float32 arithmetic and constants, the conversions
+# to the integers, the exact comparison against them, and `%` and `//`.
 #
 # Run via:
 #     ./bin/iyi run bench/std_float_exercise.iyi
@@ -14,6 +15,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/float
+import std/int
 import std/number
 import std/enumerable
 import std/list
@@ -31,6 +33,94 @@ puts "\n== constants"
 assert_true Float32::MAX > 1.0_f32, "max"
 assert_true Float32::MIN < 0.0_f32, "min"
 puts "  MAX, MIN"
+
+# Past the single's range the arithmetic answers the infinity; so does the
+# narrowing from a double, and `**` through it. Both used to panic
+# "arithmetic overflow" where `Float32::MAX * 2.0_f32` did not.
+puts "\n== narrowing"
+assert_true (Float32::MAX * 2.0_f32).infinite? == 1, "the product overflows to Infinity"
+assert_true 1.0e39.to_f32.infinite? == 1, "a double past the single overflows to Infinity"
+assert_true (-1.0e39).to_f32.infinite? == -1, "and a negative one to -Infinity"
+assert_true 1.7976931348623157e308.to_f32.infinite? == 1, "Float64::MAX narrows to Infinity"
+assert_true (2.0_f32 ** 128).infinite? == 1, "2 ** 128 is Infinity in a single"
+assert_true 2.0_f32 ** 127 == 1.7014118e+38_f32, "2 ** 127 fits a single"
+assert_true 1.0e-50.to_f32 == 0.0_f32, "a double under the single's range narrows to zero"
+puts "  a double past the single narrows to the infinity, as the arithmetic does"
+
+# Truncated first, then refused if the truncation does not fit: Python's
+# int(255.5) is 255 and int(-0.5) is 0. The range used to be checked on
+# the value itself, so 254.9 converted and 255.5 was refused.
+puts "\n== conversions to integers"
+assert_true 255.5_f32.to_u8 == 255_u8, "255.5 to_u8"
+assert_true (-0.5_f32).to_u8 == 0_u8, "-0.5 to_u8"
+assert_true (-0.99_f32).to_u32 == 0_u32, "-0.99 to_u32"
+assert_true 127.9_f32.to_i8 == 127_i8, "127.9 to_i8"
+assert_true (-128.9_f32).to_i8 == -128_i8, "-128.9 to_i8"
+assert_true 65535.9_f32.to_u16 == 65535_u16, "65535.9 to_u16"
+assert_true 2147483520.0_f32.to_i32 == 2147483520, "the last single under 2^31 to_i32"
+assert_true (-2147483648.0_f32).to_i32 == -2147483648, "-2^31 to_i32"
+assert_true 4294967040.0_f32.to_u == 4294967040_u32, "the last single under 2^32 to_u"
+assert_true 1.0e18_f32.to_i64 == 999999984306749440_i64, "1e18 to_i64 is the single's own value"
+assert_true 1.0e19_f32.to_u64 == 9999999980506447872_u64, "1e19 to_u64"
+assert_true 1.0e38_f32.to_i128 == 99999996802856924650656260769173209088_i128, "1e38 to_i128"
+assert_true 3.0e38_f32.to_u128 == 300000000549775575777803994281145270272_u128, "3e38 to_u128"
+assert_true (-1.5_f32).to_i128 == -1_i128, "-1.5 to_i128"
+assert_true 1.5_f32.trunc == 1.0_f32, "trunc still truncates"
+puts "  a single truncates, then the truncation is range-checked"
+
+# Against an integer the comparison is exact, whatever the widths:
+# `16777217 == 16777216.0_f32` was true, the integer rounded to a single
+# before the comparison, and `9007199254740993_i64 == 9007199254740992.0_f32`
+# likewise.
+puts "\n== comparison with integers"
+assert_true !(16777217 == 16777216.0_f32), "16777217 == 2^24 as a single"
+assert_true 16777217 != 16777216.0_f32, "16777217 != 2^24"
+assert_true 16777217 > 16777216.0_f32, "16777217 > 2^24"
+assert_true 16777216.0_f32 < 16777217, "2^24 < 16777217"
+assert_true 16777216.0_f32 == 16777216, "2^24 == 16777216"
+assert_true 16777216.0_f32 <= 16777216, "2^24 <= 16777216"
+assert_true !(9007199254740993_i64 == 9007199254740992.0_f32), "2^53 + 1 == 2^53 as a single"
+assert_true 9007199254740993_i64 > 9007199254740992.0_f32, "2^53 + 1 > 2^53"
+assert_true 9007199254740992.0_f32 < 9007199254740993_i64, "2^53 < 2^53 + 1"
+assert_true !(9007199254740992.0_f32 >= 9007199254740993_u64), "2^53 >= 2^53 + 1 as UInt64"
+assert_true 18446744073709551615_u64 < 18446744073709551616.0_f32, "UInt64::MAX < 2^64"
+assert_true !(170141183460469231731687303715884105727_i128 == 170141183460469231731687303715884105728.0_f32), "Int128::MAX == 2^127"
+assert_true 170141183460469231731687303715884105727_i128 < 170141183460469231731687303715884105728.0_f32, "Int128::MAX < 2^127"
+assert_true (-1_i8) < -0.5_f32, "-1 < -0.5"
+assert_true 1.5_f32 > 1_u16 && 1_u16 < 1.5_f32, "1.5 against 1, both ways"
+nan32 = 0.0_f32 / 0.0_f32
+assert_true !(nan32 == 1_i64) && nan32 != 1_i64 && !(nan32 < 1_i64) && !(nan32 >= 1_i64), "NaN is ordered against no Int64"
+assert_true !(1_i8 == nan32) && 1_i8 != nan32 && !(1_i8 > nan32) && !(1_i8 <= nan32), "and no Int8"
+puts "  the integer is not rounded to the single first"
+
+# `%` takes the divisor's sign even for its zero, as Python does; `//` is
+# the floored quotient, so `divmod` is Python's `divmod(7.5, 2.0)`.
+puts "\n== modulo and floored division"
+assert_str "0.0", ((-0.0) % 1.0).to_s, "-0.0 % 1.0"
+assert_str "-0.0", (0.0 % -1.0).to_s, "0.0 % -1.0"
+assert_str "0.0", ((-0.0_f32) % 1.0_f32).to_s, "-0.0_f32 % 1.0_f32"
+assert_str "-0.0", (4.0 % -2.0).to_s, "4.0 % -2.0"
+assert_true (-7.5) % 2.0 == 0.5 && 7.5 % -2.0 == -0.5, "the sign of a nonzero modulo is still the divisor's"
+assert_true 7.5 // 2.0 == 3.0, "7.5 // 2.0"
+assert_true (-7.5) // 2.0 == -4.0, "-7.5 // 2.0"
+assert_true 7.5 // -2.0 == -4.0, "7.5 // -2.0"
+assert_true (-7.5) // -2.0 == 3.0, "-7.5 // -2.0"
+assert_true 1.0 // 3.0 == 0.0 && (-1.0) // 3.0 == -1.0, "1 // 3 and -1 // 3"
+assert_str "-0.0", (0.0 // -2.0).to_s, "0.0 // -2.0 is the division's zero"
+assert_str "0.0", ((-1.5) // -2.0).to_s, "-1.5 // -2.0 is a positive zero"
+assert_true 1.0 // (1.0 / 0.0) == 0.0 && 1.0 // (-1.0 / 0.0) == -1.0, "a finite value over the infinities"
+assert_true ((1.0 / 0.0) // 2.0).nan?, "an infinity over a finite value"
+assert_true 1.0e308 // 1.0e-308 == 1.0 / 0.0, "a quotient past the double"
+assert_true 7.5_f32 // 2.0_f32 == 3.0_f32 && (-7.5_f32) // 2.0_f32 == -4.0_f32, "the single's //"
+q, r = 7.5.divmod(2.0)
+assert_true q == 3.0 && r == 1.5, "divmod(7.5, 2.0) is (3.0, 1.5)"
+q, r = (-7.5).divmod(2.0)
+assert_true q == -4.0 && r == 0.5, "divmod(-7.5, 2.0) is (-4.0, 0.5)"
+q, r = 7.5.divmod(-2.0)
+assert_true q == -4.0 && r == -0.5, "divmod(7.5, -2.0) is (-4.0, -0.5)"
+q32, r32 = 7.5_f32.divmod(2.0_f32)
+assert_true q32 == 3.0_f32 && r32 == 1.5_f32, "the single's divmod"
+puts "  the zero of % is the divisor's, // floors, divmod is Python's"
 
 puts "\n== traits"
 assert_true 1.5_f32.cmp(2.0_f32) == -1, "f32 cmp"

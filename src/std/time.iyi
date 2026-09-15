@@ -102,7 +102,7 @@ pub struct Span
   getter nanoseconds : Int32
 
   def initialize(seconds : Int64 = 0_i64, nanoseconds : Int32 = 0)
-    sec = seconds + (nanoseconds.to_i64 // 1000000000_i64)
+    sec = Span.add_seconds(seconds, nanoseconds.to_i64 // 1000000000_i64)
     nsec = (nanoseconds.to_i64 % 1000000000_i64).to_i32
     if sec > 0 && nsec < 0
       sec = sec - 1_i64
@@ -116,9 +116,42 @@ pub struct Span
   end
 
   def self.new(*, days : Int64 = 0_i64, hours : Int64 = 0_i64, minutes : Int64 = 0_i64, seconds : Int64 = 0_i64, milliseconds : Int64 = 0_i64, nanoseconds : Int64 = 0_i64) : Span
-    total_sec = days * 86400_i64 + hours * 3600_i64 + minutes * 60_i64 + seconds + (milliseconds // 1000_i64) + (nanoseconds // 1000000000_i64)
+    total_sec = mul_seconds(days, 86400_i64)
+    total_sec = add_seconds(total_sec, mul_seconds(hours, 3600_i64))
+    total_sec = add_seconds(total_sec, mul_seconds(minutes, 60_i64))
+    total_sec = add_seconds(total_sec, seconds)
+    total_sec = add_seconds(total_sec, milliseconds // 1000_i64)
+    total_sec = add_seconds(total_sec, nanoseconds // 1000000000_i64)
     total_ns = ((milliseconds % 1000_i64) * 1000000_i64 + (nanoseconds % 1000000000_i64)).to_i32
     new(total_sec, total_ns)
+  end
+
+  # The seconds are an Int64, and a span that leaves it is refused here,
+  # by name: `Span.seconds(Int64::MAX) + Span.seconds(1)` panicked with the
+  # prelude's "arithmetic overflow", a sentence that named no span. The
+  # wrapping sum is compared with an addend to see whether it wrapped; the
+  # product is bounded before it is taken.
+  def self.add_seconds(a : Int64, b : Int64) : Int64
+    sum = a &+ b
+    if (b > 0_i64 && sum < a) || (b < 0_i64 && sum > a)
+      raise "Span overflows: #{a} + #{b} seconds"
+    end
+    sum
+  end
+
+  def self.sub_seconds(a : Int64, b : Int64) : Int64
+    diff = a &- b
+    if (b > 0_i64 && diff > a) || (b < 0_i64 && diff < a)
+      raise "Span overflows: #{a} - #{b} seconds"
+    end
+    diff
+  end
+
+  def self.mul_seconds(n : Int64, unit : Int64) : Int64
+    if n > 9223372036854775807_i64 // unit || n < -9223372036854775808_i64 // unit
+      raise "Span overflows: #{n} * #{unit} seconds"
+    end
+    n * unit
   end
 
   def self.zero : Span
@@ -126,15 +159,15 @@ pub struct Span
   end
 
   def self.days(n : Int64) : Span
-    new(n * 86400_i64, 0)
+    new(mul_seconds(n, 86400_i64), 0)
   end
 
   def self.hours(n : Int64) : Span
-    new(n * 3600_i64, 0)
+    new(mul_seconds(n, 3600_i64), 0)
   end
 
   def self.minutes(n : Int64) : Span
-    new(n * 60_i64, 0)
+    new(mul_seconds(n, 60_i64), 0)
   end
 
   def self.seconds(n : Int64) : Span
@@ -226,15 +259,15 @@ pub struct Span
   end
 
   def +(other : Span) : Span
-    Span.new(@seconds + other.@seconds, @nanoseconds + other.@nanoseconds)
+    Span.new(Span.add_seconds(@seconds, other.@seconds), @nanoseconds + other.@nanoseconds)
   end
 
   def -(other : Span) : Span
-    Span.new(@seconds - other.@seconds, @nanoseconds - other.@nanoseconds)
+    Span.new(Span.sub_seconds(@seconds, other.@seconds), @nanoseconds - other.@nanoseconds)
   end
 
   def - : Span
-    Span.new(-@seconds, -@nanoseconds)
+    Span.new(Span.sub_seconds(0_i64, @seconds), -@nanoseconds)
   end
 
   def <=>(other : Span) : Int32
@@ -305,12 +338,25 @@ pub struct Time
   alias Span = Std::Time::Span
   alias DayOfWeek = Std::Time::DayOfWeek
 
+  # The first and last second whose year an Int32 names: -2147483648-01-01
+  # and 2147483647-12-31T23:59:59. `year` and `to_rfc3339` answer for every
+  # Time that was constructed, because `Time.unix(10_i64 ** 17)` is refused
+  # here rather than built and left to panic "arithmetic overflow" inside
+  # `civil_from_days` when its year is first asked for. The carry from the
+  # nanoseconds is added wrapping: a wrapped sum lands outside the range
+  # and is refused by the same sentence.
+  MIN_SECONDS = -67768100567971200_i64
+  MAX_SECONDS =  67767976233532799_i64
+
   def initialize(@seconds : Int64, nanoseconds : Int32 = 0)
-    sec = @seconds + (nanoseconds.to_i64 // 1000000000_i64)
+    sec = @seconds &+ (nanoseconds.to_i64 // 1000000000_i64)
     nsec = (nanoseconds.to_i64 % 1000000000_i64).to_i32
     if nsec < 0
-      sec = sec - 1_i64
+      sec = sec &- 1_i64
       nsec = nsec + 1000000000
+    end
+    if sec < MIN_SECONDS || sec > MAX_SECONDS
+      raise "year out of range: #{@seconds} seconds from the epoch is past the years an Int32 holds"
     end
     @seconds = sec
     @nanoseconds = nsec
@@ -653,12 +699,15 @@ pub struct Time
   # Arithmetic
   # ---------------------------------------------------------------------------
 
+  # The sum is checked before it is taken, so a span too long for the
+  # seconds is refused as one; a sum that fits but leaves the years an
+  # Int32 names is refused by the constructor.
   def +(span : Span) : Time
-    Time.new(@seconds + span.total_seconds_i64, @nanoseconds + span.nanoseconds)
+    Time.new(Span.add_seconds(@seconds, span.total_seconds_i64), @nanoseconds + span.nanoseconds)
   end
 
   def -(span : Span) : Time
-    Time.new(@seconds - span.total_seconds_i64, @nanoseconds - span.nanoseconds)
+    Time.new(Span.sub_seconds(@seconds, span.total_seconds_i64), @nanoseconds - span.nanoseconds)
   end
 
   def -(other : Time) : Span
@@ -741,29 +790,67 @@ pub struct Time
   #   2024-02-29 12:30:45Z
   #   2024-02-29T12:30:45+05:00
   #   2024-02-29T12:30:45-08:00
+  #   -0001-01-01T00:00:00Z and 12345-06-07T08:09:10Z, as `to_rfc3339` writes them
   def self.parse_rfc3339(str : String) : Time
     len = str.bytesize
     if len < 20
       raise "RFC 3339 string too short: #{str}"
     end
 
-    if str[4] != '-' || str[7] != '-' || str[13] != ':' || str[16] != ':'
+    # The year is what `to_rfc3339` writes: an optional `-`, then four or
+    # more digits up to the `-` that ends them. RFC 3339 itself stops at
+    # four, and the formatter did not, so `-0001-01-01T00:00:00Z` was a
+    # string the module wrote and refused to read. Ten digits are the most
+    # an Int32 year needs; an eleventh is out of range whatever it is.
+    idx = 0
+    negative_year = false
+    if str[0] == '-'
+      negative_year = true
+      idx = 1
+    end
+    year_start = idx
+    year_val = 0_i64
+    while idx < len
+      code = str.to_unsafe[idx].to_i32
+      break if code < 48 || code > 57
+      if idx - year_start >= 10
+        raise "year out of range in RFC 3339 string: #{str}"
+      end
+      year_val = year_val * 10_i64 + (code - 48).to_i64
+      idx = idx + 1
+    end
+    if idx - year_start < 4
+      raise "invalid year in RFC 3339 string: fewer than four digits in #{str}"
+    end
+    year_val = 0_i64 - year_val if negative_year
+    if year_val < -2147483648_i64 || year_val > 2147483647_i64
+      raise "year out of range in RFC 3339 string: #{str}"
+    end
+    y = year_val.to_i32
+
+    # `p` is the `-` after the year; the rest of the date and the time are
+    # at fixed offsets from it.
+    p = idx
+    if len < p + 16
+      raise "RFC 3339 string too short: #{str}"
+    end
+
+    if str[p] != '-' || str[p + 3] != '-' || str[p + 9] != ':' || str[p + 12] != ':'
       raise "invalid RFC 3339 format delimiters: #{str}"
     end
 
-    sep = str[10]
+    sep = str[p + 6]
     if sep != 'T' && sep != 't' && sep != ' '
       raise "invalid RFC 3339 date/time separator: #{sep}"
     end
 
-    y = parse_int(str, 0, 4)
-    m = parse_int(str, 5, 2)
-    d = parse_int(str, 8, 2)
-    h = parse_int(str, 11, 2)
-    mi = parse_int(str, 14, 2)
-    s = parse_int(str, 17, 2)
+    m = parse_int(str, p + 1, 2)
+    d = parse_int(str, p + 4, 2)
+    h = parse_int(str, p + 7, 2)
+    mi = parse_int(str, p + 10, 2)
+    s = parse_int(str, p + 13, 2)
 
-    idx = 19
+    idx = p + 15
     nanos = 0
 
     # Optional fractional seconds
@@ -805,28 +892,44 @@ pub struct Time
 
     if tz_char == 'Z' || tz_char == 'z'
       offset_sec = 0_i64
+      idx = idx + 1
     elsif tz_char == '+' || tz_char == '-'
       sign = tz_char == '+' ? 1_i64 : -1_i64
       rem_len = len - idx - 1
+      oh = 0
+      om = 0
       if rem_len >= 5 && str[idx + 3] == ':'
         # +HH:MM
-        oh = parse_int(str, idx + 1, 2).to_i64
-        om = parse_int(str, idx + 4, 2).to_i64
-        offset_sec = sign * (oh * 3600_i64 + om * 60_i64)
+        oh = parse_int(str, idx + 1, 2)
+        om = parse_int(str, idx + 4, 2)
+        idx = idx + 6
       elsif rem_len >= 4 && str[idx + 1].ord >= 48 && str[idx + 1].ord <= 57
         # +HHMM
-        oh = parse_int(str, idx + 1, 2).to_i64
-        om = parse_int(str, idx + 3, 2).to_i64
-        offset_sec = sign * (oh * 3600_i64 + om * 60_i64)
+        oh = parse_int(str, idx + 1, 2)
+        om = parse_int(str, idx + 3, 2)
+        idx = idx + 5
       elsif rem_len >= 2
         # +HH
-        oh = parse_int(str, idx + 1, 2).to_i64
-        offset_sec = sign * (oh * 3600_i64)
+        oh = parse_int(str, idx + 1, 2)
+        idx = idx + 3
       else
         raise "invalid timezone offset in RFC 3339: #{str}"
       end
+      # An offset is an hour of 00..23 and a minute of 00..59, as the
+      # grammar has it: `+99:99` was read as four days and change, and
+      # `+24:00` as a day, and the instant moved by that much in silence.
+      if oh > 23 || om > 59
+        raise "invalid timezone offset in RFC 3339 string: #{Time.pad2(oh)}:#{Time.pad2(om)} in #{str}"
+      end
+      offset_sec = sign * (oh.to_i64 * 3600_i64 + om.to_i64 * 60_i64)
     else
       raise "invalid timezone designator in RFC 3339: #{tz_char}"
+    end
+
+    # The offset ends the string. `...Zjunk` and `...+05:30:00` both parsed,
+    # the text after the offset never looked at.
+    if idx != len
+      raise "trailing text after the timezone in RFC 3339 string: #{str}"
     end
 
     # The fields are checked the way `Time.utc` checks them, because they
@@ -886,6 +989,10 @@ pub struct Time
   # `-0001`, and the conversions themselves were right all along - the epoch
   # round-trips through it.
   def self.pad4(n : Int32) : String
+    # The smallest year has no positive twin of its own width, so a
+    # negative year's magnitude is taken in Int64; past 999 it needs no
+    # padding.
+    return "-" + (0_i64 - n.to_i64).to_s if n <= -1000
     return "-" + pad4(0 - n) if n < 0
     if n < 10
       "000" + n.to_s

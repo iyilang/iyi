@@ -1,4 +1,5 @@
-# Exercises `std/int`: the rest of the integer tower: UInt16, Int8.
+# Exercises `std/int`: the rest of the integer tower: UInt16, Int8, and
+# the tower's exact comparison with a double and conversion from one.
 #
 # Run via:
 #     ./bin/iyi run bench/std_int_exercise.iyi
@@ -29,6 +30,51 @@ puts "\n== bits"
 assert_true 3_u16.popcount == 2, "popcount 0b11"
 assert_true 1_u16.bit_length == 1, "bit_length"
 puts "  popcount and bit_length"
+
+# A wide integer compared with a double is compared exactly, not rounded
+# to a double first: `9007199254740993_i128 == 9007199254740992.0` was
+# true. The prelude's own `Int64 == Float64` is the prelude's to mend;
+# `Int64#<=>(Float64)` here is exact.
+puts "\n== comparison with doubles"
+assert_true !(9007199254740993_i128 == 9007199254740992.0), "2^53 + 1 == 2^53"
+assert_true 9007199254740993_i128 != 9007199254740992.0, "2^53 + 1 != 2^53"
+assert_true 9007199254740993_i128 > 9007199254740992.0, "2^53 + 1 > 2^53"
+assert_true 9007199254740992.0 < 9007199254740993_i128, "2^53 < 2^53 + 1"
+assert_true 9007199254740992.0 == 9007199254740992_i128, "2^53 == 2^53"
+assert_true !(9007199254740992.0 >= 9007199254740993_u128), "2^53 >= 2^53 + 1 as UInt128"
+assert_true 170141183460469231731687303715884105727_i128 < 170141183460469231731687303715884105728.0, "Int128::MAX < 2^127"
+assert_true 340282366920938463463374607431768211455_u128 < 340282366920938463463374607431768211456.0, "UInt128::MAX < 2^128"
+assert_true (-170141183460469231731687303715884105728_i128) == -170141183460469231731687303715884105728.0, "Int128::MIN == -2^127"
+assert_true 5_i128 < 5.5 && 5_i128 > 4.5 && !(5_i128 == 5.5), "a fraction decides"
+assert_true 0_u128 > -0.5 && 0_u128 >= -0.0 && 0_u128 == 0.0, "zero against -0.5, -0.0 and 0.0"
+assert_true (-1_i8) < -0.5 && !((-1_i8) == 255.0) && 200_u8 == 200.0, "the narrow ones"
+assert_true (9007199254740993_i64 <=> 9007199254740992.0) == 1, "Int64 <=> a double is exact"
+assert_true (9223372036854775807_i64 <=> 9223372036854775808.0) == -1, "Int64::MAX <=> 2^63"
+assert_true (18446744073709551615_u64 <=> 18446744073709551616.0) == -1, "UInt64::MAX <=> 2^64"
+assert_true (2147483647 <=> 2147483647.5) == -1 && (200_u8 <=> 200.0) == 0, "the narrow spaceship"
+nan = 0.0 / 0.0
+assert_true (5_u128 <=> nan).nil?, "<=> NaN is nil"
+assert_true !(5_u128 == nan) && 5_u128 != nan && !(5_u128 < nan) && !(5_u128 >= nan), "NaN is ordered against nothing"
+assert_true !(nan == 5_i16) && nan != 5_i16 && !(nan > 5_i16) && !(nan <= 5_i16), "from the double's side too"
+puts "  the integer is not rounded to a double first"
+
+# A double converts by truncating first, then refusing what the truncation
+# does not hold: `127.9.to_i8` is 127, as Python's int(127.9) is, where the
+# range used to be checked on 127.9 itself.
+puts "\n== conversion from doubles"
+assert_true 127.9.to_i8 == 127_i8, "127.9 to_i8"
+assert_true (-128.9).to_i8 == -128_i8, "-128.9 to_i8"
+assert_true (-0.5).to_u16 == 0_u16, "-0.5 to_u16"
+assert_true (-0.99).to_u32 == 0_u32, "-0.99 to_u32"
+assert_true 4294967295.9.to_u32 == 4294967295_u32, "4294967295.9 to_u32"
+assert_true 65535.9.to_u16 == 65535_u16, "65535.9 to_u16"
+assert_true 32767.9.to_i16 == 32767_i16 && (-32768.9).to_i16 == -32768_i16, "the Int16 edges"
+assert_true 1.5.to_i128 == 1_i128 && (-1.5).to_i128 == -1_i128, "1.5 and -1.5 to_i128"
+assert_true 1.0e38.to_i128 == 99999999999999997748809823456034029568_i128, "1e38 to_i128"
+assert_true (-170141183460469231731687303715884105728.0).to_i128 == -170141183460469231731687303715884105728_i128, "-2^127 to_i128"
+assert_true 3.0e38.to_u128 == 300000000000000012135895401846682943488_u128, "3e38 to_u128"
+assert_true 255.9.to_u == 255_u32, "255.9 to_u"
+puts "  a double truncates, then the truncation is range-checked"
 
 puts "\n== traits"
 assert_true 1_i8.cmp(2_i8) == -1, "i8 cmp"

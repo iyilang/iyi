@@ -1,4 +1,5 @@
-# Exercises `std/number`: Number#abs, sign, zero? on Int32.
+# Exercises `std/number`: Number#abs, sign, zero? on Int32, round by mode,
+# and divmod on the floats through std/float's `//` and `%`.
 #
 # Run via:
 #     ./bin/iyi run bench/std_number_exercise.iyi
@@ -14,6 +15,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/number
+import std/float
 using std/number::{RoundingMode}
 
 puts "== abs"
@@ -43,6 +45,41 @@ assert_true (-2.5).round(RoundingMode::ToNegative) == -3.0, "to negative -2.5"
 assert_true 3.5.round(RoundingMode::TiesEven) == 4.0, "ties even 3.5"
 assert_true 2.5.round == 3.0, "no-arg round is still ties away"
 assert_true 5.round(RoundingMode::ToZero) == 5, "int identity"
+# The nearest integer, not the floor of the value plus a half: that sum
+# rounds, and rounded 0.49999999999999994 up to 1.0 and 4503599627370497.0
+# (an integer already) up by one. Python's round agrees with both below.
+assert_true 0.49999999999999994.round(RoundingMode::TiesAway) == 0.0, "ties away, just under a half"
+assert_true (-0.49999999999999994).round(RoundingMode::TiesAway) == 0.0, "ties away, just over minus a half"
+assert_true 4503599627370497.0.round(RoundingMode::TiesAway) == 4503599627370497.0, "ties away, an integer past 2^52 stays"
+assert_true (-4503599627370497.0).round(RoundingMode::TiesAway) == -4503599627370497.0, "and its negative"
+assert_true 0.49999999999999994.round(RoundingMode::TiesEven) == 0.0, "ties even, just under a half"
+assert_true (-0.49999999999999994).round(RoundingMode::TiesEven) == 0.0, "ties even, just over minus a half"
+assert_true 4503599627370497.0.round(RoundingMode::TiesEven) == 4503599627370497.0, "ties even, an integer past 2^52 stays"
+assert_true 0.5.round(RoundingMode::TiesAway) == 1.0 && (-0.5).round(RoundingMode::TiesAway) == -1.0, "a half goes away from zero"
+assert_true 0.5.round(RoundingMode::TiesEven) == 0.0 && (-0.5).round(RoundingMode::TiesEven) == 0.0, "and to the even neighbour"
+assert_true 1.5.round(RoundingMode::TiesEven) == 2.0 && (-1.5).round(RoundingMode::TiesEven) == -2.0, "one and a half"
+assert_true 2.4999999999999996.round(RoundingMode::TiesAway) == 2.0, "the double under 2.5"
+assert_true 9007199254740991.0.round(RoundingMode::TiesAway) == 9007199254740991.0, "the last integer under 2^53 stays"
+assert_true (0.0 / 0.0).round(RoundingMode::TiesAway).nan?, "NaN rounds to NaN"
 puts "  the mode is the rounding"
+
+# `divmod` is declared on every Number and used to fail to compile for a
+# float, which had no `//`: std/float gives both floats the floored one,
+# so `7.5.divmod(2.0)` is Python's `(3.0, 1.5)`. Integers still truncate,
+# the prelude's `//` and `%` being theirs.
+puts "\n== divmod"
+q, r = 7.5.divmod(2.0)
+assert_true q == 3.0 && r == 1.5, "divmod(7.5, 2.0) is (3.0, 1.5)"
+q, r = (-7.5).divmod(2.0)
+assert_true q == -4.0 && r == 0.5, "divmod(-7.5, 2.0) is (-4.0, 0.5)"
+q, r = 7.5.divmod(-2.0)
+assert_true q == -4.0 && r == -0.5, "divmod(7.5, -2.0) is (-4.0, -0.5)"
+q, r = (-7.5).divmod(-2.0)
+assert_true q == 3.0 && r == -1.5, "divmod(-7.5, -2.0) is (3.0, -1.5)"
+q32, r32 = 7.5_f32.divmod(2.0_f32)
+assert_true q32 == 3.0_f32 && r32 == 1.5_f32, "the single's divmod"
+qi, ri = 7.divmod(2)
+assert_true qi == 3 && ri == 1, "divmod(7, 2) is (3, 1)"
+puts "  divmod on both floats is floored, as its // and % are"
 
 puts "\nALL CHECKS PASSED"

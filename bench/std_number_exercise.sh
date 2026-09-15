@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercises `std/number`: Number#abs, sign, zero? on Int32.
+# Exercises `std/number`: Number#abs, sign, zero? on Int32, round by mode,
+# and divmod on the floats.
 #
 #     bash bench/std_number_exercise.sh
 set -u
@@ -42,7 +43,7 @@ fi
 
 echo
 echo "== every number section reported"
-for phrase in "== abs" "== sign" "== round"; do
+for phrase in "== abs" "== sign" "== round" "== divmod"; do
   if ! grep -q "$phrase" "$WORK/number-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

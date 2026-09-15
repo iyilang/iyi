@@ -201,6 +201,36 @@ time_panics_with "fraction digits the format cannot print" frac12 "fraction_digi
   'Time.utc(2024, 1, 1).to_rfc3339(12)'
 time_panics_with "an eighth day of the week" dow8 "invalid day of week: 8" \
   'DayOfWeek.new(8).to_s'
+# Text after the offset was never looked at: `...Zjunk` and `...+05:30:00`
+# parsed. An offset is 00..23 hours and 00..59 minutes: `+99:99` moved the
+# instant four days in silence. A year no Int32 holds is refused with the
+# module's sentence, at the constructor and in the parser, where it used to
+# be the prelude's "arithmetic overflow" from `year` or `to_rfc3339`; and
+# so is a span or a sum the Int64 seconds do not hold.
+time_panics_with "text after the timezone" parse_junk "trailing text after the timezone in RFC 3339 string" \
+  'Time.parse_rfc3339("2024-02-29T12:00:00Zjunk").to_rfc3339'
+time_panics_with "seconds in the offset" parse_tzsec "trailing text after the timezone in RFC 3339 string" \
+  'Time.parse_rfc3339("2024-02-29T12:00:00+05:30:00").to_rfc3339'
+time_panics_with "a 99:99 offset" parse_tz99 "invalid timezone offset in RFC 3339 string: 99:99" \
+  'Time.parse_rfc3339("2024-02-29T12:00:00+99:99").to_rfc3339'
+time_panics_with "a 24:00 offset" parse_tz24 "invalid timezone offset in RFC 3339 string: 24:00" \
+  'Time.parse_rfc3339("2024-02-29T12:00:00+24:00").to_rfc3339'
+time_panics_with "a year past Int32, parsed" parse_y2g "year out of range in RFC 3339 string" \
+  'Time.parse_rfc3339("2147483648-01-01T00:00:00Z").to_rfc3339'
+time_panics_with "a year past Int32, from the epoch" unix_1e17 "year out of range" \
+  'Time.unix(100000000000000000_i64).to_rfc3339'
+time_panics_with "the last Int64 second" unix_max "year out of range" \
+  'Time.unix(9223372036854775807_i64).year'
+time_panics_with "the first Int64 second" unix_min "year out of range" \
+  'Time.unix(-9223372036854775808_i64).to_rfc3339'
+time_panics_with "a span sum past Int64" span_add "Span overflows" \
+  'Span.seconds(9223372036854775807_i64) + Span.seconds(1_i64)'
+time_panics_with "a day count past Int64 seconds" span_days "Span overflows" \
+  'Span.days(106751991167301_i64)'
+time_panics_with "the negation of the smallest span" span_neg "Span overflows" \
+  '-Span.seconds(-9223372036854775808_i64)'
+time_panics_with "a time plus a span past Int64" time_add "Span overflows" \
+  'Time.utc(2024, 1, 1) + Span.seconds(9223372036854775807_i64)'
 # And the one RFC 3339 allows that the constructor does not: a leap second
 # is read as the second after 59, not refused.
 printf 'module main\n\nimport std/time\nusing std/time::{Time}\n\nputs Time.parse_rfc3339("2016-12-31T23:59:60Z").to_rfc3339\n' > "$WORK/leap.iyi"

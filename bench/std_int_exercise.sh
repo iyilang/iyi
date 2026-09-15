@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercises `std/int`: the rest of the integer tower: UInt16, Int8.
+# Exercises `std/int`: the rest of the integer tower: UInt16, Int8, and
+# the tower's exact comparison with a double and conversion from one.
 #
 #     bash bench/std_int_exercise.sh
 set -u
@@ -42,7 +43,7 @@ fi
 
 echo
 echo "== every int section reported"
-for phrase in "== add" "== bits" "== traits"; do
+for phrase in "== add" "== bits" "== comparison with doubles" "== conversion from doubles" "== traits"; do
   if ! grep -q "$phrase" "$WORK/int-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -57,6 +58,46 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/int-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
   status=1
 fi
+
+echo
+echo "== what the conversions from a double refuse"
+# A panicking program has no next line to assert on, so each refusal is
+# its own program. The conversion truncates first: what is refused is a
+# truncation the integer does not hold, NaN, and the infinities.
+refuses() { # refuses <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  printf 'module main\n\nimport std/int\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of panicking: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: panicked, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits 1 at "%s"\n' "$label" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+refuses "128.0 to_i8" f64_i8_128 "arithmetic overflow" '128.0.to_i8'
+refuses "-129.0 to_i8" f64_i8_neg "arithmetic overflow" '(-129.0).to_i8'
+refuses "-1.0 to_u16" f64_u16_neg "arithmetic overflow" '(-1.0).to_u16'
+refuses "65536.0 to_u16" f64_u16_big "arithmetic overflow" '65536.0.to_u16'
+refuses "2^32 to_u" f64_u_2p32 "arithmetic overflow" '4294967296.0.to_u'
+refuses "2^127 to_i128" f64_i128_2p127 "arithmetic overflow" '170141183460469231731687303715884105728.0.to_i128'
+refuses "2^128 to_u128" f64_u128_2p128 "arithmetic overflow" '340282366920938463463374607431768211456.0.to_u128'
+refuses "NaN to_i128" f64_nan "arithmetic overflow" '(0.0 / 0.0).to_i128'
+refuses "Infinity to_u128" f64_inf "arithmetic overflow" '(1.0 / 0.0).to_u128'
+refuses "-Infinity to_i16" f64_ninf "arithmetic overflow" '(-1.0 / 0.0).to_i16'
 
 echo
 echo "== proving the checks can fail when the module is broken"

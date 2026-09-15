@@ -91,11 +91,11 @@ SHELL = sh
 
 manpages_gz := $(patsubst %.1,%.1.gz,$(MAN1PAGES))
 
+ifndef LLVM_CONFIG
+  LLVM_CONFIG := $(shell src/llvm/ext/find-llvm-config.sh)
+endif
 ifeq ($(LLVM_VERSION),)
-	ifndef LLVM_CONFIG
-  	LLVM_CONFIG := $(shell src/llvm/ext/find-llvm-config.sh)
-	endif
-	LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version 2> /dev/null))
+  LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version 2> /dev/null))
 endif
 
 # FIXME: Crystal docker images before 1.8 can't build a functional compiler
@@ -281,7 +281,7 @@ manpages: $(manpages_gz)
 
 .PHONY: deps llvm_ext
 deps: $(DEPS) ## Build dependencies
-llvm_ext: $(LLVM_EXT_OBJ)
+llvm_ext: $(DEPS)
 
 .PHONY: format
 format: ## Format sources
@@ -564,10 +564,11 @@ $(O)/$(CRYSTAL_DAEMON_BIN): $(DEPS) $(SOURCES)
 	@mkdir -p $(O)
 	$(EXPORTS) $(EXPORTS_BUILD) ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) -Dwithout_mt -o $@ src/compiler/crystal.cr
 
+ifneq ($(DEPS),)
 $(LLVM_EXT_OBJ): $(LLVM_EXT_DIR)/llvm_ext.cc
 	$(call check_llvm_config)
 	$(CXX) -c $(CXXFLAGS) -o $@ $< $(if $(LLVM_CONFIG),$(shell $(LLVM_CONFIG) --cxxflags))
-
+endif
 $(O)/crystal-pu$(EXE): spec/support/process-utils.cr $(SOURCES)
 	@mkdir -p $(O)
 	$(EXPORT_CC) ./bin/crystal build $(FLAGS) -o $@ $<

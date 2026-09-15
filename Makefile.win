@@ -153,7 +153,7 @@ build: crystal
 
 .PHONY: deps llvm_ext
 deps: $(DEPS) ## Build dependencies
-llvm_ext: $(LLVM_EXT_OBJ)
+llvm_ext: $(DEPS)
 
 .PHONY: format
 format: ## Format sources
@@ -233,6 +233,7 @@ $(O)\crystal.rc: $(MAKEFILE_LIST)
 	@$(call MKDIR,"$(O)")
 	$(MAKE) -s -f $(MAKEFILE_LIST) rc > "$@"
 
+ifneq ($(DEPS),)
 $(LLVM_EXT_OBJ): $(LLVM_EXT_DIR)\llvm_ext.cc
 	$(call check_llvm_config)
 	@rem Disable some harmless warnings:
@@ -240,7 +241,7 @@ $(LLVM_EXT_OBJ): $(LLVM_EXT_DIR)\llvm_ext.cc
 	@rem - warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc
 	@rem - warning C4624: '...': destructor was implicitly defined as deleted
 	$(CXX) /nologo /c $(CXXFLAGS) /WX /wd4244 /wd4624 /wd4530 "/Fo$@" "$<" $(if $(LLVM_CONFIG),$(shell $(LLVM_CONFIG) --cxxflags))
-
+endif
 $(O)\crystal-pu.exe: spec\support\process-utils.cr $(SOURCES)
 	@$(call MKDIR,"$(O)")
 	$(call export_vars)

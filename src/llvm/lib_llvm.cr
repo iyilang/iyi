@@ -22,11 +22,6 @@
     {% llvm_targets = env("LLVM_TARGETS") || `#{llvm_config.id} --targets-built`.stringify %}
     {% llvm_ldflags = env("LLVM_LDFLAGS") || "`#{llvm_config.id} --libs --system-libs --ldflags#{" --link-static".id if flag?(:static)}#{" 2> /dev/null".id unless flag?(:win32)}`" %}
 
-    {% unless flag?(:win32) %}
-      @[Link("stdc++")]
-      lib LibLLVM
-      end
-    {% end %}
   {% end %}
 
   {% llvm_version ||= Crystal::DESCRIPTION.gsub(/.*LLVM: ([^\n]*).*/m, "\\1") %}
@@ -75,6 +70,13 @@
     IS_LT_200 = {{compare_versions(LibLLVM::VERSION, "20.0.0") < 0}}
     IS_LT_210 = {{compare_versions(LibLLVM::VERSION, "21.0.0") < 0}}
   end
+{% end %}
+{% unless flag?(:win32) %}
+  {% if LibLLVM::IS_LT_180 %}
+    @[Link("stdc++")]
+    lib LibLLVM
+    end
+  {% end %}
 {% end %}
 
 lib LibLLVM

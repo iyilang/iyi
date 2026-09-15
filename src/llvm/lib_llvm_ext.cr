@@ -1,8 +1,10 @@
 require "./lib_llvm"
-{% if flag?(:win32) %}
-  @[Link(ldflags: "#{__DIR__}/ext/llvm_ext.obj")]
-{% else %}
-  @[Link(ldflags: "#{__DIR__}/ext/llvm_ext.o")]
+{% if LibLLVM::IS_LT_180 %}
+  {% if flag?(:win32) %}
+    @[Link(ldflags: "#{__DIR__}/ext/llvm_ext.obj")]
+  {% else %}
+    @[Link(ldflags: "#{__DIR__}/ext/llvm_ext.o")]
+  {% end %}
 {% end %}
 lib LibLLVMExt
   alias Char = LibC::Char

@@ -119,7 +119,10 @@ ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_
 ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 
 # What the compiler may link, each with a reason recorded in SPEC.md.
-#   LLVM, c++  the back end, and libc++ arrives with it (B.2, Part V.9)
+#   LLVM       the back end (B.2, Part V.9)
+#   c++        conditional on LLVM < 18: llvm_ext.cc shims operand bundles and
+#              debug locations on older versions; on LLVM 18+ the shim is empty
+#              and unlinked, so libc++ (and libstdc++ on Linux) drops off the floor
 #   gc         a compiler without a collector emits invalid IR (III.9)
 #
 # Every entry is a library the compiler names on its own link line. What
@@ -134,7 +137,18 @@ ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 # compiled into itself (option_parser, semantic_version, process/shell,
 # spec/cli) parse by hand, so pcre2 is on the denylist below and the
 # compiler is held to it too (Appendix B #22).
-ALLOWED_LIBS_COMPILER="libLLVM libc++ libgc libSystem libc.so ld-linux libgcc_s libstdc++ libm.so libdl libpthread librt"
+ALLOWED_LIBS_COMPILER="libLLVM libgc libSystem libc.so ld-linux libgcc_s libm.so libdl libpthread librt"
+if [ -z "${LLVM_VERSION:-}" ]; then
+  _llvm_config="${LLVM_CONFIG:-$("$REPO/src/llvm/ext/find-llvm-config.sh" 2>/dev/null || true)}"
+  _llvm_version="$([ -n "$_llvm_config" ] && "$_llvm_config" --version 2>/dev/null || true)"
+  [ -z "$_llvm_version" ] && _llvm_version="$("$REPO/bin/crystal" --version 2>/dev/null | sed -n 's/^LLVM: //p')"
+else
+  _llvm_version="$LLVM_VERSION"
+fi
+_llvm_major="${_llvm_version%%.*}"
+if [ -n "$_llvm_major" ] && [ "$_llvm_major" -lt 18 ] 2>/dev/null; then
+  ALLOWED_LIBS_COMPILER="$ALLOWED_LIBS_COMPILER libc++ libstdc++"
+fi
 
 # Every library on Crystal's list that must never appear on a link line of
 # iyi's own: a program's or the compiler's.

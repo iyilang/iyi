@@ -59,30 +59,88 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/xml-release.out" 2>/dev/null; then
   status=1
 fi
 
+echo "== what a node refuses when it is made or its text set"
+refuses() { # refuses <label> <name> <phrase> <expression>
+  local label="$1" name="$2" phrase="$3" expression="$4"
+  printf 'module main\n\nimport std/xml\n\nusing std/xml::{Document, Node, NodeType}\n\nputs (%s).to_s\n' \
+    "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    tail -2 "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+    "$(grep -m1 -o "$phrase.*" "$WORK/$name.out")"
+}
+refuses "a comment made with --" comment_dashes "'--' is not allowed inside a comment" \
+  'Node.new_comment("a--b").to_xml'
+refuses "a comment ending in -" comment_tail "a comment cannot end with '-'" \
+  'Node.new_comment("a-").to_xml'
+refuses "a comment given -- by text=" comment_set "'--' is not allowed inside a comment" \
+  '(n = Node.new_comment("a"); n.text = "--"; n).to_xml'
+refuses "a processing instruction made with ?>" pi_closer "'?>' is not allowed inside a processing instruction" \
+  'Node.new_pi("p", "a?>b").to_xml'
+refuses "a processing instruction given ?> by text=" pi_set "'?>' is not allowed inside a processing instruction" \
+  '(n = Node.new_pi("p", "a"); n.text = "?>"; n).to_xml'
+refuses "text= on a document" document_text "a document has no text of its own" \
+  '(d = Document.new; d.text = "x"; d).to_xml'
+
 echo
-echo "== proving the checks can fail when a duplicate attribute is accepted"
-mkdir -p "$WORK/patched_dup/std"
-python3 - <<PY
-src = open("$REPO/src/std/xml.iyi").read()
-old = '''        fail_at(attr_line, attr_col, "attribute '#{attr_name}' given twice on <#{name}>")'''
-new = '''        # duplicate attributes accepted'''
+echo "== proving the checks can fail when the module is broken"
+mutate() { # mutate <label> <old> <new> <phrase>
+  local label="$1" old="$2" new="$3" phrase="$4"
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  OLD="$old" NEW="$new" python3 - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/xml.iyi").read_text()
+old = os.environ["OLD"]
 if old not in src:
-    raise SystemExit("patch site missing")
-open("$WORK/patched_dup/std/xml.iyi", "w").write(src.replace(old, new, 1))
+    raise SystemExit("patch site missing: " + old)
+Path("$WORK/patched/std/xml.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched_dup:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_xml_exercise.iyi" >"$WORK/dup.out" 2>&1; then
-  echo "  the exercise PASSED with duplicate attributes accepted"
-  status=1
-elif ! grep -q "given twice" "$WORK/dup.out"; then
-  echo "  failed, but not at the duplicate-attribute check:"
-  grep -m1 panic "$WORK/dup.out" || sed -n '1,8p' "$WORK/dup.out"
-  status=1
-else
-  echo "  a repeated attribute is caught"
-fi
+  if [ $? -ne 0 ]; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_xml_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -q "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at its own check:"
+    grep -m1 panic "$WORK/mut.out" || sed -n '1,8p' "$WORK/mut.out"
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+mutate "a repeated attribute accepted" \
+  '        fail_at(attr_line, attr_col, "attribute '"'"'#{attr_name}'"'"' given twice on <#{name}>")' \
+  '        # duplicate attributes accepted' 'given twice'
+mutate "one attribute through two prefixes accepted" \
+  '        if !first.nil?' '        if false' 'given twice'
+mutate "a name with two colons accepted" \
+  '    return true if colons == 0' '    return true' '<x:b:c/>'
+mutate "the xmlns prefix declared" \
+  '        elsif ns_prefix == "xmlns"' '        elsif false' 'accepted .*xmlns:xmlns'
+mutate "CDATA written whole" \
+  '      serialize_cdata_body(buf)' '      buf << @content' 'splits the section'
+mutate "text= dropped on an element" \
+  '      add_child(Node.new_text(value))' '      nil' 'text= replaces'
 
 echo
 if [ "$status" -eq 0 ]; then

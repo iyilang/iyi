@@ -7,7 +7,9 @@
 #     DTD reads into the tree it describes, byte for byte, and
 #     `parse(to_xml).to_xml` is the same text.
 #   * Navigation: `root`, `find`, `find_all`, `path`, `[]`/`[]?` by exact
-#     name, `Attribute#namespace_uri`, `element_children`, `inner_xml`.
+#     name, `Attribute#namespace_uri`, `element_children`, `inner_xml`; the
+#     edits `set_attribute`, `add_child` and `text=`, and that a CDATA
+#     section holding `]]>` is written as two sections and read back as one.
 #   * `escape`, `escape_attribute`, `unescape` and `unescape?`: round trips,
 #     astral characters, and the refusals `unescape` shares with the parser.
 #   * Every refusal in the module header, each with its sentence, its line and
@@ -155,6 +157,23 @@ assert_equal("2", built["plain"], "set_attribute replaces")
 assert_equal("<doc xmlns:q=\"urn:q\" q:k=\"v\" plain=\"2\">a &amp; b<!--c--></doc>", built.to_xml, "built tree serialized")
 assert_equal("/doc", built.path, "path of a parentless element")
 assert_true(NodeType::Element.to_s == "Element" && NodeType::CData.cdata?, "NodeType is an enum")
+
+edited = Std::Xml.parse("<a>old<b/></a>").root
+dropped = edited.children[1]
+edited.text = "new <&>"
+assert_equal("<a>new &lt;&amp;&gt;</a>", edited.to_xml, "text= replaces an element's children with one text node")
+assert_true(edited.children.size == 1 && dropped.parent.nil?, "the old children are let go")
+fresh = Node.new_element("a")
+fresh.text = "hello"
+assert_equal("hello", fresh.text, "text= on an empty element")
+note = Node.new_comment("c")
+note.text = "d - e"
+assert_equal("<!--d - e-->", note.to_xml, "text= on a comment")
+cdata = Node.new_element("a")
+cdata.add_child(Node.new_cdata("a]]>b]]>]]"))
+assert_equal("<a><![CDATA[a]]]]><![CDATA[>b]]]]><![CDATA[>]]]]></a>", cdata.to_xml, "']]>' in CDATA splits the section")
+assert_equal("a]]>b]]>]]", Std::Xml.parse(cdata.to_xml).root.text, "and reads back as the one run")
+assert_true(Std::Xml.parse("<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\" xmlns:x=\"u\" xmlns:y=\"v\" x:k=\"1\" y:k=\"2\"/>").root.attributes.size == 2, "the xml prefix may be declared to its own uri; one local name in two namespaces is two attributes")
 puts "  the document reads, navigates and writes back as itself: #{written.bytesize} bytes, #{menu.children.size} child nodes"
 
 # ---------------------------------------------------------------------------
@@ -211,6 +230,14 @@ refused("<a b=\"1", "unclosed attribute value at line 1, column 6")
 refused("<x:a/>", "namespace prefix 'x' of <x:a> is not declared at line 1, column 1")
 refused("<a x:b=\"1\"/>", "namespace prefix 'x' of attribute 'x:b' on <a> is not declared at line 1, column 1")
 refused("<a xmlns:x=\"\"/>", "namespace prefix 'x' cannot be bound to an empty uri at line 1, column 4")
+refused("<a xmlns:x=\"u\" xmlns:y=\"u\" x:k=\"1\" y:k=\"2\"/>", "attribute 'k' in namespace 'u' given twice on <a>, as 'x:k' and 'y:k' at line 1, column 36")
+refused("<a xmlns:xmlns=\"u\"/>", "namespace prefix 'xmlns' is reserved and cannot be declared at line 1, column 4")
+refused("<a xmlns:xml=\"u\"/>", "namespace prefix 'xml' cannot be bound to a uri other than 'http://www.w3.org/XML/1998/namespace' at line 1, column 4")
+refused("<a xmlns:y=\"http://www.w3.org/XML/1998/namespace\"/>", "namespace prefix 'y' cannot be bound to the uri of the 'xml' prefix at line 1, column 4")
+refused("<a xmlns:x=\"u\">\n  <x:b:c/></a>", "'x:b:c' is not a qualified name: a name is 'local' or 'prefix:local' at line 2, column 3")
+refused("<:a/>", "':a' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 1")
+refused("<a :k=\"1\"/>", "':k' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 4")
+refused("<a xmlns:=\"u\"/>", "'xmlns:' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 4")
 refused("<a/><b/>", "a second root element at line 1, column 5")
 refused("<a></b>", "mismatched closing tag: expected </a>, got </b> at line 1, column 4")
 refused("<a><b></a>", "mismatched closing tag: expected </b>, got </a> at line 1, column 7")
@@ -310,6 +337,7 @@ docs = [
   decl + "<a b='say \"hi\"' c=\"it's\"/>\n",
   decl + "<a b=\"1 &lt; 2 &amp; 3 &gt; 2 &quot;q&quot; &apos;s&apos;\"/>\n",
   decl + "<a>1 &lt; 2 &amp; 3 &gt; 2 &quot;q&quot; &apos;s&apos;</a>\n",
+  decl + "<a><![CDATA[a]]]]><![CDATA[>b]]></a>\n",
   decl + "<a>&#65;&#x42;&#233;&#xE9;&#x1F600;&#128512;</a>\n",
   decl + "<a b=\"&#65;&#x42;&#233;&#xE9;&#x1F600;\"/>\n",
   decl + "<a b=\"tab&#9;nl&#10;cr&#13;end\"/>\n",

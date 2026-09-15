@@ -15,9 +15,12 @@
 # `\n`) and attribute values have their literal tabs and newlines replaced by
 # spaces, as XML 1.0 says. The serializer writes what a document reads back
 # as: `&amp; &lt; &gt;` and `&#13;` in text, `&quot;` and `&#9; &#10; &#13;` in
-# attribute values as well, namespace declarations before attributes, an
-# empty element as `<a/>`, and a newline after the declaration and after every
-# top-level node.
+# attribute values as well, `]]>` inside CDATA as the end of one section and
+# the start of the next, namespace declarations before attributes, an empty
+# element as `<a/>`, and a newline after the declaration and after every
+# top-level node. A comment or a processing instruction has no such escape,
+# so `--` in a comment, a comment ending in `-`, and `?>` in a processing
+# instruction are refused when the node is made or its text set.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
@@ -25,9 +28,12 @@
 #     (surrogates, U+0000 and the other C0 controls, anything past U+10FFFF);
 #   * `--` inside a comment and `]]>` in text; a control character (other than
 #     tab, newline and carriage return) anywhere;
-#   * a raw `<` in an attribute value, an attribute given twice, a namespace
-#     prefix nobody declared, an unquoted value, a second root element, a
-#     closing tag that does not match, an unclosed anything;
+#   * a raw `<` in an attribute value, an attribute given twice - by one
+#     spelling or through two prefixes bound to the same uri - a namespace
+#     prefix nobody declared, a name with a colon first, last or twice, a
+#     declaration of the `xmlns` prefix or of `xml` to another uri, an
+#     unquoted value, a second root element, a closing tag that does not
+#     match, an unclosed anything;
 #   * an external DTD subset or entity (`SYSTEM`/`PUBLIC`) - there is no
 #     file or network access here, so there is no XXE;
 #   * more than `max_entity_expansions` entity expansions (1,000 by default)
@@ -141,6 +147,19 @@ pub class Node
     @children = [] of Node
     @parent = nil
     @namespaces = [] of Namespace
+    check_content(@content)
+  end
+
+  # A comment or a processing instruction has no escape, so content that
+  # would close it early is refused where it is given rather than written out
+  # as something the parser reads differently.
+  private def check_content(value : String) : Nil
+    if @node_type.comment?
+      raise "'--' is not allowed inside a comment" if value.includes?("--")
+      raise "a comment cannot end with '-'" if value.ends_with?("-")
+    elsif @node_type.pi?
+      raise "'?>' is not allowed inside a processing instruction" if value.includes?("?>")
+    end
   end
 
   def self.new_element(name : String) : Node
@@ -167,8 +186,23 @@ pub class Node
     content
   end
 
+  # For a text, CDATA, comment or PI node, its own text; for an element, its
+  # children are replaced by one text node with *value*.
   def text=(value : String) : Nil
-    @content = value
+    if @node_type.element?
+      i = 0
+      while i < @children.size
+        @children[i].parent = nil
+        i = i + 1
+      end
+      @children = [] of Node
+      add_child(Node.new_text(value))
+    elsif @node_type.document?
+      raise "a document has no text of its own: set the root element's"
+    else
+      check_content(value)
+      @content = value
+    end
   end
 
   # A text, CDATA, comment or PI node's own text; for an element or a
@@ -438,7 +472,7 @@ pub class Node
       buf << Std::Xml.escape(@content)
     elsif @node_type.cdata?
       buf << "<![CDATA["
-      buf << @content
+      serialize_cdata_body(buf)
       buf << "]]>"
     elsif @node_type.comment?
       buf << "<!--"
@@ -460,6 +494,30 @@ pub class Node
         c_i = c_i + 1
       end
     end
+  end
+
+  # A CDATA section has no escape either, so `]]>` in its content is written
+  # as two sections, `...]]` and `>...`, which read back as the one run.
+  private def serialize_cdata_body(buf : Array(String)) : Nil
+    if !@content.includes?("]]>")
+      buf << @content
+      return
+    end
+    ptr = @content.to_unsafe
+    len = @content.bytesize
+    run_start = 0
+    i = 0
+    while i + 2 < len
+      if ptr[i] == 93_u8 && ptr[i + 1] == 93_u8 && ptr[i + 2] == 62_u8
+        buf << @content[run_start, i + 2 - run_start]
+        buf << "]]><![CDATA["
+        run_start = i + 2
+        i = i + 2
+      else
+        i = i + 1
+      end
+    end
+    buf << @content[run_start, len - run_start]
   end
 end
 
@@ -983,12 +1041,15 @@ pub class Parser
 
     name = parse_name
     return elem if failed?
+    return elem unless qualified_name?(name, start_line, start_col)
     elem = Node.new_element(name)
     elem.parent = parent
 
     seen = Hash(String, Bool).new
     raw_names = [] of String
     raw_values = [] of String
+    raw_lines = [] of Int32
+    raw_cols = [] of Int32
     self_closing = false
     closed = false
     while @pos < @len
@@ -1009,6 +1070,7 @@ pub class Parser
       attr_col = @col
       attr_name = parse_name
       return elem if failed?
+      return elem unless qualified_name?(attr_name, attr_line, attr_col)
       if seen.has_key?(attr_name)
         fail_at(attr_line, attr_col, "attribute '#{attr_name}' given twice on <#{name}>")
         return elem
@@ -1026,14 +1088,25 @@ pub class Parser
         elem.namespaces << Namespace.new("", attr_val)
       elsif attr_name.starts_with?("xmlns:")
         ns_prefix = attr_name[6, attr_name.bytesize - 6]
-        if ns_prefix.empty? || attr_val.empty?
+        if attr_val.empty?
           fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to an empty uri")
+          return elem
+        elsif ns_prefix == "xmlns"
+          fail_at(attr_line, attr_col, "namespace prefix 'xmlns' is reserved and cannot be declared")
+          return elem
+        elsif ns_prefix == "xml" && attr_val != XML_NAMESPACE
+          fail_at(attr_line, attr_col, "namespace prefix 'xml' cannot be bound to a uri other than '#{XML_NAMESPACE}'")
+          return elem
+        elsif ns_prefix != "xml" && attr_val == XML_NAMESPACE
+          fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to the uri of the 'xml' prefix")
           return elem
         end
         elem.namespaces << Namespace.new(ns_prefix, attr_val)
       else
         raw_names << attr_name
         raw_values << attr_val
+        raw_lines << attr_line
+        raw_cols << attr_col
       end
     end
     if !closed
@@ -1045,6 +1118,10 @@ pub class Parser
       fail_at(start_line, start_col, "namespace prefix '#{elem.prefix}' of <#{name}> is not declared")
       return elem
     end
+    # Two spellings of one attribute - the same local name through two
+    # prefixes bound to the same uri - are a duplicate as much as one
+    # spelling twice.
+    expanded = Hash(String, String).new
     i = 0
     while i < raw_names.size
       attr = Attribute.new(raw_names[i], raw_values[i])
@@ -1055,6 +1132,13 @@ pub class Parser
           return elem
         end
         attr = Attribute.new(raw_names[i], raw_values[i], ns.uri)
+        key = "#{ns.uri}\n#{attr.local_name}"
+        first = expanded[key]?
+        if !first.nil?
+          fail_at(raw_lines[i], raw_cols[i], "attribute '#{attr.local_name}' in namespace '#{ns.uri}' given twice on <#{name}>, as '#{first}' and '#{attr.name}'")
+          return elem
+        end
+        expanded[key] = attr.name
       end
       elem.attributes << attr
       i = i + 1
@@ -1312,6 +1396,26 @@ pub class Parser
       fail("expected a name, found #{found}")
     end
     ""
+  end
+
+  # An element or attribute name is `local` or `prefix:local`, with neither
+  # part empty (Namespaces in XML, productions [7] and [8]): a colon first,
+  # last, or twice is refused with the name's line and column.
+  private def qualified_name?(name : String, line : Int32, col : Int32) : Bool
+    ptr = name.to_unsafe
+    len = name.bytesize
+    colons = 0
+    i = 0
+    while i < len
+      colons = colons + 1 if ptr[i] == 58_u8
+      i = i + 1
+    end
+    return true if colons == 0
+    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8
+      return true
+    end
+    fail_at(line, col, "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local'")
+    false
   end
 
   # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue

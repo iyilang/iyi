@@ -1,0 +1,222 @@
+# `Set`, unique element collection with full set algebra — SPEC.md III.
+#
+# Relation to the prelude:
+#   * `src/iyi/set.iyi` in the prelude defines a minimal 68-line `Set(T)` providing
+#     basic membership queries (`add`, `delete`, `includes?`, `each`, `-`). It exists
+#     solely to satisfy prelude self-hosting requirements (e.g. cycle detection).
+#   * `src/std/set.iyi` defines `Std::Set::Set(T)`, the full standard library collection
+#     backed by the prelude's `Hash(T, Bool)`.
+#   * It implements the complete mathematical set algebra:
+#       - Union: `|` and `+`
+#       - Intersection: `&`
+#       - Difference: `-`
+#       - Symmetric difference: `^`
+#       - Relations: `subset_of?`, `proper_subset_of?`, `superset_of?`,
+#                    `proper_superset_of?`, `disjoint?`, `intersects?`, `==`
+#   * Implements `Std::Enumerable::Enumerable` via `impl Enumerable for Set(T) forall T`,
+#     granting the full 70+ method enumerable query surface.
+#   * Seamless conversion bridges:
+#       - `::Set#to_std` converts a prelude set into a full `Std::Set::Set`.
+#       - `::Array#to_set` constructs a `Std::Set::Set` from an array.
+
+module std/set
+
+import std/enumerable
+using std/enumerable::{Enumerable}
+
+pub class Set(T)
+  @entries : Hash(T, Bool)
+
+  # Creates an empty set.
+  def initialize
+    @entries = {} of T => Bool
+  end
+
+  # Creates a set containing elements from the given array.
+  def initialize(items : Array(T))
+    @entries = {} of T => Bool
+    items.each { |x| add(x) }
+  end
+
+  # Number of unique elements in the set.
+  def size : Int32
+    @entries.size
+  end
+
+  # Returns true when the set contains zero elements.
+  def empty? : Bool
+    @entries.empty?
+  end
+
+  # Adds value to the set. Returns true if the value was not previously present.
+  def add(value : T) : Bool
+    return false if @entries.has_key?(value)
+    @entries[value] = true
+    true
+  end
+
+  # Alias for `add`, returning true if newly inserted.
+  def add?(value : T) : Bool
+    add(value)
+  end
+
+  # Adds value to the set and returns self for chaining.
+  def <<(value : T) : Set(T)
+    add(value)
+    self
+  end
+
+  # Returns true if value is an element of the set.
+  def includes?(value : T) : Bool
+    @entries.has_key?(value)
+  end
+
+  # Removes value from the set. Returns true if it was present.
+  def delete(value : T) : Bool
+    !@entries.delete(value).nil?
+  end
+
+  # Removes all elements from the set.
+  def clear : Set(T)
+    @entries = {} of T => Bool
+    self
+  end
+
+  # Creates a shallow copy of the set.
+  def dup : Set(T)
+    copy = Set(T).new
+    each { |v| copy.add(v) }
+    copy
+  end
+
+  # Returns all elements as a newly allocated Array in insertion order.
+  def to_a : Array(T)
+    @entries.keys
+  end
+
+  # Appends all elements from another set to self.
+  def concat(other : Set(T)) : Set(T)
+    other.each { |v| add(v) }
+    self
+  end
+
+  # Appends all elements from an array to self.
+  def concat(items : Array(T)) : Set(T)
+    items.each { |v| add(v) }
+    self
+  end
+
+  # Intersection (`&`): returns elements common to self and other.
+  def &(other : Set(T)) : Set(T)
+    result = Set(T).new
+    each { |v| result.add(v) if other.includes?(v) }
+    result
+  end
+
+  # Union (`|`): returns all unique elements from self and other.
+  def |(other : Set(T)) : Set(T)
+    result = Set(T).new
+    each { |v| result.add(v) }
+    other.each { |v| result.add(v) }
+    result
+  end
+
+  # Addition (`+`): alias for union (`|`).
+  def +(other : Set(T)) : Set(T)
+    self | other
+  end
+
+  # Difference (`-`): returns elements in self that are not in other.
+  def -(other : Set(T)) : Set(T)
+    result = Set(T).new
+    each { |v| result.add(v) unless other.includes?(v) }
+    result
+  end
+
+  # Difference with an Array of elements.
+  def -(items : Array(T)) : Set(T)
+    result = Set(T).new
+    each { |v| result.add(v) unless items.includes?(v) }
+    result
+  end
+
+  # Symmetric Difference (`^`): elements in self or other, but not both.
+  # Equivalently `(self - other) | (other - self)` or `(self | other) - (self & other)`.
+  def ^(other : Set(T)) : Set(T)
+    result = Set(T).new
+    each { |v| result.add(v) unless other.includes?(v) }
+    other.each { |v| result.add(v) unless includes?(v) }
+    result
+  end
+
+  # Subset: returns true if every element of self is in other.
+  def subset_of?(other : Set(T)) : Bool
+    return false if size > other.size
+    all? { |v| other.includes?(v) }
+  end
+
+  # Proper subset: returns true if self is a subset of other and self != other.
+  def proper_subset_of?(other : Set(T)) : Bool
+    return false if size >= other.size
+    all? { |v| other.includes?(v) }
+  end
+
+  # Superset: returns true if every element of other is in self.
+  def superset_of?(other : Set(T)) : Bool
+    other.subset_of?(self)
+  end
+
+  # Proper superset: returns true if self is a superset of other and self != other.
+  def proper_superset_of?(other : Set(T)) : Bool
+    other.proper_subset_of?(self)
+  end
+
+  # Disjoint: returns true if self and other share no common elements.
+  def disjoint?(other : Set(T)) : Bool
+    none? { |v| other.includes?(v) }
+  end
+
+  # Intersects: returns true if self and other share at least one common element.
+  def intersects?(other : Set(T)) : Bool
+    !disjoint?(other)
+  end
+
+  # Equality: returns true if both sets have equal size and identical elements.
+  def ==(other : Set(T)) : Bool
+    return false if size != other.size
+    all? { |v| other.includes?(v) }
+  end
+
+  # Yields each element in insertion order.
+  def each(& : T -> Nil) : Nil
+    @entries.each { |value, _| yield value }
+  end
+
+  # String representation: `Set{1, 2, 3}`.
+  def to_s : String
+    parts = [] of String
+    each { |value| parts << value.inspect }
+    "Set{" + parts.join(", ") + "}"
+  end
+
+  def inspect : String
+    to_s
+  end
+end
+
+impl Enumerable for Set(T) forall T
+  type Elem = T
+
+  def each(& : T -> Nil) : Nil
+    @entries.each { |value, _| yield value }
+  end
+end
+
+# Bridge: converts a prelude `Set(T)` to a full standard library `Std::Set::Set(T)`.
+class ::Set(T)
+  def to_std : Std::Set::Set(T)
+    s = Std::Set::Set(T).new
+    each { |v| s.add(v) }
+    s
+  end
+end

@@ -1,0 +1,118 @@
+module std/float
+
+struct ::Float32
+  NAN          = (0_f32 / 0_f32).as Float32
+  INFINITY     = (1_f32 / 0_f32).as Float32
+  MIN          = -3.40282347e+38_f32
+  MAX          =  3.40282347e+38_f32
+  EPSILON      =  1.19209290e-07_f32
+  MIN_POSITIVE =  1.17549435e-38_f32
+
+  def to_s : String
+    to_f64.to_s
+  end
+
+  def abs : Float32
+    self < 0_f32 ? 0_f32 - self : self
+  end
+
+  def floor : Float32
+    to_f64.floor.to_f32
+  end
+
+  def ceil : Float32
+    to_f64.ceil.to_f32
+  end
+
+  def round : Float32
+    to_f64.round.to_f32
+  end
+
+  def trunc : Float32
+    to_f64.to_i64.to_f32
+  end
+end
+
+struct ::Float64
+  NAN          = (0_f64 / 0_f64).as Float64
+  INFINITY     = (1_f64 / 0_f64).as Float64
+  MIN          = -1.7976931348623157e+308
+  MAX          =  1.7976931348623157e+308
+  EPSILON      =   2.2204460492503131e-16
+  MIN_POSITIVE =  2.2250738585072014e-308
+
+  def trunc : Float64
+    to_i64.to_f64
+  end
+end
+
+struct ::Float
+  def nan? : ::Bool
+    !(self == self)
+  end
+
+  def infinite? : Int32?
+    if nan? || self == 0 || self != 2 * self
+      nil
+    else
+      self > 0 ? 1 : -1
+    end
+  end
+
+  def finite? : ::Bool
+    !nan? && infinite?.nil?
+  end
+
+  def - : self
+    self.class.zero - self
+  end
+
+  def //(other)
+    (self / other).floor
+  end
+
+  def %(other)
+    modulo(other)
+  end
+
+  def modulo(other)
+    if other == 0.0
+      raise "Division by zero"
+    else
+      self - other * (self // other)
+    end
+  end
+
+  def remainder(other)
+    if other == 0.0
+      raise "Division by zero"
+    else
+      mod = self % other
+      return self.class.zero if mod == 0.0
+      return mod if self > 0 && other > 0
+      return mod if self < 0 && other < 0
+      mod - other
+    end
+  end
+
+  def <=>(other : Float) : Int32?
+    return nil if nan? || other.nan?
+    self < other ? -1 : (self > other ? 1 : 0)
+  end
+
+  def to_s(io : IyiIO) : ::Nil
+    io.print(to_s)
+  end
+end
+
+struct ::Float32
+  def self.new(value) : self
+    value.to_f32
+  end
+end
+
+struct ::Float64
+  def self.new(value) : self
+    value.to_f64
+  end
+end

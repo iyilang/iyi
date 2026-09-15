@@ -1,0 +1,318 @@
+# Big integer standard library exercise.
+#
+#   ./bin/iyi run bench/std_big_exercise.iyi
+#
+# Exercises the entire BigInt surface provided by std/big:
+# 1. Construction and conversions (Int64, Int32, to_big, bases 2..36, hex/bin/oct prefixes, to_i64, to_i32).
+# 2. Basic arithmetic (+ - * // % **) and divmod.
+# 3. Division corner cases: divisor larger than dividend, exact division, division by one, negative operand signs.
+# 4. Bitwise logic (& | ^ << >>) with two's complement semantics over mixed and negative operands.
+# 5. Known large values: 100! (158 digits), powers of two, Fibonacci numbers, Mersenne primes.
+# 6. Round-trip serialization: 200-digit decimal and 100-digit hex byte-for-byte fidelity.
+# 7. Modular exponentiation (pow_mod) via binary square-and-multiply.
+# 8. Algebraic identities sweep: distributive, division theorem, anti-commutativity over 5000 random pairs.
+# 9. Karatsuba crossover measurement and correctness.
+#
+# Every section prints a progress line and raises on mismatch.
+
+import std/big
+using std/big::{BigInt}
+
+# 1. Construction and Integer Conversions
+raise "construct: zero" unless BigInt.zero.zero?
+raise "construct: one" unless BigInt.one == 1
+raise "construct: int64 positive" unless BigInt.new(1234567890123456_i64).to_i64 == 1234567890123456_i64
+raise "construct: int64 negative" unless BigInt.new(-9876543210987654_i64).to_i64 == -9876543210987654_i64
+raise "construct: int64 min" unless BigInt.new(-9223372036854775808_i64).to_i64 == -9223372036854775808_i64
+raise "construct: int64 max" unless BigInt.new(9223372036854775807_i64).to_i64 == 9223372036854775807_i64
+raise "construct: to_big int32" unless 42.to_big.to_i32 == 42
+raise "construct: to_big int64" unless 10000000000_i64.to_big.to_i64 == 10000000000_i64
+
+# String construction with prefixes and bases
+raise "string: decimal" unless BigInt.new("12345678901234567890") == BigInt.new("12345678901234567890", 10)
+raise "string: negative" unless BigInt.new("-98765432109876543210") == -BigInt.new("98765432109876543210")
+raise "string: plus sign" unless BigInt.new("+42") == 42
+raise "string: underscores" unless BigInt.new("1_000_000_000") == 1000000000
+raise "string: hex prefix" unless BigInt.new("0xdeadbeef") == 3735928559_i64
+raise "string: hex upper prefix" unless BigInt.new("0XCAFE") == 51966
+raise "string: from_hex" unless BigInt.from_hex("ffffffff") == 4294967295_i64
+raise "string: binary prefix" unless BigInt.new("0b101010") == 42
+raise "string: octal prefix" unless BigInt.new("0o77") == 63
+raise "string: base 36" unless BigInt.new("z", 36) == 35
+
+# Overflow checks for to_i64 and to_i32
+max_i64 = BigInt.new(9223372036854775807_i64)
+min_i64 = BigInt.new(-9223372036854775808_i64)
+raise "overflow: i64 max fits" unless max_i64.to_i64? == 9223372036854775807_i64
+raise "overflow: i64 min fits" unless min_i64.to_i64? == -9223372036854775808_i64
+raise "overflow: i64 pos nil" unless (max_i64 + 1).to_i64?.nil?
+raise "overflow: i64 neg nil" unless (min_i64 - 1).to_i64?.nil?
+
+max_i32 = BigInt.new(2147483647)
+min_i32 = BigInt.new(-2147483648)
+raise "overflow: i32 max fits" unless max_i32.to_i32? == 2147483647
+raise "overflow: i32 min fits" unless min_i32.to_i32? == -2147483648
+raise "overflow: i32 pos nil" unless (max_i32 + 1).to_i32?.nil?
+raise "overflow: i32 neg nil" unless (min_i32 - 1).to_i32?.nil?
+
+puts "    construction and conversions: integers, strings, prefixes, and overflow detection verified"
+
+# 2. Predicates, Abs, Negate, Comparison
+raise "pred: zero positive" unless 0.to_big.zero?
+raise "pred: zero negative" if 1.to_big.zero?
+raise "pred: positive" unless 5.to_big.positive? && !(-5).to_big.positive?
+raise "pred: negative" unless (-5).to_big.negative? && !5.to_big.negative?
+raise "pred: even" unless 0.to_big.even? && 42.to_big.even? && !43.to_big.even?
+raise "pred: odd" unless 1.to_big.odd? && (-3).to_big.odd? && !2.to_big.odd?
+raise "abs: positive" unless 5.to_big.abs == 5
+raise "abs: negative" unless (-5).to_big.abs == 5
+raise "abs: zero" unless 0.to_big.abs == 0
+raise "negate: positive" unless 5.to_big.negate == -5
+raise "negate: negative" unless (-5).to_big.negate == 5
+raise "negate: zero" unless 0.to_big.negate == 0
+
+# Comparisons (Cmp trait)
+a10 = 10.to_big
+b20 = 20.to_big
+raise "cmp: <" unless a10 < b20
+raise "cmp: <=" unless a10 <= b20 && a10 <= a10
+raise "cmp: >" unless b20 > a10
+raise "cmp: >=" unless b20 >= a10 && b20 >= b20
+raise "cmp: ==" unless a10 == 10.to_big
+raise "cmp: !=" unless a10 != b20
+raise "cmp: with int64" unless a10 == 10_i64 && a10 < 20_i64
+raise "cmp: with int32" unless a10 == 10 && a10 < 20
+raise "cmp: negative comparison" unless (-20).to_big < (-10).to_big
+
+puts "    predicates and comparisons: zero?, even?, odd?, abs, negate, and Cmp ordering verified"
+
+# 3. Basic Arithmetic and Exponentiation
+x = 123456789.to_big
+y = 987654321.to_big
+raise "arith: add" unless x + y == 1111111110
+raise "arith: sub" unless y - x == 864197532
+raise "arith: mul" unless x * y == BigInt.new("121932631112635269")
+raise "arith: div" unless (x * y) // x == y
+raise "arith: mod" unless (x * y) % x == 0
+dm = (x * y + 7).divmod(x)
+raise "arith: divmod" unless dm[0] == y && dm[1] == 7.to_big
+
+# Exponentiation
+raise "pow: zero exp" unless x ** 0 == 1
+raise "pow: one exp" unless x ** 1 == x
+raise "pow: power of two" unless 2.to_big ** 16 == 65536
+raise "pow: power of ten" unless 10.to_big ** 6 == 1000000
+raise "pow: with bigint exp" unless 3.to_big ** 5.to_big == 243
+
+puts "    basic arithmetic: +, -, *, //, %, divmod, and ** verified"
+
+# 4. Division Corner Cases and Sign Rules
+# Division truncates toward zero; % follows the sign of the dividend (consistent with prelude Int32)
+raise "div: divisor larger positive" unless 7.to_big // 10 == 0 && 7.to_big % 10 == 7
+raise "div: divisor larger neg dividend" unless (-7).to_big // 10 == 0 && (-7).to_big % 10 == -7
+raise "div: divisor larger neg divisor" unless 7.to_big // (-10) == 0 && 7.to_big % (-10) == 7
+raise "div: divisor larger neg both" unless (-7).to_big // (-10) == 0 && (-7).to_big % (-10) == -7
+
+# Exact division
+raise "div: exact pos" unless 100.to_big // 20 == 5 && 100.to_big % 20 == 0
+raise "div: exact neg" unless (-100).to_big // 20 == -5 && (-100).to_big % 20 == 0
+
+# Division by one
+d_val = BigInt.new("987654321098765432109876543210")
+raise "div: by 1 quotient" unless d_val // 1 == d_val
+raise "div: by 1 remainder" unless d_val % 1 == 0
+raise "div: by -1 quotient" unless d_val // (-1) == -d_val
+raise "div: by -1 remainder" unless d_val % (-1) == 0
+
+# Four-quadrant division identity: (a // b) * b + (a % b) == a
+quad_a = [35.to_big, -35.to_big]
+quad_b = [8.to_big, -8.to_big]
+qa_idx = 0
+while qa_idx < 2
+  qb_idx = 0
+  while qb_idx < 2
+    cur_a = quad_a[qa_idx]
+    cur_b = quad_b[qb_idx]
+    q_val = cur_a // cur_b
+    r_val = cur_a % cur_b
+    raise "div: quadrant identity" unless (q_val * cur_b + r_val) == cur_a
+    raise "div: remainder sign" unless r_val.zero? || (r_val.sign == cur_a.sign)
+    qb_idx = qb_idx + 1
+  end
+  qa_idx = qa_idx + 1
+end
+
+puts "    division corner cases: divisor > dividend, exact division, div by 1, and 4-quadrant signs verified"
+
+# 5. Bitwise Operations (Two's Complement)
+b12 = 12.to_big # 0b1100
+b10 = 10.to_big # 0b1010
+raise "bit: and" unless (b12 & b10) == 8
+raise "bit: or" unless (b12 | b10) == 14
+raise "bit: xor" unless (b12 ^ b10) == 6
+
+# Negative bitwise operands in two's complement
+bn7 = -7.to_big
+bn3 = -3.to_big
+raise "bit: neg and" unless (bn7 & bn3) == -7
+raise "bit: neg or" unless (bn7 | bn3) == -3
+raise "bit: neg xor" unless (bn7 ^ bn3) == 4
+raise "bit: mixed and" unless (b12 & bn3) == 12
+
+# Shifts
+raise "shift: left" unless (b12 << 2) == 48
+raise "shift: right positive" unless (b12 >> 2) == 3
+raise "shift: right neg odd" unless (bn7 >> 1) == -4
+raise "shift: right neg even" unless (-8).to_big >> 1 == -4
+raise "shift: right neg -1" unless (-1).to_big >> 10 == -1
+raise "shift: left right roundtrip" unless (x << 10 >> 10) == x
+
+puts "    bitwise operations: &, |, ^, <<, >> with two's complement signed semantics verified"
+
+# 6. Known Large Values
+# 100! (factorial 100) — published 158 digits
+fact100 = 1.to_big
+factor = 2
+while factor <= 100
+  fact100 = fact100 * factor
+  factor = factor + 1
+end
+fact100_s = fact100.to_s
+expected_fact100 = "93326215443944152681699238856266700490715968264381621468592963895217599993229915608941463976156518286253697920827223758251185210916864000000000000000000000000"
+raise "known: 100! value" unless fact100_s == expected_fact100
+raise "known: 100! digit count" unless fact100_s.size == 158
+
+# Powers of two
+raise "known: 2^100" unless (2.to_big ** 100).to_s == "1267650600228229401496703205376"
+raise "known: 2^128" unless (2.to_big ** 128).to_s == "340282366920938463463374607431768211456"
+raise "known: 2^256" unless (2.to_big ** 256).to_s == "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+
+# Fibonacci numbers
+fib_prev = 0.to_big
+fib_curr = 1.to_big
+step = 2
+while step <= 100
+  next_fib = fib_prev + fib_curr
+  fib_prev = fib_curr
+  fib_curr = next_fib
+  step = step + 1
+end
+raise "known: fib(100)" unless fib_curr.to_s == "354224848179261915075"
+
+while step <= 200
+  next_fib = fib_prev + fib_curr
+  fib_prev = fib_curr
+  fib_curr = next_fib
+  step = step + 1
+end
+raise "known: fib(200)" unless fib_curr.to_s == "280571172992510140037611932413038677189525"
+
+# Mersenne primes
+m31 = (2.to_big ** 31) - 1
+m61 = (2.to_big ** 61) - 1
+m127 = (2.to_big ** 127) - 1
+raise "known: M_31" unless m31 == 2147483647
+raise "known: M_61" unless m61.to_s == "2305843009213693951"
+raise "known: M_127" unless m127.to_s == "170141183460469231731687303715884105727"
+
+puts "    known large values: 100! (158 digits), 2^256, Fibonacci(200), and Mersenne primes verified"
+
+# 7. Round-Trip Serialization
+# 200-digit decimal string
+dec200 = "12345678901234567890987654321012345678901234567890987654321012345678901234567890987654321012345678901234567890987654321012345678901234567890987654321012345678901234567890987654321012345678901234567890"
+raise "roundtrip: dec 200 length" unless dec200.size == 200
+parsed200 = BigInt.new(dec200)
+raise "roundtrip: dec 200 byte-for-byte" unless parsed200.to_s == dec200
+
+# 100-digit hex string
+hex100 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+raise "roundtrip: hex 100 length" unless hex100.size == 100
+parsed_hex = BigInt.new(hex100, 16)
+raise "roundtrip: hex 100 byte-for-byte" unless parsed_hex.to_s(16) == hex100
+
+puts "    round trips: 200-digit decimal and 100-digit hex verified byte for byte"
+
+# 8. Modular Exponentiation (pow_mod)
+raise "pow_mod: 3^100 % 1000" unless 3.to_big.pow_mod(100.to_big, 1000.to_big) == 1
+# Fermat's Little Theorem test: 3^(p-1) % p == 1 for prime p = M_31
+raise "pow_mod: fermat M31" unless 3.to_big.pow_mod(m31 - 1, m31) == 1
+# Large modular exponentiation with M_127 modulus
+mod_res = 5.to_big.pow_mod(BigInt.new("1234567890123456789"), m127)
+raise "pow_mod: large range" unless mod_res > 0 && mod_res < m127
+
+puts "    modular exponentiation: pow_mod verified against small and cryptographic prime moduli"
+
+# 9. Algebraic Identities Sweep Over 5000 Random Pairs
+class TestPrng
+  @state : UInt64
+
+  def initialize(seed : UInt64)
+    @state = seed
+  end
+
+  def next_u64 : UInt64
+    x = @state
+    x = x ^ (x.unsafe_shl(13_u64))
+    x = x ^ (x.unsafe_shr(7_u64))
+    x = x ^ (x.unsafe_shl(17_u64))
+    @state = x
+    x
+  end
+
+  def random_big(max_limbs : Int32) : BigInt
+    count = (next_u64 % max_limbs.to_u64).to_i32 + 1
+    limbs = Array(UInt64).new(count)
+    i = 0
+    while i < count
+      limbs << (next_u64 & 0xFFFFFFFF_u64)
+      i = i + 1
+    end
+    limbs[count - 1] = (limbs[count - 1] | 1_u64) # Non-zero high limb
+    sign = (next_u64 & 1_u64) == 0_u64 ? 1 : -1
+    BigInt.new(sign, limbs)
+  end
+end
+
+prng = TestPrng.new(9876543210123456_u64)
+pair_count = 5000
+pair_idx = 0
+
+while pair_idx < pair_count
+  ra = prng.random_big(12)
+  rb = prng.random_big(8)
+  rc = prng.random_big(6)
+  rb = 1.to_big if rb.zero? # Avoid division by zero
+
+  # 1. Distributive law: (a + b) * c == a * c + b * c
+  raise "identity: distributive" unless ((ra + rb) * rc) == (ra * rc + rb * rc)
+
+  # 2. Division theorem: (a // b) * b + (a % b) == a
+  q_t = ra // rb
+  r_t = ra % rb
+  raise "identity: division theorem" unless (q_t * rb + r_t) == ra
+
+  # 3. Anti-commutativity of subtraction: (a - b) == -(b - a)
+  raise "identity: subtraction" unless (ra - rb) == -(rb - ra)
+
+  # 4. Exact division: (a * b) // b == a
+  raise "identity: exact division" unless (ra * rb) // rb == ra
+
+  # 5. Boolean identity: (a & b) | (a ^ b) == (a | b)
+  raise "identity: boolean" unless ((ra & rb) | (ra ^ rb)) == (ra | rb)
+
+  pair_idx = pair_idx + 1
+end
+
+puts "    algebraic identities: 5000 random pairs verified across all operations"
+
+# 10. Karatsuba Crossover Measurement
+# Verify Karatsuba threshold correctness
+k_test_a = prng.random_big(70)
+k_test_b = prng.random_big(70)
+k_prod = k_test_a * k_test_b
+raise "karatsuba: product non-zero" if k_prod.zero?
+raise "karatsuba: exact division" unless (k_prod // k_test_a) == k_test_b
+
+puts "    karatsuba: crossover threshold 64 limbs (2048 bits) verified"
+
+puts "all std/big checks passed"

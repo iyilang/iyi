@@ -1,0 +1,768 @@
+# Unicode standard library for iyi.
+#
+# Provides case mapping, categories, UTF-8/UTF-16 encoding and normalization.
+#
+# Supported subsets:
+# - Categories (letter?, number?, whitespace?, control?, mark?, ascii?):
+#   * Letters: Latin (Basic, Supplement, Extended-A), Greek, Cyrillic,
+#     Hebrew, Arabic, Devanagari, Thai, CJK Unified Ideographs, Hiragana,
+#     Katakana, Hangul Syllables.
+#   * Numbers: ASCII digits, Arabic-Indic, Extended Arabic-Indic, Roman numerals.
+# - Normalization (NFC, NFD):
+#   * Hangul canonical decomposition and composition (algorithmic).
+#   * Latin-1 Supplement canonical decomposition and composition (precomposed
+#     letters and combining marks).
+# - Case mappings: ASCII, Latin-1, Greek, Cyrillic, Latin Extended-A, Turkic, Fold.
+
+module std/unicode
+
+import std/text
+import std/slice
+using std/slice::{Slice, Bytes}
+pub alias Bytes = Std::Slice::Bytes
+
+module ::Unicode
+  VERSION = "17.0.0-subset"
+
+  enum CaseOptions : Int32
+    None   = 0
+    ASCII  = 1
+    Turkic = 2
+    Fold   = 4
+
+    def none? : Bool
+      value == 0
+    end
+
+    def ascii? : Bool
+      (value & 1) != 0
+    end
+
+    def turkic? : Bool
+      (value & 2) != 0
+    end
+
+    def fold? : Bool
+      (value & 4) != 0
+    end
+
+    def |(other : CaseOptions) : CaseOptions
+      CaseOptions.new(value | other.value)
+    end
+  end
+
+  enum NormalizationForm : Int32
+    NFD  = 0
+    NFC  = 1
+    NFKD = 2
+    NFKC = 3
+
+    def nfd? : Bool
+      value == 0
+    end
+
+    def nfc? : Bool
+      value == 1
+    end
+
+    def nfkd? : Bool
+      value == 2
+    end
+
+    def nfkc? : Bool
+      value == 3
+    end
+  end
+
+  # Validates whether the given bytes are well-formed UTF-8.
+  def self.valid?(bytes : Bytes) : Bool
+    ptr = bytes.to_unsafe
+    len = bytes.size
+    i = 0
+
+    while i < len
+      b0 = ptr[i]
+      if b0 < 0x80_u8
+        i += 1
+      elsif b0 >= 0xC2_u8 && b0 <= 0xDF_u8
+        return false if i + 1 >= len
+        b1 = ptr[i + 1]
+        return false unless (b1 & 0xC0_u8) == 0x80_u8
+        i += 2
+      elsif b0 == 0xE0_u8
+        return false if i + 2 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        return false unless b1 >= 0xA0_u8 && b1 <= 0xBF_u8
+        return false unless (b2 & 0xC0_u8) == 0x80_u8
+        i += 3
+      elsif (b0 >= 0xE1_u8 && b0 <= 0xEC_u8) || b0 == 0xEE_u8 || b0 == 0xEF_u8
+        return false if i + 2 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        return false unless (b1 & 0xC0_u8) == 0x80_u8 && (b2 & 0xC0_u8) == 0x80_u8
+        i += 3
+      elsif b0 == 0xED_u8
+        return false if i + 2 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        return false unless b1 >= 0x80_u8 && b1 <= 0x9F_u8
+        return false unless (b2 & 0xC0_u8) == 0x80_u8
+        i += 3
+      elsif b0 == 0xF0_u8
+        return false if i + 3 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        b3 = ptr[i + 3]
+        return false unless b1 >= 0x90_u8 && b1 <= 0xBF_u8
+        return false unless (b2 & 0xC0_u8) == 0x80_u8 && (b3 & 0xC0_u8) == 0x80_u8
+        i += 4
+      elsif b0 >= 0xF1_u8 && b0 <= 0xF3_u8
+        return false if i + 3 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        b3 = ptr[i + 3]
+        return false unless (b1 & 0xC0_u8) == 0x80_u8 && (b2 & 0xC0_u8) == 0x80_u8 && (b3 & 0xC0_u8) == 0x80_u8
+        i += 4
+      elsif b0 == 0xF4_u8
+        return false if i + 3 >= len
+        b1 = ptr[i + 1]
+        b2 = ptr[i + 2]
+        b3 = ptr[i + 3]
+        return false unless b1 >= 0x80_u8 && b1 <= 0x8F_u8
+        return false unless (b2 & 0xC0_u8) == 0x80_u8 && (b3 & 0xC0_u8) == 0x80_u8
+        i += 4
+      else
+        return false
+      end
+    end
+
+    true
+  end
+
+  def self.valid?(str : String) : Bool
+    valid?(str.to_slice)
+  end
+
+  def self.clean_utf8(bytes : Bytes) : String
+    ptr = bytes.to_unsafe
+    len = bytes.size
+    i = 0
+    res = ""
+
+    while i < len
+      b0 = ptr[i]
+      if b0 < 0x80_u8
+        res = res + b0.unsafe_chr.to_s
+        i += 1
+      elsif b0 >= 0xC2_u8 && b0 <= 0xDF_u8 && i + 1 < len && (ptr[i + 1] & 0xC0_u8) == 0x80_u8
+        res = res + String.new(2) { |b| b[0] = b0; b[1] = ptr[i + 1] }
+        i += 2
+      elsif ((b0 == 0xE0_u8 && i + 2 < len && ptr[i + 1] >= 0xA0_u8 && ptr[i + 1] <= 0xBF_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8) ||
+            (((b0 >= 0xE1_u8 && b0 <= 0xEC_u8) || b0 == 0xEE_u8 || b0 == 0xEF_u8) && i + 2 < len && (ptr[i + 1] & 0xC0_u8) == 0x80_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8) ||
+            (b0 == 0xED_u8 && i + 2 < len && ptr[i + 1] >= 0x80_u8 && ptr[i + 1] <= 0x9F_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8))
+        res = res + String.new(3) { |b| b[0] = b0; b[1] = ptr[i + 1]; b[2] = ptr[i + 2] }
+        i += 3
+      elsif ((b0 == 0xF0_u8 && i + 3 < len && ptr[i + 1] >= 0x90_u8 && ptr[i + 1] <= 0xBF_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8 && (ptr[i + 3] & 0xC0_u8) == 0x80_u8) ||
+            (b0 >= 0xF1_u8 && b0 <= 0xF3_u8 && i + 3 < len && (ptr[i + 1] & 0xC0_u8) == 0x80_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8 && (ptr[i + 3] & 0xC0_u8) == 0x80_u8) ||
+            (b0 == 0xF4_u8 && i + 3 < len && ptr[i + 1] >= 0x80_u8 && ptr[i + 1] <= 0x8F_u8 && (ptr[i + 2] & 0xC0_u8) == 0x80_u8 && (ptr[i + 3] & 0xC0_u8) == 0x80_u8))
+        res = res + String.new(4) { |b| b[0] = b0; b[1] = ptr[i + 1]; b[2] = ptr[i + 2]; b[3] = ptr[i + 3] }
+        i += 4
+      else
+        res = res + "\u{FFFD}"
+        i += 1
+      end
+    end
+
+    res
+  end
+
+  def self.clean_utf8(str : String) : String
+    clean_utf8(str.to_slice)
+  end
+
+  def self.utf8_byte_number(byte : UInt8) : Int32
+    if byte < 0x80_u8
+      1
+    elsif (byte & 0xE0_u8) == 0xC0_u8
+      2
+    elsif (byte & 0xF0_u8) == 0xE0_u8
+      3
+    elsif (byte & 0xF8_u8) == 0xF0_u8
+      4
+    else
+      1
+    end
+  end
+
+  # Case mappings
+  def self.upcase(char : Char, options : CaseOptions = CaseOptions::None) : Char
+    cp = char.ord
+    if (options.ascii? || options.none?) && cp < 0x80
+      return (cp >= 97 && cp <= 122) ? (cp - 32).unsafe_chr : char
+    end
+
+    if options.turkic?
+      case char
+      when 'ı' then return 'I'
+      when 'i' then return '\u{0130}'
+      else          nil
+      end
+    end
+
+    # Latin-1 supplement
+    if cp >= 0xE0 && cp <= 0xF6
+      return (cp - 32).unsafe_chr
+    elsif cp >= 0xF8 && cp <= 0xFE
+      return (cp - 32).unsafe_chr
+    elsif cp == 0xFF
+      return 0x0178.unsafe_chr
+      # Greek
+    elsif cp >= 0x03B1 && cp <= 0x03C9
+      return (cp - 32).unsafe_chr
+    elsif cp == 0x03C2
+      return 0x03A3.unsafe_chr
+      # Cyrillic
+    elsif cp >= 0x0430 && cp <= 0x044F
+      return (cp - 32).unsafe_chr
+    elsif cp == 0x0451
+      return 0x0401.unsafe_chr
+      # Latin Extended-A
+    elsif cp >= 0x0100 && cp <= 0x017F
+      return (cp % 2 == 1) ? (cp - 1).unsafe_chr : char
+    end
+
+    char
+  end
+
+  def self.upcase(char : Char, options : CaseOptions = CaseOptions::None, &block : Char -> Nil) : Nil
+    yield upcase(char, options)
+  end
+
+  def self.upcase(str : String, options : CaseOptions = CaseOptions::None) : String
+    return "" if str.empty?
+    ch = str.chars
+    res = ""
+    ch.each do |c|
+      res = res + upcase(c, options).to_s
+    end
+    res
+  end
+
+  def self.downcase(char : Char, options : CaseOptions = CaseOptions::None) : Char
+    cp = char.ord
+    if (options.ascii? || options.none?) && cp < 0x80
+      return (cp >= 65 && cp <= 90) ? (cp + 32).unsafe_chr : char
+    end
+
+    if options.turkic?
+      case char
+      when 'I'        then return 'ı'
+      when '\u{0130}' then return 'i'
+      else                 nil
+      end
+    end
+
+    # Latin-1 supplement
+    if cp >= 0xC0 && cp <= 0xD6
+      return (cp + 32).unsafe_chr
+    elsif cp >= 0xD8 && cp <= 0xDE
+      return (cp + 32).unsafe_chr
+    elsif cp == 0x0178
+      return 0xFF.unsafe_chr
+      # Greek
+    elsif cp >= 0x0391 && cp <= 0x03A9
+      return (cp + 32).unsafe_chr
+      # Cyrillic
+    elsif cp >= 0x0410 && cp <= 0x042F
+      return (cp + 32).unsafe_chr
+    elsif cp == 0x0401
+      return 0x0451.unsafe_chr
+      # Latin Extended-A
+    elsif cp >= 0x0100 && cp <= 0x017F
+      return (cp % 2 == 0) ? (cp + 1).unsafe_chr : char
+    end
+
+    char
+  end
+
+  def self.downcase(char : Char, options : CaseOptions = CaseOptions::None, &block : Char -> Nil) : Nil
+    yield downcase(char, options)
+  end
+
+  def self.downcase(str : String, options : CaseOptions = CaseOptions::None) : String
+    return "" if str.empty?
+    if options.fold?
+      return foldcase(str, options)
+    end
+    ch = str.chars
+    res = ""
+    ch.each do |c|
+      res = res + downcase(c, options).to_s
+    end
+    res
+  end
+
+  def self.titlecase(char : Char, options : CaseOptions = CaseOptions::None) : Char
+    upcase(char, options)
+  end
+
+  def self.titlecase(char : Char, options : CaseOptions = CaseOptions::None, &block : Char -> Nil) : Nil
+    yield titlecase(char, options)
+  end
+
+  def self.titlecase(str : String, options : CaseOptions = CaseOptions::None) : String
+    return "" if str.empty?
+    ch = str.chars
+    res = ""
+    ch.each_with_index do |c, i|
+      if i == 0
+        res = res + titlecase(c, options).to_s
+      else
+        res = res + downcase(c, options).to_s
+      end
+    end
+    res
+  end
+
+  def self.foldcase(char : Char, options : CaseOptions = CaseOptions::None) : Char
+    downcase(char, options)
+  end
+
+  def self.foldcase(char : Char, options : CaseOptions = CaseOptions::None, &block : Char -> Nil) : Nil
+    if char == 'ß' || char == '\u{1E9E}'
+      yield 's'
+      yield 's'
+    else
+      yield downcase(char, options)
+    end
+  end
+
+  def self.foldcase(str : String, options : CaseOptions = CaseOptions::None) : String
+    return "" if str.empty?
+    res = ""
+    str.chars.each do |c|
+      foldcase(c, options) do |fc|
+        res = res + fc.to_s
+      end
+    end
+    res
+  end
+
+  # Category checks
+  def self.lowercase?(char : Char) : Bool
+    cp = char.ord
+    (cp >= 97 && cp <= 122) ||
+      (cp >= 0xDF && cp <= 0xF6) ||
+      (cp >= 0xF8 && cp <= 0xFF) ||
+      (cp >= 0x03B1 && cp <= 0x03C9) ||
+      (cp >= 0x0430 && cp <= 0x044F) ||
+      (cp >= 0x0100 && cp <= 0x017F && cp.odd?)
+  end
+
+  def self.uppercase?(char : Char) : Bool
+    cp = char.ord
+    (cp >= 65 && cp <= 90) ||
+      (cp >= 0xC0 && cp <= 0xD6) ||
+      (cp >= 0xD8 && cp <= 0xDE) ||
+      (cp >= 0x0391 && cp <= 0x03A9) ||
+      (cp >= 0x0410 && cp <= 0x042F) ||
+      (cp >= 0x0100 && cp <= 0x017F && cp.even?)
+  end
+
+  def self.titlecase?(char : Char) : Bool
+    uppercase?(char)
+  end
+
+  def self.letter?(char : Char) : Bool
+    cp = char.ord
+    lowercase?(char) || uppercase?(char) ||
+      (cp >= 0x0100 && cp <= 0x017F) ||                                   # Latin Extended-A
+      (cp >= 0x0370 && cp <= 0x03FF) ||                                   # Greek
+      (cp >= 0x0400 && cp <= 0x04FF) ||                                   # Cyrillic
+      (cp >= 0x05D0 && cp <= 0x05EA) || (cp >= 0x05EF && cp <= 0x05F2) || # Hebrew
+      (cp >= 0x0620 && cp <= 0x064A) || (cp >= 0x066E && cp <= 0x06D3) || cp == 0x06D5 ||
+      (cp >= 0x06E5 && cp <= 0x06E6) || (cp >= 0x06EE && cp <= 0x06EF) || (cp >= 0x06FA && cp <= 0x06FC) || cp == 0x06FF || # Arabic
+      (cp >= 0x0904 && cp <= 0x0939) || (cp >= 0x0958 && cp <= 0x0961) || (cp >= 0x0972 && cp <= 0x097F) ||                 # Devanagari
+      (cp >= 0x0E01 && cp <= 0x0E30) || (cp >= 0x0E32 && cp <= 0x0E33) || (cp >= 0x0E40 && cp <= 0x0E47) ||                 # Thai
+      (cp >= 0x4E00 && cp <= 0x9FFF) ||                                                                                     # CJK Unified Ideographs
+      (cp >= 0x3040 && cp <= 0x309F) ||                                                                                     # Hiragana
+      (cp >= 0x30A0 && cp <= 0x30FF) ||                                                                                     # Katakana
+      (cp >= 0xAC00 && cp <= 0xD7AF)                                                                                        # Hangul Syllables
+  end
+
+  def self.number?(char : Char) : Bool
+    cp = char.ord
+    (cp >= 48 && cp <= 57) ||
+      (cp >= 0x0660 && cp <= 0x0669) || # Arabic-Indic digits
+      (cp >= 0x06F0 && cp <= 0x06F9) || # Extended Arabic-Indic
+      (cp >= 0x2160 && cp <= 0x217F)    # Roman numerals
+  end
+
+  def self.control?(char : Char) : Bool
+    cp = char.ord
+    cp < 0x20 || (cp >= 0x7F && cp <= 0x9F)
+  end
+
+  def self.whitespace?(char : Char) : Bool
+    cp = char.ord
+    cp == 32 || (cp >= 9 && cp <= 13) ||
+      cp == 0x00A0 || cp == 0x1680 ||
+      (cp >= 0x2000 && cp <= 0x200A) ||
+      cp == 0x2028 || cp == 0x2029 ||
+      cp == 0x202F || cp == 0x205F || cp == 0x3000
+  end
+
+  def self.mark?(char : Char) : Bool
+    cp = char.ord
+    (cp >= 0x0300 && cp <= 0x036F) ||
+      (cp >= 0x1AB0 && cp <= 0x1AFF) ||
+      (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+      (cp >= 0x20D0 && cp <= 0x20FF) ||
+      (cp >= 0xFE20 && cp <= 0xFE2F)
+  end
+
+  def self.ascii?(char : Char) : Bool
+    char.ord < 0x80
+  end
+
+  def self.each_codepoint(str : String, &block : Int32 -> Nil) : Nil
+    str.chars.each do |c|
+      yield c.ord
+    end
+  end
+
+  # UTF-16 primitives and conversions
+end
+
+struct ::Int32
+  @[Primitive(:convert)]
+  def to_u16 : UInt16
+  end
+end
+
+module ::Unicode
+  def self.utf16_size(str : String) : Int32
+    count = 0
+    str.chars.each do |c|
+      count += (c.ord >= 0x10000 ? 2 : 1)
+    end
+    count
+  end
+
+  def self.encode_utf16(str : String, slice : Std::Slice::Slice(UInt16)) : Int32
+    at = 0
+    max = slice.size
+    str.chars.each do |c|
+      cp = c.ord
+      if cp < 0x10000
+        return at if at >= max
+        slice[at] = cp.to_u16
+        at += 1
+      else
+        return at if at + 1 >= max
+        cp_sub = cp - 0x10000
+        high = (0xD800 + (cp_sub >> 10)).to_u16
+        low = (0xDC00 + (cp_sub & 0x3FF)).to_u16
+        slice[at] = high
+        slice[at + 1] = low
+        at += 2
+      end
+    end
+    at
+  end
+
+  def self.decode_utf16(slice : Std::Slice::Slice(UInt16)) : String
+    len = slice.size
+    i = 0
+    res = ""
+    while i < len
+      u = slice[i]
+      if u >= 0xD800_u16 && u <= 0xDBFF_u16 && i + 1 < len
+        next_u = slice[i + 1]
+        if next_u >= 0xDC00_u16 && next_u <= 0xDFFF_u16
+          cp = 0x10000 + (((u.to_i32 - 0xD800) << 10) | (next_u.to_i32 - 0xDC00))
+          res = res + cp.unsafe_chr.to_s
+          i += 2
+          next
+        end
+      end
+      res = res + u.to_i32.unsafe_chr.to_s
+      i += 1
+    end
+    res
+  end
+
+  # Hangul decomposition / composition constants
+  HANGUL_S_BASE  = 0xAC00
+  HANGUL_L_BASE  = 0x1100
+  HANGUL_V_BASE  = 0x1161
+  HANGUL_T_BASE  = 0x11A7
+  HANGUL_L_COUNT =     19
+  HANGUL_V_COUNT =     21
+  HANGUL_T_COUNT =     28
+  HANGUL_N_COUNT =    588 # V_COUNT * T_COUNT
+  HANGUL_S_COUNT =  11172 # L_COUNT * N_COUNT
+
+  def self.latin1_decompose(cp : Int32) : Tuple(Int32, Int32)?
+    case cp
+    # Uppercase
+    when 0x00C0 then {0x0041, 0x0300} # À -> A + grave
+    when 0x00C1 then {0x0041, 0x0301} # Á -> A + acute
+    when 0x00C2 then {0x0041, 0x0302} # Â -> A + circumflex
+    when 0x00C3 then {0x0041, 0x0303} # Ã -> A + tilde
+    when 0x00C4 then {0x0041, 0x0308} # Ä -> A + diaeresis
+    when 0x00C5 then {0x0041, 0x030A} # Å -> A + ring above
+    when 0x00C7 then {0x0043, 0x0327} # Ç -> C + cedilla
+    when 0x00C8 then {0x0045, 0x0300} # È -> E + grave
+    when 0x00C9 then {0x0045, 0x0301} # É -> E + acute
+    when 0x00CA then {0x0045, 0x0302} # Ê -> E + circumflex
+    when 0x00CB then {0x0045, 0x0308} # Ë -> E + diaeresis
+    when 0x00CC then {0x0049, 0x0300} # Ì -> I + grave
+    when 0x00CD then {0x0049, 0x0301} # Í -> I + acute
+    when 0x00CE then {0x0049, 0x0302} # Î -> I + circumflex
+    when 0x00CF then {0x0049, 0x0308} # Ï -> I + diaeresis
+    when 0x00D1 then {0x004E, 0x0303} # Ñ -> N + tilde
+    when 0x00D2 then {0x004F, 0x0300} # Ò -> O + grave
+    when 0x00D3 then {0x004F, 0x0301} # Ó -> O + acute
+    when 0x00D4 then {0x004F, 0x0302} # Ô -> O + circumflex
+    when 0x00D5 then {0x004F, 0x0303} # Õ -> O + tilde
+    when 0x00D6 then {0x004F, 0x0308} # Ö -> O + diaeresis
+    when 0x00D9 then {0x0055, 0x0300} # Ù -> U + grave
+    when 0x00DA then {0x0055, 0x0301} # Ú -> U + acute
+    when 0x00DB then {0x0055, 0x0302} # Û -> U + circumflex
+    when 0x00DC then {0x0055, 0x0308} # Ü -> U + diaeresis
+    when 0x00DD then {0x0059, 0x0301} # Ý -> Y + acute
+    # Lowercase
+    when 0x00E0 then {0x0061, 0x0300} # à -> a + grave
+    when 0x00E1 then {0x0061, 0x0301} # á -> a + acute
+    when 0x00E2 then {0x0061, 0x0302} # â -> a + circumflex
+    when 0x00E3 then {0x0061, 0x0303} # ã -> a + tilde
+    when 0x00E4 then {0x0061, 0x0308} # ä -> a + diaeresis
+    when 0x00E5 then {0x0061, 0x030A} # å -> a + ring above
+    when 0x00E7 then {0x0063, 0x0327} # ç -> c + cedilla
+    when 0x00E8 then {0x0065, 0x0300} # è -> e + grave
+    when 0x00E9 then {0x0065, 0x0301} # é -> e + acute
+    when 0x00EA then {0x0065, 0x0302} # ê -> e + circumflex
+    when 0x00EB then {0x0065, 0x0308} # ë -> e + diaeresis
+    when 0x00EC then {0x0069, 0x0300} # ì -> i + grave
+    when 0x00ED then {0x0069, 0x0301} # í -> i + acute
+    when 0x00EE then {0x0069, 0x0302} # î -> i + circumflex
+    when 0x00EF then {0x0069, 0x0308} # ï -> i + diaeresis
+    when 0x00F1 then {0x006E, 0x0303} # ñ -> n + tilde
+    when 0x00F2 then {0x006F, 0x0300} # ò -> o + grave
+    when 0x00F3 then {0x006F, 0x0301} # ó -> o + acute
+    when 0x00F4 then {0x006F, 0x0302} # ô -> o + circumflex
+    when 0x00F5 then {0x006F, 0x0303} # õ -> o + tilde
+    when 0x00F6 then {0x006F, 0x0308} # ö -> o + diaeresis
+    when 0x00F9 then {0x0075, 0x0300} # ù -> u + grave
+    when 0x00FA then {0x0075, 0x0301} # ú -> u + acute
+    when 0x00FB then {0x0075, 0x0302} # û -> u + circumflex
+    when 0x00FC then {0x0075, 0x0308} # ü -> u + diaeresis
+    when 0x00FD then {0x0079, 0x0301} # ý -> y + acute
+    when 0x00FF then {0x0079, 0x0308} # ÿ -> y + diaeresis
+    else
+      nil
+    end
+  end
+
+  def self.latin1_compose(c0 : Int32, c1 : Int32) : Int32?
+    case c0
+    when 0x0041 # 'A'
+      case c1
+      when 0x0300 then 0x00C0
+      when 0x0301 then 0x00C1
+      when 0x0302 then 0x00C2
+      when 0x0303 then 0x00C3
+      when 0x0308 then 0x00C4
+      when 0x030A then 0x00C5
+      else             nil
+      end
+    when 0x0043 # 'C'
+      c1 == 0x0327 ? 0x00C7 : nil
+    when 0x0045 # 'E'
+      case c1
+      when 0x0300 then 0x00C8
+      when 0x0301 then 0x00C9
+      when 0x0302 then 0x00CA
+      when 0x0308 then 0x00CB
+      else             nil
+      end
+    when 0x0049 # 'I'
+      case c1
+      when 0x0300 then 0x00CC
+      when 0x0301 then 0x00CD
+      when 0x0302 then 0x00CE
+      when 0x0308 then 0x00CF
+      else             nil
+      end
+    when 0x004E # 'N'
+      c1 == 0x0303 ? 0x00D1 : nil
+    when 0x004F # 'O'
+      case c1
+      when 0x0300 then 0x00D2
+      when 0x0301 then 0x00D3
+      when 0x0302 then 0x00D4
+      when 0x0303 then 0x00D5
+      when 0x0308 then 0x00D6
+      else             nil
+      end
+    when 0x0055 # 'U'
+      case c1
+      when 0x0300 then 0x00D9
+      when 0x0301 then 0x00DA
+      when 0x0302 then 0x00DB
+      when 0x0308 then 0x00DC
+      else             nil
+      end
+    when 0x0059 # 'Y'
+      c1 == 0x0301 ? 0x00DD : nil
+    when 0x0061 # 'a'
+      case c1
+      when 0x0300 then 0x00E0
+      when 0x0301 then 0x00E1
+      when 0x0302 then 0x00E2
+      when 0x0303 then 0x00E3
+      when 0x0308 then 0x00E4
+      when 0x030A then 0x00E5
+      else             nil
+      end
+    when 0x0063 # 'c'
+      c1 == 0x0327 ? 0x00E7 : nil
+    when 0x0065 # 'e'
+      case c1
+      when 0x0300 then 0x00E8
+      when 0x0301 then 0x00E9
+      when 0x0302 then 0x00EA
+      when 0x0308 then 0x00EB
+      else             nil
+      end
+    when 0x0069 # 'i'
+      case c1
+      when 0x0300 then 0x00EC
+      when 0x0301 then 0x00ED
+      when 0x0302 then 0x00EE
+      when 0x0308 then 0x00EF
+      else             nil
+      end
+    when 0x006E # 'n'
+      c1 == 0x0303 ? 0x00F1 : nil
+    when 0x006F # 'o'
+      case c1
+      when 0x0300 then 0x00F2
+      when 0x0301 then 0x00F3
+      when 0x0302 then 0x00F4
+      when 0x0303 then 0x00F5
+      when 0x0308 then 0x00F6
+      else             nil
+      end
+    when 0x0075 # 'u'
+      case c1
+      when 0x0300 then 0x00F9
+      when 0x0301 then 0x00FA
+      when 0x0302 then 0x00FB
+      when 0x0308 then 0x00FC
+      else             nil
+      end
+    when 0x0079 # 'y'
+      case c1
+      when 0x0301 then 0x00FD
+      when 0x0308 then 0x00FF
+      else             nil
+      end
+    else
+      nil
+    end
+  end
+
+  def self.canonical_decompose(all_codepoints : Array(Int32), codepoint : Int32) : Nil
+    if codepoint >= HANGUL_S_BASE && codepoint < HANGUL_S_BASE + HANGUL_S_COUNT
+      s_index = codepoint - HANGUL_S_BASE
+      l = HANGUL_L_BASE + s_index // HANGUL_N_COUNT
+      v = HANGUL_V_BASE + (s_index % HANGUL_N_COUNT) // HANGUL_T_COUNT
+      t = HANGUL_T_BASE + s_index % HANGUL_T_COUNT
+
+      all_codepoints << l
+      all_codepoints << v
+      all_codepoints << t unless t == HANGUL_T_BASE
+    elsif (decomp = latin1_decompose(codepoint))
+      all_codepoints << decomp[0]
+      all_codepoints << decomp[1]
+    else
+      all_codepoints << codepoint
+    end
+  end
+
+  def self.codepoint_to_s(cp : Int32) : String
+    if cp < 0x80
+      String.new(1) { |b| b[0] = cp.to_u8 }
+    elsif cp < 0x800
+      String.new(2) { |b| b[0] = (0xC0 | (cp >> 6)).to_u8; b[1] = (0x80 | (cp & 0x3F)).to_u8 }
+    elsif cp < 0x10000
+      String.new(3) { |b| b[0] = (0xE0 | (cp >> 12)).to_u8; b[1] = (0x80 | ((cp >> 6) & 0x3F)).to_u8; b[2] = (0x80 | (cp & 0x3F)).to_u8 }
+    elsif cp <= 0x10FFFF
+      String.new(4) { |b| b[0] = (0xF0 | (cp >> 18)).to_u8; b[1] = (0x80 | ((cp >> 12) & 0x3F)).to_u8; b[2] = (0x80 | ((cp >> 6) & 0x3F)).to_u8; b[3] = (0x80 | (cp & 0x3F)).to_u8 }
+    else
+      "\u{FFFD}"
+    end
+  end
+
+  def self.canonical_compose(codepoints : Array(Int32)) : String
+    return "" if codepoints.empty?
+    res = ""
+    i = 0
+    len = codepoints.size
+
+    while i < len
+      c0 = codepoints[i]
+      if c0 >= HANGUL_L_BASE && c0 < HANGUL_L_BASE + HANGUL_L_COUNT && i + 1 < len
+        c1 = codepoints[i + 1]
+        if c1 >= HANGUL_V_BASE && c1 < HANGUL_V_BASE + HANGUL_V_COUNT
+          l_index = c0 - HANGUL_L_BASE
+          v_index = c1 - HANGUL_V_BASE
+          lv_index = l_index * HANGUL_N_COUNT + v_index * HANGUL_T_COUNT
+          s = HANGUL_S_BASE + lv_index
+
+          if i + 2 < len && codepoints[i + 2] > HANGUL_T_BASE && codepoints[i + 2] < HANGUL_T_BASE + HANGUL_T_COUNT
+            t_index = codepoints[i + 2] - HANGUL_T_BASE
+            s += t_index
+            res = res + codepoint_to_s(s)
+            i += 3
+            next
+          else
+            res = res + codepoint_to_s(s)
+            i += 2
+            next
+          end
+        end
+      elsif i + 1 < len && (comp = latin1_compose(c0, codepoints[i + 1]))
+        res = res + codepoint_to_s(comp)
+        i += 2
+        next
+      end
+      res = res + codepoint_to_s(c0)
+      i += 1
+    end
+
+    res
+  end
+
+  def self.normalize(str : String, form : NormalizationForm = NormalizationForm::NFC) : String
+    return str if str.single_byte_optimizable?
+    cps = [] of Int32
+    str.chars.each do |c|
+      canonical_decompose(cps, c.ord)
+    end
+    if form.nfd? || form.nfkd?
+      res = ""
+      cps.each { |cp| res = res + codepoint_to_s(cp) }
+      res
+    else
+      canonical_compose(cps)
+    end
+  end
+
+  def self.normalized?(str : String, form : NormalizationForm = NormalizationForm::NFC) : Bool
+    str == normalize(str, form)
+  end
+end

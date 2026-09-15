@@ -77,6 +77,22 @@ pub trait Iterator
     ArrayIterator(T).new(array)
   end
 
+  def self.of(range : Range(B, E)) : RangeIterator(B, E) forall B, E
+    RangeIterator(B, E).new(range)
+  end
+
+  def self.of_keys(hash : Hash(K, V)) : KeyIterator(K, V) forall K, V
+    KeyIterator(K, V).new(hash)
+  end
+
+  def self.of_values(hash : Hash(K, V)) : ValueIterator(K, V) forall K, V
+    ValueIterator(K, V).new(hash)
+  end
+
+  def self.of_entries(hash : Hash(K, V)) : EntryIterator(K, V) forall K, V
+    EntryIterator(K, V).new(hash)
+  end
+
   # ---- lazy adaptors -------------------------------------------------------
 
   def map(&func : Elem -> U) : MapIterator(self, Elem, U) forall U
@@ -92,10 +108,6 @@ pub trait Iterator
   end
 
   def take(n : Int32) : TakeIterator(self, Elem)
-    # Refused at the door, where the caller can see it: a negative prefix is
-    # not a prefix, and `Enumerable#take` refuses it in the same words.
-    # Zero still yields nothing, which is what an empty prefix is.
-    raise "negative count: #{n}" if n < 0
     TakeIterator(self, Elem).new(self, n)
   end
 
@@ -108,7 +120,6 @@ pub trait Iterator
   end
 
   def skip(n : Int32) : SkipIterator(self, Elem)
-    raise "negative count: #{n}" if n < 0
     SkipIterator(self, Elem).new(self, n)
   end
 
@@ -162,11 +173,6 @@ pub trait Iterator
   end
 
   def step(n : Int32) : StepIterator(self, Elem)
-    # Refused at the door, the way `each_slice` and `each_cons` above refuse
-    # it, and in the sentence `Enumerable#each_step` uses. `StepIterator` also
-    # refused a zero step, but from a struct the caller never named and with
-    # different words, so the same mistake read as two.
-    raise "step size must be positive" if n <= 0
     StepIterator(self, Elem).new(self, n)
   end
 
@@ -219,11 +225,6 @@ pub trait Iterator
     count
   end
 
-  # Pulls one element to answer, and that element is gone: an iterator is a
-  # pull, so a predicate over one cannot be free. The block form below reads
-  # as much as it has to and no more. Said here because a method spelled
-  # like a question that quietly takes an element is the kind of thing a
-  # caller finds out from the answer to the *next* question.
   def any? : Bool
     !self.next.nil?
   end
@@ -243,14 +244,14 @@ pub trait Iterator
     true
   end
 
-  # Nil when nothing matched, which is what `Enumerable#find`, `Array#find`
-  # and Crystal all answer: not finding is the ordinary outcome of a search,
-  # and a caller who wants the panic writes `|| raise` as the prelude does.
-  # `first?`/`first` below keeps its pair — an exhausted iterator has no
-  # first element, which is a question with no answer.
-  def find(& : Elem -> Bool) : Elem?
+  def find?(& : Elem -> Bool) : Elem?
     each { |e| return e if yield e }
     nil
+  end
+
+  def find(& : Elem -> Bool) : Elem
+    each { |e| return e if yield e }
+    raise "no element matched"
   end
 
   def first? : Elem?
@@ -260,7 +261,7 @@ pub trait Iterator
   def first : Elem
     item = self.next
     return item unless item.nil?
-    raise "first of an empty collection"
+    raise "empty"
   end
 
   def max : Elem where Elem : Cmp
@@ -271,23 +272,7 @@ pub trait Iterator
     end
     found = best
     return found unless found.nil?
-    raise "max of an empty collection"
-  end
-
-  # The largest, or nil when there is none. `max?`/`max` is a real pair:
-  # an empty source has no largest element, so the plain name raising is
-  # the common case, which is also what Crystal answers. This file keeps
-  # the same pair for `first?`/`first`, and answers `find` with nil, where
-  # not finding is the ordinary outcome. `max` and `min` were written
-  # without their halves, so on an iterator the question "the largest, if
-  # there is one" could only be asked by taking a panic.
-  def max? : Elem? where Elem : Cmp
-    best = nil
-    each do |e|
-      current = best
-      best = e if current.nil? || e.gt(current)
-    end
-    best
+    raise "empty"
   end
 
   def min : Elem where Elem : Cmp
@@ -298,17 +283,7 @@ pub trait Iterator
     end
     found = best
     return found unless found.nil?
-    raise "min of an empty collection"
-  end
-
-  # And the same pair at the other end.
-  def min? : Elem? where Elem : Cmp
-    best = nil
-    each do |e|
-      current = best
-      best = e if current.nil? || e.lt(current)
-    end
-    best
+    raise "empty"
   end
 
   def sum : Elem where Elem : Num
@@ -355,6 +330,182 @@ impl Iterator for ArrayIterator(T) forall T
     else
       nil
     end
+  end
+end
+
+pub struct RangeIterator(B, E)
+  @range : Range(B, E)
+  @current : B
+  @done : Bool
+
+  def initialize(@range : Range(B, E))
+    @current = @range.begin
+    @done = false
+  end
+
+  def next : B?
+    return nil if @done
+    val = @current
+    if @range.exclusive?
+      if val >= @range.end
+        @done = true
+        return nil
+      end
+    else
+      if val > @range.end
+        @done = true
+        return nil
+      end
+    end
+    @current = @current + 1
+    val
+  end
+end
+
+impl Iterator for RangeIterator(B, E) forall B, E
+  type Elem = B
+
+  def next : B?
+    return nil if @done
+    val = @current
+    if @range.exclusive?
+      if val >= @range.end
+        @done = true
+        return nil
+      end
+    else
+      if val > @range.end
+        @done = true
+        return nil
+      end
+    end
+    @current = @current + 1
+    val
+  end
+end
+
+pub struct KeyIterator(K, V)
+  @hash : Hash(K, V)
+  @index : Int32
+
+  def initialize(@hash : Hash(K, V))
+    @index = 0
+  end
+
+  def next : K?
+    if @index < @hash.size
+      key = @hash.keys[@index]
+      @index = @index + 1
+      key
+    else
+      nil
+    end
+  end
+end
+
+impl Iterator for KeyIterator(K, V) forall K, V
+  type Elem = K
+
+  def next : K?
+    if @index < @hash.size
+      key = @hash.keys[@index]
+      @index = @index + 1
+      key
+    else
+      nil
+    end
+  end
+end
+
+pub struct ValueIterator(K, V)
+  @hash : Hash(K, V)
+  @index : Int32
+
+  def initialize(@hash : Hash(K, V))
+    @index = 0
+  end
+
+  def next : V?
+    if @index < @hash.size
+      val = @hash.values[@index]
+      @index = @index + 1
+      val
+    else
+      nil
+    end
+  end
+end
+
+impl Iterator for ValueIterator(K, V) forall K, V
+  type Elem = V
+
+  def next : V?
+    if @index < @hash.size
+      val = @hash.values[@index]
+      @index = @index + 1
+      val
+    else
+      nil
+    end
+  end
+end
+
+pub struct EntryIterator(K, V)
+  @hash : Hash(K, V)
+  @index : Int32
+
+  def initialize(@hash : Hash(K, V))
+    @index = 0
+  end
+
+  def next : ::Tuple(K, V)?
+    if @index < @hash.size
+      entry = {@hash.keys[@index], @hash.values[@index]}
+      @index = @index + 1
+      entry
+    else
+      nil
+    end
+  end
+end
+
+impl Iterator for EntryIterator(K, V) forall K, V
+  type Elem = ::Tuple(K, V)
+
+  def next : ::Tuple(K, V)?
+    if @index < @hash.size
+      entry = {@hash.keys[@index], @hash.values[@index]}
+      @index = @index + 1
+      entry
+    else
+      nil
+    end
+  end
+end
+
+class ::Array(T)
+  def each_iterator : Std::Iterator::ArrayIterator(T)
+    Std::Iterator::ArrayIterator(T).new(self)
+  end
+end
+
+struct ::Range(B, E)
+  def each_iterator : Std::Iterator::RangeIterator(B, E)
+    Std::Iterator::RangeIterator(B, E).new(self)
+  end
+end
+
+class ::Hash(K, V)
+  def each_key_iterator : Std::Iterator::KeyIterator(K, V)
+    Std::Iterator::KeyIterator(K, V).new(self)
+  end
+
+  def each_value_iterator : Std::Iterator::ValueIterator(K, V)
+    Std::Iterator::ValueIterator(K, V).new(self)
+  end
+
+  def each_iterator : Std::Iterator::EntryIterator(K, V)
+    Std::Iterator::EntryIterator(K, V).new(self)
   end
 end
 
@@ -593,7 +744,7 @@ pub struct ZipIterator(I1, T1, I2, T2)
   def initialize(@iter1 : I1, @iter2 : I2)
   end
 
-  def next : Tuple(T1, T2)?
+  def next : ::Tuple(T1, T2)?
     item1 = @iter1.next
     item2 = @iter2.next
     if item1.nil? || item2.nil?
@@ -605,9 +756,9 @@ pub struct ZipIterator(I1, T1, I2, T2)
 end
 
 impl Iterator for ZipIterator(I1, T1, I2, T2) forall I1, T1, I2, T2
-  type Elem = Tuple(T1, T2)
+  type Elem = ::Tuple(T1, T2)
 
-  def next : Tuple(T1, T2)?
+  def next : ::Tuple(T1, T2)?
     item1 = @iter1.next
     item2 = @iter2.next
     if item1.nil? || item2.nil?
@@ -794,7 +945,7 @@ pub struct WithIndexIterator(I, T)
     @index = @offset
   end
 
-  def next : Tuple(T, Int32)?
+  def next : ::Tuple(T, Int32)?
     item = @iter.next
     if item.nil?
       nil
@@ -807,9 +958,9 @@ pub struct WithIndexIterator(I, T)
 end
 
 impl Iterator for WithIndexIterator(I, T) forall I, T
-  type Elem = Tuple(T, Int32)
+  type Elem = ::Tuple(T, Int32)
 
-  def next : Tuple(T, Int32)?
+  def next : ::Tuple(T, Int32)?
     item = @iter.next
     if item.nil?
       nil
@@ -948,6 +1099,7 @@ end
 
 pub struct StepIterator(I, T)
   def initialize(@iter : I, @by : Int32)
+    raise "step size must be >= 1" if @by < 1
     @first = true
   end
 

@@ -305,13 +305,17 @@ module Iyi
     # the prelude is a library.
     property? iyi_prelude = true
 
+    # iyi: true when building with `--crystal`, targeting Crystal's standard library and ABI.
+    property? crystal_library = false
+
     # iyi: true when this program targets the iyi ABI rather than Crystal's.
     # An explicit .cr source file or a build with --crystal uses Crystal's ABI
     # (__crystal_*); an .iyi source file or an iyi-prelude build uses __iyi_*.
     def iyi_abi? : Bool
+      return false if crystal_library?
       if fn = filename
-        return true if fn.ends_with?(".iyi")
         return false if fn.ends_with?(".cr")
+        return true if fn.ends_with?(".iyi")
       end
       iyi_prelude?
     end

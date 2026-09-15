@@ -750,7 +750,12 @@ module Iyi
     end
 
     def mangled_name(program, obj_type)
-      real_name
+      case real_name
+      when "__crystal_main", "__iyi_main"
+        program.main_name
+      else
+        real_name
+      end
     end
 
     def compatible_with?(other)

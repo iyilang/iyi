@@ -711,6 +711,7 @@ class Iyi::Command
       # are untouched — they are the language's, and a prelude is a library.
       opts.on("--crystal", "iyi: build against Crystal's standard library, so `require` works") do
         compiler.prelude = "prelude"
+        compiler.crystal_library = true
         specified_prelude = true
       end
 

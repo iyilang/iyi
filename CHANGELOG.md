@@ -105,6 +105,32 @@
 
 ### Fixed
 
+- **A probe of `src/std` found 58 defects across twelve modules, and
+  each is fixed where it lived and held by the module's gate.** The
+  shapes: a panic carrying the prelude's sentence (`std/yaml` indexed an
+  empty table on a control character; `std/time` overflowed past an
+  Int32 year; `std/text` overflowed on a Char above U+00FF in a block
+  `gsub`; `std/math` overflowed on `pow(-1, Infinity)`), a wrong answer
+  (`Math.frexp` landed past 1.0 for whole bands of small magnitudes and
+  every log-based function inherited it; `pow(2, 1023)` was off in the
+  fourteenth digit; `log10(1000)` was not 3; `atan(1e155)` was 0;
+  `asin(2)` was π/2; `round(TiesAway)` moved an integer; `from_json`
+  could not read the `UInt64` `to_json` wrote; `Node#text=` did
+  nothing; `tr` had no ranges; `Unicode.upcase("i", Turkic)` was `I`),
+  and silent loss (`std/yaml` dropped a dedented entry and made a
+  stream empty after a `%YAML` directive; `std/base64` dropped what
+  followed a `=`; `parse_rfc3339` took `+99:99` and trailing text;
+  `parse_ip` read `010.1.1.1` as ten; `read_char` accepted overlong
+  and surrogate sequences; the JSON reader accepted bytes that are not
+  UTF-8 inside a string). Also: a billion-laughs YAML is refused at a
+  million nodes instead of stalling; CDATA holding `]]>` is written as
+  two sections; `divmod` works on floats; a float narrows to infinity
+  instead of panicking; `Int64 == Float64` is exact. What is left is
+  named in the module headers: the prelude's own `//` and `%`
+  truncate (a decision, not a defect), `Float64#round` with no mode is
+  the prelude's, `sin(1e22)` still wants Payne-Hanek, and the Bessel
+  handover at 5 is a known step.
+
 - **`std/regex` was quadratic, longest-match, and read half its syntax as
   letters.** The header promised RE2's contract and the engine restarted
   the NFA from every byte, so `a*c` on 20 KB of `a` was killed at twenty

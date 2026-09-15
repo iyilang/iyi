@@ -1,0 +1,36 @@
+# Standard compiler annotations for iyi programs.
+#
+# Declares annotations for deprecations, bit flags on enums, external link flags,
+# experimental APIs, and target CPU features.
+
+module std/annotations
+
+pub annotation Deprecated
+end
+
+pub annotation Flags
+end
+
+pub annotation Link
+end
+
+pub annotation Experimental
+end
+
+pub annotation TargetFeature
+end
+
+annotation ::Deprecated
+end
+
+annotation ::Flags
+end
+
+annotation ::Link
+end
+
+annotation ::Experimental
+end
+
+annotation ::TargetFeature
+end

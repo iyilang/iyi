@@ -1,12 +1,23 @@
 # Regular expressions, RE2's contract, written in iyi.
 #
-# Linear time: a Thompson NFA, one state set per character, no
-# backtracker. Lookaround, backreferences, recursion and possessive
-# quantifiers are refused with a sentence — those are not regular.
-# `.` is any byte but newline. `^` `$` `\d` `\w` `\s` and classes
-# `[a-z]` `[^0-9]` are the rest of the surface. `match?` is the whole
-# string; `find` is the first substring; `scan` every non-overlapping
-# one; `split` and `replace` read those.
+# Linear time: a Thompson NFA run as a Pike VM, one pass over the text
+# with a thread list in priority order, so a search costs the text's
+# length times the pattern's and never more. Lookaround, backreferences,
+# recursion, possessive quantifiers, inline flags and `\p{..}` classes
+# are refused with a sentence — the first four are not regular, and the
+# last two this engine does not have.
+#
+# Matches are leftmost-first, as RE2's and Python's are: `a|ab` on `ab`
+# answers `a`, a greedy `*` takes what it can and a lazy `*?` what it
+# must. The surface: `.` (any byte but newline), `^` `$` `\A` `\z`, `\b`
+# `\B`, `\d` `\w` `\s` and their negations (ASCII), classes `[a-z]`
+# `[^0-9\s]`, `\xHH`, `?` `*` `+` `{n}` `{n,}` `{n,m}` and their lazy
+# forms, groups `( )` `(?: )` `(?<name> )` (none capture: a match is the
+# whole of it). Bytes, not code points: a class holding a byte past
+# ASCII is refused, while a literal `é` outside one matches its own
+# bytes. `match?` is the whole string; `find` is the first match; `scan`
+# every non-overlapping one; `split` and `replace` read those, and an
+# empty match costs no text.
 
 module std/regex
 
@@ -21,72 +32,69 @@ pub struct Regex
   end
 
   def match?(text : String) : Bool
-    span = @nfa.run(text, 0, true)
-    !span.nil?
+    !@nfa.full(text).nil?
   end
 
   def find(text : String) : String?
-    span = @nfa.search(text)
+    span = @nfa.search_from(text, 0)
     return nil unless span
     text[span[0], span[1] - span[0]]
   end
 
   def scan(text : String) : Array(String)
     out = [] of String
-    pos = 0
-    n = text.bytesize
-    while pos <= n
-      span = @nfa.search_from(text, pos)
-      break unless span
-      a = span[0]
-      b = span[1]
-      out << text[a, b - a]
-      pos = b > a ? b : a + 1
-    end
+    each_match(text) { |a, b| out << text[a, b - a] }
     out
   end
 
   def split(text : String) : Array(String)
     out = [] of String
-    pos = 0
-    n = text.bytesize
-    while pos <= n
-      span = @nfa.search_from(text, pos)
-      unless span
-        out << text[pos, n - pos]
-        break
-      end
-      a = span[0]
-      b = span[1]
-      out << text[pos, a - pos]
-      pos = b > a ? b : a + 1
-      if pos > n
-        out << ""
-        break
-      end
+    last = 0
+    each_match(text) do |a, b|
+      out << text[last, a - last]
+      last = b
     end
+    out << text[last, text.bytesize - last]
     out
   end
 
   def replace(text : String, replacement : String) : String
     out = ""
+    last = 0
+    each_match(text) do |a, b|
+      out = out + text[last, a - last] + replacement
+      last = b
+    end
+    out + text[last, text.bytesize - last]
+  end
+
+  # Every non-overlapping match, leftmost first. After a full match the
+  # search moves to its end; after an empty one it stays where it is but
+  # may not answer empty there again, so a lazy pattern still gets to
+  # take the byte — Python's rule, and the byte is never lost.
+  private def each_match(text : String, & : Int32, Int32 -> Nil) : Nil
     pos = 0
+    forbid = -1
     n = text.bytesize
     while pos <= n
-      span = @nfa.search_from(text, pos)
-      unless span
-        out = out + text[pos, n - pos]
-        break
-      end
+      span = @nfa.search_from(text, pos, forbid)
+      break unless span
       a = span[0]
       b = span[1]
-      out = out + text[pos, a - pos] + replacement
-      pos = b > a ? b : a + 1
+      yield a, b
+      if b > a
+        pos = b
+        forbid = -1
+      else
+        pos = a
+        forbid = a
+      end
     end
-    out
   end
 end
 
+# States: 0 a byte, 1 any but newline, 2 a class, 3 a split (out1 before
+# out2), 4 the match, 5 `^`, 6 `$`, 7 `\b`, 8 `\B`.
 class RxNfa
   getter kind : Array(Int32)
   getter ch : Array(UInt8)
@@ -139,84 +147,141 @@ class RxNfa
     @out2[id] = out2
   end
 
-  def search(text : String) : {Int32, Int32}?
-    search_from(text, 0)
+  # The leftmost-first match at or after `from`; an empty match at
+  # `forbid` does not count.
+  def search_from(text : String, from : Int32, forbid : Int32 = -1) : {Int32, Int32}?
+    RxRun.new(self, text).search(from, false, forbid)
   end
 
-  def search_from(text : String, from : Int32) : {Int32, Int32}?
-    n = text.bytesize
+  # A match of the whole text, or nil.
+  def full(text : String) : {Int32, Int32}?
+    RxRun.new(self, text).search(0, true, -1)
+  end
+end
+
+# One pass of the Pike VM over one text. Two thread lists, each a state
+# and the position its match began; a state joins a list once per step,
+# and the first to reach it is the higher-priority thread, which is what
+# makes the answer leftmost-first.
+class RxRun
+  @nfa : RxNfa
+  @src : Pointer(UInt8)
+  @n : Int32
+  @cur_state : Pointer(Int32)
+  @cur_start : Pointer(Int32)
+  @cur_size : Int32
+  @nxt_state : Pointer(Int32)
+  @nxt_start : Pointer(Int32)
+  @nxt_size : Int32
+  @seen : Pointer(Int32)
+  @gen : Int32
+
+  def initialize(@nfa : RxNfa, text : String)
+    @src = text.to_unsafe
+    @n = text.bytesize
+    count = @nfa.count.to_u64 + 1_u64
+    @cur_state = Pointer(Int32).malloc(count)
+    @cur_start = Pointer(Int32).malloc(count)
+    @cur_size = 0
+    @nxt_state = Pointer(Int32).malloc(count)
+    @nxt_start = Pointer(Int32).malloc(count)
+    @nxt_size = 0
+    @seen = Pointer(Int32).malloc(count)
+    i = 0
+    while i < @nfa.count
+      @seen[i] = 0
+      i = i + 1
+    end
+    @gen = 0
+  end
+
+  # `whole`: anchored at `from`, and only a match reaching the text's end
+  # counts. Otherwise a fresh thread starts at every position until some
+  # thread has matched, after which only the threads ahead of it in
+  # priority may still change the answer.
+  def search(from : Int32, whole : Bool, forbid : Int32) : {Int32, Int32}?
+    match_start = -1
+    match_end = -1
     pos = from
-    while pos <= n
-      span = run(text, pos, false)
-      return span if span
-      pos = pos + 1
-    end
-    nil
-  end
-
-  # full=true: the match must consume the whole string from `from`.
-  def run(text : String, from : Int32, full : Bool) : {Int32, Int32}?
-    n = text.bytesize
-    src = text.to_unsafe
-    start_states = epsilon([@start], src, from, n)
-    pos = from
-    last = nil
-    last = {from, from} if accepting?(start_states)
-    current = start_states
-    while pos < n
-      b = src[pos]
-      nxt = [] of Int32
-      current.each do |s|
-        k = @kind[s]
-        ok = false
-        if k == 0
-          ok = @ch[s] == b
-        elsif k == 1
-          ok = b != 10_u8
-        elsif k == 2
-          ok = class_has?(s, b)
+    @gen = @gen + 1
+    @cur_size = 0
+    add(false, @nfa.start, pos, pos)
+    while true
+      @nxt_size = 0
+      @gen = @gen + 1
+      i = 0
+      while i < @cur_size
+        s = @cur_state[i]
+        k = @nfa.kind[s]
+        if k == 4
+          if whole ? pos == @n : !(pos == forbid && @cur_start[i] == forbid)
+            match_start = @cur_start[i]
+            match_end = pos
+            break
+          end
+        elsif pos < @n
+          b = @src[pos]
+          ok = if k == 0
+                 @nfa.ch[s] == b
+               elsif k == 1
+                 b != 10_u8
+               elsif k == 2
+                 @nfa.class_has?(s, b)
+               else
+                 false
+               end
+          add(true, @nfa.out1[s], @cur_start[i], pos + 1) if ok
         end
-        if ok
-          nxt << @out1[s] if @out1[s] >= 0
-        end
+        i = i + 1
       end
-      current = epsilon(nxt, src, pos + 1, n)
-      break if current.empty?
+      break if pos >= @n
       pos = pos + 1
-      last = {from, pos} if accepting?(current)
+      add(true, @nfa.start, pos, pos) if match_start < 0 && !whole
+      break if @nxt_size == 0 && (whole || match_start >= 0)
+      tmp_state = @cur_state
+      @cur_state = @nxt_state
+      @nxt_state = tmp_state
+      tmp_start = @cur_start
+      @cur_start = @nxt_start
+      @nxt_start = tmp_start
+      @cur_size = @nxt_size
     end
-    return nil unless last
-    return nil if full && last[1] != n
-    last
+    return nil if match_start < 0
+    {match_start, match_end}
   end
 
-  private def accepting?(states : Array(Int32)) : Bool
-    states.each { |s| return true if @kind[s] == 4 }
-    false
+  # The epsilon closure of `s`, in priority order: out1 before out2. Into
+  # the next list when `nxt`, else the current one.
+  private def add(nxt : Bool, s : Int32, start : Int32, pos : Int32) : Nil
+    return if s < 0 || @seen[s] == @gen
+    @seen[s] = @gen
+    k = @nfa.kind[s]
+    if k == 3
+      add(nxt, @nfa.out1[s], start, pos)
+      add(nxt, @nfa.out2[s], start, pos)
+    elsif k == 5
+      add(nxt, @nfa.out1[s], start, pos) if pos == 0
+    elsif k == 6
+      add(nxt, @nfa.out1[s], start, pos) if pos == @n
+    elsif k == 7
+      add(nxt, @nfa.out1[s], start, pos) if boundary?(pos)
+    elsif k == 8
+      add(nxt, @nfa.out1[s], start, pos) unless boundary?(pos)
+    elsif nxt
+      @nxt_state[@nxt_size] = s
+      @nxt_start[@nxt_size] = start
+      @nxt_size = @nxt_size + 1
+    else
+      @cur_state[@cur_size] = s
+      @cur_start[@cur_size] = start
+      @cur_size = @cur_size + 1
+    end
   end
 
-  private def epsilon(seeds : Array(Int32), src : Pointer(UInt8), pos : Int32, n : Int32) : Array(Int32)
-    seen = Array(Int32).new(@count) { 0 }
-    out = [] of Int32
-    stack = [] of Int32
-    seeds.each { |s| stack << s if s >= 0 }
-    while stack.size > 0
-      s = stack.pop
-      next if seen[s] == 1
-      seen[s] = 1
-      k = @kind[s]
-      if k == 3
-        stack << @out1[s] if @out1[s] >= 0
-        stack << @out2[s] if @out2[s] >= 0
-      elsif k == 5
-        stack << @out1[s] if pos == 0 && @out1[s] >= 0
-      elsif k == 6
-        stack << @out1[s] if pos == n && @out1[s] >= 0
-      else
-        out << s
-      end
-    end
-    out
+  private def boundary?(pos : Int32) : Bool
+    before = pos > 0 && RxCompiler.word?(@src[pos - 1])
+    after = pos < @n && RxCompiler.word?(@src[pos])
+    before != after
   end
 end
 
@@ -226,6 +291,7 @@ class RxCompiler
   @n : Int32
   @i : Int32
   @nfa : RxNfa
+  @depth : Int32
 
   def initialize(pattern : String)
     @pat = pattern
@@ -233,24 +299,21 @@ class RxCompiler
     @n = pattern.bytesize
     @i = 0
     @nfa = RxNfa.new
+    @depth = 0
   end
 
   def compile : RxNfa
     frag = parse_alt
-    raise "regex: unmatched ')'" if @i < @n && peek == 41_u8
-    raise "regex: trailing '\\'" if @i < @n && peek == 92_u8
-    if @i < @n
-      raise "regex: unexpected byte in /#{@pat}/"
-    end
+    raise "regex: unmatched ')' in /#{@pat}/" if @i < @n && peek == 41_u8
+    raise "regex: unexpected byte in /#{@pat}/" if @i < @n
     match = @nfa.add(4)
     patch_outs(frag, match)
     @nfa.start = frag[0]
     @nfa
   end
 
-  # fragment: {start, list of dangling out indices as encoded pairs}
-  # We store dangling holes as state ids that still have out1=-1, collected
-  # in an array.
+  # A fragment: its first state, and the states whose next out is still
+  # to be patched.
   private def parse_alt : {Int32, Array(Int32)}
     left = parse_concat
     while @i < @n && peek == 124_u8 # |
@@ -266,7 +329,7 @@ class RxCompiler
   end
 
   private def parse_concat : {Int32, Array(Int32)}
-    raise "regex: empty alternative in /#{@pat}/" if @i >= @n || peek == 124_u8 || peek == 41_u8
+    return empty_fragment if @i >= @n || peek == 124_u8 || peek == 41_u8
     left = parse_repeat
     while @i < @n && peek != 124_u8 && peek != 41_u8
       right = parse_repeat
@@ -276,30 +339,136 @@ class RxCompiler
     left
   end
 
+  # An empty alternative or group matches nothing at all, which is legal.
+  private def empty_fragment : {Int32, Array(Int32)}
+    s = @nfa.add(3)
+    {s, [s]}
+  end
+
   private def parse_repeat : {Int32, Array(Int32)}
+    atom_at = @i
     atom = parse_atom
+    atom_end = @i
     return atom if @i >= @n
     q = peek
     if q == 42_u8 || q == 43_u8 || q == 63_u8
       @i = @i + 1
-      split = @nfa.add(3)
+      lazy = lazy_mark
       if q == 42_u8 # *
-        @nfa.patch(split, atom[0], -1)
-        patch_outs(atom, split)
-        {split, [split]}
+        star(atom, lazy)
       elsif q == 43_u8 # +
-        @nfa.patch(split, atom[0], -1)
-        patch_outs(atom, split)
-        {atom[0], [split]}
+        plus(atom, lazy)
       else # ?
-        @nfa.patch(split, atom[0], -1)
-        outs = atom[1]
-        outs << split
-        {split, outs}
+        optional(atom, lazy)
       end
+    elsif q == 123_u8 # {
+      counted(atom, atom_at, atom_end)
     else
       atom
     end
+  end
+
+  # `?` after a quantifier makes it lazy; `+` would make it possessive,
+  # which is a backtracker's control and refused.
+  private def lazy_mark : Bool
+    if @i < @n && peek == 63_u8
+      @i = @i + 1
+      true
+    elsif @i < @n && peek == 43_u8
+      raise "regex: possessive quantifiers are refused in /#{@pat}/"
+    else
+      false
+    end
+  end
+
+  private def star(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
+    split = @nfa.add(3)
+    if lazy
+      @nfa.patch(split, -1, atom[0])
+    else
+      @nfa.patch(split, atom[0], -1)
+    end
+    patch_outs(atom, split)
+    {split, [split]}
+  end
+
+  private def plus(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
+    split = @nfa.add(3)
+    if lazy
+      @nfa.patch(split, -1, atom[0])
+    else
+      @nfa.patch(split, atom[0], -1)
+    end
+    patch_outs(atom, split)
+    {atom[0], [split]}
+  end
+
+  private def optional(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
+    split = @nfa.add(3)
+    if lazy
+      @nfa.patch(split, -1, atom[0])
+    else
+      @nfa.patch(split, atom[0], -1)
+    end
+    outs = atom[1]
+    outs << split
+    {split, outs}
+  end
+
+  # `{n}`, `{n,}`, `{n,m}`: the atom is parsed again for every copy, so
+  # each copy has states of its own. A `{` that is not one of those three
+  # shapes is the literal byte, as RE2 and Python read it.
+  private def counted(atom : {Int32, Array(Int32)}, atom_at : Int32, atom_end : Int32) : {Int32, Array(Int32)}
+    save = @i
+    @i = @i + 1
+    lo = digits
+    hi = lo
+    unbounded = false
+    if lo >= 0 && @i < @n && peek == 44_u8 # ,
+      @i = @i + 1
+      hi = digits
+      unbounded = hi < 0
+    end
+    unless lo >= 0 && @i < @n && peek == 125_u8 # }
+      @i = save
+      return atom
+    end
+    @i = @i + 1
+    raise "regex: repeat range out of order in /#{@pat}/" if !unbounded && hi < lo
+    raise "regex: repeat count past 1000 in /#{@pat}/" if lo > 1000 || hi > 1000
+    lazy = lazy_mark
+    after = @i
+    copies = unbounded ? lo + 1 : hi
+    frag = empty_fragment
+    c = 0
+    while c < copies
+      @i = atom_at
+      piece = parse_atom
+      @i = after
+      if c >= lo
+        if unbounded
+          piece = star(piece, lazy)
+        else
+          piece = optional(piece, lazy)
+        end
+      end
+      patch_outs(frag, piece[0])
+      frag = {frag[0], piece[1]}
+      c = c + 1
+    end
+    @i = after
+    frag
+  end
+
+  private def digits : Int32
+    return -1 unless @i < @n && peek >= 48_u8 && peek <= 57_u8
+    value = 0
+    while @i < @n && peek >= 48_u8 && peek <= 57_u8
+      value = value * 10 + (peek - 48_u8).to_i32
+      value = 100000 if value > 100000
+      @i = @i + 1
+    end
+    value
   end
 
   private def parse_atom : {Int32, Array(Int32)}
@@ -307,75 +476,144 @@ class RxCompiler
     b = peek
     if b == 46_u8 # .
       @i = @i + 1
-      s = @nfa.add(1)
-      {s, [s]}
+      single(@nfa.add(1))
     elsif b == 94_u8 # ^
       @i = @i + 1
-      s = @nfa.add(5)
-      {s, [s]}
+      single(@nfa.add(5))
     elsif b == 36_u8 # $
       @i = @i + 1
-      s = @nfa.add(6)
-      {s, [s]}
+      single(@nfa.add(6))
     elsif b == 40_u8 # (
-      @i = @i + 1
-      raise "regex: lookaround is refused" if @i < @n && peek == 63_u8
-      inner = parse_alt
-      raise "regex: unmatched '('" unless @i < @n && peek == 41_u8
-      @i = @i + 1
-      inner
+      parse_group
     elsif b == 41_u8
-      raise "regex: unmatched ')'"
+      raise "regex: unmatched ')' in /#{@pat}/"
     elsif b == 91_u8 # [
       parse_class
     elsif b == 92_u8
       parse_escape
-    elsif b == 42_u8 || b == 43_u8 || b == 63_u8 || b == 124_u8
-      raise "regex: nothing to repeat"
+    elsif b == 42_u8 || b == 43_u8 || b == 63_u8
+      raise "regex: nothing to repeat in /#{@pat}/"
     else
       @i = @i + 1
-      s = @nfa.add(0, b)
-      {s, [s]}
+      single(@nfa.add(0, b))
     end
+  end
+
+  private def parse_group : {Int32, Array(Int32)}
+    @i = @i + 1
+    raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+    if peek == 63_u8 # (?
+      @i = @i + 1
+      raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+      m = peek
+      if m == 58_u8 # (?:
+        @i = @i + 1
+      elsif m == 61_u8 || m == 33_u8 # (?= (?!
+        raise "regex: lookaround is refused in /#{@pat}/"
+      elsif m == 60_u8 || m == 80_u8 # (?< (?P
+        @i = @i + 1
+        if m == 80_u8
+          raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+          raise "regex: not a group name in /#{@pat}/" unless peek == 60_u8
+          @i = @i + 1
+        end
+        raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+        if peek == 61_u8 || peek == 33_u8
+          raise "regex: lookaround is refused in /#{@pat}/"
+        end
+        while @i < @n && peek != 62_u8
+          raise "regex: not a group name in /#{@pat}/" unless RxCompiler.word?(peek)
+          @i = @i + 1
+        end
+        raise "regex: unterminated group name in /#{@pat}/" if @i >= @n
+        @i = @i + 1
+      elsif m == 82_u8 || m == 40_u8 # (?R (?(
+        raise "regex: recursion is refused in /#{@pat}/"
+      elsif m == 62_u8 # (?>
+        raise "regex: atomic groups are refused in /#{@pat}/"
+      else
+        raise "regex: inline flags are refused in /#{@pat}/"
+      end
+    end
+    @depth = @depth + 1
+    raise "regex: groups nested past 1000 in /#{@pat}/" if @depth > 1000
+    inner = parse_alt
+    @depth = @depth - 1
+    raise "regex: unmatched '(' in /#{@pat}/" unless @i < @n && peek == 41_u8
+    @i = @i + 1
+    inner
   end
 
   private def parse_escape : {Int32, Array(Int32)}
     @i = @i + 1
-    raise "regex: trailing '\\'" if @i >= @n
+    raise "regex: trailing '\\' in /#{@pat}/" if @i >= @n
     b = peek
     @i = @i + 1
     if b >= 49_u8 && b <= 57_u8
-      raise "regex: backreferences are refused"
-    elsif b == 100_u8
-      class_from(false) { |c| c >= 48_u8 && c <= 57_u8 }
+      raise "regex: backreferences are refused in /#{@pat}/"
+    elsif b == 100_u8 # \d
+      class_from(false) { |c| RxCompiler.digit?(c) }
     elsif b == 68_u8
-      class_from(true) { |c| c >= 48_u8 && c <= 57_u8 }
-    elsif b == 119_u8
-      class_from(false) { |c| word?(c) }
+      class_from(true) { |c| RxCompiler.digit?(c) }
+    elsif b == 119_u8 # \w
+      class_from(false) { |c| RxCompiler.word?(c) }
     elsif b == 87_u8
-      class_from(true) { |c| word?(c) }
-    elsif b == 115_u8
-      class_from(false) { |c| space?(c) }
+      class_from(true) { |c| RxCompiler.word?(c) }
+    elsif b == 115_u8 # \s
+      class_from(false) { |c| RxCompiler.space?(c) }
     elsif b == 83_u8
-      class_from(true) { |c| space?(c) }
-    elsif b == 110_u8
-      s = @nfa.add(0, 10_u8)
-      {s, [s]}
-    elsif b == 116_u8
-      s = @nfa.add(0, 9_u8)
-      {s, [s]}
-    elsif b == 114_u8
-      s = @nfa.add(0, 13_u8)
-      {s, [s]}
+      class_from(true) { |c| RxCompiler.space?(c) }
+    elsif b == 98_u8 # \b
+      single(@nfa.add(7))
+    elsif b == 66_u8 # \B
+      single(@nfa.add(8))
+    elsif b == 65_u8 # \A
+      single(@nfa.add(5))
+    elsif b == 122_u8 || b == 90_u8 # \z \Z
+      single(@nfa.add(6))
+    elsif b == 112_u8 || b == 80_u8 # \p \P
+      raise "regex: \\p classes are refused in /#{@pat}/ (this engine matches bytes)"
     else
-      s = @nfa.add(0, b)
-      {s, [s]}
+      single(@nfa.add(0, escaped_byte(b)))
     end
+  end
+
+  # The byte an escape stands for, outside `\d\w\s\b` and their kin: the
+  # C escapes, `\xHH`, and any punctuation as itself. A letter or digit
+  # with no meaning is refused rather than read as the letter.
+  private def escaped_byte(b : UInt8) : UInt8
+    return 10_u8 if b == 110_u8 # \n
+    return 9_u8 if b == 116_u8  # \t
+    return 13_u8 if b == 114_u8 # \r
+    return 12_u8 if b == 102_u8 # \f
+    return 11_u8 if b == 118_u8 # \v
+    return 0_u8 if b == 48_u8   # \0
+    return 27_u8 if b == 101_u8 # \e
+    return 7_u8 if b == 97_u8   # \a
+    if b == 120_u8 # \xHH
+      hi = hex_digit
+      lo = hex_digit
+      return (hi * 16 + lo).to_u8
+    end
+    if RxCompiler.word?(b)
+      raise "regex: unknown escape '\\#{b.unsafe_chr}' in /#{@pat}/"
+    end
+    b
+  end
+
+  private def hex_digit : Int32
+    raise "regex: \\x needs two hex digits in /#{@pat}/" if @i >= @n
+    c = peek
+    @i = @i + 1
+    return (c - 48_u8).to_i32 if c >= 48_u8 && c <= 57_u8
+    return (c - 87_u8).to_i32 if c >= 97_u8 && c <= 102_u8
+    return (c - 55_u8).to_i32 if c >= 65_u8 && c <= 70_u8
+    raise "regex: \\x needs two hex digits in /#{@pat}/"
   end
 
   private def parse_class : {Int32, Array(Int32)}
     @i = @i + 1
-    raise "regex: unterminated class" if @i >= @n
+    raise "regex: unterminated class in /#{@pat}/" if @i >= @n
     neg = false
     if peek == 94_u8
       neg = true
@@ -385,22 +623,24 @@ class RxCompiler
     first = true
     while @i < @n && (peek != 93_u8 || first)
       first = false
-      raise "regex: unterminated class" if @i >= @n
-      lo = next_class_byte
-      if @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
+      lo = class_atom(bits)
+      if lo >= 0 && @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
         @i = @i + 1
-        hi = next_class_byte
-        raise "regex: empty range" if hi.to_i32 < lo.to_i32
-        c = lo.to_i32
-        while c <= hi.to_i32
+        hi = class_atom(bits)
+        raise "regex: a class cannot end a range in /#{@pat}/" if hi < 0
+        raise "regex: range out of order in /#{@pat}/" if hi < lo
+        c = lo
+        while c <= hi
           set_bit(bits, c.to_u8)
           c = c + 1
         end
-      else
-        set_bit(bits, lo)
+      elsif lo < 0 && @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
+        raise "regex: a class cannot start a range in /#{@pat}/"
+      elsif lo >= 0
+        set_bit(bits, lo.to_u8)
       end
     end
-    raise "regex: unterminated class" unless @i < @n && peek == 93_u8
+    raise "regex: unterminated class in /#{@pat}/" unless @i < @n && peek == 93_u8
     @i = @i + 1
     if neg
       i = 0
@@ -411,24 +651,48 @@ class RxCompiler
     end
     s = @nfa.add(2)
     @nfa.set_class(s, bits)
-    {s, [s]}
+    single(s)
   end
 
-  private def next_class_byte : UInt8
+  # One member of a class: a byte, answered; or `\d` `\w` `\s` and their
+  # negations, merged into `bits` and answered as -1, so a range cannot
+  # be made of them.
+  private def class_atom(bits : Array(UInt8)) : Int32
     if peek == 92_u8
       @i = @i + 1
-      raise "regex: trailing '\\'" if @i >= @n
+      raise "regex: trailing '\\' in /#{@pat}/" if @i >= @n
       b = peek
       @i = @i + 1
-      return 10_u8 if b == 110_u8
-      return 9_u8 if b == 116_u8
-      return 13_u8 if b == 114_u8
-      b
-    else
-      b = peek
-      @i = @i + 1
-      b
+      if b == 100_u8 || b == 68_u8 || b == 119_u8 || b == 87_u8 || b == 115_u8 || b == 83_u8
+        neg = b == 68_u8 || b == 87_u8 || b == 83_u8
+        c = 0
+        while c < 256
+          u = c.to_u8
+          hit = if b == 100_u8 || b == 68_u8
+                  RxCompiler.digit?(u)
+                elsif b == 119_u8 || b == 87_u8
+                  RxCompiler.word?(u)
+                else
+                  RxCompiler.space?(u)
+                end
+          hit = !hit if neg
+          set_bit(bits, u) if hit
+          c = c + 1
+        end
+        return -1
+      end
+      if b == 112_u8 || b == 80_u8
+        raise "regex: \\p classes are refused in /#{@pat}/ (this engine matches bytes)"
+      end
+      if b == 98_u8
+        return 8 # \b in a class is backspace, as in Python
+      end
+      return escaped_byte(b).to_i32
     end
+    b = peek
+    @i = @i + 1
+    raise "regex: a class holding a byte past ASCII is refused in /#{@pat}/ (classes are bytes; a literal outside one matches its own)" if b >= 128_u8
+    b.to_i32
   end
 
   private def class_from(neg : Bool, & : UInt8 -> Bool) : {Int32, Array(Int32)}
@@ -443,6 +707,10 @@ class RxCompiler
     end
     s = @nfa.add(2)
     @nfa.set_class(s, bits)
+    single(s)
+  end
+
+  private def single(s : Int32) : {Int32, Array(Int32)}
     {s, [s]}
   end
 
@@ -451,11 +719,15 @@ class RxCompiler
     bits[i] = (bits[i].to_i32 | (1 << (b.to_i32 & 7))).to_u8
   end
 
-  private def word?(c : UInt8) : Bool
+  def self.digit?(c : UInt8) : Bool
+    c >= 48_u8 && c <= 57_u8
+  end
+
+  def self.word?(c : UInt8) : Bool
     (c >= 48_u8 && c <= 57_u8) || (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8) || c == 95_u8
   end
 
-  private def space?(c : UInt8) : Bool
+  def self.space?(c : UInt8) : Bool
     c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 12_u8 || c == 11_u8
   end
 

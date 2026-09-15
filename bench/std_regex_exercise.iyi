@@ -16,6 +16,42 @@ end
 import std/regex
 using std/regex::{Regex}
 
+# The pieces of `line` between bytes equal to `sep`; an empty line is one
+# empty piece, which is what a one-element list reads as.
+def fields(line : String, sep : UInt8) : Array(String)
+  out = [] of String
+  p = line.to_unsafe
+  start = 0
+  i = 0
+  while i < line.bytesize
+    if p[i] == sep
+      out << line[start, i - start]
+      start = i + 1
+    end
+    i = i + 1
+  end
+  out << line[start, line.bytesize - start]
+  out
+end
+
+# A newline travels through the fixture as byte 29, one record per line.
+def unescape(s : String) : String
+  p = s.to_unsafe
+  String.new(s.bytesize) do |dst|
+    i = 0
+    while i < s.bytesize
+      dst[i] = p[i] == 29_u8 ? 10_u8 : p[i]
+      i = i + 1
+    end
+  end
+end
+
+def unescape(list : Array(String)) : Array(String)
+  out = [] of String
+  list.each { |s| out << unescape(s) }
+  out
+end
+
 puts "== match"
 rx = Regex.compile("a+")
 assert_true rx.match?("aaa"), "whole"
@@ -35,5 +71,93 @@ assert_str "hi", Regex.compile("\\w+").find("!hi!") || "", "word"
 assert_true Regex.compile("^a$").match?("a"), "exact a"
 assert_true !Regex.compile("^a$").match?("aa"), "not aa"
 puts "  NFA: find, scan, split, class, anchors"
+
+puts "\n== leftmost-first"
+assert_str "a", Regex.compile("a|ab").find("ab") || "", "the first alternative wins, not the longest"
+assert_str "Xb", Regex.compile("a|ab").replace("ab", "X"), "and replace agrees"
+assert_str "ab", Regex.compile("ab|a").find("ab") || "", "unless it is written second"
+assert_str "aaa", Regex.compile("a*").find("aaa") || "", "greedy takes all"
+assert_str "", Regex.compile("a*?").find("aaa") || "", "lazy takes none"
+assert_str "aaab", Regex.compile("a+?b").find("aaab") || "", "lazy still reaches the b"
+assert_str "aa", Regex.compile("a{2,3}?").find("aaa") || "", "a lazy count takes the minimum"
+puts "  a|ab answers a; greedy and lazy quantifiers"
+
+puts "\n== an empty match costs no text"
+assert_true Regex.compile("x*").split("abc") == ["", "a", "b", "c", ""], "split on x* keeps every byte"
+assert_str "-a-b-c-", Regex.compile("x*").replace("abc", "-"), "replace x* writes between bytes"
+assert_str "!ab", Regex.compile("^").replace("ab", "!"), "^ replaces at the front only"
+assert_true Regex.compile("b*").split("abc") == ["", "a", "", "c", ""], "an empty match after a full one"
+assert_str "-a--c-", Regex.compile("b*").replace("abc", "-"), "and replace sees both"
+assert_true Regex.compile("x*").scan("axb") == ["", "x", "", ""], "scan lists the empty matches too"
+puts "  split, replace and scan over x* and b*"
+
+puts "\n== the syntax the header lists"
+assert_str "foo", Regex.compile("\\bfoo\\b").find("a foo b") || "", "word boundary"
+assert_true Regex.compile("\\bfoo\\b").find("bfoob").nil?, "no boundary inside a word"
+assert_str "b", Regex.compile("\\Bb").find("ab b") || "", "not a boundary"
+assert_str "aa", Regex.compile("a{2}").find("aaa") || "", "a{2}"
+assert_true Regex.compile("a{2}").find("a{2}").nil?, "a{2} is not the text a{2}"
+assert_str "aaaa", Regex.compile("a{2,}").find("aaaa") || "", "a{2,}"
+assert_str "aaa", Regex.compile("a{1,3}").find("aaaaa") || "", "a{1,3}"
+assert_str "b", Regex.compile("a{0}b").find("aab") || "", "a{0}"
+assert_str "a{", Regex.compile("a{").find("a{") || "", "a { that is not a count is itself"
+assert_str "A", Regex.compile("\\x41").find("A") || "", "\\x41"
+assert_str "hello", Regex.compile("[\\w]+").find("hello world") || "", "\\w inside a class"
+assert_str "123", Regex.compile("[\\d]+").find("ab123") || "", "\\d inside a class"
+assert_str "  ", Regex.compile("[\\s]+").find("a  b") || "", "\\s inside a class"
+assert_str "d", Regex.compile("[^a-c\\s]+").find("abc d\tefg") || "", "a negated class with \\s"
+assert_str "-a", Regex.compile("[a\\-z]+").find("x-a") || "", "an escaped dash"
+assert_str "abab", Regex.compile("(?:ab)+").find("xababy") || "", "a non-capturing group"
+assert_str "abab", Regex.compile("(?<pair>ab)+").find("xababy") || "", "a named group"
+assert_str "", Regex.compile("").find("abc") || "", "the empty pattern matches nothing at all"
+assert_true Regex.compile("()").split("ab") == ["", "a", "b", ""], "an empty group"
+assert_str "", Regex.compile("a|").find("b") || "", "an empty alternative"
+assert_str "a", Regex.compile("a\\z").find("ba") || "", "\\z"
+assert_str "a", Regex.compile("\\Aa").find("ab") || "", "\\A"
+assert_str "é", Regex.compile("é").find("café") || "", "a literal past ASCII matches its own bytes"
+puts "  \\b \\B \\A \\z \\xHH, counts, classes with \\d \\w \\s, groups, empties"
+
+puts "\n== linear time"
+long = "a" * 1000000
+assert_true Regex.compile("(a|b)*c").find(long).nil?, "a million bytes with no c"
+assert_true Regex.compile("a*c").find(long).nil?, "and again with a*c"
+assert_str long, Regex.compile("\\w+").find(long) || "", "a million-byte word"
+assert_true Regex.compile("(a*)*b").scan(long + "b").size == 1, "nested stars over a million bytes"
+puts "  a million bytes, four patterns, one pass each"
+
+args = Program.args
+if args.size > 0
+  puts "\n== against Python's re"
+  text = File.read(args[0])
+  lines = [] of String
+  start = 0
+  i = 0
+  p = text.to_unsafe
+  while i < text.bytesize
+    if p[i] == 10_u8
+      lines << text[start, i - start]
+      start = i + 1
+    end
+    i = i + 1
+  end
+  cases = 0
+  lines.each do |line|
+    f = fields(line, 30_u8)
+    next unless f.size == 6
+    rx = Regex.compile(unescape(f[0]))
+    subject = unescape(f[1])
+    label = "/#{f[0]}/ on #{subject.inspect}"
+    found = rx.find(subject)
+    assert_str unescape(f[2]), found.nil? ? "<nil>" : found, "#{label}: find"
+    want_scan = f[3] == "<none>" ? [] of String : unescape(fields(f[3], 31_u8))
+    assert_true rx.scan(subject) == want_scan, "#{label}: scan #{rx.scan(subject).inspect} vs #{want_scan.inspect}"
+    want_split = unescape(fields(f[4], 31_u8))
+    assert_true rx.split(subject) == want_split, "#{label}: split #{rx.split(subject).inspect} vs #{want_split.inspect}"
+    assert_str unescape(f[5]), rx.replace(subject, "<>"), "#{label}: replace"
+    cases = cases + 1
+  end
+  assert_true cases > 2000, "the fixture had #{cases} cases"
+  puts "  #{cases} pattern/subject pairs: find, scan, split and replace agree"
+end
 
 puts "\nALL CHECKS PASSED"

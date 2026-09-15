@@ -105,6 +105,25 @@
 
 ### Fixed
 
+- **`std/regex` was quadratic, longest-match, and read half its syntax as
+  letters.** The header promised RE2's contract and the engine restarted
+  the NFA from every byte, so `a*c` on 20 KB of `a` was killed at twenty
+  seconds; `a|ab` on `ab` answered `ab` where RE2 and Python answer `a`;
+  `split` and `replace` dropped the byte after every empty match, so
+  `x*` on `abc` replaced to `----` and `^` on `ab` ate the `a`; `\b`
+  `\A` `\z` `\x41` `a{2}` were the literal letters and braces; `[\d]`
+  was the letter `d`; `[\d-z]` was a range; `(?i)` was refused as
+  lookaround and `a*?` as nothing to repeat. The engine is a Pike VM now
+  — one pass, a thread list in priority order — so it is linear and
+  leftmost-first, and the syntax the header lists is the syntax it has:
+  `\b \B \A \z`, `\xHH`, `{n}` `{n,}` `{n,m}`, lazy quantifiers,
+  `(?:…)` and named groups, `\d \w \s` inside classes. An empty match
+  costs no text, by Python's rule. What is not regular is refused by its
+  own name; a class holding a byte past ASCII is refused rather than
+  matching half a character. `bench/std_regex_exercise.sh` holds it
+  against Python's `re` on 2,214 pattern/subject pairs and a million
+  bytes in one pass.
+
 - **The scalar traits covered `Int32` and hashed a string by its length.**
   `List(Int64).sum` and `List(Float64).sum` did not compile, `Char` could
   not be sorted, and `"aa"` and `"bb"` were one `hash_key`. `Int64`,

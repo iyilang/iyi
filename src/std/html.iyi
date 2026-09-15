@@ -1,0 +1,813 @@
+# Standard HTML escaping and unescaping library for iyi.
+#
+# Provides escape for the five predefined entities and unescape for named,
+# decimal numeric, and hexadecimal numeric references.
+#
+# Named entity table decision:
+# We implement the complete 253-entity standard HTML 4.01 and XML set
+# (Latin-1, currency, Greek alphabet, mathematical symbols, punctuation, and markup).
+# HTML5 expanded named entities to over 2,100 variants, predominantly duplicate
+# obscure mathematical notation. The standard 253-entity set provides complete
+# coverage for standard web documents and prose while remaining within the SPEC III
+# footprint floor.
+
+module std/html
+
+import std/text
+
+pub struct HTML
+  # Escapes the five predefined HTML characters:
+  # &  -> &amp;
+  # <  -> &lt;
+  # >  -> &gt;
+  # "  -> &quot;
+  # ' -> &#39;
+  def self.escape(string : String, io) : Nil
+    raw = string.to_unsafe
+    len = string.bytesize
+    i = 0
+    while i < len
+      case b = raw[i]
+      when 38_u8 # &
+        io << "&amp;"
+      when 60_u8 # <
+        io << "&lt;"
+      when 62_u8 # >
+        io << "&gt;"
+      when 34_u8 # "
+        io << "&quot;"
+      when 39_u8 # '
+        io << "&#39;"
+      else
+        io << b.unsafe_chr
+      end
+      i = i + 1
+    end
+  end
+
+  def self.escape(string : String) : String
+    # Fast path: check if any character needs escaping
+    raw = string.to_unsafe
+    len = string.bytesize
+    needs = false
+    i = 0
+    while i < len
+      b = raw[i]
+      if b == 38_u8 || b == 60_u8 || b == 62_u8 || b == 34_u8 || b == 39_u8
+        needs = true
+        break
+      end
+      i = i + 1
+    end
+    return string unless needs
+
+    # Allocate and copy
+    bytes = [] of UInt8
+    i = 0
+    while i < len
+      b = raw[i]
+      case b
+      when 38_u8 # &
+        bytes << 38_u8; bytes << 97_u8; bytes << 109_u8; bytes << 112_u8; bytes << 59_u8
+      when 60_u8 # <
+        bytes << 38_u8; bytes << 108_u8; bytes << 116_u8; bytes << 59_u8
+      when 62_u8 # >
+        bytes << 38_u8; bytes << 103_u8; bytes << 116_u8; bytes << 59_u8
+      when 34_u8 # "
+        bytes << 38_u8; bytes << 113_u8; bytes << 117_u8; bytes << 111_u8; bytes << 116_u8; bytes << 59_u8
+      when 39_u8 # '
+        bytes << 38_u8; bytes << 35_u8; bytes << 51_u8; bytes << 57_u8; bytes << 59_u8
+      else
+        bytes << b
+      end
+      i = i + 1
+    end
+
+    String.new(bytes.size) do |buf|
+      buf.copy_from(bytes.to_unsafe, bytes.size)
+    end
+  end
+
+  # Returns Unicode codepoint for standard HTML named entity, or -1 if unknown.
+  def self.named_entity_codepoint(name : String) : Int32
+    case name
+    when "AElig"
+      198
+    when "Aacute"
+      193
+    when "Acirc"
+      194
+    when "Agrave"
+      192
+    when "Alpha"
+      913
+    when "Aring"
+      197
+    when "Atilde"
+      195
+    when "Auml"
+      196
+    when "Beta"
+      914
+    when "Ccedil"
+      199
+    when "Chi"
+      935
+    when "Dagger"
+      8225
+    when "Delta"
+      916
+    when "ETH"
+      208
+    when "Eacute"
+      201
+    when "Ecirc"
+      202
+    when "Egrave"
+      200
+    when "Epsilon"
+      917
+    when "Eta"
+      919
+    when "Euml"
+      203
+    when "Gamma"
+      915
+    when "Iacute"
+      205
+    when "Icirc"
+      206
+    when "Igrave"
+      204
+    when "Iota"
+      921
+    when "Iuml"
+      207
+    when "Kappa"
+      922
+    when "Lambda"
+      923
+    when "Mu"
+      924
+    when "Ntilde"
+      209
+    when "Nu"
+      925
+    when "OElig"
+      338
+    when "Oacute"
+      211
+    when "Ocirc"
+      212
+    when "Ograve"
+      210
+    when "Omega"
+      937
+    when "Omicron"
+      927
+    when "Oslash"
+      216
+    when "Otilde"
+      213
+    when "Ouml"
+      214
+    when "Phi"
+      934
+    when "Pi"
+      928
+    when "Prime"
+      8243
+    when "Psi"
+      936
+    when "Rho"
+      929
+    when "Scaron"
+      352
+    when "Sigma"
+      931
+    when "THORN"
+      222
+    when "Tau"
+      932
+    when "Theta"
+      920
+    when "Uacute"
+      218
+    when "Ucirc"
+      219
+    when "Ugrave"
+      217
+    when "Upsilon"
+      933
+    when "Uuml"
+      220
+    when "Xi"
+      926
+    when "Yacute"
+      221
+    when "Yuml"
+      376
+    when "Zeta"
+      918
+    when "aacute"
+      225
+    when "acirc"
+      226
+    when "acute"
+      180
+    when "aelig"
+      230
+    when "agrave"
+      224
+    when "alefsym"
+      8501
+    when "alpha"
+      945
+    when "amp"
+      38
+    when "and"
+      8743
+    when "ang"
+      8736
+    when "apos"
+      39
+    when "aring"
+      229
+    when "asymp"
+      8776
+    when "atilde"
+      227
+    when "auml"
+      228
+    when "bdquo"
+      8222
+    when "beta"
+      946
+    when "brvbar"
+      166
+    when "bull"
+      8226
+    when "cap"
+      8745
+    when "ccedil"
+      231
+    when "cedil"
+      184
+    when "cent"
+      162
+    when "chi"
+      967
+    when "circ"
+      710
+    when "clubs"
+      9827
+    when "cong"
+      8773
+    when "copy"
+      169
+    when "crarr"
+      8629
+    when "cup"
+      8746
+    when "curren"
+      164
+    when "dArr"
+      8659
+    when "dagger"
+      8224
+    when "darr"
+      8595
+    when "deg"
+      176
+    when "delta"
+      948
+    when "diams"
+      9830
+    when "divide"
+      247
+    when "eacute"
+      233
+    when "ecirc"
+      234
+    when "egrave"
+      232
+    when "empty"
+      8709
+    when "emsp"
+      8195
+    when "ensp"
+      8194
+    when "epsilon"
+      949
+    when "equiv"
+      8801
+    when "eta"
+      951
+    when "eth"
+      240
+    when "euml"
+      235
+    when "euro"
+      8364
+    when "exist"
+      8707
+    when "fnof"
+      402
+    when "forall"
+      8704
+    when "frac12"
+      189
+    when "frac14"
+      188
+    when "frac34"
+      190
+    when "frasl"
+      8260
+    when "gamma"
+      947
+    when "ge"
+      8805
+    when "gt"
+      62
+    when "hArr"
+      8660
+    when "harr"
+      8596
+    when "hearts"
+      9829
+    when "hellip"
+      8230
+    when "iacute"
+      237
+    when "icirc"
+      238
+    when "iexcl"
+      161
+    when "igrave"
+      236
+    when "image"
+      8465
+    when "infin"
+      8734
+    when "int"
+      8747
+    when "iota"
+      953
+    when "iquest"
+      191
+    when "isin"
+      8712
+    when "iuml"
+      239
+    when "kappa"
+      954
+    when "lArr"
+      8656
+    when "lambda"
+      955
+    when "lang"
+      9001
+    when "laquo"
+      171
+    when "larr"
+      8592
+    when "lceil"
+      8968
+    when "ldquo"
+      8220
+    when "le"
+      8804
+    when "lfloor"
+      8970
+    when "lowast"
+      8727
+    when "loz"
+      9674
+    when "lrm"
+      8206
+    when "lsaquo"
+      8249
+    when "lsquo"
+      8216
+    when "lt"
+      60
+    when "macr"
+      175
+    when "mdash"
+      8212
+    when "micro"
+      181
+    when "middot"
+      183
+    when "minus"
+      8722
+    when "mu"
+      956
+    when "nabla"
+      8711
+    when "nbsp"
+      160
+    when "ndash"
+      8211
+    when "ne"
+      8800
+    when "ni"
+      8715
+    when "not"
+      172
+    when "notin"
+      8713
+    when "nsub"
+      8836
+    when "ntilde"
+      241
+    when "nu"
+      957
+    when "oacute"
+      243
+    when "ocirc"
+      244
+    when "oelig"
+      339
+    when "ograve"
+      242
+    when "oline"
+      8254
+    when "omega"
+      969
+    when "omicron"
+      959
+    when "oplus"
+      8853
+    when "or"
+      8744
+    when "ordf"
+      170
+    when "ordm"
+      186
+    when "oslash"
+      248
+    when "otilde"
+      245
+    when "otimes"
+      8855
+    when "ouml"
+      246
+    when "para"
+      182
+    when "part"
+      8706
+    when "permil"
+      8240
+    when "perp"
+      8869
+    when "phi"
+      966
+    when "pi"
+      960
+    when "piv"
+      982
+    when "plusmn"
+      177
+    when "pound"
+      163
+    when "prime"
+      8242
+    when "prod"
+      8719
+    when "prop"
+      8733
+    when "psi"
+      968
+    when "quot"
+      34
+    when "rArr"
+      8658
+    when "radic"
+      8730
+    when "rang"
+      9002
+    when "raquo"
+      187
+    when "rarr"
+      8594
+    when "rceil"
+      8969
+    when "rdquo"
+      8221
+    when "real"
+      8476
+    when "reg"
+      174
+    when "rfloor"
+      8971
+    when "rho"
+      961
+    when "rlm"
+      8207
+    when "rsaquo"
+      8250
+    when "rsquo"
+      8217
+    when "sbquo"
+      8218
+    when "scaron"
+      353
+    when "sdot"
+      8901
+    when "sect"
+      167
+    when "shy"
+      173
+    when "sigma"
+      963
+    when "sigmaf"
+      962
+    when "sim"
+      8764
+    when "spades"
+      9824
+    when "sub"
+      8834
+    when "sube"
+      8838
+    when "sum"
+      8721
+    when "sup"
+      8835
+    when "sup1"
+      185
+    when "sup2"
+      178
+    when "sup3"
+      179
+    when "supe"
+      8839
+    when "szlig"
+      223
+    when "tau"
+      964
+    when "there4"
+      8756
+    when "theta"
+      952
+    when "thetasym"
+      977
+    when "thinsp"
+      8201
+    when "thorn"
+      254
+    when "tilde"
+      732
+    when "times"
+      215
+    when "trade"
+      8482
+    when "uArr"
+      8657
+    when "uacute"
+      250
+    when "uarr"
+      8593
+    when "ucirc"
+      251
+    when "ugrave"
+      249
+    when "uml"
+      168
+    when "upsih"
+      978
+    when "upsilon"
+      965
+    when "uuml"
+      252
+    when "weierp"
+      8472
+    when "xi"
+      958
+    when "yacute"
+      253
+    when "yen"
+      165
+    when "yuml"
+      255
+    when "zeta"
+      950
+    when "zwj"
+      8205
+    when "zwnj"
+      8204
+    else
+      -1
+    end
+  end
+
+  # Maps legacy Windows-1252 numeric entity codepoints 0x80..0x9F to Unicode.
+  private def self.map_windows_1252(cp : Int32) : Int32
+    case cp
+    when 0x80; 0x20AC
+    when 0x82; 0x201A
+    when 0x83; 0x0192
+    when 0x84; 0x201E
+    when 0x85; 0x2026
+    when 0x86; 0x2020
+    when 0x87; 0x2021
+    when 0x88; 0x02C6
+    when 0x89; 0x2030
+    when 0x8A; 0x0160
+    when 0x8B; 0x2039
+    when 0x8C; 0x0152
+    when 0x8E; 0x017D
+    when 0x91; 0x2018
+    when 0x92; 0x2019
+    when 0x93; 0x201C
+    when 0x94; 0x201D
+    when 0x95; 0x2022
+    when 0x96; 0x2013
+    when 0x97; 0x2014
+    when 0x98; 0x02DC
+    when 0x99; 0x2122
+    when 0x9A; 0x0161
+    when 0x9B; 0x203A
+    when 0x9C; 0x0153
+    when 0x9E; 0x017E
+    when 0x9F; 0x0178
+    else
+      cp
+    end
+  end
+
+  # Appends UTF-8 encoding of codepoint to byte array.
+  # Replaces invalid codepoints (surrogates, 0, > 0x10FFFF) with 0xFFFD.
+  private def self.append_codepoint(bytes : Array(UInt8), codepoint : Int32) : Nil
+    cp = codepoint
+    # Windows-1252 remap
+    if cp >= 0x80 && cp <= 0x9F
+      cp = map_windows_1252(cp)
+    end
+
+    # Replace invalid codepoints with Unicode replacement character (U+FFFD: EF BF BD)
+    if cp <= 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)
+      bytes << 0xEF_u8
+      bytes << 0xBF_u8
+      bytes << 0xBD_u8
+      return
+    end
+
+    if cp < 0x80
+      bytes << cp.to_u8
+    elsif cp < 0x800
+      bytes << (0xC0 | (cp >> 6)).to_u8
+      bytes << (0x80 | (cp & 0x3F)).to_u8
+    elsif cp < 0x10000
+      bytes << (0xE0 | (cp >> 12)).to_u8
+      bytes << (0x80 | ((cp >> 6) & 0x3F)).to_u8
+      bytes << (0x80 | (cp & 0x3F)).to_u8
+    else
+      bytes << (0xF0 | (cp >> 18)).to_u8
+      bytes << (0x80 | ((cp >> 12) & 0x3F)).to_u8
+      bytes << (0x80 | ((cp >> 6) & 0x3F)).to_u8
+      bytes << (0x80 | (cp & 0x3F)).to_u8
+    end
+  end
+
+  private def self.hex_val(b : UInt8) : Int32
+    if b >= 48_u8 && b <= 57_u8
+      (b - 48_u8).to_i
+    elsif b >= 65_u8 && b <= 70_u8
+      (b - 65_u8 + 10_u8).to_i
+    elsif b >= 97_u8 && b <= 102_u8
+      (b - 97_u8 + 10_u8).to_i
+    else
+      -1
+    end
+  end
+
+  # Unescapes HTML character references.
+  # Handles:
+  # - 253 standard named entities (e.g. &amp;, &copy;, &euro;)
+  # - Decimal numeric entities (e.g. &#60;)
+  # - Hexadecimal numeric entities (e.g. &#x3c;, &#X3C;)
+  # - Bare & that is not an entity is preserved unchanged
+  # - Unterminated entities are handled safely
+  # - Out of range numeric entities are replaced with U+FFFD
+  def self.unescape(string : String) : String
+    return string unless string.includes?("&")
+
+    raw = string.to_unsafe
+    len = string.bytesize
+    bytes = [] of UInt8
+    ptr = 0
+
+    while ptr < len
+      if raw[ptr] == 38_u8 # '&'
+        start_amp = ptr
+        ptr = ptr + 1
+
+        if ptr < len && raw[ptr] == 35_u8 # '#'
+          # Numeric reference
+          ptr = ptr + 1
+          is_hex = false
+          if ptr < len && (raw[ptr] == 120_u8 || raw[ptr] == 88_u8) # 'x' or 'X'
+            is_hex = true
+            ptr = ptr + 1
+          end
+
+          num_start = ptr
+          if is_hex
+            while ptr < len && hex_val(raw[ptr]) >= 0
+              ptr = ptr + 1
+            end
+          else
+            while ptr < len && raw[ptr] >= 48_u8 && raw[ptr] <= 57_u8
+              ptr = ptr + 1
+            end
+          end
+
+          if ptr == num_start
+            # No digits found: bare &# or &#x
+            k = start_amp
+            while k < ptr
+              bytes << raw[k]
+              k = k + 1
+            end
+          else
+            # Parse number
+            cp = 0_i64
+            overflow = false
+            k = num_start
+            if is_hex
+              while k < ptr
+                val = hex_val(raw[k])
+                cp = (cp << 4) | val.to_i64
+                if cp > 0x10FFFF
+                  overflow = true
+                end
+                k = k + 1
+              end
+            else
+              while k < ptr
+                val = (raw[k] - 48_u8).to_i64
+                cp = (cp * 10) + val
+                if cp > 0x10FFFF
+                  overflow = true
+                end
+                k = k + 1
+              end
+            end
+
+            # Optional trailing semicolon
+            if ptr < len && raw[ptr] == 59_u8 # ';'
+              ptr = ptr + 1
+            end
+
+            if overflow
+              append_codepoint(bytes, 0xFFFD)
+            else
+              append_codepoint(bytes, cp.to_i)
+            end
+          end
+        else
+          # Named entity: scan ASCII alphanumeric characters
+          name_start = ptr
+          while ptr < len && ((raw[ptr] >= 97_u8 && raw[ptr] <= 122_u8) ||
+                (raw[ptr] >= 65_u8 && raw[ptr] <= 90_u8) ||
+                (raw[ptr] >= 48_u8 && raw[ptr] <= 57_u8))
+            ptr = ptr + 1
+          end
+
+          if ptr == name_start
+            # Bare '&' followed by non-alphanumeric
+            bytes << 38_u8
+          else
+            name = string[name_start, ptr - name_start]
+            cp = named_entity_codepoint(name)
+
+            has_semi = ptr < len && raw[ptr] == 59_u8 # ';'
+            if has_semi
+              ptr = ptr + 1
+            end
+
+            if cp >= 0
+              append_codepoint(bytes, cp)
+            else
+              # Unknown named entity: preserve original text
+              k = start_amp
+              while k < ptr
+                bytes << raw[k]
+                k = k + 1
+              end
+            end
+          end
+        end
+      else
+        bytes << raw[ptr]
+        ptr = ptr + 1
+      end
+    end
+
+    String.new(bytes.size) do |buf|
+      buf.copy_from(bytes.to_unsafe, bytes.size)
+    end
+  end
+end

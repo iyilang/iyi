@@ -1,0 +1,529 @@
+# HTTP Datagrams and the Capsule Protocol — RFC 9297, RFC 8441, RFC 9220, RFC 9000.
+#
+# Answers the protocol architecture requirements:
+#
+# 1. QUIC Variable-Length Integer Encoding (RFC 9000 Section 16 & Appendix A):
+#    A 2-bit-prefix variable-length integer encoding scheme supporting 1, 2, 4,
+#    or 8 byte representations for values up to 2^62 - 1 (4,611,686,018,427,387,903).
+#    Exported as `VarInt` so wave two's HTTP/3 and QUIC implementations can reuse
+#    this exact encoding rather than writing a second one.
+#    Supports canonical minimum-byte encoding, explicit-length multi-byte encoding
+#    (as tested in RFC 9000 Appendix A), and strict decoding that rejects overlong
+#    encodings and reserved/out-of-range values.
+#
+# 2. HTTP Datagrams (RFC 9297 Section 2):
+#    Quarter Stream IDs map datagrams to HTTP/3 request streams:
+#      quarter_stream_id = stream_id // 4
+#      stream_id = quarter_stream_id * 4
+#    Provides `HttpDatagram` with encoding and decoding over byte slices.
+#
+# 3. The Capsule Protocol (RFC 9297 Section 3):
+#    Framing for datagrams and control messages on reliable streams.
+#    Each capsule consists of:
+#      Capsule Type (i)
+#      Capsule Length (i)
+#      Capsule Value (..)
+#    Follows RFC 9297 Section 3.2 extensibility rule: unknown capsule types
+#    MUST be skipped rather than erroring.
+#    Refuses truncated capsules, lengths that overrun buffer boundaries,
+#    and invalid varint encodings.
+#
+# 4. Extended CONNECT (RFC 8441 and RFC 9220):
+#    Protocol negotiation via `:protocol` pseudo-header and the
+#    SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08) setting for HTTP/2 and HTTP/3.
+#
+# 5. Capsule-Protocol Header (RFC 9297 Section 3.3):
+#    Item Structured Field `Capsule-Protocol: ?1` enabling capsule framing.
+
+module std/capsule
+
+import std/slice
+using std/slice::{Slice, Bytes}
+
+# =============================================================================
+# 1. QUIC Variable-Length Integer Encoding (RFC 9000 Section 16 & Appendix A)
+# =============================================================================
+
+pub struct VarInt
+  # Maximum value representable in a QUIC 62-bit variable-length integer: 2^62 - 1.
+  pub MAX = 4611686018427387903_u64
+
+  # Upper bounds for canonical N-byte representations.
+  pub MAX_1BYTE =                  63_u64
+  pub MAX_2BYTE =               16383_u64
+  pub MAX_4BYTE =          1073741823_u64
+  pub MAX_8BYTE = 4611686018427387903_u64
+
+  # Checks if value can be represented as a 62-bit QUIC varint.
+  def self.valid_value?(value : UInt64) : Bool
+    value <= MAX
+  end
+
+  # Calculates the minimum number of bytes required to canonically encode value.
+  def self.encoded_size(value : UInt64) : Int32
+    if value <= MAX_1BYTE
+      1
+    elsif value <= MAX_2BYTE
+      2
+    elsif value <= MAX_4BYTE
+      4
+    elsif value <= MAX_8BYTE
+      8
+    else
+      raise "varint value exceeds maximum 62-bit integer (2^62 - 1): #{value}"
+    end
+  end
+
+  # Encodes value into its canonical (minimum-length) QUIC varint representation.
+  def self.encode(value : UInt64) : Bytes
+    size = encoded_size(value)
+    encode(value, size)
+  end
+
+  # Encodes value using an explicit length (1, 2, 4, or 8 bytes).
+  # Used to produce canonical encodings or explicit multi-byte encodings as
+  # specified in RFC 9000 Appendix A (e.g. 37 encoded in 2, 4, or 8 bytes).
+  def self.encode(value : UInt64, length : Int32) : Bytes
+    if value > MAX
+      raise "varint value exceeds maximum 62-bit integer (2^62 - 1): #{value}"
+    end
+
+    buf = Bytes.new(length)
+    if length == 1
+      if value > MAX_1BYTE
+        raise "value #{value} does not fit in 1-byte varint"
+      end
+      buf[0] = value.to_u8
+    elsif length == 2
+      if value > MAX_2BYTE
+        raise "value #{value} does not fit in 2-byte varint"
+      end
+      buf[0] = (0x40_u8 | (value.unsafe_shr(8_u64) & 0x3f_u64).to_u8)
+      buf[1] = (value & 0xff_u64).to_u8
+    elsif length == 4
+      if value > MAX_4BYTE
+        raise "value #{value} does not fit in 4-byte varint"
+      end
+      buf[0] = (0x80_u8 | (value.unsafe_shr(24_u64) & 0x3f_u64).to_u8)
+      buf[1] = (value.unsafe_shr(16_u64) & 0xff_u64).to_u8
+      buf[2] = (value.unsafe_shr(8_u64) & 0xff_u64).to_u8
+      buf[3] = (value & 0xff_u64).to_u8
+    elsif length == 8
+      buf[0] = (0xc0_u8 | (value.unsafe_shr(56_u64) & 0x3f_u64).to_u8)
+      buf[1] = (value.unsafe_shr(48_u64) & 0xff_u64).to_u8
+      buf[2] = (value.unsafe_shr(40_u64) & 0xff_u64).to_u8
+      buf[3] = (value.unsafe_shr(32_u64) & 0xff_u64).to_u8
+      buf[4] = (value.unsafe_shr(24_u64) & 0xff_u64).to_u8
+      buf[5] = (value.unsafe_shr(16_u64) & 0xff_u64).to_u8
+      buf[6] = (value.unsafe_shr(8_u64) & 0xff_u64).to_u8
+      buf[7] = (value & 0xff_u64).to_u8
+    else
+      raise "invalid varint encoding length: #{length} (must be 1, 2, 4, or 8)"
+    end
+    buf
+  end
+
+  # Decodes a QUIC variable-length integer, returning nil if truncated, overlong, or reserved.
+  def self.decode?(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {UInt64, Int32}?
+    return nil if offset < 0 || offset >= bytes.size
+
+    b0 = bytes[offset]
+    prefix = (b0.to_i32 >> 6) & 0x03
+
+    if prefix == 0_u8
+      val = (b0 & 0x3f_u8).to_u64
+      {val, 1}
+    elsif prefix == 1_u8
+      return nil if offset + 2 > bytes.size
+      val = (b0 & 0x3f_u8).to_u64.unsafe_shl(8_u64) | bytes[offset + 1].to_u64
+      return nil if strict && val <= MAX_1BYTE
+      {val, 2}
+    elsif prefix == 2_u8
+      return nil if offset + 4 > bytes.size
+      val = (b0 & 0x3f_u8).to_u64.unsafe_shl(24_u64) |
+            bytes[offset + 1].to_u64.unsafe_shl(16_u64) |
+            bytes[offset + 2].to_u64.unsafe_shl(8_u64) |
+            bytes[offset + 3].to_u64
+      return nil if strict && val <= MAX_2BYTE
+      {val, 4}
+    else # prefix == 3_u8
+      return nil if offset + 8 > bytes.size
+      val = (b0 & 0x3f_u8).to_u64.unsafe_shl(56_u64) |
+            bytes[offset + 1].to_u64.unsafe_shl(48_u64) |
+            bytes[offset + 2].to_u64.unsafe_shl(40_u64) |
+            bytes[offset + 3].to_u64.unsafe_shl(32_u64) |
+            bytes[offset + 4].to_u64.unsafe_shl(24_u64) |
+            bytes[offset + 5].to_u64.unsafe_shl(16_u64) |
+            bytes[offset + 6].to_u64.unsafe_shl(8_u64) |
+            bytes[offset + 7].to_u64
+      return nil if strict && val <= MAX_4BYTE
+      return nil if val > MAX
+      {val, 8}
+    end
+  end
+
+  # Decodes a QUIC variable-length integer from *bytes* starting at *offset*.
+  # Raises on truncated buffers, reserved values, or overlong encodings (if strict).
+  def self.decode(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {UInt64, Int32}
+    res = decode?(bytes, offset, strict: strict)
+    if res.nil?
+      if offset < 0 || offset >= bytes.size
+        raise "varint truncated: buffer empty or offset beyond end"
+      end
+      b0 = bytes[offset]
+      prefix = (b0.to_i32 >> 6) & 0x03
+      req = prefix == 0 ? 1 : (prefix == 1 ? 2 : (prefix == 2 ? 4 : 8))
+      avail = bytes.size - offset
+      if avail < req
+        raise "varint truncated: #{req}-byte varint requires #{req} bytes, but only #{avail} available"
+      end
+      raise "overlong varint encoding: value encoded in non-minimal bytes"
+    end
+    res
+  end
+
+  # Strict decoding shorthand: refuses overlong and reserved encodings.
+  def self.decode_strict(bytes : Bytes, offset : Int32 = 0) : {UInt64, Int32}
+    decode(bytes, offset, strict: true)
+  end
+
+  def self.decode_strict?(bytes : Bytes, offset : Int32 = 0) : {UInt64, Int32}?
+    decode?(bytes, offset, strict: true)
+  end
+end
+
+# =============================================================================
+# 2. HTTP Datagrams (RFC 9297 Section 2)
+# =============================================================================
+
+pub struct HttpDatagram
+  @quarter_stream_id : UInt64
+  @payload : Bytes
+
+  def initialize(@quarter_stream_id : UInt64, @payload : Bytes)
+  end
+
+  getter quarter_stream_id : UInt64
+  getter payload : Bytes
+
+  # Maps the quarter stream ID back to the associated HTTP/3 stream ID.
+  # Stream ID = Quarter Stream ID * 4.
+  def stream_id : UInt64
+    @quarter_stream_id * 4_u64
+  end
+
+  # Creates an HTTP Datagram associated with the given HTTP/3 stream ID.
+  def self.from_stream_id(stream_id : UInt64, payload : Bytes) : self
+    new(stream_id // 4_u64, payload)
+  end
+
+  # Encodes this datagram into the wire format:
+  #   Quarter Stream ID (i)
+  #   HTTP Datagram Payload (..)
+  def encode : Bytes
+    qid_bytes = VarInt.encode(@quarter_stream_id)
+    total_size = qid_bytes.size + @payload.size
+    buf = Bytes.new(total_size)
+    i = 0
+    while i < qid_bytes.size
+      buf[i] = qid_bytes[i]
+      i = i + 1
+    end
+    j = 0
+    while j < @payload.size
+      buf[qid_bytes.size + j] = @payload[j]
+      j = j + 1
+    end
+    buf
+  end
+
+  # Decodes an HTTP Datagram from a byte slice.
+  # Decodes an HTTP Datagram, returning nil if truncated.
+  def self.decode?(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {HttpDatagram, Int32}?
+    return nil if offset < 0 || offset >= bytes.size
+
+    q_res = VarInt.decode?(bytes, offset, strict: strict)
+    return nil if q_res.nil?
+    qid, qid_len = q_res
+
+    payload_offset = offset + qid_len
+    payload_size = bytes.size - payload_offset
+    return nil if payload_size < 0
+
+    payload = Bytes.new(payload_size)
+    k = 0
+    while k < payload_size
+      payload[k] = bytes[payload_offset + k]
+      k = k + 1
+    end
+
+    {new(qid, payload), bytes.size - offset}
+  end
+
+  # Decodes an HTTP Datagram from a byte slice, raising on truncation.
+  def self.decode(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {HttpDatagram, Int32}
+    res = decode?(bytes, offset, strict: strict)
+    if res.nil?
+      raise "http datagram truncated: buffer empty or ends before payload"
+    end
+    res
+  end
+end
+
+# =============================================================================
+# 3. The Capsule Protocol (RFC 9297 Section 3)
+# =============================================================================
+
+# Standard and extended capsule types.
+pub struct CapsuleType
+  pub DATAGRAM                   =   0x00_u64
+  pub CLOSE_WEBTRANSPORT_SESSION = 0x2843_u64
+  pub DRAIN_WEBTRANSPORT_SESSION = 0x78ae_u64
+end
+
+pub struct Capsule
+  @capsule_type : UInt64
+  @value : Bytes
+
+  def initialize(@capsule_type : UInt64, @value : Bytes)
+  end
+
+  getter capsule_type : UInt64
+  getter value : Bytes
+
+  def datagram? : Bool
+    @capsule_type == CapsuleType::DATAGRAM
+  end
+
+  def close_webtransport_session? : Bool
+    @capsule_type == CapsuleType::CLOSE_WEBTRANSPORT_SESSION
+  end
+
+  def drain_webtransport_session? : Bool
+    @capsule_type == CapsuleType::DRAIN_WEBTRANSPORT_SESSION
+  end
+
+  # Returns true if this capsule type is unrecognized by base specifications.
+  def unknown? : Bool
+    !datagram? && !close_webtransport_session? && !drain_webtransport_session?
+  end
+
+  # Encodes the capsule to stream wire format:
+  #   Capsule Type (i)
+  #   Capsule Length (i)
+  #   Capsule Value (..)
+  def encode : Bytes
+    type_bytes = VarInt.encode(@capsule_type)
+    len_bytes = VarInt.encode(@value.size.to_u64)
+    total_size = type_bytes.size + len_bytes.size + @value.size
+    buf = Bytes.new(total_size)
+
+    pos = 0
+    i = 0
+    while i < type_bytes.size
+      buf[pos] = type_bytes[i]
+      pos = pos + 1
+      i = i + 1
+    end
+
+    j = 0
+    while j < len_bytes.size
+      buf[pos] = len_bytes[j]
+      pos = pos + 1
+      j = j + 1
+    end
+
+    k = 0
+    while k < @value.size
+      buf[pos] = @value[k]
+      pos = pos + 1
+      k = k + 1
+    end
+
+    buf
+  end
+
+  # Decodes a single capsule from bytes starting at offset.
+  # Returns {Capsule, total_bytes_consumed}.
+  # Refuses truncated capsules or lengths that overrun the buffer.
+  # Decodes a single capsule, returning nil if truncated or length overruns buffer.
+  def self.decode?(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {Capsule, Int32}?
+    return nil if offset < 0 || offset >= bytes.size
+
+    t_res = VarInt.decode?(bytes, offset, strict: strict)
+    return nil if t_res.nil?
+    capsule_type, type_len = t_res
+
+    len_offset = offset + type_len
+    return nil if len_offset >= bytes.size
+
+    l_res = VarInt.decode?(bytes, len_offset, strict: strict)
+    return nil if l_res.nil?
+    capsule_len_u64, len_len = l_res
+
+    hdr_len = type_len + len_len
+    val_offset = offset + hdr_len
+    remaining = bytes.size - val_offset
+
+    return nil if capsule_len_u64 > remaining.to_u64
+
+    capsule_len = capsule_len_u64.to_i32
+    val = Bytes.new(capsule_len)
+    i = 0
+    while i < capsule_len
+      val[i] = bytes[val_offset + i]
+      i = i + 1
+    end
+
+    {new(capsule_type, val), hdr_len + capsule_len}
+  end
+
+  # Decodes a single capsule from bytes starting at offset, raising on error.
+  def self.decode(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {Capsule, Int32}
+    if offset < 0 || offset >= bytes.size
+      raise "truncated capsule: buffer empty or offset beyond end"
+    end
+
+    capsule_type, type_len = VarInt.decode(bytes, offset, strict: strict)
+    len_offset = offset + type_len
+
+    if len_offset >= bytes.size
+      raise "truncated capsule: buffer ends before capsule length"
+    end
+
+    capsule_len_u64, len_len = VarInt.decode(bytes, len_offset, strict: strict)
+    hdr_len = type_len + len_len
+    val_offset = offset + hdr_len
+    remaining = bytes.size - val_offset
+
+    if capsule_len_u64 > remaining.to_u64
+      raise "capsule length overruns buffer: length #{capsule_len_u64} exceeds remaining #{remaining} bytes"
+    end
+
+    capsule_len = capsule_len_u64.to_i32
+    val = Bytes.new(capsule_len)
+    i = 0
+    while i < capsule_len
+      val[i] = bytes[val_offset + i]
+      i = i + 1
+    end
+
+    {new(capsule_type, val), hdr_len + capsule_len}
+  end
+end
+
+# Capsule stream processing enforcing RFC 9297 Section 3.2 rules:
+# - Unknown capsule types are skipped rather than erroring (extensibility).
+# - Truncated capsules and length overruns are strictly refused.
+pub struct CapsuleReader
+  # Decodes all capsules in buffer into an array.
+  # Preserves unknown capsules in the list for inspection.
+  def self.read_all(bytes : Bytes, strict : Bool = false) : Array(Capsule)
+    capsules = [] of Capsule
+    offset = 0
+    while offset < bytes.size
+      capsule, consumed = Capsule.decode(bytes, offset, strict: strict)
+      capsules << capsule
+      offset = offset + consumed
+    end
+    capsules
+  end
+
+  # Decodes capsules from stream buffer, actively skipping unknown types
+  # and returning only recognized capsules, demonstrating RFC 9297 extensibility.
+  def self.read_known(bytes : Bytes, strict : Bool = false) : Array(Capsule)
+    capsules = [] of Capsule
+    offset = 0
+    while offset < bytes.size
+      capsule, consumed = Capsule.decode(bytes, offset, strict: strict)
+      unless capsule.unknown?
+        capsules << capsule
+      end
+      offset = offset + consumed
+    end
+    capsules
+  end
+
+  # Decodes capsules and reports both known capsules and the count of skipped unknown types.
+  def self.read_with_skip_count(bytes : Bytes, strict : Bool = false) : {Array(Capsule), Int32}
+    capsules = [] of Capsule
+    skipped = 0
+    offset = 0
+    while offset < bytes.size
+      capsule, consumed = Capsule.decode(bytes, offset, strict: strict)
+      if capsule.unknown?
+        skipped = skipped + 1
+      else
+        capsules << capsule
+      end
+      offset = offset + consumed
+    end
+    {capsules, skipped}
+  end
+end
+
+# =============================================================================
+# 4. Extended CONNECT (RFC 8441 & RFC 9220)
+# =============================================================================
+
+pub struct ExtendedConnect
+  # Setting identifier enabling Extended CONNECT protocol negotiation.
+  pub SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08_u64
+
+  def self.settings_id : UInt64
+    SETTINGS_ENABLE_CONNECT_PROTOCOL
+  end
+
+  pub HEADER_METHOD    = ":method"
+  pub HEADER_PROTOCOL  = ":protocol"
+  pub HEADER_SCHEME    = ":scheme"
+  pub HEADER_AUTHORITY = ":authority"
+  pub HEADER_PATH      = ":path"
+  pub HEADER_STATUS    = ":status"
+
+  pub METHOD_CONNECT = "CONNECT"
+
+  pub PROTOCOL_WEBTRANSPORT = "webtransport"
+  pub PROTOCOL_WEBSOCKET    = "websocket"
+
+  # Validates whether the given parameters form a valid Extended CONNECT request.
+  def self.valid_request?(method : String, protocol : String?, scheme : String?, authority : String?, path : String?) : Bool
+    return false unless method == METHOD_CONNECT
+    return false if protocol.nil? || protocol.empty?
+    return false if scheme.nil? || scheme.empty?
+    return false if authority.nil? || authority.empty?
+    return false if path.nil? || path.empty?
+    true
+  end
+
+  # Validates whether a response status code establishes the Extended CONNECT tunnel (2xx).
+  def self.valid_response?(status : Int32) : Bool
+    status >= 200 && status < 300
+  end
+end
+
+# =============================================================================
+# 5. Capsule-Protocol Header (RFC 9297 Section 3.3)
+# =============================================================================
+
+pub struct CapsuleProtocol
+  pub HEADER_NAME  = "Capsule-Protocol"
+  pub HEADER_VALUE = "?1"
+
+  def self.header_name : String
+    HEADER_NAME
+  end
+
+  def self.header_value : String
+    HEADER_VALUE
+  end
+
+  # Checks if a header key-value pair enables the Capsule Protocol.
+  def self.valid_header?(name : String, value : String) : Bool
+    name.downcase == "capsule-protocol" && (value == "?1" || value == "?1 ")
+  end
+
+  def self.is_capsule_protocol_header?(value : String) : Bool
+    value == "?1" || value == "?1 "
+  end
+end

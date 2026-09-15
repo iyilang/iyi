@@ -1,34 +1,46 @@
-# Semantic Versioning 2.0.0 standard library module for iyi.
+# Semantic versions, as Semantic Versioning 2.0.0 spells them:
+# `MAJOR.MINOR.PATCH`, an optional `-prerelease` of dot-separated
+# identifiers, an optional `+build` tail.
 #
-# Pure iyi implementation with zero external C library dependencies.
+# `SemanticVersion.parse?` answers nil and `SemanticVersion.parse` panics
+# with `not a semantic version: "1.0"` for anything the grammar refuses:
+# a missing field, a leading zero in a numeric field or in a numeric
+# prerelease identifier, an empty identifier (`1.0.0-alpha..1`, `1.0.0-`,
+# `1.0.0+`), a byte outside `[0-9A-Za-z-]` in an identifier, a `v` prefix.
+# One trailing newline is tolerated, the way a version read from a file
+# arrives, and nothing else outside the grammar is.
+#
+# Ordering is the standard's: numeric fields, then prerelease identifiers
+# (numeric before alphanumeric, numeric by value, alphanumeric by bytes,
+# a shorter list first, and no prerelease after every prerelease). Build
+# metadata never orders (`1.0.0+a` and `1.0.0+b` compare equal) but does
+# distinguish (`==` and `hash` read it), so a set of versions keeps both.
 
 module std/semantic_version
 
-class ::String
-  def <=>(other : String) : Int32
-    return 0 if self == other
-    self < other ? -1 : 1
-  end
-end
+import std/traits
+using std/traits::{Cmp}
 
-struct ::SemanticVersion
+pub struct SemanticVersion
   getter major : Int32
   getter minor : Int32
   getter patch : Int32
   getter build : String?
   getter prerelease : Prerelease
 
+  # The dot-separated identifiers after `-`; a numeric identifier is held
+  # as a number so that `beta.2 < beta.11`.
   struct Prerelease
     getter identifiers : Array(String | Int32)
 
     def self.parse(str : String) : self
       identifiers = [] of String | Int32
+      return new(identifiers) if str.empty?
       parts = str.split('.')
       i = 0
       while i < parts.size
         part = parts[i]
-        num = part.to_i?
-        if n = num
+        if n = part.to_i?
           identifiers << n
         else
           identifiers << part
@@ -41,7 +53,11 @@ struct ::SemanticVersion
     def initialize(@identifiers : Array(String | Int32) = [] of String | Int32)
     end
 
-    def to_s(io) : Nil
+    def empty? : Bool
+      @identifiers.empty?
+    end
+
+    def to_s(io : IO) : Nil
       io.write(to_s)
     end
 
@@ -66,35 +82,15 @@ struct ::SemanticVersion
       i = 0
       while i < @identifiers.size
         return 1 if i >= other.identifiers.size
-
-        item = @identifiers[i]
-        oitem = other.identifiers[i]
-        r = compare(item, oitem)
+        r = compare_identifier(@identifiers[i], other.identifiers[i])
         return r if r != 0
         i += 1
       end
 
-      return -1 if @identifiers.size < other.identifiers.size
-      0
+      @identifiers.size < other.identifiers.size ? -1 : 0
     end
 
-    def <(other : self) : Bool
-      (self <=> other) < 0
-    end
-
-    def <=(other : self) : Bool
-      (self <=> other) <= 0
-    end
-
-    def >(other : self) : Bool
-      (self <=> other) > 0
-    end
-
-    def >=(other : self) : Bool
-      (self <=> other) >= 0
-    end
-
-    private def compare(x : String | Int32, y : String | Int32) : Int32
+    private def compare_identifier(x : String | Int32, y : String | Int32) : Int32
       if x.is_a?(Int32)
         if y.is_a?(Int32)
           x == y ? 0 : (x < y ? -1 : 1)
@@ -111,29 +107,23 @@ struct ::SemanticVersion
     end
 
     def ==(other : Prerelease) : Bool
-      return false unless @identifiers.size == other.identifiers.size
+      (self <=> other) == 0
+    end
+
+    def hash : Int32
+      value = 17
       i = 0
       while i < @identifiers.size
-        a = @identifiers[i]
-        b = other.identifiers[i]
-        if a.is_a?(Int32) && b.is_a?(Int32)
-          return false unless a == b
-        elsif a.is_a?(String) && b.is_a?(String)
-          return false unless a == b
-        else
-          return false
-        end
+        value = (value &* 31) &+ @identifiers[i].hash
         i += 1
       end
-      true
+      value
     end
+  end
 
-    def ==(other) : Bool
-      false
-    end
-
-    def hash(hasher)
-      @identifiers.hash(hasher)
+  impl Cmp for Prerelease
+    def cmp(other : self) : Int32
+      self <=> other
     end
   end
 
@@ -142,7 +132,7 @@ struct ::SemanticVersion
   end
 
   def self.parse(str : String) : self
-    parse?(str) || raise "Not a semantic version: #{str.inspect}"
+    parse?(str) || raise "not a semantic version: #{str.inspect}"
   end
 
   def self.parse?(str : String) : self?
@@ -158,9 +148,17 @@ struct ::SemanticVersion
     pre_str = pre_range ? str[pre_range.begin, pre_range.end - pre_range.begin] : nil
     build_str = build_range ? str[build_range.begin, build_range.end - build_range.begin] : nil
 
-    new(major_str.to_i, minor_str.to_i, patch_str.to_i, pre_str, build_str)
+    major = major_str.to_i?
+    minor = minor_str.to_i?
+    patch = patch_str.to_i?
+    # A field of more digits than an Int32 holds is a number the type
+    # cannot carry, not a version.
+    return nil unless major && minor && patch
+
+    new(major, minor, patch, pre_str, build_str)
   end
 
+  # Byte ranges of the five fields, or nil where the grammar is not met.
   private def self.scan(str : String)
     bytes = str.to_unsafe
     stop = str.bytesize
@@ -206,6 +204,7 @@ struct ::SemanticVersion
     {0...major_end, (major_end + 1)...minor_end, (minor_end + 1)...patch_end, prerelease, build}
   end
 
+  # A numeric field: `0`, or a digit run that does not start with `0`.
   private def self.scan_field(bytes : Pointer(UInt8), start : Int32, stop : Int32) : Int32?
     return nil unless start < stop && bytes[start] >= 48_u8 && bytes[start] <= 57_u8
     return start + 1 if bytes[start] == 48_u8 # '0'
@@ -245,10 +244,8 @@ struct ::SemanticVersion
     true
   end
 
-  def initialize(@major : Int, @minor : Int, @patch : Int, prerelease : String | Prerelease | Nil = nil, @build : String? = nil)
-    @major = @major.to_i
-    @minor = @minor.to_i
-    @patch = @patch.to_i
+  def initialize(@major : Int32, @minor : Int32, @patch : Int32, prerelease : String | Prerelease | Nil = nil, @build : String? = nil)
+    raise "negative version field: #{@major}.#{@minor}.#{@patch}" if @major < 0 || @minor < 0 || @patch < 0
     @prerelease = case prerelease
                   when Prerelease
                     prerelease
@@ -259,13 +256,13 @@ struct ::SemanticVersion
                   end
   end
 
-  def to_s(io) : Nil
+  def to_s(io : IO) : Nil
     io.write(to_s)
   end
 
   def to_s : String
     res = "#{@major}.#{@minor}.#{@patch}"
-    unless @prerelease.identifiers.empty?
+    unless @prerelease.empty?
       res = res + "-" + @prerelease.to_s
     end
     if b = @build
@@ -274,7 +271,7 @@ struct ::SemanticVersion
     res
   end
 
-  def copy_with(major : Int32 = @major, minor : Int32 = @minor, patch : Int32 = @patch, prerelease : String | Prerelease | Nil = @prerelease, build : String? = @build)
+  def copy_with(major : Int32 = @major, minor : Int32 = @minor, patch : Int32 = @patch, prerelease : String | Prerelease | Nil = @prerelease, build : String? = @build) : SemanticVersion
     SemanticVersion.new(major, minor, patch, prerelease, build)
   end
 
@@ -286,14 +283,16 @@ struct ::SemanticVersion
     copy_with(minor: @minor + 1, patch: 0, prerelease: nil, build: nil)
   end
 
+  # A prerelease of a patch is bumped to that patch; a release to the next.
   def bump_patch : self
-    if @prerelease.identifiers.empty?
+    if @prerelease.empty?
       copy_with(patch: @patch + 1, prerelease: nil, build: nil)
     else
       copy_with(prerelease: nil, build: nil)
     end
   end
 
+  # Precedence, with build metadata ignored as the standard says.
   def <=>(other : self) : Int32
     r = @major == other.major ? 0 : (@major < other.major ? -1 : 1)
     return r unless r == 0
@@ -304,41 +303,25 @@ struct ::SemanticVersion
     @prerelease <=> other.prerelease
   end
 
-  def <(other : self) : Bool
-    (self <=> other) < 0
-  end
-
-  def <=(other : self) : Bool
-    (self <=> other) <= 0
-  end
-
-  def >(other : self) : Bool
-    (self <=> other) > 0
-  end
-
-  def >=(other : self) : Bool
-    (self <=> other) >= 0
-  end
-
+  # Identity, with build metadata read: `1.0.0+a` is not `1.0.0+b`.
   def ==(other : SemanticVersion) : Bool
-    @major == other.major &&
-      @minor == other.minor &&
-      @patch == other.patch &&
-      @prerelease == other.prerelease &&
-      @build == other.build
+    (self <=> other) == 0 && @build == other.build
   end
 
-  def ==(other) : Bool
-    false
-  end
-
-  def hash(hasher)
-    hasher = @major.hash(hasher)
-    hasher = @minor.hash(hasher)
-    hasher = @patch.hash(hasher)
-    hasher = @prerelease.hash(hasher)
-    @build ? @build.hash(hasher) : hasher
+  def hash : Int32
+    value = @major
+    value = (value &* 31) &+ @minor
+    value = (value &* 31) &+ @patch
+    value = (value &* 31) &+ @prerelease.hash
+    if b = @build
+      value = (value &* 31) &+ b.hash
+    end
+    value
   end
 end
 
-pub alias SemanticVersion = ::SemanticVersion
+impl Cmp for SemanticVersion
+  def cmp(other : self) : Int32
+    self <=> other
+  end
+end

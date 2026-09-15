@@ -1,40 +1,8 @@
-# `Tuple` and `NamedTuple` standard extensions for iyi — SPEC.md III.
+# Size, equality, each and printing for the prelude's Tuple and NamedTuple.
 #
-# Architectural finding on Tuple and NamedTuple in iyi's type system:
+# Heterogeneous tuples cannot implement Indexable (one Elem). This module
+# adds what the compiler does not: size, empty?, first/last, ==, each, to_s.
 #
-# 1. Heterogeneous Sequences vs. Collection Traits:
-#    Crystal's stdlib defines `struct Tuple(*T)` (789 lines) and `struct NamedTuple(**T)`
-#    (736 lines), including `Indexable(Union(*T))` and `Comparable(Tuple)`. In iyi:
-#    - Collection traits (`Indexable`, `Enumerable`) require a single associated type
-#      `type Elem`. A heterogeneous tuple cannot satisfy this without forcing every
-#      element access through a runtime union (`Union(*T)`), which destroys unboxed
-#      static typing and defeats the primary purpose of tuples.
-#    - iyi's trait system does not support variadic type parameters in `impl`
-#      declarations (`forall *T` is rejected by the compiler).
-#    - The orphan rule (R-3, SPEC.md IV.4) forbids implementing `Indexable` or
-#      `Enumerable` for `Tuple` outside the module that defines the trait or the
-#      module that defines the type.
-#
-# 2. What the Compiler Provides:
-#    - Syntax, parsing, and LLVM struct layout for tuple literals `{a, b}` and
-#      named tuple literals `{k: v}`.
-#    - Compile-time type indexing: `tuple[0]` returns `T0`, `tuple[1]` returns `T1`.
-#    - Out-of-bounds indexing checked at compile time for integer literal indices.
-#    - Macro reflection on tuple types via `T.size` and named tuple types via `T.keys`.
-#
-# 3. What is Missing for Full Library Expression:
-#    - Variadic generic parameters in trait declarations and trait implementations.
-#    - Dependent / indexed return types in method signatures (`def [](i : Int32)`
-#      returning the i-th type of a type list).
-#    - Compiler support for NamedTuple in the prelude: prior to this module,
-#      NamedTuple had no `size`, `empty?`, `==`, `each`, or string representation.
-#
-# 4. What is Implemented Here:
-#    - `Tuple`: `self.new(*args : *T)`, `size`, `empty?`, `first`, `first?`, `last`,
-#      `last?`, `==`, `same?`, `each`, `each_with_index`, `map`, `to_a`, `to_s`, `inspect`.
-#    - `NamedTuple`: `size`, `empty?`, `has_key?`, `==`, `same?`, `each`, `each_value`,
-#      `keys`, `values`, `to_s`, `inspect`.
-
 module std/tuple
 
 struct ::Tuple

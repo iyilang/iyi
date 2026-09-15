@@ -1,51 +1,82 @@
-# Standard YAML 1.2 Core Schema parser and emitter for iyi.
-# Fully native: zero C library bindings (no libyaml, no libc).
+# YAML, read and written in iyi alone: a parser and an emitter for the
+# YAML 1.2 core schema over the bytes of a `String`, with no library under
+# them.
 #
-# Bounded subset:
-#   * Block mappings and sequences, nested and indentation-sensitive.
-#     Supports sequence nested under mapping key at the same indentation level.
-#   * Flow mappings `{}` and flow sequences `[]`, including nested.
-#   * Plain, single-quoted (with `''` escape), and double-quoted (with standard C escapes) scalars.
-#   * Block scalars: literal `|` and folded `>` with clip (default), strip `-`, and keep `+` chomping.
-#   * Document separators `---` and terminators `...` supporting multi-document streams.
-#   * Anchors `&a` and aliases `*a` with cycle detection and merge keys (`<<`).
-#   * Tag resolution: YAML 1.2 Core Schema (null, bool, int, float, string).
-#     - Norway problem: `NO`, `no`, `off`, `n`, `y` resolve to String, not Boolean.
-#     - Integers: decimal (`0`, `[1-9][0-9]*`), hex (`0x...`), octal (`0o...`).
-#     - `0777` (no `0o`) and `1_000` (underscores) resolve to String per 1.2 Core Schema.
-#     - Sexagesimal (`22:22`) and version-like (`1.2.3`) resolve to String.
-#   * Security bounds:
-#     - Tabs forbidden as indentation (syntax error on leading tabs).
-#     - Cyclic anchor references refused with immediate error.
-#     - Billion-laughs / alias bomb protection: bounded to 1,000 alias expansions.
-#     - Maximum nesting depth: bounded to 128 levels.
-#   * Emitter: `YAML.dump(Any)` emits clean YAML 1.2 with minimal necessary quoting,
-#     guaranteeing round-trip fidelity.
+# What it reads:
+#   * Block mappings and block sequences, nested by indentation; a sequence
+#     may sit at the same indentation as the key it belongs to; `- key: v`
+#     opens a mapping inside a sequence entry.
+#   * Flow collections `[a, b]` and `{a: b}`, nested, across lines, with a
+#     trailing comma allowed and `[k: v]` as a one-pair mapping.
+#   * Plain scalars, folded across lines; single-quoted scalars with `''`;
+#     double-quoted scalars with every escape the format names (`\n`, `\t`,
+#     `\"`, `\\`, `\/`, `\0`, `\a`, `\b`, `\e`, `\f`, `\r`, `\v`, `\ `,
+#     `\N`, `\_`, `\L`, `\P`, `\xXX`, `\uXXXX`, `\UXXXXXXXX`, an escaped line
+#     break), both quoted styles folded across lines.
+#   * Block scalars `|` and `>` with `-`, `+` and an explicit indentation
+#     digit, chomped as the header says.
+#   * Anchors `&a`, aliases `*a`, merge keys `<<: *a` and `<<: [*a, *b]`.
+#     A key the mapping spells itself wins over a merged one, wherever it is
+#     spelled; among merged mappings the first wins.
+#   * The core-schema tags `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
+#     `!!seq` and `!!map`; any other tag is refused.
+#   * Streams: `%YAML` and `%TAG` directives are skipped, `---` opens a
+#     document and `...` ends one. `parse_all` answers every document;
+#     `parse` answers the first (nil for an empty stream) after checking the
+#     whole stream.
+#   * Plain scalars resolve as the 1.2 core schema says: `null`, `Null`,
+#     `NULL`, `~` and the empty scalar are nil; `true`/`false` in the three
+#     spellings are booleans; decimal, `0o` octal and `0x` hexadecimal are
+#     `Int64`; `1.5`, `.5`, `7.`, `1e3`, `1.0e+20`, `.inf`, `-.inf`, `.nan`
+#     are `Float64`; a decimal integer past the `Int64` range is read as a
+#     `Float64`; everything else is a `String`. So `yes`, `no`, `on`,
+#     `off`, `0777`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings
+#     here, where a 1.1 reader would make some of them booleans, octal
+#     numbers, or a timestamp. Keys resolve the same way: `1: one` has the
+#     `Int64` key 1, `true: x` the `Bool` key true.
 #
-# Boundaries and omissions:
-#   * Arbitrary user tags (`!type`) are preserved as raw strings rather than dispatched to custom constructors.
-#   * Complex block mapping keys (mapping or sequence as a key via `? key : val`) are omitted.
-#   * Directives (`%YAML 1.2`) at document head are skipped.
+# What it refuses, each with a sentence that says where:
+#   a tab in indentation, a control character, a quoted string that does
+#   not close, a flow collection that does not close, an unknown escape,
+#   a mapping entry or sequence entry at an indentation that belongs to
+#   nothing, text after a value on its line, a value whose text is not a
+#   node, a duplicate key (the second spelling of a key is a mistake, not
+#   an override), an alias to an anchor that is not defined or is still
+#   being built (a cycle), a merge whose value is not a mapping or a
+#   sequence of mappings, an explicit `?` key, an anchor on a key, a tag it
+#   does not know, and nesting past DEPTH_LIMIT levels.
+#
+# `YAML.parse?` answers nil for any of these; `YAML.parse` panics with the
+# sentence. `YAML.dump` writes a value back as block YAML that this parser
+# reads to an equal value: numbers, booleans and nil stay what they are as
+# values and as keys, and a string that would read as something else is
+# quoted. A collection cannot be written as a key.
+#
+# `Any` holds a document: `raw` is the union, `as_x`/`as_x?` are the
+# pairs, `[]`/`[]?`/`dig`/`dig?` walk it, `==` is structural and `hash`
+# agrees with it.
+#
+# The type tests on `Any#raw` are ordered with the reference types first.
+# A chain that tests `Nil` and `Bool` before `Array`/`Hash` over this union
+# sends an array down the hash arm today (a compiler defect being fixed);
+# every dispatch here goes through `Any#kind`, which is written in the
+# order that works, and nothing else in the file tests the union.
 
 module std/yaml
 
 import std/text
 
-struct Line
-  property line_number : Int32
-  property indent : Int32
-  property raw : String
-  property text : String
-  property has_tab : Bool
-  property blank : Bool
-  property comment : Bool
-
-  def initialize(@line_number : Int32, @indent : Int32, @raw : String, @text : String, @has_tab : Bool, @blank : Bool, @comment : Bool)
-  end
-end
-
+# The value a document holds.
 pub struct Any
   alias Type = Nil | Bool | Int64 | Float64 | String | Array(Any) | Hash(Any, Any)
+
+  KIND_NIL    = 0
+  KIND_BOOL   = 1
+  KIND_INT    = 2
+  KIND_FLOAT  = 3
+  KIND_STRING = 4
+  KIND_ARRAY  = 5
+  KIND_HASH   = 6
 
   getter raw : Type
 
@@ -56,105 +87,133 @@ pub struct Any
     @raw = value.to_i64
   end
 
+  # Which member of the union `raw` is, as one of the KIND_ constants.
+  # Reference types are tested first on purpose (see the header).
+  def kind : Int32
+    r = @raw
+    if r.is_a?(Array(Any))
+      KIND_ARRAY
+    elsif r.is_a?(Hash(Any, Any))
+      KIND_HASH
+    elsif r.is_a?(String)
+      KIND_STRING
+    elsif r.is_a?(Int64)
+      KIND_INT
+    elsif r.is_a?(Float64)
+      KIND_FLOAT
+    elsif r.is_a?(Bool)
+      KIND_BOOL
+    else
+      KIND_NIL
+    end
+  end
+
+  # The name of the kind, for the sentences below.
+  def kind_name : String
+    k = kind
+    if k == KIND_ARRAY
+      "a sequence"
+    elsif k == KIND_HASH
+      "a mapping"
+    elsif k == KIND_STRING
+      "a string"
+    elsif k == KIND_INT
+      "an integer"
+    elsif k == KIND_FLOAT
+      "a float"
+    elsif k == KIND_BOOL
+      "a boolean"
+    else
+      "null"
+    end
+  end
+
   def null? : Bool
-    @raw.is_a?(Nil)
+    kind == KIND_NIL
   end
 
   def as_nil : Nil
-    @raw.as(Nil)
+    raise "expected null, not #{kind_name}" unless null?
+    nil
   end
 
-  def as_nil? : Nil?
-    null? ? nil : nil
+  def as_nil? : Nil
+    nil
   end
 
   def as_bool : Bool
+    raise "expected a boolean, not #{kind_name}" unless kind == KIND_BOOL
     @raw.as(Bool)
   end
 
   def as_bool? : Bool?
-    @raw.is_a?(Bool) ? @raw.as(Bool) : nil
+    kind == KIND_BOOL ? @raw.as(Bool) : nil
   end
 
   def as_i : Int64
+    raise "expected an integer, not #{kind_name}" unless kind == KIND_INT
     @raw.as(Int64)
   end
 
   def as_i? : Int64?
-    @raw.is_a?(Int64) ? @raw.as(Int64) : nil
+    kind == KIND_INT ? @raw.as(Int64) : nil
   end
 
-  def as_i32 : Int32
-    @raw.as(Int64).to_i32
-  end
-
-  def as_i32? : Int32?
-    @raw.is_a?(Int64) ? @raw.as(Int64).to_i32 : nil
-  end
-
+  # A float, or an integer widened to one.
   def as_f : Float64
-    if @raw.is_a?(Float64)
-      @raw.as(Float64)
-    elsif @raw.is_a?(Int64)
-      @raw.as(Int64).to_f64
-    else
-      @raw.as(Float64)
-    end
+    k = kind
+    return @raw.as(Float64) if k == KIND_FLOAT
+    return @raw.as(Int64).to_f64 if k == KIND_INT
+    raise "expected a float, not #{kind_name}"
   end
 
   def as_f? : Float64?
-    if @raw.is_a?(Float64)
-      @raw.as(Float64)
-    elsif @raw.is_a?(Int64)
-      @raw.as(Int64).to_f64
-    else
-      nil
-    end
+    k = kind
+    return @raw.as(Float64) if k == KIND_FLOAT
+    return @raw.as(Int64).to_f64 if k == KIND_INT
+    nil
   end
 
   def as_s : String
+    raise "expected a string, not #{kind_name}" unless kind == KIND_STRING
     @raw.as(String)
   end
 
   def as_s? : String?
-    @raw.is_a?(String) ? @raw.as(String) : nil
+    kind == KIND_STRING ? @raw.as(String) : nil
   end
 
   def as_a : Array(Any)
+    raise "expected a sequence, not #{kind_name}" unless kind == KIND_ARRAY
     @raw.as(Array(Any))
   end
 
   def as_a? : Array(Any)?
-    @raw.is_a?(Array(Any)) ? @raw.as(Array(Any)) : nil
+    kind == KIND_ARRAY ? @raw.as(Array(Any)) : nil
   end
 
   def as_h : Hash(Any, Any)
+    raise "expected a mapping, not #{kind_name}" unless kind == KIND_HASH
     @raw.as(Hash(Any, Any))
   end
 
   def as_h? : Hash(Any, Any)?
-    @raw.is_a?(Hash(Any, Any)) ? @raw.as(Hash(Any, Any)) : nil
+    kind == KIND_HASH ? @raw.as(Hash(Any, Any)) : nil
   end
 
-  def [](key : String) : Any
-    h = as_h
-    k = Any.new(key)
-    val = h[k]?
-    return val unless val.nil?
-    raise "YAML: key not found: #{key}"
-  end
-
-  def []?(key : String) : Any?
-    h = as_h?
-    return nil if h.nil?
-    h[Any.new(key)]?
+  # Elements of a sequence, pairs of a mapping, characters of a string.
+  def size : Int32
+    k = kind
+    return @raw.as(Array(Any)).size if k == KIND_ARRAY
+    return @raw.as(Hash(Any, Any)).size if k == KIND_HASH
+    return @raw.as(String).size if k == KIND_STRING
+    raise "size of #{kind_name}"
   end
 
   def [](key : Any) : Any
     h = as_h
-    val = h[key]?
-    return val unless val.nil?
-    raise "YAML: key not found"
+    raise "no such key #{key.inspect}" unless h.has_key?(key)
+    h[key]
   end
 
   def []?(key : Any) : Any?
@@ -163,2679 +222,1824 @@ pub struct Any
     h[key]?
   end
 
+  def [](key : String) : Any
+    self[Any.new(key)]
+  end
+
+  def []?(key : String) : Any?
+    self[Any.new(key)]?
+  end
+
   def [](index : Int32) : Any
     as_a[index]
   end
 
   def []?(index : Int32) : Any?
-    arr = as_a?
-    return nil if arr.nil?
-    arr[index]?
+    a = as_a?
+    return nil if a.nil?
+    a[index]?
   end
 
-  def size : Int32
-    if @raw.is_a?(Array(Any))
-      @raw.as(Array(Any)).size
-    elsif @raw.is_a?(Hash(Any, Any))
-      @raw.as(Hash(Any, Any)).size
-    elsif @raw.is_a?(String)
-      @raw.as(String).size
+  def dig?(key : String | Int32) : Any?
+    step?(key)
+  end
+
+  def dig?(key : String | Int32, *rest : String | Int32) : Any?
+    v = step?(key)
+    return nil if v.nil?
+    v.dig?(*rest)
+  end
+
+  def dig(key : String | Int32) : Any
+    step(key)
+  end
+
+  def dig(key : String | Int32, *rest : String | Int32) : Any
+    step(key).dig(*rest)
+  end
+
+  private def step?(key : String | Int32) : Any?
+    if key.is_a?(String)
+      self[key]?
     else
-      0
+      self[key]?
     end
   end
 
-  def empty? : Bool
-    size == 0
-  end
-
-  def hash : Int32
-    case r = @raw
-    when Nil
-      0
-    when Bool
-      r ? 1 : 2
-    when Int64
-      r.to_i32
-    when Float64
-      r.to_i.to_i32
-    when String
-      r.hash
+  private def step(key : String | Int32) : Any
+    if key.is_a?(String)
+      self[key]
     else
-      42
+      self[key]
     end
   end
 
+  # Structural: same kind, same value; a mapping equals a mapping with the
+  # same pairs in any order. `1` and `1.0` are different values.
   def ==(other : Any) : Bool
-    @raw == other.raw
+    k = kind
+    return false unless k == other.kind
+    if k == KIND_ARRAY
+      @raw.as(Array(Any)) == other.raw.as(Array(Any))
+    elsif k == KIND_HASH
+      a = @raw.as(Hash(Any, Any))
+      b = other.raw.as(Hash(Any, Any))
+      return false unless a.size == b.size
+      a.each do |key, value|
+        found = b[key]?
+        return false if found.nil?
+        return false unless found == value
+      end
+      true
+    elsif k == KIND_STRING
+      @raw.as(String) == other.raw.as(String)
+    elsif k == KIND_INT
+      @raw.as(Int64) == other.raw.as(Int64)
+    elsif k == KIND_FLOAT
+      @raw.as(Float64) == other.raw.as(Float64)
+    elsif k == KIND_BOOL
+      @raw.as(Bool) == other.raw.as(Bool)
+    else
+      true
+    end
   end
 
-  def to_s : String
-    case r = @raw
-    when Nil
-      "null"
-    when Bool
-      r ? "true" : "false"
-    when Int64
-      r.to_s
-    when Float64
-      if r != r
-        ".nan"
-      elsif r > 1e308 && r == r * 2.0
-        ".inf"
-      elsif r < -1e308 && r == r * 2.0
-        "-.inf"
-      else
-        r.to_s
-      end
-    when String
-      r
-    when Array(Any)
-      "[" + r.map { |item| item.to_s }.join(", ") + "]"
-    when Hash(Any, Any)
-      pairs = [] of String
-      r.each do |k, v|
-        pairs << "#{k.to_s}: #{v.to_s}"
-      end
-      "{" + pairs.join(", ") + "}"
+  def !=(other : Any) : Bool
+    !(self == other)
+  end
+
+  # Agrees with `==`: the same kind and value hash the same, a mapping's
+  # hash does not depend on its order, and `0.0`/`-0.0` share one.
+  def hash : Int32
+    k = kind
+    if k == KIND_ARRAY
+      value = 7
+      @raw.as(Array(Any)).each { |item| value = (value &* 31) &+ item.hash }
+      value
+    elsif k == KIND_HASH
+      value = 11
+      @raw.as(Hash(Any, Any)).each { |key, item| value = value &+ ((key.hash &* 31) &+ item.hash) }
+      value
+    elsif k == KIND_STRING
+      @raw.as(String).hash
+    elsif k == KIND_INT
+      v = @raw.as(Int64)
+      ((v ^ (v >> 32)) & 0x7FFFFFFF_i64).to_i32
+    elsif k == KIND_FLOAT
+      f = @raw.as(Float64)
+      return 3 if f == 0.0
+      bits = IyiFloatText.bits_of(f)
+      ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
+    elsif k == KIND_BOOL
+      @raw.as(Bool) ? 1 : 2
     else
+      0
+    end
+  end
+
+  # A string as itself, a number or boolean as written, nil as nothing,
+  # a collection the way the prelude prints an array or a hash.
+  def to_s : String
+    k = kind
+    if k == KIND_STRING
+      @raw.as(String)
+    elsif k == KIND_NIL
       ""
+    else
+      inspect
     end
   end
 
   def inspect : String
-    to_s
+    k = kind
+    if k == KIND_ARRAY
+      parts = [] of String
+      @raw.as(Array(Any)).each { |item| parts << item.inspect }
+      "[" + parts.join(", ") + "]"
+    elsif k == KIND_HASH
+      parts = [] of String
+      @raw.as(Hash(Any, Any)).each { |key, item| parts << key.inspect + " => " + item.inspect }
+      "{" + parts.join(", ") + "}"
+    elsif k == KIND_STRING
+      @raw.as(String).inspect
+    elsif k == KIND_INT
+      @raw.as(Int64).to_s
+    elsif k == KIND_FLOAT
+      @raw.as(Float64).to_s
+    elsif k == KIND_BOOL
+      @raw.as(Bool) ? "true" : "false"
+    else
+      "nil"
+    end
   end
 end
 
-pub struct YAML
-  def self.node_weight(val : Any) : Int32
-    case r = val.raw
-    when Array(Any)
-      total = 1
-      r.each do |item|
-        total += node_weight(item)
-        return 10001 if total > 10000
-      end
-      total
-    when Hash(Any, Any)
-      total = 1
-      r.each do |k, v|
-        total += node_weight(k) + node_weight(v)
-        return 10001 if total > 10000
-      end
-      total
+# A growable byte buffer for the strings the parser and the emitter build.
+class ByteBuffer
+  @bytes : Pointer(UInt8)
+  @capacity : Int32
+  @size : Int32
+
+  def initialize
+    @capacity = 64
+    @bytes = Pointer(UInt8).malloc(64_u64)
+    @size = 0
+  end
+
+  def size : Int32
+    @size
+  end
+
+  def clear : Nil
+    @size = 0
+  end
+
+  def <<(byte : UInt8) : Nil
+    room(@size + 1)
+    @bytes[@size] = byte
+    @size = @size + 1
+  end
+
+  def <<(text : String) : Nil
+    count = text.bytesize
+    return if count == 0
+    room(@size + count)
+    (@bytes + @size).copy_from(text.to_unsafe, count)
+    @size = @size + count
+  end
+
+  # `count` bytes from `source`, as they are.
+  def append(source : Pointer(UInt8), count : Int32) : Nil
+    return if count <= 0
+    room(@size + count)
+    (@bytes + @size).copy_from(source, count)
+    @size = @size + count
+  end
+
+  def spaces(count : Int32) : Nil
+    while count > 0
+      self << 32_u8
+      count = count - 1
+    end
+  end
+
+  def codepoint(point : Int32) : Nil
+    if point < 0x80
+      self << point.to_u8
+    elsif point < 0x800
+      self << (0xC0 | (point >> 6)).to_u8
+      self << (0x80 | (point & 0x3F)).to_u8
+    elsif point < 0x10000
+      self << (0xE0 | (point >> 12)).to_u8
+      self << (0x80 | ((point >> 6) & 0x3F)).to_u8
+      self << (0x80 | (point & 0x3F)).to_u8
     else
-      1
+      self << (0xF0 | (point >> 18)).to_u8
+      self << (0x80 | ((point >> 12) & 0x3F)).to_u8
+      self << (0x80 | ((point >> 6) & 0x3F)).to_u8
+      self << (0x80 | (point & 0x3F)).to_u8
     end
   end
 
-  def self.encode_utf8(cp : Int32) : String
-    if cp < 0x80
-      String.new(1) { |b| b[0] = cp.to_u8 }
-    elsif cp < 0x800
-      String.new(2) do |b|
-        b[0] = (0xC0 | (cp >> 6)).to_u8
-        b[1] = (0x80 | (cp & 0x3F)).to_u8
-      end
-    elsif cp < 0x10000
-      String.new(3) do |b|
-        b[0] = (0xE0 | (cp >> 12)).to_u8
-        b[1] = (0x80 | ((cp >> 6) & 0x3F)).to_u8
-        b[2] = (0x80 | (cp & 0x3F)).to_u8
-      end
-    elsif cp <= 0x10FFFF
-      String.new(4) do |b|
-        b[0] = (0xF0 | (cp >> 18)).to_u8
-        b[1] = (0x80 | ((cp >> 12) & 0x3F)).to_u8
-        b[2] = (0x80 | ((cp >> 6) & 0x3F)).to_u8
-        b[3] = (0x80 | (cp & 0x3F)).to_u8
-      end
-    else
-      "?"
-    end
+  def to_s : String
+    count = @size
+    source = @bytes
+    String.new(count) { |target| target.copy_from(source, count) }
   end
 
-  def self.is_hex_int?(s : String) : Bool
-    return false if s.empty?
-    idx = 0
-    if s[0] == '+' || s[0] == '-'
-      idx += 1
+  private def room(needed : Int32) : Nil
+    return if needed <= @capacity
+    while @capacity < needed
+      @capacity = @capacity * 2
     end
-    return false if s.size - idx < 3
-    return false unless s[idx] == '0' && (s[idx + 1] == 'x' || s[idx + 1] == 'X')
-    idx += 2
-    while idx < s.size
-      c = s[idx]
-      is_hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-      return false unless is_hex
-      idx += 1
-    end
-    true
-  end
-
-  def self.parse_hex_int(s : String) : Int64?
-    idx = 0
-    neg = false
-    if s[0] == '-'
-      neg = true
-      idx += 1
-    elsif s[0] == '+'
-      idx += 1
-    end
-    idx += 2
-    hex_part = s[idx, s.size - idx]
-    val = hex_part.to_i64?(16)
-    return nil if val.nil?
-    neg ? (0_i64 - val) : val
-  end
-
-  def self.is_oct_int?(s : String) : Bool
-    return false if s.empty?
-    idx = 0
-    if s[0] == '+' || s[0] == '-'
-      idx += 1
-    end
-    return false if s.size - idx < 3
-    return false unless s[idx] == '0' && (s[idx + 1] == 'o' || s[idx + 1] == 'O')
-    idx += 2
-    while idx < s.size
-      c = s[idx]
-      return false unless c >= '0' && c <= '7'
-      idx += 1
-    end
-    true
-  end
-
-  def self.parse_oct_int(s : String) : Int64?
-    idx = 0
-    neg = false
-    if s[0] == '-'
-      neg = true
-      idx += 1
-    elsif s[0] == '+'
-      idx += 1
-    end
-    idx += 2
-    oct_part = s[idx, s.size - idx]
-    val = oct_part.to_i64?(8)
-    return nil if val.nil?
-    neg ? (0_i64 - val) : val
-  end
-
-  def self.is_dec_int?(s : String) : Bool
-    return false if s.empty?
-    idx = 0
-    if s[0] == '+' || s[0] == '-'
-      idx += 1
-    end
-    rem_size = s.size - idx
-    return false if rem_size == 0
-    if rem_size == 1
-      return s[idx] == '0' || (s[idx] >= '1' && s[idx] <= '9')
-    end
-    return false unless s[idx] >= '1' && s[idx] <= '9'
-    idx += 1
-    while idx < s.size
-      return false unless s[idx] >= '0' && s[idx] <= '9'
-      idx += 1
-    end
-    true
-  end
-
-  def self.is_valid_float?(s : String) : Bool
-    return false if s.empty?
-    idx = 0
-    if s[0] == '+' || s[0] == '-'
-      idx += 1
-    end
-    rem_size = s.size - idx
-    return false if rem_size == 0
-
-    dot_count = 0
-    e_count = 0
-    has_digits = false
-
-    while idx < s.size
-      c = s[idx]
-      if c >= '0' && c <= '9'
-        has_digits = true
-      elsif c == '.'
-        dot_count += 1
-        return false if dot_count > 1
-        return false if e_count > 0
-      elsif c == 'e' || c == 'E'
-        e_count += 1
-        return false if e_count > 1
-        return false unless has_digits
-        if idx + 1 < s.size && (s[idx + 1] == '+' || s[idx + 1] == '-')
-          idx += 1
-        end
-      else
-        return false
-      end
-      idx += 1
-    end
-
-    has_digits && (dot_count == 1 || e_count == 1)
-  end
-
-  def self.resolve_plain_scalar(s : String) : Any::Type
-    return nil if s.empty?
-
-    case s
-    when "~", "null", "Null", "NULL"
-      return nil
-    when "true", "True", "TRUE"
-      return true
-    when "false", "False", "FALSE"
-      return false
-    when ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF"
-      return 1.0 / 0.0
-    when "-.inf", "-.Inf", "-.INF"
-      return -1.0 / 0.0
-    when ".nan", ".NaN", ".NAN"
-      return 0.0 / 0.0
-    end
-
-    if is_hex_int?(s)
-      val = parse_hex_int(s)
-      return val unless val.nil?
-    end
-
-    if is_oct_int?(s)
-      val = parse_oct_int(s)
-      return val unless val.nil?
-    end
-
-    if is_dec_int?(s)
-      val = s.to_i64?
-      return val unless val.nil?
-    end
-
-    if is_valid_float?(s)
-      fval = s.to_f?
-      return fval unless fval.nil?
-    end
-
-    s
-  end
-
-  def self.unquote_single(s : String) : String
-    return "" if s.size < 2
-    content = s[1, s.size - 2]
-    result = ""
-    idx = 0
-    while idx < content.size
-      if content[idx] == '\'' && idx + 1 < content.size && content[idx + 1] == '\''
-        result = result + "'"
-        idx += 2
-      else
-        result = result + content[idx, 1]
-        idx += 1
-      end
-    end
-    result
-  end
-
-  def self.unquote_double(s : String) : String
-    return "" if s.size < 2
-    content = s[1, s.size - 2]
-    result = ""
-    idx = 0
-    sz = content.size
-
-    while idx < sz
-      c = content[idx]
-      if c == '\\' && idx + 1 < sz
-        next_c = content[idx + 1]
-        case next_c
-        when '0'
-          result = result + "\0"
-          idx += 2
-        when 'a'
-          result = result + 7.chr.to_s
-          idx += 2
-        when 'b'
-          result = result + "\b"
-          idx += 2
-        when 't'
-          result = result + "\t"
-          idx += 2
-        when 'n'
-          result = result + "\n"
-          idx += 2
-        when 'v'
-          result = result + 11.chr.to_s
-          idx += 2
-        when 'f'
-          result = result + "\f"
-          idx += 2
-        when 'r'
-          result = result + "\r"
-          idx += 2
-        when 'e'
-          result = result + 27.chr.to_s
-          idx += 2
-        when '"'
-          result = result + "\""
-          idx += 2
-        when '\\'
-          result = result + "\\"
-          idx += 2
-        when '/'
-          result = result + "/"
-          idx += 2
-        when ' '
-          result = result + " "
-          idx += 2
-        when 'x'
-          if idx + 3 < sz
-            hex_str = content[idx + 2, 2]
-            cp = hex_str.to_i?(16)
-            if cp
-              result = result + encode_utf8(cp)
-              idx += 4
-            else
-              result = result + "\\x"
-              idx += 2
-            end
-          else
-            result = result + "\\x"
-            idx += 2
-          end
-        when 'u'
-          if idx + 5 < sz
-            hex_str = content[idx + 2, 4]
-            cp = hex_str.to_i?(16)
-            if cp
-              result = result + encode_utf8(cp)
-              idx += 6
-            else
-              result = result + "\\u"
-              idx += 2
-            end
-          else
-            result = result + "\\u"
-            idx += 2
-          end
-        when 'U'
-          if idx + 9 < sz
-            hex_str = content[idx + 2, 8]
-            cp = hex_str.to_i?(16)
-            if cp
-              result = result + encode_utf8(cp)
-              idx += 10
-            else
-              result = result + "\\U"
-              idx += 2
-            end
-          else
-            result = result + "\\U"
-            idx += 2
-          end
-        else
-          result = result + content[idx, 2]
-          idx += 2
-        end
-      else
-        result = result + content[idx, 1]
-        idx += 1
-      end
-    end
-
-    result
-  end
-
-  def self.strip_trailing_comment(s : String) : String
-    in_single = false
-    in_double = false
-    idx = 0
-    sz = s.size
-
-    while idx < sz
-      c = s[idx]
-      if c == '\'' && !in_double
-        in_single = !in_single
-      elsif c == '"' && !in_single
-        escaped = false
-        if idx > 0 && s[idx - 1] == '\\'
-          bs_count = 0
-          back_idx = idx - 1
-          while back_idx >= 0 && s[back_idx] == '\\'
-            bs_count += 1
-            back_idx -= 1
-          end
-          escaped = (bs_count % 2) != 0
-        end
-        in_double = !in_double unless escaped
-      elsif c == '#' && !in_single && !in_double
-        if idx == 0 || s[idx - 1] == ' ' || s[idx - 1] == '\t'
-          return s[0, idx].rstrip
-        end
-      end
-      idx += 1
-    end
-
-    s.rstrip
-  end
-
-  def self.find_mapping_colon(s : String) : Int32?
-    in_single = false
-    in_double = false
-    bracket_depth = 0
-    brace_depth = 0
-    idx = 0
-    sz = s.size
-
-    while idx < sz
-      c = s[idx]
-      if c == '\'' && !in_double
-        in_single = !in_single
-      elsif c == '"' && !in_single
-        escaped = false
-        if idx > 0 && s[idx - 1] == '\\'
-          bs_count = 0
-          back_idx = idx - 1
-          while back_idx >= 0 && s[back_idx] == '\\'
-            bs_count += 1
-            back_idx -= 1
-          end
-          escaped = (bs_count % 2) != 0
-        end
-        in_double = !in_double unless escaped
-      elsif !in_single && !in_double
-        if c == '['
-          bracket_depth += 1
-        elsif c == ']'
-          bracket_depth -= 1 if bracket_depth > 0
-        elsif c == '{'
-          brace_depth += 1
-        elsif c == '}'
-          brace_depth -= 1 if brace_depth > 0
-        elsif c == ':' && bracket_depth == 0 && brace_depth == 0
-          if idx == sz - 1 || s[idx + 1] == ' ' || s[idx + 1] == '\t'
-            return idx
-          end
-        end
-      end
-      idx += 1
-    end
-
-    nil
-  end
-
-  def self.split_lines(input : String) : Array(Line)
-    lines = [] of Line
-    line_num = 1
-    start_idx = 0
-    len = input.size
-
-    while start_idx <= len
-      end_idx = start_idx
-      while end_idx < len && input[end_idx] != '\n' && input[end_idx] != '\r'
-        end_idx += 1
-      end
-
-      raw_line = input[start_idx, end_idx - start_idx]
-
-      if end_idx < len && input[end_idx] == '\r' && end_idx + 1 < len && input[end_idx + 1] == '\n'
-        start_idx = end_idx + 2
-      elsif end_idx < len
-        start_idx = end_idx + 1
-      else
-        start_idx = len + 1
-      end
-
-      indent = 0
-      has_tab = false
-      blank = true
-      comment = false
-      idx = 0
-
-      while idx < raw_line.size
-        c = raw_line[idx]
-        if c == ' '
-          indent += 1 if blank
-        elsif c == '\t'
-          has_tab = true if blank
-          indent += 1 if blank
-        elsif c == '#' && blank
-          blank = false
-          comment = true
-          break
-        else
-          blank = false
-          break
-        end
-        idx += 1
-      end
-      text = blank ? "" : raw_line[indent, raw_line.size - indent]
-      lines << Line.new(line_num, indent, raw_line, text, has_tab, blank, comment)
-      line_num += 1
-
-      break if start_idx > len
-    end
-
-    lines
-  end
-
-  def self.parse(input : String, max_aliases : Int32 = 1000, max_depth : Int32 = 128) : Any
-    lines = split_lines(input)
-    parser = Parser.new(lines, max_aliases: max_aliases, max_depth: max_depth)
-    docs = parser.parse_all
-    docs.empty? ? Any.new(nil) : docs[0]
-  end
-
-  def self.parse_all(input : String, max_aliases : Int32 = 1000, max_depth : Int32 = 128) : Array(Any)
-    lines = split_lines(input)
-    parser = Parser.new(lines, max_aliases: max_aliases, max_depth: max_depth)
-    parser.parse_all
-  end
-
-  def self.dump(any : Any) : String
-    Emitter.dump(any)
-  end
-
-  def self.dump(hash : Hash(String, Any)) : String
-    h = Hash(Any, Any).new
-    hash.each { |k, v| h[Any.new(k)] = v }
-    Emitter.dump(Any.new(h))
+    @bytes = @bytes.realloc(@capacity.to_u64)
   end
 end
 
-class FlowParser
-  @s : String
-  @pos : Int32
+# The core schema's reading of a plain scalar, shared by the parser (to
+# resolve) and the emitter (to know what must be quoted).
+module Scalar
+  def self.resolve(text : String) : Any
+    size = text.bytesize
+    return Any.new(nil) if size == 0
+    bytes = text.to_unsafe
+    first = bytes[0]
+    if first == 126_u8 # ~
+      return Any.new(nil) if size == 1
+    elsif first == 110_u8 || first == 78_u8 # n N
+      return Any.new(nil) if text == "null" || text == "Null" || text == "NULL"
+    elsif first == 116_u8 || first == 84_u8 # t T
+      return Any.new(true) if text == "true" || text == "True" || text == "TRUE"
+    elsif first == 102_u8 || first == 70_u8 # f F
+      return Any.new(false) if text == "false" || text == "False" || text == "FALSE"
+    end
+
+    if first == 48_u8 && size > 2 # 0x.. 0o..
+      if bytes[1] == 120_u8
+        v = text[2, size - 2].to_i64?(16)
+        return Any.new(v) if !v.nil? && hex_digits?(bytes + 2, size - 2)
+      elsif bytes[1] == 111_u8
+        v = text[2, size - 2].to_i64?(8)
+        return Any.new(v) if !v.nil? && octal_digits?(bytes + 2, size - 2)
+      end
+    end
+
+    at = 0
+    at = 1 if first == 45_u8 || first == 43_u8 # - +
+    return Any.new(text) if at >= size
+
+    if bytes[at] == 46_u8 # .
+      rest = text[at, size - at]
+      if rest == ".inf" || rest == ".Inf" || rest == ".INF"
+        return Any.new(first == 45_u8 ? "-Infinity".to_f : "Infinity".to_f)
+      end
+      return Any.new("NaN".to_f) if at == 0 && (rest == ".nan" || rest == ".NaN" || rest == ".NAN")
+    end
+
+    if decimal_digits?(bytes + at, size - at)
+      v = text.to_i64?(10)
+      return Any.new(v) unless v.nil?
+      return Any.new(text.to_f)
+    end
+    return Any.new(text.to_f) if float_text?(bytes + at, size - at)
+    Any.new(text)
+  end
+
+  def self.decimal_digits?(bytes : Pointer(UInt8), count : Int32) : Bool
+    return false if count == 0
+    i = 0
+    while i < count
+      return false if bytes[i] < 48_u8 || bytes[i] > 57_u8
+      i = i + 1
+    end
+    true
+  end
+
+  def self.octal_digits?(bytes : Pointer(UInt8), count : Int32) : Bool
+    return false if count == 0
+    i = 0
+    while i < count
+      return false if bytes[i] < 48_u8 || bytes[i] > 55_u8
+      i = i + 1
+    end
+    true
+  end
+
+  def self.hex_digits?(bytes : Pointer(UInt8), count : Int32) : Bool
+    return false if count == 0
+    i = 0
+    while i < count
+      b = bytes[i]
+      digit = (b >= 48_u8 && b <= 57_u8) || (b >= 97_u8 && b <= 102_u8) || (b >= 65_u8 && b <= 70_u8)
+      return false unless digit
+      i = i + 1
+    end
+    true
+  end
+
+  # `.5`, `7.`, `1.5`, `1e3`, `1.5E-3`: digits with at most one point,
+  # at least one digit, an optional exponent with at least one digit.
+  def self.float_text?(bytes : Pointer(UInt8), count : Int32) : Bool
+    i = 0
+    digits = 0
+    while i < count && bytes[i] >= 48_u8 && bytes[i] <= 57_u8
+      i = i + 1
+      digits = digits + 1
+    end
+    if i < count && bytes[i] == 46_u8
+      i = i + 1
+      while i < count && bytes[i] >= 48_u8 && bytes[i] <= 57_u8
+        i = i + 1
+        digits = digits + 1
+      end
+    end
+    return false if digits == 0
+    return true if i == count
+    return false unless bytes[i] == 101_u8 || bytes[i] == 69_u8
+    i = i + 1
+    i = i + 1 if i < count && (bytes[i] == 45_u8 || bytes[i] == 43_u8)
+    return false if i >= count
+    while i < count
+      return false if bytes[i] < 48_u8 || bytes[i] > 57_u8
+      i = i + 1
+    end
+    true
+  end
+end
+
+# Reads one stream. Every failure is recorded once in `@error` and every
+# loop returns as soon as one is recorded; nothing is raised inside.
+pub class Parser
+  DEPTH_LIMIT = 256
+
+  @bytes : Pointer(UInt8)
+  @size : Int32
+  # Per line: where it starts, where its text ends (before the line
+  # break), where its content starts (after the indentation; moved past a
+  # `- ` when a sequence entry is entered), whether a tab was in the
+  # indentation.
+  @starts : Array(Int32)
+  @ends : Array(Int32)
+  @heads : Array(Int32)
+  @tabbed : Array(Bool)
+  @line : Int32
+  @error : String?
   @anchors : Hash(String, Any)
-  @resolving_anchors : Array(String)
-  @alias_count : Int32
-  @max_aliases : Int32
+  @open_anchors : Array(String)
   @depth : Int32
-  @max_depth : Int32
+  @buffer : ByteBuffer
 
-  def initialize(@s : String, @anchors : Hash(String, Any), @resolving_anchors : Array(String), @alias_count : Int32, @max_aliases : Int32, @depth : Int32, @max_depth : Int32)
-    @pos = 0
-  end
-
-  def alias_count : Int32
-    @alias_count
-  end
-
-  def parse : Any
-    skip_whitespace
-    return Any.new(nil) if @pos >= @s.size
-    parse_value
-  end
-
-  private def skip_whitespace : Nil
-    while @pos < @s.size
-      c = @s[@pos]
-      if c == ' ' || c == '\t' || c == '\r' || c == '\n'
-        @pos += 1
-      elsif c == '#'
-        while @pos < @s.size && @s[@pos] != '\n'
-          @pos += 1
-        end
-      else
-        break
-      end
-    end
-  end
-
-  private def parse_value : Any
-    skip_whitespace
-    return Any.new(nil) if @pos >= @s.size
-
-    if @s[@pos] == '&'
-      @pos += 1
-      anchor_name = ""
-      while @pos < @s.size && @s[@pos] != ' ' && @s[@pos] != '\t' && @s[@pos] != ',' && @s[@pos] != ']' && @s[@pos] != '}'
-        anchor_name = anchor_name + @s[@pos, 1]
-        @pos += 1
-      end
-      if @resolving_anchors.includes?(anchor_name)
-        raise "YAML: cyclic anchor reference '&#{anchor_name}' detected"
-      end
-      @resolving_anchors << anchor_name
-      val = parse_value
-      @resolving_anchors.unsafe_set_size(@resolving_anchors.size - 1)
-      @anchors[anchor_name] = val
-      return val
-    end
-
-    if @s[@pos] == '*'
-      @pos += 1
-      alias_name = ""
-      while @pos < @s.size && @s[@pos] != ' ' && @s[@pos] != '\t' && @s[@pos] != ',' && @s[@pos] != ']' && @s[@pos] != '}'
-        alias_name = alias_name + @s[@pos, 1]
-        @pos += 1
-      end
-      if @resolving_anchors.includes?(alias_name)
-        raise "YAML: cyclic anchor reference '*#{alias_name}' detected"
-      end
-      val = @anchors[alias_name]?
-      if val.nil?
-        raise "YAML: unknown anchor '*#{alias_name}'"
-      end
-      weight = YAML.node_weight(val)
-      @alias_count += weight
-      if @alias_count > @max_aliases
-        raise "YAML: alias expansion limit exceeded (#{@max_aliases})"
-      end
-      return val
-    end
-
-    c = @s[@pos]
-    if c == '['
-      parse_sequence
-    elsif c == '{'
-      parse_mapping
-    elsif c == '\''
-      parse_single_quote
-    elsif c == '"'
-      parse_double_quote
-    else
-      parse_plain
-    end
-  end
-
-  private def parse_single_quote : Any
-    start = @pos
-    @pos += 1
-    while @pos < @s.size
-      if @s[@pos] == '\''
-        if @pos + 1 < @s.size && @s[@pos + 1] == '\''
-          @pos += 2
-        else
-          @pos += 1
-          break
-        end
-      else
-        @pos += 1
-      end
-    end
-    raw_str = @s[start, @pos - start]
-    Any.new(YAML.unquote_single(raw_str))
-  end
-
-  private def parse_double_quote : Any
-    start = @pos
-    @pos += 1
-    while @pos < @s.size
-      if @s[@pos] == '\\'
-        @pos += 2
-      elsif @s[@pos] == '"'
-        @pos += 1
-        break
-      else
-        @pos += 1
-      end
-    end
-    raw_str = @s[start, @pos - start]
-    Any.new(YAML.unquote_double(raw_str))
-  end
-
-  private def parse_sequence : Any
-    @depth += 1
-    if @depth > @max_depth
-      raise "YAML: maximum depth exceeded (#{@max_depth})"
-    end
-    @pos += 1
-    items = [] of Any
-
-    loop do
-      skip_whitespace
-      break if @pos >= @s.size
-      if @s[@pos] == ']'
-        @pos += 1
-        break
-      end
-
-      items << parse_value
-      skip_whitespace
-      break if @pos >= @s.size
-
-      if @s[@pos] == ','
-        @pos += 1
-        skip_whitespace
-        if @pos < @s.size && @s[@pos] == ']'
-          @pos += 1
-          break
-        end
-      elsif @s[@pos] == ']'
-        @pos += 1
-        break
-      else
-        raise "YAML: expected ',' or ']' in flow sequence at position #{@pos}"
-      end
-    end
-
-    @depth -= 1
-    Any.new(items)
-  end
-
-  private def parse_mapping : Any
-    @depth += 1
-    if @depth > @max_depth
-      raise "YAML: maximum depth exceeded (#{@max_depth})"
-    end
-    @pos += 1
-    map = Hash(Any, Any).new
-
-    loop do
-      skip_whitespace
-      break if @pos >= @s.size
-      if @s[@pos] == '}'
-        @pos += 1
-        break
-      end
-
-      key = parse_value
-      skip_whitespace
-      if @pos >= @s.size || @s[@pos] != ':'
-        raise "YAML: expected ':' in flow mapping at position #{@pos}"
-      end
-      @pos += 1
-      val = parse_value
-
-      if key.raw == "<<"
-        if val.as_h?
-          val.as_h.each { |k, v| map[k] = v unless map.has_key?(k) }
-        elsif val.as_a?
-          val.as_a.each do |elem|
-            if elem.as_h?
-              elem.as_h.each { |k, v| map[k] = v unless map.has_key?(k) }
-            end
-          end
-        else
-          map[key] = val
-        end
-      else
-        map[key] = val
-      end
-
-      skip_whitespace
-      break if @pos >= @s.size
-      if @s[@pos] == ','
-        @pos += 1
-        skip_whitespace
-        if @pos < @s.size && @s[@pos] == '}'
-          @pos += 1
-          break
-        end
-      elsif @s[@pos] == '}'
-        @pos += 1
-        break
-      else
-        raise "YAML: expected ',' or '}' in flow mapping at position #{@pos}"
-      end
-    end
-
-    @depth -= 1
-    Any.new(map)
-  end
-
-  private def parse_plain : Any
-    start = @pos
-    while @pos < @s.size
-      c = @s[@pos]
-      if c == ',' || c == ']' || c == '}' || c == '#' || c == '\n' || c == '\r'
-        break
-      elsif c == ':'
-        if @pos + 1 == @s.size || @s[@pos + 1] == ' ' || @s[@pos + 1] == '\t' || @s[@pos + 1] == ',' || @s[@pos + 1] == ']' || @s[@pos + 1] == '}'
-          break
-        end
-      end
-      @pos += 1
-    end
-    token = @s[start, @pos - start].strip
-    Any.new(YAML.resolve_plain_scalar(token))
-  end
-end
-
-class Parser
-  @lines : Array(Line)
-  @idx : Int32
-  @anchors : Hash(String, Any)
-  @resolving_anchors : Array(String)
-  @alias_count : Int32
-  @max_aliases : Int32
-  @depth : Int32
-  @max_depth : Int32
-
-  def initialize(@lines : Array(Line), @max_aliases : Int32 = 1000, @max_depth : Int32 = 128)
-    @idx = 0
+  def initialize(text : String)
+    @bytes = text.to_unsafe
+    @size = text.bytesize
+    @starts = [] of Int32
+    @ends = [] of Int32
+    @heads = [] of Int32
+    @tabbed = [] of Bool
+    @line = 0
+    @error = nil
     @anchors = Hash(String, Any).new
-    @resolving_anchors = [] of String
-    @alias_count = 0
+    @open_anchors = [] of String
     @depth = 0
+    @buffer = ByteBuffer.new
+    split_lines
   end
 
-  def parse_all : Array(Any)
+  def error : String?
+    @error
+  end
+
+  # Every document in the stream, or nil with `error` set.
+  def parse_all : Array(Any)?
     docs = [] of Any
-    skip_empty_and_comments
-
-    while @idx < @lines.size
-      line = @lines[@idx]
-      if line.text.starts_with?("---")
-        @idx += 1
-        rest = line.text[3, line.text.size - 3].strip
-        rest = YAML.strip_trailing_comment(rest)
-        if !rest.empty?
-          doc = parse_single_line_content(rest, line.line_number)
-          docs << doc
-          skip_to_next_document
-          next
+    implicit_allowed = true
+    while true
+      skip_directives_and_blank
+      return docs if @error
+      break if @line >= @starts.size
+      explicit = false
+      node = Any.new(nil)
+      if marker?(@line, 45_u8) # ---
+        explicit = true
+        pos = skip_blank(@starts[@line] + 3)
+        if pos < @ends[@line] && @bytes[pos] != 35_u8
+          @heads[@line] = pos
+          node = parse_block_node(-1, false)
+        else
+          @line = @line + 1
+          node = parse_block_node(-1, false)
         end
+      elsif marker?(@line, 46_u8) # ... with nothing before it
+        fail("a document end marker with no document", @starts[@line])
+        return nil
+      else
+        unless implicit_allowed
+          fail("expected '---' before another document", @heads[@line])
+          return nil
+        end
+        node = parse_block_node(-1, false)
       end
-
-      skip_empty_and_comments
-      if @idx >= @lines.size
-        break
+      return nil if @error
+      # A top-level scalar leaves us on its last line; a mapping or
+      # sequence already stepped past its last entry. Either way the next
+      # document starts on a later line.
+      @line = @line + 1 if @line < @starts.size && !marker?(@line, 45_u8) && !marker?(@line, 46_u8)
+      @anchors = Hash(String, Any).new
+      docs << node
+      implicit_allowed = false
+      skip_blank_lines
+      break if @line >= @starts.size
+      if marker?(@line, 46_u8)
+        pos = skip_blank(@starts[@line] + 3)
+        expect_line_end(pos)
+        return nil if @error
+        @line = @line + 1
+        implicit_allowed = true
+      elsif !marker?(@line, 45_u8)
+        fail("unexpected content", @heads[@line])
+        return nil
       end
-
-      cur_line = @lines[@idx]
-      if cur_line.text == "..." || cur_line.text.starts_with?("... ") || cur_line.text.starts_with?("...#")
-        docs << Any.new(nil)
-        @idx += 1
-        skip_empty_and_comments
-        next
-      end
-
-      doc = parse_node(0)
-      docs << doc
-      skip_to_next_document
     end
-
     docs
   end
 
-  private def skip_to_next_document : Nil
-    while @idx < @lines.size
-      line = @lines[@idx]
-      if line.text == "..." || line.text.starts_with?("... ") || line.text.starts_with?("...#")
-        @idx += 1
-        break
-      elsif line.text == "---" || line.text.starts_with?("--- ") || line.text.starts_with?("---#")
-        break
-      else
-        @idx += 1
-      end
-    end
-    skip_empty_and_comments
-  end
+  # ------------------------------------------------------------------
+  # Lines
 
-  private def skip_empty_and_comments : Nil
-    while @idx < @lines.size
-      line = @lines[@idx]
-      if line.blank || line.comment
-        @idx += 1
-      else
-        break
-      end
-    end
-  end
-
-  private def peek_non_blank_line : Line?
-    i = @idx
-    while i < @lines.size
-      l = @lines[i]
-      return l unless l.blank || l.comment
-      i += 1
-    end
-    nil
-  end
-
-  def parse_node(current_indent : Int32) : Any
-    skip_empty_and_comments
-    return Any.new(nil) if @idx >= @lines.size
-
-    line = @lines[@idx]
-    if line.has_tab
-      raise "YAML: tabs are forbidden as indentation in YAML at line #{line.line_number}"
-    end
-
-    if line.text == "---" || line.text.starts_with?("--- ") || line.text == "..." || line.text.starts_with?("... ")
-      return Any.new(nil)
-    end
-
-    if line.text.starts_with?("- ") || line.text == "-"
-      return parse_block_sequence(line.indent)
-    end
-
-    colon = YAML.find_mapping_colon(line.text)
-    if !colon.nil?
-      return parse_block_mapping(line.indent)
-    end
-
-    if line.text.starts_with?("[") || line.text.starts_with?("{")
-      return parse_flow_node
-    end
-
-    parse_scalar_node(current_indent)
-  end
-
-  private def parse_flow_node : Any
-    flow_str = ""
-    start_line = @lines[@idx].line_number
-    bracket_depth = 0
-    brace_depth = 0
-
-    while @idx < @lines.size
-      line = @lines[@idx]
-      break if line.text.starts_with?("---") || line.text.starts_with?("...")
-      line_clean = YAML.strip_trailing_comment(line.text)
-
-      in_s = false
-      in_d = false
-      idx = 0
-      while idx < line_clean.size
-        c = line_clean[idx]
-        if c == '\'' && !in_d
-          in_s = !in_s
-        elsif c == '"' && !in_s
-          in_d = !in_d
-        elsif !in_s && !in_d
-          if c == '['
-            bracket_depth += 1
-          elsif c == ']'
-            bracket_depth -= 1 if bracket_depth > 0
-          elsif c == '{'
-            brace_depth += 1
-          elsif c == '}'
-            brace_depth -= 1 if brace_depth > 0
-          end
+  private def split_lines : Nil
+    at = 0
+    at = 3 if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
+    while at <= @size
+      start = at
+      while at < @size && @bytes[at] != 10_u8 && @bytes[at] != 13_u8
+        b = @bytes[at]
+        if (b < 32_u8 && b != 9_u8) || b == 127_u8
+          fail("control character", at) unless @error
         end
-        idx += 1
+        at = at + 1
       end
-
-      flow_str = flow_str.empty? ? line_clean : (flow_str + " " + line_clean)
-      @idx += 1
-
-      if bracket_depth == 0 && brace_depth == 0
-        break
+      finish = at
+      head = start
+      tabbed = false
+      while head < finish && @bytes[head] == 32_u8
+        head = head + 1
       end
-    end
-
-    flow_parser = FlowParser.new(flow_str, @anchors, @resolving_anchors, @alias_count, @max_aliases, @depth, @max_depth)
-    val = flow_parser.parse
-    @alias_count = flow_parser.alias_count
-    val
-  end
-
-  private def parse_single_line_content(s : String, line_num : Int32) : Any
-    if s.starts_with?("[") || s.starts_with?("{")
-      flow_parser = FlowParser.new(s, @anchors, @resolving_anchors, @alias_count, @max_aliases, @depth, @max_depth)
-      val = flow_parser.parse
-      @alias_count = flow_parser.alias_count
-      return val
-    end
-
-    colon = YAML.find_mapping_colon(s)
-    if colon
-      key_str = s[0, colon].strip
-      val_str = s[colon + 1, s.size - (colon + 1)].strip
-      k = parse_scalar_value(key_str, line_num)
-      v = parse_scalar_value(val_str, line_num)
-      h = Hash(Any, Any).new
-      h[k] = v
-      return Any.new(h)
-    end
-
-    parse_scalar_value(s, line_num)
-  end
-
-  private def parse_block_sequence(indent_level : Int32) : Any
-    @depth += 1
-    if @depth > @max_depth
-      raise "YAML: maximum depth exceeded (#{@max_depth})"
-    end
-
-    items = [] of Any
-
-    while @idx < @lines.size
-      skip_empty_and_comments
-      break if @idx >= @lines.size
-
-      line = @lines[@idx]
-      if line.has_tab
-        raise "YAML: tabs are forbidden as indentation in YAML at line #{line.line_number}"
-      end
-
-      if line.text.starts_with?("---") || line.text.starts_with?("...")
-        break
-      end
-
-      break if line.indent < indent_level
-
-      if line.indent == indent_level
-        unless line.text.starts_with?("- ") || line.text == "-"
-          break
-        end
-
-        if line.text == "-"
-          rest = ""
+      tabbed = head < finish && @bytes[head] == 9_u8
+      @starts << start
+      @ends << finish
+      @heads << head
+      @tabbed << tabbed
+      if at < @size
+        if @bytes[at] == 13_u8 && at + 1 < @size && @bytes[at + 1] == 10_u8
+          at = at + 2
         else
-          rest = line.text[2, line.text.size - 2].strip
-        end
-        item_line_num = line.line_number
-        content_indent = line.indent + 2
-        @idx += 1
-
-        rest = YAML.strip_trailing_comment(rest)
-
-        if !rest.empty?
-          anchor_name = ""
-          if rest.starts_with?("&")
-            space_idx = rest.index(' ')
-            if space_idx
-              anchor_name = rest[1, space_idx - 1]
-              rest = rest[space_idx + 1, rest.size - (space_idx + 1)].strip
-            else
-              anchor_name = rest[1, rest.size - 1]
-              rest = ""
-            end
-          end
-
-          colon = YAML.find_mapping_colon(rest)
-          if colon
-            first_k = rest[0, colon].strip
-            first_v = rest[colon + 1, rest.size - (colon + 1)].strip
-            map = Hash(Any, Any).new
-            k = parse_scalar_value(first_k, item_line_num)
-            v = parse_scalar_value(first_v, item_line_num)
-            map[k] = v
-
-            while @idx < @lines.size
-              skip_empty_and_comments
-              break if @idx >= @lines.size
-              sub_line = @lines[@idx]
-              break if sub_line.text.starts_with?("---") || sub_line.text.starts_with?("...")
-              break if sub_line.indent < content_indent
-              break if sub_line.indent > content_indent
-
-              sub_colon = YAML.find_mapping_colon(sub_line.text)
-              break if sub_colon.nil?
-
-              sub_k_str = sub_line.text[0, sub_colon].strip
-              sub_v_str = sub_line.text[sub_colon + 1, sub_line.text.size - (sub_colon + 1)].strip
-              sub_v_str = YAML.strip_trailing_comment(sub_v_str)
-              @idx += 1
-
-              sub_k = parse_scalar_value(sub_k_str, sub_line.line_number)
-              if !sub_v_str.empty?
-                sub_v = parse_scalar_value(sub_v_str, sub_line.line_number)
-              else
-                nxt = peek_non_blank_line
-                if !nxt.nil? && nxt.indent > content_indent
-                  sub_v = parse_node(content_indent)
-                else
-                  sub_v = Any.new(nil)
-                end
-              end
-
-              map[sub_k] = sub_v
-            end
-
-            item_node = Any.new(map)
-            if !anchor_name.empty?
-              @anchors[anchor_name] = item_node
-            end
-            items << item_node
-          elsif rest.starts_with?("|") || rest.starts_with?(">")
-            val_s = parse_block_scalar(rest, indent_level)
-            item_node = Any.new(val_s)
-            if !anchor_name.empty?
-              @anchors[anchor_name] = item_node
-            end
-            items << item_node
-          elsif rest.starts_with?("[") || rest.starts_with?("{")
-            val_f = parse_flow_string(rest)
-            if !anchor_name.empty?
-              @anchors[anchor_name] = val_f
-            end
-            items << val_f
-          elsif rest.starts_with?("- ")
-            nested_seq = parse_block_sequence(content_indent)
-            items << nested_seq
-          elsif rest.starts_with?("*")
-            alias_name = rest[1, rest.size - 1].strip
-            val_a = resolve_alias(alias_name, item_line_num)
-            items << val_a
-          else
-            val_s = parse_scalar_value(rest, item_line_num)
-            if !anchor_name.empty?
-              @anchors[anchor_name] = val_s
-            end
-            items << val_s
-          end
-        else
-          nxt = peek_non_blank_line
-          if nxt.nil? || nxt.indent <= indent_level
-            items << Any.new(nil)
-          else
-            child_node = parse_node(indent_level)
-            items << child_node
-          end
+          at = at + 1
         end
       else
         break
       end
     end
-
-    @depth -= 1
-    Any.new(items)
   end
 
-  private def parse_block_mapping(indent_level : Int32) : Any
-    @depth += 1
-    if @depth > @max_depth
-      raise "YAML: maximum depth exceeded (#{@max_depth})"
+  private def indent_of(line : Int32) : Int32
+    @heads[line] - @starts[line]
+  end
+
+  # Nothing but whitespace, or a comment.
+  private def blank_line?(line : Int32) : Bool
+    pos = skip_blank(@heads[line])
+    pos >= @ends[line] || @bytes[pos] == 35_u8
+  end
+
+  # `---` or `...` at the first column, alone or followed by a space.
+  private def marker?(line : Int32, byte : UInt8) : Bool
+    start = @starts[line]
+    return false unless @heads[line] == start
+    return false if @ends[line] - start < 3
+    return false unless @bytes[start] == byte && @bytes[start + 1] == byte && @bytes[start + 2] == byte
+    @ends[line] - start == 3 || @bytes[start + 3] == 32_u8 || @bytes[start + 3] == 9_u8
+  end
+
+  private def document_marker?(line : Int32) : Bool
+    marker?(line, 45_u8) || marker?(line, 46_u8)
+  end
+
+  private def skip_blank_lines : Nil
+    while @line < @starts.size && blank_line?(@line)
+      @line = @line + 1
     end
-    map = Hash(Any, Any).new
-    while @idx < @lines.size
-      skip_empty_and_comments
-      break if @idx >= @lines.size
-      line = @lines[@idx]
-      if line.has_tab
-        raise "YAML: tabs are forbidden as indentation in YAML at line #{line.line_number}"
-      end
+  end
 
-      if line.text.starts_with?("---") || line.text.starts_with?("...")
-        break
-      end
-
-      break if line.indent < indent_level
-      break if line.indent > indent_level
-
-      colon = YAML.find_mapping_colon(line.text)
-
-      break if colon.nil?
-
-      key_str = line.text[0, colon].strip
-      val_str = line.text[colon + 1, line.text.size - (colon + 1)].strip
-      val_str = YAML.strip_trailing_comment(val_str)
-      key_line_num = line.line_number
-      @idx += 1
-
-      key_node = parse_scalar_value(key_str, key_line_num)
-
-      anchor_name = ""
-      if val_str.starts_with?("&")
-        space_idx = val_str.index(' ')
-        if space_idx
-          anchor_name = val_str[1, space_idx - 1]
-          val_str = val_str[space_idx + 1, val_str.size - (space_idx + 1)].strip
-        else
-          anchor_name = val_str[1, val_str.size - 1]
-          val_str = ""
-        end
-      end
-
-      if !anchor_name.empty?
-        if @resolving_anchors.includes?(anchor_name)
-          raise "YAML: cyclic anchor reference '&#{anchor_name}' detected at line #{key_line_num}"
-        end
-        @resolving_anchors << anchor_name
-      end
-
-      val_node : Any = Any.new(nil)
-
-      if !val_str.empty?
-        if val_str.starts_with?("|") || val_str.starts_with?(">")
-          val_node = Any.new(parse_block_scalar(val_str, indent_level))
-        elsif val_str.starts_with?("[") || val_str.starts_with?("{")
-          val_node = parse_flow_string(val_str)
-        elsif val_str.starts_with?("*")
-          alias_name = val_str[1, val_str.size - 1].strip
-          val_node = resolve_alias(alias_name, key_line_num)
-        else
-          plain_s = val_str
-          while @idx < @lines.size
-            nxt = @lines[@idx]
-            if nxt.blank || nxt.comment
-              break
-            end
-            if nxt.indent > indent_level && YAML.find_mapping_colon(nxt.text).nil? && !nxt.text.starts_with?("- ") && !nxt.text.starts_with?("---") && !nxt.text.starts_with?("...")
-              plain_s = plain_s + " " + YAML.strip_trailing_comment(nxt.text)
-              @idx += 1
-            else
-              break
-            end
-          end
-          val_node = parse_scalar_value(plain_s, key_line_num)
+  private def skip_directives_and_blank : Nil
+    while @line < @starts.size
+      if blank_line?(@line)
+        @line = @line + 1
+      elsif @heads[@line] == @starts[@line] && @bytes[@starts[@line]] == 37_u8 # %
+        @line = @line + 1
+        skip_blank_lines
+        if @line >= @starts.size || !marker?(@line, 45_u8)
+          at = @line < @starts.size ? @heads[@line] : @size
+          fail("expected '---' after a directive", at)
+          return
         end
       else
-        nxt = peek_non_blank_line
-        if nxt.nil? || nxt.indent < indent_level
-          val_node = Any.new(nil)
-        elsif nxt.indent == indent_level
-          if nxt.text.starts_with?("- ") || nxt.text == "-"
-            val_node = parse_block_sequence(indent_level)
-          else
-            val_node = Any.new(nil)
-          end
-        else
-          val_node = parse_node(indent_level)
-        end
+        return
       end
+    end
+  end
 
-      if !anchor_name.empty?
-        @resolving_anchors.unsafe_set_size(@resolving_anchors.size - 1)
-        @anchors[anchor_name] = val_node
-      end
+  # The next non-blank line has no tab in its indentation, or the error
+  # says so.
+  private def refuse_tab(line : Int32) : Nil
+    fail("tab used for indentation", @heads[line]) if @tabbed[line]
+  end
 
-      if key_node.raw == "<<"
-        if val_node.as_h?
-          val_node.as_h.each { |k, v| map[k] = v unless map.has_key?(k) }
-        elsif val_node.as_a?
-          val_node.as_a.each do |elem|
-            if elem.as_h?
-              elem.as_h.each { |k, v| map[k] = v unless map.has_key?(k) }
-            end
-          end
-        else
-          map[key_node] = val_node
-        end
+  # ------------------------------------------------------------------
+  # Positions and errors
+
+  private def fail(message : String, pos : Int32) : Nil
+    return unless @error.nil?
+    line = 0
+    lo = 0
+    hi = @starts.size - 1
+    while lo <= hi
+      mid = (lo + hi) // 2
+      if @starts[mid] <= pos
+        line = mid
+        lo = mid + 1
       else
-        map[key_node] = val_node
+        hi = mid - 1
       end
     end
-
-    @depth -= 1
-    Any.new(map)
+    column = 1
+    at = @starts[line]
+    while at < pos && at < @size
+      column = column + 1 if (@bytes[at] & 192_u8) != 128_u8
+      at = at + 1
+    end
+    @error = "#{message} at line #{line + 1}, column #{column}"
   end
 
-  private def parse_scalar_node(current_indent : Int32) : Any
-    line = @lines[@idx]
-    @idx += 1
-    str = YAML.strip_trailing_comment(line.text)
-
-    while @idx < @lines.size
-      nxt = @lines[@idx]
-      break if nxt.blank || nxt.comment
-      if nxt.indent > line.indent && YAML.find_mapping_colon(nxt.text).nil? && !nxt.text.starts_with?("- ")
-        str = str + " " + YAML.strip_trailing_comment(nxt.text)
-        @idx += 1
-      else
-        break
-      end
+  private def skip_blank(pos : Int32) : Int32
+    while pos < @size && (@bytes[pos] == 32_u8 || @bytes[pos] == 9_u8)
+      pos = pos + 1
     end
-
-    parse_scalar_value(str, line.line_number)
+    pos
   end
 
-  private def parse_scalar_value(s : String, line_num : Int32) : Any
-    return Any.new(nil) if s.empty?
-
-    if s.starts_with?("&")
-      space_idx = s.index(' ')
-      if space_idx
-        anchor_name = s[1, space_idx - 1]
-        rest = s[space_idx + 1, s.size - (space_idx + 1)].strip
-        val = parse_scalar_value(rest, line_num)
-        @anchors[anchor_name] = val
-        return val
-      end
-    end
-
-    if s.starts_with?("*")
-      alias_name = s[1, s.size - 1].strip
-      return resolve_alias(alias_name, line_num)
-    end
-
-    if s.starts_with?("'") && s.ends_with?("'") && s.size >= 2
-      return Any.new(YAML.unquote_single(s))
-    elsif s.starts_with?("\"") && s.ends_with?("\"") && s.size >= 2
-      return Any.new(YAML.unquote_double(s))
-    end
-
-    Any.new(YAML.resolve_plain_scalar(s))
+  private def blank_byte?(b : UInt8) : Bool
+    b == 32_u8 || b == 9_u8
   end
 
-  private def resolve_alias(alias_name : String, line_num : Int32) : Any
-    if @resolving_anchors.includes?(alias_name)
-      raise "YAML: cyclic anchor reference '*#{alias_name}' detected at line #{line_num}"
-    end
-    val = @anchors[alias_name]?
-    if val.nil?
-      raise "YAML: unknown anchor '*#{alias_name}' at line #{line_num}"
-    end
-    weight = YAML.node_weight(val)
-    @alias_count += weight
-    if @alias_count > @max_aliases
-      raise "YAML: alias expansion limit exceeded (#{@max_aliases}) at line #{line_num}"
-    end
-    val
+  # `pos` is the end of its line, or a comment starts there.
+  private def line_end?(pos : Int32) : Bool
+    pos = skip_blank(pos)
+    pos >= @ends[@line] || @bytes[pos] == 35_u8
   end
 
-  private def parse_flow_string(s : String) : Any
-    flow_parser = FlowParser.new(s, @anchors, @resolving_anchors, @alias_count, @max_aliases, @depth, @max_depth)
-    val = flow_parser.parse
-    @alias_count = flow_parser.alias_count
-    val
+  private def expect_line_end(pos : Int32) : Nil
+    return if @error
+    at = skip_blank(pos)
+    return if at >= @ends[@line] || (@bytes[at] == 35_u8 && (at == pos || at > @heads[@line]))
+    if @bytes[at] == 58_u8 && value_indicator?(at, false)
+      fail("a mapping value is not allowed here", at)
+    else
+      fail("unexpected content", at)
+    end
   end
 
-  private def parse_block_scalar(header : String, parent_indent : Int32) : String
-    is_folded = header.starts_with?(">")
-    chomping = 0
-    explicit_indent = 0
+  # A `:` that ends a key: followed by blank or line end, or in flow
+  # context by a flow indicator.
+  private def value_indicator?(pos : Int32, flow : Bool) : Bool
+    return false unless @bytes[pos] == 58_u8
+    return true if pos + 1 >= @ends[@line]
+    n = @bytes[pos + 1]
+    return true if blank_byte?(n)
+    flow && (n == 44_u8 || n == 93_u8 || n == 125_u8 || n == 91_u8 || n == 123_u8)
+  end
 
-    idx = 1
-    while idx < header.size
-      c = header[idx]
-      if c == '-'
-        chomping = 1
-      elsif c == '+'
-        chomping = 2
-      elsif c >= '1' && c <= '9'
-        explicit_indent = c.ord - '0'.ord
-      end
-      idx += 1
+  # ------------------------------------------------------------------
+  # Line shapes
+
+  private def sequence_entry?(line : Int32) : Bool
+    pos = @heads[line]
+    return false if pos >= @ends[line] || @bytes[pos] != 45_u8
+    pos + 1 >= @ends[line] || blank_byte?(@bytes[pos + 1])
+  end
+
+  # Where the key's `:` is on this line, or -1. Quoted keys close on the
+  # same line; a plain key runs to the first `: ` that is not inside a
+  # comment.
+  private def key_colon(line : Int32) : Int32
+    pos = @heads[line]
+    finish = @ends[line]
+    return -1 if pos >= finish
+    b = @bytes[pos]
+    if b == 34_u8 || b == 39_u8
+      close = closing_quote_on_line(pos)
+      return -1 if close < 0
+      at = skip_blank(close + 1)
+      return -1 if at >= finish
+      return (at == close + 1 || true) && value_indicator?(at, false) ? at : -1
     end
+    return -1 if b == 91_u8 || b == 123_u8 || b == 35_u8 || b == 124_u8 || b == 62_u8
+    return -1 if b == 45_u8 && (pos + 1 >= finish || blank_byte?(@bytes[pos + 1]))
+    at = pos
+    while at < finish
+      c = @bytes[at]
+      return -1 if c == 35_u8 && at > pos && blank_byte?(@bytes[at - 1])
+      return at if c == 58_u8 && value_indicator?(at, false)
+      at = at + 1
+    end
+    -1
+  end
 
-    content_lines = [] of String
-    content_indent = -1
-
-    while @idx < @lines.size
-      line = @lines[@idx]
-
-      if line.blank
-        if content_indent != -1
-          content_lines << ""
-        end
-        @idx += 1
+  private def closing_quote_on_line(pos : Int32) : Int32
+    quote = @bytes[pos]
+    at = pos + 1
+    finish = @ends[@line]
+    while at < finish
+      c = @bytes[at]
+      if quote == 34_u8 && c == 92_u8
+        at = at + 2
         next
       end
+      if c == quote
+        if quote == 39_u8 && at + 1 < finish && @bytes[at + 1] == 39_u8
+          at = at + 2
+          next
+        end
+        return at
+      end
+      at = at + 1
+    end
+    -1
+  end
 
-      if content_indent == -1
-        if explicit_indent > 0
-          content_indent = parent_indent + explicit_indent
+  # ------------------------------------------------------------------
+  # Block nodes
+
+  # The node that starts on the next non-blank line, which must be
+  # indented past `parent`; a sequence at `parent`'s own indentation is
+  # taken when `sequence_at_parent` says so (the value of a mapping key).
+  # A line that is not indented past `parent` is left where it is and the
+  # node is null.
+  private def parse_block_node(parent : Int32, sequence_at_parent : Bool) : Any
+    skip_blank_lines
+    return Any.new(nil) if @error
+    return Any.new(nil) if @line >= @starts.size || document_marker?(@line)
+    refuse_tab(@line)
+    return Any.new(nil) if @error
+    indent = indent_of(@line)
+    if indent <= parent
+      if sequence_at_parent && indent == parent && sequence_entry?(@line)
+        return parse_block_sequence(indent)
+      end
+      return Any.new(nil)
+    end
+    if sequence_entry?(@line)
+      parse_block_sequence(indent)
+    elsif key_colon(@line) >= 0
+      parse_block_mapping(indent)
+    else
+      value = parse_inline_node(@heads[@line], parent, sequence_at_parent)
+      value
+    end
+  end
+
+  # A node whose first token is at `pos` on the current line: properties,
+  # then an alias, a quoted or plain scalar, a flow collection, a block
+  # scalar, or (after properties alone) the block node on the lines below.
+  # Ends by requiring the rest of the line to be empty.
+  private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool) : Any
+    anchor = nil.as(String?)
+    tag = nil.as(String?)
+    anchor_pos = pos
+    while true
+      b = pos < @ends[@line] ? @bytes[pos] : 0_u8
+      if b == 38_u8 # &
+        fail("a second anchor", pos) unless anchor.nil?
+        return Any.new(nil) if @error
+        anchor_pos = pos
+        finish = name_end(pos + 1)
+        anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
+        fail("an anchor with no name", pos) if !anchor.nil? && anchor.empty?
+        return Any.new(nil) if @error
+        pos = skip_blank(finish)
+      elsif b == 33_u8 # !
+        finish = name_end(pos)
+        tag = String.new(finish - pos) { |t| t.copy_from(@bytes + pos, finish - pos) }
+        fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
+        return Any.new(nil) if @error
+        pos = skip_blank(finish)
+      else
+        break
+      end
+    end
+    open_anchor(anchor)
+    value = Any.new(nil)
+    if line_end?(pos)
+      # Properties alone on the line: the node is below.
+      @line = @line + 1
+      value = parse_block_node(parent, sequence_at_parent)
+      value = apply_tag(tag, value, anchor_pos)
+    elsif key_colon(@line) >= 0 && @heads[@line] != pos
+      # Wait: key_colon looks from the line's head; with properties in
+      # front the head is not where the key is. Re-check from `pos`.
+      saved = @heads[@line]
+      @heads[@line] = pos
+      is_key = key_colon(@line) >= 0
+      @heads[@line] = saved
+      if is_key
+        fail("an anchor or tag on a mapping key is not supported", anchor_pos)
+        return Any.new(nil)
+      end
+      value = parse_inline_value(pos, parent, tag)
+    else
+      value = parse_inline_value(pos, parent, tag)
+    end
+    close_anchor(anchor, value)
+    value
+  end
+
+  private def parse_inline_value(pos : Int32, parent : Int32, tag : String?) : Any
+    b = @bytes[pos]
+    if b == 42_u8 # *
+      finish = name_end(pos + 1)
+      name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
+      value = resolve_alias(name, pos)
+      expect_line_end(finish)
+      return value
+    end
+    if b == 91_u8 || b == 123_u8
+      finish = 0
+      value = Any.new(nil)
+      if b == 91_u8
+        value = parse_flow_sequence(pos)
+      else
+        value = parse_flow_mapping(pos)
+      end
+      return Any.new(nil) if @error
+      expect_line_end(@flow_end)
+      return apply_tag(tag, value, pos)
+    end
+    if b == 124_u8 || b == 62_u8 # | >
+      value = parse_block_scalar(pos, parent)
+      return apply_tag(tag, value, pos)
+    end
+    if b == 34_u8 || b == 39_u8
+      text = parse_quoted(pos, parent, false)
+      return Any.new(nil) if @error
+      expect_line_end(@flow_end)
+      return apply_tag(tag, Any.new(text), pos)
+    end
+    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || b == 63_u8
+      fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
+      return Any.new(nil)
+    end
+    text = parse_plain_block(pos, parent)
+    return Any.new(nil) if @error
+    expect_line_end(@flow_end)
+    if tag.nil?
+      Scalar.resolve(text)
+    else
+      apply_tag(tag, Any.new(text), pos)
+    end
+  end
+
+  private def parse_block_sequence(indent : Int32) : Any
+    items = [] of Any
+    result = Any.new(items)
+    enter(@heads[@line])
+    return result if @error
+    while true
+      skip_blank_lines
+      break if @line >= @starts.size || document_marker?(@line)
+      refuse_tab(@line)
+      break if @error
+      at = indent_of(@line)
+      break if at < indent
+      if at > indent
+        fail("bad indentation of a sequence entry", @heads[@line])
+        break
+      end
+      break unless sequence_entry?(@line)
+      dash = @heads[@line]
+      dash_line = @line
+      saved_head = dash
+      pos = skip_blank(dash + 1)
+      if pos >= @ends[@line] || @bytes[pos] == 35_u8
+        @line = @line + 1
+        items << parse_block_node(indent, false)
+      else
+        @heads[@line] = pos
+        items << parse_block_node(indent, false)
+        @heads[dash_line] = saved_head
+        @line = @line + 1 if @line == dash_line
+      end
+      break if @error
+    end
+    leave
+    result
+  end
+
+  private def parse_block_mapping(indent : Int32) : Any
+    pairs = Hash(Any, Any).new
+    spelled = Hash(Any, Bool).new
+    result = Any.new(pairs)
+    enter(@heads[@line])
+    return result if @error
+    while true
+      skip_blank_lines
+      break if @line >= @starts.size || document_marker?(@line)
+      refuse_tab(@line)
+      break if @error
+      at = indent_of(@line)
+      break if at < indent
+      if at > indent
+        fail("bad indentation of a mapping entry", @heads[@line])
+        break
+      end
+      key_pos = @heads[@line]
+      if @bytes[key_pos] == 63_u8 && (key_pos + 1 >= @ends[@line] || blank_byte?(@bytes[key_pos + 1]))
+        fail("an explicit '?' key is not supported", key_pos)
+        break
+      end
+      colon = key_colon(@line)
+      if colon < 0
+        if @bytes[key_pos] == 38_u8 || @bytes[key_pos] == 33_u8
+          fail("an anchor or tag on a mapping key is not supported", key_pos)
         else
-          content_indent = line.indent
-          if content_indent <= parent_indent
+          fail("expected a mapping key", key_pos)
+        end
+        break
+      end
+      merge = false
+      key = Any.new(nil)
+      b = @bytes[key_pos]
+      if b == 34_u8 || b == 39_u8
+        key = Any.new(parse_quoted(key_pos, indent, false))
+      elsif b == 42_u8 || b == 38_u8 || b == 33_u8
+        fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
+      else
+        finish = colon
+        while finish > key_pos && blank_byte?(@bytes[finish - 1])
+          finish = finish - 1
+        end
+        text = String.new(finish - key_pos) { |t| t.copy_from(@bytes + key_pos, finish - key_pos) }
+        merge = text == "<<"
+        key = Scalar.resolve(text)
+      end
+      break if @error
+      if !merge && spelled.has_key?(key)
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      spelled[key] = true unless merge
+      pos = skip_blank(colon + 1)
+      value = Any.new(nil)
+      if pos >= @ends[@line] || @bytes[pos] == 35_u8
+        @line = @line + 1
+        value = parse_block_node(indent, true)
+      else
+        value = parse_inline_node(pos, indent, true)
+      end
+      break if @error
+      if merge
+        merge_into(pairs, value, key_pos)
+      else
+        pairs[key] = value
+      end
+      break if @error
+      # The value ends on this line (inline) or leaves us on a more
+      # indented leftover (a nested scalar). The next mapping entry is
+      # a later line.
+      if @line < @starts.size
+        if @heads[@line] == key_pos
+          @line = @line + 1
+        elsif indent_of(@line) > indent
+          @line = @line + 1
+        end
+      end
+    end
+    leave
+    result
+  end
+
+  # The merged mappings' pairs go in where the `<<` is; a key already in
+  # the mapping keeps its value, and a key spelled later in the mapping
+  # replaces the merged one (a later `pairs[key] = value` does that).
+  private def merge_into(pairs : Hash(Any, Any), value : Any, pos : Int32) : Nil
+    k = value.kind
+    if k == Any::KIND_HASH
+      value.as_h.each do |key, item|
+        pairs[key] = item unless pairs.has_key?(key)
+      end
+    elsif k == Any::KIND_ARRAY
+      value.as_a.each do |element|
+        unless element.kind == Any::KIND_HASH
+          fail("a merge value must be a mapping or a sequence of mappings", pos)
+          return
+        end
+        element.as_h.each do |key, item|
+          pairs[key] = item unless pairs.has_key?(key)
+        end
+      end
+    else
+      fail("a merge value must be a mapping or a sequence of mappings", pos)
+    end
+  end
+
+  # ------------------------------------------------------------------
+  # Scalars
+
+  # The end of an anchor, alias or tag name: blank, line end, or a flow
+  # indicator.
+  private def name_end(pos : Int32) : Int32
+    finish = @ends[@line]
+    while pos < finish
+      b = @bytes[pos]
+      break if blank_byte?(b) || b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8
+      pos = pos + 1
+    end
+    pos
+  end
+
+  private def known_tag?(tag : String) : Bool
+    tag == "!!str" || tag == "!!int" || tag == "!!float" || tag == "!!bool" || tag == "!!null" ||
+      tag == "!!seq" || tag == "!!map"
+  end
+
+  # A tagged scalar must read as what the tag says; `!!seq`/`!!map` only
+  # confirm the shape.
+  private def apply_tag(tag : String?, value : Any, pos : Int32) : Any
+    return value if tag.nil? || @error
+    k = value.kind
+    if tag == "!!seq"
+      fail("!!seq on #{value.kind_name}", pos) unless k == Any::KIND_ARRAY
+      return value
+    elsif tag == "!!map"
+      fail("!!map on #{value.kind_name}", pos) unless k == Any::KIND_HASH
+      return value
+    end
+    unless k == Any::KIND_STRING
+      fail("#{tag} on #{value.kind_name}", pos)
+      return value
+    end
+    text = value.as_s
+    return value if tag == "!!str"
+    resolved = Scalar.resolve(text)
+    rk = resolved.kind
+    if tag == "!!int"
+      return resolved if rk == Any::KIND_INT
+      fail("not an integer: #{text.inspect}", pos)
+    elsif tag == "!!float"
+      return resolved if rk == Any::KIND_FLOAT
+      return Any.new(resolved.as_i.to_f64) if rk == Any::KIND_INT
+      fail("not a float: #{text.inspect}", pos)
+    elsif tag == "!!bool"
+      return resolved if rk == Any::KIND_BOOL
+      fail("not a boolean: #{text.inspect}", pos)
+    else
+      return resolved if rk == Any::KIND_NIL
+      fail("not null: #{text.inspect}", pos)
+    end
+    value
+  end
+
+  # After a scalar or flow collection: where it stopped on the line it
+  # stopped on.
+  @flow_end : Int32 = 0
+
+  # A plain scalar in block context, folded across the lines below that
+  # are indented past `parent`.
+  private def parse_plain_block(pos : Int32, parent : Int32) : String
+    @buffer.clear
+    stop = plain_piece_end(pos, false)
+    @buffer.append(@bytes + pos, stop - pos)
+    @flow_end = stop
+    return @buffer.to_s if stop < @ends[@line] && @bytes[stop] == 58_u8
+    blanks = 0
+    look = @line + 1
+    while look < @starts.size
+      break if document_marker?(look)
+      if blank_line?(look)
+        # A comment line ends the scalar; whitespace-only lines fold.
+        at = skip_blank(@heads[look])
+        break if at < @ends[look]
+        blanks = blanks + 1
+        look = look + 1
+        next
+      end
+      break if indent_of(look) <= parent
+      if @tabbed[look]
+        fail("tab used for indentation", @heads[look])
+        break
+      end
+      if sequence_entry?(look)
+        fail("bad indentation of a sequence entry", @heads[look])
+        break
+      end
+      if key_colon(look) >= 0
+        fail("bad indentation of a mapping entry", @heads[look])
+        break
+      end
+      @line = look
+      start = @heads[look]
+      stop = plain_piece_end(start, false)
+      if stop < @ends[look] && @bytes[stop] == 58_u8
+        fail("a mapping value is not allowed here", stop)
+        break
+      end
+      if blanks == 0
+        @buffer << 32_u8
+      else
+        while blanks > 0
+          @buffer << 10_u8
+          blanks = blanks - 1
+        end
+      end
+      @buffer.append(@bytes + start, stop - start)
+      @flow_end = stop
+      look = look + 1
+    end
+    @buffer.to_s
+  end
+
+  # Where the plain text on this line ends: before ` #`, at a value
+  # indicator, at a flow indicator in flow context, or at the line end,
+  # trailing blanks dropped.
+  private def plain_piece_end(pos : Int32, flow : Bool) : Int32
+    at = pos
+    finish = @ends[@line]
+    while at < finish
+      b = @bytes[at]
+      break if b == 35_u8 && at > pos && blank_byte?(@bytes[at - 1])
+      break if b == 58_u8 && value_indicator?(at, flow)
+      break if flow && (b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8)
+      at = at + 1
+    end
+    while at > pos && blank_byte?(@bytes[at - 1])
+      at = at - 1
+    end
+    at
+  end
+
+  # A quoted scalar starting at `pos`; folded across lines, which in block
+  # context must be indented past `parent`. Leaves `@flow_end` after the
+  # closing quote.
+  private def parse_quoted(pos : Int32, parent : Int32, flow : Bool) : String
+    quote = @bytes[pos]
+    opener = pos
+    @buffer.clear
+    at = pos + 1
+    blanks = 0
+    pending_space = false
+    while true
+      if at >= @ends[@line]
+        # The line ended inside the string: fold onto the next line.
+        trim_trailing_blanks
+        look = @line + 1
+        while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
+          blanks = blanks + 1
+          look = look + 1
+        end
+        if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
+          fail("unterminated quoted string", opener)
+          return ""
+        end
+        if blanks == 0
+          @buffer << 32_u8 unless pending_space == false && false
+        else
+          while blanks > 0
+            @buffer << 10_u8
+            blanks = blanks - 1
+          end
+        end
+        pending_space = false
+        @line = look
+        at = skip_blank(@starts[look])
+        next
+      end
+      b = @bytes[at]
+      if b == quote
+        if quote == 39_u8 && at + 1 < @ends[@line] && @bytes[at + 1] == 39_u8
+          @buffer << 39_u8
+          at = at + 2
+          next
+        end
+        @flow_end = at + 1
+        return @buffer.to_s
+      end
+      if quote == 34_u8 && b == 92_u8
+        if at + 1 >= @ends[@line]
+          # Escaped line break: join with nothing.
+          trim_trailing_blanks
+          look = @line + 1
+          if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
+            fail("unterminated quoted string", opener)
+            return ""
+          end
+          @line = look
+          at = skip_blank(@starts[look])
+          next
+        end
+        at = escape(at)
+        return "" if @error
+        next
+      end
+      @buffer << b
+      at = at + 1
+    end
+    ""
+  end
+
+  private def trim_trailing_blanks : Nil
+    # The buffer has no pop; rebuild without trailing blanks.
+    text = @buffer.to_s
+    count = text.bytesize
+    while count > 0 && blank_byte?(text.to_unsafe[count - 1])
+      count = count - 1
+    end
+    return if count == text.bytesize
+    @buffer.clear
+    @buffer.append(text.to_unsafe, count)
+  end
+
+  # `at` is the backslash; appends the escape and answers where it ends.
+  private def escape(at : Int32) : Int32
+    e = @bytes[at + 1]
+    decoded = -1
+    if e == 110_u8
+      decoded = 10 # n
+    elsif e == 116_u8
+      decoded = 9 # t
+    elsif e == 114_u8
+      decoded = 13 # r
+    elsif e == 34_u8
+      decoded = 34 # "
+    elsif e == 92_u8
+      decoded = 92 # backslash
+    elsif e == 47_u8
+      decoded = 47 # /
+    elsif e == 48_u8
+      decoded = 0 # 0
+    elsif e == 97_u8
+      decoded = 7 # a
+    elsif e == 98_u8
+      decoded = 8 # b
+    elsif e == 101_u8
+      decoded = 27 # e
+    elsif e == 102_u8
+      decoded = 12 # f
+    elsif e == 118_u8
+      decoded = 11 # v
+    elsif e == 32_u8
+      decoded = 32 # space
+    elsif e == 9_u8
+      decoded = 9 # tab
+    elsif e == 78_u8
+      decoded = 0x85 # N
+    elsif e == 95_u8
+      decoded = 0xA0 # _
+    elsif e == 76_u8
+      decoded = 0x2028 # L
+    elsif e == 80_u8
+      decoded = 0x2029 # P
+    end
+    if decoded >= 0
+      @buffer.codepoint(decoded)
+      return at + 2
+    end
+    digits = 0
+    if e == 120_u8
+      digits = 2
+    elsif e == 117_u8
+      digits = 4
+    elsif e == 85_u8
+      digits = 8
+    else
+      fail("unknown escape '\\#{e.unsafe_chr}'", at)
+      return at + 2
+    end
+    point = 0
+    i = 0
+    while i < digits
+      p = at + 2 + i
+      if p >= @ends[@line]
+        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        return at + 2
+      end
+      d = @bytes[p].unsafe_chr.to_i?(16)
+      if d.nil?
+        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        return at + 2
+      end
+      point = point * 16 + d
+      i = i + 1
+    end
+    if point > 0x10FFFF || (point >= 0xD800 && point <= 0xDFFF)
+      fail("escape past the last code point", at)
+      return at + 2
+    end
+    @buffer.codepoint(point)
+    at + 2 + digits
+  end
+
+  # `|` or `>` at `pos`: the header, then the lines below.
+  private def parse_block_scalar(pos : Int32, parent : Int32) : Any
+    literal = @bytes[pos] == 124_u8
+    chomp = 0 # clip
+    explicit = 0
+    at = pos + 1
+    finish = @ends[@line]
+    while at < finish
+      b = @bytes[at]
+      if b == 45_u8 && chomp == 0
+        chomp = -1
+      elsif b == 43_u8 && chomp == 0
+        chomp = 1
+      elsif b >= 49_u8 && b <= 57_u8 && explicit == 0
+        explicit = (b - 48_u8).to_i32
+      else
+        break
+      end
+      at = at + 1
+    end
+    expect_line_end(at)
+    return Any.new(nil) if @error
+    indent = 0
+    if explicit > 0
+      indent = parent < 0 ? explicit : parent + explicit
+    else
+      look = @line + 1
+      while look < @starts.size
+        content = skip_blank(@starts[look])
+        if content < @ends[look]
+          indent = content - @starts[look]
+          break
+        end
+        look = look + 1
+      end
+      floor = parent + 1
+      floor = 1 if floor < 1
+      indent = floor if indent < floor
+    end
+    lines = [] of String
+    look = @line + 1
+    last_content = @line
+    while look < @starts.size
+      start = @starts[look]
+      finish = @ends[look]
+      spaces = 0
+      while start + spaces < finish && @bytes[start + spaces] == 32_u8
+        spaces = spaces + 1
+      end
+      if start + spaces >= finish
+        lines << ""
+        look = look + 1
+        next
+      end
+      break if spaces < indent
+      from = start + indent
+      lines << String.new(finish - from) { |t| t.copy_from(@bytes + from, finish - from) }
+      last_content = look
+      look = look + 1
+    end
+    # Lines after the last content line are trailing breaks.
+    @line = look - 1
+    @flow_end = @ends[@line]
+    trailing = 0
+    while lines.size > 0 && lines.last.empty?
+      lines.pop
+      trailing = trailing + 1
+    end
+    @buffer.clear
+    if literal
+      i = 0
+      while i < lines.size
+        @buffer << 10_u8 if i > 0
+        @buffer << lines[i]
+        i = i + 1
+      end
+    else
+      i = 0
+      blanks = 0
+      previous_more = false
+      first = true
+      while i < lines.size
+        text = lines[i]
+        i = i + 1
+        if text.empty?
+          blanks = blanks + 1
+          next
+        end
+        more = blank_byte?(text.to_unsafe[0])
+        if first
+          first = false
+        elsif previous_more || more
+          @buffer << 10_u8
+          while blanks > 0
+            @buffer << 10_u8
+            blanks = blanks - 1
+          end
+        elsif blanks > 0
+          while blanks > 0
+            @buffer << 10_u8
+            blanks = blanks - 1
+          end
+        else
+          @buffer << 32_u8
+        end
+        blanks = 0
+        previous_more = more
+        @buffer << text
+      end
+    end
+    if chomp == 1
+      @buffer << 10_u8 if lines.size > 0
+      while trailing > 0
+        @buffer << 10_u8
+        trailing = trailing - 1
+      end
+    elsif chomp == 0
+      @buffer << 10_u8 if lines.size > 0
+    end
+    Any.new(@buffer.to_s)
+  end
+
+  # ------------------------------------------------------------------
+  # Flow collections
+
+  # Past blanks, comments and line breaks; -1 when the stream or the
+  # document ends first.
+  private def skip_flow_space(pos : Int32) : Int32
+    while true
+      finish = @ends[@line]
+      while pos < finish && blank_byte?(@bytes[pos])
+        pos = pos + 1
+      end
+      if pos < finish && @bytes[pos] == 35_u8 && (pos == @heads[@line] || blank_byte?(@bytes[pos - 1]))
+        pos = finish
+      end
+      return pos if pos < finish
+      return -1 if @line + 1 >= @starts.size || document_marker?(@line + 1)
+      @line = @line + 1
+      pos = @starts[@line]
+    end
+    -1
+  end
+
+  private def parse_flow_sequence(opener : Int32) : Any
+    items = [] of Any
+    result = Any.new(items)
+    enter(opener)
+    return result if @error
+    pos = opener + 1
+    while true
+      pos = skip_flow_space(pos)
+      if pos < 0
+        fail("unterminated flow sequence", opener)
+        break
+      end
+      b = @bytes[pos]
+      if b == 93_u8
+        @flow_end = pos + 1
+        break
+      end
+      if b == 44_u8
+        fail("expected a value before ','", pos)
+        break
+      end
+      item_pos = pos
+      item = parse_flow_node(pos)
+      break if @error
+      pos = skip_flow_space(@flow_end)
+      if pos >= 0 && @bytes[pos] == 58_u8 && value_indicator?(pos, true)
+        # `[key: value]`: a one-pair mapping.
+        pair = Hash(Any, Any).new
+        pos = skip_flow_space(pos + 1)
+        if pos < 0
+          fail("unterminated flow sequence", opener)
+          break
+        end
+        if @bytes[pos] == 44_u8 || @bytes[pos] == 93_u8
+          pair[item] = Any.new(nil)
+        else
+          pair[item] = parse_flow_node(pos)
+          break if @error
+          pos = skip_flow_space(@flow_end)
+        end
+        item = Any.new(pair)
+      end
+      items << item
+      if pos < 0
+        fail("unterminated flow sequence", opener)
+        break
+      end
+      b = @bytes[pos]
+      if b == 44_u8
+        pos = pos + 1
+      elsif b == 93_u8
+        @flow_end = pos + 1
+        break
+      else
+        fail("expected ',' or ']'", pos)
+        break
+      end
+    end
+    leave
+    result
+  end
+
+  private def parse_flow_mapping(opener : Int32) : Any
+    pairs = Hash(Any, Any).new
+    spelled = Hash(Any, Bool).new
+    result = Any.new(pairs)
+    enter(opener)
+    return result if @error
+    pos = opener + 1
+    while true
+      pos = skip_flow_space(pos)
+      if pos < 0
+        fail("unterminated flow mapping", opener)
+        break
+      end
+      b = @bytes[pos]
+      if b == 125_u8
+        @flow_end = pos + 1
+        break
+      end
+      if b == 44_u8
+        fail("expected a key before ','", pos)
+        break
+      end
+      key_pos = pos
+      if b == 63_u8 && (pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1]))
+        fail("an explicit '?' key is not supported", pos)
+        break
+      end
+      merge = b == 60_u8 && pos + 2 < @ends[@line] && @bytes[pos + 1] == 60_u8 && value_indicator?(pos + 2, true)
+      key = parse_flow_node(pos)
+      break if @error
+      kk = key.kind
+      if kk == Any::KIND_ARRAY || kk == Any::KIND_HASH
+        fail("a collection cannot be a mapping key", key_pos)
+        break
+      end
+      if !merge && spelled.has_key?(key)
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      spelled[key] = true unless merge
+      pos = skip_flow_space(@flow_end)
+      if pos < 0
+        fail("unterminated flow mapping", opener)
+        break
+      end
+      value = Any.new(nil)
+      if @bytes[pos] == 58_u8 && (value_indicator?(pos, true) || @bytes[key_pos] == 34_u8 || @bytes[key_pos] == 39_u8)
+        pos = skip_flow_space(pos + 1)
+        if pos < 0
+          fail("unterminated flow mapping", opener)
+          break
+        end
+        unless @bytes[pos] == 44_u8 || @bytes[pos] == 125_u8
+          value = parse_flow_node(pos)
+          break if @error
+          pos = skip_flow_space(@flow_end)
+          if pos < 0
+            fail("unterminated flow mapping", opener)
             break
           end
         end
       end
-
-      if line.indent < content_indent
+      if merge
+        merge_into(pairs, value, key_pos)
+        break if @error
+      else
+        pairs[key] = value
+      end
+      b = @bytes[pos]
+      if b == 44_u8
+        pos = pos + 1
+      elsif b == 125_u8
+        @flow_end = pos + 1
+        break
+      else
+        fail("expected ',' or '}'", pos)
         break
       end
-
-      line_text = line.raw.size >= content_indent ? line.raw[content_indent, line.raw.size - content_indent] : ""
-      content_lines << line_text
-      @idx += 1
     end
-
-    if is_folded
-      result = ""
-      i = 0
-      while i < content_lines.size
-        l = content_lines[i]
-        if l.empty?
-          result = result + "\n"
-          i += 1
-        else
-          if result.empty? || result.ends_with?("\n")
-            result = result + l
-          else
-            result = result + " " + l
-          end
-          if i + 1 >= content_lines.size || content_lines[i + 1].empty?
-            result = result + "\n"
-          end
-          i += 1
-        end
-      end
-    else
-      result = content_lines.join("\n")
-      result = result + "\n" unless content_lines.empty? || result.ends_with?("\n")
-    end
-
-    if chomping == 1
-      while result.ends_with?("\n") || result.ends_with?("\r")
-        result = result[0, result.size - 1]
-      end
-    elsif chomping == 0
-      while result.ends_with?("\n\n")
-        result = result[0, result.size - 1]
-      end
-    end
-
+    leave
     result
+  end
+
+  # One node inside a flow collection, starting at `pos` (not blank).
+  private def parse_flow_node(pos : Int32) : Any
+    anchor = nil.as(String?)
+    tag = nil.as(String?)
+    anchor_pos = pos
+    while true
+      b = @bytes[pos]
+      if b == 38_u8
+        anchor_pos = pos
+        finish = name_end(pos + 1)
+        anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
+        fail("an anchor with no name", pos) if !anchor.nil? && anchor.empty?
+        return Any.new(nil) if @error
+        pos = skip_flow_space(finish)
+      elsif b == 33_u8
+        finish = name_end(pos)
+        tag = String.new(finish - pos) { |t| t.copy_from(@bytes + pos, finish - pos) }
+        fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
+        return Any.new(nil) if @error
+        pos = skip_flow_space(finish)
+      else
+        break
+      end
+      if pos < 0
+        fail("a value was expected after the properties", anchor_pos)
+        return Any.new(nil)
+      end
+    end
+    open_anchor(anchor)
+    b = @bytes[pos]
+    value = Any.new(nil)
+    if b == 91_u8
+      value = parse_flow_sequence(pos)
+    elsif b == 123_u8
+      value = parse_flow_mapping(pos)
+    elsif b == 34_u8 || b == 39_u8
+      value = Any.new(parse_quoted(pos, -1, true))
+    elsif b == 42_u8
+      finish = name_end(pos + 1)
+      name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
+      value = resolve_alias(name, pos)
+      @flow_end = finish
+    elsif b == 44_u8 || b == 93_u8 || b == 125_u8 || b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 124_u8 || b == 62_u8
+      fail("a value was expected", pos)
+    else
+      stop = plain_piece_end(pos, true)
+      if stop == pos
+        fail("a value was expected", pos)
+      else
+        text = String.new(stop - pos) { |t| t.copy_from(@bytes + pos, stop - pos) }
+        value = tag.nil? ? Scalar.resolve(text) : Any.new(text)
+        @flow_end = stop
+      end
+    end
+    return Any.new(nil) if @error
+    value = apply_tag(tag, value, anchor_pos)
+    close_anchor(anchor, value)
+    value
+  end
+
+  # ------------------------------------------------------------------
+  # Anchors and depth
+
+  private def open_anchor(name : String?) : Nil
+    @open_anchors << name unless name.nil?
+  end
+
+  private def close_anchor(name : String?, value : Any) : Nil
+    return if name.nil?
+    @open_anchors.pop if @open_anchors.size > 0
+    @anchors[name] = value unless @error
+  end
+
+  private def resolve_alias(name : String, pos : Int32) : Any
+    if name.empty?
+      fail("an alias with no name", pos)
+      return Any.new(nil)
+    end
+    if @open_anchors.includes?(name)
+      fail("cyclic alias *#{name}", pos)
+      return Any.new(nil)
+    end
+    found = @anchors[name]?
+    if found.nil?
+      fail("unknown anchor *#{name}", pos)
+      return Any.new(nil)
+    end
+    found
+  end
+
+  private def enter(pos : Int32) : Nil
+    @depth = @depth + 1
+    fail("nesting deeper than #{DEPTH_LIMIT} levels", pos) if @depth > DEPTH_LIMIT
+  end
+
+  private def leave : Nil
+    @depth = @depth - 1
   end
 end
 
+# Writes a value as block YAML the parser reads back.
 class Emitter
-  def self.dump(any : Any) : String
-    case r = any.raw
-    when Nil
-      "null\n"
-    when Bool
-      r ? "true\n" : "false\n"
-    when Int64
-      "#{r}\n"
-    when Float64
-      if r != r
-        ".nan\n"
-      elsif r > 1e308 && r == r * 2.0
-        ".inf\n"
-      elsif r < -1e308 && r == r * 2.0
-        "-.inf\n"
-      else
-        "#{r}\n"
-      end
-    when String
-      dump_string(r) + "\n"
-    when Array(Any)
-      if r.empty?
-        "[]\n"
-      else
-        dump_array(r, 0)
-      end
-    when Hash(Any, Any)
-      if r.empty?
-        "{}\n"
-      else
-        dump_hash(r, 0)
+  @out : ByteBuffer
+
+  def initialize
+    @out = ByteBuffer.new
+  end
+
+  def dump(value : Any) : String
+    k = value.kind
+    if (k == Any::KIND_ARRAY || k == Any::KIND_HASH) && value.size > 0
+      block(value, 0, false)
+    else
+      @out << scalar_text(value)
+      @out << 10_u8
+    end
+    @out.to_s
+  end
+
+  # A non-empty collection, one entry per line at `indent`; when `inline`
+  # the first entry continues the current line.
+  private def block(value : Any, indent : Int32, inline : Bool) : Nil
+    if value.kind == Any::KIND_ARRAY
+      first = true
+      value.as_a.each do |item|
+        @out.spaces(indent) unless first && inline
+        first = false
+        @out << "- "
+        entry(item, indent + 2)
       end
     else
-      "null\n"
-    end
-  end
-
-  private def self.needs_quotes?(s : String) : Bool
-    return true if s.empty?
-
-    case s
-    when "~", "null", "Null", "NULL", "true", "True", "TRUE", "false", "False", "FALSE"
-      return true
-    when ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF", ".nan", ".NaN", ".NAN"
-      return true
-    end
-
-    if YAML.is_hex_int?(s) || YAML.is_oct_int?(s) || YAML.is_dec_int?(s) || YAML.is_valid_float?(s)
-      return true
-    end
-
-    return true if s.starts_with?(" ") || s.ends_with?(" ")
-
-    c0 = s[0]
-    if c0 == '-' || c0 == '?' || c0 == ':' || c0 == ',' || c0 == '[' || c0 == ']' ||
-       c0 == '{' || c0 == '}' || c0 == '#' || c0 == '&' || c0 == '*' || c0 == '!' ||
-       c0 == '|' || c0 == '>' || c0 == '\'' || c0 == '"' || c0 == '%' || c0 == '@' || c0 == '`'
-      return true
-    end
-
-    return true if s.includes?(": ") || s.ends_with?(":") || s.includes?(" #")
-    return true if s.includes?("\n") || s.includes?("\r") || s.includes?("\t") || s.includes?("\"")
-
-    false
-  end
-
-  private def self.dump_string(s : String) : String
-    if needs_quotes?(s)
-      res = "\""
-      idx = 0
-      while idx < s.size
-        c = s[idx]
-        case c
-        when '\n'
-          res = res + "\\n"
-        when '\r'
-          res = res + "\\r"
-        when '\t'
-          res = res + "\\t"
-        when '"'
-          res = res + "\\\""
-        when '\\'
-          res = res + "\\\\"
-        when '\0'
-          res = res + "\\0"
+      first = true
+      value.as_h.each do |key, item|
+        @out.spaces(indent) unless first && inline
+        first = false
+        kk = key.kind
+        raise "cannot dump #{key.kind_name} as a mapping key" if kk == Any::KIND_ARRAY || kk == Any::KIND_HASH
+        @out << scalar_text(key)
+        @out << ":"
+        if collection?(item)
+          @out << 10_u8
+          block(item, indent + 2, false)
         else
-          res = res + s[idx, 1]
+          @out << " "
+          entry(item, indent + 2)
         end
-        idx += 1
       end
-      res + "\""
+    end
+  end
+
+  # After `- ` or `key: `: a scalar or empty collection on the line, a
+  # collection continuing it.
+  private def entry(item : Any, indent : Int32) : Nil
+    if collection?(item)
+      block(item, indent, true)
     else
-      s
+      @out << scalar_text(item)
+      @out << 10_u8
     end
   end
 
-  private def self.dump_array(arr : Array(Any), indent : Int32) : String
-    res = ""
-    sp = " " * indent
-    arr.each do |elem|
-      if elem.as_h? && !elem.as_h.empty?
-        first = true
-        elem.as_h.each do |k, v|
-          k_str = dump_string(k.to_s)
-          if first
-            if v.as_a? && !v.as_a.empty?
-              res = res + "#{sp}- #{k_str}:\n" + dump_array(v.as_a, indent + 4)
-            elsif v.as_h? && !v.as_h.empty?
-              res = res + "#{sp}- #{k_str}:\n" + dump_hash(v.as_h, indent + 4)
-            else
-              res = res + "#{sp}- #{k_str}: #{dump_inline_value(v)}\n"
-            end
-            first = false
-          else
-            sub_sp = " " * (indent + 2)
-            if v.as_a? && !v.as_a.empty?
-              res = res + "#{sub_sp}#{k_str}:\n" + dump_array(v.as_a, indent + 4)
-            elsif v.as_h? && !v.as_h.empty?
-              res = res + "#{sub_sp}#{k_str}:\n" + dump_hash(v.as_h, indent + 4)
-            else
-              res = res + "#{sub_sp}#{k_str}: #{dump_inline_value(v)}\n"
-            end
-          end
-        end
-      elsif elem.as_a? && !elem.as_a.empty?
-        res = res + "#{sp}-\n" + dump_array(elem.as_a, indent + 2)
-      else
-        res = res + "#{sp}- #{dump_inline_value(elem)}\n"
-      end
-    end
-    res
+  private def collection?(value : Any) : Bool
+    k = value.kind
+    (k == Any::KIND_ARRAY || k == Any::KIND_HASH) && value.size > 0
   end
 
-  private def self.dump_hash(h : Hash(Any, Any), indent : Int32) : String
-    res = ""
-    sp = " " * indent
-    h.each do |k, v|
-      k_str = dump_string(k.to_s)
-      if v.as_a? && !v.as_a.empty?
-        res = res + "#{sp}#{k_str}:\n" + dump_array(v.as_a, indent + 2)
-      elsif v.as_h? && !v.as_h.empty?
-        res = res + "#{sp}#{k_str}:\n" + dump_hash(v.as_h, indent + 2)
-      else
-        res = res + "#{sp}#{k_str}: #{dump_inline_value(v)}\n"
-      end
-    end
-    res
-  end
-
-  private def self.dump_inline_value(v : Any) : String
-    case r = v.raw
-    when Nil
+  private def scalar_text(value : Any) : String
+    k = value.kind
+    if k == Any::KIND_NIL
       "null"
-    when Bool
-      r ? "true" : "false"
-    when Int64
-      r.to_s
-    when Float64
-      if r != r
+    elsif k == Any::KIND_BOOL
+      value.as_bool ? "true" : "false"
+    elsif k == Any::KIND_INT
+      value.as_i.to_s
+    elsif k == Any::KIND_FLOAT
+      f = value.as_f
+      if f != f
         ".nan"
-      elsif r > 1e308 && r == r * 2.0
+      elsif f == "Infinity".to_f
         ".inf"
-      elsif r < -1e308 && r == r * 2.0
+      elsif f == "-Infinity".to_f
         "-.inf"
       else
-        r.to_s
+        f.to_s
       end
-    when String
-      dump_string(r)
-    when Array(Any)
+    elsif k == Any::KIND_STRING
+      string_text(value.as_s)
+    elsif k == Any::KIND_ARRAY
       "[]"
-    when Hash(Any, Any)
-      "{}"
     else
-      "null"
+      "{}"
     end
+  end
+
+  # Plain when the parser would read it back as the same string, quoted
+  # otherwise.
+  private def string_text(text : String) : String
+    return quoted(text) unless plain_safe?(text)
+    text
+  end
+
+  private def plain_safe?(text : String) : Bool
+    size = text.bytesize
+    return false if size == 0
+    bytes = text.to_unsafe
+    first = bytes[0]
+    return false if blank_byte?(first) || blank_byte?(bytes[size - 1])
+    if first == 45_u8 || first == 63_u8 || first == 58_u8
+      return false if size == 1
+    elsif indicator?(first)
+      return false
+    end
+    return false if text.starts_with?("---") || text.starts_with?("...")
+    i = 0
+    while i < size
+      b = bytes[i]
+      return false if b < 32_u8 || b == 127_u8
+      if b == 58_u8 && (i + 1 == size || blank_byte?(bytes[i + 1]))
+        return false
+      end
+      return false if b == 35_u8 && i > 0 && blank_byte?(bytes[i - 1])
+      i = i + 1
+    end
+    Scalar.resolve(text).kind == Any::KIND_STRING
+  end
+
+  private def indicator?(b : UInt8) : Bool
+    b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8 || b == 35_u8 ||
+      b == 38_u8 || b == 42_u8 || b == 33_u8 || b == 124_u8 || b == 62_u8 || b == 39_u8 ||
+      b == 34_u8 || b == 37_u8 || b == 64_u8 || b == 96_u8
+  end
+
+  private def blank_byte?(b : UInt8) : Bool
+    b == 32_u8 || b == 9_u8
+  end
+
+  private def quoted(text : String) : String
+    buffer = ByteBuffer.new
+    buffer << 34_u8
+    bytes = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = bytes[i]
+      if b == 34_u8
+        buffer << "\\\""
+      elsif b == 92_u8
+        buffer << "\\\\"
+      elsif b == 10_u8
+        buffer << "\\n"
+      elsif b == 9_u8
+        buffer << "\\t"
+      elsif b == 13_u8
+        buffer << "\\r"
+      elsif b < 32_u8 || b == 127_u8
+        buffer << "\\x"
+        buffer << hex_digit(b.to_i32 >> 4)
+        buffer << hex_digit(b.to_i32 & 15)
+      else
+        buffer << b
+      end
+      i = i + 1
+    end
+    buffer << 34_u8
+    buffer.to_s
+  end
+
+  private def hex_digit(value : Int32) : UInt8
+    value < 10 ? (48 + value).to_u8 : (87 + value).to_u8
   end
 end
 
 pub struct YAML
-  def self.nodes_to_yaml(doc : Std::Yaml::Nodes::Document) : String
-    root = doc.nodes.first?
-    return "" unless root
-    emit_node(root, 0)
+  # The first document of `text`, or nil when the stream is not YAML this
+  # module reads (the whole stream is checked, not just the first
+  # document). An empty stream is a null document.
+  def self.parse?(text : String) : Any?
+    docs = parse_all?(text)
+    return nil if docs.nil?
+    docs.size == 0 ? Any.new(nil) : docs[0]
   end
 
-  private def self.emit_node(node : Std::Yaml::Nodes::Node, indent : Int32) : String
-    case node
-    when Std::Yaml::Nodes::Scalar
-      scalar_text(node.value) + "\n"
-    when Std::Yaml::Nodes::Sequence
-      if node.nodes.empty?
-        "[]\n"
-      else
-        res = ""
-        sp = " " * indent
-        node.nodes.each do |child|
-          case child
-          when Std::Yaml::Nodes::Scalar
-            res = res + "#{sp}- #{scalar_text(child.value)}\n"
-          when Std::Yaml::Nodes::Alias
-            res = res + "#{sp}- *#{child.value}\n"
-          else
-            res = res + "#{sp}-\n" + emit_node(child, indent + 2)
-          end
-        end
-        res
-      end
-    when Std::Yaml::Nodes::Mapping
-      if node.nodes.empty?
-        "{}\n"
-      else
-        res = ""
-        sp = " " * indent
-        i = 0
-        while i < node.nodes.size
-          k_node = node.nodes[i]
-          v_node = node.nodes[i + 1]
-          k_str = k_node.is_a?(Std::Yaml::Nodes::Scalar) ? scalar_text(k_node.value) : "\"?\""
-          case v_node
-          when Std::Yaml::Nodes::Scalar
-            res = res + "#{sp}#{k_str}: #{scalar_text(v_node.value)}\n"
-          when Std::Yaml::Nodes::Alias
-            res = res + "#{sp}#{k_str}: *#{v_node.value}\n"
-          else
-            res = res + "#{sp}#{k_str}:\n" + emit_node(v_node, indent + 2)
-          end
-          i += 2
-        end
-        res
-      end
-    when Std::Yaml::Nodes::Alias
-      "*" + node.value + "\n"
-    else
-      "null\n"
+  def self.parse(text : String) : Any
+    parser = Parser.new(text)
+    docs = parser.parse_all
+    if docs.nil?
+      raise parser.error || "invalid YAML"
     end
+    docs.size == 0 ? Any.new(nil) : docs[0]
   end
 
-  private def self.scalar_text(s : String) : String
-    r = resolve_plain_scalar(s)
-    if r.nil?
-      "null"
-    elsif r.is_a?(Bool)
-      r ? "true" : "false"
-    elsif r.is_a?(Int64)
-      r.to_s
-    elsif r.is_a?(Float64)
-      r.to_s
-    else
-      quote_scalar(s)
+  def self.parse_all?(text : String) : Array(Any)?
+    Parser.new(text).parse_all
+  end
+
+  def self.parse_all(text : String) : Array(Any)
+    parser = Parser.new(text)
+    docs = parser.parse_all
+    if docs.nil?
+      raise parser.error || "invalid YAML"
     end
+    docs
   end
 
-  private def self.quote_scalar(s : String) : String
-    if s.empty? || needs_quote?(s)
-      res = "\""
-      idx = 0
-      while idx < s.size
-        c = s[idx]
-        case c
-        when '\n'
-          res = res + "\\n"
-        when '\r'
-          res = res + "\\r"
-        when '\t'
-          res = res + "\\t"
-        when '"'
-          res = res + "\\\""
-        when '\\'
-          res = res + "\\\\"
-        when '\0'
-          res = res + "\\0"
-        else
-          res = res + s[idx, 1]
-        end
-        idx += 1
-      end
-      res + "\""
-    else
-      s
-    end
-  end
-
-  private def self.needs_quote?(s : String) : Bool
-    return true if s.empty?
-
-    case s
-    when "~", "null", "Null", "NULL", "true", "True", "TRUE", "false", "False", "FALSE"
-      return true
-    when ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF", "-.inf", "-.Inf", "-.INF", ".nan", ".NaN", ".NAN"
-      return true
-    end
-
-    if is_hex_int?(s) || is_oct_int?(s) || is_dec_int?(s) || is_valid_float?(s)
-      return true
-    end
-
-    return true if s.starts_with?(" ") || s.ends_with?(" ")
-
-    c0 = s[0]
-    if c0 == '-' || c0 == '?' || c0 == ':' || c0 == ',' || c0 == '[' || c0 == ']' ||
-       c0 == '{' || c0 == '}' || c0 == '#' || c0 == '&' || c0 == '*' || c0 == '!' ||
-       c0 == '|' || c0 == '>' || c0 == '\'' || c0 == '"' || c0 == '%' || c0 == '@' || c0 == '`'
-      return true
-    end
-
-    return true if s.includes?(": ") || s.ends_with?(":") || s.includes?(" #")
-    return true if s.includes?("\n") || s.includes?("\r") || s.includes?("\t") || s.includes?("\"")
-
-    false
-  end
-
-  def self.to_yaml(ary : Array(T)) : String forall T
-    builder = Std::Yaml::Nodes::Builder.new
-    builder.sequence do
-      ary.each { |item| write_value(item, builder) }
-    end
-    nodes_to_yaml(builder.document)
-  end
-
-  def self.to_yaml(h : Hash(K, V)) : String forall K, V
-    builder = Std::Yaml::Nodes::Builder.new
-    builder.mapping do
-      h.each do |k, v|
-        builder.scalar(k.to_s)
-        write_value(v, builder)
-      end
-    end
-    nodes_to_yaml(builder.document)
-  end
-
-  def self.write_value(val : Nil, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar("null")
-  end
-
-  def self.write_value(val : Bool, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar(val ? "true" : "false")
-  end
-
-  def self.write_value(val : Int32 | Int64 | Int16 | Int8 | UInt32 | UInt64 | UInt16 | UInt8, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar(val.to_s)
-  end
-
-  def self.write_value(val : Float32 | Float64, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar(val.to_s)
-  end
-
-  def self.write_value(val : String, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar(val)
-  end
-
-  def self.write_value(val : Symbol, yaml : Std::Yaml::Nodes::Builder) : Nil
-    yaml.scalar(val.to_s)
-  end
-
-  def self.write_value(val : Any, yaml : Std::Yaml::Nodes::Builder) : Nil
-    case r = val.raw
-    when Nil
-      yaml.scalar("null")
-    when Bool
-      yaml.scalar(r ? "true" : "false")
-    when Int64, Float64, String
-      yaml.scalar(r.to_s)
-    when Array(Any)
-      yaml.sequence do
-        r.each { |item| write_value(item, yaml) }
-      end
-    when Hash(Any, Any)
-      yaml.mapping do
-        r.each do |k, v|
-          write_value(k, yaml)
-          write_value(v, yaml)
-        end
-      end
-    else
-      yaml.scalar("null")
-    end
-  end
-
-  def self.write_value(val : Array(T), yaml : Std::Yaml::Nodes::Builder) : Nil forall T
-    yaml.sequence do
-      val.each { |e| write_value(e, yaml) }
-    end
-  end
-
-  def self.write_value(val : Hash(K, V), yaml : Std::Yaml::Nodes::Builder) : Nil forall K, V
-    yaml.mapping do
-      val.each do |k, v|
-        yaml.scalar(k.to_s)
-        write_value(v, yaml)
-      end
-    end
-  end
-
-  def self.write_value(val, yaml : Std::Yaml::Nodes::Builder) : Nil
-    if val.nil?
-      yaml.scalar("null")
-    elsif val.is_a?(String)
-      yaml.scalar(val)
-    elsif val.is_a?(Int32) || val.is_a?(Int64)
-      yaml.scalar(val.to_s)
-    elsif val.is_a?(Float64)
-      yaml.scalar(val.to_s)
-    elsif val.is_a?(Bool)
-      yaml.scalar(val ? "true" : "false")
-    else
-      val.to_yaml(yaml)
-    end
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Nil.class) : Nil
-    nil
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Bool.class) : Bool
-    unless node.is_a?(Std::Yaml::Nodes::Scalar)
-      node.raise "Expected scalar for Bool"
-    end
-    val = Std::Yaml::Schema::Core.parse_scalar(node)
-    if val.is_a?(Bool)
-      val
-    else
-      node.raise "Expected Bool, got #{node.value.inspect}"
-    end
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Int32.class) : Int32
-    unless node.is_a?(Std::Yaml::Nodes::Scalar)
-      node.raise "Expected scalar for Int32"
-    end
-    val = Std::Yaml::Schema::Core.parse_scalar(node)
-    if val.is_a?(Int64)
-      val.to_i32
-    else
-      node.raise "Expected Int32, got #{node.value.inspect}"
-    end
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Int64.class) : Int64
-    unless node.is_a?(Std::Yaml::Nodes::Scalar)
-      node.raise "Expected scalar for Int64"
-    end
-    val = Std::Yaml::Schema::Core.parse_scalar(node)
-    if val.is_a?(Int64)
-      val
-    else
-      node.raise "Expected Int64, got #{node.value.inspect}"
-    end
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Float64.class) : Float64
-    unless node.is_a?(Std::Yaml::Nodes::Scalar)
-      node.raise "Expected scalar for Float64"
-    end
-    val = Std::Yaml::Schema::Core.parse_scalar(node)
-    if val.is_a?(Float64)
-      val
-    elsif val.is_a?(Int64)
-      val.to_f64
-    else
-      node.raise "Expected Float64, got #{node.value.inspect}"
-    end
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : String.class) : String
-    unless node.is_a?(Std::Yaml::Nodes::Scalar)
-      node.raise "Expected scalar for String"
-    end
-    node.value
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Any.class) : Any
-    Any.new(node.is_a?(Std::Yaml::Nodes::Scalar) ? Std::Yaml::Schema::Core.parse_scalar(node) : nil)
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Array(T).class) : Array(T) forall T
-    unless node.is_a?(Std::Yaml::Nodes::Sequence)
-      node.raise "Expected sequence for Array"
-    end
-    res = [] of T
-    node.nodes.each do |child|
-      res << read_value(ctx, child, T)
-    end
-    res
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : Hash(String, V).class) : Hash(String, V) forall V
-    unless node.is_a?(Std::Yaml::Nodes::Mapping)
-      node.raise "Expected mapping for Hash"
-    end
-    res = Hash(String, V).new
-    Std::Yaml::Schema::Core.each(node) do |k_node, v_node|
-      unless k_node.is_a?(Std::Yaml::Nodes::Scalar)
-        k_node.raise "Expected scalar key for Hash"
-      end
-      k = k_node.value
-      v = read_value(ctx, v_node, V)
-      res[k] = v
-    end
-    res
-  end
-
-  def self.read_value(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node, type : T.class) : T forall T
-    T.new(ctx, node)
+  # Block YAML for `value`, ending in a line break.
+  def self.dump(value : Any) : String
+    Emitter.new.dump(value)
   end
 end
-
-pub def parse(input : String, max_aliases : Int32 = 1000, max_depth : Int32 = 128) : Any
-  YAML.parse(input, max_aliases: max_aliases, max_depth: max_depth)
-end
-
-pub def parse_all(input : String, max_aliases : Int32 = 1000, max_depth : Int32 = 128) : Array(Any)
-  YAML.parse_all(input, max_aliases: max_aliases, max_depth: max_depth)
-end
-
-pub def dump(any : Any) : String
-  YAML.dump(any)
-end
-
-pub enum ScalarStyle
-  ANY
-  PLAIN
-  SINGLE_QUOTED
-  DOUBLE_QUOTED
-  LITERAL
-  FOLDED
-end
-
-pub enum SequenceStyle
-  ANY
-  BLOCK
-  FLOW
-end
-
-pub enum MappingStyle
-  ANY
-  BLOCK
-  FLOW
-end
-
-pub enum EventKind
-  NONE
-  STREAM_START
-  STREAM_END
-  DOCUMENT_START
-  DOCUMENT_END
-  ALIAS
-  SCALAR
-  SEQUENCE_START
-  SEQUENCE_END
-  MAPPING_START
-  MAPPING_END
-end
-
-pub annotation Field
-end
-
-module Nodes
-  abstract class Node
-    property tag : String?
-    property anchor : String?
-    property start_line : Int32
-    property start_column : Int32
-
-    def initialize
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def location : Tuple(Int32, Int32)
-      {start_line, start_column}
-    end
-
-    def raise(message : String) : NoReturn
-      ::raise "YAML error: #{message} at line #{start_line}, column #{start_column}"
-    end
-
-    abstract def kind : String
-  end
-
-  class Document < Node
-    @nodes : Array(Node)
-
-    def initialize
-      @nodes = [] of Node
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def nodes : Array(Node)
-      @nodes
-    end
-
-    def <<(node : Node) : Nil
-      @nodes << node
-    end
-
-    def kind : String
-      "document"
-    end
-  end
-
-  class Scalar < Node
-    property style : ScalarStyle
-    property value : String
-
-    def initialize(@value : String)
-      @style = ScalarStyle::ANY
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def kind : String
-      "scalar"
-    end
-  end
-
-  class Sequence < Node
-    @nodes : Array(Node)
-    property style : SequenceStyle
-
-    def initialize
-      @nodes = [] of Node
-      @style = SequenceStyle::ANY
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def nodes : Array(Node)
-      @nodes
-    end
-
-    def <<(node : Node) : Nil
-      @nodes << node
-    end
-
-    def kind : String
-      "sequence"
-    end
-  end
-
-  class Mapping < Node
-    @nodes : Array(Node)
-    property style : MappingStyle
-
-    def initialize
-      @nodes = [] of Node
-      @style = MappingStyle::ANY
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def nodes : Array(Node)
-      @nodes
-    end
-
-    def <<(node : Node) : Nil
-      @nodes << node
-    end
-
-    def kind : String
-      "mapping"
-    end
-  end
-
-  class Alias < Node
-    property value : String
-
-    def initialize(@value : String)
-      @start_line = 0
-      @start_column = 0
-    end
-
-    def kind : String
-      "alias"
-    end
-  end
-
-  class Builder
-    getter document : Document
-    @stack : Array(Node)
-
-    def initialize
-      @document = Document.new
-      @stack = [] of Node
-    end
-
-    def mapping(reference = nil, style : MappingStyle = MappingStyle::ANY, &)
-      map = Mapping.new
-      map.style = style
-      add_node(map)
-      @stack << map
-      yield
-      @stack.pop
-    end
-
-    def sequence(reference = nil, style : SequenceStyle = SequenceStyle::ANY, &)
-      seq = Sequence.new
-      seq.style = style
-      add_node(seq)
-      @stack << seq
-      yield
-      @stack.pop
-    end
-
-    def scalar(value, style : ScalarStyle = ScalarStyle::ANY, anchor : String? = nil, tag : String? = nil)
-      sc = Scalar.new(value.to_s)
-      sc.style = style
-      sc.anchor = anchor
-      sc.tag = tag
-      add_node(sc)
-    end
-
-    def add_node(node : Node) : Nil
-      if @stack.empty?
-        @document << node
-      else
-        top = @stack.last
-        if top.is_a?(Mapping)
-          top << node
-        elsif top.is_a?(Sequence)
-          top << node
-        end
-      end
-    end
-  end
-
-  def self.parse(input : String) : Document
-    any = YAML.parse(input)
-    doc = Document.new
-    doc << node_from_any(any)
-    doc
-  end
-
-  def self.parse_all(input : String) : Array(Document)
-    docs = YAML.parse_all(input)
-    docs.map do |any|
-      doc = Document.new
-      doc << node_from_any(any)
-      doc
-    end
-  end
-
-  def self.node_from_any(any : Any) : Node
-    case r = any.raw
-    when Nil
-      Scalar.new("null")
-    when Bool
-      Scalar.new(r ? "true" : "false")
-    when Int64, Float64, String
-      Scalar.new(r.to_s)
-    when Array(Any)
-      seq = Sequence.new
-      r.each { |item| seq << node_from_any(item) }
-      seq
-    when Hash(Any, Any)
-      map = Mapping.new
-      r.each do |k, v|
-        map << node_from_any(k)
-        map << node_from_any(v)
-      end
-      map
-    else
-      Scalar.new("")
-    end
-  end
-
-  def self.any_from_node(node : Node) : Any
-    case node
-    when Scalar
-      Any.new(YAML.resolve_plain_scalar(node.value))
-    when Sequence
-      ary = [] of Any
-      node.nodes.each { |c| ary << any_from_node(c) }
-      Any.new(ary)
-    when Mapping
-      h = Hash(Any, Any).new
-      i = 0
-      while i < node.nodes.size
-        k = any_from_node(node.nodes[i])
-        v = any_from_node(node.nodes[i + 1])
-        h[k] = v
-        i += 2
-      end
-      Any.new(h)
-    when Alias
-      Any.new(node.value)
-    else
-      Any.new(nil)
-    end
-  end
-end
-
-module Schema
-  module Core
-    def self.each(node : Nodes::Mapping, &)
-      i = 0
-      while i < node.nodes.size
-        k = node.nodes[i]
-        v = node.nodes[i + 1]
-        yield k, v
-        i += 2
-      end
-    end
-
-    def self.parse_null?(node : Nodes::Node) : Bool
-      if node.is_a?(Nodes::Scalar)
-        v = node.value
-        v.empty? || v == "~" || v == "null" || v == "Null" || v == "NULL"
-      else
-        false
-      end
-    end
-
-    def self.parse_scalar(node : Nodes::Scalar) : Any::Type
-      YAML.resolve_plain_scalar(node.value)
-    end
-
-    def self.parse_int(node : Nodes::Scalar, type : Class) : Int64
-      val = YAML.resolve_plain_scalar(node.value)
-      if val.is_a?(Int64)
-        val
-      else
-        node.raise "Expected integer, not #{node.value.inspect}"
-      end
-    end
-
-    def self.reserved_string?(s : String) : Bool
-      case s
-      when "true", "True", "TRUE", "false", "False", "FALSE",
-           "null", "Null", "NULL", "~",
-           ".nan", ".NaN", ".NAN", ".inf", ".Inf", ".INF",
-           "-.inf", "-.Inf", "-.INF", "+.inf", "+.Inf", "+.INF"
-        true
-      else
-        false
-      end
-    end
-  end
-
-  module FailSafe
-    def self.parse(input : String) : Nodes::Document
-      Nodes.parse(input)
-    end
-
-    def self.parse_all(input : String) : Array(Nodes::Document)
-      Nodes.parse_all(input)
-    end
-  end
-end
-
-pub class ParseContext
-  @anchors : Hash(String, Nodes::Node)
-
-  def initialize
-    @anchors = Hash(String, Nodes::Node).new
-  end
-
-  def read_alias(node : Nodes::Node, &)
-    if node.is_a?(Nodes::Alias)
-      if target = @anchors[node.value]?
-        yield target
-      else
-        node.raise "Unknown anchor: #{node.value}"
-      end
-    end
-  end
-
-  def record_anchor(node : Nodes::Node, value = nil)
-    if anchor = node.anchor
-      @anchors[anchor] = node
-    end
-  end
-end
-
-module Serializable
-  pub annotation Options
-  end
-
-  module Strict
-    protected def on_unknown_yaml_attribute(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node, key : String)
-      node.raise "Unknown YAML attribute: #{key}"
-    end
-  end
-
-  module Unmapped
-    @[::YAML::Field(ignore: true)]
-    @yaml_unmapped : Hash(String, Any)?
-
-    def yaml_unmapped : Hash(String, Any)
-      @yaml_unmapped ||= Hash(String, Any).new
-    end
-
-    protected def on_unknown_yaml_attribute(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node, key : String)
-      yaml_unmapped[key] = Any.new(node.is_a?(::YAML::Nodes::Scalar) ? ::YAML::Schema::Core.parse_scalar(node) : nil)
-    end
-
-    protected def on_to_yaml(yaml : ::YAML::Nodes::Builder)
-      if unmapped = @yaml_unmapped
-        unmapped.each do |key, value|
-          yaml.scalar(key)
-          ::YAML.write_value(value, yaml)
-        end
-      end
-    end
-  end
-
-  macro use_yaml_discriminator(field, mapping)
-    def self.from_yaml(input : String) : self
-      doc = ::YAML::Nodes.parse(input)
-      node = doc.nodes.first? || ::YAML::Nodes::Scalar.new("")
-      ctx = ::YAML::ParseContext.new
-      new(ctx, node)
-    end
-
-    def self.new(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node) : self
-      unless node.is_a?(::YAML::Nodes::Mapping)
-        node.raise "Expected YAML mapping for discriminator"
-      end
-      discriminator_value = ""
-      ::YAML::Schema::Core.each(node) do |k_node, v_node|
-        if k_node.is_a?(::YAML::Nodes::Scalar) && k_node.value == {{field.id.stringify}}
-          discriminator_value = v_node.is_a?(::YAML::Nodes::Scalar) ? v_node.value : ""
-          break
-        end
-      end
-
-      case discriminator_value
-      {% for key, type in mapping %}
-        when {{key.id.stringify}}
-          {{type}}.new(ctx, node)
-      {% end %}
-      else
-        node.raise "Unknown discriminator value #{discriminator_value.inspect} for {{field.id}}"
-      end
-    end
-  end
-
-  macro included
-    def self.from_yaml(input : String) : self
-      doc = ::YAML::Nodes.parse(input)
-      node = doc.nodes.first? || ::YAML::Nodes::Scalar.new("")
-      ctx = ::YAML::ParseContext.new
-      new(ctx, node)
-    end
-
-    def self.new(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node) : self
-      new_from_yaml_node(ctx, node)
-    end
-
-    private def self.new_from_yaml_node(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node) : self
-      {% if @type.struct? %}
-        instance = uninitialized self
-      {% else %}
-        instance = allocate
-      {% end %}
-      instance.initialize(__context_for_yaml_serializable: ctx, __node_for_yaml_serializable: node)
-      instance
-    end
-
-    macro inherited
-      def self.new(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node) : self
-        new_from_yaml_node(ctx, node)
-      end
-    end
-
-    def initialize(*, __context_for_yaml_serializable ctx : ::YAML::ParseContext, __node_for_yaml_serializable node : ::YAML::Nodes::Node)
-      {% verbatim do %}
-        {% begin %}
-          {% properties = {} of Nil => Nil %}
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::YAML::Field) || ivar.annotation(YAML::Field) || ivar.annotation(Field) %}
-            {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
-              {% non_nil_type = ivar.type %}
-              {% if ivar.type.nilable? %}
-                {% for t in ivar.type.union_types %}
-                  {% unless t == Nil %}
-                    {% non_nil_type = t %}
-                  {% end %}
-                {% end %}
-              {% end %}
-              {%
-                properties[ivar.id] = {
-                  key:          ((ann && ann[:key]) || ivar).id.stringify,
-                  has_default:  (ann && ann[:default] != nil) || ivar.has_default_value?,
-                  default:      (ann && ann[:default]) || ivar.default_value,
-                  nilable:      ivar.type.nilable?,
-                  non_nil_type: non_nil_type,
-                  converter:    ann && ann[:converter],
-                  presence:     ann && ann[:presence],
-                }
-              %}
-            {% end %}
-          {% end %}
-
-          {% for name, value in properties %}
-            %var{name} = uninitialized typeof(@{{name}})
-            %found{name} = false
-          {% end %}
-
-          case node
-          when ::YAML::Nodes::Mapping
-            ::YAML::Schema::Core.each(node) do |k_node, v_node|
-              unless k_node.is_a?(::YAML::Nodes::Scalar)
-                k_node.raise "Expected scalar as key for mapping"
-              end
-              key = k_node.value
-              case key
-              {% for name, value in properties %}
-                when {{value[:key]}}
-                  if ::YAML::Schema::Core.parse_null?(v_node)
-                    {% if value[:nilable] %}
-                      %var{name} = nil
-                      %found{name} = true
-                    {% end %}
-                    next
-                  end
-                  %var{name} =
-                    {% if value[:converter] %}
-                      {{value[:converter]}}.from_yaml(ctx, v_node)
-                    {% else %}
-                      ::YAML.read_value(ctx, v_node, {{value[:non_nil_type]}})
-                    {% end %}
-                  %found{name} = true
-              {% end %}
-              else
-                on_unknown_yaml_attribute(ctx, v_node, key)
-              end
-            end
-          else
-            node.raise "Expected YAML mapping, not #{node.kind}"
-          end
-
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::YAML::Field) || ivar.annotation(YAML::Field) || ivar.annotation(Field) %}
-            {% if ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
-              {% if ann && ann[:default] != nil %}
-                @{{ivar.name.id}} = {{ann[:default]}}
-              {% elsif ivar.has_default_value? %}
-                @{{ivar.name.id}} = {{ivar.default_value}}
-              {% elsif ivar.type.nilable? %}
-                @{{ivar.name.id}} = nil
-              {% end %}
-            {% end %}
-          {% end %}
-
-          {% for name, value in properties %}
-            if %found{name}
-              @{{name}} = %var{name}
-            else
-              {% if value[:has_default] %}
-                @{{name}} = {{value[:default]}}
-              {% elsif value[:nilable] %}
-                @{{name}} = nil
-              {% else %}
-                node.raise "Missing YAML attribute: " + {{value[:key]}}
-              {% end %}
-            end
-
-            {% if value[:presence] %}
-              @{{name}}_present = %found{name}
-            {% end %}
-          {% end %}
-        {% end %}
-      {% end %}
-      after_initialize
-    end
-
-    def to_yaml(yaml : ::YAML::Nodes::Builder) : Nil
-      {% verbatim do %}
-        {% begin %}
-          {% options = @type.annotation(::YAML::Serializable::Options) || @type.annotation(YAML::Serializable::Options) || @type.annotation(Options) %}
-          {% emit_nulls = options && options[:emit_nulls] %}
-
-          {% properties = {} of Nil => Nil %}
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::YAML::Field) || ivar.annotation(YAML::Field) || ivar.annotation(Field) %}
-            {% unless ann && (ann[:ignore] || ann[:ignore_serialize] == true) %}
-              {%
-                properties[ivar.id] = {
-                  key:              ((ann && ann[:key]) || ivar).id.stringify,
-                  converter:        ann && ann[:converter],
-                  emit_null:        (ann && (ann[:emit_null] != nil) ? ann[:emit_null] : emit_nulls),
-                  ignore_serialize: ann && ann[:ignore_serialize],
-                }
-              %}
-            {% end %}
-          {% end %}
-
-          yaml.mapping do
-            {% for name, value in properties %}
-              _{{name}} = @{{name}}
-
-              {% if value[:ignore_serialize] %}
-                unless {{ value[:ignore_serialize] }}
-              {% end %}
-
-                {% unless value[:emit_null] %}
-                  unless _{{name}}.nil?
-                {% end %}
-
-                  yaml.scalar({{value[:key]}})
-                  {% if value[:converter] %}
-                    if val = _{{name}}
-                      {{value[:converter]}}.to_yaml(val, yaml)
-                    else
-                      yaml.scalar("null")
-                    end
-                  {% else %}
-                    if _{{name}}.nil?
-                      yaml.scalar("null")
-                    else
-                      ::YAML.write_value(_{{name}}, yaml)
-                    end
-                  {% end %}
-
-                {% unless value[:emit_null] %}
-                  end
-                {% end %}
-
-              {% if value[:ignore_serialize] %}
-                end
-              {% end %}
-            {% end %}
-            on_to_yaml(yaml)
-          end
-        {% end %}
-      {% end %}
-    end
-
-    def to_yaml : String
-      builder = ::YAML::Nodes::Builder.new
-      to_yaml(builder)
-      ::YAML.nodes_to_yaml(builder.document)
-    end
-
-    def to_yaml(io : IO) : Nil
-      io << to_yaml
-    end
-
-    protected def after_initialize
-    end
-
-    protected def on_unknown_yaml_attribute(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node, key : String)
-    end
-
-    protected def on_to_yaml(yaml : ::YAML::Nodes::Builder)
-    end
-  end
-end
-
-module ArrayConverter(T)
-  def self.from_yaml(ctx : ::YAML::ParseContext, node : ::YAML::Nodes::Node) : Array(T)
-    unless node.is_a?(::YAML::Nodes::Sequence)
-      node.raise "Expected YAML sequence"
-    end
-    ary = [] of T
-    node.nodes.each do |child|
-      ary << T.new(ctx, child)
-    end
-    ary
-  end
-
-  def self.to_yaml(values : Array(T), yaml : ::YAML::Nodes::Builder) : Nil
-    yaml.sequence do
-      values.each { |v| v.to_yaml(yaml) }
-    end
-  end
-end
-
-def Object.from_yaml(string_or_io : String)
-  doc = ::YAML::Nodes.parse(string_or_io)
-  node = doc.nodes.first? || ::YAML::Nodes::Scalar.new("")
-  ctx = ::YAML::ParseContext.new
-  new(ctx, node)
-end
-
-def Array.new(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node)
-  unless node.is_a?(Std::Yaml::Nodes::Sequence)
-    node.raise "Expected YAML sequence for Array"
-  end
-  ary = new
-  node.nodes.each do |child|
-    ary << T.new(ctx, child)
-  end
-  ary
-end
-
-def Array.from_yaml(input : String)
-  doc = Std::Yaml::Nodes.parse(input)
-  node = doc.nodes.first? || Std::Yaml::Nodes::Scalar.new("")
-  ctx = Std::Yaml::ParseContext.new
-  new(ctx, node)
-end
-
-def Hash.new(ctx : Std::Yaml::ParseContext, node : Std::Yaml::Nodes::Node)
-  unless node.is_a?(Std::Yaml::Nodes::Mapping)
-    node.raise "Expected YAML mapping for Hash"
-  end
-  h = new
-  Std::Yaml::Schema::Core.each(node) do |k_node, v_node|
-    unless k_node.is_a?(Std::Yaml::Nodes::Scalar)
-      k_node.raise "Expected scalar key for Hash"
-    end
-    k = k_node.value
-    v = V.new(ctx, v_node)
-    h[k] = v
-  end
-  h
-end
-
-def Hash.from_yaml(input : String)
-  doc = Std::Yaml::Nodes.parse(input)
-  node = doc.nodes.first? || Std::Yaml::Nodes::Scalar.new("")
-  ctx = Std::Yaml::ParseContext.new
-  new(ctx, node)
-end
-
-alias ::YAML = Std::Yaml::YAML
-alias ::YAML::Any = Std::Yaml::Any
-alias ::YAML::Nodes = Std::Yaml::Nodes
-alias ::YAML::Schema = Std::Yaml::Schema
-alias ::YAML::ParseContext = Std::Yaml::ParseContext
-alias ::YAML::ScalarStyle = Std::Yaml::ScalarStyle
-alias ::YAML::SequenceStyle = Std::Yaml::SequenceStyle
-alias ::YAML::MappingStyle = Std::Yaml::MappingStyle
-alias ::YAML::EventKind = Std::Yaml::EventKind
-alias ::YAML::Field = Std::Yaml::Field
-alias ::YAML::Serializable = Std::Yaml::Serializable
-alias ::YAML::ArrayConverter = Std::Yaml::ArrayConverter

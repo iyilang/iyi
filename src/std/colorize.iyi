@@ -1,10 +1,29 @@
-# Terminal ANSI colorization and text decoration for iyi.
+# Terminal colour and style: `"text".colorize.red.on_blue.bold` is the
+# text wrapped in the ANSI SGR escape that paints it, and back to plain
+# text with `\e[0m`. Sixteen named colours (`ColorANSI`), the 256-colour
+# palette (`Color256`, `fore(200_u8)`), 24-bit RGB (`ColorRGB`,
+# `fore(r, g, b)`), and one style slot (`Mode`: bold, dim, underline,
+# blink, reverse, hidden — the last one asked for wins, and `bright` is
+# `bold`).
 #
-# Pure iyi implementation conforming to Crystal's Colorize specification.
+# `Colorize.enabled?` decides whether escapes are written at all. Until
+# set, it reads the environment the way the NO_COLOR convention asks:
+# false when `NO_COLOR` is set to anything but the empty string, false
+# when `TERM` is `dumb`, true otherwise. The prelude has no way to ask
+# whether the output is a terminal, so a program writing to a pipe sets
+# `Colorize.enabled = false` itself or leaves it to the reader's
+# `NO_COLOR`. `Colorize.reset(io)` writes `\e[0m`; `Colorize.with` is an
+# empty coloured object to build a prefix from.
+#
+# `.colorize` is added to every value by reopening the prelude's
+# `Object` at the end of this file: the method is the whole of the
+# module's surface, and a wrapper call on every value is the one shape
+# `42.colorize.yellow` can take. That reopen is the only thing this
+# module puts outside its own namespace.
 
 module std/colorize
 
-module ::Colorize
+pub struct Colorize
   enum ColorANSI
     Default      = 39
     Black        = 30
@@ -57,22 +76,38 @@ module ::Colorize
     Hidden    = 8
   end
 
-  @@enabled : Bool = true
+  @@enabled : Bool? = nil
 
   def self.enabled? : Bool
-    @@enabled
+    e = @@enabled
+    return e if e.is_a?(Bool)
+    on = Colorize.environment_allows?
+    @@enabled = on
+    on
   end
 
   def self.enabled : Bool
-    @@enabled
+    enabled?
   end
 
   def self.enabled=(value : Bool) : Bool
     @@enabled = value
   end
 
-  def self.reset(io) : Nil
-    io.write("\e[0m") if @@enabled
+  # The environment's answer, read once: `NO_COLOR` set to anything but
+  # `""` refuses, `TERM=dumb` refuses, and nothing else is asked.
+  def self.environment_allows? : Bool
+    if no_color = Program.env("NO_COLOR")
+      return false unless no_color.empty?
+    end
+    if term = Program.env("TERM")
+      return false if term == "dumb"
+    end
+    true
+  end
+
+  def self.reset(io : IO) : Nil
+    io.write("\e[0m") if enabled?
   end
 
   def self.reset : Nil
@@ -415,7 +450,5 @@ module ::Colorize
 end
 
 class ::Object
-  include Colorize::ObjectExtensions
+  include Std::Colorize::Colorize::ObjectExtensions
 end
-
-pub alias Colorize = ::Colorize

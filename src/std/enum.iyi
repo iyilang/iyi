@@ -1,20 +1,29 @@
+# iyi: the rest of `Enum`, added to the prelude's.
+#
+# The prelude gives every enum its value, its name, `==` and the ordering,
+# `includes?`, `|` and `&`, `values`/`names`, and the two questions that
+# answer nil: `parse?` and `from_value?`. This module adds what is left:
+# the conversions the value itself has (`to_i`, `to_i32`, `to_i64`, `to_u8`,
+# `to_u64`, `to_f64`),
+# member arithmetic (`+`/`-` an integer, `^` a member), `<=>`, `clone`,
+# the `io` spellings of `to_s`/`inspect`, `each`, `valid?`, and the
+# panicking halves of the two questions: `from_value` and `parse`, which
+# refuse with the value or the name they were given.
+#
+# A `@[Flags]` enum is treated the way the prelude treats it. `each` walks
+# the members `values` lists — not `None` and `All`, which the compiler
+# added. `valid?` answers what `from_value?` answers: a member, or zero
+# (`None`); a combination of bits is not a member, and `All` is not one
+# either. Whether a combination holds a bit is `includes?`'s question.
+#
+# There is no `~`: the prelude gives integers no complement, so an enum
+# has none to build on.
+
 module std/enum
 
-import std/traits
-using std/traits::{Cmp}
-
-# Enum is the base type of all enums.
 struct ::Enum
   def to_i : Int32
     value.to_i32
-  end
-
-  def to_i8 : Int8
-    value.to_i8
-  end
-
-  def to_i16 : Int16
-    value.to_i16
   end
 
   def to_i32 : Int32
@@ -29,42 +38,30 @@ struct ::Enum
     value.to_u8
   end
 
-  def to_u16 : UInt16
-    value.to_u16
-  end
-
-  def to_u32 : UInt32
-    value.to_u32
-  end
-
   def to_u64 : UInt64
     value.to_u64
-  end
-
-  def to_f32 : Float32
-    value.to_f32
   end
 
   def to_f64 : Float64
     value.to_f64
   end
 
+  # The member `other` places after this one; may name no member.
   def +(other : Int) : self
     self.class.new(value + other)
   end
 
+  # The member `other` places before this one; may name no member.
   def -(other : Int) : self
     self.class.new(value - other)
   end
 
+  # The bits in exactly one of the two.
   def ^(other : self) : self
     self.class.new(value ^ other.value)
   end
 
-  def ~ : self
-    self.class.new(~value)
-  end
-
+  # -1, 0 or 1 by value.
   def <=>(other : self) : Int32
     v1 = value
     v2 = other.value
@@ -75,29 +72,35 @@ struct ::Enum
     self
   end
 
-  def to_s(io : IyiIO) : ::Nil
+  def to_s(io : IyiIO) : Nil
     io.print(to_s)
   end
 
-  def inspect(io : IyiIO) : ::Nil
+  def inspect(io : IyiIO) : Nil
     io.print(inspect)
   end
 
+  # The member numbered `val`; panics naming the value where no member is.
   def self.from_value(val : Int) : self
-    from_value?(val.to_i) || raise "Unknown enum value: #{val}"
+    from_value?(val.to_i32) || raise "no #{self} member has the value #{val}"
   end
 
-  def self.valid?(val : self) : ::Bool
-    !from_value?(val.value.to_i).nil?
+  # Whether `val` is a member: what `from_value?` answers, as a Bool. For a
+  # flags enum that is a single member or `None`; a combination and `All`
+  # are not members.
+  def self.valid?(val : self) : Bool
+    !from_value?(val.value.to_i32).nil?
   end
 
+  # The member named `string`, compared the lenient way `parse?` compares;
+  # panics naming the text where no member is.
   def self.parse(string : String) : self
-    parse?(string) || raise "Unknown enum name: #{string}"
+    parse?(string) || raise "no #{self} member is named #{string.inspect}"
   end
 
-  def self.each(& : self -> ::Nil) : ::Nil
-    {% for member in @type.constants %}
-      yield new({{@type.constant(member)}})
-    {% end %}
+  # Every member in the order written, as `values` lists them: for a flags
+  # enum, without `None` and `All`.
+  def self.each(& : self -> Nil) : Nil
+    values.each { |member| yield member }
   end
 end

@@ -1,230 +1,385 @@
+# The whole integer tower: `Int8`, `Int16`, `UInt16`, `UInt32`, `Int128` and
+# `UInt128` made as usable as the prelude's `Int32`, `Int64`, `UInt8` and
+# `UInt64`.
+#
+# The prelude declares arithmetic, comparison and conversion primitives for
+# its four integer types and `Float64` only; a literal `1_u16` exists, but
+# `1_u16 + 1_u16` has no method to land on. This module declares the rest of
+# the matrix the same way the prelude does - `@[Primitive]` annotations the
+# compiler lowers to instructions, no library underneath - so every pair of
+# integer types adds, subtracts, multiplies, compares and converts; then
+# gives each type the operators the prelude writes by hand (`//`, `%`, `<<`,
+# `>>`, `abs`, unary `-`) and a printer, and every integer the bit counts
+# (`popcount`, `leading_zeros_count`, `trailing_zeros_count`, `bit_length`,
+# `bit`), `gcd`/`lcm`, `digits`, `<=>`, and `chr` with the prelude's contract.
+#
+# What it refuses: arithmetic that leaves the type panics with "arithmetic
+# overflow" (the `&+` family wraps instead); a conversion that does not fit
+# panics the same way, and the `to_i8?` family answers nil instead; `//` and
+# `%` by zero panic "division by zero" / "modulo by zero"; `digits` of a
+# negative number, a base under 2, a `chr` outside 0..127, and a `to_s` base
+# outside 2..36 are refused with a sentence. There is no `Int32::MAX`: the
+# edges of a type are its literals, and that holds for every type here.
 module std/int
 
 {% begin %}
-  {% ints = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128) %}
-  {% all_types = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128 Float32 Float64) %}
-  {% prelude_nums = %w(Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64 Float64) %}
-  {% non_prelude_types = %w(Int128 UInt128 Float32) %}
-  {% prelude_ints = %w(Int8 Int16 Int32 Int64 UInt8 UInt16 UInt32 UInt64) %}
-  {% non_prelude_ints = %w(Int128 UInt128) %}
-  {% binaries = %w(+ - *) %}
-
-  {% extra_convs = {
-       to_i8: "Int8", to_i16: "Int16", to_i128: "Int128",
-       to_u: "UInt32", to_u16: "UInt16", to_u32: "UInt32", to_u128: "UInt128",
-       to_f32: "Float32",
+  {% types = [
+       {"Int8", 8, true, "i8"},
+       {"Int16", 16, true, "i16"},
+       {"Int32", 32, true, "i32"},
+       {"Int64", 64, true, "i64"},
+       {"Int128", 128, true, "i128"},
+       {"UInt8", 8, false, "u8"},
+       {"UInt16", 16, false, "u16"},
+       {"UInt32", 32, false, "u32"},
+       {"UInt64", 64, false, "u64"},
+       {"UInt128", 128, false, "u128"},
+     ] %}
+  {% prelude = %w(Int32 Int64 UInt8 UInt64) %}
+  {% mins = {
+       "Int8"   => "-128",
+       "Int16"  => "-32768",
+       "Int32"  => "-2147483648",
+       "Int64"  => "-9223372036854775808",
+       "Int128" => "-170141183460469231731687303715884105728",
      } %}
-
-  {% all_convs = {
-       to_i: "Int32", to_i8: "Int8", to_i16: "Int16", to_i32: "Int32", to_i64: "Int64", to_i128: "Int128",
-       to_u: "UInt32", to_u8: "UInt8", to_u16: "UInt16", to_u32: "UInt32", to_u64: "UInt64", to_u128: "UInt128",
-       to_f: "Float64", to_f32: "Float32", to_f64: "Float64",
+  {% maxs = {
+       "Int8"    => "127",
+       "Int16"   => "32767",
+       "Int32"   => "2147483647",
+       "Int64"   => "9223372036854775807",
+       "Int128"  => "170141183460469231731687303715884105727",
+       "UInt8"   => "255",
+       "UInt16"  => "65535",
+       "UInt32"  => "4294967295",
+       "UInt64"  => "18446744073709551615",
+       "UInt128" => "340282366920938463463374607431768211455",
      } %}
+  {% convs = [
+       {"to_i8", "Int8"}, {"to_i16", "Int16"}, {"to_i32", "Int32"}, {"to_i", "Int32"},
+       {"to_i64", "Int64"}, {"to_i128", "Int128"},
+       {"to_u8", "UInt8"}, {"to_u16", "UInt16"}, {"to_u32", "UInt32"}, {"to_u", "UInt32"},
+       {"to_u64", "UInt64"}, {"to_u128", "UInt128"},
+     ] %}
+  {% prelude_convs = %w(to_i to_i32 to_i64 to_u8 to_u64) %}
 
-  {% for t in prelude_nums %}
-    struct ::{{ t.id }}
-      {% for name, target in extra_convs %}
+  # --- the primitive matrix ---------------------------------------------
+  {% for from in types %}
+    struct ::{{ from[0].id }}
+      # Conversions: the checked form panics "arithmetic overflow" when the
+      # value does not fit; the `?` form answers nil instead. A pair the
+      # prelude already declares is not declared twice.
+      {% for conv in convs %}
+        {% to_name = conv[1] %}
+        {% to = types.find { |t| t[0] == to_name } %}
+        {% unless prelude.includes?(from[0]) && prelude_convs.includes?(conv[0]) %}
+          @[::Primitive(:convert)]
+          @[Raises]
+          def {{ conv[0].id }} : {{ to_name.id }}
+          end
+        {% end %}
+
+        {% need_low = from[2] && (!to[2] || to[1] < from[1]) %}
+        {% need_high = to[1] < from[1] || (to[1] == from[1] && to[2] && !from[2]) %}
+        def {{ conv[0].id }}? : {{ to_name.id }}?
+          {% if need_low %}
+            return nil if self < {{ (to[2] ? mins[to_name] : "0").id }}_{{ from[3].id }}
+          {% end %}
+          {% if need_high %}
+            return nil if self > {{ maxs[to_name].id }}_{{ from[3].id }}
+          {% end %}
+          {{ conv[0].id }}
+        end
+      {% end %}
+
+      {% unless prelude.includes?(from[0]) %}
         @[::Primitive(:convert)]
-        def {{ name.id }} : {{ target.id }}
+        def to_f : Float64
+        end
+
+        @[::Primitive(:convert)]
+        def to_f64 : Float64
         end
 
         @[::Primitive(:unchecked_convert)]
-        def {{ name.id }}! : {{ target.id }}
+        def unsafe_chr : Char
         end
       {% end %}
 
-      {% for t2 in non_prelude_types %}
+      {% for other in types %}
+        {% unless prelude.includes?(from[0]) && prelude.includes?(other[0]) %}
+          {% for op in %w(== != < <= > >=) %}
+            @[::Primitive(:binary)]
+            def {{ op.id }}(other : {{ other[0].id }}) : Bool
+            end
+          {% end %}
+
+          {% for op in %w(+ - *) %}
+            @[::Primitive(:binary)]
+            @[Raises]
+            def {{ op.id }}(other : {{ other[0].id }}) : self
+            end
+
+            @[::Primitive(:binary)]
+            def &{{ op.id }}(other : {{ other[0].id }}) : self
+            end
+          {% end %}
+
+          {% for op in %w(| & ^ unsafe_shl unsafe_shr unsafe_div unsafe_mod) %}
+            @[::Primitive(:binary)]
+            def {{ op.id }}(other : {{ other[0].id }}) : self
+            end
+          {% end %}
+        {% end %}
+      {% end %}
+
+      {% unless prelude.includes?(from[0]) %}
         {% for op in %w(== != < <= > >=) %}
           @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ t2.id }}) : ::Bool
+          def {{ op.id }}(other : Float64) : Bool
           end
         {% end %}
+
+        {% for op in %w(+ - *) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : Float64) : Float64
+          end
+        {% end %}
+
+        # An integer divided by a float is a float, as the prelude has it
+        # for `Int32` and `Int64`.
+        def /(other : Float64) : Float64
+          to_f64 / other
+        end
       {% end %}
     end
   {% end %}
 
-  {% for t in non_prelude_types %}
-    struct ::{{ t.id }}
-      {% for name, target in all_convs %}
+  struct ::Float64
+    {% for from in types %}
+      {% unless prelude.includes?(from[0]) %}
+        {% for op in %w(== != < <= > >=) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ from[0].id }}) : Bool
+          end
+        {% end %}
+
+        {% for op in %w(+ - *) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : {{ from[0].id }}) : self
+          end
+        {% end %}
+
+        @[::Primitive(:binary)]
+        def fdiv(other : {{ from[0].id }}) : self
+        end
+      {% end %}
+    {% end %}
+
+    {% for conv in convs %}
+      {% unless prelude_convs.includes?(conv[0]) %}
         @[::Primitive(:convert)]
-        def {{ name.id }} : {{ target.id }}
-        end
-
-        @[::Primitive(:unchecked_convert)]
-        def {{ name.id }}! : {{ target.id }}
+        @[Raises]
+        def {{ conv[0].id }} : {{ conv[1].id }}
         end
       {% end %}
+    {% end %}
+  end
 
-      {% for t2 in all_types %}
-        {% for op in %w(== != < <= > >=) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ t2.id }}) : ::Bool
+  # --- the operators the prelude writes by hand, for every type it did not --
+  {% for t in types %}
+    {% name = t[0] %}
+    {% bits = t[1] %}
+    {% signed = t[2] %}
+    {% suffix = t[3] %}
+    struct ::{{ name.id }}
+      {% unless name == "Int32" || name == "Int64" || name == "UInt64" %}
+        # The zero is checked here rather than left to the processor, which
+        # reports an integer division by zero as a floating-point fault.
+        def //(other : {{ name.id }}) : {{ name.id }}
+          raise "division by zero" if other == 0
+          {% if signed %}
+            # The one division that overflows: the smallest value has no
+            # positive twin.
+            raise "arithmetic overflow" if self == {{ mins[name].id }}_{{ suffix.id }} && other == -1
+          {% end %}
+          unsafe_div(other)
+        end
+
+        def %(other : {{ name.id }}) : {{ name.id }}
+          raise "modulo by zero" if other == 0
+          {% if signed %}
+            # Zero, and it fits: only the division underneath traps.
+            return 0_{{ suffix.id }} if self == {{ mins[name].id }}_{{ suffix.id }} && other == -1
+          {% end %}
+          unsafe_mod(other)
+        end
+      {% end %}
+
+      {% unless name == "Int32" || name == "Int64" %}
+        # A shift by the width or more answers zero (or the sign, shifting a
+        # negative value right), which the processor does not promise.
+        def <<(count : Int32) : {{ name.id }}
+          count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shl(count)
+        end
+
+        def >>(count : Int32) : {{ name.id }}
+          {% if signed %}
+            count >= {{ bits }} || count < 0 ? (self < 0 ? -1_{{ suffix.id }} : 0_{{ suffix.id }}) : unsafe_shr(count)
+          {% else %}
+            count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shr(count)
+          {% end %}
+        end
+
+        {% if signed %}
+          def - : {{ name.id }}
+            0_{{ suffix.id }} - self
+          end
+
+          def abs : {{ name.id }}
+            self < 0 ? -self : self
+          end
+        {% else %}
+          def abs : {{ name.id }}
+            self
           end
         {% end %}
       {% end %}
-    end
-  {% end %}
 
-  {% for int in prelude_ints %}
-    struct ::{{ int.id }}
-      {% for int2 in non_prelude_ints %}
-        {% for op in binaries %}
-          @[::Primitive(:binary)]
-          @[Raises]
-          def {{ op.id }}(other : {{ int2.id }}) : self
+      {% unless prelude.includes?(name) %}
+        {% if bits < 64 %}
+          # Fits an `Int64`: the prelude's printer.
+          def to_s : String
+            to_i64.to_s
           end
 
-          @[::Primitive(:binary)]
-          def &{{ op.id }}(other : {{ int2.id }}) : self
+          def to_s(base : Int32) : String
+            to_i64.to_s(base)
           end
-        {% end %}
 
-        {% for op in %w(| & ^ unsafe_shl unsafe_shr unsafe_div unsafe_mod) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ int2.id }}) : self
+          def hash : Int32
+            {% if bits < 32 || signed %} to_i32 {% else %} unsafe_shr(1).to_i32 ^ (self & 1).to_i32 {% end %}
+          end
+        {% else %}
+          # Digits backward, the negative magnitude divided rather than
+          # negated so the smallest value prints (its negation is not one of
+          # the type).
+          def to_s : String
+            to_s(10)
+          end
+
+          def to_s(base : Int32) : String
+            raise "base out of range" if base < 2 || base > 36
+            return "0" if self == 0
+
+            radix = base.{{ (signed ? "to_i128" : "to_u128").id }}
+            negative = self < 0
+            digits = [] of Int32
+            temp = self
+            while temp != 0
+              rem = temp % radix
+              {% if signed %}
+                digits << (rem < 0 ? (-rem).to_i32 : rem.to_i32)
+              {% else %}
+                digits << rem.to_i32
+              {% end %}
+              temp = temp // radix
+            end
+
+            bytesize = negative ? digits.size + 1 : digits.size
+            String.new(bytesize) do |buffer|
+              at = 0
+              if negative
+                buffer[0] = 45_u8
+                at = 1
+              end
+              rev = digits.size - 1
+              while rev >= 0
+                d = digits[rev]
+                buffer[at] = d < 10 ? (48 + d).to_u8 : (87 + d).to_u8
+                at = at + 1
+                rev = rev - 1
+              end
+            end
+          end
+
+          def hash : Int32
+            mix = (self ^ unsafe_shr(64)) & 18446744073709551615_u64
+            mix = mix ^ mix.unsafe_shr(32)
+            (mix & 2147483647).to_i32
           end
         {% end %}
       {% end %}
-    end
-  {% end %}
 
-  {% for int in non_prelude_ints %}
-    struct ::{{ int.id }}
-      {% for int2 in ints %}
-        {% for op in binaries %}
-          @[::Primitive(:binary)]
-          @[Raises]
-          def {{ op.id }}(other : {{ int2.id }}) : self
-          end
+      # --- the bits, counted with a logical shift for every type ----------
+      # A negative value has its sign bits counted: `(-1).popcount` is 32,
+      # one loop of the type's width.
+      def popcount : Int32
+        count = 0
+        i = 0
+        while i < {{ bits }}
+          count = count + 1 if (unsafe_shr(i) & 1) != 0
+          i = i + 1
+        end
+        count
+      end
 
-          @[::Primitive(:binary)]
-          def &{{ op.id }}(other : {{ int2.id }}) : self
-          end
+      def leading_zeros_count : Int32
+        i = {{ bits }} - 1
+        while i >= 0
+          return {{ bits }} - 1 - i if (unsafe_shr(i) & 1) != 0
+          i = i - 1
+        end
+        {{ bits }}
+      end
+
+      def trailing_zeros_count : Int32
+        i = 0
+        while i < {{ bits }}
+          return i if (unsafe_shr(i) & 1) != 0
+          i = i + 1
+        end
+        {{ bits }}
+      end
+
+      # Bits needed to write the value, the sign excluded: `255.bit_length`
+      # is 8, `(-1).bit_length` is 0 and `(-2).bit_length` is 1.
+      def bit_length : Int32
+        {% if signed %}
+          x = self < 0 ? ~self : self
+          {{ bits }} - x.leading_zeros_count
+        {% else %}
+          {{ bits }} - leading_zeros_count
         {% end %}
+      end
 
-        {% for op in %w(| & ^ unsafe_shl unsafe_shr unsafe_div unsafe_mod) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ int2.id }}) : self
-          end
+      def ~ : {{ name.id }}
+        {% if signed %}
+          self ^ -1_{{ suffix.id }}
+        {% else %}
+          self ^ {{ maxs[name].id }}_{{ suffix.id }}
         {% end %}
-      {% end %}
+      end
     end
   {% end %}
 {% end %}
 
-struct ::Int8
-  MIN = -128_i8
-  MAX =  127_i8
-end
-
-struct ::UInt8
-  MIN =   0_u8
-  MAX = 255_u8
-end
-
-struct ::Int16
-  MIN = -32768_i16
-  MAX =  32767_i16
-end
-
-struct ::UInt16
-  MIN =     0_u16
-  MAX = 65535_u16
-end
-
-struct ::Int32
-  MIN = -2147483648_i32
-  MAX =  2147483647_i32
-end
-
-struct ::UInt32
-  MIN =          0_u32
-  MAX = 4294967295_u32
-end
-
-struct ::Int64
-  MIN = -9223372036854775808_i64
-  MAX =  9223372036854775807_i64
-end
-
-struct ::UInt64
-  MIN =                    0_u64
-  MAX = 18446744073709551615_u64
-end
-
-struct ::Int128
-  MIN = -170141183460469231731687303715884105728_i128
-  MAX =  170141183460469231731687303715884105727_i128
-end
-
-struct ::UInt128
-  MIN =                                       0_u128
-  MAX = 340282366920938463463374607431768211455_u128
-end
-
 struct ::Int
-  def integer? : ::Bool
-    true
-  end
-
-  def ~ : self
-    self ^ -1
-  end
-
-  def <=>(other : Int) : Int32
+  def <=>(other : self) : Int32
     self < other ? -1 : (self > other ? 1 : 0)
   end
 
-  def even? : ::Bool
-    (self & 1) == 0
+  # Bit `n`, 0 or 1; a bit past the width is 0 (or the sign).
+  def bit(n : Int32) : Int32
+    ((self >> n) & 1).to_i32
   end
 
-  def odd? : ::Bool
-    (self & 1) != 0
+  def bits_set?(mask : self) : Bool
+    (self & mask) == mask
   end
 
-  def times(& : Int32 -> ::Nil) : ::Nil
-    i = 0
-    while i < self
-      yield i
-      i = i + 1
-    end
-  end
-
-  def upto(to, & : self -> ::Nil) : ::Nil
-    cur = self
-    while cur <= to
-      yield cur
-      cur = cur + 1
-    end
-  end
-
-  def downto(to, & : self -> ::Nil) : ::Nil
-    cur = self
-    while cur >= to
-      yield cur
-      cur = cur - 1
-    end
-  end
-
-  def tdiv(other : Int) : self
-    self // other
-  end
-
-  def tmod(other : Int) : self
-    self % other
-  end
-
-  def remainder(other : Int) : self
-    self % other
-  end
-
-  def fdiv(other : Int) : Float64
-    to_f64 / other.to_f64
-  end
-
-  def gcd(other : Int) : self
-    a = self.abs
+  def gcd(other : self) : self
+    a = abs
     b = other.abs
     while b != 0
       t = b
@@ -234,100 +389,30 @@ struct ::Int
     a
   end
 
-  def lcm(other : Int) : self
-    return (self - self) if self == 0 || other == 0
-    (self.abs // gcd(other)) * other.abs
+  def lcm(other : self) : self
+    return self - self if self == 0 || other == 0
+    (abs // gcd(other)) * other.abs
   end
 
-  def popcount : Int32
-    count = 0
-    temp = self
-    while temp != 0
-      count = count + (temp & 1).to_i32
-      temp = temp.unsafe_shr(1)
-    end
-    count
-  end
-
-  def trailing_zeros_count : Int32
-    return 0 if self == 0
-    count = 0
-    temp = self
-    while (temp & 1) == 0
-      count = count + 1
-      temp = temp.unsafe_shr(1)
-    end
-    count
-  end
-
-  def leading_zeros_count : Int32
-    bits = sizeof(self) * 8
-    return bits if self == 0
-    count = 0
-    i = bits - 1
-    while i >= 0
-      if ((self.unsafe_shr(i)) & 1) != 0
-        break
-      end
-      count = count + 1
-      i = i - 1
-    end
-    count
-  end
-
-  def bit_length : Int32
-    sizeof(self) * 8 - leading_zeros_count
-  end
-
-  def bit(n : Int32) : Int32
-    (self.unsafe_shr(n) & 1).to_i32
-  end
-
-  def bits_set?(mask : Int) : ::Bool
-    (self & mask) == mask
-  end
-
-  def all_bits_set?(mask : Int) : ::Bool
-    bits_set?(mask)
-  end
-
-  def no_bits_set?(mask : Int) : ::Bool
-    (self & mask) == 0
-  end
-
-  def any_bits_set?(mask : Int) : ::Bool
-    (self & mask) != 0
-  end
-
-  def digits(base : Int = 10) : Array(Int32)
-    b = base.to_i32
-    raise "Invalid base: #{b}" if b < 2
+  # The digits, least significant first: `1234.digits` is `[4, 3, 2, 1]`.
+  # A negative number has no digits in this sense and is refused.
+  def digits(base : Int32 = 10) : Array(Int32)
+    raise "base out of range: #{base}" if base < 2
+    raise "digits of a negative number: #{self}" if self < 0
     return [0] if self == 0
-    res = [] of Int32
-    temp = self.abs
+    result = [] of Int32
+    temp = self
     while temp > 0
-      res << (temp % b).to_i32
-      temp = temp // b
+      result << temp.unsafe_mod(base).to_i32
+      temp = temp.unsafe_div(base)
     end
-    res
+    result
   end
 
-  def chr : ::Char
+  # The character with this code, ASCII: the prelude's `Int32#chr`
+  # contract for every integer type.
+  def chr : Char
+    raise "#{self} is out of char range" if self < 0 || self > 127
     to_u8.unsafe_chr
   end
-
-  def to_s(io : IyiIO) : ::Nil
-    io.print(to_s)
-  end
 end
-
-{% for conv, t in {
-                    to_i8: "Int8", to_i16: "Int16", to_i32: "Int32", to_i64: "Int64", to_i128: "Int128",
-                    to_u8: "UInt8", to_u16: "UInt16", to_u32: "UInt32", to_u64: "UInt64", to_u128: "UInt128",
-                  } %}
-  struct ::{{ t.id }}
-    def self.new(value) : self
-      value.{{ conv.id }}
-    end
-  end
-{% end %}

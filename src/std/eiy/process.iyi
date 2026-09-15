@@ -1,0 +1,19 @@
+# The program `Eiy.embed` runs at compile time: `eiy/process CALLER TEMPLATE
+# IO_NAME` reads the template named beside CALLER (or by an absolute path)
+# and prints the iyi source that renders it to IO_NAME. That output is what
+# the macro splices into the program. A template that cannot be read, or has
+# a tag that is never closed, is refused here with its sentence, and the
+# compiler reports it at the macro.
+#
+# Not a module: it declares no `std/` path, so `import` cannot reach it, and
+# `run` finds it by this file's place beside `eiy.iyi`.
+
+module eiy_process
+
+import std/eiy
+using std/eiy::{Eiy}
+
+args = Program.args
+raise "usage: eiy/process CALLER TEMPLATE IO_NAME, not #{args.size} arguments" unless args.size == 3
+
+print Eiy.process_file(Eiy.locate(args[1], args[0]), args[2])

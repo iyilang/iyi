@@ -1,161 +1,133 @@
-# Garbage Collector interface for iyi runtime.
+# iyi: `GC` — the program's window onto iyi's own collector.
 #
-# Provides memory allocation, statistics, and GC control wrappers.
+# The prelude allocates through the owned collector (arenas, roots, marker,
+# sweep) and never asks the program to think about it. This module is for
+# the program that wants to: hand out raw words (`malloc`, `malloc_atomic`,
+# `realloc`, `free`), run a collection now (`collect`), hold the trigger
+# back for a stretch (`disable`/`enable`), ask whether a pointer names a
+# live chunk (`is_heap_ptr`), and read the numbers the collector actually
+# keeps (`stats`).
+#
+# The numbers are named for what they are, not for what another runtime
+# would call them: `mapped_bytes` is what the arenas and large mappings
+# reserve from the machine, not bytes in use; `bytes_since_collection` is
+# the allocation word the trigger reads and every collection resets;
+# `bytes_freed_by_last_sweep` and `bytes_kept_by_last_sweep` are the last
+# sweep's tally; `collections` is how many have run. There is no lifetime
+# total, no free-list size and no heap ceiling to set, because the
+# collector keeps none of those, and a field of zeros would be a lie.
+#
+# This module speaks for the default collector only. A build with
+# `-Dgc_none` (no collector), `-Dgc_boehm` (a borrowed one) or a wasm32
+# target (a different heap) is refused here, at compile time, with the
+# sentence below, rather than answering zeros or failing on a name the
+# other heap does not have.
 
 module std/gc
 
-module ::GC
+{% if flag?(:gc_none) %}
+  {% raise "std/gc speaks for iyi's own collector, and -Dgc_none builds without one: " \
+           "there is nothing to collect, nothing to count and no heap to ask about. " \
+           "Drop the import or drop the flag." %}
+{% elsif flag?(:gc_boehm) %}
+  {% raise "std/gc speaks for iyi's own collector, and -Dgc_boehm borrows another: " \
+           "its counters and its notion of a heap pointer are not the ones this " \
+           "module reads. Drop the import or drop the flag." %}
+{% elsif flag?(:wasm32) %}
+  {% raise "std/gc speaks for iyi's own collector on Linux, macOS and Windows; the " \
+           "wasm32 heap is a different shape and keeps different numbers. Drop the " \
+           "import for this target." %}
+{% end %}
+
+pub struct GC
+  # What the collector can answer, read at one instant.
   struct Stats
-    getter heap_size : UInt64
-    getter free_bytes : UInt64
-    getter unmapped_bytes : UInt64
-    getter bytes_since_gc : UInt64
-    getter total_bytes : UInt64
+    # Bytes the arenas and large mappings hold from the machine. A
+    # reservation, counted in whole mappings; not bytes in use.
+    getter mapped_bytes : UInt64
+    # Bytes allocated since the last collection: the word the allocation
+    # trigger reads, folded in per cache slice and reset by every
+    # collection.
+    getter bytes_since_collection : UInt64
+    # Bytes the last sweep handed back, and bytes it found still live.
+    getter bytes_freed_by_last_sweep : UInt64
+    getter bytes_kept_by_last_sweep : UInt64
+    # How many collections have run.
+    getter collections : UInt64
 
-    def initialize(@heap_size : UInt64, @free_bytes : UInt64, @unmapped_bytes : UInt64, @bytes_since_gc : UInt64, @total_bytes : UInt64)
+    def initialize(@mapped_bytes : UInt64, @bytes_since_collection : UInt64, @bytes_freed_by_last_sweep : UInt64, @bytes_kept_by_last_sweep : UInt64, @collections : UInt64)
     end
 
-    def copy_with(heap_size = @heap_size, free_bytes = @free_bytes, unmapped_bytes = @unmapped_bytes, bytes_since_gc = @bytes_since_gc, total_bytes = @total_bytes) : Stats
-      Stats.new(heap_size, free_bytes, unmapped_bytes, bytes_since_gc, total_bytes)
-    end
-
-    def clone : Stats
-      Stats.new(@heap_size, @free_bytes, @unmapped_bytes, @bytes_since_gc, @total_bytes)
+    def to_s : String
+      "mapped=#{@mapped_bytes} since_collection=#{@bytes_since_collection} freed=#{@bytes_freed_by_last_sweep} kept=#{@bytes_kept_by_last_sweep} collections=#{@collections}"
     end
   end
 
-  record ProfStats,
-    heap_size : UInt64,
-    free_bytes : UInt64,
-    unmapped_bytes : UInt64,
-    bytes_since_gc : UInt64,
-    bytes_before_gc : UInt64,
-    non_gc_bytes : UInt64,
-    gc_no : UInt64,
-    markers_m1 : UInt64,
-    bytes_reclaimed_since_gc : UInt64,
-    reclaimed_bytes_before_gc : UInt64,
-    expl_freed_bytes_since_gc : UInt64,
-    obtained_from_os_bytes : UInt64
-
-  # Allocates and clears size bytes of memory.
+  # `size` zeroed bytes the collector scans for pointers. A negative size
+  # is refused by name.
   def self.malloc(size : Int) : Void*
+    raise "negative size: #{size}" if size < 0
     __crystal_malloc64(size.to_u64)
   end
 
-  # Allocates size bytes of pointer-free memory.
+  # `size` zeroed bytes the collector does not scan: for bytes that hold no
+  # pointers, so the marker skips them.
   def self.malloc_atomic(size : Int) : Void*
+    raise "negative size: #{size}" if size < 0
     __crystal_malloc_atomic64(size.to_u64)
   end
 
-  # Reallocates memory previously allocated by malloc.
+  # The chunk at `pointer`, resized to `size` bytes; the answer may be a
+  # new address, with the old bytes copied.
   def self.realloc(pointer : Void*, size : Int) : Void*
+    raise "negative size: #{size}" if size < 0
     __crystal_realloc64(pointer, size.to_u64)
   end
 
-  # Frees memory if supported by the active allocator.
+  # Hands a chunk back before the sweep would. A null pointer is nothing
+  # to free.
   def self.free(pointer : Void*) : Nil
     return if pointer.address == 0_u64
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      IyiHeap.free(pointer)
-    {% elsif flag?(:gc_boehm) %}
-      LibGC.free(pointer)
-    {% end %}
+    IyiHeap.free(pointer)
   end
 
-  # Runs a collection cycle.
+  # Runs one collection now.
   def self.collect : Nil
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      IyiMark.collect
-    {% elsif flag?(:gc_boehm) %}
-      LibGC.collect
-    {% end %}
+    IyiMark.collect
   end
 
-  # Enables collection.
+  # The allocation trigger runs collections again. `collect` still works
+  # while disabled.
   def self.enable : Nil
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      IyiMark.auto = true
-    {% elsif flag?(:gc_boehm) %}
-      LibGC.enable
-    {% end %}
+    IyiMark.auto = true
   end
 
-  # Disables collection.
+  # The allocation trigger stops running collections until `enable`.
   def self.disable : Nil
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      IyiMark.auto = false
-    {% elsif flag?(:gc_boehm) %}
-      LibGC.disable
-    {% end %}
+    IyiMark.auto = false
   end
 
-  # Returns whether the pointer points to a live chunk on the GC heap.
+  # Whether `pointer` points into a live chunk on the collector's heap:
+  # its start or any byte inside it. Null, a stack address and a freed
+  # chunk answer false.
   def self.is_heap_ptr(pointer : Void*) : Bool
     return false if pointer.address == 0_u64
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      IyiRoots.base_of(pointer.address) != 0_u64
-    {% elsif flag?(:gc_boehm) %}
-      LibGC.is_heap_ptr(pointer) != 0
-    {% else %}
-      raise "GC.is_heap_ptr is not supported without an active garbage collector"
-    {% end %}
+    IyiRoots.base_of(pointer.address) != 0_u64
   end
 
-  # Limits max heap size. The iyi collector uses dynamic pressure budgets
-  # rather than a static heap size ceiling.
-  def self.max_heap_size=(size : UInt64) : UInt64
-    raise "GC.max_heap_size= is not supported by the active collector"
-  end
-
-  # Returns current GC allocation statistics.
+  # The numbers the collector keeps, read now.
   def self.stats : Stats
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      mapped = 0_u64
-      arena = IyiHeap.first_arena
-      while arena != 0_u64
-        mapped += IyiHeap::MAP
-        arena = IyiHeap.arena_next(arena)
-      end
-      large = IyiHeap.first_large
-      while large != 0_u64
-        mapped += IyiHeap.large_mapped(large)
-        large = IyiHeap.large_next(large)
-      end
-      total = IyiHeap.allocated_word.value.get
-      freed = IyiMark.bytes_freed
-      since_gc = IyiMark.allocated_since
-      Stats.new(mapped, freed, 0_u64, since_gc, total)
-    {% else %}
-      Stats.new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
-    {% end %}
-  end
-
-  # Returns profiling statistics.
-  def self.prof_stats : ProfStats
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      s = stats
-      ProfStats.new(
-        s.heap_size,
-        s.free_bytes,
-        s.unmapped_bytes,
-        s.bytes_since_gc,
-        0_u64,
-        0_u64,
-        IyiMark.collections,
-        0_u64,
-        IyiMark.bytes_freed,
-        0_u64,
-        0_u64,
-        s.heap_size
-      )
-    {% else %}
-      ProfStats.new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
-    {% end %}
-  end
-
-  # Marks execution of a syscall block.
-  def self.syscall(&proc : ->) : Nil
-    proc.call
+    mapped = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0_u64
+      mapped += IyiHeap::MAP
+      arena = IyiHeap.arena_next(arena)
+    end
+    large = IyiHeap.first_large
+    while large != 0_u64
+      mapped += IyiHeap.large_mapped(large)
+      large = IyiHeap.large_next(large)
+    end
+    Stats.new(mapped, IyiMark.allocated_since, IyiMark.bytes_freed, IyiMark.bytes_kept, IyiMark.collections)
   end
 end

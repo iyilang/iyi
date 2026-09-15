@@ -1,19 +1,219 @@
+# `Float32`, made a number, and what `Float64` still lacked.
+#
+# The prelude's float is `Float64`: `1.5`, arithmetic, comparisons, `floor`,
+# `ceil`, `round`, `abs`, `**` and the shortest decimal that reads back as
+# the same double. A `Float32` literal, `1.5_f32`, exists but had no method
+# to land on. This module declares the `@[Primitive]` matrix for it the way
+# the prelude does for `Float64` - arithmetic, comparisons and conversions
+# against every numeric type, instructions and nothing underneath - and
+# gives it `abs`, `floor`, `ceil`, `round`, `trunc`, unary `-`, `%`,
+# `remainder`, `<=>`, `nan?`, `infinite?`, `finite?`, the constants `NAN`,
+# `INFINITY`, `MIN`, `MAX`, `EPSILON`, `MIN_POSITIVE`, and a printer of its
+# own: the shortest decimal that reads back as the same *single*, on the
+# prelude's exact bignum, so `0.1_f32` prints `0.1` and `Float32::MAX`
+# prints `3.4028235e+38`. `Float64` gets the same constants, `trunc`, unary
+# `-`, `%`, `remainder`, `<=>` and the three predicates.
+#
+# Mixed arithmetic answers the receiver's type, as the prelude's does:
+# `1_u16 + 1.5_f32` is a `Float32`, `1.5 + 1.5_f32` a `Float64`, and
+# `1.5_f32 + 1.5` a `Float32` (computed in double, then narrowed).
+#
+# `%` is the floored modulo, its sign the divisor's, as `Float#%` has meant
+# where the name comes from; `remainder` is the truncated one, its sign the
+# dividend's. Both are exact: no `x - y * q` that rounds. Either by zero
+# panics "modulo by zero". A conversion to an integer that does not fit
+# (NaN, infinity, out of range) panics "arithmetic overflow".
 module std/float
 
-struct ::Float32
-  NAN          = (0_f32 / 0_f32).as Float32
-  INFINITY     = (1_f32 / 0_f32).as Float32
-  MIN          = -3.40282347e+38_f32
-  MAX          =  3.40282347e+38_f32
-  EPSILON      =  1.19209290e-07_f32
-  MIN_POSITIVE =  1.17549435e-38_f32
+import std/int
 
-  def to_s : String
-    to_f64.to_s
+{% begin %}
+  {% ints = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128) %}
+  {% nums = ints + %w(Float64) %}
+  {% int_convs = [
+       {"to_i8", "Int8"}, {"to_i16", "Int16"}, {"to_i32", "Int32"}, {"to_i", "Int32"},
+       {"to_i64", "Int64"}, {"to_i128", "Int128"},
+       {"to_u8", "UInt8"}, {"to_u16", "UInt16"}, {"to_u32", "UInt32"}, {"to_u", "UInt32"},
+       {"to_u64", "UInt64"}, {"to_u128", "UInt128"},
+     ] %}
+
+  struct ::Float32
+    {% for conv in int_convs %}
+      @[::Primitive(:convert)]
+      @[Raises]
+      def {{ conv[0].id }} : {{ conv[1].id }}
+      end
+    {% end %}
+
+    @[::Primitive(:convert)]
+    def to_f : Float64
+    end
+
+    @[::Primitive(:convert)]
+    def to_f64 : Float64
+    end
+
+    @[::Primitive(:convert)]
+    def to_f32 : Float32
+    end
+
+    {% for num in nums + %w(Float32) %}
+      {% for op in %w(== != < <= > >=) %}
+        @[::Primitive(:binary)]
+        def {{ op.id }}(other : {{ num.id }}) : Bool
+        end
+      {% end %}
+
+      {% for op in %w(+ - *) %}
+        @[::Primitive(:binary)]
+        def {{ op.id }}(other : {{ num.id }}) : self
+        end
+      {% end %}
+
+      @[::Primitive(:binary)]
+      def fdiv(other : {{ num.id }}) : self
+      end
+    {% end %}
+
+    @[::Primitive(:binary)]
+    def /(other : Float32) : Float32
+    end
   end
 
+  {% for num in nums %}
+    struct ::{{ num.id }}
+      @[::Primitive(:convert)]
+      @[Raises]
+      def to_f32 : Float32
+      end
+
+      {% for op in %w(== != < <= > >=) %}
+        @[::Primitive(:binary)]
+        def {{ op.id }}(other : Float32) : Bool
+        end
+      {% end %}
+
+      {% if num == "Float64" %}
+        {% for op in %w(+ - *) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : Float32) : self
+          end
+        {% end %}
+
+        @[::Primitive(:binary)]
+        def fdiv(other : Float32) : self
+        end
+      {% else %}
+        {% for op in %w(+ - *) %}
+          @[::Primitive(:binary)]
+          def {{ op.id }}(other : Float32) : Float32
+          end
+        {% end %}
+
+        def /(other : Float32) : Float32
+          to_f32 / other
+        end
+      {% end %}
+    end
+  {% end %}
+
+  # --- what both floats get, written once per type -------------------------
+  {% for f in [{"Float32", "_f32", 24, "16777216.0_f32"}, {"Float64", "", 53, "9007199254740992.0"}] %}
+    {% name = f[0] %}
+    {% sfx = f[1] %}
+    struct ::{{ name.id }}
+      NAN      = 0.0{{ sfx.id }} / 0.0{{ sfx.id }}
+      INFINITY = 1.0{{ sfx.id }} / 0.0{{ sfx.id }}
+      {% if name == "Float32" %}
+        MIN          = -3.40282347e+38_f32
+        MAX          =  3.40282347e+38_f32
+        EPSILON      =  1.1920929e-07_f32
+        MIN_POSITIVE =  1.17549435e-38_f32
+      {% else %}
+        MIN          = -1.7976931348623157e+308
+        MAX          =  1.7976931348623157e+308
+        EPSILON      =  2.220446049250313e-16
+        MIN_POSITIVE =  2.2250738585072014e-308
+      {% end %}
+
+      def nan? : Bool
+        self != self
+      end
+
+      # 1 for +Infinity, -1 for -Infinity, nil for anything finite or NaN.
+      def infinite? : Int32?
+        if self == INFINITY
+          1
+        elsif self == -INFINITY
+          -1
+        else
+          nil
+        end
+      end
+
+      def finite? : Bool
+        !nan? && infinite?.nil?
+      end
+
+      # Multiplied rather than subtracted from zero, so `-(0.0)` is `-0.0`.
+      def - : {{ name.id }}
+        -1.0{{ sfx.id }} * self
+      end
+
+      # nil when either side is NaN: NaN is ordered against nothing.
+      def <=>(other : {{ name.id }}) : Int32?
+        return nil if nan? || other.nan?
+        self < other ? -1 : (self > other ? 1 : 0)
+      end
+
+      # The remainder of the truncated division, the dividend's sign (C's
+      # `fmod`), computed exactly: the divisor is doubled up to the dividend
+      # and subtracted, and every such difference is exact.
+      def remainder(other : {{ name.id }}) : {{ name.id }}
+        raise "modulo by zero" if other == 0.0{{ sfx.id }}
+        return NAN if nan? || other.nan? || !infinite?.nil?
+        return self if !other.infinite?.nil?
+        ax = abs
+        ay = other.abs
+        while ax >= ay
+          t = ay
+          while t + t <= ax
+            t = t + t
+          end
+          ax = ax - t
+        end
+        self < 0.0{{ sfx.id }} ? -ax : ax
+      end
+
+      # The floored modulo, the divisor's sign: `-7.5 % 2.0` is 0.5,
+      # `7.5 % -2.0` is -0.5.
+      def %(other : {{ name.id }}) : {{ name.id }}
+        r = remainder(other)
+        if r != 0.0{{ sfx.id }} && (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
+          r = r + other
+        end
+        r
+      end
+
+      # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is
+      # answered as it is; NaN and the infinities likewise.
+      def trunc : {{ name.id }}
+        return self if self != self || abs >= {{ f[3].id }}
+        {% if name == "Float32" %}
+          to_i64.to_f32
+        {% else %}
+          to_i64.to_f64
+        {% end %}
+      end
+    end
+  {% end %}
+{% end %}
+
+struct ::Float32
+  # Every single is a double, and the integer nearest a single is a
+  # single: the prelude's `Float64` roundings are exact for it.
   def abs : Float32
-    self < 0_f32 ? 0_f32 - self : self
+    self < 0.0_f32 ? -1.0_f32 * self : self
   end
 
   def floor : Float32
@@ -28,91 +228,156 @@ struct ::Float32
     to_f64.round.to_f32
   end
 
-  def trunc : Float32
-    to_f64.to_i64.to_f32
+  def round(digits : Int32) : Float32
+    to_f64.round(digits).to_f32
+  end
+
+  def **(exponent : Int32) : Float32
+    (to_f64 ** exponent).to_f32
+  end
+
+  def to_s : String
+    Std::Float::Float32Text.text(Std::Float::Float32Text.bits_of(self))
+  end
+
+  def hash : Int32
+    bits = Std::Float::Float32Text.bits_of(self == 0.0_f32 ? 0.0_f32 : self)
+    (bits & 2147483647_u32).to_i32 ^ (bits.unsafe_shr(31)).to_i32
   end
 end
 
 struct ::Float64
-  NAN          = (0_f64 / 0_f64).as Float64
-  INFINITY     = (1_f64 / 0_f64).as Float64
-  MIN          = -1.7976931348623157e+308
-  MAX          =  1.7976931348623157e+308
-  EPSILON      =   2.2204460492503131e-16
-  MIN_POSITIVE =  2.2250738585072014e-308
-
-  def trunc : Float64
-    to_i64.to_f64
+  def hash : Int32
+    # `-0.0 == 0.0`, so they hash alike.
+    bits = IyiFloatText.bits_of(self == 0.0 ? 0.0 : self)
+    mix = bits ^ bits.unsafe_shr(32_u64)
+    (mix & 2147483647_u64).to_i32 ^ (mix.unsafe_shr(31_u64) & 1_u64).to_i32
   end
 end
 
-struct ::Float
-  def nan? : ::Bool
-    !(self == self)
+# The single's shortest round-tripping decimal: the prelude's free-format
+# digit generation (Steele & White, Burger & Dybvig's scaling) on the
+# prelude's exact bignum, with the single's layout - a 24-bit significand,
+# exponents from -149 - so the boundaries between one single and the next,
+# not the double's, decide where the digits stop. The notation is the
+# prelude's `Float64#to_s`'s.
+module Float32Text
+  def self.bits_of(value : Float32) : UInt32
+    holder = Pointer(Float32).malloc(1_u64)
+    holder.value = value
+    Pointer(UInt32).new(holder.address).value
   end
 
-  def infinite? : Int32?
-    if nan? || self == 0 || self != 2 * self
-      nil
-    else
-      self > 0 ? 1 : -1
+  def self.from_bits(bits : UInt32) : Float32
+    holder = Pointer(UInt32).malloc(1_u64)
+    holder.value = bits
+    Pointer(Float32).new(holder.address).value
+  end
+
+  def self.text(bits32 : UInt32) : String
+    bits = bits32.to_u64
+    negative = bits.unsafe_shr(31_u64) != 0_u64
+    exponent_bits = bits.unsafe_shr(23_u64) & 255_u64
+    fraction = bits & 8388607_u64
+    if exponent_bits == 255_u64
+      return "NaN" if fraction != 0_u64
+      return negative ? "-Infinity" : "Infinity"
     end
-  end
+    return negative ? "-0.0" : "0.0" if exponent_bits == 0_u64 && fraction == 0_u64
 
-  def finite? : ::Bool
-    !nan? && infinite?.nil?
-  end
+    # value = f * 2^e, f the 24-bit significand (23 for a subnormal).
+    hidden = 8388608_u64
+    f = exponent_bits == 0_u64 ? fraction : fraction | hidden
+    e = exponent_bits == 0_u64 ? -149 : exponent_bits.to_i64.to_i32 - 150
 
-  def - : self
-    self.class.zero - self
-  end
-
-  def //(other)
-    (self / other).floor
-  end
-
-  def %(other)
-    modulo(other)
-  end
-
-  def modulo(other)
-    if other == 0.0
-      raise "Division by zero"
+    # r/s is the value, m+/s and m-/s the distances to the neighbours'
+    # midpoints; a significand at the bottom of its binade has a nearer
+    # neighbour below, so the gap above is twice the gap below.
+    unequal = fraction == 0_u64 && exponent_bits > 1_u64
+    r = IyiBig.new(f)
+    s = IyiBig.new(1_u64)
+    if e >= 0
+      r.shl(e + (unequal ? 2 : 1))
+      s.shl(unequal ? 2 : 1)
+      m_plus = IyiBig.new(1_u64)
+      m_plus.shl(unequal ? e + 1 : e)
+      m_minus = IyiBig.new(1_u64)
+      m_minus.shl(e)
     else
-      self - other * (self // other)
+      r.shl(unequal ? 2 : 1)
+      s.shl(-e + (unequal ? 2 : 1))
+      m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64)
+      m_minus = IyiBig.new(1_u64)
     end
-  end
 
-  def remainder(other)
-    if other == 0.0
-      raise "Division by zero"
+    # An even significand owns its boundaries (round-half-even reads a
+    # midpoint back as the even neighbour), an odd one does not.
+    even = f & 1_u64 == 0_u64
+
+    # k, the decimal exponent, estimated from the binary one and corrected
+    # below by the comparisons the digits will use anyway.
+    length = 0
+    probe = f
+    while probe != 0_u64
+      probe = probe.unsafe_shr(1_u64)
+      length = length + 1
+    end
+    k = ((e + length - 1) * 1233) // 4096
+    k = k - 1 if (e + length - 1) < 0 && ((e + length - 1) * 1233) % 4096 != 0
+    k = k + 1
+    if k >= 0
+      s.mul_pow10(k)
     else
-      mod = self % other
-      return self.class.zero if mod == 0.0
-      return mod if self > 0 && other > 0
-      return mod if self < 0 && other < 0
-      mod - other
+      r.mul_pow10(-k)
+      m_plus.mul_pow10(-k)
+      m_minus.mul_pow10(-k)
     end
-  end
+    while (c = r.compare_sum(m_plus, s)) > 0 || (c == 0 && even)
+      s.mul_small(10_u64)
+      k = k + 1
+    end
+    while true
+      r_ten = r.copy
+      r_ten.mul_small(10_u64)
+      m_ten = m_plus.copy
+      m_ten.mul_small(10_u64)
+      c = r_ten.compare_sum(m_ten, s)
+      break if c > 0 || (c == 0 && even)
+      r.mul_small(10_u64)
+      m_plus.mul_small(10_u64)
+      m_minus.mul_small(10_u64)
+      k = k - 1
+    end
 
-  def <=>(other : Float) : Int32?
-    return nil if nan? || other.nan?
-    self < other ? -1 : (self > other ? 1 : 0)
-  end
+    digits = Pointer(UInt8).malloc(20_u64)
+    count = 0
+    while true
+      r.mul_small(10_u64)
+      m_plus.mul_small(10_u64)
+      m_minus.mul_small(10_u64)
+      digit = r.divide_digit(s)
+      low_c = r.compare(m_minus)
+      low = low_c < 0 || (low_c == 0 && even)
+      high_c = r.compare_sum(m_plus, s)
+      high = high_c > 0 || (high_c == 0 && even)
+      if !low && !high
+        digits[count] = digit.to_u8
+        count = count + 1
+        next
+      end
+      if low && high
+        twice = r.copy
+        twice.shl(1)
+        c = twice.compare(s)
+        digit = digit + 1 if c > 0 || (c == 0 && digit % 2 == 1)
+      elsif high
+        digit = digit + 1
+      end
+      digits[count] = digit.to_u8
+      count = count + 1
+      break
+    end
 
-  def to_s(io : IyiIO) : ::Nil
-    io.print(to_s)
-  end
-end
-
-struct ::Float32
-  def self.new(value) : self
-    value.to_f32
-  end
-end
-
-struct ::Float64
-  def self.new(value) : self
-    value.to_f64
+    IyiFloatText.format(negative, digits, count, k)
   end
 end

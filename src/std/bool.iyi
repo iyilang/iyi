@@ -1,59 +1,48 @@
+# iyi: the rest of `Bool`, added to the prelude's.
+#
+# The prelude gives `Bool` its literals, `!`, `==`, `&&`/`||` and `to_s`.
+# This module adds the eager operators `|`, `&` and `^` (both sides are
+# evaluated; `&&`/`||` are the short-circuit ones), `to_unsafe` for the 1
+# or 0 a foreign interface wants, the `io` spelling of `to_s`, `clone`,
+# and a `hash` that tells true from false so both can be keys in one
+# `Hash` (the prelude's `Object#hash` answers the type's id for both).
+#
+# There is no ordering. A Bool is a truth, not a number; `false < true` is
+# a convention some languages adopt and nothing in the prelude records.
+# A program that wants to sort by a Bool sorts by `to_unsafe`.
+
 module std/bool
 
-import std/traits
-using std/traits::{Cmp}
-
 struct ::Bool
-  # Bitwise OR. Returns true if this bool or other is true, otherwise false.
-  def |(other : ::Bool) : ::Bool
+  # `self` or `other`, both evaluated.
+  def |(other : Bool) : Bool
     self ? true : other
   end
 
-  # Bitwise AND. Returns true if this bool and other are true, otherwise false.
-  def &(other : ::Bool) : ::Bool
+  # `self` and `other`, both evaluated.
+  def &(other : Bool) : Bool
     self ? other : false
   end
 
-  # Exclusive OR. Returns true if this bool is different from other, otherwise false.
-  def ^(other : ::Bool) : ::Bool
+  # Exactly one of the two.
+  def ^(other : Bool) : Bool
     self != other
   end
 
-  # Returns 1 for true and 0 for false.
+  # 1 for true, 0 for false.
   def to_unsafe : Int32
     self ? 1 : 0
   end
 
-  # Appends "true" for true and "false" for false to the given IO.
-  def to_s(io : IyiIO) : ::Nil
+  def to_s(io : IyiIO) : Nil
     io.print(to_s)
   end
 
-  def clone : ::Bool
+  def clone : Bool
     self
   end
 
-  # Three-way comparison. false < true.
-  def <=>(other : ::Bool) : Int32
-    self == other ? 0 : (self ? 1 : -1)
-  end
-
-  def <(other : ::Bool) : ::Bool
-    !self && other
-  end
-
-  def <=(other : ::Bool) : ::Bool
-    !self || other
-  end
-
-  def >(other : ::Bool) : ::Bool
-    self && !other
-  end
-
-  def >=(other : ::Bool) : ::Bool
-    self || !other
-  end
-
+  # Two different numbers, so `{true => .., false => ..}` has two keys.
   def hash : Int32
     self ? 1231 : 1237
   end

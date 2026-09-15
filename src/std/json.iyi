@@ -1,48 +1,37 @@
-# Native JSON standard library implementation for iyi.
+# JSON, read and written in iyi: a byte lexer and a recursive parser into
+# `Any`, a streaming `PullParser`, a `Builder` that writes a document one
+# value at a time, and `JSON.parse` / `JSON.parse?` / `JSON.build` /
+# `JSON.to_json` / `JSON.from_json` on top of them.
 #
-# Provides:
-# - `JSON.parse(string : String) : JSON::Any`
-# - `JSON.build(indent = nil, &block)`
-# - `JSON::Any` dynamic traversing wrapper
-# - `JSON::PullParser` streaming pull parser
-# - `JSON::Builder` streaming JSON serializer
-# - `JSON::Error` and `JSON::ParseException`
+# What a document becomes: `null` is `Nil`, `true`/`false` are `Bool`, an
+# integer literal that fits Int64 is `Int64` (`-0` is the integer 0), every
+# other number is `Float64` (a fraction, an exponent, or an integer past what
+# Int64 holds, read as the nearest double), a string is `String` with its
+# escapes decoded (`\uXXXX` pairs into one code point), an array is
+# `Array(Any)` and an object is `Hash(String, Any)` in the order the keys
+# were written.
 #
-# Number resolution rules:
-# 1. If the number literal contains a fractional point ('.'), an exponent ('e'/'E'),
-#    or is negative zero ('-0', '-0.0'), it is parsed as Float64. Negative zero
-#    preserves the IEEE 754 sign bit.
-# 2. If the number literal is an integer without decimal point or exponent:
-#    - If it fits in signed 64-bit integer range (-9223372036854775808..9223372036854775807),
-#      it is parsed as Int64.
-#    - If it exceeds Int64 range, it falls back to Float64 so precision is preserved
-#      to the limits of IEEE 754 without overflow panic.
+# What the reader refuses, each with the line and column it stopped at:
+# anything that is not a JSON document (bare words, leading zeros, a trailing
+# comma, a raw control character or a lone surrogate inside a string, an
+# invalid escape, text after the root value, nesting past 512 levels, a
+# number too large for a Float64) and an object that names the same key twice.
+# `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
+#
+# What the writer refuses: `NaN` and `Infinity`, which are not JSON numbers;
+# a value where an object key is due, a field outside an object, a second
+# value at the document root, and a container closed that was never opened.
+# Every control byte under 0x20 and the byte 0x7f are written as `\u00XX`;
+# `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`, with a
+# surrogate pair past the basic plane.
+#
+# `ToJSON` is the trait a type implements to be written by `JSON.to_json`;
+# `Any` implements it, and so do the prelude's scalars, arrays and hashes
+# through `write_value`.
 
 module std/json
 
-import std/text
-
-pub class Error < Exception
-  getter message : String
-
-  def initialize(@message : String)
-  end
-end
-
-pub class ParseException < Error
-  getter line_number : Int32
-  getter column_number : Int32
-
-  def initialize(reason : String, @line_number : Int32, @column_number : Int32)
-    super("#{reason} at line #{@line_number}, column #{@column_number}")
-  end
-end
-
-def raise(error : Std::Json::Error) : NoReturn
-  raise error.message
-end
-
-# Internal growable byte buffer for string accumulation
+# A growable byte buffer for the text a string or a document is assembled in.
 class StringBuffer
   @buffer : Pointer(UInt8)
   @capacity : Int32
@@ -56,10 +45,6 @@ class StringBuffer
 
   def size : Int32
     @size
-  end
-
-  def empty? : Bool
-    @size == 0
   end
 
   def clear : Nil
@@ -80,11 +65,6 @@ class StringBuffer
     @size = @size + len
   end
 
-  def append_char(char : Char) : Nil
-    ord = char.ord
-    append_codepoint(ord)
-  end
-
   def append_codepoint(codepoint : Int32) : Nil
     if codepoint <= 0x7F
       append(codepoint.to_u8)
@@ -103,7 +83,7 @@ class StringBuffer
     end
   end
 
-  def ensure_capacity(needed : Int32) : Nil
+  private def ensure_capacity(needed : Int32) : Nil
     return if needed <= @capacity
     while @capacity < needed
       @capacity = @capacity * 2
@@ -120,6 +100,14 @@ class StringBuffer
   end
 end
 
+# A type that can write itself into a `Builder`. `JSON.to_json` accepts any
+# value whose type implements it.
+pub trait ToJSON
+  abstract def to_json(json : Builder) : Nil
+end
+
+# One JSON value of any kind, the result of `JSON.parse`. The `as_x` methods
+# panic when the value is of another kind; the `as_x?` ones answer `nil`.
 pub struct Any
   alias Type = Nil | Bool | Int64 | Float64 | String | Array(Any) | Hash(String, Any)
 
@@ -132,15 +120,33 @@ pub struct Any
     new(val.to_i64)
   end
 
-  def as_nil : Nil
-    @raw.as(Nil)
+  # The kind of value this is, in the word a refusal uses: `null`, `bool`,
+  # `integer`, `float`, `string`, `array` or `object`.
+  def kind : String
+    if @raw.nil?
+      "null"
+    elsif @raw.is_a?(Bool)
+      "bool"
+    elsif as_s?
+      "string"
+    elsif as_i64?
+      "integer"
+    elsif float_value?
+      "float"
+    elsif as_a?
+      "array"
+    else
+      "object"
+    end
   end
 
-  def as_nil? : Nil?
-    @raw.nil? ? nil : nil
+  def as_nil : Nil
+    raise "as_nil of a JSON #{kind}" unless @raw.nil?
+    nil
   end
 
   def as_bool : Bool
+    raise "as_bool of a JSON #{kind}" unless @raw.is_a?(Bool)
     @raw.as(Bool)
   end
 
@@ -152,32 +158,21 @@ pub struct Any
   end
 
   def as_i : Int32
-    case r = @raw
-    when Int64
-      if r < -2147483648_i64 || r > 2147483647_i64
-        raise "integer #{r} out of Int32 range"
-      end
-      r.to_i32
-    else
-      raise "expected Int, not #{r.class}"
+    r = as_i64? || raise "as_i of a JSON #{kind}"
+    if r < -2147483648_i64 || r > 2147483647_i64
+      raise "integer #{r} out of Int32 range"
     end
+    r.to_i32
   end
 
   def as_i? : Int32?
-    case r = @raw
-    when Int64
-      if r >= -2147483648_i64 && r <= 2147483647_i64
-        r.to_i32
-      else
-        nil
-      end
-    else
-      nil
-    end
+    r = as_i64?
+    return nil if r.nil?
+    r >= -2147483648_i64 && r <= 2147483647_i64 ? r.to_i32 : nil
   end
 
   def as_i64 : Int64
-    @raw.as(Int64)
+    as_i64? || raise "as_i64 of a JSON #{kind}"
   end
 
   def as_i64? : Int64?
@@ -187,12 +182,9 @@ pub struct Any
     end
   end
 
+  # A float, or an integer read as one.
   def as_f : Float64
-    case r = @raw
-    when Float64 then r
-    when Int64   then r.to_f64
-    else              raise "expected Float, not #{r.class}"
-    end
+    as_f? || raise "as_f of a JSON #{kind}"
   end
 
   def as_f? : Float64?
@@ -203,8 +195,15 @@ pub struct Any
     end
   end
 
+  protected def float_value? : Float64?
+    case r = @raw
+    when Float64 then r
+    else              nil
+    end
+  end
+
   def as_s : String
-    @raw.as(String)
+    as_s? || raise "as_s of a JSON #{kind}"
   end
 
   def as_s? : String?
@@ -215,7 +214,7 @@ pub struct Any
   end
 
   def as_a : Array(Any)
-    @raw.as(Array(Any))
+    as_a? || raise "as_a of a JSON #{kind}"
   end
 
   def as_a? : Array(Any)?
@@ -226,7 +225,7 @@ pub struct Any
   end
 
   def as_h : Hash(String, Any)
-    @raw.as(Hash(String, Any))
+    as_h? || raise "as_h of a JSON #{kind}"
   end
 
   def as_h? : Hash(String, Any)?
@@ -236,69 +235,45 @@ pub struct Any
     end
   end
 
+  # How many elements an array or an object holds. A scalar has no size.
   def size : Int32
-    case r = @raw
-    when Array(Any)        then r.size
-    when Hash(String, Any) then r.size
-    else                        raise "expected Array or Hash for #size, not #{r.class}"
-    end
+    size? || raise "size of a JSON #{kind}"
   end
 
   def size? : Int32?
-    case r = @raw
-    when Array(Any)        then r.size
-    when Hash(String, Any) then r.size
-    else                        nil
+    if a = as_a?
+      a.size
+    elsif h = as_h?
+      h.size
+    else
+      nil
     end
   end
 
   def [](index : Int32) : Any
-    case r = @raw
-    when Array(Any)
-      actual = index < 0 ? index + r.size : index
-      if actual < 0 || actual >= r.size
-        raise "index out of bounds: #{index} for size #{r.size}"
-      end
-      r[actual]
-    else
-      raise "expected Array for #[](index : Int32), not #{r.class}"
+    a = as_a? || raise "index #{index} into a JSON #{kind}"
+    actual = index < 0 ? index + a.size : index
+    if actual < 0 || actual >= a.size
+      raise "index #{index} out of range for #{a.size} elements"
     end
+    a[actual]
   end
 
   def []?(index : Int32) : Any?
-    case r = @raw
-    when Array(Any)
-      actual = index < 0 ? index + r.size : index
-      if actual < 0 || actual >= r.size
-        nil
-      else
-        r[actual]
-      end
-    else
-      nil
-    end
+    a = as_a?
+    return nil if a.nil?
+    actual = index < 0 ? index + a.size : index
+    actual < 0 || actual >= a.size ? nil : a[actual]
   end
 
   def [](key : String) : Any
-    case r = @raw
-    when Hash(String, Any)
-      if r.has_key?(key)
-        r[key]
-      else
-        raise "missing hash key: #{key.inspect}"
-      end
-    else
-      raise "expected Hash for #[](key : String), not #{r.class}"
-    end
+    h = as_h? || raise "key #{key.inspect} into a JSON #{kind}"
+    h[key]? || raise "no such key #{key.inspect}"
   end
 
   def []?(key : String) : Any?
-    case r = @raw
-    when Hash(String, Any)
-      r.has_key?(key) ? r[key] : nil
-    else
-      nil
-    end
+    h = as_h?
+    h.nil? ? nil : h[key]?
   end
 
   def dig?(key : String) : Any?
@@ -330,99 +305,119 @@ pub struct Any
   end
 
   def dig(k : String, *subkeys : String | Int32) : Any
-    v = self[k]
-    v.dig(*subkeys)
+    self[k].dig(*subkeys)
   end
 
   def dig(idx : Int32, *subkeys : String | Int32) : Any
-    v = self[idx]
-    v.dig(*subkeys)
+    self[idx].dig(*subkeys)
   end
 
+  # Equal when the values are: an integer equals the float with the same
+  # value, arrays element by element, objects key by key in any order.
   def ==(other : Any) : Bool
-    case a = @raw
-    when Nil
+    if @raw.nil?
       other.raw.nil?
-    when Bool
-      other.raw.is_a?(Bool) && a == other.raw.as(Bool)
-    when Int64
-      if other.raw.is_a?(Int64)
-        a == other.raw.as(Int64)
-      elsif other.raw.is_a?(Float64)
-        a.to_f64 == other.raw.as(Float64)
+    elsif @raw.is_a?(Bool)
+      other.raw.is_a?(Bool) && @raw.as(Bool) == other.raw.as(Bool)
+    elsif s = as_s?
+      o = other.as_s?
+      o.nil? ? false : s == o
+    elsif i = as_i64?
+      if oi = other.as_i64?
+        i == oi
+      elsif of = other.float_value?
+        integer_equals_float?(i, of)
       else
         false
       end
-    when Float64
-      if other.raw.is_a?(Float64)
-        a == other.raw.as(Float64)
-      elsif other.raw.is_a?(Int64)
-        a == other.raw.as(Int64).to_f64
+    elsif f = float_value?
+      if oi = other.as_i64?
+        integer_equals_float?(oi, f)
+      elsif of = other.float_value?
+        f == of
       else
         false
       end
-    when String
-      other.raw.is_a?(String) && a == other.raw.as(String)
-    when Array(Any)
-      if other.raw.is_a?(Array(Any))
-        b = other.raw.as(Array(Any))
-        return false if a.size != b.size
-        i = 0
-        while i < a.size
-          return false unless a[i] == b[i]
-          i = i + 1
-        end
-        true
-      else
-        false
+    elsif a = as_a?
+      b = other.as_a?
+      return false if b.nil?
+      return false if a.size != b.size
+      idx = 0
+      while idx < a.size
+        return false unless a[idx] == b[idx]
+        idx = idx + 1
       end
-    when Hash(String, Any)
-      if other.raw.is_a?(Hash(String, Any))
-        b = other.raw.as(Hash(String, Any))
-        return false if a.size != b.size
-        a.each do |k, v|
-          return false unless b.has_key?(k) && v == b[k]
-        end
-        true
-      else
-        false
+      true
+    elsif h = as_h?
+      oh = other.as_h?
+      return false if oh.nil?
+      return false if h.size != oh.size
+      keys = h.keys
+      idx = 0
+      while idx < keys.size
+        k = keys[idx]
+        ov = oh[k]?
+        return false if ov.nil?
+        return false unless h[k] == ov
+        idx = idx + 1
       end
+      true
     else
       false
     end
   end
 
-  def to_json(builder : Builder) : Nil
+  # Only a whole float in Int64's range can equal an integer, and then the
+  # comparison is exact in the integer, not rounded through the float.
+  private def integer_equals_float?(i : Int64, f : Float64) : Bool
+    return false unless f >= -9223372036854775808.0 && f < 9223372036854775808.0
+    t = f.to_i64
+    t.to_f64 == f && t == i
+  end
+
+  # Consistent with `==`: a whole float hashes as the integer it equals, an
+  # object's hash does not depend on the order its keys were written in.
+  def hash : Int32
     if @raw.nil?
-      builder.null
+      0
     elsif @raw.is_a?(Bool)
-      builder.bool(@raw.as(Bool))
+      @raw.as(Bool) ? 1 : 2
     elsif s = as_s?
-      builder.string(s)
+      s.hash
     elsif i = as_i64?
-      builder.number(i)
-    elsif f = as_f?
-      builder.number(f)
+      integer_hash(i)
+    elsif f = float_value?
+      if f >= -9223372036854775808.0 && f < 9223372036854775808.0
+        t = f.to_i64
+        return integer_hash(t) if t.to_f64 == f
+      end
+      bits = IyiFloatText.bits_of(f)
+      ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
     elsif a = as_a?
-      builder.start_array
+      value = 17
       idx = 0
       while idx < a.size
-        a[idx].to_json(builder)
+        value = (value &* 31) &+ a[idx].hash
         idx = idx + 1
       end
-      builder.end_array
+      value
     elsif h = as_h?
-      builder.start_object
+      value = 0
       keys = h.keys
       idx = 0
       while idx < keys.size
         k = keys[idx]
-        builder.field(k)
-        h[k].to_json(builder)
+        value = value &+ ((k.hash &* 31) &+ h[k].hash)
         idx = idx + 1
       end
-      builder.end_object
+      value
+    else
+      0
     end
+  end
+
+  private def integer_hash(i : Int64) : Int32
+    ((i ^ (i >> 32)) & 0x7FFFFFFF_i64).to_i32
   end
 
   def to_json : String
@@ -431,7 +426,7 @@ pub struct Any
     b.to_s
   end
 
-  def to_pretty_json(indent : Int32 = 2) : String
+  def to_pretty_json(indent : String = "  ") : String
     b = Builder.new
     b.indent = indent
     to_json(b)
@@ -454,6 +449,41 @@ pub struct Any
   end
 end
 
+impl ToJSON for Any
+  def to_json(json : Builder) : Nil
+    if @raw.nil?
+      json.null
+    elsif @raw.is_a?(Bool)
+      json.bool(@raw.as(Bool))
+    elsif s = as_s?
+      json.string(s)
+    elsif i = as_i64?
+      json.number(i)
+    elsif f = float_value?
+      json.number(f)
+    elsif a = as_a?
+      json.start_array
+      idx = 0
+      while idx < a.size
+        a[idx].to_json(json)
+        idx = idx + 1
+      end
+      json.end_array
+    elsif h = as_h?
+      json.start_object
+      keys = h.keys
+      idx = 0
+      while idx < keys.size
+        k = keys[idx]
+        json.field(k)
+        h[k].to_json(json)
+        idx = idx + 1
+      end
+      json.end_object
+    end
+  end
+end
+
 enum TokenKind
   Null
   False
@@ -468,6 +498,7 @@ enum TokenKind
   Colon
   Comma
   EOF
+  Error
 end
 
 class Token
@@ -490,6 +521,9 @@ class Token
   end
 end
 
+# Reads tokens from the bytes of a document. A malformed token is not a
+# panic here: `next_token` answers a token of kind `Error` and `error` holds
+# the sentence, so `JSON.parse?` can answer `nil` and `JSON.parse` can panic.
 class Lexer
   @input : String
   @bytes : Pointer(UInt8)
@@ -499,6 +533,7 @@ class Lexer
   @column_number : Int32
   @token : Token
   @string_buffer : StringBuffer
+  @error : String?
 
   def initialize(@input : String)
     @bytes = @input.to_unsafe
@@ -508,22 +543,21 @@ class Lexer
     @column_number = 1
     @token = Token.new
     @string_buffer = StringBuffer.new(64)
+    @error = nil
   end
 
   def token : Token
     @token
   end
 
-  def line_number : Int32
-    @line_number
+  def error : String?
+    @error
   end
 
-  def column_number : Int32
-    @column_number
-  end
-
-  private def parse_error(reason : String, line : Int32 = @line_number, col : Int32 = @column_number) : NoReturn
-    raise "#{reason} at line #{line}, column #{col}"
+  private def fail(reason : String, line : Int32, col : Int32) : Nil
+    @error = "#{reason} at line #{line}, column #{col}" if @error.nil?
+    @token.kind = TokenKind::Error
+    nil
   end
 
   private def current_byte : UInt8
@@ -532,25 +566,23 @@ class Lexer
 
   private def advance : UInt8
     b = current_byte
-    if b != 0_u8 || @pos < @bytesize
+    if @pos < @bytesize
       if b == 10_u8 # '\n'
         @line_number = @line_number + 1
         @column_number = 1
-      else
-        # Count UTF-8 character columns: continuation bytes (0x80..0xBF) do not advance column
-        if (b & 0xC0_u8) != 0x80_u8
-          @column_number = @column_number + 1
-        end
+      elsif (b & 0xC0_u8) != 0x80_u8
+        # A column is a character: continuation bytes do not advance it.
+        @column_number = @column_number + 1
       end
       @pos = @pos + 1
     end
     current_byte
   end
 
-  def skip_whitespace : Nil
+  private def skip_whitespace : Nil
     while @pos < @bytesize
       b = current_byte
-      if b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8 # ' ', '\t', '\n', '\r'
+      if b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
         advance
       else
         break
@@ -559,15 +591,14 @@ class Lexer
   end
 
   def next_token : Token
+    return @token unless @error.nil?
     skip_whitespace
 
     tok_line = @line_number
     tok_col = @column_number
 
     if @pos >= @bytesize
-      @token.kind = TokenKind::EOF
-      @token.line_number = tok_line
-      @token.column_number = tok_col
+      set_token(TokenKind::EOF, tok_line, tok_col)
       return @token
     end
 
@@ -594,21 +625,20 @@ class Lexer
     when 34_u8 # '"'
       consume_string(tok_line, tok_col)
     when 116_u8 # 't'
-      consume_true(tok_line, tok_col)
+      consume_word("true", TokenKind::True, tok_line, tok_col)
     when 102_u8 # 'f'
-      consume_false(tok_line, tok_col)
+      consume_word("false", TokenKind::False, tok_line, tok_col)
     when 110_u8 # 'n'
-      consume_null(tok_line, tok_col)
+      consume_word("null", TokenKind::Null, tok_line, tok_col)
     when 45_u8, 48_u8, 49_u8, 50_u8, 51_u8, 52_u8, 53_u8, 54_u8, 55_u8, 56_u8, 57_u8 # '-', '0'..'9'
       consume_number(tok_line, tok_col)
     else
-      # Bare identifier or unexpected character
-      if (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8
+      if identifier_byte?(b)
         consume_bare_identifier(tok_line, tok_col)
+      elsif b >= 32_u8 && b < 127_u8
+        fail("unexpected character '#{b.unsafe_chr}'", tok_line, tok_col)
       else
-        ch = b.unsafe_chr
-        advance
-        parse_error("unexpected character '#{ch}'", tok_line, tok_col)
+        fail("unexpected byte #{b}", tok_line, tok_col)
       end
     end
 
@@ -621,94 +651,43 @@ class Lexer
     @token.column_number = col
   end
 
-  private def consume_bare_identifier(line : Int32, col : Int32) : NoReturn
-    start = @pos
-    while @pos < @bytesize
-      b = current_byte
-      if (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8
-        advance
-      else
-        break
-      end
-    end
-    ident = @input[start, @pos - start]
-    parse_error("bare identifier '#{ident}'", line, col)
-  end
-
-  private def consume_true(line : Int32, col : Int32) : Nil
-    advance                   # 't'
-    if current_byte == 114_u8 # 'r'
-      advance
-      if current_byte == 117_u8 # 'u'
-        advance
-        if current_byte == 101_u8 # 'e'
-          advance
-          # Ensure next byte is not alphanumeric/identifier
-          b = current_byte
-          if is_identifier_byte(b)
-            consume_bare_identifier(line, col)
-          end
-          set_token(TokenKind::True, line, col)
-          return
-        end
-      end
-    end
-    consume_bare_identifier(line, col)
-  end
-
-  private def consume_false(line : Int32, col : Int32) : Nil
-    advance                  # 'f'
-    if current_byte == 97_u8 # 'a'
-      advance
-      if current_byte == 108_u8 # 'l'
-        advance
-        if current_byte == 115_u8 # 's'
-          advance
-          if current_byte == 101_u8 # 'e'
-            advance
-            b = current_byte
-            if is_identifier_byte(b)
-              consume_bare_identifier(line, col)
-            end
-            set_token(TokenKind::False, line, col)
-            return
-          end
-        end
-      end
-    end
-    consume_bare_identifier(line, col)
-  end
-
-  private def consume_null(line : Int32, col : Int32) : Nil
-    advance                   # 'n'
-    if current_byte == 117_u8 # 'u'
-      advance
-      if current_byte == 108_u8 # 'l'
-        advance
-        if current_byte == 108_u8 # 'l'
-          advance
-          b = current_byte
-          if is_identifier_byte(b)
-            consume_bare_identifier(line, col)
-          end
-          set_token(TokenKind::Null, line, col)
-          return
-        end
-      end
-    end
-    consume_bare_identifier(line, col)
-  end
-
-  private def is_identifier_byte(b : UInt8) : Bool
+  private def identifier_byte?(b : UInt8) : Bool
     (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8
   end
 
+  private def consume_bare_identifier(line : Int32, col : Int32) : Nil
+    start = @pos
+    while @pos < @bytesize && identifier_byte?(current_byte)
+      advance
+    end
+    fail("bare identifier '#{@input[start, @pos - start]}'", line, col)
+  end
+
+  # `true`, `false`, `null`: the whole word, and nothing joined to it.
+  private def consume_word(word : String, kind : TokenKind, line : Int32, col : Int32) : Nil
+    start = @pos
+    expected = word.to_unsafe
+    i = 0
+    while i < word.bytesize
+      if current_byte != expected[i]
+        @pos = start
+        return consume_bare_identifier(line, col)
+      end
+      advance
+      i = i + 1
+    end
+    if identifier_byte?(current_byte)
+      @pos = start
+      return consume_bare_identifier(line, col)
+    end
+    set_token(kind, line, col)
+  end
+
   private def consume_string(line : Int32, col : Int32) : Nil
-    advance # consume opening '"'
+    advance # the opening quote
     start_pos = @pos
     has_escape = false
 
-    # Scan forward to see if string has escapes or unescaped control chars
     while @pos < @bytesize
       b = current_byte
       if b == 34_u8 # '"'
@@ -717,32 +696,28 @@ class Lexer
         has_escape = true
         break
       elsif b < 32_u8
-        parse_error("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
+        return fail("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
       else
         advance
       end
     end
 
     if !has_escape && @pos < @bytesize && current_byte == 34_u8
-      # Fast path: substring without escapes
+      # No escape: the text is a substring of the input.
       str_val = @input[start_pos, @pos - start_pos]
-      advance # consume closing '"'
+      advance
       set_token(TokenKind::String, line, col)
       @token.string_value = str_val
       return
     end
 
     if @pos >= @bytesize
-      parse_error("unterminated string", line, col)
+      return fail("unterminated string", line, col)
     end
 
-    # Slow path: accumulate in @string_buffer
     @string_buffer.clear
     if @pos > start_pos
-      # Append prefix scanned so far
-      len = @pos - start_pos
-      prefix_str = @input[start_pos, len]
-      @string_buffer.append(prefix_str)
+      @string_buffer.append(@input[start_pos, @pos - start_pos])
     end
 
     while @pos < @bytesize
@@ -756,7 +731,7 @@ class Lexer
         esc_col = @column_number
         advance
         if @pos >= @bytesize
-          parse_error("unterminated string after backslash", line, esc_col)
+          return fail("unterminated string after backslash", line, esc_col)
         end
         esc = current_byte
         case esc
@@ -789,58 +764,66 @@ class Lexer
           u_col = @column_number - 1
           advance
           hex1 = read_hex4(u_line, u_col)
+          return if hex1 < 0
 
           if hex1 >= 0xD800 && hex1 <= 0xDBFF
-            # High surrogate: must be immediately followed by '\u' and low surrogate 0xDC00..0xDFFF
-            if current_byte != 92_u8 # '\'
-              parse_error("lone high surrogate \\u#{hex1.to_s(16)} without low surrogate", u_line, u_col)
+            # A high surrogate must be followed at once by `\u` and a low one.
+            if current_byte != 92_u8
+              return fail("lone high surrogate \\u#{hex1.to_s(16)} without low surrogate", u_line, u_col)
             end
             advance
-            if current_byte != 117_u8 # 'u'
-              parse_error("lone high surrogate \\u#{hex1.to_s(16)} without following \\u escape", u_line, u_col)
+            if current_byte != 117_u8
+              return fail("lone high surrogate \\u#{hex1.to_s(16)} without following \\u escape", u_line, u_col)
             end
             u2_line = @line_number
             u2_col = @column_number - 1
             advance
             hex2 = read_hex4(u2_line, u2_col)
+            return if hex2 < 0
             if hex2 < 0xDC00 || hex2 > 0xDFFF
-              parse_error("invalid surrogate pair: expected low surrogate (0xDC00..0xDFFF), got \\u#{hex2.to_s(16)}", u2_line, u2_col)
+              return fail("invalid surrogate pair: expected low surrogate (0xDC00..0xDFFF), got \\u#{hex2.to_s(16)}", u2_line, u2_col)
             end
-            codepoint = 0x10000 + ((hex1 - 0xD800) << 10) + (hex2 - 0xDC00)
-            @string_buffer.append_codepoint(codepoint)
+            @string_buffer.append_codepoint(0x10000 + ((hex1 - 0xD800) << 10) + (hex2 - 0xDC00))
           elsif hex1 >= 0xDC00 && hex1 <= 0xDFFF
-            # Lone low surrogate
-            parse_error("lone low surrogate \\u#{hex1.to_s(16)} without preceding high surrogate", u_line, u_col)
+            return fail("lone low surrogate \\u#{hex1.to_s(16)} without preceding high surrogate", u_line, u_col)
           else
             @string_buffer.append_codepoint(hex1)
           end
         else
-          bad_char = esc.unsafe_chr
-          advance
-          parse_error("invalid escape sequence '\\#{bad_char}'", line, esc_col)
+          if esc >= 32_u8 && esc < 127_u8
+            return fail("invalid escape sequence '\\#{esc.unsafe_chr}'", line, esc_col)
+          end
+          return fail("invalid escape sequence '\\' before byte #{esc}", line, esc_col)
         end
       elsif b < 32_u8
-        parse_error("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
+        return fail("unescaped control character (ASCII #{b}) in string", @line_number, @column_number)
       else
         @string_buffer.append(b)
         advance
       end
     end
 
-    parse_error("unterminated string", line, col)
+    fail("unterminated string", line, col)
   end
 
+  # Four hex digits, or -1 after recording why not.
   private def read_hex4(line : Int32, col : Int32) : Int32
     val = 0
     i = 0
     while i < 4
       if @pos >= @bytesize
-        parse_error("unterminated \\u escape sequence: expected 4 hexadecimal digits", line, col)
+        fail("unterminated \\u escape sequence: expected 4 hexadecimal digits", line, col)
+        return -1
       end
       b = current_byte
       d = hex_digit_value(b)
       if d < 0
-        parse_error("invalid hex digit '#{b.unsafe_chr}' in \\u escape sequence", @line_number, @column_number)
+        if b >= 32_u8 && b < 127_u8
+          fail("invalid hex digit '#{b.unsafe_chr}' in \\u escape sequence", @line_number, @column_number)
+        else
+          fail("invalid hex digit (byte #{b}) in \\u escape sequence", @line_number, @column_number)
+        end
+        return -1
       end
       val = (val << 4) | d
       advance
@@ -861,51 +844,47 @@ class Lexer
     end
   end
 
+  private def digit?(b : UInt8) : Bool
+    b >= 48_u8 && b <= 57_u8
+  end
+
   private def consume_number(line : Int32, col : Int32) : Nil
     start_pos = @pos
     has_fraction = false
     has_exponent = false
-    is_negative = false
 
     if current_byte == 45_u8 # '-'
-      is_negative = true
       advance
       if @pos >= @bytesize
-        parse_error("expected digit after minus sign in number", line, col)
+        return fail("expected digit after minus sign in number", line, col)
       end
-      b = current_byte
-      if b < 48_u8 || b > 57_u8
-        parse_error("expected digit after minus sign in number", @line_number, @column_number)
+      unless digit?(current_byte)
+        return fail("expected digit after minus sign in number", @line_number, @column_number)
       end
     end
 
     if current_byte == 48_u8 # '0'
       advance
-      if @pos < @bytesize
-        next_b = current_byte
-        if next_b >= 48_u8 && next_b <= 57_u8
-          parse_error("leading zero not allowed in number", @line_number, @column_number)
-        end
-      end
-    elsif current_byte >= 49_u8 && current_byte <= 57_u8 # '1'..'9'
-      advance
-      while @pos < @bytesize && current_byte >= 48_u8 && current_byte <= 57_u8
-        advance
+      if @pos < @bytesize && digit?(current_byte)
+        return fail("leading zero not allowed in number", @line_number, @column_number)
       end
     else
-      parse_error("expected digit in number", @line_number, @column_number)
+      advance
+      while @pos < @bytesize && digit?(current_byte)
+        advance
+      end
     end
 
     if @pos < @bytesize && current_byte == 46_u8 # '.'
       has_fraction = true
       advance
       if @pos >= @bytesize
-        parse_error("expected at least one digit after decimal point", line, col)
+        return fail("expected at least one digit after decimal point", line, col)
       end
-      if current_byte < 48_u8 || current_byte > 57_u8
-        parse_error("expected at least one digit after decimal point", @line_number, @column_number)
+      unless digit?(current_byte)
+        return fail("expected at least one digit after decimal point", @line_number, @column_number)
       end
-      while @pos < @bytesize && current_byte >= 48_u8 && current_byte <= 57_u8
+      while @pos < @bytesize && digit?(current_byte)
         advance
       end
     end
@@ -917,21 +896,21 @@ class Lexer
         advance
       end
       if @pos >= @bytesize
-        parse_error("expected at least one digit in exponent", line, col)
+        return fail("expected at least one digit in exponent", line, col)
       end
-      if current_byte < 48_u8 || current_byte > 57_u8
-        parse_error("expected at least one digit in exponent", @line_number, @column_number)
+      unless digit?(current_byte)
+        return fail("expected at least one digit in exponent", @line_number, @column_number)
       end
-      while @pos < @bytesize && current_byte >= 48_u8 && current_byte <= 57_u8
+      while @pos < @bytesize && digit?(current_byte)
         advance
       end
     end
 
-    # Check for invalid trailing characters like '0x12' or '1a'
+    # `0x12`, `1a`, `1.2.3`: a number does not run into letters or a second point.
     if @pos < @bytesize
       tail_b = current_byte
       if (tail_b >= 97_u8 && tail_b <= 122_u8) || (tail_b >= 65_u8 && tail_b <= 90_u8) || tail_b == 46_u8
-        parse_error("unexpected character '#{tail_b.unsafe_chr}' in number", @line_number, @column_number)
+        return fail("unexpected character '#{tail_b.unsafe_chr}' in number", @line_number, @column_number)
       end
     end
 
@@ -939,79 +918,72 @@ class Lexer
     set_token(TokenKind::Int, line, col)
     @token.raw_value = raw_num
 
-    if has_fraction || has_exponent || raw_num == "-0"
-      @token.kind = TokenKind::Float
-      @token.float_value = raw_num.to_f
-    else
-      # Integer without fraction/exponent
-      val = parse_int64_safe?(raw_num)
-      if val
-        @token.kind = TokenKind::Int
+    unless has_fraction || has_exponent
+      val = parse_int64?(raw_num)
+      unless val.nil?
         @token.int_value = val
-      else
-        # Exceeds Int64 range: fall back to Float64
-        @token.kind = TokenKind::Float
-        @token.float_value = raw_num.to_f
+        return
       end
     end
+
+    f = raw_num.to_f
+    if f.abs > 1.7976931348623157e308
+      return fail("number #{raw_num} out of range", line, col)
+    end
+    @token.kind = TokenKind::Float
+    @token.float_value = f
   end
 
-  private def parse_int64_safe?(text : String) : Int64?
-    return nil if text.empty?
+  # The Int64 these digits spell, or nil when they do not fit. The negative
+  # magnitude is accumulated so the smallest Int64 needs no negation.
+  private def parse_int64?(text : String) : Int64?
+    bytes = text.to_unsafe
+    len = text.bytesize
+    i = 0
     negative = false
-    start = 0
-    if text.starts_with?('-')
+    if bytes[0] == 45_u8
       negative = true
-      start = 1
+      i = 1
     end
-    return nil if start >= text.bytesize
-
+    val = 0_i64
     if negative
-      limit_div_10 = -922337203685477580_i64
-      limit_mod_10 = -8_i64
-      val = 0_i64
-      i = start
-      while i < text.bytesize
-        b = text.to_unsafe[i]
-        return nil if b < 48_u8 || b > 57_u8
-        d = 0_i64 - (b - 48_u8).to_i64
-        if val < limit_div_10 || (val == limit_div_10 && d < limit_mod_10)
-          return nil # Overflow negative
-        end
-        val = val * 10_i64 + d
+      while i < len
+        d = (bytes[i] - 48_u8).to_i64
+        return nil if val < -922337203685477580_i64 || (val == -922337203685477580_i64 && d > 8_i64)
+        val = val * 10_i64 - d
         i = i + 1
       end
-      val
     else
-      limit_div_10 = 922337203685477580_i64
-      limit_mod_10 = 7_i64
-      val = 0_i64
-      i = start
-      while i < text.bytesize
-        b = text.to_unsafe[i]
-        return nil if b < 48_u8 || b > 57_u8
-        d = (b - 48_u8).to_i64
-        if val > limit_div_10 || (val == limit_div_10 && d > limit_mod_10)
-          return nil # Overflow positive
-        end
+      while i < len
+        d = (bytes[i] - 48_u8).to_i64
+        return nil if val > 922337203685477580_i64 || (val == 922337203685477580_i64 && d > 7_i64)
         val = val * 10_i64 + d
         i = i + 1
       end
-      val
     end
+    val
   end
 end
 
-pub struct Parser
+MAX_NESTING = 512
+
+# Reads a whole document into an `Any`. Like the lexer it records the first
+# failure instead of panicking; `JSON.parse` and `JSON.parse?` decide what to
+# do with it.
+pub class Parser
   @lexer : Lexer
-  property max_nesting : Int32
   @nesting : Int32
+  @error : String?
 
   def initialize(input : String)
     @lexer = Lexer.new(input)
-    @max_nesting = 512
     @nesting = 0
+    @error = nil
     @lexer.next_token
+  end
+
+  def error : String?
+    @error
   end
 
   private def token : Token
@@ -1022,19 +994,49 @@ pub struct Parser
     @lexer.next_token
   end
 
-  private def parse_error(reason : String, line : Int32 = token.line_number, col : Int32 = token.column_number) : NoReturn
-    raise "#{reason} at line #{line}, column #{col}"
+  # The lexer's sentence when the current token is the one it refused, the
+  # parser's otherwise. The first failure is the one kept.
+  private def fail(reason : String, line : Int32, col : Int32) : Any
+    if @error.nil?
+      lexer_error = @lexer.error
+      @error = lexer_error.nil? ? "#{reason} at line #{line}, column #{col}" : lexer_error
+    end
+    Any.new(nil)
+  end
+
+  private def fail(reason : String) : Any
+    fail(reason, token.line_number, token.column_number)
   end
 
   def parse : Any
     if token.kind == TokenKind::EOF
-      parse_error("empty JSON input", 1, 1)
+      return fail("empty JSON input", 1, 1)
     end
     result = parse_value
+    return result unless @error.nil?
     unless token.kind == TokenKind::EOF
-      parse_error("unexpected token after JSON root value")
+      return fail("unexpected #{token_text} after JSON root value")
     end
     result
+  end
+
+  private def token_text : String
+    case token.kind
+    when TokenKind::BeginArray  then "'['"
+    when TokenKind::BeginObject then "'{'"
+    when TokenKind::EndArray    then "']'"
+    when TokenKind::EndObject   then "'}'"
+    when TokenKind::Colon       then "':'"
+    when TokenKind::Comma       then "','"
+    when TokenKind::True        then "'true'"
+    when TokenKind::False       then "'false'"
+    when TokenKind::Null        then "'null'"
+    when TokenKind::EOF         then "end of input"
+    when TokenKind::String      then "string"
+    when TokenKind::Int         then "number #{token.raw_value}"
+    when TokenKind::Float       then "number #{token.raw_value}"
+    else                             "value"
+    end
   end
 
   private def parse_value : Any
@@ -1065,7 +1067,7 @@ pub struct Parser
     when TokenKind::BeginObject
       parse_object
     else
-      parse_error("unexpected token '#{token.raw_value.empty? ? token.kind.to_s : token.raw_value}'")
+      fail("unexpected #{token_text}")
     end
   end
 
@@ -1074,37 +1076,38 @@ pub struct Parser
     col = token.column_number
 
     @nesting = @nesting + 1
-    if @nesting > @max_nesting
-      parse_error("nesting depth of #{@nesting} exceeds maximum depth #{@max_nesting}", line, col)
+    if @nesting > MAX_NESTING
+      return fail("nesting depth of #{@nesting} exceeds maximum depth #{MAX_NESTING}", line, col)
     end
 
-    next_token # consume '['
+    next_token # '['
     ary = [] of Any
 
     if token.kind == TokenKind::EndArray
-      next_token # consume ']'
+      next_token
       @nesting = @nesting - 1
       return Any.new(ary)
     end
 
     while true
       ary << parse_value
+      return Any.new(nil) unless @error.nil?
       case token.kind
       when TokenKind::Comma
         comma_line = token.line_number
         comma_col = token.column_number
         next_token
         if token.kind == TokenKind::EndArray
-          parse_error("trailing comma in array", comma_line, comma_col)
+          return fail("trailing comma in array", comma_line, comma_col)
         end
       when TokenKind::EndArray
         break
       else
-        parse_error("expected ',' or ']' in array")
+        return fail("expected ',' or ']' in array")
       end
     end
 
-    next_token # consume ']'
+    next_token # ']'
     @nesting = @nesting - 1
     Any.new(ary)
   end
@@ -1114,38 +1117,36 @@ pub struct Parser
     col = token.column_number
 
     @nesting = @nesting + 1
-    if @nesting > @max_nesting
-      parse_error("nesting depth of #{@nesting} exceeds maximum depth #{@max_nesting}", line, col)
+    if @nesting > MAX_NESTING
+      return fail("nesting depth of #{@nesting} exceeds maximum depth #{MAX_NESTING}", line, col)
     end
 
-    next_token # consume '{'
+    next_token # '{'
     obj = {} of String => Any
 
     if token.kind == TokenKind::EndObject
-      next_token # consume '}'
+      next_token
       @nesting = @nesting - 1
       return Any.new(obj)
     end
 
     while true
       unless token.kind == TokenKind::String
-        parse_error("expected string key in object")
+        return fail("expected string key in object")
       end
       key = token.string_value
-      key_line = token.line_number
-      key_col = token.column_number
       if obj.has_key?(key)
-        parse_error("duplicate key '#{key}'", key_line, key_col)
+        return fail("duplicate key '#{key}'")
       end
 
-      next_token # consume key
+      next_token # the key
       unless token.kind == TokenKind::Colon
-        parse_error("expected ':' after object key")
+        return fail("expected ':' after object key")
       end
-      next_token # consume ':'
+      next_token # ':'
 
-      val = parse_value
-      obj[key] = val
+      obj[key] = parse_value
+      return Any.new(nil) unless @error.nil?
 
       case token.kind
       when TokenKind::Comma
@@ -1153,21 +1154,24 @@ pub struct Parser
         comma_col = token.column_number
         next_token
         if token.kind == TokenKind::EndObject
-          parse_error("trailing comma in object", comma_line, comma_col)
+          return fail("trailing comma in object", comma_line, comma_col)
         end
       when TokenKind::EndObject
         break
       else
-        parse_error("expected ',' or '}' in object")
+        return fail("expected ',' or '}' in object")
       end
     end
 
-    next_token # consume '}'
+    next_token # '}'
     @nesting = @nesting - 1
     Any.new(obj)
   end
 end
 
+# Reads a document one event at a time: `kind` names what the reader is on,
+# the `read_x` methods take it and move on. The grammar is checked as it is
+# read, so a missing comma or colon is refused where it is, with a panic.
 pub class PullParser
   enum Kind
     Null
@@ -1221,6 +1225,20 @@ pub class PullParser
       self == Kind::EOF
     end
   end
+
+  # Where the reader is inside the grammar, one entry per open container plus
+  # the root: what may come next.
+  ARRAY_FIRST   = 0 # after '[': a value or ']'
+  ARRAY_VALUE   = 1 # after a value: ',' or ']'
+  ARRAY_COMMA   = 2 # after ',': a value
+  OBJECT_FIRST  = 3 # after '{': a key or '}'
+  OBJECT_KEY    = 4 # after a key: ':'
+  OBJECT_COLON  = 5 # after ':': a value
+  OBJECT_VALUE  = 6 # after a value: ',' or '}'
+  OBJECT_COMMA  = 7 # after ',': a key
+  ROOT          = 8 # the document's one value
+  ROOT_DONE     = 9 # after it: the end of the input
+
   @lexer : Lexer
   getter kind : Kind
   getter bool_value : Bool
@@ -1229,8 +1247,7 @@ pub class PullParser
   getter string_value : String
   getter raw_value : String
   property max_nesting : Int32
-  @nesting : Int32
-  @stack : Array(Int32) # 1 = array, 2 = object
+  @states : Array(Int32)
 
   def initialize(input : String)
     @lexer = Lexer.new(input)
@@ -1240,9 +1257,8 @@ pub class PullParser
     @float_value = 0.0
     @string_value = ""
     @raw_value = ""
-    @max_nesting = 512
-    @nesting = 0
-    @stack = [] of Int32
+    @max_nesting = MAX_NESTING
+    @states = [ROOT]
     read_next
   end
 
@@ -1254,137 +1270,189 @@ pub class PullParser
     @lexer.token.column_number
   end
 
-  private def parse_error(reason : String, line : Int32 = line_number, col : Int32 = column_number) : NoReturn
-    raise "#{reason} at line #{line}, column #{col}"
+  private def parse_error(reason : String) : NoReturn
+    raise "#{reason} at line #{line_number}, column #{column_number}"
+  end
+
+  private def state : Int32
+    @states.last
+  end
+
+  private def set_state(s : Int32) : Nil
+    @states[@states.size - 1] = s
+  end
+
+  private def value_allowed : Nil
+    st = state
+    return if st == ARRAY_FIRST || st == ARRAY_COMMA || st == OBJECT_COLON || st == ROOT
+    parse_error("unexpected value") if st == ARRAY_VALUE || st == OBJECT_VALUE || st == ROOT_DONE
+    parse_error("expected string key in object") if st == OBJECT_FIRST || st == OBJECT_COMMA
+    parse_error("expected ':' after object key")
+  end
+
+  private def after_value : Nil
+    st = state
+    if st == ARRAY_FIRST || st == ARRAY_COMMA
+      set_state(ARRAY_VALUE)
+    elsif st == OBJECT_COLON
+      set_state(OBJECT_VALUE)
+    else
+      set_state(ROOT_DONE)
+    end
+  end
+
+  private def open(container_state : Int32) : Nil
+    value_allowed
+    after_value
+    if @states.size > @max_nesting
+      parse_error("nesting depth of #{@states.size} exceeds maximum depth #{@max_nesting}")
+    end
+    @states << container_state
   end
 
   def read_next : Kind
-    tok = @lexer.next_token
-    case tok.kind
-    when TokenKind::Null
-      @kind = Kind::Null
-    when TokenKind::True
-      @kind = Kind::Bool
-      @bool_value = true
-    when TokenKind::False
-      @kind = Kind::Bool
-      @bool_value = false
-    when TokenKind::Int
-      @kind = Kind::Int
-      @int_value = tok.int_value
-      @raw_value = tok.raw_value
-    when TokenKind::Float
-      @kind = Kind::Float
-      @float_value = tok.float_value
-      @raw_value = tok.raw_value
-    when TokenKind::String
-      @kind = Kind::String
-      @string_value = tok.string_value
-    when TokenKind::BeginArray
-      @nesting = @nesting + 1
-      if @nesting > @max_nesting
-        parse_error("nesting depth #{@nesting} exceeds maximum depth #{@max_nesting}")
+    while true
+      tok = @lexer.next_token
+      case tok.kind
+      when TokenKind::Error
+        lexer_error = @lexer.error
+        raise lexer_error unless lexer_error.nil?
+        parse_error("malformed input")
+      when TokenKind::Comma
+        st = state
+        if st == ARRAY_VALUE
+          set_state(ARRAY_COMMA)
+        elsif st == OBJECT_VALUE
+          set_state(OBJECT_COMMA)
+        else
+          parse_error("unexpected ','")
+        end
+      when TokenKind::Colon
+        parse_error("unexpected ':'") unless state == OBJECT_KEY
+        set_state(OBJECT_COLON)
+      when TokenKind::Null
+        value_allowed
+        after_value
+        @kind = Kind::Null
+        return @kind
+      when TokenKind::True, TokenKind::False
+        value_allowed
+        after_value
+        @kind = Kind::Bool
+        @bool_value = tok.kind == TokenKind::True
+        return @kind
+      when TokenKind::Int
+        value_allowed
+        after_value
+        @kind = Kind::Int
+        @int_value = tok.int_value
+        @raw_value = tok.raw_value
+        return @kind
+      when TokenKind::Float
+        value_allowed
+        after_value
+        @kind = Kind::Float
+        @float_value = tok.float_value
+        @raw_value = tok.raw_value
+        return @kind
+      when TokenKind::String
+        st = state
+        if st == OBJECT_FIRST || st == OBJECT_COMMA
+          set_state(OBJECT_KEY)
+        else
+          value_allowed
+          after_value
+        end
+        @kind = Kind::String
+        @string_value = tok.string_value
+        return @kind
+      when TokenKind::BeginArray
+        open(ARRAY_FIRST)
+        @kind = Kind::BeginArray
+        return @kind
+      when TokenKind::EndArray
+        st = state
+        parse_error("trailing comma in array") if st == ARRAY_COMMA
+        parse_error("unexpected ']'") unless st == ARRAY_FIRST || st == ARRAY_VALUE
+        @states.pop
+        @kind = Kind::EndArray
+        return @kind
+      when TokenKind::BeginObject
+        open(OBJECT_FIRST)
+        @kind = Kind::BeginObject
+        return @kind
+      when TokenKind::EndObject
+        st = state
+        parse_error("trailing comma in object") if st == OBJECT_COMMA
+        parse_error("expected ':' after object key") if st == OBJECT_KEY
+        parse_error("expected value after ':'") if st == OBJECT_COLON
+        parse_error("unexpected '}'") unless st == OBJECT_FIRST || st == OBJECT_VALUE
+        @states.pop
+        @kind = Kind::EndObject
+        return @kind
+      when TokenKind::EOF
+        parse_error("empty JSON input") if state == ROOT
+        parse_error("unexpected end of input") unless state == ROOT_DONE
+        @kind = Kind::EOF
+        return @kind
       end
-      @stack << 1
-      @kind = Kind::BeginArray
-    when TokenKind::EndArray
-      if @stack.empty? || @stack.pop != 1
-        parse_error("unexpected end of array")
-      end
-      @nesting = @nesting - 1
-      @kind = Kind::EndArray
-    when TokenKind::BeginObject
-      @nesting = @nesting + 1
-      if @nesting > @max_nesting
-        parse_error("nesting depth #{@nesting} exceeds maximum depth #{@max_nesting}")
-      end
-      @stack << 2
-      @kind = Kind::BeginObject
-    when TokenKind::EndObject
-      if @stack.empty? || @stack.pop != 2
-        parse_error("unexpected end of object")
-      end
-      @nesting = @nesting - 1
-      @kind = Kind::EndObject
-    when TokenKind::Comma, TokenKind::Colon
-      # internal tokens: advance to next meaningful token
-      return read_next
-    when TokenKind::EOF
-      @kind = Kind::EOF
     end
-    @kind
   end
 
   def read_begin_array : Nil
-    unless @kind == Kind::BeginArray
-      parse_error("expected begin of array, got #{@kind}")
-    end
+    parse_error("expected begin of array, got #{@kind}") unless @kind == Kind::BeginArray
     read_next
   end
 
   def read_end_array : Nil
-    unless @kind == Kind::EndArray
-      parse_error("expected end of array, got #{@kind}")
-    end
+    parse_error("expected end of array, got #{@kind}") unless @kind == Kind::EndArray
     read_next
   end
 
   def read_begin_object : Nil
-    unless @kind == Kind::BeginObject
-      parse_error("expected begin of object, got #{@kind}")
-    end
+    parse_error("expected begin of object, got #{@kind}") unless @kind == Kind::BeginObject
     read_next
   end
 
   def read_end_object : Nil
-    unless @kind == Kind::EndObject
-      parse_error("expected end of object, got #{@kind}")
-    end
+    parse_error("expected end of object, got #{@kind}") unless @kind == Kind::EndObject
     read_next
   end
 
   def read_object_key : String
-    unless @kind == Kind::String
-      parse_error("expected object key string, got #{@kind}")
-    end
+    parse_error("expected object key string, got #{@kind}") unless @kind == Kind::String
     key = @string_value
     read_next
     key
   end
 
   def read_null : Nil
-    unless @kind == Kind::Null
-      parse_error("expected null, got #{@kind}")
-    end
+    parse_error("expected null, got #{@kind}") unless @kind == Kind::Null
     read_next
     nil
   end
 
   def read_bool : Bool
-    unless @kind == Kind::Bool
-      parse_error("expected bool, got #{@kind}")
-    end
+    parse_error("expected bool, got #{@kind}") unless @kind == Kind::Bool
     val = @bool_value
     read_next
     val
   end
 
   def read_int : Int64
-    unless @kind == Kind::Int
-      parse_error("expected int, got #{@kind}")
-    end
+    parse_error("expected int, got #{@kind}") unless @kind == Kind::Int
     val = @int_value
     read_next
     val
   end
 
+  # A float, or an integer read as one.
   def read_float : Float64
-    case @kind
-    when Kind::Float
+    if @kind == Kind::Float
       val = @float_value
       read_next
       val
-    when Kind::Int
+    elsif @kind == Kind::Int
       val = @int_value.to_f64
       read_next
       val
@@ -1394,9 +1462,7 @@ pub class PullParser
   end
 
   def read_string : String
-    unless @kind == Kind::String
-      parse_error("expected string, got #{@kind}")
-    end
+    parse_error("expected string, got #{@kind}") unless @kind == Kind::String
     val = @string_value
     read_next
     val
@@ -1404,7 +1470,7 @@ pub class PullParser
 
   def read_array(& : -> Nil) : Nil
     read_begin_array
-    while @kind != Kind::EndArray && @kind != Kind::EOF
+    while @kind != Kind::EndArray
       yield
     end
     read_end_array
@@ -1412,26 +1478,24 @@ pub class PullParser
 
   def read_object(& : String -> Nil) : Nil
     read_begin_object
-    while @kind != Kind::EndObject && @kind != Kind::EOF
+    while @kind != Kind::EndObject
       key = read_object_key
       yield key
     end
     read_end_object
   end
 
+  # Passes over the value the reader is on, whole.
   def skip : Nil
-    case @kind
-    when Kind::Null, Kind::Bool, Kind::Int, Kind::Float, Kind::String
-      read_next
-    when Kind::BeginArray
+    if @kind == Kind::BeginArray
       read_begin_array
-      while @kind != Kind::EndArray && @kind != Kind::EOF
+      while @kind != Kind::EndArray
         skip
       end
       read_end_array
-    when Kind::BeginObject
+    elsif @kind == Kind::BeginObject
       read_begin_object
-      while @kind != Kind::EndObject && @kind != Kind::EOF
+      while @kind != Kind::EndObject
         read_object_key
         skip
       end
@@ -1439,10 +1503,6 @@ pub class PullParser
     else
       read_next
     end
-  end
-
-  def location_i64 : Tuple(Int32, Int32)
-    {line_number, column_number}
   end
 
   def read_null? : Bool
@@ -1454,10 +1514,11 @@ pub class PullParser
     end
   end
 
+  # Reads an object, yields once at the value of `key`, and skips the rest.
   def on_key(key : String, & : -> Nil) : Nil
     read_begin_object
     found = false
-    while !kind.end_object?
+    while @kind != Kind::EndObject
       current_key = read_object_key
       if current_key == key
         found = true
@@ -1467,119 +1528,122 @@ pub class PullParser
       end
     end
     read_end_object
-    unless found
-      parse_error("Missing JSON key: #{key}")
-    end
+    parse_error("missing key #{key.inspect}") unless found
   end
 
-  def read_raw : String
-    case @kind
-    when Kind::Null
+  # The value the reader is on, as an `Any`.
+  def read_any : Any
+    if @kind == Kind::Null
       read_next
-      "null"
-    when Kind::Bool
-      val = @bool_value ? "true" : "false"
-      read_next
-      val
-    when Kind::Int, Kind::Float
-      val = @raw_value.empty? ? (@kind == Kind::Int ? @int_value.to_s : @float_value.to_s) : @raw_value
-      read_next
-      val
-    when Kind::String
-      val = @string_value
-      read_next
-      val
+      Any.new(nil)
+    elsif @kind == Kind::Bool
+      Any.new(read_bool)
+    elsif @kind == Kind::Int
+      Any.new(read_int)
+    elsif @kind == Kind::Float
+      Any.new(read_float)
+    elsif @kind == Kind::String
+      Any.new(read_string)
+    elsif @kind == Kind::BeginArray
+      ary = [] of Any
+      read_array do
+        ary << read_any
+      end
+      Any.new(ary)
+    elsif @kind == Kind::BeginObject
+      obj = {} of String => Any
+      read_object do |k|
+        parse_error("duplicate key '#{k}'") if obj.has_key?(k)
+        obj[k] = read_any
+      end
+      Any.new(obj)
     else
-      read_next
-      ""
+      parse_error("expected a value, got #{@kind}")
     end
   end
 
-  def read_raw(builder : Builder) : Nil
-    case @kind
-    when Kind::Null
+  # The value the reader is on, written into `json` as it is read.
+  def read_raw(json : Builder) : Nil
+    if @kind == Kind::Null
       read_next
-      builder.null
-    when Kind::Bool
-      builder.bool(read_bool)
-    when Kind::Int
-      builder.number(read_int)
-    when Kind::Float
-      builder.number(read_float)
-    when Kind::String
-      builder.string(read_string)
-    when Kind::BeginArray
-      builder.array do
+      json.null
+    elsif @kind == Kind::Bool
+      json.bool(read_bool)
+    elsif @kind == Kind::Int
+      json.number(read_int)
+    elsif @kind == Kind::Float
+      json.number(read_float)
+    elsif @kind == Kind::String
+      json.string(read_string)
+    elsif @kind == Kind::BeginArray
+      json.array do
         read_array do
-          read_raw(builder)
+          read_raw(json)
         end
       end
-    when Kind::BeginObject
-      builder.object do
+    elsif @kind == Kind::BeginObject
+      json.object do
         read_object do |k|
-          builder.field(k) do
-            read_raw(builder)
-          end
+          json.field(k)
+          read_raw(json)
         end
       end
     else
-      read_next
+      parse_error("expected a value, got #{@kind}")
     end
+  end
+
+  # The value the reader is on, as JSON text.
+  def read_raw : String
+    json = Builder.new
+    read_raw(json)
+    json.to_s
   end
 end
 
+# Writes a document one value at a time. `indent=` makes it pretty;
+# `ascii_only=` escapes every non-ASCII code point.
 pub class Builder
+  # Where the writer is: what may be written next.
+  ROOT         = 0
+  ARRAY_FIRST  = 1
+  ARRAY_NEXT   = 2
+  OBJECT_FIRST = 3 # a key is due
+  OBJECT_NEXT  = 4 # a key is due, after a value
+  OBJECT_VALUE = 5 # a value is due, after its key
+  ROOT_DONE    = 6
+
   @buffer : StringBuffer
-  @indent_spaces : Int32
   @indent_str : String?
   @level : Int32
-  @state_stack : Array(Int32)
-  # States:
-  # 0: Document root
-  # 1: In array (first element)
-  # 2: In array (subsequent element)
-  # 3: In object (expect key, first)
-  # 4: In object (expect key, subsequent)
-  # 5: In object (expect value)
+  @states : Array(Int32)
 
   property max_nesting : Int32
   property ascii_only : Bool
 
-  def initialize(initial_capacity : Int32 = 64)
-    @buffer = StringBuffer.new(initial_capacity)
-    @indent_spaces = -1
+  def initialize
+    @buffer = StringBuffer.new(64)
     @indent_str = nil
     @level = 0
-    @state_stack = [0]
-    @max_nesting = 512
+    @states = [ROOT]
+    @max_nesting = MAX_NESTING
     @ascii_only = false
   end
 
   def indent=(spaces : Int32) : Nil
-    @indent_spaces = spaces
-    if spaces >= 0
-      @indent_str = " " * spaces
-    else
-      @indent_str = nil
-    end
+    @indent_str = spaces > 0 ? " " * spaces : nil
   end
 
   def indent=(str : String) : Nil
-    @indent_str = str
-    @indent_spaces = str.size
+    @indent_str = str.empty? ? nil : str
   end
 
-  def indent=(nil_val : Nil) : Nil
-    @indent_spaces = -1
-    @indent_str = nil
+  private def state : Int32
+    @states.last
   end
 
-  def current_state : Int32
-    @state_stack.last
-  end
-
-  private def set_current_state(s : Int32) : Nil
-    @state_stack[@state_stack.size - 1] = s
+  private def set_state(s : Int32) : Nil
+    @states[@states.size - 1] = s
   end
 
   private def write_indent : Nil
@@ -1594,21 +1658,21 @@ pub class Builder
   end
 
   private def before_value : Nil
-    st = current_state
-    case st
-    when 0 # Document
-      # okay
-    when 1 # In array, first element
-      set_current_state(2)
+    st = state
+    if st == ROOT
+      set_state(ROOT_DONE)
+    elsif st == ARRAY_FIRST
+      set_state(ARRAY_NEXT)
       write_indent
-    when 2                  # In array, subsequent element
+    elsif st == ARRAY_NEXT
       @buffer.append(44_u8) # ','
       write_indent
-    when 5 # In object, expecting value
-      set_current_state(4)
-      # Value follows colon
+    elsif st == OBJECT_VALUE
+      set_state(OBJECT_NEXT)
+    elsif st == ROOT_DONE
+      raise "a second value at the document root"
     else
-      # State mismatch
+      raise "a value where an object key is expected"
     end
   end
 
@@ -1623,7 +1687,8 @@ pub class Builder
   end
 
   def number(val : Int32) : Nil
-    number(val.to_i64)
+    before_value
+    @buffer.append(val.to_s)
   end
 
   def number(val : Int64) : Nil
@@ -1631,16 +1696,24 @@ pub class Builder
     @buffer.append(val.to_s)
   end
 
-  def number(val : Float64) : Nil
+  def number(val : UInt8) : Nil
     before_value
-    bits = IyiFloatText.bits_of(val)
-    if bits == 0x8000000000000000_u64
-      @buffer.append("-0.0")
-    else
-      @buffer.append(val.to_s)
-    end
+    @buffer.append(val.to_s)
   end
 
+  def number(val : UInt64) : Nil
+    before_value
+    @buffer.append(val.to_s)
+  end
+
+  def number(val : Float64) : Nil
+    raise "NaN is not a JSON number" if val != val
+    raise "#{val} is not a JSON number" if val.abs > 1.7976931348623157e308
+    before_value
+    @buffer.append(val.to_s)
+  end
+
+  # Text written as it is: the caller's own JSON.
   def raw(str : String) : Nil
     before_value
     @buffer.append(str)
@@ -1686,18 +1759,12 @@ pub class Builder
         @buffer.append(92_u8)
         @buffer.append(116_u8)
         i = i + 1
-      elsif b < 32_u8
-        # Control character \u00XX
-        @buffer.append(92_u8)
-        @buffer.append(117_u8)
-        @buffer.append(48_u8)
-        @buffer.append(48_u8)
-        hex = "0123456789abcdef".to_unsafe
-        @buffer.append(hex[(b.to_i >> 4) & 0x0F])
-        @buffer.append(hex[b.to_i & 0x0F])
+      elsif b < 32_u8 || b == 127_u8
+        write_hex_u4(b.to_i)
         i = i + 1
       elsif @ascii_only && b >= 128_u8
-        # Decode UTF-8 codepoint and emit \uXXXX or surrogate pair \uXXXX\uYYYY
+        # Decode the UTF-8 sequence and write the code point as \uXXXX, or as
+        # a surrogate pair past the basic plane.
         if (b & 0xE0_u8) == 0xC0_u8 && i + 1 < len
           cp = ((b.to_i & 0x1F) << 6) | (bytes[i + 1].to_i & 0x3F)
           write_hex_u4(cp)
@@ -1708,12 +1775,9 @@ pub class Builder
           i = i + 3
         elsif (b & 0xF8_u8) == 0xF0_u8 && i + 3 < len
           cp = ((b.to_i & 0x07) << 18) | ((bytes[i + 1].to_i & 0x3F) << 12) | ((bytes[i + 2].to_i & 0x3F) << 6) | (bytes[i + 3].to_i & 0x3F)
-          # Surrogate pair:
           sub = cp - 0x10000
-          high = 0xD800 + (sub >> 10)
-          low = 0xDC00 + (sub & 0x3FF)
-          write_hex_u4(high)
-          write_hex_u4(low)
+          write_hex_u4(0xD800 + (sub >> 10))
+          write_hex_u4(0xDC00 + (sub & 0x3FF))
           i = i + 4
         else
           @buffer.append(b)
@@ -1741,18 +1805,16 @@ pub class Builder
     before_value
     @buffer.append(91_u8) # '['
     @level = @level + 1
-    if @level > @max_nesting
-      raise "maximum nesting depth #{@max_nesting} exceeded"
-    end
-    @state_stack << 1 # array first
+    raise "nesting depth of #{@level} exceeds maximum depth #{@max_nesting}" if @level > @max_nesting
+    @states << ARRAY_FIRST
   end
 
   def end_array : Nil
-    st = @state_stack.pop
+    st = state
+    raise "end_array without start_array" unless st == ARRAY_FIRST || st == ARRAY_NEXT
+    @states.pop
     @level = @level - 1
-    if st == 2 # non-empty
-      write_indent
-    end
+    write_indent if st == ARRAY_NEXT
     @buffer.append(93_u8) # ']'
   end
 
@@ -1766,18 +1828,17 @@ pub class Builder
     before_value
     @buffer.append(123_u8) # '{'
     @level = @level + 1
-    if @level > @max_nesting
-      raise "maximum nesting depth #{@max_nesting} exceeded"
-    end
-    @state_stack << 3 # object first
+    raise "nesting depth of #{@level} exceeds maximum depth #{@max_nesting}" if @level > @max_nesting
+    @states << OBJECT_FIRST
   end
 
   def end_object : Nil
-    st = @state_stack.pop
+    st = state
+    raise "end_object with a field's value still due" if st == OBJECT_VALUE
+    raise "end_object without start_object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
+    @states.pop
     @level = @level - 1
-    if st == 4 # non-empty
-      write_indent
-    end
+    write_indent if st == OBJECT_NEXT
     @buffer.append(125_u8) # '}'
   end
 
@@ -1787,18 +1848,16 @@ pub class Builder
     end_object
   end
 
+  # A key; the value that follows it is written by the next call.
   def field(name : String) : Nil
-    st = current_state
-    if st == 4              # subsequent field
-      @buffer.append(44_u8) # ','
-    end
-    set_current_state(5) # expecting value
+    st = state
+    raise "a field outside an object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
+    @buffer.append(44_u8) if st == OBJECT_NEXT # ','
+    set_state(OBJECT_VALUE)
     write_indent
     write_escaped_string(name)
     @buffer.append(58_u8) # ':'
-    if @indent_str
-      @buffer.append(32_u8) # ' '
-    end
+    @buffer.append(32_u8) unless @indent_str.nil? # ' '
   end
 
   def field(name : String, & : -> Nil) : Nil
@@ -1841,22 +1900,31 @@ pub class Builder
     null
   end
 
-  def scalar(val : Any) : Nil
-    val.to_json(self)
-  end
-
   def to_s : String
     @buffer.to_s
   end
 end
 
 pub struct JSON
-  # Parses a JSON string document into a `JSON::Any`.
+  # The document as an `Any`; panics with the line and column of the first
+  # thing it refuses.
   def self.parse(input : String) : Any
-    Parser.new(input).parse
+    parser = Parser.new(input)
+    result = parser.parse
+    failure = parser.error
+    raise failure unless failure.nil?
+    result
   end
 
-  # Builds a JSON string using `JSON::Builder`.
+  # The document as an `Any`, or `nil` when it is not one.
+  def self.parse?(input : String) : Any?
+    parser = Parser.new(input)
+    result = parser.parse
+    parser.error.nil? ? result : nil
+  end
+
+  # Text written through a `Builder` the block is handed. `indent` is a
+  # count of spaces or the string one level is indented by.
   def self.build(indent : String | Int32 | Nil = nil, & : Builder -> Nil) : String
     builder = Builder.new
     if indent.is_a?(Int32)
@@ -1868,33 +1936,13 @@ pub struct JSON
     builder.to_s
   end
 
-  def self.to_json(ary : Array(T)) : String forall T
-    build do |b|
-      b.array do
-        ary.each { |item| write_value(item, b) }
-      end
-    end
-  end
-
-  def self.to_json(h : Hash(K, V)) : String forall K, V
-    build do |b|
-      b.object do
-        h.each do |k, v|
-          b.field(k.to_s) { write_value(v, b) }
-        end
-      end
-    end
-  end
-
+  # Any value `write_value` knows: `nil`, a `Bool`, a prelude integer, a
+  # `Float64`, a `String`, an `Any`, an `Array` or `Hash` of those, or a type
+  # that implements `ToJSON`.
   def self.to_json(obj) : String
     build do |b|
       write_value(obj, b)
     end
-  end
-
-  def self.from_json(str : String, type : T.class) forall T
-    pull = PullParser.new(str)
-    read_value(pull, type)
   end
 
   def self.write_value(val : Nil, b : Builder) : Nil
@@ -1905,20 +1953,28 @@ pub struct JSON
     b.bool(val)
   end
 
-  def self.write_value(val : Int32 | Int64 | Int16 | Int8 | UInt32 | UInt64 | UInt16 | UInt8, b : Builder) : Nil
+  def self.write_value(val : Int32, b : Builder) : Nil
     b.number(val)
   end
 
-  def self.write_value(val : Float32 | Float64, b : Builder) : Nil
+  def self.write_value(val : Int64, b : Builder) : Nil
+    b.number(val)
+  end
+
+  def self.write_value(val : UInt8, b : Builder) : Nil
+    b.number(val)
+  end
+
+  def self.write_value(val : UInt64, b : Builder) : Nil
+    b.number(val)
+  end
+
+  def self.write_value(val : Float64, b : Builder) : Nil
     b.number(val)
   end
 
   def self.write_value(val : String, b : Builder) : Nil
     b.string(val)
-  end
-
-  def self.write_value(val : Symbol, b : Builder) : Nil
-    b.string(val.to_s)
   end
 
   def self.write_value(val : Any, b : Builder) : Nil
@@ -1934,25 +1990,25 @@ pub struct JSON
   def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
     b.object do
       val.each do |k, v|
-        b.field(k.to_s) { write_value(v, b) }
+        b.field(k.to_s)
+        write_value(v, b)
       end
     end
   end
 
-  def self.write_value(val, b : Builder) : Nil
-    if val.nil?
-      b.null
-    elsif val.is_a?(String)
-      b.string(val)
-    elsif val.is_a?(Int)
-      b.number(val)
-    elsif val.is_a?(Float)
-      b.number(val)
-    elsif val.is_a?(Bool)
-      b.bool(val)
-    else
-      val.to_json(b)
-    end
+  def self.write_value(val : T, b : Builder) : Nil forall T : ToJSON
+    val.to_json(b)
+  end
+
+  # The document read into `type`: `Nil`, `Bool`, `Int32`, `Int64`, `UInt8`,
+  # `UInt64`, `Float64`, `String`, `Any`, or an `Array` or `Hash(String, V)`
+  # of those. An integer outside the type is refused, as is anything after
+  # the root value.
+  def self.from_json(str : String, type : T.class) forall T
+    pull = PullParser.new(str)
+    value = read_value(pull, type)
+    raise "unexpected value after JSON root value at line #{pull.line_number}, column #{pull.column_number}" unless pull.kind.eof?
+    value
   end
 
   def self.read_value(pull : PullParser, type : Nil.class) : Nil
@@ -1964,55 +2020,37 @@ pub struct JSON
   end
 
   def self.read_value(pull : PullParser, type : Int32.class) : Int32
-    pull.read_int.to_i32
+    v = pull.read_int
+    raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64
+    v.to_i32
   end
 
   def self.read_value(pull : PullParser, type : Int64.class) : Int64
     pull.read_int
   end
 
-  def self.read_value(pull : PullParser, type : Int16.class) : Int16
-    pull.read_int.to_i16
-  end
-
-  def self.read_value(pull : PullParser, type : Int8.class) : Int8
-    pull.read_int.to_i8
-  end
-
-  def self.read_value(pull : PullParser, type : UInt32.class) : UInt32
-    pull.read_int.to_u32
+  def self.read_value(pull : PullParser, type : UInt8.class) : UInt8
+    v = pull.read_int
+    raise "integer #{v} out of UInt8 range" if v < 0_i64 || v > 255_i64
+    v.to_u8
   end
 
   def self.read_value(pull : PullParser, type : UInt64.class) : UInt64
-    pull.read_int.to_u64
-  end
-
-  def self.read_value(pull : PullParser, type : UInt16.class) : UInt16
-    pull.read_int.to_u16
-  end
-
-  def self.read_value(pull : PullParser, type : UInt8.class) : UInt8
-    pull.read_int.to_u8
+    v = pull.read_int
+    raise "integer #{v} out of UInt64 range" if v < 0_i64
+    v.to_u64
   end
 
   def self.read_value(pull : PullParser, type : Float64.class) : Float64
     pull.read_float
   end
 
-  def self.read_value(pull : PullParser, type : Float32.class) : Float32
-    pull.read_float.to_f32
-  end
-
   def self.read_value(pull : PullParser, type : String.class) : String
     pull.read_string
   end
 
-  def self.read_value(pull : PullParser, type : Symbol.class) : Symbol
-    Symbol.new(pull.read_string)
-  end
-
   def self.read_value(pull : PullParser, type : Any.class) : Any
-    Any.new(pull)
+    pull.read_any
   end
 
   def self.read_value(pull : PullParser, type : Array(T).class) : Array(T) forall T
@@ -2025,444 +2063,15 @@ pub struct JSON
     ary
   end
 
-  def self.read_value(pull : PullParser, type : Hash(K, V).class) : Hash(K, V) forall K, V
-    h = Hash(K, V).new
+  def self.read_value(pull : PullParser, type : Hash(String, V).class) : Hash(String, V) forall V
+    h = Hash(String, V).new
     pull.read_begin_object
     while !pull.kind.end_object?
       k = pull.read_object_key
-      v = read_value(pull, V)
-      {% if K == String %}
-        h[k] = v
-      {% elsif K == Symbol %}
-        h[Symbol.new(k)] = v
-      {% else %}
-        h[k.to_s] = v
-      {% end %}
+      raise "duplicate key '#{k}' at line #{pull.line_number}, column #{pull.column_number}" if h.has_key?(k)
+      h[k] = read_value(pull, V)
     end
     pull.read_end_object
     h
   end
-
-  def self.read_value(pull : PullParser, type : T.class) forall T
-    T.new(pull)
-  end
 end
-
-pub class SerializableError < Error
-  getter line_number : Int32
-  getter column_number : Int32
-  getter klass : String
-  getter attribute : String?
-
-  def initialize(message : String, @klass : String, @attribute : String?, @line_number : Int32, @column_number : Int32)
-    msg = String.build do |io|
-      io << message
-      io << " for " << klass
-      if attr = attribute
-        io << "#" << attr
-      end
-      io << " at line " << line_number << ", column " << column_number
-    end
-    super(msg)
-  end
-end
-
-pub annotation Field
-end
-
-module Serializable
-  annotation Options
-  end
-
-  module Strict
-    protected def on_unknown_json_attribute(pull : ::JSON::PullParser, key : String, line_number : Int32, column_number : Int32)
-      raise ::JSON::SerializableError.new("Unknown JSON attribute: #{key}", self.class.to_s, key, line_number, column_number).message
-    end
-  end
-
-  module Unmapped
-    @[::JSON::Field(ignore: true)]
-    @json_unmapped : Hash(String, ::JSON::Any)?
-
-    def json_unmapped : Hash(String, ::JSON::Any)
-      @json_unmapped ||= Hash(String, ::JSON::Any).new
-    end
-
-    protected def on_unknown_json_attribute(pull : ::JSON::PullParser, key : String, line_number : Int32, column_number : Int32)
-      json_unmapped[key] = ::JSON::Any.new(pull)
-    end
-
-    protected def on_to_json(json : ::JSON::Builder)
-      if unmapped = @json_unmapped
-        unmapped.each do |key, value|
-          json.field(key) { value.to_json(json) }
-        end
-      end
-    end
-  end
-
-  macro use_json_discriminator(field, mapping)
-    def self.from_json(input : String) : self
-      pull = ::JSON::PullParser.new(input)
-      new(pull)
-    end
-
-    def self.new(pull : ::JSON::PullParser) : self
-      location = pull.location_i64
-      discriminator_value = ""
-      json = ::JSON.build do |b|
-        b.start_object
-        pull.read_object do |key|
-          if key == {{field.id.stringify}}
-            case pull.kind
-            when ::JSON::PullParser::Kind::String
-              discriminator_value = pull.string_value
-            when ::JSON::PullParser::Kind::Int
-              discriminator_value = pull.int_value.to_s
-            when ::JSON::PullParser::Kind::Bool
-              discriminator_value = pull.bool_value ? "true" : "false"
-            else
-              raise ::JSON::SerializableError.new("JSON discriminator field '{{field.id}}' has invalid type", to_s, nil, location[0], location[1]).message
-            end
-            b.field(key, discriminator_value)
-            pull.read_next
-          else
-            b.field(key) { pull.read_raw(b) }
-          end
-        end
-        b.end_object
-      end
-
-      case discriminator_value
-      {% for key, type in mapping %}
-        when {{key.id.stringify}}
-          {{type}}.from_json(json)
-      {% end %}
-      else
-        raise ::JSON::SerializableError.new("Unknown discriminator value #{discriminator_value.inspect} for {{field.id}}", to_s, nil, location[0], location[1]).message
-      end
-    end
-  end
-
-  macro included
-    def self.from_json(input : String) : self
-      pull = ::JSON::PullParser.new(input)
-      new(pull)
-    end
-
-    def self.from_json(input : String, root : String) : self
-      pull = ::JSON::PullParser.new(input)
-      pull.on_key(root) do
-        new(pull)
-      end
-    end
-
-    def self.new(pull : ::JSON::PullParser) : self
-      new_from_json_pull_parser(pull)
-    end
-
-    private def self.new_from_json_pull_parser(pull : ::JSON::PullParser) : self
-      {% if @type.struct? %}
-        instance = uninitialized self
-      {% else %}
-        instance = allocate
-      {% end %}
-      instance.initialize(__pull_for_json_serializable: pull)
-      instance
-    end
-
-    macro inherited
-      def self.new(pull : ::JSON::PullParser) : self
-        new_from_json_pull_parser(pull)
-      end
-    end
-
-    def initialize(*, __pull_for_json_serializable pull : ::JSON::PullParser)
-      {% verbatim do %}
-        {% begin %}
-          {% properties = {} of Nil => Nil %}
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::JSON::Field) || ivar.annotation(JSON::Field) || ivar.annotation(Field) %}
-            {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
-              {% non_nil_type = ivar.type %}
-              {% if ivar.type.nilable? %}
-                {% for t in ivar.type.union_types %}
-                  {% unless t == Nil %}
-                    {% non_nil_type = t %}
-                  {% end %}
-                {% end %}
-              {% end %}
-              {%
-                properties[ivar.id] = {
-                  key:          ((ann && ann[:key]) || ivar).id.stringify,
-                  has_default:  (ann && ann[:default] != nil) || ivar.has_default_value?,
-                  default:      (ann && ann[:default]) || ivar.default_value,
-                  nilable:      ivar.type.nilable?,
-                  non_nil_type: non_nil_type,
-                  root:         ann && ann[:root],
-                  converter:    ann && ann[:converter],
-                  presence:     ann && ann[:presence],
-                }
-              %}
-            {% end %}
-          {% end %}
-
-          {% for name, value in properties %}
-            %var{name} = uninitialized typeof(@{{name}})
-            %found{name} = false
-          {% end %}
-
-          %line = pull.line_number
-          %col = pull.column_number
-          begin
-            pull.read_begin_object
-          rescue exc : ::JSON::ParseException
-            raise ::JSON::SerializableError.new(exc.message, self.class.to_s, nil, %line, %col).message
-          end
-
-          while !pull.kind.end_object?
-            %key_line = pull.line_number
-            %key_col = pull.column_number
-            key = pull.read_object_key
-            case key
-            {% for name, value in properties %}
-              when {{value[:key]}}
-                begin
-                  {% if value[:has_default] || value[:nilable] || value[:root] %}
-                    if pull.read_null?
-                      {% if value[:nilable] %}
-                        %var{name} = nil
-                        %found{name} = true
-                      {% end %}
-                      next
-                    end
-                  {% end %}
-
-                  %var{name} =
-                    {% if value[:root] %}
-                      pull.on_key({{value[:root]}}) do
-                        {% if value[:converter] %}
-                          {{value[:converter]}}.from_json(pull)
-                        {% else %}
-                          ::JSON.read_value(pull, {{value[:non_nil_type]}})
-                        {% end %}
-                      end
-                    {% elsif value[:converter] %}
-                      {{value[:converter]}}.from_json(pull)
-                    {% else %}
-                      ::JSON.read_value(pull, {{value[:non_nil_type]}})
-                    {% end %}
-                  %found{name} = true
-                rescue exc : ::JSON::ParseException
-                  raise ::JSON::SerializableError.new(exc.message, self.class.to_s, {{value[:key]}}, %key_line, %key_col).message
-                end
-            {% end %}
-            else
-              on_unknown_json_attribute(pull, key, %key_line, %key_col)
-            end
-          end
-          pull.read_end_object
-
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::JSON::Field) || ivar.annotation(JSON::Field) || ivar.annotation(Field) %}
-            {% if ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
-              {% if ann && ann[:default] != nil %}
-                @{{ivar.name.id}} = {{ann[:default]}}
-              {% elsif ivar.has_default_value? %}
-                @{{ivar.name.id}} = {{ivar.default_value}}
-              {% elsif ivar.type.nilable? %}
-                @{{ivar.name.id}} = nil
-              {% end %}
-            {% end %}
-          {% end %}
-
-          {% for name, value in properties %}
-            if %found{name}
-              @{{name}} = %var{name}
-            else
-              {% if value[:has_default] %}
-                @{{name}} = {{value[:default]}}
-              {% elsif value[:nilable] %}
-                @{{name}} = nil
-              {% else %}
-                raise ::JSON::SerializableError.new("Missing JSON attribute: " + {{value[:key]}}, self.class.to_s, {{value[:key]}}, %line, %col).message
-              {% end %}
-            end
-
-            {% if value[:presence] %}
-              @{{name}}_present = %found{name}
-            {% end %}
-          {% end %}
-        {% end %}
-      {% end %}
-      after_initialize
-    end
-
-    def to_json(json : ::JSON::Builder) : Nil
-      {% verbatim do %}
-        {% begin %}
-          {% options = @type.annotation(::JSON::Serializable::Options) || @type.annotation(JSON::Serializable::Options) || @type.annotation(Options) %}
-          {% emit_nulls = options && options[:emit_nulls] %}
-
-          {% properties = {} of Nil => Nil %}
-          {% for ivar in @type.instance_vars %}
-            {% ann = ivar.annotation(::JSON::Field) || ivar.annotation(JSON::Field) || ivar.annotation(Field) %}
-            {% unless ann && (ann[:ignore] || ann[:ignore_serialize] == true) %}
-              {%
-                properties[ivar.id] = {
-                  key:              ((ann && ann[:key]) || ivar).id.stringify,
-                  root:             ann && ann[:root],
-                  converter:        ann && ann[:converter],
-                  emit_null:        (ann && (ann[:emit_null] != nil) ? ann[:emit_null] : emit_nulls),
-                  ignore_serialize: ann && ann[:ignore_serialize],
-                }
-              %}
-            {% end %}
-          {% end %}
-
-          json.object do
-            {% for name, value in properties %}
-              _{{name}} = @{{name}}
-
-              {% if value[:ignore_serialize] %}
-                unless {{ value[:ignore_serialize] }}
-              {% end %}
-
-                {% unless value[:emit_null] %}
-                  unless _{{name}}.nil?
-                {% end %}
-
-                  {% if value[:root] %}
-                    json.field({{value[:key]}}) do
-                      json.object do
-                        json.field({{value[:root]}}) do
-                          {% if value[:converter] %}
-                            if val = _{{name}}
-                              {{value[:converter]}}.to_json(val, json)
-                            else
-                              json.null
-                            end
-                          {% else %}
-                            ::JSON.write_value(_{{name}}, json)
-                          {% end %}
-                        end
-                      end
-                    end
-                  {% else %}
-                    json.field({{value[:key]}}) do
-                      {% if value[:converter] %}
-                        if val = _{{name}}
-                          {{value[:converter]}}.to_json(val, json)
-                        else
-                          json.null
-                        end
-                      {% else %}
-                        ::JSON.write_value(_{{name}}, json)
-                      {% end %}
-                    end
-                  {% end %}
-
-                {% unless value[:emit_null] %}
-                  end
-                {% end %}
-
-              {% if value[:ignore_serialize] %}
-                end
-              {% end %}
-            {% end %}
-            on_to_json(json)
-          end
-        {% end %}
-      {% end %}
-    end
-
-    def to_json : String
-      ::JSON.build do |b|
-        to_json(b)
-      end
-    end
-
-    def to_pretty_json(indent : String = "  ") : String
-      ::JSON.build(indent: indent) do |b|
-        to_json(b)
-      end
-    end
-
-    def to_pretty_json(indent : Int32) : String
-      ::JSON.build(indent: indent) do |b|
-        to_json(b)
-      end
-    end
-
-    def to_json(io : IO) : Nil
-      io << to_json
-    end
-
-    def to_pretty_json(io : IO, indent : String = "  ") : Nil
-      io << to_pretty_json(indent)
-    end
-
-    protected def after_initialize
-    end
-
-    protected def on_unknown_json_attribute(pull : ::JSON::PullParser, key : String, line_number : Int32, column_number : Int32)
-      pull.skip
-    end
-
-    protected def on_to_json(json : ::JSON::Builder)
-    end
-  end
-end
-
-module ArrayConverter(T)
-  def self.from_json(pull : ::JSON::PullParser) : Array(T)
-    ary = [] of T
-    pull.read_begin_array
-    while !pull.kind.end_array?
-      ary << T.new(pull)
-    end
-    pull.read_end_array
-    ary
-  end
-
-  def self.to_json(values : Array(T), json : ::JSON::Builder) : Nil
-    json.array do
-      values.each { |v| v.to_json(json) }
-    end
-  end
-end
-
-module HashValueConverter(K, V)
-  def self.from_json(pull : ::JSON::PullParser) : Hash(K, V)
-    h = Hash(K, V).new
-    pull.read_begin_object
-    while !pull.kind.end_object?
-      k = pull.read_object_key
-      v = V.new(pull)
-      h[k] = v
-    end
-    pull.read_end_object
-    h
-  end
-
-  def self.to_json(values : Hash(K, V), json : ::JSON::Builder) : Nil
-    json.object do
-      values.each do |k, v|
-        json.field(k.to_s) { v.to_json(json) }
-      end
-    end
-  end
-end
-
-alias ::JSON = Std::Json::JSON
-alias ::JSON::Any = Std::Json::Any
-alias ::JSON::PullParser = Std::Json::PullParser
-alias ::JSON::Builder = Std::Json::Builder
-alias ::JSON::Error = Std::Json::Error
-alias ::JSON::ParseException = Std::Json::ParseException
-alias ::JSON::Parser = Std::Json::Parser
-alias ::JSON::Serializable = Std::Json::Serializable
-alias ::JSON::SerializableError = Std::Json::SerializableError
-alias ::JSON::Field = Std::Json::Field
-alias ::JSON::ArrayConverter = Std::Json::ArrayConverter
-alias ::JSON::HashValueConverter = Std::Json::HashValueConverter

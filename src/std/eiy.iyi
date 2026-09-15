@@ -1,42 +1,80 @@
-# Eiy: embedded iyi, a template language for iyi.
+# Eiy: embedded iyi. A template is text with iyi code inside it, and this
+# module turns the template into iyi source — at compile time, so a rendered
+# template is ordinary compiled code by the time the program runs.
 #
-# The name follows the ERB and ECR lineage. Transforms Eiy templates
-# containing embedded code into native iyi code at compile time without
-# shelling out or arbitrary compile-time execution.
+# The tags:
+#   * `<%= expr %>` prints the expression's `to_s`.
+#   * `<% code %>` runs the code; `<% if x %>` ... `<% end %>` and every other
+#     iyi statement work, because the code is spliced into the program as is.
+#   * `<%- ... %>` drops the indentation before the tag when the tag is the
+#     first thing on its line; `<% ... -%>` drops the rest of the line after
+#     it, newline included. Both keep a control line from leaving a blank one.
+#   * `<%# note %>` is a comment: nothing is printed and nothing runs.
+#   * `<%% ... %>` is the text `<% ... %>` itself, for a template about
+#     templates.
 #
-# Supports:
-#   * Output expressions: `<%= expr %>`
-#   * Control expressions: `<% code %>`
-#   * Leading whitespace suppression: `<%- ... %>`
-#   * Trailing newline suppression: `<% ... -%>`
-#   * Comments: `<%# ... %>`
-#   * Escaped tags: `<%% ... %>`
-#   * Macro embedding: `Eiy.embed(filename, io_name)`
-#   * String rendering: `Eiy.render(filename)`
-#   * Method definition: `Eiy.def_to_s(filename)`
-#   * Runtime processing: `Eiy.process_string` and `Eiy.process_file`
-#   * Token lexing: `Eiy::Lexer`
+# Printing goes through one verb, `print`, so a template writes to anything
+# that has it: an `IyiIO` (`stdout`, a `File`) or `Eiy::Buffer`, which
+# collects the text for `render`.
+#
+# Compile time:
+#   * `Eiy.embed("page.eiy", io)` splices the template's code here; `io`
+#     names what it prints to.
+#   * `Eiy.render("page.eiy")` is the rendered text as a `String`.
+#   * `Eiy.def_to_s("page.eiy")` in a class defines `to_s(io)` and `to_s`
+#     from the template.
+#   The template path is read beside the file that writes the macro, or as
+#   itself when absolute. The macros run `eiy/process`, an iyi program in this
+#   directory that reads the template with the lexer below and prints the
+#   source; it is compiled once and cached with the compiler's other macro
+#   programs, and rebuilt when this module changes.
+#
+# Run time:
+#   * `Eiy.process_string(text, filename, io_name)` and
+#     `Eiy.process_file(filename, io_name)` are that translation as a value;
+#     `Eiy::Lexer` is the tokeniser under it, for a tool that wants tokens.
+#
+# What it refuses: a tag that is never closed, with its line and column
+# (`unterminated <%= tag at line 3, column 5`); `next_token?`,
+# `process_string?` and `process_file?` answer nil for the same template.
+# A template file that cannot be read is refused by `File.read`'s own
+# sentence. Positions count lines from 1 and columns from 1 in characters,
+# not bytes, so a column on a line with non-ASCII text is the column a
+# reader sees.
 
 module std/eiy
-import std/text
-
-class ::Object
-  def to_s(io) : Nil
-    io << to_s
-  end
-end
-
-class ::String
-  def to_s(io) : Nil
-    io << self
-  end
-end
 
 pub struct Eiy
-  DefaultBufferName = "__str__"
+  DefaultIoName = "__io__"
+
+  # Collects what a template prints, for `render` or for a caller that wants
+  # the text rather than a stream.
+  pub class Buffer
+    @parts : Array(String)
+
+    def initialize
+      @parts = [] of String
+    end
+
+    def print(text : String) : Nil
+      @parts << text
+    end
+
+    def print(value) : Nil
+      @parts << value.to_s
+    end
+
+    def to_s : String
+      @parts.join("")
+    end
+
+    def to_s(io) : Nil
+      io.write(to_s)
+    end
+  end
 
   pub class Lexer
-    class Token
+    pub class Token
       enum Type
         String
         Output
@@ -85,16 +123,6 @@ pub struct Eiy
       end
     end
 
-    class SyntaxException < Exception
-      getter line_number : Int32
-      getter column_number : Int32
-      getter message : String
-
-      def initialize(message : String, @line_number : Int32, @column_number : Int32)
-        @message = "#{message} at line #{@line_number}, column #{@column_number}"
-      end
-    end
-
     @string : String
     @bytes : Pointer(UInt8)
     @len : Int32
@@ -102,6 +130,7 @@ pub struct Eiy
     @line_number : Int32
     @column_number : Int32
     @token : Token
+    @error : String
 
     def initialize(@string : String)
       @bytes = @string.to_unsafe
@@ -110,9 +139,23 @@ pub struct Eiy
       @line_number = 1
       @column_number = 1
       @token = Token.new
+      @error = ""
     end
 
+    # Why the last `next_token?` answered nil, or nil while it has not.
+    def error : String?
+      @error.empty? ? nil : @error
+    end
+
+    # The next token; the same `Token` object is reused, so copy what is
+    # needed before asking again. Panics on a tag that is never closed.
     def next_token : Token
+      next_token? || raise @error
+    end
+
+    # The next token, or nil on a tag that is never closed; `error` then says
+    # where.
+    def next_token? : Token?
       copy_location_info_to_token
 
       if @pos >= @len
@@ -123,8 +166,10 @@ pub struct Eiy
 
       b = current_byte
       if b == 60_u8 && peek_byte == 37_u8 # '<' and '%'
-        next_byte                         # skip '<'
-        next_byte                         # skip '%'
+        open_line = @line_number
+        open_column = @column_number
+        next_byte # skip '<'
+        next_byte # skip '%'
 
         suppress_leading = current_byte == 45_u8 # '-'
         next_byte if suppress_leading
@@ -145,7 +190,7 @@ pub struct Eiy
           copy_location_info_to_token
         end
 
-        return consume_control(is_output, is_escape, suppress_leading)
+        return consume_control(is_output, is_escape, suppress_leading, open_line, open_column)
       end
 
       consume_string
@@ -171,19 +216,14 @@ pub struct Eiy
       @token
     end
 
-    private def consume_control(is_output : Bool, is_escape : Bool, suppress_leading : Bool) : Token
+    private def consume_control(is_output : Bool, is_escape : Bool, suppress_leading : Bool, open_line : Int32, open_column : Int32) : Token?
       start_pos = @pos
-      suppress_trailing = false
 
       while true
         if @pos >= @len
-          if is_output
-            raise SyntaxException.new("Unexpected end of file inside <%= ...", @line_number, @column_number).message
-          elsif is_escape
-            raise SyntaxException.new("Unexpected end of file inside <%% ...", @line_number, @column_number).message
-          else
-            raise SyntaxException.new("Unexpected end of file inside <% ...", @line_number, @column_number).message
-          end
+          tag = is_output ? "<%=" : (is_escape ? "<%%" : "<%")
+          @error = "unterminated #{tag} tag at line #{open_line}, column #{open_column}"
+          return nil
         end
 
         b = current_byte
@@ -191,22 +231,13 @@ pub struct Eiy
           @line_number += 1
           @column_number = 0
         elsif b == 45_u8 && peek_byte == 37_u8 # '-' and '%'
-          # Check if next byte after '%' is '>'
-          saved_pos = @pos
-          saved_col = @column_number
-          saved_line = @line_number
-
-          next_byte             # skip '-'
-          if peek_byte == 62_u8 # '>'
-            suppress_trailing = true
-            end_pos = saved_pos
+          # Only `-%>` closes; a `-%` followed by anything else is code.
+          if @pos + 2 < @len && @bytes[@pos + 2] == 62_u8 # '>'
+            end_pos = @pos
+            next_byte # skip '-'
             next_byte # skip '%'
             next_byte # skip '>'
-            return setup_control_token(start_pos, end_pos, is_escape, suppress_leading, suppress_trailing, is_output)
-          else
-            @pos = saved_pos
-            @column_number = saved_col
-            @line_number = saved_line
+            return setup_control_token(start_pos, end_pos, is_escape, suppress_leading, true, is_output)
           end
         elsif b == 37_u8 && peek_byte == 62_u8 # '%' and '>'
           end_pos = @pos
@@ -253,52 +284,99 @@ pub struct Eiy
       @pos + 1 < @len ? @bytes[@pos + 1] : 0_u8
     end
 
+    # Advances one byte; the column advances one character, so a UTF-8
+    # continuation byte does not count.
     private def next_byte : UInt8
       b = current_byte
       @pos += 1
-      @column_number += 1
+      @column_number += 1 unless (b & 0xC0_u8) == 0x80_u8
       b
     end
   end
 
-  # Processes an Eiy template string and returns the generated iyi code.
-  def self.process_string(string : String, filename : String = "", buffer_name : String = DefaultBufferName) : String
+  # The iyi source that prints the template *string* to *io_name*, or nil
+  # for a tag that is never closed.
+  def self.process_string?(string : String, filename : String = "", io_name : String = DefaultIoName) : String?
+    generate(Lexer.new(string), filename, io_name)
+  end
+
+  # The iyi source that prints the template *string* to *io_name*. Panics on
+  # a tag that is never closed, naming *filename* when there is one.
+  def self.process_string(string : String, filename : String = "", io_name : String = DefaultIoName) : String
     lexer = Lexer.new(string)
-    token = lexer.next_token
+    code = generate(lexer, filename, io_name)
+    return code if code
+    sentence = lexer.error || "template refused"
+    raise filename.empty? ? sentence : "#{filename}: #{sentence}"
+  end
+
+  # `process_string?` of the file at *filename*.
+  def self.process_file?(filename : String, io_name : String = DefaultIoName) : String?
+    process_string?(File.read(filename), filename, io_name)
+  end
+
+  # `process_string` of the file at *filename*.
+  def self.process_file(filename : String, io_name : String = DefaultIoName) : String
+    process_string(File.read(filename), filename, io_name)
+  end
+
+  # Where `embed` reads *template* from when it is written in *caller*: the
+  # template itself when absolute, otherwise beside the caller.
+  def self.locate(template : String, caller : String) : String
+    return template if template.starts_with?('/') || caller.empty?
+    raw = caller.to_unsafe
+    i = caller.bytesize - 1
+    while i >= 0
+      return caller[0, i + 1] + template if raw[i] == 47_u8 # '/'
+      i -= 1
+    end
+    template
+  end
+
+  private def self.generate(lexer : Lexer, filename : String, io_name : String) : String?
+    token = lexer.next_token?
+    return nil unless token
 
     parts = [] of String
     while true
       if token.string?
         str_val = token.value
-        token = lexer.next_token
+        token = lexer.next_token?
+        return nil unless token
 
         str_val = suppress_leading_indentation(token, str_val)
 
-        parts << buffer_name
-        parts << " << "
-        parts << str_val.inspect
-        parts << "\n"
+        unless str_val.empty?
+          parts << io_name
+          parts << ".print("
+          parts << quote(str_val)
+          parts << ")\n"
+        end
       elsif token.output?
         str_val = token.value
         line_number = token.line_number
         column_number = token.column_number
         suppress_trailing = token.suppress_trailing?
-        token = lexer.next_token
+        token = lexer.next_token?
+        return nil unless token
 
         suppress_trailing_whitespace(token, suppress_trailing)
 
-        parts << "#<loc:push>("
+        # The newline before `))` keeps a comment at the end of the
+        # expression from swallowing the rest of the line.
+        parts << "#<loc:push>"
+        parts << io_name
+        parts << ".print(("
         append_loc(parts, filename, line_number, column_number)
         parts << str_val
-        parts << ")#<loc:pop>.to_s "
-        parts << buffer_name
-        parts << "\n"
+        parts << "\n))#<loc:pop>\n"
       elsif token.control?
         str_val = token.value
         line_number = token.line_number
         column_number = token.column_number
         suppress_trailing = token.suppress_trailing?
-        token = lexer.next_token
+        token = lexer.next_token?
+        return nil unless token
 
         suppress_trailing_whitespace(token, suppress_trailing)
 
@@ -306,8 +384,7 @@ pub struct Eiy
         append_loc(parts, filename, line_number, column_number)
         parts << " " unless str_val.starts_with?(' ')
         parts << str_val
-        parts << "#<loc:pop>"
-        parts << "\n"
+        parts << "\n#<loc:pop>\n"
       elsif token.eof?
         break
       end
@@ -316,18 +393,62 @@ pub struct Eiy
     parts.join("")
   end
 
-  # Reads and processes an Eiy template file.
-  def self.process_file(filename : String, buffer_name : String = DefaultBufferName) : String
-    content = File.read(filename)
-    process_string(content, filename, buffer_name)
+  # *text* as an iyi string literal: quotes, backslashes and `#` escaped,
+  # control bytes written out, everything else — UTF-8 included — as itself.
+  private def self.quote(text : String) : String
+    parts = [] of String
+    parts << "\""
+    raw = text.to_unsafe
+    len = text.bytesize
+    run_start = 0
+    i = 0
+    while i < len
+      b = raw[i].to_i32
+      escape =
+        if b == 34 # '"'
+          "\\\""
+        elsif b == 92 # '\\'
+          "\\\\"
+        elsif b == 35 # '#'
+          "\\#"
+        elsif b == 10
+          "\\n"
+        elsif b == 13
+          "\\r"
+        elsif b == 9
+          "\\t"
+        elsif b < 32 || b == 127
+          "\\x#{HEX[b // 16]}#{HEX[b % 16]}"
+        else
+          nil
+        end
+      if escape
+        parts << text[run_start, i - run_start] if i > run_start
+        parts << escape
+        run_start = i + 1
+      end
+      i += 1
+    end
+    parts << text[run_start, len - run_start] if len > run_start
+    parts << "\""
+    parts.join("")
   end
+
+  HEX = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
 
   private def self.suppress_leading_indentation(token : Lexer::Token, string : String) : String
     if (token.output? || token.control?) && token.suppress_leading?
-      char_index = string.rindex('\n')
-      start_idx = char_index ? char_index + 1 : 0
-      len = string.bytesize
       raw = string.to_unsafe
+      len = string.bytesize
+      start_idx = 0
+      i = len - 1
+      while i >= 0
+        if raw[i] == 10_u8 # '\n'
+          start_idx = i + 1
+          break
+        end
+        i -= 1
+      end
       all_ws = true
       i = start_idx
       while i < len
@@ -356,7 +477,7 @@ pub struct Eiy
 
   private def self.append_loc(parts : Array(String), filename : String, line_number : Int32, column_number : Int32) : Nil
     parts << "#<loc:"
-    parts << filename.inspect
+    parts << quote(filename)
     parts << ","
     parts << line_number.to_s
     parts << ","
@@ -364,26 +485,28 @@ pub struct Eiy
     parts << ">"
   end
 
-  # Defines a `to_s(io)` method whose body is the template contained in *filename*.
-  macro def_to_s(filename)
-    def to_s(__io__) : Nil
-      ::Std::Eiy::Eiy.embed {{filename}}, __io__
+  # Splices the template at *filename* here; its code prints to *io_name*.
+  macro embed(filename, io_name)
+    {{ run("./eiy/process", @caller.first.filename || "", filename, io_name.id.stringify) }}
+  end
+
+  # The template at *filename*, rendered to a `String`.
+  macro render(filename)
+    begin
+      __buf__ = ::Std::Eiy::Eiy::Buffer.new
+      ::Std::Eiy::Eiy.embed({{filename}}, __buf__)
+      __buf__.to_s
     end
   end
 
-  # Embeds an Eiy template file *filename* into the program and appends content to *io_name*.
-  macro embed(filename, io_name)
-    {{ run("ecr/process", filename, io_name.id.stringify) }}
-  end
+  # Defines `to_s(io)` and `to_s` from the template at *filename*.
+  macro def_to_s(filename)
+    def to_s(io) : Nil
+      ::Std::Eiy::Eiy.embed({{filename}}, io)
+    end
 
-  # Embeds an Eiy template file *filename* into the program and renders it to a string.
-  macro render(filename)
-    begin
-      __buf__ = [] of String
-      ::Std::Eiy::Eiy.embed({{filename}}, __buf__)
-      __buf__.join("")
+    def to_s : String
+      ::Std::Eiy::Eiy.render({{filename}})
     end
   end
 end
-
-pub alias ECR = Std::Eiy::Eiy

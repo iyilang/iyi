@@ -1,94 +1,70 @@
-# Native XML processing library for iyi.
+# XML for iyi: a well-formedness parser, a document tree, and a serializer.
 #
-# Provides a well-formed XML 1.0 parser producing a document tree, navigation
-# and query methods (find, find_all, root, children, parent, attributes, path),
-# and an XML serializer with proper character entity escaping.
+# `parse` reads an XML 1.0 document - declaration, comments, processing
+# instructions, an internal DTD subset with entity declarations, elements,
+# attributes, namespaces, text, CDATA, character and entity references - into a
+# `Document` of `Node`s. `parse?` answers nil where `parse` panics. A node can
+# be walked (`children`, `parent`, `root`), searched (`find`, `find_all`),
+# located (`path`), edited (`add_child`, `set_attribute`, `text=`) and written
+# back out (`to_xml`, `inner_xml`). `escape`, `escape_attribute` and `unescape`
+# are the character-reference rules on their own.
 #
-# Unlike Crystal's XML standard library (which binds libxml2 via @[Link("xml2")]),
-# this implementation is 100% native iyi code with zero external dependencies
-# and zero C symbols, adhering strictly to SPEC.md III.9 dependency floors.
+# Bytes are UTF-8 and stay as they are: text is copied by the run, never
+# decoded and re-encoded, so a document with "café" or an emoji reads and
+# writes the same bytes. Line ends are normalised (`\r\n` and `\r` become
+# `\n`) and attribute values have their literal tabs and newlines replaced by
+# spaces, as XML 1.0 says. The serializer writes what a document reads back
+# as: `&amp; &lt; &gt;` and `&#13;` in text, `&quot;` and `&#9; &#10; &#13;` in
+# attribute values as well, namespace declarations before attributes, an
+# empty element as `<a/>`, and a newline after the declaration and after every
+# top-level node.
 #
-# Security Hardening:
-# 1. External Entity Expansion (XXE) Prevention:
-#    External entities declared with SYSTEM or PUBLIC in DOCTYPE are strictly
-#    refused by default. Attempting to parse external entities triggers a fatal
-#    well-formedness panic naming the security violation, preventing arbitrary
-#    file reads, SSRF, or network requests.
-# 2. Billion Laughs / Entity Expansion Bounding:
-#    Internal entity expansions are strictly bounded (max 1,000 expansions by default)
-#    and expansion depth is capped (max depth 10). Nested recursive entity definitions
-#    designed to produce exponential blowups are detected and halted immediately.
-# 3. Element Nesting Depth Limiting:
-#    Element nesting depth is capped (max 256 levels by default) to prevent stack
-#    overflow or resource exhaustion from adversarial deeply-nested trees.
-# 4. Detailed Well-Formedness Error Reporting:
-#    Every error specifies exact line and column numbers, clearly diagnosing
-#    mismatched tags, unclosed tags, invalid characters, duplicate attributes,
-#    or multiple root elements.
+# What it refuses, each with the line and column:
+#   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
+#     the `;`), and a character reference that is not an XML character
+#     (surrogates, U+0000 and the other C0 controls, anything past U+10FFFF);
+#   * `--` inside a comment and `]]>` in text; a control character (other than
+#     tab, newline and carriage return) anywhere;
+#   * a raw `<` in an attribute value, an attribute given twice, a namespace
+#     prefix nobody declared, an unquoted value, a second root element, a
+#     closing tag that does not match, an unclosed anything;
+#   * an external DTD subset or entity (`SYSTEM`/`PUBLIC`) - there is no
+#     file or network access here, so there is no XXE;
+#   * more than `max_entity_expansions` entity expansions (1,000 by default)
+#     or an entity that expands more than ten levels deep, which is what a
+#     "billion laughs" document is;
+#   * elements nested deeper than `max_depth` (256 by default);
+#   * markup inside an entity's replacement text, a parameter entity
+#     reference, and an encoding other than UTF-8 or US-ASCII: each is named
+#     as unsupported rather than read as something else.
+#
+# `unescape` follows the same reference rules as the parser: the five
+# predefined entities and valid character references are decoded, everything
+# else is refused with the same sentence. The DTD is read for its entities and
+# not kept: `to_xml` writes no DOCTYPE, and entity references come out as the
+# text they stood for.
 
 module std/xml
 
-import std/text
-
-pub struct NodeType
-  getter value : Int32
-
-  def initialize(@value : Int32)
-  end
-
-  Element               = NodeType.new(1)
-  Text                  = NodeType.new(2)
-  CData                 = NodeType.new(3)
-  Comment               = NodeType.new(4)
-  ProcessingInstruction = NodeType.new(5)
-  Document              = NodeType.new(6)
-
-  def ==(other : NodeType) : Bool
-    @value == other.value
-  end
-
-  def element? : Bool
-    @value == 1
-  end
-
-  def text? : Bool
-    @value == 2
-  end
+pub enum NodeType
+  Element
+  Text
+  CData
+  Comment
+  ProcessingInstruction
+  Document
 
   def cdata? : Bool
-    @value == 3
-  end
-
-  def comment? : Bool
-    @value == 4
+    self == NodeType::CData
   end
 
   def pi? : Bool
-    @value == 5
-  end
-
-  def document? : Bool
-    @value == 6
-  end
-
-  def to_s : String
-    if @value == 1
-      "element"
-    elsif @value == 2
-      "text"
-    elsif @value == 3
-      "cdata"
-    elsif @value == 4
-      "comment"
-    elsif @value == 5
-      "processing_instruction"
-    elsif @value == 6
-      "document"
-    else
-      "unknown"
-    end
+    self == NodeType::ProcessingInstruction
   end
 end
+
+# The namespace the `xml:` prefix is bound to without a declaration.
+XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 
 pub struct Namespace
   getter prefix : String
@@ -103,9 +79,9 @@ pub struct Namespace
 
   def to_s : String
     if @prefix.empty?
-      "xmlns=\"#{@uri}\""
+      "xmlns=\"#{Std::Xml.escape_attribute(@uri)}\""
     else
-      "xmlns:#{@prefix}=\"#{@uri}\""
+      "xmlns:#{@prefix}=\"#{Std::Xml.escape_attribute(@uri)}\""
     end
   end
 end
@@ -115,18 +91,17 @@ pub struct Attribute
   getter value : String
   getter prefix : String
   getter local_name : String
+  # The namespace the prefix was bound to; "" for an unprefixed attribute,
+  # which has no namespace, not even the default one.
   getter namespace_uri : String
 
-  def initialize(@name : String, @value : String, @prefix : String = "", @local_name : String = "", @namespace_uri : String = "")
-    if @local_name.empty?
-      colon = @name.index(':')
-      if !colon.nil? && colon > 0
-        @prefix = @name[0, colon]
-        @local_name = @name[colon + 1, @name.bytesize - colon - 1]
-      else
-        @prefix = ""
-        @local_name = @name
-      end
+  def initialize(@name : String, @value : String, @namespace_uri : String = "")
+    @prefix = ""
+    @local_name = @name
+    colon = @name.index(':')
+    if !colon.nil? && colon > 0
+      @prefix = @name[0, colon]
+      @local_name = @name[colon + 1, @name.bytesize - colon - 1]
     end
   end
 
@@ -142,21 +117,15 @@ pub class Node
   property name : String
   property prefix : String
   property local_name : String
-  property content : String
   property attributes : Array(Attribute)
   property children : Array(Node)
   property parent : Node?
-  @namespace : Namespace?
-
-  def namespace=(ns : Namespace?) : Nil
-    @namespace = ns
-  end
+  property namespaces : Array(Namespace)
+  @content : String
 
   def ==(other : Node) : Bool
     @id == other.id
   end
-
-  property namespaces : Array(Namespace)
 
   def initialize(@node_type : NodeType, @name : String = "", @content : String = "")
     @@next_id = @@next_id + 1
@@ -171,7 +140,6 @@ pub class Node
     @attributes = [] of Attribute
     @children = [] of Node
     @parent = nil
-    @namespace = nil
     @namespaces = [] of Namespace
   end
 
@@ -203,11 +171,10 @@ pub class Node
     @content = value
   end
 
+  # A text, CDATA, comment or PI node's own text; for an element or a
+  # document, the text and CDATA of every descendant, joined.
   def content : String
-    if @node_type.text? || @node_type.cdata? || @node_type.comment? || @node_type.pi?
-      return @content
-    end
-    # For element or document, concatenate text content of all descendants
+    return @content unless @node_type.element? || @node_type.document?
     parts = [] of String
     collect_text_into(parts)
     parts.join("")
@@ -225,13 +192,11 @@ pub class Node
     end
   end
 
+  # The namespace this element's name is in: the one its prefix is bound to,
+  # or the default namespace in scope, or nil.
   def namespace : Namespace?
-    return @namespace unless @namespace.nil?
-    if !@prefix.empty?
-      return resolve_namespace_prefix(@prefix)
-    else
-      return resolve_default_namespace
-    end
+    return resolve_namespace_prefix(@prefix) unless @prefix.empty?
+    resolve_default_namespace
   end
 
   def namespace_uri : String
@@ -240,11 +205,10 @@ pub class Node
   end
 
   def resolve_namespace_prefix(prefix : String) : Namespace?
+    return Namespace.new("xml", XML_NAMESPACE) if prefix == "xml"
     i = 0
     while i < @namespaces.size
-      if @namespaces[i].prefix == prefix
-        return @namespaces[i]
-      end
+      return @namespaces[i] if @namespaces[i].prefix == prefix
       i = i + 1
     end
     if !(p = @parent).nil?
@@ -253,11 +217,13 @@ pub class Node
     nil
   end
 
+  # `xmlns=""` undeclares the default namespace, so a declaration with an
+  # empty uri answers nil rather than being passed over.
   def resolve_default_namespace : Namespace?
     i = 0
     while i < @namespaces.size
       if @namespaces[i].default?
-        return @namespaces[i]
+        return @namespaces[i].uri.empty? ? nil : @namespaces[i]
       end
       i = i + 1
     end
@@ -267,20 +233,15 @@ pub class Node
     nil
   end
 
+  # The root element of the tree this node is in.
   def root : Node
     curr = self
     while !(p = curr.parent).nil?
       curr = p
     end
     if curr.node_type.document?
-      # If curr is Document, return its first element child
-      i = 0
-      while i < curr.children.size
-        if curr.children[i].node_type.element?
-          return curr.children[i]
-        end
-        i = i + 1
-      end
+      el = curr.first_element_child
+      return el unless el.nil?
     end
     curr
   end
@@ -302,9 +263,7 @@ pub class Node
   def first_element_child : Node?
     i = 0
     while i < @children.size
-      if @children[i].node_type.element?
-        return @children[i]
-      end
+      return @children[i] if @children[i].node_type.element?
       i = i + 1
     end
     nil
@@ -314,20 +273,18 @@ pub class Node
     res = [] of Node
     i = 0
     while i < @children.size
-      if @children[i].node_type.element?
-        res << @children[i]
-      end
+      res << @children[i] if @children[i].node_type.element?
       i = i + 1
     end
     res
   end
 
+  # The value of the attribute with exactly this name (`"x:attr"` is not
+  # `"attr"`), or nil.
   def attribute(name : String) : String?
     i = 0
     while i < @attributes.size
-      if @attributes[i].name == name || @attributes[i].local_name == name
-        return @attributes[i].value
-      end
+      return @attributes[i].value if @attributes[i].name == name
       i = i + 1
     end
     nil
@@ -335,9 +292,7 @@ pub class Node
 
   def [](name : String) : String
     val = attribute(name)
-    if val.nil?
-      raise "missing attribute: '#{name}'"
-    end
+    raise "missing attribute: '#{name}'" if val.nil?
     val
   end
 
@@ -349,42 +304,43 @@ pub class Node
     !attribute(name).nil?
   end
 
+  # Sets or replaces the attribute; a prefixed name takes the namespace its
+  # prefix is bound to here, "" where none is declared.
   def set_attribute(name : String, value : String) : Attribute
-    # Update existing if present
+    attr = Attribute.new(name, value)
+    if !attr.prefix.empty?
+      ns = resolve_namespace_prefix(attr.prefix)
+      attr = Attribute.new(name, value, ns.nil? ? "" : ns.uri)
+    end
     i = 0
     while i < @attributes.size
       if @attributes[i].name == name
-        attr = Attribute.new(name, value)
         @attributes[i] = attr
         return attr
       end
       i = i + 1
     end
-    attr = Attribute.new(name, value)
     @attributes << attr
     attr
   end
 
-  # Finds the first descendant element matching name or local_name.
+  # The first descendant element whose name or local name is *name*.
   def find(name : String) : Node?
     i = 0
     while i < @children.size
       child = @children[i]
       if child.node_type.element?
-        if child.name == name || child.local_name == name
-          return child
-        end
+        return child if child.name == name || child.local_name == name
         nested = child.find(name)
-        if !nested.nil?
-          return nested
-        end
+        return nested unless nested.nil?
       end
       i = i + 1
     end
     nil
   end
 
-  # Finds all descendant elements matching name or local_name.
+  # Every descendant element whose name or local name is *name*, in document
+  # order.
   def find_all(name : String) : Array(Node)
     res = [] of Node
     collect_find_all(name, res)
@@ -396,36 +352,28 @@ pub class Node
     while i < @children.size
       child = @children[i]
       if child.node_type.element?
-        if child.name == name || child.local_name == name
-          res << child
-        end
+        res << child if child.name == name || child.local_name == name
         child.collect_find_all(name, res)
       end
       i = i + 1
     end
   end
 
-  # Computes a canonical path from document/root to this node.
+  # Where this element is, as `/root/item[2]/name[1]`: each step counts
+  # same-named element siblings from 1.
   def path : String
-    if @parent.nil?
+    p = @parent
+    if p.nil?
       return @node_type.element? ? "/#{@name}" : "/"
     end
-    p = @parent
-    if p.nil? || p.node_type.document?
-      return "/#{@name}"
-    end
+    return "/#{@name}" if p.node_type.document?
 
-    # Count preceding siblings of the same element name
     index = 1
     i = 0
     while i < p.children.size
       sib = p.children[i]
-      if sib == self
-        break
-      end
-      if sib.node_type.element? && sib.name == @name
-        index = index + 1
-      end
+      break if sib == self
+      index = index + 1 if sib.node_type.element? && sib.name == @name
       i = i + 1
     end
 
@@ -461,22 +409,18 @@ pub class Node
     if @node_type.element?
       buf << "<"
       buf << @name
-      # Write declared namespaces if not already written in attributes
       ns_i = 0
       while ns_i < @namespaces.size
-        ns = @namespaces[ns_i]
         buf << " "
-        buf << ns.to_s
+        buf << @namespaces[ns_i].to_s
         ns_i = ns_i + 1
       end
-      # Write attributes
       attr_i = 0
       while attr_i < @attributes.size
         buf << " "
         buf << @attributes[attr_i].to_s
         attr_i = attr_i + 1
       end
-
       if @children.empty?
         buf << "/>"
       else
@@ -508,10 +452,11 @@ pub class Node
         buf << @content
       end
       buf << "?>"
-    elsif @node_type.document?
+    else
       c_i = 0
       while c_i < @children.size
         @children[c_i].serialize_node(buf)
+        buf << "\n"
         c_i = c_i + 1
       end
     end
@@ -529,9 +474,7 @@ pub class Document < Node
 
   def root : Node
     el = first_element_child
-    if el.nil?
-      raise "document has no root element"
-    end
+    raise "document has no root element" if el.nil?
     el
   end
 
@@ -543,100 +486,26 @@ pub class Document < Node
     buf = [] of String
     buf << "<?xml version=\""
     buf << @version
-    buf << "\" encoding=\""
-    buf << @encoding
     buf << "\""
+    if !@encoding.empty?
+      buf << " encoding=\""
+      buf << @encoding
+      buf << "\""
+    end
     if !@standalone.nil?
       buf << " standalone=\""
       buf << (@standalone ? "yes" : "no")
       buf << "\""
     end
     buf << "?>\n"
-
-    i = 0
-    while i < @children.size
-      @children[i].serialize_node(buf)
-      i = i + 1
-    end
+    serialize_node(buf)
     buf.join("")
   end
 end
 
-# Internal entity mapping for DTD entities
-class EntityTable
-  @entries : Hash(String, String)
-  getter expansions : Int32
-  getter max_expansions : Int32
-
-  def initialize(@max_expansions : Int32 = 1000)
-    @entries = Hash(String, String).new
-    @entries["lt"] = "<"
-    @entries["gt"] = ">"
-    @entries["amp"] = "&"
-    @entries["apos"] = "'"
-    @entries["quot"] = "\""
-    @expansions = 0
-  end
-
-  def register(name : String, value : String) : Nil
-    @entries[name] = value
-  end
-
-  def has_entity?(name : String) : Bool
-    @entries.has_key?(name)
-  end
-
-  def lookup(name : String) : String?
-    @entries[name]?
-  end
-
-  def expand(name : String, depth : Int32 = 0) : String
-    if depth > 10
-      raise "entity expansion depth limit exceeded (possible billion laughs recursion)"
-    end
-    val = @entries[name]?
-    if val.nil?
-      raise "undefined entity reference: &#{name};"
-    end
-    # If predefined entity, no count increment
-    if name == "lt" || name == "gt" || name == "amp" || name == "apos" || name == "quot"
-      return val
-    end
-
-    @expansions = @expansions + 1
-    if @expansions > @max_expansions
-      raise "entity expansion limit exceeded (billion laughs attack detected, limit: #{@max_expansions})"
-    end
-
-    # Check if value itself contains entity references, expand recursively
-    if val.includes?("&")
-      res = [] of String
-      i = 0
-      len = val.bytesize
-      ptr = val.to_unsafe
-      while i < len
-        if ptr[i] == 38_u8 # '&'
-          semi = val.index(';', i)
-          if semi.nil?
-            res << "&"
-            i = i + 1
-          else
-            ent_name = val[i + 1, semi - i - 1]
-            res << expand(ent_name, depth + 1)
-            i = semi + 1
-          end
-        else
-          res << ptr[i].unsafe_chr.to_s
-          i = i + 1
-        end
-      end
-      return res.join("")
-    end
-
-    val
-  end
-end
-
+# The parser keeps the first thing that went wrong in `error` and, once
+# something has, runs its cursor to the end so every loop above it unwinds:
+# `parse?` then answers nil and `parse` panics with that sentence.
 pub class Parser
   @input : String
   @len : Int32
@@ -645,171 +514,226 @@ pub class Parser
   @col : Int32
   @max_depth : Int32
   @depth : Int32
-  @entities : EntityTable
-  @refuse_external_entities : Bool
+  @entities : Hash(String, String)
+  @expansions : Int32
+  @max_expansions : Int32
+  @error : String
 
-  def initialize(@input : String, @max_depth : Int32 = 256, max_entity_expansions : Int32 = 1000, @refuse_external_entities : Bool = true)
+  def initialize(input : String, @max_depth : Int32 = 256, @max_expansions : Int32 = 1000)
+    @input = Parser.normalize_line_ends(input)
     @len = @input.bytesize
     @pos = 0
     @line = 1
     @col = 1
     @depth = 0
-    @entities = EntityTable.new(max_entity_expansions)
+    @entities = Hash(String, String).new
+    @expansions = 0
+    @error = ""
   end
 
-  private def error(message : String) : NoReturn
-    raise "Error at line #{@line}, column #{@col}: #{message}"
+  # The sentence the last parse failed with, or "" when it did not.
+  def error : String
+    @error
   end
 
-  private def error_at(line : Int32, col : Int32, message : String) : NoReturn
-    raise "Error at line #{line}, column #{col}: #{message}"
+  def parse? : Document?
+    doc = parse_document
+    @error.empty? ? doc : nil
   end
 
-  private def peek : Char?
-    return nil if @pos >= @len
-    @input.to_unsafe[@pos].unsafe_chr
+  def parse : Document
+    doc = parse_document
+    raise @error unless @error.empty?
+    doc
   end
 
-  private def peek_byte : UInt8?
-    return nil if @pos >= @len
-    @input.to_unsafe[@pos]
+  # `\r\n` and a lone `\r` both mean `\n` (XML 1.0, 2.11).
+  protected def self.normalize_line_ends(input : String) : String
+    return input unless input.includes?("\r")
+    ptr = input.to_unsafe
+    len = input.bytesize
+    bytes = [] of UInt8
+    i = 0
+    while i < len
+      b = ptr[i]
+      if b == 13_u8
+        bytes << 10_u8
+        i = i + 1 if i + 1 < len && ptr[i + 1] == 10_u8
+      else
+        bytes << b
+      end
+      i = i + 1
+    end
+    String.new(bytes.size) { |buffer| buffer.copy_from(bytes.to_unsafe, bytes.size) }
   end
 
-  private def advance : Char?
-    return nil if @pos >= @len
-    ch = @input.to_unsafe[@pos].unsafe_chr
+  # -- the cursor ----------------------------------------------------------
+
+  private def failed? : Bool
+    !@error.empty?
+  end
+
+  private def fail(message : String) : Nil
+    fail_at(@line, @col, message)
+  end
+
+  private def fail_at(line : Int32, col : Int32, message : String) : Nil
+    return unless @error.empty?
+    @error = "#{message} at line #{line}, column #{col}"
+    @pos = @len
+  end
+
+  private def byte_at(i : Int32) : UInt8
+    @input.to_unsafe[i]
+  end
+
+  # One byte on; a column is a character, so a continuation byte is not one.
+  private def step : Nil
+    b = @input.to_unsafe[@pos]
     @pos = @pos + 1
-    if ch == '\n'
+    if b == 10_u8
       @line = @line + 1
       @col = 1
-    else
+    elsif (b & 192_u8) != 128_u8
       @col = @col + 1
     end
-    ch
   end
 
-  private def skip_whitespace : Nil
+  private def skip_whitespace : Bool
+    skipped = false
     while @pos < @len
-      ch = @input.to_unsafe[@pos].unsafe_chr
-      if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
-        advance
-      else
-        break
-      end
+      b = byte_at(@pos)
+      break unless b == 32_u8 || b == 9_u8 || b == 10_u8
+      step
+      skipped = true
     end
+    skipped
   end
 
-  private def match_str?(prefix : String) : Bool
-    p_len = prefix.bytesize
-    return false if @pos + p_len > @len
-    ptr = @input.to_unsafe
-    p_ptr = prefix.to_unsafe
+  private def match?(literal : String) : Bool
+    n = literal.bytesize
+    return false if @pos + n > @len
+    ptr = @input.to_unsafe + @pos
+    lit = literal.to_unsafe
     i = 0
-    while i < p_len
-      return false if ptr[@pos + i] != p_ptr[i]
+    while i < n
+      return false if ptr[i] != lit[i]
       i = i + 1
     end
     true
   end
 
-  private def consume(prefix : String) : Bool
-    if match_str?(prefix)
-      i = 0
-      while i < prefix.bytesize
-        advance
-        i = i + 1
-      end
-      true
-    else
-      false
+  private def consume(literal : String) : Bool
+    return false unless match?(literal)
+    i = 0
+    while i < literal.bytesize
+      step
+      i = i + 1
     end
+    true
   end
 
-  def parse : Document
-    doc = Document.new
-    skip_whitespace
+  private def slice_from(from : Int32) : String
+    @input[from, @pos - from]
+  end
 
-    # 1. Parse optional XML Declaration: <?xml ...?>
-    if match_str?("<?xml")
+  private def control?(b : UInt8) : Bool
+    b < 32_u8 && b != 9_u8 && b != 10_u8
+  end
+
+  private def fail_control(b : UInt8) : Nil
+    fail("control character U+#{Parser.hex4(b.to_i32)} is not allowed")
+  end
+
+  protected def self.hex4(value : Int32) : String
+    digits = value.to_s(16).upcase
+    while digits.bytesize < 4
+      digits = "0" + digits
+    end
+    digits
+  end
+
+  # -- the document --------------------------------------------------------
+
+  private def parse_document : Document
+    doc = Document.new
+    @pos = 3 if match?("\u{FEFF}")
+    if match?("<?xml") && @pos + 5 < @len && whitespace_byte?(byte_at(@pos + 5))
       parse_xml_declaration(doc)
     end
 
     has_root = false
-
-    # 2. Parse misc (comments, PIs, DOCTYPE) and the root element
+    seen_doctype = false
     while @pos < @len
       skip_whitespace
       break if @pos >= @len
-
-      if match_str?("<!--")
+      if match?("<!--")
         doc.add_child(parse_comment)
-      elsif match_str?("<?")
+      elsif match?("<?")
         doc.add_child(parse_pi)
-      elsif match_str?("<!DOCTYPE")
-        parse_doctype
-      elsif match_str?("<![CDATA[")
-        error("CDATA sections are only allowed within elements")
-      elsif match_str?("</")
-        error("unexpected closing tag outside root element")
-      elsif match_str?("<")
+      elsif match?("<!DOCTYPE")
         if has_root
-          # Well-formedness error: multiple root elements!
-          tag_name = peek_tag_name
-          error("multiple root elements: unexpected <#{tag_name}>")
+          fail("DOCTYPE must come before the root element")
+        elsif seen_doctype
+          fail("a second DOCTYPE")
+        else
+          seen_doctype = true
+          parse_doctype
         end
-        root_elem = parse_element
-        doc.add_child(root_elem)
-        has_root = true
+      elsif match?("<![CDATA[")
+        fail("CDATA is only allowed inside an element")
+      elsif match?("</")
+        fail("closing tag outside the root element")
+      elsif match?("<")
+        if has_root
+          fail("a second root element")
+        else
+          doc.add_child(parse_element(doc))
+          has_root = true
+        end
       else
-        ch = peek
-        error("unexpected character '#{ch}' outside root element")
+        fail("text outside the root element")
       end
     end
 
-    if !has_root
-      error("document has no root element")
-    end
-
+    fail("document has no root element") if !has_root && !failed?
     doc
   end
 
-  private def peek_tag_name : String
-    save_pos = @pos
-    save_line = @line
-    save_col = @col
-    advance # skip '<'
-    name = parse_name? || "unknown"
-    @pos = save_pos
-    @line = save_line
-    @col = save_col
-    name
+  private def whitespace_byte?(b : UInt8) : Bool
+    b == 32_u8 || b == 9_u8 || b == 10_u8
   end
 
   private def parse_xml_declaration(doc : Document) : Nil
     start_line = @line
     start_col = @col
     consume("<?xml")
-
-    # Attributes in XML declaration
+    doc.encoding = ""
     while @pos < @len
-      skip_whitespace
-      if consume("?>")
+      had_space = skip_whitespace
+      return if consume("?>")
+      if !had_space
+        fail("expected whitespace in the XML declaration")
         return
       end
-      if @pos >= @len
-        error_at(start_line, start_col, "unclosed XML declaration")
-      end
       attr_name = parse_name
+      return if failed?
       skip_whitespace
       if !consume("=")
-        error("expected '=' after XML declaration attribute '#{attr_name}'")
+        fail("expected '=' after '#{attr_name}' in the XML declaration")
+        return
       end
       skip_whitespace
-      attr_val = parse_quoted_value
-
+      attr_val = parse_quoted_literal
+      return if failed?
       if attr_name == "version"
         doc.version = attr_val
       elsif attr_name == "encoding"
+        lowered = attr_val.downcase
+        if lowered != "utf-8" && lowered != "utf8" && lowered != "us-ascii" && lowered != "ascii"
+          fail_at(start_line, start_col, "encoding '#{attr_val}' is not supported: the input is read as UTF-8")
+          return
+        end
         doc.encoding = attr_val
       elsif attr_name == "standalone"
         if attr_val == "yes"
@@ -817,130 +741,176 @@ pub class Parser
         elsif attr_val == "no"
           doc.standalone = false
         else
-          error("invalid standalone value '#{attr_val}', expected 'yes' or 'no'")
+          fail("standalone must be 'yes' or 'no', not '#{attr_val}'")
+          return
         end
+      else
+        fail("'#{attr_name}' is not an XML declaration attribute")
+        return
       end
     end
-    error_at(start_line, start_col, "unclosed XML declaration")
+    fail_at(start_line, start_col, "unclosed XML declaration")
   end
+
+  # -- the DTD -------------------------------------------------------------
 
   private def parse_doctype : Nil
     start_line = @line
     start_col = @col
     consume("<!DOCTYPE")
     skip_whitespace
-    root_name = parse_name
+    parse_name
+    return if failed?
     skip_whitespace
-
-    # Check for SYSTEM or PUBLIC external entity declarations
-    if match_str?("SYSTEM") || match_str?("PUBLIC")
-      if @refuse_external_entities
-        error("external entity expansion is disabled: refused SYSTEM/PUBLIC DOCTYPE")
-      end
+    if match?("SYSTEM") || match?("PUBLIC")
+      fail("external DTD subset refused: no SYSTEM or PUBLIC identifier is read")
+      return
     end
-
-    # Parse optional external id or internal subset [...]
-    while @pos < @len
-      if consume(">")
+    if consume("[")
+      parse_internal_subset
+      return if failed?
+      if !consume("]")
+        fail_at(start_line, start_col, "unclosed DOCTYPE internal subset")
         return
       end
-      if consume("[")
-        # Internal subset: parse ENTITY declarations
-        parse_internal_subset
-        skip_whitespace
-        if !consume("]")
-          error_at(start_line, start_col, "unclosed internal DOCTYPE subset")
-        end
-        skip_whitespace
-        if !consume(">")
-          error_at(start_line, start_col, "expected '>' after DOCTYPE internal subset")
-        end
-        return
-      end
-
-      # Check keywords in DOCTYPE
-      if match_str?("SYSTEM") || match_str?("PUBLIC")
-        if @refuse_external_entities
-          error("external entity expansion is disabled: refused SYSTEM/PUBLIC DOCTYPE")
-        end
-      end
-      advance
+      skip_whitespace
     end
-    error_at(start_line, start_col, "unclosed DOCTYPE declaration")
+    fail_at(start_line, start_col, "unclosed DOCTYPE") unless consume(">")
   end
 
   private def parse_internal_subset : Nil
     while @pos < @len
       skip_whitespace
-      if match_str?("]")
-        return
-      end
-      if match_str?("<!ENTITY")
+      return if match?("]")
+      if match?("<!ENTITY")
         parse_entity_decl
-      elsif match_str?("<!--")
+      elsif match?("<!--")
         parse_comment
+      elsif match?("<?")
+        parse_pi
+      elsif match?("<!ELEMENT") || match?("<!ATTLIST") || match?("<!NOTATION")
+        skip_declaration
+      elsif match?("%")
+        fail("parameter entity references are not supported")
       else
-        # Skip other declarations in internal subset (ELEMENT, ATTLIST, etc.)
-        advance
+        fail("unexpected text in the DOCTYPE internal subset")
+      end
+      return if failed?
+    end
+  end
+
+  # A declaration that is not used: skipped to its `>`, quotes respected.
+  private def skip_declaration : Nil
+    start_line = @line
+    start_col = @col
+    while @pos < @len
+      b = byte_at(@pos)
+      if b == 62_u8
+        step
+        return
+      elsif b == 34_u8 || b == 39_u8
+        step
+        while @pos < @len && byte_at(@pos) != b
+          step
+        end
+        step if @pos < @len
+      else
+        step
       end
     end
+    fail_at(start_line, start_col, "unclosed declaration in the DOCTYPE internal subset")
   end
 
   private def parse_entity_decl : Nil
+    start_line = @line
+    start_col = @col
     consume("<!ENTITY")
-    skip_whitespace
-    # Check for parameter entities (% name)
-    if consume("%")
-      skip_whitespace
-      param_name = parse_name
-      skip_whitespace
-      # Check for external parameter entities
-      if match_str?("SYSTEM") || match_str?("PUBLIC")
-        if @refuse_external_entities
-          error("external entity expansion is disabled: refused parameter entity '#{param_name}'")
-        end
-      end
-      val = parse_quoted_value
-      skip_whitespace
-      consume(">")
+    if !skip_whitespace
+      fail("expected whitespace after <!ENTITY")
       return
     end
-
+    parameter = consume("%")
+    skip_whitespace if parameter
     name = parse_name
+    return if failed?
+    if !skip_whitespace
+      fail("expected whitespace after the entity name '#{name}'")
+      return
+    end
+    if match?("SYSTEM") || match?("PUBLIC")
+      fail("external entity '#{name}' refused: no SYSTEM or PUBLIC identifier is read")
+      return
+    end
+    value = parse_entity_value(name)
+    return if failed?
+    @entities[name] = value if !parameter && !@entities.has_key?(name)
     skip_whitespace
+    fail_at(start_line, start_col, "unclosed entity declaration for '#{name}'") unless consume(">")
+  end
 
-    # Check for SYSTEM or PUBLIC entity declaration (XXE vector!)
-    if match_str?("SYSTEM") || match_str?("PUBLIC")
-      if @refuse_external_entities
-        error("external entity expansion is disabled: refused SYSTEM/PUBLIC entity '#{name}'")
+  # The literal in quotes: character references are decoded now, a general
+  # entity reference is checked and kept for the moment it is used.
+  private def parse_entity_value(entity : String) : String
+    start_line = @line
+    start_col = @col
+    quote = @pos < @len ? byte_at(@pos) : 0_u8
+    if quote != 34_u8 && quote != 39_u8
+      fail("entity value must be quoted")
+      return ""
+    end
+    step
+    parts = [] of String
+    run_start = @pos
+    while @pos < @len
+      b = byte_at(@pos)
+      if b == quote
+        parts << slice_from(run_start)
+        step
+        return parts.join("")
+      elsif b == 60_u8
+        fail("markup inside the value of entity '#{entity}' is not supported")
+        return ""
+      elsif b == 38_u8
+        parts << slice_from(run_start)
+        parts << parse_reference(0, true)
+        return "" if failed?
+        run_start = @pos
+      elsif control?(b)
+        fail_control(b)
+        return ""
+      else
+        step
       end
     end
-
-    # Internal entity with literal replacement value
-    val = parse_quoted_value
-    @entities.register(name, val)
-    skip_whitespace
-    if !consume(">")
-      error("expected '>' at end of entity declaration for '#{name}'")
-    end
+    fail_at(start_line, start_col, "unclosed entity value")
+    ""
   end
+
+  # -- comments, PIs, CDATA ------------------------------------------------
 
   private def parse_comment : Node
     start_line = @line
     start_col = @col
     consume("<!--")
-    parts = [] of String
+    run_start = @pos
     while @pos < @len
-      if consume("-->")
-        return Node.new_comment(parts.join(""))
+      if match?("-->")
+        body = slice_from(run_start)
+        consume("-->")
+        return Node.new_comment(body)
+      elsif match?("--")
+        fail("'--' is not allowed inside a comment")
+        return Node.new_comment("")
       end
-      ch = advance
-      if ch.nil?
-        break
+      b = byte_at(@pos)
+      if control?(b)
+        fail_control(b)
+        return Node.new_comment("")
       end
-      parts << ch.to_s
+      step
     end
-    error_at(start_line, start_col, "unclosed comment")
+    fail_at(start_line, start_col, "unclosed comment")
+    Node.new_comment("")
   end
 
   private def parse_pi : Node
@@ -948,445 +918,592 @@ pub class Parser
     start_col = @col
     consume("<?")
     target = parse_name
-    if target == "xml" || target == "XML"
-      error_at(start_line, start_col, "processing instruction target cannot be 'xml'")
+    return Node.new_pi("", "") if failed?
+    if target.downcase == "xml"
+      fail_at(start_line, start_col, "processing instruction target '#{target}' is reserved")
+      return Node.new_pi("", "")
     end
-    skip_whitespace
-    parts = [] of String
+    return Node.new_pi(target, "") if consume("?>")
+    if !skip_whitespace
+      fail("expected whitespace after the processing instruction target '#{target}'")
+      return Node.new_pi("", "")
+    end
+    run_start = @pos
     while @pos < @len
-      if consume("?>")
-        return Node.new_pi(target, parts.join("").strip)
+      if match?("?>")
+        body = slice_from(run_start)
+        consume("?>")
+        return Node.new_pi(target, body)
       end
-      ch = advance
-      if ch.nil?
-        break
+      b = byte_at(@pos)
+      if control?(b)
+        fail_control(b)
+        return Node.new_pi("", "")
       end
-      parts << ch.to_s
+      step
     end
-    error_at(start_line, start_col, "unclosed processing instruction")
+    fail_at(start_line, start_col, "unclosed processing instruction")
+    Node.new_pi("", "")
   end
 
   private def parse_cdata : Node
     start_line = @line
     start_col = @col
     consume("<![CDATA[")
-    parts = [] of String
+    run_start = @pos
     while @pos < @len
-      if consume("]]>")
-        return Node.new_cdata(parts.join(""))
+      if match?("]]>")
+        body = slice_from(run_start)
+        consume("]]>")
+        return Node.new_cdata(body)
       end
-      ch = advance
-      if ch.nil?
-        break
+      b = byte_at(@pos)
+      if control?(b)
+        fail_control(b)
+        return Node.new_cdata("")
       end
-      parts << ch.to_s
+      step
     end
-    error_at(start_line, start_col, "unclosed CDATA section")
+    fail_at(start_line, start_col, "unclosed CDATA section")
+    Node.new_cdata("")
   end
 
-  private def parse_element : Node
+  # -- elements ------------------------------------------------------------
+
+  private def parse_element(parent : Node) : Node
     start_line = @line
     start_col = @col
-    consume("<")
-
+    step
+    elem = Node.new_element("")
     @depth = @depth + 1
     if @depth > @max_depth
-      error_at(start_line, start_col, "maximum element depth exceeded (depth: #{@depth}, limit: #{@max_depth})")
+      fail_at(start_line, start_col, "elements nested deeper than #{@max_depth}")
+      return elem
     end
 
-    elem_name = parse_name
-    elem = Node.new_element(elem_name)
+    name = parse_name
+    return elem if failed?
+    elem = Node.new_element(name)
+    elem.parent = parent
 
-    # Parse attributes and namespace declarations
-    seen_attrs = Hash(String, Bool).new
-
+    seen = Hash(String, Bool).new
+    raw_names = [] of String
+    raw_values = [] of String
+    self_closing = false
+    closed = false
     while @pos < @len
-      skip_whitespace
+      had_space = skip_whitespace
       if consume("/>")
-        # Self-closing element
-        @depth = @depth - 1
-        return elem
+        self_closing = true
+        closed = true
+        break
       elsif consume(">")
-        # Start tag finished, parse children
+        closed = true
         break
       end
-
+      if !had_space
+        fail("expected whitespace before the next attribute of <#{name}>")
+        return elem
+      end
       attr_line = @line
       attr_col = @col
       attr_name = parse_name
-
-      # Check for duplicate attributes
-      if seen_attrs.has_key?(attr_name)
-        error_at(attr_line, attr_col, "duplicate attribute: '#{attr_name}'")
+      return elem if failed?
+      if seen.has_key?(attr_name)
+        fail_at(attr_line, attr_col, "attribute '#{attr_name}' given twice on <#{name}>")
+        return elem
       end
-      seen_attrs[attr_name] = true
-
+      seen[attr_name] = true
       skip_whitespace
       if !consume("=")
-        error("expected '=' after attribute name '#{attr_name}'")
+        fail("expected '=' after the attribute name '#{attr_name}'")
+        return elem
       end
       skip_whitespace
       attr_val = parse_attribute_value
-
-      # Detect namespace declarations: xmlns or xmlns:prefix
+      return elem if failed?
       if attr_name == "xmlns"
-        ns = Namespace.new("", attr_val)
-        elem.namespaces << ns
-        elem.namespace = ns
+        elem.namespaces << Namespace.new("", attr_val)
       elsif attr_name.starts_with?("xmlns:")
         ns_prefix = attr_name[6, attr_name.bytesize - 6]
-        ns = Namespace.new(ns_prefix, attr_val)
-        elem.namespaces << ns
-        if elem.prefix == ns_prefix
-          elem.namespace = ns
+        if ns_prefix.empty? || attr_val.empty?
+          fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to an empty uri")
+          return elem
         end
+        elem.namespaces << Namespace.new(ns_prefix, attr_val)
       else
-        elem.set_attribute(attr_name, attr_val)
+        raw_names << attr_name
+        raw_values << attr_val
       end
     end
+    if !closed
+      fail_at(start_line, start_col, "unclosed start tag <#{name}>")
+      return elem
+    end
 
-    # Parse element children and end tag
-    text_buffer = [] of String
+    if !elem.prefix.empty? && elem.resolve_namespace_prefix(elem.prefix).nil?
+      fail_at(start_line, start_col, "namespace prefix '#{elem.prefix}' of <#{name}> is not declared")
+      return elem
+    end
+    i = 0
+    while i < raw_names.size
+      attr = Attribute.new(raw_names[i], raw_values[i])
+      if !attr.prefix.empty?
+        ns = elem.resolve_namespace_prefix(attr.prefix)
+        if ns.nil?
+          fail_at(start_line, start_col, "namespace prefix '#{attr.prefix}' of attribute '#{attr.name}' on <#{name}> is not declared")
+          return elem
+        end
+        attr = Attribute.new(raw_names[i], raw_values[i], ns.uri)
+      end
+      elem.attributes << attr
+      i = i + 1
+    end
 
+    if self_closing
+      @depth = @depth - 1
+      return elem
+    end
+
+    parts = [] of String
+    run_start = @pos
     while @pos < @len
-      if match_str?("</")
-        # End tag
-        if !text_buffer.empty?
-          elem.add_child(Node.new_text(text_buffer.join("")))
-          text_buffer = [] of String
+      b = byte_at(@pos)
+      if b == 60_u8
+        parts << slice_from(run_start)
+        flush_text(elem, parts)
+        parts = [] of String
+        if match?("</")
+          end_line = @line
+          end_col = @col
+          consume("</")
+          closing = parse_name
+          return elem if failed?
+          skip_whitespace
+          if !consume(">")
+            fail("expected '>' to end the closing tag </#{closing}>")
+            return elem
+          end
+          if closing != name
+            fail_at(end_line, end_col, "mismatched closing tag: expected </#{name}>, got </#{closing}>")
+            return elem
+          end
+          @depth = @depth - 1
+          return elem
+        elsif match?("<!--")
+          elem.add_child(parse_comment)
+        elsif match?("<![CDATA[")
+          elem.add_child(parse_cdata)
+        elsif match?("<?")
+          elem.add_child(parse_pi)
+        else
+          elem.add_child(parse_element(elem))
         end
-
-        end_line = @line
-        end_col = @col
-        consume("</")
-        closing_name = parse_name
-        skip_whitespace
-        if !consume(">")
-          error("expected '>' at end of closing tag </#{closing_name}>")
-        end
-
-        if closing_name != elem_name
-          error_at(end_line, end_col, "mismatched closing tag: expected </#{elem_name}>, got </#{closing_name}>")
-        end
-
-        @depth = @depth - 1
+        return elem if failed?
+        run_start = @pos
+      elsif b == 38_u8
+        parts << slice_from(run_start)
+        parts << parse_reference(0)
+        return elem if failed?
+        run_start = @pos
+      elsif b == 93_u8 && match?("]]>")
+        fail("']]>' is not allowed in text")
         return elem
-      elsif match_str?("<!--")
-        if !text_buffer.empty?
-          elem.add_child(Node.new_text(text_buffer.join("")))
-          text_buffer = [] of String
-        end
-        elem.add_child(parse_comment)
-      elsif match_str?("<![CDATA[")
-        if !text_buffer.empty?
-          elem.add_child(Node.new_text(text_buffer.join("")))
-          text_buffer = [] of String
-        end
-        elem.add_child(parse_cdata)
-      elsif match_str?("<?")
-        if !text_buffer.empty?
-          elem.add_child(Node.new_text(text_buffer.join("")))
-          text_buffer = [] of String
-        end
-        elem.add_child(parse_pi)
-      elsif match_str?("<")
-        if !text_buffer.empty?
-          elem.add_child(Node.new_text(text_buffer.join("")))
-          text_buffer = [] of String
-        end
-        child = parse_element
-        elem.add_child(child)
-      elsif match_str?("&")
-        # Entity reference in text content
-        ent_val = parse_entity_reference
-        text_buffer << ent_val
+      elsif control?(b)
+        fail_control(b)
+        return elem
       else
-        ch = advance
-        if ch.nil?
-          break
-        end
-        text_buffer << ch.to_s
+        step
       end
     end
-
-    error_at(start_line, start_col, "unclosed tag: <#{elem_name}>")
+    fail_at(start_line, start_col, "unclosed element <#{name}>")
+    elem
   end
 
+  private def flush_text(elem : Node, parts : Array(String)) : Nil
+    return if parts.empty?
+    text = parts.join("")
+    elem.add_child(Node.new_text(text)) unless text.empty?
+  end
+
+  # A quoted value with references decoded and a literal tab or newline
+  # read as a space (attribute-value normalisation, XML 1.0 3.3.3).
   private def parse_attribute_value : String
     start_line = @line
     start_col = @col
-    quote = advance
-    if quote != '"' && quote != '\''
-      error("attribute value must be enclosed in quotes")
+    quote = @pos < @len ? byte_at(@pos) : 0_u8
+    if quote != 34_u8 && quote != 39_u8
+      fail("attribute value must be quoted")
+      return ""
     end
-
+    step
     parts = [] of String
+    run_start = @pos
     while @pos < @len
-      ch = peek
-      if ch == quote
-        advance
+      b = byte_at(@pos)
+      if b == quote
+        parts << slice_from(run_start)
+        step
         return parts.join("")
-      elsif ch == '<'
-        error("raw '<' is not permitted in attribute value")
-      elsif ch == '&'
-        parts << parse_entity_reference
-      elsif ch.nil?
-        break
+      elsif b == 60_u8
+        fail("raw '<' is not allowed in an attribute value")
+        return ""
+      elsif b == 38_u8
+        parts << slice_from(run_start)
+        parts << parse_reference(0)
+        return "" if failed?
+        run_start = @pos
+      elsif b == 9_u8 || b == 10_u8
+        parts << slice_from(run_start)
+        parts << " "
+        step
+        run_start = @pos
+      elsif control?(b)
+        fail_control(b)
+        return ""
       else
-        advance
-        parts << ch.to_s
+        step
       end
     end
-    error_at(start_line, start_col, "unclosed attribute quote")
+    fail_at(start_line, start_col, "unclosed attribute value")
+    ""
   end
 
-  private def parse_quoted_value : String
+  # A quoted value taken as written: the XML declaration's.
+  private def parse_quoted_literal : String
     start_line = @line
     start_col = @col
-    quote = advance
-    if quote != '"' && quote != '\''
-      error("expected quoted string")
+    quote = @pos < @len ? byte_at(@pos) : 0_u8
+    if quote != 34_u8 && quote != 39_u8
+      fail("expected a quoted value")
+      return ""
     end
-
-    parts = [] of String
+    step
+    run_start = @pos
     while @pos < @len
-      ch = advance
-      if ch == quote
-        return parts.join("")
-      elsif ch.nil?
-        break
-      else
-        parts << ch.to_s
+      if byte_at(@pos) == quote
+        value = slice_from(run_start)
+        step
+        return value
       end
+      step
     end
-    error_at(start_line, start_col, "unclosed quote")
+    fail_at(start_line, start_col, "unclosed quote")
+    ""
   end
 
-  private def parse_entity_reference : String
-    start_line = @line
-    start_col = @col
-    consume("&")
+  # -- references ----------------------------------------------------------
 
-    # Check for numeric character reference: &#NNN; or &#xHHH;
-    if consume("#")
-      is_hex = false
-      if consume("x") || consume("X")
-        is_hex = true
+  # At an `&`: the text the reference stands for. With *keep_names*, an
+  # entity reference is checked for shape and answered as written (`&name;`),
+  # which is what an entity's own value keeps until it is used.
+  private def parse_reference(depth : Int32, keep_names : Bool = false) : String
+    ref_line = @line
+    ref_col = @col
+    ref_start = @pos
+    step
+    while @pos < @len && byte_at(@pos) != 59_u8 && !reference_stop?(byte_at(@pos))
+      step
+    end
+    if @pos >= @len || byte_at(@pos) != 59_u8
+      kind = @pos > ref_start + 1 && byte_at(ref_start + 1) == 35_u8 ? "character" : "entity"
+      fail_at(ref_line, ref_col, "unterminated #{kind} reference #{slice_from(ref_start)}: expected ';'")
+      return ""
+    end
+    ref = @input[ref_start + 1, @pos - ref_start - 1]
+    step
+    if ref.empty?
+      fail_at(ref_line, ref_col, "empty entity reference")
+      return ""
+    end
+    if ref.starts_with?("#")
+      cp = char_ref_value(ref)
+      if cp < 0
+        fail_at(ref_line, ref_col, "invalid character reference '&#{ref};'")
+        return ""
+      elsif !xml_char?(cp)
+        fail_at(ref_line, ref_col, "character reference &#{ref}; is not an XML character")
+        return ""
       end
-
-      num_parts = [] of String
-      while @pos < @len
-        ch = peek
-        if ch == ';'
-          advance
-          break
-        elsif ch.nil?
-          error_at(start_line, start_col, "unclosed numeric character reference")
-        else
-          advance
-          num_parts << ch.to_s
-        end
-      end
-
-      num_str = num_parts.join("")
-      if num_str.empty?
-        error_at(start_line, start_col, "empty numeric character reference")
-      end
-
-      codepoint = if is_hex
-                    if val = num_str.to_i64?(16)
-                      val.to_i
-                    else
-                      nil
-                    end
-                  else
-                    num_str.to_i?
-                  end
-      if codepoint.nil?
-        error_at(start_line, start_col, "invalid numeric character reference: '#{num_str}'")
-      end
-
-      cp = codepoint
-      # Encode codepoint to UTF-8
       return cp.unsafe_chr.to_s
     end
+    return slice_from(ref_start) if keep_names
+    expand_entity(ref, ref_line, ref_col, depth)
+  end
 
-    # Named entity reference: &name;
-    ent_name_parts = [] of String
-    while @pos < @len
-      ch = peek
-      if ch == ';'
-        advance
-        break
-      elsif ch == ' ' || ch == '\t' || ch == '\n' || ch == '<' || ch == '&' || ch.nil?
-        error_at(start_line, start_col, "unterminated entity reference: expected ';'")
+  private def expand_entity(name : String, line : Int32, col : Int32, depth : Int32) : String
+    return "<" if name == "lt"
+    return ">" if name == "gt"
+    return "&" if name == "amp"
+    return "'" if name == "apos"
+    return "\"" if name == "quot"
+    value = @entities[name]?
+    if value.nil?
+      fail_at(line, col, "undefined entity reference &#{name};")
+      return ""
+    end
+    if depth >= 10
+      fail_at(line, col, "entity &#{name}; expands more than 10 levels deep")
+      return ""
+    end
+    @expansions = @expansions + 1
+    if @expansions > @max_expansions
+      fail_at(line, col, "entity expansion limit of #{@max_expansions} exceeded at &#{name};")
+      return ""
+    end
+    return value unless value.includes?("&")
+
+    # The replacement text is read as content: a character reference is
+    # decoded, an entity reference expanded a level deeper.
+    ptr = value.to_unsafe
+    len = value.bytesize
+    parts = [] of String
+    run_start = 0
+    i = 0
+    while i < len
+      if ptr[i] == 38_u8
+        parts << value[run_start, i - run_start]
+        semi = i + 1
+        while semi < len && ptr[semi] != 59_u8 && !reference_stop?(ptr[semi])
+          semi = semi + 1
+        end
+        if semi >= len || ptr[semi] != 59_u8
+          fail_at(line, col, "unterminated reference #{value[i, semi - i]} in the value of entity '#{name}': expected ';'")
+          return ""
+        end
+        ref = value[i + 1, semi - i - 1]
+        if ref.empty?
+          fail_at(line, col, "empty entity reference in the value of entity '#{name}'")
+          return ""
+        elsif ref.starts_with?("#")
+          cp = char_ref_value(ref)
+          if cp < 0
+            fail_at(line, col, "invalid character reference '&#{ref};' in the value of entity '#{name}'")
+            return ""
+          elsif !xml_char?(cp)
+            fail_at(line, col, "character reference &#{ref}; in the value of entity '#{name}' is not an XML character")
+            return ""
+          end
+          parts << cp.unsafe_chr.to_s
+        else
+          parts << expand_entity(ref, line, col, depth + 1)
+          return "" if failed?
+        end
+        i = semi + 1
+        run_start = i
       else
-        advance
-        ent_name_parts << ch.to_s
+        i = i + 1
       end
     end
-
-    ent_name = ent_name_parts.join("")
-    if ent_name.empty?
-      error_at(start_line, start_col, "empty entity reference")
-    end
-
-    @entities.expand(ent_name)
+    parts << value[run_start, len - run_start]
+    parts.join("")
   end
+
+  # -- names ---------------------------------------------------------------
 
   private def parse_name : String
     name = parse_name?
-    if name.nil? || name.empty?
-      ch = peek
-      error("invalid character in name: '#{ch}'")
+    return name unless name.nil?
+    if @pos >= @len
+      fail("expected a name, found the end of the input")
+    else
+      b = byte_at(@pos)
+      found = b >= 32_u8 && b < 127_u8 ? "'#{b.unsafe_chr}'" : "U+#{Parser.hex4(b.to_i32)}"
+      fail("expected a name, found #{found}")
     end
-    name
+    ""
   end
 
+  # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue
+  # one; any byte of a non-ASCII character does both.
   private def parse_name? : String?
     return nil if @pos >= @len
-    ch = peek
-    return nil if ch.nil?
-
-    # XML 1.0 NameStartChar: [a-zA-Z_:] or byte >= 0x80 (UTF-8 multi-byte)
-    o = ch.ord
-    is_start = (o >= 97 && o <= 122) || # a-z
-               (o >= 65 && o <= 90) ||  # A-Z
-               o == 95 ||               # '_'
-               o == 58 ||               # ':'
-               o >= 128                 # multi-byte UTF-8
-
+    b = byte_at(@pos)
+    is_start = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
     return nil unless is_start
-
-    parts = [] of String
+    start = @pos
     while @pos < @len
-      ch = peek
-      break if ch.nil?
-      o = ch.ord
-      is_char = (o >= 97 && o <= 122) || # a-z
-                (o >= 65 && o <= 90) ||  # A-Z
-                (o >= 48 && o <= 57) ||  # 0-9
-                o == 95 ||               # '_'
-                o == 58 ||               # ':'
-                o == 45 ||               # '-'
-                o == 46 ||               # '.'
-                o >= 128                 # multi-byte UTF-8
-      if is_char
-        advance
-        parts << ch.to_s
-      else
-        break
-      end
+      b = byte_at(@pos)
+      is_char = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) ||
+                b == 95_u8 || b == 58_u8 || b == 45_u8 || b == 46_u8 || b >= 128_u8
+      break unless is_char
+      step
     end
-
-    parts.join("")
+    slice_from(start)
   end
 end
 
-# Module-level parsing functions
+# -- the module's functions --------------------------------------------------
 
 pub def parse(xml : String, max_depth : Int32 = 256, max_entity_expansions : Int32 = 1000) : Document
-  parser = Parser.new(xml, max_depth: max_depth, max_entity_expansions: max_entity_expansions, refuse_external_entities: true)
-  parser.parse
+  Parser.new(xml, max_depth: max_depth, max_expansions: max_entity_expansions).parse
 end
 
+pub def parse?(xml : String, max_depth : Int32 = 256, max_entity_expansions : Int32 = 1000) : Document?
+  Parser.new(xml, max_depth: max_depth, max_expansions: max_entity_expansions).parse?
+end
+
+# Whether *cp* is a character XML 1.0 allows in a document (production [2]).
+pub def xml_char?(cp : Int32) : Bool
+  return true if cp == 9 || cp == 10 || cp == 13
+  return true if cp >= 0x20 && cp <= 0xD7FF
+  return true if cp >= 0xE000 && cp <= 0xFFFD
+  cp >= 0x10000 && cp <= 0x10FFFF
+end
+
+# *text* as character data: `&`, `<`, `>` and `\r` become references,
+# every other byte is copied as it is.
 pub def escape(text : String) : String
-  parts = [] of String
-  i = 0
-  len = text.bytesize
+  escape_bytes(text, false)
+end
+
+# *text* for inside a double-quoted attribute value: `"` and a literal tab
+# or newline become references as well, so the value reads back unchanged.
+pub def escape_attribute(text : String) : String
+  escape_bytes(text, true)
+end
+
+def escape_bytes(text : String, attribute : Bool) : String
   ptr = text.to_unsafe
+  len = text.bytesize
+  parts = [] of String
+  run_start = 0
+  i = 0
   while i < len
     b = ptr[i]
-    if b == 38_u8 # '&'
-      parts << "&amp;"
-    elsif b == 60_u8 # '<'
-      parts << "&lt;"
-    elsif b == 62_u8 # '>'
-      parts << "&gt;"
-    else
-      parts << b.unsafe_chr.to_s
+    replacement = if b == 38_u8
+                    "&amp;"
+                  elsif b == 60_u8
+                    "&lt;"
+                  elsif b == 62_u8
+                    "&gt;"
+                  elsif b == 13_u8
+                    "&#13;"
+                  elsif attribute && b == 34_u8
+                    "&quot;"
+                  elsif attribute && b == 9_u8
+                    "&#9;"
+                  elsif attribute && b == 10_u8
+                    "&#10;"
+                  else
+                    ""
+                  end
+    if !replacement.empty?
+      parts << text[run_start, i - run_start] if i > run_start
+      parts << replacement
+      run_start = i + 1
     end
     i = i + 1
   end
+  return text if run_start == 0
+  parts << text[run_start, len - run_start] if len > run_start
   parts.join("")
 end
 
-pub def escape_attribute(text : String) : String
-  parts = [] of String
-  i = 0
-  len = text.bytesize
-  ptr = text.to_unsafe
-  while i < len
-    b = ptr[i]
-    if b == 38_u8 # '&'
-      parts << "&amp;"
-    elsif b == 60_u8 # '<'
-      parts << "&lt;"
-    elsif b == 62_u8 # '>'
-      parts << "&gt;"
-    elsif b == 34_u8 # '"'
-      parts << "&quot;"
-    elsif b == 39_u8 # '\''
-      parts << "&apos;"
-    else
-      parts << b.unsafe_chr.to_s
-    end
-    i = i + 1
-  end
-  parts.join("")
+# The five predefined entities and character references decoded, the same
+# way and with the same refusals as inside a document; nil where `unescape`
+# panics.
+pub def unescape?(text : String) : String?
+  result = unescape_or_error(text)
+  result[1].empty? ? result[0] : nil
 end
 
 pub def unescape(text : String) : String
-  return text unless text.includes?("&")
-  parts = [] of String
-  i = 0
+  result = unescape_or_error(text)
+  raise result[1] unless result[1].empty?
+  result[0]
+end
+
+# The decoded text and "", or "" and the sentence it was refused with.
+def unescape_or_error(text : String) : Tuple(String, String)
+  return {text, ""} unless text.includes?("&")
+  ptr = text.to_unsafe
   len = text.bytesize
+  parts = [] of String
+  run_start = 0
+  line = 1
+  col = 1
+  i = 0
   while i < len
-    if text.to_unsafe[i] == 38_u8 # '&'
-      semi = text.index(';', i)
-      if !semi.nil?
-        ent = text[i + 1, semi - i - 1]
-        if ent == "lt"
-          parts << "<"
-          i = semi + 1
-          next
-        elsif ent == "gt"
-          parts << ">"
-          i = semi + 1
-          next
-        elsif ent == "amp"
-          parts << "&"
-          i = semi + 1
-          next
-        elsif ent == "apos"
-          parts << "'"
-          i = semi + 1
-          next
-        elsif ent == "quot"
-          parts << "\""
-          i = semi + 1
-          next
-        elsif ent.starts_with?("#x") || ent.starts_with?("#X")
-          hex_str = ent[2, ent.bytesize - 2]
-          cp = hex_str.to_i64?(16)
-          if !cp.nil?
-            parts << cp.unsafe_chr.to_s
-            i = semi + 1
-            next
-          end
-        elsif ent.starts_with?("#")
-          dec_str = ent[1, ent.bytesize - 1]
-          cp = dec_str.to_i?
-          if !cp.nil?
-            parts << cp.unsafe_chr.to_s
-            i = semi + 1
-            next
-          end
-        end
+    b = ptr[i]
+    if b == 38_u8
+      parts << text[run_start, i - run_start]
+      semi = i + 1
+      while semi < len && ptr[semi] != 59_u8 && !reference_stop?(ptr[semi])
+        semi = semi + 1
       end
+      if semi >= len || ptr[semi] != 59_u8
+        kind = semi > i + 1 && ptr[i + 1] == 35_u8 ? "character" : "entity"
+        return {"", "unterminated #{kind} reference #{text[i, semi - i]}: expected ';' at line #{line}, column #{col}"}
+      end
+      ref = text[i + 1, semi - i - 1]
+      if ref.empty?
+        return {"", "empty entity reference at line #{line}, column #{col}"}
+      elsif ref.starts_with?("#")
+        cp = char_ref_value(ref)
+        return {"", "invalid character reference '&#{ref};' at line #{line}, column #{col}"} if cp < 0
+        return {"", "character reference &#{ref}; is not an XML character at line #{line}, column #{col}"} unless xml_char?(cp)
+        parts << cp.unsafe_chr.to_s
+      elsif ref == "lt"
+        parts << "<"
+      elsif ref == "gt"
+        parts << ">"
+      elsif ref == "amp"
+        parts << "&"
+      elsif ref == "apos"
+        parts << "'"
+      elsif ref == "quot"
+        parts << "\""
+      else
+        return {"", "undefined entity reference &#{ref}; at line #{line}, column #{col}"}
+      end
+      col = col + (semi - i + 1)
+      i = semi + 1
+      run_start = i
+    else
+      if b == 10_u8
+        line = line + 1
+        col = 1
+      elsif (b & 192_u8) != 128_u8
+        col = col + 1
+      end
+      i = i + 1
     end
-    parts << text.to_unsafe[i].unsafe_chr.to_s
+  end
+  parts << text[run_start, len - run_start]
+  {parts.join(""), ""}
+end
+
+# A byte that cannot be part of a reference, so a reference reaching one
+# without its `;` is unterminated.
+def reference_stop?(b : UInt8) : Bool
+  b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8 || b == 60_u8 || b == 62_u8 || b == 38_u8 || b == 34_u8 || b == 39_u8
+end
+
+# The code point a character reference names, given the text between its
+# `&` and `;` (`#65`, `#x41`); -1 where that is not digits. Accumulation
+# stops past U+10FFFF, so a long reference is merely too large.
+def char_ref_value(ref : String) : Int32
+  ptr = ref.to_unsafe
+  len = ref.bytesize
+  i = 1
+  hex = i < len && ptr[i] == 120_u8
+  i = i + 1 if hex
+  return -1 if i >= len
+  cp = 0
+  while i < len
+    d = digit_value(ptr[i], hex)
+    return -1 if d < 0
+    cp = cp * (hex ? 16 : 10) + d if cp <= 0x10FFFF
     i = i + 1
   end
-  parts.join("")
+  cp
+end
+
+def digit_value(b : UInt8, hex : Bool) : Int32
+  return (b - 48_u8).to_i32 if b >= 48_u8 && b <= 57_u8
+  return -1 unless hex
+  return (b - 65_u8).to_i32 + 10 if b >= 65_u8 && b <= 70_u8
+  return (b - 97_u8).to_i32 + 10 if b >= 97_u8 && b <= 102_u8
+  -1
 end

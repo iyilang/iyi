@@ -1,7 +1,21 @@
-# Standard URI library for iyi according to RFC 3986.
+# URI references as RFC 3986 spells them: scheme, userinfo, host, port,
+# path, query and fragment, read by `URI.parse` (`URI.parse?` answers nil
+# where `parse` panics with the reason), written back by `to_s`, resolved
+# against a base by `resolve` (section 5.2, dot segments included),
+# normalized by `normalize` (lower-case scheme and host, default port
+# dropped, dot segments removed). `Params` holds an ordered multi-valued
+# query, read by `Params.parse` and written by `to_s` the
+# application/x-www-form-urlencoded way.
 #
-# Provides parsing, building, percent-encoding/decoding, parameter handling,
-# normalization, and relative reference resolution (RFC 3986 Section 5).
+# Percent-encoding: `encode`, `encode_path`, `encode_path_segment` and
+# `encode_www_form` each keep a documented set of bytes and encode every
+# other one, `%` included, so each is injective and `decode` undoes it.
+# `decode?` answers nil and `decode` panics for a `%` without two hex
+# digits after it. Bytes above ASCII pass through the parser as they are
+# and are encoded one by one by the encoders.
+#
+# What the parser refuses is listed at `parse?`. What it does not check:
+# percent escapes (`decode` does), and the shape of a bracketed host.
 
 module std/uri
 
@@ -227,20 +241,13 @@ pub class URI
     @host
   end
 
+  # Stored as given: an IPv6 address is written with its brackets,
+  # `"[::1]"`, the way it appears in a URI, and `hostname` takes them off.
   def host=(h : String?) : Nil
-    if h
-      # Wrap IPv6 address in brackets if contains colon and not already wrapped
-      if h.includes?(":") && !h.starts_with?('[')
-        @host = "[" + h + "]"
-      else
-        @host = h
-      end
-    else
-      @host = nil
-    end
+    @host = h
   end
 
-  # Returns the host part unwrapping square brackets for IPv6 addresses.
+  # The host without the brackets an IPv6 address carries.
   def hostname : String?
     h = @host
     h ? URI.unwrap_ipv6(h) : nil
@@ -297,14 +304,16 @@ pub class URI
     @query = params.empty? ? nil : params.to_s
   end
 
+  # `userinfo@host:port`, the userinfo percent-encoded (a space is `%20`)
+  # and the host written as stored.
   def authority : String?
     return nil unless @host || @user || @port
 
     parts = [] of String
     if u = @user
-      u_enc = URI.encode_www_form(u)
+      u_enc = URI.encode_www_form(u, space_to_plus: false)
       if p = @password
-        p_enc = URI.encode_www_form(p)
+        p_enc = URI.encode_www_form(p, space_to_plus: false)
         parts << (u_enc + ":" + p_enc + "@")
       else
         parts << (u_enc + "@")
@@ -447,172 +456,71 @@ pub class URI
     nibble < 10 ? (48 + nibble).to_u8 : (65 + nibble - 10).to_u8
   end
 
-  # Percent-encodes string.
-  # Guarantees:
-  # 1. Does not double-encode: if a sequence is already %XX (valid hex), it is preserved.
-  # 2. Non-ASCII bytes are percent-encoded per byte so UTF-8 round-trips.
+  # Which bytes an encoder writes as themselves; everything else,
+  # `%` included, becomes `%XX`, so every encoder here is injective and
+  # `decode(encode(s)) == s` for any `s`.
+  private def self.keep?(b : UInt8, level : Int32) : Bool
+    return true if unreserved?(b)
+    case level
+    when 0 then reserved?(b)   # encode: RFC 3986 reserved characters pass
+    when 1 then b == 47_u8     # encode_path: '/' separates segments
+    else        false          # encode_path_segment, encode_www_form
+    end
+  end
+
+  private def self.percent_encode(str : String, level : Int32, space_to_plus : Bool) : String
+    bytes = [] of UInt8
+    raw = str.to_unsafe
+    len = str.bytesize
+    i = 0
+    while i < len
+      b = raw[i]
+      if b == 32_u8 && space_to_plus
+        bytes << 43_u8 # '+'
+      elsif keep?(b, level)
+        bytes << b
+      else
+        bytes << 37_u8 # '%'
+        bytes << hex_char((b.to_i >> 4) & 0xF)
+        bytes << hex_char(b.to_i & 0xF)
+      end
+      i = i + 1
+    end
+
+    String.new(bytes.size) do |buf|
+      buf.copy_from(bytes.to_unsafe, bytes.size)
+    end
+  end
+
+  # Percent-encodes every byte that is neither unreserved nor reserved,
+  # `%` among them: `"%20"` becomes `"%2520"`, and a space `"%20"` (or
+  # `"+"` when *space_to_plus*). Bytes above ASCII are encoded one by one,
+  # so UTF-8 text round-trips through `decode`.
   def self.encode(str : String, space_to_plus : Bool = false) : String
-    bytes = [] of UInt8
-    raw = str.to_unsafe
-    len = str.bytesize
-    i = 0
-    while i < len
-      b = raw[i]
-      if b == 32_u8 # space
-        if space_to_plus
-          bytes << 43_u8 # '+'
-        else
-          bytes << 37_u8 # '%'
-          bytes << 50_u8 # '2'
-          bytes << 48_u8 # '0'
-        end
-        i = i + 1
-      elsif b == 37_u8 # '%'
-        # Trap: check if already a valid percent escape (%XX)
-        if i + 2 < len && hex_digit?(raw[i + 1]) && hex_digit?(raw[i + 2])
-          bytes << 37_u8
-          bytes << raw[i + 1]
-          bytes << raw[i + 2]
-          i = i + 3
-        else
-          # Not already encoded, encode % as %25
-          bytes << 37_u8
-          bytes << 50_u8 # '2'
-          bytes << 53_u8 # '5'
-          i = i + 1
-        end
-      elsif unreserved?(b) || reserved?(b)
-        bytes << b
-        i = i + 1
-      else
-        # Multi-byte UTF-8 or control character: encode each byte
-        bytes << 37_u8
-        high = (b.to_i >> 4) & 0xF
-        low = b.to_i & 0xF
-        bytes << hex_char(high)
-        bytes << hex_char(low)
-        i = i + 1
-      end
-    end
-
-    String.new(bytes.size) do |buf|
-      buf.copy_from(bytes.to_unsafe, bytes.size)
-    end
+    percent_encode(str, 0, space_to_plus)
   end
 
+  # Encodes a path, keeping `/` between its segments.
   def self.encode_path(str : String) : String
-    bytes = [] of UInt8
-    raw = str.to_unsafe
-    len = str.bytesize
-    i = 0
-    while i < len
-      b = raw[i]
-      if b == 37_u8 # '%'
-        if i + 2 < len && hex_digit?(raw[i + 1]) && hex_digit?(raw[i + 2])
-          bytes << 37_u8
-          bytes << raw[i + 1]
-          bytes << raw[i + 2]
-          i = i + 3
-        else
-          bytes << 37_u8
-          bytes << 50_u8
-          bytes << 53_u8
-          i = i + 1
-        end
-      elsif unreserved?(b) || b == 47_u8 # '/' allowed in path
-        bytes << b
-        i = i + 1
-      else
-        bytes << 37_u8
-        high = (b.to_i >> 4) & 0xF
-        low = b.to_i & 0xF
-        bytes << hex_char(high)
-        bytes << hex_char(low)
-        i = i + 1
-      end
-    end
-
-    String.new(bytes.size) do |buf|
-      buf.copy_from(bytes.to_unsafe, bytes.size)
-    end
+    percent_encode(str, 1, false)
   end
 
+  # Encodes one path segment: only unreserved bytes pass.
   def self.encode_path_segment(str : String) : String
-    bytes = [] of UInt8
-    raw = str.to_unsafe
-    len = str.bytesize
-    i = 0
-    while i < len
-      b = raw[i]
-      if b == 37_u8 # '%'
-        if i + 2 < len && hex_digit?(raw[i + 1]) && hex_digit?(raw[i + 2])
-          bytes << 37_u8
-          bytes << raw[i + 1]
-          bytes << raw[i + 2]
-          i = i + 3
-        else
-          bytes << 37_u8
-          bytes << 50_u8
-          bytes << 53_u8
-          i = i + 1
-        end
-      elsif unreserved?(b)
-        bytes << b
-        i = i + 1
-      else
-        bytes << 37_u8
-        high = (b.to_i >> 4) & 0xF
-        low = b.to_i & 0xF
-        bytes << hex_char(high)
-        bytes << hex_char(low)
-        i = i + 1
-      end
-    end
-
-    String.new(bytes.size) do |buf|
-      buf.copy_from(bytes.to_unsafe, bytes.size)
-    end
+    percent_encode(str, 2, false)
   end
 
+  # Encodes a form field the application/x-www-form-urlencoded way: a
+  # space is `+` unless *space_to_plus* is false, and only unreserved
+  # bytes pass.
   def self.encode_www_form(str : String, space_to_plus : Bool = true) : String
-    bytes = [] of UInt8
-    raw = str.to_unsafe
-    len = str.bytesize
-    i = 0
-    while i < len
-      b = raw[i]
-      if b == 32_u8 # space
-        if space_to_plus
-          bytes << 43_u8 # '+'
-        else
-          bytes << 37_u8
-          bytes << 50_u8
-          bytes << 48_u8
-        end
-        i = i + 1
-      elsif unreserved?(b)
-        bytes << b
-        i = i + 1
-      else
-        bytes << 37_u8
-        high = (b.to_i >> 4) & 0xF
-        low = b.to_i & 0xF
-        bytes << hex_char(high)
-        bytes << hex_char(low)
-        i = i + 1
-      end
-    end
-
-    String.new(bytes.size) do |buf|
-      buf.copy_from(bytes.to_unsafe, bytes.size)
-    end
+    percent_encode(str, 2, space_to_plus)
   end
 
-  # Decodes percent-encoded string.
-  # Traps:
-  # - Must reject truncated % escape (raises exception)
-  # - Must reject invalid hex digits following % (raises exception)
-  # - Multi-byte UTF-8 bytes are decoded and reconstruct valid UTF-8 string.
+  # Decodes `%XX` escapes (and `+` to a space when *plus_to_space*).
+  # `decode?` answers nil and `decode` panics for a `%` not followed by
+  # two hex digits; a multi-byte UTF-8 character encoded byte by byte
+  # comes back as the character.
   def self.decode?(str : String, plus_to_space : Bool = false) : String?
     bytes = [] of UInt8
     raw = str.to_unsafe
@@ -651,12 +559,7 @@ pub class URI
   end
 
   def self.decode(str : String, plus_to_space : Bool = false) : String
-    res = decode?(str, plus_to_space: plus_to_space)
-    if res
-      res
-    else
-      raise "malformed percent escape"
-    end
+    decode?(str, plus_to_space: plus_to_space) || raise "malformed percent escape in #{str.inspect}"
   end
 
   def self.decode_www_form(str : String, plus_to_space : Bool = true) : String
@@ -667,89 +570,135 @@ pub class URI
   # RFC 3986 Section 3 & 4: URI Parsing
   # =========================================================================
 
+  # Reads *raw_url* as a URI reference. `parse?` answers nil and `parse`
+  # panics with the reason for: a space or control character anywhere
+  # (`space at byte 11 in "http://exa mple.com"`), a `:` before the first
+  # `/`, `?` or `#` whose prefix is not a scheme (`invalid scheme "ht!tp"
+  # in ...`), a `[` in the host with no `]`, a host with a byte a host
+  # cannot hold, and a port that is not decimal digits or is above 65535.
+  # Percent escapes are not checked here; `decode` does that.
+  def self.parse?(raw_url : String) : URI?
+    uri = URI.new
+    scan(raw_url, uri) ? nil : uri
+  end
+
   def self.parse(raw_url : String) : URI
     uri = URI.new
-    s = raw_url.strip
-    return uri if s.empty?
+    if reason = scan(raw_url, uri)
+      raise reason
+    end
+    uri
+  end
 
+  private def self.scheme_byte?(c : UInt8, first : Bool) : Bool
+    return true if (c >= 97_u8 && c <= 122_u8) || (c >= 65_u8 && c <= 90_u8)
+    return false if first
+    (c >= 48_u8 && c <= 57_u8) || c == 43_u8 || c == 45_u8 || c == 46_u8
+  end
+
+  # Fills *uri* from *s*; answers nil, or the sentence that refuses *s*.
+  private def self.scan(s : String, uri : URI) : String?
     raw = s.to_unsafe
     len = s.bytesize
+
+    i = 0
+    while i < len
+      b = raw[i]
+      return "space at byte #{i} in #{s.inspect}" if b == 32_u8
+      return "control character at byte #{i} in #{s.inspect}" if b < 32_u8 || b == 127_u8
+      i = i + 1
+    end
+    return nil if len == 0
+
     ptr = 0
 
-    # Parse scheme if present: alpha *(alpha | digit | "+" | "-" | ".") ":"
-    has_scheme = false
-    if (raw[0] >= 97_u8 && raw[0] <= 122_u8) || (raw[0] >= 65_u8 && raw[0] <= 90_u8)
-      colon = -1
-      i = 1
-      while i < len
-        c = raw[i]
-        if c == 58_u8 # ':'
-          colon = i
-          break
-        elsif (c >= 97_u8 && c <= 122_u8) || (c >= 65_u8 && c <= 90_u8) ||
-              (c >= 48_u8 && c <= 57_u8) || c == 43_u8 || c == 45_u8 || c == 46_u8
-          i = i + 1
-        else
-          break
-        end
+    # A ':' before the first '/', '?' or '#' ends a scheme, and nothing else
+    # may stand before it: "a:b" is scheme "a", "ht!tp:x" is refused.
+    i = 0
+    while i < len && raw[i] != 47_u8 && raw[i] != 63_u8 && raw[i] != 35_u8 && raw[i] != 58_u8
+      i = i + 1
+    end
+    if i < len && raw[i] == 58_u8 # ':'
+      k = 0
+      while k < i && scheme_byte?(raw[k], k == 0)
+        k = k + 1
       end
-
-      if colon > 0
-        uri.scheme = s[0, colon]
-        ptr = colon + 1
-        has_scheme = true
-      end
+      return "invalid scheme #{s[0, i].inspect} in #{s.inspect}" if i == 0 || k < i
+      uri.scheme = s[0, i]
+      ptr = i + 1
     end
 
-    # Authority: begins with "//"
+    # Authority: "//" up to the next '/', '?' or '#'
     if ptr + 1 < len && raw[ptr] == 47_u8 && raw[ptr + 1] == 47_u8
       ptr = ptr + 2
-      # Authority runs until '/', '?', '#', or end of string
       auth_start = ptr
       while ptr < len && raw[ptr] != 47_u8 && raw[ptr] != 63_u8 && raw[ptr] != 35_u8
         ptr = ptr + 1
       end
       auth_str = s[auth_start, ptr - auth_start]
 
-      # Parse userinfo@host:port from auth_str
-      at_idx = auth_str.index('@')
-      host_port_str = auth_str
-      if at_idx
+      host_port = auth_str
+      if at_idx = auth_str.index('@')
         uinfo = auth_str[0, at_idx]
-        colon_ui = uinfo.index(':')
-        if colon_ui
-          uri.user = URI.decode_www_form(uinfo[0, colon_ui])
-          uri.password = URI.decode_www_form(uinfo[colon_ui + 1, uinfo.bytesize - colon_ui - 1])
-        else
-          uri.user = URI.decode_www_form(uinfo)
+        user = uinfo
+        password = nil
+        if colon_ui = uinfo.index(':')
+          user = uinfo[0, colon_ui]
+          password = uinfo[colon_ui + 1, uinfo.bytesize - colon_ui - 1]
         end
-        host_port_str = auth_str[at_idx + 1, auth_str.bytesize - at_idx - 1]
+        # Userinfo is percent-decoded here and re-encoded by `authority`;
+        # a '+' in it is a '+', not a space.
+        decoded_user = URI.decode?(user)
+        return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" unless decoded_user
+        uri.user = decoded_user
+        if password
+          decoded_password = URI.decode?(password)
+          return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" unless decoded_password
+          uri.password = decoded_password
+        end
+        host_port = auth_str[at_idx + 1, auth_str.bytesize - at_idx - 1]
       end
 
-      # Parse host and port, taking IPv6 [ ... ] into account
-      if host_port_str.starts_with?('[')
-        bracket_end = host_port_str.index(']')
-        if bracket_end
-          uri.host = host_port_str[0, bracket_end + 1]
-          rest = host_port_str[bracket_end + 1, host_port_str.bytesize - bracket_end - 1]
-          if rest.starts_with?(':')
-            port_str = rest[1, rest.bytesize - 1]
-            p_val = port_str.to_i?
-            uri.port = p_val if p_val
-          end
-        else
-          uri.host = host_port_str
+      port_str = nil
+      if host_port.starts_with?('[')
+        bracket_end = host_port.index(']')
+        return "unterminated IPv6 host #{host_port.inspect} in #{s.inspect}" unless bracket_end
+        uri.host = host_port[0, bracket_end + 1]
+        rest = host_port[bracket_end + 1, host_port.bytesize - bracket_end - 1]
+        if rest.starts_with?(':')
+          port_str = rest[1, rest.bytesize - 1]
+        elsif !rest.empty?
+          return "invalid host #{host_port.inspect} in #{s.inspect}"
         end
       else
-        colon_hp = host_port_str.rindex(':')
-        if colon_hp
-          uri.host = host_port_str[0, colon_hp]
-          port_str = host_port_str[colon_hp + 1, host_port_str.bytesize - colon_hp - 1]
-          p_val = port_str.to_i?
-          uri.port = p_val if p_val
-        else
-          uri.host = host_port_str
+        host = host_port
+        if colon_hp = host_port.index(':')
+          host = host_port[0, colon_hp]
+          port_str = host_port[colon_hp + 1, host_port.bytesize - colon_hp - 1]
         end
+        hp = host.to_unsafe
+        j = 0
+        while j < host.bytesize
+          c = hp[j]
+          unless unreserved?(c) || sub_delim?(c) || c == 37_u8 || c >= 128_u8
+            return "invalid host #{host.inspect} in #{s.inspect}"
+          end
+          j = j + 1
+        end
+        uri.host = host
+      end
+
+      if port_str && !port_str.empty?
+        pp = port_str.to_unsafe
+        j = 0
+        while j < port_str.bytesize
+          c = pp[j]
+          return "invalid port #{port_str.inspect} in #{s.inspect}" if c < 48_u8 || c > 57_u8
+          j = j + 1
+        end
+        port = port_str.to_i?
+        return "port #{port_str} out of range in #{s.inspect}" if port.nil? || port > 65535
+        uri.port = port
       end
     end
 
@@ -760,7 +709,6 @@ pub class URI
     end
     uri.path = s[path_start, ptr - path_start]
 
-    # Query: begins with '?'
     if ptr < len && raw[ptr] == 63_u8 # '?'
       ptr = ptr + 1
       query_start = ptr
@@ -770,13 +718,12 @@ pub class URI
       uri.query = s[query_start, ptr - query_start]
     end
 
-    # Fragment: begins with '#'
     if ptr < len && raw[ptr] == 35_u8 # '#'
       ptr = ptr + 1
       uri.fragment = s[ptr, len - ptr]
     end
 
-    uri
+    nil
   end
 
   # =========================================================================

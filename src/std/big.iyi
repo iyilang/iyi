@@ -1,31 +1,36 @@
-# Arbitrary-precision integers — BigInt
+# Arbitrary precision numbers: BigInt, BigDecimal and BigRational.
 #
-# Fully native arbitrary-precision arithmetic over 32-bit limbs stored in UInt64.
-# Does not bind GMP or any external C library (SPEC.md III.9, III.10).
+# Everything here is iyi all the way down: no GMP, no libc, no `lib` (SPEC.md
+# III.9, III.10). The module refuses what it cannot answer with a sentence and
+# exits 1: division and modulo by zero, a negative exponent, a base outside
+# 2..36, a digit the base does not have, a value that does not fit the integer
+# asked for.
 #
-# Representation:
-# Sign-magnitude representation where:
-#   @sign : Int32 (-1 for negative, 0 for zero, 1 for positive)
-#   @limbs : Array(UInt64) (little-endian: limbs[0] is least significant)
+# BigInt is sign-magnitude:
+#   @sign : Int32          -1 negative, 0 zero, 1 positive
+#   @limbs : Array(UInt64) little-endian 32-bit digits, no leading zeros
 #
-# Each limb stores a 32-bit digit (0 <= limb < 2^32) held in a UInt64 word.
-# Using UInt64 avoids the prelude's broken UInt32 and guarantees that 32x32-bit
-# limb products and additions never overflow 64-bit machine registers.
+# Each limb holds 32 bits in a 64-bit word so that a 32x32 product plus two
+# carries still fits the word; the canonical form (zero is sign 0 with no
+# limbs) makes equality a limb-by-limb comparison.
 #
-# Algorithms:
-# - Addition and Subtraction: O(n) schoolbook carry-propagate and borrow-propagate.
-# - Multiplication:
-#     * Schoolbook multiplication O(n*m) below Karatsuba threshold.
-#     * Karatsuba multiplication O(n^1.585) above the crossover threshold.
-# - Division and Modulo:
-#     * O(n) single-limb division when divisor is 1 limb.
-#     * Knuth Algorithm D (TAOCP Vol. 2, Sec. 4.3.1) for multi-limb divisor.
-#     * Consistent with prelude Int32: division truncates towards zero,
-#       and remainder (%) follows the sign of the dividend.
-# - Modular Exponentiation:
-#     * pow_mod via binary square-and-multiply.
-# - Bitwise Operations:
-#     * Two's complement semantics over infinite sign extension.
+# Algorithms: schoolbook add/sub; schoolbook multiply below 64 limbs and
+# Karatsuba above; single-limb short division or Knuth's Algorithm D (TAOCP
+# 4.3.1); binary square-and-multiply for `**` and `pow_mod`; two's complement
+# over infinite sign extension for `& | ^ ~ << >>`. `//` truncates toward zero
+# and `%` takes the dividend's sign, the prelude's Int32 rule. `hash` mixes
+# every limb with wrapping arithmetic, so any size hashes.
+#
+# BigDecimal is `value * 10^-scale` with an exact BigInt value. `+ - *` are
+# exact. `/` is the one operation that can be inexact: `div(other, precision)`
+# answers the quotient rounded half away from zero to `precision` fractional
+# digits, and an exact quotient is answered with the fewest digits that write
+# it (`1/4` is `0.25`, `6/3` is `2`); `a / b` is `a.div(b, DIVISION_PRECISION)`
+# with 20 fractional digits. `==` and `hash` agree: `1.10 == 1.1` and both
+# hash alike. Zero prints as `0` whatever its scale.
+#
+# BigRational is a reduced numerator/denominator pair with a positive
+# denominator; every operation reduces, so `==` and `hash` are structural.
 
 module std/big
 
@@ -54,18 +59,6 @@ pub struct BigInt
       @sign = sign < 0 ? -1 : (sign > 0 ? 1 : 0)
       @limbs = limbs
     end
-  end
-
-  # Canonical constant for zero.
-  def self.zero : BigInt
-    BigInt.new(0, Array(UInt64).new)
-  end
-
-  # Canonical constant for one.
-  def self.one : BigInt
-    arr = Array(UInt64).new(1)
-    arr << 1_u64
-    BigInt.new(1, arr)
   end
 
   # Constructs a BigInt from an Int64.
@@ -310,42 +303,13 @@ pub struct BigInt
     0
   end
 
-  # Full three-way comparison between self and other.
-  def cmp(other : BigInt) : Int32
-    if @sign != other.sign
-      return @sign < other.sign ? -1 : 1
-    end
-    return 0 if @sign == 0
-    c = cmp_abs(other)
-    @sign > 0 ? c : -c
-  end
-
+  # Three-way comparison is `cmp`, from `impl Cmp` below.
   def <=>(other : BigInt) : Int32
     cmp(other)
   end
 
-  def ==(other : BigInt) : Bool
-    cmp(other) == 0
-  end
-
   def !=(other : BigInt) : Bool
     cmp(other) != 0
-  end
-
-  def <(other : BigInt) : Bool
-    cmp(other) < 0
-  end
-
-  def <=(other : BigInt) : Bool
-    cmp(other) <= 0
-  end
-
-  def >(other : BigInt) : Bool
-    cmp(other) > 0
-  end
-
-  def >=(other : BigInt) : Bool
-    cmp(other) >= 0
   end
 
   # Comparison overloads for Int64 and Int32
@@ -592,7 +556,7 @@ pub struct BigInt
   # Division and Modulo: Knuth Algorithm D
   # Returns {quotient, remainder}.
   # Division truncates towards zero; remainder follows the sign of the dividend (self).
-  def divmod(other : BigInt) : ::Tuple(BigInt, BigInt)
+  def divmod(other : BigInt) : Tuple(BigInt, BigInt)
     raise "division by zero" if other.zero?
     return {BigInt.zero, BigInt.zero} if zero?
 
@@ -756,6 +720,7 @@ pub struct BigInt
   end
 
   def %(other : BigInt) : BigInt
+    raise "modulo by zero" if other.zero?
     divmod(other)[1]
   end
 
@@ -1351,31 +1316,29 @@ pub struct BigInt
     BigRational.new(self, BigInt.one)
   end
 
-  def to_big_f : BigFloat
-    BigFloat.new(self)
-  end
-
-  # 32-bit hash value combining sign and limb bits
+  # FNV-1a over the sign and every limb, folded to 31 bits. Wrapping
+  # multiplication (`&*`) is the point: a checked product would overflow on
+  # the second limb, and a hash has to answer for any size.
   def hash : Int32
-    return 0 if zero?
-    h = @sign
+    h = 14695981039346656037_u64
+    h = (h ^ (@sign + 1).to_u64) &* 1099511628211_u64
     i = 0
     while i < @limbs.size
-      limb = @limbs[i]
-      h = ((h.unsafe_shl(5)) - h) ^ (limb & 0x7FFFFFFF_u64).to_i32
+      h = (h ^ @limbs[i]) &* 1099511628211_u64
       i = i + 1
     end
-    h
-  end
-
-  def hash_key : Int32
-    hash
+    ((h ^ h.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
   end
 end
 
 impl Cmp for BigInt
   def cmp(other : self) : Int32
-    self.cmp(other)
+    if @sign != other.sign
+      return @sign < other.sign ? -1 : 1
+    end
+    return 0 if @sign == 0
+    c = cmp_abs(other)
+    @sign > 0 ? c : -c
   end
 end
 
@@ -1401,7 +1364,7 @@ end
 
 impl Hashable for BigInt
   def hash_key : Int32
-    self.hash
+    hash
   end
 end
 
@@ -1422,8 +1385,9 @@ pub struct BigDecimal
     @scale = scale
   end
 
+  # Parses `[+-]digits[.digits][e[+-]digits]`; anything else is refused.
   def initialize(str : String)
-    raise "empty BigDecimal string" if str.empty?
+    raise "not a decimal: \"#{str}\"" if str.empty?
     negative = false
     idx = 0
     len = str.bytesize
@@ -1445,7 +1409,7 @@ pub struct BigDecimal
     while idx < len
       byte = ptr[idx]
       if byte == 46_u8 # '.'
-        raise "multiple decimal points" if decimal_point >= 0 || has_exp
+        raise "not a decimal: \"#{str}\"" if decimal_point >= 0 || has_exp
         decimal_point = digits.size
       elsif byte == 101_u8 || byte == 69_u8 # 'e' or 'E'
         has_exp = true
@@ -1457,26 +1421,28 @@ pub struct BigDecimal
           idx = idx + 1
         end
         exp_digits = 0
+        exp_start = idx
         while idx < len
           eb = ptr[idx]
           if eb >= 48_u8 && eb <= 57_u8
             exp_digits = exp_digits * 10 + (eb - 48_u8).to_i32
           else
-            raise "invalid exponent character"
+            raise "not a decimal: \"#{str}\""
           end
           idx = idx + 1
         end
+        raise "not a decimal: \"#{str}\"" if idx == exp_start
         exp = exp_negative ? -exp_digits : exp_digits
         break
       elsif byte >= 48_u8 && byte <= 57_u8
         digits << byte.to_i32.chr
       else
-        raise "invalid BigDecimal character"
+        raise "not a decimal: \"#{str}\""
       end
       idx = idx + 1
     end
 
-    raise "no digits in BigDecimal" if digits.empty?
+    raise "not a decimal: \"#{str}\"" if digits.empty?
 
     digit_str = digits.join("")
     frac_len = decimal_point >= 0 ? (digits.size - decimal_point) : 0
@@ -1487,13 +1453,8 @@ pub struct BigDecimal
     @scale = final_scale
   end
 
-  def self.zero : BigDecimal
-    BigDecimal.new(BigInt.zero, 0)
-  end
-
-  def self.one : BigDecimal
-    BigDecimal.new(BigInt.one, 0)
-  end
+  # Fractional digits `/` keeps when the quotient is not exact.
+  DIVISION_PRECISION = 20
 
   def zero? : Bool
     @value.zero?
@@ -1523,7 +1484,7 @@ pub struct BigDecimal
     self
   end
 
-  protected def self.align(a : BigDecimal, b : BigDecimal) : ::Tuple(BigInt, BigInt, Int32)
+  protected def self.align(a : BigDecimal, b : BigDecimal) : Tuple(BigInt, BigInt, Int32)
     if a.scale == b.scale
       {a.value, b.value, a.scale}
     elsif a.scale > b.scale
@@ -1563,16 +1524,40 @@ pub struct BigDecimal
     self * BigDecimal.new(other)
   end
 
-  def /(other : BigDecimal) : BigDecimal
+  # `self / other` rounded to `precision` fractional digits, half away from
+  # zero. A quotient that is exact within `precision` digits is answered with
+  # the fewest digits that write it: `1/4` is `0.25`, `6/3` is `2`. One that
+  # is not keeps all `precision` digits, so the reader sees where it was cut.
+  def div(other : BigDecimal, precision : Int32) : BigDecimal
     raise "division by zero" if other.zero?
-    prec = 20
-    scaled_val = @value * (BigInt.new(10_i64) ** prec)
-    quot = scaled_val // other.value
-    BigDecimal.new(quot, @scale - other.scale + prec)
+    raise "negative precision: #{precision}" if precision < 0
+    return BigDecimal.zero if zero?
+    # self / other = (@value / other.value) * 10^(other.scale - @scale);
+    # scale that by 10^precision and divide as integers.
+    shift = other.scale - @scale + precision
+    num = @value
+    den = other.value
+    if shift >= 0
+      num = num * (BigInt.new(10_i64) ** shift)
+    else
+      den = den * (BigInt.new(10_i64) ** (-shift))
+    end
+    qr = num.divmod(den)
+    q = qr[0]
+    r = qr[1]
+    return BigDecimal.new(q, precision).normalized if r.zero?
+    if (r.abs * 2).cmp(den.abs) >= 0
+      q = @value.sign == other.value.sign ? q + 1 : q - 1
+    end
+    BigDecimal.new(q, precision)
+  end
+
+  def /(other : BigDecimal) : BigDecimal
+    div(other, DIVISION_PRECISION)
   end
 
   def /(other : Int32 | Int64) : BigDecimal
-    self / BigDecimal.new(other)
+    div(BigDecimal.new(other), DIVISION_PRECISION)
   end
 
   def //(other : BigDecimal) : BigDecimal
@@ -1582,50 +1567,42 @@ pub struct BigDecimal
   end
 
   def %(other : BigDecimal) : BigDecimal
-    raise "division by zero" if other.zero?
+    raise "modulo by zero" if other.zero?
     tup = BigDecimal.align(self, other)
     BigDecimal.new(tup[0] % tup[1], tup[2])
   end
 
-  def cmp(other : BigDecimal) : Int32
-    if @value.sign != other.value.sign
-      return @value.sign < other.value.sign ? -1 : 1
+  # The same value with the smallest non-negative scale: trailing zeros of
+  # the fraction are dropped and a negative scale is multiplied out.
+  def normalized : BigDecimal
+    return BigDecimal.zero if zero?
+    if @scale < 0
+      return BigDecimal.new(@value * (BigInt.new(10_i64) ** (-@scale)), 0)
     end
-    tup = BigDecimal.align(self, other)
-    tup[0].cmp(tup[1])
+    v = @value
+    s = @scale
+    ten = BigInt.new(10_i64)
+    while s > 0
+      qr = v.divmod(ten)
+      break unless qr[1].zero?
+      v = qr[0]
+      s = s - 1
+    end
+    BigDecimal.new(v, s)
   end
 
   def <=>(other : BigDecimal) : Int32
     cmp(other)
   end
 
-  def ==(other : BigDecimal) : Bool
-    cmp(other) == 0
-  end
-
   def !=(other : BigDecimal) : Bool
     cmp(other) != 0
   end
 
-  def <(other : BigDecimal) : Bool
-    cmp(other) < 0
-  end
-
-  def <=(other : BigDecimal) : Bool
-    cmp(other) <= 0
-  end
-
-  def >(other : BigDecimal) : Bool
-    cmp(other) > 0
-  end
-
-  def >=(other : BigDecimal) : Bool
-    cmp(other) >= 0
-  end
-
+  # Zero is `0` whatever its scale; every other value prints every digit of
+  # its scale, so `1.10` stays `1.10`.
   def to_s : String
-    return "0.0" if zero? && @scale == 1
-    return "0" if zero?
+    return "0" if @value.zero?
     v_str = @value.abs.to_s
     prefix = negative? ? "-" : ""
 
@@ -1681,18 +1658,21 @@ pub struct BigDecimal
     to_big_i.to_i32
   end
 
+  # The same value at another scale is the same key: `1.10` and `1.1` hash
+  # alike because `==` says they are equal.
   def hash : Int32
-    @value.hash ^ @scale
-  end
-
-  def hash_key : Int32
-    hash
+    n = normalized
+    n.value.hash &* 31 &+ n.scale
   end
 end
 
 impl Cmp for BigDecimal
   def cmp(other : self) : Int32
-    self.cmp(other)
+    if @value.sign != other.value.sign
+      return @value.sign < other.value.sign ? -1 : 1
+    end
+    tup = BigDecimal.align(self, other)
+    tup[0].cmp(tup[1])
   end
 end
 
@@ -1716,7 +1696,7 @@ end
 
 impl Hashable for BigDecimal
   def hash_key : Int32
-    self.hash
+    hash
   end
 end
 
@@ -1759,14 +1739,6 @@ pub struct BigRational
     end
   end
 
-  def self.zero : BigRational
-    BigRational.new(BigInt.zero, BigInt.one)
-  end
-
-  def self.one : BigRational
-    BigRational.new(BigInt.one, BigInt.one)
-  end
-
   def zero? : Bool
     @numerator.zero?
   end
@@ -1796,7 +1768,7 @@ pub struct BigRational
   end
 
   def inv : BigRational
-    raise "division by zero in inv" if @numerator.zero?
+    raise "division by zero" if @numerator.zero?
     BigRational.new(@denominator, @numerator)
   end
 
@@ -1843,36 +1815,12 @@ pub struct BigRational
     end
   end
 
-  def cmp(other : BigRational) : Int32
-    (@numerator * other.denominator).cmp(other.numerator * @denominator)
-  end
-
   def <=>(other : BigRational) : Int32
     cmp(other)
   end
 
-  def ==(other : BigRational) : Bool
-    cmp(other) == 0
-  end
-
   def !=(other : BigRational) : Bool
     cmp(other) != 0
-  end
-
-  def <(other : BigRational) : Bool
-    cmp(other) < 0
-  end
-
-  def <=(other : BigRational) : Bool
-    cmp(other) <= 0
-  end
-
-  def >(other : BigRational) : Bool
-    cmp(other) > 0
-  end
-
-  def >=(other : BigRational) : Bool
-    cmp(other) >= 0
   end
 
   def to_s : String
@@ -1899,18 +1847,15 @@ pub struct BigRational
     to_big_d.to_f64
   end
 
+  # A rational is stored reduced, so equal values have equal parts.
   def hash : Int32
-    @numerator.hash ^ @denominator.hash
-  end
-
-  def hash_key : Int32
-    hash
+    @numerator.hash &* 31 &+ @denominator.hash
   end
 end
 
 impl Cmp for BigRational
   def cmp(other : self) : Int32
-    self.cmp(other)
+    (@numerator * other.denominator).cmp(other.numerator * @denominator)
   end
 end
 
@@ -1934,184 +1879,7 @@ end
 
 impl Hashable for BigRational
   def hash_key : Int32
-    self.hash
-  end
-end
-
-pub struct BigFloat
-  getter dec : BigDecimal
-
-  def initialize(@dec : BigDecimal)
-  end
-
-  def initialize(str : String)
-    @dec = BigDecimal.new(str)
-  end
-
-  def initialize(num : BigInt)
-    @dec = BigDecimal.new(num, 0)
-  end
-
-  def initialize(num : BigRational)
-    @dec = num.to_big_d
-  end
-
-  def initialize(num : Float64)
-    @dec = BigDecimal.new(num.to_s)
-  end
-
-  def initialize(num : Int32)
-    @dec = BigDecimal.new(num, 0)
-  end
-
-  def initialize(num : Int64)
-    @dec = BigDecimal.new(num, 0)
-  end
-
-  def self.zero : BigFloat
-    BigFloat.new(BigDecimal.zero)
-  end
-
-  def self.one : BigFloat
-    BigFloat.new(BigDecimal.one)
-  end
-
-  def zero? : Bool
-    @dec.zero?
-  end
-
-  def positive? : Bool
-    @dec.positive?
-  end
-
-  def negative? : Bool
-    @dec.negative?
-  end
-
-  def abs : BigFloat
-    BigFloat.new(@dec.abs)
-  end
-
-  def negate : BigFloat
-    BigFloat.new(@dec.negate)
-  end
-
-  def - : BigFloat
-    negate
-  end
-
-  def + : BigFloat
-    self
-  end
-
-  def +(other : BigFloat) : BigFloat
-    BigFloat.new(@dec + other.dec)
-  end
-
-  def -(other : BigFloat) : BigFloat
-    BigFloat.new(@dec - other.dec)
-  end
-
-  def *(other : BigFloat) : BigFloat
-    BigFloat.new(@dec * other.dec)
-  end
-
-  def /(other : BigFloat) : BigFloat
-    BigFloat.new(@dec / other.dec)
-  end
-
-  def cmp(other : BigFloat) : Int32
-    @dec.cmp(other.dec)
-  end
-
-  def <=>(other : BigFloat) : Int32
-    cmp(other)
-  end
-
-  def ==(other : BigFloat) : Bool
-    cmp(other) == 0
-  end
-
-  def !=(other : BigFloat) : Bool
-    cmp(other) != 0
-  end
-
-  def <(other : BigFloat) : Bool
-    cmp(other) < 0
-  end
-
-  def <=(other : BigFloat) : Bool
-    cmp(other) <= 0
-  end
-
-  def >(other : BigFloat) : Bool
-    cmp(other) > 0
-  end
-
-  def >=(other : BigFloat) : Bool
-    cmp(other) >= 0
-  end
-
-  def to_s : String
-    @dec.to_s
-  end
-
-  def inspect : String
-    to_s
-  end
-
-  def to_f64 : Float64
-    @dec.to_f64
-  end
-
-  def to_big_f : BigFloat
-    self
-  end
-
-  def to_big_d : BigDecimal
-    @dec
-  end
-
-  def to_big_i : BigInt
-    @dec.to_big_i
-  end
-
-  def hash : Int32
-    @dec.hash
-  end
-
-  def hash_key : Int32
     hash
-  end
-end
-
-impl Cmp for BigFloat
-  def cmp(other : self) : Int32
-    self.cmp(other)
-  end
-end
-
-impl Num for BigFloat
-  def self.zero : self
-    BigFloat.new(BigDecimal.new(BigInt.zero, 0))
-  end
-
-  def self.one : self
-    BigFloat.new(BigDecimal.new(BigInt.one, 0))
-  end
-
-  def add(other : self) : self
-    self + other
-  end
-
-  def mul(other : self) : self
-    self * other
-  end
-end
-
-impl Hashable for BigFloat
-  def hash_key : Int32
-    self.hash
   end
 end
 
@@ -2130,10 +1898,6 @@ struct ::Int64
 
   def to_big_r : Std::Big::BigRational
     Std::Big::BigRational.new(self, 1_i64)
-  end
-
-  def to_big_f : Std::Big::BigFloat
-    Std::Big::BigFloat.new(self)
   end
 
   def +(other : Std::Big::BigInt) : Std::Big::BigInt
@@ -2174,10 +1938,6 @@ struct ::Int32
     Std::Big::BigRational.new(self, 1)
   end
 
-  def to_big_f : Std::Big::BigFloat
-    Std::Big::BigFloat.new(self)
-  end
-
   def +(other : Std::Big::BigInt) : Std::Big::BigInt
     to_big + other
   end
@@ -2210,9 +1970,5 @@ class ::String
 
   def to_big_r : Std::Big::BigRational
     Std::Big::BigRational.new(self)
-  end
-
-  def to_big_f : Std::Big::BigFloat
-    Std::Big::BigFloat.new(self)
   end
 end

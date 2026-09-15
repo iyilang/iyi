@@ -1,6 +1,6 @@
 # Fixed-size stack-allocated array for iyi.
 #
-# Pure iyi implementation conforming to Crystal's StaticArray specification.
+# A fixed-size array on the stack: `StaticArray(T, N)`.
 
 module std/static_array
 

@@ -1,16 +1,13 @@
-# String pool implementation for iyi.
+# Interned strings: the same bytes become the same String object.
 #
-# Preserves strings in a pool to reuse instances of common strings
-# instead of creating new duplicates.
 
 module std/string_pool
 
-import std/text
 import std/slice
 using std/slice::{Bytes}
 pub alias Bytes = Std::Slice::Bytes
 
-class ::StringPool
+pub class StringPool
   getter size : Int32
   getter capacity : Int32
   @hashes : Pointer(UInt64)

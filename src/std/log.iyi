@@ -1,25 +1,35 @@
-# Standard logging library for iyi.
+# Levelled logging with named sources.
 #
-# Provides structured, levelled logging with:
-#   * Severities: debug, info, notice, warn, error, fatal (plus none for silencing)
-#   * Named loggers arranged in a dot-delimited hierarchy (e.g. "db", "db.pool")
-#   * Dynamic level and backend inheritance from parent to child loggers
-#   * Zero-allocation level filtering: block forms avoid evaluating messages
-#     when the logger's severity threshold is not met
-#   * Pluggable formatters with an RFC-clean default formatter
-#   * IOBackend writing directly to any IyiIO (stdout, stderr, files, pipes)
-#   * MemoryBackend for capturing log entries in tests and buffers
+# `Log.info "started"` writes an `Entry` — source, severity, message and
+# the UTC instant it was made — through the root logger's backend.
+# `Log.for("db.pool")` answers the logger for that source: a child of
+# `db`, which is a child of the root, and the same object every time the
+# name is asked for. A logger with no level or backend of its own uses
+# its parent's, so `Log.setup(level, backend)` reconfigures the root in
+# place and every logger already handed out follows it; a child given
+# its own `level=` or `backend=` keeps that until it is set back to nil.
 #
-# Scope and omissions from Crystal's log.cr:
-#   Crystal's implementation (1,394 lines) carries fiber-local Context dictionaries,
-#   asynchronous channel-based broadcast workers, regex pattern matching for source
-#   bindings, JSON metadata serializations, and fiber backtrace captures.
-#   iyi omits those background dispatchers to keep logging direct, synchronous,
-#   predictable, and free of background fiber overhead.
+# Severities in order: Trace, Debug, Info, Notice, Warn, Error, Fatal, and
+# None to silence a logger. An entry below the logger's level is dropped
+# before its message is built, so `log.debug { expensive }` costs nothing
+# when Debug is off. The default level is Info.
+#
+# Backends: `IOBackend` writes each entry to an IO through a `Formatter`
+# (`DefaultFormatter`: `2024-02-29T15:30:45.123456Z INFO - source: message`,
+# the source and its ` - ` omitted at the root); `MemoryBackend` keeps
+# the entries for a test to read back. A `Backend` of your own is a
+# class with `write(entry)` and `close`.
+#
+# Logging is synchronous: the entry is written before the call returns,
+# in the calling thread, with no queue between.
 
 module std/log
 
+import std/time
+using std/time::{Time}
+
 pub enum Severity
+  Trace  = 0
   Debug  = 1
   Info   = 2
   Notice = 3
@@ -30,6 +40,7 @@ pub enum Severity
 
   def label : String
     case value
+    when 0 then "TRACE"
     when 1 then "DEBUG"
     when 2 then "INFO"
     when 3 then "NOTICE"
@@ -38,6 +49,26 @@ pub enum Severity
     when 6 then "FATAL"
     else        "NONE"
     end
+  end
+
+  # The severity named by *name*, case-insensitively, or nil: what a
+  # `LOG_LEVEL` variable holds.
+  def self.parse?(name : String) : Severity?
+    case name.downcase
+    when "trace"  then Trace
+    when "debug"  then Debug
+    when "info"   then Info
+    when "notice" then Notice
+    when "warn"   then Warn
+    when "error"  then Error
+    when "fatal"  then Fatal
+    when "none"   then None
+    else               nil
+    end
+  end
+
+  def self.parse(name : String) : Severity
+    parse?(name) || raise "not a severity: #{name.inspect}"
   end
 
   def to_s : String
@@ -65,30 +96,28 @@ pub struct Entry
   getter source : String
   getter severity : Severity
   getter message : String
+  getter timestamp : Time
 
-  def initialize(@source : String, @severity : Severity, @message : String)
+  def initialize(@source : String, @severity : Severity, @message : String, @timestamp : Time = Time.utc)
   end
 end
 
 pub abstract class Formatter
-  abstract def format(entry : Entry, io : IyiIO) : Nil
   abstract def format(entry : Entry) : String
+
+  def format(entry : Entry, io : IO) : Nil
+    io.write(format(entry))
+    io.write("\n")
+  end
 end
 
 pub class DefaultFormatter < Formatter
-  def format(entry : Entry, io : IyiIO) : Nil
-    if entry.source.empty?
-      io.puts("[#{entry.severity.label}] #{entry.message}")
-    else
-      io.puts("[#{entry.severity.label}] #{entry.source}: #{entry.message}")
-    end
-  end
-
   def format(entry : Entry) : String
+    head = "#{entry.timestamp.to_rfc3339(6)} #{entry.severity.label}"
     if entry.source.empty?
-      "[#{entry.severity.label}] #{entry.message}"
+      "#{head} - #{entry.message}"
     else
-      "[#{entry.severity.label}] #{entry.source}: #{entry.message}"
+      "#{head} - #{entry.source}: #{entry.message}"
     end
   end
 end
@@ -100,13 +129,14 @@ end
 
 pub class IOBackend < Backend
   property formatter : Formatter
-  getter io : IyiIO
+  getter io : IO
 
-  def initialize(@io : IyiIO, @formatter : Formatter = DefaultFormatter.new)
+  def initialize(@io : IO, @formatter : Formatter = DefaultFormatter.new)
   end
 
   def write(entry : Entry) : Nil
     @formatter.format(entry, @io)
+    @io.flush
   end
 
   def close : Nil
@@ -129,6 +159,7 @@ pub class MemoryBackend < Backend
   def close : Nil
   end
 
+  # The entries as the formatter would have written them.
   def output : Array(String)
     @entries.map { |e| @formatter.format(e) }
   end
@@ -140,16 +171,20 @@ end
 
 pub class Logger
   getter source : String
-  property backend : Backend?
   @level : Severity?
+  @backend : Backend?
   @parent : Logger?
   @children : Hash(String, Logger)
 
-  def initialize(@source : String, level : Severity? = nil, @backend : Backend? = nil, @parent : Logger? = nil)
+  def initialize(@source : String, level : Severity? = nil, backend : Backend? = nil, parent : Logger? = nil)
     @level = level
+    @backend = backend
+    @parent = parent
     @children = Hash(String, Logger).new
   end
 
+  # This logger's own level, or the nearest ancestor's; Info at a root
+  # never given one.
   def level : Severity
     if l = @level
       l
@@ -160,10 +195,36 @@ pub class Logger
     end
   end
 
-  def level=(lvl : Severity?)
+  # nil hands the decision back to the parent.
+  def level=(lvl : Severity?) : Nil
     @level = lvl
   end
 
+  def own_level : Severity?
+    @level
+  end
+
+  # This logger's own backend, or the nearest ancestor's; nil silences.
+  def backend : Backend?
+    if b = @backend
+      b
+    elsif p = @parent
+      p.backend
+    else
+      nil
+    end
+  end
+
+  def backend=(b : Backend?) : Nil
+    @backend = b
+  end
+
+  def own_backend : Backend?
+    @backend
+  end
+
+  # The logger for *child_name* under this one, created on first ask;
+  # `"a.b"` is the child `b` of the child `a`.
   def for(child_name : String) : Logger
     return self if child_name.empty?
 
@@ -186,28 +247,26 @@ pub class Logger
     child
   end
 
-  def effective_backend : Backend?
-    return @backend if @backend
-    if parent = @parent
-      return parent.effective_backend
-    end
-    nil
-  end
-
   def log(severity : Severity, message : String) : Nil
     return if severity < level
-    if b = effective_backend
-      entry = Entry.new(@source, severity, message)
-      b.write(entry)
+    if b = backend
+      b.write(Entry.new(@source, severity, message))
     end
   end
 
   def log(severity : Severity, &block : -> String) : Nil
     return if severity < level
-    if b = effective_backend
-      entry = Entry.new(@source, severity, block.call)
-      b.write(entry)
+    if b = backend
+      b.write(Entry.new(@source, severity, block.call))
     end
+  end
+
+  def trace(message : String) : Nil
+    log(Severity::Trace, message)
+  end
+
+  def trace(&b : -> String) : Nil
+    log(Severity::Trace, &b)
   end
 
   def debug(message : String) : Nil
@@ -258,6 +317,10 @@ pub class Logger
     log(Severity::Fatal, &b)
   end
 
+  def trace? : Bool
+    level <= Severity::Trace
+  end
+
   def debug? : Bool
     level <= Severity::Debug
   end
@@ -283,6 +346,7 @@ pub class Logger
   end
 end
 
+# The root logger and the calls that go straight to it.
 pub class Log
   @@root : Logger?
 
@@ -296,10 +360,12 @@ pub class Log
     end
   end
 
+  # Reconfigures the root in place, so loggers obtained earlier follow.
   def self.setup(level : Severity = Severity::Info, backend : Backend = IOBackend.new(STDOUT)) : Logger
-    logger = Logger.new("", level, backend)
-    @@root = logger
-    logger
+    r = root
+    r.level = level
+    r.backend = backend
+    r
   end
 
   def self.for(source : String) : Logger
@@ -310,7 +376,7 @@ pub class Log
     root.level
   end
 
-  def self.level=(level : Severity)
+  def self.level=(level : Severity) : Nil
     root.level = level
   end
 
@@ -318,8 +384,16 @@ pub class Log
     root.backend
   end
 
-  def self.backend=(backend : Backend?)
+  def self.backend=(backend : Backend?) : Nil
     root.backend = backend
+  end
+
+  def self.trace(msg : String) : Nil
+    root.trace(msg)
+  end
+
+  def self.trace(&b : -> String) : Nil
+    root.trace(&b)
   end
 
   def self.debug(msg : String) : Nil

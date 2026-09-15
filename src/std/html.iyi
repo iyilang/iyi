@@ -732,25 +732,27 @@ pub struct HTML
               k = k + 1
             end
           else
-            # Parse number
+            # Parse number. Stop accumulating once past U+10FFFF so a
+            # long digit run cannot overflow Int64 (that would panic
+            # instead of becoming U+FFFD).
             cp = 0_i64
             overflow = false
             k = num_start
             if is_hex
               while k < ptr
-                val = hex_val(raw[k])
-                cp = (cp << 4) | val.to_i64
-                if cp > 0x10FFFF
-                  overflow = true
+                unless overflow
+                  val = hex_val(raw[k])
+                  cp = (cp << 4) | val.to_i64
+                  overflow = true if cp > 0x10FFFF
                 end
                 k = k + 1
               end
             else
               while k < ptr
-                val = (raw[k] - 48_u8).to_i64
-                cp = (cp * 10) + val
-                if cp > 0x10FFFF
-                  overflow = true
+                unless overflow
+                  val = (raw[k] - 48_u8).to_i64
+                  cp = (cp * 10) + val
+                  overflow = true if cp > 0x10FFFF
                 end
                 k = k + 1
               end

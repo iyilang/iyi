@@ -1,8 +1,8 @@
-# `Indexable`, ported for iyi standard library.
+# `Indexable`: random access.
 #
 # Random-access sequence abstraction: the second load-bearing trait in
 # the standard library, sitting under Array, Slice, Deque, and other indexed
-# collections. It builds on Enumerable by requiring only two methods:
+# collections. It requires two methods:
 #
 #   * `abstract def size : Int32`
 #   * `abstract def unsafe_fetch(index : Int32) : Elem`
@@ -18,7 +18,21 @@
 #   * Selection and search: `sample`, `bsearch`, `bsearch_index`
 #   * Structural inspection: `dig`, `dig?`, `equals?`
 #   * Serialization and conversions: `join`, `to_a`, `hash`
-#   * Default iteration: `def each` which satisfies Enumerable requirements
+#   * Default iteration: `def each`, which an `impl Enumerable` beside this
+#     one answers with — implementing `Indexable` does not make a type
+#     `Enumerable` by itself. SPEC.md II.6 prescribes the pair: `impl
+#     Indexable for T`, then `impl Enumerable for T` answering only `type
+#     Elem`. `Array` and `Slice` both say both.
+#
+# `IndexableMutable : Indexable` adds one more requirement, `unsafe_put`,
+# and from it in-place `update`, `swap`, `reverse_in_place`,
+# `rotate_in_place` and `fill`. The `class ::Array(T)` reopen at the end
+# gives the prelude's array its mutators (`insert`, `delete_at`, `delete_if`,
+# `keep_if`, `clear`, `rotated`, `compact_in_place`, `cartesian`).
+#
+# What is refused: every index is checked with the prelude's one sentence,
+# `index 5 out of range for 3 elements`, naming the index as it was written;
+# `first`/`last` on an empty collection panic, `first?`/`last?` answer nil.
 
 module std/indexable
 
@@ -36,7 +50,10 @@ pub trait Indexable
   # ---- iteration -----------------------------------------------------------
 
   # Default iteration yielding elements sequentially from 0 up to size - 1.
-  # Satisfies Enumerable's abstract def each requirement.
+  # It answers `Enumerable`'s requirement for a type that also says `impl
+  # Enumerable`, which is one more line than the ergonomics claim implies
+  # (SPEC.md II.6) — the claim that this trait supplied it was false, and
+  # `Array` went without `zip`, `take` and the rest until the line existed.
   def each(& : Elem -> Nil) : Nil
     i = 0
     while i < size
@@ -71,10 +88,15 @@ pub trait Indexable
   # ---- indexing ------------------------------------------------------------
 
   # Returns the element at the given index. Negative indices count from the
-  # end, so `a[-1]` returns the last element. Raises when index is out of bounds.
+  # end, so `a[-1]` returns the last element. Raises when index is out of
+  # bounds, naming the index as it was written and the size there was:
+  # `index out of range` on its own told a caller with a computed index
+  # nothing it did not already know. The wording is `Array`'s
+  # (src/iyi/array.iyi), because one mistake gets one sentence.
   def [](index : Int32) : Elem
+    asked = index
     index = size + index if index < 0
-    raise "index out of range" if index < 0 || index >= size
+    raise "index #{asked} out of range for #{size} elements" if index < 0 || index >= size
     unsafe_fetch(index)
   end
 
@@ -392,80 +414,74 @@ pub trait Indexable
     h
   end
 end
+
+# `Indexable` with one more requirement, `unsafe_put`, from which the
+# in-place operations follow. In-place variants are spelled `_in_place`;
+# the copies (`rotated`, `reversed`) live on the concrete type, since a
+# trait cannot build one without knowing how.
 pub trait IndexableMutable : Indexable
   type Elem
 
   abstract def unsafe_put(index : Int32, value : Elem) : Elem
 
-  # Updates element at index using block transformation.
+  # Replaces the element at index with what the block answers for it,
+  # and answers the new value.
   def update(index : Int32, & : Elem -> Elem) : Elem
-    idx = index < 0 ? index + size : index
-    raise "index out of range" if idx < 0 || idx >= size
-    val = yield unsafe_fetch(idx)
-    unsafe_put(idx, val)
+    asked = index
+    index = size + index if index < 0
+    raise "index #{asked} out of range for #{size} elements" if index < 0 || index >= size
+    val = yield unsafe_fetch(index)
+    unsafe_put(index, val)
     val
   end
 
   # Swaps two elements in place.
   def swap(index0 : Int32, index1 : Int32) : self
-    idx0 = index0 < 0 ? index0 + size : index0
-    idx1 = index1 < 0 ? index1 + size : index1
-    raise "index out of range" if idx0 < 0 || idx0 >= size || idx1 < 0 || idx1 >= size
-    unless idx0 == idx1
-      tmp = unsafe_fetch(idx0)
-      unsafe_put(idx0, unsafe_fetch(idx1))
-      unsafe_put(idx1, tmp)
+    asked0 = index0
+    asked1 = index1
+    index0 = size + index0 if index0 < 0
+    index1 = size + index1 if index1 < 0
+    raise "index #{asked0} out of range for #{size} elements" if index0 < 0 || index0 >= size
+    raise "index #{asked1} out of range for #{size} elements" if index1 < 0 || index1 >= size
+    unless index0 == index1
+      tmp = unsafe_fetch(index0)
+      unsafe_put(index0, unsafe_fetch(index1))
+      unsafe_put(index1, tmp)
     end
     self
   end
 
   # Reverses elements in place.
   def reverse_in_place : self
-    i = 0
-    j = size - 1
-    while i < j
-      tmp = unsafe_fetch(i)
-      unsafe_put(i, unsafe_fetch(j))
-      unsafe_put(j, tmp)
-      i = i + 1
-      j = j - 1
-    end
+    reverse_between(0, size - 1)
     self
   end
 
-  # Rotates elements in place by n positions.
+  # Rotates elements in place so that the element at position n comes
+  # first; a negative n rotates the other way. Three reversals, no
+  # scratch space.
   def rotate_in_place(n : Int32 = 1) : self
     return self if size <= 1
     k = n % size
     k = k + size if k < 0
     return self if k == 0
-
-    # Reverse 0...k, reverse k...size, then reverse whole
-    # 1. reverse 0...k
-    i = 0
-    j = k - 1
-    while i < j
-      tmp = unsafe_fetch(i)
-      unsafe_put(i, unsafe_fetch(j))
-      unsafe_put(j, tmp)
-      i = i + 1
-      j = j - 1
-    end
-    # 2. reverse k...size
-    i = k
-    j = size - 1
-    while i < j
-      tmp = unsafe_fetch(i)
-      unsafe_put(i, unsafe_fetch(j))
-      unsafe_put(j, tmp)
-      i = i + 1
-      j = j - 1
-    end
-    # 3. reverse 0...size
-    reverse_in_place
+    reverse_between(0, k - 1)
+    reverse_between(k, size - 1)
+    reverse_between(0, size - 1)
+    self
   end
 
-  # Fills entire container with value.
+  private def reverse_between(i : Int32, j : Int32) : Nil
+    while i < j
+      tmp = unsafe_fetch(i)
+      unsafe_put(i, unsafe_fetch(j))
+      unsafe_put(j, tmp)
+      i = i + 1
+      j = j - 1
+    end
+  end
+
+  # Every element becomes value.
   def fill(value : Elem) : self
     i = 0
     while i < size
@@ -475,20 +491,24 @@ pub trait IndexableMutable : Indexable
     self
   end
 
-  # Fills range with value.
+  # The count elements from offset become value. A negative count is a
+  # mistake; a window that runs past the end is refused by naming the
+  # index that would have been written.
   def fill(value : Elem, offset : Int32, count : Int32) : self
     raise "negative count: #{count}" if count < 0
-    actual_offset = offset < 0 ? offset + size : offset
-    raise "offset out of range" if actual_offset < 0 || actual_offset + count > size
+    asked = offset
+    offset = size + offset if offset < 0
+    raise "index #{asked} out of range for #{size} elements" if offset < 0 || offset > size
+    raise "index #{asked + count} out of range for #{size} elements" if offset + count > size
     i = 0
     while i < count
-      unsafe_put(actual_offset + i, value)
+      unsafe_put(offset + i, value)
       i = i + 1
     end
     self
   end
 
-  # Fills container by yielding each index.
+  # Every element becomes what the block answers for its index.
   def fill(& : Int32 -> Elem) : self
     i = 0
     while i < size
@@ -520,118 +540,95 @@ impl IndexableMutable for Array(T) forall T
   end
 end
 
+# The mutators the prelude's array does not have, written against its
+# public surface (`to_unsafe`, `<<`, `pop`, `unsafe_set_size`) rather than
+# its ivars, so the prelude's layout stays its own. `swap`, `fill`,
+# `reverse_in_place` and `rotate_in_place` come from `IndexableMutable`
+# above and are not repeated here.
 class ::Array(T)
-  # Inserts an element at the given index, shifting elements right.
+  # Inserts value at index, shifting what follows right. An index of
+  # `size` appends; `-1` also appends, as the position after the last.
   def insert(index : Int32, value : T) : Array(T)
-    actual = index < 0 ? index + @size + 1 : index
-    raise "index out of range: #{index} for size #{@size}" if actual < 0 || actual > @size
+    asked = index
+    index = size + index + 1 if index < 0
+    raise "index #{asked} out of range for #{size} elements" if index < 0 || index > size
     self << value
-    i = @size - 1
-    while i > actual
-      @buffer[i] = @buffer[i - 1]
+    buffer = to_unsafe
+    i = size - 1
+    while i > index
+      buffer[i] = buffer[i - 1]
       i = i - 1
     end
-    @buffer[actual] = value
+    buffer[index] = value
     self
   end
 
-  # Deletes and returns the element at the specified index, shifting left.
+  # Removes and answers the element at index, shifting what follows left.
   def delete_at(index : Int32) : T
-    actual = index < 0 ? index + @size : index
-    raise "index out of range: #{index} for size #{@size}" if actual < 0 || actual >= @size
-    val = @buffer[actual]
-    i = actual
-    while i < @size - 1
-      @buffer[i] = @buffer[i + 1]
+    asked = index
+    index = size + index if index < 0
+    raise "index #{asked} out of range for #{size} elements" if index < 0 || index >= size
+    buffer = to_unsafe
+    val = buffer[index]
+    i = index
+    while i < size - 1
+      buffer[i] = buffer[i + 1]
       i = i + 1
     end
-    @size = @size - 1
+    pop
     val
   end
 
-  # Removes elements for which block returns true.
+  # Removes every element the block answers true for, in place, keeping
+  # the order of the rest; one pass, no per-element shifting.
   def delete_if(& : T -> Bool) : Array(T)
+    buffer = to_unsafe
+    kept = 0
     i = 0
-    while i < @size
-      if yield @buffer[i]
-        delete_at(i)
-      else
-        i = i + 1
+    while i < size
+      value = buffer[i]
+      unless yield value
+        buffer[kept] = value
+        kept = kept + 1
       end
+      i = i + 1
     end
+    unsafe_set_size(kept)
     self
   end
 
-  # Keeps elements for which block returns true.
+  # Keeps only the elements the block answers true for, in place.
   def keep_if(& : T -> Bool) : Array(T)
     delete_if { |x| !(yield x) }
   end
 
-  # Clears all elements from the array.
+  # Forgets every element.
   def clear : Array(T)
-    @size = 0
+    unsafe_set_size(0)
     self
   end
 
-  # Rotates the array by n positions, returning a new Array.
-  def rotate(n : Int32 = 1) : Array(T)
+  # A copy rotated so that the element at position n comes first; the
+  # past participle names the copy, as `sorted` and `reversed` do, and
+  # `rotate_in_place` is the one that moves this array.
+  def rotated(n : Int32 = 1) : Array(T)
     copy = dup
     copy.rotate_in_place(n)
     copy
   end
 
-  # Swaps two elements in place.
-  def swap(index0 : Int32, index1 : Int32) : Array(T)
-    actual0 = index0 < 0 ? index0 + @size : index0
-    actual1 = index1 < 0 ? index1 + @size : index1
-    raise "index out of range" if actual0 < 0 || actual0 >= @size || actual1 < 0 || actual1 >= @size
-    unless actual0 == actual1
-      tmp = @buffer[actual0]
-      @buffer[actual0] = @buffer[actual1]
-      @buffer[actual1] = tmp
-    end
-    self
-  end
-
-  # Fills the array with value.
-  def fill(value : T) : Array(T)
-    i = 0
-    while i < @size
-      @buffer[i] = value
-      i = i + 1
-    end
-    self
-  end
-
-  # Fills the array with value in the specified range.
-  def fill(value : T, offset : Int32, count : Int32) : Array(T)
-    raise "negative count: #{count}" if count < 0
-    actual_offset = offset < 0 ? offset + @size : offset
-    raise "offset out of range" if actual_offset < 0 || actual_offset + count > @size
-    i = 0
-    while i < count
-      @buffer[actual_offset + i] = value
-      i = i + 1
-    end
-    self
-  end
-
-  # Removes nil elements in place.
+  # Removes the nils in place.
   def compact_in_place : Array(T)
     delete_if { |x| x.nil? }
   end
 
-  # Cartesian product of two arrays.
-  def product(other : Array(U)) : Array(Tuple(T, U)) forall U
-    result = Array(Tuple(T, U)).new(@size * other.size)
-    i = 0
-    while i < @size
-      j = 0
-      while j < other.size
-        result << {@buffer[i], other[j]}
-        j = j + 1
-      end
-      i = i + 1
+  # Every pair with an element of the other array, this array's order
+  # first. Not `product`: on an `Enumerable`, `product` is the
+  # multiplicative fold, and one name means one thing.
+  def cartesian(other : Array(U)) : Array(Tuple(T, U)) forall U
+    result = Array(Tuple(T, U)).new(size * other.size)
+    each do |a|
+      other.each { |b| result << {a, b} }
     end
     result
   end

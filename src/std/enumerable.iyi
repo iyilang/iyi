@@ -1,11 +1,11 @@
-# `Enumerable`, ported — SPEC.md II.6.
+# `Enumerable` — SPEC.md II.6.
 #
-# The load-bearing abstraction of Crystal's standard library: 71 method names
-# in 117 defs, written against a single `abstract def each`, included by 17
-# types. If traits
-# cannot express this shape, the library cannot be written in Crystal's idiom
-# and the ergonomics half of the pitch fails. So this file is the evidence for
-# the claim, not an illustration of it.
+# The load-bearing abstraction of a collections library: 71 method names
+# written against a single `abstract def each`, shared by every type that
+# can yield its elements. If traits cannot express this shape, the library
+# cannot be written in the idiom the pitch promises and the ergonomics half
+# of it fails. So this file is the evidence for the claim, not an
+# illustration of it.
 #
 #   ./bin/crystal run samples/iyi/collections.iyi
 #
@@ -28,17 +28,16 @@
 #     identity belongs to the type, since an empty collection has no element
 #     to ask.
 #
-# What the port corrected in the spec's own sketch:
+# What this file corrected in the spec's own sketch:
 #
 #   * II.6 writes `abstract def each(&block : Elem -> Nil)`. That form
 #     *captures* the block into a `Proc`, and a captured block cannot `return`
 #     from the enclosing method — which kills early exit in `find`, `any?`,
 #     `all?`, `none?`, `first`, `take`, `take_while`, `empty?`, `index` and
 #     `find_value`. The block has to be typed without being captured, as
-#     `& : Elem -> Nil`, and yielded. That is the form the Crystal stdlib uses
-#     for the same reason.
-#   * Crystal spells two of these `find!` and `index!`. With `!` out of
-#     identifiers (III.1.7) the port takes the convention `Enumerable` already
+#     `& : Elem -> Nil`, and yielded.
+#   * Two of these are elsewhere spelled `find!` and `index!`. With `!` out of
+#     identifiers (III.1.7) the file takes the convention `Enumerable` already
 #     uses everywhere else — `max?`/`max`, `first?`/`first` — and applies it
 #     here too: `?` is the nilable one, the plain name raises. Dropping `!`
 #     made the library *more* consistent, not less.
@@ -112,16 +111,15 @@ pub trait Enumerable
 
   # ---- searching -----------------------------------------------------------
   #
-  # `find` and `index` answer nil when nothing matched, which is Crystal's
-  # meaning for both names, `Indexable`'s, `Array`'s and what every other
-  # library spells the same way.
+  # `find` and `index` answer nil when nothing matched, which is the
+  # meaning `Indexable`, `Array` and every other library give both names.
   #
   # They raised here for a while, on a rule this trait had stated and
   # generalised too far: `?` for the nilable one, the plain name for the
   # one that raises, "the convention `max?`/`max` and `first?`/`first`
-  # already use". Those two are not that rule. Crystal's plain `max` raises
+  # already use". Those two are not that rule. The plain `max` raises
   # because an empty collection has no largest element — a question with no
-  # answer — and its plain `find` answers nil because *not finding* is the
+  # answer — and the plain `find` answers nil because *not finding* is the
   # ordinary outcome of a search. The rule is "the plain name is the common
   # case", and applying the wrong half of it here made one name mean two
   # things inside this library: `Enumerable#index` raised while
@@ -135,8 +133,7 @@ pub trait Enumerable
   # the raising default put the recoverable answer out of reach.
   #
   # `max?`/`max`, `min?`/`min`, `first?`/`first` and `minmax?`/`minmax` keep
-  # their pairs: there the plain name raising *is* the common case, and it
-  # is what Crystal answers.
+  # their pairs: there the plain name raising *is* the common case.
 
   def find(& : Elem -> Bool) : Elem?
     each { |e| return e if yield e }
@@ -283,8 +280,8 @@ pub trait Enumerable
   end
 
   # The separator defaults to nothing, the way `Array#join` (src/iyi/array.iyi)
-  # and `Indexable#join` already default it: a name shared with Crystal means
-  # the same thing here (SPEC.md III.1.7a), and `slice.join` has to compile
+  # and `Indexable#join` already default it: one name means one thing
+  # (SPEC.md III.1.7a), and `slice.join` has to compile
   # where `array.join` does. A mandatory separator made the arity of one name
   # depend on which tower the receiver came from.
   def join(separator : String = "") : String
@@ -577,7 +574,7 @@ pub trait Enumerable
   end
 
   def zip(other : O) : Array(Tuple(Elem, O::Elem)) forall O : Enumerable
-    # SPEC.md II.6 finding 6: Crystal's
+    # SPEC.md II.6 finding 6: a
     # `zip(*others : Indexable | Iterable | Iterator)` is duck typing left over
     # from having no traits. One bound replaces the union, and `O::Elem` names
     # what the other collection yields without the caller stating it.
@@ -751,11 +748,21 @@ impl Enumerable for Array(T) forall T
   type Elem = T
 end
 
+# The prelude's `Set` likewise: `Set#each` is the prelude's own, so the
+# impl answers only the element type. It lives here for the same reason
+# `Array`'s does — R-3 puts an impl with the trait or with the type, and
+# the prelude does not know std exists — and std/set, which adds the set
+# algebra to the same type, imports this module so that a caller of one
+# gets both.
+impl Enumerable for Set(T) forall T
+  type Elem = T
+end
+
 # ---------------------------------------------------------------------------
 # Method coverage
 # ---------------------------------------------------------------------------
 #
-# All 71 method names from Crystal's Enumerable are ported here against `each`.
+# All 71 method names of the trait are written here against `each`.
 # Methods taking block transforms map element keys into `Cmp`, `Num`, or
 # `Hashable` traits, providing full coverage for sorting, min/max calculations,
 # grouping, counting, and slicing.

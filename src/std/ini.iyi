@@ -1,48 +1,33 @@
-# Standard INI configuration parsing and building library for iyi.
+# INI configuration text: `[section]` headers, `key = value` lines,
+# comments opened by `#` or `;`, and keys before the first header filed
+# under the section named `""`.
 #
-# Provides parsing and generation of INI-style configuration files conforming to
-# Crystal's INI API:
-#   * Section extraction ([section])
-#   * Key-value assignment (key=value, key = value)
-#   * Top-level keys without a section header (empty section "")
-#   * Comment skipping for lines starting with '#' or ';'
-#   * Precise error locations with ParseException (line_number, column_number, location)
-#   * INI generation via INI.build with configurable spacing
+# `INI.parse` reads a String or an IO into `Hash(String, Hash(String, String))`
+# and panics with a located sentence for what it refuses: a `[` with no
+# `]` (`unterminated section at line 3, column 6`), anything after the
+# `]` including a trailing space (`data after section at line 3, column 7`),
+# and a line that is neither header, comment nor assignment (`expected
+# declaration at line 4, column 4`). The column counts characters, so a
+# section named `[café]` is a section and not an error. A line of nothing
+# but whitespace is skipped like an empty one. Repeating a header
+# continues the earlier section; a value keeps every `=` after its first.
+#
+# `INI.build(ini, space)` and `INI.build(io, ini, space)` write the same
+# text: top-level keys first, then each section as `[name]`, its keys and
+# one blank line. `space` chooses `key = value` over `key=value` and is
+# false unless asked, so `parse(build(x))` and `build(parse(text))` round
+# trip for text written the compact way. The IO form takes the IO first,
+# the way `io.write` reads, and calls only `write`.
 
 module std/ini
 
 pub struct INI
-  # Exception raised on an INI parse error.
-  pub class ParseException < Exception
-    getter line_number : Int32
-    getter column_number : Int32
-    getter message : String
-
-    def initialize(message : String, @line_number : Int32, @column_number : Int32)
-      @message = "#{message} at line #{@line_number}, column #{@column_number}"
-    end
-
-    def location : Tuple(Int32, Int32)
-      {@line_number, @column_number}
-    end
-  end
-
-  # Parses INI-style configuration from the given string.
-  # Raises a `ParseException` on syntax errors.
   def self.parse(string : String) : Hash(String, Hash(String, String))
     parse_lines(string.lines)
   end
 
-  # Parses INI-style configuration from the given IO.
-  def self.parse(io) : Hash(String, Hash(String, String))
-    if io.is_a?(String)
-      return parse(io)
-    end
-    lines = [] of String
-    io.each_line do |l|
-      lines << l
-    end
-    parse_lines(lines)
+  def self.parse(io : IO) : Hash(String, Hash(String, String))
+    parse_lines(io.read_all.lines)
   end
 
   private def self.parse_lines(lines : Array(String)) : Hash(String, Hash(String, String))
@@ -55,26 +40,19 @@ pub struct INI
       lineno += 1
       raw = line.to_unsafe
       len = line.bytesize
+      len -= 1 if len > 0 && raw[len - 1] == 13_u8 # a CRLF file's '\r'
 
-      # Skip leading whitespace
       offset = 0
       while offset < len && (raw[offset] == 32_u8 || raw[offset] == 9_u8)
         offset += 1
       end
-
-      # Empty line or comment line
-      if offset >= len
-        next
-      end
+      next if offset >= len
 
       first_byte = raw[offset]
-      if first_byte == 35_u8 || first_byte == 59_u8 # '#' or ';'
-        next
-      end
+      next if first_byte == 35_u8 || first_byte == 59_u8 # '#' or ';'
 
-      case first_byte
-      when 91_u8 # '['
-        end_idx : Int32? = nil
+      if first_byte == 91_u8 # '['
+        end_idx = -1
         i = offset + 1
         while i < len
           if raw[i] == 93_u8 # ']'
@@ -84,19 +62,18 @@ pub struct INI
           i += 1
         end
 
-        raise ParseException.new("Unterminated section", lineno, line.size).message unless end_idx
-        raise ParseException.new("Data after section", lineno, end_idx + 1).message unless end_idx == line.size - 1
+        raise "unterminated section at line #{lineno}, column #{column(line, len)}" if end_idx < 0
+        raise "data after section at line #{lineno}, column #{column(line, end_idx + 1)}" unless end_idx == len - 1
 
-        current_section_name = line[offset + 1, end_idx - offset - 1]
-        if existing = ini[current_section_name]?
+        name = line[offset + 1, end_idx - offset - 1]
+        if existing = ini[name]?
           current_section = existing
         else
-          new_sec = Hash(String, String).new
-          ini[current_section_name] = new_sec
-          current_section = new_sec
+          current_section = Hash(String, String).new
+          ini[name] = current_section
         end
       else
-        eq_idx : Int32? = nil
+        eq_idx = -1
         i = offset
         while i < len
           if raw[i] == 61_u8 # '='
@@ -106,11 +83,11 @@ pub struct INI
           i += 1
         end
 
-        raise ParseException.new("Expected declaration", lineno, line.size).message unless eq_idx
+        raise "expected declaration at line #{lineno}, column #{column(line, len)}" if eq_idx < 0
 
         key = line[offset, eq_idx - offset].strip
-        val = line[eq_idx + 1, line.bytesize - eq_idx - 1].strip
-        current_section[key] = val
+        value = line[eq_idx + 1, len - eq_idx - 1].strip
+        current_section[key] = value
       end
     end
 
@@ -120,78 +97,49 @@ pub struct INI
     ini
   end
 
-  # Generates INI-formatted text from a nested Hash of sections and properties.
-  # If `space` is true (default), key-value pairs are separated with spaces: `key = value`.
-  # If `space` is false, key-value pairs are compact: `key=value`.
-  def self.build(ini : Hash(String, Hash(String, String)), space : Bool = true) : String
-    first_section = true
-    delim = space ? " = " : "="
+  # The 1-based character column of byte *index* in *line*: every byte
+  # that is not a UTF-8 continuation byte begins a character.
+  private def self.column(line : String, index : Int32) : Int32
+    raw = line.to_unsafe
+    count = 0
+    i = 0
+    while i < index
+      count += 1 if (raw[i] & 0xC0_u8) != 0x80_u8
+      i += 1
+    end
+    count + 1
+  end
+
+  def self.build(ini : Hash(String, Hash(String, String)), space : Bool = false) : String
     parts = [] of String
+    delim = space ? " = " : "="
 
     if top = ini[""]?
-      top.each do |key, val|
+      top.each do |key, value|
         parts << key
         parts << delim
-        parts << val
+        parts << value
         parts << "\n"
       end
-      first_section = false unless top.empty?
     end
 
     ini.each do |section, properties|
-      if section == ""
-        next
-      end
-
-      if first_section
-        first_section = false
-      else
-        parts << "\n"
-      end
-
+      next if section.empty?
       parts << "["
       parts << section
       parts << "]\n"
-      properties.each do |key, val|
+      properties.each do |key, value|
         parts << key
         parts << delim
-        parts << val
+        parts << value
         parts << "\n"
       end
+      parts << "\n"
     end
     parts.join("")
   end
 
-  # Streams INI-formatted text into an IO.
-  def self.build(ini : Hash(String, Hash(String, String)), io, space : Bool = true) : Nil
-    first_section = true
-    delim = space ? " = " : "="
-
-    # First write top-level properties (empty section name) if present
-    if top = ini[""]?
-      top.each do |key, val|
-        io << key << delim << val << "\n"
-      end
-      first_section = false unless top.empty?
-    end
-
-    # Write each named section
-    ini.each do |section, properties|
-      if section == ""
-        next
-      end
-
-      if first_section
-        first_section = false
-      else
-        io << "\n"
-      end
-
-      io << "[" << section << "]\n"
-      properties.each do |key, val|
-        io << key << delim << val << "\n"
-      end
-    end
-    nil
+  def self.build(io : IO, ini : Hash(String, Hash(String, String)), space : Bool = false) : Nil
+    io.write(build(ini, space))
   end
 end

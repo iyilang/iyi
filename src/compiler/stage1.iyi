@@ -1,0 +1,39 @@
+# The stage-one compiler entry point: a whole-compiler executable built from
+# src/compiler/**/*.iyi with the bootstrap compiler (bin/iyi), rather than
+# wiring iyi components into Crystal's compiler in-process, which the heap
+# boundary makes impossible.
+#
+# This is the ported command driver (compiler/command/driver) dispatched over
+# Program.args: the same argv surface the shipped compiler serves, so every
+# command the driver ports (build, check, tool, mod, version, help, ...) is
+# dispatched for real, not one hardcoded path.
+
+module compiler/stage1
+
+import compiler/command/driver
+
+using compiler/command/driver::{CommandDriver, OutputBuffer, CommandResult}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run_driver : Nil
+  CommandDriver.program_name = "iyi"
+  driver = CommandDriver.new(Program.args)
+  result = driver.run
+  stdout_text = result.stdout_output
+  if !stdout_text.empty?
+    print stdout_text
+  end
+  stderr_text = result.stderr_output
+  if !stderr_text.empty?
+    STDERR.puts stderr_text
+  end
+  code = result.exit_code
+  if code
+    LibC.exit(code)
+  end
+end
+
+run_driver

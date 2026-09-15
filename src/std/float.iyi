@@ -26,6 +26,7 @@
 module std/float
 
 import std/int
+import std/number
 
 {% begin %}
   {% ints = %w(Int8 Int16 Int32 Int64 Int128 UInt8 UInt16 UInt32 UInt64 UInt128) %}
@@ -379,5 +380,11 @@ module Float32Text
     end
 
     IyiFloatText.format(negative, digits, count, k)
+  end
+end
+
+struct ::Float32
+  def round(mode : Std::Number::RoundingMode) : Float32
+    to_f64.round(mode).to_f32
   end
 end

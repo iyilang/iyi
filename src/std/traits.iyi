@@ -62,24 +62,64 @@ pub trait Hashable
   abstract def hash_key : Int32
 end
 
-impl Cmp for Int32
-  # Compared, not subtracted: a difference is only a comparison while it
-  # fits, and `2000000000.cmp(-2000000000)` left `Int32` and panicked with
-  # "arithmetic overflow" - so every `Enumerable` method that reads `cmp`
-  # (`sorted`, `min`, `max`, `includes?`, `clamp`) refused two numbers that
-  # `<` answers for.
+# Compared, not subtracted: a difference is only a comparison while it
+# fits, and `2000000000.cmp(-2000000000)` left `Int32` and panicked with
+# "arithmetic overflow" - so every `Enumerable` method that reads `cmp`
+# (`sorted`, `min`, `max`, `includes?`, `clamp`) refused two numbers that
+# `<` answers for. The same three-way is used for every prelude integer.
+{% begin %}
+  {% prelude_ints = [
+       {"Int32", "0", "1"},
+       {"Int64", "0_i64", "1_i64"},
+       {"UInt8", "0_u8", "1_u8"},
+       {"UInt64", "0_u64", "1_u64"},
+     ] %}
+  {% for t in prelude_ints %}
+    impl Cmp for {{ t[0].id }}
+      def cmp(other : self) : Int32
+        self < other ? -1 : (self == other ? 0 : 1)
+      end
+    end
+
+    impl Num for {{ t[0].id }}
+      def self.zero : self
+        {{ t[1].id }}
+      end
+
+      def self.one : self
+        {{ t[2].id }}
+      end
+
+      def add(other : self) : self
+        self + other
+      end
+
+      def mul(other : self) : self
+        self * other
+      end
+    end
+
+    impl Hashable for {{ t[0].id }}
+      def hash_key : Int32
+        hash
+      end
+    end
+  {% end %}
+{% end %}
+
+impl Cmp for Float64
   def cmp(other : self) : Int32
     self < other ? -1 : (self == other ? 0 : 1)
   end
 end
 
-impl Num for Int32
+impl Num for Float64
   def self.zero : self
-    0
+    0.0
   end
 
   def self.one : self
-    1
+    1.0
   end
 
   def add(other : self) : self
@@ -91,9 +131,9 @@ impl Num for Int32
   end
 end
 
-impl Hashable for Int32
+impl Hashable for Float64
   def hash_key : Int32
-    self
+    hash
   end
 end
 
@@ -107,6 +147,131 @@ end
 
 impl Hashable for String
   def hash_key : Int32
-    size
+    hash # FNV, not the length
+  end
+end
+
+impl Cmp for Char
+  def cmp(other : self) : Int32
+    self < other ? -1 : (self == other ? 0 : 1)
+  end
+end
+
+impl Hashable for Char
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Hashable for Bool
+  def hash_key : Int32
+    self ? 1231 : 1237
+  end
+end
+
+# The prelude hashed only `Int32`. Every other integer, and every `Char`,
+# used `Object#hash` — the type's id — so a `Hash` of them was one slot
+# and `Hashable#hash_key` would have been the same lie as `String#hash_key`
+# answering the length.
+struct ::Int64
+  def hash : Int32
+    mix = self ^ (self >> 32)
+    mix = mix ^ (mix >> 16)
+    (mix & 2147483647_i64).to_i32
+  end
+end
+
+struct ::UInt64
+  def hash : Int32
+    mix = self ^ unsafe_shr(32_u64)
+    mix = mix ^ mix.unsafe_shr(16_u64)
+    (mix & 2147483647_u64).to_i32
+  end
+end
+
+struct ::UInt8
+  def hash : Int32
+    to_i32
+  end
+end
+
+struct ::Char
+  def hash : Int32
+    ord
+  end
+end
+
+# The rest of the integer tower and Float32: the types are prelude-declared
+# (R-3 puts the impl next to the trait), the arithmetic that makes them
+# numbers is std/int and std/float. A program that sums `Int8` loads those.
+{% begin %}
+  {% rest = [
+       {"Int8", "0_i8", "1_i8"},
+       {"Int16", "0_i16", "1_i16"},
+       {"UInt16", "0_u16", "1_u16"},
+       {"UInt32", "0_u32", "1_u32"},
+       {"Int128", "0_i128", "1_i128"},
+       {"UInt128", "0_u128", "1_u128"},
+     ] %}
+  {% for t in rest %}
+    impl Cmp for {{ t[0].id }}
+      def cmp(other : self) : Int32
+        self < other ? -1 : (self == other ? 0 : 1)
+      end
+    end
+
+    impl Num for {{ t[0].id }}
+      def self.zero : self
+        {{ t[1].id }}
+      end
+
+      def self.one : self
+        {{ t[2].id }}
+      end
+
+      def add(other : self) : self
+        self + other
+      end
+
+      def mul(other : self) : self
+        self * other
+      end
+    end
+
+    impl Hashable for {{ t[0].id }}
+      def hash_key : Int32
+        hash
+      end
+    end
+  {% end %}
+{% end %}
+
+impl Cmp for Float32
+  def cmp(other : self) : Int32
+    self < other ? -1 : (self == other ? 0 : 1)
+  end
+end
+
+impl Num for Float32
+  def self.zero : self
+    0.0_f32
+  end
+
+  def self.one : self
+    1.0_f32
+  end
+
+  def add(other : self) : self
+    self + other
+  end
+
+  def mul(other : self) : self
+    self * other
+  end
+end
+
+impl Hashable for Float32
+  def hash_key : Int32
+    hash
   end
 end

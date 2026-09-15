@@ -42,7 +42,7 @@ fi
 
 echo
 echo "== every float section reported"
-for phrase in "== arithmetic" "== constants"; do
+for phrase in "== arithmetic" "== constants" "== traits"; do
   if ! grep -q "$phrase" "$WORK/float-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

@@ -42,7 +42,7 @@ fi
 
 echo
 echo "== every int section reported"
-for phrase in "== add" "== bits"; do
+for phrase in "== add" "== bits" "== traits"; do
   if ! grep -q "$phrase" "$WORK/int-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

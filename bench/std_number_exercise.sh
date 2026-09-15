@@ -42,7 +42,7 @@ fi
 
 echo
 echo "== every number section reported"
-for phrase in "== abs" "== sign"; do
+for phrase in "== abs" "== sign" "== round"; do
   if ! grep -q "$phrase" "$WORK/number-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -64,10 +64,10 @@ mkdir -p "$WORK/patched/std"
 python3 - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/number.iyi").read_text()
-old = 'self * self'
+old = 'even == f ? f : f + 1.0'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/number.iyi").write_text(src.replace(old, 'self', 1))
+Path("$WORK/patched/std/number.iyi").write_text(src.replace(old, 'f + 1.0', 1))
 PY
 if [ $? -ne 0 ]; then
   echo "  the patch did not apply"

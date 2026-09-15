@@ -14,6 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/number
+using std/number::{RoundingMode}
 
 puts "== abs"
 assert_true (-7).abs == 7, "abs"
@@ -27,5 +28,21 @@ assert_true 0.sign == 0, "zero"
 assert_true 4.sign == 1, "pos"
 assert_true 0.zero?, "zero?"
 puts "  sign and zero?"
+
+puts "\n== round"
+assert_true 2.5.round(RoundingMode::TiesEven) == 2.0, "ties even 2.5"
+assert_true 2.5.round(RoundingMode::TiesAway) == 3.0, "ties away 2.5"
+assert_true 2.5.round(RoundingMode::ToZero) == 2.0, "to zero 2.5"
+assert_true 2.5.round(RoundingMode::ToPositive) == 3.0, "to positive 2.5"
+assert_true 2.5.round(RoundingMode::ToNegative) == 2.0, "to negative 2.5"
+assert_true (-2.5).round(RoundingMode::TiesEven) == -2.0, "ties even -2.5"
+assert_true (-2.5).round(RoundingMode::TiesAway) == -3.0, "ties away -2.5"
+assert_true (-2.5).round(RoundingMode::ToZero) == -2.0, "to zero -2.5"
+assert_true (-2.5).round(RoundingMode::ToPositive) == -2.0, "to positive -2.5"
+assert_true (-2.5).round(RoundingMode::ToNegative) == -3.0, "to negative -2.5"
+assert_true 3.5.round(RoundingMode::TiesEven) == 4.0, "ties even 3.5"
+assert_true 2.5.round == 3.0, "no-arg round is still ties away"
+assert_true 5.round(RoundingMode::ToZero) == 5, "int identity"
+puts "  the mode is the rounding"
 
 puts "\nALL CHECKS PASSED"

@@ -14,6 +14,10 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/int
+import std/enumerable
+import std/list
+using std/enumerable::{Enumerable}
+using std/list::{List}
 
 puts "== add"
 assert_true 1_u16 + 2_u16 == 3_u16, "u16"
@@ -25,5 +29,11 @@ puts "\n== bits"
 assert_true 3_u16.popcount == 2, "popcount 0b11"
 assert_true 1_u16.bit_length == 1, "bit_length"
 puts "  popcount and bit_length"
+
+puts "\n== traits"
+assert_true 1_i8.cmp(2_i8) == -1, "i8 cmp"
+assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"
+assert_true List(UInt16).new([] of UInt16).sum == 0_u16, "u16 empty sum"
+puts "  Cmp and Num for the rest of the tower"
 
 puts "\nALL CHECKS PASSED"

@@ -14,6 +14,12 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/float
+import std/number
+import std/enumerable
+import std/list
+using std/number::{RoundingMode}
+using std/enumerable::{Enumerable}
+using std/list::{List}
 
 puts "== arithmetic"
 assert_true 1.5_f32 + 1.5_f32 == 3.0_f32, "add"
@@ -25,5 +31,11 @@ puts "\n== constants"
 assert_true Float32::MAX > 1.0_f32, "max"
 assert_true Float32::MIN < 0.0_f32, "min"
 puts "  MAX, MIN"
+
+puts "\n== traits"
+assert_true 1.5_f32.cmp(2.0_f32) == -1, "f32 cmp"
+assert_true List(Float32).new([1.5_f32, 2.5_f32]).sum == 4.0_f32, "f32 sum"
+assert_true 2.5_f32.round(RoundingMode::TiesEven) == 2.0_f32, "f32 ties even"
+puts "  Num and round(mode)"
 
 puts "\nALL CHECKS PASSED"

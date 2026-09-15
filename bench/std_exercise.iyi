@@ -494,4 +494,25 @@ assert_eq(5.cmp(5), 0, "cmp: equal")
 assert_eq("a".cmp("b"), -1, "cmp: strings")
 assert_eq([2000000000, -2000000000].sorted[0], -2000000000, "cmp: sorted reads it")
 
+# The trait named Hashable, then hashed by the length; "aa" and "bb" were one
+# key. Int64/UInt64/UInt8/Char hashed as their type, so a Hash of them was
+# one slot. Num was only Int32, so List(Int64).sum and List(Float64).sum
+# did not compile, and Char could not be sorted.
+assert_true("aa".hash_key != "bb".hash_key, "Hashable: String hash_key is the string")
+assert_eq("aa".hash_key, "aa".hash, "Hashable: String hash_key is hash")
+assert_true(1_i64.hash != 2_i64.hash, "hash: Int64 values differ")
+assert_true(1_u64.hash != 2_u64.hash, "hash: UInt64 values differ")
+assert_true(1_u8.hash != 2_u8.hash, "hash: UInt8 values differ")
+assert_true('a'.hash != 'b'.hash, "hash: Char values differ")
+assert_eq(List(Int64).new([1_i64, 2_i64, 3_i64]).sum.to_i32, 6, "enum: Int64 sum")
+assert_eq(List(Int64).new([] of Int64).sum.to_i32, 0, "enum: Int64 empty sum")
+assert_true(List(Float64).new([1.5, 2.5]).sum == 4.0, "enum: Float64 sum")
+assert_true(List(Float64).new([] of Float64).sum == 0.0, "enum: Float64 empty sum")
+assert_str(List(Char).new(['c', 'a', 'b']).sorted.join, "abc", "enum: Char sorted")
+h64 = {} of Int64 => Int32
+h64[1_i64] = 10
+h64[2_i64] = 20
+assert_eq(h64[1_i64], 10, "hash: Int64 key 1")
+assert_eq(h64[2_i64], 20, "hash: Int64 key 2")
+
 puts "all std checks passed"

@@ -1,11 +1,11 @@
 module std/number
 
-enum RoundingMode
-  TIES_EVEN
-  TIES_AWAY
-  TO_ZERO
-  TO_POSITIVE
-  TO_NEGATIVE
+pub enum RoundingMode
+  TiesEven
+  TiesAway
+  ToZero
+  ToPositive
+  ToNegative
 end
 
 struct ::Number
@@ -55,7 +55,36 @@ struct ::Number
     {q, r}
   end
 
-  def round(mode : RoundingMode = RoundingMode::TIES_EVEN) : self
-    round
+  # An integer is already whole: every mode answers self. `Float64` names
+  # the mode below; `round` with no arguments stays the prelude's (ties
+  # away from zero).
+  def round(mode : Std::Number::RoundingMode = Std::Number::RoundingMode.new(0)) : self
+    self
+  end
+end
+
+struct ::Float64
+  def round(mode : Std::Number::RoundingMode) : Float64
+    return self if self != self || abs >= 9007199254740992.0
+    if mode == Std::Number::RoundingMode::ToZero
+      self < 0.0 ? ceil : floor
+    elsif mode == Std::Number::RoundingMode::ToPositive
+      ceil
+    elsif mode == Std::Number::RoundingMode::ToNegative
+      floor
+    elsif mode == Std::Number::RoundingMode::TiesAway
+      round
+    else
+      f = floor
+      d = self - f
+      if d < 0.5
+        f
+      elsif d > 0.5
+        f + 1.0
+      else
+        even = (f / 2.0).floor * 2.0
+        even == f ? f : f + 1.0
+      end
+    end
   end
 end

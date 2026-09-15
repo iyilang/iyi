@@ -66,6 +66,23 @@
 
 ### Fixed
 
+- **The scalar traits covered `Int32` and hashed a string by its length.**
+  `List(Int64).sum` and `List(Float64).sum` did not compile, `Char` could
+  not be sorted, and `"aa"` and `"bb"` were one `hash_key`. `Int64`,
+  `UInt64`, `UInt8` and `Char` hashed as their type, so a `Hash` of them
+  was one slot. `Cmp`/`Num`/`Hashable` now cover the prelude integers,
+  `Float64`, `Float32`, the rest of the `std/int` tower, `String`, `Char`
+  and `Bool`; `hash_key` is the value's `hash`. `bench/std_exercise.sh`
+  holds it.
+
+- **`Number#round(mode)` ignored the mode, and `RoundingMode` was not
+  `pub`.** The default named `TIES_EVEN` in a scope that could not see
+  it, so even naming the mode failed to compile. The enum is `pub` as
+  `TiesEven` / `TiesAway` / `ToZero` / `ToPositive` / `ToNegative`; a
+  float uses the mode, an integer is already whole, and `round` with no
+  arguments stays the prelude's (ties away from zero).
+  `bench/std_number_exercise.sh` holds it.
+
 - **`File.exists?` on wasm32-wasi panicked with `File.read`'s sentence.**
   The predicate went through `path_open`, which this prelude does not
   have, and the panic named File rather than `exists?`. It is refused

@@ -1,0 +1,421 @@
+# Terminal ANSI colorization and text decoration for iyi.
+#
+# Pure iyi implementation conforming to Crystal's Colorize specification.
+
+module std/colorize
+
+module ::Colorize
+  enum ColorANSI
+    Default      = 39
+    Black        = 30
+    Red          = 31
+    Green        = 32
+    Yellow       = 33
+    Blue         = 34
+    Magenta      = 35
+    Cyan         = 36
+    LightGray    = 37
+    DarkGray     = 90
+    LightRed     = 91
+    LightGreen   = 92
+    LightYellow  = 93
+    LightBlue    = 94
+    LightMagenta = 95
+    LightCyan    = 96
+    White        = 97
+  end
+
+  struct Color256
+    getter value : UInt8
+
+    def initialize(@value : UInt8)
+    end
+
+    def to_u8 : UInt8
+      @value
+    end
+  end
+
+  struct ColorRGB
+    getter red : UInt8
+    getter green : UInt8
+    getter blue : UInt8
+
+    def initialize(@red : UInt8, @green : UInt8, @blue : UInt8)
+    end
+  end
+
+  alias Color = ColorANSI | Color256 | ColorRGB
+
+  enum Mode
+    Default   = 0
+    Bold      = 1
+    Dim       = 2
+    Underline = 4
+    Blink     = 5
+    Reverse   = 7
+    Hidden    = 8
+  end
+
+  @@enabled : Bool = true
+
+  def self.enabled? : Bool
+    @@enabled
+  end
+
+  def self.enabled : Bool
+    @@enabled
+  end
+
+  def self.enabled=(value : Bool) : Bool
+    @@enabled = value
+  end
+
+  def self.reset(io) : Nil
+    io.write("\e[0m") if @@enabled
+  end
+
+  def self.reset : Nil
+    reset(STDOUT)
+  end
+
+  def self.with : Object(String)
+    "".colorize
+  end
+
+  struct Object(T)
+    @target : T
+
+    def initialize(@target : T, @fore : Color? = nil, @back : Color? = nil, @mode : Mode = Mode::Default, @enabled : Bool = true)
+    end
+
+    def toggle(enabled : Bool) : self
+      Object(T).new(@target, @fore, @back, @mode, enabled)
+    end
+
+    private def parse_color(symbol : Symbol) : ColorANSI
+      case symbol
+      when :black         then ColorANSI::Black
+      when :red           then ColorANSI::Red
+      when :green         then ColorANSI::Green
+      when :yellow        then ColorANSI::Yellow
+      when :blue          then ColorANSI::Blue
+      when :magenta       then ColorANSI::Magenta
+      when :cyan          then ColorANSI::Cyan
+      when :light_gray    then ColorANSI::LightGray
+      when :dark_gray     then ColorANSI::DarkGray
+      when :light_red     then ColorANSI::LightRed
+      when :light_green   then ColorANSI::LightGreen
+      when :light_yellow  then ColorANSI::LightYellow
+      when :light_blue    then ColorANSI::LightBlue
+      when :light_magenta then ColorANSI::LightMagenta
+      when :light_cyan    then ColorANSI::LightCyan
+      when :white         then ColorANSI::White
+      else                     ColorANSI::Default
+      end
+    end
+
+    def fore(color : Color) : self
+      Object(T).new(@target, color, @back, @mode, @enabled)
+    end
+
+    def fore(color : Symbol) : self
+      fore(parse_color(color))
+    end
+
+    def fore(val : UInt8) : self
+      fore(Color256.new(val))
+    end
+
+    def fore(r : UInt8, g : UInt8, b : UInt8) : self
+      fore(ColorRGB.new(r, g, b))
+    end
+
+    def back(color : Color) : self
+      Object(T).new(@target, @fore, color, @mode, @enabled)
+    end
+
+    def back(color : Symbol) : self
+      back(parse_color(color))
+    end
+
+    def back(val : UInt8) : self
+      back(Color256.new(val))
+    end
+
+    def back(r : UInt8, g : UInt8, b : UInt8) : self
+      back(ColorRGB.new(r, g, b))
+    end
+
+    def on(color) : self
+      back(color)
+    end
+
+    def mode(mode : Mode) : self
+      Object(T).new(@target, @fore, @back, mode, @enabled)
+    end
+
+    def mode(sym : Symbol) : self
+      m = case sym
+          when :bold      then Mode::Bold
+          when :dim       then Mode::Dim
+          when :underline then Mode::Underline
+          when :blink     then Mode::Blink
+          when :reverse   then Mode::Reverse
+          when :hidden    then Mode::Hidden
+          else                 Mode::Default
+          end
+      mode(m)
+    end
+
+    # Colors
+    def black : self
+      fore(:black)
+    end
+
+    def red : self
+      fore(:red)
+    end
+
+    def green : self
+      fore(:green)
+    end
+
+    def yellow : self
+      fore(:yellow)
+    end
+
+    def blue : self
+      fore(:blue)
+    end
+
+    def magenta : self
+      fore(:magenta)
+    end
+
+    def cyan : self
+      fore(:cyan)
+    end
+
+    def light_gray : self
+      fore(:light_gray)
+    end
+
+    def dark_gray : self
+      fore(:dark_gray)
+    end
+
+    def light_red : self
+      fore(:light_red)
+    end
+
+    def light_green : self
+      fore(:light_green)
+    end
+
+    def light_yellow : self
+      fore(:light_yellow)
+    end
+
+    def light_blue : self
+      fore(:light_blue)
+    end
+
+    def light_magenta : self
+      fore(:light_magenta)
+    end
+
+    def light_cyan : self
+      fore(:light_cyan)
+    end
+
+    def white : self
+      fore(:white)
+    end
+
+    def default : self
+      fore(:default)
+    end
+
+    # Backgrounds
+    def on_black : self
+      back(:black)
+    end
+
+    def on_red : self
+      back(:red)
+    end
+
+    def on_green : self
+      back(:green)
+    end
+
+    def on_yellow : self
+      back(:yellow)
+    end
+
+    def on_blue : self
+      back(:blue)
+    end
+
+    def on_magenta : self
+      back(:magenta)
+    end
+
+    def on_cyan : self
+      back(:cyan)
+    end
+
+    def on_light_gray : self
+      back(:light_gray)
+    end
+
+    def on_dark_gray : self
+      back(:dark_gray)
+    end
+
+    def on_light_red : self
+      back(:light_red)
+    end
+
+    def on_light_green : self
+      back(:light_green)
+    end
+
+    def on_light_yellow : self
+      back(:light_yellow)
+    end
+
+    def on_light_blue : self
+      back(:light_blue)
+    end
+
+    def on_light_magenta : self
+      back(:light_magenta)
+    end
+
+    def on_light_cyan : self
+      back(:light_cyan)
+    end
+
+    def on_white : self
+      back(:white)
+    end
+
+    def on_default : self
+      back(:default)
+    end
+
+    # Modes
+    def bold : self
+      mode(Mode::Bold)
+    end
+
+    def bright : self
+      bold
+    end
+
+    def dim : self
+      mode(Mode::Dim)
+    end
+
+    def underline : self
+      mode(Mode::Underline)
+    end
+
+    def blink : self
+      mode(Mode::Blink)
+    end
+
+    def reverse : self
+      mode(Mode::Reverse)
+    end
+
+    def hidden : self
+      mode(Mode::Hidden)
+    end
+
+    def to_s : String
+      target_str = @target.to_s
+      return target_str unless Colorize.enabled? && @enabled
+
+      parts = [] of String
+      if @mode.value != 0
+        parts << @mode.value.to_s
+      end
+
+      if fc = @fore
+        if fc.is_a?(ColorANSI)
+          parts << fc.value.to_s unless fc.value == 39
+        elsif fc.is_a?(Color256)
+          parts << "38;5"
+          parts << fc.value.to_s
+        elsif fc.is_a?(ColorRGB)
+          parts << "38;2"
+          parts << fc.red.to_s
+          parts << fc.green.to_s
+          parts << fc.blue.to_s
+        end
+      end
+
+      if bc = @back
+        if bc.is_a?(ColorANSI)
+          parts << (bc.value + 10).to_s unless bc.value == 39
+        elsif bc.is_a?(Color256)
+          parts << "48;5"
+          parts << bc.value.to_s
+        elsif bc.is_a?(ColorRGB)
+          parts << "48;2"
+          parts << bc.red.to_s
+          parts << bc.green.to_s
+          parts << bc.blue.to_s
+        end
+      end
+
+      return target_str if parts.empty?
+
+      escape = "\e[" + parts.join(";") + "m"
+      escape + target_str + "\e[0m"
+    end
+
+    def to_s(io) : Nil
+      io.write(to_s)
+    end
+
+    def inspect : String
+      to_s
+    end
+
+    def inspect(io) : Nil
+      io.write(to_s)
+    end
+  end
+
+  module ObjectExtensions
+    def colorize : Colorize::Object(self)
+      Colorize::Object.new(self)
+    end
+
+    def colorize(fore : Symbol) : Colorize::Object(self)
+      colorize.fore(fore)
+    end
+
+    def colorize(fore : Color) : Colorize::Object(self)
+      colorize.fore(fore)
+    end
+
+    def colorize(fore : UInt8) : Colorize::Object(self)
+      colorize.fore(fore)
+    end
+
+    def colorize(r : UInt8, g : UInt8, b : UInt8) : Colorize::Object(self)
+      colorize.fore(r, g, b)
+    end
+  end
+end
+
+class ::Object
+  include Colorize::ObjectExtensions
+end
+
+pub alias Colorize = ::Colorize

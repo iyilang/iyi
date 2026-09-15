@@ -628,10 +628,10 @@ class Iyi::CodeGenVisitor
       context.fun.call_convention = call_convention
     end
 
-    if @single_module && mangled_name.starts_with?("__crystal_")
+    if @single_module && mangled_name.starts_with?(abi_prefix)
       # FIXME: macos ld fails to link when the personality fun is internal; it
       # might work with lld so we might want to check the linker?
-      unless @program.has_flag?("darwin") && mangled_name.starts_with?("__crystal_personality")
+      unless (@program.has_flag?("darwin") && mangled_name.starts_with?(@personality_name)) || mangled_name.starts_with?("__iyi_fiber_")
         context.fun.linkage = LLVM::Linkage::Internal
       end
     end

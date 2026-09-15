@@ -240,7 +240,7 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
     index = index + 1
   end
   # The same check end to end through codegen's clearing entry point:
-  # Pointer of a pointerful type routes to `__crystal_malloc64`.
+  # Pointer of a pointerful type routes to `__iyi_malloc64`.
   words = Pointer(Pointer(UInt8)).malloc(16_u64)
   index = 0
   while index < 128
@@ -252,7 +252,7 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
   index = 0
   while index < 128
     if words.as(Pointer(UInt8))[index] != 0_u8
-      raise "clearing: __crystal_malloc64 reused chunk dirty at byte #{index}"
+      raise "clearing: __iyi_malloc64 reused chunk dirty at byte #{index}"
     end
     index = index + 1
   end
@@ -265,7 +265,7 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
   if IyiMark.flags(words.address) != IyiMark.epoch_flag | IyiHeap::UNTYPED_FLAG
     raise "clearing: reused chunk carried stale bits: #{IyiMark.flags(words.address).to_i64}"
   end
-  puts "clearing: a freed chunk of 0xAA bytes comes back zeroed, directly, through __crystal_malloc64, and in its byte"
+  puts "clearing: a freed chunk of 0xAA bytes comes back zeroed, directly, through __iyi_malloc64, and in its byte"
 
   # --- No corruption under reuse: freed chunks serve new owners, survivors unchanged ---
   rblocks = [] of Pointer(UInt8)

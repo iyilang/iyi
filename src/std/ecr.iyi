@@ -1,0 +1,386 @@
+# Embedded Crystal (ECR) template language library for iyi.
+#
+# Transforms ECR templates containing embedded code into native iyi/Crystal code
+# at compile time without shelling out or arbitrary compile-time execution.
+#
+# Supports:
+#   * Output expressions: `<%= expr %>`
+#   * Control expressions: `<% code %>`
+#   * Leading whitespace suppression: `<%- ... %>`
+#   * Trailing newline suppression: `<% ... -%>`
+#   * Comments: `<%# ... %>`
+#   * Escaped tags: `<%% ... %>`
+#   * Macro embedding: `ECR.embed(filename, io_name)`
+#   * String rendering: `ECR.render(filename)`
+#   * Method definition: `ECR.def_to_s(filename)`
+#   * Runtime processing: `ECR.process_string` and `ECR.process_file`
+#   * Token lexing: `ECR::Lexer`
+
+module std/ecr
+import std/text
+
+class ::Object
+  def to_s(io) : Nil
+    io << to_s
+  end
+end
+
+class ::String
+  def to_s(io) : Nil
+    io << self
+  end
+end
+
+pub struct ECR
+  DefaultBufferName = "__str__"
+
+  pub class Lexer
+    class Token
+      enum Type
+        String
+        Output
+        Control
+        EOF
+      end
+
+      def string? : Bool
+        @type.value == 0
+      end
+
+      def output? : Bool
+        @type.value == 1
+      end
+
+      def control? : Bool
+        @type.value == 2
+      end
+
+      def eof? : Bool
+        @type.value == 3
+      end
+
+      property type : Type
+      property value : String
+      property line_number : Int32
+      property column_number : Int32
+      property suppress_leading : Bool
+      property suppress_trailing : Bool
+
+      def suppress_leading? : Bool
+        @suppress_leading
+      end
+
+      def suppress_trailing? : Bool
+        @suppress_trailing
+      end
+
+      def initialize
+        @type = Type::EOF
+        @value = ""
+        @line_number = 0
+        @column_number = 0
+        @suppress_leading = false
+        @suppress_trailing = false
+      end
+    end
+
+    class SyntaxException < Exception
+      getter line_number : Int32
+      getter column_number : Int32
+      getter message : String
+
+      def initialize(message : String, @line_number : Int32, @column_number : Int32)
+        @message = "#{message} at line #{@line_number}, column #{@column_number}"
+      end
+    end
+
+    @string : String
+    @bytes : Pointer(UInt8)
+    @len : Int32
+    @pos : Int32
+    @line_number : Int32
+    @column_number : Int32
+    @token : Token
+
+    def initialize(@string : String)
+      @bytes = @string.to_unsafe
+      @len = @string.bytesize
+      @pos = 0
+      @line_number = 1
+      @column_number = 1
+      @token = Token.new
+    end
+
+    def next_token : Token
+      copy_location_info_to_token
+
+      if @pos >= @len
+        @token.type = Token::Type::EOF
+        @token.value = ""
+        return @token
+      end
+
+      b = current_byte
+      if b == 60_u8 && peek_byte == 37_u8 # '<' and '%'
+        next_byte                         # skip '<'
+        next_byte                         # skip '%'
+
+        suppress_leading = current_byte == 45_u8 # '-'
+        next_byte if suppress_leading
+
+        is_output = false
+        is_escape = false
+
+        case current_byte
+        when 61_u8 # '='
+          next_byte
+          copy_location_info_to_token
+          is_output = true
+        when 37_u8 # '%'
+          next_byte
+          copy_location_info_to_token
+          is_escape = true
+        else
+          copy_location_info_to_token
+        end
+
+        return consume_control(is_output, is_escape, suppress_leading)
+      end
+
+      consume_string
+    end
+
+    private def consume_string : Token
+      start_pos = @pos
+      while @pos < @len
+        b = current_byte
+        if b == 10_u8 # '\n'
+          @line_number += 1
+          @column_number = 0
+        elsif b == 60_u8 && peek_byte == 37_u8 # '<' and '%'
+          break
+        end
+        next_byte
+      end
+
+      @token.type = Token::Type::String
+      @token.value = @string[start_pos, @pos - start_pos]
+      @token.suppress_leading = false
+      @token.suppress_trailing = false
+      @token
+    end
+
+    private def consume_control(is_output : Bool, is_escape : Bool, suppress_leading : Bool) : Token
+      start_pos = @pos
+      suppress_trailing = false
+
+      while true
+        if @pos >= @len
+          if is_output
+            raise SyntaxException.new("Unexpected end of file inside <%= ...", @line_number, @column_number).message
+          elsif is_escape
+            raise SyntaxException.new("Unexpected end of file inside <%% ...", @line_number, @column_number).message
+          else
+            raise SyntaxException.new("Unexpected end of file inside <% ...", @line_number, @column_number).message
+          end
+        end
+
+        b = current_byte
+        if b == 10_u8 # '\n'
+          @line_number += 1
+          @column_number = 0
+        elsif b == 45_u8 && peek_byte == 37_u8 # '-' and '%'
+          # Check if next byte after '%' is '>'
+          saved_pos = @pos
+          saved_col = @column_number
+          saved_line = @line_number
+
+          next_byte             # skip '-'
+          if peek_byte == 62_u8 # '>'
+            suppress_trailing = true
+            end_pos = saved_pos
+            next_byte # skip '%'
+            next_byte # skip '>'
+            return setup_control_token(start_pos, end_pos, is_escape, suppress_leading, suppress_trailing, is_output)
+          else
+            @pos = saved_pos
+            @column_number = saved_col
+            @line_number = saved_line
+          end
+        elsif b == 37_u8 && peek_byte == 62_u8 # '%' and '>'
+          end_pos = @pos
+          next_byte # skip '%'
+          next_byte # skip '>'
+          return setup_control_token(start_pos, end_pos, is_escape, suppress_leading, false, is_output)
+        end
+
+        next_byte
+      end
+    end
+
+    private def setup_control_token(start_pos : Int32, end_pos : Int32, is_escape : Bool, suppress_leading : Bool, suppress_trailing : Bool, is_output : Bool) : Token
+      @token.suppress_leading = !is_escape && suppress_leading
+      @token.suppress_trailing = !is_escape && suppress_trailing
+
+      if is_escape
+        head = suppress_leading ? "<%-" : "<%"
+        tail = @string[start_pos, end_pos - start_pos]
+        close_tag = suppress_trailing ? "-%>" : "%>"
+        @token.type = Token::Type::String
+        @token.value = "#{head}#{tail}#{close_tag}"
+      elsif is_output
+        @token.type = Token::Type::Output
+        @token.value = @string[start_pos, end_pos - start_pos]
+      else
+        @token.type = Token::Type::Control
+        @token.value = @string[start_pos, end_pos - start_pos]
+      end
+
+      @token
+    end
+
+    private def copy_location_info_to_token : Nil
+      @token.line_number = @line_number
+      @token.column_number = @column_number
+    end
+
+    private def current_byte : UInt8
+      @pos < @len ? @bytes[@pos] : 0_u8
+    end
+
+    private def peek_byte : UInt8
+      @pos + 1 < @len ? @bytes[@pos + 1] : 0_u8
+    end
+
+    private def next_byte : UInt8
+      b = current_byte
+      @pos += 1
+      @column_number += 1
+      b
+    end
+  end
+
+  # Processes an ECR template string and returns the generated iyi/Crystal code.
+  def self.process_string(string : String, filename : String = "", buffer_name : String = DefaultBufferName) : String
+    lexer = Lexer.new(string)
+    token = lexer.next_token
+
+    parts = [] of String
+    while true
+      if token.string?
+        str_val = token.value
+        token = lexer.next_token
+
+        str_val = suppress_leading_indentation(token, str_val)
+
+        parts << buffer_name
+        parts << " << "
+        parts << str_val.inspect
+        parts << "\n"
+      elsif token.output?
+        str_val = token.value
+        line_number = token.line_number
+        column_number = token.column_number
+        suppress_trailing = token.suppress_trailing?
+        token = lexer.next_token
+
+        suppress_trailing_whitespace(token, suppress_trailing)
+
+        parts << "#<loc:push>("
+        append_loc(parts, filename, line_number, column_number)
+        parts << str_val
+        parts << ")#<loc:pop>.to_s "
+        parts << buffer_name
+        parts << "\n"
+      elsif token.control?
+        str_val = token.value
+        line_number = token.line_number
+        column_number = token.column_number
+        suppress_trailing = token.suppress_trailing?
+        token = lexer.next_token
+
+        suppress_trailing_whitespace(token, suppress_trailing)
+
+        parts << "#<loc:push>"
+        append_loc(parts, filename, line_number, column_number)
+        parts << " " unless str_val.starts_with?(' ')
+        parts << str_val
+        parts << "#<loc:pop>"
+        parts << "\n"
+      elsif token.eof?
+        break
+      end
+    end
+
+    parts.join("")
+  end
+
+  # Reads and processes an ECR template file.
+  def self.process_file(filename : String, buffer_name : String = DefaultBufferName) : String
+    content = File.read(filename)
+    process_string(content, filename, buffer_name)
+  end
+
+  private def self.suppress_leading_indentation(token : Lexer::Token, string : String) : String
+    if (token.output? || token.control?) && token.suppress_leading?
+      char_index = string.rindex('\n')
+      start_idx = char_index ? char_index + 1 : 0
+      len = string.bytesize
+      raw = string.to_unsafe
+      all_ws = true
+      i = start_idx
+      while i < len
+        b = raw[i]
+        unless b == 32_u8 || b == 9_u8
+          all_ws = false
+          break
+        end
+        i += 1
+      end
+      if all_ws
+        return string[0, start_idx]
+      end
+    end
+    string
+  end
+
+  private def self.suppress_trailing_whitespace(token : Lexer::Token, suppress_trailing : Bool) : Nil
+    if suppress_trailing && token.string?
+      idx = token.value.index('\n')
+      if idx
+        token.value = token.value[idx + 1, token.value.bytesize - idx - 1]
+      end
+    end
+  end
+
+  private def self.append_loc(parts : Array(String), filename : String, line_number : Int32, column_number : Int32) : Nil
+    parts << "#<loc:"
+    parts << filename.inspect
+    parts << ","
+    parts << line_number.to_s
+    parts << ","
+    parts << column_number.to_s
+    parts << ">"
+  end
+
+  # Defines a `to_s(io)` method whose body is the ECR contained in *filename*.
+  macro def_to_s(filename)
+    def to_s(__io__) : Nil
+      ::ECR.embed {{filename}}, __io__
+    end
+  end
+
+  # Embeds an ECR file *filename* into the program and appends content to *io_name*.
+  macro embed(filename, io_name)
+    {{ ecr_process(filename, io_name.id.stringify) }}
+  end
+
+  # Embeds an ECR file *filename* into the program and renders it to a string.
+  macro render(filename)
+    begin
+      __mem__ = ::Std::Io::Memory.new
+      ::ECR.embed({{filename}}, __mem__)
+      __mem__.to_s
+    end
+  end
+end

@@ -1,0 +1,372 @@
+# Standard logging library for iyi.
+#
+# Provides structured, levelled logging with:
+#   * Severities: debug, info, notice, warn, error, fatal (plus none for silencing)
+#   * Named loggers arranged in a dot-delimited hierarchy (e.g. "db", "db.pool")
+#   * Dynamic level and backend inheritance from parent to child loggers
+#   * Zero-allocation level filtering: block forms avoid evaluating messages
+#     when the logger's severity threshold is not met
+#   * Pluggable formatters with an RFC-clean default formatter
+#   * IOBackend writing directly to any IyiIO (stdout, stderr, files, pipes)
+#   * MemoryBackend for capturing log entries in tests and buffers
+#
+# Scope and omissions from Crystal's log.cr:
+#   Crystal's implementation (1,394 lines) carries fiber-local Context dictionaries,
+#   asynchronous channel-based broadcast workers, regex pattern matching for source
+#   bindings, JSON metadata serializations, and fiber backtrace captures.
+#   iyi omits those background dispatchers to keep logging direct, synchronous,
+#   predictable, and free of background fiber overhead.
+
+module std/log
+
+pub enum Severity
+  Debug  = 1
+  Info   = 2
+  Notice = 3
+  Warn   = 4
+  Error  = 5
+  Fatal  = 6
+  None   = 7
+
+  def label : String
+    case value
+    when 1 then "DEBUG"
+    when 2 then "INFO"
+    when 3 then "NOTICE"
+    when 4 then "WARN"
+    when 5 then "ERROR"
+    when 6 then "FATAL"
+    else        "NONE"
+    end
+  end
+
+  def to_s : String
+    label
+  end
+
+  def <(other : Severity) : Bool
+    value < other.value
+  end
+
+  def <=(other : Severity) : Bool
+    value <= other.value
+  end
+
+  def >=(other : Severity) : Bool
+    value >= other.value
+  end
+
+  def >(other : Severity) : Bool
+    value > other.value
+  end
+end
+
+pub struct Entry
+  getter source : String
+  getter severity : Severity
+  getter message : String
+
+  def initialize(@source : String, @severity : Severity, @message : String)
+  end
+end
+
+pub abstract class Formatter
+  abstract def format(entry : Entry, io : IyiIO) : Nil
+  abstract def format(entry : Entry) : String
+end
+
+pub class DefaultFormatter < Formatter
+  def format(entry : Entry, io : IyiIO) : Nil
+    if entry.source.empty?
+      io.puts("[#{entry.severity.label}] #{entry.message}")
+    else
+      io.puts("[#{entry.severity.label}] #{entry.source}: #{entry.message}")
+    end
+  end
+
+  def format(entry : Entry) : String
+    if entry.source.empty?
+      "[#{entry.severity.label}] #{entry.message}"
+    else
+      "[#{entry.severity.label}] #{entry.source}: #{entry.message}"
+    end
+  end
+end
+
+pub abstract class Backend
+  abstract def write(entry : Entry) : Nil
+  abstract def close : Nil
+end
+
+pub class IOBackend < Backend
+  property formatter : Formatter
+  getter io : IyiIO
+
+  def initialize(@io : IyiIO, @formatter : Formatter = DefaultFormatter.new)
+  end
+
+  def write(entry : Entry) : Nil
+    @formatter.format(entry, @io)
+  end
+
+  def close : Nil
+    @io.flush
+  end
+end
+
+pub class MemoryBackend < Backend
+  property formatter : Formatter
+  getter entries : Array(Entry)
+
+  def initialize(@formatter : Formatter = DefaultFormatter.new)
+    @entries = [] of Entry
+  end
+
+  def write(entry : Entry) : Nil
+    @entries << entry
+  end
+
+  def close : Nil
+  end
+
+  def output : Array(String)
+    @entries.map { |e| @formatter.format(e) }
+  end
+
+  def clear : Nil
+    @entries = [] of Entry
+  end
+end
+
+pub class Logger
+  getter source : String
+  property backend : Backend?
+  @level : Severity?
+  @parent : Logger?
+  @children : Hash(String, Logger)
+
+  def initialize(@source : String, level : Severity? = nil, @backend : Backend? = nil, @parent : Logger? = nil)
+    @level = level
+    @children = Hash(String, Logger).new
+  end
+
+  def level : Severity
+    if l = @level
+      l
+    elsif p = @parent
+      p.level
+    else
+      Severity::Info
+    end
+  end
+
+  def level=(lvl : Severity?)
+    @level = lvl
+  end
+
+  def for(child_name : String) : Logger
+    return self if child_name.empty?
+
+    parts = child_name.split('.')
+    current = self
+    parts.each do |part|
+      current = current.get_or_create_child(part)
+    end
+    current
+  end
+
+  protected def get_or_create_child(name : String) : Logger
+    if child = @children[name]?
+      return child
+    end
+
+    child_source = @source.empty? ? name : "#{@source}.#{name}"
+    child = Logger.new(child_source, nil, nil, self)
+    @children[name] = child
+    child
+  end
+
+  def effective_backend : Backend?
+    return @backend if @backend
+    if parent = @parent
+      return parent.effective_backend
+    end
+    nil
+  end
+
+  def log(severity : Severity, message : String) : Nil
+    return if severity < level
+    if b = effective_backend
+      entry = Entry.new(@source, severity, message)
+      b.write(entry)
+    end
+  end
+
+  def log(severity : Severity, &block : -> String) : Nil
+    return if severity < level
+    if b = effective_backend
+      entry = Entry.new(@source, severity, block.call)
+      b.write(entry)
+    end
+  end
+
+  def debug(message : String) : Nil
+    log(Severity::Debug, message)
+  end
+
+  def debug(&b : -> String) : Nil
+    log(Severity::Debug, &b)
+  end
+
+  def info(message : String) : Nil
+    log(Severity::Info, message)
+  end
+
+  def info(&b : -> String) : Nil
+    log(Severity::Info, &b)
+  end
+
+  def notice(message : String) : Nil
+    log(Severity::Notice, message)
+  end
+
+  def notice(&b : -> String) : Nil
+    log(Severity::Notice, &b)
+  end
+
+  def warn(message : String) : Nil
+    log(Severity::Warn, message)
+  end
+
+  def warn(&b : -> String) : Nil
+    log(Severity::Warn, &b)
+  end
+
+  def error(message : String) : Nil
+    log(Severity::Error, message)
+  end
+
+  def error(&b : -> String) : Nil
+    log(Severity::Error, &b)
+  end
+
+  def fatal(message : String) : Nil
+    log(Severity::Fatal, message)
+  end
+
+  def fatal(&b : -> String) : Nil
+    log(Severity::Fatal, &b)
+  end
+
+  def debug? : Bool
+    level <= Severity::Debug
+  end
+
+  def info? : Bool
+    level <= Severity::Info
+  end
+
+  def notice? : Bool
+    level <= Severity::Notice
+  end
+
+  def warn? : Bool
+    level <= Severity::Warn
+  end
+
+  def error? : Bool
+    level <= Severity::Error
+  end
+
+  def fatal? : Bool
+    level <= Severity::Fatal
+  end
+end
+
+pub class Log
+  @@root : Logger?
+
+  def self.root : Logger
+    if r = @@root
+      r
+    else
+      logger = Logger.new("", Severity::Info, IOBackend.new(STDOUT))
+      @@root = logger
+      logger
+    end
+  end
+
+  def self.setup(level : Severity = Severity::Info, backend : Backend = IOBackend.new(STDOUT)) : Logger
+    logger = Logger.new("", level, backend)
+    @@root = logger
+    logger
+  end
+
+  def self.for(source : String) : Logger
+    root.for(source)
+  end
+
+  def self.level : Severity
+    root.level
+  end
+
+  def self.level=(level : Severity)
+    root.level = level
+  end
+
+  def self.backend : Backend?
+    root.backend
+  end
+
+  def self.backend=(backend : Backend?)
+    root.backend = backend
+  end
+
+  def self.debug(msg : String) : Nil
+    root.debug(msg)
+  end
+
+  def self.debug(&b : -> String) : Nil
+    root.debug(&b)
+  end
+
+  def self.info(msg : String) : Nil
+    root.info(msg)
+  end
+
+  def self.info(&b : -> String) : Nil
+    root.info(&b)
+  end
+
+  def self.notice(msg : String) : Nil
+    root.notice(msg)
+  end
+
+  def self.notice(&b : -> String) : Nil
+    root.notice(&b)
+  end
+
+  def self.warn(msg : String) : Nil
+    root.warn(msg)
+  end
+
+  def self.warn(&b : -> String) : Nil
+    root.warn(&b)
+  end
+
+  def self.error(msg : String) : Nil
+    root.error(msg)
+  end
+
+  def self.error(&b : -> String) : Nil
+    root.error(&b)
+  end
+
+  def self.fatal(msg : String) : Nil
+    root.fatal(msg)
+  end
+
+  def self.fatal(&b : -> String) : Nil
+    root.fatal(&b)
+  end
+end

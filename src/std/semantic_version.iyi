@@ -1,0 +1,344 @@
+# Semantic Versioning 2.0.0 standard library module for iyi.
+#
+# Pure iyi implementation with zero external C library dependencies.
+
+module std/semantic_version
+
+class ::String
+  def <=>(other : String) : Int32
+    return 0 if self == other
+    self < other ? -1 : 1
+  end
+end
+
+struct ::SemanticVersion
+  getter major : Int32
+  getter minor : Int32
+  getter patch : Int32
+  getter build : String?
+  getter prerelease : Prerelease
+
+  struct Prerelease
+    getter identifiers : Array(String | Int32)
+
+    def self.parse(str : String) : self
+      identifiers = [] of String | Int32
+      parts = str.split('.')
+      i = 0
+      while i < parts.size
+        part = parts[i]
+        num = part.to_i?
+        if n = num
+          identifiers << n
+        else
+          identifiers << part
+        end
+        i += 1
+      end
+      new(identifiers)
+    end
+
+    def initialize(@identifiers : Array(String | Int32) = [] of String | Int32)
+    end
+
+    def to_s(io) : Nil
+      io.write(to_s)
+    end
+
+    def to_s : String
+      res = ""
+      i = 0
+      while i < @identifiers.size
+        res = res + "." if i > 0
+        res = res + @identifiers[i].to_s
+        i += 1
+      end
+      res
+    end
+
+    def <=>(other : self) : Int32
+      if @identifiers.empty?
+        return other.identifiers.empty? ? 0 : 1
+      elsif other.identifiers.empty?
+        return -1
+      end
+
+      i = 0
+      while i < @identifiers.size
+        return 1 if i >= other.identifiers.size
+
+        item = @identifiers[i]
+        oitem = other.identifiers[i]
+        r = compare(item, oitem)
+        return r if r != 0
+        i += 1
+      end
+
+      return -1 if @identifiers.size < other.identifiers.size
+      0
+    end
+
+    def <(other : self) : Bool
+      (self <=> other) < 0
+    end
+
+    def <=(other : self) : Bool
+      (self <=> other) <= 0
+    end
+
+    def >(other : self) : Bool
+      (self <=> other) > 0
+    end
+
+    def >=(other : self) : Bool
+      (self <=> other) >= 0
+    end
+
+    private def compare(x : String | Int32, y : String | Int32) : Int32
+      if x.is_a?(Int32)
+        if y.is_a?(Int32)
+          x == y ? 0 : (x < y ? -1 : 1)
+        else
+          -1
+        end
+      else
+        if y.is_a?(Int32)
+          1
+        else
+          x == y ? 0 : (x < y ? -1 : 1)
+        end
+      end
+    end
+
+    def ==(other : Prerelease) : Bool
+      return false unless @identifiers.size == other.identifiers.size
+      i = 0
+      while i < @identifiers.size
+        a = @identifiers[i]
+        b = other.identifiers[i]
+        if a.is_a?(Int32) && b.is_a?(Int32)
+          return false unless a == b
+        elsif a.is_a?(String) && b.is_a?(String)
+          return false unless a == b
+        else
+          return false
+        end
+        i += 1
+      end
+      true
+    end
+
+    def ==(other) : Bool
+      false
+    end
+
+    def hash(hasher)
+      @identifiers.hash(hasher)
+    end
+  end
+
+  def self.valid?(str : String) : Bool
+    !scan(str).nil?
+  end
+
+  def self.parse(str : String) : self
+    parse?(str) || raise "Not a semantic version: #{str.inspect}"
+  end
+
+  def self.parse?(str : String) : self?
+    parts = scan(str)
+    return nil unless parts
+
+    major_range, minor_range, patch_range, pre_range, build_range = parts
+
+    major_str = str[major_range.begin, major_range.end - major_range.begin]
+    minor_str = str[minor_range.begin, minor_range.end - minor_range.begin]
+    patch_str = str[patch_range.begin, patch_range.end - patch_range.begin]
+
+    pre_str = pre_range ? str[pre_range.begin, pre_range.end - pre_range.begin] : nil
+    build_str = build_range ? str[build_range.begin, build_range.end - build_range.begin] : nil
+
+    new(major_str.to_i, minor_str.to_i, patch_str.to_i, pre_str, build_str)
+  end
+
+  private def self.scan(str : String)
+    bytes = str.to_unsafe
+    stop = str.bytesize
+
+    stop -= 1 if stop > 0 && bytes[stop - 1] == 10_u8 # '\n'
+
+    major_end = scan_field(bytes, 0, stop)
+    return nil unless major_end
+    return nil unless major_end < stop && bytes[major_end] == 46_u8 # '.'
+
+    minor_end = scan_field(bytes, major_end + 1, stop)
+    return nil unless minor_end
+    return nil unless minor_end < stop && bytes[minor_end] == 46_u8 # '.'
+
+    patch_end = scan_field(bytes, minor_end + 1, stop)
+    return nil unless patch_end
+
+    pos = patch_end
+    prerelease = nil
+    build = nil
+
+    if pos < stop && bytes[pos] == 45_u8 # '-'
+      pos += 1
+      plus = pos
+      while plus < stop && bytes[plus] != 43_u8 # '+'
+        plus += 1
+      end
+
+      return nil unless scan_identifiers?(bytes, pos, plus, reject_leading_zero: true)
+      prerelease = pos...plus
+      pos = plus
+    end
+
+    if pos < stop && bytes[pos] == 43_u8 # '+'
+      pos += 1
+      return nil unless scan_identifiers?(bytes, pos, stop, reject_leading_zero: false)
+      build = pos...stop
+      pos = stop
+    end
+
+    return nil unless pos == stop
+
+    {0...major_end, (major_end + 1)...minor_end, (minor_end + 1)...patch_end, prerelease, build}
+  end
+
+  private def self.scan_field(bytes : Pointer(UInt8), start : Int32, stop : Int32) : Int32?
+    return nil unless start < stop && bytes[start] >= 48_u8 && bytes[start] <= 57_u8
+    return start + 1 if bytes[start] == 48_u8 # '0'
+
+    pos = start + 1
+    while pos < stop && bytes[pos] >= 48_u8 && bytes[pos] <= 57_u8
+      pos += 1
+    end
+    pos
+  end
+
+  private def self.scan_identifiers?(bytes : Pointer(UInt8), start : Int32, stop : Int32, *, reject_leading_zero : Bool) : Bool
+    pos = start
+
+    while true
+      first = pos
+      numeric = true
+
+      while pos < stop
+        b = bytes[pos]
+        break if b == 46_u8 # '.'
+        is_num = b >= 48_u8 && b <= 57_u8
+        is_alpha = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8)
+        is_dash = b == 45_u8
+        return false unless is_num || is_alpha || is_dash
+        numeric = false unless is_num
+        pos += 1
+      end
+
+      return false if pos == first
+      return false if reject_leading_zero && numeric && pos - first > 1 && bytes[first] == 48_u8
+
+      break if pos == stop
+      pos += 1
+    end
+
+    true
+  end
+
+  def initialize(@major : Int, @minor : Int, @patch : Int, prerelease : String | Prerelease | Nil = nil, @build : String? = nil)
+    @major = @major.to_i
+    @minor = @minor.to_i
+    @patch = @patch.to_i
+    @prerelease = case prerelease
+                  when Prerelease
+                    prerelease
+                  when String
+                    Prerelease.parse(prerelease)
+                  else
+                    Prerelease.new
+                  end
+  end
+
+  def to_s(io) : Nil
+    io.write(to_s)
+  end
+
+  def to_s : String
+    res = "#{@major}.#{@minor}.#{@patch}"
+    unless @prerelease.identifiers.empty?
+      res = res + "-" + @prerelease.to_s
+    end
+    if b = @build
+      res = res + "+" + b
+    end
+    res
+  end
+
+  def copy_with(major : Int32 = @major, minor : Int32 = @minor, patch : Int32 = @patch, prerelease : String | Prerelease | Nil = @prerelease, build : String? = @build)
+    SemanticVersion.new(major, minor, patch, prerelease, build)
+  end
+
+  def bump_major : self
+    copy_with(major: @major + 1, minor: 0, patch: 0, prerelease: nil, build: nil)
+  end
+
+  def bump_minor : self
+    copy_with(minor: @minor + 1, patch: 0, prerelease: nil, build: nil)
+  end
+
+  def bump_patch : self
+    if @prerelease.identifiers.empty?
+      copy_with(patch: @patch + 1, prerelease: nil, build: nil)
+    else
+      copy_with(prerelease: nil, build: nil)
+    end
+  end
+
+  def <=>(other : self) : Int32
+    r = @major == other.major ? 0 : (@major < other.major ? -1 : 1)
+    return r unless r == 0
+    r = @minor == other.minor ? 0 : (@minor < other.minor ? -1 : 1)
+    return r unless r == 0
+    r = @patch == other.patch ? 0 : (@patch < other.patch ? -1 : 1)
+    return r unless r == 0
+    @prerelease <=> other.prerelease
+  end
+
+  def <(other : self) : Bool
+    (self <=> other) < 0
+  end
+
+  def <=(other : self) : Bool
+    (self <=> other) <= 0
+  end
+
+  def >(other : self) : Bool
+    (self <=> other) > 0
+  end
+
+  def >=(other : self) : Bool
+    (self <=> other) >= 0
+  end
+
+  def ==(other : SemanticVersion) : Bool
+    @major == other.major &&
+      @minor == other.minor &&
+      @patch == other.patch &&
+      @prerelease == other.prerelease &&
+      @build == other.build
+  end
+
+  def ==(other) : Bool
+    false
+  end
+
+  def hash(hasher)
+    hasher = @major.hash(hasher)
+    hasher = @minor.hash(hasher)
+    hasher = @patch.hash(hasher)
+    hasher = @prerelease.hash(hasher)
+    @build ? @build.hash(hasher) : hasher
+  end
+end
+
+pub alias SemanticVersion = ::SemanticVersion

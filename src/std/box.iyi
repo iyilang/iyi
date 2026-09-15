@@ -1,0 +1,32 @@
+# Box allows turning any object to a Void* and back.
+#
+# A Box's purpose is passing data to C as a Void* and then converting that
+# back to the original data type.
+#
+# For example, sending Procs or context to C callbacks.
+
+module std/box
+
+pub class Box(T)
+  getter object : T
+
+  def initialize(@object : T)
+  end
+
+  # Turns object into a Void*.
+  #
+  # Copies object to the heap inside a Box container if needed.
+  def self.box(object : T) : Void*
+    new(object).as(Void*)
+  end
+
+  # Unboxes a Void* into an object of type T.
+  #
+  # Specifying T is required: `Box(T).unbox(data)`.
+  def self.unbox(pointer : Void*) : T
+    if pointer.address == 0
+      raise "Unboxing null pointer"
+    end
+    pointer.as(self).object
+  end
+end

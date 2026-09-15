@@ -321,6 +321,76 @@ describe "Semantic: iyi import" do
     end
   end
 
+  describe "the import wall and lexical lookup (SPEC.md R-1)" do
+    # `module lib/tuple` declares `Lib::Tuple`. Looking `Tuple` up from
+    # `Lib::Pair` walks to `Lib` first, where it found the sibling unit —
+    # and the wall then refused a name `pair.iyi` never meant. A unit the
+    # file has not imported is not in scope: the walk goes on outward and
+    # finds the prelude's `::Tuple`.
+    it "does not let a sibling module namespace hide a prelude type" do
+      with_iyi_modules({
+        "lib/tuple.iyi" => <<-IYI,
+          module lib/tuple
+
+          pub def arity : Int32
+            2
+          end
+          IYI
+        "lib/pair.iyi" => <<-IYI,
+          module lib/pair
+
+          pub def pair : Tuple(Int32, Int32)
+            {1, 2}
+          end
+          IYI
+        "main.iyi" => <<-IYI,
+          module app/main
+
+          import lib/tuple
+          import lib/pair
+          using lib/pair::{pair}
+
+          pair
+          IYI
+      }) do
+        semantic_iyi("main.iyi")
+      end
+    end
+
+    # The sibling is still refused, not merely invisible, when nothing
+    # outside resolves the name: the sentence names the import to add.
+    it "still refuses a sibling module reached lexically without an import" do
+      with_iyi_modules({
+        "lib/badge.iyi" => <<-IYI,
+          module lib/badge
+
+          pub struct Badge
+          end
+          IYI
+        "lib/peek.iyi" => <<-IYI,
+          module lib/peek
+
+          pub def peek : Badge::Badge?
+            nil
+          end
+          IYI
+        "main.iyi" => <<-IYI,
+          module app/main
+
+          import lib/badge
+          import lib/peek
+          using lib/peek::{peek}
+
+          peek
+          IYI
+      }) do
+        expect_raises(Iyi::TypeException, /`Lib::Badge` is not imported here/) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+  end
+
   describe "from a .iyimod (SPEC.md IV.1)" do
     # R-1's contract, stated as a test: the source is not opened. Not opened
     # rather than not preferred — there is no `app/dep.iyi` on disk at all.

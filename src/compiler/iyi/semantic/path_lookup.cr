@@ -95,7 +95,18 @@ module Iyi
     # If *lookup_self* is `true`, if the type is not found under `self` but has
     # the same name as `self`, then `self` is returned. This has higher
     # precedence than ancestors and the enclosing namespace.
+    #
+    # iyi: a type found here that lives in a module this file has not
+    # imported is not in scope (SPEC.md R-1) — a sibling unit `Std::Tuple`
+    # reached by walking up from `Std::Enumerable` must not hide the
+    # prelude's `::Tuple`. The walk goes on outward; the walled match is
+    # kept only as the last answer, so that a name nothing else resolves
+    # is still refused with the import wall's own sentence rather than
+    # "undefined constant". Only for the first path item (the one looked
+    # up lexically): `Std::Tuple` written out is a reach, not a shadow.
     def lookup_path_item(name : String, lookup_self, lookup_in_namespace, include_private, location) : Type | ASTNode | Nil
+      walled = nil
+
       # First search in our types
       type = lookup_name(name)
       if type
@@ -103,7 +114,11 @@ module Iyi
           return nil
         end
 
-        return type
+        if lookup_in_namespace && program.iyi_walled_unit?(location, type)
+          walled = type
+        else
+          return type
+        end
       end
 
       # Try ourself for the first path item, unless we are the top-level
@@ -130,10 +145,11 @@ module Iyi
 
       # Try our namespace, unless we are the top-level
       if lookup_in_namespace && self != program
-        return namespace.lookup_path_item(name, false, lookup_in_namespace, include_private, location)
+        match = namespace.lookup_path_item(name, false, lookup_in_namespace, include_private, location)
+        return match if match
       end
 
-      nil
+      walled
     end
 
     # iyi: resolves *name* against the modules `using` brought into this scope.

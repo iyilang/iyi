@@ -133,6 +133,23 @@ module Iyi
     # that unit — its own imports, then onward only through `pub import`
     # edges. Anchored at the node, which is the line to fix.
     def iyi_check_import_reach(node : ASTNode, resolved : Type) : Nil
+      unit = iyi_walled_unit?(node.location, resolved)
+      return unless unit
+
+      node.raise "`#{unit}` is not imported here — it is in the program " \
+                 "only because some other file imported it. Add an import " \
+                 "in this file, or have a module this file imports " \
+                 "re-export it with `pub import` (SPEC.md R-1)"
+    end
+
+    # The wall as a question: the unit `resolved` lives in, when the file
+    # that wrote `location` does not reach it; nil when the name is free
+    # to be used. Constant lookup asks it while walking enclosing
+    # namespaces, so that a sibling module namespace this file never
+    # imported (`Std::Tuple` seen from `Std::Enumerable`) does not hide
+    # the prelude's `::Tuple` — a unit the file cannot name is not in
+    # scope, and lexical lookup goes on outward.
+    def iyi_walled_unit?(location : Location?, resolved : Type) : NamedType?
       # iyi's law, not Crystal's: a `--crystal` build consumes bound
       # shards whose signatures name each other's types transitively —
       # that world keeps Crystal's rules, which is the mode's whole
@@ -157,7 +174,7 @@ module Iyi
       unit_file = unit.locations.try(&.first?).try(&.filename).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
-      writer = node.location.try(&.filename).as?(String)
+      writer = location.try(&.filename).as?(String)
       return unless writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything
@@ -169,10 +186,7 @@ module Iyi
       return unless writer == filename || iyi_imported_files.includes?(writer)
       return if iyi_reachable_files(writer).includes?(unit_file)
 
-      node.raise "`#{unit}` is not imported here — it is in the program " \
-                 "only because some other file imported it. Add an import " \
-                 "in this file, or have a module this file imports " \
-                 "re-export it with `pub import` (SPEC.md R-1)"
+      unit
     end
 
     # The files reachable from `from`: every direct import, then onward

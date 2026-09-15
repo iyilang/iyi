@@ -1,8 +1,10 @@
 module compiler/command/driver
 
 import std/option_parser
+import compiler/platform/target
 
 using std/option_parser::{OptionParser}
+using compiler/platform/target::{Target}
 
 # What a command invocation exits with.
 pub enum Exit
@@ -167,8 +169,19 @@ end
 
 # The command driver ported from src/compiler/iyi/command.cr.
 pub class CommandDriver
-  @@program_name = "crystal"
-  @@version_description = "Crystal 1.22.0-dev\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
+  IYI_VERSION = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
+  BASE_VERSION = {{ read_file("#{__DIR__}/../../VERSION").chomp }}
+
+  {% begin %}
+    {% llvm_config = env("LLVM_CONFIG") || "llvm-config" %}
+    {% llvm_ver = env("IYI_CONFIG_LLVM_VERSION") || env("LLVM_VERSION") || `#{llvm_config.id} --version 2> /dev/null || true`.strip.stringify %}
+    {% raw_triple = env("IYI_CONFIG_TARGET") || env("TARGET") || `#{llvm_config.id} --host-target 2> /dev/null || true`.strip.stringify %}
+    LLVM_VERSION = {{ llvm_ver }}
+    CONFIG_TARGET = {{ raw_triple }}
+  {% end %}
+
+  @@program_name = "iyi"
+  @@version_description : String? = nil
 
   def self.program_name : String
     @@program_name
@@ -178,16 +191,62 @@ pub class CommandDriver
     @@program_name = name
   end
 
+  def self.language_name : String
+    @@program_name == "crystal" ? "Crystal" : "iyi"
+  end
+
+  def self.version : String
+    @@program_name == "iyi" ? IYI_VERSION : BASE_VERSION
+  end
+
+  def self.release_mode? : Bool
+    {{ flag?(:release) }}
+  end
+
+  def self.llvm_version : String
+    LLVM_VERSION
+  end
+
+  def self.default_target : String
+    target = Target.parse?(CONFIG_TARGET)
+    if target
+      target.to_s
+    else
+      CONFIG_TARGET
+    end
+  end
+
+  def self.default_version_description : String
+    sb = OutputBuffer.new
+    sb.print("#{CommandDriver.language_name} #{CommandDriver.version}")
+    unless release_mode?
+      sb.print("\n\nThe compiler was not built in release mode.")
+    end
+    unless LLVM_VERSION.empty?
+      sb.print("\n\nLLVM: #{LLVM_VERSION}")
+    end
+    target_str = default_target
+    unless target_str.empty?
+      sb.print("\nDefault target: #{target_str}")
+    end
+    sb.puts("")
+    sb.to_s
+  end
+
   def self.version_description : String
-    @@version_description
+    if override = @@version_description
+      return override
+    end
+    default_version_description
   end
 
   def self.version_description=(desc : String) : Nil
     @@version_description = desc
   end
 
-  USAGE = <<-USAGE
-    Usage: crystal [command] [switches] [program file] [--] [arguments]
+  def self.usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} [command] [switches] [program file] [--] [arguments]
 
     Command:
         init                     generate a new project
@@ -198,7 +257,7 @@ pub class CommandDriver
         fix                      apply the compiler's did-you-mean edits until the file is clean
         bind                     put every shard under lib/ behind a boundary, as .iyimod files
         migrate                  write a Crystal tree as iyi modules, the namespace as the path
-        env                      print Crystal environment information
+        env                      print #{CommandDriver.language_name} environment information
         eval                     eval code from args or standard input
         mod                      inspect a .iyimod module artifact
         lsp                      serve the language over stdio (editors, agents)
@@ -212,8 +271,9 @@ pub class CommandDriver
         version, --version, -v   show version
 
     Run a command followed by --help to see command specific information, ex:
-        crystal <command> --help
+        #{CommandDriver.program_name} <command> --help
     USAGE
+  end
 
   def self.commands_usage : String
     <<-USAGE
@@ -456,7 +516,7 @@ pub class CommandDriver
     Usage: #{CommandDriver.program_name} init TYPE (DIR | NAME DIR)
 
     Initializes a project folder as a git repository and default folder
-    structure for Crystal projects.
+    structure for #{CommandDriver.language_name} projects.
 
     TYPE is one of:
         lib                      Creates a library skeleton
@@ -563,7 +623,7 @@ pub class CommandDriver
     case
     when !command
       @selected_command = "help"
-      puts USAGE
+      puts CommandDriver.usage
       exit(0)
     when command == "init"
       @selected_command = "init"
@@ -575,7 +635,7 @@ pub class CommandDriver
       build
     when "deps".starts_with?(command)
       @selected_command = "deps"
-      @stderr.puts "Please use 'shards': 'crystal deps' has been removed"
+      @stderr.puts "Please use 'shards': '#{CommandDriver.program_name} deps' has been removed"
       exit(1)
     when command == "env"
       @selected_command = "env"
@@ -656,7 +716,7 @@ pub class CommandDriver
       mod
     when "help".starts_with?(command), "--help" == command, "-h" == command
       @selected_command = "help"
-      puts USAGE
+      puts CommandDriver.usage
       exit(0)
     when "version".starts_with?(command), "--version" == command, "-v" == command
       @selected_command = "version"
@@ -771,7 +831,7 @@ pub class CommandDriver
     # the usage after it and no `Error:` in front, so this cannot go through
     # the driver's own error printer.
     if rest.empty?
-      puts "Cannot initialize Crystal project: Argument TYPE is missing"
+      puts "Cannot initialize #{CommandDriver.language_name} project: Argument TYPE is missing"
       puts parser
       exit(1)
       return
@@ -779,7 +839,7 @@ pub class CommandDriver
 
     skeleton = rest[0]
     if skeleton != "lib" && skeleton != "app"
-      puts "Cannot initialize Crystal project: Invalid TYPE value: #{skeleton}"
+      puts "Cannot initialize #{CommandDriver.language_name} project: Invalid TYPE value: #{skeleton}"
       puts parser
       exit(1)
     end
@@ -800,7 +860,7 @@ pub class CommandDriver
     compiler_opts = CompilerOptions.new
     link_flags = [] of String
     parser = OptionParser.new
-    parser.banner = "Usage: crystal spec [options] [files] [-- runtime_options]\n\nOptions:"
+    parser.banner = "Usage: #{CommandDriver.program_name} spec [options] [files] [-- runtime_options]\n\nOptions:"
     setup_simple_compiler_options(parser, compiler_opts)
     parser.on("-h", "--help", "Show this message") do
       puts parser
@@ -1562,7 +1622,7 @@ pub class CommandDriver
     end
 
     unless no_codegen
-      parser.on("--ll", "Dump ll to Crystal's cache directory") do
+      parser.on("--ll", "Dump ll to #{CommandDriver.language_name}'s cache directory") do
         opts.dump_ll = true
       end
       parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|

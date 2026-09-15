@@ -1,0 +1,699 @@
+# Path: hierarchical filesystem path manipulation according to POSIX and Windows rules.
+#
+# Provides parsing, lexical inspection, normalization, extension modification,
+# joining, relative path resolution, and comparison without external C libraries.
+
+module std/path
+
+import std/traits
+using std/traits::{Cmp}
+
+pub struct Path
+  pub enum Kind : UInt8
+    POSIX   = 0
+    WINDOWS = 1
+
+    def self.native : Kind
+      {% if flag?(:win32) %}
+        Kind::WINDOWS
+      {% else %}
+        Kind::POSIX
+      {% end %}
+    end
+
+    def posix? : Bool
+      value == 0_u8
+    end
+
+    def windows? : Bool
+      value == 1_u8
+    end
+  end
+
+  pub class Error < Exception
+    getter message : String
+
+    def initialize(@message : String)
+    end
+  end
+
+  getter name : String
+  getter kind : Kind
+
+  def initialize(@name : String = "", @kind : Kind = Kind.native)
+  end
+
+  def self.new(path : Path) : Path
+    path
+  end
+
+  def self.[](name : String = "") : Path
+    Path.new(name)
+  end
+
+  def self.[](first : String | Path, second : String | Path) : Path
+    Path.new(first.to_s).join(second)
+  end
+
+  def self.[](first : String | Path, second : String | Path, third : String | Path) : Path
+    Path.new(first.to_s).join(second).join(third)
+  end
+
+  def self.[](parts : Array(String)) : Path
+    Path.new("").join(parts)
+  end
+
+  def self.posix(name : String = "") : Path
+    Path.new(name, Kind::POSIX)
+  end
+
+  def self.windows(name : String = "") : Path
+    Path.new(name, Kind::WINDOWS)
+  end
+
+  def posix? : Bool
+    @kind.posix?
+  end
+
+  def windows? : Bool
+    @kind.windows?
+  end
+
+  def native? : Bool
+    @kind == Kind.native
+  end
+
+  def empty? : Bool
+    @name.empty?
+  end
+
+  def to_s : String
+    @name
+  end
+
+  def to_s(io : IO) : Nil
+    io.write(@name)
+  end
+
+  def inspect(io : IO) : Nil
+    io.write("Path[\"")
+    io.write(@name)
+    io.write("\"]")
+  end
+
+  def to_posix : Path
+    return self if posix?
+    # Convert backslashes to slashes
+    buf = Pointer(UInt8).malloc(@name.bytesize.to_u64)
+    i = 0
+    while i < @name.bytesize
+      b = @name.to_unsafe[i]
+      buf[i] = (b == 92_u8) ? 47_u8 : b
+      i = i + 1
+    end
+    str = String.new(@name.bytesize) do |target|
+      target.copy_from(buf, @name.bytesize)
+    end
+    Path.new(str, Kind::POSIX)
+  end
+
+  def to_windows : Path
+    return self if windows?
+    # Convert slashes to backslashes
+    buf = Pointer(UInt8).malloc(@name.bytesize.to_u64)
+    i = 0
+    while i < @name.bytesize
+      b = @name.to_unsafe[i]
+      buf[i] = (b == 47_u8) ? 92_u8 : b
+      i = i + 1
+    end
+    str = String.new(@name.bytesize) do |target|
+      target.copy_from(buf, @name.bytesize)
+    end
+    Path.new(str, Kind::WINDOWS)
+  end
+
+  def to_native : Path
+    if Kind.native.windows?
+      to_windows
+    else
+      to_posix
+    end
+  end
+
+  private def is_sep(b : UInt8) : Bool
+    if @kind.windows?
+      b == 47_u8 || b == 92_u8
+    else
+      b == 47_u8
+    end
+  end
+
+  def root : String?
+    return nil if @name.empty?
+    b0 = @name.to_unsafe[0]
+    if posix?
+      if b0 == 47_u8
+        return "/"
+      else
+        return nil
+      end
+    end
+
+    # Windows root / drive
+    len = @name.bytesize
+    ptr = @name.to_unsafe
+    # Check drive: C: or C:\
+    if len >= 2 && ((b0 >= 65_u8 && b0 <= 90_u8) || (b0 >= 97_u8 && b0 <= 122_u8)) && ptr[1] == 58_u8
+      if len >= 3 && is_sep(ptr[2])
+        return String.new(3) { |t| t.copy_from(ptr, 3) }
+      else
+        return String.new(2) { |t| t.copy_from(ptr, 2) }
+      end
+    end
+    if is_sep(b0)
+      return "\\"
+    end
+    nil
+  end
+
+  def anchor : String?
+    root
+  end
+
+  def drive : String?
+    return nil unless windows?
+    len = @name.bytesize
+    return nil if len < 2
+    ptr = @name.to_unsafe
+    b0 = ptr[0]
+    if ((b0 >= 65_u8 && b0 <= 90_u8) || (b0 >= 97_u8 && b0 <= 122_u8)) && ptr[1] == 58_u8
+      String.new(2) { |t| t.copy_from(ptr, 2) }
+    else
+      nil
+    end
+  end
+
+  def root? : Bool
+    r = root
+    return false unless r
+    r == @name
+  end
+
+  def absolute? : Bool
+    return false if @name.empty?
+    if posix?
+      @name.to_unsafe[0] == 47_u8
+    else
+      d = drive
+      r = root
+      if d && r && r.bytesize >= 3
+        true
+      else
+        is_sep(@name.to_unsafe[0])
+      end
+    end
+  end
+
+  def relative? : Bool
+    !absolute?
+  end
+
+  def basename(suffix : String? = nil) : String
+    len = @name.bytesize
+    return "" if len == 0
+    ptr = @name.to_unsafe
+
+    # Strip trailing separators
+    last = len - 1
+    while last > 0 && is_sep(ptr[last])
+      last = last - 1
+    end
+
+    if last == 0 && is_sep(ptr[0])
+      return posix? ? "/" : "\\"
+    end
+
+    first = last
+    while first > 0 && !is_sep(ptr[first - 1])
+      first = first - 1
+    end
+
+    base_len = last - first + 1
+    if suffix && !suffix.empty? && base_len >= suffix.bytesize
+      s_len = suffix.bytesize
+      s_ptr = suffix.to_unsafe
+      match = true
+      k = 0
+      while k < s_len
+        if ptr[first + base_len - s_len + k] != s_ptr[k]
+          match = false
+          break
+        end
+        k = k + 1
+      end
+      if match
+        base_len = base_len - s_len
+      end
+    end
+
+    String.new(base_len) do |target|
+      target.copy_from(ptr + first, base_len)
+    end
+  end
+
+  def dirname : String
+    len = @name.bytesize
+    return "." if len == 0
+    ptr = @name.to_unsafe
+
+    # Strip trailing separators
+    last = len - 1
+    while last > 0 && is_sep(ptr[last])
+      last = last - 1
+    end
+
+    if last == 0 && is_sep(ptr[0])
+      return posix? ? "/" : "\\"
+    end
+
+    # Skip current filename
+    while last >= 0 && !is_sep(ptr[last])
+      last = last - 1
+    end
+
+    if last < 0
+      return "."
+    end
+
+    # Strip trailing separators from dirname
+    while last > 0 && is_sep(ptr[last])
+      last = last - 1
+    end
+
+    if last == 0 && is_sep(ptr[0])
+      return posix? ? "/" : "\\"
+    end
+
+    String.new(last + 1) do |target|
+      target.copy_from(ptr, last + 1)
+    end
+  end
+
+  def parent : Path
+    Path.new(dirname, @kind)
+  end
+
+  def parents : Array(Path)
+    res = [] of Path
+    curr = self
+    while true
+      p = curr.parent
+      break if p == curr || (p.name == "." && curr.name == ".")
+      res << p
+      curr = p
+    end
+    res
+  end
+
+  def each_parent(&block : Path -> Nil) : Nil
+    parents.each do |p|
+      yield p
+    end
+  end
+
+  def extension : String
+    base = basename
+    len = base.bytesize
+    return "" if len == 0
+    ptr = base.to_unsafe
+
+    # Find last '.'
+    last_dot = -1
+    i = len - 1
+    while i > 0
+      if ptr[i] == 46_u8
+        last_dot = i
+        break
+      end
+      i = i - 1
+    end
+
+    if last_dot <= 0 || last_dot == len - 1
+      return ""
+    end
+
+    ext_len = len - last_dot
+    String.new(ext_len) do |target|
+      target.copy_from(ptr + last_dot, ext_len)
+    end
+  end
+
+  def extname : String
+    extension
+  end
+
+  def stem : String
+    base = basename
+    ext = extension
+    if ext.empty?
+      base
+    else
+      rem_len = base.bytesize - ext.bytesize
+      String.new(rem_len) do |target|
+        target.copy_from(base.to_unsafe, rem_len)
+      end
+    end
+  end
+
+  def parts : Array(String)
+    res = [] of String
+    return res if @name.empty?
+    len = @name.bytesize
+    ptr = @name.to_unsafe
+
+    start_idx = 0
+    if is_sep(ptr[0])
+      res << (posix? ? "/" : "\\")
+      while start_idx < len && is_sep(ptr[start_idx])
+        start_idx = start_idx + 1
+      end
+    end
+
+    i = start_idx
+    seg_start = start_idx
+    while i <= len
+      if i == len
+        if i > seg_start
+          seg_len = i - seg_start
+          res << String.new(seg_len) { |t| t.copy_from(ptr + seg_start, seg_len) }
+        end
+        break
+      elsif is_sep(ptr[i])
+        if i > seg_start
+          seg_len = i - seg_start
+          res << String.new(seg_len) { |t| t.copy_from(ptr + seg_start, seg_len) }
+        end
+        while i < len && is_sep(ptr[i])
+          i = i + 1
+        end
+        seg_start = i
+      else
+        i = i + 1
+      end
+    end
+    res
+  end
+
+  def each_part(&block : String -> Nil) : Nil
+    parts.each do |p|
+      yield p
+    end
+  end
+
+  def join(part : String) : Path
+    return self if part.empty?
+    p = Path.new(part, @kind)
+    return p if p.absolute?
+
+    sep = posix? ? "/" : "\\"
+    if @name.empty? || @name == "."
+      return Path.new(part, @kind)
+    end
+
+    last_b = @name.to_unsafe[@name.bytesize - 1]
+    joined = if is_sep(last_b)
+               @name + part
+             else
+               @name + sep + part
+             end
+    Path.new(joined, @kind)
+  end
+
+  def join(part : Path) : Path
+    join(part.name)
+  end
+
+  def join(first : String | Path, second : String | Path) : Path
+    join(first).join(second)
+  end
+
+  def join(first : String | Path, second : String | Path, third : String | Path) : Path
+    join(first).join(second).join(third)
+  end
+
+  def join(parts : Array(String)) : Path
+    curr = self
+    parts.each do |p|
+      curr = curr.join(p)
+    end
+    curr
+  end
+
+  def /(part : String | Path) : Path
+    join(part)
+  end
+
+  def normalize : Path
+    return Path.new(".", @kind) if @name.empty?
+    orig_parts = parts
+    return Path.new(posix? ? "/" : "\\", @kind) if orig_parts.empty? && is_sep(@name.to_unsafe[0])
+
+    is_abs = absolute?
+    norm = [] of String
+
+    orig_parts.each do |seg|
+      next if seg == "."
+      if seg == ".."
+        if !norm.empty? && norm.last != ".." && norm.last != "/" && norm.last != "\\"
+          norm.pop
+        elsif !is_abs
+          norm << ".."
+        end
+      else
+        norm << seg
+      end
+    end
+
+    if norm.empty?
+      return Path.new(is_abs ? (posix? ? "/" : "\\") : ".", @kind)
+    end
+
+    sep = posix? ? "/" : "\\"
+    res = ""
+    first_elem = true
+    norm.each do |elem|
+      if first_elem
+        res = elem
+        first_elem = false
+      elsif res == "/" || res == "\\"
+        res = res + elem
+      else
+        res = res + sep + elem
+      end
+    end
+    Path.new(res, @kind)
+  end
+
+  def relative_to?(base : Path | String) : Path?
+    base_path = base.is_a?(Path) ? base : Path.new(base, @kind)
+    target = normalize
+    base_norm = base_path.normalize
+
+    return nil if target.absolute? != base_norm.absolute?
+
+    t_parts = target.parts
+    b_parts = base_norm.parts
+
+    # Find common prefix length
+    common = 0
+    min_len = t_parts.size < b_parts.size ? t_parts.size : b_parts.size
+    while common < min_len && t_parts[common] == b_parts[common]
+      common = common + 1
+    end
+
+    res = [] of String
+    # Step up from base
+    up_count = b_parts.size - common
+    u = 0
+    while u < up_count
+      res << ".."
+      u = u + 1
+    end
+
+    # Step down to target
+    d = common
+    while d < t_parts.size
+      res << t_parts[d]
+      d = d + 1
+    end
+
+    if res.empty?
+      Path.new(".", @kind)
+    else
+      sep = posix? ? "/" : "\\"
+      Path.new(res.join(sep), @kind)
+    end
+  end
+
+  def relative_to(base : Path | String) : Path
+    rel = relative_to?(base)
+    if rel
+      rel
+    else
+      raise "Cannot compute relative path between #{@name} and #{base.to_s}"
+    end
+  end
+
+  def expand(base : Path | String? = nil, home : Bool = false) : Path
+    name_str = @name
+    if home && name_str.starts_with?("~/")
+      home_dir = Program.env("HOME")
+      if home_dir
+        name_str = home_dir + name_str[1..]
+      end
+    elsif home && name_str == "~"
+      home_dir = Program.env("HOME")
+      name_str = home_dir if home_dir
+    end
+
+    p = Path.new(name_str, @kind)
+    if p.absolute?
+      p.normalize
+    else
+      base_dir = if base
+                   base.is_a?(Path) ? base : Path.new(base, @kind)
+                 else
+                   # Default to current directory or "/"
+                   pwd = Program.env("PWD")
+                   pwd ? Path.new(pwd, @kind) : Path.new("/", @kind)
+                 end
+      base_dir.join(p).normalize
+    end
+  end
+
+  def sibling(name : String | Path) : Path
+    parent.join(name)
+  end
+
+  def change_extension(new_ext : String) : Path
+    stem_str = stem
+    new_ext_str = if new_ext.empty? || new_ext.starts_with?(".")
+                    new_ext
+                  else
+                    "." + new_ext
+                  end
+    parent.join(stem_str + new_ext_str)
+  end
+
+  def <=>(other : Path) : Int32
+    if @kind.windows? && other.kind.windows?
+      Path.compare_strings_ci(@name, other.name)
+    else
+      Path.compare_strings(@name, other.name)
+    end
+  end
+
+  def ==(other : Path) : Bool
+    (@kind == other.kind) && ((self <=> other) == 0)
+  end
+
+  def self.compare_strings(s1 : String, s2 : String) : Int32
+    len1 = s1.bytesize
+    len2 = s2.bytesize
+    min_len = len1 < len2 ? len1 : len2
+    p1 = s1.to_unsafe
+    p2 = s2.to_unsafe
+    i = 0
+    while i < min_len
+      b1 = p1[i]
+      b2 = p2[i]
+      if b1 < b2
+        return -1
+      elsif b1 > b2
+        return 1
+      end
+      i = i + 1
+    end
+    if len1 < len2
+      -1
+    elsif len1 > len2
+      1
+    else
+      0
+    end
+  end
+
+  def self.compare_strings_ci(s1 : String, s2 : String) : Int32
+    len1 = s1.bytesize
+    len2 = s2.bytesize
+    min_len = len1 < len2 ? len1 : len2
+    p1 = s1.to_unsafe
+    p2 = s2.to_unsafe
+    i = 0
+    while i < min_len
+      b1 = p1[i]
+      b2 = p2[i]
+      b1 = b1 + 32_u8 if b1 >= 65_u8 && b1 <= 90_u8
+      b2 = b2 + 32_u8 if b2 >= 65_u8 && b2 <= 90_u8
+      if b1 < b2
+        return -1
+      elsif b1 > b2
+        return 1
+      end
+      i = i + 1
+    end
+    if len1 < len2
+      -1
+    elsif len1 > len2
+      1
+    else
+      0
+    end
+  end
+
+  def match?(pattern : String) : Bool
+    Path.match_pattern(pattern, @name)
+  end
+
+  def self.match_pattern(pattern : String, str : String) : Bool
+    p_len = pattern.bytesize
+    s_len = str.bytesize
+    p_ptr = pattern.to_unsafe
+    s_ptr = str.to_unsafe
+
+    pi = 0
+    si = 0
+    star_pi = -1
+    star_si = 0
+
+    while si < s_len
+      if pi < p_len && (p_ptr[pi] == 63_u8 || p_ptr[pi] == s_ptr[si])
+        pi = pi + 1
+        si = si + 1
+      elsif pi < p_len && p_ptr[pi] == 42_u8
+        star_pi = pi
+        star_si = si
+        pi = pi + 1
+      elsif star_pi >= 0
+        pi = star_pi + 1
+        star_si = star_si + 1
+        si = star_si
+      else
+        return false
+      end
+    end
+
+    while pi < p_len && p_ptr[pi] == 42_u8
+      pi = pi + 1
+    end
+
+    pi == p_len
+  end
+end
+
+impl Cmp for Path
+  def cmp(other : self) : Int32
+    self <=> other
+  end
+end

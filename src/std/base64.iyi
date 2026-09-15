@@ -1,0 +1,101 @@
+# Base64, RFC 4648, written in iyi.
+#
+# `encode` is the alphabet with `+` `/` and `=` padding, no line
+# breaks (RFC 4648 §4). `urlsafe_encode` uses `-` `_` and the same
+# padding. `decode` accepts both alphabets, ignores ASCII whitespace,
+# and panics on a byte that is neither.
+
+module std/base64
+
+pub struct Base64
+  def self.encode(data : String) : String
+    encode_with(data, plus_slash, true)
+  end
+
+  def self.urlsafe_encode(data : String) : String
+    encode_with(data, minus_underscore, true)
+  end
+
+  def self.decode(text : String) : String
+    src = text.to_unsafe
+    n = text.bytesize
+    out_cap = (n // 4) * 3 + 3
+    buf = Pointer(UInt8).malloc(out_cap.to_u64)
+    o = 0
+    acc = 0
+    bits = 0
+    i = 0
+    while i < n
+      b = src[i]
+      i = i + 1
+      next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8
+      break if b == 61_u8 # '='
+      v = value_of(b)
+      raise "base64: invalid byte #{b}" if v < 0
+      acc = (acc << 6) | v
+      bits = bits + 6
+      if bits >= 8
+        bits = bits - 8
+        buf[o] = ((acc >> bits) & 255).to_u8
+        o = o + 1
+      end
+    end
+    String.new(o) { |dst| dst.copy_from(buf, o) }
+  end
+
+  private def self.encode_with(data : String, alphabet : String, pad : Bool) : String
+    n = data.bytesize
+    src = data.to_unsafe
+    table = alphabet.to_unsafe
+    out_n = ((n + 2) // 3) * 4
+    String.new(out_n) do |dst|
+      i = 0
+      o = 0
+      while i < n
+        rest = n - i
+        b0 = src[i].to_i32
+        b1 = rest > 1 ? src[i + 1].to_i32 : 0
+        b2 = rest > 2 ? src[i + 2].to_i32 : 0
+        triple = (b0 << 16) | (b1 << 8) | b2
+        dst[o] = table[(triple >> 18) & 63]
+        dst[o + 1] = table[(triple >> 12) & 63]
+        if rest == 1
+          dst[o + 2] = pad ? 61_u8 : table[(triple >> 6) & 63]
+          dst[o + 3] = 61_u8
+        elsif rest == 2
+          dst[o + 2] = table[(triple >> 6) & 63]
+          dst[o + 3] = pad ? 61_u8 : table[triple & 63]
+        else
+          dst[o + 2] = table[(triple >> 6) & 63]
+          dst[o + 3] = table[triple & 63]
+        end
+        o = o + 4
+        i = i + 3
+      end
+    end
+  end
+
+  private def self.plus_slash : String
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  end
+
+  private def self.minus_underscore : String
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+  end
+
+  private def self.value_of(b : UInt8) : Int32
+    if b >= 65_u8 && b <= 90_u8
+      (b - 65_u8).to_i32
+    elsif b >= 97_u8 && b <= 122_u8
+      (b - 97_u8).to_i32 + 26
+    elsif b >= 48_u8 && b <= 57_u8
+      (b - 48_u8).to_i32 + 52
+    elsif b == 43_u8 || b == 45_u8
+      62
+    elsif b == 47_u8 || b == 95_u8
+      63
+    else
+      -1
+    end
+  end
+end

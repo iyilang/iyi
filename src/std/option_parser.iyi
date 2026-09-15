@@ -1,0 +1,100 @@
+# Flag parsing, written in iyi.
+#
+# `on("--name VALUE", "help") { |v| ... }` and `on("-h", "help") { }`
+# register flags. `parse` walks `Program.args` (or the array given),
+# calls the blocks, and answers the leftover operands. An unknown
+# flag is `unknown flag: --x`. A flag that takes a value and is last
+# is `flag --name needs a value`.
+
+module std/option_parser
+
+pub class OptionParser
+  @long : Hash(String, {Bool, (String -> Nil)})
+  @short : Hash(String, {Bool, (String -> Nil)})
+  @help : Array(String)
+
+  def initialize
+    @long = {} of String => {Bool, (String -> Nil)}
+    @short = {} of String => {Bool, (String -> Nil)}
+    @help = [] of String
+  end
+
+  def on(flag : String, description : String, &block : String -> Nil) : Nil
+    @help << "  #{flag}  #{description}"
+    takes = flag.includes?(" ")
+    name = flag.split(' ')[0]
+    if name.starts_with?("--")
+      @long[name] = {takes, block}
+    elsif name.starts_with?("-") && name.bytesize == 2
+      @short[name] = {takes, block}
+    else
+      raise "option: not a flag: #{flag}"
+    end
+  end
+
+  def parse : Array(String)
+    parse(Program.args)
+  end
+
+  def parse(args : Array(String)) : Array(String)
+    rest = [] of String
+    i = 0
+    n = args.size
+    while i < n
+      a = args[i]
+      if a == "--"
+        i = i + 1
+        while i < n
+          rest << args[i]
+          i = i + 1
+        end
+        break
+      elsif a.starts_with?("--")
+        eq = a.index('=')
+        if eq
+          name = a[0, eq]
+          val = a[eq + 1, a.bytesize - eq - 1]
+          spec = @long[name]?
+          raise "unknown flag: #{name}" unless spec
+          raise "flag #{name} takes no value" unless spec[0]
+          spec[1].call(val)
+        else
+          spec = @long[a]?
+          raise "unknown flag: #{a}" unless spec
+          if spec[0]
+            i = i + 1
+            raise "flag #{a} needs a value" if i >= n
+            spec[1].call(args[i])
+          else
+            spec[1].call("")
+          end
+        end
+      elsif a.starts_with?("-") && a.bytesize >= 2 && a != "-"
+        name = a[0, 2]
+        spec = @short[name]?
+        raise "unknown flag: #{name}" unless spec
+        if spec[0]
+          if a.bytesize > 2
+            spec[1].call(a[2, a.bytesize - 2])
+          else
+            i = i + 1
+            raise "flag #{name} needs a value" if i >= n
+            spec[1].call(args[i])
+          end
+        else
+          spec[1].call("")
+        end
+      else
+        rest << a
+      end
+      i = i + 1
+    end
+    rest
+  end
+
+  def help : String
+    lines = ["options:"]
+    @help.each { |h| lines << h }
+    lines.join("\n")
+  end
+end

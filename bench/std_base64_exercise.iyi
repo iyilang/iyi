@@ -1,0 +1,33 @@
+# Exercises `std/base64`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_base64_exercise.iyi
+
+module bench/std_base64_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/base64
+using std/base64::{Base64}
+
+puts "== encode"
+assert_str "aGk=", Base64.encode("hi"), "hi"
+assert_str "Zg==", Base64.encode("f"), "f"
+assert_str "Zm8=", Base64.encode("fo"), "fo"
+assert_str "Zm9v", Base64.encode("foo"), "foo"
+assert_str "", Base64.encode(""), "empty"
+assert_str "Pz8=", Base64.urlsafe_encode("??"), "urlsafe"
+puts "  RFC 4648, with padding"
+
+puts "\n== decode"
+assert_str "hi", Base64.decode("aGk="), "pad"
+assert_str "hello world", Base64.decode(Base64.encode("hello world")), "round trip"
+puts "  decode and round trip"
+
+puts "\nALL CHECKS PASSED"

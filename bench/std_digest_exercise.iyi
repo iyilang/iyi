@@ -1,0 +1,38 @@
+# Exercises `std/digest`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_digest_exercise.iyi
+
+module bench/std_digest_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/digest
+using std/digest::{MD5, SHA1, SHA256, CRC32, Adler32}
+
+puts "== md5"
+assert_str "d41d8cd98f00b204e9800998ecf8427e", MD5.hexdigest(""), "empty"
+assert_str "900150983cd24fb0d6963f7d28e17f72", MD5.hexdigest("abc"), "abc"
+puts "  empty and abc"
+
+puts "\n== sha"
+assert_str "da39a3ee5e6b4b0d3255bfef95601890afd80709", SHA1.hexdigest(""), "sha1 empty"
+assert_str "a9993e364706816aba3e25717850c26c9cd0d89d", SHA1.hexdigest("abc"), "sha1 abc"
+assert_str "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", SHA256.hexdigest(""), "sha256 empty"
+assert_str "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", SHA256.hexdigest("abc"), "sha256 abc"
+puts "  SHA-1 and SHA-256"
+
+puts "\n== checksum"
+assert_str "00000000", CRC32.hexdigest(""), "crc empty"
+assert_str "cbf43926", CRC32.hexdigest("123456789"), "crc ITU"
+assert_str "00000001", Adler32.hexdigest(""), "adler empty"
+assert_str "091e01de", Adler32.hexdigest("123456789"), "adler ITU"
+puts "  CRC-32 and Adler-32"
+
+puts "\nALL CHECKS PASSED"

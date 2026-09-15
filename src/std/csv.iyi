@@ -1,0 +1,126 @@
+# CSV, RFC 4180, written in iyi.
+#
+# `CSV.parse` reads a document into rows of fields. A field may be
+# quoted; a quote inside a quoted field is doubled. The separator is
+# a comma. Lines end at LF or CRLF. `CSV.build` writes the same
+# contract: a field is quoted when it holds a comma, a quote or a
+# line break. A quote without its pair is `unterminated quoted field`.
+
+module std/csv
+
+pub struct CSV
+  def self.parse(text : String) : Array(Array(String))
+    rows = [] of Array(String)
+    row = [] of String
+    n = text.bytesize
+    src = text.to_unsafe
+    i = 0
+    field = Pointer(UInt8).malloc((n + 1).to_u64)
+    flen = 0
+    quoted = false
+    while i < n
+      b = src[i]
+      if quoted
+        if b == 34_u8 # "
+          if i + 1 < n && src[i + 1] == 34_u8
+            field[flen] = 34_u8
+            flen = flen + 1
+            i = i + 2
+          else
+            quoted = false
+            i = i + 1
+          end
+        else
+          field[flen] = b
+          flen = flen + 1
+          i = i + 1
+        end
+      else
+        if b == 34_u8 && flen == 0
+          quoted = true
+          i = i + 1
+        elsif b == 44_u8 # comma
+          row << take(field, flen)
+          flen = 0
+          i = i + 1
+        elsif b == 10_u8
+          row << take(field, flen)
+          flen = 0
+          rows << row
+          row = [] of String
+          i = i + 1
+        elsif b == 13_u8
+          i = i + 1
+        else
+          field[flen] = b
+          flen = flen + 1
+          i = i + 1
+        end
+      end
+    end
+    raise "unterminated quoted field" if quoted
+    if flen > 0 || row.size > 0 || (n > 0 && src[n - 1] == 44_u8)
+      row << take(field, flen)
+      rows << row
+    end
+    rows
+  end
+
+  def self.build(rows : Array(Array(String))) : String
+    out = ""
+    r = 0
+    while r < rows.size
+      out = out + "\n" if r > 0
+      fields = rows[r]
+      c = 0
+      while c < fields.size
+        out = out + "," if c > 0
+        out = out + escape(fields[c])
+        c = c + 1
+      end
+      r = r + 1
+    end
+    out
+  end
+
+  private def self.take(field : Pointer(UInt8), flen : Int32) : String
+    String.new(flen) { |dst| dst.copy_from(field, flen) }
+  end
+
+  private def self.escape(field : String) : String
+    need = false
+    p = field.to_unsafe
+    n = field.bytesize
+    i = 0
+    while i < n
+      b = p[i]
+      if b == 44_u8 || b == 34_u8 || b == 10_u8 || b == 13_u8
+        need = true
+        break
+      end
+      i = i + 1
+    end
+    return field unless need
+    extra = 2
+    i = 0
+    while i < n
+      extra = extra + 1 if p[i] == 34_u8
+      i = i + 1
+    end
+    String.new(n + extra) do |dst|
+      dst[0] = 34_u8
+      o = 1
+      i = 0
+      while i < n
+        dst[o] = p[i]
+        o = o + 1
+        if p[i] == 34_u8
+          dst[o] = 34_u8
+          o = o + 1
+        end
+        i = i + 1
+      end
+      dst[o] = 34_u8
+    end
+  end
+end

@@ -1,0 +1,144 @@
+# HTTP/1.1 over the blocking socket, written in iyi.
+#
+# `HTTP.get` speaks `http://` only, to a numeric IPv4 host or
+# `localhost` — the same addresses `IyiSocket` will open. TLS is not
+# in 0.x. `format_request` / `parse_response` are the text; `get`
+# writes one and reads the other. A status line that is not HTTP is
+# refused with the first line.
+
+module std/http
+
+import std/socket
+import std/uri
+using std/socket::{IyiSocket}
+using std/uri::{URI}
+
+pub struct Response
+  getter status : Int32
+  getter reason : String
+  getter headers : Hash(String, String)
+  getter body : String
+
+  def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String)
+  end
+end
+
+pub struct HTTP
+  def self.format_request(method : String, path : String, host : String, body : String = "") : String
+    req = "#{method} #{path} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
+    if body.bytesize > 0
+      req = req + "Content-Length: #{body.bytesize}\r\n"
+    end
+    req + "\r\n" + body
+  end
+
+  def self.parse_response(text : String) : Response
+    split_at = find_headers_end(text)
+    raise "HTTP: no header terminator" unless split_at
+    head = text[0, split_at]
+    body = text[split_at + 4, text.bytesize - split_at - 4]
+    lines = split_crlf(head)
+    raise "HTTP: empty response" if lines.size == 0
+    status, reason = parse_status(lines[0])
+    headers = {} of String => String
+    i = 1
+    while i < lines.size
+      line = lines[i]
+      next if line.bytesize == 0
+      colon = line.index(':')
+      raise "HTTP: header without a colon: #{line}" unless colon
+      name = line[0, colon]
+      val = line[colon + 1, line.bytesize - colon - 1]
+      headers[name] = trim_l(val)
+      i = i + 1
+    end
+    if cl = headers["Content-Length"]?
+      n = cl.to_i
+      body = body[0, n] if n < body.bytesize
+    end
+    Response.new(status, reason, headers, body)
+  end
+
+  def self.find_headers_end(text : String) : Int32?
+    p = text.to_unsafe
+    n = text.bytesize
+    i = 0
+    while i + 3 < n
+      if p[i] == 13_u8 && p[i + 1] == 10_u8 && p[i + 2] == 13_u8 && p[i + 3] == 10_u8
+        return i
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  def self.split_crlf(text : String) : Array(String)
+    lines = [] of String
+    p = text.to_unsafe
+    n = text.bytesize
+    start = 0
+    i = 0
+    while i < n
+      if p[i] == 13_u8 && i + 1 < n && p[i + 1] == 10_u8
+        lines << text[start, i - start]
+        i = i + 2
+        start = i
+      else
+        i = i + 1
+      end
+    end
+    lines << text[start, n - start] if start < n
+    lines
+  end
+
+  def self.get(url : String) : Response
+    uri = URI.parse(url)
+    scheme = uri.scheme
+    raise "HTTP: TLS is not in 0.x; use http://" if scheme == "https"
+    raise "HTTP: only http://" unless scheme == "http"
+    host = uri.hostname
+    raise "HTTP: missing host" unless host
+    path = uri.path
+    path = "/" if path.bytesize == 0
+    if q = uri.query
+      path = path + "?" + q
+    end
+    port = uri.port
+    port = 80 unless port
+    sock = IyiSocket.connect(host, port)
+    defer sock.close
+    sock.write(format_request("GET", path, host))
+    buf = ""
+    while true
+      chunk = sock.read(4096)
+      break if chunk.bytesize == 0
+      buf = buf + chunk
+    end
+    parse_response(buf)
+  end
+
+  private def self.parse_status(line : String) : {Int32, String}
+    # HTTP/1.1 200 OK
+    raise "HTTP: not a status line: #{line}" unless line.starts_with?("HTTP/")
+    sp1 = line.index(' ')
+    raise "HTTP: not a status line: #{line}" unless sp1
+    rest = line[sp1 + 1, line.bytesize - sp1 - 1]
+    sp2 = rest.index(' ')
+    if sp2
+      {rest[0, sp2].to_i, rest[sp2 + 1, rest.bytesize - sp2 - 1]}
+    else
+      {rest.to_i, ""}
+    end
+  end
+
+  private def self.trim_l(s : String) : String
+    i = 0
+    n = s.bytesize
+    while i < n
+      ch = s[i]
+      break unless ch == ' ' || ch == '\t'
+      i = i + 1
+    end
+    s[i, n - i]
+  end
+end

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Nine std modules written in iyi, none of them a C binding.** Digest
+  (MD5, SHA-1, SHA-256, CRC-32, Adler-32), Base64 (RFC 4648), CSV (RFC
+  4180), a PCG-32 `Random` (and `Array#shuffle` / `sample`), UUID v4
+  (RFC 4122), a Thompson NFA `Regex` (RE2's contract: linear time, no
+  backreferences or lookaround), a min-heap over `Cmp`, HTTP/1.1 GET
+  over `IyiSocket` (numeric IPv4 and `localhost`; TLS is not in 0.x),
+  and `OptionParser`. Each has a `bench/std_<name>_exercise.sh`. What
+  Crystal's library gets from OpenSSL, PCRE, zlib, GMP and getaddrinfo
+  is still not here, on purpose.
+
 ### Removed
 
 - **The Crystal socket stack that landed beside `IyiSocket`.** TCP, UDP,

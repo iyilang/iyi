@@ -1,0 +1,33 @@
+# Exercises `std/http`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_http_exercise.iyi
+
+module bench/std_http_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/http
+using std/http::{HTTP}
+
+puts "== request"
+req = HTTP.format_request("GET", "/", "127.0.0.1")
+assert_true req.starts_with?("GET / HTTP/1.1"), "method line"
+assert_true req.includes?("Host: 127.0.0.1"), "host"
+puts "  GET request text"
+
+puts "\n== response"
+resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
+assert_true resp.status == 200, "status"
+assert_str "OK", resp.reason, "reason"
+assert_str "hi!\n", resp.body, "body"
+assert_str "4", resp.headers["Content-Length"], "length header"
+puts "  status, headers, body"
+
+puts "\nALL CHECKS PASSED"

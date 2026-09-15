@@ -1,0 +1,39 @@
+# Exercises `std/regex`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_regex_exercise.iyi
+
+module bench/std_regex_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/regex
+using std/regex::{Regex}
+
+puts "== match"
+rx = Regex.compile("a+")
+assert_true rx.match?("aaa"), "whole"
+assert_true !rx.match?("baa"), "not whole"
+assert_str "aaa", rx.find("xxaaayy") || "", "find"
+assert_true rx.scan("a1aa2aaa").size == 3, "scan three"
+assert_true Regex.compile(",").split("a,b,c").size == 3, "split"
+assert_str "xoy", Regex.compile("a+").replace("xaaay", "o"), "replace"
+assert_str "dog", Regex.compile("cat|dog").find("the dog") || "", "alt"
+assert_str "12", Regex.compile("[0-9]+").find("ab12cd") || "", "class"
+assert_true Regex.compile("^ab").match?("ab"), "anchor yes"
+assert_true (Regex.compile("^ab").find("xab") || "") == "", "anchor no"
+assert_true Regex.compile("a*").match?(""), "star empty"
+assert_true Regex.compile("a.c").match?("abc"), "dot"
+assert_str "12", Regex.compile("\\d+").find("ab12cd") || "", "digits"
+assert_str "hi", Regex.compile("\\w+").find("!hi!") || "", "word"
+assert_true Regex.compile("^a$").match?("a"), "exact a"
+assert_true !Regex.compile("^a$").match?("aa"), "not aa"
+puts "  NFA: find, scan, split, class, anchors"
+
+puts "\nALL CHECKS PASSED"

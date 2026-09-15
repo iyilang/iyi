@@ -1,0 +1,36 @@
+# Exercises `std/random`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_random_exercise.iyi
+
+module bench/std_random_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/random
+using std/random::{Random}
+
+puts "== seed"
+r = Random.new(1_u64)
+assert_true r.next_u32 == 3380776849_u32, "first"
+assert_true r.next_u32 == 361947764_u32, "second"
+assert_true Random.new(1_u64).rand(10) == 9, "bounded"
+assert_true r.next_bool == true, "bool"
+puts "  PCG-32 is deterministic from a seed"
+
+puts "\n== array"
+a = [1, 2, 3, 4, 5]
+b = a.shuffle
+assert_true a.size == 5, "original kept"
+assert_true b.size == 5, "shuffled same length"
+s = a.sample
+assert_true s >= 1 && s <= 5, "sample in range"
+puts "  shuffle and sample"
+
+puts "\nALL CHECKS PASSED"

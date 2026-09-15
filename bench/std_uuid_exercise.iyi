@@ -1,0 +1,28 @@
+# Exercises `std/uuid`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_uuid_exercise.iyi
+
+module bench/std_uuid_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/uuid
+using std/uuid::{UUID}
+
+puts "== parse"
+q = UUID.parse("550e8400-e29b-41d4-a716-446655440000")
+assert_str "550e8400-e29b-41d4-a716-446655440000", q.to_s, "round trip"
+assert_true q.version == 4, "parsed version"
+u = UUID.v4
+assert_true u.version == 4, "v4 version"
+assert_true UUID.parse(u.to_s) == u, "v4 parses back"
+puts "  hyphenated form and version 4"
+
+puts "\nALL CHECKS PASSED"

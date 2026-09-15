@@ -1,0 +1,31 @@
+# Exercises `std/csv`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_csv_exercise.iyi
+
+module bench/std_csv_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/csv
+using std/csv::{CSV}
+
+puts "== parse"
+rows = CSV.parse("a,b\n1,2\n")
+assert_true rows.size == 2, "two rows"
+assert_str "a", rows[0][0], "first field"
+assert_str "2", rows[1][1], "last field"
+quoted = CSV.parse("\"a,b\",c\n")
+assert_str "a,b", quoted[0][0], "quoted comma"
+assert_str "c", quoted[0][1], "after quoted"
+built = CSV.build(quoted)
+assert_true built.includes?("a,b"), "build keeps comma field"
+puts "  rows, quotes, build"
+
+puts "\nALL CHECKS PASSED"

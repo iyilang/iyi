@@ -1,0 +1,106 @@
+# UUID version 4, RFC 4122, written in iyi.
+#
+# Sixteen random bytes, then version 4 and the RFC 4122 variant bits.
+# `UUID.v4` answers the hyphenated form; `parse` reads it back and
+# panics on a length or hex digit that is not one.
+
+module std/uuid
+
+import std/random
+using std/random::{Random}
+
+pub struct UUID
+  @bytes : Array(UInt8)
+
+  def initialize(bytes : Array(UInt8))
+    raise "UUID: need 16 bytes, got #{bytes.size}" if bytes.size != 16
+    @bytes = bytes
+  end
+
+  def self.v4 : UUID
+    rng = Random.new
+    bytes = Array(UInt8).new(16) { 0_u8 }
+    i = 0
+    while i < 16
+      bytes[i] = (rng.next_u32 & 255_u32).to_u8
+      i = i + 1
+    end
+    bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8
+    bytes[8] = (bytes[8] & 0x3f_u8) | 0x80_u8
+    new(bytes)
+  end
+
+  def self.parse(text : String) : UUID
+    hex = compact(text)
+    raise "UUID: not 32 hex digits: #{text}" if hex.size != 32
+    bytes = Array(UInt8).new(16) { 0_u8 }
+    i = 0
+    while i < 16
+      bytes[i] = ((nibble(hex[i * 2]) << 4) | nibble(hex[i * 2 + 1])).to_u8
+      i = i + 1
+    end
+    new(bytes)
+  end
+
+  def to_s : String
+    String.new(36) do |dst|
+      write_hex(dst, 0, 0, 4)
+      dst[8] = 45_u8
+      write_hex(dst, 9, 4, 2)
+      dst[13] = 45_u8
+      write_hex(dst, 14, 6, 2)
+      dst[18] = 45_u8
+      write_hex(dst, 19, 8, 2)
+      dst[23] = 45_u8
+      write_hex(dst, 24, 10, 6)
+    end
+  end
+
+  def bytes : Array(UInt8)
+    @bytes
+  end
+
+  def ==(other : UUID) : Bool
+    i = 0
+    while i < 16
+      return false if @bytes[i] != other.bytes[i]
+      i = i + 1
+    end
+    true
+  end
+
+  def version : Int32
+    (@bytes[6].to_i32 >> 4) & 15
+  end
+
+  private def write_hex(dst : Pointer(UInt8), at : Int32, from : Int32, count : Int32) : Nil
+    i = 0
+    while i < count
+      b = @bytes[from + i].to_i32
+      dst[at + i * 2] = hex_nibble(b >> 4)
+      dst[at + i * 2 + 1] = hex_nibble(b & 15)
+      i = i + 1
+    end
+  end
+
+  private def self.compact(text : String) : Array(Char)
+    out = [] of Char
+    text.each_char do |ch|
+      next if ch == '-'
+      out << ch
+    end
+    out
+  end
+
+  private def self.nibble(ch : Char) : Int32
+    o = ch.ord
+    return o - 48 if o >= 48 && o <= 57
+    return o - 97 + 10 if o >= 97 && o <= 102
+    return o - 65 + 10 if o >= 65 && o <= 70
+    raise "UUID: not a hex digit: #{ch}"
+  end
+
+  private def hex_nibble(n : Int32) : UInt8
+    n < 10 ? (48 + n).to_u8 : (87 + n).to_u8
+  end
+end

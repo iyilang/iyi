@@ -1,0 +1,475 @@
+# Regular expressions, RE2's contract, written in iyi.
+#
+# Linear time: a Thompson NFA, one state set per character, no
+# backtracker. Lookaround, backreferences, recursion and possessive
+# quantifiers are refused with a sentence — those are not regular.
+# `.` is any byte but newline. `^` `$` `\d` `\w` `\s` and classes
+# `[a-z]` `[^0-9]` are the rest of the surface. `match?` is the whole
+# string; `find` is the first substring; `scan` every non-overlapping
+# one; `split` and `replace` read those.
+
+module std/regex
+
+pub struct Regex
+  @nfa : RxNfa
+
+  def initialize(@nfa : RxNfa)
+  end
+
+  def self.compile(pattern : String) : Regex
+    new(RxCompiler.new(pattern).compile)
+  end
+
+  def match?(text : String) : Bool
+    span = @nfa.run(text, 0, true)
+    !span.nil?
+  end
+
+  def find(text : String) : String?
+    span = @nfa.search(text)
+    return nil unless span
+    text[span[0], span[1] - span[0]]
+  end
+
+  def scan(text : String) : Array(String)
+    out = [] of String
+    pos = 0
+    n = text.bytesize
+    while pos <= n
+      span = @nfa.search_from(text, pos)
+      break unless span
+      a = span[0]
+      b = span[1]
+      out << text[a, b - a]
+      pos = b > a ? b : a + 1
+    end
+    out
+  end
+
+  def split(text : String) : Array(String)
+    out = [] of String
+    pos = 0
+    n = text.bytesize
+    while pos <= n
+      span = @nfa.search_from(text, pos)
+      unless span
+        out << text[pos, n - pos]
+        break
+      end
+      a = span[0]
+      b = span[1]
+      out << text[pos, a - pos]
+      pos = b > a ? b : a + 1
+      if pos > n
+        out << ""
+        break
+      end
+    end
+    out
+  end
+
+  def replace(text : String, replacement : String) : String
+    out = ""
+    pos = 0
+    n = text.bytesize
+    while pos <= n
+      span = @nfa.search_from(text, pos)
+      unless span
+        out = out + text[pos, n - pos]
+        break
+      end
+      a = span[0]
+      b = span[1]
+      out = out + text[pos, a - pos] + replacement
+      pos = b > a ? b : a + 1
+    end
+    out
+  end
+end
+
+class RxNfa
+  getter kind : Array(Int32)
+  getter ch : Array(UInt8)
+  getter out1 : Array(Int32)
+  getter out2 : Array(Int32)
+  getter mask : Array(UInt8)
+  property start : Int32
+  getter count : Int32
+
+  def initialize
+    @kind = [] of Int32
+    @ch = [] of UInt8
+    @out1 = [] of Int32
+    @out2 = [] of Int32
+    @mask = [] of UInt8
+    @start = 0
+    @count = 0
+  end
+
+  def add(kind : Int32, ch : UInt8 = 0_u8) : Int32
+    id = @count
+    @kind << kind
+    @ch << ch
+    @out1 << -1
+    @out2 << -1
+    i = 0
+    while i < 32
+      @mask << 0_u8
+      i = i + 1
+    end
+    @count = @count + 1
+    id
+  end
+
+  def set_class(id : Int32, bits : Array(UInt8)) : Nil
+    i = 0
+    while i < 32
+      @mask[id * 32 + i] = bits[i]
+      i = i + 1
+    end
+  end
+
+  def class_has?(id : Int32, b : UInt8) : Bool
+    byte = @mask[id * 32 + (b.to_i32 >> 3)].to_i32
+    (byte & (1 << (b.to_i32 & 7))) != 0
+  end
+
+  def patch(id : Int32, out1 : Int32, out2 : Int32 = -1) : Nil
+    @out1[id] = out1
+    @out2[id] = out2
+  end
+
+  def search(text : String) : {Int32, Int32}?
+    search_from(text, 0)
+  end
+
+  def search_from(text : String, from : Int32) : {Int32, Int32}?
+    n = text.bytesize
+    pos = from
+    while pos <= n
+      span = run(text, pos, false)
+      return span if span
+      pos = pos + 1
+    end
+    nil
+  end
+
+  # full=true: the match must consume the whole string from `from`.
+  def run(text : String, from : Int32, full : Bool) : {Int32, Int32}?
+    n = text.bytesize
+    src = text.to_unsafe
+    start_states = epsilon([@start], src, from, n)
+    pos = from
+    last = nil
+    last = {from, from} if accepting?(start_states)
+    current = start_states
+    while pos < n
+      b = src[pos]
+      nxt = [] of Int32
+      current.each do |s|
+        k = @kind[s]
+        ok = false
+        if k == 0
+          ok = @ch[s] == b
+        elsif k == 1
+          ok = b != 10_u8
+        elsif k == 2
+          ok = class_has?(s, b)
+        end
+        if ok
+          nxt << @out1[s] if @out1[s] >= 0
+        end
+      end
+      current = epsilon(nxt, src, pos + 1, n)
+      break if current.empty?
+      pos = pos + 1
+      last = {from, pos} if accepting?(current)
+    end
+    return nil unless last
+    return nil if full && last[1] != n
+    last
+  end
+
+  private def accepting?(states : Array(Int32)) : Bool
+    states.each { |s| return true if @kind[s] == 4 }
+    false
+  end
+
+  private def epsilon(seeds : Array(Int32), src : Pointer(UInt8), pos : Int32, n : Int32) : Array(Int32)
+    seen = Array(Int32).new(@count) { 0 }
+    out = [] of Int32
+    stack = [] of Int32
+    seeds.each { |s| stack << s if s >= 0 }
+    while stack.size > 0
+      s = stack.pop
+      next if seen[s] == 1
+      seen[s] = 1
+      k = @kind[s]
+      if k == 3
+        stack << @out1[s] if @out1[s] >= 0
+        stack << @out2[s] if @out2[s] >= 0
+      elsif k == 5
+        stack << @out1[s] if pos == 0 && @out1[s] >= 0
+      elsif k == 6
+        stack << @out1[s] if pos == n && @out1[s] >= 0
+      else
+        out << s
+      end
+    end
+    out
+  end
+end
+
+class RxCompiler
+  @pat : String
+  @src : Pointer(UInt8)
+  @n : Int32
+  @i : Int32
+  @nfa : RxNfa
+
+  def initialize(pattern : String)
+    @pat = pattern
+    @src = pattern.to_unsafe
+    @n = pattern.bytesize
+    @i = 0
+    @nfa = RxNfa.new
+  end
+
+  def compile : RxNfa
+    frag = parse_alt
+    raise "regex: unmatched ')'" if @i < @n && peek == 41_u8
+    raise "regex: trailing '\\'" if @i < @n && peek == 92_u8
+    if @i < @n
+      raise "regex: unexpected byte in /#{@pat}/"
+    end
+    match = @nfa.add(4)
+    patch_outs(frag, match)
+    @nfa.start = frag[0]
+    @nfa
+  end
+
+  # fragment: {start, list of dangling out indices as encoded pairs}
+  # We store dangling holes as state ids that still have out1=-1, collected
+  # in an array.
+  private def parse_alt : {Int32, Array(Int32)}
+    left = parse_concat
+    while @i < @n && peek == 124_u8 # |
+      @i = @i + 1
+      right = parse_concat
+      split = @nfa.add(3)
+      @nfa.patch(split, left[0], right[0])
+      outs = left[1]
+      right[1].each { |o| outs << o }
+      left = {split, outs}
+    end
+    left
+  end
+
+  private def parse_concat : {Int32, Array(Int32)}
+    raise "regex: empty alternative in /#{@pat}/" if @i >= @n || peek == 124_u8 || peek == 41_u8
+    left = parse_repeat
+    while @i < @n && peek != 124_u8 && peek != 41_u8
+      right = parse_repeat
+      patch_outs(left, right[0])
+      left = {left[0], right[1]}
+    end
+    left
+  end
+
+  private def parse_repeat : {Int32, Array(Int32)}
+    atom = parse_atom
+    return atom if @i >= @n
+    q = peek
+    if q == 42_u8 || q == 43_u8 || q == 63_u8
+      @i = @i + 1
+      split = @nfa.add(3)
+      if q == 42_u8 # *
+        @nfa.patch(split, atom[0], -1)
+        patch_outs(atom, split)
+        {split, [split]}
+      elsif q == 43_u8 # +
+        @nfa.patch(split, atom[0], -1)
+        patch_outs(atom, split)
+        {atom[0], [split]}
+      else # ?
+        @nfa.patch(split, atom[0], -1)
+        outs = atom[1]
+        outs << split
+        {split, outs}
+      end
+    else
+      atom
+    end
+  end
+
+  private def parse_atom : {Int32, Array(Int32)}
+    raise "regex: unexpected end of /#{@pat}/" if @i >= @n
+    b = peek
+    if b == 46_u8 # .
+      @i = @i + 1
+      s = @nfa.add(1)
+      {s, [s]}
+    elsif b == 94_u8 # ^
+      @i = @i + 1
+      s = @nfa.add(5)
+      {s, [s]}
+    elsif b == 36_u8 # $
+      @i = @i + 1
+      s = @nfa.add(6)
+      {s, [s]}
+    elsif b == 40_u8 # (
+      @i = @i + 1
+      raise "regex: lookaround is refused" if @i < @n && peek == 63_u8
+      inner = parse_alt
+      raise "regex: unmatched '('" unless @i < @n && peek == 41_u8
+      @i = @i + 1
+      inner
+    elsif b == 41_u8
+      raise "regex: unmatched ')'"
+    elsif b == 91_u8 # [
+      parse_class
+    elsif b == 92_u8
+      parse_escape
+    elsif b == 42_u8 || b == 43_u8 || b == 63_u8 || b == 124_u8
+      raise "regex: nothing to repeat"
+    else
+      @i = @i + 1
+      s = @nfa.add(0, b)
+      {s, [s]}
+    end
+  end
+
+  private def parse_escape : {Int32, Array(Int32)}
+    @i = @i + 1
+    raise "regex: trailing '\\'" if @i >= @n
+    b = peek
+    @i = @i + 1
+    if b >= 49_u8 && b <= 57_u8
+      raise "regex: backreferences are refused"
+    elsif b == 100_u8
+      class_from(false) { |c| c >= 48_u8 && c <= 57_u8 }
+    elsif b == 68_u8
+      class_from(true) { |c| c >= 48_u8 && c <= 57_u8 }
+    elsif b == 119_u8
+      class_from(false) { |c| word?(c) }
+    elsif b == 87_u8
+      class_from(true) { |c| word?(c) }
+    elsif b == 115_u8
+      class_from(false) { |c| space?(c) }
+    elsif b == 83_u8
+      class_from(true) { |c| space?(c) }
+    elsif b == 110_u8
+      s = @nfa.add(0, 10_u8)
+      {s, [s]}
+    elsif b == 116_u8
+      s = @nfa.add(0, 9_u8)
+      {s, [s]}
+    elsif b == 114_u8
+      s = @nfa.add(0, 13_u8)
+      {s, [s]}
+    else
+      s = @nfa.add(0, b)
+      {s, [s]}
+    end
+  end
+
+  private def parse_class : {Int32, Array(Int32)}
+    @i = @i + 1
+    raise "regex: unterminated class" if @i >= @n
+    neg = false
+    if peek == 94_u8
+      neg = true
+      @i = @i + 1
+    end
+    bits = Array(UInt8).new(32) { 0_u8 }
+    first = true
+    while @i < @n && (peek != 93_u8 || first)
+      first = false
+      raise "regex: unterminated class" if @i >= @n
+      lo = next_class_byte
+      if @i + 1 < @n && peek == 45_u8 && @src[@i + 1] != 93_u8
+        @i = @i + 1
+        hi = next_class_byte
+        raise "regex: empty range" if hi.to_i32 < lo.to_i32
+        c = lo.to_i32
+        while c <= hi.to_i32
+          set_bit(bits, c.to_u8)
+          c = c + 1
+        end
+      else
+        set_bit(bits, lo)
+      end
+    end
+    raise "regex: unterminated class" unless @i < @n && peek == 93_u8
+    @i = @i + 1
+    if neg
+      i = 0
+      while i < 32
+        bits[i] = bits[i] ^ 255_u8
+        i = i + 1
+      end
+    end
+    s = @nfa.add(2)
+    @nfa.set_class(s, bits)
+    {s, [s]}
+  end
+
+  private def next_class_byte : UInt8
+    if peek == 92_u8
+      @i = @i + 1
+      raise "regex: trailing '\\'" if @i >= @n
+      b = peek
+      @i = @i + 1
+      return 10_u8 if b == 110_u8
+      return 9_u8 if b == 116_u8
+      return 13_u8 if b == 114_u8
+      b
+    else
+      b = peek
+      @i = @i + 1
+      b
+    end
+  end
+
+  private def class_from(neg : Bool, & : UInt8 -> Bool) : {Int32, Array(Int32)}
+    bits = Array(UInt8).new(32) { 0_u8 }
+    c = 0
+    while c < 256
+      u = c.to_u8
+      hit = yield u
+      hit = !hit if neg
+      set_bit(bits, u) if hit
+      c = c + 1
+    end
+    s = @nfa.add(2)
+    @nfa.set_class(s, bits)
+    {s, [s]}
+  end
+
+  private def set_bit(bits : Array(UInt8), b : UInt8) : Nil
+    i = b.to_i32 >> 3
+    bits[i] = (bits[i].to_i32 | (1 << (b.to_i32 & 7))).to_u8
+  end
+
+  private def word?(c : UInt8) : Bool
+    (c >= 48_u8 && c <= 57_u8) || (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8) || c == 95_u8
+  end
+
+  private def space?(c : UInt8) : Bool
+    c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 12_u8 || c == 11_u8
+  end
+
+  private def peek : UInt8
+    @src[@i]
+  end
+
+  private def patch_outs(frag : {Int32, Array(Int32)}, target : Int32) : Nil
+    frag[1].each do |s|
+      if @nfa.out1[s] < 0
+        @nfa.out1[s] = target
+      elsif @nfa.out2[s] < 0
+        @nfa.out2[s] = target
+      end
+    end
+  end
+end

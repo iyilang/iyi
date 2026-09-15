@@ -1,0 +1,103 @@
+# A PCG-32 generator, and a handful of random values from it.
+#
+# `Random.new(seed)` is deterministic. `Random.new` seeds from
+# `/dev/urandom` (eight bytes) on native platforms; wasm32 has no
+# such device and seeds from the clocks. Neither is a lock: this is
+# shuffle-the-deck randomness, not a secret.
+#
+# `rand` is in `[0, 1)`. `rand(n)` is an `Int32` in `0...n`. A
+# non-positive bound is `empty range`. `Array#shuffle` and
+# `Array#sample` land here so a program that never asks for a
+# random number does not carry one.
+
+module std/random
+
+import std/int
+import std/time
+using std/time::{Time}
+
+pub class Random
+  @state : UInt64
+  @inc : UInt64
+
+  def initialize(seed : UInt64)
+    @inc = (seed << 1) | 1_u64
+    @state = 0_u64
+    next_u32
+    @state = @state &+ seed
+    next_u32
+  end
+
+  def self.new : Random
+    new(entropy)
+  end
+
+  def next_u32 : UInt32
+    old = @state
+    @state = old &* 6364136223846793005_u64 &+ @inc
+    mixed = ((old >> 18) ^ old) >> 27
+    xorshifted = (mixed & 4294967295_u64).to_u32
+    rot = (old >> 59).to_i32
+    if rot == 0
+      xorshifted
+    else
+      (xorshifted >> rot) | (xorshifted << (32 - rot))
+    end
+  end
+
+  def rand : Float64
+    next_u32.to_f64 / 4294967296.0
+  end
+
+  def rand(n : Int32) : Int32
+    raise "empty range: #{n}" if n <= 0
+    (next_u32.to_u64 % n.to_u64).to_i32
+  end
+
+  def next_bool : Bool
+    (next_u32 & 1_u32) == 1_u32
+  end
+
+  private def self.entropy : UInt64
+    {% if flag?(:wasm32) %}
+      Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64
+    {% else %}
+      io = File.open("/dev/urandom")
+      bytes = io.read_bytes(8)
+      io.close
+      raise "Random: /dev/urandom answered #{bytes.bytesize} bytes, not 8" if bytes.bytesize != 8
+      p = bytes.to_unsafe
+      v = 0_u64
+      i = 0
+      while i < 8
+        v = v | (p[i].to_u64 << (i * 8))
+        i = i + 1
+      end
+      v
+    {% end %}
+  end
+end
+
+class ::Array(T)
+  def shuffle_in_place : Array(T)
+    rng = Std::Random::Random.new
+    i = @size - 1
+    while i > 0
+      j = rng.rand(i + 1)
+      tmp = @buffer[i]
+      @buffer[i] = @buffer[j]
+      @buffer[j] = tmp
+      i = i - 1
+    end
+    self
+  end
+
+  def shuffle : Array(T)
+    dup.shuffle_in_place
+  end
+
+  def sample : T
+    raise "sample of an empty array" if empty?
+    self[Std::Random::Random.new.rand(@size)]
+  end
+end

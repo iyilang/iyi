@@ -1,0 +1,32 @@
+# Exercises `std/heap`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_heap_exercise.iyi
+
+module bench/std_heap_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/heap
+using std/heap::{Heap}
+
+puts "== order"
+h = Heap(Int32).new
+h.push(3)
+h.push(1)
+h.push(2)
+assert_true h.size == 3, "size"
+assert_true h.peek == 1, "peek min"
+assert_true h.pop == 1, "pop 1"
+assert_true h.pop == 2, "pop 2"
+assert_true h.pop == 3, "pop 3"
+assert_true h.empty?, "empty after"
+puts "  min-heap pop order"
+
+puts "\nALL CHECKS PASSED"

@@ -1,0 +1,436 @@
+# Digests, written in iyi: MD5, SHA-1, SHA-256, CRC-32 and Adler-32.
+#
+# Nothing here reaches OpenSSL, zlib or compiler-rt. The words are the
+# RFCs' (1321, 3174, 6234, 1950, ISO 3309); the arithmetic is `std/int`'s
+# wrapping `&+` and the shifts. `hexdigest` answers lowercase hex.
+# MD5 and SHA-1 are the checksums they always were, not a lock.
+
+module std/digest
+
+import std/int
+
+pub struct MD5
+  def self.hexdigest(data : String) : String
+    DigestUtil.hex(hash_bytes(data), 16)
+  end
+
+  def self.hash_bytes(data : String) : Array(UInt8)
+    a0 = 0x67452301_u32
+    b0 = 0xEFCDAB89_u32
+    c0 = 0x98BADCFE_u32
+    d0 = 0x10325476_u32
+    msg = DigestUtil.padded_le(data)
+    off = 0
+    while off < msg.size
+      w = Array(UInt32).new(16) { 0_u32 }
+      i = 0
+      while i < 16
+        j = off + i * 4
+        w[i] = msg[j].to_u32 | (msg[j + 1].to_u32 << 8) | (msg[j + 2].to_u32 << 16) | (msg[j + 3].to_u32 << 24)
+        i = i + 1
+      end
+      a = a0
+      b = b0
+      c = c0
+      d = d0
+      a, b, c, d = md5_round(a, b, c, d, w)
+      a0 = a0 &+ a
+      b0 = b0 &+ b
+      c0 = c0 &+ c
+      d0 = d0 &+ d
+      off = off + 64
+    end
+    DigestUtil.u32s_le([a0, b0, c0, d0])
+  end
+
+  private def self.md5_round(a : UInt32, b : UInt32, c : UInt32, d : UInt32, w : Array(UInt32)) : {UInt32, UInt32, UInt32, UInt32}
+    a = ff(a, b, c, d, w[0], 7, 0xd76aa478_u32)
+    d = ff(d, a, b, c, w[1], 12, 0xe8c7b756_u32)
+    c = ff(c, d, a, b, w[2], 17, 0x242070db_u32)
+    b = ff(b, c, d, a, w[3], 22, 0xc1bdceee_u32)
+    a = ff(a, b, c, d, w[4], 7, 0xf57c0faf_u32)
+    d = ff(d, a, b, c, w[5], 12, 0x4787c62a_u32)
+    c = ff(c, d, a, b, w[6], 17, 0xa8304613_u32)
+    b = ff(b, c, d, a, w[7], 22, 0xfd469501_u32)
+    a = ff(a, b, c, d, w[8], 7, 0x698098d8_u32)
+    d = ff(d, a, b, c, w[9], 12, 0x8b44f7af_u32)
+    c = ff(c, d, a, b, w[10], 17, 0xffff5bb1_u32)
+    b = ff(b, c, d, a, w[11], 22, 0x895cd7be_u32)
+    a = ff(a, b, c, d, w[12], 7, 0x6b901122_u32)
+    d = ff(d, a, b, c, w[13], 12, 0xfd987193_u32)
+    c = ff(c, d, a, b, w[14], 17, 0xa679438e_u32)
+    b = ff(b, c, d, a, w[15], 22, 0x49b40821_u32)
+
+    a = gg(a, b, c, d, w[1], 5, 0xf61e2562_u32)
+    d = gg(d, a, b, c, w[6], 9, 0xc040b340_u32)
+    c = gg(c, d, a, b, w[11], 14, 0x265e5a51_u32)
+    b = gg(b, c, d, a, w[0], 20, 0xe9b6c7aa_u32)
+    a = gg(a, b, c, d, w[5], 5, 0xd62f105d_u32)
+    d = gg(d, a, b, c, w[10], 9, 0x02441453_u32)
+    c = gg(c, d, a, b, w[15], 14, 0xd8a1e681_u32)
+    b = gg(b, c, d, a, w[4], 20, 0xe7d3fbc8_u32)
+    a = gg(a, b, c, d, w[9], 5, 0x21e1cde6_u32)
+    d = gg(d, a, b, c, w[14], 9, 0xc33707d6_u32)
+    c = gg(c, d, a, b, w[3], 14, 0xf4d50d87_u32)
+    b = gg(b, c, d, a, w[8], 20, 0x455a14ed_u32)
+    a = gg(a, b, c, d, w[13], 5, 0xa9e3e905_u32)
+    d = gg(d, a, b, c, w[2], 9, 0xfcefa3f8_u32)
+    c = gg(c, d, a, b, w[7], 14, 0x676f02d9_u32)
+    b = gg(b, c, d, a, w[12], 20, 0x8d2a4c8a_u32)
+
+    a = hh(a, b, c, d, w[5], 4, 0xfffa3942_u32)
+    d = hh(d, a, b, c, w[8], 11, 0x8771f681_u32)
+    c = hh(c, d, a, b, w[11], 16, 0x6d9d6122_u32)
+    b = hh(b, c, d, a, w[14], 23, 0xfde5380c_u32)
+    a = hh(a, b, c, d, w[1], 4, 0xa4beea44_u32)
+    d = hh(d, a, b, c, w[4], 11, 0x4bdecfa9_u32)
+    c = hh(c, d, a, b, w[7], 16, 0xf6bb4b60_u32)
+    b = hh(b, c, d, a, w[10], 23, 0xbebfbc70_u32)
+    a = hh(a, b, c, d, w[13], 4, 0x289b7ec6_u32)
+    d = hh(d, a, b, c, w[0], 11, 0xeaa127fa_u32)
+    c = hh(c, d, a, b, w[3], 16, 0xd4ef3085_u32)
+    b = hh(b, c, d, a, w[6], 23, 0x04881d05_u32)
+    a = hh(a, b, c, d, w[9], 4, 0xd9d4d039_u32)
+    d = hh(d, a, b, c, w[12], 11, 0xe6db99e5_u32)
+    c = hh(c, d, a, b, w[15], 16, 0x1fa27cf8_u32)
+    b = hh(b, c, d, a, w[2], 23, 0xc4ac5665_u32)
+
+    a = ii(a, b, c, d, w[0], 6, 0xf4292244_u32)
+    d = ii(d, a, b, c, w[7], 10, 0x432aff97_u32)
+    c = ii(c, d, a, b, w[14], 15, 0xab9423a7_u32)
+    b = ii(b, c, d, a, w[5], 21, 0xfc93a039_u32)
+    a = ii(a, b, c, d, w[12], 6, 0x655b59c3_u32)
+    d = ii(d, a, b, c, w[3], 10, 0x8f0ccc92_u32)
+    c = ii(c, d, a, b, w[10], 15, 0xffeff47d_u32)
+    b = ii(b, c, d, a, w[1], 21, 0x85845dd1_u32)
+    a = ii(a, b, c, d, w[8], 6, 0x6fa87e4f_u32)
+    d = ii(d, a, b, c, w[15], 10, 0xfe2ce6e0_u32)
+    c = ii(c, d, a, b, w[6], 15, 0xa3014314_u32)
+    b = ii(b, c, d, a, w[13], 21, 0x4e0811a1_u32)
+    a = ii(a, b, c, d, w[4], 6, 0xf7537e82_u32)
+    d = ii(d, a, b, c, w[11], 10, 0xbd3af235_u32)
+    c = ii(c, d, a, b, w[2], 15, 0x2ad7d2bb_u32)
+    b = ii(b, c, d, a, w[9], 21, 0xeb86d391_u32)
+    {a, b, c, d}
+  end
+
+  private def self.ff(a : UInt32, b : UInt32, c : UInt32, d : UInt32, x : UInt32, s : Int32, ac : UInt32) : UInt32
+    DigestUtil.rotl(a &+ ((b & c) | ((~b) & d)) &+ x &+ ac, s) &+ b
+  end
+
+  private def self.gg(a : UInt32, b : UInt32, c : UInt32, d : UInt32, x : UInt32, s : Int32, ac : UInt32) : UInt32
+    DigestUtil.rotl(a &+ ((b & d) | (c & (~d))) &+ x &+ ac, s) &+ b
+  end
+
+  private def self.hh(a : UInt32, b : UInt32, c : UInt32, d : UInt32, x : UInt32, s : Int32, ac : UInt32) : UInt32
+    DigestUtil.rotl(a &+ (b ^ c ^ d) &+ x &+ ac, s) &+ b
+  end
+
+  private def self.ii(a : UInt32, b : UInt32, c : UInt32, d : UInt32, x : UInt32, s : Int32, ac : UInt32) : UInt32
+    DigestUtil.rotl(a &+ (c ^ (b | (~d))) &+ x &+ ac, s) &+ b
+  end
+end
+
+pub struct SHA1
+  def self.hexdigest(data : String) : String
+    DigestUtil.hex(hash_bytes(data), 20)
+  end
+
+  def self.hash_bytes(data : String) : Array(UInt8)
+    h0 = 0x67452301_u32
+    h1 = 0xEFCDAB89_u32
+    h2 = 0x98BADCFE_u32
+    h3 = 0x10325476_u32
+    h4 = 0xC3D2E1F0_u32
+    msg = DigestUtil.padded_be(data)
+    off = 0
+    while off < msg.size
+      w = Array(UInt32).new(80) { 0_u32 }
+      i = 0
+      while i < 16
+        j = off + i * 4
+        w[i] = (msg[j].to_u32 << 24) | (msg[j + 1].to_u32 << 16) | (msg[j + 2].to_u32 << 8) | msg[j + 3].to_u32
+        i = i + 1
+      end
+      i = 16
+      while i < 80
+        w[i] = DigestUtil.rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+        i = i + 1
+      end
+      a = h0
+      b = h1
+      c = h2
+      d = h3
+      e = h4
+      t = 0
+      while t < 80
+        f = 0_u32
+        k = 0_u32
+        if t < 20
+          f = (b & c) | ((~b) & d)
+          k = 0x5A827999_u32
+        elsif t < 40
+          f = b ^ c ^ d
+          k = 0x6ED9EBA1_u32
+        elsif t < 60
+          f = (b & c) | (b & d) | (c & d)
+          k = 0x8F1BBCDC_u32
+        else
+          f = b ^ c ^ d
+          k = 0xCA62C1D6_u32
+        end
+        temp = DigestUtil.rotl(a, 5) &+ f &+ e &+ w[t] &+ k
+        e = d
+        d = c
+        c = DigestUtil.rotl(b, 30)
+        b = a
+        a = temp
+        t = t + 1
+      end
+      h0 = h0 &+ a
+      h1 = h1 &+ b
+      h2 = h2 &+ c
+      h3 = h3 &+ d
+      h4 = h4 &+ e
+      off = off + 64
+    end
+    DigestUtil.u32s_be([h0, h1, h2, h3, h4])
+  end
+end
+
+pub struct SHA256
+  def self.hexdigest(data : String) : String
+    DigestUtil.hex(hash_bytes(data), 32)
+  end
+
+  def self.hash_bytes(data : String) : Array(UInt8)
+    h = [
+      0x6a09e667_u32, 0xbb67ae85_u32, 0x3c6ef372_u32, 0xa54ff53a_u32,
+      0x510e527f_u32, 0x9b05688c_u32, 0x1f83d9ab_u32, 0x5be0cd19_u32,
+    ]
+    k = sha256_k
+    msg = DigestUtil.padded_be(data)
+    off = 0
+    while off < msg.size
+      w = Array(UInt32).new(64) { 0_u32 }
+      i = 0
+      while i < 16
+        j = off + i * 4
+        w[i] = (msg[j].to_u32 << 24) | (msg[j + 1].to_u32 << 16) | (msg[j + 2].to_u32 << 8) | msg[j + 3].to_u32
+        i = i + 1
+      end
+      i = 16
+      while i < 64
+        s0 = DigestUtil.rotr(w[i - 15], 7) ^ DigestUtil.rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+        s1 = DigestUtil.rotr(w[i - 2], 17) ^ DigestUtil.rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+        w[i] = w[i - 16] &+ s0 &+ w[i - 7] &+ s1
+        i = i + 1
+      end
+      a = h[0]
+      b = h[1]
+      c = h[2]
+      d = h[3]
+      e = h[4]
+      f = h[5]
+      g = h[6]
+      hh = h[7]
+      t = 0
+      while t < 64
+        s1 = DigestUtil.rotr(e, 6) ^ DigestUtil.rotr(e, 11) ^ DigestUtil.rotr(e, 25)
+        ch = (e & f) ^ ((~e) & g)
+        temp1 = hh &+ s1 &+ ch &+ k[t] &+ w[t]
+        s0 = DigestUtil.rotr(a, 2) ^ DigestUtil.rotr(a, 13) ^ DigestUtil.rotr(a, 22)
+        maj = (a & b) ^ (a & c) ^ (b & c)
+        temp2 = s0 &+ maj
+        hh = g
+        g = f
+        f = e
+        e = d &+ temp1
+        d = c
+        c = b
+        b = a
+        a = temp1 &+ temp2
+        t = t + 1
+      end
+      h[0] = h[0] &+ a
+      h[1] = h[1] &+ b
+      h[2] = h[2] &+ c
+      h[3] = h[3] &+ d
+      h[4] = h[4] &+ e
+      h[5] = h[5] &+ f
+      h[6] = h[6] &+ g
+      h[7] = h[7] &+ hh
+      off = off + 64
+    end
+    DigestUtil.u32s_be(h)
+  end
+
+  private def self.sha256_k : Array(UInt32)
+    [
+      0x428a2f98_u32, 0x71374491_u32, 0xb5c0fbcf_u32, 0xe9b5dba5_u32,
+      0x3956c25b_u32, 0x59f111f1_u32, 0x923f82a4_u32, 0xab1c5ed5_u32,
+      0xd807aa98_u32, 0x12835b01_u32, 0x243185be_u32, 0x550c7dc3_u32,
+      0x72be5d74_u32, 0x80deb1fe_u32, 0x9bdc06a7_u32, 0xc19bf174_u32,
+      0xe49b69c1_u32, 0xefbe4786_u32, 0x0fc19dc6_u32, 0x240ca1cc_u32,
+      0x2de92c6f_u32, 0x4a7484aa_u32, 0x5cb0a9dc_u32, 0x76f988da_u32,
+      0x983e5152_u32, 0xa831c66d_u32, 0xb00327c8_u32, 0xbf597fc7_u32,
+      0xc6e00bf3_u32, 0xd5a79147_u32, 0x06ca6351_u32, 0x14292967_u32,
+      0x27b70a85_u32, 0x2e1b2138_u32, 0x4d2c6dfc_u32, 0x53380d13_u32,
+      0x650a7354_u32, 0x766a0abb_u32, 0x81c2c92e_u32, 0x92722c85_u32,
+      0xa2bfe8a1_u32, 0xa81a664b_u32, 0xc24b8b70_u32, 0xc76c51a3_u32,
+      0xd192e819_u32, 0xd6990624_u32, 0xf40e3585_u32, 0x106aa070_u32,
+      0x19a4c116_u32, 0x1e376c08_u32, 0x2748774c_u32, 0x34b0bcb5_u32,
+      0x391c0cb3_u32, 0x4ed8aa4a_u32, 0x5b9cca4f_u32, 0x682e6ff3_u32,
+      0x748f82ee_u32, 0x78a5636f_u32, 0x84c87814_u32, 0x8cc70208_u32,
+      0x90befffa_u32, 0xa4506ceb_u32, 0xbef9a3f7_u32, 0xc67178f2_u32,
+    ]
+  end
+end
+
+pub struct CRC32
+  def self.checksum(data : String) : UInt32
+    crc = 0xffffffff_u32
+    p = data.to_unsafe
+    n = data.bytesize
+    i = 0
+    while i < n
+      crc = crc ^ p[i].to_u32
+      b = 0
+      while b < 8
+        if (crc & 1_u32) == 1_u32
+          crc = (crc >> 1) ^ 0xedb88320_u32
+        else
+          crc = crc >> 1
+        end
+        b = b + 1
+      end
+      i = i + 1
+    end
+    crc ^ 0xffffffff_u32
+  end
+
+  def self.hexdigest(data : String) : String
+    DigestUtil.hex_u32(checksum(data))
+  end
+end
+
+pub struct Adler32
+  def self.checksum(data : String) : UInt32
+    a = 1_u32
+    b = 0_u32
+    p = data.to_unsafe
+    n = data.bytesize
+    i = 0
+    while i < n
+      a = (a + p[i].to_u32) % 65521_u32
+      b = (b + a) % 65521_u32
+      i = i + 1
+    end
+    (b << 16) | a
+  end
+
+  def self.hexdigest(data : String) : String
+    DigestUtil.hex_u32(checksum(data))
+  end
+end
+
+struct DigestUtil
+  def self.rotl(x : UInt32, n : Int32) : UInt32
+    n = n & 31
+    return x if n == 0
+    (x << n) | (x >> (32 - n))
+  end
+
+  def self.rotr(x : UInt32, n : Int32) : UInt32
+    n = n & 31
+    return x if n == 0
+    (x >> n) | (x << (32 - n))
+  end
+
+  def self.padded_le(data : String) : Array(UInt8)
+    padded(data, true)
+  end
+
+  def self.padded_be(data : String) : Array(UInt8)
+    padded(data, false)
+  end
+
+  private def self.padded(data : String, little : Bool) : Array(UInt8)
+    n = data.bytesize
+    bit_len = n.to_u64 * 8_u64
+    pad = 64 - ((n + 9) % 64)
+    pad = 0 if pad == 64
+    total = n + 1 + pad + 8
+    out = Array(UInt8).new(total) { 0_u8 }
+    p = data.to_unsafe
+    i = 0
+    while i < n
+      out[i] = p[i]
+      i = i + 1
+    end
+    out[n] = 0x80_u8
+    if little
+      t = 0
+      while t < 8
+        out[total - 8 + t] = ((bit_len >> (t * 8)) & 255_u64).to_u8
+        t = t + 1
+      end
+    else
+      t = 0
+      while t < 8
+        out[total - 8 + t] = ((bit_len >> ((7 - t) * 8)) & 255_u64).to_u8
+        t = t + 1
+      end
+    end
+    out
+  end
+
+  def self.u32s_le(words : Array(UInt32)) : Array(UInt8)
+    out = Array(UInt8).new(words.size * 4)
+    words.each do |w|
+      out << (w & 255_u32).to_u8
+      out << ((w >> 8) & 255_u32).to_u8
+      out << ((w >> 16) & 255_u32).to_u8
+      out << ((w >> 24) & 255_u32).to_u8
+    end
+    out
+  end
+
+  def self.u32s_be(words : Array(UInt32)) : Array(UInt8)
+    out = Array(UInt8).new(words.size * 4)
+    words.each do |w|
+      out << ((w >> 24) & 255_u32).to_u8
+      out << ((w >> 16) & 255_u32).to_u8
+      out << ((w >> 8) & 255_u32).to_u8
+      out << (w & 255_u32).to_u8
+    end
+    out
+  end
+
+  def self.hex(bytes : Array(UInt8), n : Int32) : String
+    String.new(n * 2) do |buf|
+      i = 0
+      while i < n
+        b = bytes[i].to_i32
+        buf[i * 2] = nibble(b >> 4)
+        buf[i * 2 + 1] = nibble(b & 15)
+        i = i + 1
+      end
+    end
+  end
+
+  def self.hex_u32(w : UInt32) : String
+    String.new(8) do |buf|
+      i = 0
+      while i < 8
+        shift = (7 - i) * 4
+        buf[i] = nibble(((w >> shift) & 15_u32).to_i32)
+        i = i + 1
+      end
+    end
+  end
+
+  private def self.nibble(n : Int32) : UInt8
+    n < 10 ? (48 + n).to_u8 : (87 + n).to_u8
+  end
+end

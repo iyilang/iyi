@@ -1,0 +1,636 @@
+# DEFLATE (RFC 1951), and the two envelopes it travels in: zlib (RFC
+# 1950) and gzip (RFC 1952). Written in iyi; no zlib is linked, which is
+# what SPEC.md III.10 asks for ("own it. DEFLATE is a known quantity and
+# arrives with HTTP").
+#
+# `Deflate.compress` writes one fixed-Huffman block over an LZ77 match
+# finder (a 32 KiB window, hash chains, greedy matching), which is the
+# shape zlib's level 1 has; `Deflate.decompress` reads every block type
+# the format has — stored, fixed and dynamic — so anything zlib wrote
+# reads back. `Zlib` adds the two-byte header and the Adler-32 trailer,
+# `Gzip` the ten-byte header, the optional fields, and the CRC-32 and
+# length trailer. Each envelope checks what it carries and refuses by
+# name: a header that is not the format's, a preset dictionary, a
+# checksum or a length that does not match, a stream that ends early.
+#
+# Strings are the byte type here, as everywhere in `src/std`: a
+# compressed stream is a `String` whose bytes are the stream.
+
+module std/compress
+
+import std/digest
+using std/digest::{CRC32, Adler32}
+
+# A growing byte buffer: the output side of both directions, and the
+# window a back-reference copies from.
+class ByteBuffer
+  @data : Pointer(UInt8)
+  @size : Int32
+  @cap : Int32
+
+  def initialize(cap : Int32 = 1024)
+    @cap = cap < 64 ? 64 : cap
+    @data = Pointer(UInt8).malloc(@cap.to_u64)
+    @size = 0
+  end
+
+  def size : Int32
+    @size
+  end
+
+  def [](i : Int32) : UInt8
+    @data[i]
+  end
+
+  def push(b : UInt8) : Nil
+    reserve(1)
+    @data[@size] = b
+    @size = @size + 1
+  end
+
+  def append(p : Pointer(UInt8), n : Int32) : Nil
+    reserve(n)
+    i = 0
+    while i < n
+      @data[@size + i] = p[i]
+      i = i + 1
+    end
+    @size = @size + n
+  end
+
+  # `length` bytes from `distance` back, byte by byte so a distance shorter
+  # than the length repeats what it just wrote, which is the format's way
+  # of spelling a run.
+  def copy_back(distance : Int32, length : Int32) : Nil
+    reserve(length)
+    src = @size - distance
+    i = 0
+    while i < length
+      @data[@size + i] = @data[src + i]
+      i = i + 1
+    end
+    @size = @size + length
+  end
+
+  def to_s : String
+    n = @size
+    src = @data
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+
+  private def reserve(n : Int32) : Nil
+    return if @size + n <= @cap
+    new_cap = @cap * 2
+    new_cap = @size + n if new_cap < @size + n
+    @data = @data.realloc(new_cap.to_u64)
+    @cap = new_cap
+  end
+end
+
+# Bits off the stream, least significant first, as the format packs them.
+class BitReader
+  @data : Pointer(UInt8)
+  @size : Int32
+  @pos : Int32
+  @buf : UInt32
+  @cnt : Int32
+
+  def initialize(data : String, start : Int32)
+    @data = data.to_unsafe
+    @size = data.bytesize
+    @pos = start
+    @buf = 0_u32
+    @cnt = 0
+  end
+
+  # The next `n` bits (up to 16) as a number.
+  def bits(n : Int32) : Int32
+    while @cnt < n
+      raise "DEFLATE: the stream ends inside a block" if @pos >= @size
+      @buf = @buf | (@data[@pos].to_u32 << @cnt)
+      @pos = @pos + 1
+      @cnt = @cnt + 8
+    end
+    value = (@buf & ((1_u32 << n) - 1_u32)).to_i32
+    @buf = @buf >> n
+    @cnt = @cnt - n
+    value
+  end
+
+  # Drop to the next byte boundary. Fewer than eight bits are ever held
+  # after a read, so what is dropped is the tail of the byte just read.
+  def align : Nil
+    @buf = 0_u32
+    @cnt = 0
+  end
+
+  # A whole byte, after `align`.
+  def byte : UInt8
+    raise "DEFLATE: the stream ends inside a block" if @pos >= @size
+    b = @data[@pos]
+    @pos = @pos + 1
+    b
+  end
+
+  def pos : Int32
+    @pos
+  end
+
+  def remaining : Int32
+    @size - @pos
+  end
+end
+
+# Bits onto the stream, least significant first.
+class BitWriter
+  @bytes : ByteBuffer
+  @buf : UInt32
+  @cnt : Int32
+
+  def initialize(cap : Int32)
+    @bytes = ByteBuffer.new(cap)
+    @buf = 0_u32
+    @cnt = 0
+  end
+
+  def put(value : Int32, nbits : Int32) : Nil
+    @buf = @buf | (value.to_u32 << @cnt)
+    @cnt = @cnt + nbits
+    while @cnt >= 8
+      @bytes.push((@buf & 0xff_u32).to_u8)
+      @buf = @buf >> 8
+      @cnt = @cnt - 8
+    end
+  end
+
+  # A Huffman code goes most significant bit first (RFC 1951 §3.1.1), the
+  # one thing in the stream that does.
+  def put_code(code : Int32, len : Int32) : Nil
+    rev = 0
+    i = 0
+    while i < len
+      rev = (rev << 1) | ((code >> i) & 1)
+      i = i + 1
+    end
+    put(rev, len)
+  end
+
+  def finish : String
+    @bytes.push((@buf & 0xff_u32).to_u8) if @cnt > 0
+    @bytes.to_s
+  end
+end
+
+# A canonical Huffman code from its code lengths (RFC 1951 §3.2.2),
+# decoded a bit at a time the way puff.c does: per length, the count of
+# codes and the first symbol index, which is all a canonical code needs.
+class Huffman
+  @count : Pointer(Int32)
+  @symbol : Pointer(Int32)
+
+  def initialize(lengths : Pointer(Int32), n : Int32)
+    @count = Pointer(Int32).malloc(16_u64)
+    @symbol = Pointer(Int32).malloc(n.to_u64 + 1_u64)
+    len = 0
+    while len < 16
+      @count[len] = 0
+      len = len + 1
+    end
+    i = 0
+    while i < n
+      raise "DEFLATE: a code length past 15" if lengths[i] > 15
+      @count[lengths[i]] = @count[lengths[i]] + 1
+      i = i + 1
+    end
+    # Over-subscribed lengths make an ambiguous code; incomplete ones are
+    # legal only for a single-code distance tree, which the caller decides.
+    left = 1
+    len = 1
+    while len < 16
+      left = left << 1
+      left = left - @count[len]
+      raise "DEFLATE: the code lengths are over-subscribed" if left < 0
+      len = len + 1
+    end
+    offs = Pointer(Int32).malloc(16_u64)
+    offs[1] = 0
+    len = 1
+    while len < 15
+      offs[len + 1] = offs[len] + @count[len]
+      len = len + 1
+    end
+    i = 0
+    while i < n
+      if lengths[i] != 0
+        @symbol[offs[lengths[i]]] = i
+        offs[lengths[i]] = offs[lengths[i]] + 1
+      end
+      i = i + 1
+    end
+  end
+
+  def decode(r : BitReader) : Int32
+    code = 0
+    first = 0
+    index = 0
+    len = 1
+    while len < 16
+      code = code | r.bits(1)
+      count = @count[len]
+      return @symbol[index + (code - first)] if code - count < first
+      index = index + count
+      first = first + count
+      first = first << 1
+      code = code << 1
+      len = len + 1
+    end
+    raise "DEFLATE: a code is not in its table"
+  end
+end
+
+# The length and distance alphabets (RFC 1951 §3.2.5): base values and
+# the count of extra bits after each code.
+struct Tables
+  getter lbase : Pointer(Int32)
+  getter lext : Pointer(Int32)
+  getter dbase : Pointer(Int32)
+  getter dext : Pointer(Int32)
+
+  def initialize
+    @lbase = fill([3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258])
+    @lext = fill([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0])
+    @dbase = fill([1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577])
+    @dext = fill([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13])
+  end
+
+  private def fill(values : Array(Int32)) : Pointer(Int32)
+    p = Pointer(Int32).malloc(values.size.to_u64)
+    i = 0
+    while i < values.size
+      p[i] = values[i]
+      i = i + 1
+    end
+    p
+  end
+
+  # The code for a length 3..258, and for a distance 1..32768.
+  def length_code(len : Int32) : Int32
+    i = 28
+    while i > 0 && @lbase[i] > len
+      i = i - 1
+    end
+    i
+  end
+
+  def distance_code(dist : Int32) : Int32
+    i = 29
+    while i > 0 && @dbase[i] > dist
+      i = i - 1
+    end
+    i
+  end
+end
+
+pub struct Deflate
+  # One fixed-Huffman block over an LZ77 match finder.
+  def self.compress(data : String) : String
+    t = Tables.new
+    n = data.bytesize
+    p = data.to_unsafe
+    w = BitWriter.new(n // 2 + 16)
+    w.put(1, 1) # BFINAL
+    w.put(1, 2) # BTYPE = 01, fixed Huffman
+    head = Pointer(Int32).malloc(32768_u64)
+    h = 0
+    while h < 32768
+      head[h] = -1
+      h = h + 1
+    end
+    prev = Pointer(Int32).malloc(n.to_u64 + 1_u64)
+    i = 0
+    while i < n
+      best_len = 0
+      best_dist = 0
+      if i + 2 < n
+        h = hash(p[i], p[i + 1], p[i + 2])
+        cand = head[h]
+        chain = 0
+        max = n - i
+        max = 258 if max > 258
+        while cand >= 0 && i - cand <= 32768 && chain < 64
+          if p[cand + best_len] == p[i + best_len] && p[cand] == p[i] && p[cand + 1] == p[i + 1] && p[cand + 2] == p[i + 2]
+            len = 3
+            while len < max && p[cand + len] == p[i + len]
+              len = len + 1
+            end
+            if len > best_len
+              best_len = len
+              best_dist = i - cand
+              break if len == max
+            end
+          end
+          cand = prev[cand]
+          chain = chain + 1
+        end
+        prev[i] = head[h]
+        head[h] = i
+      end
+      if best_len >= 3
+        put_length(w, t, best_len)
+        put_distance(w, t, best_dist)
+        # The positions the match covers still go into the chains, or the
+        # next match cannot start inside this one.
+        j = i + 1
+        stop = i + best_len
+        while j < stop
+          if j + 2 < n
+            h = hash(p[j], p[j + 1], p[j + 2])
+            prev[j] = head[h]
+            head[h] = j
+          end
+          j = j + 1
+        end
+        i = stop
+      else
+        put_literal(w, p[i].to_i32)
+        i = i + 1
+      end
+    end
+    put_literal(w, 256)
+    w.finish
+  end
+
+  def self.decompress(data : String) : String
+    sink, used = inflate(data, 0)
+    sink
+  end
+
+  # The bytes, and how many of the stream's bytes they took: an envelope
+  # reads its trailer from there.
+  def self.inflate(data : String, start : Int32) : {String, Int32}
+    t = Tables.new
+    r = BitReader.new(data, start)
+    sink = ByteBuffer.new((data.bytesize - start) * 3 + 64)
+    fixed_lit : Huffman? = nil
+    fixed_dist : Huffman? = nil
+    while true
+      last = r.bits(1)
+      kind = r.bits(2)
+      if kind == 0
+        r.align
+        len = r.byte.to_i32 | (r.byte.to_i32 << 8)
+        nlen = r.byte.to_i32 | (r.byte.to_i32 << 8)
+        raise "DEFLATE: a stored block's length does not match its complement" unless len == ((~nlen) & 0xffff)
+        raise "DEFLATE: the stream ends inside a stored block" if r.remaining < len
+        i = 0
+        while i < len
+          sink.push(r.byte)
+          i = i + 1
+        end
+      elsif kind == 1
+        unless fixed_lit && fixed_dist
+          lengths = Pointer(Int32).malloc(288_u64)
+          s = 0
+          while s < 288
+            lengths[s] = s < 144 ? 8 : (s < 256 ? 9 : (s < 280 ? 7 : 8))
+            s = s + 1
+          end
+          fixed_lit = Huffman.new(lengths, 288)
+          s = 0
+          while s < 30
+            lengths[s] = 5
+            s = s + 1
+          end
+          fixed_dist = Huffman.new(lengths, 30)
+        end
+        codes(r, sink, t, fixed_lit, fixed_dist)
+      elsif kind == 2
+        lit, dist = dynamic_tables(r)
+        codes(r, sink, t, lit, dist)
+      else
+        raise "DEFLATE: block type 3 is reserved"
+      end
+      break if last == 1
+    end
+    r.align
+    {sink.to_s, r.pos}
+  end
+
+  # A dynamic block's two tables, themselves Huffman-coded (RFC 1951 §3.2.7).
+  private def self.dynamic_tables(r : BitReader) : {Huffman, Huffman}
+    nlen = r.bits(5) + 257
+    ndist = r.bits(5) + 1
+    ncode = r.bits(4) + 4
+    raise "DEFLATE: too many length codes" if nlen > 286 || ndist > 30
+    order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    lengths = Pointer(Int32).malloc(320_u64)
+    i = 0
+    while i < 19
+      lengths[order[i]] = i < ncode ? r.bits(3) : 0
+      i = i + 1
+    end
+    lencode = Huffman.new(lengths, 19)
+    i = 0
+    while i < nlen + ndist
+      sym = lencode.decode(r)
+      if sym < 16
+        lengths[i] = sym
+        i = i + 1
+      else
+        value = 0
+        repeat = 0
+        if sym == 16
+          raise "DEFLATE: a repeat with no length before it" if i == 0
+          value = lengths[i - 1]
+          repeat = 3 + r.bits(2)
+        elsif sym == 17
+          repeat = 3 + r.bits(3)
+        else
+          repeat = 11 + r.bits(7)
+        end
+        raise "DEFLATE: a repeat runs past the table" if i + repeat > nlen + ndist
+        while repeat > 0
+          lengths[i] = value
+          i = i + 1
+          repeat = repeat - 1
+        end
+      end
+    end
+    raise "DEFLATE: the block has no end-of-block code" if lengths[256] == 0
+    lit = Huffman.new(lengths, nlen)
+    dist = Huffman.new(lengths + nlen.to_i64, ndist)
+    {lit, dist}
+  end
+
+  private def self.codes(r : BitReader, sink : ByteBuffer, t : Tables, lit : Huffman, dist : Huffman) : Nil
+    while true
+      sym = lit.decode(r)
+      if sym < 256
+        sink.push(sym.to_u8)
+      elsif sym == 256
+        return
+      else
+        sym = sym - 257
+        raise "DEFLATE: a length code past 285" if sym >= 29
+        len = t.lbase[sym] + r.bits(t.lext[sym])
+        dsym = dist.decode(r)
+        raise "DEFLATE: a distance code past 29" if dsym >= 30
+        distance = t.dbase[dsym] + r.bits(t.dext[dsym])
+        raise "DEFLATE: a distance reaches before the output began" if distance > sink.size
+        sink.copy_back(distance, len)
+      end
+    end
+  end
+
+  # The fixed literal/length code (RFC 1951 §3.2.6).
+  private def self.put_literal(w : BitWriter, sym : Int32) : Nil
+    if sym < 144
+      w.put_code(0x30 + sym, 8)
+    elsif sym < 256
+      w.put_code(0x190 + (sym - 144), 9)
+    elsif sym < 280
+      w.put_code(sym - 256, 7)
+    else
+      w.put_code(0xc0 + (sym - 280), 8)
+    end
+  end
+
+  private def self.put_length(w : BitWriter, t : Tables, len : Int32) : Nil
+    code = t.length_code(len)
+    put_literal(w, 257 + code)
+    w.put(len - t.lbase[code], t.lext[code]) if t.lext[code] > 0
+  end
+
+  private def self.put_distance(w : BitWriter, t : Tables, dist : Int32) : Nil
+    code = t.distance_code(dist)
+    w.put_code(code, 5)
+    w.put(dist - t.dbase[code], t.dext[code]) if t.dext[code] > 0
+  end
+
+  private def self.hash(a : UInt8, b : UInt8, c : UInt8) : Int32
+    ((a.to_i32 << 10) ^ (b.to_i32 << 5) ^ c.to_i32 ^ (b.to_i32 << 12) ^ (c.to_i32 << 7)) & 0x7fff
+  end
+end
+
+pub struct Zlib
+  # CMF 0x78 (deflate, a 32 KiB window), FLG 0x9c (the check bits that make
+  # the pair a multiple of 31, no dictionary), then the Adler-32 of the
+  # bytes, big-endian.
+  def self.compress(data : String) : String
+    body = Deflate.compress(data)
+    sum = Adler32.checksum(data)
+    String.new(body.bytesize + 6) do |dst|
+      dst[0] = 0x78_u8
+      dst[1] = 0x9c_u8
+      (dst + 2_i64).copy_from(body.to_unsafe, body.bytesize)
+      n = body.bytesize + 2
+      dst[n] = (sum >> 24).to_u8
+      dst[n + 1] = ((sum >> 16) & 0xff_u32).to_u8
+      dst[n + 2] = ((sum >> 8) & 0xff_u32).to_u8
+      dst[n + 3] = (sum & 0xff_u32).to_u8
+    end
+  end
+
+  def self.decompress(data : String) : String
+    raise "zlib: the stream is shorter than its header" if data.bytesize < 2
+    p = data.to_unsafe
+    cmf = p[0].to_i32
+    flg = p[1].to_i32
+    raise "zlib: not a deflate stream (method #{cmf & 0x0f})" unless (cmf & 0x0f) == 8
+    raise "zlib: a window past 32 KiB" if (cmf >> 4) > 7
+    raise "zlib: the header check failed" unless ((cmf << 8) | flg) % 31 == 0
+    raise "zlib: a preset dictionary is not supported" if (flg & 0x20) != 0
+    sink, used = Deflate.inflate(data, 2)
+    raise "zlib: the stream ends before its checksum" if data.bytesize - used < 4
+    want = (p[used].to_u32 << 24) | (p[used + 1].to_u32 << 16) | (p[used + 2].to_u32 << 8) | p[used + 3].to_u32
+    got = Adler32.checksum(sink)
+    raise "zlib: the checksum does not match (#{hex(got)}, stream says #{hex(want)})" unless got == want
+    sink
+  end
+
+  def self.hex(w : UInt32) : String
+    digits = "0123456789abcdef"
+    String.new(8) do |buf|
+      i = 0
+      while i < 8
+        buf[i] = digits.to_unsafe[((w >> ((7 - i) * 4)) & 0xf_u32).to_i32]
+        i = i + 1
+      end
+    end
+  end
+end
+
+pub struct Gzip
+  # The ten-byte header with nothing optional set, an mtime of zero and an
+  # unknown OS; then the CRC-32 and the length modulo 2^32, little-endian.
+  def self.compress(data : String) : String
+    body = Deflate.compress(data)
+    crc = CRC32.checksum(data)
+    size = data.bytesize.to_u32
+    String.new(body.bytesize + 18) do |dst|
+      dst[0] = 0x1f_u8
+      dst[1] = 0x8b_u8
+      dst[2] = 8_u8
+      i = 3
+      while i < 9
+        dst[i] = 0_u8
+        i = i + 1
+      end
+      dst[9] = 0xff_u8
+      (dst + 10_i64).copy_from(body.to_unsafe, body.bytesize)
+      n = body.bytesize + 10
+      put_le(dst + n.to_i64, crc)
+      put_le(dst + (n + 4).to_i64, size)
+    end
+  end
+
+  def self.decompress(data : String) : String
+    raise "gzip: the stream is shorter than its header" if data.bytesize < 10
+    p = data.to_unsafe
+    raise "gzip: not a gzip stream" unless p[0] == 0x1f_u8 && p[1] == 0x8b_u8
+    raise "gzip: not a deflate stream (method #{p[2]})" unless p[2] == 8_u8
+    flags = p[3].to_i32
+    pos = 10
+    if (flags & 4) != 0 # FEXTRA
+      raise "gzip: the stream ends inside its header" if data.bytesize < pos + 2
+      xlen = p[pos].to_i32 | (p[pos + 1].to_i32 << 8)
+      pos = pos + 2 + xlen
+    end
+    if (flags & 8) != 0 # FNAME
+      pos = skip_zero_terminated(data, pos)
+    end
+    if (flags & 16) != 0 # FCOMMENT
+      pos = skip_zero_terminated(data, pos)
+    end
+    pos = pos + 2 if (flags & 2) != 0 # FHCRC
+    raise "gzip: the stream ends inside its header" if data.bytesize < pos
+    sink, used = Deflate.inflate(data, pos)
+    raise "gzip: the stream ends before its trailer" if data.bytesize - used < 8
+    want_crc = get_le(p + used.to_i64)
+    want_size = get_le(p + (used + 4).to_i64)
+    got_crc = CRC32.checksum(sink)
+    raise "gzip: the checksum does not match (#{Zlib.hex(got_crc)}, stream says #{Zlib.hex(want_crc)})" unless got_crc == want_crc
+    raise "gzip: the length does not match (#{sink.bytesize}, stream says #{want_size})" unless sink.bytesize.to_u32 == want_size
+    sink
+  end
+
+  private def self.skip_zero_terminated(data : String, pos : Int32) : Int32
+    p = data.to_unsafe
+    while pos < data.bytesize && p[pos] != 0_u8
+      pos = pos + 1
+    end
+    raise "gzip: the stream ends inside its header" if pos >= data.bytesize
+    pos + 1
+  end
+
+  private def self.put_le(dst : Pointer(UInt8), w : UInt32) : Nil
+    dst[0] = (w & 0xff_u32).to_u8
+    dst[1] = ((w >> 8) & 0xff_u32).to_u8
+    dst[2] = ((w >> 16) & 0xff_u32).to_u8
+    dst[3] = (w >> 24).to_u8
+  end
+
+  private def self.get_le(p : Pointer(UInt8)) : UInt32
+    p[0].to_u32 | (p[1].to_u32 << 8) | (p[2].to_u32 << 16) | (p[3].to_u32 << 24)
+  end
+end

@@ -11,8 +11,21 @@
   backreferences or lookaround), a min-heap over `Cmp`, HTTP/1.1 GET
   over `IyiSocket` (numeric IPv4 and `localhost`; TLS is not in 0.x),
   and `OptionParser`. Each has a `bench/std_<name>_exercise.sh`. What
-  Crystal's library gets from OpenSSL, PCRE, zlib, GMP and getaddrinfo
-  is still not here, on purpose.
+  Crystal's library gets from OpenSSL, PCRE, GMP and getaddrinfo is
+  still not here, on purpose.
+
+- **`std/compress`: DEFLATE, zlib and gzip, written in iyi.** SPEC.md
+  III.10 said "own it. DEFLATE is a known quantity and arrives with
+  HTTP", and it has. `Deflate.decompress` reads every block type the
+  format has (stored, fixed, dynamic); `Deflate.compress` writes one
+  fixed-Huffman block over a 32 KiB LZ77 window with hash chains, which
+  is zlib level 1's shape and comes out smaller than zlib level 1 on
+  every corpus the gate tries. `Zlib` and `Gzip` add and check their
+  envelopes — the header, a preset dictionary, the Adler-32 or CRC-32,
+  the length, a gzip header's optional fields — and refuse by name. No
+  zlib is linked. `bench/std_compress_exercise.sh` reads 72 streams
+  zlib wrote (six corpora, four levels, three envelopes) and has zlib
+  read 18 of iyi's.
 
 - **`std/http` speaks the verbs, and reads what a server actually sends.**
   `HTTP.get`, `head`, `post`, `put`, `delete` and the `request` under

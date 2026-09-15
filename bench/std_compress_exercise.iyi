@@ -1,0 +1,150 @@
+# Exercises `std/compress`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_compress_exercise.iyi
+#     ./bin/iyi run bench/std_compress_exercise.iyi <fixtures>
+#
+# With a directory, the streams zlib wrote there (every level, every
+# envelope) are read back and compared, and this module's own streams are
+# written beside them for zlib to read; `bench/std_compress_exercise.sh`
+# is the other half of that conversation.
+
+module bench/std_compress_exercise
+
+import std/compress
+import std/random
+using std/compress::{Deflate, Zlib, Gzip}
+using std/random::{Random}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def bytes(values : Array(Int32)) : String
+  String.new(values.size) do |dst|
+    i = 0
+    while i < values.size
+      dst[i] = values[i].to_u8
+      i = i + 1
+    end
+  end
+end
+
+def run_of(byte : Int32, n : Int32) : String
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = byte.to_u8
+      i = i + 1
+    end
+  end
+end
+
+def random_bytes(n : Int32, seed : UInt64) : String
+  rng = Random.new(seed)
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = (rng.next_u32 & 0xff_u32).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def every_byte(times : Int32) : String
+  String.new(256 * times) do |dst|
+    i = 0
+    while i < 256 * times
+      dst[i] = (i & 0xff).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def round_trip(label : String, data : String) : Nil
+  raw = Deflate.compress(data)
+  assert_true Deflate.decompress(raw) == data, "#{label}: raw round trip"
+  z = Zlib.compress(data)
+  assert_true Zlib.decompress(z) == data, "#{label}: zlib round trip"
+  g = Gzip.compress(data)
+  assert_true Gzip.decompress(g) == data, "#{label}: gzip round trip"
+  assert_true z.bytesize == raw.bytesize + 6 && g.bytesize == raw.bytesize + 18, "#{label}: the envelopes cost 6 and 18 bytes"
+  puts "  #{label}: #{data.bytesize} -> #{raw.bytesize} bytes, back the same three ways"
+end
+
+puts "== round trips"
+round_trip "nothing", ""
+round_trip "one byte", "x"
+round_trip "a sentence", "the quick brown fox jumps over the lazy dog"
+text = ""
+i = 0
+while i < 400
+  text = text + "line #{i}: the quick brown fox jumps over the lazy dog #{i % 7}\n"
+  i = i + 1
+end
+round_trip "repetitive text", text
+round_trip "a run of one byte", run_of(97, 100000)
+round_trip "every byte value", every_byte(40)
+random = random_bytes(70000, 7_u64)
+round_trip "random bytes", random
+far = random_bytes(3000, 3_u64)
+round_trip "a repeat from 40 KiB back", far + random_bytes(40000, 9_u64) + far
+round_trip "a repeat from 20 KiB back", far + random_bytes(20000, 11_u64) + far
+
+puts "\n== what the match finder finds"
+run = Deflate.compress(run_of(97, 100000))
+assert_true run.bytesize < 700, "a 100,000-byte run is 388 matches of 258 at 13 bits each, under 700 bytes (#{run.bytesize})"
+rep = Deflate.compress(text)
+assert_true rep.bytesize * 4 < text.bytesize, "repetitive text compresses at least 4x (#{text.bytesize} -> #{rep.bytesize})"
+middle = random_bytes(20000, 11_u64)
+alone = Deflate.compress(far + middle).bytesize
+near = Deflate.compress(far + middle + far).bytesize
+assert_true near < alone + 100, "a 3,000-byte repeat from 20 KiB back is twelve back-references, under 100 bytes (#{near - alone})"
+beyond = Deflate.compress(far + random_bytes(40000, 9_u64) + far).bytesize
+alone = Deflate.compress(far + random_bytes(40000, 9_u64)).bytesize
+assert_true beyond > alone + 3000, "the same repeat from 40 KiB back is outside the window and costs its bytes (#{beyond - alone})"
+noise = Deflate.compress(random)
+assert_true noise.bytesize < 70000 + 70000 // 8 + 16, "random bytes cost at most the fixed code's overhead (#{noise.bytesize})"
+puts "  a run, repetition, a 20 KiB back-reference, a 40 KiB one, and noise each cost what they should"
+
+puts "\n== the format's own words"
+assert_true Deflate.decompress(bytes([0x03, 0x00])) == "", "an empty fixed block"
+assert_true Deflate.compress("") == bytes([0x03, 0x00]), "and that is what nothing compresses to"
+stored = bytes([0x01, 0x05, 0x00, 0xfa, 0xff, 0x68, 0x65, 0x6c, 0x6c, 0x6f])
+assert_true Deflate.decompress(stored) == "hello", "a stored block"
+two = bytes([0x00, 0x02, 0x00, 0xfd, 0xff, 0x68, 0x69, 0x01, 0x03, 0x00, 0xfc, 0xff, 0x21, 0x21, 0x21])
+assert_true Deflate.decompress(two) == "hi!!!", "two stored blocks, the second final"
+assert_true Zlib.decompress(bytes([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01])) == "", "zlib's own empty stream"
+assert_true Gzip.decompress(bytes([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])) == "", "gzip's own empty stream"
+z = Zlib.compress("abc")
+assert_true z.bytesize == 11 && z.to_unsafe[0] == 0x78_u8 && z.to_unsafe[1] == 0x9c_u8, "the zlib header is 78 9c"
+assert_true z.to_unsafe[7] == 0x02_u8 && z.to_unsafe[8] == 0x4d_u8 && z.to_unsafe[9] == 0x01_u8 && z.to_unsafe[10] == 0x27_u8, "the Adler-32 of abc is 024d0127, big-endian"
+g = Gzip.compress("abc")
+assert_true g.bytesize == 23 && g.to_unsafe[0] == 0x1f_u8 && g.to_unsafe[1] == 0x8b_u8 && g.to_unsafe[2] == 8_u8, "the gzip header"
+assert_true g.to_unsafe[15] == 0xc2_u8 && g.to_unsafe[16] == 0x41_u8 && g.to_unsafe[17] == 0x24_u8 && g.to_unsafe[18] == 0x35_u8, "the CRC-32 of abc is 352441c2, little-endian"
+assert_true g.to_unsafe[19] == 3_u8 && g.to_unsafe[20] == 0_u8 && g.to_unsafe[22] == 0_u8, "the length of abc"
+puts "  empty, stored, and the two envelopes byte for byte"
+
+args = Program.args
+if args.size > 0
+  dir = args[0]
+  puts "\n== against zlib"
+  names = ["text", "zeros", "bytes", "random", "far", "source"]
+  levels = ["0", "1", "6", "9"]
+  names.each do |name|
+    plain = File.read("#{dir}/#{name}.bin")
+    levels.each do |level|
+      assert_true Deflate.decompress(File.read("#{dir}/#{name}.#{level}.raw")) == plain, "#{name} at level #{level}, raw"
+      assert_true Zlib.decompress(File.read("#{dir}/#{name}.#{level}.zlib")) == plain, "#{name} at level #{level}, zlib"
+      assert_true Gzip.decompress(File.read("#{dir}/#{name}.#{level}.gzip")) == plain, "#{name} at level #{level}, gzip"
+    end
+    File.write("#{dir}/#{name}.iyi.raw", Deflate.compress(plain))
+    File.write("#{dir}/#{name}.iyi.zlib", Zlib.compress(plain))
+    File.write("#{dir}/#{name}.iyi.gzip", Gzip.compress(plain))
+    puts "  #{name}: zlib's twelve streams read back, three written for zlib"
+  end
+  assert_true Gzip.decompress(File.read("#{dir}/fields.gzip")) == File.read("#{dir}/text.bin"), "a gzip header with a name, a comment, an extra field and a header CRC"
+  puts "  a gzip header's optional fields are walked past"
+end
+
+puts "\nALL CHECKS PASSED"

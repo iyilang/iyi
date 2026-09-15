@@ -14,7 +14,7 @@ class MyError < Exception
 end
 
 def raise(ex : Exception) : NoReturn
-  __crystal_raise(ex.as(Void*))
+  __iyi_raise(ex.as(Void*))
 end
 
 fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32

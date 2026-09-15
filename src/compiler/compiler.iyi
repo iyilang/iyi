@@ -141,7 +141,7 @@ pub class Compiler
       top_level << Nop.new
     end
     append_entry_point(funs, top_level)
-    if funs.none? { |f| f.name == "__crystal_raise" }
+    if funs.none? { |f| f.name == "__iyi_raise" }
       Compiler.append_raise_runtime(classes, funs, defs, libs, top_level)
     end
 
@@ -442,13 +442,13 @@ lib LibUnwind
   fun set_ip = _Unwind_SetIP(context : Void*, value : UInt64) : Void
 end
 
-fun __crystal_get_exception(ex : Void*) : UInt64
+fun __iyi_get_exception(ex : Void*) : UInt64
   p64 = ex.as(Pointer(UInt64))
   p64[4]
 end
 
 @[Raises]
-fun __crystal_raise(ex : Void*) : NoReturn
+fun __iyi_raise(ex : Void*) : NoReturn
   buf = LibC.malloc(48_u64)
   p64 = buf.as(Pointer(UInt64))
   p64[0] = 0x4352590000000000_u64
@@ -466,7 +466,7 @@ fun __crystal_raise(ex : Void*) : NoReturn
   LibC.exit(1)
 end
 
-fun __crystal_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+fun __iyi_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
   start = LibUnwind.get_region_start(context)
   ip = LibUnwind.get_ip(context)
   lsd = LibUnwind.get_language_specific_data(context)

@@ -323,21 +323,21 @@ prove_compile_mutation "pipeline drops default entry point for declaration-only 
   "$REPO/bench/fixtures/compile_no_top_level.iyi" \
   0
 
-prove_compile_mutation "corrupt runtime __crystal_raise entry point" \
+prove_compile_mutation "corrupt runtime __iyi_raise entry point" \
   "$REPO/bench/fixtures/compile_raise.iyi" \
   "p64[4] = ex.address" \
   "p64[4] = 0_u64" \
   "$REPO/bench/fixtures/compile_raise.iyi" \
   38
 
-prove_compile_mutation "corrupt runtime __crystal_personality entry point" \
+prove_compile_mutation "corrupt runtime __iyi_personality entry point" \
   "$REPO/bench/fixtures/compile_raise.iyi" \
   "return 6" \
   "return 8" \
   "$REPO/bench/fixtures/compile_raise.iyi" \
   38
 
-prove_compile_mutation "corrupt runtime __crystal_get_exception entry point" \
+prove_compile_mutation "corrupt runtime __iyi_get_exception entry point" \
   "$REPO/bench/fixtures/compile_raise.iyi" \
   "p64[4]" \
   "p64[0]" \

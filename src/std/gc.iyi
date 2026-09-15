@@ -40,17 +40,17 @@ module ::GC
 
   # Allocates and clears size bytes of memory.
   def self.malloc(size : Int) : Void*
-    __crystal_malloc64(size.to_u64)
+    __iyi_malloc64(size.to_u64)
   end
 
   # Allocates size bytes of pointer-free memory.
   def self.malloc_atomic(size : Int) : Void*
-    __crystal_malloc_atomic64(size.to_u64)
+    __iyi_malloc_atomic64(size.to_u64)
   end
 
   # Reallocates memory previously allocated by malloc.
   def self.realloc(pointer : Void*, size : Int) : Void*
-    __crystal_realloc64(pointer, size.to_u64)
+    __iyi_realloc64(pointer, size.to_u64)
   end
 
   # Frees memory if supported by the active allocator.

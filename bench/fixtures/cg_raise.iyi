@@ -4,12 +4,12 @@ lib LibRunner
 end
 
 @[Raises]
-fun __crystal_raise(ex : Void*) : NoReturn
+fun __iyi_raise(ex : Void*) : NoReturn
   LibRunner.c_raise(ex)
 end
 
 def raise(msg : String) : NoReturn
-  __crystal_raise(msg.as(Void*))
+  __iyi_raise(msg.as(Void*))
 end
 
 fun test_direct_raise(code : Int32) : Int32

@@ -573,10 +573,10 @@ require "./file"
     fun realloc = GC_realloc(pointer : Void*, size : UInt64) : Void*
   end
 
-  # Codegen emits calls to these by name for every allocation, so they are not
-  # optional and their names are not ours to choose.
-  # Codegen emits calls to these by name for every allocation, so they are not
-  # optional and their names are not ours to choose. Every mode leaves one
+  # Codegen emits calls to these by name for every allocation under the
+  # __iyi_* ABI.
+  #
+  # Every mode leaves one
   # word under the pointer it answers: codegen stores an object's type id in
   # its high half - the only place the id lives, so an object is its fields
   # and nothing else (GC_DESIGN.md Stage 5) - and an object's layout is one
@@ -584,16 +584,16 @@ require "./file"
   # link under any of them. Here the word is the first eight bytes of a
   # block libgc handed out; the program's pointer is an interior one, which
   # libgc follows by default.
-  fun __crystal_malloc64(size : UInt64) : Void*
+  fun __iyi_malloc64(size : UInt64) : Void*
     LibGC.malloc(size + 8_u64) + 8_i64
   end
 
-  fun __crystal_malloc_atomic64(size : UInt64) : Void*
+  fun __iyi_malloc_atomic64(size : UInt64) : Void*
     LibGC.malloc_atomic(size + 8_u64) + 8_i64
   end
 
-  fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
-    return __crystal_malloc64(size) if pointer.address == 0
+  fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
+    return __iyi_malloc64(size) if pointer.address == 0
     LibGC.realloc(Pointer(Void).new(pointer.address - 8_u64), size + 8_u64) + 8_i64
   end
 {% else %}
@@ -675,7 +675,7 @@ require "./file"
     # traversed, not to serve the hot path.
     #
     # The clearing contract is the stage's correctness point, because reuse
-    # is what is new here. `__crystal_malloc64` is documented to allocate
+    # is what is new here. `__iyi_malloc64` is documented to allocate
     # *and clear*, and until now the clear was free: every byte any path
     # handed out came from a fresh mapping, zero-filled by the kernel, and
     # nothing was handed out twice. A free list hands memory back out, so a
@@ -689,7 +689,7 @@ require "./file"
     # the chunk, reachable through the size header the next time a realloc
     # grows into them. Zeroed slack keeps a reused chunk indistinguishable
     # from a fresh mapping, the invariant every path in this file provided
-    # for free until now. `__crystal_malloc_atomic64` does not clear,
+    # for free until now. `__iyi_malloc_atomic64` does not clear,
     # matching `GC_malloc_atomic`: atomic means the collector never scans
     # those bytes, so their initial value is no one's contract, and a reused
     # chunk may come back dirty on that path on purpose.
@@ -987,7 +987,7 @@ require "./file"
       # per collection where the arithmetic says microseconds.
       FREE_FLAG = 4_u64
       # Bit 3: this allocation is atomic — the caller promised it holds no
-      # pointers, which is what `__crystal_malloc_atomic64` means on every
+      # pointers, which is what `__iyi_malloc_atomic64` means on every
       # allocator. The mark loop honours it the way Boehm honours
       # `GC_malloc_atomic`: an atomic object with no layout is blackened
       # and never word-scanned, because scanning it is where a 32 MiB
@@ -2614,13 +2614,13 @@ require "./file"
       end
     end
 
-    # Codegen emits calls to these by name for every allocation, so they are not
-    # optional and their names are not ours to choose.
-    fun __crystal_malloc64(size : UInt64) : Void*
+    # Codegen emits calls to these by name for every allocation under the
+    # __iyi_* ABI.
+    fun __iyi_malloc64(size : UInt64) : Void*
       IyiHeap.alloc(size)
     end
 
-    fun __crystal_malloc_atomic64(size : UInt64) : Void*
+    fun __iyi_malloc_atomic64(size : UInt64) : Void*
       IyiHeap.alloc_atomic(size)
     end
 
@@ -2631,7 +2631,7 @@ require "./file"
       IyiHeap.new_object(size, type_id, flags & 1_u64 != 0, flags & 2_u64 != 0)
     end
 
-    fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
+    fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
       IyiHeap.realloc(pointer, size)
     end
 
@@ -6032,7 +6032,7 @@ require "./file"
     # allocate, never free, which is the contract the libc path below already
     # has (`free` is not bound there for the same reason, and a program that
     # outlives its memory is what allocating without collecting asks for).
-    # `MAP_ANONYMOUS` guarantees zero-fill, so `__crystal_malloc64`'s
+    # MAP_ANONYMOUS guarantees zero-fill, so `__iyi_malloc64`'s
     # documented clear comes from the mapping itself rather than a second pass
     # over the bytes: nothing is handed out twice, so nothing can be dirtier
     # than the kernel left it, and the atomic variant is therefore the same
@@ -6127,17 +6127,17 @@ require "./file"
       Pointer(Void).new(result.to_u64)
     end
 
-    # Codegen emits calls to these by name for every allocation, so they are not
-    # optional and their names are not ours to choose.
-    fun __crystal_malloc64(size : UInt64) : Void*
+    # Codegen emits calls to these by name for every allocation under the
+    # __iyi_* ABI.
+    fun __iyi_malloc64(size : UInt64) : Void*
       IyiHeap.alloc(size)
     end
 
-    fun __crystal_malloc_atomic64(size : UInt64) : Void*
+    fun __iyi_malloc_atomic64(size : UInt64) : Void*
       IyiHeap.alloc(size)
     end
 
-    fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
+    fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
       IyiHeap.realloc(pointer, size)
     end
 
@@ -6199,22 +6199,22 @@ require "./file"
       fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
     end
 
-    # Codegen emits calls to these by name for every allocation, so they are not
-    # optional and their names are not ours to choose.
+    # Codegen emits calls to these by name for every allocation under the
+    # __iyi_* ABI.
     # Every mode leaves the object header word under the pointer, for the
     # type id codegen stores in its high half.
-    fun __crystal_malloc64(size : UInt64) : Void*
+    fun __iyi_malloc64(size : UInt64) : Void*
       pointer = LibC.malloc(size + 8_u64)
       LibC.memset(pointer, 0, size + 8_u64)
       pointer + 8_i64
     end
 
-    fun __crystal_malloc_atomic64(size : UInt64) : Void*
+    fun __iyi_malloc_atomic64(size : UInt64) : Void*
       LibC.malloc(size + 8_u64) + 8_i64
     end
 
-    fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
-      return __crystal_malloc64(size) if pointer.address == 0
+    fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
+      return __iyi_malloc64(size) if pointer.address == 0
       LibC.realloc(Pointer(Void).new(pointer.address - 8_u64), size + 8_u64) + 8_i64
     end
   {% elsif flag?(:win32) %}
@@ -6226,7 +6226,7 @@ require "./file"
     # `src/lib_c/x86_64-windows-msvc/c/heapapi.cr` carries for the compiler's
     # own runtime.
     #
-    # `HEAP_ZERO_MEMORY` (0x8) gives `__crystal_malloc64` its documented clear
+    # `HEAP_ZERO_MEMORY` (0x8) gives `__iyi_malloc64` its documented clear
     # in the allocator itself rather than a second pass over the bytes, and the
     # atomic variant passes 0 because not clearing is exactly what atomic
     # means (`GC_malloc_atomic` does not clear either). `HeapReAlloc` keeps
@@ -6250,19 +6250,19 @@ require "./file"
       fun HeapReAlloc(heap : Void*, flags : UInt32, memory : Void*, bytes : UInt64) : Void*
     end
 
-    # Codegen emits calls to these by name for every allocation, so they are not
-    # optional and their names are not ours to choose.
+    # Codegen emits calls to these by name for every allocation under the
+    # __iyi_* ABI.
     # Every mode leaves the object header word under the pointer, for the
     # type id codegen stores in its high half.
-    fun __crystal_malloc64(size : UInt64) : Void*
+    fun __iyi_malloc64(size : UInt64) : Void*
       LibC.HeapAlloc(LibC.GetProcessHeap, 0x8_u32, size + 8_u64) + 8_i64
     end
 
-    fun __crystal_malloc_atomic64(size : UInt64) : Void*
+    fun __iyi_malloc_atomic64(size : UInt64) : Void*
       LibC.HeapAlloc(LibC.GetProcessHeap, 0_u32, size + 8_u64) + 8_i64
     end
 
-    fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
+    fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
       if pointer.address == 0
         LibC.HeapAlloc(LibC.GetProcessHeap, 0x8_u32, size + 8_u64) + 8_i64
       else
@@ -7027,15 +7027,15 @@ require "./file"
       end
     {% end %}
 
-    fun __crystal_malloc64(size : UInt64) : Void*
+    fun __iyi_malloc64(size : UInt64) : Void*
       IyiHeap.alloc(size)
     end
 
-    fun __crystal_malloc_atomic64(size : UInt64) : Void*
+    fun __iyi_malloc_atomic64(size : UInt64) : Void*
       IyiHeap.alloc_atomic(size)
     end
 
-    fun __crystal_realloc64(pointer : Void*, size : UInt64) : Void*
+    fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
       IyiHeap.realloc(pointer, size)
     end
 
@@ -7156,16 +7156,16 @@ require "./file"
 # Every function with an `ensure` names a personality function, so a program
 # with a `defer` in it does not link without this symbol. It is not reachable:
 # reaching it would mean something is unwinding, and nothing here unwinds.
-fun __crystal_personality
-  print "iyi: __crystal_personality called, which cannot happen\n"
+fun __iyi_personality
+  print "iyi: __iyi_personality called, which cannot happen\n"
   __iyi_exit(1)
 end
 
 # Reached from the same landing pad, for the same reason, and just as
 # unreachable: `ensure` compiles a path that would ask the unwinder what was
 # thrown, and nothing here throws.
-fun __crystal_get_exception(exception : Void*) : UInt64
-  print "iyi: __crystal_get_exception called, which cannot happen\n"
+fun __iyi_get_exception(exception : Void*) : UInt64
+  print "iyi: __iyi_get_exception called, which cannot happen\n"
   __iyi_exit(1)
   0_u64
 end
@@ -7174,8 +7174,8 @@ end
 # this prelude can reach it either — `raise` panics rather than unwinding —
 # but a program with an `ensure` in it names the symbol.
 @[Raises]
-fun __crystal_raise(exception : Void*) : NoReturn
-  print "iyi: __crystal_raise called, which cannot happen\n"
+fun __iyi_raise(exception : Void*) : NoReturn
+  print "iyi: __iyi_raise called, which cannot happen\n"
   __iyi_exit(1)
 end
 
@@ -7183,7 +7183,7 @@ end
 # It is a `fun` — the name is the ABI — but the body just steps into the
 # ordinary panic def, so an overflow in a task dies at the task
 # boundary like any other bug instead of taking the process (III.1.4).
-fun __crystal_raise_overflow : NoReturn
+fun __iyi_raise_overflow : NoReturn
   raise "arithmetic overflow"
 end
 
@@ -7370,7 +7370,7 @@ end
 # constants, initialised from `main`'s own parameters before anything
 # else runs (codegen/const.cr); `environ` is the C runtime's exported
 # global. A first draft captured argv in class variables from `main` and
-# read zeros: `__crystal_main` runs the class-variable initialisers
+# read zeros: `__iyi_main` runs the class-variable initialisers
 # *after* `main`'s prologue stored, wiping it — symbols do not have that
 # ordering problem.
 #
@@ -7436,9 +7436,9 @@ class Program
   end
 end
 
-lib LibCrystalMain
+lib LibIyiMain
   @[Raises]
-  fun __crystal_main(argc : Int32, argv : UInt8**)
+  fun __iyi_main(argc : Int32, argv : UInt8**)
 end
 
 fun main(argc : Int32, argv : UInt8**) : Int32
@@ -7448,7 +7448,7 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   {% if flag?(:gc_boehm) %}
     LibGC.init
   {% end %}
-  LibCrystalMain.__crystal_main(argc, argv)
+  LibIyiMain.__iyi_main(argc, argv)
   0
 end
 
@@ -7465,7 +7465,7 @@ end
   # platform's contract already lives, and because `main` above stays exactly as
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
-    LibCrystalMain.__crystal_main(argc, argv)
+    LibIyiMain.__iyi_main(argc, argv)
     0
   end
 {% end %}

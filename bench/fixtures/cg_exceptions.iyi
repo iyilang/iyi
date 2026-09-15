@@ -32,21 +32,21 @@ lib LibRunner
   fun c_raise = __runner_raise(ex : Void*) : NoReturn
 end
 
-fun __crystal_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+fun __iyi_personality(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
   LibRunner.c_personality(version, actions, exception_class, exception_object, context)
 end
 
-fun __crystal_get_exception(ex : Void*) : UInt64
+fun __iyi_get_exception(ex : Void*) : UInt64
   LibRunner.c_get_exception(ex)
 end
 
 @[Raises]
-fun __crystal_raise(ex : Void*) : NoReturn
+fun __iyi_raise(ex : Void*) : NoReturn
   LibRunner.c_raise(ex)
 end
 
 def raise(ex : Exception) : NoReturn
-  __crystal_raise(ex.as(Void*))
+  __iyi_raise(ex.as(Void*))
 end
 
 fun test_raise_catch(x : Int32) : Int32

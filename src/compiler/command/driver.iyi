@@ -169,7 +169,7 @@ end
 
 # The command driver ported from src/compiler/iyi/command.cr.
 pub class CommandDriver
-  IYI_VERSION = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
+  IYI_VERSION  = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
   BASE_VERSION = {{ read_file("#{__DIR__}/../../VERSION").chomp }}
 
   {% begin %}

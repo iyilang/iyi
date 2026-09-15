@@ -7,17 +7,10 @@ require "./llvm_builder_helper"
 require "./abi/*"
 
 module Iyi
-  MAIN_NAME              = "__crystal_main"
-  RAISE_NAME             = "__crystal_raise"
-  RAISE_OVERFLOW_NAME    = "__crystal_raise_overflow"
-  RAISE_CAST_FAILED_NAME = "__crystal_raise_cast_failed"
-  MALLOC_NAME            = "__crystal_malloc64"
-  MALLOC_ATOMIC_NAME     = "__crystal_malloc_atomic64"
-  IYI_NEW_NAME           = "__iyi_new"
-  REALLOC_NAME           = "__crystal_realloc64"
-  GET_EXCEPTION_NAME     = "__crystal_get_exception"
-  ONCE_INIT              = "__crystal_once_init"
-  ONCE                   = "__crystal_once"
+  # ABI runtime symbol names (__iyi_* vs __crystal_*) are dynamic methods on
+  # Program and CodeGenVisitor (abi_name, main_name, raise_name, malloc_name, etc.),
+  # selected based on the program language mode (Program#iyi_abi?).
+  IYI_NEW_NAME = "__iyi_new"
   # iyi: the collector's write barrier (GC_DESIGN.md Stage 9). While a mark
   # runs beside the program, every store of a pointer-bearing value is
   # bracketed: `begin` marks the thread as inside a barrier so a stop
@@ -47,7 +40,7 @@ module Iyi
       llvm_mod = visitor.modules[""].mod
       llvm_mod.target = target_machine.triple
 
-      main = visitor.typed_fun?(llvm_mod, MAIN_NAME).not_nil!
+      main = visitor.typed_fun?(llvm_mod, visitor.main_name).not_nil!
 
       # It seems the JIT doesn't like it if we return an empty type (struct {})
       llvm_context = llvm_mod.context
@@ -111,7 +104,7 @@ module Iyi
       llvm_mod = visitor.modules[""].mod
       llvm_mod.target = target_machine.triple
 
-      main = visitor.typed_fun?(llvm_mod, MAIN_NAME).not_nil!
+      main = visitor.typed_fun?(llvm_mod, visitor.main_name).not_nil!
 
       # void (*__evaluate_wrapper)(void*)
       wrapper_type = LLVM::Type.function([llvm_context.void_pointer], llvm_context.void)
@@ -239,6 +232,11 @@ module Iyi
     getter personality_name : String
     property last : LLVM::Value
 
+    delegate abi_prefix, abi_name, main_name, raise_name, raise_overflow_name,
+      raise_cast_failed_name, malloc_name, malloc_atomic_name, realloc_name,
+      get_exception_name, once_init_name, once_name,
+      type_id_to_class_name_map_name, to: @program
+
     class LLVMVar
       getter pointer : LLVM::Value
       getter type : Type
@@ -305,15 +303,15 @@ module Iyi
       @main_ret_type = node.type? || @program.nil_type
       ret_type = @llvm_typer.llvm_return_type(@main_ret_type)
       main_type = LLVM::Type.function([llvm_context.int32, llvm_context.void_pointer.pointer], ret_type)
-      @main = @llvm_mod.functions.add(MAIN_NAME, main_type)
+      @main = @llvm_mod.functions.add(main_name, main_type)
       @main.linkage = LLVM::Linkage::Internal if @single_module
-      @fun_types = { {@llvm_mod, MAIN_NAME} => main_type }
+      @fun_types = { {@llvm_mod, main_name} => main_type }
 
       if @program.has_flag?("msvc")
         @personality_name = "__CxxFrameHandler3"
         @main.personality_function = windows_personality_fun.func
       else
-        @personality_name = "__crystal_personality"
+        @personality_name = abi_name("personality")
       end
 
       @context = Context.new @main, main_type, @program
@@ -338,7 +336,7 @@ module Iyi
       # library out of a module.
       @iyi_closure_host = nil.as(ModuleInfo?)
 
-      set_internal_fun_debug_location(@main, MAIN_NAME, nil)
+      set_internal_fun_debug_location(@main, main_name, nil)
 
       @alloca_block, @entry_block = new_entry_block_chain "alloca", "entry"
 
@@ -626,9 +624,9 @@ module Iyi
 
       def visit(node : FunDef)
         case node.name
-        when MALLOC_NAME, MALLOC_ATOMIC_NAME, REALLOC_NAME, RAISE_NAME,
-             @codegen.personality_name, GET_EXCEPTION_NAME, RAISE_OVERFLOW_NAME,
-             RAISE_CAST_FAILED_NAME, ONCE_INIT, ONCE,
+        when @codegen.malloc_name, @codegen.malloc_atomic_name, @codegen.realloc_name, @codegen.raise_name,
+             @codegen.personality_name, @codegen.get_exception_name, @codegen.raise_overflow_name,
+             @codegen.raise_cast_failed_name, @codegen.once_init_name, @codegen.once_name,
              WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME
           @codegen.accept node
         end
@@ -1885,7 +1883,7 @@ module Iyi
     end
 
     def type_id_to_class_name(type_id)
-      map_name = "__crystal_type_id_to_class_name_map"
+      map_name = type_id_to_class_name_map_name
 
       global = @main_mod.globals[map_name]?
       unless global
@@ -2676,18 +2674,18 @@ module Iyi
     end
 
     def crystal_malloc_fun
-      @malloc_fun ||= typed_fun?(@main_mod, MALLOC_NAME)
+      @malloc_fun ||= typed_fun?(@main_mod, malloc_name)
       if malloc_fun = @malloc_fun
-        check_main_fun MALLOC_NAME, malloc_fun
+        check_main_fun malloc_name, malloc_fun
       else
         nil
       end
     end
 
     def crystal_malloc_atomic_fun
-      @malloc_atomic_fun ||= typed_fun?(@main_mod, MALLOC_ATOMIC_NAME)
+      @malloc_atomic_fun ||= typed_fun?(@main_mod, malloc_atomic_name)
       if malloc_fun = @malloc_atomic_fun
-        check_main_fun MALLOC_ATOMIC_NAME, malloc_fun
+        check_main_fun malloc_atomic_name, malloc_fun
       else
         nil
       end
@@ -2704,9 +2702,9 @@ module Iyi
     end
 
     def crystal_realloc_fun
-      @realloc_fun ||= typed_fun?(@main_mod, REALLOC_NAME)
+      @realloc_fun ||= typed_fun?(@main_mod, realloc_name)
       if realloc_fun = @realloc_fun
-        check_main_fun REALLOC_NAME, realloc_fun
+        check_main_fun realloc_name, realloc_fun
       else
         nil
       end
@@ -2792,18 +2790,18 @@ module Iyi
     end
 
     def crystal_raise_overflow_fun
-      @raise_overflow_fun ||= typed_fun?(@main_mod, RAISE_OVERFLOW_NAME)
+      @raise_overflow_fun ||= typed_fun?(@main_mod, raise_overflow_name)
       if raise_overflow_fun = @raise_overflow_fun
-        check_main_fun RAISE_OVERFLOW_NAME, raise_overflow_fun
+        check_main_fun raise_overflow_name, raise_overflow_fun
       else
-        raise Error.new("Missing __crystal_raise_overflow function, either use std-lib's prelude or define it")
+        raise Error.new("Missing #{raise_overflow_name} function, either use std-lib's prelude or define it")
       end
     end
 
     def crystal_raise_cast_failed_fun
-      @raise_cast_failed_fun ||= typed_fun?(@main_mod, RAISE_CAST_FAILED_NAME)
+      @raise_cast_failed_fun ||= typed_fun?(@main_mod, raise_cast_failed_name)
       if raise_cast_failed_fun = @raise_cast_failed_fun
-        check_main_fun RAISE_CAST_FAILED_NAME, raise_cast_failed_fun
+        check_main_fun raise_cast_failed_name, raise_cast_failed_fun
       else
         nil
       end

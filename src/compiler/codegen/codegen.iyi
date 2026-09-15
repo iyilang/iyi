@@ -694,30 +694,30 @@ pub class CodeGenVisitor < Visitor
     end
   end
 
-  def ensure_crystal_personality : Function
-    if f = @mod.get_function?("__crystal_personality")
+  def ensure_iyi_personality : Function
+    if f = @mod.get_function?("__iyi_personality")
       f
     else
       pers_fn_ty = LLVMType.function([@context.int32, @context.int32, @context.int64, @context.pointer, @context.pointer], @context.int32, true)
-      @mod.add_function("__crystal_personality", pers_fn_ty)
+      @mod.add_function("__iyi_personality", pers_fn_ty)
     end
   end
 
-  def ensure_crystal_get_exception : Function
-    if f = @mod.get_function?("__crystal_get_exception")
+  def ensure_iyi_get_exception : Function
+    if f = @mod.get_function?("__iyi_get_exception")
       f
     else
       get_ex_fn_ty = LLVMType.function([@context.pointer], @context.int64, false)
-      @mod.add_function("__crystal_get_exception", get_ex_fn_ty)
+      @mod.add_function("__iyi_get_exception", get_ex_fn_ty)
     end
   end
 
-  def ensure_crystal_raise : Function
-    if f = @mod.get_function?("__crystal_raise")
+  def ensure_iyi_raise : Function
+    if f = @mod.get_function?("__iyi_raise")
       f
     else
       raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
-      @mod.add_function("__crystal_raise", raise_fn_ty)
+      @mod.add_function("__iyi_raise", raise_fn_ty)
     end
   end
 
@@ -1170,7 +1170,7 @@ pub class CodeGenVisitor < Visitor
          else
            @mod.add_function(node.name, fn_ty)
          end
-    if node.body && node.name.starts_with?("__crystal_") && node.name != "__crystal_personality"
+    if node.body && node.name.starts_with?("__iyi_") && node.name != "__iyi_personality"
       fn.linkage = LibLLVM::Linkage::Internal
     end
     @current_fn = fn
@@ -2175,7 +2175,7 @@ pub class CodeGenVisitor < Visitor
              else
                return false
              end
-    pers_fn = ensure_crystal_personality
+    pers_fn = ensure_iyi_personality
     cur_fn.personality_function = pers_fn.to_value
     landing_pad_ty = if st = @llvm_struct_types["landing_pad"]?
                        st
@@ -2229,7 +2229,7 @@ pub class CodeGenVisitor < Visitor
     unwind_ex_obj = @builder.extract_value(lp, 0)
     exception_type_id = @builder.extract_value(lp, 1)
 
-    get_ex_fn = ensure_crystal_get_exception
+    get_ex_fn = ensure_iyi_get_exception
     get_ex_fn_ty = LLVMType.function([@context.pointer], @context.int64, false)
     caught_ex_u64 = @builder.call(get_ex_fn_ty, get_ex_fn.to_value, [unwind_ex_obj])
     caught_ex_ptr = @builder.int_to_ptr(caught_ex_u64, @context.pointer)
@@ -2324,7 +2324,7 @@ pub class CodeGenVisitor < Visitor
       if ens = node_ensure
         ens.accept(self)
       end
-      raise_fn = ensure_crystal_raise
+      raise_fn = ensure_iyi_raise
       raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
       @builder.call(raise_fn_ty, raise_fn.to_value, [unwind_ex_obj])
       @builder.unreachable
@@ -2332,7 +2332,7 @@ pub class CodeGenVisitor < Visitor
       if ens = node_ensure
         ens.accept(self)
       end
-      raise_fn = ensure_crystal_raise
+      raise_fn = ensure_iyi_raise
       raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
       @builder.call(raise_fn_ty, raise_fn.to_value, [unwind_ex_obj])
       @builder.unreachable
@@ -2343,7 +2343,7 @@ pub class CodeGenVisitor < Visitor
       re_lp = @builder.landing_pad(landing_pad_ty, pers_fn.to_value, [] of LLVMValue)
       re_unwind = @builder.extract_value(re_lp, 0)
       node_ensure.accept(self)
-      raise_fn = ensure_crystal_raise
+      raise_fn = ensure_iyi_raise
       raise_fn_ty = LLVMType.function([@context.pointer], @context.void, false)
       @builder.call(raise_fn_ty, raise_fn.to_value, [re_unwind])
       @builder.unreachable
@@ -2470,9 +2470,9 @@ pub class CodeGenVisitor < Visitor
                        b.position_at_end(entry_bb)
                        param = rh.param(0)
                        param.name = arg_tname == "String" ? "msg" : "ex"
-                       crystal_raise_fn = ensure_crystal_raise
-                       crystal_raise_ty = LLVMType.function([@context.pointer], @context.void, false)
-                       b.call(crystal_raise_ty, crystal_raise_fn.to_value, [param])
+                       iyi_raise_fn = ensure_iyi_raise
+                       iyi_raise_ty = LLVMType.function([@context.pointer], @context.void, false)
+                       b.call(iyi_raise_ty, iyi_raise_fn.to_value, [param])
                        b.unreachable
                        b.dispose
                        rh
@@ -4355,10 +4355,10 @@ end
 # so a program's behaviour does not depend on which one compiled it.
 pub def append_entry_point(funs : Array(FunDef), top_level_stmts : Array(ASTNode)) : Nil
   argv_type = Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)
-  unless funs.any? { |f| f.name == "__crystal_main" && !f.body.nil? }
+  unless funs.any? { |f| f.name == "__iyi_main" && !f.body.nil? }
     init_stmts = top_level_stmts.empty? ? [Nop.new] of ASTNode : top_level_stmts
     init_fun = FunDef.new(
-      "__crystal_main",
+      "__iyi_main",
       [
         Arg.new("argc", restriction: Path.global("Int32")),
         Arg.new("argv", restriction: argv_type),
@@ -4378,7 +4378,7 @@ pub def append_entry_point(funs : Array(FunDef), top_level_stmts : Array(ASTNode
       ],
       Path.global("Int32"),
       Expressions.new([
-        Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
+        Call.new(nil, "__iyi_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
         NumberLiteral.new("0", NumberKind::I32),
       ] of ASTNode)
     )

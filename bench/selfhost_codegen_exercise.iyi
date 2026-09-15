@@ -132,7 +132,7 @@ module BenchSelfhostCodegenExercise
     all_fns = [] of Function
     mod.functions.each do |fn|
       next if fn.first_basic_block.nil?
-      next if fn.name == "__crystal_main"
+      next if fn.name == "__crystal_main" || fn.name == "__iyi_main"
       all_fns << fn
     end
     sorted_fns = all_fns.sorted_by { |f| f.name }

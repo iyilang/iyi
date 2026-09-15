@@ -382,7 +382,7 @@ line so it cannot move unread.
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
 it uses, and iyi's own library is 13,949 lines rather than 8,161. The whole
-library is 541 KB on disk beside the binary.
+library is 540 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
@@ -410,7 +410,7 @@ tar -xzf iyi-0.12.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 541 KB prelude, the 1,889 KB of `src/std` that `import std/...`
+iyi's own 540 KB prelude, the 1,889 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all

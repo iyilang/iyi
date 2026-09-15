@@ -479,7 +479,7 @@ module Iyi
     end
 
     def get_current_debug_scope(location)
-      if context.fun.name == MAIN_NAME
+      if context.fun.name == main_name
         main_scopes = (@main_scopes ||= {} of {String, String} => LibLLVM::MetadataRef)
         file, dir = file_and_dir(location.filename)
         main_scope = main_scopes[{file, dir}] ||= begin

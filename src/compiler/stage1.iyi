@@ -17,6 +17,7 @@ using compiler/command/driver::{CommandDriver, OutputBuffer, CommandResult}
 lib LibC
   fun exit(status : Int32) : NoReturn
 end
+
 def run_driver : Nil
   CommandDriver.program_name = "iyi"
   driver = CommandDriver.new(Program.args)

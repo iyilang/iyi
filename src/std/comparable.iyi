@@ -1,0 +1,54 @@
+module std/comparable
+
+import std/traits
+using std/traits::{Cmp}
+
+# The Comparable trait is used by types whose instances may be ordered.
+#
+# Types implementing Comparable must provide an `<=>` method returning:
+# - negative Int32 if self < other
+# - positive Int32 if self > other
+# - 0 if self == other
+# - nil if self and other are not comparable
+pub trait Comparable(T)
+  abstract def <=>(other : T) : Int32?
+
+  # Compares this object to other based on the receiver's `<=>` method.
+  def <(other : T) : ::Bool
+    cmp = self <=> other
+    cmp ? cmp < 0 : false
+  end
+
+  def <=(other : T) : ::Bool
+    cmp = self <=> other
+    cmp ? cmp <= 0 : false
+  end
+
+  def >(other : T) : ::Bool
+    cmp = self <=> other
+    cmp ? cmp > 0 : false
+  end
+
+  def >=(other : T) : ::Bool
+    cmp = self <=> other
+    cmp ? cmp >= 0 : false
+  end
+
+  # Clamps a value between min and max.
+  def clamp(min_val, max_val)
+    return max_val if !max_val.nil? && self > max_val
+    return min_val if !min_val.nil? && self < min_val
+    self
+  end
+
+  # Clamps a value within range.
+  def clamp(range : Range)
+    raise "Can't clamp an exclusive range" if range.exclusive?
+    clamp(range.begin, range.end)
+  end
+
+  # Returns true if self is between min and max inclusive.
+  def between?(min_val, max_val) : ::Bool
+    self >= min_val && self <= max_val
+  end
+end

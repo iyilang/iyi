@@ -1566,12 +1566,14 @@ describe Iyi::IyiMod do
   # producer emits can serve a consumer, and the body is the only thing that
   # can travel. The consumer here instantiates at a type the producer never
   # did, which is the case that makes carrying the producer's object code no
-  # answer at all.
+  # answer at all. The fixture is `pack/box`, not `std/box`: that module
+  # ships, and deleting the fixture would find the library's (the case the
+  # "names a module whose path reaches another file now" example holds).
   it "ships a generic type's bodies, and the consumer specialises them" do
     with_tempdir("iyimod_mono_generic") do
-      Dir.mkdir_p "std"
-      File.write "std/box.iyi", <<-IYI
-        module std/box
+      Dir.mkdir_p "pack"
+      File.write "pack/box.iyi", <<-IYI
+        module pack/box
 
         pub struct Box(T)
           @item : T
@@ -1587,10 +1589,10 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/box
+        import pack/box
 
-        puts Std::Box::Box(Int32).new(7).item
-        puts Std::Box::Box(String).new("seven").item
+        puts Pack::Box::Box(Int32).new(7).item
+        puts Pack::Box::Box(String).new("seven").item
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
@@ -1601,10 +1603,10 @@ describe Iyi::IyiMod do
       producer.compile source, File.expand_path("from-source")
       `./from-source`.chomp.should eq "7\nseven"
 
-      artifact = Iyi::IyiMod.read(File.join("mods", "std", "box.iyimod"))
+      artifact = Iyi::IyiMod.read(File.join("mods", "pack", "box.iyimod"))
       artifact.mono_bodies.keys.should contain "Box#item()"
 
-      File.delete "std/box.iyi"
+      File.delete "pack/box.iyi"
 
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"
@@ -1626,9 +1628,9 @@ describe Iyi::IyiMod do
   # an instance, which numbers a type nothing declared.
   it "specialises an imported generic however the consumer reaches it" do
     with_tempdir("iyimod_generic_reach") do
-      Dir.mkdir_p "std"
-      File.write "std/box.iyi", <<-IYI
-        module std/box
+      Dir.mkdir_p "pack"
+      File.write "pack/box.iyi", <<-IYI
+        module pack/box
 
         pub trait Show
           abstract def show : String
@@ -1654,11 +1656,11 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/box
+        import pack/box
 
-        puts Std::Box::Box.new(21).map { |v| v + v }.value
-        puts Std::Box::Box.new(1).show
-        puts Std::Box::Box.new(Std::Box::Box.new(5)).value.value
+        puts Pack::Box::Box.new(21).map { |v| v + v }.value
+        puts Pack::Box::Box.new(1).show
+        puts Pack::Box::Box.new(Pack::Box::Box.new(5)).value.value
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
@@ -1669,7 +1671,7 @@ describe Iyi::IyiMod do
       producer.compile source, File.expand_path("from-source")
       `./from-source`.chomp.should eq "42\nshown\n5"
 
-      File.delete "std/box.iyi"
+      File.delete "pack/box.iyi"
 
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"

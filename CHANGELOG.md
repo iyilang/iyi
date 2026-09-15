@@ -78,6 +78,12 @@
   `beta also declares Shared, and alpha already wrote mods/shared.iyimod`.
   `bench/bind_roundtrip.sh` holds it.
 
+- **Two generic-boundary specs asked `std/box` after that module shipped.**
+  They delete the fixture and compile from the artifact; the import then
+  finds the library's `std/box`, and the artifact is about the fixture.
+  The fixtures are `pack/box`, a path the library does not own.
+  `spec/compiler/iyimod_spec.cr` holds it.
+
 - **A sibling `Std::Tuple` hid the prelude's `::Tuple`.** Looking `Tuple`
   up from `Std::Enumerable` walked to `Std` first, found the sibling
   unit, and the import wall refused a name the file never meant. Lookup

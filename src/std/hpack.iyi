@@ -1,0 +1,893 @@
+# Standard HPACK: Header Compression for HTTP/2 (RFC 7541)
+#
+# Implements:
+# - RFC 7541 61-entry Static Table (Appendix A)
+# - Dynamic Table with FIFO eviction by size (Section 4)
+# - N-bit prefix integer encoding and decoding for 1..8 bits (Section 5.1)
+# - String literals, both raw and canonical Huffman-coded (Section 5.2)
+# - Canonical Huffman table (Appendix B, 257 symbols)
+# - Prefix-tree / state-machine Huffman decoder with strict padding validation:
+#     * Rejects EOS symbol in stream
+#     * Rejects padding longer than 7 bits
+#     * Rejects padding containing 0 bits (must be all 1s)
+# - Four field representations (Section 6):
+#     * Indexed Header Field (6.1)
+#     * Literal Header Field with Incremental Indexing (6.2.1)
+#     * Literal Header Field without Indexing (6.2.2)
+#     * Literal Header Field Never Indexed (6.2.3)
+# - Dynamic Table Size Update (Section 6.3)
+# - Security defenses:
+#     * Decompression bomb protection: bounds decoded uncompressed header size & count
+#     * Respects peer SETTINGS_HEADER_TABLE_SIZE limit
+#     * Invalid index detection (index 0 or index > static + dynamic length)
+#     * Never-indexed representation honoured on re-encode
+
+module std/hpack
+
+import std/traits
+import std/slice
+import std/text
+
+using std/slice::{Slice, Bytes}
+
+pub alias Bytes = Std::Slice::Bytes
+
+# ---------------------------------------------------------------------------
+# HeaderField: Ordered representation of a single header name-value pair
+# ---------------------------------------------------------------------------
+
+pub struct IndexingMode
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def ==(other : IndexingMode) : Bool
+    @value == other.value
+  end
+
+  Incremental     = IndexingMode.new(0)
+  WithoutIndexing = IndexingMode.new(1)
+  NeverIndexed    = IndexingMode.new(2)
+end
+
+pub struct HeaderField
+  getter name : String
+  getter value : String
+  getter indexing : IndexingMode
+
+  def initialize(@name : String, @value : String, @indexing : IndexingMode = IndexingMode::Incremental)
+  end
+
+  def initialize(@name : String, @value : String, never_indexed : Bool)
+    @indexing = never_indexed ? IndexingMode::NeverIndexed : IndexingMode::Incremental
+  end
+
+  def never_indexed : Bool
+    @indexing == IndexingMode::NeverIndexed
+  end
+
+  def size : Int32
+    # RFC 7541 Section 4.1: size = name.bytesize + value.bytesize + 32
+    @name.bytesize + @value.bytesize + 32
+  end
+
+  def to_s : String
+    "#{@name}: #{@value}"
+  end
+
+  def ==(other : HeaderField) : Bool
+    @name == other.name && @value == other.value && @indexing == other.indexing
+  end
+end
+
+# ---------------------------------------------------------------------------
+# HpackError: Error type for HPACK decoding and encoding failures
+# ---------------------------------------------------------------------------
+
+pub struct HpackError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for HpackError
+  def message : String
+    @message
+  end
+end
+
+# ---------------------------------------------------------------------------
+# StaticTable: RFC 7541 Appendix A 61 predefined header entries
+# ---------------------------------------------------------------------------
+
+pub class StaticTable
+  ENTRIES = [
+    HeaderField.new("", ""), # Index 0 is unused in HPACK
+    HeaderField.new(":authority", ""),
+    HeaderField.new(":method", "GET"),
+    HeaderField.new(":method", "POST"),
+    HeaderField.new(":path", "/"),
+    HeaderField.new(":path", "/index.html"),
+    HeaderField.new(":scheme", "http"),
+    HeaderField.new(":scheme", "https"),
+    HeaderField.new(":status", "200"),
+    HeaderField.new(":status", "204"),
+    HeaderField.new(":status", "206"),
+    HeaderField.new(":status", "304"),
+    HeaderField.new(":status", "400"),
+    HeaderField.new(":status", "404"),
+    HeaderField.new(":status", "500"),
+    HeaderField.new("accept-charset", ""),
+    HeaderField.new("accept-encoding", "gzip, deflate"),
+    HeaderField.new("accept-language", ""),
+    HeaderField.new("accept-ranges", ""),
+    HeaderField.new("accept", ""),
+    HeaderField.new("access-control-allow-origin", ""),
+    HeaderField.new("age", ""),
+    HeaderField.new("allow", ""),
+    HeaderField.new("authorization", ""),
+    HeaderField.new("cache-control", ""),
+    HeaderField.new("content-disposition", ""),
+    HeaderField.new("content-encoding", ""),
+    HeaderField.new("content-language", ""),
+    HeaderField.new("content-length", ""),
+    HeaderField.new("content-location", ""),
+    HeaderField.new("content-range", ""),
+    HeaderField.new("content-type", ""),
+    HeaderField.new("cookie", ""),
+    HeaderField.new("date", ""),
+    HeaderField.new("etag", ""),
+    HeaderField.new("expect", ""),
+    HeaderField.new("expires", ""),
+    HeaderField.new("from", ""),
+    HeaderField.new("host", ""),
+    HeaderField.new("if-match", ""),
+    HeaderField.new("if-modified-since", ""),
+    HeaderField.new("if-none-match", ""),
+    HeaderField.new("if-range", ""),
+    HeaderField.new("if-unmodified-since", ""),
+    HeaderField.new("last-modified", ""),
+    HeaderField.new("link", ""),
+    HeaderField.new("location", ""),
+    HeaderField.new("max-forwards", ""),
+    HeaderField.new("proxy-authenticate", ""),
+    HeaderField.new("proxy-authorization", ""),
+    HeaderField.new("range", ""),
+    HeaderField.new("referer", ""),
+    HeaderField.new("refresh", ""),
+    HeaderField.new("retry-after", ""),
+    HeaderField.new("server", ""),
+    HeaderField.new("set-cookie", ""),
+    HeaderField.new("strict-transport-security", ""),
+    HeaderField.new("transfer-encoding", ""),
+    HeaderField.new("user-agent", ""),
+    HeaderField.new("vary", ""),
+    HeaderField.new("via", ""),
+    HeaderField.new("www-authenticate", ""),
+  ]
+
+  def self.size : Int32
+    61
+  end
+
+  def self.get(index : Int32) : HeaderField?
+    if index >= 1 && index <= 61
+      ENTRIES[index]
+    else
+      nil
+    end
+  end
+
+  def self.find(name : String, value : String) : Tuple(Int32, Bool)
+    name_idx = 0
+    i = 1
+    while i <= 61
+      entry = ENTRIES[i]
+      if entry.name == name
+        if entry.value == value
+          return {i, true}
+        elsif name_idx == 0
+          name_idx = i
+        end
+      end
+      i = i + 1
+    end
+    {name_idx, false}
+  end
+
+  def self.find_name(name : String) : Int32
+    i = 1
+    while i <= 61
+      if ENTRIES[i].name == name
+        return i
+      end
+      i = i + 1
+    end
+    0
+  end
+end
+
+# ---------------------------------------------------------------------------
+# DynamicTable: FIFO eviction header table bounded by octet capacity
+# ---------------------------------------------------------------------------
+
+pub class DynamicTable
+  getter max_size : Int32
+  getter settings_max_size : Int32
+  getter size : Int32
+  getter entries : Array(HeaderField)
+
+  def initialize(@max_size : Int32 = 4096, @settings_max_size : Int32 = 4096)
+    @size = 0
+    @entries = [] of HeaderField
+  end
+
+  def length : Int32
+    @entries.size
+  end
+
+  def empty? : Bool
+    @entries.empty?
+  end
+
+  def set_max_size(new_max : Int32) : Nil | HpackError
+    if new_max < 0
+      return HpackError.new("Negative dynamic table size: #{new_max}")
+    end
+    if new_max > @settings_max_size
+      return HpackError.new("Dynamic table size #{new_max} exceeds protocol limit #{@settings_max_size}")
+    end
+    @max_size = new_max
+    evict_to_fit
+    nil
+  end
+
+  def add(name : String, value : String, never_indexed : Bool = false) : Nil
+    field = HeaderField.new(name, value, never_indexed)
+    entry_size = field.size
+    if entry_size > @max_size
+      @entries = [] of HeaderField
+      @size = 0
+      return
+    end
+    while @size + entry_size > @max_size && !@entries.empty?
+      removed = @entries.pop
+      @size = @size - removed.size
+    end
+    new_entries = [field]
+    i = 0
+    while i < @entries.size
+      new_entries << @entries[i]
+      i = i + 1
+    end
+    @entries = new_entries
+    @size = @size + entry_size
+  end
+
+  def add(field : HeaderField) : Nil
+    add(field.name, field.value, field.never_indexed)
+  end
+
+  private def evict_to_fit : Nil
+    while @size > @max_size && !@entries.empty?
+      removed = @entries.pop
+      @size = @size - removed.size
+    end
+  end
+
+  def get(relative_index : Int32) : HeaderField?
+    if relative_index >= 1 && relative_index <= @entries.size
+      @entries[relative_index - 1]
+    else
+      nil
+    end
+  end
+
+  def find(name : String, value : String) : Tuple(Int32, Bool)
+    name_idx = 0
+    i = 0
+    while i < @entries.size
+      entry = @entries[i]
+      if entry.name == name
+        if entry.value == value
+          return {i + 1, true}
+        elsif name_idx == 0
+          name_idx = i + 1
+        end
+      end
+      i = i + 1
+    end
+    {name_idx, false}
+  end
+
+  def find_name(name : String) : Int32
+    i = 0
+    while i < @entries.size
+      if @entries[i].name == name
+        return i + 1
+      end
+      i = i + 1
+    end
+    0
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Table: Combined Static and Dynamic table indexing
+# ---------------------------------------------------------------------------
+
+pub class Table
+  def self.get(dynamic_table : DynamicTable, global_index : Int32) : HeaderField?
+    if global_index >= 1 && global_index <= 61
+      StaticTable.get(global_index)
+    elsif global_index > 61 && global_index <= 61 + dynamic_table.length
+      dynamic_table.get(global_index - 61)
+    else
+      nil
+    end
+  end
+
+  def self.find(dynamic_table : DynamicTable, name : String, value : String) : Tuple(Int32, Bool)
+    s_idx, s_exact = StaticTable.find(name, value)
+    return {s_idx, true} if s_exact
+
+    d_idx, d_exact = dynamic_table.find(name, value)
+    if d_exact
+      return {61 + d_idx, true}
+    end
+
+    if s_idx > 0
+      {s_idx, false}
+    elsif d_idx > 0
+      {61 + d_idx, false}
+    else
+      {0, false}
+    end
+  end
+
+  def self.find_name(dynamic_table : DynamicTable, name : String) : Int32
+    s_idx = StaticTable.find_name(name)
+    return s_idx if s_idx > 0
+    d_idx = dynamic_table.find_name(name)
+    return 61 + d_idx if d_idx > 0
+    0
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Integer: Variable-length N-bit prefix integer codec (RFC 7541 Section 5.1)
+# ---------------------------------------------------------------------------
+
+pub class Integer
+  def self.encode(val : UInt64, prefix_bits : Int32, prefix_byte : UInt8, buffer : Array(UInt8)) : Nil
+    raise "prefix_bits must be between 1 and 8" if prefix_bits < 1 || prefix_bits > 8
+    prefix_max = (1_u64.unsafe_shl(prefix_bits)) - 1_u64
+    if val < prefix_max
+      buffer << (prefix_byte | val.to_u8)
+    else
+      buffer << (prefix_byte | prefix_max.to_u8)
+      rem = val - prefix_max
+      while rem >= 128_u64
+        chunk = (rem & 127_u64) | 128_u64
+        buffer << chunk.to_u8
+        rem = rem.unsafe_shr(7)
+      end
+      buffer << rem.to_u8
+    end
+  end
+
+  def self.encode(val : UInt64, prefix_bits : Int32, prefix_byte : UInt8 = 0_u8) : Bytes
+    buf = [] of UInt8
+    encode(val, prefix_bits, prefix_byte, buf)
+    Bytes.new(buf.size) { |i| buf[i] }
+  end
+
+  def self.decode(bytes : Bytes, offset : Int32, prefix_bits : Int32) : Tuple(UInt64, Int32) | HpackError
+    if prefix_bits < 1 || prefix_bits > 8
+      return HpackError.new("Invalid prefix_bits: #{prefix_bits}")
+    end
+    if offset >= bytes.size
+      return HpackError.new("Unexpected EOF decoding integer")
+    end
+    prefix_max = (1_u64.unsafe_shl(prefix_bits)) - 1_u64
+    first_byte = bytes[offset]
+    val = (first_byte.to_u64) & prefix_max
+    cur_offset = offset + 1
+    if val < prefix_max
+      return {val, cur_offset}
+    end
+
+    m = 0_i32
+    loop do
+      if cur_offset >= bytes.size
+        return HpackError.new("Unexpected EOF decoding integer continuation")
+      end
+      b = bytes[cur_offset].to_u64
+      cur_offset = cur_offset + 1
+      if m > 63
+        return HpackError.new("Integer overflow decoding HPACK integer")
+      end
+      val = val + ((b & 127_u64).unsafe_shl(m))
+      m = m + 7
+      if (b & 128_u64) == 0_u64
+        break
+      end
+    end
+    {val, cur_offset}
+  end
+end
+
+pub alias IntegerCodec = Integer
+
+# ---------------------------------------------------------------------------
+# Huffman: Canonical RFC 7541 Huffman codec with state machine decoder
+# ---------------------------------------------------------------------------
+
+HUFFMAN_CODES = [0x1ff8_u64, 0x7fffd8_u64, 0xfffffe2_u64, 0xfffffe3_u64, 0xfffffe4_u64, 0xfffffe5_u64, 0xfffffe6_u64, 0xfffffe7_u64, 0xfffffe8_u64, 0xffffea_u64, 0x3ffffffc_u64, 0xfffffe9_u64, 0xfffffea_u64, 0x3ffffffd_u64, 0xfffffeb_u64, 0xfffffec_u64, 0xfffffed_u64, 0xfffffee_u64, 0xfffffef_u64, 0xffffff0_u64, 0xffffff1_u64, 0xffffff2_u64, 0x3ffffffe_u64, 0xffffff3_u64, 0xffffff4_u64, 0xffffff5_u64, 0xffffff6_u64, 0xffffff7_u64, 0xffffff8_u64, 0xffffff9_u64, 0xffffffa_u64, 0xffffffb_u64, 0x14_u64, 0x3f8_u64, 0x3f9_u64, 0xffa_u64, 0x1ff9_u64, 0x15_u64, 0xf8_u64, 0x7fa_u64, 0x3fa_u64, 0x3fb_u64, 0xf9_u64, 0x7fb_u64, 0xfa_u64, 0x16_u64, 0x17_u64, 0x18_u64, 0x0_u64, 0x1_u64, 0x2_u64, 0x19_u64, 0x1a_u64, 0x1b_u64, 0x1c_u64, 0x1d_u64, 0x1e_u64, 0x1f_u64, 0x5c_u64, 0xfb_u64, 0x7ffc_u64, 0x20_u64, 0xffb_u64, 0x3fc_u64, 0x1ffa_u64, 0x21_u64, 0x5d_u64, 0x5e_u64, 0x5f_u64, 0x60_u64, 0x61_u64, 0x62_u64, 0x63_u64, 0x64_u64, 0x65_u64, 0x66_u64, 0x67_u64, 0x68_u64, 0x69_u64, 0x6a_u64, 0x6b_u64, 0x6c_u64, 0x6d_u64, 0x6e_u64, 0x6f_u64, 0x70_u64, 0x71_u64, 0x72_u64, 0xfc_u64, 0x73_u64, 0xfd_u64, 0x1ffb_u64, 0x7fff0_u64, 0x1ffc_u64, 0x3ffc_u64, 0x22_u64, 0x7ffd_u64, 0x3_u64, 0x23_u64, 0x4_u64, 0x24_u64, 0x5_u64, 0x25_u64, 0x26_u64, 0x27_u64, 0x6_u64, 0x74_u64, 0x75_u64, 0x28_u64, 0x29_u64, 0x2a_u64, 0x7_u64, 0x2b_u64, 0x76_u64, 0x2c_u64, 0x8_u64, 0x9_u64, 0x2d_u64, 0x77_u64, 0x78_u64, 0x79_u64, 0x7a_u64, 0x7b_u64, 0x7ffe_u64, 0x7fc_u64, 0x3ffd_u64, 0x1ffd_u64, 0xffffffc_u64, 0xfffe6_u64, 0x3fffd2_u64, 0xfffe7_u64, 0xfffe8_u64, 0x3fffd3_u64, 0x3fffd4_u64, 0x3fffd5_u64, 0x7fffd9_u64, 0x3fffd6_u64, 0x7fffda_u64, 0x7fffdb_u64, 0x7fffdc_u64, 0x7fffdd_u64, 0x7fffde_u64, 0xffffeb_u64, 0x7fffdf_u64, 0xffffec_u64, 0xffffed_u64, 0x3fffd7_u64, 0x7fffe0_u64, 0xffffee_u64, 0x7fffe1_u64, 0x7fffe2_u64, 0x7fffe3_u64, 0x7fffe4_u64, 0x1fffdc_u64, 0x3fffd8_u64, 0x7fffe5_u64, 0x3fffd9_u64, 0x7fffe6_u64, 0x7fffe7_u64, 0xffffef_u64, 0x3fffda_u64, 0x1fffdd_u64, 0xfffe9_u64, 0x3fffdb_u64, 0x3fffdc_u64, 0x7fffe8_u64, 0x7fffe9_u64, 0x1fffde_u64, 0x7fffea_u64, 0x3fffdd_u64, 0x3fffde_u64, 0xfffff0_u64, 0x1fffdf_u64, 0x3fffdf_u64, 0x7fffeb_u64, 0x7fffec_u64, 0x1fffe0_u64, 0x1fffe1_u64, 0x3fffe0_u64, 0x1fffe2_u64, 0x7fffed_u64, 0x3fffe1_u64, 0x7fffee_u64, 0x7fffef_u64, 0xfffea_u64, 0x3fffe2_u64, 0x3fffe3_u64, 0x3fffe4_u64, 0x7ffff0_u64, 0x3fffe5_u64, 0x3fffe6_u64, 0x7ffff1_u64, 0x3ffffe0_u64, 0x3ffffe1_u64, 0xfffeb_u64, 0x7fff1_u64, 0x3fffe7_u64, 0x7ffff2_u64, 0x3fffe8_u64, 0x1ffffec_u64, 0x3ffffe2_u64, 0x3ffffe3_u64, 0x3ffffe4_u64, 0x7ffffde_u64, 0x7ffffdf_u64, 0x3ffffe5_u64, 0xfffff1_u64, 0x1ffffed_u64, 0x7fff2_u64, 0x1fffe3_u64, 0x3ffffe6_u64, 0x7ffffe0_u64, 0x7ffffe1_u64, 0x3ffffe7_u64, 0x7ffffe2_u64, 0xfffff2_u64, 0x1fffe4_u64, 0x1fffe5_u64, 0x3ffffe8_u64, 0x3ffffe9_u64, 0xffffffd_u64, 0x7ffffe3_u64, 0x7ffffe4_u64, 0x7ffffe5_u64, 0xfffec_u64, 0xfffff3_u64, 0xfffed_u64, 0x1fffe6_u64, 0x3fffe9_u64, 0x1fffe7_u64, 0x1fffe8_u64, 0x7ffff3_u64, 0x3fffea_u64, 0x3fffeb_u64, 0x1ffffee_u64, 0x1ffffef_u64, 0xfffff4_u64, 0xfffff5_u64, 0x3ffffea_u64, 0x7ffff4_u64, 0x3ffffeb_u64, 0x7ffffe6_u64, 0x3ffffec_u64, 0x3ffffed_u64, 0x7ffffe7_u64, 0x7ffffe8_u64, 0x7ffffe9_u64, 0x7ffffea_u64, 0x7ffffeb_u64, 0xffffffe_u64, 0x7ffffec_u64, 0x7ffffed_u64, 0x7ffffee_u64, 0x7ffffef_u64, 0x7fffff0_u64, 0x3ffffee_u64, 0x3fffffff_u64]
+
+HUFFMAN_LENS = [13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 28, 6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10, 13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6, 15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5, 6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28, 20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23, 23, 23, 23, 24, 23, 24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24, 22, 21, 20, 22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23, 21, 21, 22, 21, 23, 22, 23, 23, 20, 22, 22, 22, 23, 22, 22, 23, 26, 26, 20, 19, 22, 23, 22, 25, 26, 26, 26, 27, 27, 26, 24, 25, 19, 21, 26, 27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27, 20, 24, 20, 21, 22, 21, 21, 23, 22, 22, 25, 25, 24, 24, 26, 23, 26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26, 30]
+
+HUFFMAN_NEXT_STATE = [66, 1, 93, 2, 104, 3, 119, 4, 144, 5, 75, 6, 123, 7, 71, 8, 77, 9, 73, 10, 11, 13, 12, 102, 0, 0, 127, 14, 128, 15, 98, 16, 0, 17, 124, 18, 150, 19, 20, 25, 199, 21, 216, 22, 23, 162, 24, 161, 0, 0, 167, 26, 41, 27, 191, 28, 211, 29, 229, 30, 31, 45, 32, 38, 33, 35, 0, 34, 0, 0, 36, 37, 0, 0, 0, 0, 39, 52, 40, 51, 0, 0, 208, 42, 43, 165, 0, 44, 0, 0, 55, 46, 63, 47, 147, 48, 0, 49, 50, 59, 0, 0, 0, 0, 53, 54, 0, 0, 0, 0, 56, 60, 57, 58, 0, 0, 0, 0, 0, 0, 61, 62, 0, 0, 0, 0, 64, 65, 0, 0, 0, 0, 85, 67, 68, 82, 143, 69, 70, 81, 0, 0, 72, 79, 0, 0, 0, 74, 0, 0, 76, 80, 0, 0, 0, 78, 0, 0, 0, 0, 0, 0, 0, 0, 83, 90, 84, 89, 0, 0, 86, 130, 87, 88, 0, 0, 0, 0, 0, 0, 91, 92, 0, 0, 0, 0, 99, 94, 138, 95, 142, 96, 97, 103, 0, 0, 0, 0, 100, 132, 101, 129, 0, 0, 0, 0, 0, 0, 105, 112, 106, 109, 107, 108, 0, 0, 0, 0, 110, 111, 0, 0, 0, 0, 113, 116, 114, 115, 0, 0, 0, 0, 117, 118, 0, 0, 0, 0, 120, 136, 121, 122, 0, 0, 0, 0, 0, 0, 125, 155, 126, 148, 0, 0, 0, 0, 0, 0, 0, 0, 131, 135, 0, 0, 133, 134, 0, 0, 0, 0, 0, 0, 137, 141, 0, 0, 139, 140, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 145, 146, 0, 0, 0, 0, 0, 0, 0, 149, 0, 0, 196, 151, 152, 178, 153, 158, 0, 154, 0, 0, 156, 175, 157, 204, 0, 0, 159, 160, 0, 0, 0, 0, 0, 0, 163, 164, 0, 0, 0, 0, 166, 171, 0, 0, 168, 185, 169, 173, 170, 172, 0, 0, 0, 0, 0, 0, 174, 181, 0, 0, 241, 176, 177, 188, 0, 0, 179, 183, 180, 182, 0, 0, 0, 0, 0, 0, 184, 190, 0, 0, 186, 194, 187, 189, 0, 0, 0, 0, 0, 0, 0, 0, 192, 218, 193, 234, 0, 0, 195, 203, 0, 0, 197, 235, 198, 202, 0, 0, 200, 206, 201, 205, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 207, 210, 0, 0, 209, 215, 0, 0, 0, 0, 212, 224, 213, 222, 214, 221, 0, 0, 0, 0, 217, 243, 0, 0, 245, 219, 220, 244, 0, 0, 0, 0, 223, 228, 0, 0, 237, 225, 248, 226, 0, 227, 0, 0, 0, 0, 230, 249, 231, 239, 232, 233, 0, 0, 0, 0, 0, 0, 236, 242, 0, 0, 238, 246, 0, 0, 240, 247, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 250, 253, 251, 252, 0, 0, 0, 0, 254, 255, 0, 0, 0, 0]
+
+HUFFMAN_SYMBOL = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 36, -1, -1, -1, -1, -1, -1, 123, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 135, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 254, -1, 2, 3, -1, -1, 4, 5, 6, 7, -1, -1, -1, -1, 8, 11, -1, -1, -1, -1, 239, -1, 9, 142, -1, -1, -1, -1, -1, -1, 249, -1, -1, -1, 10, 13, 12, 14, -1, -1, 15, 16, 17, 18, -1, -1, -1, -1, 19, 20, 21, 23, 22, 256, -1, -1, 24, 25, 26, 27, -1, -1, 28, 29, 30, 31, -1, -1, -1, -1, -1, -1, -1, -1, 32, 37, -1, -1, 33, 34, 124, -1, 35, 62, -1, -1, 38, 42, 63, -1, 39, 43, 40, 41, 44, 59, 45, 46, -1, -1, -1, -1, 47, 51, -1, -1, -1, -1, 48, 49, 50, 97, 52, 53, -1, -1, 54, 55, 56, 57, -1, -1, -1, -1, -1, -1, -1, -1, 58, 66, 60, 96, -1, -1, -1, -1, 61, 65, 64, 91, 67, 68, -1, -1, -1, -1, -1, -1, 69, 70, 71, 72, -1, -1, 73, 74, 75, 76, -1, -1, -1, -1, 77, 78, 79, 80, -1, -1, 81, 82, 83, 84, -1, -1, -1, -1, 85, 86, 87, 89, 88, 90, -1, -1, -1, -1, 92, 195, 93, 126, 94, 125, 95, 98, -1, -1, 99, 101, -1, -1, 100, 102, 103, 104, 105, 111, -1, -1, 106, 107, -1, -1, 108, 109, 110, 112, 113, 118, 114, 117, 115, 116, -1, -1, 119, 120, 121, 122, 127, 220, 208, -1, 128, 130, -1, -1, -1, -1, -1, -1, 230, -1, 129, 132, -1, -1, -1, -1, 131, 162, -1, -1, 133, 134, 136, 146, 137, 138, -1, -1, 139, 140, 141, 143, -1, -1, 144, 145, -1, -1, -1, -1, -1, -1, 147, 149, 148, 159, 150, 151, -1, -1, 152, 155, -1, -1, -1, -1, 153, 161, -1, -1, -1, -1, 154, 156, 157, 158, 160, 163, -1, -1, 164, 169, -1, -1, -1, -1, 165, 166, 167, 172, 168, 174, 170, 173, -1, -1, -1, -1, 171, 206, -1, -1, 175, 180, -1, -1, -1, -1, 176, 177, -1, -1, -1, -1, 178, 181, 179, 209, 182, 183, 184, 194, 185, 186, -1, -1, 187, 189, -1, -1, 188, 191, 190, 196, -1, -1, -1, -1, -1, -1, 192, 193, 197, 231, -1, -1, 198, 228, -1, -1, -1, -1, 199, 207, 200, 201, -1, -1, 202, 205, -1, -1, -1, -1, 255, -1, 203, 204, 210, 213, -1, -1, -1, -1, -1, -1, 211, 212, 214, 221, 215, 225, -1, -1, 216, 217, -1, -1, 218, 219, -1, -1, 222, 223, 224, 226, 227, 229, 232, 233, 234, 235, 236, 237, 238, 240, 241, 244, 242, 243, -1, -1, -1, -1, 245, 246, 247, 248, -1, -1, 250, 251, 252, 253]
+
+pub class Huffman
+  def self.encode(input : String, buffer : Array(UInt8)) : Nil
+    bit_buf = 0_u64
+    bits_in_buf = 0_i32
+    i = 0
+    while i < input.bytesize
+      byte_val = input.to_unsafe[i].to_i32
+      code = HUFFMAN_CODES[byte_val]
+      code_len = HUFFMAN_LENS[byte_val]
+
+      bit_buf = (bit_buf.unsafe_shl(code_len)) | code
+      bits_in_buf = bits_in_buf + code_len
+
+      while bits_in_buf >= 8
+        bits_in_buf = bits_in_buf - 8
+        byte_out = (bit_buf.unsafe_shr(bits_in_buf)) & 255_u64
+        buffer << byte_out.to_u8
+      end
+      i = i + 1
+    end
+
+    if bits_in_buf > 0
+      pad_len = 8 - bits_in_buf
+      eos_pad = (1_u64.unsafe_shl(pad_len)) - 1_u64
+      bit_buf = (bit_buf.unsafe_shl(pad_len)) | eos_pad
+      byte_out = bit_buf & 255_u64
+      buffer << byte_out.to_u8
+    end
+  end
+
+  def self.encode(input : String) : Bytes
+    arr = [] of UInt8
+    encode(input, arr)
+    Bytes.new(arr.size) { |i| arr[i] }
+  end
+
+  def self.encode(input : Bytes) : Bytes
+    # Convert slice to String without copying for encoding
+    str = String.new(input.size) do |b|
+      j = 0
+      while j < input.size
+        b[j] = input[j]
+        j = j + 1
+      end
+    end
+    encode(str)
+  end
+
+  def self.encoded_size(input : String) : Int32
+    total_bits = 0_i32
+    i = 0
+    while i < input.bytesize
+      byte_val = input.to_unsafe[i].to_i32
+      total_bits = total_bits + HUFFMAN_LENS[byte_val]
+      i = i + 1
+    end
+    (total_bits + 7) // 8
+  end
+
+  def self.decode(bytes : Bytes, offset : Int32, length : Int32) : String | HpackError
+    if offset < 0 || length < 0 || offset + length > bytes.size
+      return HpackError.new("Huffman decode: offset/length out of bounds")
+    end
+    out_chars = [] of UInt8
+    state = 0_i32
+    bits_since_sym = 0_i32
+    i = 0
+    while i < length
+      b = bytes[offset + i]
+      shift = 7_i32
+      while shift >= 0
+        bit = ((b.to_i32 >> shift) & 1)
+        bits_since_sym = bits_since_sym + 1
+        idx = state * 2 + bit
+        next_st = HUFFMAN_NEXT_STATE[idx]
+        sym = HUFFMAN_SYMBOL[idx]
+        if sym >= 0
+          if sym == 256
+            return HpackError.new("EOS symbol in Huffman stream")
+          end
+          out_chars << sym.to_u8
+          state = 0_i32
+          bits_since_sym = 0_i32
+        else
+          state = next_st
+        end
+        shift = shift - 1
+      end
+      i = i + 1
+    end
+
+    if state != 0
+      # Valid padding must be strictly <= 7 bits of 1s (EOS prefix)
+      # Internal states 0..7 correspond to 0..7 consecutive bits of 1s from root
+      if bits_since_sym > 7 || state > 7
+        return HpackError.new("Invalid Huffman padding")
+      end
+    end
+
+    String.new(out_chars.size) do |buf|
+      j = 0
+      while j < out_chars.size
+        buf[j] = out_chars[j]
+        j = j + 1
+      end
+    end
+  end
+
+  def self.decode(bytes : Bytes) : String | HpackError
+    decode(bytes, 0, bytes.size)
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Decoder: HPACK wire-format decoder with security protections
+# ---------------------------------------------------------------------------
+
+pub class Decoder
+  getter dynamic_table : DynamicTable
+  property protocol_max_table_size : Int32
+  property max_header_list_size : Int32
+  property max_header_count : Int32
+
+  def initialize(max_table_size : Int32 = 4096, protocol_max_table_size : Int32 = 4096, max_header_list_size : Int32 = 65536, max_header_count : Int32 = 1000)
+    @dynamic_table = DynamicTable.new(max_table_size, protocol_max_table_size)
+    @protocol_max_table_size = protocol_max_table_size
+    @max_header_list_size = max_header_list_size
+    @max_header_count = max_header_count
+  end
+
+  def decode(payload : Bytes) : Array(HeaderField) | HpackError
+    headers = [] of HeaderField
+    offset = 0_i32
+    total_uncompressed_size = 0_i32
+    header_count = 0_i32
+
+    while offset < payload.size
+      b = payload[offset]
+
+      if (b & 0x80_u8) != 0_u8
+        # 6.1 Indexed Header Field (starts with 1, 7-bit prefix)
+        dec_int = Integer.decode(payload, offset, 7)
+        if dec_int.is_a?(HpackError)
+          return dec_int
+        end
+        idx = dec_int[0].to_i32
+        offset = dec_int[1]
+
+        if idx == 0
+          return HpackError.new("Invalid index 0 in indexed header field representation")
+        end
+        field = Table.get(@dynamic_table, idx)
+        if field.nil?
+          return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+        end
+
+        header_count = header_count + 1
+        if header_count > @max_header_count
+          return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
+        end
+        total_uncompressed_size = total_uncompressed_size + field.name.bytesize + field.value.bytesize
+        if total_uncompressed_size > @max_header_list_size
+          return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
+        end
+
+        headers << field
+      elsif (b & 0x40_u8) != 0_u8
+        # 6.2.1 Literal Header Field with Incremental Indexing (starts with 01, 6-bit prefix)
+        dec_int = Integer.decode(payload, offset, 6)
+        if dec_int.is_a?(HpackError)
+          return dec_int
+        end
+        idx = dec_int[0].to_i32
+        offset = dec_int[1]
+
+        name = ""
+        if idx > 0
+          field = Table.get(@dynamic_table, idx)
+          if field.nil?
+            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+          end
+          name = field.name
+        else
+          dec_name = decode_string(payload, offset)
+          if dec_name.is_a?(HpackError)
+            return dec_name
+          end
+          name = dec_name[0]
+          offset = dec_name[1]
+        end
+
+        dec_val = decode_string(payload, offset)
+        if dec_val.is_a?(HpackError)
+          return dec_val
+        end
+        val = dec_val[0]
+        offset = dec_val[1]
+
+        header_count = header_count + 1
+        if header_count > @max_header_count
+          return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
+        end
+        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
+        if total_uncompressed_size > @max_header_list_size
+          return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
+        end
+
+        @dynamic_table.add(name, val, false)
+        headers << HeaderField.new(name, val, IndexingMode::Incremental)
+      elsif (b & 0x20_u8) != 0_u8
+        # 6.3 Dynamic Table Size Update (starts with 001, 5-bit prefix)
+        dec_int = Integer.decode(payload, offset, 5)
+        if dec_int.is_a?(HpackError)
+          return dec_int
+        end
+        new_max = dec_int[0].to_i32
+        offset = dec_int[1]
+
+        if new_max > @protocol_max_table_size
+          return HpackError.new("Dynamic table size update #{new_max} exceeds protocol limit #{@protocol_max_table_size}")
+        end
+        err = @dynamic_table.set_max_size(new_max)
+        if err
+          return err
+        end
+      elsif (b & 0x10_u8) != 0_u8
+        # 6.2.3 Literal Header Field Never Indexed (starts with 0001, 4-bit prefix)
+        dec_int = Integer.decode(payload, offset, 4)
+        if dec_int.is_a?(HpackError)
+          return dec_int
+        end
+        idx = dec_int[0].to_i32
+        offset = dec_int[1]
+
+        name = ""
+        if idx > 0
+          field = Table.get(@dynamic_table, idx)
+          if field.nil?
+            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+          end
+          name = field.name
+        else
+          dec_name = decode_string(payload, offset)
+          if dec_name.is_a?(HpackError)
+            return dec_name
+          end
+          name = dec_name[0]
+          offset = dec_name[1]
+        end
+
+        dec_val = decode_string(payload, offset)
+        if dec_val.is_a?(HpackError)
+          return dec_val
+        end
+        val = dec_val[0]
+        offset = dec_val[1]
+
+        header_count = header_count + 1
+        if header_count > @max_header_count
+          return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
+        end
+        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
+        if total_uncompressed_size > @max_header_list_size
+          return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
+        end
+
+        headers << HeaderField.new(name, val, IndexingMode::NeverIndexed)
+      else
+        # 6.2.2 Literal Header Field without Indexing (starts with 0000, 4-bit prefix)
+        dec_int = Integer.decode(payload, offset, 4)
+        if dec_int.is_a?(HpackError)
+          return dec_int
+        end
+        idx = dec_int[0].to_i32
+        offset = dec_int[1]
+
+        name = ""
+        if idx > 0
+          field = Table.get(@dynamic_table, idx)
+          if field.nil?
+            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+          end
+          name = field.name
+        else
+          dec_name = decode_string(payload, offset)
+          if dec_name.is_a?(HpackError)
+            return dec_name
+          end
+          name = dec_name[0]
+          offset = dec_name[1]
+        end
+
+        dec_val = decode_string(payload, offset)
+        if dec_val.is_a?(HpackError)
+          return dec_val
+        end
+        val = dec_val[0]
+        offset = dec_val[1]
+
+        header_count = header_count + 1
+        if header_count > @max_header_count
+          return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
+        end
+        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
+        if total_uncompressed_size > @max_header_list_size
+          return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
+        end
+
+        headers << HeaderField.new(name, val, IndexingMode::WithoutIndexing)
+      end
+    end
+
+    headers
+  end
+
+  private def decode_string(payload : Bytes, offset : Int32) : Tuple(String, Int32) | HpackError
+    if offset >= payload.size
+      return HpackError.new("Unexpected EOF decoding string literal")
+    end
+    huffman = (payload[offset] & 0x80_u8) != 0_u8
+    dec_len = Integer.decode(payload, offset, 7)
+    if dec_len.is_a?(HpackError)
+      return dec_len
+    end
+    str_len = dec_len[0].to_i32
+    offset = dec_len[1]
+
+    if offset + str_len > payload.size
+      return HpackError.new("Unexpected EOF reading string data (need #{str_len} bytes, available #{payload.size - offset})")
+    end
+
+    if huffman
+      res = Huffman.decode(payload, offset, str_len)
+      if res.is_a?(HpackError)
+        return res
+      end
+      {res, offset + str_len}
+    else
+      s = String.new(str_len) do |buf|
+        j = 0
+        while j < str_len
+          buf[j] = payload[offset + j]
+          j = j + 1
+        end
+      end
+      {s, offset + str_len}
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Encoder: HPACK wire-format encoder
+# ---------------------------------------------------------------------------
+
+pub class Encoder
+  getter dynamic_table : DynamicTable
+  property protocol_max_table_size : Int32
+  property use_huffman : Bool
+
+  def initialize(max_table_size : Int32 = 4096, protocol_max_table_size : Int32 = 4096, use_huffman : Bool = true)
+    @dynamic_table = DynamicTable.new(max_table_size, protocol_max_table_size)
+    @protocol_max_table_size = protocol_max_table_size
+    @use_huffman = use_huffman
+    @pending_table_size_update = false
+    @pending_table_size = 0_i32
+  end
+
+  def set_max_table_size(new_max : Int32) : Nil | HpackError
+    err = @dynamic_table.set_max_size(new_max)
+    return err if err
+    @pending_table_size_update = true
+    @pending_table_size = new_max
+    nil
+  end
+
+  def encode(headers : Array(HeaderField), force_huffman : Bool? = nil) : Bytes
+    huff = force_huffman.nil? ? @use_huffman : force_huffman
+    buffer = [] of UInt8
+
+    if @pending_table_size_update
+      Integer.encode(@pending_table_size.to_u64, 5, 0x20_u8, buffer)
+      @pending_table_size_update = false
+    end
+
+    i = 0
+    while i < headers.size
+      field = headers[i]
+      encode_field(field, buffer, huff)
+      i = i + 1
+    end
+
+    Bytes.new(buffer.size) { |idx| buffer[idx] }
+  end
+
+  private def encode_field(field : HeaderField, buffer : Array(UInt8), huff : Bool) : Nil
+    if field.indexing == IndexingMode::NeverIndexed
+      # 6.2.3 Literal Header Field Never Indexed (0001xxxx)
+      name_idx = Table.find_name(@dynamic_table, field.name)
+      if name_idx > 0
+        Integer.encode(name_idx.to_u64, 4, 0x10_u8, buffer)
+        encode_string(field.value, buffer, huff)
+      else
+        buffer << 0x10_u8
+        encode_string(field.name, buffer, huff)
+        encode_string(field.value, buffer, huff)
+      end
+    elsif field.indexing == IndexingMode::WithoutIndexing
+      # 6.2.2 Literal Header Field without Indexing (0000xxxx)
+      name_idx = Table.find_name(@dynamic_table, field.name)
+      if name_idx > 0
+        Integer.encode(name_idx.to_u64, 4, 0x00_u8, buffer)
+        encode_string(field.value, buffer, huff)
+      else
+        buffer << 0x00_u8
+        encode_string(field.name, buffer, huff)
+        encode_string(field.value, buffer, huff)
+      end
+    else
+      # IndexingMode::Incremental
+      idx, exact = Table.find(@dynamic_table, field.name, field.value)
+      if exact
+        # 6.1 Indexed Header Field (1xxxxxxx)
+        Integer.encode(idx.to_u64, 7, 0x80_u8, buffer)
+      elsif idx > 0
+        # 6.2.1 Literal Header Field with Incremental Indexing, Indexed Name (01xxxxxx)
+        Integer.encode(idx.to_u64, 6, 0x40_u8, buffer)
+        encode_string(field.value, buffer, huff)
+        @dynamic_table.add(field.name, field.value, false)
+      else
+        # 6.2.1 Literal Header Field with Incremental Indexing, New Name (01000000)
+        buffer << 0x40_u8
+        encode_string(field.name, buffer, huff)
+        encode_string(field.value, buffer, huff)
+        @dynamic_table.add(field.name, field.value, false)
+      end
+    end
+  end
+
+  private def encode_string(str : String, buffer : Array(UInt8), huff : Bool) : Nil
+    if huff
+      huff_len = Huffman.encoded_size(str)
+      Integer.encode(huff_len.to_u64, 7, 0x80_u8, buffer)
+      Huffman.encode(str, buffer)
+    else
+      raw_len = str.bytesize
+      Integer.encode(raw_len.to_u64, 7, 0_u8, buffer)
+      j = 0
+      while j < raw_len
+        buffer << str.to_unsafe[j]
+        j = j + 1
+      end
+    end
+  end
+end

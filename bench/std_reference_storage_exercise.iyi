@@ -1,0 +1,131 @@
+# Exercises `std/reference_storage`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_reference_storage_exercise.iyi
+
+module bench/std_reference_storage_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_i32(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_u64(expected : UInt64, actual : UInt64, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+import std/reference_storage
+using std/reference_storage::{ReferenceStorage}
+
+class Empty
+end
+
+class Point
+  property x : Int32
+  property y : Int32
+
+  def initialize(@x : Int32, @y : Int32)
+  end
+end
+
+class Node
+  property id : Int64
+  property tag : UInt8
+  property active : Bool
+
+  def initialize(@id : Int64, @tag : UInt8, @active : Bool)
+  end
+end
+
+class BytePair
+  property first : UInt8
+  property second : UInt8
+
+  def initialize(@first : UInt8, @second : UInt8)
+  end
+end
+
+puts "== size and alignment"
+assert_u64 instance_sizeof(Empty).to_u64, sizeof(ReferenceStorage(Empty)).to_u64, "Empty size matches instance_sizeof"
+assert_u64 instance_alignof(Empty).to_u64, alignof(ReferenceStorage(Empty)).to_u64, "Empty align matches instance_alignof"
+
+assert_u64 instance_sizeof(Point).to_u64, sizeof(ReferenceStorage(Point)).to_u64, "Point size matches instance_sizeof"
+assert_u64 instance_alignof(Point).to_u64, alignof(ReferenceStorage(Point)).to_u64, "Point align matches instance_alignof"
+assert_u64 8_u64, sizeof(ReferenceStorage(Point)).to_u64, "Point storage is 8 bytes"
+
+assert_u64 instance_sizeof(Node).to_u64, sizeof(ReferenceStorage(Node)).to_u64, "Node size matches instance_sizeof"
+assert_u64 instance_alignof(Node).to_u64, alignof(ReferenceStorage(Node)).to_u64, "Node align matches instance_alignof"
+assert_u64 16_u64, sizeof(ReferenceStorage(Node)).to_u64, "Node storage is 16 bytes with alignment padding"
+puts "  sizeof and alignof match instance metrics"
+
+puts "\n== stack allocation and unsafe_construct"
+storage = uninitialized ReferenceStorage(Point)
+pt = Point.unsafe_construct(pointerof(storage), 10, 20)
+assert_i32 10, pt.x, "constructed ref x"
+assert_i32 20, pt.y, "constructed ref y"
+ref = storage.to_reference
+assert_i32 10, ref.x, "to_reference reads x"
+assert_i32 20, ref.y, "to_reference reads y"
+ref.x = 42
+assert_i32 42, pt.x, "mutation via to_reference affects constructed reference"
+pt.y = 84
+assert_i32 84, storage.to_reference.y, "mutation via reference affects to_reference"
+puts "  unsafe_construct and to_reference share memory"
+
+puts "\n== manual pre_initialize and initialize"
+node_storage = uninitialized ReferenceStorage(Node)
+node_ref = Node.pre_initialize(pointerof(node_storage))
+node_ref.initialize(1001_i64, 5_u8, true)
+assert_true node_ref.id == 1001_i64, "pre_initialized node id"
+assert_true node_ref.tag == 5_u8, "pre_initialized node tag"
+assert_true node_ref.active, "pre_initialized node active"
+assert_true node_storage.to_reference.id == 1001_i64, "node_storage to_reference matches"
+puts "  pre_initialize sets type header for initialize"
+
+puts "\n== heap allocation and custom storage"
+raw = Pointer(UInt8).malloc(instance_sizeof(Point).to_u64)
+heap_pt = Point.unsafe_construct(raw, 77, 88)
+assert_i32 77, heap_pt.x, "heap constructed x"
+assert_i32 88, heap_pt.y, "heap constructed y"
+storage_ptr = raw.as(Pointer(ReferenceStorage(Point)))
+assert_i32 77, storage_ptr.value.to_reference.x, "storage pointer reads x"
+assert_i32 88, storage_ptr.value.to_reference.y, "storage pointer reads y"
+storage_ptr.value.to_reference.x = 99
+assert_i32 99, heap_pt.x, "mutation reflects in heap object"
+puts "  custom pointer storage holds instance data"
+
+puts "\n== equality and hash"
+s1 = uninitialized ReferenceStorage(BytePair)
+BytePair.unsafe_construct(pointerof(s1), 10_u8, 20_u8)
+s2 = uninitialized ReferenceStorage(BytePair)
+BytePair.unsafe_construct(pointerof(s2), 10_u8, 20_u8)
+s3 = uninitialized ReferenceStorage(BytePair)
+BytePair.unsafe_construct(pointerof(s3), 10_u8, 99_u8)
+assert_true s1 == s2, "equal storages compare equal"
+assert_true (s1 == s3) == false, "differing storages compare unequal"
+assert_true (s1 == 42) == false, "different type compares unequal"
+assert_i32 s1.hash, s2.hash, "equal storages have equal hash"
+assert_true s1.hash != s3.hash, "differing storages have distinct hash"
+
+e1 = uninitialized ReferenceStorage(Empty)
+Empty.unsafe_construct(pointerof(e1))
+e2 = uninitialized ReferenceStorage(Empty)
+Empty.unsafe_construct(pointerof(e2))
+assert_true e1 == e2, "empty storages compare equal"
+assert_i32 0, e1.hash, "empty storage hash is 0"
+puts "  structural equality and content hash"
+
+puts "\n== string representation"
+assert_str "ReferenceStorage(#<Bench::StdReferenceStorageExercise::Point>)", storage.to_s, "to_s formats type name"
+assert_str "ReferenceStorage(#<Bench::StdReferenceStorageExercise::Point>)", storage.inspect, "inspect matches to_s"
+assert_str "ReferenceStorage(#<Bench::StdReferenceStorageExercise::Empty>)", e1.to_s, "to_s for empty class"
+puts "  to_s and inspect name wrapped type"
+
+puts "\nALL CHECKS PASSED"

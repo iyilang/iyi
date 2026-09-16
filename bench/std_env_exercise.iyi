@@ -1,0 +1,166 @@
+# Exercises `std/env`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_env_exercise.iyi
+
+module bench/std_env_exercise
+
+import std/env
+using std/env::{ENV}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_str_nilable(expected : String, actual : String?, msg : String) : Nil
+  if actual.nil?
+    raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got nil"
+  else
+    raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got #{actual.inspect}" unless expected == actual
+  end
+end
+
+def assert_nil(actual : String?, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected nil\n  got #{actual.inspect}" unless actual.nil?
+end
+
+PREFIX   = "_IYI_ENV_EXERCISE_"
+K1       = "#{PREFIX}VAR_ONE"
+K2       = "#{PREFIX}VAR_TWO"
+K3       = "#{PREFIX}VAR_THREE"
+K_ABSENT = "#{PREFIX}VAR_NEVER_SET"
+
+# Capture any pre-existing values to restore on exit
+orig_k1 = ENV[K1]?
+orig_k2 = ENV[K2]?
+orig_k3 = ENV[K3]?
+orig_absent = ENV[K_ABSENT]?
+
+# Ensure clean starting state for the exercise keys
+ENV.delete(K1)
+ENV.delete(K2)
+ENV.delete(K3)
+ENV.delete(K_ABSENT)
+
+puts "== set and get"
+assert_nil ENV[K1]?, "K1 initially absent"
+assert_true !ENV.has_key?(K1), "K1 has_key? false initially"
+
+ENV[K1] = "first_value"
+assert_str "first_value", ENV[K1], "get after set"
+assert_str_nilable "first_value", ENV[K1]?, "nilable get after set"
+assert_str "first_value", ENV.fetch(K1), "fetch after set"
+assert_str "first_value", ENV.fetch(K1, "fallback"), "fetch with default when present"
+assert_true ENV.has_key?(K1), "has_key? after set"
+
+ENV[K1] = "updated_value"
+assert_str "updated_value", ENV[K1], "get after overwrite"
+puts "  set, get, overwrite, and presence"
+
+puts "\n== absent key and defaults"
+assert_nil ENV[K_ABSENT]?, "absent nilable"
+assert_true !ENV.has_key?(K_ABSENT), "absent has_key?"
+assert_str "my_default", ENV.fetch(K_ABSENT, "my_default"), "fetch with default"
+block_res = ENV.fetch(K_ABSENT) { |k| "fallback_for_#{k}" }
+assert_str "fallback_for_#{K_ABSENT}", block_res, "fetch with block fallback"
+puts "  absent key nilable, default, and block fallbacks"
+
+puts "\n== delete and presence"
+ENV[K2] = "to_be_deleted"
+assert_true ENV.has_key?(K2), "K2 present before delete"
+old = ENV.delete(K2)
+assert_str_nilable "to_be_deleted", old, "delete returns old value"
+assert_nil ENV[K2]?, "K2 absent after delete"
+assert_true !ENV.has_key?(K2), "K2 has_key? false after delete"
+
+old_absent = ENV.delete(K_ABSENT)
+assert_nil old_absent, "delete absent returns nil"
+puts "  delete and absent delete"
+
+puts "\n== iteration and hash"
+ENV[K1] = "val1"
+ENV[K2] = "val2"
+ENV[K3] = "val3"
+
+found_k1 = false
+found_k2 = false
+found_k3 = false
+ENV.each do |k, v|
+  if k == K1
+    assert_str "val1", v, "K1 value in each"
+    found_k1 = true
+  elsif k == K2
+    assert_str "val2", v, "K2 value in each"
+    found_k2 = true
+  elsif k == K3
+    assert_str "val3", v, "K3 value in each"
+    found_k3 = true
+  end
+end
+assert_true found_k1, "K1 found in each"
+assert_true found_k2, "K2 found in each"
+assert_true found_k3, "K3 found in each"
+
+keys_seen = 0
+ENV.each_key do |k|
+  if k == K1 || k == K2 || k == K3
+    keys_seen = keys_seen + 1
+  end
+end
+assert_true keys_seen == 3, "seen exactly 3 set keys in each_key"
+
+vals_seen = 0
+ENV.each_value do |v|
+  if v == "val1" || v == "val2" || v == "val3"
+    vals_seen = vals_seen + 1
+  end
+end
+assert_true vals_seen == 3, "seen exactly 3 set values in each_value"
+
+all_keys = ENV.keys
+assert_true all_keys.includes?(K1), "keys includes K1"
+assert_true all_keys.includes?(K2), "keys includes K2"
+assert_true all_keys.includes?(K3), "keys includes K3"
+
+all_vals = ENV.values
+assert_true all_vals.includes?("val1"), "values includes val1"
+assert_true all_vals.includes?("val2"), "values includes val2"
+assert_true all_vals.includes?("val3"), "values includes val3"
+
+env_map = ENV.to_h
+assert_str "val1", env_map[K1], "to_h K1"
+assert_str "val2", env_map[K2], "to_h K2"
+assert_str "val3", env_map[K3], "to_h K3"
+
+assert_true ENV.size >= 3, "size at least 3"
+assert_true !ENV.empty?, "empty? is false"
+
+# Clean up all created variables
+ENV.delete(K1)
+ENV.delete(K2)
+ENV.delete(K3)
+assert_nil ENV[K1]?, "K1 cleaned up"
+assert_nil ENV[K2]?, "K2 cleaned up"
+assert_nil ENV[K3]?, "K3 cleaned up"
+
+# Restore any pre-existing variables that were set prior to exercise
+if orig_k1
+  ENV[K1] = orig_k1
+end
+if orig_k2
+  ENV[K2] = orig_k2
+end
+if orig_k3
+  ENV[K3] = orig_k3
+end
+if orig_absent
+  ENV[K_ABSENT] = orig_absent
+end
+
+puts "  each, each_key, each_value, keys, values, to_h, size, and cleanup"
+
+puts "\nALL CHECKS PASSED"

@@ -1,0 +1,138 @@
+# Exercises `std/levenshtein`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_levenshtein_exercise.iyi
+
+module bench/std_levenshtein_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_nil(actual, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected nil\n  got      #{actual.inspect}" unless actual.nil?
+end
+
+class ::String
+  def single_byte_optimizable? : Bool
+    bytesize == size
+  end
+end
+
+import std/levenshtein
+
+puts "== identical strings"
+assert_int 0, Levenshtein.distance("", ""), "empty vs empty"
+assert_int 0, Levenshtein.distance("a", "a"), "single char identical"
+assert_int 0, Levenshtein.distance("kitten", "kitten"), "ascii identical"
+assert_int 0, Levenshtein.distance("café", "café"), "unicode identical"
+assert_int 0, Levenshtein.distance("こんにちは", "こんにちは"), "multibyte identical"
+puts "  identical strings have distance 0"
+
+puts "\n== empty against non-empty"
+assert_int 1, Levenshtein.distance("", "a"), "empty vs single char"
+assert_int 1, Levenshtein.distance("a", ""), "single char vs empty"
+assert_int 5, Levenshtein.distance("", "hello"), "empty vs hello"
+assert_int 5, Levenshtein.distance("world", ""), "world vs empty"
+assert_int 4, Levenshtein.distance("", "café"), "empty vs unicode café"
+assert_int 4, Levenshtein.distance("café", ""), "unicode café vs empty"
+assert_int 5, Levenshtein.distance("", "こんにちは"), "empty vs japanese 5 chars"
+puts "  empty against non-empty equals target size"
+
+puts "\n== single edit kinds"
+# Insert
+assert_int 1, Levenshtein.distance("cat", "cats"), "insert at end"
+assert_int 1, Levenshtein.distance("cat", "scat"), "insert at start"
+assert_int 1, Levenshtein.distance("cat", "cart"), "insert in middle"
+# Delete
+assert_int 1, Levenshtein.distance("cats", "cat"), "delete from end"
+assert_int 1, Levenshtein.distance("scat", "cat"), "delete from start"
+assert_int 1, Levenshtein.distance("cart", "cat"), "delete from middle"
+# Substitute
+assert_int 1, Levenshtein.distance("cat", "bat"), "substitute start"
+assert_int 1, Levenshtein.distance("cat", "cot"), "substitute middle"
+assert_int 1, Levenshtein.distance("cat", "car"), "substitute end"
+puts "  insert, delete, and substitute each cost 1"
+
+puts "\n== multiple edits and classical distances"
+assert_int 3, Levenshtein.distance("kitten", "sitting"), "kitten -> sitting"
+assert_int 3, Levenshtein.distance("saturday", "sunday"), "saturday -> sunday"
+assert_int 8, Levenshtein.distance("rosettacode", "raisethysword"), "rosettacode -> raisethysword"
+assert_int 6, Levenshtein.distance("industry", "interest"), "industry -> interest"
+puts "  multi-step edits match textbook Levenshtein matrix"
+
+puts "\n== transposition"
+# Classical Levenshtein does not treat transposition as single operation (costs 2)
+assert_int 2, Levenshtein.distance("ab", "ba"), "ab -> ba costs 2"
+assert_int 2, Levenshtein.distance("tea", "ate"), "tea -> ate costs 2"
+assert_int 2, Levenshtein.distance("abcdef", "abcfed"), "adjacent transposition costs 2"
+puts "  classical Levenshtein treats adjacent transposition as 2 edits"
+
+puts "\n== multibyte and unicode"
+assert_int 1, Levenshtein.distance("café", "cafe"), "substitute é with e"
+assert_int 1, Levenshtein.distance("café", "cafés"), "insert s after é"
+assert_int 1, Levenshtein.distance("日本語", "日本"), "delete kanji character"
+assert_int 1, Levenshtein.distance("日本語", "日本国"), "substitute kanji character"
+assert_int 1, Levenshtein.distance("Москва", "Москве"), "cyrillic inflection"
+assert_int 2, Levenshtein.distance("Москва", "Тоска"), "cyrillic substitution and deletion"
+puts "  non-ASCII characters are counted by glyph, not byte width"
+
+puts "\n== symmetry"
+assert_int Levenshtein.distance("kitten", "sitting"), Levenshtein.distance("sitting", "kitten"), "kitten symmetry"
+assert_int Levenshtein.distance("café", "cafe"), Levenshtein.distance("cafe", "café"), "unicode symmetry"
+assert_int Levenshtein.distance("a", "abcde"), Levenshtein.distance("abcde", "a"), "length-asymmetric symmetry"
+puts "  distance(a, b) == distance(b, a)"
+
+puts "\n== finder and candidate search"
+entry = Levenshtein::Entry.new("match", 2)
+assert_str "match", entry.value, "entry value"
+assert_int 2, entry.distance, "entry distance"
+
+# Finder with custom tolerance
+finder = Levenshtein::Finder.new("target", 1)
+assert_str "target", finder.target, "finder target"
+assert_int 1, finder.tolerance, "finder tolerance"
+finder.test("targe")
+finder.test("tar")
+assert_str "targe", finder.best_match || "", "finder best match"
+
+# Finder default tolerance: (size + 4) // 5
+f_default = Levenshtein::Finder.new("hello")
+assert_int 1, f_default.tolerance, "default tolerance for size 5"
+f_long = Levenshtein::Finder.new("longer_target")
+assert_int 3, f_long.tolerance, "default tolerance for size 13"
+
+# Levenshtein.find with block
+best = Levenshtein.find("apple") do |f|
+  f.test("apply")
+  f.test("banana")
+  f.test("orange")
+end
+assert_str "apply", best || "", "find with block"
+
+custom_val = Levenshtein.find("color") do |f|
+  f.test("colour", "FOUND_COLOUR")
+end
+assert_str "FOUND_COLOUR", custom_val || "", "find with custom value mapping"
+
+none_match = Levenshtein.find("apple", 0) do |f|
+  f.test("apply")
+end
+assert_nil none_match, "find exceeding tolerance returns nil"
+
+# Levenshtein.find with candidates array
+words = ["banana", "orange", "apple", "grape"]
+m = Levenshtein.find("aple", words)
+assert_str "apple", m || "", "find in candidate list"
+assert_nil Levenshtein.find("zebra", words), "find unmatched candidate returns nil"
+puts "  Finder ranks nearest match within tolerance and returns nil on exceed"
+
+puts "\nALL CHECKS PASSED"

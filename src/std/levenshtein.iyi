@@ -1,0 +1,146 @@
+# Levenshtein distance methods for iyi.
+#
+# Provides edit distance calculation and fuzzy string matching.
+
+module std/levenshtein
+
+import std/text
+
+module ::Levenshtein
+  # Computes the Levenshtein distance between two strings.
+  def self.distance(string1 : String, string2 : String) : Int32
+    return 0 if string1 == string2
+
+    s_size = string1.size
+    t_size = string2.size
+
+    return t_size if s_size == 0
+    return s_size if t_size == 0
+
+    if t_size > s_size
+      string1, string2 = string2, string1
+      t_size, s_size = s_size, t_size
+    end
+
+    costs = Array(Int32).new(t_size + 1) { |i| i }
+    last_cost = 0
+
+    if string1.single_byte_optimizable? && string2.single_byte_optimizable?
+      s = string1.to_unsafe
+      t = string2.to_unsafe
+
+      i = 0
+      while i < s_size
+        last_cost = i + 1
+        j = 0
+        while j < t_size
+          sub_cost = s[i] == t[j] ? 0 : 1
+          cost = last_cost + 1
+          c2 = costs[j + 1] + 1
+          cost = c2 if c2 < cost
+          c3 = costs[j] + sub_cost
+          cost = c3 if c3 < cost
+
+          costs[j] = last_cost
+          last_cost = cost
+          j = j + 1
+        end
+        costs[t_size] = last_cost
+        i = i + 1
+      end
+
+      last_cost
+    else
+      chars1 = string1.chars
+      chars2 = string2.chars
+
+      i = 0
+      while i < s_size
+        last_cost = i + 1
+        c1 = chars1[i]
+        j = 0
+        while j < t_size
+          sub_cost = c1 == chars2[j] ? 0 : 1
+          cost = last_cost + 1
+          c2 = costs[j + 1] + 1
+          cost = c2 if c2 < cost
+          c3 = costs[j] + sub_cost
+          cost = c3 if c3 < cost
+
+          costs[j] = last_cost
+          last_cost = cost
+          j = j + 1
+        end
+        costs[t_size] = last_cost
+        i = i + 1
+      end
+
+      last_cost
+    end
+  end
+
+  struct Entry
+    getter value : String
+    getter distance : Int32
+
+    def initialize(@value : String, @distance : Int32)
+    end
+  end
+
+  # Finds the closest string to a given string amongst candidates.
+  class Finder
+    getter target : String
+    getter tolerance : Int32
+    @best_entry : Entry?
+
+    def initialize(@target : String, tolerance : Int32? = nil)
+      @tolerance = tolerance || ((@target.size + 4) // 5)
+      @best_entry = nil
+    end
+
+    def test(name : String, value : String = name) : Nil
+      dist = Levenshtein.distance(@target, name)
+      if dist <= @tolerance
+        if best = @best_entry
+          if dist < best.distance
+            @best_entry = Entry.new(value, dist)
+          end
+        else
+          @best_entry = Entry.new(value, dist)
+        end
+      end
+    end
+
+    def best_match : String?
+      if entry = @best_entry
+        entry.value
+      else
+        nil
+      end
+    end
+
+    def self.find(name : String, tolerance : Int32? = nil, &block : Finder -> Nil) : String?
+      finder = new(name, tolerance)
+      yield finder
+      finder.best_match
+    end
+
+    def self.find(name : String, all_names, tolerance : Int32? = nil) : String?
+      find(name, tolerance) do |similar|
+        all_names.each do |a_name|
+          similar.test(a_name)
+        end
+      end
+    end
+  end
+
+  def self.find(name : String, tolerance : Int32? = nil, &block : Finder -> Nil) : String?
+    Finder.find(name, tolerance) do |finder|
+      yield finder
+    end
+  end
+
+  def self.find(name : String, all_names, tolerance : Int32? = nil) : String?
+    Finder.find(name, all_names, tolerance)
+  end
+end

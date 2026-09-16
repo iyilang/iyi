@@ -136,9 +136,31 @@ ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 # compiler is held to it too (Appendix B #22).
 ALLOWED_LIBS_COMPILER="libLLVM libc++ libgc libSystem libc.so ld-linux libgcc_s libstdc++ libm.so libdl libpthread librt"
 
-# Every library on Crystal's list that must never appear on a link line of
-# iyi's own: a program's or the compiler's.
-FORBIDDEN="libevent libgmp mpir libiconv libssl libcrypto libxml2 libyaml libz. libffi libpcre"
+# Crystal requires thirteen libraries:
+#   1. libc        platform runtime (permitted for programs and compiler)
+#   2. bdw-gc      garbage collector (compiler only, until self-hosting; forbidden for programs)
+#   3. LLVM        code generation back end (compiler only, toolchain requirement; forbidden for programs)
+#   4. libevent    event loop (forbidden for both; in-tree event loop)
+#   5. compiler-rt runtime builtins (forbidden for both; ported in tree)
+#   6. pcre2       regular expressions (forbidden for both; owned Iyi::Rx engine)
+#   7. gmp         arbitrary precision numbers (forbidden for both)
+#   8. iconv       character encoding (forbidden for both; UTF-8 only)
+#   9. openssl     TLS and cryptography (forbidden for both; digests in tree)
+#  10. libxml2     XML parsing (forbidden for both)
+#  11. libyaml     YAML parsing (forbidden for both)
+#  12. zlib        compression (forbidden for both; std/compress in tree)
+#  13. libffi      interpreter FFI (forbidden for both; interpreter removed)
+#
+# The ancestor denylist names all thirteen. If an ancestor library appears on
+# a link line, the failure message names it and identifies it as an ancestor
+# dependency from Crystal's required-libraries list.
+#
+# Ancestor libraries forbidden for ALL binaries (programs and compiler alike):
+ANCESTOR_FORBIDDEN_ALL="libevent:libevent compiler-rt:libclang_rt compiler-rt:compiler_rt pcre2:libpcre gmp:libgmp gmp:mpir iconv:libiconv openssl:libssl openssl:libcrypto libxml2:libxml2 libyaml:libyaml zlib:libz\\. libffi:libffi"
+
+# Ancestor libraries permitted for the compiler only (with a recorded reason in SPEC.md III.9),
+# but strictly forbidden for any program iyi builds:
+ANCESTOR_COMPILER_ONLY="bdw-gc:libgc LLVM:libLLVM"
 
 symbols() {
   nm -u "$1" 2>/dev/null |
@@ -341,14 +363,34 @@ III.10. A new one needs a reason there before it needs a line here."
 # legitimately inside libLLVM's own dependency list.
 for binary in "$WORK"/* "$REPO/.build/iyi"; do
   [ -f "$binary" ] || continue
-  case "$binary" in *.log | *syms | *libs) continue ;; esac
-  for forbidden in $FORBIDDEN; do
-    if libraries "$binary" | grep -q "$forbidden"; then
-      echo "FORBIDDEN: $(basename "$binary") links $forbidden, which is on Crystal's"
-      echo "required-libraries list and iyi is not allowed to need it."
+  case "$binary" in *.log | *syms | *libs | */boehm) continue ;; esac
+  bin_libs="$(libraries "$binary")"
+  is_compiler=no
+  [ "$binary" = "$REPO/.build/iyi" ] && is_compiler=yes
+
+  for entry in $ANCESTOR_FORBIDDEN_ALL; do
+    name="${entry%%:*}"
+    pattern="${entry#*:}"
+    if match="$(echo "$bin_libs" | grep -E "$pattern" | head -n 1)"; then
+      [ -n "$match" ] || continue
+      echo "FORBIDDEN: $(basename "$binary") links $name ($match), which is an ancestor dependency"
+      echo "from Crystal's required-libraries list and iyi is not allowed to need it."
       status=1
     fi
   done
+
+  if [ "$is_compiler" = no ]; then
+    for entry in $ANCESTOR_COMPILER_ONLY; do
+      name="${entry%%:*}"
+      pattern="${entry#*:}"
+      if match="$(echo "$bin_libs" | grep -E "$pattern" | head -n 1)"; then
+        [ -n "$match" ] || continue
+        echo "FORBIDDEN: $(basename "$binary") links $name ($match), which is an ancestor dependency"
+        echo "from Crystal's required-libraries list and is not allowed in an iyi program."
+        status=1
+      fi
+    done
+  fi
 done
 
 # A floor that dropped and was not recorded stops being a floor.

@@ -4897,6 +4897,42 @@ a Crystal program. A compiler that needs LLVM to build itself emits
 own-prelude binaries whose only host library is the platform libc, and whose
 object for Linux asks that libc for nothing.
 
+#### The toolchain-floor rule: zero library dependencies, permitted toolchain
+
+The dependency rule is now decided as policy: **zero library dependencies in
+what iyi ships or builds**, with LLVM and `cc` permitted as toolchain
+requirements. This is the posture Go held while bootstrapping through C.
+
+The rule states:
+
+1. **A program iyi builds links the platform libc and nothing else.** On
+   Darwin that is libSystem; on Linux an own-prelude object requests no
+   symbols, and the linked executable carries only the link template's runtime
+   start symbols. None of Crystal's thirteen ancestor libraries are reachable.
+2. **The compiler may link LLVM and the platform libc.** LLVM and `cc` are
+   permitted as **toolchain** requirements. A native backend (instruction
+   selection and machine-code emission for arm64) and an own object-file
+   linker were explicitly considered and not chosen. This is a deliberate
+   decision rather than an omission.
+3. **Every external tool is recorded with a reason.** The compiler and build
+   system do not invoke unexamined host binaries. Tools required to build the
+   compiler or link user programs are enumerated with reasons rather than
+   admitted by habit.
+4. **The two entries that have known exits are recorded as temporary with their
+   exit conditions**, so nobody reads them as settled architecture:
+   - `libgc` (bdw-gc): the Boehm collector used by the Crystal bootstrap
+     compiler. Programs built by iyi use `IyiHeap` and link no collector
+     library. `libgc` is present on the compiler only, and leaves when the
+     compiler stops being a Crystal program.
+   - `crystal`: the parent bootstrap compiler. It is a build-time tool only,
+     and leaves at stage two when a released iyi compiler builds the next
+     released iyi.
+
+The gate in `bench/dependency_floor.sh` enforces this floor. An explicit
+denylist names all thirteen of Crystal's ancestor libraries, so if any returns,
+the failure message identifies it as an ancestor dependency rather than a
+generic unexpected library.
+
 #### Order
 
 1. ~~Route the prelude's allocator through the flag, so `gc_none` means
@@ -4907,7 +4943,10 @@ object for Linux asks that libc for nothing.
 3. ~~Raw syscalls for `write` and `exit` on Linux, which the tree can already
    do.~~ Done, and further than written: the prelude issues the raw syscalls
    for `write`, `exit` and the allocator (`mmap`) on Linux.
-4. Nothing about LLVM, and nothing about self-hosting.
+4. ~~Nothing about LLVM, and nothing about self-hosting.~~ Decided: the
+   toolchain-floor rule permits LLVM and `cc` as toolchain requirements, while
+   library dependencies are zero and the two bootstrap dependencies carry
+   explicit exit conditions.
 
 ### III.10 Every library Crystal needs, and iyi's answer for each: **PROPOSED**
 
@@ -4943,7 +4982,7 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | Library | What it is for | Reachable | iyi's answer |
 |---|---|---|---|
 | libc | everything | yes: `write`, `exit`, `memset` and the collector's `mmap`/`munmap` on darwin | keep. On Linux the prelude issues the raw syscalls instead, so the object asks libc for nothing and the executable carries only the link template's five |
-| Boehm GC | allocation | no: the default is the owned collector, arena over the platform's own `mmap`; `-Dgc_boehm` opts libgc back in, `-Dgc_none` opts out of collecting | **owned, shipped, default.** II.5 already required a precise collector for R-4; GC_DESIGN.md is the record and `bench/gc_default.py` the measurement that flipped the default |
+| Boehm GC | allocation | no: the default is the owned collector, arena over the platform's own `mmap`; `-Dgc_boehm` opts libgc back in, `-Dgc_none` opts out of collecting | **owned, shipped, default.** II.5 already required a precise collector for R-4; GC_DESIGN.md is the record and `bench/gc_default.py` the measurement that flipped the default. Present on the compiler only as a temporary bootstrap runtime dependency with an exit condition: leaves when the compiler stops being a Crystal program |
 | compiler-rt builtins | 128-bit divide, float conversion, overflow-checked multiply | no | **already owned**: `src/crystal/compiler_rt/` ports them to Crystal. Keep porting |
 | libunwind / libgcc | exception backtraces | no | own the walk. III.1 is what makes this cheap: errors are union members, so only a panic unwinds |
 | libevent | event loop | no | **never adopt it.** Crystal already wrote native backends and libevent is its default only on OpenBSD, NetBSD, Dragonfly and Solaris |
@@ -4958,7 +4997,7 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | libyaml | `YAML` | no | same, and Go ships no YAML at all |
 | GMP / MPIR | `BigInt`, `BigFloat` | no | own it or do without. Go's `math/big` is Go |
 | libffi | the interpreter's FFI | no | gone with the interpreter (V.11) |
-| LLVM, libstdc++ | the compiler's back end | no | compiler only. Part V.9 and B.2 |
+| LLVM, libstdc++ | the compiler's back end | no | compiler only. Permitted as a toolchain requirement (native backend and own linker considered and not chosen; III.9). Part V.9 and B.2 |
 
 **Two of them are already answered by work in this tree and neither was on
 anybody's list.** `compiler_rt` is ported to Crystal, so the routines LLVM emits

@@ -39,7 +39,7 @@ assert_true s1.to_i != s3.to_i, "distinct integer ids"
 matched = case s1
           when :banana then false
           when :apple  then true
-          else false
+          else              false
           end
 assert_true matched, "case expression dispatches on symbol"
 puts "  ==, !=, ===, clone, to_i and hash interning"

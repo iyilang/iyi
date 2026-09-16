@@ -89,6 +89,54 @@ else
 fi
 
 echo
+echo "== every string constructor leaves room for its terminator"
+# The samples above are the symptom and this is the property. A sample sweep
+# only catches a missing terminator when some name happens to land on a size
+# class, which is why the bug reached a 116-byte name and nothing smaller.
+# This asks the question directly, at 3,000 lengths per constructor.
+if IYI_CACHE_DIR="$WORK/probe-cache" \
+     ./bin/crystal run --no-color -Dgc_none "$REPO/bench/terminator_room.cr" \
+     > "$WORK/room.log" 2>&1; then
+  grep -a "leaves room" "$WORK/room.log" | sed 's/^/  /'
+else
+  echo "  FAIL: a constructor allocates no room for the terminator"
+  grep -aE "NO ROOM|Error" "$WORK/room.log" | head -6 | cut -c1-150 | sed 's/^/    /'
+  status=1
+fi
+
+echo
+echo "== the 30-module project compiles with it"
+# 7,207 lines against 27 small samples: the size where a build allocates
+# enough for a rare reuse to become a common one. Both failures that survived
+# the first fix appeared here and nowhere else.
+if python3 "$REPO/bench/incremental/generate_project.py" "$WORK/gen" \
+     > "$WORK/gen.log" 2>&1 && [ -f "$WORK/gen/iyi/main.iyi" ]; then
+  big_failed=0
+  run=1
+  while [ "$run" -le "$RUNS" ]; do
+    IYI_CACHE_DIR="$WORK/bigcache.$run" \
+      ./bin/iyi build -o "$WORK/big.$run" "$WORK/gen/iyi/main.iyi" \
+      > "$WORK/big.$run.log" 2>&1
+    if [ $? -ne 0 ]; then
+      big_failed=$((big_failed + 1))
+      echo "  FAIL: the 30-module project, run $run"
+      grep -aoE "Trace/BPT trap|Undefined symbols|read before assignment[^']*'[^']*'|Error[^,]{0,60}" \
+        "$WORK/big.$run.log" | head -2 | sed 's/^/    /'
+    fi
+    run=$((run + 1))
+  done
+  if [ "$big_failed" -gt 0 ]; then
+    echo "  FAIL: $big_failed of $RUNS builds of the project failed"
+    status=1
+  else
+    echo "  $RUNS builds, none failed"
+  fi
+else
+  echo "  FAIL: could not generate the project to build"
+  status=1
+fi
+
+echo
 echo "== the default build is unchanged"
 rm -f .build/iyi .build/crystal
 if make -j8 > "$WORK/default.log" 2>&1; then

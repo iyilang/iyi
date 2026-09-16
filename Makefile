@@ -76,11 +76,15 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # collector-free compiler links libLLVM and libSystem only. bench/collector_
 # free_floor.sh is the gate, and it fails if the reservation is removed again.
 #
-# The compiler still builds with bdw-gc by default, because that is a
-# permitted toolchain dependency and dropping it is a separate decision about
-# peak memory rather than about correctness. What this note no longer says is
-# that a collector is required: it is not, and the bug it was hiding was in
-# the standard library the whole time.
+# The compiler still builds with bdw-gc by default, and that is now a trade
+# with numbers on it rather than a limit. Collector-free against default, zero
+# failures in ten runs each: the 7,207-line generated project 598MB peak
+# against 464MB, the compiler's own source 7,430MB against 5,702MB, wall time
+# within noise both times. So it is 29% more peak memory for one fewer library
+# on a binary whose floor already permits libc, and flipping this is a one-line
+# change here whenever that is judged worth taking. What this note no longer
+# says is that a collector is required: it is not, and the bug it was hiding
+# was in the standard library the whole time.
 override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)
 SPEC_WARNINGS_OFF := --exclude-warnings spec/std --exclude-warnings spec/compiler --exclude-warnings spec/primitives --exclude-warnings src/float/printer --exclude-warnings src/random.cr
 override SPEC_FLAGS += $(if $(verbose),-v )$(if $(junit_output),--junit_output $(junit_output) )$(if $(order),--order=$(order) )

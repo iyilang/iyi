@@ -5130,13 +5130,24 @@ rather than the compiler.
 
 **The exit condition recorded here was "a collector that frees", and that is
 withdrawn.** A compiler built with no collector at all now compiles every
-sample, so freeing was never what stood in the way. bdw-gc stays on the
-compiler by decision (Appendix B #24, superseded and restated): it is a
-permitted toolchain dependency, and what a collector buys the compiler is
-bounded peak memory on a long walk over ASTs, which is a measurement worth
-taking before the default changes rather than a correctness requirement.
-`bench/collector_free_floor.sh` keeps the collector-free path working in the
-meantime, so the option stays open rather than rotting.
+sample, the 7,207-line generated project, and the compiler's own source, so
+freeing was never what stood in the way. What a collector buys the compiler is
+peak memory, and that is now a number rather than a worry:
+
+| build | 30-module project (7,207 lines) | the compiler's own source |
+|---|---|---|
+| with bdw-gc | 464 MB peak, 0.74s | 5,702 MB peak, 22.3s |
+| collector-free | 598 MB peak, 0.78s | 7,430 MB peak, 20.3s |
+
+**+29% peak, and wall time within noise**, both at zero failures in ten runs.
+So bdw-gc stays on the compiler by decision rather than by necessity
+(Appendix B #24, superseded and restated): it is a permitted toolchain
+dependency, and 1.7 GB of extra peak on a self-host is a real cost to put on
+every contributor's machine for a library the floor already permits.
+`bench/collector_free_floor.sh` keeps the collector-free path working, gating
+the samples, the project, and the terminator property directly, so the option
+stays open rather than rotting. Flipping the default is a one-line change to
+`COMPILER_FLAGS` whenever that memory trade is judged worth taking.
 
 **3. Regex, and the semantics are the interesting part. Decided (#22), built,
 and measured off the binary.** Owning PCRE2 removes a dependency from iyi

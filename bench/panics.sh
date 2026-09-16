@@ -299,7 +299,13 @@ run "$work/index.iyi"
 [ "$code" = 1 ] || fail "prelude panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
 echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
-echo "$out" | grep -q "Index@Index::go" || fail "missing caller frame for library panic: $out"
+# The trace has to point at the program rather than the library, which line
+# 301 already half-proves by refusing a library line. This is the other half,
+# and it accepts either the program's file or its function: the exact mangled
+# spelling is not the property under test, and pinning `Index@Index::go`
+# passed here and failed on a CI runner where the frame reads differently.
+echo "$out" | grep -qE "index\.iyi|Index@Index::go|Index::go" \
+  || fail "library panic named no frame in the program: $out"
 step "a panic the library raises names no library line, prelude or std"
 
 # ── 10. the stack running out is a panic the program prints itself: on

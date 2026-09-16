@@ -322,15 +322,16 @@ module Iyi
     # iyi: true when building with `--crystal`, targeting Crystal's standard library and ABI.
     property? crystal_library = false
 
-    # iyi: true when this program targets the iyi ABI rather than Crystal's.
-    # An explicit .cr source file or a build with --crystal uses Crystal's ABI
-    # (__crystal_*); an .iyi source file or an iyi-prelude build uses __iyi_*.
+    # iyi: true when this program's runtime symbols are `__iyi_*`.
+    #
+    # The prelude decides, because the prelude is what defines them: iyi's
+    # declares `__iyi_main`, `__iyi_raise` and the rest, Crystal's declares
+    # `__crystal_*`. A `.iyi` entry built against Crystal's library (the
+    # `.iyimod` specs do this without `--crystal`) has Crystal's runtime and
+    # must call it by Crystal's names; the entry's extension says nothing
+    # about which prelude was loaded, and deciding by it linked against
+    # symbols the prelude did not have.
     def iyi_abi? : Bool
-      return false if crystal_library?
-      if fn = filename
-        return false if fn.ends_with?(".cr")
-        return true if fn.ends_with?(".iyi")
-      end
       iyi_prelude?
     end
 

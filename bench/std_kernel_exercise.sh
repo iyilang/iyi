@@ -70,6 +70,8 @@ build_and_run "release" kernel-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/kernel-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
   status=1
+else
+  echo "  every check holds under --release"
 fi
 
 echo

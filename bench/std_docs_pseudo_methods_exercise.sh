@@ -19,7 +19,7 @@ export IYI_PATH="$REPO/src:$REPO/samples/iyi"
 build_and_run() {
   local label="$1" name="$2"
   shift 2
-  if ! "$IYI" build -Ddocs "$@" -o "$WORK/$name" "$REPO/bench/std_docs_pseudo_methods_exercise.iyi" \
+  if ! "$IYI" build "$@" -o "$WORK/$name" "$REPO/bench/std_docs_pseudo_methods_exercise.iyi" \
        >"$WORK/$name.build.log" 2>&1; then
     echo "$label: build failed"
     tail -12 "$WORK/$name.build.log"
@@ -76,22 +76,11 @@ PY
 if [ $? -ne 0 ]; then
   echo "  the patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run -Ddocs "$REPO/bench/std_docs_pseudo_methods_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_docs_pseudo_methods_exercise.iyi" >"$WORK/mut.out" 2>&1; then
   echo "  the exercise PASSED on a broken module"
   status=1
 else
   echo "  a broken docs_pseudo_methods is caught"
-fi
-
-echo
-echo "== what happens without -Ddocs"
-# The module has {% skip_file unless flag?(:docs) %}, so building the exercise
-# without -Ddocs must fail because the declarations are skipped.
-if "$IYI" build -o "$WORK/nodocs" "$REPO/bench/std_docs_pseudo_methods_exercise.iyi" >"$WORK/nodocs.log" 2>&1; then
-  echo "  building without -Ddocs should have failed"
-  status=1
-else
-  echo "  skipping without -Ddocs confirmed"
 fi
 
 if [ "$status" -eq 0 ]; then

@@ -1,7 +1,7 @@
 # Exercises `std/docs_pseudo_methods`.
 #
 # Run via:
-#     ./bin/iyi run -Ddocs bench/std_docs_pseudo_methods_exercise.iyi
+#     ./bin/iyi run bench/std_docs_pseudo_methods_exercise.iyi
 
 module bench/std_docs_pseudo_methods_exercise
 

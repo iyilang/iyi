@@ -5,7 +5,7 @@
 
 module std/docs_pseudo_methods
 
-{% skip_file unless flag?(:docs) %}
+# Stubs for pseudo-methods implemented directly by the compiler.
 
 def __crystal_pseudo_typeof(*expression) : Class
 end

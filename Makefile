@@ -64,11 +64,24 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # failing the same way. The same compiler with bdw-gc: 0 failures in 5 runs of
 # that sample, 0 across two passes of every sample, and that exercise green.
 #
-# The reason is unchanged: the compiler is not a short lived process that
-# allocates a little, it is a long walk over ASTs with parallel codegen and
-# fibers, and `src/gc/none.cr` never frees. So the compiler keeps bdw-gc and
-# the programs it builds do not, which is the split SPEC.md III.9 already
-# draws. The owned collector it tracks is what ends this.
+# The cause was half right and the half that named parallel codegen is wrong,
+# which matters because it is also the exit condition. Tested against the
+# switch two lines below, which removes the parallel half:
+#
+#   gc_none                 collections.iyi failed 5/5
+#   gc_none + sequential    collections.iyi failed 5/5
+#
+# Identical, so threading is not the discriminator, and the failure is
+# deterministic rather than "some runs": the same `Undefined symbols` reached
+# from `__iyi_main`, with a `Trace/BPT trap: 5` still showing up
+# single-threaded. What is left of the reason is the part that does not mention
+# threads: the compiler is a long walk over ASTs and `src/gc/none.cr` never
+# frees. So the compiler keeps bdw-gc and the programs it builds do not, which
+# is the split SPEC.md III.9 already draws.
+#
+# What ends this is therefore a collector that frees, not one that serves
+# parallel codegen. Waiting on the parallel milestone would be waiting on the
+# wrong thing.
 override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)
 SPEC_WARNINGS_OFF := --exclude-warnings spec/std --exclude-warnings spec/compiler --exclude-warnings spec/primitives --exclude-warnings src/float/printer --exclude-warnings src/random.cr
 override SPEC_FLAGS += $(if $(verbose),-v )$(if $(junit_output),--junit_output $(junit_output) )$(if $(order),--order=$(order) )

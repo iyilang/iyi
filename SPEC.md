@@ -4862,7 +4862,10 @@ verification and the two findings). Measured after a clean bootstrap: `otool
 .build/iyi` leaves none of the thirteen `pcre2_*` symbols it used to. `libgc`
 stays, and not for want of trying: `-Dgc_none` was built and is not viable
 for the compiler itself (III.10 has the evidence), and iyi's own collector
-does not yet serve parallel codegen, for the threading reason above. So the
+does not yet reclaim what the compiler allocates. Not for the threading
+reason above: `-Dgc_none` fails identically with parallel codegen switched
+off, measured 5/5 either way, so the discriminator is freeing rather than
+threads. So the
 compiler keeps a collector and own-prelude programs do not. Its collector is a
 recorded exception (Appendix B #24), not an unexamined habit. `libc++` arrives
 with LLVM, and on two independent conditions rather than always. `llvm_ext.cc`
@@ -5059,13 +5062,33 @@ has a decision. **The owner decided (Appendix B #20, overruling the adopt-gcry
 recommendation this section carried): iyi writes its own collector, and gcry
 stays as prior art whose measurements are inherited.** The decision is for the
 language, the runtime iyi programs run on, and it does not reach the compiler
-yet: a collector has to serve parallel codegen before it can host a compiler
-that runs parallel codegen over fibers, and gcry's record is the nearest
-evidence for how far off that stage is, proven and measured at
-`ExecutionContext` parallelism 1 with its parallel path an opt-in still marked
-experimental. III.9 has the measurements; bdw-gc stays on the compiler as a
+yet. The reason it does not, though, is narrower than this paragraph used to
+claim, and the difference is the revisit condition itself.
+
+The claim was that a collector has to serve parallel codegen before it can
+host a compiler that runs parallel codegen over fibers. Measured against the
+Makefile's own `sequential_codegen` switch, which removes the parallel half:
+
+| build | `collections.iyi` |
+|---|---|
+| `-Dgc_none` | failed 5/5 |
+| `-Dgc_none` + `sequential_codegen=1` | failed 5/5 |
+
+Identical, so **threading is not the discriminator**, and the failure is
+deterministic rather than intermittent: the same `Undefined symbols` reached
+from `__iyi_main`, and a `Trace/BPT trap: 5` still arriving single-threaded.
+This is the second time parallel codegen has been blamed for something it did
+not do, and cleared the same way, by the single-threaded path failing
+identically: III.11's cache-cleaner bug is the first, and its lesson was that
+a symptom shared by the failing builds is not a cause.
+
+What is left is the part that never mentioned threads: the compiler is a long
+walk over ASTs and `src/gc/none.cr` never frees. So the exit condition is a
+collector that **frees**, not one that serves parallel codegen; gcry's
+parallelism record is evidence about a milestone this no longer waits on.
+III.9 has the measurements; bdw-gc stays on the compiler as a
 recorded exception (Appendix B #24, superseded and restated) until iyi's own
-collector reaches the stage that serves parallel codegen.
+collector reclaims what the compiler allocates.
 
 **3. Regex, and the semantics are the interesting part. Decided (#22), built,
 and measured off the binary.** Owning PCRE2 removes a dependency from iyi

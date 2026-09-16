@@ -85,7 +85,12 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # change here whenever that is judged worth taking. What this note no longer
 # says is that a collector is required: it is not, and the bug it was hiding
 # was in the standard library the whole time.
-override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)
+# `-Dgc_none` is here because the objective is a compiler with no ancestor
+# library on it, and `libgc` was the last one that was not a deliberate
+# toolchain choice. Set `collector=1` to build with bdw-gc instead, which is
+# the configuration every number above was measured against and the one to
+# reach for if a build runs out of memory rather than out of patience.
+override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)$(if $(collector),, -Dgc_none)
 SPEC_WARNINGS_OFF := --exclude-warnings spec/std --exclude-warnings spec/compiler --exclude-warnings spec/primitives --exclude-warnings src/float/printer --exclude-warnings src/random.cr
 override SPEC_FLAGS += $(if $(verbose),-v )$(if $(junit_output),--junit_output $(junit_output) )$(if $(order),--order=$(order) )
 IYI_CONFIG_LIBRARY_PATH := '$$ORIGIN/../lib/iyi'

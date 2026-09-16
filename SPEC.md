@@ -4865,7 +4865,16 @@ for the compiler itself (III.10 has the evidence), and iyi's own collector
 does not yet serve parallel codegen, for the threading reason above. So the
 compiler keeps a collector and own-prelude programs do not. Its collector is a
 recorded exception (Appendix B #24), not an unexamined habit. `libc++` arrives
-with LLVM. **LLVM is the
+with LLVM, and on two independent conditions rather than always. `llvm_ext.cc`
+shims operand bundles and debug locations below LLVM 18; above it that object
+is empty and goes unlinked. Separately, a statically linked `libLLVM` carries
+its own C++ symbols at any version, where a shared one resolves them
+internally. So the C++ runtime is owed when either holds, which is what the
+Makefile gates `NEEDS_CXX_RUNTIME` on and what `ALLOWED_LIBS_COMPILER`
+permits; with LLVM 18+ shared, measured on darwin arm64 at 22.1.8, it is off
+the link line entirely. The first reading of this took a shared LLVM for the
+whole story and called the library removable: CI links a static LLVM 20.1.2
+and the floor caught the claim. **LLVM is the
 list**, and Part V.9 already priced what owning the back end would cost while
 declining to own the linker, for reasons that apply here with more force.
 

@@ -119,7 +119,15 @@ ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_
 ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 
 # What the compiler may link, each with a reason recorded in SPEC.md.
-#   LLVM, c++  the back end, and libc++ arrives with it (B.2, Part V.9)
+#   LLVM       the back end (B.2, Part V.9)
+#   c++        conditional, and on two independent reasons, the same two the
+#              Makefile gates NEEDS_CXX_RUNTIME on. llvm_ext.cc shims operand
+#              bundles and debug locations below LLVM 18, and a statically
+#              linked libLLVM carries its own C++ symbols at any version. When
+#              both are absent, libc++ (and libstdc++ on Linux) drops off the
+#              floor; when either holds it is on it, and this list says so
+#              rather than the gate going red for a library the build was
+#              right to link
 #   gc         a compiler without a collector emits invalid IR (III.9)
 #
 # Every entry is a library the compiler names on its own link line. What
@@ -134,7 +142,27 @@ ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 # compiled into itself (option_parser, semantic_version, process/shell,
 # spec/cli) parse by hand, so pcre2 is on the denylist below and the
 # compiler is held to it too (Appendix B #22).
-ALLOWED_LIBS_COMPILER="libLLVM libc++ libgc libSystem libc.so ld-linux libgcc_s libstdc++ libm.so libdl libpthread librt"
+ALLOWED_LIBS_COMPILER="libLLVM libgc libSystem libc.so ld-linux libgcc_s libm.so libdl libpthread librt"
+if [ -z "${LLVM_VERSION:-}" ]; then
+  _llvm_config="${LLVM_CONFIG:-$("$REPO/src/llvm/ext/find-llvm-config.sh" 2>/dev/null || true)}"
+  _llvm_version="$([ -n "$_llvm_config" ] && "$_llvm_config" --version 2>/dev/null || true)"
+  [ -z "$_llvm_version" ] && _llvm_version="$("$REPO/bin/crystal" --version 2>/dev/null | sed -n 's/^LLVM: //p')"
+else
+  _llvm_version="$LLVM_VERSION"
+fi
+_llvm_major="${_llvm_version%%.*}"
+_llvm_shared="$([ -n "${_llvm_config:-}" ] && "$_llvm_config" --shared-mode 2>/dev/null || true)"
+[ -n "${LLVM_SHARED_MODE:-}" ] && _llvm_shared="$LLVM_SHARED_MODE"
+_cxx_shim=false
+[ -n "$_llvm_major" ] && [ "$_llvm_major" -lt 18 ] 2>/dev/null && _cxx_shim=true
+# Unknown shared mode is not read as shared: a missing answer must not quietly
+# widen the floor, and must not narrow it either, so it allows and the
+# measurement below is what decides.
+_llvm_static=true
+[ "$_llvm_shared" = "shared" ] && _llvm_static=false
+if [ "$_cxx_shim" = true ] || [ "$_llvm_static" = true ]; then
+  ALLOWED_LIBS_COMPILER="$ALLOWED_LIBS_COMPILER libc++ libstdc++"
+fi
 
 # Crystal requires thirteen libraries:
 #   1. libc        platform runtime (permitted for programs and compiler)

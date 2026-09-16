@@ -22,11 +22,14 @@
     {% llvm_targets = env("LLVM_TARGETS") || `#{llvm_config.id} --targets-built`.stringify %}
     {% llvm_ldflags = env("LLVM_LDFLAGS") || "`#{llvm_config.id} --libs --system-libs --ldflags#{" --link-static".id if flag?(:static)}#{" 2> /dev/null".id unless flag?(:win32)}`" %}
 
-    {% unless flag?(:win32) %}
-      @[Link("stdc++")]
-      lib LibLLVM
-      end
-    {% end %}
+    # Whether LLVM is a shared library or a pile of archives. It decides
+    # whether we owe the C++ runtime: `libLLVM.dylib` resolves its own C++
+    # symbols internally, while `libLLVM*.a` hands them to whoever links it,
+    # which is how `std::__1::future_error` and a row of error-category
+    # vtables arrive undefined. CI builds against a static LLVM and a local
+    # dylib hid this completely.
+    {% llvm_shared_mode = env("LLVM_SHARED_MODE") || `#{llvm_config.id} --shared-mode 2> /dev/null`.stringify %}
+
   {% end %}
 
   {% llvm_version ||= Crystal::DESCRIPTION.gsub(/.*LLVM: ([^\n]*).*/m, "\\1") %}
@@ -51,6 +54,9 @@
   lib LibLLVM
     VERSION = {{ llvm_version.strip.gsub(/git/, "").gsub(/-?rc.*/, "") }}
     BUILT_TARGETS = {{ llvm_targets.strip.downcase.gsub(/;|,/, " ").split(' ').map(&.id.symbolize) }}
+    # "shared" when LLVM is one dylib, "static" when it is archives. Empty on
+    # the msvc path, where llvm-config is not consulted at all.
+    SHARED_MODE = {{ (llvm_shared_mode || "").strip }}
   end
 {% end %}
 
@@ -75,6 +81,16 @@
     IS_LT_200 = {{compare_versions(LibLLVM::VERSION, "20.0.0") < 0}}
     IS_LT_210 = {{compare_versions(LibLLVM::VERSION, "21.0.0") < 0}}
   end
+{% end %}
+{% unless flag?(:win32) %}
+  # Two independent reasons to owe the C++ runtime, so it goes only when both
+  # are absent: the shim below LLVM 18, and a statically linked LLVM whose
+  # archives carry their own C++ symbols.
+  {% if LibLLVM::IS_LT_180 || LibLLVM::SHARED_MODE != "shared" %}
+    @[Link("stdc++")]
+    lib LibLLVM
+    end
+  {% end %}
 {% end %}
 
 lib LibLLVM

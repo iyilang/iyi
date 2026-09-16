@@ -1,0 +1,151 @@
+# Exercises `std/annotations`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_annotations_exercise.iyi
+
+module bench/std_annotations_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int64, actual : Int64, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+import std/annotations
+using std/annotations::{Deprecated, Flags, Link, Experimental, TargetFeature}
+
+# 1. Flags on an enum
+@[Flags]
+enum Permissions
+  Read
+  Write
+  Execute
+end
+
+# 2. Deprecated on class and method
+@[Deprecated("legacy class")]
+class DeprecatedGreeter
+  @[Deprecated("legacy method")]
+  def legacy_say : String
+    "hello from legacy"
+  end
+end
+
+# 3. Experimental on class and method
+@[Experimental("preview api")]
+class ExperimentalWorker
+  @[Experimental("unstable method")]
+  def run_experiment : String
+    "running experiment"
+  end
+end
+
+# 4. TargetFeature on methods
+class TargetFeatureOps
+  @[TargetFeature("neon")]
+  def vector_add(a : Int32, b : Int32) : Int32
+    a + b
+  end
+
+  @[TargetFeature(cpu: "generic")]
+  def generic_scale(a : Int32, b : Int32) : Int32
+    a * b
+  end
+end
+
+# 5. Link on lib and class
+@[Link("c")]
+lib LibCInterop
+  fun strlen(s : UInt8*) : UInt64
+end
+
+@[Link(ldflags: "-lc")]
+class LinkMetadata
+end
+
+puts "== flags"
+assert_int 0_i64, Permissions::None.value.to_i64, "Permissions::None is 0"
+assert_int 7_i64, Permissions::All.value.to_i64, "Permissions::All is 7"
+assert_int 1_i64, Permissions::Read.value.to_i64, "Permissions::Read is 1"
+assert_int 2_i64, Permissions::Write.value.to_i64, "Permissions::Write is 2"
+assert_int 4_i64, Permissions::Execute.value.to_i64, "Permissions::Execute is 4"
+
+combined = Permissions::Read | Permissions::Write
+assert_int 3_i64, combined.value.to_i64, "Read | Write is 3"
+assert_true combined.read?, "combined has read"
+assert_true combined.write?, "combined has write"
+assert_true !combined.execute?, "combined does not have execute"
+assert_true combined.includes?(Permissions::Read), "combined includes Read"
+assert_true !combined.includes?(Permissions::Execute), "combined does not include Execute"
+assert_true (Permissions::All & Permissions::Write) == Permissions::Write, "All & Write == Write"
+assert_str "None", Permissions::None.to_s, "None to_s is None"
+assert_str "Read | Write", combined.to_s, "combined to_s is Read | Write"
+
+flags_macro_found = {{ Permissions.annotation(::Flags) ? true : false }}
+assert_true flags_macro_found, "Flags macro annotation detected on Permissions"
+puts "  enum bitmask operations and auto-generated members"
+
+puts "\n== deprecated"
+greeter = DeprecatedGreeter.new
+assert_str "hello from legacy", greeter.legacy_say, "deprecated method callable"
+
+dep_class_found = {{ DeprecatedGreeter.annotation(Deprecated) ? true : false }}
+assert_true dep_class_found, "Deprecated annotation detected on DeprecatedGreeter"
+dep_class_msg = {{ DeprecatedGreeter.annotation(Deprecated)[0] }}
+assert_str "legacy class", dep_class_msg, "Deprecated message matches on class"
+
+dep_method_found = {{ DeprecatedGreeter.methods.find { |m| m.name == "legacy_say" }.annotation(Deprecated) ? true : false }}
+assert_true dep_method_found, "Deprecated annotation detected on legacy_say"
+dep_method_msg = {{ DeprecatedGreeter.methods.find { |m| m.name == "legacy_say" }.annotation(Deprecated)[0] }}
+assert_str "legacy method", dep_method_msg, "Deprecated message matches on method"
+puts "  deprecated annotations on class and method with message inspection"
+
+puts "\n== experimental"
+worker = ExperimentalWorker.new
+assert_str "running experiment", worker.run_experiment, "experimental method callable"
+
+exp_class_found = {{ ExperimentalWorker.annotation(Experimental) ? true : false }}
+assert_true exp_class_found, "Experimental annotation detected on ExperimentalWorker"
+exp_class_msg = {{ ExperimentalWorker.annotation(Experimental)[0] }}
+assert_str "preview api", exp_class_msg, "Experimental message matches on class"
+
+exp_method_found = {{ ExperimentalWorker.methods.find { |m| m.name == "run_experiment" }.annotation(Experimental) ? true : false }}
+assert_true exp_method_found, "Experimental annotation detected on run_experiment"
+exp_method_msg = {{ ExperimentalWorker.methods.find { |m| m.name == "run_experiment" }.annotation(Experimental)[0] }}
+assert_str "unstable method", exp_method_msg, "Experimental message matches on method"
+puts "  experimental annotations on class and method with message inspection"
+
+puts "\n== target_feature"
+tf_ops = TargetFeatureOps.new
+assert_int 42_i64, tf_ops.vector_add(15, 27).to_i64, "vector_add result"
+assert_int 42_i64, tf_ops.generic_scale(6, 7).to_i64, "generic_scale result"
+
+tf_vec_found = {{ TargetFeatureOps.methods.find { |m| m.name == "vector_add" }.annotation(TargetFeature) ? true : false }}
+assert_true tf_vec_found, "TargetFeature detected on vector_add"
+tf_vec_feat = {{ TargetFeatureOps.methods.find { |m| m.name == "vector_add" }.annotation(TargetFeature)[0] }}
+assert_str "neon", tf_vec_feat, "TargetFeature feature argument matches"
+
+tf_scale_found = {{ TargetFeatureOps.methods.find { |m| m.name == "generic_scale" }.annotation(TargetFeature) ? true : false }}
+assert_true tf_scale_found, "TargetFeature detected on generic_scale"
+tf_scale_cpu = {{ TargetFeatureOps.methods.find { |m| m.name == "generic_scale" }.annotation(TargetFeature)[:cpu] }}
+assert_str "generic", tf_scale_cpu, "TargetFeature named cpu argument matches"
+puts "  target feature annotations with positional and named arguments"
+
+puts "\n== link"
+lib_link_found = {{ LibCInterop.annotation(Link) ? true : false }}
+assert_true lib_link_found, "Link annotation detected on LibCInterop"
+lib_link_lib = {{ LibCInterop.annotation(Link)[0] }}
+assert_str "c", lib_link_lib, "Link library argument matches on LibCInterop"
+link_found = {{ LinkMetadata.annotation(Link) ? true : false }}
+assert_true link_found, "Link annotation detected on LinkMetadata"
+link_ldflags = {{ LinkMetadata.annotation(Link)[:ldflags] }}
+assert_str "-lc", link_ldflags, "Link named ldflags argument matches"
+puts "  link annotations on lib interop and metadata types"
+
+puts "\nALL CHECKS PASSED"

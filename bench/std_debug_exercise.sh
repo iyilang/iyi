@@ -156,9 +156,25 @@ EOF
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 t = open(src).read()
-t = t.replace("{% if flag?(:darwin) %}\n", "", 1)
-t = t.replace("{% end %}\n\nstruct DwarfResolver", "\nstruct DwarfResolver", 1)
-t = t.replace("n = __iyi_write(", "n = LibC.write(", 1)
+old = "n = __iyi_write("
+new = "n = LibC.write("
+if old not in t:
+    raise SystemExit("say no longer goes through __iyi_write")
+t = t.replace(old, new, 1)
+# Darwin already has LibC.write behind the flag. Linux needs a declaration
+# so the patched copy can bind `write` and fail the undefined-symbol check.
+anchor = "module std/debug\n"
+lib = """module std/debug
+
+{% unless flag?(:darwin) %}
+  lib LibC
+    fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
+  end
+{% end %}
+"""
+if not t.startswith(anchor) and anchor not in t:
+    raise SystemExit("module header missing")
+t = t.replace(anchor, lib, 1)
 open(dst, "w").write(t)
 PY
   cat > "$WORK/badprog.iyi" <<'EOF'

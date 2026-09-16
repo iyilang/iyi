@@ -1,0 +1,421 @@
+# Exercises `std/bit_array`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_bit_array_exercise.iyi
+
+module bench/std_bit_array_exercise
+
+import std/bit_array
+using std/bit_array::{BitArray}
+
+def assert_true(label : String, condition : Bool) : Nil
+  raise "assertion failed for #{label}: expected true, got false" unless condition
+end
+
+def assert_false(label : String, condition : Bool) : Nil
+  raise "assertion failed for #{label}: expected false, got true" if condition
+end
+
+def assert_equal_int(label : String, actual : Int32, expected : Int32) : Nil
+  raise "assertion failed for #{label}: expected #{expected}, got #{actual}" if actual != expected
+end
+
+def assert_equal_str(label : String, actual : String, expected : String) : Nil
+  raise "assertion failed for #{label}: expected #{expected}, got #{actual}" if actual != expected
+end
+
+# ---- 1. Construction and size -----------------------------------------------
+
+puts "== construction and size"
+
+empty = BitArray.new(0)
+assert_equal_int("empty size", empty.size, 0)
+assert_true("empty?", empty.empty?)
+assert_equal_int("empty count", empty.count, 0)
+assert_equal_int("empty count(true)", empty.count(true), 0)
+assert_equal_int("empty count(false)", empty.count(false), 0)
+assert_true("empty all?", empty.all?)
+assert_false("empty any?", empty.any?)
+assert_true("empty none?", empty.none?)
+assert_false("empty one?", empty.one?)
+assert_true("empty first? is nil", empty.first?.nil?)
+assert_true("empty last? is nil", empty.last?.nil?)
+assert_equal_str("empty to_s", empty.to_s, "BitArray[]")
+
+default_false = BitArray.new(16)
+assert_equal_int("default false size", default_false.size, 16)
+assert_false("default false empty?", default_false.empty?)
+assert_equal_int("default false count(false)", default_false.count(false), 16)
+assert_equal_int("default false count(true)", default_false.count(true), 0)
+assert_false("default false all?", default_false.all?)
+assert_true("default false none?", default_false.none?)
+assert_false("default false any?", default_false.any?)
+
+initial_true = BitArray.new(16, true)
+assert_equal_int("initial true size", initial_true.size, 16)
+assert_equal_int("initial true count(true)", initial_true.count(true), 16)
+assert_equal_int("initial true count(false)", initial_true.count(false), 0)
+assert_true("initial true all?", initial_true.all?)
+assert_true("initial true any?", initial_true.any?)
+assert_false("initial true none?", initial_true.none?)
+
+block_init = BitArray.new(10) { |i| i % 2 == 0 }
+assert_equal_int("block init size", block_init.size, 10)
+assert_equal_int("block init count(true)", block_init.count(true), 5)
+assert_equal_int("block init count(false)", block_init.count(false), 5)
+assert_true("block_init[0] true", block_init[0])
+assert_false("block_init[1] false", block_init[1])
+assert_true("block_init[2] true", block_init[2])
+assert_false("block_init[3] false", block_init[3])
+assert_true("block_init[8] true", block_init[8])
+assert_false("block_init[9] false", block_init[9])
+
+# ---- 2. Bit indexing and toggle ---------------------------------------------
+
+puts "== bit indexing and toggle"
+
+ba = BitArray.new(10)
+ba[0] = true
+ba[5] = true
+ba[9] = true
+assert_true("ba[0]", ba[0])
+assert_false("ba[1]", ba[1])
+assert_true("ba[5]", ba[5])
+assert_false("ba[6]", ba[6])
+assert_true("ba[9]", ba[9])
+
+# Negative indexing reads
+assert_true("ba[-1] is ba[9]", ba[-1])
+assert_false("ba[-2] is ba[8]", ba[-2])
+assert_true("ba[-5] is ba[5]", ba[-5])
+assert_true("ba[-10] is ba[0]", ba[-10])
+
+# Negative indexing writes
+ba[-1] = false
+assert_false("ba[9] after ba[-1]=false", ba[9])
+ba[-2] = true
+assert_true("ba[8] after ba[-2]=true", ba[8])
+
+# Safe indexing with []?
+q_true = ba[0]?
+assert_true("ba[0]? is not nil", !q_true.nil?)
+assert_true("ba[0]? value", q_true == true)
+q_false = ba[1]?
+assert_true("ba[1]? is not nil", !q_false.nil?)
+assert_true("ba[1]? value", q_false == false)
+assert_true("ba[10]? is nil (past end)", ba[10]?.nil?)
+assert_true("ba[-11]? is nil (before start)", ba[-11]?.nil?)
+
+# Toggle operation
+tba = BitArray.new(10)
+assert_false("before toggle", tba[3])
+tba.toggle(3)
+assert_true("after first toggle", tba[3])
+tba.toggle(3)
+assert_false("after second toggle", tba[3])
+
+# Toggle with negative index
+tba.toggle(-1)
+assert_true("toggle(-1) sets index 9", tba[9])
+tba.toggle(-1)
+assert_false("toggle(-1) clears index 9", tba[9])
+
+# Unsafe accessors
+tba.unsafe_put(4, true)
+assert_true("unsafe_put/fetch true", tba.unsafe_fetch(4))
+tba.unsafe_put(4, false)
+assert_false("unsafe_put/fetch false", tba.unsafe_fetch(4))
+
+# ---- 3. Reads at first and last ---------------------------------------------
+
+puts "== reads at first and last"
+
+fl = BitArray.new(8)
+fl[0] = true
+fl[7] = false
+assert_true("fl.first", fl.first)
+q_first = fl.first?
+assert_true("fl.first? is true", q_first == true)
+assert_false("fl.last", fl.last)
+q_last = fl.last?
+assert_true("fl.last? is false", q_last == false)
+
+fl[0] = false
+fl[7] = true
+assert_false("fl.first false", fl.first)
+assert_true("fl.last true", fl.last)
+
+# Single element array
+single = BitArray.new(1)
+assert_false("single initial first", single.first)
+assert_false("single initial last", single.last)
+single[0] = true
+assert_true("single updated first", single.first)
+assert_true("single updated last", single.last)
+
+# ---- 4. Word boundaries -----------------------------------------------------
+
+puts "== word boundaries"
+
+# Array spanning multiple 64-bit words: size 200 (words: 0..63, 64..127, 128..191, 192..199)
+multi = BitArray.new(200)
+assert_equal_int("multi size", multi.size, 200)
+assert_true("multi initially all false", multi.none?)
+
+# Test bit 62 and 63 (top of word 0) and bit 64 and 65 (bottom of word 1)
+multi[62] = true
+assert_true("bit 62 set", multi[62])
+assert_false("bit 63 clear", multi[63])
+assert_false("bit 64 clear", multi[64])
+
+multi[63] = true
+assert_true("bit 63 set", multi[63])
+assert_false("bit 64 still clear", multi[64])
+assert_false("bit 65 still clear", multi[65])
+
+multi[64] = true
+assert_true("bit 63 still set", multi[63])
+assert_true("bit 64 set", multi[64])
+assert_false("bit 65 clear", multi[65])
+
+multi[65] = true
+assert_true("bit 64 still set", multi[64])
+assert_true("bit 65 set", multi[65])
+
+# Toggling across word boundary
+multi.toggle(63)
+assert_false("bit 63 toggled to false", multi[63])
+assert_true("bit 64 untouched by toggle 63", multi[64])
+
+multi.toggle(64)
+assert_false("bit 64 toggled to false", multi[64])
+assert_true("bit 65 untouched by toggle 64", multi[65])
+
+# Word 1 to Word 2 boundary (bit 127 and bit 128)
+multi[127] = true
+multi[128] = true
+assert_true("bit 127 set", multi[127])
+assert_true("bit 128 set", multi[128])
+assert_false("bit 126 clear", multi[126])
+assert_false("bit 129 clear", multi[129])
+
+# Non-multiple of 64 size: 70 bits (word 0 has 64 bits, word 1 has 6 bits)
+rem_ba = BitArray.new(70, true)
+assert_equal_int("rem_ba size", rem_ba.size, 70)
+assert_equal_int("rem_ba count(true)", rem_ba.count(true), 70)
+assert_true("rem_ba all?", rem_ba.all?)
+assert_true("rem_ba last is index 69", rem_ba[69])
+
+# Invert on size 70: must clear unused bits in last word so none? holds
+rem_ba.invert
+assert_equal_int("rem_ba inverted count(true)", rem_ba.count(true), 0)
+assert_equal_int("rem_ba inverted count(false)", rem_ba.count(false), 70)
+assert_true("rem_ba inverted none?", rem_ba.none?)
+assert_false("rem_ba inverted all?", rem_ba.all?)
+
+# Invert back to all true
+rem_ba.invert
+assert_equal_int("rem_ba double inverted count(true)", rem_ba.count(true), 70)
+assert_true("rem_ba double inverted all?", rem_ba.all?)
+
+# Fill on partial word
+rem_ba.fill(false)
+assert_true("rem_ba fill false none?", rem_ba.none?)
+rem_ba.fill(true)
+assert_true("rem_ba fill true all?", rem_ba.all?)
+assert_equal_int("rem_ba fill true count", rem_ba.count(true), 70)
+
+# ---- 5. Bulk operations and predicates --------------------------------------
+
+puts "== bulk operations and predicates"
+
+bulk = BitArray.new(10)
+
+# Range fill
+bulk.fill(true, 2, 4)
+assert_false("bulk[1] false", bulk[1])
+assert_true("bulk[2] true", bulk[2])
+assert_true("bulk[3] true", bulk[3])
+assert_true("bulk[4] true", bulk[4])
+assert_true("bulk[5] true", bulk[5])
+assert_false("bulk[6] false", bulk[6])
+assert_equal_int("bulk count after range fill", bulk.count(true), 4)
+
+# Range fill with negative start
+bulk.fill(true, -3, 2)
+assert_true("bulk[7] true via negative start", bulk[7])
+assert_true("bulk[8] true via negative start", bulk[8])
+assert_false("bulk[9] false untouched", bulk[9])
+
+# Range fill count clamping
+bulk.fill(true, 8, 10)
+assert_true("bulk[8] clamped fill", bulk[8])
+assert_true("bulk[9] clamped fill", bulk[9])
+
+# Range fill count <= 0 is a no-op
+bulk.fill(false, 0, 0)
+assert_true("bulk[9] still true after 0 count fill", bulk[9])
+bulk.fill(false, 0, -5)
+assert_true("bulk[9] still true after negative count fill", bulk[9])
+
+# Predicates: any?, none?, all?, one?
+
+pred = BitArray.new(8)
+assert_true("pred initial none?", pred.none?)
+assert_false("pred initial any?", pred.any?)
+assert_false("pred initial all?", pred.all?)
+assert_false("pred initial one?", pred.one?)
+assert_true("pred includes? false", pred.includes?(false))
+assert_false("pred includes? true", pred.includes?(true))
+
+pred[2] = true
+assert_false("pred with 1 bit none?", pred.none?)
+assert_true("pred with 1 bit any?", pred.any?)
+assert_false("pred with 1 bit all?", pred.all?)
+assert_true("pred with 1 bit one?", pred.one?)
+assert_true("pred with 1 bit includes? true", pred.includes?(true))
+assert_true("pred with 1 bit includes? false", pred.includes?(false))
+
+pred[4] = true
+assert_false("pred with 2 bits one?", pred.one?)
+assert_true("pred with 2 bits any?", pred.any?)
+
+pred.fill(true)
+assert_true("pred full all?", pred.all?)
+assert_true("pred full any?", pred.any?)
+assert_false("pred full none?", pred.none?)
+assert_false("pred full one?", pred.one?)
+assert_true("pred full includes? true", pred.includes?(true))
+assert_false("pred full includes? false", pred.includes?(false))
+
+# Index and rindex
+idx_ba = BitArray.new(10)
+idx_ba[2] = true
+idx_ba[7] = true
+
+# index(true)
+i_first = idx_ba.index(true)
+assert_true("index(true) not nil", !i_first.nil?)
+assert_equal_int("index(true) value", i_first.as(Int32), 2)
+
+i_second = idx_ba.index(true, 3)
+assert_true("index(true, 3) not nil", !i_second.nil?)
+assert_equal_int("index(true, 3) value", i_second.as(Int32), 7)
+
+i_none = idx_ba.index(true, 8)
+assert_true("index(true, 8) is nil", i_none.nil?)
+
+# index(false)
+i_false = idx_ba.index(false)
+assert_true("index(false) not nil", !i_false.nil?)
+assert_equal_int("index(false) value", i_false.as(Int32), 0)
+
+# rindex(true)
+r_last = idx_ba.rindex(true)
+assert_true("rindex(true) not nil", !r_last.nil?)
+assert_equal_int("rindex(true) value", r_last.as(Int32), 7)
+
+r_prev = idx_ba.rindex(true, 6)
+assert_true("rindex(true, 6) not nil", !r_prev.nil?)
+assert_equal_int("rindex(true, 6) value", r_prev.as(Int32), 2)
+
+r_none = idx_ba.rindex(true, 1)
+assert_true("rindex(true, 1) is nil", r_none.nil?)
+
+# ---- 6. Equality, hashing, copying, slicing ---------------------------------
+
+puts "== equality, hashing, copying, slicing"
+
+orig = BitArray.new(70) { |i| i % 3 == 0 }
+cloned = orig.clone
+duped = orig.dup
+
+assert_true("orig == cloned", orig == cloned)
+assert_true("orig == duped", orig == duped)
+assert_true("cloned == duped", cloned == duped)
+
+# Independence of copies
+cloned.toggle(0)
+assert_false("orig == cloned after mutating clone", orig == cloned)
+assert_true("orig == duped still holds", orig == duped)
+
+# Different sizes not equal
+diff_size = BitArray.new(71) { |i| i % 3 == 0 }
+assert_false("different sizes not equal", orig == diff_size)
+
+# Equality with non-BitArray returns false
+assert_false("equality with non-BitArray", orig == "some string")
+
+# to_s and inspect
+str_ba = BitArray.new(4)
+str_ba[1] = true
+str_ba[3] = true
+assert_equal_str("to_s format", str_ba.to_s, "BitArray[0101]")
+assert_equal_str("inspect format", str_ba.inspect, "BitArray[0101]")
+
+# to_slice
+slice_ba = BitArray.new(16)
+slice_ba[0] = true
+slice_ba[8] = true
+slice = slice_ba.to_slice
+assert_equal_int("slice size in bytes", slice.size, 2)
+assert_equal_int("slice byte 0", slice[0].to_i32, 1)
+assert_equal_int("slice byte 1", slice[1].to_i32, 1)
+
+# ---- 7. Iteration, reverse, rotate ------------------------------------------
+
+puts "== iteration, reverse, rotate"
+
+iter_ba = BitArray.new(5)
+iter_ba[1] = true
+iter_ba[3] = true
+
+# each
+seen_true = 0
+seen_false = 0
+iter_ba.each do |b|
+  if b
+    seen_true += 1
+  else
+    seen_false += 1
+  end
+end
+assert_equal_int("each seen_true", seen_true, 2)
+assert_equal_int("each seen_false", seen_false, 3)
+
+# each_with_index
+true_index_sum = 0
+iter_ba.each_with_index do |b, idx|
+  true_index_sum += idx if b
+end
+assert_equal_int("each_with_index index sum", true_index_sum, 4) # 1 + 3 = 4
+
+# reverse_in_place
+rev_ba = BitArray.new(4)
+rev_ba[0] = true
+rev_ba[1] = true # "1100"
+rev_ba.reverse_in_place
+assert_equal_str("reversed 4 bits", rev_ba.to_s, "BitArray[0011]")
+
+odd_rev = BitArray.new(5)
+odd_rev[0] = true
+odd_rev[2] = true # "10100"
+odd_rev.reverse_in_place
+assert_equal_str("reversed 5 bits", odd_rev.to_s, "BitArray[00101]")
+
+# rotate_in_place
+rot_ba = BitArray.new(5)
+rot_ba[0] = true # "10000"
+rot_ba.rotate_in_place(1)
+assert_equal_str("rotate 1", rot_ba.to_s, "BitArray[00001]")
+
+rot_ba.rotate_in_place(-1)
+assert_equal_str("rotate -1", rot_ba.to_s, "BitArray[10000]")
+
+rot_ba.rotate_in_place(2)
+assert_equal_str("rotate 2", rot_ba.to_s, "BitArray[00010]")
+
+rot_ba.rotate_in_place(0)
+assert_equal_str("rotate 0 no-op", rot_ba.to_s, "BitArray[00010]")
+
+puts "\nALL CHECKS PASSED"

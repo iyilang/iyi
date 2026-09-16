@@ -199,13 +199,17 @@ echo "== the library is iyi all the way down"
 # this costs no library: a program importing `std/debug` still links
 # libSystem and nothing else, which the floor checks separately.
 #
+# `file`, `dir` and `udp` are platform modules of `socket`'s shape: raw
+# syscalls on Linux, libSystem on darwin, and the floor names every symbol
+# they add there.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
 reaching=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
-  case "$name" in socket|time|debug) continue ;; esac
+  case "$name" in socket|time|debug|file|dir|udp) continue ;; esac
   if [ "$name" = math ]; then
     grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" \
       | grep -vE 'llvm\.(sqrt|copysign|fma)\.' > "$WORK/reach.$name" || true

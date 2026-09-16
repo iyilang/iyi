@@ -134,10 +134,8 @@ end
     result
   end
 
-  # `read`, for `read_input` below. Syscall 0 on x86_64 and 63 on aarch64,
-  # the same numbers `src/syscall/*-linux.cr` carries. Binding libc's `read`
-  # here for one call would put the whole library back on the link line and
-  # undo the floor III.9 measures.
+  # `read`, for `read_input` below: 0 on x86_64, 63 on aarch64. Binding
+  # libc's for one call would put the whole library back on the link line.
   def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
@@ -184,16 +182,18 @@ end
     result
   end
 
+  # The kernel writes its answer into the number register; an asm with no
+  # output let LLVM keep "3" there, and a second close in a row became `read`.
   def __iyi_close(fd : Int64) : Nil
+    result = uninitialized Int64
     {% if flag?(:x86_64) %}
-      asm("syscall" :: "{rax}"(3_i64), "{rdi}"(fd) : "rcx", "r11", "memory" : "volatile")
+      asm("syscall" : "={rax}"(result) : "{rax}"(3_i64), "{rdi}"(fd) : "rcx", "r11", "memory" : "volatile")
     {% else %}
-      asm("svc #0" :: "{x8}"(57_i64), "{x0}"(fd) : "memory" : "volatile")
+      asm("svc #0" : "={x0}"(result) : "{x8}"(57_i64), "{x0}"(fd) : "memory" : "volatile")
     {% end %}
   end
 
-  # `unlinkat`, with AT_FDCWD and no flags. Syscall 263 on x86_64 and 35 on
-  # aarch64.
+  # `unlinkat`, with AT_FDCWD and no flags: 263 on x86_64, 35 on aarch64.
   def __iyi_unlink(path : UInt8*) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
@@ -7208,20 +7208,14 @@ end
 # A panic is for bugs, not control flow, and it unwinds without an
 # unwinder: `defer` registers its cleanup on the way in (the normalizer
 # emits `__iyi_defer_push`/`__iyi_defer_pop_run` around every deferred
-# scope), so the panic path *walks a list* instead of walking frames —
-# the whole Itanium machinery stays unlinked and the dependency floor
-# stays where it is.
-#
-# On the concurrency targets the registry lives on the current fiber and
-# a panicking task dies alone: its defers run, its group is told, its
-# siblings are cancelled, and the group's join re-panics in the owner —
-# a panicking fiber cannot die silently (III.1.4), and an uncaught panic
-# still reaches main and exits 1, after every defer on the path ran.
-# Elsewhere there are no tasks, so the registry is one global stack and
-# a panic is a clean exit that ran the pending cleanups first.
+# scope), so the panic path walks a list, not frames, and the Itanium
+# machinery stays unlinked. On the concurrency targets the registry lives
+# on the current fiber and a panicking task dies alone: its defers run,
+# its siblings are cancelled, and the group's join re-panics in the owner
+# (III.1.4); an uncaught panic still reaches main and exits 1. Elsewhere
+# the registry is one global stack and a panic is a clean exit.
 
-# One registered cleanup. A class rather than a struct: the stack is an
-# intrusive linked list, and a node must be a reference to link.
+# One registered cleanup; a class, since an intrusive list node must be a reference.
 class IyiDeferNode
   @proc : Proc(Nil)
   property next_node : IyiDeferNode?
@@ -7236,8 +7230,7 @@ class IyiDeferNode
 end
 
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-  # No fibers on this target, so one global stack is exact: a single
-  # thread of control pushes and pops in strict block-nesting order.
+  # No fibers on this target, so one global stack is exact.
   class IyiDefers
     @@head : IyiDeferNode?
 
@@ -7290,9 +7283,8 @@ class IyiPanic
   end
 end
 
-# The panic's own write: descriptor 2 directly, no stream object, no error.
-# `print` goes through `IyiIO`, whose write raises when a pipe closes, and
-# reaching for `stdout`/`STDERR` flushes zeros if called before globals exist.
+# The panic's own write: descriptor 2 directly, no stream object, no error;
+# `print` raises when a pipe closes and `STDERR` may not exist yet.
 private def __iyi_say(text : String) : Nil
   written = 0_i64
   total = text.bytesize.to_i64
@@ -7311,10 +7303,8 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
   __iyi_say("\n")
-  # The site, when it is the program's: the file and line the compiler
-  # filled in at the call. A panic the library raises - an index out of
-  # range in the prelude, a zero slice size in `std` - names the
-  # library's own line, which is not where the bug is, and prints none.
+  # The site, when it is the program's; a panic the library raises names
+  # the library's own line, which is not where the bug is, and prints none.
   unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/")
     __iyi_say("  at ")
     __iyi_say(file)

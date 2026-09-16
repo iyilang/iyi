@@ -27,15 +27,99 @@ using std/path::{Path}
     fun SetCurrentDirectoryA(path : UInt8*) : Int32
   end
 {% else %}
-  lib LibC
-    fun opendir(name : UInt8*) : Void*
-    fun readdir(dirp : Void*) : Void*
-    fun closedir(dirp : Void*) : Int32
-    fun rewinddir(dirp : Void*) : Void
-    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
-    fun chdir(path : UInt8*) : Int32
-    fun mkdir(path : UInt8*, mode : Int32) : Int32
-    fun rmdir(path : UInt8*) : Int32
+  # Linux: the kernel's own calls (SPEC.md III.9), in libc's shape so the
+  # callers below read the same. A directory stream is a descriptor and
+  # a buffer of `linux_dirent64` records from `getdents64`, which is the
+  # record libc's `readdir` hands back: the name sits at byte 19 either way.
+  pub struct LibC
+    AT_FDCWD     = -100_i64
+    AT_REMOVEDIR = 0x200_i64
+    BUFFER       = 32768_i64
+    {% if flag?(:x86_64) %}
+      SYS_GETDENTS64 = 217_i64
+      SYS_LSEEK      =   8_i64
+      SYS_GETCWD     =  79_i64
+      SYS_CHDIR      =  80_i64
+      SYS_MKDIRAT    = 258_i64
+      SYS_UNLINKAT   = 263_i64
+    {% else %}
+      SYS_GETDENTS64 =  61_i64
+      SYS_LSEEK      =  62_i64
+      SYS_GETCWD     =  17_i64
+      SYS_CHDIR      =  49_i64
+      SYS_MKDIRAT    =  34_i64
+      SYS_UNLINKAT   =  35_i64
+    {% end %}
+
+    def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
+    end
+
+    # The stream: four words — descriptor, buffer address, read position, fill.
+    def self.opendir(name : UInt8*) : Void*
+      fd = __iyi_openat(name, 0x90000, 0) # O_RDONLY | O_DIRECTORY | O_CLOEXEC
+      return Pointer(Void).new(0_u64) if fd < 0_i64
+      stream = Pointer(Int64).malloc(4_u64)
+      stream[0] = fd
+      stream[1] = Pointer(UInt8).malloc(BUFFER.to_u64).address.to_i64
+      stream[2] = 0_i64
+      stream[3] = 0_i64
+      stream.as(Void*)
+    end
+
+    def self.readdir(dirp : Void*) : Void*
+      stream = dirp.as(Int64*)
+      if stream[2] >= stream[3]
+        n = sys(SYS_GETDENTS64, stream[0], stream[1], BUFFER)
+        return Pointer(Void).new(0_u64) if n <= 0_i64
+        stream[2] = 0_i64
+        stream[3] = n
+      end
+      record = Pointer(UInt8).new(stream[1].to_u64) + stream[2]
+      stream[2] = stream[2] + record[16].to_i64 + (record[17].to_i64 << 8)
+      record.as(Void*)
+    end
+
+    def self.closedir(dirp : Void*) : Int32
+      stream = dirp.as(Int64*)
+      __iyi_close(stream[0])
+      0
+    end
+
+    def self.rewinddir(dirp : Void*) : Nil
+      stream = dirp.as(Int64*)
+      sys(SYS_LSEEK, stream[0], 0_i64, 0_i64)
+      stream[2] = 0_i64
+      stream[3] = 0_i64
+    end
+
+    def self.getcwd(buf : UInt8*, size : UInt64) : UInt8*
+      sys(SYS_GETCWD, buf.address.to_i64, size.to_i64, 0_i64) < 0_i64 ? Pointer(UInt8).new(0_u64) : buf
+    end
+
+    def self.chdir(path : UInt8*) : Int32
+      sys(SYS_CHDIR, path.address.to_i64, 0_i64, 0_i64).to_i32
+    end
+
+    def self.mkdir(path : UInt8*, mode : Int32) : Int32
+      sys(SYS_MKDIRAT, AT_FDCWD, path.address.to_i64, mode.to_i64).to_i32
+    end
+
+    def self.rmdir(path : UInt8*) : Int32
+      sys(SYS_UNLINKAT, AT_FDCWD, path.address.to_i64, AT_REMOVEDIR).to_i32
+    end
   end
 {% end %}
 

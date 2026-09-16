@@ -59,42 +59,274 @@ using std/path::{Path}
     fun CreateSymbolicLinkA(linkpath : UInt8*, target : UInt8*, flags : UInt32) : Int32
   end
 {% else %}
-  lib LibC
-    struct Timespec
-      tv_sec : Int64
-      tv_nsec : Int64
+  # Linux: the kernel's own calls, as `socket` and the prelude make them
+  # (SPEC.md III.9: an own-prelude object asks libc for nothing). The
+  # shape is libc's, so the callers above read the same; a failure comes
+  # back as the negative errno the kernel answers, which every caller
+  # here reads as "not zero". `realpath` is a walk over `readlinkat` and
+  # `newfstatat`, since libc's is a library function and not a call.
+  pub struct LibC
+    pub struct Timespec
+      getter tv_sec : Int64
+      getter tv_nsec : Int64
+
+      def initialize
+        @tv_sec = 0_i64
+        @tv_nsec = 0_i64
+      end
     end
 
-    struct Stat
-      st_dev : UInt64
-      st_ino : UInt64
-      st_nlink : UInt64
-      st_mode : Int32
-      st_uid : Int32
-      st_gid : Int32; st_pad0 : Int32
-      st_rdev : UInt64
-      st_size : Int64
-      st_blksize : Int64
-      st_blocks : Int64
-      st_atime : Timespec
-      st_mtime : Timespec
-      st_ctime : Timespec
-      _glibc_reserved0 : Int64; _glibc_reserved1 : Int64; _glibc_reserved2 : Int64
+    {% if flag?(:aarch64) %}
+      # asm-generic `struct stat`, 128 bytes.
+      pub struct Stat
+        getter st_dev : UInt64
+        getter st_ino : UInt64
+        getter st_mode : Int32
+        getter st_nlink : Int32
+        getter st_uid : Int32
+        getter st_gid : Int32
+        getter st_rdev : UInt64
+        getter st_pad1 : UInt64
+        getter st_size : Int64
+        getter st_blksize : Int32
+        getter st_pad2 : Int32
+        getter st_blocks : Int64
+        getter st_atime : Timespec
+        getter st_mtime : Timespec
+        getter st_ctime : Timespec
+        getter st_unused0 : Int32
+        getter st_unused1 : Int32
+
+      def initialize
+        @st_dev = 0_u64
+        @st_ino = 0_u64
+        @st_mode = 0
+        @st_nlink = 0
+        @st_uid = 0
+        @st_gid = 0
+        @st_rdev = 0_u64
+        @st_pad1 = 0_u64
+        @st_size = 0_i64
+        @st_blksize = 0
+        @st_pad2 = 0
+        @st_blocks = 0_i64
+        @st_atime = Timespec.new
+        @st_mtime = Timespec.new
+        @st_ctime = Timespec.new
+        @st_unused0 = 0
+        @st_unused1 = 0
+      end
+      end
+    {% else %}
+      # x86_64 `struct stat`, 144 bytes, the layout glibc shares with the kernel.
+      pub struct Stat
+        getter st_dev : UInt64
+        getter st_ino : UInt64
+        getter st_nlink : UInt64
+        getter st_mode : Int32
+        getter st_uid : Int32
+        getter st_gid : Int32
+        getter st_pad0 : Int32
+        getter st_rdev : UInt64
+        getter st_size : Int64
+        getter st_blksize : Int64
+        getter st_blocks : Int64
+        getter st_atime : Timespec
+        getter st_mtime : Timespec
+        getter st_ctime : Timespec
+        getter st_reserved0 : Int64
+        getter st_reserved1 : Int64
+        getter st_reserved2 : Int64
+
+      def initialize
+        @st_dev = 0_u64
+        @st_ino = 0_u64
+        @st_nlink = 0_u64
+        @st_mode = 0
+        @st_uid = 0
+        @st_gid = 0
+        @st_pad0 = 0
+        @st_rdev = 0_u64
+        @st_size = 0_i64
+        @st_blksize = 0_i64
+        @st_blocks = 0_i64
+        @st_atime = Timespec.new
+        @st_mtime = Timespec.new
+        @st_ctime = Timespec.new
+        @st_reserved0 = 0_i64
+        @st_reserved1 = 0_i64
+        @st_reserved2 = 0_i64
+      end
+      end
+    {% end %}
+
+    AT_FDCWD           =  -100_i64
+    AT_SYMLINK_NOFOLLOW = 0x100_i64
+
+    def self.sys(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64 = 0_i64, e : Int64 = 0_i64) : Int64
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c), "{r10}"(d), "{r8}"(e)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c), "{x3}"(d), "{x4}"(e)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      result
     end
 
-    fun stat(path : UInt8*, buf : Stat*) : Int32
-    fun lstat(path : UInt8*, buf : Stat*) : Int32
-    fun fstat(fd : Int32, buf : Stat*) : Int32
-    fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32
-    fun link(oldpath : UInt8*, newpath : UInt8*) : Int32
-    fun symlink(target : UInt8*, linkpath : UInt8*) : Int32
-    fun readlink(path : UInt8*, buf : UInt8*, bufsiz : UInt64) : Int64
-    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
-    fun chmod(path : UInt8*, mode : Int32) : Int32
-    fun chown(path : UInt8*, owner : UInt32, group : UInt32) : Int32
-    fun truncate(path : UInt8*, length : Int64) : Int32
-    fun ftruncate(fd : Int32, length : Int64) : Int32
-    fun access(path : UInt8*, mode : Int32) : Int32
+    # Syscall numbers: x86_64 first, aarch64 second.
+    {% if flag?(:x86_64) %}
+      SYS_NEWFSTATAT = 262_i64
+      SYS_FSTAT      =   5_i64
+      SYS_RENAMEAT   = 264_i64
+      SYS_LINKAT     = 265_i64
+      SYS_SYMLINKAT  = 266_i64
+      SYS_READLINKAT = 267_i64
+      SYS_FCHMODAT   = 268_i64
+      SYS_FCHOWNAT   = 260_i64
+      SYS_TRUNCATE   =  76_i64
+      SYS_FTRUNCATE  =  77_i64
+      SYS_FACCESSAT  = 269_i64
+      SYS_GETCWD     =  79_i64
+    {% else %}
+      SYS_NEWFSTATAT =  79_i64
+      SYS_FSTAT      =  80_i64
+      SYS_RENAMEAT   =  38_i64
+      SYS_LINKAT     =  37_i64
+      SYS_SYMLINKAT  =  36_i64
+      SYS_READLINKAT =  78_i64
+      SYS_FCHMODAT   =  53_i64
+      SYS_FCHOWNAT   =  54_i64
+      SYS_TRUNCATE   =  45_i64
+      SYS_FTRUNCATE  =  46_i64
+      SYS_FACCESSAT  =  48_i64
+      SYS_GETCWD     =  17_i64
+    {% end %}
+
+    def self.stat(path : UInt8*, buf : Stat*) : Int32
+      sys(SYS_NEWFSTATAT, AT_FDCWD, path.address.to_i64, buf.address.to_i64, 0_i64).to_i32
+    end
+
+    def self.lstat(path : UInt8*, buf : Stat*) : Int32
+      sys(SYS_NEWFSTATAT, AT_FDCWD, path.address.to_i64, buf.address.to_i64, AT_SYMLINK_NOFOLLOW).to_i32
+    end
+
+    def self.fstat(fd : Int32, buf : Stat*) : Int32
+      sys(SYS_FSTAT, fd.to_i64, buf.address.to_i64, 0_i64).to_i32
+    end
+
+    def self.rename(oldpath : UInt8*, newpath : UInt8*) : Int32
+      sys(SYS_RENAMEAT, AT_FDCWD, oldpath.address.to_i64, AT_FDCWD, newpath.address.to_i64).to_i32
+    end
+
+    def self.link(oldpath : UInt8*, newpath : UInt8*) : Int32
+      sys(SYS_LINKAT, AT_FDCWD, oldpath.address.to_i64, AT_FDCWD, newpath.address.to_i64, 0_i64).to_i32
+    end
+
+    def self.symlink(target : UInt8*, linkpath : UInt8*) : Int32
+      sys(SYS_SYMLINKAT, target.address.to_i64, AT_FDCWD, linkpath.address.to_i64).to_i32
+    end
+
+    def self.readlink(path : UInt8*, buf : UInt8*, bufsiz : UInt64) : Int64
+      sys(SYS_READLINKAT, AT_FDCWD, path.address.to_i64, buf.address.to_i64, bufsiz.to_i64)
+    end
+
+    def self.chmod(path : UInt8*, mode : Int32) : Int32
+      sys(SYS_FCHMODAT, AT_FDCWD, path.address.to_i64, mode.to_i64).to_i32
+    end
+
+    def self.chown(path : UInt8*, owner : UInt32, group : UInt32) : Int32
+      sys(SYS_FCHOWNAT, AT_FDCWD, path.address.to_i64, owner.to_i64, group.to_i64, 0_i64).to_i32
+    end
+
+    def self.truncate(path : UInt8*, length : Int64) : Int32
+      sys(SYS_TRUNCATE, path.address.to_i64, length, 0_i64).to_i32
+    end
+
+    def self.ftruncate(fd : Int32, length : Int64) : Int32
+      sys(SYS_FTRUNCATE, fd.to_i64, length, 0_i64).to_i32
+    end
+
+    def self.access(path : UInt8*, mode : Int32) : Int32
+      sys(SYS_FACCESSAT, AT_FDCWD, path.address.to_i64, mode.to_i64).to_i32
+    end
+
+    # The absolute path with every `.`, `..` and symbolic link resolved, or
+    # null when a component does not exist. Forty links deep is the limit,
+    # as it is in libc.
+    def self.realpath(path : UInt8*, resolved : UInt8*) : UInt8*
+      text = c_text(path)
+      if text.bytesize == 0 || text.to_unsafe[0] != 47_u8
+        cwd = Pointer(UInt8).malloc(4096_u64)
+        return Pointer(UInt8).new(0_u64) if sys(SYS_GETCWD, cwd.address.to_i64, 4096_i64, 0_i64) < 0_i64
+        text = c_text(cwd) + "/" + text
+      end
+      hops = 0
+      done = ""
+      rest = text
+      while rest.bytesize > 0
+        i = 0
+        while i < rest.bytesize && rest.to_unsafe[i] == 47_u8
+          i = i + 1
+        end
+        rest = rest[i, rest.bytesize - i]
+        break if rest.bytesize == 0
+        j = 0
+        while j < rest.bytesize && rest.to_unsafe[j] != 47_u8
+          j = j + 1
+        end
+        part = rest[0, j]
+        rest = rest[j, rest.bytesize - j]
+        next if part == "."
+        if part == ".."
+          k = done.bytesize
+          while k > 0 && done.to_unsafe[k - 1] != 47_u8
+            k = k - 1
+          end
+          done = k > 0 ? done[0, k - 1] : ""
+          next
+        end
+        candidate = done + "/" + part
+        buf = Pointer(UInt8).malloc(4096_u64)
+        n = readlink(c_bytes(candidate), buf, 4095_u64)
+        if n > 0_i64
+          hops = hops + 1
+          return Pointer(UInt8).new(0_u64) if hops > 40
+          target = String.new(n.to_i) { |t| t.copy_from(buf, n.to_i) }
+          rest = target + (rest.bytesize > 0 ? "/" + rest : "")
+          done = "" if target.to_unsafe[0] == 47_u8
+          next
+        end
+        st = uninitialized Stat
+        return Pointer(UInt8).new(0_u64) if lstat(c_bytes(candidate), pointerof(st)) != 0
+        done = candidate
+      end
+      done = "/" if done.bytesize == 0
+      return Pointer(UInt8).new(0_u64) if done.bytesize >= 4096
+      resolved.copy_from(done.to_unsafe, done.bytesize)
+      resolved[done.bytesize] = 0_u8
+      resolved
+    end
+
+    private def self.c_text(p : UInt8*) : String
+      n = 0
+      while p[n] != 0_u8
+        n = n + 1
+      end
+      String.new(n) { |t| t.copy_from(p, n) }
+    end
+
+    private def self.c_bytes(s : String) : UInt8*
+      buf = Pointer(UInt8).malloc(s.bytesize.to_u64 + 1_u64)
+      buf.copy_from(s.to_unsafe, s.bytesize)
+      buf[s.bytesize] = 0_u8
+      buf
+    end
   end
 {% end %}
 private def c_path(path : String) : UInt8*

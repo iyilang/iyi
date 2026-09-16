@@ -41,6 +41,23 @@
   `bench/std_http_exercise.sh` holds it, five verbs against a server on
   a thread.
 
+- **Twenty-eight pull requests from jwaldrip, merged.** New std modules
+  `bit_array`, `dir`, `docs_pseudo_methods`, `fiber`, `file`,
+  `levenshtein`, `named_tuple`, `weak_ref`, `capsule`, `hpack` and `udp`
+  (#63, #65, #66, #71, #72, #75, #76, #81, #82, #83, #84), and the eleven
+  reinstated below. The runtime's ABI symbols are `__iyi_*` for an iyi
+  program and `__crystal_*` under `--crystal` (#55); a panic on darwin
+  prints a backtrace, and `std/debug` resolves it to `file:line` from the
+  program's own DWARF (#56); a build-tool floor gate names every host
+  binary the build runs (#58); the C++ shim and libc++ are conditional
+  on LLVM < 18 (#59); the toolchain-floor rule is recorded in SPEC.md
+  III.9 and the floor's denylist names Crystal's thirteen ancestor
+  libraries (#60, #61). `file` and `dir` arrived calling libc on Linux,
+  which the floor refuses; their Linux branches are raw syscalls now,
+  the shape `socket` has, with `realpath` walked in iyi over
+  `readlinkat`, and the darwin floor names each libSystem symbol the
+  three platform modules add.
+
 ### Removed
 
 - **The Crystal socket stack that landed beside `IyiSocket`.** TCP, UDP,
@@ -49,12 +66,16 @@
   module is the blocking `IyiSocket` it was, over raw syscalls on Linux
   and libSystem on darwin. `bench/socket_exercise.sh` holds it.
 
-- **Twelve std modules the prelude already owns.** `annotations`,
-  `comparable`, `empty`, `env`, `errno`, `exception`, `iterable`,
-  `kernel`, `nil`, `reference_storage`, `steppable` and `symbol` were
-  empty shims, exception classes in a language without exceptions, or
-  names the compiler has already refused (`p`, `pp`, `ENV`, `try`,
-  `not_nil!`). They are gone rather than taught a second meaning.
+- **Twelve std modules the prelude already owns — and eleven of them
+  came back.** `annotations`, `comparable`, `empty`, `env`, `errno`,
+  `exception`, `iterable`, `kernel`, `nil`, `reference_storage`,
+  `steppable` and `symbol` were dropped from the rewrite as empty shims,
+  exception classes in a language without exceptions, or names the
+  compiler has already refused (`p`, `pp`, `ENV`, `try`, `not_nil!`).
+  Their author's pull requests (#62, #64, #68, #69, #70, #73, #74, #77,
+  #78, #79, #80) reinstate all but `exception`, each with a gate of its
+  own, on the owner's call; the sentence above records why they had
+  gone, so the second meaning is at least a written one.
 
 - **`iyi repl`.** The session ran on the macro evaluator, which is the
   other language's compile-time library, so it answered iyi code with
@@ -74,8 +95,9 @@
 
 - **`src/std` is iyi over the prelude.** JSON, YAML, XML, HTML, path, IO,
   unicode, big and the rest of the library bind nothing: no `lib`, no
-  `fun`, no `asm`, no `@[Link]`, except `socket` and `time` (the
-  platform, on purpose) and `math`'s LLVM hardware instructions
+  `fun`, no `asm`, no `@[Link]`, except `socket`, `time`, `file`, `dir`
+  and `udp` (the platform, on purpose), `debug` (the program's own DWARF)
+  and `math`'s LLVM hardware instructions
   (`llvm.sqrt`, `llvm.copysign`). `Math` is a `pub struct`
   with class methods; `Complex` and `Benchmark` import it. `sin(1e22)`
   answers a point on the circle instead of panicking. Every module has a
@@ -104,6 +126,15 @@
   `first?`/`first` and `minmax?`/`minmax` keep their pairs untouched.
 
 ### Fixed
+
+- **A second `close` in a row became a `read`, under optimisation.** The
+  prelude's `__iyi_close` issued its syscall from an `asm` that declared
+  no output, so LLVM took the number register to still hold 3 afterwards
+  and skipped the load for the next call; the kernel had written 0 there,
+  and the next close blocked in `read` on the descriptor. Found by
+  `std/udp`'s gate, whose lifecycle section closes two sockets back to
+  back; the syscall's answer is declared as an output now, on both
+  Linux targets.
 
 - **A probe of `src/std` found 58 defects across twelve modules, and
   each is fixed where it lived and held by the module's gate.** The

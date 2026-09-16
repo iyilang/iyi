@@ -1,6 +1,5 @@
-# Complete NamedTuple standard library extensions for iyi.
-#
-# Builds upon std/tuple and implements Crystal's full NamedTuple specification.
+# NamedTuple methods the prelude does not carry: dynamic key access,
+# merge, clone, and conversion to Array/Hash.
 
 module std/named_tuple
 
@@ -12,12 +11,12 @@ struct ::NamedTuple
     options
   end
 
-  # Returns the value for *key*, or raises KeyError if missing.
+  # Returns the value for *key*, or panics if missing.
   def [](key : Symbol)
     fetch(key) { raise "Missing named tuple key: #{key.inspect}" }
   end
 
-  # Returns the value for string *key*, or raises KeyError if missing.
+  # Returns the value for string *key*, or panics if missing.
   def [](key : String)
     fetch(key) { raise "Missing named tuple key: #{key.inspect}" }
   end
@@ -43,14 +42,14 @@ struct ::NamedTuple
   # Fetches value for *key*, or yields to block if missing.
   def fetch(key : Symbol, &block)
     {% for k in T.keys %}
-      return self[:{{k.id}}] if key == :{{k.id}}
+      return self[{{k.symbolize}}] if key == {{k.symbolize}}
     {% end %}
     yield key
   end
 
   def fetch(key : String, &block)
     {% for k in T.keys %}
-      return self[:{{k.id}}] if key == "{{k.id}}"
+      return self[{{k.symbolize}}] if key == {{k.stringify}}
     {% end %}
     yield key
   end
@@ -58,7 +57,7 @@ struct ::NamedTuple
   # Returns true if the named tuple has the given string key.
   def has_key?(key : String) : Bool
     {% for k in T.keys %}
-      return true if key == "{{k.id}}"
+      return true if key == {{k.stringify}}
     {% end %}
     false
   end
@@ -66,7 +65,7 @@ struct ::NamedTuple
   # Yields each key symbol in order.
   def each_key(& : Symbol -> Nil) : Nil
     {% for k in T.keys %}
-      yield :{{k.id}}
+      yield {{k.symbolize}}
     {% end %}
   end
 
@@ -74,7 +73,7 @@ struct ::NamedTuple
   def each_with_index(offset : Int = 0, &) : Nil
     i = offset.to_i
     {% for k in T.keys %}
-      yield :{{k.id}}, self[:{{k.id}}], i
+      yield {{k.symbolize}}, self[{{k.symbolize}}], i
       i += 1
     {% end %}
   end
@@ -86,50 +85,64 @@ struct ::NamedTuple
 
   def merge(**other : **U) forall U
     {% begin %}
-      {
+      NamedTuple.new(
         {% for k in T.keys %}
           {% unless U.keys.includes?(k) %}
-            {{k.id}}: self[:{{k.id}}],
+            {{k.stringify}}: self[{{k.symbolize}}],
           {% end %}
         {% end %}
         {% for k in U.keys %}
-          {{k.id}}: other[:{{k.id}}],
+          {{k.stringify}}: other[{{k.symbolize}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 
-  # Merges self into other.
+  # Merges self into other: self's values win on overlapping keys.
   def reverse_merge(other : NamedTuple)
     other.merge(self)
   end
 
+  def reverse_merge(**other)
+    reverse_merge(other)
+  end
+
   # Deep clone of this named tuple.
   def clone
-    {% begin %}
-      {
+    {% if T.keys.size == 0 %}
+      NamedTuple.new
+    {% else %}
+      NamedTuple.new(
         {% for k in T.keys %}
-          {{k.id}}: self[:{{k.id}}].clone,
+          {{k.stringify}}: self[{{k.symbolize}}].clone,
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Converts this named tuple into an Array of {Symbol, Value} pairs.
   def to_a
-    arr = [] of {Symbol, typeof(values[0])}
-    {% for k in T.keys %}
-      arr << {:{{k.id}}, self[:{{k.id}}]}
+    {% if T.keys.size == 0 %}
+      [] of {Symbol, NoReturn}
+    {% else %}
+      [
+        {% for k in T.keys %}
+          { {{k.symbolize}}, self[{{k.symbolize}}] },
+        {% end %}
+      ]
     {% end %}
-    arr
   end
 
   # Converts this named tuple into a Hash.
   def to_h
-    h = {} of Symbol => typeof(values[0])
-    {% for k in T.keys %}
-      h[:{{k.id}}] = self[:{{k.id}}]
+    {% if T.keys.size == 0 %}
+      {} of Symbol => NoReturn
+    {% else %}
+      {
+        {% for k in T.keys %}
+          {{k.symbolize}} => self[{{k.symbolize}}],
+        {% end %}
+      }
     {% end %}
-    h
   end
 end

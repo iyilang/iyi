@@ -120,6 +120,131 @@ refuses "an incomplete IPv4 address" incomplete_ip "cannot resolve address: 1.2.
   'UdpSocket.parse_ipv4("1.2.3")'
 refuses "an invalid hex character in IPv6" bad_hex "invalid hex character in IPv6 address: x" \
   'UdpSocket.parse_ipv6("2001:xyz::1")'
+refuses "a leading-zero octet" leading_zero "an octet with a leading zero is not decimal" \
+  'UdpSocket.parse_ipv4("010.1.1.1")'
+refuses "an overflowing octet" overflow_octet "cannot resolve address: 2147483648.1.1.1" \
+  'UdpSocket.parse_ipv4("2147483648.1.1.1")'
+refuses "a second IPv6 compression" two_compressions "invalid IPv6 address: 1::2::3" \
+  'UdpSocket.parse_ipv6("1::2::3")'
+refuses "a five-digit IPv6 group" long_group "invalid IPv6 address group" \
+  'UdpSocket.parse_ipv6("00000::1")'
+refuses "a leading single colon" lead_colon "invalid IPv6 address group" \
+  'UdpSocket.parse_ipv6(":1:2:3:4:5:6:7")'
+
+refuses_body() { # refuses_body <label> <name> <phrase>
+  local label="$1" name="$2" phrase="$3"
+  cat > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+
+refuses_body "a negative port" neg_port "port -1 is not a port: 0 to 65535" <<'IYI'
+module main
+import std/udp
+using std/udp::{UdpSocket}
+s = UdpSocket.bind("127.0.0.1", -1)
+puts s.local_port
+IYI
+
+refuses_body "a port above 65535" high_port "port 70000 is not a port: 0 to 65535" <<'IYI'
+module main
+import std/udp
+using std/udp::{UdpSocket}
+s = UdpSocket.bind("127.0.0.1", 70000)
+puts s.local_port
+IYI
+
+refuses_body "a Datagram index that is not 0, 1, or 2" dg_index "Datagram index -1 is not 0, 1, or 2" <<'IYI'
+module main
+import std/udp
+using std/udp::{Datagram, Bytes}
+buf = Bytes.new(1)
+buf[0] = 120_u8
+dg = Datagram.new(buf, "h", 7)
+puts dg[-1]
+IYI
+
+refuses_body "a negative receive count" neg_recv "negative count: -1" <<'IYI'
+module main
+import std/udp
+using std/udp::{UdpSocket}
+s = UdpSocket.bind("127.0.0.1", 0)
+s.non_blocking = true
+s.receive_from(-1)
+IYI
+
+refuses_body "local_port after close" closed_port "socket is closed" <<'IYI'
+module main
+import std/udp
+using std/udp::{UdpSocket}
+s = UdpSocket.bind("127.0.0.1", 0)
+s.close
+puts s.local_port
+IYI
+
+refuses_body "a negative poll timeout" neg_poll "negative timeout: -1" <<'IYI'
+module main
+import std/udp
+using std/udp::{UdpSocket}
+s = UdpSocket.bind("127.0.0.1", 0)
+puts s.poll_read(-1)
+IYI
+
+echo
+echo "== proving a Datagram index check can fail when the module is broken"
+mkdir -p "$WORK/patched_dg/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/udp.iyi").read_text()
+old = '''    elsif i == 2
+      @port
+    else
+      raise "Datagram index #{i} is not 0, 1, or 2"'''
+if old not in src:
+    raise SystemExit("datagram patch site missing")
+new = '''    else
+      @port'''
+Path("$WORK/patched_dg/std/udp.iyi").write_text(src.replace(old, new, 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the datagram patch did not apply"
+  status=1
+else
+  cat > "$WORK/dg_idx.iyi" <<'IYI'
+module main
+import std/udp
+using std/udp::{Datagram, Bytes}
+buf = Bytes.new(1)
+buf[0] = 120_u8
+dg = Datagram.new(buf, "h", 7)
+puts dg[-1]
+IYI
+  if IYI_PATH="$WORK/patched_dg:$REPO/src:$REPO/samples/iyi" "$IYI" run "$WORK/dg_idx.iyi" >"$WORK/dg_mut.out" 2>&1; then
+    echo "  a broken Datagram index is caught"
+  else
+    echo "  the index program refused on a broken module (cannot prove the check)"
+    sed -n '1,3p' "$WORK/dg_mut.out"
+    status=1
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

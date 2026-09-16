@@ -99,6 +99,27 @@ else
 fi
 
 echo
+echo "== proving a truncating touch is caught"
+mkdir -p "$WORK/patched_touch/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/file.iyi").read_text()
+old = '    File.write(p, "") unless File.exists?(p)'
+if old not in src:
+    raise SystemExit("touch patch site missing")
+Path("$WORK/patched_touch/std/file.iyi").write_text(src.replace(old, '    File.write(p, "")', 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the touch patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_touch:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_touch.out" 2>&1; then
+  echo "  the exercise PASSED on a truncating touch"
+  status=1
+else
+  echo "  a truncating touch is caught"
+fi
+
+echo
 echo "== what file refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expr="$4"
@@ -133,6 +154,8 @@ refuses "unsupported append open mode" append_mode "unsupported mode: a" \
   'File.open("'"$WORK"'/foo.txt", "a")'
 refuses "info on a path that does not exist" info_nonexistent "File not found: " \
   'File.info("'"$WORK"'/does_not_exist.txt")'
+refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
+  'File.real_path("")'
 
 echo
 if [ "$status" -eq 0 ]; then

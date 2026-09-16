@@ -5,9 +5,10 @@
 #
 # Proves the exercise holds plain and --release, that every comparison operator
 # derived from <=> holds for less, equal, and greater values, that transitivity
-# holds, that incomparable values evaluate to false, that clamp and between?
-# work as specified, that a broken operator or helper is caught via IYI_PATH,
-# and that clamping an exclusive range panics with a descriptive sentence.
+# holds, that incomparable values evaluate to false, that == follows <=>, that
+# clamp and between? work as specified, that a broken operator or helper is
+# caught via IYI_PATH, that clamping an exclusive range panics with a
+# descriptive sentence, and that inverted min/max panics rather than lying.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -105,10 +106,19 @@ prove_fails "between? helper" broken_between \
   'self >= min_val && self <= max_val' \
   'self > min_val && self < max_val'
 
+prove_fails "equality from spaceship" broken_eq \
+  'cmp ? cmp == 0 : false' \
+  'false'
+
+prove_fails "exclusive unbounded" broken_excl_open \
+  'raise "Can'\''t clamp an exclusive range" if range.exclusive? && !range.end.nil?' \
+  'raise "Can'\''t clamp an exclusive range" if range.exclusive?'
+
 echo
 echo "== what clamp refuses"
 refuses() {
   local label="$1" name="$2" phrase="$3"
+  local call="$4"
   cat >"$WORK/$name.iyi" <<'EOF'
 import std/comparable
 using std/comparable::{Comparable}
@@ -130,9 +140,8 @@ impl Comparable(Score) for Score
     end
   end
 end
-
-Score.new(20).clamp(Score.new(10)...Score.new(30))
 EOF
+  printf '%s\n' "$call" >>"$WORK/$name.iyi"
   if "$IYI" run "$WORK/$name.iyi" >"$WORK/$name.out" 2>&1; then
     echo "  FAIL ($label): did not panic"
     status=1
@@ -145,7 +154,12 @@ EOF
   fi
 }
 
-refuses "clamping an exclusive range" clamp_exc "Can't clamp an exclusive range"
+refuses "clamping an exclusive range" clamp_exc "Can't clamp an exclusive range" \
+  'Score.new(20).clamp(Score.new(10)...Score.new(30))'
+refuses "clamping with min > max" clamp_inv "Can't clamp with min > max" \
+  'Score.new(20).clamp(Score.new(30), Score.new(10))'
+refuses "clamping an inverted range" clamp_inv_range "Can't clamp with min > max" \
+  'Score.new(20).clamp(Score.new(30)..Score.new(10))'
 
 echo
 if [ "$status" -eq 0 ]; then

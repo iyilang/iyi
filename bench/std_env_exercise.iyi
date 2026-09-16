@@ -138,6 +138,38 @@ assert_str "val3", env_map[K3], "to_h K3"
 
 assert_true ENV.size >= 3, "size at least 3"
 assert_true !ENV.empty?, "empty? is false"
+puts "  each, each_key, each_value, keys, values, to_h, size, and cleanup"
+
+puts "\n== nil assignment, empty value, positions, and Program.env"
+ENV[K1] = "nil_me"
+ENV[K1] = nil
+assert_nil ENV[K1]?, "[]= nil deletes"
+
+ENV[K1] = ""
+assert_str "", ENV[K1], "empty value is present"
+assert_true ENV.has_key?(K1), "empty value has_key?"
+
+ENV[K1] = "named"
+pe = Program.env(K1)
+if pe.nil?
+  raise "ASSERTION FAILED: Program.env sees ENV write\n  expected \"named\"\n  got nil"
+else
+  assert_str "named", pe, "Program.env sees ENV write"
+end
+
+ENV[K1] = "a"
+ENV[K2] = "b"
+ENV[K3] = "c"
+ENV.delete(K2)
+assert_nil ENV[K2]?, "middle deleted"
+assert_str "a", ENV[K1], "first survives middle delete"
+assert_str "c", ENV[K3], "last survives middle delete"
+ENV.delete(K1)
+assert_nil ENV[K1]?, "first of remaining deleted"
+assert_str "c", ENV[K3], "last survives first delete"
+ENV.delete(K3)
+assert_nil ENV[K3]?, "last deleted"
+puts "  nil assignment, empty value, delete positions, and Program.env"
 
 # Clean up all created variables
 ENV.delete(K1)
@@ -160,7 +192,5 @@ end
 if orig_absent
   ENV[K_ABSENT] = orig_absent
 end
-
-puts "  each, each_key, each_value, keys, values, to_h, size, and cleanup"
 
 puts "\nALL CHECKS PASSED"

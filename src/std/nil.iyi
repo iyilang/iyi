@@ -5,8 +5,8 @@ class ::NilAssertionError
   end
 end
 
-def raise(error : ::NilAssertionError) : NoReturn
-  raise error.message
+def raise(error : ::NilAssertionError, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
+  raise error.message, file, line
 end
 
 struct ::Nil
@@ -43,10 +43,10 @@ struct ::Nil
     self
   end
 
-  # Raises NilAssertionError.
-  def not_nil(message : String? = nil) : NoReturn
+  # Panics with NilAssertionError's sentence.
+  def not_nil(message : String? = nil, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
     msg = message
-    raise msg.nil? ? "Nil assertion failed" : msg
+    raise ::NilAssertionError.new(msg.nil? ? "Nil assertion failed" : msg), file, line
   end
 
   # Returns self.

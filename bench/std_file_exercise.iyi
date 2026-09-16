@@ -49,6 +49,7 @@ assert_true File.empty?(f_empty), "empty? is true for empty file"
 f_nonexistent = sandbox + "/std_file_ex_nonexistent_xyz.txt"
 assert_true !File.exists?(f_nonexistent), "nonexistent file does not exist"
 assert_true File.info?(f_nonexistent).nil?, "info? on nonexistent returns nil"
+assert_true !File.empty?(f_nonexistent), "empty? on a missing path is false"
 puts "  exists, size, and empty verified"
 
 puts "\n== line-wise reading"
@@ -72,6 +73,11 @@ assert_true File.size(f1) == 5_i64, "truncated size"
 File.write(f1, "overwritten content")
 assert_str "overwritten content", File.read(f1), "overwritten content"
 assert_true File.size(f1) == 19_i64, "overwritten size"
+File.touch(f1)
+assert_str "overwritten content", File.read(f1), "touch does not truncate"
+File.touch(f1, 1_i64)
+assert_true File.info(f1).modification_time == 1_i64, "touch sets the given unix time"
+File.touch(f1)
 puts "  truncation and overwrite verified"
 
 puts "\n== metadata and permissions"
@@ -129,6 +135,15 @@ assert_str "std_file_ex_1.txt", File.basename(f1), "basename"
 assert_str ".txt", File.extname(f1), "extname"
 assert_str sandbox, File.dirname(f1), "dirname"
 assert_str "a/b/c", File.join(["a", "b", "c"]), "join"
+assert_str "a/b", File.join("a", "b"), "join two strings"
+assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
+assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
+assert_true File.match?("a.txt", "?.txt"), "match ?"
+ta = File.tempfile("std_file_ex")
+tb = File.tempfile("std_file_ex")
+assert_true ta != tb, "tempfile names differ"
+File.delete(ta)
+File.delete(tb)
 puts "  links, rename, and path helpers verified"
 
 puts "\n== delete"

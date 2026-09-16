@@ -52,6 +52,13 @@ class BytePair
   end
 end
 
+class Box
+  property label : String
+
+  def initialize(@label : String)
+  end
+end
+
 puts "== size and alignment"
 assert_u64 instance_sizeof(Empty).to_u64, sizeof(ReferenceStorage(Empty)).to_u64, "Empty size matches instance_sizeof"
 assert_u64 instance_alignof(Empty).to_u64, alignof(ReferenceStorage(Empty)).to_u64, "Empty align matches instance_alignof"
@@ -120,7 +127,47 @@ e2 = uninitialized ReferenceStorage(Empty)
 Empty.unsafe_construct(pointerof(e2))
 assert_true e1 == e2, "empty storages compare equal"
 assert_i32 0, e1.hash, "empty storage hash is 0"
+
+ps1 = uninitialized ReferenceStorage(Point)
+Point.unsafe_construct(pointerof(ps1), 10, 20)
+ps2 = uninitialized ReferenceStorage(Point)
+Point.unsafe_construct(pointerof(ps2), 10, 20)
+ps3 = uninitialized ReferenceStorage(Point)
+Point.unsafe_construct(pointerof(ps3), 11, 20)
+assert_true ps1 == ps2, "equal points compare equal"
+assert_i32 ps1.hash, ps2.hash, "equal points have equal hash"
+assert_true ps1.hash != ps3.hash, "differing points have distinct hash"
+
+ns1 = uninitialized ReferenceStorage(Node)
+Node.unsafe_construct(pointerof(ns1), 1_i64, 2_u8, true)
+ns2 = uninitialized ReferenceStorage(Node)
+Node.unsafe_construct(pointerof(ns2), 1_i64, 2_u8, true)
+assert_true ns1 == ns2, "equal nodes compare equal"
+assert_i32 ns1.hash, ns2.hash, "equal nodes have equal hash"
 puts "  structural equality and content hash"
+
+puts "\n== uninitialized storage with a reference field"
+u1 = uninitialized ReferenceStorage(Box)
+u2 = uninitialized ReferenceStorage(Box)
+uninit_eq = u1 == u2
+assert_true uninit_eq || (uninit_eq == false), "uninitialized ref-field compare returns a bool"
+b1 = uninitialized ReferenceStorage(Box)
+Box.unsafe_construct(pointerof(b1), String.new(4) do |buf|
+  buf[0] = 115_u8
+  buf[1] = 97_u8
+  buf[2] = 109_u8
+  buf[3] = 101_u8
+end)
+b2 = uninitialized ReferenceStorage(Box)
+Box.unsafe_construct(pointerof(b2), String.new(4) do |buf|
+  buf[0] = 115_u8
+  buf[1] = 97_u8
+  buf[2] = 109_u8
+  buf[3] = 101_u8
+end)
+assert_true (b1 == b2) == false, "equal string contents at different addresses compare unequal"
+assert_true b1.hash != b2.hash, "distinct string pointers hash differently"
+puts "  identity compare of class fields does not follow pointers"
 
 puts "\n== string representation"
 assert_str "ReferenceStorage(#<Bench::StdReferenceStorageExercise::Point>)", storage.to_s, "to_s formats type name"

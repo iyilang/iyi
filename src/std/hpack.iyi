@@ -15,11 +15,14 @@
 #     * Literal Header Field with Incremental Indexing (6.2.1)
 #     * Literal Header Field without Indexing (6.2.2)
 #     * Literal Header Field Never Indexed (6.2.3)
-# - Dynamic Table Size Update (Section 6.3)
+# - Dynamic Table Size Update (Section 6.3), including RFC 4.2:
+#     * encoder emits the interval minimum then the final size
+#     * decoder refuses a size update after a header field
 # - Security defenses:
 #     * Decompression bomb protection: bounds decoded uncompressed header size & count
 #     * Respects peer SETTINGS_HEADER_TABLE_SIZE limit
 #     * Invalid index detection (index 0 or index > static + dynamic length)
+#     * Integer encodings that overflow UInt64 or Int32 indexes are HpackError
 #     * Never-indexed representation honoured on re-encode
 
 module std/hpack
@@ -410,10 +413,21 @@ pub class Integer
       end
       b = bytes[cur_offset].to_u64
       cur_offset = cur_offset + 1
-      if m > 63
+      # RFC 7541 5.1 / 7.4: encodings that exceed implementation limits
+      # MUST be decoding errors, not a wrapping add or an overflow panic.
+      if m >= 64
         return HpackError.new("Integer overflow decoding HPACK integer")
       end
-      val = val + ((b & 127_u64).unsafe_shl(m))
+      chunk = b & 127_u64
+      if m > 0 && chunk.unsafe_shr(64 - m) != 0_u64
+        return HpackError.new("Integer overflow decoding HPACK integer")
+      end
+      shifted = chunk.unsafe_shl(m)
+      max_u = 18446744073709551615_u64
+      if val > max_u - shifted
+        return HpackError.new("Integer overflow decoding HPACK integer")
+      end
+      val = val + shifted
       m = m + 7
       if (b & 128_u64) == 0_u64
         break
@@ -572,6 +586,7 @@ pub class Decoder
     offset = 0_i32
     total_uncompressed_size = 0_i32
     header_count = 0_i32
+    seen_field = false
 
     while offset < payload.size
       b = payload[offset]
@@ -582,15 +597,19 @@ pub class Decoder
         if dec_int.is_a?(HpackError)
           return dec_int
         end
-        idx = dec_int[0].to_i32
+        idx_u = dec_int[0]
         offset = dec_int[1]
 
-        if idx == 0
+        if idx_u == 0_u64
           return HpackError.new("Invalid index 0 in indexed header field representation")
         end
-        field = Table.get(@dynamic_table, idx)
+        max_idx = 61 + @dynamic_table.length
+        if idx_u > max_idx.to_u64
+          return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
+        end
+        field = Table.get(@dynamic_table, idx_u.to_i32)
         if field.nil?
-          return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+          return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
         end
 
         header_count = header_count + 1
@@ -603,20 +622,25 @@ pub class Decoder
         end
 
         headers << field
+        seen_field = true
       elsif (b & 0x40_u8) != 0_u8
         # 6.2.1 Literal Header Field with Incremental Indexing (starts with 01, 6-bit prefix)
         dec_int = Integer.decode(payload, offset, 6)
         if dec_int.is_a?(HpackError)
           return dec_int
         end
-        idx = dec_int[0].to_i32
+        idx_u = dec_int[0]
         offset = dec_int[1]
 
         name = ""
-        if idx > 0
-          field = Table.get(@dynamic_table, idx)
+        if idx_u > 0_u64
+          max_idx = 61 + @dynamic_table.length
+          if idx_u > max_idx.to_u64
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
+          end
+          field = Table.get(@dynamic_table, idx_u.to_i32)
           if field.nil?
-            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
           end
           name = field.name
         else
@@ -646,18 +670,23 @@ pub class Decoder
 
         @dynamic_table.add(name, val, false)
         headers << HeaderField.new(name, val, IndexingMode::Incremental)
+        seen_field = true
       elsif (b & 0x20_u8) != 0_u8
         # 6.3 Dynamic Table Size Update (starts with 001, 5-bit prefix)
         dec_int = Integer.decode(payload, offset, 5)
         if dec_int.is_a?(HpackError)
           return dec_int
         end
-        new_max = dec_int[0].to_i32
+        new_max_u = dec_int[0]
         offset = dec_int[1]
 
-        if new_max > @protocol_max_table_size
-          return HpackError.new("Dynamic table size update #{new_max} exceeds protocol limit #{@protocol_max_table_size}")
+        if seen_field
+          return HpackError.new("Dynamic table size update not at beginning of header block")
         end
+        if new_max_u > @protocol_max_table_size.to_u64
+          return HpackError.new("Dynamic table size update #{new_max_u} exceeds protocol limit #{@protocol_max_table_size}")
+        end
+        new_max = new_max_u.to_i32
         err = @dynamic_table.set_max_size(new_max)
         if err
           return err
@@ -668,14 +697,18 @@ pub class Decoder
         if dec_int.is_a?(HpackError)
           return dec_int
         end
-        idx = dec_int[0].to_i32
+        idx_u = dec_int[0]
         offset = dec_int[1]
 
         name = ""
-        if idx > 0
-          field = Table.get(@dynamic_table, idx)
+        if idx_u > 0_u64
+          max_idx = 61 + @dynamic_table.length
+          if idx_u > max_idx.to_u64
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
+          end
+          field = Table.get(@dynamic_table, idx_u.to_i32)
           if field.nil?
-            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
           end
           name = field.name
         else
@@ -704,20 +737,25 @@ pub class Decoder
         end
 
         headers << HeaderField.new(name, val, IndexingMode::NeverIndexed)
+        seen_field = true
       else
         # 6.2.2 Literal Header Field without Indexing (starts with 0000, 4-bit prefix)
         dec_int = Integer.decode(payload, offset, 4)
         if dec_int.is_a?(HpackError)
           return dec_int
         end
-        idx = dec_int[0].to_i32
+        idx_u = dec_int[0]
         offset = dec_int[1]
 
         name = ""
-        if idx > 0
-          field = Table.get(@dynamic_table, idx)
+        if idx_u > 0_u64
+          max_idx = 61 + @dynamic_table.length
+          if idx_u > max_idx.to_u64
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
+          end
+          field = Table.get(@dynamic_table, idx_u.to_i32)
           if field.nil?
-            return HpackError.new("Index #{idx} out of range (max: #{61 + @dynamic_table.length})")
+            return HpackError.new("Index #{idx_u} out of range (max: #{max_idx})")
           end
           name = field.name
         else
@@ -746,6 +784,7 @@ pub class Decoder
         end
 
         headers << HeaderField.new(name, val, IndexingMode::WithoutIndexing)
+        seen_field = true
       end
     end
 
@@ -761,12 +800,13 @@ pub class Decoder
     if dec_len.is_a?(HpackError)
       return dec_len
     end
-    str_len = dec_len[0].to_i32
+    str_len_u = dec_len[0]
     offset = dec_len[1]
-
-    if offset + str_len > payload.size
-      return HpackError.new("Unexpected EOF reading string data (need #{str_len} bytes, available #{payload.size - offset})")
+    avail = payload.size - offset
+    if str_len_u > avail.to_u64
+      return HpackError.new("Unexpected EOF reading string data (need #{str_len_u} bytes, available #{avail})")
     end
+    str_len = str_len_u.to_i32
 
     if huffman
       res = Huffman.decode(payload, offset, str_len)
@@ -802,12 +842,20 @@ pub class Encoder
     @use_huffman = use_huffman
     @pending_table_size_update = false
     @pending_table_size = 0_i32
+    @pending_min_table_size = 0_i32
   end
 
   def set_max_table_size(new_max : Int32) : Nil | HpackError
     err = @dynamic_table.set_max_size(new_max)
     return err if err
-    @pending_table_size_update = true
+    if @pending_table_size_update
+      if new_max < @pending_min_table_size
+        @pending_min_table_size = new_max
+      end
+    else
+      @pending_table_size_update = true
+      @pending_min_table_size = new_max
+    end
     @pending_table_size = new_max
     nil
   end
@@ -817,6 +865,11 @@ pub class Encoder
     buffer = [] of UInt8
 
     if @pending_table_size_update
+      # RFC 7541 4.2: if the max size changed more than once since the last
+      # header block, signal the smallest size that occurred, then the final.
+      if @pending_min_table_size < @pending_table_size
+        Integer.encode(@pending_min_table_size.to_u64, 5, 0x20_u8, buffer)
+      end
       Integer.encode(@pending_table_size.to_u64, 5, 0x20_u8, buffer)
       @pending_table_size_update = false
     end

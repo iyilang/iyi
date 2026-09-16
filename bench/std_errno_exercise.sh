@@ -147,6 +147,14 @@ prove_fails "errno setter zeroed" setter_zero "Errno.value setter sets EACCES" \
   '= errno.value' \
   '= 0'
 
+prove_fails "linux EREMOTE collides with EPROTO" eremote_linux "EREMOTE is 66 on linux" \
+  '    EREMOTE         =  66' \
+  '    EREMOTE         =  71'
+
+prove_fails "linux ESOCKTNOSUPPORT is Darwin 44" esock_linux "ESOCKTNOSUPPORT is 94 on linux" \
+  '    ESOCKTNOSUPPORT =  94' \
+  '    ESOCKTNOSUPPORT =  44'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "std/errno: all checks and negative proofs passed"

@@ -55,7 +55,8 @@ for phrase in "== RFC 7541 integer codec" \
               "== dynamic table eviction at capacity" \
               "== table size update" \
               "== realistic round trip" \
-              "== decoder refusals on malformed and truncated wire"; do
+              "== decoder refusals on malformed and truncated wire" \
+              "== overflow, two size updates, mid-block size, C.5"; do
   if ! grep -q "$phrase" "$WORK/hpack-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -90,6 +91,25 @@ elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/benc
   status=1
 else
   echo "  a broken hpack is caught"
+fi
+
+mkdir -p "$WORK/patched2/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/hpack.iyi").read_text()
+old = 'if @pending_min_table_size < @pending_table_size'
+if old not in src:
+    raise SystemExit("two-update patch site missing")
+Path("$WORK/patched2/std/hpack.iyi").write_text(src.replace(old, 'if false', 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the two-update patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched2:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpack_exercise.iyi" >"$WORK/mut2.out" 2>&1; then
+  echo "  the exercise PASSED without RFC 4.2 two size updates"
+  status=1
+else
+  echo "  a missing two-size-update is caught"
 fi
 
 echo

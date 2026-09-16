@@ -69,7 +69,14 @@ using std/path::{Path}
 
     # The stream: four words — descriptor, buffer address, read position, fill.
     def self.opendir(name : UInt8*) : Void*
-      fd = __iyi_openat(name, 0x90000, 0) # O_RDONLY | O_DIRECTORY | O_CLOEXEC
+      # x86_64: O_DIRECTORY 00200000 | O_CLOEXEC 02000000 = 0x90000
+      # aarch64: O_DIRECTORY (1<<14)=0x4000 | O_CLOEXEC 02000000 = 0x84000
+      # (arm64 fcntl.h overrides O_DIRECTORY; 0x90000 there is O_DIRECT|O_CLOEXEC.)
+      {% if flag?(:x86_64) %}
+        fd = __iyi_openat(name, 0x90000, 0)
+      {% else %}
+        fd = __iyi_openat(name, 0x84000, 0)
+      {% end %}
       return Pointer(Void).new(0_u64) if fd < 0_i64
       stream = Pointer(Int64).malloc(4_u64)
       stream[0] = fd
@@ -233,14 +240,12 @@ pub class Dir
     res
   end
 
-  def to_s(io : IO) : Nil
-    io.write("#<Dir:")
-    io.write(@path)
-    io.write(">")
+  def to_s : String
+    "#<Dir:#{@path}>"
   end
 
-  def inspect(io : IO) : Nil
-    to_s(io)
+  def inspect : String
+    to_s
   end
 
   # Class-level directory helpers
@@ -378,7 +383,7 @@ pub class Dir
 
     p = Path.new(p_str)
     segments = p.parts
-    return if segments.empty?
+    raise "Cannot create directory: #{p_str}" if segments.empty?
 
     acc = ""
     segments.each do |seg|
@@ -399,6 +404,8 @@ pub class Dir
         {% end %}
       end
     end
+
+    raise "Cannot create directory: #{p_str}" unless exists?(p_str)
   end
 
   def self.delete(path : String | Path) : Nil
@@ -457,13 +464,11 @@ pub class Dir
     file_pattern = p.basename
 
     if pattern.includes?("**")
-      # Recursive walk from base_dir or "."
-      root_walk = (base_dir == "." || base_dir.empty?) ? "." : base_dir
-      walk_recursive(root_walk, pattern, &block)
+      walk_recursive(glob_walk_root(pattern), pattern, 0, &block)
     elsif base_dir == "." || base_dir.empty?
       if Dir.exists?(".")
         Dir.each_child(".") do |child|
-          if Path.match_pattern(pattern, child)
+          if match_pattern(pattern, child)
             yield child
           end
         end
@@ -472,7 +477,7 @@ pub class Dir
       if Dir.exists?(base_dir)
         Dir.each_child(base_dir) do |child|
           full = Path.new(base_dir).join(child).to_s
-          if Path.match_pattern(file_pattern, child) || Path.match_pattern(pattern, full)
+          if match_pattern(file_pattern, child) || match_pattern(pattern, full)
             yield full
           end
         end
@@ -480,23 +485,108 @@ pub class Dir
     end
   end
 
-  private def self.walk_recursive(dir : String, pattern : String, &block : String -> Nil) : Nil
+  # Segments before the first `**`; `.` when the pattern is recursive from cwd.
+  private def self.glob_walk_root(pattern : String) : String
+    acc = ""
+    Path.new(pattern).parts.each do |seg|
+      break if seg == "**"
+      if acc.empty?
+        acc = seg
+      elsif acc == "/" || acc == "\\"
+        acc = acc + seg
+      else
+        acc = acc + "/" + seg
+      end
+    end
+    acc.empty? ? "." : acc
+  end
+
+  private def self.walk_recursive(dir : String, pattern : String, depth : Int32, &block : String -> Nil) : Nil
+    return if depth > 64
     return unless Dir.exists?(dir)
     Dir.each_child(dir) do |child|
       full_path = (dir == "." ? child : dir + "/" + child)
-      if Path.match_pattern(pattern, full_path)
+      if match_pattern(pattern, full_path)
         yield full_path
       end
       if Dir.exists?(full_path)
-        walk_recursive(full_path, pattern, &block)
+        walk_recursive(full_path, pattern, depth + 1, &block)
       end
     end
   end
 
+  # `*` / `?` stay inside one segment; `**` crosses `/`. A leading `.` in a
+  # segment matches only when the pattern has a `.` there (FNM_PERIOD).
+  private def self.match_pattern(pattern : String, name : String) : Bool
+    glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)
+  end
+
+  private def self.glob_match(p : UInt8*, pi : Int32, pn : Int32, s : UInt8*, si : Int32, sn : Int32) : Bool
+    star = 42_u8
+    qst = 63_u8
+    slash = 47_u8
+    dot = 46_u8
+    while pi < pn
+      pc = p[pi]
+      if pc == star && (pi + 1) < pn && p[pi + 1] == star
+        while pi < pn && p[pi] == star
+          pi = pi + 1
+        end
+        pi = pi + 1 if pi < pn && p[pi] == slash
+        return true if pi >= pn
+        i = si
+        while i <= sn
+          return true if glob_match(p, pi, pn, s, i, sn)
+          break if i >= sn
+          i = i + 1
+        end
+        return false
+      elsif pc == star
+        pi = pi + 1
+        at_seg = si == 0 || (si > 0 && s[si - 1] == slash)
+        hide_dot = at_seg && si < sn && s[si] == dot
+        if pi >= pn
+          return false if hide_dot
+          j = si
+          while j < sn
+            return false if s[j] == slash
+            j = j + 1
+          end
+          return true
+        end
+        i = si
+        while i <= sn
+          return true if glob_match(p, pi, pn, s, i, sn)
+          break if i >= sn || s[i] == slash
+          break if hide_dot && i == si
+          i = i + 1
+        end
+        return false
+      elsif pc == qst
+        at_seg = si == 0 || (si > 0 && s[si - 1] == slash)
+        return false if si >= sn || s[si] == slash
+        return false if at_seg && s[si] == dot
+        pi = pi + 1
+        si = si + 1
+      else
+        return false if si >= sn || s[si] != pc
+        pi = pi + 1
+        si = si + 1
+      end
+    end
+    si >= sn
+  end
+
   protected def self.c_str(str : String) : UInt8*
     n = str.bytesize
+    ptr = str.to_unsafe
+    i = 0
+    while i < n
+      raise "path contains a NUL byte" if ptr[i] == 0_u8
+      i = i + 1
+    end
     buf = Pointer(UInt8).malloc((n + 1).to_u64)
-    buf.copy_from(str.to_unsafe, n)
+    buf.copy_from(ptr, n)
     buf[n] = 0_u8
     buf
   end

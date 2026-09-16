@@ -23,11 +23,13 @@ class ::IyiFiber
   end
 
   def enqueue : Nil
+    raise "cannot enqueue a dead fiber" if dead?
+    raise "cannot enqueue a fiber that has no stack" if stack_top == 0_u64 && !same?(IyiScheduler.current)
     IyiScheduler.enqueue(self)
   end
 
   def resume : Nil
-    IyiScheduler.enqueue(self)
+    enqueue
   end
 
   def to_s : String
@@ -64,6 +66,9 @@ class ::IyiFiber
   end
 
   def self.suspend : Nil
+    # Drop Running and stay off the run queue, so `running?` / `resumable?`
+    # match a parked fiber rather than the one that is still executing.
+    IyiScheduler.current.state = IyiFiberState::Runnable
     IyiScheduler.reschedule
   end
 

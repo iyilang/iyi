@@ -1,8 +1,5 @@
 module std/comparable
 
-import std/traits
-using std/traits::{Cmp}
-
 # The Comparable trait is used by types whose instances may be ordered.
 #
 # Types implementing Comparable must provide an `<=>` method returning:
@@ -34,16 +31,25 @@ pub trait Comparable(T)
     cmp ? cmp >= 0 : false
   end
 
+  def ==(other : T) : ::Bool
+    cmp = self <=> other
+    cmp ? cmp == 0 : false
+  end
+
   # Clamps a value between min and max.
   def clamp(min_val, max_val)
+    if !min_val.nil? && !max_val.nil? && min_val > max_val
+      raise "Can't clamp with min > max"
+    end
     return max_val if !max_val.nil? && self > max_val
     return min_val if !min_val.nil? && self < min_val
     self
   end
 
-  # Clamps a value within range.
+  # Clamps a value within range. An exclusive range with a nil end is
+  # begin-only, so it is not refused.
   def clamp(range : Range)
-    raise "Can't clamp an exclusive range" if range.exclusive?
+    raise "Can't clamp an exclusive range" if range.exclusive? && !range.end.nil?
     clamp(range.begin, range.end)
   end
 

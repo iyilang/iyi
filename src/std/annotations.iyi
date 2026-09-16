@@ -1,36 +1,16 @@
-# Standard compiler annotations for iyi programs.
+# Compiler annotations, re-exported for `using std/annotations::{...}`.
 #
-# Declares annotations for deprecations, bit flags on enums, external link flags,
-# experimental APIs, and target CPU features.
+# `::Deprecated`, `::Flags`, `::Link`, `::Experimental` and `::TargetFeature`
+# are created by the compiler (`Program#initialize`) and are what compilation
+# actually honours: deprecation warnings, flags-enum numbering, linker flags,
+# experimental docs, and per-def CPU features. A second `annotation`
+# declaration in this module is a different type; `using` would attach that
+# copy and the compiler would ignore it.
 
 module std/annotations
 
-pub annotation Deprecated
-end
-
-pub annotation Flags
-end
-
-pub annotation Link
-end
-
-pub annotation Experimental
-end
-
-pub annotation TargetFeature
-end
-
-annotation ::Deprecated
-end
-
-annotation ::Flags
-end
-
-annotation ::Link
-end
-
-annotation ::Experimental
-end
-
-annotation ::TargetFeature
-end
+pub alias Deprecated = ::Deprecated
+pub alias Flags = ::Flags
+pub alias Link = ::Link
+pub alias Experimental = ::Experimental
+pub alias TargetFeature = ::TargetFeature

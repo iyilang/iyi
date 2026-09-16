@@ -4,6 +4,7 @@ import std/iterator
 using std/iterator::{Iterator}
 
 # Implements a step method for iterating from a value.
+# T needs `+`, `-`, `<=>`, and comparison with the integer 0 (`>` / `<`).
 pub class NumericStepIterator(T)
   @current : T
   @limit : T?
@@ -38,23 +39,47 @@ pub class NumericStepIterator(T)
       return @current
     end
 
-    next_val = @current + @step
-    if !limit.nil?
-      step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
-      cmp = (next_val <=> limit)
-      if step_sign > 0
-        if cmp > 0 || (cmp == 0 && @exclusive)
-          @reached_end = true
-          return nil
-        end
+    if limit.nil?
+      @current = @current + @step
+      return @current
+    end
+
+    # Room left versus the step. `@current + @step` overflows Int32 near MAX
+    # (MIN stepping down); `limit - @step` overflows near the other end when
+    # the step is large. Pick the subtraction when `@current` is already on the
+    # overflowing side of `+`, otherwise add first — the two cannot both fire
+    # for a value that still fits in the type.
+    step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
+    use_sub = (step_sign > 0 && @current > 0) || (step_sign < 0 && @current < 0)
+    if use_sub
+      gap = ((limit - @step) <=> @current)
+      if gap == step_sign
+        @current = @current + @step
+        return @current
+      elsif gap == 0 && !@exclusive
+        @reached_end = true
+        @current = @current + @step
+        return @current
       else
-        if cmp < 0 || (cmp == 0 && @exclusive)
-          @reached_end = true
-          return nil
-        end
+        @reached_end = true
+        return nil
       end
     end
 
+    next_val = @current + @step
+    cmp = (next_val <=> limit)
+    if step_sign > 0
+      if cmp > 0 || (cmp == 0 && @exclusive)
+        @reached_end = true
+        return nil
+      end
+    else
+      if cmp < 0 || (cmp == 0 && @exclusive)
+        @reached_end = true
+        return nil
+      end
+    end
+    @reached_end = true if cmp == 0
     @current = next_val
     @current
   end

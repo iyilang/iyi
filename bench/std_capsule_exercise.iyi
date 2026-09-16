@@ -123,6 +123,33 @@ dmax, lmax = VarInt.decode(vmax)
 assert_u64 VarInt::MAX, dmax, "decode MAX"
 assert_i32 8, lmax, "consumed MAX"
 
+# Boundary bytes: 63, 64, 2^30-1
+v63 = VarInt.encode(63_u64)
+assert_i32 1, v63.size, "63 canonical size"
+assert_u64 0x3f_u64, v63[0].to_u64, "63 byte 0"
+v64 = VarInt.encode(64_u64)
+assert_i32 2, v64.size, "64 canonical size"
+assert_u64 0x40_u64, v64[0].to_u64, "64 byte 0"
+assert_u64 0x40_u64, v64[1].to_u64, "64 byte 1"
+d64s, l64s = VarInt.decode_strict(v64)
+assert_u64 64_u64, d64s, "strict decode 64"
+assert_i32 2, l64s, "strict consumed 64"
+v2p30 = VarInt.encode(1073741823_u64)
+assert_i32 4, v2p30.size, "2^30-1 canonical size"
+assert_u64 0xbf_u64, v2p30[0].to_u64, "2^30-1 byte 0"
+assert_u64 0xff_u64, v2p30[1].to_u64, "2^30-1 byte 1"
+assert_u64 0xff_u64, v2p30[2].to_u64, "2^30-1 byte 2"
+assert_u64 0xff_u64, v2p30[3].to_u64, "2^30-1 byte 3"
+d2p30, l2p30 = VarInt.decode_strict(v2p30)
+assert_u64 1073741823_u64, d2p30, "strict decode 2^30-1"
+
+# Leftover bytes after a varint are not consumed
+left_buf = Bytes.new(3)
+left_buf[0] = 0x25_u8; left_buf[1] = 0xaa_u8; left_buf[2] = 0xbb_u8
+dl, ll = VarInt.decode(left_buf)
+assert_u64 37_u64, dl, "leftover decode value"
+assert_i32 1, ll, "leftover consumed only the varint"
+
 # Explicit multi-byte encoding (RFC 9000 Appendix A: 37 in 1, 2, 4, 8 bytes)
 m1 = VarInt.encode(37_u64, 1)
 m2 = VarInt.encode(37_u64, 2)
@@ -184,6 +211,12 @@ dg19 = HttpDatagram.from_stream_id(19_u64, Bytes.new(0))
 assert_u64 4_u64, dg19.quarter_stream_id, "qid from stream 19 (19 // 4 = 4)"
 assert_u64 16_u64, dg19.stream_id, "stream_id from qid 4"
 
+dg1 = HttpDatagram.from_stream_id(1_u64, Bytes.new(0))
+assert_u64 0_u64, dg1.quarter_stream_id, "qid from stream 1"
+assert_u64 0_u64, dg1.stream_id, "stream_id from qid 0 (1 // 4 * 4)"
+dg_maxq = HttpDatagram.new(VarInt::MAX, Bytes.new(0))
+assert_u64 18446744073709551612_u64, dg_maxq.stream_id, "MAX qid * 4 fits UInt64"
+
 # Datagram encoding and decoding with binary payload
 pay = Bytes.new(5)
 pay[0] = 0x01_u8; pay[1] = 0x02_u8; pay[2] = 0x03_u8; pay[3] = 0x04_u8; pay[4] = 0x05_u8
@@ -226,6 +259,23 @@ assert_i32 6, dg_off_len, "offset datagram consumed"
 # Truncated decode returns nil
 assert_true HttpDatagram.decode?(Bytes.new(0)).nil?, "empty datagram decode returns nil"
 assert_true HttpDatagram.decode?(offset_buf, offset: 20).nil?, "out of bounds offset returns nil"
+
+# RFC 9297 §2: HTTP Datagram payload is the remainder of the buffer
+rest_buf = Bytes.new(4)
+rest_buf[0] = 0x01_u8; rest_buf[1] = 0xaa_u8; rest_buf[2] = 0xbb_u8; rest_buf[3] = 0xcc_u8
+dg_rest, dg_rest_n = HttpDatagram.decode(rest_buf)
+assert_u64 1_u64, dg_rest.quarter_stream_id, "remainder datagram qid"
+assert_i32 3, dg_rest.payload.size, "remainder datagram payload is the rest"
+assert_i32 4, dg_rest_n, "remainder datagram consumes to end"
+
+# Strict mode refuses overlong quarter-stream ID
+ol_qid = Bytes.new(3)
+ol_qid[0] = 0x40_u8; ol_qid[1] = 0x00_u8; ol_qid[2] = 0xaa_u8
+assert_true HttpDatagram.decode?(ol_qid, 0, true).nil?, "strict overlong qid returns nil"
+ol_ok, ol_n = HttpDatagram.decode(ol_qid)
+assert_u64 0_u64, ol_ok.quarter_stream_id, "non-strict overlong qid is 0"
+assert_i32 1, ol_ok.payload.size, "non-strict overlong qid payload"
+assert_i32 3, ol_n, "non-strict overlong qid consumed"
 puts "  RFC 9297 HTTP Datagrams quarter-stream mapping, encode, and decode"
 
 puts "\n== capsule"
@@ -368,6 +418,14 @@ assert_u64 CapsuleType::DRAIN_WEBTRANSPORT_SESSION, known_caps[2].capsule_type, 
 caps_skipped, skip_cnt = CapsuleReader.read_with_skip_count(stream)
 assert_i32 3, caps_skipped.size, "read_with_skip_count known count"
 assert_i32 1, skip_cnt, "read_with_skip_count skipped count"
+
+empty_known, empty_skip = CapsuleReader.read_with_skip_count(Bytes.new(0))
+assert_i32 0, empty_known.size, "empty stream known count"
+assert_i32 0, empty_skip, "empty stream skip count"
+unk_only = Capsule.new(0x21_u64, Bytes.new(0))
+unk_known, unk_skip = CapsuleReader.read_with_skip_count(unk_only.encode)
+assert_i32 0, unk_known.size, "all-unknown known count"
+assert_i32 1, unk_skip, "all-unknown skip count"
 puts "  CapsuleReader stream processing and RFC 9297 Section 3.2 extensibility"
 
 puts "\n== connect"
@@ -422,6 +480,11 @@ assert_true CapsuleProtocol.is_capsule_protocol_header?("?1"), "is_capsule_proto
 assert_true CapsuleProtocol.is_capsule_protocol_header?("?1 "), "is_capsule_protocol_header ?1 "
 assert_false CapsuleProtocol.is_capsule_protocol_header?("?0"), "is_capsule_protocol_header ?0"
 assert_false CapsuleProtocol.is_capsule_protocol_header?(""), "is_capsule_protocol_header empty"
+assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", "?1;foo=bar"), "structured-field parameters are not accepted"
+assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", " ?1"), "leading space is not accepted"
+assert_false ExtendedConnect.valid_request?("CONNECT", "webtransport", nil, "example.com", "/wt"), "nil scheme"
+assert_false ExtendedConnect.valid_response?(199), "response 199 is invalid"
+assert_false ExtendedConnect.valid_response?(300), "response 300 is invalid"
 puts "  Extended CONNECT protocol negotiation and Capsule-Protocol header"
 
 puts "\nALL CHECKS PASSED"

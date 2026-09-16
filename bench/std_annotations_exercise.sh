@@ -4,8 +4,11 @@
 #     bash bench/std_annotations_exercise.sh
 #
 # Proves the exercise holds plain and --release, that an unexported annotation
-# is caught by using, and what the annotations refuse: non-string messages for
-# Deprecated and Experimental, and unrecognized named arguments for TargetFeature.
+# is caught by using, that dummy annotation types (not the compiler's) fail
+# the identity checks, and what the annotations refuse after `using`:
+# non-string messages for Deprecated and Experimental, unrecognized named
+# arguments for TargetFeature, empty Link, a missing library name actually
+# passed to the linker, and a deprecation warning on a call.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,7 +49,7 @@ fi
 
 echo
 echo "== every annotations section reported"
-for phrase in "== flags" "== deprecated" "== experimental" "== target_feature" "== link"; do
+for phrase in "== identity" "== flags" "== deprecated" "== experimental" "== target_feature" "== link"; do
   if ! grep -q "$phrase" "$WORK/annotations-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -68,10 +71,10 @@ mkdir -p "$WORK/patched/std"
 python3 - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/annotations.iyi").read_text()
-old = 'pub annotation Flags'
+old = 'pub alias Flags = ::Flags'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/annotations.iyi").write_text(src.replace(old, 'annotation Flags', 1))
+Path("$WORK/patched/std/annotations.iyi").write_text(src.replace(old, 'alias Flags = ::Flags', 1))
 PY
 if [ $? -ne 0 ]; then
   echo "  the patch did not apply"
@@ -84,10 +87,33 @@ else
 fi
 
 echo
+echo "== dummy annotation types fail the identity checks"
+mkdir -p "$WORK/dummy/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/annotations.iyi").read_text()
+for name in ("Deprecated", "Flags", "Link", "Experimental", "TargetFeature"):
+    old = f"pub alias {name} = ::{name}"
+    if old not in src:
+        raise SystemExit(f"dummy patch site missing: {name}")
+    src = src.replace(old, f"pub annotation {name}\nend", 1)
+Path("$WORK/dummy/std/annotations.iyi").write_text(src)
+PY
+if [ $? -ne 0 ]; then
+  echo "  the dummy patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/dummy:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_annotations_exercise.iyi" >"$WORK/dummy.out" 2>&1; then
+  echo "  the exercise PASSED on dummy annotation types"
+  status=1
+else
+  echo "  dummy types are caught by identity"
+fi
+
+echo
 echo "== what annotations refuse"
 refuses() { # refuses <label> <name> <phrase> <code_snippet>
   local label="$1" name="$2" phrase="$3" snippet="$4"
-  printf 'import std/annotations\nusing std/annotations::{Deprecated, Experimental, TargetFeature}\n%s\n' "$snippet" > "$WORK/$name.iyi"
+  printf 'module %s\nimport std/annotations\nusing std/annotations::{Deprecated, Experimental, TargetFeature, Link}\n%s\n' "$name" "$snippet" > "$WORK/$name.iyi"
   if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build.log" 2>&1; then
     echo "  $label: unexpectedly succeeded"
     status=1
@@ -108,6 +134,35 @@ refuses "non-string Experimental message" bad_exp "first argument must be a Stri
   $'@[Experimental(456)]\ndef bad_exp\nend'
 refuses "invalid TargetFeature named argument" bad_tf "no argument named 'invalid', expected 'cpu'" \
   $'class Simd\n  @[TargetFeature(invalid: "cpu")]\n  def bad_tf\n  end\nend'
+refuses "empty Link" bad_link "missing link arguments: must at least specify a library name" \
+  $'@[Link]\nlib LibEmpty\nend'
+refuses "bogus Link library" bad_lib "-lnosuchlib_annotations_probe" \
+  $'@[Link("nosuchlib_annotations_probe")]\nlib LibMissing\n  fun nosuch_annotations_probe_sym : Int32\nend\nputs LibMissing.nosuch_annotations_probe_sym'
+
+echo
+echo "== deprecation warning after using"
+printf '%s\n' \
+  'module dep_warn' \
+  'import std/annotations' \
+  'using std/annotations::{Deprecated}' \
+  'class G' \
+  '  @[Deprecated("use hi")]' \
+  '  def old_hi : String' \
+  '    "old"' \
+  '  end' \
+  'end' \
+  'puts G.new.old_hi' \
+  > "$WORK/dep_warn.iyi"
+if ! "$IYI" build -o "$WORK/dep_warn" "$WORK/dep_warn.iyi" > "$WORK/dep_warn.build.log" 2>&1; then
+  echo "  dep_warn: build failed"
+  sed -n '1,8p' "$WORK/dep_warn.build.log" | sed 's/^/    /'
+  status=1
+elif ! grep -q "Warning: Deprecated" "$WORK/dep_warn.build.log"; then
+  echo "  dep_warn: compiled without a deprecation warning"
+  status=1
+else
+  echo "  calling a @[Deprecated] method warns"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

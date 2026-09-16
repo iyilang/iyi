@@ -96,6 +96,48 @@ else
 fi
 
 echo
+echo "== old Number sleep cannot compile Float32"
+printf '%s\n' 'module kernel_sleep_f32' 'import std/kernel' 'using std/kernel::{sleep}' 'sleep(0.0_f32)' 'puts "F32_OK"' > "$WORK/sleep_f32.iyi"
+if ! "$IYI" build -o "$WORK/sleep_f32" "$WORK/sleep_f32.iyi" >"$WORK/sleep_f32.build" 2>&1; then
+  echo "  Float32 sleep did not compile on the real module"
+  sed -n '1,12p' "$WORK/sleep_f32.build"
+  status=1
+else
+  "$WORK/sleep_f32" >"$WORK/sleep_f32.out" 2>&1
+  if ! grep -q "F32_OK" "$WORK/sleep_f32.out"; then
+    echo "  Float32 sleep ran without the sentinel"
+    status=1
+  else
+    echo "  Float32 sleep compiles after the Number restriction was dropped"
+  fi
+fi
+mkdir -p "$WORK/patched-sleep/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/kernel.iyi").read_text()
+old = "pub def sleep(seconds : Float64) : Nil\n  if seconds <= 0.0"
+new = "pub def sleep(seconds : Number) : Nil\n  if seconds <= 0"
+if old not in src:
+    raise SystemExit("sleep patch site missing")
+Path("$WORK/patched-sleep/std/kernel.iyi").write_text(src.replace(old, new, 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the sleep patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched-sleep:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/sleep_f32_old" "$WORK/sleep_f32.iyi" >"$WORK/sleep_f32_old.build" 2>&1; then
+  echo "  Float32 sleep compiled on the old Number body"
+  status=1
+else
+  if grep -q "undefined method '<=' for Float32" "$WORK/sleep_f32_old.build"; then
+    echo "  the old Number sleep is caught on Float32"
+  else
+    echo "  the old Number sleep failed for a different reason"
+    sed -n '1,12p' "$WORK/sleep_f32_old.build"
+    status=1
+  fi
+fi
+
+echo
 echo "== abort paths"
 check_abort() { # check_abort <label> <name> <expected_code> <expected_stderr> <code>
   local label="$1" name="$2" expected_code="$3" expected_stderr="$4" code="$5"

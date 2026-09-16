@@ -118,6 +118,18 @@ prove_fails "invert does nothing" broken_invert \
 prove_fails "count ignores bit values" broken_count \
   'ones += 1 if unsafe_fetch(i)' \
   'ones += 1'
+
+prove_fails "hash ignores bit values" broken_hash \
+  'h = (31 &* h) &+ (unsafe_fetch(i) ? 1 : 0)' \
+  'h = (31 &* h)'
+
+prove_fails "fill start+count overflows Int32" broken_fill_overflow \
+  'limit = (c > @size - s) ? @size : (s + c)' \
+  'limit = (s + c > @size) ? @size : (s + c)'
+
+prove_fails "rotate goes through Int32" broken_rotate_i32 \
+  'k64 = n.to_i64 % @size.to_i64' \
+  'k64 = n.to_i.to_i64 % @size.to_i64'
 echo
 echo "== what bit_array refuses"
 
@@ -162,6 +174,8 @@ refuses "toggle past end" toggle_oob "Index out of bounds: 8 (size: 8)" 'ba = Bi
 refuses "first of empty array" first_empty "Empty BitArray" 'ba = BitArray.new(0); ba.first'
 refuses "last of empty array" last_empty "Empty BitArray" 'ba = BitArray.new(0); ba.last'
 refuses "fill start out of bounds" fill_oob "Start out of bounds" 'ba = BitArray.new(10); ba.fill(true, 12, 1)'
+refuses "size above Int32" size_too_large "Bit array size too large: 2147483648" 'BitArray.new(2147483648_i64)'
+refuses "negative size below Int32" neg_i64 "Negative bit array size: -2147483649" 'BitArray.new(-2147483649_i64)'
 
 echo
 if [ "$status" -eq 0 ]; then

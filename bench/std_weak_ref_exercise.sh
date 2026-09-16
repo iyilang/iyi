@@ -11,6 +11,7 @@
 #   * A freed target returns nil and zeroes the stored target.
 #   * Both plain and --release builds pass.
 #   * A broken module is caught when the stored address is discarded.
+#   * Calling prelude GC.is_heap_ptr (instead of std/gc) is caught.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,6 +87,27 @@ elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/benc
   status=1
 else
   echo "  a broken weak_ref is caught"
+fi
+
+echo
+echo "== proving prelude GC.is_heap_ptr does not resolve"
+mkdir -p "$WORK/patched_gc/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/weak_ref.iyi").read_text()
+old = "Std::Gc::GC.is_heap_ptr"
+if src.count(old) < 2:
+    raise SystemExit("gc qualify site missing")
+Path("$WORK/patched_gc/std/weak_ref.iyi").write_text(src.replace(old, "GC.is_heap_ptr"))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the gc patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_gc:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_weak_ref_exercise.iyi" >"$WORK/mut_gc.out" 2>&1; then
+  echo "  the exercise PASSED on prelude GC.is_heap_ptr"
+  status=1
+else
+  echo "  prelude GC.is_heap_ptr is caught"
 fi
 
 echo

@@ -6,7 +6,8 @@
 # Proves the exercise holds plain and --release, that all sections report,
 # and proves the checks can fail when the module is broken:
 # a broken step calculation, an ignored exclusive boundary, an unchecked
-# step direction, and a broken block-iterator trait default.
+# step direction, a broken block-iterator trait default, and an add-first
+# overflow at Int32 MAX.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,7 +58,8 @@ for phrase in \
   "== zero step and direction mismatches" \
   "== open-ended stepping without limit" \
   "== block iteration from trait default" \
-  "== iterator sum and std/iterator integration"; do
+  "== iterator sum and std/iterator integration" \
+  "== Int32 overflow near the type's edges"; do
   if ! grep -q "$phrase" "$WORK/steppable-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -102,10 +104,12 @@ PY
   fi
 }
 
-prove_fails "step arithmetic" mut1 "next_val = @current + @step" "next_val = @current + @step + @step"
-prove_fails "exclusive boundary check" mut2 "if cmp > 0 || (cmp == 0 && @exclusive)" "if cmp > 0"
+prove_fails "step arithmetic" mut1 "if gap == step_sign" "if gap != step_sign"
+prove_fails "exclusive boundary check" mut2 "elsif gap == 0 && !@exclusive" "elsif gap == 0"
 prove_fails "step direction validation" mut3 "if sign != step_sign" "if false"
 prove_fails "trait block iteration default" mut4 "yield item" "nil"
+prove_fails "overflow-safe gap compare" mut5 "gap = ((limit - @step) <=> @current)" "tmp = @current + @step
+    gap = ((limit - @step) <=> @current)"
 
 echo
 if [ "$status" -eq 0 ]; then

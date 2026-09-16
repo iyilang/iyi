@@ -62,12 +62,12 @@ pub def abort(message : String? = nil, status : Int32 = 1) : NoReturn
   __iyi_exit(status)
 end
 
-# Pauses the current fiber or thread for the specified duration.
-pub def sleep(seconds : Number) : Nil
-  if seconds <= 0
+# Busy-waits on the monotonic clock for `seconds`. Does not park a fiber.
+pub def sleep(seconds : Float64) : Nil
+  if seconds <= 0.0
     return
   end
-  target_ns = __iyi_monotonic_ns + (seconds.to_f64 * 1_000_000_000.0).to_i64
+  target_ns = __iyi_monotonic_ns + (seconds * 1_000_000_000.0).to_i64
   while __iyi_monotonic_ns < target_ns
   end
 end

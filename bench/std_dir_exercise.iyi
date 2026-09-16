@@ -119,6 +119,8 @@ assert_true child_count == 3, "Dir.each_child visits children excluding dot entr
 # Dir instance methods, rewind and stream navigation
 Dir.open(listing_dir) do |dir|
   assert_str listing_dir, dir.path, "instance path matches opened path"
+  assert_true dir.to_s.includes?(listing_dir), "to_s includes the opened path"
+  assert_true dir.to_s.includes?("#<Dir:"), "to_s uses the Dir inspect form"
   assert_true !dir.closed?, "opened dir instance is not closed"
   first_entry = dir.read
   assert_true first_entry != nil, "first read returns an entry"
@@ -142,6 +144,24 @@ assert_true d_manual.closed?, "d_manual is closed after close call"
 d_manual.close
 assert_true d_manual.closed?, "d_manual remains closed after idempotent close"
 puts "  entries, children, and dot entry filtering policies"
+
+puts "\n== glob star, recursive, hidden, and no-match"
+File.write(listing_dir + "/.hidden_glob", "h")
+glob_txt = Dir.glob(listing_dir + "/*.txt")
+assert_true glob_txt.size == 2, "Dir.glob *.txt matches two files"
+assert_true glob_txt.any? { |p| p.includes?("file_a.txt") }, "glob includes file_a.txt"
+assert_true glob_txt.any? { |p| p.includes?("file_b.txt") }, "glob includes file_b.txt"
+
+glob_star = Dir.glob(listing_dir + "/*")
+assert_true glob_star.any? { |p| p.includes?("file_a.txt") }, "glob * includes visible file"
+assert_true glob_star.any? { |p| p.includes?("nested_dir") }, "glob * includes nested dir"
+assert_true !glob_star.any? { |p| p.includes?(".hidden_glob") }, "glob * skips hidden names"
+
+glob_deep = Dir.glob(listing_dir + "/**/*.txt")
+assert_true glob_deep.size == 2, "recursive glob finds both txt files"
+assert_true Dir.glob(listing_dir + "/no_such_pattern_*").empty?, "no-match glob is empty"
+assert_true Dir[listing_dir + "/*.txt"].size == 2, "Dir[] is glob"
+puts "  glob matching, hidden names, recursion, and empty results"
 
 puts "\n== current working directory and cd"
 current_before = Dir.current

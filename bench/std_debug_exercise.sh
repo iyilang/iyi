@@ -6,6 +6,7 @@
 #
 # What it proves, in order:
 #
+#   Darwin:
 #   1. A panic several calls deep resolves every frame to the right line. The
 #      probe's call sites sit at known lines and each is checked by number,
 #      because a plausible line number that points at the wrong statement is
@@ -18,6 +19,16 @@
 #   4. The resolved program links only the platform libc as well, which is the
 #      dependency floor's rule and the reason this module may bind at all
 #      (`bench/std_exercise.sh` records that exception).
+#
+#   Linux (ELF reader not yet built):
+#   1. `import std/debug` still compiles and runs.
+#   2. A panic with the import does not grow `file:line:column` frames; the
+#      prelude's raise does not capture a backtrace on Linux, so the hook is
+#      never invoked.
+#   3. Invoking the installed hook dumps hex PCs, not source locations.
+#   4. The program does not leave `write` (or Darwin dyld symbols) undefined.
+#      `say` goes through `__iyi_write` (a syscall on Linux). A patched copy
+#      that binds `LibC.write` is refused, so the check has teeth.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +40,8 @@ status=0
 export IYI_PATH="$REPO/src"
 
 case "$(uname -s)" in
-  Darwin) ;;
+  Darwin) PLATFORM=darwin ;;
+  Linux) PLATFORM=linux ;;
   *)
     echo "std/debug: Darwin Mach-O/DWARF resolver (Linux ELF and Windows PE not yet built)"
     exit 0
@@ -57,6 +69,127 @@ platform_libc_only() {
     esac
   done
 }
+
+# Darwin dyld names, plus libc write: a Linux import must not grow any of these
+# as undefined symbols. Bare iyi programs already have __libc_start_main.
+forbidden_undef() {
+  nm -u "$1" 2>/dev/null | grep -E ' (write|dladdr|_NSGetExecutablePath|_dyld_get_image_vmaddr_slide)$'
+}
+
+# ── Linux: compile, refuse a fake DWARF resolution, keep the syscall write
+if [ "$PLATFORM" = linux ]; then
+  cat > "$WORK/imp.iyi" <<'EOF'
+module imp
+
+import std/debug
+
+print "ok\n"
+EOF
+
+  echo "== import std/debug compiles and runs"
+  if ! "$IYI" build -o "$WORK/imp" "$WORK/imp.iyi" > "$WORK/imp.build" 2>&1; then
+    echo "  build failed"
+    sed 's/^/    /' "$WORK/imp.build"
+    exit 1
+  fi
+  "$WORK/imp" > "$WORK/imp.out" 2>&1
+  grep -q "^ok$" "$WORK/imp.out" || fail "import ran but did not print ok"
+  platform_libc_only "$WORK/imp" "the imported program"
+  if forbidden_undef "$WORK/imp" | grep -q .; then
+    fail "import leaves a Darwin/libc symbol undefined:"
+    forbidden_undef "$WORK/imp" | sed 's/^/    /'
+  fi
+
+  cat > "$WORK/boom.iyi" <<'EOF'
+module boom
+
+import std/debug
+
+raise "boom"
+EOF
+
+  echo "== a panic with the import still has no DWARF frames"
+  if "$IYI" build -o "$WORK/boom" "$WORK/boom.iyi" > "$WORK/boom.build" 2>&1; then
+    "$WORK/boom" > "$WORK/boom.out" 2>&1
+    boom_code=$?
+    sed 's/^/  /' "$WORK/boom.out"
+    [ "$boom_code" -ne 0 ] || fail "a panicking program exited 0"
+    grep -q "^iyi: panic: boom" "$WORK/boom.out" || fail "the message is not the first line"
+    grep -q "\.iyi:[0-9]*:[0-9]*" "$WORK/boom.out" \
+      && fail "Linux panic grew a file:line:column frame; the ELF reader is not built"
+  else
+    echo "  build failed"
+    sed 's/^/    /' "$WORK/boom.build"
+    status=1
+  fi
+
+  cat > "$WORK/hook.iyi" <<'EOF'
+module hook
+
+import std/debug
+
+slot = Pointer(Void).new(0x401000_u64)
+if r = IyiPanic.resolver
+  r.call(pointerof(slot).as(Pointer(Void*)), 1)
+else
+  print "hook-nil\n"
+end
+EOF
+
+  echo "== the installed hook dumps hex, not file:line:column"
+  if "$IYI" build -o "$WORK/hook" "$WORK/hook.iyi" > "$WORK/hook.build" 2>&1; then
+    "$WORK/hook" > "$WORK/hook.out" 2>&1
+    sed 's/^/  /' "$WORK/hook.out"
+    grep -q "\[0x401000\]" "$WORK/hook.out" || fail "the Linux fallback did not dump the PC"
+    grep -q "\.iyi:[0-9]*:[0-9]*" "$WORK/hook.out" \
+      && fail "the Linux fallback resolved a column anyway"
+    grep -q "hook-nil" "$WORK/hook.out" && fail "import did not install the panic hook"
+  else
+    echo "  build failed"
+    sed 's/^/    /' "$WORK/hook.build"
+    status=1
+  fi
+
+  echo "== proving the write check fails when say binds LibC.write"
+  mkdir -p "$WORK/bad/std"
+  python3 - "$REPO/src/std/debug.iyi" "$WORK/bad/std/debug.iyi" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+t = open(src).read()
+t = t.replace("{% if flag?(:darwin) %}\n", "", 1)
+t = t.replace("{% end %}\n\nstruct DwarfResolver", "\nstruct DwarfResolver", 1)
+t = t.replace("n = __iyi_write(", "n = LibC.write(", 1)
+open(dst, "w").write(t)
+PY
+  cat > "$WORK/badprog.iyi" <<'EOF'
+module badprog
+
+import std/debug
+
+print "ok\n"
+EOF
+  if IYI_PATH="$WORK/bad:$REPO/src" "$IYI" build -o "$WORK/badprog" "$WORK/badprog.iyi" \
+       > "$WORK/badprog.build" 2>&1; then
+    if forbidden_undef "$WORK/badprog" | grep -q ' write$'; then
+      echo "  a LibC.write copy leaves write undefined, so the check has teeth"
+    else
+      fail "a module that binds LibC.write passed the write check"
+      forbidden_undef "$WORK/badprog" | sed 's/^/    /'
+    fi
+  else
+    echo "  patched copy failed to build"
+    sed 's/^/    /' "$WORK/badprog.build"
+    status=1
+  fi
+
+  echo
+  if [ "$status" -eq 0 ]; then
+    echo "std/debug imports on Linux, dumps hex, and does not bind libc write"
+  else
+    echo "STD DEBUG EXERCISE FAILED"
+  fi
+  exit $status
+fi
 
 # ── 1. a panic several calls deep, with the call sites on known lines
 #

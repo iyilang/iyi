@@ -62,12 +62,16 @@ puts "\n== sleep"
 sleep(0)
 sleep(-1)
 sleep(-0.5)
+sleep(0.0_f32)
+sleep(0_i8)
+sleep(0_i16)
+sleep(0_u32)
 
 t0 = __iyi_monotonic_ns
 sleep(0.005)
 t1 = __iyi_monotonic_ns
 elapsed_ns = t1 - t0
 assert_true elapsed_ns >= 4_000_000_i64, "sleep(0.005) paused for at least 4ms"
-puts "  sleep handled zero, negative, and positive durations"
+puts "  sleep handled zero, negative, narrow widths, and positive durations"
 
 puts "\nALL CHECKS PASSED"

@@ -628,4 +628,90 @@ assert_refusal(dec_bomb_size, wire_bomb_size,
 
 puts "  index 0, out of range index, table limit, truncated integer/string, EOS symbol, bad padding and decompression bombs refused"
 
+# ===========================================================================
+# 9. Integer overflow, two size updates, mid-block size update, C.5
+# ===========================================================================
+puts "\n== overflow, two size updates, mid-block size, C.5"
+
+# RFC 7541 5.1 / 7.4: a continuation that would overflow UInt64 is a
+# decoding error, not an arithmetic-overflow panic.
+ov = [0x1f_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xff_u8]
+ov_bytes = Bytes.new(ov.size) { |i| ov[i] }
+ov_r = Integer.decode(ov_bytes, 0, 5)
+raise "overflow must be HpackError, not a panic or a value" unless ov_r.is_a?(HpackError)
+assert_str("Integer overflow decoding HPACK integer", ov_r.message, "integer overflow is HpackError")
+
+# A huge indexed representation must not panic on to_i32.
+huge = [] of UInt8
+Integer.encode(2147483648_u64, 7, 0x80_u8, huge)
+huge_bytes = Bytes.new(huge.size) { |i| huge[i] }
+huge_r = Decoder.new.decode(huge_bytes)
+raise "huge index must be HpackError" unless huge_r.is_a?(HpackError)
+assert_true(huge_r.message.includes?("out of range") || huge_r.message.includes?("overflow"), "huge index refused")
+
+# RFC 7541 4.2: shrink to 0 then restore 4096 must emit both updates so
+# the decoder evicts. Wire starts with size-update 0 (0x20).
+enc_two = Encoder.new(use_huffman: false)
+dec_two = Decoder.new
+w_fill = enc_two.encode([HeaderField.new("keep-me", "aaaa")])
+r_fill = dec_two.decode(w_fill)
+raise "fill failed" if r_fill.is_a?(HpackError)
+enc_two.set_max_table_size(0)
+enc_two.set_max_table_size(4096)
+w_two = enc_two.encode([HeaderField.new("new-one", "bbbb")])
+assert_u8(0x20_u8, w_two[0], "RFC 4.2 first size update is 0")
+r_two = dec_two.decode(w_two)
+raise "two-update decode failed" if r_two.is_a?(HpackError)
+assert_int(1, dec_two.dynamic_table.length, "decoder evicted keep-me after seeing 0")
+assert_str("new-one", dec_two.dynamic_table.entries[0].name, "only new-one remains")
+assert_true(!Table.find(dec_two.dynamic_table, "keep-me", "aaaa")[1], "keep-me gone on decoder")
+
+# RFC 7541 4.2: a size update after a header field is a decoding error.
+mid = Bytes.new(2) { |i| [0x82_u8, 0x20_u8][i] }
+assert_refusal(Decoder.new, mid,
+  "Dynamic table size update not at beginning of header block",
+  "refuse mid-block size update")
+
+# RFC 7541 C.5 with SETTINGS_HEADER_TABLE_SIZE 256, no Huffman.
+enc_c5 = Encoder.new(max_table_size: 256, protocol_max_table_size: 256, use_huffman: false)
+dec_c5 = Decoder.new(max_table_size: 256, protocol_max_table_size: 256)
+h_c51 = [
+  HeaderField.new(":status", "302"),
+  HeaderField.new("cache-control", "private"),
+  HeaderField.new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+  HeaderField.new("location", "https://www.example.com"),
+]
+w_c51 = enc_c5.encode(h_c51)
+expected_c51 = [
+  0x48_u8, 0x03_u8, 0x33_u8, 0x30_u8, 0x32_u8, 0x58_u8, 0x07_u8,
+  0x70_u8, 0x72_u8, 0x69_u8, 0x76_u8, 0x61_u8, 0x74_u8, 0x65_u8, 0x61_u8, 0x1d_u8,
+  0x4d_u8, 0x6f_u8, 0x6e_u8, 0x2c_u8, 0x20_u8, 0x32_u8, 0x31_u8, 0x20_u8, 0x4f_u8, 0x63_u8, 0x74_u8, 0x20_u8,
+  0x32_u8, 0x30_u8, 0x31_u8, 0x33_u8, 0x20_u8, 0x32_u8, 0x30_u8, 0x3a_u8, 0x31_u8, 0x33_u8, 0x3a_u8, 0x32_u8, 0x31_u8, 0x20_u8,
+  0x47_u8, 0x4d_u8, 0x54_u8, 0x6e_u8, 0x17_u8,
+  0x68_u8, 0x74_u8, 0x74_u8, 0x70_u8, 0x73_u8, 0x3a_u8, 0x2f_u8, 0x2f_u8, 0x77_u8, 0x77_u8, 0x77_u8, 0x2e_u8,
+  0x65_u8, 0x78_u8, 0x61_u8, 0x6d_u8, 0x70_u8, 0x6c_u8, 0x65_u8, 0x2e_u8, 0x63_u8, 0x6f_u8, 0x6d_u8,
+]
+assert_bytes(expected_c51, w_c51, "RFC 7541 C.5.1 encode")
+d_c51 = dec_c5.decode(w_c51)
+raise "C.5.1 decode failed" if d_c51.is_a?(HpackError)
+assert_int(4, d_c51.size, "C.5.1 count")
+assert_str("302", d_c51[0].value, "C.5.1 status")
+assert_int(222, dec_c5.dynamic_table.size, "C.5.1 dynamic size 222")
+
+h_c52 = [
+  HeaderField.new(":status", "307"),
+  HeaderField.new("cache-control", "private"),
+  HeaderField.new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+  HeaderField.new("location", "https://www.example.com"),
+]
+w_c52 = enc_c5.encode(h_c52)
+expected_c52 = [0x48_u8, 0x03_u8, 0x33_u8, 0x30_u8, 0x37_u8, 0xc1_u8, 0xc0_u8, 0xbf_u8]
+assert_bytes(expected_c52, w_c52, "RFC 7541 C.5.2 encode")
+d_c52 = dec_c5.decode(w_c52)
+raise "C.5.2 decode failed" if d_c52.is_a?(HpackError)
+assert_str("307", d_c52[0].value, "C.5.2 status")
+assert_int(222, dec_c5.dynamic_table.size, "C.5.2 dynamic size 222")
+
+puts "  overflow is HpackError, two size updates evict, mid-block size refused, C.5.1-C.5.2 match"
+
 puts "\nALL CHECKS PASSED"

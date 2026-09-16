@@ -14,14 +14,6 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/gc
-
-# Forward is_heap_ptr on the prelude's GC to Std::Gc::GC so WeakRef's calls resolve.
-module ::GC
-  def self.is_heap_ptr(pointer : Void*) : Bool
-    Std::Gc::GC.is_heap_ptr(pointer)
-  end
-end
-
 import std/weak_ref
 using std/weak_ref::{WeakRef}
 

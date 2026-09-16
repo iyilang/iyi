@@ -35,6 +35,63 @@
   the same on every target; `Cancelled` moved into the prelude for that,
   and the ceiling stays at 3,734.
 
+### Fixed
+
+- **The twenty-two merge modules were probed, the way the other
+  fifty-three were.** Nearly 1,200 programs against `bit_array`, `dir`,
+  `docs_pseudo_methods`, `fiber`, `file`, `levenshtein`, `named_tuple`,
+  `weak_ref`, `capsule`, `hpack`, `udp`, `annotations`, `comparable`,
+  `empty`, `env`, `errno`, `iterable`, `kernel`, `nil`,
+  `reference_storage`, `steppable`, `symbol`, and `debug`. Local defects
+  are held by each module's gate. What is a leftover (`empty`,
+  `docs_pseudo_methods`, `p`/`pp`, `NilAssertionError`, `ENV` vs
+  `Program.env`, `Errno.value` as a class variable, `Fiber.new` beside
+  `group`) stays for the owner.
+
+  - `std/file`: `touch` no longer truncates; `empty?` of a missing path
+    is false; `chown` compiles; `match?` and `join("a", "b")` compile;
+    `real_path("")` refuses; tempfile names include the pid;
+    `readable?`/`writable?`/`executable?` ask `faccessat`;
+    `same_content?` of a directory is false; a NUL in a path is refused.
+  - `std/dir`: `glob` matches and walks from the segments before `**`;
+    `mkdir_p` through a file refuses; a NUL in a path is refused; Linux
+    `O_DIRECTORY` on aarch64 is `0x84000`; `to_s` is `#<Dir:path>`.
+  - `std/env`: an empty key, a key with `=`, and a NUL in a key or a
+    value are refused by name, instead of aliasing a prefix or dropping
+    the entry from `each`.
+  - `std/errno`: seven Linux numbers were Darwin leftovers (`EPROTO`
+    was 71, `EREMOTE`'s sentence).
+  - `std/hpack`: integer overflow and a huge index are `HpackError`;
+    a size update after a header field is refused; the encoder emits
+    RFC 7541 §4.2's minimum then the new size.
+  - `std/capsule`: overlong datagram varints name overlong, not
+    truncated; a quarter-stream id at `2^62` is refused; a negative
+    encode length is refused before `Bytes.new`.
+  - `std/udp`: `Datagram[i]` panics unless `i` is 0, 1 or 2. Receive
+    still blocks the worker (`MSG_DONTWAIT` is not parking).
+  - `std/bit_array`: `hash` mixes the bits; `fill`/`rotate`/`new` past
+    `Int32` refuse with the module's sentence.
+  - `std/comparable`: inverted `clamp` panics; `==` follows `<=>`;
+    exclusive `...nil` is unbounded; the unused `Cmp` import is gone.
+  - `std/symbol`: inspect escapes `"`, `\\`, newline; `:sort!` does not
+    need quotes.
+  - `std/steppable`: a walk that lands on `Int32::MAX` does not overflow
+    on the next `next`.
+  - `std/named_tuple`: hyphenated keys work on `[]`/`fetch`/`merge`.
+  - `std/levenshtein`: distance uses `bytesize == size`; Finder scores
+    an adjacent transposition as one.
+  - `std/fiber`: enqueue of a dead fiber or one with no stack panics;
+    `suspend` leaves the fiber resumable, not running.
+  - `std/weak_ref`: `Std::Gc::GC.is_heap_ptr`, no `::GC` shim.
+  - `std/debug`: `say` is `__iyi_write`; Darwin `lib LibC` is behind
+    `flag?(:darwin)`.
+  - `std/reference_storage`: `hash` wraps; `==` is field-wise.
+  - `std/nil`: a `not_nil` panic names the program site.
+  - `std/kernel`: `sleep` takes `Float64` (narrow widths compiled
+    `Number` and died).
+  - `std/annotations`: `using` re-exports the compiler's annotations,
+    so `@[Deprecated]` warns and `@[Link]` is `-l`.
+
 ## 0.13.0 — 2026-09-16
 
 **The standard library is iyi.** `src/std` is seventy-five modules and

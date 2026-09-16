@@ -215,6 +215,8 @@ Fiber.yield
 Fiber.yield
 assert_int 1, handoff_step, "parked worker remained off run queue"
 assert_true !parked_worker.dead?, "parked worker is not dead"
+assert_true !parked_worker.running?, "parked worker is not running"
+assert_true parked_worker.resumable?, "parked worker is resumable"
 
 # Explicit resume puts it back on run queue
 parked_worker.resume

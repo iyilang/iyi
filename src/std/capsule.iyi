@@ -84,6 +84,9 @@ pub struct VarInt
   # Used to produce canonical encodings or explicit multi-byte encodings as
   # specified in RFC 9000 Appendix A (e.g. 37 encoded in 2, 4, or 8 bytes).
   def self.encode(value : UInt64, length : Int32) : Bytes
+    unless length == 1 || length == 2 || length == 4 || length == 8
+      raise "invalid varint encoding length: #{length} (must be 1, 2, 4, or 8)"
+    end
     if value > MAX
       raise "varint value exceeds maximum 62-bit integer (2^62 - 1): #{value}"
     end
@@ -201,6 +204,9 @@ pub struct HttpDatagram
   @payload : Bytes
 
   def initialize(@quarter_stream_id : UInt64, @payload : Bytes)
+    if @quarter_stream_id > VarInt::MAX
+      raise "http datagram quarter stream id exceeds maximum 62-bit integer (2^62 - 1): #{@quarter_stream_id}"
+    end
   end
 
   getter quarter_stream_id : UInt64
@@ -261,10 +267,19 @@ pub struct HttpDatagram
   end
 
   # Decodes an HTTP Datagram from a byte slice, raising on truncation.
+  # Overlong quarter-stream IDs in strict mode raise the varint overlong
+  # sentence rather than pretending the buffer was truncated.
   def self.decode(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {HttpDatagram, Int32}
-    res = decode?(bytes, offset, strict: strict)
+    res = decode?(bytes, offset, strict: false)
     if res.nil?
       raise "http datagram truncated: buffer empty or ends before payload"
+    end
+    if strict
+      strict_res = decode?(bytes, offset, strict: true)
+      if strict_res.nil?
+        raise "overlong varint encoding: value encoded in non-minimal bytes"
+      end
+      return strict_res
     end
     res
   end

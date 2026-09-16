@@ -258,6 +258,17 @@ assert_true("bulk[9] still true after 0 count fill", bulk[9])
 bulk.fill(false, 0, -5)
 assert_true("bulk[9] still true after negative count fill", bulk[9])
 
+# Huge count must clamp, not panic with arithmetic overflow on start+count
+huge_fill = BitArray.new(8)
+huge_fill.fill(true, 2, 2147483647)
+assert_equal_int("huge fill count clamps", huge_fill.count(true), 6)
+assert_false("huge fill left [0]", huge_fill[0])
+assert_false("huge fill left [1]", huge_fill[1])
+assert_true("huge fill from [2]", huge_fill[2])
+assert_true("huge fill last", huge_fill[7])
+start_at_end = BitArray.new(4)
+start_at_end.fill(true, 4, 2147483647)
+assert_true("fill start==size huge count is no-op", start_at_end.none?)
 # Predicates: any?, none?, all?, one?
 
 pred = BitArray.new(8)
@@ -345,6 +356,15 @@ assert_false("different sizes not equal", orig == diff_size)
 
 # Equality with non-BitArray returns false
 assert_false("equality with non-BitArray", orig == "some string")
+# Hash follows equality: content, not Object type-id. Old hash(hasher) was
+# dead Crystal API, so every BitArray hashed to crystal_type_id.
+assert_true("equal copies hash equal", orig.hash == duped.hash)
+same_bits = BitArray.new(70) { |i| i % 3 == 0 }
+assert_true("equal reconstruction hashes equal", orig.hash == same_bits.hash)
+flipped = orig.dup
+flipped.toggle(0)
+assert_false("different bits hash differently", orig.hash == flipped.hash)
+assert_false("empty hashes unlike nonempty", BitArray.new(0).hash == orig.hash)
 
 # to_s and inspect
 str_ba = BitArray.new(4)
@@ -417,5 +437,11 @@ assert_equal_str("rotate 2", rot_ba.to_s, "BitArray[00010]")
 
 rot_ba.rotate_in_place(0)
 assert_equal_str("rotate 0 no-op", rot_ba.to_s, "BitArray[00010]")
+rot_i64 = BitArray.new(5)
+rot_i64[0] = true
+rot_i64.rotate_in_place(3000000001_i64)
+assert_equal_str("rotate huge i64", rot_i64.to_s, "BitArray[00001]")
+rot_i64.rotate_in_place(3000000000_i64)
+assert_equal_str("rotate huge i64 multiple of size", rot_i64.to_s, "BitArray[00001]")
 
 puts "\nALL CHECKS PASSED"

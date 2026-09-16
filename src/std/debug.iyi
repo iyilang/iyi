@@ -11,31 +11,33 @@
 
 module std/debug
 
-lib LibC
-  struct DlInfo
-    dli_fname : UInt8*
-    dli_fbase : Void*
-    dli_sname : UInt8*
-    dli_saddr : Void*
-  end
+{% if flag?(:darwin) %}
+  lib LibC
+    struct DlInfo
+      dli_fname : UInt8*
+      dli_fbase : Void*
+      dli_sname : UInt8*
+      dli_saddr : Void*
+    end
 
-  fun dladdr(addr : Void*, info : DlInfo*) : Int32
-  fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
-  fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
-  fun mmap(addr : Void*, len : UInt64, prot : Int32, flags : Int32, fd : Int32, offset : Int64) : Void*
-  fun munmap(addr : Void*, len : UInt64) : Int32
-  fun open(path : UInt8*, oflag : Int32, ...) : Int32
-  fun close(fd : Int32) : Int32
-  fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
-  fun _dyld_get_image_vmaddr_slide(index : Int32) : Int64
-end
+    fun dladdr(addr : Void*, info : DlInfo*) : Int32
+    fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
+    fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
+    fun mmap(addr : Void*, len : UInt64, prot : Int32, flags : Int32, fd : Int32, offset : Int64) : Void*
+    fun munmap(addr : Void*, len : UInt64) : Int32
+    fun open(path : UInt8*, oflag : Int32, ...) : Int32
+    fun close(fd : Int32) : Int32
+    fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
+    fun _dyld_get_image_vmaddr_slide(index : Int32) : Int64
+  end
+{% end %}
 
 struct DwarfResolver
   private def self.say(text : String) : Nil
     written = 0_i64
     total = text.bytesize.to_i64
     while written < total
-      n = LibC.write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
+      n = __iyi_write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
       break if n <= 0_i64
       written = written + n
     end

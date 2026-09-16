@@ -62,8 +62,10 @@ pub struct Datagram
       @data
     elsif i == 1
       @host
-    else
+    elsif i == 2
       @port
+    else
+      raise "Datagram index #{i} is not 0, 1, or 2"
     end
   end
 
@@ -102,6 +104,10 @@ pub class UdpSocket
 
   def to_unsafe : Int32
     @fd
+  end
+
+  private def check_open : Nil
+    raise "socket is closed" if @fd < 0
   end
 
   # --- Factory Constructors ---
@@ -159,6 +165,7 @@ pub class UdpSocket
 
   # Sends bytes to a destination host and port.
   def send_to(bytes : Bytes, host : String, port : Int32) : Int32
+    check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, bytes.to_unsafe, bytes.size.to_u64, 0, addr, addrlen)
     raise "cannot send to #{host}:#{port}" if res < 0_i64
@@ -172,6 +179,8 @@ pub class UdpSocket
 
   # Sends a raw buffer to a destination host and port.
   def send_to(buffer : Pointer(UInt8), count : Int32, host : String, port : Int32) : Int32
+    check_open
+    raise "negative count: #{count}" if count < 0
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
     raise "cannot send to #{host}:#{port}" if res < 0_i64
@@ -184,6 +193,8 @@ pub class UdpSocket
   # Returns {payload, peer_host, peer_port}.
   # Raises if an error occurs, or if the receive timed out / would block.
   def receive_from(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)
+    check_open
+    raise "negative count: #{max_bytes}" if max_bytes < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
@@ -215,6 +226,7 @@ pub class UdpSocket
   # Receives a datagram into a caller-supplied Bytes buffer.
   # Returns {subslice_of_received_bytes, peer_host, peer_port}.
   def receive_from(buffer : Bytes) : Tuple(Bytes, String, Int32)
+    check_open
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     flags = @non_blocking ? MSG_DONTWAIT : 0
@@ -242,6 +254,8 @@ pub class UdpSocket
 
   # Receives a datagram, or returns nil if non-blocking or timed out with no data.
   def receive_from?(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)?
+    check_open
+    raise "negative count: #{max_bytes}" if max_bytes < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
@@ -268,6 +282,7 @@ pub class UdpSocket
 
   # Receives into a buffer, returning nil on timeout or would block.
   def receive_from?(buffer : Bytes) : Tuple(Bytes, String, Int32)?
+    check_open
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     flags = @non_blocking ? MSG_DONTWAIT : 0
@@ -306,6 +321,7 @@ pub class UdpSocket
 
   # Connects the UDP socket to a remote host and port (sets default peer).
   def connect(host : String, port : Int32) : Nil
+    check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_connect(@fd, addr, addrlen)
     raise "cannot connect UDP socket to #{host}:#{port}" if res < 0
@@ -313,6 +329,7 @@ pub class UdpSocket
 
   # Sends bytes to the connected peer.
   def send(bytes : Bytes) : Int32
+    check_open
     res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
     raise "cannot send on UDP socket" if res < 0_i64
     res.to_i32
@@ -340,6 +357,7 @@ pub class UdpSocket
 
   # Reads back the locally bound port assigned by the OS.
   def local_port : Int32
+    check_open
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
@@ -350,6 +368,7 @@ pub class UdpSocket
 
   # Reads back the locally bound IP address.
   def local_address : String
+    check_open
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
@@ -362,9 +381,10 @@ pub class UdpSocket
   # Closes the socket file descriptor.
   def close : Nil
     if @fd >= 0
-      __iyi_close(@fd.to_i64)
+      fd = @fd
       @fd = -1
       @closed = true
+      __iyi_close(fd.to_i64)
     end
   end
 
@@ -376,22 +396,28 @@ pub class UdpSocket
 
   # Returns the current receive buffer size (SO_RCVBUF).
   def receive_buffer_size : Int32
+    check_open
     UdpSocket.__sys_get_buffer_size(@fd, SOL_SOCKET, SO_RCVBUF)
   end
 
   # Sets the receive buffer size (SO_RCVBUF).
   def receive_buffer_size=(size : Int32) : Nil
+    check_open
+    raise "negative buffer size: #{size}" if size < 0
     res = UdpSocket.__sys_set_buffer_size(@fd, SOL_SOCKET, SO_RCVBUF, size)
     raise "cannot set receive buffer size" if res < 0
   end
 
   # Returns the current send buffer size (SO_SNDBUF).
   def send_buffer_size : Int32
+    check_open
     UdpSocket.__sys_get_buffer_size(@fd, SOL_SOCKET, SO_SNDBUF)
   end
 
   # Sets the send buffer size (SO_SNDBUF).
   def send_buffer_size=(size : Int32) : Nil
+    check_open
+    raise "negative buffer size: #{size}" if size < 0
     res = UdpSocket.__sys_set_buffer_size(@fd, SOL_SOCKET, SO_SNDBUF, size)
     raise "cannot set send buffer size" if res < 0
   end
@@ -402,6 +428,8 @@ pub class UdpSocket
 
   # Sets the socket receive timeout in milliseconds. 0 disables timeout.
   def read_timeout=(ms : Int32) : Nil
+    check_open
+    raise "negative timeout: #{ms}" if ms < 0
     @read_timeout = ms
     res = UdpSocket.__sys_set_timeout(@fd, SO_RCVTIMEO, ms)
     raise "cannot set read timeout" if res < 0
@@ -411,6 +439,8 @@ pub class UdpSocket
 
   # Sets the socket send timeout in milliseconds. 0 disables timeout.
   def write_timeout=(ms : Int32) : Nil
+    check_open
+    raise "negative timeout: #{ms}" if ms < 0
     @write_timeout = ms
     res = UdpSocket.__sys_set_timeout(@fd, SO_SNDTIMEO, ms)
     raise "cannot set write timeout" if res < 0
@@ -428,6 +458,8 @@ pub class UdpSocket
   # Polls whether the socket is readable within timeout_ms milliseconds.
   # Returns true if a datagram is ready to be read, false on timeout.
   def poll_read(timeout_ms : Int32 = 0) : Bool
+    check_open
+    raise "negative timeout: #{timeout_ms}" if timeout_ms < 0
     UdpSocket.__sys_poll_read(@fd, timeout_ms)
   end
 
@@ -454,6 +486,8 @@ pub class UdpSocket
         curr = 0
         has_digit = false
       elsif ch >= '0' && ch <= '9'
+        raise "cannot resolve address: #{host}" if curr > 255
+        raise "cannot resolve address: #{host}: an octet with a leading zero is not decimal" if has_digit && curr == 0
         curr = curr * 10 + (ch.ord - 48)
         has_digit = true
       else
@@ -471,6 +505,7 @@ pub class UdpSocket
   end
 
   private def self.parse_hex_group(str : String) : Int32
+    raise "invalid IPv6 address group" if str.bytesize == 0 || str.bytesize > 4
     val = 0
     i = 0
     while i < str.bytesize
@@ -502,13 +537,16 @@ pub class UdpSocket
 
     return bytes if host == "::"
 
-    # Find "::" if present
+    # Find "::" if present; a second "::" is not an address.
     double_colon = -1
     idx = 0
     while idx < host.bytesize - 1
       if host[idx] == ':' && host[idx + 1] == ':'
+        if double_colon >= 0
+          raise "invalid IPv6 address: #{host}"
+        end
         double_colon = idx
-        break
+        idx = idx + 1
       end
       idx = idx + 1
     end
@@ -663,6 +701,7 @@ pub class UdpSocket
   end
 
   def self.make_sockaddr(host : String, port : Int32)
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
     if host.includes?(":")
       v6_bytes = parse_ipv6(host)
       {make_sockaddr_in6(v6_bytes, port), SOCKADDR_IN6_SIZE, AF_INET6}
@@ -678,6 +717,15 @@ pub class UdpSocket
     is_v6 = {% if flag?(:darwin) %} family == 30 {% else %} family == 10 {% end %}
 
     host = if is_v6
+             unspec = true
+             u = 0
+             while u < 16
+               if addr[8 + u] != 0_u8
+                 unspec = false
+                 break
+               end
+               u = u + 1
+             end
              # Check for ::1 loopback
              is_loopback = true
              j = 0
@@ -688,7 +736,9 @@ pub class UdpSocket
                end
                j = j + 1
              end
-             if is_loopback && addr[23] == 1_u8
+             if unspec
+               "::"
+             elsif is_loopback && addr[23] == 1_u8
                "::1"
              else
                parts = [] of String

@@ -48,7 +48,7 @@ end
 
 # 4. TargetFeature on methods
 class TargetFeatureOps
-  @[TargetFeature("neon")]
+  @[TargetFeature("+sse2")]
   def vector_add(a : Int32, b : Int32) : Int32
     a + b
   end
@@ -68,6 +68,16 @@ end
 @[Link(ldflags: "-lc")]
 class LinkMetadata
 end
+
+puts "== identity"
+# A second `annotation` type in std/annotations would make these false:
+# `using` would attach the copy, and the compiler would ignore it.
+assert_true {{ Deprecated == ::Deprecated }}, "Deprecated is the compiler annotation"
+assert_true {{ Flags == ::Flags }}, "Flags is the compiler annotation"
+assert_true {{ Link == ::Link }}, "Link is the compiler annotation"
+assert_true {{ Experimental == ::Experimental }}, "Experimental is the compiler annotation"
+assert_true {{ TargetFeature == ::TargetFeature }}, "TargetFeature is the compiler annotation"
+puts "  using names the compiler annotations"
 
 puts "== flags"
 assert_int 0_i64, Permissions::None.value.to_i64, "Permissions::None is 0"
@@ -125,17 +135,9 @@ puts "\n== target_feature"
 tf_ops = TargetFeatureOps.new
 assert_int 42_i64, tf_ops.vector_add(15, 27).to_i64, "vector_add result"
 assert_int 42_i64, tf_ops.generic_scale(6, 7).to_i64, "generic_scale result"
-
-tf_vec_found = {{ TargetFeatureOps.methods.find { |m| m.name == "vector_add" }.annotation(TargetFeature) ? true : false }}
-assert_true tf_vec_found, "TargetFeature detected on vector_add"
-tf_vec_feat = {{ TargetFeatureOps.methods.find { |m| m.name == "vector_add" }.annotation(TargetFeature)[0] }}
-assert_str "neon", tf_vec_feat, "TargetFeature feature argument matches"
-
-tf_scale_found = {{ TargetFeatureOps.methods.find { |m| m.name == "generic_scale" }.annotation(TargetFeature) ? true : false }}
-assert_true tf_scale_found, "TargetFeature detected on generic_scale"
-tf_scale_cpu = {{ TargetFeatureOps.methods.find { |m| m.name == "generic_scale" }.annotation(TargetFeature)[:cpu] }}
-assert_str "generic", tf_scale_cpu, "TargetFeature named cpu argument matches"
-puts "  target feature annotations with positional and named arguments"
+# The compiler consumes TargetFeature (sets the def's CPU features) and does
+# not store it for `.annotation`. A dummy std copy was inspectable and ignored.
+puts "  target feature methods callable; annotation is the compiler's"
 
 puts "\n== link"
 lib_link_found = {{ LibCInterop.annotation(Link) ? true : false }}

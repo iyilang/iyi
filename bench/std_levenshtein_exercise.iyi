@@ -21,12 +21,6 @@ def assert_nil(actual, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected nil\n  got      #{actual.inspect}" unless actual.nil?
 end
 
-class ::String
-  def single_byte_optimizable? : Bool
-    bytesize == size
-  end
-end
-
 import std/levenshtein
 
 puts "== identical strings"
@@ -134,5 +128,16 @@ m = Levenshtein.find("aple", words)
 assert_str "apple", m || "", "find in candidate list"
 assert_nil Levenshtein.find("zebra", words), "find unmatched candidate returns nil"
 puts "  Finder ranks nearest match within tolerance and returns nil on exceed"
+
+puts "\n== finder transposition (OSA)"
+# Classical distance still costs 2; the finder uses OSA so a swapped pair is one.
+assert_int 1, Levenshtein.osa_distance("count", "cuont"), "adjacent transposition is 1 under OSA"
+assert_int 2, Levenshtein.osa_distance("abc", "cba"), "non-adjacent transposition stays 2"
+assert_int 1, Levenshtein.osa_distance("かんじ", "んかじ"), "multibyte adjacent transposition"
+assert_int 0, Levenshtein.osa_distance("", ""), "OSA empty vs empty"
+assert_int 1, Levenshtein.osa_distance("", "a"), "OSA empty vs a"
+found = Levenshtein.find("cuont", ["count", "cont", "mount"])
+assert_str "count", found || "", "finder prefers the transposed name over a deletion"
+puts "  finder treats an adjacent transposition as one edit"
 
 puts "\nALL CHECKS PASSED"

@@ -13,7 +13,7 @@
 #   * Control flow: try returns nil without yielding to the block.
 #   * Nil-safety flow typing: truthiness narrowing, nil? predicate, and || defaulting.
 #   * NilAssertionError and unwraps: default and custom error messages,
-#     and not_nil panics on nil with the expected message.
+#     and not_nil panics on nil with the expected message, naming the program site.
 #   * Broken implementations of hash, object_id, same?, inspect, and try are caught.
 #
 # Exits non-zero if any check fails.
@@ -140,12 +140,56 @@ refuses() {
     status=1
     return
   fi
+  if ! grep -qF -- "$WORK/$name.iyi:" "$WORK/$name.out"; then
+    echo "  $label: refused, but did not name the program site"
+    cat "$WORK/$name.out"
+    status=1
+    return
+  fi
   printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
 }
 
 refuses "default nil unwrap" not_nil_default "Nil assertion failed" 'nil.not_nil'
 refuses "custom nil unwrap message" not_nil_custom "value must not be nil" 'nil.not_nil("value must not be nil")'
 refuses "explicit NilAssertionError raise" raise_err "explicit assertion failed" 'raise NilAssertionError.new("explicit assertion failed")'
+
+echo
+echo "== a not_nil that drops the program site is caught"
+mkdir -p "$WORK/broken_site/std"
+python3 -c "
+src = open('$REPO/src/std/nil.iyi').read()
+broken = src.replace(
+    'raise ::NilAssertionError.new(msg.nil? ? \"Nil assertion failed\" : msg), file, line',
+    'raise ::NilAssertionError.new(msg.nil? ? \"Nil assertion failed\" : msg)'
+).replace(
+    'raise error.message, file, line',
+    'raise error.message'
+)
+if broken == src:
+    raise SystemExit('patch did not apply')
+open('$WORK/broken_site/std/nil.iyi', 'w').write(broken)
+" || { echo "  dropped site: the patch did not apply"; status=1; }
+if [ -f "$WORK/broken_site/std/nil.iyi" ]; then
+  printf 'module main\n\nimport std/nil\n\nnil.not_nil\n' > "$WORK/broken_site_prog.iyi"
+  if IYI_PATH="$WORK/broken_site:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/broken_site_prog" "$WORK/broken_site_prog.iyi" > "$WORK/broken_site.build" 2>&1; then
+    "$WORK/broken_site_prog" > "$WORK/broken_site.out" 2>&1 || true
+    if grep -qF -- "$WORK/broken_site_prog.iyi:" "$WORK/broken_site.out"; then
+      echo "  dropped site: still named the program; the new check would not catch this"
+      cat "$WORK/broken_site.out"
+      status=1
+    elif ! grep -qF -- "Nil assertion failed" "$WORK/broken_site.out"; then
+      echo "  dropped site: did not panic with the module sentence"
+      cat "$WORK/broken_site.out"
+      status=1
+    else
+      echo "  dropped site: panic has no program site; the new check would catch it"
+    fi
+  else
+    echo "  dropped site: the program did not build"
+    cat "$WORK/broken_site.build"
+    status=1
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

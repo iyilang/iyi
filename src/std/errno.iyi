@@ -105,17 +105,17 @@ pub enum Errno
     ELOOP           =  40
     ENOMSG          =  42
     EIDRM           =  43
-    ESOCKTNOSUPPORT =  44
-    EPFNOSUPPORT    =  46
-    ESHUTDOWN       =  58
-    ETOOMANYREFS    =  59
+    ESOCKTNOSUPPORT =  94
+    EPFNOSUPPORT    =  96
+    ESHUTDOWN       = 108
+    ETOOMANYREFS    = 109
     ENOSTR          =  60
     ENODATA         =  61
     ETIME           =  62
     ENOSR           =  63
-    EHOSTDOWN       =  64
+    EHOSTDOWN       = 112
     ENOLINK         =  67
-    EUSERS          =  68
+    EUSERS          =  87
     EPROTO          =  71
     EMULTIHOP       =  72
     EBADMSG         =  74
@@ -149,7 +149,7 @@ pub enum Errno
     ECANCELED       = 125
     EOWNERDEAD      = 130
     ENOTRECOVERABLE = 131
-    EREMOTE         =  71
+    EREMOTE         =  66
   {% end %}
 
   def message : String

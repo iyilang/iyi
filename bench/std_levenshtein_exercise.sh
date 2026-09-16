@@ -53,7 +53,8 @@ for phrase in \
   "== transposition" \
   "== multibyte and unicode" \
   "== symmetry" \
-  "== finder and candidate search"; do
+  "== finder and candidate search" \
+  "== finder transposition (OSA)"; do
   if ! grep -q "$phrase" "$WORK/levenshtein-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -110,6 +111,46 @@ elif IYI_PATH="$WORK/patched2:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/ben
   status=1
 else
   echo "  a broken substitution cost is caught"
+fi
+
+# Mutation 3: Finder scores with classic distance (transposition costs 2)
+mkdir -p "$WORK/patched3/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/levenshtein.iyi").read_text()
+old = 'dist = Levenshtein.osa_distance(@target, name)'
+if old not in src:
+    raise SystemExit("patch site missing: osa_distance in Finder")
+Path("$WORK/patched3/std/levenshtein.iyi").write_text(src.replace(old, 'dist = Levenshtein.distance(@target, name)', 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the finder-distance patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched3:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_levenshtein_exercise.iyi" >"$WORK/mut3.out" 2>&1; then
+  echo "  the exercise PASSED on finder using classic distance"
+  status=1
+else
+  echo "  a finder that ignores transposition is caught"
+fi
+
+# Mutation 4: a method the prelude does not have, instead of bytesize == size
+mkdir -p "$WORK/patched4/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/levenshtein.iyi").read_text()
+old = 'if string1.bytesize == string1.size && string2.bytesize == string2.size'
+if old not in src:
+    raise SystemExit("patch site missing: bytesize == size")
+Path("$WORK/patched4/std/levenshtein.iyi").write_text(src.replace(old, 'if string1.single_byte_optimizable? && string2.single_byte_optimizable?', 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the single-byte-optimizable patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched4:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_levenshtein_exercise.iyi" >"$WORK/mut4.out" 2>&1; then
+  echo "  the exercise PASSED with single_byte_optimizable?"
+  status=1
+else
+  echo "  a method the prelude does not have is caught"
 fi
 
 echo

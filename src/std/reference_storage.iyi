@@ -28,9 +28,19 @@ pub struct ReferenceStorage(T) < Value
     pointerof(@type_id).as(T)
   end
 
+  # Field-wise, with class fields compared by identity. `T#==` on a
+  # `String` field follows the pointer, so uninitialized storage died of
+  # a memory fault; two storages with equal string contents at different
+  # addresses compared equal while `hash` mixed the pointer bytes. Whole-
+  # blob compare is also wrong: `other` is passed by value and padding
+  # bytes are not copied, so two constructed `Node`s compared unequal.
   def ==(other : ReferenceStorage(T)) : Bool
     {% for ivar in T.instance_vars %}
-      return false unless to_reference.@{{ivar.id}} == other.to_reference.@{{ivar.id}}
+      {% if ivar.type.class? %}
+        return false unless to_reference.@{{ivar.id}}.object_id == other.to_reference.@{{ivar.id}}.object_id
+      {% else %}
+        return false unless to_reference.@{{ivar.id}} == other.to_reference.@{{ivar.id}}
+      {% end %}
     {% end %}
     true
   end
@@ -39,13 +49,16 @@ pub struct ReferenceStorage(T) < Value
     false
   end
 
+  # Wrapping mix: checked `h * 31` panics with `arithmetic overflow` as
+  # soon as `instance_sizeof(T)` is more than a few bytes (a constructed
+  # `Point` is 8).
   def hash : Int32
     h = 0
     ptr = pointerof(@type_id).as(Pointer(UInt8))
     i = 0
     sz = instance_sizeof(T)
     while i < sz
-      h = (h * 31) ^ ptr[i].to_i32
+      h = (h &* 31) ^ ptr[i].to_i32
       i = i + 1
     end
     h

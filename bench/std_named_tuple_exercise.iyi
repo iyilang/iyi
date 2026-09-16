@@ -156,4 +156,48 @@ assert_true cloned_nt[:item].val == 42, "clone value preserved"
 assert_true cloned_nt[:item] != box_nt[:item], "clone creates distinct instance"
 puts "  merge, reverse_merge, to_a, to_h, and clone"
 
+puts "\n== edges"
+hetero_a = {a: 1, b: "two"}.to_a
+assert_true hetero_a.size == 2, "hetero to_a size"
+assert_true hetero_a[0] == {:a, 1}, "hetero to_a first"
+assert_true hetero_a[1] == {:b, "two"}, "hetero to_a second"
+
+hetero_h = {a: 1, b: "two"}.to_h
+assert_true hetero_h[:a] == 1, "hetero to_h a"
+assert_true hetero_h[:b] == "two", "hetero to_h b"
+assert_true hetero_h.size == 2, "hetero to_h size"
+
+empty_nt = NamedTuple.new
+empty_a = empty_nt.to_a
+assert_true empty_a.size == 0, "empty to_a size"
+empty_h = empty_nt.to_h
+assert_true empty_h.size == 0, "empty to_h size"
+empty_c = empty_nt.clone
+assert_true empty_c.size == 0, "empty clone size"
+assert_true empty_c.empty? == true, "empty clone empty?"
+empty_m = empty_nt.merge(empty_nt)
+assert_true empty_m.size == 0, "empty merge empty"
+
+hyphen = {"a-b": 7, x: 1}
+hyphen_k = ["a-b"][0]
+assert_true hyphen[hyphen_k] == 7, "hyphen string []"
+assert_true hyphen[hyphen_k]? == 7, "hyphen string []?"
+assert_true hyphen.fetch(hyphen_k, 0) == 7, "hyphen fetch hit"
+assert_true hyphen.has_key?("a-b") == true, "hyphen has_key?"
+hyphen_keys = [] of Symbol
+hyphen.each_key { |k| hyphen_keys << k }
+assert_true hyphen_keys.size == 2, "hyphen each_key size"
+assert_true hyphen_keys[0] == :"a-b", "hyphen each_key first"
+hyphen_extra = {"a-b": 9, y: 3}
+hyphen_m = hyphen.merge(hyphen_extra)
+assert_true hyphen_m[hyphen_k] == 9, "hyphen merge other wins"
+assert_true hyphen_m[:x] == 1, "hyphen merge keeps x"
+assert_true hyphen_m[:y] == 3, "hyphen merge adds y"
+
+rm_kw = {a: 1, b: 2}.reverse_merge(b: 20, c: 30)
+assert_true rm_kw[:b] == 2, "reverse_merge kwargs self wins"
+assert_true rm_kw[:a] == 1, "reverse_merge kwargs keeps a"
+assert_true rm_kw[:c] == 30, "reverse_merge kwargs adds c"
+puts "  hetero to_a/to_h, empty conversions, hyphen keys, reverse_merge kwargs"
+
 puts "\nALL CHECKS PASSED"

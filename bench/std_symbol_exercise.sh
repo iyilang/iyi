@@ -113,13 +113,23 @@ prove_fails "inverted <=> ordering" inv_order \
 
 prove_fails "inspect omits required quotes" dropped_quotes \
   "ASSERTION FAILED: inspect with space" \
-  ':\"" + val + "\""' \
+  ':\"" + Symbol.escape_quoted_body(val) + "\""' \
   ':" + val'
 
 prove_fails "quote_for_named_argument leaves special names raw" raw_named \
   "ASSERTION FAILED: quote_for_named_argument _" \
-  '"\"" + string + "\""' \
+  '"\"" + escape_quoted_body(string) + "\""' \
   'string'
+
+prove_fails "inspect does not escape an inner quote" unescaped_quote \
+  "ASSERTION FAILED: inspect escapes inner quote" \
+  'Symbol.escape_quoted_body(val)' \
+  'val'
+
+prove_fails "needs_quotes? quotes a legal bang identifier" quoted_bang \
+  "ASSERTION FAILED: needs_quotes? sort!" \
+  'last_byte == 33_u8 || last_byte == 63_u8' \
+  'false'
 
 echo
 if [ "$status" -eq 0 ]; then

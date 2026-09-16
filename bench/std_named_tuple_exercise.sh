@@ -47,7 +47,7 @@ fi
 
 echo
 echo "== every named_tuple section reported"
-for phrase in "== construction" "== access" "== iteration" "== equality" "== merge and transformation"; do
+for phrase in "== construction" "== access" "== iteration" "== equality" "== merge and transformation" "== edges"; do
   if ! grep -q "$phrase" "$WORK/named_tuple-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -82,6 +82,40 @@ elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/benc
   status=1
 else
   echo "  a broken named_tuple is caught"
+fi
+
+echo
+echo "== proving hetero to_a fails when the module types only the first value"
+mkdir -p "$WORK/patched_toa/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/named_tuple.iyi").read_text()
+old = """    {% if T.keys.size == 0 %}
+      [] of {Symbol, NoReturn}
+    {% else %}
+      [
+        {% for k in T.keys %}
+          { {{k.symbolize}}, self[{{k.symbolize}}] },
+        {% end %}
+      ]
+    {% end %}"""
+if old not in src:
+    raise SystemExit("to_a patch site missing")
+new = """    arr = [] of {Symbol, typeof(values[0])}
+    {% for k in T.keys %}
+      arr << {:{{k.id}}, self[:{{k.id}}]}
+    {% end %}
+    arr"""
+Path("$WORK/patched_toa/std/named_tuple.iyi").write_text(src.replace(old, new, 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the to_a patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_toa:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_named_tuple_exercise.iyi" >"$WORK/mut_toa.out" 2>&1; then
+  echo "  the exercise PASSED on a broken to_a"
+  status=1
+else
+  echo "  a broken to_a is caught"
 fi
 
 echo

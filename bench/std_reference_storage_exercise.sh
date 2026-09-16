@@ -48,6 +48,7 @@ for phrase in \
   "== manual pre_initialize and initialize" \
   "== heap allocation and custom storage" \
   "== equality and hash" \
+  "== uninitialized storage with a reference field" \
   "== string representation"; do
   if ! grep -q "$phrase" "$WORK/reference_storage-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
@@ -83,6 +84,27 @@ elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/benc
   status=1
 else
   echo "  a broken reference_storage is caught"
+fi
+
+echo
+echo "== proving wrapping hash is required"
+mkdir -p "$WORK/patched_hash/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/reference_storage.iyi").read_text()
+old = "h = (h &* 31) ^ ptr[i].to_i32"
+if old not in src:
+    raise SystemExit("hash patch site missing")
+Path("$WORK/patched_hash/std/reference_storage.iyi").write_text(src.replace(old, "h = (h * 31) ^ ptr[i].to_i32", 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the hash patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_hash:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/mut_hash.out" 2>&1; then
+  echo "  the exercise PASSED on overflow-checked hash"
+  status=1
+else
+  echo "  overflow-checked hash is caught"
 fi
 
 echo

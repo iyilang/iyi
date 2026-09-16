@@ -137,10 +137,21 @@ assert_str "clean", Symbol.quote_for_named_argument("clean"), "quote_for_named_a
 assert_str "\"_\"", Symbol.quote_for_named_argument("_"), "quote_for_named_argument _"
 assert_str "\"1st\"", Symbol.quote_for_named_argument("1st"), "quote_for_named_argument 1st"
 assert_str "\"foo-bar\"", Symbol.quote_for_named_argument("foo-bar"), "quote_for_named_argument foo-bar"
+assert_str "\"sort!\"", Symbol.quote_for_named_argument("sort!"), "quote_for_named_argument bang"
+assert_str "\"a\\\"b\"", Symbol.quote_for_named_argument("a\"b"), "quote_for_named_argument escapes inner quote"
 
 io_q = Memory.new
 Symbol.quote_for_named_argument(io_q, "foo-bar")
 assert_str "\"foo-bar\"", io_q.to_s, "quote_for_named_argument(io)"
+
+assert_true !Symbol.needs_quotes?("sort!"), "needs_quotes? sort!"
+assert_true !Symbol.needs_quotes?("empty?"), "needs_quotes? empty?"
+assert_true Symbol.needs_quotes_for_named_argument?("sort!"), "named arg still quotes bang"
+
+assert_str ":sort!", :sort!.inspect, "inspect bang identifier unquoted"
+assert_str ":empty?", :empty?.inspect, "inspect question identifier unquoted"
+assert_str ":\"a\\\"b\"", :"a\"b".inspect, "inspect escapes inner quote"
+assert_str ":\"a\\nb\"", :"a\nb".inspect, "inspect escapes newline"
 puts "  needs_quotes?, needs_quotes_for_named_argument? and quote_for_named_argument"
 
 puts "\nALL CHECKS PASSED"

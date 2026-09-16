@@ -4,9 +4,10 @@
 #     bash bench/std_dir_exercise.sh
 #
 # Proves the exercise holds plain and --release, that broken dot-entry filtering
-# is caught, and what directory operations refuse: opening non-existent paths or
-# files, deleting non-empty or non-existent directories, creating existing
-# directories, and operating on closed directory handles.
+# and a dead glob matcher are caught, and what directory operations refuse:
+# opening non-existent paths or files, deleting non-empty or non-existent
+# directories, creating existing directories, mkdir_p through a file, and
+# operating on closed directory handles.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,6 +53,7 @@ echo "== every dir section reported"
 for phrase in "== create, exists and file paths" \
               "== nested creation with mkdir_p" \
               "== list entries and dot entries policy" \
+              "== glob star, recursive, hidden, and no-match" \
               "== current working directory and cd" \
               "== delete empty and non-empty directories"; do
   if ! grep -q "$phrase" "$WORK/dir-plain.out" 2>/dev/null; then
@@ -91,6 +93,27 @@ else
 fi
 
 echo
+echo "== proving glob is caught when the matcher is dead"
+mkdir -p "$WORK/patched_glob/std"
+python3 - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/dir.iyi").read_text()
+old = "glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)"
+if old not in src:
+    raise SystemExit("glob patch site missing")
+Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "false", 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the glob patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_glob:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_dir_exercise.iyi" >"$WORK/mut_glob.out" 2>&1; then
+  echo "  the exercise PASSED on a dead glob matcher"
+  status=1
+else
+  echo "  dead glob matcher is caught"
+fi
+
+echo
 echo "== what dir operations refuse"
 refuses() { # refuses <label> <name> <phrase> <code>
   local label="$1" name="$2" phrase="$3"
@@ -126,6 +149,12 @@ refuses "delete a missing directory" delete_missing "Cannot remove directory" \
 
 refuses "mkdir an existing directory" mkdir_existing "Cannot create directory" \
   'Dir.mkdir("'"$WORK"'/already_created"); Dir.mkdir("'"$WORK"'/already_created")'
+
+refuses "mkdir_p through a regular file" mkdir_p_file "Cannot create directory" \
+  'File.write("'"$WORK"'/mkdir_p_blocker", "x"); Dir.mkdir_p("'"$WORK"'/mkdir_p_blocker/child")'
+
+refuses "open a path containing a NUL byte" open_nul "path contains a NUL byte" \
+  'Dir.open("'"$WORK"'" + "/abc\u0000def")'
 
 refuses "cd to a missing directory" cd_missing "Cannot change directory to" \
   'Dir.cd("'"$WORK"'/missing_target_cwd")'

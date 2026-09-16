@@ -53,6 +53,15 @@ assert_true Errno::EAGAIN.value == Errno::EWOULDBLOCK.value, "EAGAIN and EWOULDB
   assert_int 35, Errno::EDEADLK.value, "EDEADLK is 35 on linux"
   assert_int 110, Errno::ETIMEDOUT.value, "ETIMEDOUT is 110 on linux"
   assert_int 111, Errno::ECONNREFUSED.value, "ECONNREFUSED is 111 on linux"
+  assert_int 94, Errno::ESOCKTNOSUPPORT.value, "ESOCKTNOSUPPORT is 94 on linux"
+  assert_int 96, Errno::EPFNOSUPPORT.value, "EPFNOSUPPORT is 96 on linux"
+  assert_int 108, Errno::ESHUTDOWN.value, "ESHUTDOWN is 108 on linux"
+  assert_int 109, Errno::ETOOMANYREFS.value, "ETOOMANYREFS is 109 on linux"
+  assert_int 112, Errno::EHOSTDOWN.value, "EHOSTDOWN is 112 on linux"
+  assert_int 87, Errno::EUSERS.value, "EUSERS is 87 on linux"
+  assert_int 66, Errno::EREMOTE.value, "EREMOTE is 66 on linux"
+  assert_true Errno::EREMOTE.value != Errno::EPROTO.value, "EREMOTE and EPROTO are distinct on linux"
+  assert_str "Protocol error", Errno::EPROTO.message, "EPROTO message is Protocol error"
 {% end %}
 puts "  POSIX constants and alias values verified"
 

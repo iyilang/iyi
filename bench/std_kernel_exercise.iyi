@@ -1,0 +1,73 @@
+# Exercises `std/kernel`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_kernel_exercise.iyi
+
+module bench/std_kernel_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/kernel
+using std/kernel::{p, pp, puts_all, print_all, loop, abort, sleep}
+
+puts "== p"
+v_int = p(42)
+assert_true v_int == 42, "p returns single integer"
+
+v_str = p("kernel test")
+assert_str "kernel test", v_str, "p returns single string"
+
+tup = p("alpha", 100, true)
+assert_true tup == {"alpha", 100, true}, "p returns tuple of arguments"
+puts "  p inspected single and variadic arguments, returning objects"
+
+puts "\n== pp"
+pp_int = pp(99)
+assert_true pp_int == 99, "pp returns single integer"
+
+pp_str = pp("pretty")
+assert_str "pretty", pp_str, "pp returns single string"
+
+pp_tup = pp(1, "two", false)
+assert_true pp_tup == {1, "two", false}, "pp returns tuple of arguments"
+puts "  pp inspected single and variadic arguments, returning objects"
+
+puts "\n== puts_all"
+puts_all("line1", 12345, "line3")
+puts "  puts_all emitted items with newlines"
+
+puts "\n== print_all"
+print_all("chunkA", "-", 987, "\n")
+puts "  print_all emitted items without implicit newlines"
+
+puts "\n== loop"
+iterations = 0
+sum = 0
+loop do
+  iterations += 1
+  sum += iterations
+  break if iterations == 10
+end
+assert_true iterations == 10, "loop ran 10 iterations"
+assert_true sum == 55, "loop accumulated sum"
+puts "  loop executed until explicit break"
+
+puts "\n== sleep"
+sleep(0)
+sleep(-1)
+sleep(-0.5)
+
+t0 = __iyi_monotonic_ns
+sleep(0.005)
+t1 = __iyi_monotonic_ns
+elapsed_ns = t1 - t0
+assert_true elapsed_ns >= 4_000_000_i64, "sleep(0.005) paused for at least 4ms"
+puts "  sleep handled zero, negative, and positive durations"
+
+puts "\nALL CHECKS PASSED"

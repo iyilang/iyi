@@ -1,0 +1,98 @@
+# Exercises `std/weak_ref`: inspect a referenced object without preventing collection.
+#
+# Run via:
+#     ./bin/iyi run bench/std_weak_ref_exercise.iyi
+
+module bench/std_weak_ref_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/gc
+
+# Forward is_heap_ptr on the prelude's GC to Std::Gc::GC so WeakRef's calls resolve.
+module ::GC
+  def self.is_heap_ptr(pointer : Void*) : Bool
+    Std::Gc::GC.is_heap_ptr(pointer)
+  end
+end
+
+import std/weak_ref
+using std/weak_ref::{WeakRef}
+
+class Widget
+  getter id : Int32
+  getter name : String
+  property counter : Int32
+
+  def initialize(@id : Int32, @name : String)
+    @counter = 0
+  end
+end
+
+puts "== strongly held target"
+w = Widget.new(101, "gizmo")
+ref = WeakRef(Widget).new(w)
+target = ref.value
+
+assert_true !target.nil?, "strongly held target reads back as present"
+if target
+  assert_true target.id == 101, "id matches"
+  assert_str "gizmo", target.name, "name matches"
+  target.counter = 5
+  assert_true w.counter == 5, "mutation visible on original object"
+  assert_true target.object_id == w.object_id, "object_id matches original"
+  assert_true target.as(Void*).address == w.as(Void*).address, "heap address matches original"
+end
+
+# Multiple reads preserve identity
+second = ref.value
+if second
+  assert_true second.object_id == w.object_id, "subsequent read preserves identity"
+end
+
+# Multiple WeakRefs to the same target agree
+ref2 = WeakRef(Widget).new(w)
+if t2 = ref2.value
+  assert_true t2.object_id == w.object_id, "second weak ref sees same object"
+end
+puts "  present, accessor, attributes, and identity"
+
+puts "\n== non-heap target"
+# String literal lives in static rodata (not heap), so WeakRef sets target to 0
+lit = "static string literal in rodata"
+ref_lit = WeakRef(String).new(lit)
+assert_true ref_lit.value.nil?, "non-heap object returns nil from value"
+
+# Dynamically heap-allocated string returns non-nil with identity preserved
+dyn = "heap " + "string"
+ref_dyn = WeakRef(String).new(dyn)
+if v = ref_dyn.value
+  assert_str "heap string", v, "heap string reads back"
+  assert_true v.object_id == dyn.object_id, "heap string identity matches"
+else
+  raise "heap string should not be nil"
+end
+puts "  non-heap target yields nil; dynamic heap string yields present"
+
+puts "\n== cleared reference"
+# Automatic GC collection timing is non-deterministic (depending on conservative
+# stack scanning, register contents, and allocation churn thresholds). The module
+# guarantees that when a chunk is no longer in the heap (tested here deterministically
+# via explicit free), value yields nil and zeroes @target.
+item = Widget.new(202, "freed-widget")
+ref_freed = WeakRef(Widget).new(item)
+assert_true !ref_freed.value.nil?, "initially present"
+ptr = item.as(Void*)
+Std::Gc::GC.free(ptr)
+assert_true !Std::Gc::GC.is_heap_ptr(ptr), "chunk is no longer a heap pointer"
+assert_true ref_freed.value.nil?, "freed chunk returns nil and zeroes target"
+assert_true ref_freed.value.nil?, "subsequent calls continue to return nil"
+puts "  freed target yields nil and resets target address"
+
+puts "\nALL CHECKS PASSED"

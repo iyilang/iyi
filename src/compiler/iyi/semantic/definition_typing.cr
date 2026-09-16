@@ -86,6 +86,7 @@ module Iyi::DefinitionTyping
 
     def flush_into(node : Expressions) : Nil
       return if @probes.empty?
+      was_empty = node.expressions.empty?
       unless @witness_nodes.empty?
         # Witnesses are declarations, and declarations are the top-level
         # pass's business — which already ran. One more visitor over just
@@ -95,9 +96,12 @@ module Iyi::DefinitionTyping
         wrapper = Expressions.new(@witness_nodes.dup)
         wrapper.accept(visitor)
         visitor.process_finished_hooks
-        node.expressions.concat(@witness_nodes)
       end
-      node.expressions.concat(@probes)
+      # Prepend witness declarations and probes before user code so that
+      # definition typing probes under `if false` do not overwrite the
+      # program's return type. If the program had no expressions, keep Nil.
+      node.expressions = @witness_nodes + @probes + node.expressions
+      node.expressions << Nop.new if was_empty
     end
 
     # The entry file plus everything it imported: exactly the code this

@@ -203,6 +203,17 @@ echo "== the library is iyi all the way down"
 # syscalls on Linux, libSystem on darwin, and the floor names every symbol
 # they add there.
 #
+# Whether `file` and `dir` should keep those bindings at all was left open for
+# a while, and it is settled by measurement rather than by taste: a program
+# that imports both and calls into them links **libSystem and nothing else**.
+# The two declare `LibC` and `LibKernel32` only, 29 `fun`s between them, so
+# what they reach is the platform libc that Appendix B #19 already permits and
+# `ALLOWED_LIBS_PROGRAM` already lists. They cost no ancestor library, which is
+# the property the whole dependency floor exists to hold, so they stay as they
+# are. Shrinking them to the prelude's intrinsics would move the same syscalls
+# into the prelude and spend its measured line budget to change nothing a
+# program links.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.

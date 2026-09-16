@@ -51,37 +51,36 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # iyi: -Dwithout_iconv because iyi's String has no encoding conversion, so the
 # compiler asks libiconv for nothing.
 #
-# -Dgc_none was tried here too and is not viable, which is worth recording so
-# nobody spends the afternoon again. The conclusion has held through a
-# re-measurement on 2026-09-16; the symptom has not, so the old one is replaced
-# rather than left to mislead. A collector-free compiler now builds clean and
-# emits no invalid IR at all. What it does instead is drop symbols and fall
-# over: building samples/iyi/collections.iyi failed 9 runs out of 10 with
-# `Undefined symbols for architecture arm64` naming a generic instantiation the
-# compiler had already agreed to emit
-# (`Nums@Std::Enumerable::Enumerable#zip<Words>`), one of those runs taking a
-# `Trace/BPT trap: 5` in the compiler itself, and bench/std_iterator_exercise.sh
-# failing the same way. The same compiler with bdw-gc: 0 failures in 5 runs of
-# that sample, 0 across two passes of every sample, and that exercise green.
+# -Dgc_none was not viable here for a long time, and the reason was never a
+# collector. It was one byte. `String::Builder` grew its buffer to
+# `real_bytesize + count` while `to_s` writes the string's terminator at
+# `@buffer[real_bytesize]`, so a string whose final size landed exactly on its
+# capacity had its terminator written one byte outside its allocation, and the
+# reclaiming shrink was skipped because the capacity was not bigger than what
+# was needed. bdw-gc rounds a block up and never reissues an address something
+# still points at, so under the collector every program was correct. Plain
+# `malloc` returns exactly the size asked for, and the next allocation
+# overwrote the byte.
 #
-# The cause was half right and the half that named parallel codegen is wrong,
-# which matters because it is also the exit condition. Tested against the
-# switch two lines below, which removes the parallel half:
+# What that looked like from outside: a 116-byte mangled function name in a
+# 128-byte block, needing 129, clean at `target_def_fun` and corrupt at the
+# same address by `check_mod_fun`, LLVM's `strlen` reading into the next
+# allocation, and `samples/iyi/collections.iyi` failing to link 10 runs out of
+# 10. Four mechanisms were written down before it and all four were wrong:
+# invalid IR, a dropped symbol, an empty link line, and parallel codegen. The
+# switch two lines below removes the parallel half and changed nothing, 5/5
+# either way, which is what finally ruled threading out.
 #
-#   gc_none                 collections.iyi failed 5/5
-#   gc_none + sequential    collections.iyi failed 5/5
+# Fixed in src/string/builder.cr, and measured: the same sample now builds 0
+# failures in 10 runs with a fresh cache each, every sample builds, and the
+# collector-free compiler links libLLVM and libSystem only. bench/collector_
+# free_floor.sh is the gate, and it fails if the reservation is removed again.
 #
-# Identical, so threading is not the discriminator, and the failure is
-# deterministic rather than "some runs": the same `Undefined symbols` reached
-# from `__iyi_main`, with a `Trace/BPT trap: 5` still showing up
-# single-threaded. What is left of the reason is the part that does not mention
-# threads: the compiler is a long walk over ASTs and `src/gc/none.cr` never
-# frees. So the compiler keeps bdw-gc and the programs it builds do not, which
-# is the split SPEC.md III.9 already draws.
-#
-# What ends this is therefore a collector that frees, not one that serves
-# parallel codegen. Waiting on the parallel milestone would be waiting on the
-# wrong thing.
+# The compiler still builds with bdw-gc by default, because that is a
+# permitted toolchain dependency and dropping it is a separate decision about
+# peak memory rather than about correctness. What this note no longer says is
+# that a collector is required: it is not, and the bug it was hiding was in
+# the standard library the whole time.
 override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)
 SPEC_WARNINGS_OFF := --exclude-warnings spec/std --exclude-warnings spec/compiler --exclude-warnings spec/primitives --exclude-warnings src/float/printer --exclude-warnings src/random.cr
 override SPEC_FLAGS += $(if $(verbose),-v )$(if $(junit_output),--junit_output $(junit_output) )$(if $(order),--order=$(order) )

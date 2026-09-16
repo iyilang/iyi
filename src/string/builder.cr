@@ -123,7 +123,16 @@ class String::Builder < IO
   private def increase_capacity_by(count)
     raise IO::EOFError.new if count >= Int32::MAX - real_bytesize
 
-    new_bytesize = real_bytesize + count
+    # The trailing zero byte is part of what the buffer has to hold: `to_s`
+    # writes it at `@buffer[real_bytesize]`, one past the content, and
+    # `initialize` reserves it for the same reason. Growing to exactly
+    # `real_bytesize + count` dropped it, so a string whose final size landed
+    # on the capacity had its terminator written one byte past the allocation,
+    # and the reclaiming shrink below was skipped, because the capacity was
+    # not bigger than what was needed. bdw-gc rounds a block up and hides
+    # this; a plain `malloc` hands back exactly the size asked for, and the
+    # next allocation overwrites the byte.
+    new_bytesize = real_bytesize + count + 1
     return if new_bytesize <= @capacity
 
     new_capacity = calculate_new_capacity(new_bytesize)

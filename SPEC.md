@@ -5038,10 +5038,19 @@ floor back (GC_DESIGN.md, `bench/gc_default.py`). The price this paragraph
 recorded — a default that allocates and never frees — is paid no longer; it
 is `-Dgc_none`'s price now, chosen rather than shipped. One shortcut stays
 closed by measurement: **`-Dgc_none` is not viable for the compiler itself.**
-It was built and tried, and the compiler emits invalid IR ("Load operand must
-be a pointer", from `LLVM::Module#verify`) on some runs and dies in
-`main_user_code` on others, because it is a long walk over ASTs with parallel
-codegen and fibers under an allocator that never frees. So the compiler keeps
+The verdict has survived a re-measurement on 2026-09-16 and the symptom has
+not, so what stands here is today's, because a reason nobody can reproduce is
+worse than no reason. A collector-free compiler now builds clean and emits no
+invalid IR at all. What it does instead is lose work it had already agreed to
+do: building `samples/iyi/collections.iyi` failed **9 runs out of 10** with
+`Undefined symbols for architecture arm64` naming a generic instantiation,
+`Nums@Std::Enumerable::Enumerable#zip<Words>`, with one run taking a
+`Trace/BPT trap: 5` inside the compiler, and
+`bench/std_iterator_exercise.sh` failing the same way. The same compiler with
+bdw-gc, measured in the same session: **0 failures in 5 runs** of that sample,
+0 across two passes of every sample, and that exercise green. The cause is
+unchanged: a long walk over ASTs with parallel codegen and fibers under an
+allocator that never frees. So the compiler keeps
 its collector, and the collected default for programs arrived through the
 real collector, exactly as this sentence once predicted.
 

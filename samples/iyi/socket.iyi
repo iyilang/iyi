@@ -19,17 +19,17 @@ port = server.local_port
 puts "server listening on an ephemeral port"
 
 # Client connects to server on loopback
-client = IyiSocket.connect("127.0.0.1", port)
+client = IyiSocket.connect("127.0.0.1", port).or_panic
 client.write("hello from client\n")
 
 # Server accepts and reads the message
-conn = server.accept
-msg = conn.read(1024)
+conn = server.accept.or_panic
+msg = conn.read(1024).or_panic
 puts "server received: #{msg}"
 
 # Server replies to client
 conn.write("hello from server\n")
-reply = client.read(1024)
+reply = client.read(1024).or_panic
 puts "client received: #{reply}"
 
 # Clean teardown

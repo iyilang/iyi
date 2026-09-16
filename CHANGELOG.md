@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A server written in iyi serves HTTP.** `Server.serve(listener) {
+  |request| Response }` in `std/http`: a fiber per connection under a
+  group, keep-alive across requests (HTTP/1.0 and `Connection: close`
+  honoured), chunked request bodies, `HEAD` without the body, a 400 and
+  a close for what is not HTTP, the listener's `close` ending `serve`.
+  `Request` carries method, path, query, headers and body;
+  `Response.new(status, body, headers)` is written with its length and
+  the status's own reason. `bench/std_http_exercise.sh` drives it from a
+  raw socket, from the module's own client, from Python's `http.client`,
+  and under `wrk -c50 -d3s` on a release build: 76,226 requests/s,
+  236,296 requests, every one answered 200.
+
+### Changed
+
+- **`IyiSocket` parks instead of blocking.** On the targets that have the
+  runtime, every socket is non-blocking and `connect`, `accept`, `read`
+  and `write` park the calling fiber on the poller — `wait_writable`
+  joined `wait_readable` for the send side — so a slow peer costs one
+  fiber, not the thread. Those calls answer `T | Cancelled` now
+  (SPEC.md III.4.2): `!` passes a cancelled task through its remaining
+  IO, `.or_panic` refuses it at the top level, and a socket closed by
+  another fiber under a parked call answers the same, since the kernel
+  drops a closed descriptor from the poller silently and `close` now
+  wakes the waiter (`wake_closed`). `bench/server_load.sh` no longer
+  names the poller by hand, and `bench/socket_exercise.sh` holds the
+  contract: a task parked in `read` leaves with `Cancelled` when a
+  sibling fails, on one thread. Where there is no runtime the same
+  names answer `T` and block as they did.
+
 ## 0.13.0 — 2026-09-16
 
 **The standard library is iyi.** `src/std` is seventy-five modules and
@@ -6479,7 +6512,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 14,135-line library and nothing else. Every other
+  written against iyi's own 14,216-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

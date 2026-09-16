@@ -12,9 +12,15 @@
 # provided by libSystem.
 #
 # Concurrency:
-# Sockets are blocking. Event-loop integration (with III.4 group/Channel) would
-# require non-blocking fds registered with the runtime's kqueue (Darwin) or
-# epoll (Linux) poller, parking the calling fiber when EAGAIN is returned.
+# On the targets that have the runtime (SPEC.md III.4), every socket is
+# non-blocking and `connect`, `accept`, `read` and `write` park the calling
+# fiber on the poller when the kernel has nothing yet, so a server is a
+# fiber per connection and a slow peer stalls one fiber, not the thread.
+# A parked call answers `Cancelled` when its task is cancelled (III.4.2),
+# which `!` propagates and `.or_panic` refuses, and a socket closed by
+# another fiber under a parked call answers the same; so on those targets
+# these methods answer `T | Cancelled`, and the same names answer `T` and
+# block where there is no runtime to park in. One fiber may wait on one fd.
 #
 # Where it lives:
 # Outside the prelude, because a program that opens no socket should not
@@ -54,19 +60,203 @@ pub class IyiSocket
 
   # --- Connection and Listening ---
 
-  def self.connect(host : String, port : Int32) : IyiSocket
-    fd = __sys_socket
-    raise "cannot create socket" if fd < 0
+  # Two bodies for one surface: with the runtime, every call below parks;
+  # without it, each blocks the way it always did.
+  {% if @top_level.has_constant?("Cancelled") %}
+    def self.connect(host : String, port : Int32) : IyiSocket | Cancelled
+      fd = __sys_socket
+      raise "cannot create socket" if fd < 0
 
-    ip = parse_ip(host)
-    addr = make_sockaddr_in(ip, port)
-    if __sys_connect(fd, addr) < 0
-      __iyi_close(fd.to_i64)
-      raise "cannot connect to #{host}:#{port}"
+      ip = parse_ip(host)
+      addr = make_sockaddr_in(ip, port)
+      __sys_set_nonblock(fd)
+      res = __sys_connect(fd, addr)
+      if res < 0 && !__sys_in_progress?(res)
+        __iyi_close(fd.to_i64)
+        raise "cannot connect to #{host}:#{port}"
+      end
+      if res < 0
+        # The handshake is under way; the socket turns writable when it is
+        # done, and SO_ERROR says how it went.
+        waited = wait_writable(fd)
+        if waited.is_a?(Cancelled)
+          __iyi_close(fd.to_i64)
+          return waited
+        end
+        if __sys_sock_error(fd) != 0
+          __iyi_close(fd.to_i64)
+          raise "cannot connect to #{host}:#{port}"
+        end
+      end
+      IyiSocket.new(fd)
     end
 
-    IyiSocket.new(fd)
-  end
+    def accept : IyiSocket | Cancelled
+      raise "socket is closed" if @fd < 0
+      addr = Pointer(UInt8).malloc(16_u64)
+      len = 16_u32
+      while true
+        client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
+        if client_fd >= 0
+          IyiSocket.__sys_set_nonblock(client_fd)
+          return IyiSocket.new(client_fd)
+        end
+        raise "cannot accept socket" unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+        waited = wait_readable(@fd)
+        return waited if waited.is_a?(Cancelled)
+        # Closed under the wait, by another fiber: the wait is over and
+        # nothing is coming, which is what `Cancelled` says.
+        return Cancelled.new if @fd < 0
+      end
+    end
+
+    # --- Reading and Writing ---
+
+    def read(max_bytes : Int32 = 4096) : String | Cancelled
+      # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
+      # neither the count nor the call; the enumerable's sentence for it.
+      raise "negative count: #{max_bytes}" if max_bytes < 0
+      raise "socket is closed" if @fd < 0
+      buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
+      count = read(buffer, max_bytes)
+      return count if count.is_a?(Cancelled)
+      return "" if count == 0
+      String.new(count) do |target|
+        target.copy_from(buffer, count)
+      end
+    end
+
+    def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+      raise "negative count: #{count}" if count < 0
+      raise "socket is closed" if @fd < 0
+      while true
+        n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
+        return n.to_i32 if n >= 0_i64
+        raise "cannot read from socket" unless IyiSocket.__sys_would_block?(n)
+        waited = wait_readable(@fd)
+        return waited if waited.is_a?(Cancelled)
+        # Closed under the wait, by another fiber: the wait is over and
+        # nothing is coming, which is what `Cancelled` says.
+        return Cancelled.new if @fd < 0
+      end
+    end
+
+    def recv(max_bytes : Int32 = 4096) : String | Cancelled
+      read(max_bytes)
+    end
+
+    def recv(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+      read(buffer, count)
+    end
+
+    def write(contents : String) : Int32 | Cancelled
+      # Checked before the loop: `write("")` on a closed socket has nothing
+      # to send and answered 0 where `write("x")` refused.
+      raise "socket is closed" if @fd < 0
+      write(contents.to_unsafe, contents.bytesize)
+    end
+
+    def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+      raise "socket is closed" if @fd < 0
+      written = 0
+      while written < count
+        n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
+        if n < 0_i64 && IyiSocket.__sys_would_block?(n)
+          waited = wait_writable(@fd)
+          return waited if waited.is_a?(Cancelled)
+          return Cancelled.new if @fd < 0
+          next
+        end
+        raise "cannot write to socket" if n <= 0_i64
+        written = written + n.to_i32
+      end
+      written
+    end
+
+    def send(contents : String) : Int32 | Cancelled
+      write(contents)
+    end
+
+    def send(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+      write(buffer, count)
+    end
+  {% else %}
+    def self.connect(host : String, port : Int32) : IyiSocket
+      fd = __sys_socket
+      raise "cannot create socket" if fd < 0
+
+      ip = parse_ip(host)
+      addr = make_sockaddr_in(ip, port)
+      if __sys_connect(fd, addr) < 0
+        __iyi_close(fd.to_i64)
+        raise "cannot connect to #{host}:#{port}"
+      end
+      IyiSocket.new(fd)
+    end
+
+    def accept : IyiSocket
+      raise "socket is closed" if @fd < 0
+      addr = Pointer(UInt8).malloc(16_u64)
+      len = 16_u32
+      client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
+      raise "cannot accept socket" if client_fd < 0
+      IyiSocket.new(client_fd)
+    end
+
+    # --- Reading and Writing ---
+
+    def read(max_bytes : Int32 = 4096) : String
+      raise "negative count: #{max_bytes}" if max_bytes < 0
+      raise "socket is closed" if @fd < 0
+      buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
+      count = IyiSocket.__sys_recv(@fd, buffer, max_bytes.to_u64)
+      raise "cannot read from socket" if count < 0_i64
+      return "" if count == 0_i64
+      String.new(count.to_i32) do |target|
+        target.copy_from(buffer, count.to_i32)
+      end
+    end
+
+    def read(buffer : Pointer(UInt8), count : Int32) : Int32
+      raise "negative count: #{count}" if count < 0
+      raise "socket is closed" if @fd < 0
+      n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
+      raise "cannot read from socket" if n < 0_i64
+      n.to_i32
+    end
+
+    def recv(max_bytes : Int32 = 4096) : String
+      read(max_bytes)
+    end
+
+    def recv(buffer : Pointer(UInt8), count : Int32) : Int32
+      read(buffer, count)
+    end
+
+    def write(contents : String) : Int32
+      raise "socket is closed" if @fd < 0
+      write(contents.to_unsafe, contents.bytesize)
+    end
+
+    def write(buffer : Pointer(UInt8), count : Int32) : Int32
+      raise "socket is closed" if @fd < 0
+      written = 0
+      while written < count
+        n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
+        raise "cannot write to socket" if n <= 0_i64
+        written = written + n.to_i32
+      end
+      written
+    end
+
+    def send(contents : String) : Int32
+      write(contents)
+    end
+
+    def send(buffer : Pointer(UInt8), count : Int32) : Int32
+      write(buffer, count)
+    end
+  {% end %}
 
   def self.listen(host : String, port : Int32, backlog : Int32 = 128) : IyiSocket
     fd = __sys_socket
@@ -86,6 +276,9 @@ pub class IyiSocket
       raise "cannot listen on socket"
     end
 
+    {% if @top_level.has_constant?("Cancelled") %}
+      __sys_set_nonblock(fd)
+    {% end %}
     IyiSocket.new(fd)
   end
 
@@ -93,89 +286,18 @@ pub class IyiSocket
     listen("0.0.0.0", port, backlog)
   end
 
-  def accept : IyiSocket
-    raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
-    client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
-    raise "cannot accept socket" if client_fd < 0
-
-    IyiSocket.new(client_fd)
-  end
-
-  # --- Reading and Writing ---
-
-  def read(max_bytes : Int32 = 4096) : String
-    # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
-    # neither the count nor the call; the enumerable's sentence for it.
-    raise "negative count: #{max_bytes}" if max_bytes < 0
-    raise "socket is closed" if @fd < 0
-    buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
-    count = IyiSocket.__sys_recv(@fd, buffer, max_bytes.to_u64)
-    raise "cannot read from socket" if count < 0_i64
-    return "" if count == 0_i64
-
-    String.new(count.to_i32) do |target|
-      target.copy_from(buffer, count.to_i32)
-    end
-  end
-
-  def read(buffer : Pointer(UInt8), count : Int32) : Int32
-    raise "negative count: #{count}" if count < 0
-    raise "socket is closed" if @fd < 0
-    n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
-    raise "cannot read from socket" if n < 0_i64
-    n.to_i32
-  end
-
-  def recv(max_bytes : Int32 = 4096) : String
-    read(max_bytes)
-  end
-
-  def recv(buffer : Pointer(UInt8), count : Int32) : Int32
-    read(buffer, count)
-  end
-
-  def write(contents : String) : Int32
-    # Checked before the loop: `write("")` on a closed socket has nothing
-    # to send and answered 0 where `write("x")` refused.
-    raise "socket is closed" if @fd < 0
-    written = 0
-    total = contents.bytesize
-    bytes = contents.to_unsafe
-    while written < total
-      count = IyiSocket.__sys_send(@fd, bytes + written, (total - written).to_u64)
-      raise "cannot write to socket" if count <= 0_i64
-      written = written + count.to_i32
-    end
-    written
-  end
-
-  def write(buffer : Pointer(UInt8), count : Int32) : Int32
-    raise "socket is closed" if @fd < 0
-    written = 0
-    while written < count
-      n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
-      raise "cannot write to socket" if n <= 0_i64
-      written = written + n.to_i32
-    end
-    written
-  end
-
-  def send(contents : String) : Int32
-    write(contents)
-  end
-
-  def send(buffer : Pointer(UInt8), count : Int32) : Int32
-    write(buffer, count)
-  end
-
   # --- Lifecycle and Metadata ---
 
   def close : Nil
     if @fd >= 0
-      __iyi_close(@fd.to_i64)
+      fd = @fd
       @fd = -1
+      {% if @top_level.has_constant?("Cancelled") %}
+        # A fiber parked on this socket is woken first, and finds `@fd`
+        # already gone; then the descriptor goes.
+        wake_closed(fd)
+      {% end %}
+      __iyi_close(fd.to_i64)
     end
   end
 
@@ -300,6 +422,9 @@ pub class IyiSocket
       fun recv(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
       fun getsockname(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
       fun setsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32) : Int32
+      fun getsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32*) : Int32
+      fun fcntl(fd : Int32, cmd : Int32, ...) : Int32
+      fun error_location = __error : Int32*
     end
 
     # The length of a `sockaddr_in`, in the type each branch's call wants. It
@@ -346,6 +471,31 @@ pub class IyiSocket
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x0004, pointerof(val).as(Void*), 4_u32)
     end
+
+    # F_SETFL with O_NONBLOCK; the flags already set are read first.
+    def self.__sys_set_nonblock(fd : Int32) : Int32
+      flags = LibC.fcntl(fd, 3)
+      LibC.fcntl(fd, 4, flags | 4)
+    end
+
+    # libSystem answers -1 and leaves the reason in errno: EAGAIN is 35,
+    # EINPROGRESS 36.
+    def self.__sys_would_block?(result : Int64) : Bool
+      result < 0_i64 && LibC.error_location.value == 35
+    end
+
+    def self.__sys_in_progress?(result : Int32) : Bool
+      result < 0 && LibC.error_location.value == 36
+    end
+
+    # SO_ERROR (0x1007) at SOL_SOCKET (0xffff): what a connect that was in
+    # progress ended with, 0 when it went through.
+    def self.__sys_sock_error(fd : Int32) : Int32
+      err = 0_i32
+      len = 4_u32
+      LibC.getsockopt(fd, 0xffff, 0x1007, pointerof(err).as(Void*), pointerof(len))
+      err
+    end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
     {% if flag?(:x86_64) %}
       SYS_SOCKET      =  41_i64
@@ -357,6 +507,8 @@ pub class IyiSocket
       SYS_LISTEN      =  50_i64
       SYS_GETSOCKNAME =  51_i64
       SYS_SETSOCKOPT  =  54_i64
+      SYS_GETSOCKOPT  =  55_i64
+      SYS_FCNTL       =  72_i64
     {% else %}
       SYS_SOCKET      = 198_i64
       SYS_BIND        = 200_i64
@@ -367,6 +519,8 @@ pub class IyiSocket
       SYS_SENDTO      = 206_i64
       SYS_RECVFROM    = 207_i64
       SYS_SETSOCKOPT  = 208_i64
+      SYS_GETSOCKOPT  = 209_i64
+      SYS_FCNTL       =  25_i64
     {% end %}
 
     # Sized as the syscall takes it, a full register. See the darwin branch's
@@ -458,6 +612,30 @@ pub class IyiSocket
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 1_i64, 2_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
+
+    # F_GETFL (3), then F_SETFL (4) with O_NONBLOCK (0x800) added.
+    def self.__sys_set_nonblock(fd : Int32) : Int32
+      flags = __sys3(SYS_FCNTL, fd.to_i64, 3_i64, 0_i64)
+      __sys3(SYS_FCNTL, fd.to_i64, 4_i64, flags | 0x800_i64).to_i32
+    end
+
+    # A raw syscall answers the negative errno: EAGAIN is 11, EINPROGRESS 115.
+    def self.__sys_would_block?(result : Int64) : Bool
+      result == -11_i64
+    end
+
+    def self.__sys_in_progress?(result : Int32) : Bool
+      result == -115
+    end
+
+    # SO_ERROR (4) at SOL_SOCKET (1): what a connect that was in progress
+    # ended with, 0 when it went through.
+    def self.__sys_sock_error(fd : Int32) : Int32
+      err = 0_i32
+      len = 4_i32
+      __sys5(SYS_GETSOCKOPT, fd.to_i64, 1_i64, 4_i64, pointerof(err).address.to_i64, pointerof(len).address.to_i64)
+      err
+    end
   {% else %}
     def self.__sys_socket : Int32
       raise "IyiSocket is not supported on this platform"
@@ -493,6 +671,22 @@ pub class IyiSocket
 
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       -1
+    end
+
+    def self.__sys_set_nonblock(fd : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_would_block?(result : Int64) : Bool
+      false
+    end
+
+    def self.__sys_in_progress?(result : Int32) : Bool
+      false
+    end
+
+    def self.__sys_sock_error(fd : Int32) : Int32
+      0
     end
   {% end %}
 end

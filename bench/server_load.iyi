@@ -25,16 +25,16 @@ using std/socket::{IyiSocket}
 ROUNDS      = 200
 STACK_BOUND =   8
 
-# One connection, server side: park, read, answer, and report the stack
-# it ran on, so the caller can count how many stacks the run used.
+# One connection, server side: read (which parks), answer, and report the
+# stack it ran on, so the caller can count how many stacks the run used.
+# The socket parks by itself now; nothing here names the poller.
 pub def serve(client : IyiSocket) : UInt64
   top = IyiScheduler.current.stack_top
-  case wait_readable(client.to_unsafe)
+  case request = client.read(256)
   in Cancelled
     client.close
     0_u64
-  in Nil
-    request = client.read(256)
+  in String
     client.write("reply-" + request.size.to_s)
     client.close
     top
@@ -43,19 +43,22 @@ end
 
 # One connection, client side: the other half of the same park.
 pub def ask(port : Int32, id : Int32) : Int32
-  socket = IyiSocket.connect("127.0.0.1", port)
-  socket.write("ping-" + id.to_s)
-  case wait_readable(socket.to_unsafe)
+  case socket = IyiSocket.connect("127.0.0.1", port)
   in Cancelled
-    socket.close
     1
-  in Nil
-    reply = socket.read(256)
-    socket.close
-    want = "reply-" + ("ping-" + id.to_s).size.to_s
-    return 0 if reply == want
-    puts "FAIL: reply " + reply + ", wanted " + want
-    1
+  in IyiSocket
+    socket.write("ping-" + id.to_s)
+    case reply = socket.read(256)
+    in Cancelled
+      socket.close
+      1
+    in String
+      socket.close
+      want = "reply-" + ("ping-" + id.to_s).size.to_s
+      return 0 if reply == want
+      puts "FAIL: reply " + reply + ", wanted " + want
+      1
+    end
   end
 end
 
@@ -128,13 +131,13 @@ group do |outer|
   outer.spawn do
     n = 0
     while n < ROUNDS
-      case wait_readable(listener.to_unsafe)
+      case client = listener.accept
       in Cancelled
         n = ROUNDS
-      in Nil
-        client = listener.accept
+      in IyiSocket
+        accepted = client
         outer.spawn do
-          tops << serve(client)
+          tops << serve(accepted)
           0
         end
         n = n + 1

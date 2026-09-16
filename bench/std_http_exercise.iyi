@@ -15,12 +15,12 @@ end
 
 import std/http
 import std/socket
-using std/http::{HTTP, Response}
+using std/http::{HTTP, Response, Request, Server}
 using std/socket::{IyiSocket}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.
-def read_request(conn : IyiSocket) : String
+def read_request(conn : IyiSocket) : String | Cancelled
   buf = ""
   while true
     if split = HTTP.find_headers_end(buf)
@@ -34,11 +34,34 @@ def read_request(conn : IyiSocket) : String
       end
       break if buf.bytesize - split - 4 >= need
     end
-    chunk = conn.read(4096)
+    chunk = conn.read(4096)!
     break if chunk.bytesize == 0
     buf = buf + chunk
   end
   buf
+end
+
+# One response off a raw socket: the head, then the body its length
+# promises (the server always writes one), without reading past it.
+def read_response(c : IyiSocket) : String
+  buf = ""
+  while true
+    if split = HTTP.find_headers_end(buf)
+      need = 0
+      HTTP.split_crlf(buf[0, split]).each do |line|
+        colon = line.index(':')
+        next unless colon
+        if HTTP.same_name?(line[0, colon], "Content-Length")
+          need = line[colon + 1, line.bytesize - colon - 1].strip.to_i
+        end
+      end
+      have = buf.bytesize - split - 4
+      return buf if have >= need
+    end
+    chunk = c.read(4096).or_panic
+    raise "the server closed mid-response" if chunk.bytesize == 0
+    buf = buf + chunk
+  end
 end
 
 # The request line: what comes before the first CRLF.
@@ -132,8 +155,8 @@ server = IyiThread.start do
   l = IyiSocket.new(fd)
   i = 0
   while i < 5
-    conn = l.accept
-    saw = read_request(conn)
+    conn = l.accept.or_panic
+    saw = read_request(conn).or_panic
     line = first_line(saw)
     reply = if i == 0
               "HTTP/1.1 200 OK\r\ncontent-length: #{saw.bytesize}\r\n\r\n" + saw
@@ -155,28 +178,28 @@ server = IyiThread.start do
 end
 
 base = "http://127.0.0.1:#{port}"
-r = HTTP.get("#{base}/items?x=1")
+r = HTTP.get("#{base}/items?x=1").or_panic
 assert_true r.status == 200, "GET status"
 assert_true r.body.starts_with?("GET /items?x=1 HTTP/1.1\r\n"), "GET line with the query"
 assert_true r.body.includes?("Host: 127.0.0.1:#{port}\r\n"), "Host names the port when it is not 80"
 assert_true !r.body.includes?("Content-Length"), "GET carried no length"
 assert_str r.body.bytesize.to_s, r.header("Content-Length") || "", "GET length by any case"
-r = HTTP.post("#{base}/items", "{\"a\":1}", {"Content-Type" => "application/json"})
+r = HTTP.post("#{base}/items", "{\"a\":1}", {"Content-Type" => "application/json"}).or_panic
 assert_true r.status == 201, "POST status"
 assert_true r.body.starts_with?("POST /items HTTP/1.1\r\n"), "POST line, through a chunked answer"
 assert_true r.body.includes?("Content-Type: application/json\r\n"), "POST carried the caller's header"
 assert_true r.body.includes?("Content-Length: 7\r\n"), "POST carried the body's length"
 assert_true r.body.ends_with?("\r\n\r\n{\"a\":1}"), "POST carried the body"
-r = HTTP.head("#{base}/items")
+r = HTTP.head("#{base}/items").or_panic
 assert_true r.status == 200, "HEAD status"
 assert_str "", r.body, "HEAD body"
 assert_str "99", r.header("Content-Length") || "", "HEAD length"
 assert_str "HEAD /items HTTP/1.1", r.header("X-Request-Line") || "", "HEAD line"
-r = HTTP.put("#{base}/items/1", "v=2", {"X-Token" => "abc"})
+r = HTTP.put("#{base}/items/1", "v=2", {"X-Token" => "abc"}).or_panic
 assert_true r.status == 200, "PUT status"
 assert_true r.body.starts_with?("PUT /items/1 HTTP/1.1\r\n"), "PUT line"
 assert_true r.body.includes?("X-Token: abc\r\n") && r.body.ends_with?("Content-Length: 3\r\n\r\nv=2"), "PUT carried the header and the body"
-r = HTTP.delete("#{base}/items/9")
+r = HTTP.delete("#{base}/items/9").or_panic
 assert_true r.status == 204 && r.success?, "DELETE status"
 assert_str "", r.body, "DELETE body"
 assert_str "DELETE /items/9 HTTP/1.1", r.header("X-Request-Line") || "", "DELETE line"
@@ -184,5 +207,81 @@ assert_str "no", r.header("X-Request-Has-Length") || "", "DELETE carried no leng
 server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
+
+puts "\n== the server, from a raw socket"
+# What the server does with the wire: keep-alive across requests, a
+# chunked request body, HEAD, a request that is not HTTP, and `Connection:
+# close`. The client here is a bare socket so every byte is ours.
+listener = IyiSocket.listen(0)
+sport = listener.local_port
+seen_paths = [] of String
+group do |g|
+  g.spawn do
+    Server.serve(listener) do |req|
+      seen_paths << req.method + " " + req.path
+      if req.path == "/echo"
+        Response.new(200, req.body, {"X-Query" => req.query || "-", "X-Agent" => req.header("user-agent") || "-"})
+      elsif req.path == "/nothing"
+        Response.new(204)
+      elsif req.path == "/stop"
+        listener.close
+        Response.new(200, "bye")
+      else
+        Response.new(404, "no #{req.path}\n")
+      end
+    end
+    0
+  end
+  g.spawn do
+    c = IyiSocket.connect("127.0.0.1", sport).or_panic
+    # Two requests on one connection, the second chunked, then a HEAD.
+    c.write("POST /echo?a=1 HTTP/1.1\r\nHost: x\r\nUser-Agent: raw\r\nContent-Length: 5\r\n\r\nhello").or_panic
+    r1 = HTTP.parse_response(read_response(c))
+    assert_true r1.status == 200 && r1.body == "hello", "first request on the connection"
+    assert_str "a=1", r1.header("X-Query") || "", "the query reached the block"
+    assert_str "raw", r1.header("X-Agent") || "", "a header reached the block by any case"
+    assert_str "keep-alive", r1.header("Connection") || "", "HTTP/1.1 keeps the connection"
+    c.write("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n").or_panic
+    r2 = HTTP.parse_response(read_response(c))
+    assert_str "abcde", r2.body, "a chunked request body arrives joined"
+    c.write("HEAD /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n").or_panic
+    r3 = HTTP.parse_response(read_response(c), true)
+    assert_true r3.status == 200 && r3.body == "", "HEAD carries no body"
+    c.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    r4 = HTTP.parse_response(read_response(c))
+    assert_true r4.status == 204 && r4.reason == "No Content", "a 204 with the status's own reason"
+    c.write("GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").or_panic
+    r5 = HTTP.parse_response(read_response(c))
+    assert_true r5.status == 404 && r5.body == "no /missing\n", "a 404 from the block"
+    assert_str "close", r5.header("Connection") || "", "the server honours Connection: close"
+    assert_str "", c.read(16).or_panic, "and closes after it"
+    c.close
+    # A request that is not HTTP is answered 400 and the connection closed.
+    bad = IyiSocket.connect("127.0.0.1", sport).or_panic
+    bad.write("this is not http\r\n\r\n").or_panic
+    r6 = HTTP.parse_response(read_response(bad))
+    assert_true r6.status == 400, "not HTTP is 400"
+    assert_true r6.body.starts_with?("not an HTTP/1 request"), "and says why: #{r6.body.inspect}"
+    assert_str "", bad.read(16).or_panic, "and the connection is closed"
+    bad.close
+    # HTTP/1.0 closes by default.
+    old = IyiSocket.connect("127.0.0.1", sport).or_panic
+    old.write("GET /nothing HTTP/1.0\r\n\r\n").or_panic
+    r7 = HTTP.parse_response(read_response(old))
+    assert_true r7.status == 204, "HTTP/1.0 is served"
+    assert_str "", old.read(16).or_panic, "and closed after one request"
+    old.close
+    # The client half of this module against the server half.
+    r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
+    assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
+    assert_str "bye", r9.body, "the block closed the listener"
+    0
+  end
+end
+assert_true seen_paths.size == 8, "the block ran eight times (the 400 never reached it), not #{seen_paths.size}"
+assert_str "POST /echo", seen_paths[0], "the first request's line"
+assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, and the client against it"
 
 puts "\nALL CHECKS PASSED"

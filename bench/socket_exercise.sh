@@ -81,7 +81,7 @@ fi
 echo "== a negative count is refused by name"
 # `recv(-1)` died of "arithmetic overflow" on a `to_u64`, a sentence about
 # neither the count nor the call.
-printf 'module main\n\nimport std/socket\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port)\nputs l.accept.recv(-1).inspect\n' > "$WORK/negative.iyi"
+printf 'module main\n\nimport std/socket\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nputs l.accept.or_panic.recv(-1).inspect\n' > "$WORK/negative.iyi"
 if "$IYI" run "$WORK/negative.iyi" > "$WORK/negative.out" 2>&1; then
   echo "  a negative count was taken"; status=1
 elif ! grep -q "negative count: -1" "$WORK/negative.out"; then
@@ -127,14 +127,14 @@ prove_fails() {
 
 # 1. Broken payload reception
 prove_fails "message payload mismatch" badpayload "message_exchange:" \
-  '{ sub(/target\.copy_from\(buffer, count\.to_i32\)/, "target[0] = 63_u8"); print }'
+  '{ sub(/target\.copy_from\(buffer, count\)/, "target[0] = 63_u8"); print }'
 
 # 2. Broken short read (clamping buffer size below 16 bytes alters chunk size)
 prove_fails "short read size mismatch" badshort "short_read:" \
   '{ sub(/buffer = Pointer\(UInt8\)\.malloc\(max_bytes\.to_u64\)/, "if max_bytes < 16; max_bytes = 1; end; buffer = Pointer(UInt8).malloc(max_bytes.to_u64)"); print }'
 # 3. Broken closed peer detection (does not answer empty string on EOF)
 prove_fails "closed peer EOF missed" badoff "closed_peer:" \
-  '{ sub(/return "" if count == 0_i64/, "return \"eof_missed\" if count == 0_i64"); print }'
+  '{ sub(/return "" if count == 0$/, "return \"eof_missed\" if count == 0"); print }'
 
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
@@ -182,13 +182,13 @@ refuses "a port past sixteen bits" port_big "is not a port" \
 refuses "a negative port" port_neg "is not a port" \
   "IyiSocket.listen(-1, 1).local_port"
 refuses "an address with too many digits" addr_long "cannot resolve address" \
-  "IyiSocket.connect(\"999999999999.1.1.1\", 80).to_unsafe"
+  "IyiSocket.connect(\"999999999999.1.1.1\", 80).or_panic.to_unsafe"
 refuses "an octet past 255" addr_octet "cannot resolve address" \
-  "IyiSocket.connect(\"256.1.1.1\", 80).to_unsafe"
+  "IyiSocket.connect(\"256.1.1.1\", 80).or_panic.to_unsafe"
 refuses "an octet with a leading zero" addr_octal "cannot resolve address: \"010.1.1.1\": an octet with a leading zero" \
-  "IyiSocket.connect(\"010.1.1.1\", 80).to_unsafe"
+  "IyiSocket.connect(\"010.1.1.1\", 80).or_panic.to_unsafe"
 refuses "a one-digit leading zero" addr_octal_short "cannot resolve address: \"01.2.3.4\"" \
-  "IyiSocket.connect(\"01.2.3.4\", 80).to_unsafe"
+  "IyiSocket.connect(\"01.2.3.4\", 80).or_panic.to_unsafe"
 refuses "a host with a leading space, shown inspected" addr_space "cannot resolve address: \" 1.2.3.4\"" \
   "IyiSocket.parse_ip(\" 1.2.3.4\").b0"
 refuses "a host with a trailing space, shown inspected" addr_tspace "cannot resolve address: \"1.2.3.4 \"" \
@@ -204,7 +204,7 @@ echo "== a closed socket says so"
 # `write("")` had nothing to send and answered 0.
 refuses_after_close() { # refuses_after_close <label> <name> <statements on a closed connection c and listener l>
   local label="$1" name="$2" body="$3"
-  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port)\nc.close\nl.close\n%s\n' \
+  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nc.close\nl.close\n%s\n' \
     "$body" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -227,11 +227,11 @@ refuses_after_close() { # refuses_after_close <label> <name> <statements on a cl
   fi
   printf '  %s: exits %s at "socket is closed"\n' "$label" "$code"
 }
-refuses_after_close "a read after close" closed_read 'puts c.read(10).inspect'
-refuses_after_close "a write after close" closed_write 'puts c.write("x")'
-refuses_after_close "an empty write after close" closed_write_empty 'puts c.write("")'
+refuses_after_close "a read after close" closed_read 'puts c.read(10).or_panic.inspect'
+refuses_after_close "a write after close" closed_write 'puts c.write("x").or_panic'
+refuses_after_close "an empty write after close" closed_write_empty 'puts c.write("").or_panic'
 refuses_after_close "local_port after close" closed_port 'puts c.local_port'
-refuses_after_close "accept after close" closed_accept 'puts l.accept.closed?'
+refuses_after_close "accept after close" closed_accept 'puts l.accept.or_panic.closed?'
 
 echo
 if [ "$status" -eq 0 ]; then

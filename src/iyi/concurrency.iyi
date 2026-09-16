@@ -13,6 +13,7 @@
 #   t.value                   # joins, then answers what the block returned
 #   sleep(ms)                 # Nil | Cancelled
 #   wait_readable(fd)         # Nil | Cancelled — the poller, made visible
+#   wait_writable(fd)         # Nil | Cancelled — the other direction
 #   iyi_read(fd, buf, n)      # Int64 | Cancelled — a read that parks, not blocks
 #   Channel(T).new            # a rendezvous; .new(n) buffers n sends first
 #   select / when / else      # over any mix of arms; the expansion's
@@ -1065,6 +1066,53 @@ class IyiScheduler
     nil
   end
 
+  # The other direction: park until *fd* can take bytes. A socket's send
+  # buffer fills under a slow reader, and a write that blocked there would
+  # block the thread; a fiber parks instead and the poller wakes it when
+  # the kernel has room. Same registry, same one-waiter-per-fd rule.
+  def self.wait_writable_current(fd : Int32 | Int64) : Nil | Cancelled
+    fiber = current
+    return Cancelled.new if fiber.cancelled
+    {% if flag?(:win32) %}
+      nil
+    {% else %}
+      wait_writable_posix(fd.to_i32)
+    {% end %}
+  end
+
+  def self.wait_writable_posix(fd : Int32) : Nil | Cancelled
+    fiber = current
+    return Cancelled.new if fiber.cancelled
+    scan = state.io_head
+    while scan.is_a?(IyiFiber)
+      raise "two fibers waiting on one fd" if scan.wait_fd == fd
+      scan = scan.next_io
+    end
+    {% if flag?(:darwin) %}
+      # EV_ADD on EVFILT_WRITE (-2).
+      change = __iyi_kevent_change(fd, 0x1FFFE_u64)
+      added = LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
+        Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64)).to_i64
+      return nil if added < 0 && LibC.error_location.value == 22
+      raise "kevent add failed" if added < 0
+    {% else %}
+      # EPOLL_CTL_ADD = 1, EPOLLOUT = 4, data = the fd itself.
+      event = Pointer(UInt8).malloc(16_u64)
+      event.as(Pointer(UInt64)).value = 4_u64
+      Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fd.to_u64
+      added = __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 1_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      return nil if added == -1_i64
+      raise "epoll_ctl add failed" if added < 0
+    {% end %}
+    fiber.wait_fd = fd
+    fiber.state = IyiFiberState::WaitingIo
+    fiber.next_io = state.io_head
+    state.io_head = fiber
+    reschedule
+    return Cancelled.new if fiber.cancelled
+    nil
+  end
+
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
       raise "task already has a joiner" if fiber.joiner.is_a?(IyiFiber)
@@ -1190,6 +1238,19 @@ class IyiScheduler
     enqueue(fiber)
   end
 
+  # A descriptor being closed under a parked waiter: the kernel drops a
+  # closed fd from the poller without a word, so a fiber parked on it
+  # would wait forever. The closer takes it off the registry and wakes
+  # it; the woken call finds the fd gone and says so.
+  def self.wake_closed(fd : Int32) : Nil
+    {% if flag?(:win32) %}
+    {% else %}
+      fiber = io_take(fd)
+      return unless fiber.is_a?(IyiFiber)
+      enqueue(fiber)
+    {% end %}
+  end
+
   def self.wake_expired_sleepers : Nil
     now = __iyi_monotonic_ns
     while true
@@ -1307,7 +1368,12 @@ class IyiScheduler
     {% if flag?(:win32) %}
       fiber.next_io = nil
     {% elsif flag?(:darwin) %}
+      # EV_DELETE on both filters: the fiber waited on one of them, and
+      # the other delete answers ENOENT, which is nothing.
       change = __iyi_kevent_change(fiber.wait_fd, 0x2FFFF_u64)
+      LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
+        Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+      change = __iyi_kevent_change(fiber.wait_fd, 0x2FFFE_u64)
       LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% else %}
@@ -1427,6 +1493,21 @@ end
 
 def wait_readable(fd : Int64) : Nil | Cancelled
   IyiScheduler.wait_readable_current(fd)
+end
+
+# Tell the poller *fd* is being closed, so a fiber parked on it wakes
+# instead of waiting for an event the kernel will never deliver.
+def wake_closed(fd : Int32) : Nil
+  IyiScheduler.wake_closed(fd)
+end
+
+# Park until *fd* can take bytes: a socket whose send buffer is full.
+def wait_writable(fd : Int32) : Nil | Cancelled
+  IyiScheduler.wait_writable_current(fd)
+end
+
+def wait_writable(fd : Int64) : Nil | Cancelled
+  IyiScheduler.wait_writable_current(fd)
 end
 
 def iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64 | Cancelled

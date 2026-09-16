@@ -1,0 +1,24 @@
+# A server for `bench/std_http_exercise.sh` to drive from Python: prints
+# its port, serves until `/stop`, echoes what it was sent.
+module bench/std_http_server
+
+import std/http
+import std/socket
+using std/http::{Server, Response}
+using std/socket::{IyiSocket}
+
+listener = IyiSocket.listen(0)
+puts listener.local_port
+Server.serve(listener) do |req|
+  if req.path == "/stop"
+    listener.close
+    Response.new(200, "stopping")
+  elsif req.path == "/echo"
+    Response.new(200, req.body, {"X-Method" => req.method, "X-Query" => req.query || "-", "Content-Type" => req.header("Content-Type") || "-"})
+  elsif req.path == "/big"
+    Response.new(200, "x" * 1000000)
+  else
+    Response.new(404, "no #{req.path}\n")
+  end
+end
+puts "stopped"

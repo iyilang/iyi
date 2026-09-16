@@ -28,36 +28,36 @@ server = IyiSocket.listen(0)
 port = server.local_port
 raise "local_port failed: port must be positive" if port <= 0
 
-client = IyiSocket.connect("127.0.0.1", port)
+client = IyiSocket.connect("127.0.0.1", port).or_panic
 raise "connect failed: client is closed" if client.closed?
 
 client.write("ping from client\n")
 
-conn = server.accept
+conn = server.accept.or_panic
 raise "accept failed: server connection is closed" if conn.closed?
 puts "connect_accept: ok"
 
 # 2. Message exchange each way
-msg = conn.read(1024)
+msg = conn.read(1024).or_panic
 raise "message_exchange: server received wrong message" if msg != "ping from client\n"
 
 conn.write("pong from server\n")
-reply = client.read(1024)
+reply = client.read(1024).or_panic
 raise "message_exchange: client received wrong reply" if reply != "pong from server\n"
 puts "message_exchange: ok"
 
 # 3. Short read respecting buffer limits
 client.write("0123456789ABCDEF")
 
-c1 = conn.read(4)
+c1 = conn.read(4).or_panic
 raise "short_read: chunk 1 size mismatch" if c1.bytesize != 4
 raise "short_read: chunk 1 content mismatch" if c1 != "0123"
 
-c2 = conn.read(8)
+c2 = conn.read(8).or_panic
 raise "short_read: chunk 2 size mismatch" if c2.bytesize != 8
 raise "short_read: chunk 2 content mismatch" if c2 != "456789AB"
 
-c3 = conn.read(4)
+c3 = conn.read(4).or_panic
 raise "short_read: chunk 3 size mismatch" if c3.bytesize != 4
 raise "short_read: chunk 3 content mismatch" if c3 != "CDEF"
 puts "short_read: ok"
@@ -66,7 +66,7 @@ puts "short_read: ok"
 client.close
 raise "closed_peer: client close failed" unless client.closed?
 
-eof = conn.read(1024)
+eof = conn.read(1024).or_panic
 raise "closed_peer: expected empty string on EOF" if eof.bytesize != 0
 
 conn.close
@@ -74,5 +74,56 @@ server.close
 raise "closed_peer: conn close failed" unless conn.closed?
 raise "closed_peer: server close failed" unless server.closed?
 puts "closed_peer: ok"
+
+# 5. A read parks rather than blocks, and a cancelled task's read answers
+#    `Cancelled` (SPEC.md III.4.2). Three tasks on one thread: a reader
+#    parked on a connection nobody writes to, a sibling that answers an
+#    error and so cancels the group, and a listener that accepts. If the
+#    read blocked the thread, the sibling could never run and the group
+#    could never cancel anything: the program would hang here.
+struct Boom
+end
+
+impl Error for Boom
+  def message : String
+    "boom"
+  end
+end
+
+listener = IyiSocket.listen(0)
+quiet_port = listener.local_port
+parked_answer = ""
+held = [] of IyiSocket
+group do |g|
+  g.spawn do
+    case peer = IyiSocket.connect("127.0.0.1", quiet_port)
+    in Cancelled
+      parked_answer = "connect cancelled"
+    in IyiSocket
+      case peer.read(16)
+      in Cancelled
+        parked_answer = "cancelled"
+      in String
+        parked_answer = "read"
+      end
+      peer.close
+    end
+    0
+  end
+  g.spawn do
+    # Accepted and kept open, so the peer's read has nothing to read.
+    accepted = listener.accept
+    held << accepted if accepted.is_a?(IyiSocket)
+    0
+  end
+  g.spawn do
+    sleep(20)
+    Boom.new
+  end
+end
+held.each { |h| h.close }
+listener.close
+raise "parked read: expected cancelled, got #{parked_answer.inspect}" unless parked_answer == "cancelled"
+puts "parked_read_cancelled: ok"
 
 puts "socket_exercise: all checks passed"

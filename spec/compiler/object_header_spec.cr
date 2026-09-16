@@ -212,18 +212,35 @@ describe Iyi::Collector::ObjectHeader do
   it "lets exactly one of two concurrent claimants shade the same white object" do
     # 10,000 rounds rather than 1,000, because of what the split looks like when
     # measured: at 1,000 rounds it came out 32/968, at 10,000 it is 5012/4988,
-    # and at 100,000 it is 58498/41502. The one-winner invariant below holds at
-    # every size, but the contention assertion is a probability, and 32/968 is
-    # one unlucky schedule away from a zero and a spec that flakes on a loaded
-    # machine. Ten thousand rounds costs about 9ms.
+    # and at 100,000 it is 58498/41502. Ten thousand rounds costs about 9ms.
+    #
+    # The one-winner invariant holds at every size and is checked on every
+    # attempt. The contention proof is a probability, and the note that used to
+    # sit here said 32/968 was one unlucky schedule away from a zero and a spec
+    # that flakes on a loaded machine. It then flaked on a loaded runner,
+    # exactly there, with wins_a at 0. Knowing a check is load-bearing on luck
+    # and leaving it is what made that a failure rather than a finding.
+    #
+    # So contention is now asked several times before it is disbelieved. One
+    # starved attempt is a schedule; every attempt starved is the threads never
+    # contending, which is the thing worth failing over.
     rounds = 10_000
-    wins_a, wins_b = ShadingRace.new.run(rounds)
-    (wins_a + wins_b).should eq rounds
+    attempts = 5
+    contended = false
 
-    # Not the invariant under test, but the proof the race was real: if one
-    # claimant won every round the threads never actually contended, and this
-    # spec would be a story about a race rather than one.
-    wins_a.should be > 0
-    wins_b.should be > 0
+    attempts.times do
+      wins_a, wins_b = ShadingRace.new.run(rounds)
+
+      # The actual invariant: every round has exactly one winner, so the two
+      # tallies account for all of them and neither claimant double-counts.
+      (wins_a + wins_b).should eq rounds
+
+      if wins_a > 0 && wins_b > 0
+        contended = true
+        break
+      end
+    end
+
+    fail "both claimants starved in #{attempts} attempts of #{rounds} rounds" unless contended
   end
 end

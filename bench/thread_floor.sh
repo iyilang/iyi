@@ -156,7 +156,7 @@ case "$(uname -s)" in
     # refused variants carry them for the same reason - the Mach one
     # included, whose own stop never signals - so the five sit in the
     # runtime's list, not the probe's.
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _clock_gettime_nsec_np _exit _kevent _kqueue _madvise _mmap _munmap _pipe _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _read _sigaction _sigaltstack _sysctlbyname _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _madvise _mmap _munmap _pipe _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _read _sigaction _sigaltstack _sysctlbyname _write'
     thread='__tlv_bootstrap _pthread_join _pthread_threadid_np'
     # The refused parks: the lock's two calls in place of `pipe` and `read`,
     # and `sigsuspend` alone in their place. The Mach stop swaps the stop

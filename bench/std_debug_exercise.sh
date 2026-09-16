@@ -28,6 +28,14 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src"
 
+case "$(uname -s)" in
+  Darwin) ;;
+  *)
+    echo "std/debug: Darwin Mach-O/DWARF resolver (Linux ELF and Windows PE not yet built)"
+    exit 0
+    ;;
+esac
+
 fail() {
   echo "  FAIL: $1"
   status=1

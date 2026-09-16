@@ -1,0 +1,224 @@
+# Exercises `std/fiber`: Crystal-compatible Fiber API.
+#
+# Run via:
+#     ./bin/iyi run bench/std_fiber_exercise.iyi
+
+module bench/std_fiber_exercise
+
+import std/fiber
+using std/fiber::{Fiber}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+# ---------------------------------------------------------------------------
+# 1. Accessors and current fiber inspection
+# ---------------------------------------------------------------------------
+puts "== accessors and identity"
+main = Fiber.current
+assert_true main.running?, "main fiber must be running"
+assert_true !main.dead?, "main fiber cannot be dead while executing"
+assert_true !main.resumable?, "running fiber is not resumable"
+
+# Fiber.current? accessor
+cur = Fiber.current?
+assert_true !cur.nil?, "Fiber.current? must not be nil"
+assert_true cur == main, "Fiber.current? must equal Fiber.current"
+assert_true cur.same?(main), "Fiber.current? must be same instance as main"
+
+# Name accessor on current fiber
+assert_true main.name.nil?, "main fiber has no initial name"
+main.name = "coordinator"
+assert_str "coordinator", main.name || "", "main fiber name assignment"
+
+# String representations
+id_hex = main.object_id.to_s(16)
+assert_str "#<Fiber:0x#{id_hex} coordinator>", main.to_s, "named fiber to_s"
+assert_str main.to_s, main.inspect, "named fiber inspect matches to_s"
+
+puts "  current fiber state, name, and string representation verified"
+
+# ---------------------------------------------------------------------------
+# 2. Spawning and initial state
+# ---------------------------------------------------------------------------
+puts "== spawning and initial state"
+unnamed = Fiber.new do
+end
+
+assert_true unnamed.name.nil?, "unnamed fiber has nil name"
+unnamed_hex = unnamed.object_id.to_s(16)
+assert_str "#<Fiber:0x#{unnamed_hex}>", unnamed.to_s, "unnamed fiber to_s"
+
+worker = Fiber.new("worker-init") do
+end
+
+assert_str "worker-init", worker.name || "", "spawned worker has assigned name"
+assert_true !worker.running?, "freshly spawned fiber is not running"
+assert_true worker.resumable?, "freshly spawned fiber is resumable"
+assert_true !worker.dead?, "freshly spawned fiber is not dead"
+
+assert_true worker == worker, "fiber equals itself"
+assert_true worker.same?(worker), "fiber is same as itself"
+assert_true worker != unnamed, "distinct fibers do not equal"
+assert_true !worker.same?(unnamed), "distinct fibers are not same"
+
+# Clean up initial test fibers so the run queue stays clean
+worker.resume
+unnamed.resume
+Fiber.yield
+
+puts "  fiber creation, state before enqueue, and identity verified"
+
+# ---------------------------------------------------------------------------
+# 3. Cooperative yielding and deterministic FIFO ordering
+# ---------------------------------------------------------------------------
+puts "== cooperative yielding and deterministic ordering"
+# The scheduler run queue is strictly FIFO: fibers enqueued in order A, B
+# run in that order. When a fiber yields with Fiber.yield, it appends itself
+# to the tail of the queue, allowing the next queued fiber to proceed.
+trace = Array(String).new
+
+fiber_a = Fiber.new("fiber-A") do
+  assert_str "fiber-A", Fiber.current.name || "", "fiber A name inside"
+  assert_true Fiber.current.running?, "fiber A running inside"
+  trace << "A1"
+  Fiber.yield
+  trace << "A2"
+  Fiber.yield
+  trace << "A3"
+end
+
+fiber_b = Fiber.new("fiber-B") do
+  assert_str "fiber-B", Fiber.current.name || "", "fiber B name inside"
+  assert_true Fiber.current.running?, "fiber B running inside"
+  trace << "B1"
+  Fiber.yield
+  trace << "B2"
+end
+
+fiber_a.enqueue
+fiber_b.enqueue
+
+# Main yields to let queued fibers run round 1:
+# fiber_a runs A1, yields (appends A to tail)
+# fiber_b runs B1, yields (appends B to tail)
+# main runs and checks trace
+Fiber.yield
+assert_int 2, trace.size, "round 1 trace size"
+assert_str "A1", trace[0], "round 1 step 1"
+assert_str "B1", trace[1], "round 1 step 2"
+
+# Round 2:
+# fiber_a runs A2, yields
+# fiber_b runs B2 and completes (removed from queue)
+# main runs
+Fiber.yield
+assert_int 4, trace.size, "round 2 trace size"
+assert_str "A2", trace[2], "round 2 step 3"
+assert_str "B2", trace[3], "round 2 step 4"
+
+# Round 3:
+# fiber_a runs A3 and completes
+Fiber.yield
+assert_int 5, trace.size, "round 3 trace size"
+assert_str "A3", trace[4], "round 3 step 5"
+
+puts "  strictly FIFO interleaved fiber scheduling verified"
+
+# ---------------------------------------------------------------------------
+# 4. Completed fiber vs suspended fiber states
+# ---------------------------------------------------------------------------
+puts "== completion and suspended states"
+
+# fiber_b has completed its block
+assert_true fiber_b.dead?, "completed fiber is dead"
+assert_true !fiber_b.running?, "completed fiber is not running"
+assert_true !fiber_b.resumable?, "completed fiber is not resumable"
+
+# Spawn a completed worker and a worker that yields mid-execution
+completed_ran = false
+c_worker = Fiber.new("c-worker") do
+  completed_ran = true
+end
+
+partially_ran = false
+fully_ran = false
+s_worker = Fiber.new("s-worker") do
+  partially_ran = true
+  Fiber.yield
+  fully_ran = true
+end
+
+c_worker.resume
+s_worker.resume
+
+# Main yields: c_worker completes, s_worker runs up to yield
+Fiber.yield
+
+assert_true completed_ran, "c_worker completed"
+assert_true c_worker.dead?, "c_worker is dead"
+assert_true !c_worker.running?, "c_worker is not running"
+assert_true !c_worker.resumable?, "c_worker is not resumable"
+
+assert_true partially_ran, "s_worker ran partially"
+assert_true !fully_ran, "s_worker has not finished yet"
+assert_true !s_worker.dead?, "s_worker is not dead while suspended"
+assert_true !s_worker.running?, "s_worker is not running while main runs"
+assert_true s_worker.resumable?, "s_worker is resumable while suspended in queue"
+
+# Now let s_worker complete
+Fiber.yield
+
+assert_true fully_ran, "s_worker ran to completion"
+assert_true s_worker.dead?, "s_worker is dead after completion"
+assert_true !s_worker.running?, "s_worker is not running after completion"
+assert_true !s_worker.resumable?, "s_worker is not resumable after completion"
+
+puts "  completed dead fiber vs mid-execution suspended fiber verified"
+
+# ---------------------------------------------------------------------------
+# 5. Explicit suspend and resume handoff
+# ---------------------------------------------------------------------------
+puts "== explicit suspend and resume"
+# Fiber.suspend parks the current fiber off the scheduler's run queue.
+# Unlike Fiber.yield, calling Fiber.yield in main does NOT wake a suspended
+# fiber until it is explicitly re-enqueued via resume or enqueue.
+handoff_step = 0
+
+parked_worker = Fiber.new("parked-worker") do
+  handoff_step = 1
+  Fiber.suspend
+  handoff_step = 2
+end
+
+parked_worker.resume
+Fiber.yield
+assert_int 1, handoff_step, "worker reached suspend point"
+
+# Yielding from main does not run parked_worker because it was not enqueued
+Fiber.yield
+Fiber.yield
+assert_int 1, handoff_step, "parked worker remained off run queue"
+assert_true !parked_worker.dead?, "parked worker is not dead"
+
+# Explicit resume puts it back on run queue
+parked_worker.resume
+assert_true parked_worker.resumable?, "resumed worker is resumable"
+assert_true !parked_worker.dead?, "resumed worker is not dead"
+
+Fiber.yield
+assert_int 2, handoff_step, "parked worker completed after explicit resume"
+assert_true parked_worker.dead?, "parked worker is now dead"
+
+puts "  Fiber.suspend removes from run queue until explicit resume verified"
+
+puts "\nALL CHECKS PASSED"

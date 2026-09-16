@@ -1,0 +1,147 @@
+# Exercises `std/file`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_file_exercise.iyi
+
+module bench/std_file_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/file
+using std/file::{File}
+
+args = Program.args
+env_sandbox = Program.env("IYI_FILE_SANDBOX")
+sandbox = if args.size > 0
+            args[0]
+          elsif !env_sandbox.nil?
+            env_sandbox
+          else
+            "/tmp"
+          end
+
+puts "== write, read, and append"
+f1 = sandbox + "/std_file_ex_1.txt"
+File.write(f1, "first line\n")
+assert_str "first line\n", File.read(f1), "write then read back"
+
+File.write(f1, File.read(f1) + "second line\n")
+assert_str "first line\nsecond line\n", File.read(f1), "append"
+puts "  write, read back, and append verified"
+
+puts "\n== exists, size, and empty"
+assert_true File.exists?(f1), "file exists"
+assert_true File.size(f1) == 23_i64, "file size matches bytesize"
+assert_true !File.empty?(f1), "file is not empty"
+
+f_empty = sandbox + "/std_file_ex_empty.txt"
+File.write(f_empty, "")
+assert_true File.exists?(f_empty), "empty file exists"
+assert_true File.size(f_empty) == 0_i64, "empty file size is 0"
+assert_true File.empty?(f_empty), "empty? is true for empty file"
+
+f_nonexistent = sandbox + "/std_file_ex_nonexistent_xyz.txt"
+assert_true !File.exists?(f_nonexistent), "nonexistent file does not exist"
+assert_true File.info?(f_nonexistent).nil?, "info? on nonexistent returns nil"
+puts "  exists, size, and empty verified"
+
+puts "\n== line-wise reading"
+lines = File.read_lines(f1)
+assert_true lines.size == 2, "read_lines returned 2 lines"
+assert_str "first line", lines[0], "line 0"
+assert_str "second line", lines[1], "line 1"
+
+count = 0
+File.each_line(f1) do |l|
+  count = count + 1
+end
+assert_true count == 2, "each_line visited 2 lines"
+puts "  read_lines and each_line verified"
+
+puts "\n== truncation and overwrite"
+File.truncate(f1, 5_i64)
+assert_str "first", File.read(f1), "truncated content"
+assert_true File.size(f1) == 5_i64, "truncated size"
+
+File.write(f1, "overwritten content")
+assert_str "overwritten content", File.read(f1), "overwritten content"
+assert_true File.size(f1) == 19_i64, "overwritten size"
+puts "  truncation and overwrite verified"
+
+puts "\n== metadata and permissions"
+inf = File.info(f1)
+assert_true inf.file?, "info is file"
+assert_true !inf.directory?, "info is not directory"
+assert_true inf.size == 19_i64, "info size"
+assert_true File.readable?(f1), "File.readable?"
+assert_true File.writable?(f1), "File.writable?"
+assert_true File.file?(f1), "File.file?"
+assert_true !File.directory?(f1), "File.directory? on file is false"
+
+File.chmod(f1, 0o644)
+perms = File.info(f1).permissions
+assert_true perms.owner_read?, "owner read"
+assert_true perms.owner_write?, "owner write"
+assert_str "rw-r--r--", perms.to_s, "permissions string"
+puts "  metadata, permissions, and chmod verified"
+
+puts "\n== directory and file queries"
+assert_true File.exists?(sandbox), "sandbox directory exists"
+assert_true File.directory?(sandbox), "sandbox is a directory"
+assert_true !File.file?(sandbox), "sandbox is not a file"
+dir_info = File.info(sandbox)
+assert_true dir_info.directory?, "dir_info.directory?"
+assert_true !dir_info.file?, "dir_info not file?"
+assert_true dir_info.type.directory?, "dir_info.type.directory?"
+assert_true File.readable?(sandbox), "sandbox directory is readable"
+puts "  directory inspection verified"
+
+puts "\n== paths, links, and content comparison"
+f2 = sandbox + "/std_file_ex_2.txt"
+File.write(f2, "overwritten content")
+assert_true File.same_content?(f1, f2), "same_content? is true for identical content"
+assert_true !File.same?(f1, f2), "same? is false for distinct files"
+
+flink = sandbox + "/std_file_ex_link.txt"
+File.link(f1, flink)
+assert_true File.exists?(flink), "link exists"
+assert_true File.same?(f1, flink), "hard link same? is true"
+assert_str "overwritten content", File.read(flink), "link content"
+
+fsym = sandbox + "/std_file_ex_sym.txt"
+File.symlink(f1, fsym)
+assert_true File.symlink?(fsym), "symlink? is true"
+assert_true File.readlink(fsym) == f1, "readlink returns target"
+assert_true File.real_path(fsym) == File.real_path(f1), "real_path resolves target"
+
+fren = sandbox + "/std_file_ex_renamed.txt"
+File.rename(f2, fren)
+assert_true !File.exists?(f2), "old path does not exist after rename"
+assert_true File.exists?(fren), "new path exists after rename"
+
+assert_str "std_file_ex_1.txt", File.basename(f1), "basename"
+assert_str ".txt", File.extname(f1), "extname"
+assert_str sandbox, File.dirname(f1), "dirname"
+assert_str "a/b/c", File.join(["a", "b", "c"]), "join"
+puts "  links, rename, and path helpers verified"
+
+puts "\n== delete"
+File.delete(f1)
+assert_true !File.exists?(f1), "f1 deleted"
+File.delete(f_empty)
+assert_true !File.exists?(f_empty), "f_empty deleted"
+File.delete(flink)
+assert_true !File.exists?(flink), "flink deleted"
+File.delete(fsym)
+assert_true !File.exists?(fsym), "fsym deleted"
+File.delete(fren)
+assert_true !File.exists?(fren), "fren deleted"
+puts "  file deletion verified"
+
+puts "\nALL CHECKS PASSED"

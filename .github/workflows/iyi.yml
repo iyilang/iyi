@@ -606,6 +606,9 @@ jobs:
       - name: The dependency floor
         run: bash bench/dependency_floor.sh
 
+      - name: The build tool floor
+        run: bash bench/build_tool_floor.sh
+
       # What a kernel thread costs that floor, measured before anything is
       # designed on one (GC_DESIGN.md Stages 4, 7, 8, 9; III.4.7's `Share`):
       # raw `clone`, a `tgkill` stop-the-world, a futex join, and the
@@ -1041,6 +1044,9 @@ jobs:
 
       - name: The dependency floor (III.9)
         run: bash bench/dependency_floor.sh
+
+      - name: The build tool floor
+        run: bash bench/build_tool_floor.sh
 
       # What a thread costs *this* floor, where every call is libSystem's:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`

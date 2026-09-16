@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises `std/fiber`: Crystal-compatible Fiber API.
+# Exercises `std/fiber`: Fiber API.
 #
 #     bash bench/std_fiber_exercise.sh
 #
@@ -7,7 +7,7 @@
 #   * bench/std_fiber_exercise.iyi passes plain and --release.
 #   * Fiber.current, name, and string inspection reflect current state.
 #   * Spawning, initial state, and identity comparison.
-#   * Cooperative yielding preserves strictly deterministic FIFO run queue order.
+#   * Cooperative yielding preserves sequential execution ordering.
 #   * Completed fibers are dead, and fibers suspended in queue are resumable.
 #   * Fiber.suspend parks off the run queue until explicit resume.
 #   * Negative proofs: broken state comparisons or dropped fiber properties

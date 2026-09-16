@@ -1,4 +1,4 @@
-# Crystal-compatible Fiber API — fiber inspection, cooperative scheduling,
+# Fiber API: fiber inspection, cooperative scheduling,
 # and execution state tracking built on iyi's native IyiFiber runtime.
 
 module std/fiber

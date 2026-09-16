@@ -1,0 +1,80 @@
+# Fiber API: fiber inspection, cooperative scheduling,
+# and execution state tracking built on iyi's native IyiFiber runtime.
+
+module std/fiber
+
+class ::IyiFiber
+  property name : String?
+
+  # `@state` is an `IyiFiberState`, and comparing one against a bare integer
+  # answers `false` rather than refusing to compile, so these name the members.
+  # The numbers were right and the comparison was not, which is the shape that
+  # reported the main fiber as not running.
+  def running? : Bool
+    @state == IyiFiberState::Running
+  end
+
+  def resumable? : Bool
+    @state != IyiFiberState::Running && @state != IyiFiberState::Done
+  end
+
+  def dead? : Bool
+    @state == IyiFiberState::Done
+  end
+
+  def enqueue : Nil
+    IyiScheduler.enqueue(self)
+  end
+
+  def resume : Nil
+    IyiScheduler.enqueue(self)
+  end
+
+  def to_s : String
+    if n = @name
+      "#<Fiber:0x#{object_id.to_s(16)} #{n}>"
+    else
+      "#<Fiber:0x#{object_id.to_s(16)}>"
+    end
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  def ==(other : IyiFiber) : Bool
+    self.object_id == other.object_id
+  end
+
+  def same?(other : IyiFiber) : Bool
+    self.object_id == other.object_id
+  end
+
+  def self.current : IyiFiber
+    IyiScheduler.current
+  end
+
+  def self.current? : IyiFiber?
+    IyiScheduler.current
+  end
+
+  def self.yield : Nil
+    IyiScheduler.enqueue(IyiScheduler.current)
+    IyiScheduler.reschedule
+  end
+
+  def self.suspend : Nil
+    IyiScheduler.reschedule
+  end
+
+  def self.new(name : String? = nil, &proc : ->) : IyiFiber
+    f = IyiFiber.new
+    f.name = name
+    f.proc = proc
+    f.prepare_stack
+    IyiScheduler.register(f)
+    f
+  end
+end
+
+pub alias Fiber = ::IyiFiber

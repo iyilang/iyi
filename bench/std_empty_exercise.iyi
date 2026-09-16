@@ -1,0 +1,45 @@
+# Exercises `std/empty`: empty standard module entrypoint, namespace, and emptiness predicates.
+#
+# Run via:
+#     ./bin/iyi run bench/std_empty_exercise.iyi
+
+module bench/std_empty_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/empty
+using std/empty
+
+puts "== module"
+assert_str "Std::Empty", Std::Empty.to_s, "module name"
+puts "  module imported and bound"
+
+puts "\n== empty predicate"
+assert_true "".empty?, "empty string"
+assert_true !"a".empty?, "single char string"
+assert_true !"hello".empty?, "multi-char string"
+assert_true !" ".empty?, "whitespace string"
+assert_true !"\0".empty?, "null byte string"
+
+arr0 = [] of Int32
+assert_true arr0.empty?, "empty array"
+arr1 = [42]
+assert_true !arr1.empty?, "single element array"
+arr2 = [1, 2]
+assert_true !arr2.empty?, "multi element array"
+
+h0 = {} of String => Int32
+assert_true h0.empty?, "empty hash"
+h1 = {"key" => 1}
+assert_true !h1.empty?, "single element hash"
+h2 = {"a" => 1, "b" => 2}
+assert_true !h2.empty?, "multi element hash"
+puts "  empty and non-empty for string, array, hash"
+
+puts "\nALL CHECKS PASSED"

@@ -238,8 +238,17 @@ case "$(uname -s)" in
     fi
     ;;
   *)
-    # On Darwin, libSystem supplies clock_gettime_nsec_np, which concurrency already links
-    allowed_symbols="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+    # On Darwin, libSystem supplies clock_gettime_nsec_np, which concurrency already links.
+    #
+    # `backtrace` and `backtrace_symbols_fd` are on the list for the reason the
+    # prelude already records where it binds them: on Apple's platform that is
+    # how a panic prints its own frames, and both are libSystem symbols, the
+    # platform libc `bench/dependency_floor.sh` already permits. So they cost
+    # no library, which the `allowed_libs` check below proves independently:
+    # this binary still links libSystem and nothing else. They are named here
+    # rather than waved through, because a symbol nobody wrote down is the
+    # thing this audit exists to catch.
+    allowed_symbols="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
     ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"

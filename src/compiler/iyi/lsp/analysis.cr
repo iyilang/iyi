@@ -587,11 +587,20 @@ module Iyi::Lsp
       unless anchor
         # Nothing in this file carries a location: the cause lives in an
         # import. Land on line 1 and say where it really is.
+        #
+        # The frames come with it. This used to write the far file into the
+        # prose and then hand back an empty `related`, so the sentence knew
+        # where the error was and the data did not, and every consumer that
+        # reads structure rather than English was blind: `iyi fix` finds the
+        # file to point at by looking for a frame in another file, found
+        # none, and reported no cause at all. The prose and the frames are
+        # the same finding and they leave together.
         message = deepest_message
         if far = frames.last?
           message += "\n(in #{far[0]}:#{far[1]})"
         end
-        return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), [] of {String, Int32, Int32, String})
+        carried = frames.map { |(file, line, col, _, msg, _)| {file, line, col, msg} }
+        return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), carried)
       end
 
       message = anchor[4]

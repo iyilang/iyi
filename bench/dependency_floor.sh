@@ -115,14 +115,14 @@ trap 'rm -rf "$WORK"' EXIT
 # `backtrace` and `backtrace_symbols_fd` joined when panics gained backtraces:
 # the panic path captures the frames and writes them directly to stderr
 # through libSystem, linking no new library.
-# `std/file` and `std/dir` (stat64, lstat64, fstat64, rename, link, symlink,
-# readlink, realpath, chown, truncate, ftruncate, access, utimes, opendir,
-# readdir, closedir, rewinddir, getcwd, chdir, mkdir, rmdir) and `std/udp`
-# (sendto, recvfrom, getsockopt) joined the way `IyiSocket` did: libSystem is
-# darwin's interface, and on Linux each is a raw syscall the object does not
-# name. `std/debug` reads the program's own image through `dladdr`,
-# `_NSGetExecutablePath` and `lseek`, all libSystem's.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide stat64 lstat64 fstat64 rename link symlink readlink realpath chown truncate ftruncate access utimes opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom getsockopt dladdr _NSGetExecutablePath lseek"
+# `std/file` and `std/dir` (stat64, lstat64, rename, link, symlink, readlink,
+# realpath, truncate, opendir, readdir, closedir, rewinddir, getcwd, chdir,
+# mkdir, rmdir) and `std/udp` (sendto, recvfrom) joined the way `IyiSocket`
+# did: libSystem is darwin's interface, and on Linux each is a raw syscall
+# the object does not name. What the modules declare but their gates never
+# reach (fstat64, chown, access, utimes, getsockopt) is not on the list; the
+# floor is what a program leaves undefined, not what a module could ask.
+ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom"
 ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main environ"
 
 # What a program may link. The platform libc only.

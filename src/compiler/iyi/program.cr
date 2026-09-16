@@ -330,9 +330,13 @@ module Iyi
     # `.iyimod` specs do this without `--crystal`) has Crystal's runtime and
     # must call it by Crystal's names; the entry's extension says nothing
     # about which prelude was loaded, and deciding by it linked against
-    # symbols the prelude did not have.
+    # symbols the prelude did not have. The ground truth is the prelude
+    # itself rather than the flag, as `iyi_object_layout?` reads it: a
+    # spec-built snippet carries the default `iyi_prelude?` and requires
+    # Crystal's prelude, or none. `IyiRuntimeLock` is iyi's prelude's, on
+    # every target and under every mode.
     def iyi_abi? : Bool
-      iyi_prelude?
+      iyi_prelude? && !types?.try(&.[]?("IyiRuntimeLock")).nil?
     end
 
     def abi_prefix : String

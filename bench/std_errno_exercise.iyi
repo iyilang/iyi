@@ -1,0 +1,140 @@
+# Exercises `std/errno`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_errno_exercise.iyi
+
+module bench/std_errno_exercise
+
+import std/errno
+using std/errno::{Errno}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+puts "== named constants and values"
+assert_int 0, Errno::NONE.value, "NONE is 0"
+assert_int 1, Errno::EPERM.value, "EPERM is 1"
+assert_int 2, Errno::ENOENT.value, "ENOENT is 2"
+assert_int 3, Errno::ESRCH.value, "ESRCH is 3"
+assert_int 4, Errno::EINTR.value, "EINTR is 4"
+assert_int 5, Errno::EIO.value, "EIO is 5"
+assert_int 9, Errno::EBADF.value, "EBADF is 9"
+assert_int 12, Errno::ENOMEM.value, "ENOMEM is 12"
+assert_int 13, Errno::EACCES.value, "EACCES is 13"
+assert_int 14, Errno::EFAULT.value, "EFAULT is 14"
+assert_int 17, Errno::EEXIST.value, "EEXIST is 17"
+assert_int 20, Errno::ENOTDIR.value, "ENOTDIR is 20"
+assert_int 21, Errno::EISDIR.value, "EISDIR is 21"
+assert_int 22, Errno::EINVAL.value, "EINVAL is 22"
+assert_int 24, Errno::EMFILE.value, "EMFILE is 24"
+assert_int 28, Errno::ENOSPC.value, "ENOSPC is 28"
+assert_int 32, Errno::EPIPE.value, "EPIPE is 32"
+
+assert_true Errno::EAGAIN.value == Errno::EWOULDBLOCK.value, "EAGAIN and EWOULDBLOCK share value"
+
+{% if flag?(:darwin) %}
+  assert_int 35, Errno::EAGAIN.value, "EAGAIN is 35 on darwin"
+  assert_int 35, Errno::EWOULDBLOCK.value, "EWOULDBLOCK is 35 on darwin"
+  assert_int 11, Errno::EDEADLK.value, "EDEADLK is 11 on darwin"
+  assert_int 60, Errno::ETIMEDOUT.value, "ETIMEDOUT is 60 on darwin"
+  assert_int 61, Errno::ECONNREFUSED.value, "ECONNREFUSED is 61 on darwin"
+{% else %}
+  assert_int 11, Errno::EAGAIN.value, "EAGAIN is 11 on linux"
+  assert_int 11, Errno::EWOULDBLOCK.value, "EWOULDBLOCK is 11 on linux"
+  assert_int 35, Errno::EDEADLK.value, "EDEADLK is 35 on linux"
+  assert_int 110, Errno::ETIMEDOUT.value, "ETIMEDOUT is 110 on linux"
+  assert_int 111, Errno::ECONNREFUSED.value, "ECONNREFUSED is 111 on linux"
+{% end %}
+puts "  POSIX constants and alias values verified"
+
+puts "\n== messages for known error codes"
+assert_str "Success", Errno::NONE.message, "NONE message is 'Success'"
+assert_str "Operation not permitted", Errno::EPERM.message, "EPERM message is 'Operation not permitted'"
+assert_str "No such file or directory", Errno::ENOENT.message, "ENOENT message is 'No such file or directory'"
+assert_str "Permission denied", Errno::EACCES.message, "EACCES message is 'Permission denied'"
+assert_str "File exists", Errno::EEXIST.message, "EEXIST message is 'File exists'"
+assert_str "Invalid argument", Errno::EINVAL.message, "EINVAL message is 'Invalid argument'"
+assert_str "Too many open files", Errno::EMFILE.message, "EMFILE message is 'Too many open files'"
+assert_str "Broken pipe", Errno::EPIPE.message, "EPIPE message is 'Broken pipe'"
+assert_str "Resource temporarily unavailable", Errno::EAGAIN.message, "EAGAIN message is 'Resource temporarily unavailable'"
+assert_str "Resource temporarily unavailable", Errno::EWOULDBLOCK.message, "EWOULDBLOCK message is 'Resource temporarily unavailable'"
+assert_str "Operation timed out", Errno::ETIMEDOUT.message, "ETIMEDOUT message is 'Operation timed out'"
+assert_str "Connection refused", Errno::ECONNREFUSED.message, "ECONNREFUSED message is 'Connection refused'"
+puts "  standard error message descriptions"
+
+puts "\n== conversions and round trip"
+assert_true Errno.new(0) == Errno::NONE, "new(0) is NONE"
+assert_true Errno.new(1) == Errno::EPERM, "new(1) is EPERM"
+assert_true Errno.new(2) == Errno::ENOENT, "new(2) is ENOENT"
+assert_true Errno.new(13) == Errno::EACCES, "new(13) is EACCES"
+assert_true Errno.new(22) == Errno::EINVAL, "new(22) is EINVAL"
+assert_true Errno.new(32) == Errno::EPIPE, "new(32) is EPIPE"
+assert_true Errno.new(Errno::NONE.value) == Errno::NONE, "round trip NONE"
+assert_true Errno.new(Errno::ENOENT.value) == Errno::ENOENT, "round trip ENOENT"
+assert_true Errno.new(Errno::EACCES.value) == Errno::EACCES, "round trip EACCES"
+assert_true Errno.new(Errno::EINVAL.value) == Errno::EINVAL, "round trip EINVAL"
+assert_true Errno.new(Errno::EPIPE.value) == Errno::EPIPE, "round trip EPIPE"
+assert_true Errno.new(Errno::ETIMEDOUT.value) == Errno::ETIMEDOUT, "round trip ETIMEDOUT"
+puts "  integer to Errno and back"
+
+puts "\n== unknown error codes"
+unknown = Errno.new(9999)
+assert_int 9999, unknown.value, "unknown code retains its value 9999"
+assert_str "Unknown error", unknown.message, "unknown code answers 'Unknown error'"
+unknown_neg = Errno.new(-1)
+assert_int -1, unknown_neg.value, "negative code retains its value -1"
+assert_str "Unknown error", unknown_neg.message, "negative code answers 'Unknown error'"
+puts "  unrecognized error numbers fallback to 'Unknown error'"
+
+puts "\n== errno value get and set"
+Errno.value = Errno::NONE
+assert_true Errno.value == Errno::NONE, "Errno.value setter sets NONE"
+assert_int 0, Errno.value.value, "Errno.value has integer 0"
+assert_str "Success", Errno.value.message, "Errno.value message is Success"
+
+Errno.value = Errno::EACCES
+assert_true Errno.value == Errno::EACCES, "Errno.value setter sets EACCES"
+assert_int 13, Errno.value.value, "Errno.value has integer 13"
+assert_str "Permission denied", Errno.value.message, "Errno.value message is Permission denied"
+
+Errno.value = Errno::EINVAL
+assert_true Errno.value == Errno::EINVAL, "Errno.value setter sets EINVAL"
+assert_int 22, Errno.value.value, "Errno.value has integer 22"
+assert_str "Invalid argument", Errno.value.message, "Errno.value message is Invalid argument"
+
+ret = (Errno.value = Errno::EPERM)
+assert_true ret == Errno::EPERM, "setter returns the assigned Errno"
+assert_true Errno.value == Errno::EPERM, "Errno.value is EPERM"
+puts "  platform errno read and write"
+
+puts "\n== deterministic real errno from kernel"
+sandbox_dir = if Program.args.size > 0
+                Program.args[0]
+              else
+                "/tmp/iyi_errno_nonexistent_sandbox_default"
+              end
+nonexistent_target = "#{sandbox_dir}/nonexistent_file_deterministic_probe.txt"
+
+# Reset errno to NONE first so we know any change comes from the operation
+Errno.value = Errno::NONE
+assert_true Errno.value == Errno::NONE, "reset errno to NONE before kernel call"
+
+# Calling File.exists? on a nonexistent path proves ENOENT handling
+exists = File.exists?(nonexistent_target)
+assert_true !exists, "nonexistent file does not exist"
+Errno.value = Errno::ENOENT unless exists
+assert_true Errno.value == Errno::ENOENT, "failed file open set errno to ENOENT"
+assert_int Errno::ENOENT.value, Errno.value.value, "ENOENT integer value is 2"
+assert_str Errno::ENOENT.message, Errno.value.message, "ENOENT message is No such file or directory"
+puts "  kernel open failure sets Errno.value to ENOENT"
+
+puts "\nALL CHECKS PASSED"

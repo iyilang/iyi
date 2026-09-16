@@ -7147,39 +7147,28 @@ require "./file"
 {% end %}
 # ── end of the memory layer ─────────────────────────────────────────────
 
-# Codegen emits a call to this on every overflowing operation, so a program
-# cannot link without it. It aborts rather than raising: 0.1.0's `raise` is a
-# panic (SPEC.md III.1.4) and there is no unwinder under it.
-# Every function with an `ensure` names a personality function, so a program
-# with a `defer` in it does not link without this symbol. It is not reachable:
-# reaching it would mean something is unwinding, and nothing here unwinds.
+# The three symbols an `ensure` names and a `defer` links: a personality,
+# the exception fetch and the re-raise. None is reachable — reaching one
+# would mean something is unwinding, and nothing here unwinds (III.1.4).
 fun __iyi_personality
   print "iyi: __iyi_personality called, which cannot happen\n"
   __iyi_exit(1)
 end
 
-# Reached from the same landing pad, for the same reason, and just as
-# unreachable: `ensure` compiles a path that would ask the unwinder what was
-# thrown, and nothing here throws.
 fun __iyi_get_exception(exception : Void*) : UInt64
   print "iyi: __iyi_get_exception called, which cannot happen\n"
   __iyi_exit(1)
   0_u64
 end
 
-# Codegen emits a call to this wherever a `rescue` would re-raise. Nothing in
-# this prelude can reach it either — `raise` panics rather than unwinding —
-# but a program with an `ensure` in it names the symbol.
 @[Raises]
 fun __iyi_raise(exception : Void*) : NoReturn
   print "iyi: __iyi_raise called, which cannot happen\n"
   __iyi_exit(1)
 end
 
-# Codegen emits a call to this on every overflowing checked operation.
-# It is a `fun` — the name is the ABI — but the body just steps into the
-# ordinary panic def, so an overflow in a task dies at the task
-# boundary like any other bug instead of taking the process (III.1.4).
+# Every checked operation names this; the body is the ordinary panic, so an
+# overflow in a task dies at the task boundary like any other bug.
 fun __iyi_raise_overflow : NoReturn
   raise "arithmetic overflow"
 end
@@ -7329,13 +7318,24 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   {% end %}
 end
 
-# The one word a test needs, and no framework under it (`iyi test`): a
-# false condition is a panic naming the site, exiting 1 - the contract every
-# gate in `bench/` runs on. The message is the sentence a failure prints;
-# without one, the site is the sentence.
+# The one word a test needs (`iyi test`): a false condition is a panic
+# naming the site, exiting 1, which is the contract every gate runs on.
 def assert(condition : Bool, message : String = "", file : String = __FILE__, line : Int32 = __LINE__) : Nil
   return if condition
   raise(message.empty? ? "assertion failed" : "assertion failed: " + message, file, line)
+end
+
+# What a wait answers when its task was cancelled (III.4.2): an error
+# member. Here, not in the runtime: `IyiSocket` answers it on every target.
+pub struct Cancelled
+  def initialize
+  end
+end
+
+impl Error for Cancelled
+  def message : String
+    "cancelled"
+  end
 end
 
 # A failed `.as` in `select` expansion is a compiler bug; this panic carries

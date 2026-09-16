@@ -31,7 +31,9 @@
   names the poller by hand, and `bench/socket_exercise.sh` holds the
   contract: a task parked in `read` leaves with `Cancelled` when a
   sibling fails, on one thread. Where there is no runtime the same
-  names answer `T` and block as they did.
+  names block on a `poll` and carry the same type, so a program reads
+  the same on every target; `Cancelled` moved into the prelude for that,
+  and the ceiling stays at 3,734.
 
 ## 0.13.0 — 2026-09-16
 
@@ -6512,7 +6514,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 14,216-line library and nothing else. Every other
+  written against iyi's own 14,208-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

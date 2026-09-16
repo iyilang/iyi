@@ -299,17 +299,9 @@ end
 # a value gives one of these, `!` propagates it, `case` handles it. That a
 # *cancelled* wait is an error value rather than an unwound stack is the
 # design's whole answer to III.4.2 — and panics (III.1.4) landing did not
-# change it: cancellation is control flow, a panic is a bug.
-pub struct Cancelled
-  def initialize
-  end
-end
-
-impl Error for Cancelled
-  def message : String
-    "cancelled"
-  end
-end
+# change it: cancellation is control flow, a panic is a bug. `Cancelled`
+# itself is the prelude's (prelude.iyi), on every target: a socket answers
+# it, and a socket's type may not depend on whether a runtime is present.
 
 # What a *caught* panic answers as — III.1.4's "catchable at task
 # boundaries", made literal: reading a panicked task's value delivers

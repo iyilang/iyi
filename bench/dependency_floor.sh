@@ -120,12 +120,19 @@ trap 'rm -rf "$WORK"' EXIT
 # mkdir, rmdir) and `std/udp` (sendto, recvfrom) joined the way `IyiSocket`
 # did: libSystem is darwin's interface, and on Linux each is a raw syscall
 # the object does not name. What the modules declare but their gates never
-# reach (fstat64, chown, access, utimes) is not on the list; the floor is
+# reach (fstat64, chown) is not on the list; the floor is
 # what a program leaves undefined, not what a module could ask.
 # `fcntl` and `getsockopt` joined when the socket started parking: every
 # socket is O_NONBLOCK now, and a connect that is in progress reads
 # SO_ERROR when the poller says it finished. Linux does both by syscall.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
+# `access` and `utimes` joined when `bench/std_file_exercise.sh` started
+# reaching them: asking whether a path is readable or writable without
+# opening it is `access`, and setting a file's times is `utimes`. Both were
+# on the unreached list above until the exercise exercised them, which is
+# the second time that list has handed a symbol back. Neither adds a
+# library: libSystem on darwin, a syscall on Linux, and the
+# `ALLOWED_LIBS_PROGRAM` check below is what proves it.
+ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept access backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink utimes write _dyld_get_image_header _dyld_get_image_vmaddr_slide stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
 ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main environ"
 
 # What a program may link. The platform libc only.

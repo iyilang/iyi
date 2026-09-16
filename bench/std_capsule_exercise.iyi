@@ -1,0 +1,427 @@
+# Exercises `std/capsule`: RFC 9297 Capsule Protocol, RFC 9000 VarInt,
+# HTTP Datagrams, Extended CONNECT (RFC 8441, RFC 9220), and Capsule-Protocol.
+#
+# Run via:
+#     ./bin/iyi run bench/std_capsule_exercise.iyi
+
+module bench/std_capsule_exercise
+
+import std/slice
+using std/slice::{Bytes}
+import std/capsule
+using std/capsule::{VarInt, HttpDatagram, CapsuleType, Capsule, CapsuleReader, ExtendedConnect, CapsuleProtocol}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_false(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" if cond
+end
+
+def assert_u64(expected : UInt64, actual : UInt64, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_i32(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_bytes(expected : Bytes, actual : Bytes, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected size #{expected.size}\n  got      size #{actual.size}" unless expected.size == actual.size
+  i = 0
+  while i < expected.size
+    unless expected[i] == actual[i]
+      raise "ASSERTION FAILED: #{msg} at index #{i}\n  expected #{expected[i]}\n  got      #{actual[i]}"
+    end
+    i = i + 1
+  end
+end
+
+puts "== varint"
+# Bounds and valid_value?
+assert_true VarInt.valid_value?(0_u64), "0 is valid varint"
+assert_true VarInt.valid_value?(37_u64), "37 is valid varint"
+assert_true VarInt.valid_value?(VarInt::MAX_1BYTE), "MAX_1BYTE is valid varint"
+assert_true VarInt.valid_value?(VarInt::MAX_2BYTE), "MAX_2BYTE is valid varint"
+assert_true VarInt.valid_value?(VarInt::MAX_4BYTE), "MAX_4BYTE is valid varint"
+assert_true VarInt.valid_value?(VarInt::MAX), "MAX is valid varint"
+assert_false VarInt.valid_value?(4611686018427387904_u64), "MAX+1 exceeds 62 bits"
+
+# encoded_size (minimum canonical length)
+assert_i32 1, VarInt.encoded_size(0_u64), "encoded_size 0"
+assert_i32 1, VarInt.encoded_size(37_u64), "encoded_size 37"
+assert_i32 1, VarInt.encoded_size(63_u64), "encoded_size 63 (MAX_1BYTE)"
+assert_i32 2, VarInt.encoded_size(64_u64), "encoded_size 64"
+assert_i32 2, VarInt.encoded_size(15293_u64), "encoded_size 15293"
+assert_i32 2, VarInt.encoded_size(16383_u64), "encoded_size 16383 (MAX_2BYTE)"
+assert_i32 4, VarInt.encoded_size(16384_u64), "encoded_size 16384"
+assert_i32 4, VarInt.encoded_size(494878333_u64), "encoded_size 494878333"
+assert_i32 4, VarInt.encoded_size(1073741823_u64), "encoded_size 1073741823 (MAX_4BYTE)"
+assert_i32 8, VarInt.encoded_size(1073741824_u64), "encoded_size 1073741824"
+assert_i32 8, VarInt.encoded_size(151288809941952642_u64), "encoded_size 151288809941952642"
+assert_i32 8, VarInt.encoded_size(VarInt::MAX), "encoded_size MAX"
+
+# Canonical RFC 9000 Appendix A test vectors: encode and decode
+# 37: 1 byte 0x25
+v37 = VarInt.encode(37_u64)
+assert_i32 1, v37.size, "37 canonical size"
+assert_u64 0x25_u64, v37[0].to_u64, "37 byte 0"
+d37, l37 = VarInt.decode(v37)
+assert_u64 37_u64, d37, "decode 37"
+assert_i32 1, l37, "consumed 37"
+
+# 15293: 2 bytes 0x7b, 0xbd
+v15293 = VarInt.encode(15293_u64)
+assert_i32 2, v15293.size, "15293 canonical size"
+assert_u64 0x7b_u64, v15293[0].to_u64, "15293 byte 0"
+assert_u64 0xbd_u64, v15293[1].to_u64, "15293 byte 1"
+d15293, l15293 = VarInt.decode(v15293)
+assert_u64 15293_u64, d15293, "decode 15293"
+assert_i32 2, l15293, "consumed 15293"
+
+# 494878333: 4 bytes 0x9d, 0x7f, 0x3e, 0x7d
+v494 = VarInt.encode(494878333_u64)
+assert_i32 4, v494.size, "494878333 canonical size"
+assert_u64 0x9d_u64, v494[0].to_u64, "494 byte 0"
+assert_u64 0x7f_u64, v494[1].to_u64, "494 byte 1"
+assert_u64 0x3e_u64, v494[2].to_u64, "494 byte 2"
+assert_u64 0x7d_u64, v494[3].to_u64, "494 byte 3"
+d494, l494 = VarInt.decode(v494)
+assert_u64 494878333_u64, d494, "decode 494878333"
+assert_i32 4, l494, "consumed 494878333"
+
+# 151288809941952642: 8 bytes 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x82
+v151 = VarInt.encode(151288809941952642_u64)
+assert_i32 8, v151.size, "151288809941952642 canonical size"
+assert_u64 0xc2_u64, v151[0].to_u64, "151 byte 0"
+assert_u64 0x19_u64, v151[1].to_u64, "151 byte 1"
+assert_u64 0x7c_u64, v151[2].to_u64, "151 byte 2"
+assert_u64 0x5e_u64, v151[3].to_u64, "151 byte 3"
+assert_u64 0xff_u64, v151[4].to_u64, "151 byte 4"
+assert_u64 0x14_u64, v151[5].to_u64, "151 byte 5"
+assert_u64 0xe8_u64, v151[6].to_u64, "151 byte 6"
+assert_u64 0x82_u64, v151[7].to_u64, "151 byte 7"
+d151, l151 = VarInt.decode(v151)
+assert_u64 151288809941952642_u64, d151, "decode 151288809941952642"
+assert_i32 8, l151, "consumed 151288809941952642"
+# 0: 1 byte 0x00
+v0 = VarInt.encode(0_u64)
+assert_i32 1, v0.size, "0 canonical size"
+d0, l0 = VarInt.decode(v0)
+assert_u64 0_u64, d0, "decode 0"
+assert_i32 1, l0, "consumed 0"
+
+# MAX: 8 bytes
+vmax = VarInt.encode(VarInt::MAX)
+assert_i32 8, vmax.size, "MAX canonical size"
+dmax, lmax = VarInt.decode(vmax)
+assert_u64 VarInt::MAX, dmax, "decode MAX"
+assert_i32 8, lmax, "consumed MAX"
+
+# Explicit multi-byte encoding (RFC 9000 Appendix A: 37 in 1, 2, 4, 8 bytes)
+m1 = VarInt.encode(37_u64, 1)
+m2 = VarInt.encode(37_u64, 2)
+m4 = VarInt.encode(37_u64, 4)
+m8 = VarInt.encode(37_u64, 8)
+assert_i32 1, m1.size, "m1 size"
+assert_i32 2, m2.size, "m2 size"
+assert_i32 4, m4.size, "m4 size"
+assert_i32 8, m8.size, "m8 size"
+assert_u64 0x25_u64, m1[0].to_u64, "m1 bytes"
+assert_u64 0x40_u64, m2[0].to_u64, "m2 byte 0"
+assert_u64 0x25_u64, m2[1].to_u64, "m2 byte 1"
+assert_u64 0x80_u64, m4[0].to_u64, "m4 byte 0"
+assert_u64 0x25_u64, m4[3].to_u64, "m4 byte 3"
+assert_u64 0xc0_u64, m8[0].to_u64, "m8 byte 0"
+assert_u64 0x25_u64, m8[7].to_u64, "m8 byte 7"
+
+# Non-strict decoding permits multi-byte representation
+dm1, lm1 = VarInt.decode(m1)
+dm2, lm2 = VarInt.decode(m2)
+dm4, lm4 = VarInt.decode(m4)
+dm8, lm8 = VarInt.decode(m8)
+assert_u64 37_u64, dm1, "non-strict dm1"
+assert_u64 37_u64, dm2, "non-strict dm2"
+assert_u64 37_u64, dm4, "non-strict dm4"
+assert_u64 37_u64, dm8, "non-strict dm8"
+assert_i32 1, lm1, "len lm1"
+assert_i32 2, lm2, "len lm2"
+assert_i32 4, lm4, "len lm4"
+assert_i32 8, lm8, "len lm8"
+
+# Strict decoding rejects overlong representation
+assert_false VarInt.decode_strict?(m1).nil?, "m1 valid in strict mode"
+assert_true VarInt.decode_strict?(m2).nil?, "m2 overlong in strict mode"
+assert_true VarInt.decode_strict?(m4).nil?, "m4 overlong in strict mode"
+assert_true VarInt.decode_strict?(m8).nil?, "m8 overlong in strict mode"
+
+# Truncated buffer detection
+trunc_buf = Bytes.new(1)
+trunc_buf[0] = 0x40_u8 # indicates 2-byte varint, but only 1 byte present
+assert_true VarInt.decode?(trunc_buf).nil?, "truncated 2-byte varint returns nil"
+assert_true VarInt.decode?(Bytes.new(0)).nil?, "empty buffer returns nil"
+assert_true VarInt.decode?(trunc_buf, offset: 5).nil?, "offset beyond buffer returns nil"
+puts "  RFC 9000 VarInt encoding, decoding, boundaries, and strictness"
+
+puts "\n== datagram"
+# Stream ID to Quarter Stream ID mapping
+# Quarter Stream ID = Stream ID // 4
+# Stream ID = Quarter Stream ID * 4
+dg0 = HttpDatagram.from_stream_id(0_u64, Bytes.new(0))
+assert_u64 0_u64, dg0.quarter_stream_id, "qid from stream 0"
+assert_u64 0_u64, dg0.stream_id, "stream_id from qid 0"
+
+dg16 = HttpDatagram.from_stream_id(16_u64, Bytes.new(0))
+assert_u64 4_u64, dg16.quarter_stream_id, "qid from stream 16"
+assert_u64 16_u64, dg16.stream_id, "stream_id from qid 4"
+
+dg19 = HttpDatagram.from_stream_id(19_u64, Bytes.new(0))
+assert_u64 4_u64, dg19.quarter_stream_id, "qid from stream 19 (19 // 4 = 4)"
+assert_u64 16_u64, dg19.stream_id, "stream_id from qid 4"
+
+# Datagram encoding and decoding with binary payload
+pay = Bytes.new(5)
+pay[0] = 0x01_u8; pay[1] = 0x02_u8; pay[2] = 0x03_u8; pay[3] = 0x04_u8; pay[4] = 0x05_u8
+dg_custom = HttpDatagram.new(12_u64, pay)
+assert_u64 12_u64, dg_custom.quarter_stream_id, "custom datagram qid"
+assert_u64 48_u64, dg_custom.stream_id, "custom datagram stream_id (12 * 4)"
+assert_bytes pay, dg_custom.payload, "custom datagram payload"
+
+dg_encoded = dg_custom.encode
+# Header is VarInt(12) which is 1 byte (0x0c), followed by 5 bytes payload = 6 bytes
+assert_i32 6, dg_encoded.size, "dg_encoded size"
+assert_u64 0x0c_u64, dg_encoded[0].to_u64, "dg_encoded qid header"
+
+dg_decoded, dg_consumed = HttpDatagram.decode(dg_encoded)
+assert_u64 12_u64, dg_decoded.quarter_stream_id, "decoded datagram qid"
+assert_u64 48_u64, dg_decoded.stream_id, "decoded datagram stream_id"
+assert_bytes pay, dg_decoded.payload, "decoded datagram payload"
+assert_i32 6, dg_consumed, "consumed bytes for datagram"
+
+# Empty datagram decode and round trip
+dg_empty = HttpDatagram.new(1_u64, Bytes.new(0))
+dg_empty_dec, dg_empty_len = HttpDatagram.decode(dg_empty.encode)
+assert_u64 1_u64, dg_empty_dec.quarter_stream_id, "empty datagram qid"
+assert_i32 0, dg_empty_dec.payload.size, "empty datagram payload size"
+assert_i32 1, dg_empty_len, "empty datagram consumed length"
+
+# Offset decoding
+offset_buf = Bytes.new(8)
+offset_buf[0] = 0xff_u8; offset_buf[1] = 0xff_u8
+i = 0
+while i < dg_encoded.size
+  offset_buf[2 + i] = dg_encoded[i]
+  i = i + 1
+end
+dg_off, dg_off_len = HttpDatagram.decode(offset_buf, offset: 2)
+assert_u64 12_u64, dg_off.quarter_stream_id, "offset datagram qid"
+assert_bytes pay, dg_off.payload, "offset datagram payload"
+assert_i32 6, dg_off_len, "offset datagram consumed"
+
+# Truncated decode returns nil
+assert_true HttpDatagram.decode?(Bytes.new(0)).nil?, "empty datagram decode returns nil"
+assert_true HttpDatagram.decode?(offset_buf, offset: 20).nil?, "out of bounds offset returns nil"
+puts "  RFC 9297 HTTP Datagrams quarter-stream mapping, encode, and decode"
+
+puts "\n== capsule"
+# Types
+assert_u64 0x00_u64, CapsuleType::DATAGRAM, "CapsuleType::DATAGRAM"
+assert_u64 0x2843_u64, CapsuleType::CLOSE_WEBTRANSPORT_SESSION, "CapsuleType::CLOSE_WEBTRANSPORT_SESSION"
+assert_u64 0x78ae_u64, CapsuleType::DRAIN_WEBTRANSPORT_SESSION, "CapsuleType::DRAIN_WEBTRANSPORT_SESSION"
+
+# Datagram capsule
+c_data_val = Bytes.new(3)
+c_data_val[0] = 10_u8; c_data_val[1] = 20_u8; c_data_val[2] = 30_u8
+c_data = Capsule.new(CapsuleType::DATAGRAM, c_data_val)
+assert_true c_data.datagram?, "c_data is datagram"
+assert_false c_data.close_webtransport_session?, "c_data is not close"
+assert_false c_data.drain_webtransport_session?, "c_data is not drain"
+assert_false c_data.unknown?, "c_data is known"
+
+# Close WebTransport Session capsule
+c_close = Capsule.new(CapsuleType::CLOSE_WEBTRANSPORT_SESSION, Bytes.new(4))
+assert_false c_close.datagram?, "c_close is not datagram"
+assert_true c_close.close_webtransport_session?, "c_close is close"
+assert_false c_close.drain_webtransport_session?, "c_close is not drain"
+assert_false c_close.unknown?, "c_close is known"
+
+# Drain WebTransport Session capsule (empty payload)
+c_drain = Capsule.new(CapsuleType::DRAIN_WEBTRANSPORT_SESSION, Bytes.new(0))
+assert_false c_drain.datagram?, "c_drain is not datagram"
+assert_false c_drain.close_webtransport_session?, "c_drain is not close"
+assert_true c_drain.drain_webtransport_session?, "c_drain is drain"
+assert_false c_drain.unknown?, "c_drain is known"
+
+# Unknown capsule type
+c_unk = Capsule.new(0x9999_u64, Bytes.new(2))
+assert_false c_unk.datagram?, "c_unk is not datagram"
+assert_false c_unk.close_webtransport_session?, "c_unk is not close"
+assert_false c_unk.drain_webtransport_session?, "c_unk is not drain"
+assert_true c_unk.unknown?, "c_unk is unknown"
+
+# Capsule encoding and decoding: round-trip
+# Format: Capsule Type (i), Capsule Length (i), Capsule Value (..)
+c_data_enc = c_data.encode
+# type 0 (1 byte 0x00), len 3 (1 byte 0x03), payload 3 bytes = 5 bytes total
+assert_i32 5, c_data_enc.size, "c_data_enc size"
+assert_u64 0x00_u64, c_data_enc[0].to_u64, "c_data_enc type"
+assert_u64 0x03_u64, c_data_enc[1].to_u64, "c_data_enc len"
+assert_bytes c_data_val, c_data.value, "c_data payload matches"
+
+c_data_dec, c_data_consumed = Capsule.decode(c_data_enc)
+assert_u64 CapsuleType::DATAGRAM, c_data_dec.capsule_type, "decoded capsule type"
+assert_bytes c_data_val, c_data_dec.value, "decoded capsule value"
+assert_i32 5, c_data_consumed, "decoded capsule consumed bytes"
+
+# Drain capsule round-trip (empty value, 4-byte type 0x78ae: 30894 > 16383)
+c_drain_enc = c_drain.encode
+# 0x78ae > 16383 (MAX_2BYTE) so encoded as 4 bytes, length 0 as 1 byte = 5 bytes total
+assert_i32 5, c_drain_enc.size, "c_drain_enc size"
+c_drain_dec, c_drain_consumed = Capsule.decode(c_drain_enc)
+assert_u64 CapsuleType::DRAIN_WEBTRANSPORT_SESSION, c_drain_dec.capsule_type, "decoded drain type"
+assert_i32 0, c_drain_dec.value.size, "decoded drain empty value"
+assert_i32 5, c_drain_consumed, "decoded drain consumed"
+
+# Unknown capsule round-trip preserving type and payload
+c_unk_val = Bytes.new(2)
+c_unk_val[0] = 0xde_u8; c_unk_val[1] = 0xad_u8
+c_unk_real = Capsule.new(0x88_u64, c_unk_val)
+c_unk_dec, c_unk_len = Capsule.decode(c_unk_real.encode)
+assert_u64 0x88_u64, c_unk_dec.capsule_type, "decoded unknown type"
+assert_true c_unk_dec.unknown?, "decoded unknown is unknown"
+assert_bytes c_unk_val, c_unk_dec.value, "decoded unknown value preserved"
+
+# Decode error checks
+assert_true Capsule.decode?(Bytes.new(0)).nil?, "empty buffer returns nil"
+one_byte = Bytes.new(1); one_byte[0] = 0x00_u8
+assert_true Capsule.decode?(one_byte).nil?, "buffer ending before length returns nil"
+overrun_buf = Bytes.new(3)
+overrun_buf[0] = 0x00_u8 # type 0
+overrun_buf[1] = 0x10_u8 # length 16
+overrun_buf[2] = 0xaa_u8 # only 1 byte payload present
+assert_true Capsule.decode?(overrun_buf).nil?, "buffer overrun returns nil"
+puts "  RFC 9297 Capsule framing, type classifications, and decode bounds"
+
+puts "\n== reader"
+# Stream processing: reading multiple capsules and enforcing RFC 9297 Section 3.2 extensibility
+# Build a concatenated stream of 4 capsules:
+#   1. DATAGRAM (known)
+#   2. UNKNOWN type 0x99
+#   3. CLOSE_WEBTRANSPORT_SESSION (known)
+#   4. DRAIN_WEBTRANSPORT_SESSION (known)
+cap1 = Capsule.new(CapsuleType::DATAGRAM, c_data_val)
+cap2 = Capsule.new(0x99_u64, Bytes.new(1))
+cap3 = Capsule.new(CapsuleType::CLOSE_WEBTRANSPORT_SESSION, Bytes.new(2))
+cap4 = Capsule.new(CapsuleType::DRAIN_WEBTRANSPORT_SESSION, Bytes.new(0))
+
+e1 = cap1.encode
+e2 = cap2.encode
+e3 = cap3.encode
+e4 = cap4.encode
+
+total_stream_len = e1.size + e2.size + e3.size + e4.size
+stream = Bytes.new(total_stream_len)
+pos = 0
+idx = 0
+while idx < e1.size
+  stream[pos] = e1[idx]
+  pos = pos + 1; idx = idx + 1
+end
+idx = 0
+while idx < e2.size
+  stream[pos] = e2[idx]
+  pos = pos + 1; idx = idx + 1
+end
+idx = 0
+while idx < e3.size
+  stream[pos] = e3[idx]
+  pos = pos + 1; idx = idx + 1
+end
+idx = 0
+while idx < e4.size
+  stream[pos] = e4[idx]
+  pos = pos + 1; idx = idx + 1
+end
+
+# read_all parses every capsule, including unknown
+all_caps = CapsuleReader.read_all(stream)
+assert_i32 4, all_caps.size, "read_all count"
+assert_u64 CapsuleType::DATAGRAM, all_caps[0].capsule_type, "all[0] type"
+assert_u64 0x99_u64, all_caps[1].capsule_type, "all[1] type"
+assert_true all_caps[1].unknown?, "all[1] is unknown"
+assert_u64 CapsuleType::CLOSE_WEBTRANSPORT_SESSION, all_caps[2].capsule_type, "all[2] type"
+assert_u64 CapsuleType::DRAIN_WEBTRANSPORT_SESSION, all_caps[3].capsule_type, "all[3] type"
+
+# read_known skips unknown capsules per Section 3.2
+known_caps = CapsuleReader.read_known(stream)
+assert_i32 3, known_caps.size, "read_known count (1 unknown skipped)"
+assert_u64 CapsuleType::DATAGRAM, known_caps[0].capsule_type, "known[0] type"
+assert_u64 CapsuleType::CLOSE_WEBTRANSPORT_SESSION, known_caps[1].capsule_type, "known[1] type"
+assert_u64 CapsuleType::DRAIN_WEBTRANSPORT_SESSION, known_caps[2].capsule_type, "known[2] type"
+
+# read_with_skip_count returns known capsules plus exact skip count
+caps_skipped, skip_cnt = CapsuleReader.read_with_skip_count(stream)
+assert_i32 3, caps_skipped.size, "read_with_skip_count known count"
+assert_i32 1, skip_cnt, "read_with_skip_count skipped count"
+puts "  CapsuleReader stream processing and RFC 9297 Section 3.2 extensibility"
+
+puts "\n== connect"
+# Extended CONNECT (RFC 8441 and RFC 9220)
+assert_u64 0x08_u64, ExtendedConnect::SETTINGS_ENABLE_CONNECT_PROTOCOL, "SETTINGS_ENABLE_CONNECT_PROTOCOL"
+assert_u64 0x08_u64, ExtendedConnect.settings_id, "ExtendedConnect.settings_id"
+assert_str ":method", ExtendedConnect::HEADER_METHOD, "HEADER_METHOD"
+assert_str ":protocol", ExtendedConnect::HEADER_PROTOCOL, "HEADER_PROTOCOL"
+assert_str ":scheme", ExtendedConnect::HEADER_SCHEME, "HEADER_SCHEME"
+assert_str ":authority", ExtendedConnect::HEADER_AUTHORITY, "HEADER_AUTHORITY"
+assert_str ":path", ExtendedConnect::HEADER_PATH, "HEADER_PATH"
+assert_str ":status", ExtendedConnect::HEADER_STATUS, "HEADER_STATUS"
+assert_str "CONNECT", ExtendedConnect::METHOD_CONNECT, "METHOD_CONNECT"
+assert_str "webtransport", ExtendedConnect::PROTOCOL_WEBTRANSPORT, "PROTOCOL_WEBTRANSPORT"
+assert_str "websocket", ExtendedConnect::PROTOCOL_WEBSOCKET, "PROTOCOL_WEBSOCKET"
+
+# Extended CONNECT request validation
+assert_true ExtendedConnect.valid_request?("CONNECT", "webtransport", "https", "example.com", "/wt"), "valid WebTransport CONNECT"
+assert_true ExtendedConnect.valid_request?("CONNECT", "websocket", "https", "example.com", "/chat"), "valid WebSocket CONNECT"
+assert_false ExtendedConnect.valid_request?("GET", "webtransport", "https", "example.com", "/wt"), "invalid method GET"
+assert_false ExtendedConnect.valid_request?("CONNECT", "", "https", "example.com", "/wt"), "empty protocol"
+assert_false ExtendedConnect.valid_request?("CONNECT", nil, "https", "example.com", "/wt"), "nil protocol"
+assert_false ExtendedConnect.valid_request?("CONNECT", "webtransport", "", "example.com", "/wt"), "empty scheme"
+assert_false ExtendedConnect.valid_request?("CONNECT", "webtransport", "https", "", "/wt"), "empty authority"
+assert_false ExtendedConnect.valid_request?("CONNECT", "webtransport", "https", "example.com", ""), "empty path"
+
+# Extended CONNECT response status validation (2xx)
+assert_true ExtendedConnect.valid_response?(200), "response 200 is valid"
+assert_true ExtendedConnect.valid_response?(201), "response 201 is valid"
+assert_true ExtendedConnect.valid_response?(299), "response 299 is valid"
+assert_false ExtendedConnect.valid_response?(101), "response 101 is invalid"
+assert_false ExtendedConnect.valid_response?(301), "response 301 is invalid"
+assert_false ExtendedConnect.valid_response?(400), "response 400 is invalid"
+assert_false ExtendedConnect.valid_response?(404), "response 404 is invalid"
+assert_false ExtendedConnect.valid_response?(500), "response 500 is invalid"
+
+# Capsule-Protocol header (RFC 9297 Section 3.3)
+assert_str "Capsule-Protocol", CapsuleProtocol::HEADER_NAME, "HEADER_NAME"
+assert_str "?1", CapsuleProtocol::HEADER_VALUE, "HEADER_VALUE"
+assert_str "Capsule-Protocol", CapsuleProtocol.header_name, "header_name"
+assert_str "?1", CapsuleProtocol.header_value, "header_value"
+
+assert_true CapsuleProtocol.valid_header?("Capsule-Protocol", "?1"), "standard Capsule-Protocol header"
+assert_true CapsuleProtocol.valid_header?("capsule-protocol", "?1"), "lowercase Capsule-Protocol header"
+assert_true CapsuleProtocol.valid_header?("CAPSULE-PROTOCOL", "?1"), "uppercase Capsule-Protocol header"
+assert_true CapsuleProtocol.valid_header?("Capsule-Protocol", "?1 "), "Capsule-Protocol with trailing space"
+assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", "?0"), "Capsule-Protocol ?0 is invalid"
+assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", "1"), "Capsule-Protocol 1 is invalid"
+assert_false CapsuleProtocol.valid_header?("Other-Header", "?1"), "Other-Header is invalid"
+
+assert_true CapsuleProtocol.is_capsule_protocol_header?("?1"), "is_capsule_protocol_header ?1"
+assert_true CapsuleProtocol.is_capsule_protocol_header?("?1 "), "is_capsule_protocol_header ?1 "
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?0"), "is_capsule_protocol_header ?0"
+assert_false CapsuleProtocol.is_capsule_protocol_header?(""), "is_capsule_protocol_header empty"
+puts "  Extended CONNECT protocol negotiation and Capsule-Protocol header"
+
+puts "\nALL CHECKS PASSED"

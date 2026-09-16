@@ -1,0 +1,157 @@
+# Exercises `std/comparable`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_comparable_exercise.iyi
+
+module bench/std_comparable_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+import std/comparable
+using std/comparable::{Comparable}
+
+# Type 1: A standard ordered value type.
+struct Score
+  getter val : Int32
+
+  def initialize(@val : Int32)
+  end
+end
+
+impl Comparable(Score) for Score
+  def <=>(other : Score) : Int32?
+    if @val < other.val
+      -1
+    elsif @val > other.val
+      1
+    else
+      0
+    end
+  end
+end
+
+# Type 2: A type supporting incomparable instances where <=> returns nil.
+struct Quantity
+  getter val : Int32
+  getter defined : Bool
+
+  def initialize(@val : Int32, @defined : Bool = true)
+  end
+end
+
+impl Comparable(Quantity) for Quantity
+  def <=>(other : Quantity) : Int32?
+    return nil unless @defined && other.defined
+    if @val < other.val
+      -1
+    elsif @val > other.val
+      1
+    else
+      0
+    end
+  end
+end
+
+puts "== operators"
+s10 = Score.new(10)
+s20 = Score.new(20)
+s20_copy = Score.new(20)
+s30 = Score.new(30)
+
+# Strictly less
+assert_true s10 < s20, "10 < 20 holds"
+assert_true s10 <= s20, "10 <= 20 holds"
+assert_true !(s10 > s20), "!(10 > 20) holds"
+assert_true !(s10 >= s20), "!(10 >= 20) holds"
+
+# Equal
+assert_true !(s20 < s20_copy), "!(20 < 20) holds"
+assert_true s20 <= s20_copy, "20 <= 20 holds"
+assert_true !(s20 > s20_copy), "!(20 > 20) holds"
+assert_true s20 >= s20_copy, "20 >= 20 holds"
+
+# Strictly greater
+assert_true s30 > s20, "30 > 20 holds"
+assert_true s30 >= s20, "30 >= 20 holds"
+assert_true !(s30 < s20), "!(30 < 20) holds"
+assert_true !(s30 <= s20), "!(30 <= 20) holds"
+puts "  derived <, <=, >, >= on less, equal, and greater"
+
+puts "\n== transitivity"
+# Transitivity of <: a < b and b < c => a < c
+assert_true s10 < s20 && s20 < s30 && s10 < s30, "< transitivity holds"
+# Transitivity of <=: a <= b and b <= c => a <= c
+assert_true s10 <= s20 && s20 <= s20_copy && s10 <= s20_copy, "<= transitivity holds"
+# Transitivity of >: c > b and b > a => c > a
+assert_true s30 > s20 && s20 > s10 && s30 > s10, "> transitivity holds"
+# Transitivity of >=: c >= b and b >= a => c >= a
+assert_true s30 >= s20 && s20 >= s20_copy && s30 >= s20_copy, ">= transitivity holds"
+# Reflexivity: a <= a and a >= a
+assert_true s20 <= s20 && s20 >= s20, "reflexivity holds"
+puts "  transitivity and reflexivity hold"
+
+puts "\n== incomparable"
+q_valid1 = Quantity.new(10)
+q_valid2 = Quantity.new(20)
+q_undef = Quantity.new(0, false)
+
+# Valid quantities order normally
+assert_true q_valid1 < q_valid2, "defined quantities order"
+assert_true q_valid2 > q_valid1, "defined quantities order"
+
+# When <=> returns nil, every comparison operator must evaluate to false
+assert_true !(q_valid1 < q_undef), "valid < undef is false"
+assert_true !(q_valid1 <= q_undef), "valid <= undef is false"
+assert_true !(q_valid1 > q_undef), "valid > undef is false"
+assert_true !(q_valid1 >= q_undef), "valid >= undef is false"
+
+assert_true !(q_undef < q_valid1), "undef < valid is false"
+assert_true !(q_undef <= q_valid1), "undef <= valid is false"
+assert_true !(q_undef > q_valid1), "undef > valid is false"
+assert_true !(q_undef >= q_valid1), "undef >= valid is false"
+
+assert_true !(q_undef < q_undef), "undef < undef is false"
+assert_true !(q_undef <= q_undef), "undef <= undef is false"
+assert_true !(q_undef > q_undef), "undef > undef is false"
+assert_true !(q_undef >= q_undef), "undef >= undef is false"
+puts "  incomparable instances evaluate to false for all operators"
+
+puts "\n== clamp"
+# clamp(min_val, max_val)
+assert_int 15, Score.new(5).clamp(Score.new(15), Score.new(25)).val, "clamp value below min"
+assert_int 20, Score.new(20).clamp(Score.new(15), Score.new(25)).val, "clamp value between"
+assert_int 25, Score.new(35).clamp(Score.new(15), Score.new(25)).val, "clamp value above max"
+assert_int 15, Score.new(15).clamp(Score.new(15), Score.new(25)).val, "clamp value equal to min"
+assert_int 25, Score.new(25).clamp(Score.new(15), Score.new(25)).val, "clamp value equal to max"
+
+# clamp with nil bounds
+assert_int 15, Score.new(5).clamp(Score.new(15), nil).val, "clamp min only: below"
+assert_int 20, Score.new(20).clamp(Score.new(15), nil).val, "clamp min only: above"
+assert_int 20, Score.new(20).clamp(nil, Score.new(25)).val, "clamp max only: below"
+assert_int 25, Score.new(35).clamp(nil, Score.new(25)).val, "clamp max only: above"
+
+# clamp(range : Range) with inclusive range
+range = Score.new(10)..Score.new(30)
+assert_int 10, Score.new(5).clamp(range).val, "clamp range below"
+assert_int 20, Score.new(20).clamp(range).val, "clamp range within"
+assert_int 30, Score.new(40).clamp(range).val, "clamp range above"
+puts "  clamp values and inclusive ranges"
+
+puts "\n== between"
+min_s = Score.new(10)
+max_s = Score.new(30)
+assert_true !(Score.new(5).between?(min_s, max_s)), "5 not between 10 and 30"
+assert_true Score.new(10).between?(min_s, max_s), "10 is between 10 and 30 (min boundary)"
+assert_true Score.new(20).between?(min_s, max_s), "20 is between 10 and 30 (interior)"
+assert_true Score.new(30).between?(min_s, max_s), "30 is between 10 and 30 (max boundary)"
+assert_true !(Score.new(35).between?(min_s, max_s)), "35 not between 10 and 30"
+assert_true !(q_undef.between?(Quantity.new(5), Quantity.new(25))), "incomparable not between"
+puts "  between? on boundaries, interior, exterior, and incomparable"
+
+puts "\nALL CHECKS PASSED"

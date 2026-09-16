@@ -1,6 +1,51 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 — 2026-09-16
+
+**The standard library is iyi.** `src/std` is seventy-five modules and
+36,269 lines written in iyi over the prelude — JSON, YAML, XML, HTML,
+path, IO, unicode, big, regex, digest, base64, CSV, random, UUID, a heap,
+HTTP with its verbs, DEFLATE with zlib and gzip, an option parser — and
+they bind nothing but the platform: `socket`, `time`, `file`, `dir` and
+`udp` reach the kernel by raw syscall on Linux and libSystem on darwin,
+`debug` reads the program's own DWARF, and everything else is iyi over
+the prelude's intrinsics, which `bench/std_exercise.sh` checks by
+reading the source. What Crystal's library gets from zlib, PCRE, OpenSSL,
+GMP and getaddrinfo is written here or absent on purpose: DEFLATE reads
+72 of zlib's streams and zlib reads 18 of iyi's; the regex engine is a
+Pike VM, linear and leftmost-first, held against Python's `re` on 2,214
+pattern/subject pairs; the digests against hashlib. The Crystal socket
+stack that had landed beside `IyiSocket` left, and so did `iyi repl`.
+
+**Then it was probed, and 65 defects were fixed where they lived.** Nearly
+a thousand programs against twelve modules found panics wearing the
+prelude's sentence (a control character in YAML indexed an empty table,
+`pow(-1, Infinity)` overflowed, a Char above U+00FF overflowed a block
+`gsub`), wrong answers (`Math.frexp` landed past 1.0 for whole bands of
+small magnitudes and every log-based function inherited it; `a|ab`
+matched `ab`; `round(TiesAway)` moved an integer; `from_json` could not
+read the `UInt64` `to_json` wrote), and silent loss (a dedented YAML
+entry dropped, base64 data after a `=` dropped, `+99:99` accepted as an
+offset). Each fix is held by the module's own gate, most against
+Python's answer. Before that, the verbs were probed the same way:
+seventeen of them have a gate now, the language server and the MCP
+server answer a client's mistake with the protocol's code, a syntax slip
+is a sentence rather than the token the parser wanted, and the stack
+running out is a panic the program prints itself.
+
+**Twenty-nine pull requests from jwaldrip landed.** The runtime's symbols
+are `__iyi_*` for an iyi program and `__crystal_*` under `--crystal`; a
+panic on darwin prints a backtrace that `std/debug` resolves to
+`file:line`; twenty-two std modules arrived, eleven of them the ones the
+rewrite had dropped, reinstated on the owner's call; a build-tool floor
+names every host binary the build runs. Landing them found three things:
+the prelude's `__iyi_close` declared no output for its syscall, so under
+optimisation a second `close` in a row became a `read`; the ABI is
+decided by the prelude that was loaded, not the entry's extension; and
+`file` and `dir` had come calling libc on Linux, which the floor refuses,
+so their Linux branches are raw syscalls now.
+
+`.iyimod` is v50.
 
 ### Added
 

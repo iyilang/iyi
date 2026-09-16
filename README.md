@@ -106,7 +106,7 @@ that prints each one is named beside it.
 
 **Where it loses**, said here rather than left to be found: a full build of a
 6,912-line program from scratch is 0.24 s against `go build`'s 0.09 s. The
-current compiler reports `0.12.0`. iyi's own prelude carries the small-tool
+current compiler reports `0.13.0`. iyi's own prelude carries the small-tool
 floor — `puts`, stdin, whole-file `File` read/write, `Program.args`/`.env` —
 and no more: no TLS, no serialisation, and no sockets or format strings -
 `import std/socket` and `import std/format` are where the last two live,
@@ -397,7 +397,7 @@ fails when one of those drifts from the tree.</sup>
 
 ## Getting it
 
-The released tarball is 0.12.0, and a build from current source reports the
+The released tarball is 0.13.0, and a build from current source reports the
 same. The one-liner at the top runs [`install.sh`](install.sh): POSIX sh
 over `curl` and `tar`, it picks the tarball for `uname` (linux-x86_64 or
 darwin-arm64), follows GitHub's `releases/latest` redirect rather than the
@@ -406,11 +406,11 @@ against the `SHA256SUMS` the release publishes beside it and refuses a
 mismatch with nothing unpacked; releases before 0.12.0 published no sums,
 and it says so rather than passing over it. CI runs the script against
 the tarball each build proves, then against a sum with one digit wrong.
-`IYI_PREFIX` moves the destination and `IYI_VERSION=0.12.0` pins a
+`IYI_PREFIX` moves the destination and `IYI_VERSION=0.13.0` pins a
 release. By hand it is the same two lines:
 
 ```sh
-tar -xzf iyi-0.12.0-linux-x86_64.tar.gz -C ~/.local
+tar -xzf iyi-0.13.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
@@ -854,7 +854,7 @@ An artifact is readable:
 ```console
 $ iyi mod dump mods/kemal/router.iyimod | head -20
 module        kemal/router
-compiler      0.12.0
+compiler      0.13.0
 ...
 exports
   pub struct Context
@@ -952,7 +952,7 @@ swept through it, Kemal among them. There is still no package manager: point
 R-1 for the required shard, which is compiled from source rather than read as
 declarations.
 
-**Is the syntax stable?** No. 0.12.0 is a release of a language that is still
+**Is the syntax stable?** No. 0.13.0 is a release of a language that is still
 moving, and the parts of SPEC.md marked PROPOSED are exactly the parts that
 will move.
 
@@ -965,7 +965,7 @@ that the test suite runs on every target.
 **Who is this for right now?** Somebody who wants to check the claim, read the
 design, or argue with a number. `--crystal` moved the other line: a program
 that requires shards is buildable today, and what should keep you away is the
-language rather than the library — master is 0.12.0, and the parts of SPEC.md
+language rather than the library — master is 0.13.0, and the parts of SPEC.md
 marked PROPOSED are the parts that will move under you.
 
 ## What is not here
@@ -1048,8 +1048,8 @@ marked PROPOSED are the parts that will move under you.
   of the same released version read each other's `.iyimod` files only on the
   same target under the same flags; anything else is rejected and rebuilt,
   never migrated. A `-dev` build is not a released version: it keeps the build
-  commit in its identity and interoperates only with itself. 0.12.0 is
-  released, so its artifacts carry the version alone and any 0.12.0 build on
+  commit in its identity and interoperates only with itself. 0.13.0 is
+  released, so its artifacts carry the version alone and any 0.13.0 build on
   the same target and flags reads them.
 - **A derive reads upwards, and an artifact carries more than the rule says.**
   `derive <macro>` in a class or struct body runs once, in the module that
@@ -1090,7 +1090,7 @@ iyi's compiler is built on the Crystal compiler and carries Crystal's licence
 and copyright: Apache 2.0, Copyright 2012-2026 Manas Technology Solutions. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Everything here that is not
 Crystal's is a change to Crystal's source. `iyi --version` reports
-`iyi 0.12.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
+`iyi 0.13.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
 is built on. The compatibility binary in the same checkout still reports itself
 as `Crystal 1.22.0-dev`, because that is what it is. This paragraph is a licence
 obligation and an accurate one; the language above it is iyi's own.

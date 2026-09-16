@@ -112,7 +112,10 @@ trap 'rm -rf "$WORK"' EXIT
 # was already on the list for the collector's helpers, and an exercise
 # that starts a thread and waits for it names the other half. Linux's
 # join is a futex.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+# `backtrace` and `backtrace_symbols_fd` joined when panics gained backtraces:
+# the panic path captures the frames and writes them directly to stderr
+# through libSystem, linking no new library.
+ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
 ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main environ"
 
 # What a program may link. The platform libc only.

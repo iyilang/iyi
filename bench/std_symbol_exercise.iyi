@@ -1,0 +1,146 @@
+# Exercises `std/symbol`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_symbol_exercise.iyi
+
+module bench/std_symbol_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+import std/symbol
+import std/io
+using std/io::{Memory}
+
+puts "== identity and equality"
+s1 = :apple
+s2 = :apple
+s3 = :banana
+
+assert_true s1 == s2, "equal symbols are =="
+assert_true !(s1 != s2), "equal symbols are not !="
+assert_true s1 != s3, "distinct symbols are !="
+assert_true !(s1 == s3), "distinct symbols are not =="
+assert_true s1 === s2, "case equality ==="
+assert_true s1.clone == s1, "clone returns self"
+assert_int s1.to_i, s2.to_i, "interning: same integer id"
+assert_int s1.hash, s2.hash, "same hash code"
+assert_true s1.to_i != s3.to_i, "distinct integer ids"
+
+matched = case s1
+          when :banana then false
+          when :apple  then true
+          else false
+          end
+assert_true matched, "case expression dispatches on symbol"
+puts "  ==, !=, ===, clone, to_i and hash interning"
+
+puts "\n== string conversion"
+assert_str "apple", s1.to_s, "plain symbol to_s"
+assert_str "+", :+.to_s, "operator symbol to_s"
+assert_str "hello world", :"hello world".to_s, "quoted symbol to_s"
+assert_str "_", :_.to_s, "underscore symbol to_s"
+
+io_str = Memory.new
+s1.to_s(io_str)
+assert_str "apple", io_str.to_s, "to_s(io) matches to_s"
+puts "  to_s and to_s(io)"
+
+puts "\n== ordering"
+assert_int 0, (:apple <=> :apple), "<=> equal"
+assert_int -1, (:apple <=> :banana), "<=> less"
+assert_int 1, (:banana <=> :apple), "<=> greater"
+
+assert_true :apple < :banana, "apple < banana"
+assert_true :apple <= :banana, "apple <= banana"
+assert_true :apple <= :apple, "apple <= apple"
+assert_true :banana > :apple, "banana > apple"
+assert_true :banana >= :apple, "banana >= apple"
+assert_true :banana >= :banana, "banana >= banana"
+
+assert_true !(:banana < :apple), "!(banana < apple)"
+assert_true !(:apple > :banana), "!(apple > banana)"
+
+assert_true :app < :apple, "prefix is smaller"
+assert_true :Apple < :apple, "ASCII uppercase precedes lowercase"
+assert_true :+ < :a, "operator precedes alphanumeric in ASCII"
+puts "  <=>, <, <=, >, >= lexicographical string ordering"
+
+puts "\n== inspect"
+assert_str ":apple", :apple.inspect, "inspect plain"
+assert_str ":foo_bar_99", :foo_bar_99.inspect, "inspect identifier"
+assert_str ":A1", :A1.inspect, "inspect capital identifier"
+assert_str ":_", :_.inspect, "inspect underscore"
+
+assert_str ":+", :+.inspect, "inspect +"
+assert_str ":-", :-.inspect, "inspect -"
+assert_str ":*", :*.inspect, "inspect *"
+assert_str ":/", :/.inspect, "inspect /"
+assert_str ":==", :==.inspect, "inspect =="
+assert_str ":!=", :!=.inspect, "inspect !="
+assert_str ":<=", :<=.inspect, "inspect <="
+assert_str ":>=", :>=.inspect, "inspect >="
+assert_str ":!", :!.inspect, "inspect !"
+assert_str ":<=>", :<=>.inspect, "inspect <=>"
+assert_str ":===", :===.inspect, "inspect ==="
+assert_str ":<<", :<<.inspect, "inspect <<"
+assert_str ":>>", :>>.inspect, "inspect >>"
+assert_str ":[]=", :[]=.inspect, "inspect []="
+assert_str ":[]?", :[]?.inspect, "inspect []?"
+
+assert_str ":\"hello world\"", :"hello world".inspect, "inspect with space"
+assert_str ":\"123\"", :"123".inspect, "inspect starting with digit"
+assert_str ":\"foo-bar\"", :"foo-bar".inspect, "inspect with hyphen"
+assert_str ":\"foo.bar\"", :"foo.bar".inspect, "inspect with period"
+
+io_insp1 = Memory.new
+:apple.inspect(io_insp1)
+assert_str ":apple", io_insp1.to_s, "inspect(io) unquoted"
+
+io_insp2 = Memory.new
+:"foo bar".inspect(io_insp2)
+assert_str ":\"foo bar\"", io_insp2.to_s, "inspect(io) quoted"
+puts "  inspect and inspect(io) with and without quotes"
+
+puts "\n== quote helpers"
+assert_true !Symbol.needs_quotes?("apple"), "needs_quotes? apple"
+assert_true !Symbol.needs_quotes?("foo_bar_1"), "needs_quotes? foo_bar_1"
+assert_true !Symbol.needs_quotes?("_"), "needs_quotes? _"
+assert_true !Symbol.needs_quotes?("+"), "needs_quotes? +"
+assert_true !Symbol.needs_quotes?("<=>"), "needs_quotes? <=>"
+assert_true !Symbol.needs_quotes?("[]="), "needs_quotes? []="
+
+assert_true Symbol.needs_quotes?(""), "needs_quotes? empty"
+assert_true Symbol.needs_quotes?("1start"), "needs_quotes? starts with digit"
+assert_true Symbol.needs_quotes?("has space"), "needs_quotes? space"
+assert_true Symbol.needs_quotes?("has-dash"), "needs_quotes? dash"
+assert_true Symbol.needs_quotes?("has.dot"), "needs_quotes? dot"
+
+assert_true Symbol.needs_quotes_for_named_argument?("_"), "named arg needs quotes for _"
+assert_true Symbol.needs_quotes_for_named_argument?(""), "named arg needs quotes for empty"
+assert_true Symbol.needs_quotes_for_named_argument?("9abc"), "named arg needs quotes for digit start"
+assert_true Symbol.needs_quotes_for_named_argument?("has-dash"), "named arg needs quotes for dash"
+assert_true !Symbol.needs_quotes_for_named_argument?("plain"), "named arg plain"
+assert_true !Symbol.needs_quotes_for_named_argument?("camelCase"), "named arg camelCase"
+assert_true !Symbol.needs_quotes_for_named_argument?("snake_case_1"), "named arg snake_case_1"
+
+assert_str "clean", Symbol.quote_for_named_argument("clean"), "quote_for_named_argument clean"
+assert_str "\"_\"", Symbol.quote_for_named_argument("_"), "quote_for_named_argument _"
+assert_str "\"1st\"", Symbol.quote_for_named_argument("1st"), "quote_for_named_argument 1st"
+assert_str "\"foo-bar\"", Symbol.quote_for_named_argument("foo-bar"), "quote_for_named_argument foo-bar"
+
+io_q = Memory.new
+Symbol.quote_for_named_argument(io_q, "foo-bar")
+assert_str "\"foo-bar\"", io_q.to_s, "quote_for_named_argument(io)"
+puts "  needs_quotes?, needs_quotes_for_named_argument? and quote_for_named_argument"
+
+puts "\nALL CHECKS PASSED"

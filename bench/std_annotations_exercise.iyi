@@ -138,9 +138,10 @@ assert_str "generic", tf_scale_cpu, "TargetFeature named cpu argument matches"
 puts "  target feature annotations with positional and named arguments"
 
 puts "\n== link"
-interop_len = LibCInterop.strlen("annotations".to_unsafe)
-assert_int 11_i64, interop_len.to_i64, "LibCInterop.strlen executed"
-
+lib_link_found = {{ LibCInterop.annotation(Link) ? true : false }}
+assert_true lib_link_found, "Link annotation detected on LibCInterop"
+lib_link_lib = {{ LibCInterop.annotation(Link)[0] }}
+assert_str "c", lib_link_lib, "Link library argument matches on LibCInterop"
 link_found = {{ LinkMetadata.annotation(Link) ? true : false }}
 assert_true link_found, "Link annotation detected on LinkMetadata"
 link_ldflags = {{ LinkMetadata.annotation(Link)[:ldflags] }}

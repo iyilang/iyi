@@ -132,8 +132,8 @@ PY
 }
 
 prove_fails "constant altered" enoent_val "ENOENT is 2" \
-  '  ENOENT          =   2' \
-  '  ENOENT          =  99'
+  '  ENOENT  =  2' \
+  '  ENOENT  = 99'
 
 prove_fails "known message altered" msg_altered "ENOENT message is 'No such file or directory'" \
   'when ENOENT          then "No such file or directory"' \

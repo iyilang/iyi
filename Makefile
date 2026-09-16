@@ -54,15 +54,31 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # -Dgc_none was tried here too and is not viable, which is worth recording so
 # nobody spends the afternoon again. The conclusion has held through a
 # re-measurement on 2026-09-16; the symptom has not, so the old one is replaced
-# rather than left to mislead. A collector-free compiler now builds clean and
-# emits no invalid IR at all. What it does instead is drop symbols and fall
-# over: building samples/iyi/collections.iyi failed 9 runs out of 10 with
-# `Undefined symbols for architecture arm64` naming a generic instantiation the
-# compiler had already agreed to emit
-# (`Nums@Std::Enumerable::Enumerable#zip<Words>`), one of those runs taking a
-# `Trace/BPT trap: 5` in the compiler itself, and bench/std_iterator_exercise.sh
-# failing the same way. The same compiler with bdw-gc: 0 failures in 5 runs of
-# that sample, 0 across two passes of every sample, and that exercise green.
+# rather than left to mislead, and the root cause is now known.
+#
+# A collector-free compiler builds clean and emits no invalid IR. It fails at
+# the link, 9 runs of 10 on samples/iyi/collections.iyi against 0 of 10 with
+# the collector, each run given a fresh cache so cache warmth is not doing the
+# work, with `Undefined symbols` naming a generic instantiation
+# (`Nums@...#zip<Words>`) and a `Trace/BPT trap: 5` in the compiler on some
+# runs.
+#
+# The cause is a corrupted symbol NAME, not missing code. The linker's wanted
+# name carries a trailing 0x01 byte that the definition does not have:
+#
+#   nm _main.o0.o        ... #zip<...>:Array(Tuple(Int32, String))^A
+#   nm ...N-ums.o0.o     ... #zip<...>:Array(Tuple(Int32, String))
+#
+# so the two cannot match. Searching every object of a failing build for a
+# `zip<` name ending in 0x01 finds exactly one, `_main.o0.o`; the same search
+# over a collector-backed build finds none. Everything else checks out and was
+# checked: both builds emit 39 objects, the owning object is byte-identical
+# between them and defines the instantiation in both, and `cc` receives all 39
+# objects including that one in both. A name built in memory the collector
+# would have zeroed, read one byte too long.
+#
+# That also explains `--single-module` succeeding: with one object there is no
+# cross-module reference to mangle a name for.
 #
 # The cause was half right and the half that named parallel codegen is wrong,
 # which matters because it is also the exit condition. Tested against the

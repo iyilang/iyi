@@ -5043,17 +5043,35 @@ is `-Dgc_none`'s price now, chosen rather than shipped. One shortcut stays
 closed by measurement: **`-Dgc_none` is not viable for the compiler itself.**
 The verdict has survived a re-measurement on 2026-09-16 and the symptom has
 not, so what stands here is today's, because a reason nobody can reproduce is
-worse than no reason. A collector-free compiler now builds clean and emits no
-invalid IR at all. What it does instead is lose work it had already agreed to
-do: building `samples/iyi/collections.iyi` failed **9 runs out of 10** with
-`Undefined symbols for architecture arm64` naming a generic instantiation,
-`Nums@Std::Enumerable::Enumerable#zip<Words>`, with one run taking a
-`Trace/BPT trap: 5` inside the compiler, and
-`bench/std_iterator_exercise.sh` failing the same way. The same compiler with
-bdw-gc, measured in the same session: **0 failures in 5 runs** of that sample,
-0 across two passes of every sample, and that exercise green. The cause is
-unchanged: a long walk over ASTs with parallel codegen and fibers under an
-allocator that never frees. So the compiler keeps
+worse than no reason. A collector-free compiler builds clean and emits no
+invalid IR at all. It fails at the link, **9 runs of 10** on
+`samples/iyi/collections.iyi` against **0 of 10** with the collector, each run
+given a fresh cache so cache warmth is not doing the work, with `Undefined
+symbols for architecture arm64` naming a generic instantiation,
+`Nums@Std::Enumerable::Enumerable#zip<Words>`, and a `Trace/BPT trap: 5`
+inside the compiler on some runs.
+
+**The cause is a corrupted symbol name, not missing code.** The name the
+linker wants carries a trailing `0x01` byte the definition does not have:
+
+```
+nm _main.o0.o       ... #zip<...>:Array(Tuple(Int32, String))^A
+nm ...N-ums.o0.o    ... #zip<...>:Array(Tuple(Int32, String))
+```
+
+so the two never match. Searching every object of a failing build for a
+`zip<` name ending in `0x01` finds exactly one, `_main.o0.o`; the same search
+across a collector-backed build finds none. Everything else was checked and is
+sound: both builds emit 39 objects, the owning object is byte-identical
+between them and defines the instantiation in both, and `cc` receives all 39
+objects including that one in both, captured by interposing a `cc` that logs
+its argv. A name built in memory a collector would have zeroed, then read one
+byte too long. It also explains `--single-module` passing: one object, so no
+cross-module reference whose name has to be mangled.
+
+Three earlier mechanisms were recorded for this and all three were wrong:
+invalid IR, a dropped symbol, and an empty link line. Each was a plausible
+reading of the error promoted before it was isolated. So the compiler keeps
 its collector, and the collected default for programs arrived through the
 real collector, exactly as this sentence once predicted.
 

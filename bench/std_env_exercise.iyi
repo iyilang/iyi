@@ -28,13 +28,19 @@ def assert_nil(actual : String?, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected nil\n  got #{actual.inspect}" unless actual.nil?
 end
 
-PREFIX = "_IYI_ENV_EXERCISE_"
-K1 = "#{PREFIX}VAR_ONE"
-K2 = "#{PREFIX}VAR_TWO"
-K3 = "#{PREFIX}VAR_THREE"
+PREFIX   = "_IYI_ENV_EXERCISE_"
+K1       = "#{PREFIX}VAR_ONE"
+K2       = "#{PREFIX}VAR_TWO"
+K3       = "#{PREFIX}VAR_THREE"
 K_ABSENT = "#{PREFIX}VAR_NEVER_SET"
 
-# Ensure clean starting state
+# Capture any pre-existing values to restore on exit
+orig_k1 = ENV[K1]?
+orig_k2 = ENV[K2]?
+orig_k3 = ENV[K3]?
+orig_absent = ENV[K_ABSENT]?
+
+# Ensure clean starting state for the exercise keys
 ENV.delete(K1)
 ENV.delete(K2)
 ENV.delete(K3)
@@ -140,6 +146,21 @@ ENV.delete(K3)
 assert_nil ENV[K1]?, "K1 cleaned up"
 assert_nil ENV[K2]?, "K2 cleaned up"
 assert_nil ENV[K3]?, "K3 cleaned up"
+
+# Restore any pre-existing variables that were set prior to exercise
+if orig_k1
+  ENV[K1] = orig_k1
+end
+if orig_k2
+  ENV[K2] = orig_k2
+end
+if orig_k3
+  ENV[K3] = orig_k3
+end
+if orig_absent
+  ENV[K_ABSENT] = orig_absent
+end
+
 puts "  each, each_key, each_value, keys, values, to_h, size, and cleanup"
 
 puts "\nALL CHECKS PASSED"

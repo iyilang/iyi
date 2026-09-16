@@ -12,11 +12,19 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+ORIG_IYI_PATH="${IYI_PATH:-}"
+cleanup() {
+  rm -rf "$WORK"
+  if [ -n "$ORIG_IYI_PATH" ]; then
+    export IYI_PATH="$ORIG_IYI_PATH"
+  else
+    unset IYI_PATH
+  fi
+}
+trap cleanup EXIT
 
 status=0
 export IYI_PATH="$REPO/src:$REPO/samples/iyi"
-
 build_and_run() {
   local label="$1" name="$2"
   shift 2

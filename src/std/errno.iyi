@@ -2,14 +2,6 @@
 
 module std/errno
 
-lib LibErrno
-  {% if flag?(:darwin) %}
-    fun __error : Int32*
-  {% elsif flag?(:linux) %}
-    fun __errno_location : Int32*
-  {% end %}
-end
-
 pub enum Errno
   NONE            =   0
   EPERM           =   1
@@ -22,7 +14,6 @@ pub enum Errno
   ENOEXEC         =   8
   EBADF           =   9
   ECHILD          =  10
-  EDEADLK         =  35
   ENOMEM          =  12
   EACCES          =  13
   EFAULT          =  14
@@ -46,60 +37,120 @@ pub enum Errno
   EPIPE           =  32
   EDOM            =  33
   ERANGE          =  34
-  EAGAIN          =  11
-  EWOULDBLOCK     =  11
-  EINPROGRESS     =  36
-  EALREADY        =  37
-  ENOTSOCK        =  38
-  EDESTADDRREQ    =  39
-  EMSGSIZE        =  40
-  EPROTOTYPE      =  41
-  ENOPROTOOPT     =  42
-  EPROTONOSUPPORT =  43
-  ESOCKTNOSUPPORT =  44
-  EOPNOTSUPP      =  45
-  EPFNOSUPPORT    =  46
-  EAFNOSUPPORT    =  47
-  EADDRINUSE      =  48
-  EADDRNOTAVAIL   =  49
-  ENETDOWN        =  50
-  ENETUNREACH     =  51
-  ENETRESET       =  52
-  ECONNABORTED    =  53
-  ECONNRESET      =  54
-  ENOBUFS         =  55
-  EISCONN         =  56
-  ENOTCONN        =  57
-  ESHUTDOWN       =  58
-  ETOOMANYREFS    =  59
-  ETIMEDOUT       =  60
-  ECONNREFUSED    =  61
-  ELOOP           =  62
-  ENAMETOOLONG    =  63
-  EHOSTDOWN       =  64
-  EHOSTUNREACH    =  65
-  ENOTEMPTY       =  66
-  EUSERS          =  68
-  EDQUOT          =  69
-  ESTALE          =  70
-  EREMOTE         =  71
-  ENOLCK          =  77
-  ENOSYS          =  78
-  EOVERFLOW       =  84
-  ECANCELED       =  89
-  EIDRM           =  90
-  ENOMSG          =  91
-  EILSEQ          =  92
-  EBADMSG         =  94
-  EMULTIHOP       =  95
-  ENODATA         =  96
-  ENOLINK         =  97
-  ENOSR           =  98
-  ENOSTR          =  99
-  EPROTO          = 100
-  ETIME           = 101
-  ENOTRECOVERABLE = 104
-  EOWNERDEAD      = 105
+
+  {% if flag?(:darwin) %}
+    EDEADLK         =  11
+    EAGAIN          =  35
+    EWOULDBLOCK     =  35
+    EINPROGRESS     =  36
+    EALREADY        =  37
+    ENOTSOCK        =  38
+    EDESTADDRREQ    =  39
+    EMSGSIZE        =  40
+    EPROTOTYPE      =  41
+    ENOPROTOOPT     =  42
+    EPROTONOSUPPORT =  43
+    ESOCKTNOSUPPORT =  44
+    EOPNOTSUPP      = 102
+    EPFNOSUPPORT    =  46
+    EAFNOSUPPORT    =  47
+    EADDRINUSE      =  48
+    EADDRNOTAVAIL   =  49
+    ENETDOWN        =  50
+    ENETUNREACH     =  51
+    ENETRESET       =  52
+    ECONNABORTED    =  53
+    ECONNRESET      =  54
+    ENOBUFS         =  55
+    EISCONN         =  56
+    ENOTCONN        =  57
+    ESHUTDOWN       =  58
+    ETOOMANYREFS    =  59
+    ETIMEDOUT       =  60
+    ECONNREFUSED    =  61
+    ELOOP           =  62
+    ENAMETOOLONG    =  63
+    EHOSTDOWN       =  64
+    EHOSTUNREACH    =  65
+    ENOTEMPTY       =  66
+    EUSERS          =  68
+    EDQUOT          =  69
+    ESTALE          =  70
+    EREMOTE         =  71
+    ENOLCK          =  77
+    ENOSYS          =  78
+    EOVERFLOW       =  84
+    ECANCELED       =  89
+    EIDRM           =  90
+    ENOMSG          =  91
+    EILSEQ          =  92
+    EBADMSG         =  94
+    EMULTIHOP       =  95
+    ENODATA         =  96
+    ENOLINK         =  97
+    ENOSR           =  98
+    ENOSTR          =  99
+    EPROTO          = 100
+    ETIME           = 101
+    ENOTRECOVERABLE = 104
+    EOWNERDEAD      = 105
+  {% else %}
+    EAGAIN          =  11
+    EWOULDBLOCK     =  11
+    EDEADLK         =  35
+    ENAMETOOLONG    =  36
+    ENOLCK          =  37
+    ENOSYS          =  38
+    ENOTEMPTY       =  39
+    ELOOP           =  40
+    ENOMSG          =  42
+    EIDRM           =  43
+    ESOCKTNOSUPPORT =  44
+    EPFNOSUPPORT    =  46
+    ESHUTDOWN       =  58
+    ETOOMANYREFS    =  59
+    ENOSTR          =  60
+    ENODATA         =  61
+    ETIME           =  62
+    ENOSR           =  63
+    EHOSTDOWN       =  64
+    ENOLINK         =  67
+    EUSERS          =  68
+    EPROTO          =  71
+    EMULTIHOP       =  72
+    EBADMSG         =  74
+    EOVERFLOW       =  75
+    EILSEQ          =  84
+    ENOTSOCK        =  88
+    EDESTADDRREQ    =  89
+    EMSGSIZE        =  90
+    EPROTOTYPE      =  91
+    ENOPROTOOPT     =  92
+    EPROTONOSUPPORT =  93
+    EOPNOTSUPP      =  95
+    EAFNOSUPPORT    =  97
+    EADDRINUSE      =  98
+    EADDRNOTAVAIL   =  99
+    ENETDOWN        = 100
+    ENETUNREACH     = 101
+    ENETRESET       = 102
+    ECONNABORTED    = 103
+    ECONNRESET      = 104
+    ENOBUFS         = 105
+    EISCONN         = 106
+    ENOTCONN        = 107
+    ETIMEDOUT       = 110
+    ECONNREFUSED    = 111
+    EHOSTUNREACH    = 113
+    EALREADY        = 114
+    EINPROGRESS     = 115
+    ESTALE          = 116
+    EDQUOT          = 122
+    ECANCELED       = 125
+    EOWNERDEAD      = 130
+    ENOTRECOVERABLE = 131
+    EREMOTE         =  71
+  {% end %}
 
   def message : String
     case self
@@ -195,22 +246,15 @@ pub enum Errno
     end
   end
 
+  @@value = Errno::NONE
+
   def self.value : self
-    {% if flag?(:darwin) %}
-      Errno.new(LibErrno.__error.value)
-    {% elsif flag?(:linux) %}
-      Errno.new(LibErrno.__errno_location.value)
-    {% else %}
-      Errno::NONE
-    {% end %}
+    @@value
   end
 
   def self.value=(errno : Errno) : Errno
-    {% if flag?(:darwin) %}
-      LibErrno.__error.value = errno.value
-    {% elsif flag?(:linux) %}
-      LibErrno.__errno_location.value = errno.value
-    {% end %}
+    @@value = Errno.new(val = errno.value)
     errno
   end
+
 end

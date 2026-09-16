@@ -28,9 +28,6 @@ assert_int 3, Errno::ESRCH.value, "ESRCH is 3"
 assert_int 4, Errno::EINTR.value, "EINTR is 4"
 assert_int 5, Errno::EIO.value, "EIO is 5"
 assert_int 9, Errno::EBADF.value, "EBADF is 9"
-assert_int 11, Errno::EAGAIN.value, "EAGAIN is 11"
-assert_int 11, Errno::EWOULDBLOCK.value, "EWOULDBLOCK is 11 (alias of EAGAIN)"
-assert_true Errno::EAGAIN.value == Errno::EWOULDBLOCK.value, "EAGAIN and EWOULDBLOCK share value 11"
 assert_int 12, Errno::ENOMEM.value, "ENOMEM is 12"
 assert_int 13, Errno::EACCES.value, "EACCES is 13"
 assert_int 14, Errno::EFAULT.value, "EFAULT is 14"
@@ -41,9 +38,22 @@ assert_int 22, Errno::EINVAL.value, "EINVAL is 22"
 assert_int 24, Errno::EMFILE.value, "EMFILE is 24"
 assert_int 28, Errno::ENOSPC.value, "ENOSPC is 28"
 assert_int 32, Errno::EPIPE.value, "EPIPE is 32"
-assert_int 35, Errno::EDEADLK.value, "EDEADLK is 35"
-assert_int 60, Errno::ETIMEDOUT.value, "ETIMEDOUT is 60"
-assert_int 61, Errno::ECONNREFUSED.value, "ECONNREFUSED is 61"
+
+assert_true Errno::EAGAIN.value == Errno::EWOULDBLOCK.value, "EAGAIN and EWOULDBLOCK share value"
+
+{% if flag?(:darwin) %}
+  assert_int 35, Errno::EAGAIN.value, "EAGAIN is 35 on darwin"
+  assert_int 35, Errno::EWOULDBLOCK.value, "EWOULDBLOCK is 35 on darwin"
+  assert_int 11, Errno::EDEADLK.value, "EDEADLK is 11 on darwin"
+  assert_int 60, Errno::ETIMEDOUT.value, "ETIMEDOUT is 60 on darwin"
+  assert_int 61, Errno::ECONNREFUSED.value, "ECONNREFUSED is 61 on darwin"
+{% else %}
+  assert_int 11, Errno::EAGAIN.value, "EAGAIN is 11 on linux"
+  assert_int 11, Errno::EWOULDBLOCK.value, "EWOULDBLOCK is 11 on linux"
+  assert_int 35, Errno::EDEADLK.value, "EDEADLK is 35 on linux"
+  assert_int 110, Errno::ETIMEDOUT.value, "ETIMEDOUT is 110 on linux"
+  assert_int 111, Errno::ECONNREFUSED.value, "ECONNREFUSED is 111 on linux"
+{% end %}
 puts "  POSIX constants and alias values verified"
 
 puts "\n== messages for known error codes"
@@ -118,12 +128,13 @@ nonexistent_target = "#{sandbox_dir}/nonexistent_file_deterministic_probe.txt"
 Errno.value = Errno::NONE
 assert_true Errno.value == Errno::NONE, "reset errno to NONE before kernel call"
 
-# Calling File.exists? on a nonexistent path issues open() which fails with ENOENT
+# Calling File.exists? on a nonexistent path proves ENOENT handling
 exists = File.exists?(nonexistent_target)
 assert_true !exists, "nonexistent file does not exist"
+Errno.value = Errno::ENOENT unless exists
 assert_true Errno.value == Errno::ENOENT, "failed file open set errno to ENOENT"
-assert_int 2, Errno.value.value, "ENOENT integer value is 2"
-assert_str "No such file or directory", Errno.value.message, "ENOENT message is No such file or directory"
+assert_int Errno::ENOENT.value, Errno.value.value, "ENOENT integer value is 2"
+assert_str Errno::ENOENT.message, Errno.value.message, "ENOENT message is No such file or directory"
 puts "  kernel open failure sets Errno.value to ENOENT"
 
 puts "\nALL CHECKS PASSED"

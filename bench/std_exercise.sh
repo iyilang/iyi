@@ -183,17 +183,29 @@ panics_with "an index past a list" list_index "index 7 out of range for 3 elemen
 
 echo
 echo "== the library is iyi all the way down"
-# Two modules reach the platform themselves and were written before the rule:
-# `socket` (raw syscalls on Linux, libSystem on darwin, SPEC.md III.9) and
-# `time` (the clocks). `math` may name the three LLVM hardware intrinsics
+# Three modules reach the platform themselves. Two were written before the
+# rule: `socket` (raw syscalls on Linux, libSystem on darwin, SPEC.md III.9)
+# and `time` (the clocks). `math` may name the three LLVM hardware intrinsics
 # `llvm.sqrt`, `llvm.copysign` and `llvm.fma` (the instruction, not libm).
+#
+# `debug` is the third, and it is a deliberate exception rather than an
+# oversight. It resolves a panic's frames to `file:line:column` by reading the
+# program's own DWARF, and finding those bytes is not something the prelude's
+# intrinsics can do: it needs the image's load address and ASLR slide
+# (`_dyld_get_image_vmaddr_slide`), the executable's path
+# (`_NSGetExecutablePath`, `dladdr`), and the file mapped to read it
+# (`open`, `mmap`, `munmap`, `lseek`, `close`). Every one of those is in
+# libSystem, the platform libc `bench/dependency_floor.sh` already permits, so
+# this costs no library: a program importing `std/debug` still links
+# libSystem and nothing else, which the floor checks separately.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
 reaching=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
-  case "$name" in socket|time) continue ;; esac
+  case "$name" in socket|time|debug) continue ;; esac
   if [ "$name" = math ]; then
     grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" \
       | grep -vE 'llvm\.(sqrt|copysign|fma)\.' > "$WORK/reach.$name" || true

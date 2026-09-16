@@ -1,0 +1,109 @@
+# Exercises `std/docs_pseudo_methods`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_docs_pseudo_methods_exercise.iyi
+
+module bench/std_docs_pseudo_methods_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_false(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" if cond
+end
+
+def assert_nil(val, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless val.nil?
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+import std/docs_pseudo_methods
+
+puts "== documentation pseudo-types"
+# ::CRYSTAL_PSEUDO__NoReturn and ::CRYSTAL_PSEUDO__Void are declared at top-level
+assert_str "CRYSTAL_PSEUDO__NoReturn", CRYSTAL_PSEUDO__NoReturn.to_s, "NoReturn type name"
+assert_str "CRYSTAL_PSEUDO__Void", CRYSTAL_PSEUDO__Void.to_s, "Void type name"
+
+nr = CRYSTAL_PSEUDO__NoReturn.allocate
+v = CRYSTAL_PSEUDO__Void.allocate
+assert_true nr.is_a?(CRYSTAL_PSEUDO__NoReturn), "nr is_a? CRYSTAL_PSEUDO__NoReturn"
+assert_true v.is_a?(CRYSTAL_PSEUDO__Void), "v is_a? CRYSTAL_PSEUDO__Void"
+
+assert_int 0, sizeof(CRYSTAL_PSEUDO__NoReturn), "sizeof CRYSTAL_PSEUDO__NoReturn"
+assert_int 0, sizeof(CRYSTAL_PSEUDO__Void), "sizeof CRYSTAL_PSEUDO__Void"
+assert_int 1, alignof(CRYSTAL_PSEUDO__NoReturn), "alignof CRYSTAL_PSEUDO__NoReturn"
+assert_int 1, alignof(CRYSTAL_PSEUDO__Void), "alignof CRYSTAL_PSEUDO__Void"
+puts "  pseudo-types instantiated and verified"
+
+puts "\n== Object pseudo-methods"
+obj = 12345
+
+# __crystal_pseudo_as and __crystal_pseudo_as? have no return type constraint,
+# so calling them executes the stub body (returning Nil).
+assert_nil obj.__crystal_pseudo_as(Int32), "__crystal_pseudo_as returns nil"
+assert_nil obj.__crystal_pseudo_as?(Int32), "__crystal_pseudo_as? returns nil"
+
+# The following pseudo-methods on Object:
+#   __crystal_pseudo_not : Bool
+#   __crystal_pseudo_is_a?(type : Class) : Bool
+#   __crystal_pseudo_nil? : Bool
+#   __crystal_pseudo_responds_to?(name : Symbol) : Bool
+# declare `: Bool` return types but have empty bodies returning `Nil`.
+# Calling them causes a compile-time type mismatch error (Nil is not Bool).
+# We verify their definition on Object using `responds_to?`.
+assert_true obj.responds_to?(:__crystal_pseudo_not), "responds to __crystal_pseudo_not"
+assert_true obj.responds_to?(:__crystal_pseudo_is_a?), "responds to __crystal_pseudo_is_a?"
+assert_true obj.responds_to?(:__crystal_pseudo_nil?), "responds to __crystal_pseudo_nil?"
+assert_true obj.responds_to?(:__crystal_pseudo_responds_to?), "responds to __crystal_pseudo_responds_to?"
+assert_true obj.responds_to?(:__crystal_pseudo_as), "responds to __crystal_pseudo_as"
+assert_true obj.responds_to?(:__crystal_pseudo_as?), "responds to __crystal_pseudo_as?"
+puts "  Object pseudo-methods referenced and verified"
+
+puts "\n== compiler intrinsics documented by the pseudo-methods"
+# Top-level pseudo methods:
+#   __crystal_pseudo_typeof(*expression) : Class
+#   __crystal_pseudo_sizeof(type : Class) : Int32
+#   __crystal_pseudo_instance_sizeof(type : Class) : Int32
+#   __crystal_pseudo_alignof(type : Class) : Int32
+#   __crystal_pseudo_instance_alignof(type : Class) : Int32
+#   __crystal_pseudo_pointerof(variable : T) : Pointer(T) forall T
+#   __crystal_pseudo_offsetof(type : Class, offset) : Int32
+# are declared in module std/docs_pseudo_methods without `pub`.
+# Under SPEC.md R-2, non-pub declarations are private to the module and
+# cannot be reached by other modules. Their empty bodies also return Nil
+# while declaring non-nil types (Class, Int32, Pointer(T)).
+# Here we verify the actual compiler intrinsics they document.
+assert_str "Int32", typeof(123).to_s, "typeof intrinsic"
+assert_int 4, sizeof(Int32), "sizeof intrinsic"
+assert_int 4, alignof(Int32), "alignof intrinsic"
+
+class DummyRef
+  @x : Int32 = 1
+  @y : Int64 = 2
+end
+
+assert_true instance_sizeof(DummyRef) > 0, "instance_sizeof intrinsic"
+assert_true instance_alignof(DummyRef) > 0, "instance_alignof intrinsic"
+assert_true offsetof(DummyRef, @y) > 0, "offsetof intrinsic"
+
+var = 42
+ptr = pointerof(var)
+assert_int 42, ptr.value, "pointerof intrinsic"
+
+assert_true (123.is_a?(Int32)), "is_a? intrinsic"
+assert_false (123.nil?), "nil? intrinsic"
+assert_int 123, (123.as(Int32)), "as intrinsic"
+as_val = 123.as?(Int32)
+assert_int 123, (as_val || 0), "as? intrinsic"
+assert_true (123.responds_to?(:to_s)), "responds_to? intrinsic"
+puts "  documented compiler intrinsics verified"
+
+puts "\nALL CHECKS PASSED"

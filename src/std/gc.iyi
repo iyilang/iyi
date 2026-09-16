@@ -67,21 +67,21 @@ pub struct GC
   # is refused by name.
   def self.malloc(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
-    __crystal_malloc64(size.to_u64)
+    __iyi_malloc64(size.to_u64)
   end
 
   # `size` zeroed bytes the collector does not scan: for bytes that hold no
   # pointers, so the marker skips them.
   def self.malloc_atomic(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
-    __crystal_malloc_atomic64(size.to_u64)
+    __iyi_malloc_atomic64(size.to_u64)
   end
 
   # The chunk at `pointer`, resized to `size` bytes; the answer may be a
   # new address, with the old bytes copied.
   def self.realloc(pointer : Void*, size : Int) : Void*
     raise "negative size: #{size}" if size < 0
-    __crystal_realloc64(pointer, size.to_u64)
+    __iyi_realloc64(pointer, size.to_u64)
   end
 
   # Hands a chunk back before the sweep would. A null pointer is nothing

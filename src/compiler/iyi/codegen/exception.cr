@@ -149,7 +149,7 @@ class Iyi::CodeGenVisitor
         exception_type_id = extract_value lp, 1
 
         # We call __crystal_get_exception to get the actual crystal `Exception` object.
-        get_exception_fun = main_fun(GET_EXCEPTION_NAME)
+        get_exception_fun = main_fun(get_exception_name)
         get_exception_arg_type = get_exception_fun.type.params_types.first # Void* or LibUnwind::Exception*
         get_exception_arg = pointer_cast(unwind_ex_obj, get_exception_arg_type)
 
@@ -289,7 +289,7 @@ class Iyi::CodeGenVisitor
       call windows_throw_fun, [llvm_context.void_pointer.null, llvm_context.void_pointer.null]
       unreachable
     else
-      raise_fun = main_fun(RAISE_NAME)
+      raise_fun = main_fun(raise_name)
       raise_fun_arg_type = raise_fun.func.params.first.type # Void* or LibUnwind::Exception*
       raise_fun_arg = pointer_cast(unwind_ex_obj.not_nil!, raise_fun_arg_type)
       codegen_call_or_invoke(node, nil, nil, raise_fun, [raise_fun_arg], true, @program.no_return)

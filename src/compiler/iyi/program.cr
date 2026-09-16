@@ -319,6 +319,73 @@ module Iyi
     # the prelude is a library.
     property? iyi_prelude = true
 
+    # iyi: true when building with `--crystal`, targeting Crystal's standard library and ABI.
+    property? crystal_library = false
+
+    # iyi: true when this program targets the iyi ABI rather than Crystal's.
+    # An explicit .cr source file or a build with --crystal uses Crystal's ABI
+    # (__crystal_*); an .iyi source file or an iyi-prelude build uses __iyi_*.
+    def iyi_abi? : Bool
+      return false if crystal_library?
+      if fn = filename
+        return false if fn.ends_with?(".cr")
+        return true if fn.ends_with?(".iyi")
+      end
+      iyi_prelude?
+    end
+
+    def abi_prefix : String
+      iyi_abi? ? "__iyi_" : "__crystal_"
+    end
+
+    def abi_name(suffix : String) : String
+      "#{abi_prefix}#{suffix}"
+    end
+
+    def main_name
+      abi_name("main")
+    end
+
+    def raise_name
+      abi_name("raise")
+    end
+
+    def raise_overflow_name
+      abi_name("raise_overflow")
+    end
+
+    def raise_cast_failed_name
+      abi_name("raise_cast_failed")
+    end
+
+    def malloc_name
+      abi_name("malloc64")
+    end
+
+    def malloc_atomic_name
+      abi_name("malloc_atomic64")
+    end
+
+    def realloc_name
+      abi_name("realloc64")
+    end
+
+    def get_exception_name
+      abi_name("get_exception")
+    end
+
+    def once_init_name
+      abi_name("once_init")
+    end
+
+    def once_name
+      abi_name("once")
+    end
+
+    def type_id_to_class_name_map_name
+      abi_name("type_id_to_class_name_map")
+    end
+
     # iyi: the directory the prelude was loaded from, once it has been.
     #
     # Every prelude file sits beside `prelude.iyi`, so this is what tells a

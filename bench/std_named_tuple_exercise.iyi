@@ -1,0 +1,159 @@
+# Exercises `std/named_tuple`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_named_tuple_exercise.iyi
+
+module bench/std_named_tuple_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/named_tuple
+
+class CloneBox
+  getter val : Int32
+
+  def initialize(@val : Int32)
+  end
+
+  def clone
+    CloneBox.new(@val)
+  end
+end
+
+puts "== construction"
+nt = {a: 1, b: "two", c: true}
+assert_true nt.size == 3, "size is 3"
+assert_true nt.empty? == false, "not empty"
+
+from_new = NamedTuple.new(x: 10, y: 20)
+assert_true from_new[:x] == 10, "new with kwargs x"
+assert_true from_new[:y] == 20, "new with kwargs y"
+assert_true from_new.size == 2, "new size 2"
+
+empty = NamedTuple.new
+assert_true empty.size == 0, "empty size is 0"
+assert_true empty.empty? == true, "empty? is true"
+puts "  literal and NamedTuple.new construction"
+
+puts "\n== access"
+# Literal symbol indexing (compile-time)
+assert_true nt[:a] == 1, "symbol literal a"
+assert_str "two", nt[:b], "symbol literal b"
+assert_true nt[:c] == true, "symbol literal c"
+
+# Dynamic symbol indexing (runtime)
+sym_a = [:a][0]
+sym_b = [:b][0]
+assert_true nt[sym_a] == 1, "dynamic symbol a"
+assert_true nt[sym_b] == "two", "dynamic symbol b"
+
+# Literal string indexing
+assert_true nt["a"] == 1, "string literal a"
+assert_str "two", nt["b"], "string literal b"
+
+# Dynamic string indexing
+str_a = ["a"][0]
+str_b = ["b"][0]
+assert_true nt[str_a] == 1, "dynamic string a"
+assert_true nt[str_b] == "two", "dynamic string b"
+
+# []? safe access
+assert_true nt[:a]? == 1, "[]? existing symbol"
+assert_true nt[:missing]?.nil?, "[]? missing symbol"
+assert_true nt["b"]? == "two", "[]? existing string"
+assert_true nt["missing"]?.nil?, "[]? missing string"
+
+# fetch with default value
+assert_true nt.fetch(:a, 999) == 1, "fetch sym present"
+assert_true nt.fetch(:missing, 999) == 999, "fetch sym default"
+assert_true nt.fetch("b", "fallback") == "two", "fetch str present"
+assert_true nt.fetch("missing", "fallback") == "fallback", "fetch str default"
+
+# fetch with block
+assert_true nt.fetch(:a) { |k| 42 } == 1, "fetch sym block present"
+assert_true nt.fetch(:missing) { |k| 42 } == 42, "fetch sym block default"
+assert_true nt.fetch("b") { |k| "fallback_#{k}" } == "two", "fetch str block present"
+assert_true nt.fetch("missing") { |k| "fallback_#{k}" } == "fallback_missing", "fetch str block default"
+
+# has_key?
+assert_true nt.has_key?(:a) == true, "has_key? sym present"
+assert_true nt.has_key?(:missing) == false, "has_key? sym missing"
+assert_true nt.has_key?("b") == true, "has_key? str present"
+assert_true nt.has_key?("missing") == false, "has_key? str missing"
+puts "  symbol, string, safe access, fetch, and has_key?"
+
+puts "\n== iteration"
+assert_true nt.keys == {:a, :b, :c}, "keys tuple"
+assert_true nt.values == {1, "two", true}, "values tuple"
+
+each_keys = [] of Symbol
+each_vals = [] of String
+{name: "Alice", role: "Dev"}.each do |k, v|
+  each_keys << k
+  each_vals << v
+end
+assert_true each_keys == [:name, :role], "each yields keys"
+assert_true each_vals == ["Alice", "Dev"], "each yields values"
+
+key_list = [] of Symbol
+nt.each_key do |k|
+  key_list << k
+end
+assert_true key_list == [:a, :b, :c], "each_key order"
+
+idx_default = [] of Int32
+nt.each_with_index do |k, v, i|
+  idx_default << i
+end
+assert_true idx_default == [0, 1, 2], "each_with_index default offset"
+
+idx_offset = [] of Int32
+nt.each_with_index(10) do |k, v, i|
+  idx_offset << i
+end
+assert_true idx_offset == [10, 11, 12], "each_with_index offset 10"
+puts "  keys, values, each, each_key, and each_with_index"
+
+puts "\n== equality"
+assert_true ({x: 10, y: 20} == {x: 10, y: 20}), "same order equal"
+assert_true ({x: 10, y: 20} == {y: 20, x: 10}), "different order equal"
+assert_true ({x: 10, y: 20} != {x: 99, y: 20}), "different value unequal"
+assert_true ({x: 10, y: 20} != {x: 10, z: 20}), "different key unequal"
+puts "  order-independent equality and value inequality"
+
+puts "\n== merge and transformation"
+base = {a: 1, b: 2}
+extra = {b: 20, c: 30}
+
+m1 = base.merge(extra)
+assert_true m1 == {a: 1, b: 20, c: 30}, "merge NamedTuple"
+
+m2 = base.merge(b: 20, c: 30)
+assert_true m2 == {a: 1, b: 20, c: 30}, "merge kwargs"
+
+rm = base.reverse_merge(extra)
+assert_true rm == {b: 2, c: 30, a: 1}, "reverse_merge"
+assert_true rm == {a: 1, b: 2, c: 30}, "reverse_merge matches pairs"
+
+pairs = {x: 10, y: 20}.to_a
+assert_true pairs == [{:x, 10}, {:y, 20}], "to_a pairs"
+
+hash = {x: 10, y: 20}.to_h
+assert_true hash[:x] == 10, "to_h key x"
+assert_true hash[:y] == 20, "to_h key y"
+assert_true hash.size == 2, "to_h size"
+
+box = CloneBox.new(42)
+box_nt = {item: box}
+cloned_nt = box_nt.clone
+assert_true cloned_nt[:item].val == 42, "clone value preserved"
+assert_true cloned_nt[:item] != box_nt[:item], "clone creates distinct instance"
+puts "  merge, reverse_merge, to_a, to_h, and clone"
+
+puts "\nALL CHECKS PASSED"

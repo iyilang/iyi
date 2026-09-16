@@ -1,0 +1,61 @@
+# `ReferenceStorage(T)` provides the minimum storage for the instance data of
+# an object of type `T`. The compiler guarantees that
+# `sizeof(ReferenceStorage(T)) == instance_sizeof(T)`.
+#
+# `T` must be a non-union reference type.
+#
+# WARNING: `ReferenceStorage` is for manual memory management, such as
+# allocating an instance on the stack or with a custom arena allocator.
+
+module std/reference_storage
+
+class ::Reference
+  @[Primitive(:pre_initialize)]
+  def self.pre_initialize(address : Pointer)
+    {% @type %}
+  end
+
+  def self.unsafe_construct(address : Pointer, *args, **opts) : self
+    obj = pre_initialize(address)
+    obj.initialize(*args, **opts)
+    obj
+  end
+end
+
+@[Primitive(:ReferenceStorageType)]
+pub struct ReferenceStorage(T) < Value
+  def to_reference : T
+    pointerof(@type_id).as(T)
+  end
+
+  def ==(other : ReferenceStorage(T)) : Bool
+    {% for ivar in T.instance_vars %}
+      return false unless to_reference.@{{ivar.id}} == other.to_reference.@{{ivar.id}}
+    {% end %}
+    true
+  end
+
+  def ==(other) : Bool
+    false
+  end
+
+  def hash : Int32
+    h = 0
+    ptr = pointerof(@type_id).as(Pointer(UInt8))
+    i = 0
+    sz = instance_sizeof(T)
+    while i < sz
+      h = (h * 31) ^ ptr[i].to_i32
+      i = i + 1
+    end
+    h
+  end
+
+  def to_s : String
+    "ReferenceStorage(#<" + {{ T.name.stringify }} + ">)"
+  end
+
+  def inspect : String
+    to_s
+  end
+end

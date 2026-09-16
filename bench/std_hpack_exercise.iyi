@@ -1,0 +1,642 @@
+# Exercises `std/hpack`: RFC 7541 Header Compression for HTTP/2.
+#
+# Run via:
+#     ./bin/iyi run bench/std_hpack_exercise.iyi
+
+module bench/std_hpack_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_u8(expected : UInt8, actual : UInt8, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def assert_bytes(expected : Array(UInt8), actual : Std::Slice::Bytes, msg : String) : Nil
+  if expected.size != actual.size
+    raise "ASSERTION FAILED: #{msg}\n  expected size #{expected.size}, got #{actual.size}"
+  end
+  i = 0
+  while i < expected.size
+    if expected[i] != actual[i]
+      raise "ASSERTION FAILED: #{msg} at byte #{i}\n  expected #{expected[i]}, got #{actual[i]}"
+    end
+    i = i + 1
+  end
+end
+
+import std/slice
+import std/hpack
+
+using std/slice::{Bytes}
+using std/hpack::{
+  HeaderField,
+  IndexingMode,
+  StaticTable,
+  DynamicTable,
+  Table,
+  Integer,
+  Huffman,
+  Encoder,
+  Decoder,
+  HpackError
+}
+
+# ===========================================================================
+# 1. RFC 7541 Integer Codec
+# ===========================================================================
+puts "== RFC 7541 integer codec"
+
+# C.1.1: 10 with 5-bit prefix -> [0x0a]
+enc_c11 = Integer.encode(10_u64, 5)
+assert_bytes([0x0a_u8], enc_c11, "RFC 7541 C.1.1 encode")
+dec_c11 = Integer.decode(enc_c11, 0, 5)
+raise "C.1.1 decode failed" unless dec_c11.is_a?(Tuple(UInt64, Int32))
+assert_true(dec_c11[0] == 10_u64 && dec_c11[1] == 1, "RFC 7541 C.1.1 decode")
+
+# C.1.2: 1337 with 5-bit prefix -> [0x1f, 0x9a, 0x0a]
+enc_c12 = Integer.encode(1337_u64, 5)
+assert_bytes([0x1f_u8, 0x9a_u8, 0x0a_u8], enc_c12, "RFC 7541 C.1.2 encode")
+dec_c12 = Integer.decode(enc_c12, 0, 5)
+raise "C.1.2 decode failed" unless dec_c12.is_a?(Tuple(UInt64, Int32))
+assert_true(dec_c12[0] == 1337_u64 && dec_c12[1] == 3, "RFC 7541 C.1.2 decode")
+
+# C.1.3: 42 with 8-bit prefix -> [0x2a]
+enc_c13 = Integer.encode(42_u64, 8)
+assert_bytes([0x2a_u8], enc_c13, "RFC 7541 C.1.3 encode")
+dec_c13 = Integer.decode(enc_c13, 0, 8)
+raise "C.1.3 decode failed" unless dec_c13.is_a?(Tuple(UInt64, Int32))
+assert_true(dec_c13[0] == 42_u64 && dec_c13[1] == 1, "RFC 7541 C.1.3 decode")
+
+# Prefix byte preservation
+enc_pfx = Integer.encode(10_u64, 5, 0xe0_u8)
+assert_bytes([0xea_u8], enc_pfx, "Prefix byte mask with 5-bit prefix")
+
+# Boundaries and various prefix widths (1, 4, 7 bits)
+p1 = Integer.encode(0_u64, 1)
+assert_bytes([0x00_u8], p1, "0 with 1-bit prefix")
+d_p1 = Integer.decode(p1, 0, 1)
+raise "0 with 1-bit decode" unless d_p1.is_a?(Tuple(UInt64, Int32)) && d_p1[0] == 0_u64
+
+p4 = Integer.encode(15_u64, 4)
+assert_bytes([0x0f_u8, 0x00_u8], p4, "15 with 4-bit prefix")
+d_p4 = Integer.decode(p4, 0, 4)
+raise "15 with 4-bit decode" unless d_p4.is_a?(Tuple(UInt64, Int32)) && d_p4[0] == 15_u64
+
+p7 = Integer.encode(65535_u64, 7)
+d_p7 = Integer.decode(p7, 0, 7)
+raise "65535 with 7-bit decode" unless d_p7.is_a?(Tuple(UInt64, Int32)) && d_p7[0] == 65535_u64
+
+# Non-zero offset decoding
+buf_offset = Bytes.new(5) { |i| [0x99_u8, 0x88_u8, 0x1f_u8, 0x9a_u8, 0x0a_u8][i] }
+d_off = Integer.decode(buf_offset, 2, 5)
+raise "decode at offset failed" unless d_off.is_a?(Tuple(UInt64, Int32))
+assert_true(d_off[0] == 1337_u64 && d_off[1] == 5, "decode integer at offset 2")
+
+puts "  variable-length integers with 1..8 bit prefixes and offsets"
+
+# ===========================================================================
+# 2. RFC 7541 Huffman Codec
+# ===========================================================================
+puts "\n== RFC 7541 Huffman codec"
+
+# C.4.1: "www.example.com"
+h_ex1 = Huffman.encode("www.example.com")
+expected_hex1 = [0xf1_u8, 0xe3_u8, 0xc2_u8, 0xe5_u8, 0xf2_u8, 0x3a_u8, 0x6b_u8, 0xa0_u8, 0xab_u8, 0x90_u8, 0xf4_u8, 0xff_u8]
+assert_bytes(expected_hex1, h_ex1, "Huffman www.example.com")
+assert_int(12, Huffman.encoded_size("www.example.com"), "Huffman encoded_size www.example.com")
+dec_h1 = Huffman.decode(h_ex1)
+raise "dec_h1 failed" if dec_h1.is_a?(HpackError)
+assert_str("www.example.com", dec_h1, "Huffman decode www.example.com")
+
+# C.4.2: "no-cache"
+h_ex2 = Huffman.encode("no-cache")
+expected_hex2 = [0xa8_u8, 0xeb_u8, 0x10_u8, 0x64_u8, 0x9c_u8, 0xbf_u8]
+assert_bytes(expected_hex2, h_ex2, "Huffman no-cache")
+assert_int(6, Huffman.encoded_size("no-cache"), "Huffman encoded_size no-cache")
+dec_h2 = Huffman.decode(h_ex2)
+raise "dec_h2 failed" if dec_h2.is_a?(HpackError)
+assert_str("no-cache", dec_h2, "Huffman decode no-cache")
+
+# C.4.3: "custom-key" and "custom-value"
+h_ck = Huffman.encode("custom-key")
+expected_ck = [0x25_u8, 0xa8_u8, 0x49_u8, 0xe9_u8, 0x5b_u8, 0xa9_u8, 0x7d_u8, 0x7f_u8]
+assert_bytes(expected_ck, h_ck, "Huffman custom-key")
+dec_ck = Huffman.decode(h_ck)
+raise "dec_ck failed" if dec_ck.is_a?(HpackError)
+assert_str("custom-key", dec_ck, "Huffman decode custom-key")
+
+h_cv = Huffman.encode("custom-value")
+expected_cv = [0x25_u8, 0xa8_u8, 0x49_u8, 0xe9_u8, 0x5b_u8, 0xb8_u8, 0xe8_u8, 0xb4_u8, 0xbf_u8]
+assert_bytes(expected_cv, h_cv, "Huffman custom-value")
+dec_cv = Huffman.decode(h_cv)
+raise "dec_cv failed" if dec_cv.is_a?(HpackError)
+assert_str("custom-value", dec_cv, "Huffman decode custom-value")
+
+# Round trip across varied text shapes
+test_strings = [
+  "",
+  "a",
+  "/index.html",
+  "gzip, deflate, br",
+  "Bearer token1234567890",
+  "https://api.example.com:8443/v1/resource?id=42&active=true",
+  "text/html; charset=UTF-8"
+]
+idx_s = 0
+while idx_s < test_strings.size
+  ts = test_strings[idx_s]
+  encoded = Huffman.encode(ts)
+  assert_int(Huffman.encoded_size(ts), encoded.size, "encoded_size matches encode output size")
+  decoded = Huffman.decode(encoded)
+  raise "Huffman round trip failed on #{ts.inspect}" if decoded.is_a?(HpackError)
+  assert_str(ts, decoded, "Huffman round trip #{ts.inspect}")
+  idx_s = idx_s + 1
+end
+
+puts "  canonical RFC 7541 Huffman vectors and round trips"
+
+# ===========================================================================
+# 3. RFC 7541 Request and Response Test Vectors
+# ===========================================================================
+puts "\n== RFC 7541 request and response vectors"
+
+# Appendix C.2.1: Literal Header Field with Indexing - New Name (without Huffman)
+enc_c21 = Encoder.new(use_huffman: false)
+wire_c21 = enc_c21.encode([HeaderField.new("custom-key", "custom-header", IndexingMode::Incremental)])
+expected_c21 = [
+  0x40_u8, 0x0a_u8,
+  0x63_u8, 0x75_u8, 0x73_u8, 0x74_u8, 0x6f_u8, 0x6d_u8, 0x2d_u8, 0x6b_u8, 0x65_u8, 0x79_u8,
+  0x0d_u8,
+  0x63_u8, 0x75_u8, 0x73_u8, 0x74_u8, 0x6f_u8, 0x6d_u8, 0x2d_u8, 0x68_u8, 0x65_u8, 0x61_u8, 0x64_u8, 0x65_u8, 0x72_u8
+]
+assert_bytes(expected_c21, wire_c21, "RFC 7541 C.2.1 wire")
+dec_c21 = Decoder.new
+res_c21 = dec_c21.decode(wire_c21)
+raise "C.2.1 decode failed" if res_c21.is_a?(HpackError)
+assert_int(1, res_c21.size, "C.2.1 header count")
+assert_str("custom-key", res_c21[0].name, "C.2.1 name")
+assert_str("custom-header", res_c21[0].value, "C.2.1 value")
+assert_int(1, dec_c21.dynamic_table.length, "C.2.1 dynamic table count")
+assert_int(55, dec_c21.dynamic_table.size, "C.2.1 dynamic table size (10 + 13 + 32 = 55)")
+
+# Appendix C.2.2: Literal Header Field without Indexing - Indexed Name (without Huffman)
+wire_c22 = [
+  0x04_u8, 0x0c_u8,
+  0x2f_u8, 0x73_u8, 0x61_u8, 0x6d_u8, 0x70_u8, 0x6c_u8, 0x65_u8, 0x2f_u8, 0x70_u8, 0x61_u8, 0x74_u8, 0x68_u8
+]
+bytes_c22 = Bytes.new(wire_c22.size) { |i| wire_c22[i] }
+dec_c22 = Decoder.new
+res_c22 = dec_c22.decode(bytes_c22)
+raise "C.2.2 decode failed" if res_c22.is_a?(HpackError)
+assert_int(1, res_c22.size, "C.2.2 count")
+assert_str(":path", res_c22[0].name, "C.2.2 name")
+assert_str("/sample/path", res_c22[0].value, "C.2.2 value")
+assert_true(res_c22[0].indexing == IndexingMode::WithoutIndexing, "C.2.2 indexing mode")
+assert_int(0, dec_c22.dynamic_table.length, "C.2.2 table remains empty")
+
+# Appendix C.2.3: Literal Header Field Never Indexed - New Name (without Huffman)
+wire_c23 = [
+  0x10_u8,
+  0x08_u8, 0x70_u8, 0x61_u8, 0x73_u8, 0x73_u8, 0x77_u8, 0x6f_u8, 0x72_u8, 0x64_u8,
+  0x06_u8, 0x73_u8, 0x65_u8, 0x63_u8, 0x72_u8, 0x65_u8, 0x74_u8
+]
+bytes_c23 = Bytes.new(wire_c23.size) { |i| wire_c23[i] }
+dec_c23 = Decoder.new
+res_c23 = dec_c23.decode(bytes_c23)
+raise "C.2.3 decode failed" if res_c23.is_a?(HpackError)
+assert_int(1, res_c23.size, "C.2.3 count")
+assert_str("password", res_c23[0].name, "C.2.3 name")
+assert_str("secret", res_c23[0].value, "C.2.3 value")
+assert_true(res_c23[0].indexing == IndexingMode::NeverIndexed, "C.2.3 indexing mode")
+assert_true(res_c23[0].never_indexed, "C.2.3 never_indexed helper")
+
+# Appendix C.2.4: Indexed Header Field (:method: GET)
+wire_c24 = Bytes.new(1) { 0x82_u8 }
+dec_c24 = Decoder.new
+res_c24 = dec_c24.decode(wire_c24)
+raise "C.2.4 decode failed" if res_c24.is_a?(HpackError)
+assert_int(1, res_c24.size, "C.2.4 count")
+assert_str(":method", res_c24[0].name, "C.2.4 name")
+assert_str("GET", res_c24[0].value, "C.2.4 value")
+
+# Appendix C.3: Three consecutive requests without Huffman
+enc_seq_c3 = Encoder.new(use_huffman: false)
+dec_seq_c3 = Decoder.new
+
+# C.3.1
+req_c31 = [
+  HeaderField.new(":method", "GET"),
+  HeaderField.new(":scheme", "http"),
+  HeaderField.new(":path", "/"),
+  HeaderField.new(":authority", "www.example.com")
+]
+w_c31 = enc_seq_c3.encode(req_c31)
+expected_c31 = [
+  0x82_u8, 0x86_u8, 0x84_u8, 0x41_u8, 0x0f_u8,
+  0x77_u8, 0x77_u8, 0x77_u8, 0x2e_u8, 0x65_u8, 0x78_u8, 0x61_u8, 0x6d_u8, 0x70_u8, 0x6c_u8, 0x65_u8, 0x2e_u8, 0x63_u8, 0x6f_u8, 0x6d_u8
+]
+assert_bytes(expected_c31, w_c31, "C.3.1 encode")
+d_c31 = dec_seq_c3.decode(w_c31)
+raise "C.3.1 decode failed" if d_c31.is_a?(HpackError)
+assert_int(4, d_c31.size, "C.3.1 count")
+assert_int(1, dec_seq_c3.dynamic_table.length, "C.3.1 dynamic entries")
+assert_int(57, dec_seq_c3.dynamic_table.size, "C.3.1 dynamic size")
+
+# C.3.2
+req_c32 = [
+  HeaderField.new(":method", "GET"),
+  HeaderField.new(":scheme", "http"),
+  HeaderField.new(":path", "/"),
+  HeaderField.new(":authority", "www.example.com"),
+  HeaderField.new("cache-control", "no-cache")
+]
+w_c32 = enc_seq_c3.encode(req_c32)
+expected_c32 = [
+  0x82_u8, 0x86_u8, 0x84_u8, 0xbe_u8, 0x58_u8, 0x08_u8,
+  0x6e_u8, 0x6f_u8, 0x2d_u8, 0x63_u8, 0x61_u8, 0x63_u8, 0x68_u8, 0x65_u8
+]
+assert_bytes(expected_c32, w_c32, "C.3.2 encode")
+d_c32 = dec_seq_c3.decode(w_c32)
+raise "C.3.2 decode failed" if d_c32.is_a?(HpackError)
+assert_int(5, d_c32.size, "C.3.2 count")
+assert_int(2, dec_seq_c3.dynamic_table.length, "C.3.2 dynamic entries")
+assert_int(110, dec_seq_c3.dynamic_table.size, "C.3.2 dynamic size")
+
+# C.3.3
+req_c33 = [
+  HeaderField.new(":method", "GET"),
+  HeaderField.new(":scheme", "https"),
+  HeaderField.new(":path", "/index.html"),
+  HeaderField.new(":authority", "www.example.com"),
+  HeaderField.new("custom-key", "custom-value")
+]
+w_c33 = enc_seq_c3.encode(req_c33)
+expected_c33 = [
+  0x82_u8, 0x87_u8, 0x85_u8, 0xbf_u8, 0x40_u8, 0x0a_u8,
+  0x63_u8, 0x75_u8, 0x73_u8, 0x74_u8, 0x6f_u8, 0x6d_u8, 0x2d_u8, 0x6b_u8, 0x65_u8, 0x79_u8,
+  0x0c_u8,
+  0x63_u8, 0x75_u8, 0x73_u8, 0x74_u8, 0x6f_u8, 0x6d_u8, 0x2d_u8, 0x76_u8, 0x61_u8, 0x6c_u8, 0x75_u8, 0x65_u8
+]
+assert_bytes(expected_c33, w_c33, "C.3.3 encode")
+d_c33 = dec_seq_c3.decode(w_c33)
+raise "C.3.3 decode failed" if d_c33.is_a?(HpackError)
+assert_int(5, d_c33.size, "C.3.3 count")
+assert_int(3, dec_seq_c3.dynamic_table.length, "C.3.3 dynamic entries")
+assert_int(164, dec_seq_c3.dynamic_table.size, "C.3.3 dynamic size")
+
+# Appendix C.4: Three consecutive requests with Huffman
+enc_seq_c4 = Encoder.new(use_huffman: true)
+dec_seq_c4 = Decoder.new
+
+# C.4.1
+w_c41 = enc_seq_c4.encode(req_c31)
+expected_c41 = [
+  0x82_u8, 0x86_u8, 0x84_u8, 0x41_u8, 0x8c_u8,
+  0xf1_u8, 0xe3_u8, 0xc2_u8, 0xe5_u8, 0xf2_u8, 0x3a_u8, 0x6b_u8, 0xa0_u8, 0xab_u8, 0x90_u8, 0xf4_u8, 0xff_u8
+]
+assert_bytes(expected_c41, w_c41, "C.4.1 encode")
+d_c41 = dec_seq_c4.decode(w_c41)
+raise "C.4.1 decode failed" if d_c41.is_a?(HpackError)
+assert_int(4, d_c41.size, "C.4.1 count")
+
+# C.4.2
+w_c42 = enc_seq_c4.encode(req_c32)
+expected_c42 = [
+  0x82_u8, 0x86_u8, 0x84_u8, 0xbe_u8, 0x58_u8, 0x86_u8,
+  0xa8_u8, 0xeb_u8, 0x10_u8, 0x64_u8, 0x9c_u8, 0xbf_u8
+]
+assert_bytes(expected_c42, w_c42, "C.4.2 encode")
+d_c42 = dec_seq_c4.decode(w_c42)
+raise "C.4.2 decode failed" if d_c42.is_a?(HpackError)
+assert_int(5, d_c42.size, "C.4.2 count")
+
+# C.4.3
+w_c43 = enc_seq_c4.encode(req_c33)
+expected_c43 = [
+  0x82_u8, 0x87_u8, 0x85_u8, 0xbf_u8, 0x40_u8, 0x88_u8,
+  0x25_u8, 0xa8_u8, 0x49_u8, 0xe9_u8, 0x5b_u8, 0xa9_u8, 0x7d_u8, 0x7f_u8,
+  0x89_u8,
+  0x25_u8, 0xa8_u8, 0x49_u8, 0xe9_u8, 0x5b_u8, 0xb8_u8, 0xe8_u8, 0xb4_u8, 0xbf_u8
+]
+assert_bytes(expected_c43, w_c43, "C.4.3 encode")
+d_c43 = dec_seq_c4.decode(w_c43)
+raise "C.4.3 decode failed" if d_c43.is_a?(HpackError)
+assert_int(5, d_c43.size, "C.4.3 count")
+
+puts "  RFC 7541 Appendices C.2, C.3 and C.4 sequence verified byte-for-byte"
+
+# ===========================================================================
+# 4. Static Table Hits
+# ===========================================================================
+puts "\n== static table hits"
+
+assert_int(61, StaticTable.size, "static table size is 61")
+
+# Exact hits
+hit_get = StaticTable.find(":method", "GET")
+assert_true(hit_get[1] && hit_get[0] == 2, ":method: GET is static 2")
+
+hit_post = StaticTable.find(":method", "POST")
+assert_true(hit_post[1] && hit_post[0] == 3, ":method: POST is static 3")
+
+hit_path = StaticTable.find(":path", "/")
+assert_true(hit_path[1] && hit_path[0] == 4, ":path: / is static 4")
+
+hit_status_200 = StaticTable.find(":status", "200")
+assert_true(hit_status_200[1] && hit_status_200[0] == 8, ":status: 200 is static 8")
+
+hit_status_404 = StaticTable.find(":status", "404")
+assert_true(hit_status_404[1] && hit_status_404[0] == 13, ":status: 404 is static 13")
+
+# Partial hits (name exists in static table, value differs)
+hit_put = StaticTable.find(":method", "PUT")
+assert_true(!hit_put[1] && hit_put[0] == 2, ":method: PUT has name hit at 2")
+
+hit_custom_path = StaticTable.find(":path", "/custom/endpoint")
+assert_true(!hit_custom_path[1] && hit_custom_path[0] == 4, ":path: /custom has name hit at 4")
+
+hit_status_201 = StaticTable.find(":status", "201")
+assert_true(!hit_status_201[1] && hit_status_201[0] == 8, ":status: 201 has name hit at 8")
+
+hit_ua = StaticTable.find("user-agent", "custom-client/1.0")
+assert_true(!hit_ua[1] && hit_ua[0] == 58, "user-agent has name hit at 58")
+
+# Misses
+hit_miss = StaticTable.find("x-custom-header", "custom-value")
+assert_true(!hit_miss[1] && hit_miss[0] == 0, "unknown header is table miss")
+
+assert_int(0, StaticTable.find_name("x-custom-header"), "find_name 0 on miss")
+assert_int(58, StaticTable.find_name("user-agent"), "find_name 58 on user-agent")
+
+# StaticTable.get boundaries
+f1 = StaticTable.get(1)
+raise "static entry 1 missing" if f1.nil?
+assert_str(":authority", f1.name, "entry 1 name")
+
+f61 = StaticTable.get(61)
+raise "static entry 61 missing" if f61.nil?
+assert_str("www-authenticate", f61.name, "entry 61 name")
+
+assert_true(StaticTable.get(0).nil?, "index 0 is nil")
+assert_true(StaticTable.get(62).nil?, "index 62 is nil in static table")
+
+puts "  static table exact hits, name matches, and boundary lookups"
+
+# ===========================================================================
+# 5. Dynamic Table Insertion and Eviction at Capacity
+# ===========================================================================
+puts "\n== dynamic table eviction at capacity"
+
+# Table with capacity 110 octets
+dt = DynamicTable.new(max_size: 110, settings_max_size: 4096)
+assert_int(0, dt.length, "initial dt empty")
+assert_true(dt.empty?, "empty? true")
+
+# Entry 1: name 4 ("auth"), value 4 ("user") -> size = 4 + 4 + 32 = 40
+dt.add("auth", "user")
+assert_int(1, dt.length, "1 entry")
+assert_int(40, dt.size, "40 octets")
+
+# Entry 2: name 4 ("sess"), value 4 ("1234") -> size = 40. Total = 80 <= 110
+dt.add("sess", "1234")
+assert_int(2, dt.length, "2 entries")
+assert_int(80, dt.size, "80 octets")
+
+# Combined table indexing: relative 1 is sess (61 + 1 = 62), relative 2 is auth (61 + 2 = 63)
+tf_sess = Table.find(dt, "sess", "1234")
+assert_true(tf_sess[1] && tf_sess[0] == 62, "sess: 1234 found at global index 62")
+tf_auth = Table.find(dt, "auth", "user")
+assert_true(tf_auth[1] && tf_auth[0] == 63, "auth: user found at global index 63")
+
+# Entry 3: name 4 ("role"), value 4 ("admn") -> size = 40. Total = 80 + 40 = 120 > 110!
+# Eviction must pop oldest entry ("auth: user"), leaving 80 octets.
+dt.add("role", "admn")
+assert_int(2, dt.length, "eviction keeps 2 entries")
+assert_int(80, dt.size, "size stays at 80 octets after eviction")
+
+# Entries should now be: [1] role: admn (global 62), [2] sess: 1234 (global 63).
+# auth: user (old index 63) was evicted.
+tf_role = Table.find(dt, "role", "admn")
+assert_true(tf_role[1] && tf_role[0] == 62, "newest entry role: admn at global 62")
+tf_sess2 = Table.find(dt, "sess", "1234")
+assert_true(tf_sess2[1] && tf_sess2[0] == 63, "sess: 1234 shifted to global 63")
+tf_auth_evicted = Table.find(dt, "auth", "user")
+assert_true(!tf_auth_evicted[1] && tf_auth_evicted[0] == 0, "evicted auth: user not in table")
+assert_true(Table.get(dt, 64).nil?, "global index 64 out of range")
+
+# Table size reduction causes eviction to fit
+err_resize = dt.set_max_size(45)
+raise "set_max_size failed" if err_resize
+assert_int(45, dt.max_size, "max size updated to 45")
+assert_int(1, dt.length, "size reduction evicted sess: 1234")
+assert_int(40, dt.size, "40 octets left")
+assert_str("role", dt.entries[0].name, "role remained")
+
+# Reduction to 0 evicts everything
+dt.set_max_size(0)
+assert_int(0, dt.length, "0 max size evicted all")
+assert_int(0, dt.size, "0 octets")
+assert_true(dt.empty?, "empty? true at 0 max size")
+
+# Oversized entry (> max_size) clears the table per RFC 7541 Section 4.4
+dt.set_max_size(50)
+dt.add("small", "1") # 5 + 1 + 32 = 38 <= 50
+assert_int(1, dt.length, "small entry added")
+dt.add("a_very_long_header_name_that_exceeds_table_capacity", "val") # > 50
+assert_int(0, dt.length, "oversized entry cleared table")
+assert_int(0, dt.size, "table size 0 after oversized attempt")
+
+puts "  FIFO dynamic table eviction, combined table indexing, and zero-capacity clearing"
+
+# ===========================================================================
+# 6. Table Size Update
+# ===========================================================================
+puts "\n== table size update"
+
+enc_ts = Encoder.new(max_table_size: 4096)
+dec_ts = Decoder.new(max_table_size: 4096)
+
+# Signal table size update to 256
+enc_ts.set_max_table_size(256)
+h_ts = [HeaderField.new(":status", "200")]
+wire_ts = enc_ts.encode(h_ts)
+
+# Wire starts with 5-bit prefix integer for 256: 0x20 | 0x1f = 0x3f, followed by continuation 225 (0xe1), 1 (0x01)
+# Total 3 octets: 3f e1 01, followed by 0x88 (:status: 200)
+assert_u8(0x3f_u8, wire_ts[0], "table size update byte 0")
+assert_u8(0xe1_u8, wire_ts[1], "table size update byte 1")
+assert_u8(0x01_u8, wire_ts[2], "table size update byte 2")
+assert_u8(0x88_u8, wire_ts[3], "header follows table size update")
+
+# Decoder receives wire, applies table size update
+res_ts = dec_ts.decode(wire_ts)
+raise "decode table size update failed" if res_ts.is_a?(HpackError)
+assert_int(1, res_ts.size, "decoded header count")
+assert_str(":status", res_ts[0].name, "decoded header name")
+assert_int(256, dec_ts.dynamic_table.max_size, "decoder dynamic table updated to 256")
+
+puts "  encoder emits 5-bit prefix integer update and decoder updates dynamic capacity"
+
+# ===========================================================================
+# 7. Realistic Round Trip
+# ===========================================================================
+puts "\n== realistic round trip"
+
+realistic_req = [
+  HeaderField.new(":method", "GET"),
+  HeaderField.new(":scheme", "https"),
+  HeaderField.new(":path", "/api/v2/items?page=1&limit=25"),
+  HeaderField.new(":authority", "api.service.internal:8443"),
+  HeaderField.new("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"),
+  HeaderField.new("accept", "application/json, text/plain, */*"),
+  HeaderField.new("accept-encoding", "gzip, deflate, br"),
+  HeaderField.new("accept-language", "en-US,en;q=0.9"),
+  HeaderField.new("authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", IndexingMode::NeverIndexed),
+  HeaderField.new("x-correlation-id", "9a6e114b-2df9-4c12-9c41-2a62888cf3b2")
+]
+
+realistic_resp = [
+  HeaderField.new(":status", "200"),
+  HeaderField.new("content-type", "application/json; charset=utf-8"),
+  HeaderField.new("content-encoding", "gzip"),
+  HeaderField.new("date", "Tue, 15 Sep 2026 12:00:00 GMT"),
+  HeaderField.new("cache-control", "private, max-age=0, no-cache"),
+  HeaderField.new("vary", "Accept-Encoding, Origin"),
+  HeaderField.new("x-frame-options", "DENY"),
+  HeaderField.new("set-cookie", "session_id=abc123xyz; Secure; HttpOnly; SameSite=Strict", IndexingMode::NeverIndexed)
+]
+
+# Test both Huffman and raw encoding
+[true, false].each do |use_huff|
+  enc_r = Encoder.new(use_huffman: use_huff)
+  dec_r = Decoder.new
+
+  # Request round trip
+  w_req1 = enc_r.encode(realistic_req)
+  d_req1 = dec_r.decode(w_req1)
+  raise "realistic req decode failed (huff: #{use_huff})" if d_req1.is_a?(HpackError)
+  assert_int(realistic_req.size, d_req1.size, "request count matches")
+  k = 0
+  while k < realistic_req.size
+    assert_str(realistic_req[k].name, d_req1[k].name, "request header name #{k}")
+    assert_str(realistic_req[k].value, d_req1[k].value, "request header value #{k}")
+    assert_true(realistic_req[k].indexing == d_req1[k].indexing, "request indexing mode #{k}")
+    k = k + 1
+  end
+
+  # Subsequent identical request on same connection should compress dramatically
+  w_req2 = enc_r.encode(realistic_req)
+  assert_true(w_req2.size < w_req1.size // 2, "second request is heavily compressed via dynamic table")
+  d_req2 = dec_r.decode(w_req2)
+  raise "realistic req2 decode failed" if d_req2.is_a?(HpackError)
+  assert_int(realistic_req.size, d_req2.size, "second request count matches")
+
+  # Response round trip
+  w_resp = enc_r.encode(realistic_resp)
+  d_resp = dec_r.decode(w_resp)
+  raise "realistic resp decode failed (huff: #{use_huff})" if d_resp.is_a?(HpackError)
+  assert_int(realistic_resp.size, d_resp.size, "response count matches")
+  k = 0
+  while k < realistic_resp.size
+    assert_str(realistic_resp[k].name, d_resp[k].name, "response header name #{k}")
+    assert_str(realistic_resp[k].value, d_resp[k].value, "response header value #{k}")
+    assert_true(realistic_resp[k].indexing == d_resp[k].indexing, "response indexing mode #{k}")
+    k = k + 1
+  end
+end
+
+puts "  10-field request and 8-field response round trips with Huffman and literal strings"
+
+# ===========================================================================
+# 8. Decoder Refusals on Malformed and Truncated Wire
+# ===========================================================================
+puts "\n== decoder refusals on malformed and truncated wire"
+
+dec_ref = Decoder.new
+
+def assert_refusal(dec : Decoder, payload : Bytes, expected_msg : String, label : String) : Nil
+  res = dec.decode(payload)
+  if res.is_a?(HpackError)
+    assert_str(expected_msg, res.message, label)
+  else
+    raise "ASSERTION FAILED: #{label} - expected refusal, but decode succeeded with #{res.size} headers"
+  end
+end
+
+# 1. Invalid index 0 in indexed header representation (0x80)
+assert_refusal(dec_ref, Bytes.new(1) { 0x80_u8 },
+  "Invalid index 0 in indexed header field representation",
+  "refuse index 0")
+
+# 2. Out of range index (> 61 when dynamic table empty: 0x80 | 62 = 0xbe)
+assert_refusal(dec_ref, Bytes.new(1) { 0xbe_u8 },
+  "Index 62 out of range (max: 61)",
+  "refuse out of range index")
+
+# 3. Dynamic table size update exceeding protocol limit (5000 with protocol limit 4096)
+buf_ts_bad = [] of UInt8
+Integer.encode(5000_u64, 5, 0x20_u8, buf_ts_bad)
+wire_ts_bad = Bytes.new(buf_ts_bad.size) { |i| buf_ts_bad[i] }
+assert_refusal(dec_ref, wire_ts_bad,
+  "Dynamic table size update 5000 exceeds protocol limit 4096",
+  "refuse excessive table size update")
+
+# 4. Truncated integer continuation (0xff needs continuation bytes but payload ends)
+assert_refusal(dec_ref, Bytes.new(1) { 0xff_u8 },
+  "Unexpected EOF decoding integer continuation",
+  "refuse truncated integer continuation")
+
+# 5. Truncated string literal header (0x40 starts literal incremental indexed with new name, but EOF)
+assert_refusal(dec_ref, Bytes.new(1) { 0x40_u8 },
+  "Unexpected EOF decoding string literal",
+  "refuse EOF at string literal start")
+
+# 6. Truncated string data (string length prefix says 5 octets, but only 2 provided)
+wire_trunc_str = Bytes.new(4) { |i| [0x40_u8, 0x05_u8, 97_u8, 98_u8][i] }
+assert_refusal(dec_ref, wire_trunc_str,
+  "Unexpected EOF reading string data (need 5 bytes, available 2)",
+  "refuse truncated string content")
+
+# 7. EOS symbol in Huffman stream (RFC 7541 Section 5.2 forbids EOS in stream)
+# Wire: literal new name, Huffman encoded name consisting of EOS symbol (30 1s: 0xff, 0xff, 0xff, 0xfc)
+wire_eos = Bytes.new(6) { |i| [0x40_u8, 0x84_u8, 0xff_u8, 0xff_u8, 0xff_u8, 0xfc_u8][i] }
+assert_refusal(dec_ref, wire_eos,
+  "EOS symbol in Huffman stream",
+  "refuse EOS symbol in Huffman stream")
+
+# 8. Invalid Huffman padding (padding containing zero bits, or > 7 bits)
+# 0x00 is all zero bits padding
+wire_bad_pad = Bytes.new(3) { |i| [0x40_u8, 0x81_u8, 0x00_u8][i] }
+assert_refusal(dec_ref, wire_bad_pad,
+  "Invalid Huffman padding",
+  "refuse invalid Huffman padding")
+
+# 9. Decompression bomb: header count limit exceeded
+dec_bomb_count = Decoder.new(max_header_count: 2)
+# Three :method: GET headers (0x82, 0x82, 0x82)
+wire_bomb_count = Bytes.new(3) { 0x82_u8 }
+assert_refusal(dec_bomb_count, wire_bomb_count,
+  "Decompression bomb: header count limit 2 exceeded",
+  "refuse header count decompression bomb")
+
+# 10. Decompression bomb: uncompressed header list size exceeded
+dec_bomb_size = Decoder.new(max_header_list_size: 15)
+# Two :method: GET headers (size = (7 + 3) * 2 = 20 > 15)
+wire_bomb_size = Bytes.new(2) { 0x82_u8 }
+assert_refusal(dec_bomb_size, wire_bomb_size,
+  "Decompression bomb: decoded header list exceeds 15 octets",
+  "refuse header list size decompression bomb")
+
+puts "  index 0, out of range index, table limit, truncated integer/string, EOS symbol, bad padding and decompression bombs refused"
+
+puts "\nALL CHECKS PASSED"

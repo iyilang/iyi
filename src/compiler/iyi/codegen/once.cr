@@ -4,10 +4,10 @@ class Iyi::CodeGenVisitor
   ONCE_STATE = "~ONCE_STATE"
 
   def once_init
-    if once_init_fun = typed_fun?(@main_mod, ONCE_INIT)
+    if once_init_fun = typed_fun?(@main_mod, once_init_name)
       # legacy (kept for backward compatibility): the compiler must save the
       # state returned by __crystal_once_init
-      once_init_fun = check_main_fun ONCE_INIT, once_init_fun
+      once_init_fun = check_main_fun once_init_name, once_init_fun
 
       once_state_global = @main_mod.globals.add(once_init_fun.type.return_type, ONCE_STATE)
       once_state_global.linkage = LLVM::Linkage::Internal if @single_module
@@ -19,7 +19,7 @@ class Iyi::CodeGenVisitor
   end
 
   def run_once(flag, func : LLVMTypedFunction)
-    once_fun = main_fun(ONCE)
+    once_fun = main_fun(once_name)
     once_fun_params = once_fun.func.params
     once_initializer_type = once_fun_params.last.type # must be Void*
     initializer = pointer_cast(func.func.to_value, once_initializer_type)
@@ -30,7 +30,7 @@ class Iyi::CodeGenVisitor
       # legacy (kept for backward compatibility): the compiler must pass the
       # state returned by __crystal_once_init to __crystal_once as the first
       # argument
-      once_init_fun = main_fun(ONCE_INIT)
+      once_init_fun = main_fun(once_init_name)
       once_state_type = once_init_fun.type.return_type # must be Void*
 
       once_state_global = @llvm_mod.globals[ONCE_STATE]? || begin

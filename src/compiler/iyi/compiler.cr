@@ -117,6 +117,8 @@ module Iyi
     # `require "prelude"` (or whatever name is set here) to
     # the source file to compile.
     property prelude = "prelude"
+    # iyi: true when building with `--crystal`, targeting Crystal's standard library and ABI.
+    property? crystal_library = false
 
     # iyi: directory to write a `.iyimod` per imported module into, or nil
     # (SPEC.md IV.1). Set by `--emit-iyimod`.
@@ -337,7 +339,7 @@ module Iyi
       program.color = color?
       program.stdout = stdout
       program.show_error_trace = show_error_trace?
-
+      program.crystal_library = crystal_library?
       yield program
 
       node = @progress_tracker.stage("Parse") do
@@ -434,8 +436,7 @@ module Iyi
 
     # Re-applied by the adopt path above. `new_program` is what would otherwise
     # have set them, and adoption skips it.
-    APPLIED_ON_ADOPT = %w(use_iyimod no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root)
-
+    APPLIED_ON_ADOPT = %w(use_iyimod no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root crystal_library)
     # Neither, and two of these are judgements rather than facts. `mcpu`,
     # `mattr` and `mcmodel` reach the target machine and the target machine
     # reaches codegen, not analysis — a prelude analysed for one `-mcpu` is the
@@ -2051,6 +2052,7 @@ module Iyi
       program.filename = sources.first.filename
       program.codegen_target = codegen_target
       program.target_machine = create_target_machine
+      program.crystal_library = crystal_library?
       program.flags << "release" if release?
       program.flags << "debug" unless debug.none?
       program.flags << "static" if static?

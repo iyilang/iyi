@@ -628,10 +628,20 @@ class Iyi::CodeGenVisitor
       context.fun.call_convention = call_convention
     end
 
-    if @single_module && mangled_name.starts_with?("__crystal_")
+    if @single_module && mangled_name.starts_with?(abi_prefix)
       # FIXME: macos ld fails to link when the personality fun is internal; it
       # might work with lld so we might want to check the linker?
-      unless @program.has_flag?("darwin") && mangled_name.starts_with?("__crystal_personality")
+      #
+      # `__iyi_sigreturn` joins the list for the reason `__iyi_fiber_` is on
+      # it: inline `asm` names it as a literal string, which no pass can see,
+      # so internalising it leaves a symbol with no visible reference and the
+      # optimiser strips it. On x86_64 Linux that surfaced as
+      # `ld.lld: error: undefined symbol: __iyi_sigreturn`, from the two
+      # instructions a signal handler returns through. A reference the
+      # compiler cannot read is still a reference.
+      asm_referenced = mangled_name.starts_with?("__iyi_fiber_") ||
+                       mangled_name.includes?("sigreturn")
+      unless (@program.has_flag?("darwin") && mangled_name.starts_with?(@personality_name)) || asm_referenced
         context.fun.linkage = LLVM::Linkage::Internal
       end
     end

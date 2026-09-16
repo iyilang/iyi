@@ -1,0 +1,419 @@
+# Dir: directory stream and filesystem directory operations.
+#
+# Provides opening, reading entries, creating, deleting, traversing,
+# changing current working directory, and globbing without external C libraries.
+
+module std/dir
+
+import std/path
+using std/path::{Path}
+
+{% if flag?(:darwin) %}
+  lib LibC
+    fun opendir(name : UInt8*) : Void*
+    fun readdir(dirp : Void*) : Void*
+    fun closedir(dirp : Void*) : Int32
+    fun rewinddir(dirp : Void*) : Void
+    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    fun chdir(path : UInt8*) : Int32
+    fun mkdir(path : UInt8*, mode : Int32) : Int32
+    fun rmdir(path : UInt8*) : Int32
+  end
+{% elsif flag?(:win32) %}
+  lib LibKernel32
+    fun CreateDirectoryA(path : UInt8*, sec : Void*) : Int32
+    fun RemoveDirectoryA(path : UInt8*) : Int32
+    fun GetCurrentDirectoryA(buf_len : UInt32, buf : UInt8*) : UInt32
+    fun SetCurrentDirectoryA(path : UInt8*) : Int32
+  end
+{% else %}
+  lib LibC
+    fun opendir(name : UInt8*) : Void*
+    fun readdir(dirp : Void*) : Void*
+    fun closedir(dirp : Void*) : Int32
+    fun rewinddir(dirp : Void*) : Void
+    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    fun chdir(path : UInt8*) : Int32
+    fun mkdir(path : UInt8*, mode : Int32) : Int32
+    fun rmdir(path : UInt8*) : Int32
+  end
+{% end %}
+
+pub class Dir
+  getter path : String
+
+  @handle : Void*
+  @closed : Bool
+
+  def initialize(path : String | Path)
+    @path = path.to_s
+    @handle = open_dir(@path)
+    @closed = false
+  end
+
+  def self.open(path : String | Path) : Dir
+    Dir.new(path)
+  end
+
+  def self.open(path : String | Path, &block : Dir -> Nil) : Nil
+    d = Dir.new(path)
+    defer d.close
+    yield d
+  end
+
+  private def open_dir(dir_path : String) : Void*
+    {% if flag?(:darwin) || flag?(:linux) %}
+      p = LibC.opendir(Dir.c_str(dir_path))
+      if p.address == 0_u64
+        raise "Cannot open directory: #{dir_path}"
+      end
+      p.as(Void*)
+    {% else %}
+      Pointer(Void).new(0_u64)
+    {% end %}
+  end
+
+  def read : String?
+    raise "Cannot read from closed Dir" if @closed
+    {% if flag?(:darwin) || flag?(:linux) %}
+      entry = LibC.readdir(@handle)
+      return nil if entry.address == 0_u64
+
+      {% if flag?(:darwin) %}
+        name_ptr = entry.as(UInt8*) + 21
+      {% else %}
+        name_ptr = entry.as(UInt8*) + 19
+      {% end %}
+
+      len = 0
+      while name_ptr[len] != 0_u8
+        len = len + 1
+      end
+      String.new(len) do |target|
+        target.copy_from(name_ptr, len)
+      end
+    {% else %}
+      nil
+    {% end %}
+  end
+
+  def rewind : self
+    raise "Cannot rewind closed Dir" if @closed
+    {% if flag?(:darwin) || flag?(:linux) %}
+      LibC.rewinddir(@handle)
+    {% end %}
+    self
+  end
+
+  def close : Nil
+    return if @closed
+    {% if flag?(:darwin) || flag?(:linux) %}
+      LibC.closedir(@handle)
+    {% end %}
+    @closed = true
+  end
+
+  def closed? : Bool
+    @closed
+  end
+
+  def each(&block : String -> Nil) : Nil
+    while entry = read
+      yield entry
+    end
+  end
+
+  def entries : Array(String)
+    res = [] of String
+    rewind
+    while entry = read
+      res << entry
+    end
+    res
+  end
+
+  def each_child(&block : String -> Nil) : Nil
+    rewind
+    while entry = read
+      if entry != "." && entry != ".."
+        yield entry
+      end
+    end
+  end
+
+  def children : Array(String)
+    res = [] of String
+    each_child do |entry|
+      res << entry
+    end
+    res
+  end
+
+  def to_s(io : IO) : Nil
+    io.write("#<Dir:")
+    io.write(@path)
+    io.write(">")
+  end
+
+  def inspect(io : IO) : Nil
+    to_s(io)
+  end
+
+  # Class-level directory helpers
+
+  def self.current : String
+    {% if flag?(:darwin) || flag?(:linux) %}
+      buf = Pointer(UInt8).malloc(4096_u64)
+      res = LibC.getcwd(buf, 4096_u64)
+      if res.address == 0_u64
+        raise "Error getting current working directory"
+      end
+      len = 0
+      while res[len] != 0_u8
+        len = len + 1
+      end
+      String.new(len) { |t| t.copy_from(res, len) }
+    {% elsif flag?(:win32) %}
+      buf = Pointer(UInt8).malloc(4096_u64)
+      len = LibKernel32.GetCurrentDirectoryA(4096_u32, buf)
+      String.new(len.to_i) { |t| t.copy_from(buf, len.to_i) }
+    {% else %}
+      "/"
+    {% end %}
+  end
+
+  def self.current=(path : String | Path) : String
+    cd(path)
+  end
+
+  def self.cd(path : String | Path) : String
+    target = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if LibC.chdir(c_str(target)) != 0
+        raise "Cannot change directory to: #{target}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.SetCurrentDirectoryA(c_str(target)) == 0
+        raise "Cannot change directory to: #{target}"
+      end
+    {% end %}
+    target
+  end
+
+  def self.cd(path : String | Path, &block : -> Nil) : Nil
+    old_dir = current
+    cd(path)
+    defer cd(old_dir)
+    yield
+  end
+
+  def self.tempdir : String
+    tmp = Program.env("TMPDIR")
+    return tmp if tmp && !tmp.empty?
+    tmp2 = Program.env("TEMP")
+    return tmp2 if tmp2 && !tmp2.empty?
+    tmp3 = Program.env("TMP")
+    return tmp3 if tmp3 && !tmp3.empty?
+    {% if flag?(:win32) %}
+      "C:\\Windows\\Temp"
+    {% else %}
+      "/tmp"
+    {% end %}
+  end
+
+  def self.each(dirname : String | Path, &block : String -> Nil) : Nil
+    Dir.open(dirname) do |dir|
+      dir.each do |filename|
+        yield filename
+      end
+    end
+  end
+
+  def self.entries(dirname : String | Path) : Array(String)
+    Dir.open(dirname) do |dir|
+      return dir.entries
+    end
+    [] of String
+  end
+
+  def self.each_child(dirname : String | Path, &block : String -> Nil) : Nil
+    Dir.open(dirname) do |dir|
+      dir.each_child do |filename|
+        yield filename
+      end
+    end
+  end
+
+  def self.children(dirname : String | Path) : Array(String)
+    Dir.open(dirname) do |dir|
+      return dir.children
+    end
+    [] of String
+  end
+
+  def self.exists?(path : String | Path) : Bool
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      dirp = LibC.opendir(c_str(p))
+      if dirp.address != 0_u64
+        LibC.closedir(dirp)
+        true
+      else
+        false
+      end
+    {% else %}
+      false
+    {% end %}
+  end
+
+  def self.empty?(path : String | Path) : Bool
+    Dir.open(path) do |dir|
+      dir.each_child do |_|
+        return false
+      end
+    end
+    true
+  end
+
+  def self.mkdir(path : String | Path, mode : Int32 = 0o777) : Nil
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if LibC.mkdir(c_str(p), mode) != 0
+        raise "Cannot create directory: #{p}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.CreateDirectoryA(c_str(p), Pointer(Void).new(0_u64)) == 0
+        raise "Cannot create directory: #{p}"
+      end
+    {% end %}
+  end
+
+  def self.mkdir_p(path : String | Path, mode : Int32 = 0o777) : Nil
+    p_str = path.to_s
+    return if exists?(p_str)
+
+    p = Path.new(p_str)
+    segments = p.parts
+    return if segments.empty?
+
+    acc = ""
+    segments.each do |seg|
+      if acc.empty?
+        acc = seg
+      elsif acc == "/" || acc == "\\"
+        acc = acc + seg
+      else
+        acc = acc + "/" + seg
+      end
+
+      if !exists?(acc)
+        # Try mkdir, ignore if already exists (e.g. root or race)
+        {% if flag?(:darwin) || flag?(:linux) %}
+          LibC.mkdir(c_str(acc), mode)
+        {% elsif flag?(:win32) %}
+          LibKernel32.CreateDirectoryA(c_str(acc), Pointer(Void).new(0_u64))
+        {% end %}
+      end
+    end
+  end
+
+  def self.delete(path : String | Path) : Nil
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      if LibC.rmdir(c_str(p)) != 0
+        raise "Cannot remove directory: #{p}"
+      end
+    {% elsif flag?(:win32) %}
+      if LibKernel32.RemoveDirectoryA(c_str(p)) == 0
+        raise "Cannot remove directory: #{p}"
+      end
+    {% end %}
+  end
+
+  def self.delete?(path : String | Path) : Bool
+    p = path.to_s
+    {% if flag?(:darwin) || flag?(:linux) %}
+      LibC.rmdir(c_str(p)) == 0
+    {% elsif flag?(:win32) %}
+      LibKernel32.RemoveDirectoryA(c_str(p)) != 0
+    {% else %}
+      false
+    {% end %}
+  end
+
+  def self.rmdir(path : String | Path) : Nil
+    delete(path)
+  end
+
+  def self.glob(patterns : String | Array(String)) : Array(String)
+    res = [] of String
+    glob(patterns) do |entry|
+      res << entry
+    end
+    res
+  end
+
+  def self.glob(patterns : String | Array(String), &block : String -> Nil) : Nil
+    if patterns.is_a?(String)
+      glob_single(patterns, &block)
+    else
+      patterns.each do |p|
+        glob_single(p, &block)
+      end
+    end
+  end
+
+  def self.[](patterns : String | Array(String)) : Array(String)
+    glob(patterns)
+  end
+
+  private def self.glob_single(pattern : String, &block : String -> Nil) : Nil
+    p = Path.new(pattern)
+    base_dir = p.dirname
+    file_pattern = p.basename
+
+    if pattern.includes?("**")
+      # Recursive walk from base_dir or "."
+      root_walk = (base_dir == "." || base_dir.empty?) ? "." : base_dir
+      walk_recursive(root_walk, pattern, &block)
+    elsif base_dir == "." || base_dir.empty?
+      if Dir.exists?(".")
+        Dir.each_child(".") do |child|
+          if Path.match_pattern(pattern, child)
+            yield child
+          end
+        end
+      end
+    else
+      if Dir.exists?(base_dir)
+        Dir.each_child(base_dir) do |child|
+          full = Path.new(base_dir).join(child).to_s
+          if Path.match_pattern(file_pattern, child) || Path.match_pattern(pattern, full)
+            yield full
+          end
+        end
+      end
+    end
+  end
+
+  private def self.walk_recursive(dir : String, pattern : String, &block : String -> Nil) : Nil
+    return unless Dir.exists?(dir)
+    Dir.each_child(dir) do |child|
+      full_path = (dir == "." ? child : dir + "/" + child)
+      if Path.match_pattern(pattern, full_path)
+        yield full_path
+      end
+      if Dir.exists?(full_path)
+        walk_recursive(full_path, pattern, &block)
+      end
+    end
+  end
+
+  protected def self.c_str(str : String) : UInt8*
+    n = str.bytesize
+    buf = Pointer(UInt8).malloc((n + 1).to_u64)
+    buf.copy_from(str.to_unsafe, n)
+    buf[n] = 0_u8
+    buf
+  end
+end

@@ -1,0 +1,179 @@
+# Exercises `std/dir`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_dir_exercise.iyi
+
+module bench/std_dir_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/dir
+using std/dir::{Dir}
+
+def clean_tree(dir_path : String) : Nil
+  return unless Dir.exists?(dir_path)
+  Dir.children(dir_path).each do |child|
+    full = dir_path + "/" + child
+    if Dir.exists?(full)
+      clean_tree(full)
+      Dir.delete?(full)
+    else
+      File.delete(full)
+    end
+  end
+end
+
+saved_orig = Dir.current
+sandbox_env = Program.env("TEST_SANDBOX")
+sandbox = if sandbox_env && !sandbox_env.empty?
+            sandbox_env
+          else
+            Dir.cd(Dir.tempdir)
+            s = Dir.current + "/iyi_std_dir_exercise_sandbox"
+            Dir.cd(saved_orig)
+            s
+          end
+
+clean_tree(sandbox)
+Dir.delete?(sandbox)
+
+puts "== create, exists and file paths"
+assert_true !Dir.exists?(sandbox), "sandbox does not exist yet"
+Dir.mkdir(sandbox)
+assert_true Dir.exists?(sandbox), "sandbox exists after mkdir"
+assert_true Dir.empty?(sandbox), "new sandbox is empty"
+
+non_existent = sandbox + "/non_existent_subdir"
+assert_true !Dir.exists?(non_existent), "non-existent path returns false from exists?"
+assert_true !Dir.delete?(non_existent), "delete? returns false for non-existent path"
+
+sample_file = sandbox + "/regular_file.txt"
+File.write(sample_file, "contents of file")
+assert_true File.exists?(sample_file), "file exists on disk"
+assert_true !Dir.exists?(sample_file), "Dir.exists? returns false for a regular file"
+assert_true !Dir.delete?(sample_file), "Dir.delete? returns false for a regular file"
+
+sub_created = sandbox + "/sub_created"
+Dir.mkdir(sub_created)
+assert_true Dir.exists?(sub_created), "sub_created directory exists"
+assert_true Dir.empty?(sub_created), "sub_created directory is empty"
+puts "  create and exists behavior on directories, files, and missing paths"
+
+puts "\n== nested creation with mkdir_p"
+nested = sandbox + "/level1/level2/level3"
+assert_true !Dir.exists?(nested), "nested target does not exist before mkdir_p"
+Dir.mkdir_p(nested)
+assert_true Dir.exists?(nested), "nested target exists after mkdir_p"
+assert_true Dir.exists?(sandbox + "/level1"), "parent level1 exists"
+assert_true Dir.exists?(sandbox + "/level1/level2"), "parent level2 exists"
+
+# mkdir_p is idempotent when the target already exists
+Dir.mkdir_p(nested)
+assert_true Dir.exists?(nested), "nested target still exists after second mkdir_p"
+puts "  nested directory hierarchies and idempotence"
+
+puts "\n== list entries and dot entries policy"
+listing_dir = sandbox + "/listing"
+Dir.mkdir(listing_dir)
+File.write(listing_dir + "/file_a.txt", "alpha")
+File.write(listing_dir + "/file_b.txt", "beta")
+Dir.mkdir(listing_dir + "/nested_dir")
+
+# entries includes . and ..
+ents = Dir.entries(listing_dir)
+assert_true ents.includes?("."), "entries includes ."
+assert_true ents.includes?(".."), "entries includes .."
+assert_true ents.includes?("file_a.txt"), "entries includes file_a.txt"
+assert_true ents.includes?("file_b.txt"), "entries includes file_b.txt"
+assert_true ents.includes?("nested_dir"), "entries includes nested_dir"
+assert_true ents.size == 5, "entries size is 5 including dot entries"
+
+# children excludes . and ..
+kids = Dir.children(listing_dir)
+assert_true !kids.includes?("."), "children excludes ."
+assert_true !kids.includes?(".."), "children excludes .."
+assert_true kids.includes?("file_a.txt"), "children includes file_a.txt"
+assert_true kids.includes?("file_b.txt"), "children includes file_b.txt"
+assert_true kids.includes?("nested_dir"), "children includes nested_dir"
+assert_true kids.size == 3, "children size is 3 excluding dot entries"
+
+# iteration forms
+all_count = 0
+Dir.each(listing_dir) do |_|
+  all_count = all_count + 1
+end
+assert_true all_count == 5, "Dir.each visits all entries including dot entries"
+
+child_count = 0
+Dir.each_child(listing_dir) do |_|
+  child_count = child_count + 1
+end
+assert_true child_count == 3, "Dir.each_child visits children excluding dot entries"
+
+# Dir instance methods, rewind and stream navigation
+Dir.open(listing_dir) do |dir|
+  assert_str listing_dir, dir.path, "instance path matches opened path"
+  assert_true !dir.closed?, "opened dir instance is not closed"
+  first_entry = dir.read
+  assert_true first_entry != nil, "first read returns an entry"
+  dir.rewind
+  second_entry = dir.read
+  assert_true second_entry != nil, "read after rewind returns an entry"
+  if first_entry && second_entry
+    assert_str first_entry, second_entry, "rewind restores stream to start"
+  end
+  entries_list = dir.entries
+  assert_true entries_list.size == 5, "dir.entries returns 5 items"
+  children_list = dir.children
+  assert_true children_list.size == 3, "dir.children returns 3 items"
+end
+
+# Manual open and close
+d_manual = Dir.new(listing_dir)
+assert_true !d_manual.closed?, "d_manual is open"
+d_manual.close
+assert_true d_manual.closed?, "d_manual is closed after close call"
+d_manual.close
+assert_true d_manual.closed?, "d_manual remains closed after idempotent close"
+puts "  entries, children, and dot entry filtering policies"
+
+puts "\n== current working directory and cd"
+current_before = Dir.current
+Dir.cd(sub_created) do
+  assert_str sub_created, Dir.current, "Dir.current inside cd block matches target"
+end
+assert_str current_before, Dir.current, "Dir.current restored after cd block"
+puts "  temporary directory change with automatic restore"
+
+puts "\n== delete empty and non-empty directories"
+# non-empty directory cannot be removed
+assert_true !Dir.empty?(listing_dir), "listing_dir is not empty"
+assert_true !Dir.delete?(listing_dir), "delete? returns false for non-empty directory"
+assert_true Dir.exists?(listing_dir), "listing_dir remains intact"
+
+# empty directory can be removed
+empty_dir = sandbox + "/empty_for_delete"
+Dir.mkdir(empty_dir)
+assert_true Dir.empty?(empty_dir), "empty_dir is empty"
+assert_true Dir.delete?(empty_dir), "delete? returns true for empty directory"
+assert_true !Dir.exists?(empty_dir), "empty_dir is removed"
+
+# Dir.rmdir works for empty directory
+rmdir_dir = sandbox + "/empty_for_rmdir"
+Dir.mkdir(rmdir_dir)
+Dir.rmdir(rmdir_dir)
+assert_true !Dir.exists?(rmdir_dir), "rmdir removes empty directory"
+puts "  deletion outcomes for empty and non-empty paths"
+
+# Cleanup sandbox
+clean_tree(sandbox)
+Dir.delete?(sandbox)
+assert_true !Dir.exists?(sandbox), "sandbox removed after exercise"
+
+puts "\nALL CHECKS PASSED"

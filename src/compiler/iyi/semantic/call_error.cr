@@ -97,21 +97,38 @@ class Iyi::Path
   # The `std/<module>` whose file declares `pub class|struct|module|trait|
   # enum|alias NAME` at the top level, with the two lines that bring it in.
   # Read off the search path the way an import is resolved, and only on
-  # the error path.
+  # the error path. A string walk rather than a `Regex`: the compiler
+  # links no pcre2 (SPEC.md III.9), and one regex here was enough to make
+  # it.
+  IYI_STD_DECLARERS = {"pub class ", "pub struct ", "pub module ", "pub trait ", "pub enum ", "pub alias "}
+
   private def iyi_std_declares_hint(program, name : String) : String?
-    pattern = /^pub (?:class|struct|module|trait|enum|alias) #{Regex.escape(name)}\b/m
     program.iyi_path.entries.each do |entry|
       dir = File.join(entry, "std")
       next unless Dir.exists?(dir)
       Dir.each_child(dir) do |file|
         next unless file.ends_with?(".iyi")
         path = File.join(dir, file)
-        next unless File.file?(path) && File.read(path).matches?(pattern)
+        next unless File.file?(path) && iyi_declares_at_top_level?(File.read(path), name)
         written = "std/#{file.rchop(".iyi")}"
         return "`#{name}` comes with `import #{written}` and `using #{written}::{#{name}}`."
       end
     end
     nil
+  end
+
+  private def iyi_declares_at_top_level?(text : String, name : String) : Bool
+    text.each_line do |line|
+      next unless line.starts_with?("pub ")
+      IYI_STD_DECLARERS.each do |declarer|
+        next unless line.starts_with?(declarer)
+        rest = line[declarer.size..]
+        next unless rest.starts_with?(name)
+        after = rest[name.size]?
+        return true if after.nil? || !(after.alphanumeric? || after == '_')
+      end
+    end
+    false
   end
 
   private def iyi_each_unit(type, &block : ModuleType ->) : Nil

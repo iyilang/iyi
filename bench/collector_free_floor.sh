@@ -36,7 +36,7 @@ cd "$REPO" || exit 1
 export IYI_PATH="$REPO/src"
 
 echo "== the compiler, built without a collector"
-rm -f .build/iyi .build/crystal
+rm -f .build/iyi .build/iyi-daemon .build/crystal
 if ! make -j8 FLAGS="-Dgc_none" > "$WORK/build.log" 2>&1; then
   echo "  FAIL: the compiler does not build with -Dgc_none"
   grep -aE "^Error|error:" "$WORK/build.log" | head -5 | sed 's/^/    /'
@@ -162,7 +162,7 @@ if env PKG_CONFIG_LIBDIR="$EMPTY" PKG_CONFIG_PATH="$EMPTY" \
   status=1
 else
   echo "  pkg-config cannot find bdw-gc, so the isolation holds"
-  rm -f .build/iyi .build/crystal
+  rm -f .build/iyi .build/iyi-daemon .build/crystal
   if env -u LIBRARY_PATH PKG_CONFIG_LIBDIR="$EMPTY" PKG_CONFIG_PATH="$EMPTY" \
        CRYSTAL_LIBRARY_PATH="$EMPTY" make -j8 > "$WORK/isolated.log" 2>&1; then
     echo "  the binaries build with no bdw-gc reachable"
@@ -175,9 +175,21 @@ else
 fi
 
 echo
-echo "== the default build is unchanged"
-rm -f .build/iyi .build/crystal
-if make -j8 > "$WORK/default.log" 2>&1; then
+echo "== the default build is unchanged, daemon included"
+# `iyi-daemon` explicitly, and this is not tidiness. `daemon start` execs that
+# binary while the client is `iyi`, and the daemon compares its own
+# `Config.description` against the client's, so the pair has to be built
+# together. Rebuilding one of them made every case in
+# `bench/daemon_protocol.py` fail with "The build daemon and this client are
+# different compilers.", three steps after this gate ran, with nothing in the
+# failure pointing back here.
+#
+# Reproduced before being believed: rebuild `iyi` alone against a different
+# build commit and that test goes from exit 0 to exit 1 with 12 failures, all
+# of them that refusal.
+rm -f .build/iyi .build/iyi-daemon .build/crystal
+if make -j8 > "$WORK/default.log" 2>&1 \
+     && make -j8 iyi-daemon >> "$WORK/default.log" 2>&1; then
   echo "  default build restored"
 else
   echo "  FAIL: the default build broke"

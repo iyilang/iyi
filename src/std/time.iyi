@@ -440,7 +440,11 @@ pub struct Time
       if freq == 0_i64
         0_u64
       else
-        (count.to_u64 * 1000000000_u64) // freq.to_u64
+        # the divide goes first: `count * 1000000000` overflows a UInt64 half
+        # an hour into an uptime on a 10 MHz counter.
+        sec = count.to_u64 // freq.to_u64
+        rem = count.to_u64 % freq.to_u64
+        sec * 1000000000_u64 + (rem * 1000000000_u64) // freq.to_u64
       end
     end
   {% elsif flag?(:wasm32) %}

@@ -222,6 +222,11 @@ echo "== the library is iyi all the way down"
 # syscalls on Linux, libSystem on darwin, and the floor names every symbol
 # they add there.
 #
+# `random` joined them for Windows alone: `/dev/urandom` is a file on the
+# POSIX targets and there is no such path there, so its win32 arm asks the
+# OS for the bytes. Before that arm, `Random.new` panicked on Windows and
+# took `std/uuid`, `Array#sample` and `#shuffle` with it.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
@@ -231,18 +236,25 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath'
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32'
+# The `@[Link]`s an exempt module may carry: the two DLLs Windows itself
+# ships, named in SPEC.md III.10's inventory. `std/random` is here for one
+# of them — the OS entropy `Random.new` seeds from is `RtlGenRandom`, and
+# Windows has no kernel32 name for it — and everything else in this list
+# reaches the platform through a `lib` block alone.
+PLATFORM_LINKS='@\[Link\("(kernel32|advapi32)"\)\]'
 reaching=""
 foreign=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
   case "$name" in
-    socket|time|debug|file|dir|udp)
+    socket|time|debug|file|dir|udp|random)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.
       grep -nE '^\s*(lib [A-Z]|@\[Link)' "$source" \
-        | grep -vE "lib ($PLATFORM_LIBS)\b" > "$WORK/foreign.$name" || true
+        | grep -vE "lib ($PLATFORM_LIBS)\b" \
+        | grep -vE "$PLATFORM_LINKS" > "$WORK/foreign.$name" || true
       if [ -s "$WORK/foreign.$name" ]; then
         foreign="$foreign $name"
         echo "  std/$name is exempt for the platform, and this is not the platform:"

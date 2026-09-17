@@ -483,10 +483,10 @@ class ::File
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
       written = Std::File::LibKernel32.FormatMessageW(0x1200, Pointer(Void).new(0_u64), code, 0,
-                                                     wide, room - 1, Pointer(Void).new(0_u64))
+        wide, room - 1, Pointer(Void).new(0_u64))
       return "Windows error #{code}" if written <= 0
       while written > 0 && (wide[written - 1] == 13_u16 || wide[written - 1] == 10_u16 ||
-                           wide[written - 1] == 32_u16 || wide[written - 1] == 46_u16)
+            wide[written - 1] == 32_u16 || wide[written - 1] == 46_u16)
         written = written - 1
       end
       wide[written] = 0_u16

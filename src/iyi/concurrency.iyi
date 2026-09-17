@@ -942,6 +942,48 @@ class IyiScheduler
     nil
   end
 
+  # The two halves of an overlapped operation, so a caller that is not a
+  # read can use the same park. Windows has no readiness model: a socket's
+  # `accept` and a `send` that filled the peer's window cannot be waited
+  # for, they can only be *posted* and completed, so `std/socket` posts
+  # `AcceptEx` and `WSASend` itself and parks here. Measured before this
+  # existed: a listening socket answers the zero-byte read trick in 32 us
+  # with a failure, so an accept loop over it hot-spun, and the sleep it
+  # would otherwise fall back to costs 15.6 ms a round on the default
+  # Windows timer tick.
+  #
+  # `arm` associates the handle with the port, zeroes the running fiber's
+  # OVERLAPPED and answers it; `park` waits for the port to name that
+  # operation. Between the two the caller makes exactly one overlapped
+  # call, and reads `GetLastError` itself: ERROR_IO_PENDING (997) means
+  # park, anything else means the call answered on the spot.
+  def self.arm_overlapped_current(handle : Void*) : Pointer(UInt8)
+    fiber = current
+    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
+    LibC.SetFileCompletionNotificationModes(handle, 1_u8)
+
+    ov = fiber.wait_overlapped
+    Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
+
+    fiber.wait_handle = handle
+    fiber.io_bytes_read = 0_i64
+    ov
+  end
+
+  def self.park_overlapped_current : Int64 | Cancelled
+    fiber = current
+    fiber.state = IyiFiberState::WaitingIo
+    fiber.next_io = state.io_head
+    state.io_head = fiber
+    reschedule
+
+    return Cancelled.new if fiber.cancelled
+    fiber.io_bytes_read
+  end
+
   def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64) : Int64 | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
@@ -957,17 +999,7 @@ class IyiScheduler
       handle = Pointer(Void).new(fd.to_i64.to_u64)
     end
 
-    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
-    LibC.SetFileCompletionNotificationModes(handle, 1_u8)
-
-    ov = fiber.wait_overlapped
-    Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
-
-    fiber.wait_handle = handle
-    fiber.io_bytes_read = 0_i64
+    ov = arm_overlapped_current(handle)
 
     read_bytes = uninitialized Int32
     ok = LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read_bytes), ov.as(Void*))
@@ -988,13 +1020,7 @@ class IyiScheduler
       return 0_i64
     end
 
-    fiber.state = IyiFiberState::WaitingIo
-    fiber.next_io = state.io_head
-    state.io_head = fiber
-    reschedule
-
-    return Cancelled.new if fiber.cancelled
-    fiber.io_bytes_read
+    park_overlapped_current
   end
 
   def self.wait_readable_current(fd : Int32 | Int64) : Nil | Cancelled

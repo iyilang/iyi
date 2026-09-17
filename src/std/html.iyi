@@ -22,7 +22,7 @@ pub struct HTML
   # >  -> &gt;
   # "  -> &quot;
   # ' -> &#39;
-  def self.escape(string : String, io) : Nil
+  def self.escape(string : String, io : IyiIO) : Nil
     raw = string.to_unsafe
     len = string.bytesize
     i = 0

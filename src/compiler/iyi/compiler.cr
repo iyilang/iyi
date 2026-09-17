@@ -630,6 +630,7 @@ module Iyi
         # First, because collecting the surface is also what records which of
         # its bodies have to travel.
         exports = collect_iyi_exports(program, module_name, filename)
+        reopened = collect_iyi_reopened(program, module_name, filename)
 
         artifact = IyiMod::Artifact.new(
           module_name: module_name,
@@ -654,6 +655,7 @@ module Iyi
           # says so now — the header a consumer reads them under supplies
           # nothing. See `Artifact#module_extends_self`.
           module_extends_self: true,
+          reopened: reopened,
         )
 
         # Here rather than in `write_iyimods`, so that they are taken from the
@@ -953,6 +955,89 @@ module Iyi
       module_class_vars = type ? collect_iyi_class_vars(type) : [] of IyiMod::ClassVarDecl
 
       IyiMod::Exports.new(functions, types, impls, carried_functions, module_class_vars)
+    end
+
+    # iyi: what this module added to types it does not own, for
+    # `Section::Reopened` — `struct ::Int` in `std/int`, `class ::String`
+    # in `std/text`. Twelve std modules are nothing but this, and their
+    # artifacts carried nothing: `exports (none)`, `object code (none)`, so
+    # a program reading `std/int` from its artifact was told `12.gcd` is an
+    # undefined method, which is R-1 broken for every one of them.
+    #
+    # Every def written in this file on a type outside the module, both
+    # sides (`def self.` is on the metaclass), declared under the type's
+    # absolute name so the consumer reopens the same one. Every body
+    # travels: the machine code sits in the *owner's* unit — `Int32`'s —
+    # which is the prelude's and not this module's to ship, so the consumer
+    # compiles it the way it compiles a block-taking def (IV.1g). An impl's
+    # methods are not here; they travel in the impl record.
+    #
+    # R-2's type rule is not asked of them, for the reason `iyi_carried_methods`
+    # gives: the rule is "nothing can be recovered from a body that stays
+    # behind", and these bodies do not stay behind. `Tuple#first` answers
+    # `T[0]`, which no annotation can say and no consumer needs said.
+    private def collect_iyi_reopened(program : Program, module_name : String,
+                                     filename : String) : Array(IyiMod::TypeDecl)
+      declarations = [] of IyiMod::TypeDecl
+      own = program.iyi_module_type(module_name)
+      own_prefix = own ? "#{own}::" : ""
+
+      iyi_each_named_type(program) do |type|
+        next if own && (type == own || type.to_s.starts_with?(own_prefix))
+        next if type.is_a?(MetaclassType) || type.is_a?(GenericInstanceType)
+
+        methods = [] of IyiMod::Signature
+        # Without the type arguments: the header carries them itself.
+        container = "::#{type.to_s(generic_args: false)}"
+        {type, type.metaclass}.each do |side|
+          side.as?(ModuleType).try &.defs.try &.each_value do |items|
+            items.each do |item|
+              a_def = item.def
+              # `original_filename`, through the macro: the integer tower is
+              # written once as `{% for %}` over eleven types, and a def a
+              # macro wrote is located in its expansion, not in the file.
+              next unless a_def.location.try(&.original_filename) == filename
+              next if a_def.iyi_from_impl? || a_def.new? || a_def.abstract?
+              next if a_def.body.is_a?(Primitive)
+              signature = IyiMod.signature(a_def, check_block: false)
+              methods << signature
+              iyi_record_mono_body program, filename, container, signature, a_def
+            end
+          end
+        end
+        next if methods.empty?
+        methods.sort_by! &.name
+
+        # `Tuple` and `NamedTuple` describe themselves as "tuple" and "named
+        # tuple", which are not keywords; reopened, they are structs.
+        kind = type.type_desc
+        kind = "struct" if kind == "tuple" || kind == "named tuple"
+        declarations << IyiMod::TypeDecl.new(
+          name: container,
+          kind: kind,
+          type_parameters: type.as?(GenericType).try(&.type_vars) || [] of String,
+          assoc_types: [] of String,
+          supertraits: [] of String,
+          fields: [] of {String, String, String},
+          methods: methods,
+          visibility: "",
+          types: [] of IyiMod::TypeDecl,
+        )
+      end
+      declarations.sort_by! &.name
+    end
+
+    # Every named type the program has, depth first, `Program` itself aside.
+    private def iyi_each_named_type(program : Program, &block : Type ->) : Nil
+      walk = uninitialized Proc(Type, Nil)
+      walk = ->(type : Type) do
+        type.types?.try &.each_value do |nested|
+          next if nested.is_a?(Const) || nested.is_a?(AliasType)
+          block.call(nested)
+          walk.call(nested)
+        end
+      end
+      walk.call(program)
     end
 
     # iyi: the machine code for a module's own definitions, for `ObjectCode`
@@ -1766,7 +1851,11 @@ module Iyi
     # the module's author wrote them.
     private def collect_iyi_fields(type : Type) : Array({String, String, String})
       fields = [] of {String, String, String}
-      return fields unless type.responds_to?(:instance_vars)
+      # `is_a?`, not `responds_to?`: every type answers `responds_to?(:instance_vars)`
+      # because the base declares it as a raise, and an `enum` declared inside
+      # an exported class (`Path::Kind`, `Colorize::ColorANSI`) ended `iyi doc`
+      # on "BUG: ... doesn't implement instance_vars".
+      return fields unless type.is_a?(InstanceVarContainer)
 
       # The default the module wrote, where it wrote one. In place beside the
       # field rather than after the others, because a field's position in this

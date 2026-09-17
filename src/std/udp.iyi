@@ -46,7 +46,7 @@ pub struct Datagram
     {@data, @host, @port}
   end
 
-  def [](i : Int32)
+  def [](i : Int32) : Bytes | String | Int32
     if i == 0
       @data
     elsif i == 1
@@ -556,7 +556,7 @@ pub class UdpSocket
     buffer
   end
 
-  def self.make_sockaddr(host : String, port : Int32)
+  def self.make_sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), SockLen, Int32)
     raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
     if host.includes?(":")
       v6_bytes = parse_ipv6(host)
@@ -630,6 +630,7 @@ pub class UdpSocket
     MSG_DONTWAIT      =   0x80
     SOCKADDR_IN_SIZE  = 16_u32
     SOCKADDR_IN6_SIZE = 28_u32
+    alias SockLen = UInt32
 
     lib LibC
       fun socket(domain : Int32, type : Int32, protocol : Int32) : Int32
@@ -747,6 +748,7 @@ pub class UdpSocket
     MSG_DONTWAIT       = 0x40
     SOCKADDR_IN_SIZE   = 16_i64
     SOCKADDR_IN6_SIZE  = 28_i64
+    alias SockLen = Int64
 
     {% if flag?(:x86_64) %}
       SYS_SOCKET        =  41_i64
@@ -909,6 +911,7 @@ pub class UdpSocket
     MSG_DONTWAIT      =   0x40
     SOCKADDR_IN_SIZE  = 16_i64
     SOCKADDR_IN6_SIZE = 28_i64
+    alias SockLen = Int64
 
     def self.__sys_socket(domain : Int32 = 2) : Int32
       raise "UdpSocket is not supported on this platform"

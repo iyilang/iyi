@@ -14,7 +14,7 @@ pub struct Complex
     @imag = imag.to_f64
   end
 
-  def self.new(c : Complex)
+  def self.new(c : Complex) : Complex
     c
   end
 

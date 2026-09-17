@@ -108,7 +108,7 @@ pub struct Math
     sin(value.to_f64).to_f32
   end
 
-  def self.sin(value) : Float64
+  def self.sin(value : T) : Float64 forall T
     sin(value.to_f64)
   end
 
@@ -122,7 +122,7 @@ pub struct Math
     cos(value.to_f64).to_f32
   end
 
-  def self.cos(value) : Float64
+  def self.cos(value : T) : Float64 forall T
     cos(value.to_f64)
   end
 
@@ -137,7 +137,7 @@ pub struct Math
     tan(value.to_f64).to_f32
   end
 
-  def self.tan(value) : Float64
+  def self.tan(value : T) : Float64 forall T
     tan(value.to_f64)
   end
 
@@ -149,7 +149,7 @@ pub struct Math
     LibLLVMMath.sqrt_f32(value)
   end
 
-  def self.sqrt(value) : Float64
+  def self.sqrt(value : T) : Float64 forall T
     sqrt(value.to_f64)
   end
 
@@ -181,7 +181,7 @@ pub struct Math
     cbrt(value.to_f64).to_f32
   end
 
-  def self.cbrt(value) : Float64
+  def self.cbrt(value : T) : Float64 forall T
     cbrt(value.to_f64)
   end
 
@@ -213,7 +213,7 @@ pub struct Math
     exp(value.to_f64).to_f32
   end
 
-  def self.exp(value) : Float64
+  def self.exp(value : T) : Float64 forall T
     exp(value.to_f64)
   end
 
@@ -233,7 +233,7 @@ pub struct Math
     exp2(value.to_f64).to_f32
   end
 
-  def self.exp2(value) : Float64
+  def self.exp2(value : T) : Float64 forall T
     exp2(value.to_f64)
   end
 
@@ -256,7 +256,7 @@ pub struct Math
     expm1(value.to_f64).to_f32
   end
 
-  def self.expm1(value) : Float64
+  def self.expm1(value : T) : Float64 forall T
     expm1(value.to_f64)
   end
 
@@ -296,7 +296,7 @@ pub struct Math
     log(value.to_f64).to_f32
   end
 
-  def self.log(value) : Float64
+  def self.log(value : T) : Float64 forall T
     log(value.to_f64)
   end
 
@@ -304,7 +304,7 @@ pub struct Math
     log(value) / log(base)
   end
 
-  def self.log(value, base) : Float64
+  def self.log(value : T, base : U) : Float64 forall T, U
     log(value.to_f64, base.to_f64)
   end
 
@@ -324,7 +324,7 @@ pub struct Math
     log2(value.to_f64).to_f32
   end
 
-  def self.log2(value) : Float64
+  def self.log2(value : T) : Float64 forall T
     log2(value.to_f64)
   end
 
@@ -342,7 +342,7 @@ pub struct Math
     log10(value.to_f64).to_f32
   end
 
-  def self.log10(value) : Float64
+  def self.log10(value : T) : Float64 forall T
     log10(value.to_f64)
   end
 
@@ -366,7 +366,7 @@ pub struct Math
     log1p(value.to_f64).to_f32
   end
 
-  def self.log1p(value) : Float64
+  def self.log1p(value : T) : Float64 forall T
     log1p(value.to_f64)
   end
 
@@ -494,7 +494,7 @@ pub struct Math
     pow(base.to_f64, exp.to_f64).to_f32
   end
 
-  def self.pow(base, exp) : Float64
+  def self.pow(base : T, exp : U) : Float64 forall T, U
     pow(base.to_f64, exp.to_f64)
   end
 
@@ -621,7 +621,7 @@ pub struct Math
     atan(value.to_f64).to_f32
   end
 
-  def self.atan(value) : Float64
+  def self.atan(value : T) : Float64 forall T
     atan(value.to_f64)
   end
 
@@ -655,7 +655,7 @@ pub struct Math
     atan2(y.to_f64, x.to_f64).to_f32
   end
 
-  def self.atan2(y, x) : Float64
+  def self.atan2(y : T, x : U) : Float64 forall T, U
     atan2(y.to_f64, x.to_f64)
   end
 
@@ -670,7 +670,7 @@ pub struct Math
     asin(value.to_f64).to_f32
   end
 
-  def self.asin(value) : Float64
+  def self.asin(value : T) : Float64 forall T
     asin(value.to_f64)
   end
 
@@ -685,7 +685,7 @@ pub struct Math
     acos(value.to_f64).to_f32
   end
 
-  def self.acos(value) : Float64
+  def self.acos(value : T) : Float64 forall T
     acos(value.to_f64)
   end
 
@@ -717,7 +717,7 @@ pub struct Math
     sinh(value.to_f64).to_f32
   end
 
-  def self.sinh(value) : Float64
+  def self.sinh(value : T) : Float64 forall T
     sinh(value.to_f64)
   end
 
@@ -733,7 +733,7 @@ pub struct Math
     cosh(value.to_f64).to_f32
   end
 
-  def self.cosh(value) : Float64
+  def self.cosh(value : T) : Float64 forall T
     cosh(value.to_f64)
   end
 
@@ -757,7 +757,7 @@ pub struct Math
     tanh(value.to_f64).to_f32
   end
 
-  def self.tanh(value) : Float64
+  def self.tanh(value : T) : Float64 forall T
     tanh(value.to_f64)
   end
 
@@ -780,7 +780,7 @@ pub struct Math
     asinh(value.to_f64).to_f32
   end
 
-  def self.asinh(value) : Float64
+  def self.asinh(value : T) : Float64 forall T
     asinh(value.to_f64)
   end
 
@@ -797,7 +797,7 @@ pub struct Math
     acosh(value.to_f64).to_f32
   end
 
-  def self.acosh(value) : Float64
+  def self.acosh(value : T) : Float64 forall T
     acosh(value.to_f64)
   end
 
@@ -821,7 +821,7 @@ pub struct Math
     atanh(value.to_f64).to_f32
   end
 
-  def self.atanh(value) : Float64
+  def self.atanh(value : T) : Float64 forall T
     atanh(value.to_f64)
   end
 
@@ -846,7 +846,7 @@ pub struct Math
     hypot(x.to_f64, y.to_f64).to_f32
   end
 
-  def self.hypot(x, y) : Float64
+  def self.hypot(x : T, y : U) : Float64 forall T, U
     hypot(x.to_f64, y.to_f64)
   end
 

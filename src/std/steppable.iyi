@@ -99,7 +99,7 @@ end
 
 pub trait Steppable
   # Iterates from self to limit incrementing by step_val on each iteration.
-  def step(*, to limit = nil, by step_val, exclusive : ::Bool = false, & : self -> ::Nil) : ::Nil
+  def step(*, to limit : self? = nil, by step_val : self, exclusive : ::Bool = false, & : self -> ::Nil) : ::Nil
     iter = self.step(to: limit, by: step_val, exclusive: exclusive)
     while !(item = iter.next).nil?
       yield item
@@ -107,7 +107,7 @@ pub trait Steppable
   end
 
   # Returns an Iterator that iterates from self to limit by step_val.
-  def step(*, to limit = nil, by step_val, exclusive : ::Bool = false) : NumericStepIterator(self)
+  def step(*, to limit : self? = nil, by step_val : self, exclusive : ::Bool = false) : NumericStepIterator(self)
     NumericStepIterator(self).new(self, limit, step_val, exclusive)
   end
 end

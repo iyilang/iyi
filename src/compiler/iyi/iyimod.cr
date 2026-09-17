@@ -2447,6 +2447,21 @@ module Iyi::IyiMod
     artifact.exports.impls.each do |record|
       io << "impl " << record.trait_name << " for " << record.type_name << '\n'
     end
+
+    # What the module added to types it does not own - the whole of
+    # `std/int` and eleven more - which is a caller's surface as much as
+    # anything above: `12.gcd(18)` is what importing the module buys.
+    artifact.reopened.each do |declaration|
+      io << '\n' << render_type_header(declaration) << '\n'
+      declaration.methods.each do |method|
+        next if method.visibility == "private"
+        if docs && !method.doc.empty?
+          method.doc.each_line { |line| io << "  # " << line << '\n' }
+        end
+        io << "  " << render_signature(method) << '\n'
+      end
+      io << "end\n"
+    end
   end
 
   # How a type declaration's first line is written back. The kind already

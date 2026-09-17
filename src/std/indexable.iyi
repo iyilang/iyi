@@ -326,27 +326,6 @@ pub trait Indexable
     self[index]?
   end
 
-  # Multi-level navigation across nested indexable structures.
-  def dig(index : Int32, *subindexes)
-    val = self[index]
-    if val.responds_to?(:dig)
-      val.dig(*subindexes)
-    else
-      val
-    end
-  end
-
-  # Multi-level nilable navigation across nested indexable structures.
-  def dig?(index : Int32, *subindexes)
-    val = self[index]?
-    return nil if val.nil?
-    if val.responds_to?(:dig?)
-      val.dig?(*subindexes)
-    else
-      val
-    end
-  end
-
   # ---- comparison and equality ---------------------------------------------
 
   # Structural equality comparing collection size and element values.

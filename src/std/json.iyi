@@ -2036,7 +2036,7 @@ pub struct JSON
   # Any value `write_value` knows: `nil`, a `Bool`, a prelude integer, a
   # `Float64`, a `String`, an `Any`, an `Array` or `Hash` of those, or a type
   # that implements `ToJSON`.
-  def self.to_json(obj) : String
+  def self.to_json(obj : T) : String forall T
     build do |b|
       write_value(obj, b)
     end
@@ -2115,7 +2115,7 @@ pub struct JSON
   # `UInt64`, `Float64`, `String`, `Any`, or an `Array` or `Hash(String, V)`
   # of those. An integer outside the type is refused, as is anything after
   # the root value.
-  def self.from_json(str : String, type : T.class) forall T
+  def self.from_json(str : String, type : T.class) : T forall T
     pull = PullParser.new(str)
     value = read_value(pull, type)
     raise "unexpected value after JSON root value at line #{pull.line_number}, column #{pull.column_number}" unless pull.kind.eof?

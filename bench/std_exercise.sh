@@ -306,6 +306,29 @@ else
 fi
 
 echo
+echo "== every std module compiles alone and writes its artifact"
+# `iyi doc FILE` compiles the module on its own, front end only, and writes
+# the artifact a consumer would read - which is where R-2 asks every
+# exported signature for its types (IyiMod.check_types_written), and
+# where an enum nested in an exported class ended the build on a BUG.
+# Fifteen modules could not be packaged, and nothing here noticed, because
+# every gate compiles its module from source inside a program.
+unpackaged=""
+for source in "$REPO"/src/std/*.iyi; do
+  name="$(basename "$source" .iyi)"
+  if ! "$IYI" doc "$source" > "$WORK/doc_$name.txt" 2>&1; then
+    unpackaged="$unpackaged $name"
+    echo "  $name: $(grep -m1 -E 'Error|BUG' "$WORK/doc_$name.txt" | cut -c1-140)"
+  fi
+done
+if [ -n "$unpackaged" ]; then
+  echo "  FAIL: cannot be written as an artifact:$unpackaged"
+  status=1
+else
+  echo "  every module under src/std writes its artifact"
+fi
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

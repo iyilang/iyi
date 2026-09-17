@@ -178,6 +178,34 @@
 
 ### Fixed
 
+- **`iyi doc` crashed on six std modules, refused fifteen, and printed
+  twelve as a bare header.** One sweep of `iyi doc` over every file in
+  `src/std`, which nothing had run. The crash: an `enum` nested in an
+  exported class (`Path::Kind`, `Colorize::ColorANSI`) was asked for
+  `instance_vars`, which every type answers `responds_to?` to because the
+  base declares it as a raise; the walk asks `is_a?(InstanceVarContainer)`
+  now. The refusals were R-2's, and right: `doc` writes the artifact, and
+  that is where an exported signature is asked for its types, so fifteen
+  modules that every gate compiled from source could not be packaged at
+  all - `Deque#dig(*subindexes)`, `Math.sin(value)`, `Benchmark.bm(&)`,
+  four `==(other)` catch-alls, `JSON.to_json(obj)`, `Steppable#step`.
+  Each says its types now; `Indexable`'s variadic `dig`, whose answer no
+  annotation can name, is gone. `bench/std_exercise.sh` writes every
+  module's artifact from now on. The bare headers were the twelve modules
+  that only reopen a prelude type (`std/int` is `struct ::Int` and the
+  tower, `std/text` is `class ::String`): their artifacts carried nothing
+  - `exports (none)`, `object code (none)` - so a program reading
+  `std/int` from its artifact was told `12.gcd` is undefined, which is R-1
+  broken for each of them. The producer collects what a module added to
+  types it does not own now (`Section::Reopened`, every body travelling,
+  since the machine code sits in the owner's unit), `doc` renders it, and
+  `12.gcd(18)` reads from the artifact. Not finished on the consumer's
+  side: 39 of the 60 std exercises still do not build from artifacts,
+  for reasons the morning owns - `@[Primitive]` defs need an annotation
+  field a `Signature` has no room for (a format bump), macro-written
+  bodies render as they expanded, "code inside a type body" refuses ten
+  modules, and one consumer build dies of an `IndexError`.
+
 - **The parallel marker's "pool never recycles" proof did not fire on a
   three-core runner.** The tree's marks publish batches only by donation -
   when the pool is empty and a helper is idle - so how many they publish

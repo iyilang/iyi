@@ -424,7 +424,7 @@ pub struct Slice(T)
     true
   end
 
-  def ==(other) : Bool
+  def ==(other : Object) : Bool
     false
   end
 

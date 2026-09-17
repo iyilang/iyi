@@ -286,14 +286,14 @@ pub class Benchmark
     end
   end
 
-  def self.bm(&)
+  def self.bm(& : BM::Job -> Nil) : BM::Job
     report = BM::Job.new
     yield report
     report.execute
     report
   end
 
-  def self.ips(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false, &)
+  def self.ips(calculation : Std::Time::Span = Std::Time::Span.seconds(5), warmup : Std::Time::Span = Std::Time::Span.seconds(2), interactive : Bool = false, & : IPS::Job -> Nil) : IPS::Job
     job = IPS::Job.new(calculation, warmup, interactive)
     yield job
     job.execute
@@ -301,11 +301,11 @@ pub class Benchmark
     job
   end
 
-  def self.ips(calculation = 5, warmup = 2, interactive = false, &)
+  def self.ips(calculation : Int32 = 5, warmup : Int32 = 2, interactive : Bool = false, & : IPS::Job -> Nil) : IPS::Job
     ips(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64), !!interactive) { |job| yield job }
   end
 
-  def self.measure(label : String = "", &) : BM::Tms
+  def self.measure(label : String = "", & : -> Nil) : BM::Tms
     t0 = Std::Time::Time.monotonic
     yield
     t1 = Std::Time::Time.monotonic
@@ -313,7 +313,7 @@ pub class Benchmark
     BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, label)
   end
 
-  def self.realtime(&) : Std::Time::Span
+  def self.realtime(& : -> Nil) : Std::Time::Span
     t0 = Std::Time::Time.monotonic
     yield
     t1 = Std::Time::Time.monotonic

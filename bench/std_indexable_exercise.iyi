@@ -50,26 +50,6 @@ impl Enumerable for MinimalSeq(T) forall T
   type Elem = T
 end
 
-# Nested box for testing dig and dig?
-pub struct NestedBox
-  @data : Array(Array(Int32))
-
-  def initialize(@data : Array(Array(Int32)))
-  end
-end
-
-impl Indexable for NestedBox
-  type Elem = Array(Int32)
-
-  def size : Int32
-    @data.size
-  end
-
-  def unsafe_fetch(index : Int32) : Array(Int32)
-    @data.unsafe_fetch(index)
-  end
-end
-
 def assert_true(cond : Bool, msg : String) : Nil
   raise "assertion failed: #{msg}" unless cond
 end
@@ -184,12 +164,6 @@ assert_true(arr.bsearch_index { |x| x > 100 }.nil?, "bsearch_index not found")
 assert_true(arr.dig(2) == 30, "dig flat")
 assert_true(arr.dig?(2) == 30, "dig? flat")
 assert_true(arr.dig?(10).nil?, "dig? out of bounds")
-
-nested = NestedBox.new([[1, 2], [3, 4, 5], [6]])
-assert_true(nested.dig(1, 2) == 5, "dig nested")
-assert_true(nested.dig?(1, 2) == 5, "dig? nested")
-assert_true(nested.dig?(1, 10).nil?, "dig? nested out of bounds")
-assert_true(nested.dig?(10, 0).nil?, "dig? outer out of bounds")
 
 # Equals
 arr_copy = [10, 20, 30, 40, 50]

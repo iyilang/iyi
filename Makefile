@@ -423,7 +423,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 	cp -R -p $(if $(deref_symlinks),-L,-P) src/. "$(DESTDIR)$(DATADIR)/iyi/crystal/"
 	rm -rf "$(DESTDIR)$(DATADIR)/iyi/crystal/iyi"
 # And `std/`, for the reason it is above under its own name: nothing in
-# Crystal's library requires `std/...`, the directory's 1,175 KB is a second
+# Crystal's library requires `std/...`, the directory's 1,176 KB is a second
 # copy of a library that already shipped, and while it is there it answers
 # `import std/text` out of `share/iyi/crystal` — which is how the accident
 # looked before `src/std` was installed at all, and which would let that

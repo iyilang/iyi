@@ -121,10 +121,34 @@ assert_true File.same?(f1, flink), "hard link same? is true"
 assert_str "overwritten content", File.read(flink), "link content"
 
 fsym = sandbox + "/std_file_ex_sym.txt"
-File.symlink(f1, fsym)
-assert_true File.symlink?(fsym), "symlink? is true"
-assert_true File.readlink(fsym) == f1, "readlink returns target"
-assert_true File.real_path(fsym) == File.real_path(f1), "real_path resolves target"
+# Making a symbolic link on Windows takes a privilege
+# (SeCreateSymbolicLinkPrivilege): an administrator has it, Developer Mode
+# grants it to everyone, and a machine with neither refuses with
+# ERROR_PRIVILEGE_NOT_HELD. That is a fact about the machine and not about
+# `std/file`, so the exercise asks Windows first — through the same call
+# `File.symlink` makes — and reports what it cannot measure instead of
+# failing. Everywhere else a symlink always works and the answer is yes.
+symlinks_allowed = true
+{% if flag?(:win32) %}
+  probe = sandbox + "/std_file_ex_probe.txt"
+  File.delete(probe) if File.exists?(probe)
+  probe_wide = __iyi_wide_path(probe.to_unsafe)
+  target_wide = __iyi_wide_path(f1.to_unsafe)
+  symlinks_allowed = probe_wide.address != 0_u64 && target_wide.address != 0_u64 &&
+                     Std::File::LibKernel32.CreateSymbolicLinkW(probe_wide, target_wide, 0x2_u32) != 0_u8
+{% end %}
+if symlinks_allowed
+  File.symlink(f1, fsym)
+  assert_true File.symlink?(fsym), "symlink? is true"
+  # Windows keeps a link's target in its own spelling — every separator a
+  # backslash, whatever the caller wrote — so the exact bytes handed to
+  # `File.symlink` are not the bytes stored. Both platforms are asked the
+  # question that matters: the link and the target are one file.
+  assert_true File.real_path(File.readlink(fsym)) == File.real_path(f1), "readlink returns target"
+  assert_true File.real_path(fsym) == File.real_path(f1), "real_path resolves target"
+else
+  puts "  symlink checks skipped: this machine refuses a symbolic link (no create-symlink privilege, no Developer Mode)"
+end
 
 fren = sandbox + "/std_file_ex_renamed.txt"
 File.rename(f2, fren)
@@ -134,8 +158,12 @@ assert_true File.exists?(fren), "new path exists after rename"
 assert_str "std_file_ex_1.txt", File.basename(f1), "basename"
 assert_str ".txt", File.extname(f1), "extname"
 assert_str sandbox, File.dirname(f1), "dirname"
-assert_str "a/b/c", File.join(["a", "b", "c"]), "join"
-assert_str "a/b", File.join("a", "b"), "join two strings"
+# `join` writes the separator of the platform it runs on, so the expected
+# string is built out of the same constant rather than pinning `/`: on
+# POSIX these are the two strings they always were.
+sep = File::SEPARATOR_STRING
+assert_str "a" + sep + "b" + sep + "c", File.join(["a", "b", "c"]), "join"
+assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
@@ -153,8 +181,10 @@ File.delete(f_empty)
 assert_true !File.exists?(f_empty), "f_empty deleted"
 File.delete(flink)
 assert_true !File.exists?(flink), "flink deleted"
-File.delete(fsym)
-assert_true !File.exists?(fsym), "fsym deleted"
+if symlinks_allowed
+  File.delete(fsym)
+  assert_true !File.exists?(fsym), "fsym deleted"
+end
 File.delete(fren)
 assert_true !File.exists?(fren), "fren deleted"
 puts "  file deletion verified"

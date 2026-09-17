@@ -493,11 +493,15 @@ iyi-tarball: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN) check_iyi_is_release
 	find "$(O)/iyi-package/share/iyi/samples" -type f -perm -u+x -delete
 	find "$(O)/iyi-package/share/iyi/samples" -type d -empty -delete
 # What the binaries need at runtime and a fresh machine has no reason to
-# own — libgc, and libstdc++ on Linux; LLVM is inside the binary when it
-# was linked against `scripts/build-static-llvm.sh`'s archive, and the
-# script refuses a package that carries libLLVM in that case. Not a
-# curated list: the script takes what the loader reports, and CI's clean
-# room (a bare image with nothing but a C toolchain) is what judges it.
+# own. The collector is no longer among them by default; `collector=1` puts
+# libgc back and the bundle follows it. What is left depends on how LLVM was
+# linked, and both cases are measured: against `scripts/build-static-llvm.sh`
+# LLVM is inside the binary and `lib/` is empty, and the script refuses a
+# package that carries libLLVM in that case; against a shared LLVM, `lib/`
+# carries it and whatever it names (here libLLVM, libz3, libzstd), plus
+# libstdc++ on Linux. Not a curated list: the script takes what the loader
+# reports, which is why it needed no change when the collector left, and
+# CI's clean room (a bare image with nothing but a C toolchain) judges it.
 	bash scripts/bundle-runtime-libs.sh "$(O)/iyi-package"
 	tar -czf "$(O)/$(IYI_PACKAGE).tar.gz" -C "$(O)/iyi-package" .
 	@echo "wrote $(O)/$(IYI_PACKAGE).tar.gz"

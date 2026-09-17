@@ -997,7 +997,8 @@ jobs:
       # brew's shared libLLVM in `lib/` and, by the bundler's fixed point,
       # everything it names outside `/usr/lib` and `/System` — because the
       # compiler linked `/opt/homebrew/opt/llvm`.
-      # Now it links a static minimal LLVM and `lib/` is libgc alone. Built
+      # Now it links a static minimal LLVM, and with the collector off the
+      # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
       # SDK it was compiled against; cached on the recipe's hash and the
       # platform, so the build is paid once per recipe change. `$HOME`

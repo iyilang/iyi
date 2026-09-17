@@ -22,8 +22,39 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
@@ -175,8 +206,10 @@ for kind, need in floor.items():
         print(f"  too few {kind} oracle lines: {counts[kind]} < {need}")
 sys.exit(1 if bad else 0)
 EOF
-if [ -f "$WORK/big-plain.out" ]; then
-  if ! python3 "$WORK/oracle.py" < "$WORK/big-plain.out"; then
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the arithmetic oracle is unmeasured"
+elif [ -f "$WORK/big-plain.out" ]; then
+  if ! "$PY" "$WORK/oracle.py" < "$WORK/big-plain.out"; then
     echo "  python3 disagrees with std/big"
     status=1
   fi
@@ -185,8 +218,10 @@ else
   status=1
 fi
 # The oracle itself has to be able to disagree.
-if sed 's|^oracle dec: 2 / 3 = 0.66666666666666666667$|oracle dec: 2 / 3 = 0.66666666666666666666|' "$WORK/big-plain.out" \
-     | python3 "$WORK/oracle.py" >"$WORK/oracle-broken.out" 2>&1; then
+if [ -z "$PY" ]; then
+  echo "  and with no interpreter the oracle's own failure mode is unmeasured too"
+elif sed 's|^oracle dec: 2 / 3 = 0.66666666666666666667$|oracle dec: 2 / 3 = 0.66666666666666666666|' "$WORK/big-plain.out" \
+     | "$PY" "$WORK/oracle.py" >"$WORK/oracle-broken.out" 2>&1; then
   echo "  the oracle accepted a wrong quotient, so it checks nothing"
   status=1
 else
@@ -258,7 +293,7 @@ prove_fails() {
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/std_big_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched big library did not build"

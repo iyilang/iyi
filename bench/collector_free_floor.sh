@@ -29,8 +29,34 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a program
+# built into a scratch directory named `/tmp/tmp.X` is named by a path it
+# cannot read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 status=0
+# An arm whose reader or interpreter is absent is counted rather than
+# folded into the pass: a summary may not claim more than was measured.
+unmeasured=0
 RUNS="${COLLECTOR_FREE_RUNS:-3}"
+
+# The generator below is written in python, and a machine can answer
+# `python3` with a stub that prints a sentence and exits: an interpreter is
+# the one that imports a module, so that is what is asked of it here.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
 
 cd "$REPO" || exit 1
 export IYI_PATH="$REPO/src"
@@ -49,13 +75,32 @@ echo
 echo "== and its link line carries no collector"
 # Named, because "no collector" is the claim and `gc_none` is only the flag
 # that was passed: what settles it is what the binary actually links.
-libs="$(otool -L .build/iyi 2>/dev/null || ldd .build/iyi 2>/dev/null)"
-if printf '%s' "$libs" | grep -qE 'libgc'; then
-  echo "  FAIL: a collector is still linked"
-  printf '%s\n' "$libs" | grep -E 'libgc' | sed 's/^/    /'
-  status=1
+# A link line read with a reader that is not installed is not read at all:
+# both readers failing leaves the text empty, and an empty text has no
+# `libgc` in it, which reads as the claim holding.
+LIBS_READER=""
+for candidate in otool ldd; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    LIBS_READER="$candidate"
+    break
+  fi
+done
+if [ -z "$LIBS_READER" ]; then
+  echo "  no otool or ldd here, so the link line is not read"
+  unmeasured=$((unmeasured + 1))
 else
-  echo "  no libgc"
+  if [ "$LIBS_READER" = otool ]; then
+    libs="$(otool -L .build/iyi 2>/dev/null)"
+  else
+    libs="$(ldd .build/iyi 2>/dev/null)"
+  fi
+  if printf '%s' "$libs" | grep -qE 'libgc'; then
+    echo "  FAIL: a collector is still linked"
+    printf '%s\n' "$libs" | grep -E 'libgc' | sed 's/^/    /'
+    status=1
+  else
+    echo "  no libgc"
+  fi
 fi
 
 echo
@@ -109,7 +154,10 @@ echo "== the 30-module project compiles with it"
 # 7,207 lines against 27 small samples: the size where a build allocates
 # enough for a rare reuse to become a common one. Both failures that survived
 # the first fix appeared here and nowhere else.
-if python3 "$REPO/bench/incremental/generate_project.py" "$WORK/gen" \
+if [ -z "$PY" ]; then
+  echo "  the 30-module project went unbuilt: its generator needs python and this machine has none"
+  unmeasured=$((unmeasured + 1))
+elif "$PY" "$REPO/bench/incremental/generate_project.py" "$WORK/gen" \
      > "$WORK/gen.log" 2>&1 && [ -f "$WORK/gen/iyi/main.iyi" ]; then
   big_failed=0
   run=1
@@ -194,6 +242,11 @@ if make -j8 > "$WORK/default.log" 2>&1 \
 else
   echo "  FAIL: the default build broke"
   status=1
+fi
+
+if [ "$status" -eq 0 ] && [ "$unmeasured" -gt 0 ]; then
+  echo
+  echo "the collector-free floor holds, with $unmeasured check not measured here"
 fi
 
 rm -rf "$WORK"

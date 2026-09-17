@@ -24,8 +24,21 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# the wrapper in bin is a posix shell script, so a caller that already has a
+# compiler of its own names it through the environment.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a program
+# built into a scratch directory named `/tmp/tmp.X` is named by a path it
+# cannot read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 cd "$WORK" || exit 1
 
@@ -67,32 +80,44 @@ grep -q 'every property held' answers-release.txt || { cat answers-release.txt; 
 # linked library; a new name is a dependency being taken on and belongs in
 # this list in the commit that causes it.
 step "dependency floor: the runtime stays on the platform's own doorway"
-case "$(uname -s)" in
-  Darwin)
-    allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_madvise|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
-    added="$(nm -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
-      grep -E -cv "^($allowed)\$")"
-    extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |
-      grep -cv 'libSystem')"
-    if [ "$added" -ne 0 ] || [ "$extra_libs" -ne 0 ]; then
-      echo "the runtime moved the darwin floor:"
-      nm -u exercise
-      otool -L exercise
-      exit 1
-    fi
-    ;;
-  *)
-    added="$(nm -u exercise |
-      sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$' |
-      grep -cv '^\s*$')"
-    if [ "$added" -ne 0 ]; then
-      echo "the runtime put $added undefined symbols back on the link line:"
-      nm -u exercise
-      exit 1
-    fi
-    ;;
-esac
+# A floor counted with a reader that is not installed is not a floor at all:
+# `nm -u` in a shell with no `nm` prints nothing, the count comes out zero,
+# and that reads as the floor holding. The reader is resolved first, and an
+# absent one is named rather than counted.
+NM=""
+command -v nm >/dev/null 2>&1 && NM=nm
+unmeasured=0
+if [ -z "$NM" ]; then
+  echo "no nm here, so the symbol floor is not measured"
+  unmeasured=$((unmeasured + 1))
+else
+  case "$(uname -s)" in
+    Darwin)
+      allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_madvise|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
+      added="$("$NM" -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
+        grep -E -cv "^($allowed)\$")"
+      extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |
+        grep -cv 'libSystem')"
+      if [ "$added" -ne 0 ] || [ "$extra_libs" -ne 0 ]; then
+        echo "the runtime moved the darwin floor:"
+        "$NM" -u exercise
+        otool -L exercise
+        exit 1
+      fi
+      ;;
+    *)
+      added="$("$NM" -u exercise |
+        sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
+        grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$' |
+        grep -cv '^\s*$')"
+      if [ "$added" -ne 0 ]; then
+        echo "the runtime put $added undefined symbols back on the link line:"
+        "$NM" -u exercise
+        exit 1
+      fi
+      ;;
+  esac
+fi
 
 # ── 3. Failure proof: a deadlock dies loudly ──────────────────────────────
 step "failure proof: deadlock is a diagnosis, not a hang"
@@ -131,5 +156,11 @@ if [ $? -ne 1 ] || ! grep -q 'FAIL: interleaving' misordered.txt; then
 fi
 
 echo "workdir $WORK"
-echo "concurrency gate: every step held"
+# A summary may not claim more than was measured, so a step whose reader was
+# missing is named here rather than folded into the pass.
+if [ "$unmeasured" -gt 0 ]; then
+  echo "concurrency gate: every step held, with $unmeasured not measured here"
+else
+  echo "concurrency gate: every step held"
+fi
 exit 0

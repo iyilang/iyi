@@ -11,9 +11,29 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs whatever compiler the caller names; `bin/iyi` is a shell
+# wrapper, and on Windows the caller has to point at the built exe itself.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` on it is silently ignored, so the patched
+# copy is never read and the proof that a check can fail quietly stops
+# proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 status=0
 
@@ -39,7 +59,7 @@ prove_fails() {
   if cmp -s "$WORK/$dir/iyi/float.iyi" "$REPO/src/iyi/float.iyi"; then
     echo "  $label: the awk found nothing to change"; status=1; return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/float_text.iyi" > "$WORK/$dir/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/float_text.iyi" > "$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"; tail -3 "$WORK/$dir/build.log"; status=1; return
   fi
   set +e

@@ -40,8 +40,27 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
+# Windows the caller is the only one who knows where the real binary is.
+IYI="${IYI:-$REPO/bin/iyi}"
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on the search path, so
+# the patched copy is never read and the proof that a check can fail
+# quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 cd "$WORK" || exit 1
 
@@ -149,7 +168,7 @@ cp "$REPO"/src/iyi/*.iyi patched/iyi/
 awk '{ sub(/each_thread_root\(visit\)/, "each_global_root(visit)"); print }' \
   "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi
 cmp -s patched/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
-if ! IYI_PATH="$WORK/patched:$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unrooted > build-unrooted.log 2>&1; then
+if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unrooted > build-unrooted.log 2>&1; then
   cat build-unrooted.log; exit 1
 fi
 timeout 120 ./unrooted 8 > unrooted.txt 2>&1

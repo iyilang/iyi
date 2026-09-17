@@ -41,8 +41,24 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
+# the compiler this gate measures: the wrapper in bin/ is a posix shell script
+# and cannot run a windows build, so an `IYI` from the environment wins.
+IYI="${IYI:-$REPO/bin/iyi}"
+
 status=0
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 # Crystal's thirteen, plus the spellings a linker actually emits.
@@ -88,15 +104,29 @@ known_pattern() {
   eval "printf '%s' \"\${KNOWN_FAIL_PATTERN_$1:-}\""
 }
 
+# A floor measured with a reader that is not installed is not measured at
+# all: `readelf -d` in a shell with no readelf prints nothing, and an empty
+# library list reads as a floor that held. The reader is resolved once here,
+# and the arm that needs it says what it could not measure instead.
+LIBS_READER=""
+for candidate in otool readelf; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    LIBS_READER="$candidate"
+    break
+  fi
+done
+unmeasured=0
+
 libs_of() {
-  case "$(uname -s)" in
-    Darwin) otool -L "$1" 2>/dev/null | sed 1d | awk '{print $1}' ;;
-    *) readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' ;;
-  esac
+  if [ "$LIBS_READER" = otool ]; then
+    otool -L "$1" 2>/dev/null | sed 1d | awk '{print $1}'
+  else
+    readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'
+  fi
 }
 
-if [ ! -x ./bin/iyi ]; then
-  echo "bin/iyi is missing; run make first."
+if [ ! -x "$IYI" ]; then
+  echo "$IYI is missing; run make first."
   exit 1
 fi
 
@@ -125,7 +155,7 @@ for m in $modules; do
   out="$WORK/bin_$name"
   err="$WORK/err_$name"
 
-  if IYI_PATH="$REPO/src" ./bin/iyi build -o "$out" "$probe" > "$err" 2>&1; then
+  if IYI_PATH="$REPO/src" "$IYI" build -o "$out" "$probe" > "$err" 2>&1; then
     if known_fail "$name"; then
       # Failure mode 3: recorded as broken, now builds.
       stale_known="$stale_known $name(now-builds)"
@@ -170,8 +200,13 @@ done
 echo "  modules found:        $module_count  (floor $FLOOR_MODULES)"
 echo "  built alone:          $built  (floor $FLOOR_BUILT)"
 echo "  known failures:       $(echo $KNOWN_FAIL_MODULES | wc -w | tr -d ' ')"
-echo "  libraries linked:"
-sort -u "$all_libs" | sed '/^$/d' | sed 's/^/    /'
+if [ -z "$LIBS_READER" ]; then
+  echo "  libraries linked:     no otool or readelf here, so what the modules link went unmeasured"
+  unmeasured=$((unmeasured + 1))
+else
+  echo "  libraries linked:"
+  sort -u "$all_libs" | sed '/^$/d' | sed 's/^/    /'
+fi
 
 if [ -n "$dep_hits" ]; then
   echo
@@ -219,7 +254,13 @@ if [ "$built" -lt "$FLOOR_BUILT" ]; then
   status=1
 fi
 
-if [ "$status" -eq 0 ]; then
+if [ "$status" -eq 0 ] && [ "$unmeasured" -gt 0 ]; then
+  # Every module built alone, which is the half this machine can measure. A
+  # verdict may not claim the other half: with no reader the link line of
+  # each binary was never read, and that is where a dependency would show.
+  echo
+  echo "the standard library builds alone; with $unmeasured arm unread, what it links is not measured here"
+elif [ "$status" -eq 0 ]; then
   echo
   echo "the standard library reaches no dependency"
 fi

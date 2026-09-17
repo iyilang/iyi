@@ -18,12 +18,43 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2" source="$3"
@@ -49,7 +80,7 @@ build_and_run() {
 # turns the other way, so it is handed `-n`; its `insert` and `del` take
 # the same non-negative indices the exercise draws.
 oracle() {
-  python3 - <<'PY'
+  "$PY" - <<'PY'
 from collections import deque
 seed = 7
 def draw(bound):
@@ -93,23 +124,29 @@ done
 
 echo
 echo "== the churn against python3, 3,000 operations"
-oracle > "$WORK/oracle.out"
-grep '^step ' "$WORK/exercise-deque.out" > "$WORK/iyi-steps.out"
-if [ "$(grep -c '^step ' "$WORK/oracle.out")" -ne 30 ]; then
-  echo "  the oracle did not produce 30 snapshots"
-  status=1
-elif diff "$WORK/oracle.out" "$WORK/iyi-steps.out" > "$WORK/steps.diff"; then
-  echo "  every snapshot agrees with python3's deque"
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the churn against python's own deque is unmeasured"
 else
-  echo "  FAIL: iyi and python3 disagree"
-  sed -n '1,6p' "$WORK/steps.diff" | cut -c1-160
-  status=1
+  oracle > "$WORK/oracle.out"
+  grep '^step ' "$WORK/exercise-deque.out" > "$WORK/iyi-steps.out"
+  if [ "$(grep -c '^step ' "$WORK/oracle.out")" -ne 30 ]; then
+    echo "  the oracle did not produce 30 snapshots"
+    status=1
+  elif diff "$WORK/oracle.out" "$WORK/iyi-steps.out" > "$WORK/steps.diff"; then
+    echo "  every snapshot agrees with python3's deque"
+  else
+    echo "  FAIL: iyi and python3 disagree"
+    sed -n '1,6p' "$WORK/steps.diff" | cut -c1-160
+    status=1
+  fi
 fi
 
 echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "std_deque release" exercise-deque-release "$REPO/bench/std_deque_exercise.iyi" --release >/dev/null
-if grep '^step ' "$WORK/exercise-deque-release.out" | diff -q "$WORK/oracle.out" - >/dev/null; then
+if [ -z "$PY" ]; then
+  echo "  and with no oracle the optimised build has nothing to be compared against"
+elif grep '^step ' "$WORK/exercise-deque-release.out" | diff -q "$WORK/oracle.out" - >/dev/null; then
   echo "  the optimised build agrees with python3 too"
 else
   echo "  FAIL: the optimised build disagrees with python3"
@@ -161,7 +198,11 @@ echo "== proving the checks can fail when the ring is broken"
 prove_fails() { # prove_fails <label> <name> <phrase> <python replace-expression>
   local label="$1" name="$2" phrase="$3" replace="$4"
   mkdir -p "$WORK/$name/std"
-  python3 -c "
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the broken-ring proof is unmeasured"
+    return
+  fi
+  "$PY" -c "
 import sys
 src = open('$REPO/src/std/deque.iyi').read()
 broken = $replace
@@ -169,7 +210,7 @@ if broken == src:
     sys.exit('patch did not apply')
 open('$WORK/$name/std/deque.iyi', 'w').write(broken)
 " || { echo "  $label: the patch did not apply"; status=1; return; }
-  if ! IYI_PATH="$WORK/$name:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_deque_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_deque_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
     echo "  $label: the patched library did not build"
     sed -n '1,10p' "$WORK/$name/build.log"
     status=1

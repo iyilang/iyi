@@ -20,10 +20,26 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
-CRYSTAL="$REPO/bin/crystal"
+# A native compiler cannot resolve this shell's own path mapping: the
+# fixture is named to `iyi migrate` as a path, and one built from the
+# shell's `pwd` is not a directory the compiler can open.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) REPO="$(cygpath -m "$REPO")" ;;
+esac
+# Both compilers are whichever ones the caller names; `bin/crystal` and
+# `bin/iyi` are shell wrappers, and on Windows the caller has to point at
+# the built exes themselves.
+IYI="${IYI:-$REPO/bin/iyi}"
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
 FIXTURE="$REPO/bench/migrate_fixture"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a
+# scratch directory named `/tmp/tmp.X` is silently ignored on the search
+# path, so the patched copy is never read and the proof that a check can
+# fail quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) WORK="$(cygpath -m "$WORK")" ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0

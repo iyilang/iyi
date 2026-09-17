@@ -23,11 +23,22 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# A native compiler cannot resolve this shell's own path mapping, and the
+# package root and every source handed to it are named through this one, so
+# it is converted before anything is derived from it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) REPO="$(cygpath -m "$REPO")" ;;
+esac
 ROOT="${1:-$REPO/.build/iyi-package}"
 IYI="$ROOT/bin/iyi"
 SHIPPED="$ROOT/share/iyi/src/std"
 SAMPLES="$ROOT/share/iyi/samples"
 WORK="$(mktemp -d)"
+# And the same for the scratch directory, which is where the compiler is
+# told to write every binary it builds here.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) WORK="$(cygpath -m "$WORK")" ;;
+esac
 
 status=0
 

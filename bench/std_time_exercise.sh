@@ -24,14 +24,46 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/floor_base.sh"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
 
 status=0
 
 # Ensure IYI_PATH can find std modules in src/ and samples/iyi/
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 symbols() {
   nm -u "$1" 2>/dev/null |
@@ -103,62 +135,74 @@ done
 
 echo
 echo "== negative proof: broken leap-year rule is caught"
-mkdir -p "$WORK/patched_leap/std"
-cp "$REPO/src/std/time.iyi" "$WORK/patched_leap/std/time.iyi"
-python3 -c "
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched_leap/std"
+  cp "$REPO/src/std/time.iyi" "$WORK/patched_leap/std/time.iyi"
+  "$PY" -c "
 with open('$WORK/patched_leap/std/time.iyi') as f:
     content = f.read()
 broken = content.replace('|| (year % 400 == 0)', '&& false')
 with open('$WORK/patched_leap/std/time.iyi', 'w') as f:
     f.write(broken)
 "
-if (IYI_PATH="$WORK/patched_leap:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/leap-fail.out" 2>&1); then
-  echo "  the exercise PASSED with a broken leap-year rule (it should have failed):"
-  head -15 "$WORK/leap-fail.out" | sed 's/^/    /'
-  status=1
-else
-  leap_exit=$?
-  echo "  the broken leap-year rule was caught (exit $leap_exit)"
+  if (IYI_PATH="$WORK/patched_leap${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/leap-fail.out" 2>&1); then
+    echo "  the exercise PASSED with a broken leap-year rule (it should have failed):"
+    head -15 "$WORK/leap-fail.out" | sed 's/^/    /'
+    status=1
+  else
+    leap_exit=$?
+    echo "  the broken leap-year rule was caught (exit $leap_exit)"
+  fi
 fi
 
 echo
 echo "== negative proof: broken civil roundtrip is caught"
-mkdir -p "$WORK/patched_rt/std"
-cp "$REPO/src/std/time.iyi" "$WORK/patched_rt/std/time.iyi"
-python3 -c "
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched_rt/std"
+  cp "$REPO/src/std/time.iyi" "$WORK/patched_rt/std/time.iyi"
+  "$PY" -c "
 with open('$WORK/patched_rt/std/time.iyi') as f:
     content = f.read()
 broken = content.replace('def to_unix : Int64\n    @seconds', 'def to_unix : Int64\n    @seconds + 1_i64')
 with open('$WORK/patched_rt/std/time.iyi', 'w') as f:
     f.write(broken)
 "
-if (IYI_PATH="$WORK/patched_rt:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/rt-fail.out" 2>&1); then
-  echo "  the exercise PASSED with broken roundtrip (it should have failed):"
-  head -15 "$WORK/rt-fail.out" | sed 's/^/    /'
-  status=1
-else
-  rt_exit=$?
-  echo "  the broken civil roundtrip was caught (exit $rt_exit)"
+  if (IYI_PATH="$WORK/patched_rt${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/rt-fail.out" 2>&1); then
+    echo "  the exercise PASSED with broken roundtrip (it should have failed):"
+    head -15 "$WORK/rt-fail.out" | sed 's/^/    /'
+    status=1
+  else
+    rt_exit=$?
+    echo "  the broken civil roundtrip was caught (exit $rt_exit)"
+  fi
 fi
 
 echo
 echo "== negative proof: broken RFC 3339 timezone offset is caught"
-mkdir -p "$WORK/patched_tz/std"
-cp "$REPO/src/std/time.iyi" "$WORK/patched_tz/std/time.iyi"
-python3 -c "
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched_tz/std"
+  cp "$REPO/src/std/time.iyi" "$WORK/patched_tz/std/time.iyi"
+  "$PY" -c "
 with open('$WORK/patched_tz/std/time.iyi') as f:
     content = f.read()
 broken = content.replace('utc_sec = local_sec - offset_sec', 'utc_sec = local_sec')
 with open('$WORK/patched_tz/std/time.iyi', 'w') as f:
     f.write(broken)
 "
-if (IYI_PATH="$WORK/patched_tz:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/tz-fail.out" 2>&1); then
-  echo "  the exercise PASSED with broken timezone offset handling (it should have failed):"
-  head -15 "$WORK/tz-fail.out" | sed 's/^/    /'
-  status=1
-else
-  tz_exit=$?
-  echo "  the broken RFC 3339 timezone offset was caught (exit $tz_exit)"
+  if (IYI_PATH="$WORK/patched_tz${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/tz-fail.out" 2>&1); then
+    echo "  the exercise PASSED with broken timezone offset handling (it should have failed):"
+    head -15 "$WORK/tz-fail.out" | sed 's/^/    /'
+    status=1
+  else
+    tz_exit=$?
+    echo "  the broken RFC 3339 timezone offset was caught (exit $tz_exit)"
+  fi
 fi
 
 echo

@@ -10,12 +10,44 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2"
@@ -65,8 +97,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched/std"
+  "$PY" - <<PY
 from pathlib import Path
 # The parser is std/socket's now, so the module broken is that one.
 src = Path("$REPO/src/std/socket.iyi").read_text()
@@ -75,14 +110,15 @@ if old not in src:
     raise SystemExit("patch site missing")
 Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_udp_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
-else
-  echo "  a broken udp is caught"
+  if [ $? -ne 0 ]; then
+    echo "  the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_udp_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  the exercise PASSED on a broken module"
+    status=1
+  else
+    echo "  a broken udp is caught"
+  fi
 fi
 
 echo
@@ -286,8 +322,11 @@ fi
 # And the proof that this arm tests parking: a copy whose first receive is
 # a blocking `recvfrom` (no MSG_DONTWAIT) pins the one thread, the sender
 # never runs, and the program is killed at the bound.
-mkdir -p "$WORK/blocking/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/blocking/std"
+  "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/udp.iyi").read_text()
 old = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))"
@@ -295,24 +334,28 @@ if old not in src:
     raise SystemExit("patch site missing")
 Path("$WORK/blocking/std/udp.iyi").write_text(src.replace(old, "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, 0, addr, pointerof(len))", 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the blocking patch did not apply"
-  status=1
-elif ! IYI_PATH="$WORK/blocking:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/park_blocking" "$WORK/park.iyi" > "$WORK/park_blocking.build" 2>&1; then
-  echo "  the blocking copy did not build:"
-  sed -n '1,8p' "$WORK/park_blocking.build"
-  status=1
-elif timeout 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
-  echo "  a blocking receive still let the sibling run, so this arm does not test parking"
-  status=1
-else
-  echo "  a blocking receive pins the thread and is killed at the bound, so the arm has teeth"
+  if [ $? -ne 0 ]; then
+    echo "  the blocking patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/blocking${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/park_blocking" "$WORK/park.iyi" > "$WORK/park_blocking.build" 2>&1; then
+    echo "  the blocking copy did not build:"
+    sed -n '1,8p' "$WORK/park_blocking.build"
+    status=1
+  elif timeout 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
+    echo "  a blocking receive still let the sibling run, so this arm does not test parking"
+    status=1
+  else
+    echo "  a blocking receive pins the thread and is killed at the bound, so the arm has teeth"
+  fi
 fi
 
 echo
 echo "== proving a Datagram index check can fail when the module is broken"
-mkdir -p "$WORK/patched_dg/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched_dg/std"
+  "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/udp.iyi").read_text()
 old = '''    elsif i == 2
@@ -325,11 +368,11 @@ new = '''    else
       @port'''
 Path("$WORK/patched_dg/std/udp.iyi").write_text(src.replace(old, new, 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the datagram patch did not apply"
-  status=1
-else
-  cat > "$WORK/dg_idx.iyi" <<'IYI'
+  if [ $? -ne 0 ]; then
+    echo "  the datagram patch did not apply"
+    status=1
+  else
+    cat > "$WORK/dg_idx.iyi" <<'IYI'
 module main
 import std/udp
 using std/udp::{Datagram, Bytes}
@@ -338,12 +381,13 @@ buf[0] = 120_u8
 dg = Datagram.new(buf, "h", 7)
 puts dg[-1]
 IYI
-  if IYI_PATH="$WORK/patched_dg:$REPO/src:$REPO/samples/iyi" "$IYI" run "$WORK/dg_idx.iyi" >"$WORK/dg_mut.out" 2>&1; then
-    echo "  a broken Datagram index is caught"
-  else
-    echo "  the index program refused on a broken module (cannot prove the check)"
-    sed -n '1,3p' "$WORK/dg_mut.out"
-    status=1
+    if IYI_PATH="$WORK/patched_dg${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$WORK/dg_idx.iyi" >"$WORK/dg_mut.out" 2>&1; then
+      echo "  a broken Datagram index is caught"
+    else
+      echo "  the index program refused on a broken module (cannot prove the check)"
+      sed -n '1,3p' "$WORK/dg_mut.out"
+      status=1
+    fi
   fi
 fi
 

@@ -24,8 +24,28 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
@@ -84,7 +104,7 @@ mkdir -p load
 sed -E 's/^ROUNDS[[:space:]]+= 200$/ROUNDS = 2000/' "$REPO/bench/server_load.iyi" > load/server_load.iyi
 cmp -s load/server_load.iyi "$REPO/bench/server_load.iyi" && {
   echo "the rounds line moved; this proof is running at the plain size"; exit 1; }
-if ! IYI_PATH="$WORK/patched:$REPO/src" "$IYI" build "$WORK/load/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
+if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$WORK/load/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
   cat build-hidden.log; exit 1
 fi
 timeout 300 ./hidden > hidden.txt 2>&1
@@ -102,7 +122,7 @@ sed -e 's/^    fiber\.release_stack$/    # the stack is not handed back/' \
     "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
 cmp -s patched/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && {
   echo "the sed found nothing to change"; exit 1; }
-if ! IYI_PATH="$WORK/patched:$REPO/src" "$IYI" build "$REPO/bench/server_load.iyi" -o noreuse > build-noreuse.log 2>&1; then
+if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$REPO/bench/server_load.iyi" -o noreuse > build-noreuse.log 2>&1; then
   cat build-noreuse.log; exit 1
 fi
 timeout 300 ./noreuse > noreuse.txt 2>&1

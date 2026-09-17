@@ -10,12 +10,47 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+# A proof that did not run is counted, so the closing line cannot claim more
+# than was measured.
+unmeasured=0
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2"
@@ -67,8 +102,13 @@ echo
 echo "== proving the checks can fail when the module is broken"
 prove_fails() { # prove_fails <label> <dir> <phrase> <old> <new>
   local label="$1" dir="$2" phrase="$3" old="$4" new="$5"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    unmeasured=$((unmeasured + 1))
+    return 0
+  fi
   mkdir -p "$WORK/$dir/std"
-  python3 - "$old" "$new" "$WORK/$dir/std/symbol.iyi" <<'PY'
+  "$PY" - "$old" "$new" "$WORK/$dir/std/symbol.iyi" <<'PY'
 import sys
 from pathlib import Path
 old = sys.argv[1]
@@ -84,7 +124,7 @@ PY
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_symbol_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_symbol_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched module did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
     status=1
@@ -132,9 +172,11 @@ prove_fails "needs_quotes? quotes a legal bang identifier" quoted_bang \
   'false'
 
 echo
-if [ "$status" -eq 0 ]; then
+if [ "$status" -ne 0 ]; then
+  echo "the std/symbol exercise did not hold"
+elif [ "$unmeasured" -eq 0 ]; then
   echo "the std/symbol exercise holds"
 else
-  echo "the std/symbol exercise did not hold"
+  echo "the std/symbol exercise holds, and $unmeasured of its proofs were not measured here"
 fi
 exit $status

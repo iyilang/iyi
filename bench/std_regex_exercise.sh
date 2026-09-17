@@ -6,17 +6,54 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
+
+if [ -z "$PY" ]; then
+  echo "std/regex: SKIPPED, not a pass: every check compares against oracle cases drawn by python3, none runs here, so no case was measured"
+  exit 0
+fi
 
 # Every pattern against every subject, the four answers written down for
 # the exercise to compare. Python's `$` also matches before a final
 # newline, so no subject ends in one; `\z` is spelled `\Z` there.
-python3 - "$WORK/cases.txt" <<'PY'
+"$PY" - "$WORK/cases.txt" <<'PY'
 import re, sys
 patterns = [
     "a", "a+", "a*", "a?", "ab|cd", "a|ab", "ab|a", "(a|b)*c", "x*", "b*", "^", "$", "^$",
@@ -104,7 +141,11 @@ echo
 echo "== what a pattern refuses, by name"
 refuses() { # refuses <label> <name> <phrase> <pattern>
   local label="$1" name="$2" phrase="$3" pattern="$4"
-  PATTERN="$pattern" python3 - "$WORK/$name.iyi" <<'PY'
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to write the probe program with"
+    return 0
+  fi
+  PATTERN="$pattern" "$PY" - "$WORK/$name.iyi" <<'PY'
 import os, sys
 pat = os.environ["PATTERN"].replace("\\", "\\\\").replace('"', '\\"')
 open(sys.argv[1], "w").write('module main\n\nimport std/regex\nusing std/regex::{Regex}\n\nputs Regex.compile("%s").find("a").inspect\n' % pat)
@@ -154,9 +195,13 @@ echo
 echo "== proving the checks can fail when the module is broken"
 mutate() { # mutate <label> <old> <new>
   local label="$1" old="$2" new="$3"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    return 0
+  fi
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  OLD="$old" NEW="$new" python3 - <<PY
+  OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/regex.iyi").read_text()
@@ -168,7 +213,7 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" "$WORK/cases.txt" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" "$WORK/cases.txt" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

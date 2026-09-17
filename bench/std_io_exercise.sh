@@ -28,13 +28,45 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/floor_base.sh"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
 
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 symbols() {
   nm -u "$1" 2>/dev/null |
@@ -117,7 +149,8 @@ done
 echo
 echo "== every ByteFormat encoding against python3 struct"
 grep -E '^  (LE|BE) (Int32|Int64|UInt64|UInt8) ' "$WORK/exercise-io.out" > "$WORK/encodings.iyi.txt"
-python3 - "$WORK/encodings.iyi.txt" > "$WORK/encodings.py.txt" <<'PY'
+if [ -n "$PY" ]; then
+  "$PY" - "$WORK/encodings.iyi.txt" > "$WORK/encodings.py.txt" <<'PY'
 import struct, sys
 codes = {"Int32": "i", "Int64": "q", "UInt64": "Q", "UInt8": "B"}
 for line in open(sys.argv[1]):
@@ -125,10 +158,13 @@ for line in open(sys.argv[1]):
     fmt = ("<" if order == "LE" else ">") + codes[kind]
     print(f"  {order} {kind} {value} {struct.pack(fmt, int(value)).hex()}")
 PY
+fi
 encoded="$(wc -l < "$WORK/encodings.iyi.txt")"
 if [ "$encoded" -lt 60 ]; then
   echo "  only $encoded encodings printed; the table has shrunk"
   status=1
+elif [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the encodings were not compared with struct.pack"
 elif diff "$WORK/encodings.iyi.txt" "$WORK/encodings.py.txt" > "$WORK/encodings.diff"; then
   echo "  all $encoded encodings (Int32, Int64, UInt64, UInt8; LE and BE; negative, min, max) agree with struct.pack"
 else
@@ -146,7 +182,8 @@ done
 echo
 echo "== every Hexdump line against python3's hexdump -C"
 grep -E '^[0-9a-f]{8}  ' "$WORK/exercise-io.out" > "$WORK/dumps.iyi.txt"
-python3 - "$WORK/dumps.oracle.txt" <<'PY'
+if [ -n "$PY" ]; then
+  "$PY" - "$WORK/dumps.oracle.txt" <<'PY'
 import sys
 
 def dump_c(data: bytes) -> str:
@@ -174,9 +211,12 @@ with open(sys.argv[1], "w") as out:
     for chunk in chunks:
         out.write(dump_c(chunk))
 PY
+fi
 if [ "$(wc -l < "$WORK/dumps.iyi.txt")" -ne 5 ]; then
   echo "  expected five dump lines on stdout, found $(wc -l < "$WORK/dumps.iyi.txt")"
   status=1
+elif [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the dump lines were not compared with hexdump -C"
 elif diff "$WORK/dumps.iyi.txt" "$WORK/dumps.oracle.txt" > "$WORK/dumps.diff"; then
   echo "  five lines (a short line, three lines of forty bytes, a stdout dump) equal hexdump -C's"
 else
@@ -202,9 +242,13 @@ done
 
 patched_fails() { # patched_fails <label> <dir> <check phrase> <python replacement expression>
   local label="$1" dir="$2" phrase="$3" replacement="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    return 0
+  fi
   mkdir -p "$WORK/$dir/std"
   cp "$REPO/src/std/io.iyi" "$WORK/$dir/std/io.iyi"
-  python3 - "$WORK/$dir/std/io.iyi" "$replacement" <<'PY'
+  "$PY" - "$WORK/$dir/std/io.iyi" "$replacement" <<'PY'
 import sys
 path, replacement = sys.argv[1], sys.argv[2]
 old, new = replacement.split("=>", 1)
@@ -218,7 +262,7 @@ PY
     status=1
     return
   fi
-  if (IYI_PATH="$WORK/$dir:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_io_exercise.iyi" >"$WORK/$dir.out" 2>&1); then
+  if (IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_io_exercise.iyi" >"$WORK/$dir.out" 2>&1); then
     echo "  $label: the exercise PASSED with the module broken (it should have failed):"
     head -15 "$WORK/$dir.out" | sed 's/^/    /'
     status=1

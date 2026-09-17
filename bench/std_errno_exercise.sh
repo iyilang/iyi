@@ -17,12 +17,43 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2" source="$3"
@@ -87,7 +118,11 @@ echo "== proving the checks can fail when the module is broken"
 prove_fails() { # prove_fails <label> <dir> <phrase> <old> <new>
   local label="$1" dir="$2" phrase="$3" old="$4" new="$5"
   mkdir -p "$WORK/$dir/std"
-  OLD="$old" NEW="$new" REPO="$REPO" WORK="$WORK" DIR="$dir" python3 - << 'PY'
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
+    return
+  fi
+  OLD="$old" NEW="$new" REPO="$REPO" WORK="$WORK" DIR="$dir" "$PY" - << 'PY'
 import os, sys
 from pathlib import Path
 src = Path(f"{os.environ['REPO']}/src/std/errno.iyi").read_text()
@@ -103,7 +138,7 @@ PY
     status=1
     return 1
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_errno_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_errno_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched module did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
     status=1

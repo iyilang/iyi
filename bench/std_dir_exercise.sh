@@ -11,13 +11,44 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 WORK="$(cd "$WORK" && pwd -P)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export TEST_SANDBOX="$WORK/sandbox"
 
 build_and_run() {
@@ -74,7 +105,9 @@ fi
 echo
 echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
+elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
 old = 'if entry != "." && entry != ".."'
@@ -82,10 +115,10 @@ if old not in src:
     raise SystemExit("patch site missing")
 Path("$WORK/patched/std/dir.iyi").write_text(src.replace(old, 'if true', 1))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "  the patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_dir_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_dir_exercise.iyi" >"$WORK/mut.out" 2>&1; then
   echo "  the exercise PASSED on a broken module"
   status=1
 else
@@ -95,7 +128,9 @@ fi
 echo
 echo "== proving glob is caught when the matcher is dead"
 mkdir -p "$WORK/patched_glob/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
+elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
 old = "glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)"
@@ -103,10 +138,10 @@ if old not in src:
     raise SystemExit("glob patch site missing")
 Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "false", 1))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "  the glob patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched_glob:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_dir_exercise.iyi" >"$WORK/mut_glob.out" 2>&1; then
+elif IYI_PATH="$WORK/patched_glob${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_dir_exercise.iyi" >"$WORK/mut_glob.out" 2>&1; then
   echo "  the exercise PASSED on a dead glob matcher"
   status=1
 else
@@ -123,7 +158,7 @@ import std/dir
 using std/dir::{Dir}
 $*
 EOF
-  if IYI_PATH="$REPO/src:$REPO/samples/iyi" "$IYI" run "$WORK/$name.iyi" >"$WORK/$name.out" 2>&1; then
+  if IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$WORK/$name.iyi" >"$WORK/$name.out" 2>&1; then
     echo "  $label: accepted invalid input"
     status=1
   elif ! grep -q "$phrase" "$WORK/$name.out"; then

@@ -6,12 +6,43 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 # What zlib writes, at every level and in every envelope, for iyi to read;
 # and a gzip header with every optional field set.
@@ -24,7 +55,13 @@ export IYI_PATH="$REPO/src:$REPO/samples/iyi"
 # about a file that was never written. An oracle that cannot be produced
 # is the gate's failure, said here, not the module's.
 mkdir -p "$WORK/fixtures"
-if ! python3 - "$WORK/fixtures" "$REPO/src/std/compress.iyi" <<'PY'
+# and without an interpreter there is no oracle at all: the exercise reads the
+# fixtures directory, so every check below would be measuring an empty one.
+if [ -z "$PY" ]; then
+  echo "no python3 on this machine: the zlib oracle cannot be written, so std/compress goes unmeasured"
+  exit 0
+fi
+if ! "$PY" - "$WORK/fixtures" "$REPO/src/std/compress.iyi" <<'PY'
 import os, random, struct, sys, zlib
 out, source = sys.argv[1], sys.argv[2]
 
@@ -109,7 +146,7 @@ done
 
 echo
 echo "== what iyi wrote, read by zlib"
-python3 - "$WORK/fixtures" <<'PY' || status=1
+"$PY" - "$WORK/fixtures" <<'PY' || status=1
 import os, sys, zlib
 d = sys.argv[1]
 bad = 0
@@ -203,7 +240,7 @@ mutate() { # mutate <label> <old> <new>
   local label="$1" old="$2" new="$3"
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  OLD="$old" NEW="$new" python3 - <<PY
+  if ! OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/compress.iyi").read_text()
@@ -212,10 +249,10 @@ if old not in src:
     raise SystemExit("patch site missing: " + old)
 Path("$WORK/patched/std/compress.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
-  if [ $? -ne 0 ]; then
+  then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_compress_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_compress_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

@@ -52,8 +52,21 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
+# Windows the caller is the only one who knows where the real binary is.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on the search path, so
+# the patched copy is never read and the proof that a check can fail
+# quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
@@ -177,7 +190,9 @@ refuses "fix on bytes that are not text" "not a valid iyi source file" -- \
 refuses "fix on a directory" "is a directory" -- "$IYI" fix "$WORK"
 refuses "an unknown flag to fix" "unknown flag" -- "$IYI" fix --nonesuch good.iyi
 refuses "a second file after fix's" "unexpected" -- "$IYI" fix good.iyi extra.iyi
-refuses "vet with no file" "Usage: $(basename "$IYI") vet" -- "$IYI" vet
+# `.exe` off the end: the usage line names the command, and the command is
+# the compiler's name without the suffix Windows puts on the file.
+refuses "vet with no file" "Usage: $(basename "$IYI" .exe) vet" -- "$IYI" vet
 refuses "a variable env does not have" "no such variable" -- "$IYI" env NOPE
 refuses "an argument to clear_cache" "takes no arguments" -- "$IYI" clear_cache extra
 refuses "an argument to the mcp server" "takes no arguments" -- "$IYI" mcp --nonesuch
@@ -321,7 +336,15 @@ chmod 500 "$WORK/readonly"
 # which is the question the compiler asks - the mode-500 one where the bit
 # binds, a read-only filesystem where it does not.
 unwritable=""
-for candidate in "$WORK/readonly" /sys /proc; do
+# `/sys` and `/proc` are this shell's own mounts, not places a native
+# compiler can be sent: handed `/proc/prog` it resolves the name against the
+# current drive and writes the program into `C:\proc`, so the case reported
+# that nothing was refused after the build had quietly succeeded.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) candidates="$WORK/readonly" ;;
+  *) candidates="$WORK/readonly /sys /proc" ;;
+esac
+for candidate in $candidates; do
   if [ -d "$candidate" ] && [ ! -w "$candidate" ]; then
     unwritable="$candidate"
     break
@@ -395,15 +418,22 @@ fi
 # read - and every later build linked them again: `ld.lld: error:
 # <file>:1: unknown directive: garbage`, until somebody thought of
 # `clear_cache`. The empty case was already guarded; these were not.
+# The compiler names a cached object the way the platform's linker wants it,
+# and on Windows that is `.obj`: a search for `*.o` found nothing to corrupt
+# and the case reported that it had checked nothing.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) OBJ_GLOB='*.obj' ;;
+  *) OBJ_GLOB='*.o' ;;
+esac
 mkdir -p "$WORK/cache"
 env IYI_CACHE_DIR="$WORK/cache" "$IYI" build -o cached1 good.iyi > cache1.txt 2>&1 ||
   { echo "  a build with its own cache directory failed:"; cat cache1.txt; status=1; }
 corrupted=0
-for object in $(find "$WORK/cache" -name '*.o' | head -3); do
+for object in $(find "$WORK/cache" -name "$OBJ_GLOB" | head -3); do
   printf 'garbage' > "$object"
   corrupted=$((corrupted + 1))
 done
-truncate -s 2 "$(find "$WORK/cache" -name '*.o' | tail -1)" 2>/dev/null
+truncate -s 2 "$(find "$WORK/cache" -name "$OBJ_GLOB" | tail -1)" 2>/dev/null
 if [ "$corrupted" -eq 0 ]; then
   echo "  the cache held no objects to corrupt, so this case checked nothing"
   status=1
@@ -540,9 +570,15 @@ else
 fi
 # A file the process cannot read. `chmod 000` does not bite as root, which
 # is what CI runs as, so the unreadable file here is the kernel's own:
-# `/proc/self/mem` refuses a read at offset 0 for everybody.
-if [ -r /proc/self/mem ]; then
-  ln -sf /proc/self/mem unreadable.iyi
+# `/proc/self/mem` refuses a read at offset 0 for everybody. It is this
+# shell's own mount, though, and not a file a native compiler can open, so
+# on Windows there is nothing here to drive.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) kernel_file="" ;;
+  *) kernel_file="/proc/self/mem" ;;
+esac
+if [ -n "$kernel_file" ] && [ -r "$kernel_file" ]; then
+  ln -sf "$kernel_file" unreadable.iyi
   refuses "a module the kernel will not hand over" "cannot be read" -- \
     "$IYI" doc unreadable.iyi
 else

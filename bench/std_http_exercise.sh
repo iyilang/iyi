@@ -5,12 +5,44 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2"
@@ -114,7 +146,10 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-  elif PORT="$port" python3 - <<'PY'
+  elif [ -z "$PY" ]; then
+    echo "  skipped: no working python3, so its http.client was not run against the server"
+    kill "$server_pid" 2>/dev/null
+  elif PORT="$port" "$PY" - <<'PY'
 import http.client, os, sys
 port = int(os.environ["PORT"])
 c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
@@ -174,7 +209,7 @@ if command -v wrk >/dev/null 2>&1; then
   errs=$(grep -o 'Socket errors: .*' "$WORK/wrk.out" | grep -oE 'connect [1-9][0-9]*|timeout [1-9][0-9]*' || true)
   non2xx=$(grep -o 'Non-2xx or 3xx responses: [0-9]*' "$WORK/wrk.out" | grep -o '[0-9]*$' || echo 0)
   total=$(grep -o '^ *[0-9]* requests in' "$WORK/wrk.out" | grep -o '[0-9]*' | head -1)
-  curl -s "http://127.0.0.1:$lport/stop" >/dev/null 2>&1 || python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$lport/stop').read()"
+  curl -s "http://127.0.0.1:$lport/stop" >/dev/null 2>&1 || { [ -n "$PY" ] && "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$lport/stop').read()"; }
   wait "$load_pid"
   if [ -z "$reqs" ] || [ "${non2xx:-0}" -ne 0 ] || [ -n "$errs" ]; then
     echo "  wrk -c50 -d3s: $reqs req/s, ${total:-0} requests, non-2xx ${non2xx:-0} $errs"
@@ -191,9 +226,13 @@ echo
 echo "== proving the checks can fail when the module is broken"
 mutate() { # mutate <label> <old> <new>
   local label="$1" old="$2" new="$3"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    return 0
+  fi
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  OLD="$old" NEW="$new" python3 - <<PY
+  OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/http.iyi").read_text()
@@ -205,7 +244,7 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" timeout 120 "$IYI" run "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 120 "$IYI" run "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

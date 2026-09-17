@@ -18,12 +18,47 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+# A proof that did not run is counted, so the closing line cannot claim more
+# than was measured.
+unmeasured=0
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2" source="$3"
@@ -48,7 +83,7 @@ build_and_run() {
 # python3 draws the same 200 pairs with the same generator and prints the
 # same lines; the diff is the check.
 oracle() {
-  python3 - <<'PY'
+  "$PY" - <<'PY'
 seed = 42
 def draw(bound):
     global seed
@@ -89,23 +124,31 @@ done
 
 echo
 echo "== the algebra against python3, 200 generated pairs"
-oracle > "$WORK/oracle.out"
-grep '^pair \|^  ' "$WORK/exercise-set.out" > "$WORK/iyi-pairs.out"
-if [ "$(grep -c '^pair ' "$WORK/oracle.out")" -ne 200 ]; then
-  echo "  the oracle did not produce 200 pairs"
-  status=1
-elif diff "$WORK/oracle.out" "$WORK/iyi-pairs.out" > "$WORK/pairs.diff"; then
-  echo "  every operator and relation agrees with python3 on all 200 pairs"
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the 200-pair oracle was not drawn or compared"
+  unmeasured=$((unmeasured + 1))
 else
-  echo "  FAIL: iyi and python3 disagree"
-  sed -n '1,12p' "$WORK/pairs.diff"
-  status=1
+  oracle > "$WORK/oracle.out"
+  grep '^pair \|^  ' "$WORK/exercise-set.out" > "$WORK/iyi-pairs.out"
+  if [ "$(grep -c '^pair ' "$WORK/oracle.out")" -ne 200 ]; then
+    echo "  the oracle did not produce 200 pairs"
+    status=1
+  elif diff "$WORK/oracle.out" "$WORK/iyi-pairs.out" > "$WORK/pairs.diff"; then
+    echo "  every operator and relation agrees with python3 on all 200 pairs"
+  else
+    echo "  FAIL: iyi and python3 disagree"
+    sed -n '1,12p' "$WORK/pairs.diff"
+    status=1
+  fi
 fi
 
 echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "std_set release" exercise-set-release "$REPO/bench/std_set_exercise.iyi" --release >/dev/null
-if grep '^pair \|^  ' "$WORK/exercise-set-release.out" | diff -q "$WORK/oracle.out" - >/dev/null; then
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the optimised build was not compared with the oracle"
+  unmeasured=$((unmeasured + 1))
+elif grep '^pair \|^  ' "$WORK/exercise-set-release.out" | diff -q "$WORK/oracle.out" - >/dev/null; then
   echo "  the optimised build agrees with python3 too"
 else
   echo "  FAIL: the optimised build disagrees with python3"
@@ -116,8 +159,13 @@ echo
 echo "== proving the checks can fail when the algebra is broken"
 prove_fails() { # prove_fails <label> <name> <phrase> <python replace-expression>
   local label="$1" name="$2" phrase="$3" replace="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    unmeasured=$((unmeasured + 1))
+    return 0
+  fi
   mkdir -p "$WORK/$name/std"
-  python3 -c "
+  "$PY" -c "
 import sys
 src = open('$REPO/src/std/set.iyi').read()
 broken = $replace
@@ -125,7 +173,7 @@ if broken == src:
     sys.exit('patch did not apply')
 open('$WORK/$name/std/set.iyi', 'w').write(broken)
 " || { echo "  $label: the patch did not apply"; status=1; return; }
-  if ! IYI_PATH="$WORK/$name:$REPO/src:$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_set_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_set_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
     echo "  $label: the patched library did not build"
     sed -n '1,10p' "$WORK/$name/build.log"
     status=1
@@ -161,10 +209,13 @@ prove_fails "symmetric difference missing one side" broken_xor "assertion failed
   "src.replace('other.each { |v| result.add(v) unless includes?(v) }', '')"
 
 echo
-if [ "$status" -eq 0 ]; then
+if [ "$status" -ne 0 ]; then
+  echo "Set: something above failed."
+elif [ "$unmeasured" -eq 0 ]; then
   echo "Set: the algebra agrees with python3 on 200 pairs, the relations, equality"
   echo "and hashing hold, and each check is proven to fail when broken."
 else
-  echo "Set: something above failed."
+  echo "Set: the relations, equality and hashing hold, and $unmeasured checks were"
+  echo "not measured here: no working python3 for the oracle or the broken copies."
 fi
 exit $status

@@ -32,8 +32,39 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
@@ -151,8 +182,11 @@ EOF
   fi
 
   echo "== proving the write check fails when say binds LibC.write"
-  mkdir -p "$WORK/bad/std"
-  python3 - "$REPO/src/std/debug.iyi" "$WORK/bad/std/debug.iyi" <<'PY'
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the LibC.write proof is unmeasured"
+  else
+    mkdir -p "$WORK/bad/std"
+    "$PY" - "$REPO/src/std/debug.iyi" "$WORK/bad/std/debug.iyi" <<'PY'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 t = open(src).read()
@@ -177,25 +211,26 @@ if not t.startswith(anchor) and anchor not in t:
 t = t.replace(anchor, lib, 1)
 open(dst, "w").write(t)
 PY
-  cat > "$WORK/badprog.iyi" <<'EOF'
+    cat > "$WORK/badprog.iyi" <<'EOF'
 module badprog
 
 import std/debug
 
 print "ok\n"
 EOF
-  if IYI_PATH="$WORK/bad:$REPO/src" "$IYI" build -o "$WORK/badprog" "$WORK/badprog.iyi" \
-       > "$WORK/badprog.build" 2>&1; then
-    if forbidden_undef "$WORK/badprog" | grep -q ' write$'; then
-      echo "  a LibC.write copy leaves write undefined, so the check has teeth"
+    if IYI_PATH="$WORK/bad${PSEP}$REPO/src" "$IYI" build -o "$WORK/badprog" "$WORK/badprog.iyi" \
+         > "$WORK/badprog.build" 2>&1; then
+      if forbidden_undef "$WORK/badprog" | grep -q ' write$'; then
+        echo "  a LibC.write copy leaves write undefined, so the check has teeth"
+      else
+        fail "a module that binds LibC.write passed the write check"
+        forbidden_undef "$WORK/badprog" | sed 's/^/    /'
+      fi
     else
-      fail "a module that binds LibC.write passed the write check"
-      forbidden_undef "$WORK/badprog" | sed 's/^/    /'
+      echo "  patched copy failed to build"
+      sed 's/^/    /' "$WORK/badprog.build"
+      status=1
     fi
-  else
-    echo "  patched copy failed to build"
-    sed 's/^/    /' "$WORK/badprog.build"
-    status=1
   fi
 
   echo

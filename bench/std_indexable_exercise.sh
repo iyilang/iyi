@@ -18,9 +18,30 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 status=0
 
@@ -30,7 +51,7 @@ status=0
 # into the tree where the identity floor could see it.
 export PATH="/opt/homebrew/bin:/usr/bin:/bin:$PATH"
 export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 echo "== the exercise, plain build"
 if ! "$IYI" build -o "$WORK/exercise" "$REPO/bench/std_indexable_exercise.iyi" \
@@ -132,7 +153,7 @@ prove_fails() {
   mkdir -p "$WORK/$dir/std"
   sed "$sed_script" "$REPO/src/std/indexable.iyi" > "$WORK/$dir/std/indexable.iyi"
 
-  if ! IYI_PATH="$WORK/$dir:$REPO/src:$REPO/samples/iyi" "$IYI" run \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run \
        "$REPO/bench/std_indexable_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
     local code=$?
     if grep -q "$expected_phrase" "$WORK/$dir.out" 2>/dev/null; then

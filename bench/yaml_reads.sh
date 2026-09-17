@@ -21,14 +21,34 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CRYSTAL="$REPO/bin/crystal"
-IYI="$REPO/bin/iyi"
+# Both compilers, overridable for the same reason: `bin/crystal` and
+# `bin/iyi` are POSIX shell wrappers, and on Windows the caller is the only
+# one who knows where the real binaries are.
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+IYI="${IYI:-$REPO/bin/iyi}"
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on the search path, so
+# the patched copy is never read and the proof that a check can fail
+# quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 cd "$WORK" || exit 1
 
 export CRYSTAL_PATH="$REPO/src"
-export IYI_PATH="$REPO/share/iyi/src:$REPO/share/iyi/crystal:$REPO/src"
+export IYI_PATH="$REPO/share/iyi/src${PSEP}$REPO/share/iyi/crystal${PSEP}$REPO/src"
 
 # Both, and the second is not decoration. `YAML::Any#to_json_object_key` names
 # `JSON::Error` in its body, so a boundary measured with `yaml` alone reads one

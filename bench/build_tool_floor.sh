@@ -63,6 +63,24 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
+# A native compiler cannot resolve this shell's own path mapping, and the
+# scan below is handed the repository root to read: the shell's `pwd` names
+# it in a way nothing outside this shell resolves.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) REPO="$(cygpath -m "$REPO")" ;;
+esac
+
+# The scan is written in python, and a machine can answer `python3` with a
+# stub that prints a sentence and exits: an interpreter is the one that
+# imports a module, so that is what is asked of it here.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 # Allowlists: each entry has a stated reason in the header above.
 ALLOWED_BUILD_TOOLS="c++ cc crystal git llvm-config"
 ALLOWED_RUNTIME_TOOLS="cc dsymutil git ldd pkg-config wasmtime"
@@ -99,7 +117,12 @@ status=0
 echo "== 1. Tools required to BUILD the compiler"
 
 # Measure build tools from build files
-build_scan="$(python3 "$REPO/bench/build_tool_scan.py" build "$REPO")"
+if [ -n "$PY" ]; then
+  build_scan="$("$PY" "$REPO/bench/build_tool_scan.py" build "$REPO")"
+else
+  build_scan=""
+  echo "  the build files went unread: no python3 or python here is an interpreter"
+fi
 
 found_build_tools=""
 found_aux_tools=""
@@ -130,7 +153,12 @@ echo
 echo "== 2. Tools the compiler invokes at RUNTIME to build a user's program"
 
 # Measure runtime tools from compiler source
-runtime_scan="$(python3 "$REPO/bench/build_tool_scan.py" runtime "$REPO")"
+if [ -n "$PY" ]; then
+  runtime_scan="$("$PY" "$REPO/bench/build_tool_scan.py" runtime "$REPO")"
+else
+  runtime_scan=""
+  echo "  the compiler source went unread: no python3 or python here is an interpreter"
+fi
 
 found_runtime_tools=""
 while IFS=: read -r prefix tool count locs; do
@@ -165,6 +193,14 @@ if command -v crystal >/dev/null 2>&1; then
 fi
 if command -v cc >/dev/null 2>&1; then
   printf '  cc:            %s\n' "$(command -v cc)"
+fi
+
+# The allowlists judge what the scan found, and with no interpreter the scan
+# found nothing: a floor that went unmeasured is not a floor that moved, so
+# this says so instead of reading an empty answer as either verdict.
+if [ -z "$PY" ]; then
+  echo "the tool floor went unmeasured: the scan needs python and this machine has none"
+  exit "$status"
 fi
 
 echo

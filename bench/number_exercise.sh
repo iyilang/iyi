@@ -24,11 +24,34 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs whatever compiler the caller names; `bin/iyi` is a shell
+# wrapper, and on Windows the caller has to point at the built exe itself.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` on it is silently ignored, so the patched
+# copy is never read and the proof that a check can fail quietly stops
+# proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
 
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
 status=0
+# The arm that asks for a signal cannot ask for one everywhere, and a run
+# that skipped it must not read as a run that made the measurement.
+guard_unmeasured=0
 
 run_case() { # run_case <label> <name> [build flags...]
   local label="$1" name="$2"
@@ -132,7 +155,7 @@ prove_fails() { # prove_fails <label> <dir> <file> <phrase> <sed script>
     return
   fi
 
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/number_exercise.iyi" \
        > "$WORK/$dir/build" 2>&1; then
     echo "  $label: the patched prelude did not build"
@@ -221,7 +244,7 @@ prove_traps() { # prove_traps <label> <dir> <sed script>
     return
   fi
   printf 'module main\n\nputs (-2147483648 %% -1).to_s\n' > "$WORK/$dir/program.iyi"
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$WORK/$dir/program.iyi" > "$WORK/$dir/build" 2>&1; then
     echo "  $label: the patched prelude did not build"
     sed -n '1,10p' "$WORK/$dir/build"
@@ -238,8 +261,19 @@ prove_traps() { # prove_traps <label> <dir> <sed script>
   printf '  %s: dies of signal %s without the guard\n' "$label" "$((code - 128))"
 }
 
-prove_traps "remainder without its guard" no_mod_guard \
-  's/^    return 0 if self == -2147483648 \&\& other == -1$/    # unchecked/'
+# Windows delivers no signal: without the guard the program still dies, but
+# it dies with an exit code and nothing names a processor fault, so this arm
+# is not measured here rather than weakened into accepting one.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  remainder without its guard: not measured here, because Windows delivers no signal for a processor fault"
+    guard_unmeasured=1
+    ;;
+  *)
+    prove_traps "remainder without its guard" no_mod_guard \
+      's/^    return 0 if self == -2147483648 \&\& other == -1$/    # unchecked/'
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then
@@ -248,6 +282,10 @@ if [ "$status" -eq 0 ]; then
   echo "than a fault from the processor, and the floats keep the three answers"
   echo "a program reads without thinking - NaN is not itself, -0.0 is zero, and"
   echo "everything rounds toward the same side it always did."
+  if [ "$guard_unmeasured" -eq 1 ]; then
+    echo "What this run did not measure is what the remainder's guard prevents:"
+    echo "that needs a signal, and this platform delivers none."
+  fi
 else
   echo "the number surface does not hold"
 fi

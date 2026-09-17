@@ -5,12 +5,44 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# The negative proofs are patched by python, and a machine can answer
+# `python3` with a store stub that prints a refusal instead of running, so
+# the interpreter is resolved once and proven to run before it is trusted.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2"
@@ -67,8 +99,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched/std"
+  "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/reference_storage.iyi").read_text()
 old = 'obj.initialize(*args, **opts)'
@@ -76,20 +111,24 @@ if old not in src:
     raise SystemExit("patch site missing")
 Path("$WORK/patched/std/reference_storage.iyi").write_text(src.replace(old, '# skipped init', 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
-else
-  echo "  a broken reference_storage is caught"
+  if [ $? -ne 0 ]; then
+    echo "  the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  the exercise PASSED on a broken module"
+    status=1
+  else
+    echo "  a broken reference_storage is caught"
+  fi
 fi
 
 echo
 echo "== proving wrapping hash is required"
-mkdir -p "$WORK/patched_hash/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched_hash/std"
+  "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/reference_storage.iyi").read_text()
 old = "h = (h &* 31) ^ ptr[i].to_i32"
@@ -97,14 +136,15 @@ if old not in src:
     raise SystemExit("hash patch site missing")
 Path("$WORK/patched_hash/std/reference_storage.iyi").write_text(src.replace(old, "h = (h * 31) ^ ptr[i].to_i32", 1))
 PY
-if [ $? -ne 0 ]; then
-  echo "  the hash patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched_hash:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/mut_hash.out" 2>&1; then
-  echo "  the exercise PASSED on overflow-checked hash"
-  status=1
-else
-  echo "  overflow-checked hash is caught"
+  if [ $? -ne 0 ]; then
+    echo "  the hash patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched_hash${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/mut_hash.out" 2>&1; then
+    echo "  the exercise PASSED on overflow-checked hash"
+    status=1
+  else
+    echo "  overflow-checked hash is caught"
+  fi
 fi
 
 echo

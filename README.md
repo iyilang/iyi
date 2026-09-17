@@ -328,7 +328,7 @@ own toolchain, which is the command `--cross-compile` prints.
 
 **Windows x86-64 is a run target now, and its own entry below says how far
 that reaches.** The runtime is there — the collector, kernel threads, fibers
-over an I/O completion port — and of the 93 programs under `bench/`, 85 run
+over an I/O completion port — and of the 87 programs under `bench/`, 79 run
 and pass on a Windows 11 machine. What is missing is named: sockets, and
 with them HTTP.
 
@@ -1031,7 +1031,7 @@ marked PROPOSED are the parts that will move under you.
   just as cleanly and access-violates before `main`, which is why the
   choice is written down). On a Windows 11 machine the compiler builds
   from source with the Visual C++ build tools and an LLVM of Crystal's
-  own, and of the 93 programs under `bench/` **85 pass**: the collector
+  own, and of the 87 programs under `bench/` **79 pass**: the collector
   with its PE-section and TEB roots, kernel threads stopped with
   `SuspendThread` — a thread caught inside the allocator is left running
   with a request and parks itself on the way out, the way the POSIX
@@ -1040,7 +1040,7 @@ marked PROPOSED are the parts that will move under you.
   `bench/thread_exercise.iyi` holds there: 8 threads, 3.92M allocations,
   292 collections, every live list intact.
   What is *not* here: **sockets**, and therefore UDP and HTTP — five of
-  those 93 refuse by name; paths and the console are the ANSI Win32
+  those 87 refuse by name; paths and the console are the ANSI Win32
   entry points, so a non-ACP filename is stored mojibake and a long path
   is still capped at `MAX_PATH`; there is no subprocess and no
   `Time::Location`; arm64 Windows is refused at compile time rather than

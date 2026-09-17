@@ -88,6 +88,17 @@
   host compiles, that a `touch` which drops its argument is caught at the
   time check.
 
+- **Checks that were red on darwin for reasons that were theirs, not the
+  modules'.** Each is fixed where it lived:
+  - `bench/std_compress_exercise.sh` wrote its zlib oracle with
+    `zlib.compress(data, level, wbits=...)`, whose `wbits` arrived in
+    Python 3.11. Under an older interpreter the generator died on the
+    first stream, the gate carried on against an empty directory, and the
+    verdict it printed was the decoder's — "DEFLATE: the stream ends
+    inside a block" — about a file that was never written. It uses
+    `compressobj` now, which every Python 3 has, refuses to continue when
+    the oracle cannot be produced, and counts the 79 fixtures it expects.
+
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a
   variable only its `break` paths ever set, so a run whose every round

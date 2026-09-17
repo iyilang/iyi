@@ -15,10 +15,23 @@ export IYI_PATH="$REPO/src:$REPO/samples/iyi"
 
 # What zlib writes, at every level and in every envelope, for iyi to read;
 # and a gzip header with every optional field set.
+#
+# Through `compressobj`, which every Python 3 has, rather than
+# `zlib.compress(data, level, wbits=...)`, whose `wbits` arrived in 3.11.
+# Under an older interpreter the generator died on the first stream, the
+# gate carried on against an empty fixtures directory, and the verdict it
+# printed was the decoder's — "DEFLATE: the stream ends inside a block" —
+# about a file that was never written. An oracle that cannot be produced
+# is the gate's failure, said here, not the module's.
 mkdir -p "$WORK/fixtures"
-python3 - "$WORK/fixtures" "$REPO/src/std/compress.iyi" <<'PY'
-import gzip, os, random, struct, sys, zlib
+if ! python3 - "$WORK/fixtures" "$REPO/src/std/compress.iyi" <<'PY'
+import os, random, struct, sys, zlib
 out, source = sys.argv[1], sys.argv[2]
+
+def deflate(data, level, wbits):
+    c = zlib.compressobj(level, zlib.DEFLATED, wbits)
+    return c.compress(data) + c.flush()
+
 rng = random.Random(20260915)
 text = b"".join(b"line %d: the quick brown fox jumps over the lazy dog %d\n" % (i, i % 7) for i in range(400))
 far = bytes(rng.getrandbits(8) for _ in range(3000))
@@ -33,17 +46,28 @@ corpora = {
 for name, data in corpora.items():
     open(os.path.join(out, name + ".bin"), "wb").write(data)
     for level in (0, 1, 6, 9):
-        open(os.path.join(out, f"{name}.{level}.raw"), "wb").write(zlib.compress(data, level, wbits=-15))
-        open(os.path.join(out, f"{name}.{level}.zlib"), "wb").write(zlib.compress(data, level, wbits=15))
-        open(os.path.join(out, f"{name}.{level}.gzip"), "wb").write(zlib.compress(data, level, wbits=31))
+        open(os.path.join(out, f"{name}.{level}.raw"), "wb").write(deflate(data, level, -15))
+        open(os.path.join(out, f"{name}.{level}.zlib"), "wb").write(deflate(data, level, 15))
+        open(os.path.join(out, f"{name}.{level}.gzip"), "wb").write(deflate(data, level, 31))
 # FTEXT|FHCRC|FEXTRA|FNAME|FCOMMENT, a subfield, a name, a comment, and the header's own CRC-16.
 header = bytes([0x1f, 0x8b, 8, 0x1f]) + struct.pack("<IBB", 0, 0, 255)
 extra = b"AB" + struct.pack("<H", 4) + b"wxyz"
 header += struct.pack("<H", len(extra)) + extra + b"a-name.txt\0" + b"a comment\0"
 header += struct.pack("<H", zlib.crc32(header) & 0xffff)
-body = zlib.compress(text, 6, wbits=-15)
+body = deflate(text, 6, -15)
 open(os.path.join(out, "fields.gzip"), "wb").write(header + body + struct.pack("<II", zlib.crc32(text), len(text)))
 PY
+then
+  echo "the zlib oracle could not be written; nothing below would be measuring the module" >&2
+  exit 2
+fi
+# Six corpora, each `.bin` plus four levels in three envelopes, and the
+# gzip header with every field: 6 * 13 + 1.
+fixture_count="$(find "$WORK/fixtures" -type f | wc -l | tr -d ' ')"
+if [ "$fixture_count" -ne 79 ]; then
+  echo "the zlib oracle wrote $fixture_count files where 79 were expected" >&2
+  exit 2
+fi
 
 build_and_run() {
   local label="$1" name="$2"

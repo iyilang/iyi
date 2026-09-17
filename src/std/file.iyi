@@ -428,8 +428,20 @@ using std/path::{Path}
   end
 {% end %}
 class ::File
-  SEPARATOR        = '/'
-  SEPARATOR_STRING = "/"
+  {% if flag?(:win32) %}
+    # The separator of the platform the program runs on. This said `/` on
+    # every target, while `Path` — which every `File.join` goes through —
+    # joins with `\` on Windows and `Dir.current` answers `\`: a program
+    # that built a path out of this constant got a different separator
+    # from one that called `join`, and the two disagreed about the same
+    # file. Both forms are accepted wherever a path comes in; this is the
+    # one iyi writes.
+    SEPARATOR        = '\\'
+    SEPARATOR_STRING = "\\"
+  {% else %}
+    SEPARATOR        = '/'
+    SEPARATOR_STRING = "/"
+  {% end %}
   using std/path::{Path}
 
   private def self.sys_path(path : String) : UInt8*

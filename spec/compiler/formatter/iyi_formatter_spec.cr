@@ -96,6 +96,37 @@ describe "Formatter on iyi" do
     (covered - taken).should be_empty
   end
 
+  # The samples, twice: a formatter that is not a fixed point rewrites a
+  # file on every save, and the samples are the tree's own code, so the
+  # second pass has to be a no-op over every one. Then the same files with
+  # their indentation destroyed: what comes out is the file in the tree,
+  # which is what "canonical" means. Lines inside a multi-line string are
+  # left as they are, because they are the string.
+  it "is a fixed point over the samples, and canonical from ruined indentation" do
+    Dir.glob(File.expand_path("../../../samples/iyi/*.iyi", __DIR__)).sort.each do |path|
+      source = File.read(path)
+      once = Iyi.format(source, filename: path)
+      once.should eq(source), "#{path} is not formatted as the tree keeps it"
+      Iyi.format(once, filename: path).should eq(once), "#{path} is not a fixed point"
+
+      ruined = String.build do |io|
+        in_string = false
+        n = 0
+        source.each_line(chomp: false) do |line|
+          n += 1
+          if in_string
+            io << line
+          else
+            io << " " * (n % 7) << line.lstrip(" \t")
+          end
+          quotes = line.gsub("\\\"", "").count('"')
+          in_string = !in_string if quotes.odd?
+        end
+      end
+      Iyi.format(ruined, filename: path).should eq(source), "#{path} did not come back from ruined indentation"
+    end
+  end
+
   # Running at all: these two are wrong on the way in and right on the way out.
   assert_iyi_format "module m\n\npub    def   polite(name : String) : String\n  name\nend",
     "module m\n\npub def polite(name : String) : String\n  name\nend"

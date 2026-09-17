@@ -108,6 +108,11 @@
     request on every target. The strengthened-copy proof catches exactly
     the six relaxed instructions it patches, where before it counted
     nine with three of them always missing.
+  - `bench/std_io_exercise.sh` and `bench/std_time_exercise.sh` carried
+    their own copies of the darwin floor from before panics printed
+    backtraces, so every darwin program's `backtrace` and
+    `backtrace_symbols_fd` read as "something new". Recorded, with the
+    reason `bench/dependency_floor.sh` already gives.
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a

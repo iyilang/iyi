@@ -399,7 +399,11 @@ case "$(uname -s)" in
     fi
     ;;
   *)
-    allowed_symbols="__error _tlv_bootstrap accept bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+    # `backtrace` and `backtrace_symbols_fd` are the panic path's: a panic on
+    # darwin prints its frames through libSystem, so every darwin program
+    # carries the two, this one included. bench/dependency_floor.sh records
+    # them; this copy of the list had been written before they arrived.
+    allowed_symbols="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
     ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"

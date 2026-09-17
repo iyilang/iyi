@@ -74,6 +74,14 @@
   differently: every target this file is required on takes the same
   branch it did.
 
+- **The darwin job runs the standard library's gates.** The std job ran
+  all seventy-odd on Linux and nothing ran them on the platform the darwin
+  tarball is shipped for — the gap the collector's five gates had once,
+  with the same cost: run on a darwin machine, six of them were red, one
+  for the module's own defect (`File.touch`) and five for the gates', and
+  every one had been green on Linux for a release. `bench/std_exercise.sh`
+  runs in the darwin job now, and its timeout is sixty minutes for it.
+
 ### Removed
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The

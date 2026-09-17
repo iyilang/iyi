@@ -46,6 +46,23 @@
   serve HTTP, soak an LSP and run aarch64 under qemu, and one that hangs
   held a runner for a working day and reported nothing.
 
+- **The floor every program carries has one home.** `bench/floor_base.sh`
+  names what a darwin program leaves undefined by being an iyi program at
+  all — the prelude's, the poller's, the collector's, the thread layer's
+  and the panic path's libSystem symbols — and what a Linux program
+  carries from the C runtime, and the gates that audit a program's floor
+  source it and add what their own program asks for on top:
+  `bench/dependency_floor.sh`, whose list is this plus the platform
+  modules' and which keeps the reason for every name, and the root, eiy,
+  io and time exercises. It was copied into eleven gates before, and when
+  panics learned to print a backtrace two of them were not told; a floor
+  written in eleven places is eleven floors, and the one nobody updates is
+  the one that fails. The lists whose point is being *exact* — the
+  runtime's own twelve in the thread exercise, the thread floor's
+  variants, the collector's — stay written out, because "nothing else" is
+  what they assert. No list changed by a name: the five rebuilt from the
+  base are set-identical to what they replaced.
+
 ### Removed
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The

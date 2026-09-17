@@ -32,6 +32,11 @@ IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The part of the floor every program carries, shared with the other gates
+# that audit one: bench/floor_base.sh. What is added below it here is what
+# the library's platform modules ask for.
+. "$REPO/bench/floor_base.sh"
+
 # What a program iyi builds may leave undefined. On darwin these are libSystem's
 # and there is no way around that: Apple supports libSystem as its only
 # interface and raw syscalls are explicitly not a stable ABI, which is why Go
@@ -132,11 +137,11 @@ trap 'rm -rf "$WORK"' EXIT
 # the second time that list has handed a symbol back. Neither adds a
 # library: libSystem on darwin, a syscall on Linux, and the
 # `ALLOWED_LIBS_PROGRAM` check below is what proves it.
-ALLOWED_SYMBOLS_DARWIN="__error _tlv_bootstrap accept access backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect environ exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_join pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink utimes write _dyld_get_image_header _dyld_get_image_vmaddr_slide stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
-ALLOWED_SYMBOLS_LINUX="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main environ"
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
+ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.
-ALLOWED_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
+ALLOWED_LIBS_PROGRAM="$FLOOR_LIBS_PROGRAM"
 
 # What the compiler may link, each with a reason recorded in SPEC.md.
 #   LLVM       the back end (B.2, Part V.9)

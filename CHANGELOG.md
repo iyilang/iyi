@@ -35,6 +35,17 @@
   the same on every target; `Cancelled` moved into the prelude for that,
   and the ceiling stays at 3,734.
 
+- **A release is gated on every job that runs something, and no job can
+  hang for a working day.** `release.needs` named eleven jobs and left out
+  four: the three that *execute* on Windows — the only jobs that run a
+  Windows binary at all — and the one that runs the collector on
+  wasm32-wasi, under a README that claims a program is run on those
+  targets. A `v*` tag published regardless. It names all sixteen now,
+  `cross-objects` included. And every one of the eighteen jobs carries a
+  `timeout-minutes`: the default is six hours, these jobs start daemons,
+  serve HTTP, soak an LSP and run aarch64 under qemu, and one that hangs
+  held a runner for a working day and reported nothing.
+
 ### Removed
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The

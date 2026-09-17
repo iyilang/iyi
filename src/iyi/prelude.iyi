@@ -432,6 +432,13 @@ end
                       written : Int32*, reserved : Void*) : Int32
     fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
                      read : Int32*, control : Void*) : Int32
+    # The crash path's three, and the only thing a program of this shape
+    # asks Windows for at startup: no error dialog, room reserved for the
+    # overflow handler, and the handler itself.
+    fun SetErrorMode(mode : Int32) : Int32
+    fun SetThreadStackGuarantee(size : Int32*) : Int32
+    fun SetUnhandledExceptionFilter(filter : Void*) : Void*
+    fun AddVectoredExceptionHandler(first : Int32, handler : Void*) : Void*
   end
 
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
@@ -629,8 +636,26 @@ end
     wide = Pointer(UInt16).malloc(needed.to_u64)
     return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 0, path, -1, wide, needed) <= 0
     # `needed` counts the terminator; the length does not.
-    return wide if needed - 1 < IYI_WIN_PATH_LIMIT
+    # The limit is on the path Windows resolves, not on the text handed in:
+    # `needed` measures a relative name without the current directory in
+    # front of it, and a short name in a deep directory is a long path.
+    # Measured before this line said so: a 215-byte relative name in a
+    # 48-byte directory is 264 bytes absolute — past MAX_PATH, under this
+    # threshold, so no prefix went on and the call failed, while the same
+    # path written absolutely worked. A rooted path is its own absolute
+    # form, so there its own length is the answer and nothing is asked.
+    return wide if needed - 1 < IYI_WIN_PATH_LIMIT && __iyi_wide_rooted?(wide)
     __iyi_wide_long_path(wide)
+  end
+
+  # `\\server\share` and `\\?\…` are rooted, and so is `C:\`. `C:x` is
+  # relative to that drive's own current directory and `\x` to the current
+  # drive, and neither one's length says what the absolute one is.
+  private def __iyi_wide_rooted?(wide : UInt16*) : Bool
+    return false if wide[0] == 0_u16
+    return true if wide[0] == 92_u16 && wide[1] == 92_u16
+    return false if wide[1] != 58_u16 # ':'
+    wide[2] == 92_u16 || wide[2] == 47_u16
   end
 
   private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
@@ -639,6 +664,11 @@ end
     full = Pointer(UInt16).malloc(full_needed.to_u64)
     written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
     return wide if written <= 0
+    # Resolved short: the path was relative and shallow, so the plain
+    # relative form is the one to keep — a `\\?\` prefix may only sit on a
+    # full path, and putting one on a short path costs a resolution nothing
+    # asked for.
+    return wide if written < IYI_WIN_PATH_LIMIT
     # Already prefixed: `\\?\` in the source survives GetFullPathNameW.
     return full if full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16
     unc = full[0] == 92_u16 && full[1] == 92_u16
@@ -7801,12 +7831,98 @@ lib LibIyiMain
   fun __iyi_main(argc : Int32, argv : UInt8**)
 end
 
+{% if flag?(:win32) %}
+  # What Windows does with an unhandled fault, and what it should do.
+  #
+  # Left alone, a fault raises Windows Error Reporting: a dialog on a
+  # desktop and a process that waits for somebody to click it in CI, and
+  # then an exit code with no sentence anywhere. `SetErrorMode` with
+  # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX (0x1 | 0x2) turns the
+  # dialog off, and the filter below is what replaces it: the two faults a
+  # program of this runtime's shape actually takes, each named.
+  #
+  # A stack overflow is the reason the filter exists. On the POSIX targets
+  # `IyiStackGuard` catches it on an alternate signal stack and prints
+  # where it happened; Windows has no sigaltstack, and the guard page is
+  # already spent by the time anything runs, so the handler needs room
+  # reserved in advance — `SetThreadStackGuarantee`, 16 KB, which is what
+  # makes printing from here safe at all.
+  #
+  # The write is `WriteFile` on the standard error handle rather than
+  # `print`: a fault may have landed inside the allocator, and the console
+  # path above allocates.
+  IYI_WIN_STACK_OVERFLOW = -1073741571 # 0xC00000FD, as the Int32 this file spells a DWORD with
+  IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
+
+  fun __iyi_win_fault(info : Void*) : Int32
+    record = Pointer(UInt64).new(info.address).value
+    code = Pointer(Int32).new(record).value
+    handle = LibC.GetStdHandle(-12)
+    written = uninitialized Int32
+    if code == IYI_WIN_STACK_OVERFLOW
+      message = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
+      LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
+      LibC.ExitProcess(1)
+    end
+    if code == IYI_WIN_ACCESS_VIOLATION
+      # An access violation is a wild pointer *or* a fiber's stack running
+      # out: a fiber stack's guard is the first page of its reservation,
+      # left uncommitted, and Windows raises STACK_OVERFLOW only for a
+      # thread's own stack. The faulting address is the second of the
+      # record's exception parameters — code 0, flags 4, record 8, address
+      # 16, parameter count 24, parameters from 32 — and the scheduler
+      # knows which page belongs to which stack.
+      faulting = Pointer(UInt64).new(record + 40_u64).value
+      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+        if IyiScheduler.fiber_guard_hit?(faulting)
+          overflow = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
+          LibC.WriteFile(handle, overflow.to_unsafe.as(Void*), overflow.bytesize, pointerof(written), nil)
+          LibC.ExitProcess(1)
+        end
+      {% end %}
+      message = "iyi: the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory it does not own: if the program uses `Pointer`, that is the place to look. If it does not, it is a bug in iyi's own runtime, and ours to fix: https://github.com/iyilang/iyi/issues\n"
+      LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
+      LibC.ExitProcess(1)
+    end
+    # EXCEPTION_CONTINUE_SEARCH: not one of ours, so whatever Windows would
+    # have done with it, it still does.
+    0
+  end
+
+  def __iyi_win_install_fault_handler : Nil
+    LibC.SetErrorMode(3)
+    guarantee = 16384_i32
+    LibC.SetThreadStackGuarantee(pointerof(guarantee))
+    # A proc's first word is its function, which is the address Windows
+    # wants — the same way `IyiThread.address_of` hands a thread entry to
+    # `CreateThread`. This one closes over nothing, so there is no second
+    # word and it is callable from outside iyi.
+    filter = ->__iyi_win_fault(Void*)
+    address = Pointer(Void).new(Pointer(UInt64).new(pointerof(filter).address).value)
+    # Both, and the vectored one is the one that works: a program whose
+    # entry point is the CRT's `mainCRTStartup` runs inside
+    # `__scrt_common_main_seh`, whose own `__except` takes a stack overflow
+    # before the unhandled-exception filter is ever asked — measured, with
+    # `SetUnhandledExceptionFilter` alone the process exited 0xC00000FD and
+    # printed nothing. A vectored handler is asked first, before any
+    # frame-based one. The filter answers only for the two codes it names,
+    # so a C++ exception (0xE06D7363, which is how `rescue` travels on
+    # msvc) passes straight through.
+    LibC.AddVectoredExceptionHandler(1, address)
+    LibC.SetUnhandledExceptionFilter(address)
+    nil
+  end
+{% end %}
+
 fun main(argc : Int32, argv : UInt8**) : Int32
   # There is nothing to start under the default allocator, and nothing missing
   # either: `gc/none.cr`'s `GC.init` sets up thread suspend and resume, and
   # 0.1.0 has one thread. Only Boehm has an `init` worth calling.
   {% if flag?(:gc_boehm) %}
     LibGC.init
+  {% end %}
+  {% if flag?(:win32) %}
+    __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
   0

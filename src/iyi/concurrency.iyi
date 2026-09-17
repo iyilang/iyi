@@ -834,6 +834,29 @@ class IyiScheduler
     0_u64
   end
 
+  {% if flag?(:win32) %}
+    # Whether *address* is in the guard page of a live fiber stack, which
+    # is how a fiber's stack running out is told from a wild pointer on
+    # Windows. There is no signal and no `sigaltstack` here: the fault
+    # arrives as an access violation, because a fiber stack's guard is the
+    # first page of its reservation left uncommitted (`settle_stack`) and
+    # Windows raises STACK_OVERFLOW only for a thread's own stack, which
+    # carries the guard attribute the kernel set. So the runtime answers
+    # the question itself, from the stacks it already knows the bounds of.
+    def self.fiber_guard_hit?(address : UInt64) : Bool
+      fiber = @@all_head
+      while fiber.is_a?(IyiFiber)
+        top = fiber.stack_top
+        if top != 0
+          low = top - IyiFiber::STACK_BYTES
+          return true if address >= low && address < low + IyiFiber::PAGE
+        end
+        fiber = fiber.next_fiber
+      end
+      false
+    end
+  {% end %}
+
   # The running fiber's stack top, 0 when it is the main fiber (or no
   # fiber has run yet). Read without making anything: the collector asks
   # this from inside a collection.

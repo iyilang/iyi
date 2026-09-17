@@ -1049,6 +1049,19 @@ jobs:
       - name: The build tool floor
         run: bash bench/build_tool_floor.sh
 
+      # A gate nobody runs is not a gate. This one rebuilds the compiler with
+      # and without a collector, so it lives here rather than in a job that
+      # would pay for a second toolchain: darwin is also where the property
+      # was lost, because Apple's `malloc` hands back exactly the size asked
+      # for while bdw-gc rounds a block up and hides a byte written past it.
+      #
+      # One run per sample rather than three, because CI is not the place to
+      # measure a rate: the shapes it has to catch, a terminator outside its
+      # allocation and a build that needs bdw-gc installed, fail on the first
+      # run or not at all.
+      - name: The collector-free floor (III.9)
+        run: COLLECTOR_FREE_RUNS=1 bash bench/collector_free_floor.sh
+
       # What a thread costs *this* floor, where every call is libSystem's:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`
       # to park on, and `__tlv_bootstrap` for a `@[ThreadLocal]` — held as

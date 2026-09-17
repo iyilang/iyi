@@ -326,8 +326,11 @@ runner, which builds the release compiler, holds the same gates and ships the
 darwin tarball. The cross-compiled three are linked there with the target's
 own toolchain, which is the command `--cross-compile` prints.
 
-Windows is worse than any of those and gets its own entry below: it compiles,
-it links, and what it prints at run time cannot be trusted.
+**Windows x86-64 is a run target now, and its own entry below says how far
+that reaches.** The runtime is there — the collector, kernel threads, fibers
+over an I/O completion port — and of the 93 programs under `bench/`, 85 run
+and pass on a Windows 11 machine. What is missing is named: sockets, and
+with them HTTP.
 
 **Performance — Crystal's backend, and now one measurement of its own.**
 Native code through LLVM, the same GC. `python3 bench/runtime.py` runs the same
@@ -991,17 +994,18 @@ marked PROPOSED are the parts that will move under you.
   Crystal's does; out of range after that wrap still raises.
   `samples/iyi/formatting.iyi` is the rest of the small set: `to_s(base)`,
   `rjust` / `ljust`, and `*`.
-- **`Share` gates nothing yet, and two platforms have no runtime.** SPEC.md
+- **`Share` gates nothing yet, and one platform has no runtime.** SPEC.md
   III.4's structured concurrency — `group`/`spawn`, `Channel`, `select`,
   cancellation delivered as values, panics dying at task boundaries — is
-  built in iyi's own prelude and runs on Linux (x86_64, aarch64) and macOS
-  arm64 (epoll there, kqueue here; SPEC.md III.4.8). A kernel thread is
+  built in iyi's own prelude and runs on Linux (x86_64, aarch64), macOS
+  arm64 and Windows x86-64 (epoll, kqueue, and an I/O completion port;
+  SPEC.md III.4.8). A kernel thread is
   here too — `IyiThread.start { }`, III.4.11, not a task and stopped by
   the collector — and its block may capture only `Share` values: III.4.4's
   marker, decided per type from whether any method assigns a field, and
   the compiler names the variable, the type and the field when it refuses
-  one. What is *not* here: wasm32 and Windows
-  get no runtime rather than a sequential imitation — a `group` there fails
+  one. What is *not* here: wasm32
+  gets no runtime rather than a sequential imitation — a `group` there fails
   to compile, which III.4.8 chose by name over shipping a spelling without
   the feature. A program built `--crystal` has Crystal's fibers, which are
   the thing III.4 was written to replace rather than an answer to it.
@@ -1020,21 +1024,29 @@ marked PROPOSED are the parts that will move under you.
   `x86_64-windows-msvc` and `arm-linux-gnueabihf` are not among them.
   Nothing here claims that the test suite runs on any target but the one CI
   builds on.
-- **A Windows binary runs right now, and only that much is claimed.**
-  `x86_64-windows-msvc` compiles and links: the object asks Windows for six
-  `kernel32` functions and nothing else, and with `kernel32` and the
-  *dynamic* CRT named (the static one, `libcmt`, links just as cleanly and
-  access-violates before `main`) the linker is happy. It used to be broken at
-  run time three different ways — the right answer, memory it was never
-  given (`ache\w` where `HELLO, IYI!` belongs, `BEEP ` with the digits gone),
-  and `0xC0000005`, on the same binary with nothing changed between runs.
-  The wild write was the prelude's own `memset`, striding eight elements per
-  eight bytes; SPEC III.9 12c tells it whole. CI runs the binary twenty
-  times with a 50,000-iteration self-check in each, watched without failing
-  until thirty-six builds in a row read twenty right and nothing else, and
-  it is a gate now. What is not claimed: Windows is not a test target, has
-  no collector (its allocator is `HeapAlloc`, never freed) and no threads,
-  and nothing here has run on it but that probe.
+- **Windows x86-64 runs the runtime, and what is missing is sockets.**
+  `x86_64-windows-msvc` compiles, links and runs: `kernel32` and the
+  *dynamic* CRT are the whole link line (the static one, `libcmt`, links
+  just as cleanly and access-violates before `main`, which is why the
+  choice is written down). On a Windows 11 machine the compiler builds
+  from source with the Visual C++ build tools and an LLVM of Crystal's
+  own, and of the 93 programs under `bench/` **85 pass**: the collector
+  with its PE-section and TEB roots, kernel threads stopped with
+  `SuspendThread` — a thread caught inside the allocator is left running
+  with a request and parks itself on the way out, the way the POSIX
+  handler defers — fibers over an I/O completion port, `Channel`,
+  `select`, cancellation, files, directories, clocks, entropy from the OS.
+  `bench/thread_exercise.iyi` holds there: 8 threads, 3.92M allocations,
+  292 collections, every live list intact.
+  What is *not* here: **sockets**, and therefore UDP and HTTP — five of
+  those 93 refuse by name; paths and the console are the ANSI Win32
+  entry points, so a non-ACP filename is stored mojibake and a long path
+  is still capped at `MAX_PATH`; there is no subprocess and no
+  `Time::Location`; arm64 Windows is refused at compile time rather than
+  broken at run time, and the x86-64 build runs there under emulation.
+  CI links the cross-compiled probe, collector and runtime exercises on a
+  Windows runner; it does not yet build the compiler there, so these
+  numbers are a measurement on one machine and not a gate.
 - **A wasm program needs a wasi toolchain, not just a linker.** A wasm32-wasi
   module is a program only once wasi-libc's entry stub is linked in, and only
   the compiler driver knows where its sysroot keeps that object — so this fork

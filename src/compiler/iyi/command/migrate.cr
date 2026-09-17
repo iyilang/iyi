@@ -412,8 +412,31 @@ class Iyi::Command
     linked = File.join(out_dir, "lib")
     if single.nil? && Dir.exists?(shards_dir) && !File.exists?(linked) && !File.symlink?(linked)
       Dir.mkdir_p(out_dir)
-      File.symlink(shards_dir, linked)
-      notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+      {% if flag?(:win32) %}
+        # A *symbolic* link on Windows needs SeCreateSymbolicLinkPrivilege,
+        # which an ordinary account does not hold unless Developer Mode is on
+        # or the process is elevated, so `File.symlink` answered `A required
+        # privilege is not held by the client` and the migration died there
+        # with the modules never written. A junction needs no privilege at
+        # all and, for a directory named by an absolute local path - which
+        # `lib` beside the manifest is - resolves the way a directory
+        # symbolic link does. And if even that is refused the tree is still
+        # written: the link is a convenience, the migration is what the
+        # person asked for, and a note can say what is missing.
+        begin
+          File.symlink(shards_dir, linked)
+          notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+        rescue File::Error
+          if migrate_junction(shards_dir, linked)
+            notes.add "vendored", "lib -> #{shards_dir} as a junction, since a symbolic link here wants a privilege this account does not hold; `shards install` here writes its own copy over it"
+          else
+            notes.add "vendored", "lib is not linked: neither a symbolic link nor a junction could be made at #{linked}, so a migrated `require` of a shard has nothing to resolve from. The modules are written; run `shards install` in #{out_dir}, or name #{shards_dir} on the search path, before building them"
+          end
+        end
+      {% else %}
+        File.symlink(shards_dir, linked)
+        notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+      {% end %}
     end
 
     [MANIFEST_FILE, "shard.lock"].each do |manifest|
@@ -742,6 +765,70 @@ class Iyi::Command
       puts "next: #{Command.program_name} migrate #{src} --out #{out_dir} --check"
     end
   end
+
+  {% if flag?(:win32) %}
+    # The junction the block above falls back to, written the way the kernel
+    # stores one: `CreateDirectoryW` makes the empty directory a reparse
+    # point hangs on, and `FSCTL_SET_REPARSE_POINT` writes an
+    # IO_REPARSE_TAG_MOUNT_POINT buffer over it - eight bytes of header (tag,
+    # data length, reserved), then `SubstituteNameOffset`,
+    # `SubstituteNameLength`, `PrintNameOffset` and `PrintNameLength`, then
+    # the names: the substitute name in the object-manager spelling
+    # `\??\C:\path`, the print name the plain `C:\path` a person reads, each
+    # NUL-terminated. `File.readlink` reads this same structure back
+    # (src/std/file.iyi's win32 arm, whose names start at 16 for a mount
+    # point rather than 20, there being no flag word), which is what says
+    # these offsets are the ones Windows means. The kernel is asked rather
+    # than `cmd /c mklink /J` spawned: mklink writes exactly this buffer, and
+    # a compiler that shells out for a filesystem operation takes on a
+    # shell's quoting and its exit codes for nothing. A refusal is `false`
+    # and not a raise, because the caller's answer to one is a note.
+    private def migrate_junction(target : String, link : String) : Bool
+      # Absolute, because a junction's stored name is resolved against
+      # nothing: a relative one would be read against whichever directory a
+      # later process happened to be in.
+      native = File.expand_path(target).gsub('/', '\\')
+      substitute = "\\??\\#{native}".to_utf16
+      printed = native.to_utf16
+      # Both names and both NULs, after the four offsets: the print name
+      # begins two bytes past the end of the substitute name's own.
+      data_bytes = 8 + (substitute.size + printed.size + 2) * 2
+      buffer = Bytes.new(8 + data_bytes)
+      head = buffer.to_unsafe
+      head.as(UInt32*).value = 0xA0000003_u32
+      (head + 4).as(UInt16*).value = data_bytes.to_u16
+      (head + 8).as(UInt16*).value = 0_u16
+      (head + 10).as(UInt16*).value = (substitute.size * 2).to_u16
+      (head + 12).as(UInt16*).value = (substitute.size * 2 + 2).to_u16
+      (head + 14).as(UInt16*).value = (printed.size * 2).to_u16
+      names = (head + 16).as(UInt16*)
+      names.copy_from(substitute.to_unsafe, substitute.size)
+      (names + substitute.size + 1).copy_from(printed.to_unsafe, printed.size)
+      wide_link = Crystal::System.to_wstr(link)
+      return false if LibC.CreateDirectoryW(wide_link, nil) == 0
+      # FILE_FLAG_BACKUP_SEMANTICS is what opens a directory at all, and
+      # FILE_FLAG_OPEN_REPARSE_POINT opens this one rather than following it.
+      handle = LibC.CreateFileW(wide_link, LibC::GENERIC_WRITE, LibC::DEFAULT_SHARE_MODE, nil,
+        LibC::OPEN_EXISTING, LibC::FILE_FLAG_BACKUP_SEMANTICS | LibC::FILE_FLAG_OPEN_REPARSE_POINT,
+        LibC::HANDLE.null)
+      if handle == LibC::INVALID_HANDLE_VALUE
+        LibC.RemoveDirectoryW(wide_link)
+        return false
+      end
+      written = LibC.DeviceIoControl(handle, LibC::FSCTL_SET_REPARSE_POINT, buffer.to_unsafe.as(Void*),
+        buffer.size.to_u32, nil, 0, out _, nil)
+      LibC.CloseHandle(handle)
+      # An empty `lib` beside the modules is worse than no `lib`: a build
+      # resolves a shard require against it, finds nothing, and the reason
+      # reads as the shard's absence rather than the link's. So the directory
+      # goes back if the reparse point did not take.
+      if written == 0
+        LibC.RemoveDirectoryW(wide_link)
+        return false
+      end
+      true
+    end
+  {% end %}
 
   # A flag's value, which is not the flag written after it. `--out` only
   # tested for the end of argv, so `migrate tree --out --check` took

@@ -52,7 +52,16 @@ step() {
   fi
 }
 holds() { # holds <name> <needle> <file>
-  if grep -qF -- "$2" "$3"; then step ok "$1"; else step fail "$1 (no '$2')"; fi
+  # Both sides with their separators folded to `/`: a needle here spells a
+  # path inside the fixture the way this file is written, and the verb
+  # prints it the way the platform does, so on Windows three cases whose
+  # refusal was exactly right reported a missing message. Folding is a
+  # no-op where the separator already is `/`.
+  if tr '\\' '/' < "$3" | grep -qF -- "$(printf '%s' "$2" | tr '\\' '/')"; then
+    step ok "$1"
+  else
+    step fail "$1 (no '$2')"
+  fi
 }
 
 echo "== the fixture, as Crystal"

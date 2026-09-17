@@ -7331,6 +7331,18 @@ the program links the new body through the linker. Add a `pub def` to
 `app/inner` instead, and `app/outer` is refused by name. Both are in
 `spec/compiler/iyimod_spec.cr`.
 
+**A boundary answers the source question with its inputs.** A module
+compiled from source is one file at its module path, and the source hash is
+over that file. A shard `iyi bind` wrote has no such file - its source is a
+checkout - so the artifact records every file the bind read, each with what
+it hashed to (`Section::Inputs`), and a consumer digests each one that is
+still on the machine before reading the artifact. That is a read of the
+whole checkout per `import` of the boundary, per build: the price of a cache
+that can go stale, paid where a module of one's own pays one file. A file
+that is gone is not asked, because a boundary travels without its checkout;
+a file *added* to a shard that requires by glob is not seen, because what is
+recorded is what was read. `bench/bind_roundtrip.sh` holds both.
+
 **One bug it found, in the build nothing had run before.** Reading one module
 from its artifact while compiling another from source is what an incremental
 build *is*, and it had never been done with codegen on. The closure copies a

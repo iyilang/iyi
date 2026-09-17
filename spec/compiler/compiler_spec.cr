@@ -45,8 +45,17 @@ private def undefined_symbols(path : String) : Array(String)
   end
 end
 
+# Whether this machine has an `nm` that can read what this machine links.
+# On Windows the runners carry a GNU `nm` (Git's, MinGW's) and it exits 1 on
+# an executable MSVC linked, so "the tool is on PATH" was the wrong question:
+# the instrument there is `dumpbin /symbols`, which CI's `windows-probe` job
+# already reads the cross-compiled objects with.
 private def nm_available?
-  !!Process.find_executable("nm")
+  {% if flag?(:win32) %}
+    false
+  {% else %}
+    !!Process.find_executable("nm")
+  {% end %}
 end
 
 describe "Compiler" do
@@ -73,6 +82,15 @@ describe "Compiler" do
   # third of a warm build spent looking for linkers nobody had installed
   # (SPEC.md 0.1.0 item 2). This is the file that keeps the answer.
   it "remembers which linker it found rather than searching PATH per build" do
+    # The probe caches a `PATH` search, and the msvc path performs none: its
+    # linker is the one the Visual C++ installation names, found through
+    # `vswhere` and the registry. There is nothing to remember, so there is
+    # no file — and a spec that asserted one passed here only where `lld-link`
+    # happened to be on `PATH`.
+    {% if flag?(:msvc) %}
+      pending! "the msvc link takes its linker from the VC++ installation, not from PATH"
+    {% end %}
+
     with_temp_executable "compiler_spec_output" do |path|
       Iyi::Command.run ["build"].concat(program_flags_options).concat([compiler_datapath("compiler_sample"), "-o", path])
 

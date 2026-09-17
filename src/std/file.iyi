@@ -705,6 +705,17 @@ class ::File
     File.read(p1) == File.read(p2)
   end
 
+  # *time* 0 is "now"; any other value is the Unix second both atime and
+  # mtime are set to.
+  #
+  # The darwin branch passed a null `times` to `utimes`, which is the
+  # kernel's spelling of "now" — so `touch(path, 1)` set the clock's time
+  # there and the epoch second on Linux, one name with two behaviours
+  # decided by the platform (SPEC.md III.1.7a). It writes the pair now, in
+  # the same shape the Linux branch writes its `timespec`s: `timeval` is an
+  # `Int64` second and an `Int32` microsecond padded to eight, so four
+  # `Int64` slots are the two structures and the odd slots are the
+  # microseconds, zero.
   def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
     p = path.to_s
     File.write(p, "") unless File.exists?(p)
@@ -713,7 +724,16 @@ class ::File
         raise "Cannot touch #{p}"
       end
     {% elsif flag?(:darwin) %}
-      if Std::File::LibC.utimes(sys_path(p), Pointer(Void).new(0_u64)) != 0
+      times = Pointer(Void).new(0_u64)
+      if time != 0_i64
+        tv = Pointer(Int64).malloc(4_u64)
+        tv[0] = time
+        tv[1] = 0_i64
+        tv[2] = time
+        tv[3] = 0_i64
+        times = tv.as(Void*)
+      end
+      if Std::File::LibC.utimes(sys_path(p), times) != 0
         raise "Cannot touch #{p}"
       end
     {% end %}

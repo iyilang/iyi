@@ -76,6 +76,18 @@
 
 ### Fixed
 
+- **`File.touch(path, time)` set "now" on darwin whatever `time` said.**
+  The Linux branch writes the second it is given through `utimensat`;
+  the darwin branch passed a null `times` to `utimes`, which is the
+  kernel's spelling of "now", so `touch(path, 1)` was the epoch second on
+  one platform and the clock on the other — one name, two behaviours,
+  decided by the machine (III.1.7a). It writes the `timeval` pair now, in
+  the shape the Linux branch writes its `timespec`s. The exercise had
+  asserted it all along and been red on every darwin machine;
+  `bench/std_file_exercise.sh` now also proves, on whichever branch the
+  host compiles, that a `touch` which drops its argument is caught at the
+  time check.
+
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a
   variable only its `break` paths ever set, so a run whose every round

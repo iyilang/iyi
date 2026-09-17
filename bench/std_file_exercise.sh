@@ -120,6 +120,45 @@ else
 fi
 
 echo
+echo "== proving a touch that ignores the time it is given is caught"
+# The branch the host compiles, because that is the only one this run can
+# reach: darwin writes a `timeval` pair through `utimes` and Linux a
+# `timespec` pair through `utimensat`. The darwin branch passed a null
+# `times`, which means "now", so `touch(path, 1)` set the clock's time
+# there and the epoch second on Linux — and nothing here said so, because
+# the Linux copy is what the proofs had always patched.
+# The *mtime* slot, which is what `File.info#modification_time` reads: the
+# pair is atime then mtime, and a patch to the first one moves a field
+# nothing here asks about.
+case "$(uname -s)" in
+  Linux) touch_site='        ts[2] = sec' ;;
+  *)     touch_site='        tv[2] = time' ;;
+esac
+mkdir -p "$WORK/patched_time/std"
+TOUCH_SITE="$touch_site" python3 - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/file.iyi").read_text()
+old = os.environ["TOUCH_SITE"]
+if old not in src:
+    raise SystemExit(f"touch time patch site missing: {old!r}")
+Path("$WORK/patched_time/std/file.iyi").write_text(src.replace(old, old.replace("time", "0_i64").replace("sec", "0_i64"), 1))
+PY
+if [ $? -ne 0 ]; then
+  echo "  the touch time patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_time:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_time.out" 2>&1; then
+  echo "  the exercise PASSED on a touch that ignores its argument"
+  status=1
+elif grep -q "touch sets the given unix time" "$WORK/mut_time.out"; then
+  echo "  a touch that ignores its argument is caught"
+else
+  echo "  it failed, but not at the time check:"
+  tail -3 "$WORK/mut_time.out" | sed 's/^/    /'
+  status=1
+fi
+
+echo
 echo "== what file refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expr="$4"

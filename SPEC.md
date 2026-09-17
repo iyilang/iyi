@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 14,418 lines, of which 3,841 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,417 lines, none of it written in iyi |
+| compiler | 111417 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -950,9 +950,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,417 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 111417 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 14,418-line own prelude + 36,962 in std |
-| Specs | 21,146 lines | 10,284 for iyi |
+| Specs | 21,146 lines | 10284 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |

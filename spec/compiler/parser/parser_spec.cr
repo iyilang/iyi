@@ -4516,6 +4516,18 @@ end").as(ClassDef)
         end
       end
 
+      # A unary operator reaches across a newline for its operand, so a stray
+      # `!` before the header read it as `!(module x)`: past the one-module
+      # rule, never typed, and codegen died on "has no type".
+      it "refuses a declaration as a unary operand" do
+        expect_raises(SyntaxException, "unexpected '!': a module header is a declaration, not a value to negate") do
+          parse("!\nmodule x\n\nputs 1\n", filename: "x.iyi")
+        end
+        expect_raises(SyntaxException, "unexpected '-': a def is a declaration") do
+          parse("module z\n\n-\ndef f\n  1\nend\n", filename: "z.iyi")
+        end
+      end
+
       it "explains `else if` when the outer `if` is left open" do
         expect_raises(SyntaxException, "`else if` at line 3 opens a second `if` that needs its own `end`; `elsif` is the spelling here") do
           parse("if true\n  1\nelse if false\n  2\nend\n", filename: "x.iyi")

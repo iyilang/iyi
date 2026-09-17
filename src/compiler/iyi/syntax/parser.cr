@@ -766,6 +766,14 @@ module Iyi
         next_token_skip_space_or_newline
         check_void_expression_keyword
         arg = parse_prefix
+        # iyi: a unary operator reaches across a newline for its operand, so
+        # a stray `!` on the line before `module x` read the header as
+        # `!(module x ...)` - out of the top level, past the one-module rule,
+        # never typed, and codegen died on "`module x` has no type". A
+        # declaration is not a value, and the sentence says so at the line.
+        if iyi? && (what = iyi_declaration_word(arg))
+          raise "unexpected '#{token_type}': a #{what} is a declaration, not a value to negate", location
+        end
         if token_type.op_bang?
           Not.new(arg).at(location).at_end(arg)
         else
@@ -775,6 +783,23 @@ module Iyi
         end
       else
         parse_atomic_with_method
+      end
+    end
+
+    # iyi: what a declaration node is called in a sentence, or nil for a value.
+    private def iyi_declaration_word(node : ASTNode) : String?
+      case node
+      when ModuleHeader then "module header"
+      when ModuleDef    then "module"
+      when ClassDef     then node.struct? ? "struct" : "class"
+      when Def          then "def"
+      when Macro        then "macro"
+      when EnumDef      then "enum"
+      when Alias        then "alias"
+      when TraitDef     then "trait"
+      when ImplDef      then "impl"
+      when LibDef       then "lib"
+      else                   nil
       end
     end
 

@@ -178,6 +178,16 @@
 
 ### Fixed
 
+- **A stray `!` before the module header crashed codegen.** A unary
+  operator reaches across a newline for its operand, so `!` on the line
+  above `module x` parsed as `!(module x ...)`: past the one-module rule,
+  never typed by the semantic pass (`check` said nothing), and the build
+  died on "BUG: `module x` has no type". Found by 10,500 mutants of the
+  samples and std under `check` and `build` - the one crash among them.
+  A declaration is refused as a unary operand at the line: "unexpected
+  '!': a module header is a declaration, not a value to negate", and the
+  same for `-` before a `def`. `spec/compiler/parser/parser_spec.cr`.
+
 - **`iyi doc` crashed on six std modules, refused fifteen, and printed
   twelve as a bare header.** One sweep of `iyi doc` over every file in
   `src/std`, which nothing had run. The crash: an `enum` nested in an

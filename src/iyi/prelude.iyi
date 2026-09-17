@@ -336,6 +336,7 @@ end
     fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileA(name : UInt8*) : Int32
+    fun GetFileAttributesA(name : UInt8*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
   end

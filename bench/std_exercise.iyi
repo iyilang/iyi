@@ -474,17 +474,6 @@ assert_eq(SliceIterator.new(Slice(Int32).new(0)).to_a.size, 0,
 puts "== std/derives: Show trait"
 assert_str(s1.show, "Score(10)", "derives: show")
 
-puts "== std/traits: one <=> per type, and it sorts"
-# `std/float` writes `Float64#<=>` itself and `std/traits` imports it; the
-# type's own def wins over the impl's, so the two have to agree on `Int32`.
-# They did not: float's answered `Int32?` (nil for NaN) and `sorted` refused
-# a list of floats with "expected block to return Int32, not (Int32 | Nil)".
-nan = 0.0 / 0.0
-assert_true(List(Float64).new([3.5, nan, -1.5]).sorted.to_s == "[-1.5, 3.5, NaN]", "sorted: floats, NaN last")
-assert_true(List(Float32).new([3.5_f32, -1.5_f32]).sorted.to_s == "[-1.5, 3.5]", "sorted: Float32")
-assert_true(List(Int128).new([3_i128, -1_i128]).sorted.to_s == "[-1, 3]", "sorted: Int128")
-assert_true(List(Char).new(['b', 'a']).sorted.to_s == "['a', 'b']", "sorted: Char")
-
 puts "== std/traits: the arithmetic a comparison and a hash are made of"
 # `cmp` was `self - other`, so two numbers far enough apart left `Int32` and
 # panicked - and every `Enumerable` method that reads `cmp` refused a pair
@@ -540,5 +529,16 @@ h16[1_i16] = 10
 h16[31337_i16] = 20
 assert_eq(h16[1_i16], 10, "hash: Int16 key 1")
 assert_eq(h16[31337_i16], 20, "hash: Int16 key 31337")
+
+puts "== std/traits: one <=> per type, and it sorts"
+# `std/float` writes `Float64#<=>` itself and `std/traits` imports it; the
+# type's own def wins over the impl's, so the two have to agree on `Int32`.
+# They did not: float's answered `Int32?` (nil for NaN) and `sorted` refused
+# a list of floats with "expected block to return Int32, not (Int32 | Nil)".
+nan = 0.0 / 0.0
+assert_true(List(Float64).new([3.5, nan, -1.5]).sorted.to_s == "[-1.5, 3.5, NaN]", "sorted: floats, NaN last")
+assert_true(List(Float32).new([3.5_f32, -1.5_f32]).sorted.to_s == "[-1.5, 3.5]", "sorted: Float32")
+assert_true(List(Int8).new([3_i8, -1_i8]).sorted.to_s == "[-1, 3]", "sorted: Int8")
+assert_true(List(Char).new(['b', 'a']).sorted.to_s == "['a', 'b']", "sorted: Char")
 
 puts "all std checks passed"

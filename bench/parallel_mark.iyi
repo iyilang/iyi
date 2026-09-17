@@ -104,8 +104,12 @@
   puts "phase: one mark of the wide object with helpers"
   IyiMark.collect
   fail("the wide object lost a node under the shared mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
+  # Four megabytes: the wide mark's spills outrun fifteen helpers for a
+  # moment and the pool's high-water mark is a handful of pieces - 1.5 MB
+  # on a three-core darwin runner - where the copy that never recycles
+  # is eleven and more on every machine measured.
   pool = IyiMark.pool_bytes
-  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 1048576_u64
+  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 4194304_u64
   puts "pool: #{pool.to_i64} bytes mapped for the marks' batches"
 
   # A worker's stack starts small and grows: a mark alone of one object

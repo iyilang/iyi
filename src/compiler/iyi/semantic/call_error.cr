@@ -932,7 +932,7 @@ class Iyi::Call
     # iyi: the compiler's own pseudo-methods are on no type's def list, so
     # `x.i_a?(T)` was "undefined method" with nothing near it. They are
     # names a call can be a typo of like any other.
-    similar_name ||= Levenshtein.find(def_name, IYI_PSEUDO_METHODS) if obj
+    similar_name ||= Levenshtein.find(def_name, IYI_PSEUDO_METHODS) if obj && def_name.size >= 3
 
     # The name that the span under this error can be *replaced with* — set
     # only where that is literally true: the suggestion names a different

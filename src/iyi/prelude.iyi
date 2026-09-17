@@ -4995,7 +4995,16 @@ require "./file"
       # every arena and the large list at once, what `IyiMark.collect` runs
       # for a program that asked for its memory back now.
       def self.sweep : Nil
-        while sweep_one
+        # `sweep_one` takes the size class the caller wants and answers 0
+        # when there is nothing left, 1 for a slice swept and 2 for a
+        # slice a helper is inside. This loop called it with no argument
+        # at all, so `IyiMark.sweep` — a public verb — did not compile on
+        # any target: a program that asked for its memory back was told
+        # "wrong number of arguments for 'IyiMark.sweep_one'". The class
+        # asked for is the smallest, because a class with nothing left
+        # sweeps any other, and 2 is a slice that is microseconds away, so
+        # only 0 ends the loop.
+        while sweep_one(0_u64) != 0_u64
         end
         sweep_large
       end

@@ -186,7 +186,24 @@ try {
     foreach ($name in $cut) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
 
     try {
-        foreach ($name in $cut) { [Environment]::SetEnvironmentVariable($name, $null) }
+        # `Remove-Item Env:\...`, and the difference is the whole of this
+        # gate: `[Environment]::SetEnvironmentVariable($name, $null)` removes
+        # the variable under Windows PowerShell 5.1 and leaves it *set and
+        # empty* under PowerShell 7 (measured on 5.1.26100 and 7.6.6), where
+        # `iyi` reads an empty IYI_PATH as "search nothing" and answers
+        # `can't find file 'iyi/prelude'` with the zip's own prelude sitting
+        # beside it. That is how this step first failed on the runner, which
+        # uses pwsh, while passing here under 5.1. The provider's Remove
+        # takes the variable out on both hosts, and it is asked afterwards
+        # rather than assumed: the whole claim of the gate is what the
+        # compiler cannot see.
+        foreach ($name in $cut) {
+            if (Test-Path -LiteralPath "Env:\$name") { Remove-Item -LiteralPath "Env:\$name" }
+        }
+        $stillSet = @($cut | Where-Object { Test-Path -LiteralPath "Env:\$_" })
+        if ($stillSet.Count -gt 0) {
+            Die "these are still in the environment and the run would not prove the zip: $($stillSet -join ', ')"
+        }
         [Environment]::SetEnvironmentVariable('PATH', $trimmed)
         Say "PATH: $trimmed"
         Say "removed from the environment: $((@($cut) | Where-Object { $_ -ne 'PATH' }) -join ', ')"
@@ -254,7 +271,16 @@ try {
             Pop-Location
         }
     } finally {
-        foreach ($name in $cut) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+        # The same asymmetry on the way back: a variable that was not set
+        # stays not set, rather than coming back empty for whatever runs
+        # after this script in the same session.
+        foreach ($name in $cut) {
+            if ($null -eq $saved[$name]) {
+                if (Test-Path -LiteralPath "Env:\$name") { Remove-Item -LiteralPath "Env:\$name" }
+            } else {
+                [Environment]::SetEnvironmentVariable($name, $saved[$name])
+            }
+        }
     }
 
     Say "the zip is good: $ZipName"

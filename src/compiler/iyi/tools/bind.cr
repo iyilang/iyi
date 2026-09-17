@@ -2481,7 +2481,7 @@ module Iyi
   # boundary silently contributing nothing is the failure worth seeing.
   private def self.bound_names(program : Program, dir : String, io : IO) : Set(String)
     names = Set(String).new
-    paths = Dir.glob(File.join(dir, "*.iyimod")).sort
+    paths = Dir.glob(::Path[dir].to_posix.join("*.iyimod")).sort
     return names if paths.empty?
 
     io.puts "boundaries already written:"

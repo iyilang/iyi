@@ -395,7 +395,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     prefix = dir == "." ? "" : "#{dir}/"
     siblings = [] of String
     roots.each do |root|
-      Dir.glob(File.join(root, dir, "*.iyi")) do |file|
+      Dir.glob(::Path[root].to_posix.join(dir, "*.iyi")) do |file|
         siblings << prefix + File.basename(file, ".iyi")
       end
     end

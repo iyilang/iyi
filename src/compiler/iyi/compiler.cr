@@ -749,7 +749,7 @@ module Iyi
     private def add_bind_boundary_imports(artifact : IyiMod::Artifact, dir : String,
                                           own : String) : Nil
       edges = artifact.imports.map(&.module_name).to_set
-      Dir.glob(File.join(dir, "*.iyimod")).sort.each do |path|
+      Dir.glob(::Path[dir].to_posix.join("*.iyimod")).sort.each do |path|
         next if File.expand_path(path) == File.expand_path(own)
 
         begin

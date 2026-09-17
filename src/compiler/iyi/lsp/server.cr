@@ -804,8 +804,12 @@ module Iyi::Lsp
 
       uris = @documents.keys.dup
       if root = @root
-        Dir.glob(File.join(root, "**", "*.iyi")) do |file|
-          next if file.includes?("/.") || file.includes?("/lib/")
+        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          # Read as posix before the skip tests: a glob yields the platform's
+          # own separators, so a backslashed path went past `/.` and `/lib/`
+          # and the `.git` and `lib` trees were indexed anyway.
+          posix = ::Path[file].to_posix.to_s
+          next if posix.includes?("/.") || posix.includes?("/lib/")
           uri = uri_of(file)
           uris << uri unless uris.includes?(uri)
           break if uris.size >= 200
@@ -962,11 +966,12 @@ module Iyi::Lsp
 
       outside = 0_u64
       if root = @root
-        Dir.glob(File.join(root, "**", "*.iyi")) do |file|
-          next if file.includes?("/.")
+        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          posix = ::Path[file].to_posix.to_s
+          next if posix.includes?("/.")
           info = File.info?(file)
           next unless info
-          if file.includes?("/lib/")
+          if posix.includes?("/lib/")
             outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
             next
           end
@@ -974,7 +979,7 @@ module Iyi::Lsp
           header, imports = header_and_imports(file, info)
           nodes[file] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
         end
-        Dir.glob(File.join(root, "**", "iyi.mod"), File.join(root, "**", "iyi.sum")) do |file|
+        Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
           info = File.info?(file)
           next unless info
           outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
@@ -1488,8 +1493,9 @@ module Iyi::Lsp
     private def workspace_entries : Array({String, String})
       entries = @documents.map { |doc_uri, doc_text| {path_of(doc_uri), doc_text} }
       if root = @root
-        Dir.glob(File.join(root, "**", "*.iyi")) do |file|
-          next if file.includes?("/.") || file.includes?("/lib/")
+        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          posix = ::Path[file].to_posix.to_s
+          next if posix.includes?("/.") || posix.includes?("/lib/")
           next if @documents.has_key?(uri_of(file))
           entries << {file, File.read(file)}
           break if entries.size >= 200
@@ -1905,8 +1911,9 @@ module Iyi::Lsp
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
       if root = @root
-        Dir.glob(File.join(root, "**", "*.iyi")) do |file|
-          next if file.includes?("/.") || file.includes?("/lib/")
+        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          posix = ::Path[file].to_posix.to_s
+          next if posix.includes?("/.") || posix.includes?("/lib/")
           paths << file unless paths.includes?(file)
           break if paths.size >= 2000
         end

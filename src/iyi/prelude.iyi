@@ -350,6 +350,40 @@ end
     fun ExitProcess(exit_code : Int32) : NoReturn
   end
 
+  # The rest of the kernel32 surface this runtime names: virtual memory,
+  # threads and their contexts, the performance counter, and the I/O
+  # completion port. It sits here, beside the floor, rather than inside the
+  # collector's arm below, because the scheduler and the threads are chosen
+  # by the target (`concurrency.iyi`, required at the top of this file) and
+  # not by which allocator a build asked for. Declared there, a
+  # `-Dgc_none` or `-Dgc_boehm` build on Windows got as far as codegen and
+  # stopped at `undefined fun 'CancelIoEx' for LibC`, since the fiber that
+  # cancels an IO exists in every build.
+  lib LibC
+    fun VirtualAlloc(lpAddress : Void*, dwSize : UInt64, flAllocationType : Int32, flProtect : Int32) : Void*
+    fun VirtualFree(lpAddress : Void*, dwSize : UInt64, dwFreeType : Int32) : Int32
+    fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
+    fun GetCurrentThread : Void*
+    fun SuspendThread(hThread : Void*) : Int32
+    fun ResumeThread(hThread : Void*) : Int32
+    fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
+    fun QueryPerformanceCounter(lpPerformanceCount : Int64*) : Int32
+    fun QueryPerformanceFrequency(lpFrequency : Int64*) : Int32
+    fun CreateThread(lpThreadAttributes : Void*, dwStackSize : UInt64, lpStartAddress : Void*, lpParameter : Void*, dwCreationFlags : Int32, lpThreadId : Int32*) : Void*
+    fun GetLastError : Int32
+    fun CreateIoCompletionPort(file_handle : Void*, existing_completion_port : Void*, completion_key : UInt64, number_of_concurrent_threads : Int32) : Void*
+    fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
+    fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
+    fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
+    fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
+    fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
+    fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
+    fun SwitchToThread : Int32
+    fun GetActiveProcessorCount(group_number : UInt16) : Int32
+    fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
+    fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
+  end
+
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
   # STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12). They are negative
   # identifiers reinterpreted as DWORD; as Int32 they spell themselves.
@@ -795,31 +829,6 @@ require "./file"
         LibC.madvise(Pointer(Void).new(address), length, 7_i32)
       end
     {% elsif flag?(:win32) %}
-      lib LibC
-        fun VirtualAlloc(lpAddress : Void*, dwSize : UInt64, flAllocationType : Int32, flProtect : Int32) : Void*
-        fun VirtualFree(lpAddress : Void*, dwSize : UInt64, dwFreeType : Int32) : Int32
-        fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
-        fun GetCurrentThread : Void*
-        fun SuspendThread(hThread : Void*) : Int32
-        fun ResumeThread(hThread : Void*) : Int32
-        fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
-        fun QueryPerformanceCounter(lpPerformanceCount : Int64*) : Int32
-        fun QueryPerformanceFrequency(lpFrequency : Int64*) : Int32
-        fun CreateThread(lpThreadAttributes : Void*, dwStackSize : UInt64, lpStartAddress : Void*, lpParameter : Void*, dwCreationFlags : Int32, lpThreadId : Int32*) : Void*
-        fun GetLastError : Int32
-        fun CreateIoCompletionPort(file_handle : Void*, existing_completion_port : Void*, completion_key : UInt64, number_of_concurrent_threads : Int32) : Void*
-        fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
-        fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
-        fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
-        fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
-        fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
-        fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
-        fun SwitchToThread : Int32
-        fun GetActiveProcessorCount(group_number : UInt16) : Int32
-        fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
-        fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
-      end
-
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.VirtualAlloc(nil, length, 0x3000_i32, 4_i32)
         if result.address == 0_u64

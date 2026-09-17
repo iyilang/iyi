@@ -147,13 +147,31 @@ prove_fails "errno setter zeroed" setter_zero "Errno.value setter sets EACCES" \
   '= errno.value' \
   '= 0'
 
-prove_fails "linux EREMOTE collides with EPROTO" eremote_linux "EREMOTE is 66 on linux" \
-  '    EREMOTE         =  66' \
-  '    EREMOTE         =  71'
-
-prove_fails "linux ESOCKTNOSUPPORT is Darwin 44" esock_linux "ESOCKTNOSUPPORT is 94 on linux" \
-  '    ESOCKTNOSUPPORT =  94' \
-  '    ESOCKTNOSUPPORT =  44'
+# The platform numbers, proved on the platform that compiles them. The two
+# below patched the Linux branch on every host, and on darwin that branch
+# is inside a `{% if flag?(:linux) %}` the compiler never enters — so the
+# copy built the same, the exercise passed, and the proof reported "does
+# not test this" about a check it could not reach. Each host patches the
+# block it builds: a collision with a neighbour, and the other platform's
+# number leaking in, which are the two mistakes the numbers have had.
+case "$(uname -s)" in
+  Linux)
+    prove_fails "linux EREMOTE collides with EPROTO" eremote_linux "EREMOTE is 66 on linux" \
+      '    EREMOTE         =  66' \
+      '    EREMOTE         =  71'
+    prove_fails "linux ESOCKTNOSUPPORT is Darwin 44" esock_linux "ESOCKTNOSUPPORT is 94 on linux" \
+      '    ESOCKTNOSUPPORT =  94' \
+      '    ESOCKTNOSUPPORT =  44'
+    ;;
+  *)
+    prove_fails "darwin ETIMEDOUT collides with ECONNREFUSED" etimedout_darwin "ETIMEDOUT is 60 on darwin" \
+      '    ETIMEDOUT       =  60' \
+      '    ETIMEDOUT       =  61'
+    prove_fails "darwin ECONNREFUSED is Linux 111" econnrefused_darwin "ECONNREFUSED is 61 on darwin" \
+      '    ECONNREFUSED    =  61' \
+      '    ECONNREFUSED    = 111'
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

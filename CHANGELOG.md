@@ -113,6 +113,13 @@
     backtraces, so every darwin program's `backtrace` and
     `backtrace_symbols_fd` read as "something new". Recorded, with the
     reason `bench/dependency_floor.sh` already gives.
+  - `bench/std_errno_exercise.sh`'s two platform proofs patched the Linux
+    branch on every host, and on darwin that branch is inside a
+    `{% if flag?(:linux) %}` the compiler never enters, so the copy built
+    the same and the proof reported "does not test this" about a check it
+    could not reach. Each host patches the block it builds now: a
+    collision with a neighbour and the other platform's number leaking in,
+    which are the two mistakes the numbers have had.
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a

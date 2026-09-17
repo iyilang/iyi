@@ -92,14 +92,30 @@ using std/path::{Path}
       nFileIndexLow : UInt32
     end
 
-    fun MoveFileExA(oldpath : UInt8*, newpath : UInt8*, flags : UInt32) : Int32
-    fun CreateHardLinkA(newpath : UInt8*, oldpath : UInt8*, sec : Void*) : Int32
-    fun CreateSymbolicLinkA(linkpath : UInt8*, target : UInt8*, flags : UInt32) : Int32
+    # The `*W` twin of each path call, never the `*A` one: an `*A` entry point
+    # reads its path in the process's active code page, so a name this
+    # library was handed as UTF-8 arrived as whatever those bytes spell there
+    # and the file it named was not the file the caller meant; and a path past
+    # MAX_PATH was refused, because the `\\?\` prefix that lifts the limit is
+    # understood by the wide calls alone. Every path below therefore goes
+    # through the prelude's `__iyi_wide_path`, which is the one conversion and
+    # the one place that prefix is put on. The handle calls further down take
+    # no path and stay as they are.
+    fun MoveFileExW(oldpath : UInt16*, newpath : UInt16*, flags : UInt32) : Int32
+    fun CreateHardLinkW(newpath : UInt16*, oldpath : UInt16*, sec : Void*) : Int32
+    # Alone among these, this one answers a BOOLEAN and not a BOOL: one byte,
+    # returned in the low eight bits of the register with the rest left as
+    # whatever was there. Read as an Int32 it was almost never zero, so a
+    # refused symlink — ERROR_PRIVILEGE_NOT_HELD, which is what a machine
+    # without SeCreateSymbolicLinkPrivilege and without Developer Mode
+    # answers — came back as success and the failure surfaced later, as a
+    # `symlink?` that said no about a link that was never made.
+    fun CreateSymbolicLinkW(linkpath : UInt16*, target : UInt16*, flags : UInt32) : UInt8
     # A DWORD is declared Int32 here, as the prelude declares it: the same 32
     # bits at the ABI, and one signature per symbol is what a program gets.
-    fun GetFileAttributesA(name : UInt8*) : Int32
-    fun GetFileAttributesExA(path : UInt8*, level : Int32, data : WIN32_FILE_ATTRIBUTE_DATA*) : Int32
-    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+    fun GetFileAttributesW(name : UInt16*) : Int32
+    fun GetFileAttributesExW(path : UInt16*, level : Int32, data : WIN32_FILE_ATTRIBUTE_DATA*) : Int32
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun GetFileInformationByHandle(handle : Void*, info : BY_HANDLE_FILE_INFORMATION*) : Int32
     fun CloseHandle(handle : Void*) : Int32
@@ -683,10 +699,11 @@ class ::File
 
       Info.new(stat_buf.st_size, perms, file_type, file_flags, mtime, owner, group, dev, ino)
     {% elsif flag?(:win32) %}
-      cpath = sys_path(p)
+      wpath = __iyi_wide_path(sys_path(p))
+      return nil if wpath.address == 0_u64
       data = uninitialized Std::File::LibKernel32::WIN32_FILE_ATTRIBUTE_DATA
       # 0 is GetFileExInfoStandard, the one level this call answers.
-      if Std::File::LibKernel32.GetFileAttributesExA(cpath, 0, pointerof(data)) == 0
+      if Std::File::LibKernel32.GetFileAttributesExW(wpath, 0, pointerof(data)) == 0
         return nil
       end
 
@@ -706,7 +723,7 @@ class ::File
       dev = 0_i64
       ino = 0_u64
       open_flags = follow_symlinks ? 0x2000000 : 0x2200000
-      handle = Std::File::LibKernel32.CreateFileA(cpath, 0, 0x7, Pointer(Void).new(0_u64), 3, open_flags, Pointer(Void).new(0_u64))
+      handle = Std::File::LibKernel32.CreateFileW(wpath, 0, 0x7, Pointer(Void).new(0_u64), 3, open_flags, Pointer(Void).new(0_u64))
       if handle.address != 0xFFFFFFFFFFFFFFFF_u64
         by_handle = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
         if Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(by_handle)) != 0
@@ -852,7 +869,11 @@ class ::File
       # directory. Both times are written, the way the arms above write the
       # pair: a FILETIME is 100-nanosecond ticks from 1601-01-01, and *time* 0
       # is the clock, which the kernel reads out in those ticks already.
-      handle = Std::File::LibKernel32.CreateFileA(sys_path(p), 0x100, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+      wpath = __iyi_wide_path(sys_path(p))
+      if wpath.address == 0_u64
+        raise "Cannot touch #{p}"
+      end
+      handle = Std::File::LibKernel32.CreateFileW(wpath, 0x100, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot touch #{p}"
       end
@@ -883,11 +904,14 @@ class ::File
         raise "Cannot rename #{o} to #{n}"
       end
     {% elsif flag?(:win32) %}
-      # MoveFileA refuses a destination that exists, where posix `rename`
+      # MoveFileW refuses a destination that exists, where posix `rename`
       # replaces it: MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED is the
       # same method's meaning, the second flag so a move across volumes is a
       # copy rather than a refusal.
-      if Std::File::LibKernel32.MoveFileExA(sys_path(o), sys_path(n), 0x3_u32) == 0
+      old_wide = __iyi_wide_path(sys_path(o))
+      new_wide = __iyi_wide_path(sys_path(n))
+      if old_wide.address == 0_u64 || new_wide.address == 0_u64 ||
+         Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
         raise "Cannot rename #{o} to #{n}"
       end
     {% end %}
@@ -901,7 +925,10 @@ class ::File
         raise "Cannot link #{o} to #{n}"
       end
     {% elsif flag?(:win32) %}
-      if Std::File::LibKernel32.CreateHardLinkA(sys_path(n), sys_path(o), Pointer(Void).new(0_u64)) == 0
+      old_wide = __iyi_wide_path(sys_path(o))
+      new_wide = __iyi_wide_path(sys_path(n))
+      if old_wide.address == 0_u64 || new_wide.address == 0_u64 ||
+         Std::File::LibKernel32.CreateHardLinkW(new_wide, old_wide, Pointer(Void).new(0_u64)) == 0
         raise "Cannot link #{o} to #{n}"
       end
     {% end %}
@@ -921,13 +948,21 @@ class ::File
       # target is a directory, which Windows decides when the link is made
       # rather than reading it off the target the way posix does.
       # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
-      # spells as the Int32 it is declared as.
-      target_attrs = Std::File::LibKernel32.GetFileAttributesA(sys_path(o))
+      # spells as the Int32 it is declared as. The target's attributes are
+      # read off the wide path already in hand rather than through the
+      # prelude's `__iyi_path_attributes`, which would convert the same string
+      # a second time to arrive at the same pointer.
+      old_wide = __iyi_wide_path(sys_path(o))
+      new_wide = __iyi_wide_path(sys_path(n))
+      if old_wide.address == 0_u64 || new_wide.address == 0_u64
+        raise "Cannot symlink #{o} to #{n}"
+      end
+      target_attrs = Std::File::LibKernel32.GetFileAttributesW(old_wide)
       link_flags = 0x2_u32
       if target_attrs != -1 && (target_attrs & 0x10) != 0
         link_flags = link_flags | 0x1_u32
       end
-      if Std::File::LibKernel32.CreateSymbolicLinkA(sys_path(n), sys_path(o), link_flags) == 0
+      if Std::File::LibKernel32.CreateSymbolicLinkW(new_wide, old_wide, link_flags) == 0_u8
         raise "Cannot symlink #{o} to #{n}"
       end
     {% end %}
@@ -994,7 +1029,11 @@ class ::File
       # The pointer is placed from FILE_BEGIN (0) and SetEndOfFile cuts there,
       # which extends with zeroes past the end exactly as posix `truncate`
       # does.
-      handle = Std::File::LibKernel32.CreateFileA(sys_path(p), 0x40000000, 0x7, Pointer(Void).new(0_u64), 3, 0, Pointer(Void).new(0_u64))
+      wpath = __iyi_wide_path(sys_path(p))
+      if wpath.address == 0_u64
+        raise "Cannot truncate #{p}"
+      end
+      handle = Std::File::LibKernel32.CreateFileW(wpath, 0x40000000, 0x7, Pointer(Void).new(0_u64), 3, 0, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot truncate #{p}"
       end

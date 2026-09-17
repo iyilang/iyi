@@ -288,6 +288,15 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # or assigned, by the rule above, so a bare mention is still caught.
     (r'`CRYSTAL_LIBRARY_PATH`|CRYSTAL_LIBRARY_PATH="\$EMPTY"',
      "the search path the build's own compiler reads, where iyi's adds instead of replacing"),
+    # The Windows job installs the other language's own package, because the
+    # compiler is still a Crystal program (SPEC.md B.2) and Windows has no
+    # second way to bootstrap it: upstream's action, the version it is asked
+    # for, and the search path that package's `crystal env` answers with,
+    # handed to the job's environment so `make -f Makefile.win` can read it.
+    # Each names upstream's artifact, not this compiler.
+    (r"crystal-lang/install-crystal", "upstream's action, which installs the bootstrap compiler"),
+    (r"^\s*crystal: \d", "the bootstrap compiler's version, that action's own input"),
+    (r'"CRYSTAL_LIBRARY_PATH=\$lib"', "the bootstrap package's search path, put in the job's environment"),
     (r"Crystal on the machine|a Crystal\b", "a sentence about the other language"),
     # Comments citing Crystal's own source, DWARF producer strings, and the
     # version banner's "a fork of Crystal X" clause. All name the other

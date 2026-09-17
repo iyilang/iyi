@@ -1452,7 +1452,7 @@ jobs:
             exit 1
           }
           $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          Write-Host "crystal libraries: $lib"
+          Write-Host "bootstrap libraries: $lib"
           Write-Host "llvm: $llvm"
           "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV

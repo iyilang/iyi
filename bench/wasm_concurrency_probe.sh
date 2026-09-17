@@ -257,6 +257,21 @@ else
   fail "expected compiler to refuse group on wasm32-wasi with explicit message"
 fi
 
+# `sleep` is the runtime's other name a plain program reaches for, and it
+# was a bare "undefined method 'sleep'" where `group` had its reason.
+cat << 'EOF' > "$WORK/sleep_refusal.iyi"
+sleep(50)
+puts "slept"
+EOF
+"$IYI" build --cross-compile --target wasm32-wasi -o "$WORK/sleep_refusal" "$WORK/sleep_refusal.iyi" > "$WORK/sleep_build.log" 2>&1
+ec=$?
+if [ $ec -ne 0 ] && grep -q "sleep is not available on wasm32-wasi: it parks a task on the scheduler" "$WORK/sleep_build.log"; then
+  pass "compiler refuses sleep on wasm32-wasi by name"
+else
+  fail "expected compiler to refuse sleep on wasm32-wasi with its reason"
+  sed 's/^/    /' "$WORK/sleep_build.log" | head -6
+fi
+
 # Failure proof: honest program without group compiles cleanly
 cat << 'EOF' > "$WORK/honest.iyi"
 puts 42

@@ -76,6 +76,18 @@
 
 ### Fixed
 
+- **`sleep` on wasm32-wasi was a bare "undefined method".** The prelude's
+  `sleep` parks a task on the scheduler and lives with the runtime, which
+  wasm32-wasi does not carry (SPEC.md III.4); `group` had its reason at
+  the same spot and `sleep` had none. It is refused by name now, in the
+  same macro block, and `bench/wasm_concurrency_probe.sh` step 4 holds
+  it. A probe of thirty-odd programs under wasmtime found nothing else:
+  a panic prints and exits 1 with its defers run, overflow, a bad index
+  and a missing key panic by name, `File` refuses by name, `Program.env`
+  is nil, stdin/stdout/stderr work, `std/time`, `std/format`, `std/env`
+  and `std/random` answer. The stack running out is still wasmtime's
+  trap (exit 134), as the stack-guard entry says.
+
 - **`File.touch(path, time)` set "now" on darwin whatever `time` said.**
   The Linux branch writes the second it is given through `utimensat`;
   the darwin branch passed a null `times` to `utimes`, which is the

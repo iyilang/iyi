@@ -1031,6 +1031,15 @@ class IyiScheduler
     elsif fd == 2_i32 || fd == 2_i64
       handle = LibC.GetStdHandle(-12)
     else
+      # A descriptor a caller already closed is -1, and `to_u64` on a
+      # negative number is a *checked* convert: a wait on a closed
+      # descriptor died of "arithmetic overflow" — a sentence with
+      # nothing in it about descriptors — in a frame the caller never
+      # wrote. std/socket met it by closing a listener from inside a
+      # handler while an accept was parked. A read of something already
+      # gone is a read of nothing, and the convert below keeps its check
+      # for every value that is not that.
+      return 0_i64 if fd.to_i64 < 0_i64
       handle = Pointer(Void).new(fd.to_i64.to_u64)
     end
 

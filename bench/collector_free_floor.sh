@@ -141,9 +141,15 @@ echo "== and they build with bdw-gc unreachable, not merely absent from the link
 # A library the binaries do not link can still be a library the build needs,
 # and two obvious ways of checking that are worthless. Unsetting LIBRARY_PATH
 # proves nothing, because brew symlinks libgc into a directory already on the
-# search path. Emptying CRYSTAL_LIBRARY_PATH proves nothing either, because
+# search path. Emptying `CRYSTAL_LIBRARY_PATH` proves nothing either, because
 # `@[Link("gc", pkg_config: "bdw-gc")]` emits its own -L from pkg-config. Both
 # were tried here and both passed while the dependency was still required.
+#
+# `CRYSTAL_LIBRARY_PATH` and not `IYI_LIBRARY_PATH`: the two are not
+# interchangeable here. The first replaces the default search path, the second
+# adds to it, so swapping them made this section pass with the collector back
+# on the binaries, which is to say it stopped measuring anything. The build
+# runs through `./bin/crystal`, so the variable that governs it is Crystal's.
 #
 # Blanking pkg-config as well is what makes it genuinely unreachable, and
 # `pkg-config --libs bdw-gc` failing first is the control: without it this

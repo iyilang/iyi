@@ -121,6 +121,12 @@ class Iyi::Command
     wanted.each { |name| visit.call(name) }
 
     executable = Process.executable_path || abort!("bind: cannot find the compiler's own executable", :USAGE_ERROR)
+    # And one that is there and will not take a file: the first thing
+    # written is the shard's bind log, and its "Permission denied" named
+    # the log, not the flag.
+    if Dir.exists?(mods) && !File.writable?(mods)
+      abort! "bind: --mods #{mods} will not take the .iyimod files: no permission to write there", :USAGE_ERROR
+    end
     Dir.mkdir_p(mods)
     mods_path = File.expand_path(mods)
 

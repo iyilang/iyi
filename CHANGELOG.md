@@ -112,6 +112,17 @@
 
 ### Fixed
 
+- **`bind --mods` and `migrate --out` died of the filesystem's words for a
+  directory that will not take a file.** `--mods ro/` was
+  `ro/x.bind.log: Permission denied`, naming the log and no flag;
+  `migrate --out ro/` the first module's; and `--out` naming a file was
+  `mkdir`'s `File exists`. Each is refused up front by the flag it was
+  given, in the sentence `build -o` already uses. `bench/verbs_exercise.sh`
+  holds the three. A probe of forty edges found nothing else: an empty
+  shard, a missing entry file, a cyclic require, a hyphenated name, a
+  shard depending on a shard, `--out` inside the tree, and a syntax error
+  each answer by name.
+
 - **`sleep` on wasm32-wasi was a bare "undefined method".** The prelude's
   `sleep` parks a task on the scheduler and lives with the runtime, which
   wasm32-wasi does not carry (SPEC.md III.4); `group` had its reason at
@@ -6772,7 +6783,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 14,208-line library and nothing else. Every other
+  written against iyi's own 14,217-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -516,6 +516,20 @@ refuses "a file where --mods' directory goes" "and bindhere/shard.yml is a file"
   "$IYI" bind --lib bindhere/lib --mods bindhere/shard.yml
 refuses "an empty shard name" "the shard name is empty" -- \
   "$IYI" bind --lib bindhere/lib --mods "$WORK/bindmods" ""
+# A directory that is there and will not take a file: `--mods` died of
+# the bind log's "Permission denied", `--out` of the first module's, and
+# `--out` naming a file of mkdir's "File exists". `$unwritable` is the
+# directory found above, since a mode bit does not bind as root.
+if [ -n "$unwritable" ]; then
+  chmod 500 "$WORK/readonly"
+  refuses "a --mods directory that will not take the files" "no permission to write there" -- \
+    "$IYI" bind --lib bindhere/lib --mods "$unwritable"
+  refuses "a --out directory that will not take the modules" "no permission to write there" -- \
+    "$IYI" migrate tree --out "$unwritable"
+  chmod 700 "$WORK/readonly"
+fi
+refuses "a file where --out's directory goes" "and $WORK/bindhere/shard.yml is a file" -- \
+  "$IYI" migrate tree --out bindhere/shard.yml
 # The refusal `migrate` was asked for is the one it did not write: nothing
 # under `--out`, and no directory named after the flag.
 if [ -e "$WORK/migrated" ] || [ -e "$WORK/--check" ]; then

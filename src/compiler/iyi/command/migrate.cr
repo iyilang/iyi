@@ -199,17 +199,17 @@ class Iyi::Command
       # source, and that is worth saying rather than discovering.
       by_module = requirers.select(&.ends_with?(".iyi"))
       unless by_module.empty?
-        named = by_module.first(4).map { |file| file.lchop(project_root + "/") }.join(", ")
+        named = by_module.first(4).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
         more = by_module.size > 4 ? " and #{by_module.size - 4} more" : ""
-        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{single.lchop(project_root + "/")} (#{named}#{more}); " \
+        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); " \
                "a `require` that finds a `.iyi` gets a compilation unit and none of its names, so that consumer needs an `import` - which is the whole tree's job: " \
                "#{Command.program_name} migrate #{File.dirname(single)} --out DIR", :USAGE_ERROR
       end
       by_crystal = requirers.reject(&.ends_with?(".iyi"))
       unless by_crystal.empty?
-        named = by_crystal.first(3).map { |file| file.lchop(project_root + "/") }.join(", ")
+        named = by_crystal.first(3).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
         more = by_crystal.size > 3 ? " and #{by_crystal.size - 3} more" : ""
-        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{single.lchop(project_root + "/")} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
+        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
       end
     end
     # A shards directory is other projects' source. `shards install`
@@ -365,7 +365,7 @@ class Iyi::Command
       next unless File.file?(file)
       next if file.ends_with?(".cr")
       next if shards_install?(file, src)
-      relative_asset = file.lchop(project_root).lchop('/')
+      relative_asset = file.lchop(project_root).lchop(File::SEPARATOR)
       target = File.join(out_dir, relative_asset)
       Dir.mkdir_p(File.dirname(target))
       if TEMPLATE_EXTENSIONS.any? { |extension| file.ends_with?(extension) }
@@ -828,7 +828,10 @@ class Iyi::Command
       # `require` inside a spec still means what it meant.
       suite = String.build do |io|
         specs.each do |spec|
-          io << %(require ".) << spec.lchop(spec_dir).rchop(".cr") << %("\n)
+          # The path is native so it can be chopped against `spec_dir`, and
+          # posix again inside the `require`: that string is Crystal's to
+          # resolve, and its grammar has one separator.
+          io << %(require ".) << ::Path[spec.lchop(spec_dir).rchop(".cr")].to_posix << %("\n)
         end
       end
       programs << {"#{specs.size} spec file#{specs.size == 1 ? "" : "s"}",

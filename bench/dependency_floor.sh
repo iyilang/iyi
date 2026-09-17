@@ -137,7 +137,13 @@ trap 'rm -rf "$WORK"' EXIT
 # the second time that list has handed a symbol back. Neither adds a
 # library: libSystem on darwin, a syscall on Linux, and the
 # `ALLOWED_LIBS_PROGRAM` check below is what proves it.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
+# `isatty` is the newest, and it arrived for a defect rather than a
+# feature: `std/colorize` wrote its escapes into pipes and files because
+# the prelude had no way to ask whether standard output was a terminal.
+# Windows answers with `GetConsoleMode`, Linux by making the terminal-only
+# `ioctl` itself, and darwin with libSystem's own `isatty` — the same
+# library every other symbol on this line comes from.
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

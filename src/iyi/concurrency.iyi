@@ -695,9 +695,7 @@ class IyiSchedulerState
 end
 
 class IyiScheduler
-  {% unless flag?(:win32) %}
-    @[ThreadLocal]
-  {% end %}
+  @[ThreadLocal]
   @@state : IyiSchedulerState?
   @@states_head : IyiSchedulerState?
 

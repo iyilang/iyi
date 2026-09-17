@@ -1255,9 +1255,7 @@ require "./file"
       SLICE         = 65536_u64
       CENTRAL_ALLOCATED = 1280_u64
 
-      {% unless flag?(:win32) %}
-        @[ThreadLocal]
-      {% end %}
+      @[ThreadLocal]
       @@cache : UInt64 = 0_u64
       @@caches : UInt64 = 0_u64
       @@central : UInt64 = 0_u64
@@ -1348,6 +1346,30 @@ require "./file"
       def self.in_allocator? : Bool
         page = @@cache
         page != 0 && read64(page + CACHE_INSIDE) != 0
+      end
+
+      # The same two questions, asked about a named cache rather than this
+      # thread's, which is what Windows needs: a stop there is
+      # `SuspendThread` and not a handler running on the thread itself, so
+      # a suspended thread cannot answer for itself. The thread that
+      # stopped it reads the cache the stopped thread published on its line
+      # and, finding a `take` half done, leaves the request there and lets
+      # it run on — a chunk live in a register the scan has no name for, or
+      # the centre's lock held against the sweep, is the same hazard the
+      # POSIX handler refuses to park into. The park happens at `leave`,
+      # where a deferred stop is always paid.
+      def self.cache_inside?(page : UInt64) : Bool
+        page != 0 && read64(page + CACHE_INSIDE) != 0
+      end
+
+      def self.request_stop_at(page : UInt64) : Nil
+        write64(page + CACHE_REQUEST, 1_u64)
+      end
+
+      # This thread's cache page, for a thread that wants to publish it
+      # where another thread can find it.
+      def self.cache_page : UInt64
+        cache.address
       end
 
       def self.request_stop : Nil
@@ -2955,6 +2977,20 @@ require "./file"
           teb
         end
 
+        # Every general register a suspended thread holds, onto its line.
+        # Eight of them were spilled here once — the callee-saved set — on
+        # the reasoning that a call's caller-saved registers are already on
+        # the stack. That reasoning belongs to a *voluntary* stop, which
+        # `stop_here` is: a thread suspended by another one stopped at an
+        # instruction nobody chose, and an object whose only reference sits
+        # in `rax` between an allocation and its store is live. The POSIX
+        # handler copies all sixteen the kernel saved for the same reason
+        # (`IYI_UC_COUNT`), and the line has room for thirty-two.
+        #
+        # The offsets are CONTEXT's on x86-64: ContextFlags at 48, and the
+        # integer registers from Rax at 120 through Rip at 248. Rsp is not
+        # spilled — it is the answer, and the range above it is the stack
+        # the collector walks.
         def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
           ctx_buf = uninitialized UInt8[1280]
           addr = pointerof(ctx_buf).address + 15_u64
@@ -2964,14 +3000,22 @@ require "./file"
           if LibC.GetThreadContext(thread_handle, ctx_ptr) == 0
             return 0_u64
           end
-          IyiHeap.write64(out_spill + 0_u64, IyiHeap.read64(ctx_addr + 144_u64))  # Rbx
-          IyiHeap.write64(out_spill + 8_u64, IyiHeap.read64(ctx_addr + 160_u64))  # Rbp
-          IyiHeap.write64(out_spill + 16_u64, IyiHeap.read64(ctx_addr + 176_u64)) # Rdi
-          IyiHeap.write64(out_spill + 24_u64, IyiHeap.read64(ctx_addr + 168_u64)) # Rsi
-          IyiHeap.write64(out_spill + 32_u64, IyiHeap.read64(ctx_addr + 216_u64)) # R12
-          IyiHeap.write64(out_spill + 40_u64, IyiHeap.read64(ctx_addr + 224_u64)) # R13
-          IyiHeap.write64(out_spill + 48_u64, IyiHeap.read64(ctx_addr + 232_u64)) # R14
-          IyiHeap.write64(out_spill + 56_u64, IyiHeap.read64(ctx_addr + 240_u64)) # R15
+          IyiHeap.write64(out_spill + 0_u64, IyiHeap.read64(ctx_addr + 120_u64))   # Rax
+          IyiHeap.write64(out_spill + 8_u64, IyiHeap.read64(ctx_addr + 128_u64))   # Rcx
+          IyiHeap.write64(out_spill + 16_u64, IyiHeap.read64(ctx_addr + 136_u64))  # Rdx
+          IyiHeap.write64(out_spill + 24_u64, IyiHeap.read64(ctx_addr + 144_u64))  # Rbx
+          IyiHeap.write64(out_spill + 32_u64, IyiHeap.read64(ctx_addr + 160_u64))  # Rbp
+          IyiHeap.write64(out_spill + 40_u64, IyiHeap.read64(ctx_addr + 168_u64))  # Rsi
+          IyiHeap.write64(out_spill + 48_u64, IyiHeap.read64(ctx_addr + 176_u64))  # Rdi
+          IyiHeap.write64(out_spill + 56_u64, IyiHeap.read64(ctx_addr + 184_u64))  # R8
+          IyiHeap.write64(out_spill + 64_u64, IyiHeap.read64(ctx_addr + 192_u64))  # R9
+          IyiHeap.write64(out_spill + 72_u64, IyiHeap.read64(ctx_addr + 200_u64))  # R10
+          IyiHeap.write64(out_spill + 80_u64, IyiHeap.read64(ctx_addr + 208_u64))  # R11
+          IyiHeap.write64(out_spill + 88_u64, IyiHeap.read64(ctx_addr + 216_u64))  # R12
+          IyiHeap.write64(out_spill + 96_u64, IyiHeap.read64(ctx_addr + 224_u64))  # R13
+          IyiHeap.write64(out_spill + 104_u64, IyiHeap.read64(ctx_addr + 232_u64)) # R14
+          IyiHeap.write64(out_spill + 112_u64, IyiHeap.read64(ctx_addr + 240_u64)) # R15
+          IyiHeap.write64(out_spill + 120_u64, IyiHeap.read64(ctx_addr + 248_u64)) # Rip
           IyiHeap.read64(ctx_addr + 152_u64) # Rsp
         end
       {% else %}
@@ -3451,9 +3495,7 @@ require "./file"
       #   +24  the arena its pending live count is for   +32  the count
       #   +40  the type id whose layout entry is cached   +48  the entry
       #   +88  the stack's capacity in entries
-      {% unless flag?(:win32) %}
-        @[ThreadLocal]
-      {% end %}
+      @[ThreadLocal]
       @@worker : UInt64 = 0_u64
       @@collector_worker : UInt64 = 0_u64
       W_STACK = 0_u64

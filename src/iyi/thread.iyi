@@ -73,6 +73,10 @@
   # +48  pc
   # +56  the thread's IyiThread object, raw, for the child to find its body
   # +64  set while the thread is exiting: a stop no longer names it
+  # +72  this thread's allocator cache, published at registration. Windows
+  #      reads it from the other side: a suspended thread cannot answer
+  #      "am I inside the allocator?" for itself, and that answer decides
+  #      whether the stop may take it where it stands
   # +128 the spill: 32 words for whatever registers the stop captured
   IYI_TL_HANDLE  =   0_u64
   IYI_TL_NEXT    =   8_u64
@@ -82,6 +86,7 @@
   IYI_TL_SP      =  40_u64
   IYI_TL_PC      =  48_u64
   IYI_TL_OBJECT  =  56_u64
+  IYI_TL_CACHE   =  72_u64
   IYI_TL_SPILL   = 128_u64
   IYI_TL_SPILL_END = 384_u64
 
@@ -338,9 +343,7 @@
     # This thread's line; 0 on a thread nobody registered, which is the
     # main thread before the first `start`, and a child in the instant
     # before its first instruction — both found by handle then.
-    {% unless flag?(:win32) %}
-      @[ThreadLocal]
-    {% end %}
+    @[ThreadLocal]
     @@line : UInt64 = 0_u64
     # Every line, from the newest; the control page; the count of threads
     # a stop must hear from besides the stopper; the handler, once.
@@ -348,6 +351,12 @@
     @@control : UInt64 = 0_u64
     @@count : Int64 = 0_i64
     @@installed : Bool = false
+    {% if flag?(:win32) %}
+      # How many threads the last stop left running with a request to
+      # park, which is how many it waits for and how many the resume
+      # waits to see leave.
+      @@deferred : Int64 = 0_i64
+    {% end %}
     # Every thread object ever started, so a body's closure is rooted from
     # `start` until the thread that runs it holds it on its own stack.
     @@head : IyiThread?
@@ -500,6 +509,13 @@
           Pointer(Void).new(0xFFFFFFFFFFFFFFFF_u64), pointerof(real_handle), 0_i32, 0_i32, 2_i32)
         IyiHeap.write64(line + IYI_TL_HANDLE, real_handle.address)
       {% end %}
+      # Windows reads this thread's allocator state from another thread,
+      # so the cache has to exist and be findable before the first stop
+      # can name this line. Made here rather than on first allocation:
+      # one page, once per thread.
+      {% if flag?(:win32) %}
+        IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
+      {% end %}
       IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.stack_base)
       @@line = line
       link(line)
@@ -600,6 +616,9 @@
         IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)
       {% elsif flag?(:win32) %}
         IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
+        # Before the body runs, so the first stop that names this line
+        # reads a cache and not a zero (see `suspend_others`).
+        IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
       {% end %}
       thread = @@head
       while thread.is_a?(IyiThread)
@@ -608,6 +627,11 @@
       end
       raise "a thread started with no body" unless thread.is_a?(IyiThread)
       thread.proc.call
+      # The cache goes before it is unmapped: a stop that read this line
+      # after the retire would follow a pointer into a freed mapping.
+      {% if flag?(:win32) %}
+        IyiHeap.write64(line + IYI_TL_CACHE, 0_u64)
+      {% end %}
       IyiHeap.retire_cache
       unlink(line)
     end
@@ -681,6 +705,56 @@
       end
     {% end %}
 
+    {% if flag?(:win32) %}
+      # Windows has no signal to deliver: the thread that stops the others
+      # suspends them where they stand. The one check the POSIX handler
+      # makes on the thread itself — never park a thread inside the
+      # allocator, because a `take` half done holds a chunk in a register
+      # the scan has no name for and may hold the centre's lock against
+      # the sweep — is made from here instead, off the cache the stopped
+      # thread published on its line.
+      #
+      # A thread found inside gets the request and its suspend back, and
+      # parks itself at `leave`, which is exactly POSIX's deferral. The
+      # first shape of this fix took the suspend back and simply retried,
+      # and four threads allocating never left the retry: somebody was
+      # always inside. The request converges because `leave` runs on every
+      # exit from the allocator and the lock's spin parks too.
+      private def self.resume_suspended(line : UInt64) : Nil
+        cursor = @@lines
+        while cursor != 0
+          if cursor != line
+            LibC.ResumeThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE)))
+          end
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
+      end
+
+      # Answers how many threads were left running with a request to park,
+      # which is how many the stop then waits to hear from.
+      private def self.suspend_others(line : UInt64) : Int64
+        deferred = 0_i64
+        cursor = @@lines
+        while cursor != 0
+          if cursor != line
+            handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
+            LibC.SuspendThread(handle)
+            cache = IyiHeap.read64(cursor + IYI_TL_CACHE)
+            if IyiHeap.cache_inside?(cache)
+              IyiHeap.request_stop_at(cache)
+              LibC.ResumeThread(handle)
+              deferred = deferred + 1_i64
+            else
+              sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
+              IyiHeap.write64(cursor + IYI_TL_SP, sp)
+            end
+          end
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
+        deferred
+      end
+    {% end %}
+
     # The thread that runs this holds the runtime lock. Every other
     # registered thread is signalled and waited for; when this returns,
     # each has its registers and sp on its line and is parked. Answers
@@ -695,29 +769,34 @@
       word(page + IYI_TC_SUSPENDED).value.set(0_u64)
       word(page + IYI_TC_RESUMED).value.set(0_u64)
       word(page + IYI_TC_RESUME).value.set(0_u64)
-      others = 0_i64
-      cursor = @@lines
-      while cursor != 0
-        if cursor != line
-          {% if flag?(:linux) %}
-            tid = IyiHeap.read64(cursor + IYI_TL_HANDLE).to_i64
-            result = __iyi_conc_syscall3(IYI_SYS_TGKILL, IyiHeap.read64(page + IYI_TC_PID).to_i64, tid, IYI_SIGSTOP_THE_WORLD)
-            raise "tgkill failed: #{result}" if result < 0
-          {% elsif flag?(:darwin) %}
-            handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
-            result = LibC.pthread_kill(handle, IYI_SIGSTOP_THE_WORLD)
-            raise "pthread_kill failed: #{result}" if result != 0
-          {% elsif flag?(:win32) %}
-            handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
-            LibC.SuspendThread(handle)
-            sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
-            IyiHeap.write64(cursor + IYI_TL_SP, sp)
-          {% end %}
-          others = others + 1_i64
+      {% if flag?(:win32) %}
+        # Every other thread is either stopped where it stood, with its
+        # registers on its line, or running with a request to park. Only
+        # the second kind is waited for, and only it counts itself in.
+        others = @@count - (line != 0 ? 1_i64 : 0_i64)
+        deferred = suspend_others(line)
+        @@deferred = deferred
+        while word(page + IYI_TC_SUSPENDED).value.get < deferred.to_u64
+          yield_cpu
         end
-        cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
-      end
-      {% unless flag?(:win32) %}
+      {% else %}
+        others = 0_i64
+        cursor = @@lines
+        while cursor != 0
+          if cursor != line
+            {% if flag?(:linux) %}
+              tid = IyiHeap.read64(cursor + IYI_TL_HANDLE).to_i64
+              result = __iyi_conc_syscall3(IYI_SYS_TGKILL, IyiHeap.read64(page + IYI_TC_PID).to_i64, tid, IYI_SIGSTOP_THE_WORLD)
+              raise "tgkill failed: #{result}" if result < 0
+            {% elsif flag?(:darwin) %}
+              handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
+              result = LibC.pthread_kill(handle, IYI_SIGSTOP_THE_WORLD)
+              raise "pthread_kill failed: #{result}" if result != 0
+            {% end %}
+            others = others + 1_i64
+          end
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
         while word(page + IYI_TC_SUSPENDED).value.get < others.to_u64
           yield_cpu
         end
@@ -733,13 +812,13 @@
       page = control
       word(page + IYI_TC_RESUME).value.set(1_u64)
       {% if flag?(:win32) %}
-        cursor = @@lines
-        while cursor != 0
-          if cursor != @@line
-            handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
-            LibC.ResumeThread(handle)
-          end
-          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        # A thread that parked itself is not suspended, and `ResumeThread`
+        # on a suspend count of zero is nothing: the flag above releases
+        # the one and this releases the other. The parked ones are waited
+        # for, because the next stop clears the flag they are watching.
+        resume_suspended(@@line)
+        while word(page + IYI_TC_RESUMED).value.get < @@deferred.to_u64
+          yield_cpu
         end
       {% else %}
         page = control

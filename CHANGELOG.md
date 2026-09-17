@@ -178,6 +178,16 @@
 
 ### Fixed
 
+- **`bench/generic_boundary.py` counts a reopening module apart.** Once
+  `std/int` and `std/float` carried what they add to the prelude's types,
+  every body of theirs travels - the machine code sits in the owner's
+  unit, which is the prelude's - and the corpus went to 60% bodies over
+  the 50% line. The line is about a module's own surface; the two are
+  printed on their own row, with the number that would take them out
+  named: codegen owning a reopening's code by the module that wrote it.
+  The script's section table was also two numbers stale (`reopened` is
+  17, `libs` 18, `layouts` 64), so it had never seen a reopened section.
+
 - **A stray `!` before the module header crashed codegen.** A unary
   operator reaches across a newline for its operand, so `!` on the line
   above `module x` parsed as `!(module x ...)`: past the one-module rule,

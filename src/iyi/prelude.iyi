@@ -7524,6 +7524,318 @@ require "./file"
     result
   end
 {% end %}
+
+{% if flag?(:win32) %}
+  # The four division helpers LLVM calls for a 128-bit `/` and `%`, and why
+  # Windows is the target that has to carry them.
+  #
+  # LLVM has no 128-bit divide instruction to lower to on any target: an
+  # `sdiv`/`udiv`/`srem`/`urem` on `i128` becomes a call to `__divti3`,
+  # `__udivti3`, `__modti3` or `__umodti3`, the compiler-rt names. Linux and
+  # darwin have that library on the link line already, as libgcc or as the
+  # platform's own compiler-rt; the msvc link step has neither, so every
+  # program that divided a 128-bit integer failed to link:
+  #
+  #   I-nt128.o0.obj : error LNK2019: unresolved external symbol __modti3
+  #   referenced in function .2A.Int128.23..25..3C.Int128.3E..3A.Int128
+  #
+  # which is `std/int`'s `Int128#%`. Linking `clang_rt.builtins-x86_64.lib`
+  # for four functions would move this tree's dependency floor
+  # (`bench/dependency_floor.sh`: kernel32, advapi32, ws2_32, the CRT import
+  # libraries and the opt-in collector), so the four are defined here
+  # instead, the same way `__multi3` above is defined for the targets that
+  # ask for it.
+  #
+  # These are ABI, not library API: LLVM emits the calls behind the
+  # program's back, so the names, the parameters and the return are the
+  # backend's, and a definition that merely looks right is a silently wrong
+  # quotient. The shape below is measured, from `--emit asm` on a program
+  # that divides a `UInt128`: the call site passes each operand *by
+  # address*, dividend in rcx and divisor in rdx, and reads the answer out
+  # of xmm0 —
+  #
+  #   lea rcx, [rsp + 80]   ; the dividend's two words
+  #   lea rdx, [rsp + 64]   ; the divisor's two words
+  #   call __udivti3
+  #   movq rax, xmm0
+  #   pshufd xmm0, xmm0, 238
+  #   movq rdx, xmm0
+  #
+  # which is the Win64 rule for a 16-byte value, and not the rax:rdx pair
+  # that `fun __udivti3(a : UInt128, b : UInt128) : UInt128` is lowered
+  # to. Written that way first, every quotient was 0 and the program then
+  # died of a divide by zero fault: the callee was reading register halves
+  # nobody had put operands in. So the parameters here are pointers, the
+  # answer is put in xmm0 by hand, and the functions return nothing —
+  # `__iyi_win_answer128` below says what happened to the one iyi return
+  # type that reaches that register.
+  #
+  # Nothing below divides a 128-bit value, because `/` and `%` on one are
+  # calls to these very functions and the program would recurse until the
+  # stack ran out. The arithmetic is 64-bit words throughout, read out of
+  # the operands through a pointer the way `__multi3` reads them; win32 is
+  # little-endian, so word 0 is the low half.
+
+  # How many bits the word occupies: the highest set bit's index plus one,
+  # and zero for zero. It is what keeps the long division below off the
+  # leading zeros of the dividend — 2^100 over a divisor above 2^64 costs
+  # the 101 steps its bits ask for, not 128.
+  def __iyi_win_bit_span(word : UInt64) : Int32
+    value = word
+    span = 0
+    if value.unsafe_shr(32) != 0_u64
+      value = value.unsafe_shr(32)
+      span = span + 32
+    end
+    if value.unsafe_shr(16) != 0_u64
+      value = value.unsafe_shr(16)
+      span = span + 16
+    end
+    if value.unsafe_shr(8) != 0_u64
+      value = value.unsafe_shr(8)
+      span = span + 8
+    end
+    if value.unsafe_shr(4) != 0_u64
+      value = value.unsafe_shr(4)
+      span = span + 4
+    end
+    if value.unsafe_shr(2) != 0_u64
+      value = value.unsafe_shr(2)
+      span = span + 2
+    end
+    if value.unsafe_shr(1) != 0_u64
+      value = value.unsafe_shr(1)
+      span = span + 1
+    end
+    value == 0_u64 ? 0 : span + 1
+  end
+
+  # A word the optimiser cannot see the value of. It exists for the
+  # divide-by-zero case below: inside a branch that has just tested the
+  # divisor's low word against zero, LLVM knows what that word is, and it
+  # folds a divide by a known zero to poison rather than emitting the
+  # instruction. Measured: at `--release` the 128-bit divide by zero over
+  # a dividend wider than a word printed 1554060939272 and exited 0, while
+  # the same program at -O0 faulted. The word travels through an empty asm
+  # here, so the divide that follows is a real one.
+  def __iyi_win_opaque_word(word : UInt64) : UInt64
+    answer = uninitialized UInt64
+    asm("" : "=r"(answer) : "r"(word) :: "volatile")
+    answer
+  end
+
+  # The unsigned kernel: quotient and remainder of one 128-bit division,
+  # both written through the caller's pointers, which is compiler-rt's own
+  # `__udivmodti4` shape. One kernel answers all four names, and the
+  # remainder falls out of the same loop the quotient does, so `%` costs a
+  # division and not a division plus a multiply.
+  #
+  # Division by zero is the processor's, not this file's. Measured on this
+  # machine, an iyi program whose 64-bit divisor is zero prints nothing and
+  # the process dies with exit code 0xC0000094,
+  # STATUS_INTEGER_DIVIDE_BY_ZERO — the runtime's vectored filter answers
+  # only for a stack overflow and an access violation, so the fault travels
+  # to Windows untouched. The two word-sized cases below are therefore left
+  # to the hardware `div`, which is the instruction that raises exactly
+  # that, rather than given a check of their own: a second behaviour for a
+  # divisor of zero, invented here and different at 128 bits than at 64,
+  # would be the worse answer. It is also what compiler-rt does —
+  # `n.s.high % d.s.low` on a zero low word is in `udivmodti4.c` for this
+  # reason. `std/int`'s `//` and `%` still refuse a zero divisor with a
+  # sentence before any of this is reached; what is matched here is what
+  # `unsafe_div` and `unsafe_mod` do.
+  def __iyi_win_udivmod128(a : UInt128, b : UInt128, quotient : Pointer(UInt128), remainder : Pointer(UInt128)) : Nil
+    dividend = a
+    divisor = b
+    dividend_words = pointerof(dividend).as(Pointer(UInt64))
+    divisor_words = pointerof(divisor).as(Pointer(UInt64))
+    a_low = dividend_words.value
+    a_high = (dividend_words + 1_i64).value
+    b_low = divisor_words.value
+    b_high = (divisor_words + 1_i64).value
+
+    quotient_words = quotient.as(Pointer(UInt64))
+    remainder_words = remainder.as(Pointer(UInt64))
+
+    if b_high == 0_u64
+      if a_high == 0_u64
+        # Both operands inside one word: one 64-bit divide answers it, and
+        # a zero divisor faults here.
+        quotient_words.value = a_low.unsafe_div(b_low)
+        (quotient_words + 1_i64).value = 0_u64
+        remainder_words.value = a_low.unsafe_mod(b_low)
+        (remainder_words + 1_i64).value = 0_u64
+        return nil
+      end
+      if b_low == 0_u64
+        # A zero divisor under a dividend too wide for a word: the high
+        # word divided by it raises the same fault, and the divisor goes
+        # through `__iyi_win_opaque_word` so that the divide is still there
+        # at -O3.
+        zero = __iyi_win_opaque_word(b_low)
+        quotient_words.value = a_high.unsafe_div(zero)
+        (quotient_words + 1_i64).value = 0_u64
+        remainder_words.value = a_high.unsafe_mod(zero)
+        (remainder_words + 1_i64).value = 0_u64
+        return nil
+      end
+    end
+
+    # Shift-subtract long division, most significant bit first: the
+    # remainder takes one bit of the dividend per step, and the step where
+    # it reaches the divisor subtracts and sets that bit of the quotient.
+    # A 128-bit compare is the high words, then the low; a 128-bit subtract
+    # is the low words with the borrow carried into the high.
+    q_low = 0_u64
+    q_high = 0_u64
+    r_low = 0_u64
+    r_high = 0_u64
+    bit = a_high == 0_u64 ? __iyi_win_bit_span(a_low) - 1 : __iyi_win_bit_span(a_high) + 63
+    while bit >= 0
+      r_high = r_high.unsafe_shl(1) | r_low.unsafe_shr(63)
+      r_low = r_low.unsafe_shl(1)
+      r_low = r_low | (bit >= 64 ? a_high.unsafe_shr(bit - 64) & 1_u64 : a_low.unsafe_shr(bit) & 1_u64)
+      if r_high > b_high || (r_high == b_high && r_low >= b_low)
+        borrow = r_low < b_low ? 1_u64 : 0_u64
+        r_low = r_low &- b_low
+        r_high = (r_high &- b_high) &- borrow
+        if bit >= 64
+          q_high = q_high | 1_u64.unsafe_shl(bit - 64)
+        else
+          q_low = q_low | 1_u64.unsafe_shl(bit)
+        end
+      end
+      bit = bit - 1
+    end
+
+    quotient_words.value = q_low
+    (quotient_words + 1_i64).value = q_high
+    remainder_words.value = r_low
+    (remainder_words + 1_i64).value = r_high
+    nil
+  end
+
+  # The signed pair, built out of the unsigned kernel: each operand's sign
+  # is the top bit of its high word, the magnitudes are the two's
+  # complement negations, and C's rules put the signs back — the quotient
+  # takes the two signs multiplied, the remainder takes the dividend's.
+  #
+  # The one magnitude that does not fit needs no case of its own: negating
+  # the most negative Int128 yields the same two words, and read unsigned
+  # they are 2^127, which is its magnitude exactly. That also settles
+  # `MIN / -1`, whose true quotient is one past the type: the unsigned
+  # quotient is 2^127, negating it gives back 2^127, and the words read
+  # signed are MIN again — the wrap the hardware and compiler-rt both
+  # answer for a division C leaves undefined. `std/int`'s `//` and `%`
+  # refuse that pair before ever reaching here.
+  def __iyi_win_divmod128_signed(a : Int128, b : Int128, quotient : Pointer(Int128), remainder : Pointer(Int128)) : Nil
+    left = a
+    right = b
+    left_words = pointerof(left).as(Pointer(UInt64))
+    right_words = pointerof(right).as(Pointer(UInt64))
+    a_low = left_words.value
+    a_high = (left_words + 1_i64).value
+    b_low = right_words.value
+    b_high = (right_words + 1_i64).value
+
+    a_negative = a_high.unsafe_shr(63) != 0_u64
+    b_negative = b_high.unsafe_shr(63) != 0_u64
+    if a_negative
+      a_borrow = a_low != 0_u64 ? 1_u64 : 0_u64
+      a_low = 0_u64 &- a_low
+      a_high = (0_u64 &- a_high) &- a_borrow
+    end
+    if b_negative
+      b_borrow = b_low != 0_u64 ? 1_u64 : 0_u64
+      b_low = 0_u64 &- b_low
+      b_high = (0_u64 &- b_high) &- b_borrow
+    end
+
+    magnitude_a = uninitialized UInt128
+    magnitude_b = uninitialized UInt128
+    magnitude_a_words = pointerof(magnitude_a).as(Pointer(UInt64))
+    magnitude_b_words = pointerof(magnitude_b).as(Pointer(UInt64))
+    magnitude_a_words.value = a_low
+    (magnitude_a_words + 1_i64).value = a_high
+    magnitude_b_words.value = b_low
+    (magnitude_b_words + 1_i64).value = b_high
+
+    unsigned_quotient = uninitialized UInt128
+    unsigned_remainder = uninitialized UInt128
+    __iyi_win_udivmod128(magnitude_a, magnitude_b, pointerof(unsigned_quotient), pointerof(unsigned_remainder))
+
+    quotient_source = pointerof(unsigned_quotient).as(Pointer(UInt64))
+    remainder_source = pointerof(unsigned_remainder).as(Pointer(UInt64))
+    q_low = quotient_source.value
+    q_high = (quotient_source + 1_i64).value
+    r_low = remainder_source.value
+    r_high = (remainder_source + 1_i64).value
+
+    if a_negative != b_negative
+      q_borrow = q_low != 0_u64 ? 1_u64 : 0_u64
+      q_low = 0_u64 &- q_low
+      q_high = (0_u64 &- q_high) &- q_borrow
+    end
+    if a_negative
+      r_borrow = r_low != 0_u64 ? 1_u64 : 0_u64
+      r_low = 0_u64 &- r_low
+      r_high = (0_u64 &- r_high) &- r_borrow
+    end
+
+    quotient_words = quotient.as(Pointer(UInt64))
+    quotient_words.value = q_low
+    (quotient_words + 1_i64).value = q_high
+    remainder_words = remainder.as(Pointer(UInt64))
+    remainder_words.value = r_low
+    (remainder_words + 1_i64).value = r_high
+    nil
+  end
+
+  # The answer, into the register the call site reads it from: one
+  # unaligned 16-byte load, and it is the last thing each entry point
+  # does. Nothing after it touches xmm0, so the register still holds both
+  # words at the `ret`.
+  #
+  # The value is not handed back as a return value, because a 128-bit one
+  # has no iyi type that lands in xmm0. A `Float64` out of the asm was
+  # tried and answered every wide quotient with its low word and a zero
+  # high word: a double is 64 bits, so LLVM rounded the register through
+  # the stack — `movsd qword ptr [rsp + 8], xmm0` and back — and the high
+  # lane went with it. These functions therefore return nothing, and the
+  # register is the answer.
+  def __iyi_win_answer128(value : Void*) : Nil
+    asm("movups ($0), %xmm0" :: "r"(value) : "xmm0" : "volatile")
+    nil
+  end
+
+  fun __udivti3(a : Pointer(UInt128), b : Pointer(UInt128)) : Nil
+    quotient = uninitialized UInt128
+    remainder = uninitialized UInt128
+    __iyi_win_udivmod128(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(quotient).as(Void*))
+  end
+
+  fun __umodti3(a : Pointer(UInt128), b : Pointer(UInt128)) : Nil
+    quotient = uninitialized UInt128
+    remainder = uninitialized UInt128
+    __iyi_win_udivmod128(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(remainder).as(Void*))
+  end
+
+  fun __divti3(a : Pointer(Int128), b : Pointer(Int128)) : Nil
+    quotient = uninitialized Int128
+    remainder = uninitialized Int128
+    __iyi_win_divmod128_signed(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(quotient).as(Void*))
+  end
+
+  fun __modti3(a : Pointer(Int128), b : Pointer(Int128)) : Nil
+    quotient = uninitialized Int128
+    remainder = uninitialized Int128
+    __iyi_win_divmod128_signed(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(remainder).as(Void*))
+  end
+{% end %}
 # ── end of the memory layer ─────────────────────────────────────────────
 
 # The three symbols an `ensure` names and a `defer` links: a personality,

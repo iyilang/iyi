@@ -165,7 +165,12 @@
   the verb that rebuilds what it is about: `iyi bind` for a boundary,
   `--emit-iyimod` for a module of one's own. `bench/bind_roundtrip.sh`
   holds both directions — an edited shard is refused by name, and a
-  boundary whose checkout is gone still builds.
+  boundary whose checkout is gone still builds — and that the inputs are
+  the shard's own: "under the shard's directory" was a bare `starts_with?`
+  on the dirname, so `lib/radix/src-extra/extra.cr` was recorded as
+  `lib/radix/src`'s and the boundary went stale whenever the neighbour
+  changed. The same rule decided which types and defs were the shard's;
+  the directory carries its separator now, in every one of those places.
 
 - **`Hashable` promised what `std/traits` had not loaded.** `hash_key`
   forwards to the value's own `hash`; the prelude defines `hash` for

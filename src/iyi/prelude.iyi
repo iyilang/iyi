@@ -409,16 +409,24 @@ end
 
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE
   # is all bits set, which as an unsigned address plus one wraps to zero.
+  #
+  # Both opens name every share right there is — FILE_SHARE_READ |
+  # FILE_SHARE_WRITE | FILE_SHARE_DELETE — because POSIX `open` grants no
+  # exclusivity and this prelude's `File` is POSIX's. A read handle asked
+  # for FILE_SHARE_READ alone, so a later write to the same path failed,
+  # and a write handle asked for nothing, so reading a file while it was
+  # still open came back as ERROR_SHARING_VIOLATION: that is what
+  # `bench/io_exercise.iyi`'s flush check read as "cannot read".
   def __iyi_open_read(path : UInt8*) : Int64
-    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, -2147483648, 1, nil, 3, 128, Pointer(Void).new(0_u64))
+    # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+    handle = LibC.CreateFileA(path, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
-    # GENERIC_WRITE, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, 1073741824, 0, nil, 2, 128, Pointer(Void).new(0_u64))
+    # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
+    handle = LibC.CreateFileA(path, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end

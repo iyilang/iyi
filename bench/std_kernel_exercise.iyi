@@ -14,7 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/kernel
-using std/kernel::{p, pp, puts_all, print_all, loop, abort, sleep}
+using std/kernel::{p, pp, puts_all, print_all, loop, abort}
 
 puts "== p"
 v_int = p(42)
@@ -58,20 +58,21 @@ assert_true iterations == 10, "loop ran 10 iterations"
 assert_true sum == 55, "loop accumulated sum"
 puts "  loop executed until explicit break"
 
+# The prelude's, and the only one: `std/kernel` declared a second `sleep`
+# taking seconds as a `Float64` and busy-waiting, so `sleep 2` and
+# `sleep 2.0` were a thousandfold apart and one of them burned a core.
+# What is checked here is that milliseconds is what `sleep` means, and the
+# `.sh` beside this file checks that the seconds one is gone.
 puts "\n== sleep"
 sleep(0)
 sleep(-1)
-sleep(-0.5)
-sleep(0.0_f32)
-sleep(0_i8)
-sleep(0_i16)
-sleep(0_u32)
 
 t0 = __iyi_monotonic_ns
-sleep(0.005)
+sleep(5)
 t1 = __iyi_monotonic_ns
 elapsed_ns = t1 - t0
-assert_true elapsed_ns >= 4_000_000_i64, "sleep(0.005) paused for at least 4ms"
-puts "  sleep handled zero, negative, narrow widths, and positive durations"
+assert_true elapsed_ns >= 4_000_000_i64, "sleep(5) paused for at least 4ms"
+assert_true elapsed_ns < 1_000_000_000_i64, "sleep(5) is 5 milliseconds, not 5 seconds"
+puts "  sleep is the prelude's milliseconds: zero, negative, and a positive wait"
 
 puts "\nALL CHECKS PASSED"

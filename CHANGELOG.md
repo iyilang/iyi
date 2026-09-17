@@ -35,6 +35,22 @@
   the same on every target; `Cancelled` moved into the prelude for that,
   and the ceiling stays at 3,734.
 
+### Removed
+
+- **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The
+  prelude has a `sleep` and it takes **milliseconds** as an `Int32`, parking
+  the fiber on the scheduler; this module declared a second one taking
+  `Float64` seconds, so the unit was decided by whether the argument was
+  written `2` or `2.0` — a thousandfold apart, one name meaning two things
+  (III.1.7a). Measured: `sleep 2` returned in 0.36 s and `sleep 2.0` in
+  2.36 s, of which 1.96 s was CPU, because the body spun on
+  `__iyi_monotonic_ns` and starved every other fiber on the thread while it
+  did (III.4). The prelude's is the `sleep` there is, and it says so itself:
+  `sleep 2.0` is refused with "`sleep` takes milliseconds, an `Int32`".
+  `bench/std_kernel_exercise.sh` holds all three — the module declares no
+  `sleep`, `using std/kernel::{sleep}` is refused by name, and a `Float64`
+  argument is refused with the unit in the sentence.
+
 ### Fixed
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**

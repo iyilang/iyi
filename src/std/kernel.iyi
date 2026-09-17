@@ -1,4 +1,14 @@
 # Kernel methods and top-level utilities.
+#
+# No `sleep`. The prelude has one and it takes **milliseconds** as an
+# `Int32`, parking the fiber on the scheduler; this module carried a second
+# `sleep` taking seconds as a `Float64`, which busy-waited on the monotonic
+# clock. Two meanings for one name, decided by whether the argument was
+# written `2` or `2.0` — a thousandfold apart — and the second one burned a
+# core for the whole wait and starved every other fiber on the thread with
+# it (SPEC.md III.1.7a, III.4). The prelude's is the `sleep` there is, and
+# it says so itself: `sleep 2.0` is refused with "`sleep` takes
+# milliseconds, an `Int32`".
 
 module std/kernel
 
@@ -60,14 +70,4 @@ pub def abort(message : String? = nil, status : Int32 = 1) : NoReturn
     __iyi_write(2, nl.to_unsafe.as(Void*), 1_u64)
   end
   __iyi_exit(status)
-end
-
-# Busy-waits on the monotonic clock for `seconds`. Does not park a fiber.
-pub def sleep(seconds : Float64) : Nil
-  if seconds <= 0.0
-    return
-  end
-  target_ns = __iyi_monotonic_ns + (seconds * 1_000_000_000.0).to_i64
-  while __iyi_monotonic_ns < target_ns
-  end
 end

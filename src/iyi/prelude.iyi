@@ -50,6 +50,15 @@ require "./atomic"
   # A kernel thread, and the stop-the-world over them (GC_DESIGN.md Stage
   # 4); the file itself says which builds get one.
   require "./thread"
+{% elsif flag?(:win32) %}
+  # Windows on anything but x86-64. The runtime's Windows arm is x86-64
+  # throughout — the fiber switch is Win64 assembly, the stack bounds and
+  # the TEB are read through `gs`, and `GetThreadContext` is unpacked at
+  # x86-64's CONTEXT offsets — so an arm64 Windows build used to compile
+  # with no scheduler and no threads and then die at its first collection
+  # in `discover_stack_base`. It is refused here instead, by name, and the
+  # x86-64 build runs on those machines under emulation.
+  {% raise "iyi's runtime on Windows is x86-64 only: the fiber switch, the stack bounds and the thread context are x86-64's. Build for x86_64-windows-msvc; an arm64 Windows machine runs that build under emulation (SPEC.md III.4.8)" %}
 {% elsif flag?(:wasm32) %}
   # wasm32-wasi has no concurrency runtime (SPEC.md III.4): core WebAssembly
   # has no stack-switching instruction, wasmtime 48 disables the stack-switching

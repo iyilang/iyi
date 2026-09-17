@@ -39,7 +39,7 @@ module std/indexable
 import std/enumerable
 using std/enumerable::{Enumerable}
 import std/traits
-using std/traits::{Cmp, Hashable}
+using std/traits::{Comparable, Hashable}
 
 pub trait Indexable
   type Elem

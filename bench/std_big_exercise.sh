@@ -329,7 +329,7 @@ prove_fails "decimal hash skips normalisation" no_dec_norm "hash: decimal scale 
 
 # 12. Division truncates instead of rounding
 prove_fails "decimal division truncates" no_dec_round "decimal: div rounds half away" \
-  's/if (r\.abs \* 2)\.cmp(den\.abs) >= 0/if (r.abs * 2).cmp(den.abs) > 2/'
+  's/if ((r\.abs \* 2) <=> den\.abs) >= 0/if ((r.abs * 2) <=> den.abs) > 2/'
 
 # 13. Exact quotients keep their trailing zeros
 prove_fails "exact division not detected" no_dec_exact "decimal: exact division is short" \

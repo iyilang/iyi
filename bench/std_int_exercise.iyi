@@ -77,9 +77,9 @@ assert_true 255.9.to_u == 255_u32, "255.9 to_u"
 puts "  a double truncates, then the truncation is range-checked"
 
 puts "\n== traits"
-assert_true 1_i8.cmp(2_i8) == -1, "i8 cmp"
+assert_true (1_i8 <=> 2_i8) == -1, "i8 cmp"
 assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"
 assert_true List(UInt16).new([] of UInt16).sum == 0_u16, "u16 empty sum"
-puts "  Cmp and Num for the rest of the tower"
+puts "  Comparable and Num for the rest of the tower"
 
 puts "\nALL CHECKS PASSED"

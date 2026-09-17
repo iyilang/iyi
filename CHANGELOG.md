@@ -18,6 +18,19 @@
 
 ### Changed
 
+- **One comparison trait, and it is `Comparable`.** `std/traits` had
+  `Cmp` with `cmp(other) : Int32`, nine modules and `Enumerable`'s bounds
+  leaned on it, and `std/comparable` carried a second, generic
+  `Comparable(T)` with `<=>` that nothing implemented - so a type written
+  against the Crystal-shaped one got `<`, `clamp` and `between?` and could
+  not be sorted, `max`ed or put in a `Heap`. The trait is `Comparable`
+  now, in `std/traits` beside `Num` and `Hashable`, its one requirement
+  `<=>(other : self) : Int32`, and `<`, `<=`, `>`, `>=`, `==`, `clamp`
+  and `between?` come with it; `lt`/`gt` are gone, `(a <=> b) < 0` is
+  what they said. Every `impl` and every `where Elem : Comparable` in std,
+  the samples and the gates follows. SPEC II.6 had written `Comparable`
+  all along.
+
 - **`IyiSocket` parks instead of blocking.** On the targets that have the
   runtime, every socket is non-blocking and `connect`, `accept`, `read`
   and `write` park the calling fiber on the poller — `wait_writable`
@@ -83,6 +96,10 @@
   runs in the darwin job now, and its timeout is sixty minutes for it.
 
 ### Removed
+
+- **`std/comparable` and `std/cmp`.** The second trait above, and a
+  module of four free functions (`min`, `max`, `clamp`) over the first,
+  which `Enumerable` and the trait itself already answer.
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The
   prelude has a `sleep` and it takes **milliseconds** as an `Int32`, parking

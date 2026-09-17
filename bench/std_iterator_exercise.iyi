@@ -17,7 +17,7 @@
 module bench/std_iterator_exercise
 
 import std/traits
-using std/traits::{Cmp, Num}
+using std/traits::{Comparable, Num}
 
 import std/iterator
 using std/iterator::{Iterator, ArrayIterator}

@@ -13,7 +13,7 @@
 #   * Span construction, accessors, operators (+, -, -@), and Time arithmetic.
 #   * ISO 8601 / RFC 3339 serialization (fraction digits 0, 3, 6, 9) and parsing
 #     with timezone offset conversions.
-#   * Comparable trait implementation via `Std::Traits::Cmp`.
+#   * Comparable trait implementation via `Std::Traits::Comparable`.
 #   * Negative proofs: the exercise script breaks the leap-year rule, roundtrip
 #     arithmetic, and RFC 3339 offset handling, asserting each is caught.
 #   * Dependency floor: audits symbols and libraries to prove zero new dependencies.
@@ -95,7 +95,7 @@ for check in "known-value table" "leap-year rules" "scattered roundtrip" "platfo
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Cmp all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Comparable all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs

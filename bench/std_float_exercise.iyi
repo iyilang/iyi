@@ -123,7 +123,7 @@ assert_true q32 == 3.0_f32 && r32 == 1.5_f32, "the single's divmod"
 puts "  the zero of % is the divisor's, // floors, divmod is Python's"
 
 puts "\n== traits"
-assert_true 1.5_f32.cmp(2.0_f32) == -1, "f32 cmp"
+assert_true (1.5_f32 <=> 2.0_f32) == -1, "f32 cmp"
 assert_true List(Float32).new([1.5_f32, 2.5_f32]).sum == 4.0_f32, "f32 sum"
 assert_true 2.5_f32.round(RoundingMode::TiesEven) == 2.0_f32, "f32 ties even"
 puts "  Num and round(mode)"

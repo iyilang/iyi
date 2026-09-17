@@ -121,28 +121,29 @@ puts Counts.new.pair.sum
 # says so. Crystal duck-types these and fails at instantiation naming neither
 # the bound nor the element type.
 
-pub trait Cmp
-  abstract def cmp(other : self) : Int32
+pub trait Comparable
+  abstract def <=>(other : self) : Int32
 end
 
-# `Ord : Cmp` requires an implementer to implement `Cmp` too. A requirement,
-# not an inclusion: implementing `Ord` does not hand a type `Cmp`'s methods,
-# it insists the type has its own `impl Cmp for` it. Were it an include, every
-# implementer of `Ord` would satisfy `Cmp` with no impl anywhere — the open
-# class hole R-3 exists to close.
-pub trait Ord : Cmp
+# `Ord : Comparable` requires an implementer to implement `Comparable` too.
+# A requirement, not an inclusion: implementing `Ord` does not hand a type
+# `Comparable`'s methods, it insists the type has its own `impl Comparable
+# for` it. Were it an include, every implementer of `Ord` would satisfy
+# `Comparable` with no impl anywhere — the open class hole R-3 exists to
+# close.
+pub trait Ord : Comparable
   type Item
 
   abstract def item : Item
 
-  # `Ord` never declares `cmp`; the requirement is what guarantees it is there.
+  # `Ord` never declares `<=>`; the requirement is what guarantees it is there.
   def beats(other : self) : Bool
-    cmp(other) > 0
+    (self <=> other) > 0
   end
 
   # Valid only when the item type is comparable. `Ranked` answers `Item` with
-  # `Score`, which implements `Cmp`, so this one is callable there.
-  def best : Item where Item : Cmp
+  # `Score`, which implements `Comparable`, so this one is callable there.
+  def best : Item where Item : Comparable
     item
   end
 end
@@ -154,8 +155,8 @@ pub struct Score
   end
 end
 
-impl Cmp for Score
-  def cmp(other : self) : Int32
+impl Comparable for Score
+  def <=>(other : self) : Int32
     n - other.n
   end
 end
@@ -167,8 +168,8 @@ pub struct Ranked
   end
 end
 
-impl Cmp for Ranked
-  def cmp(other : self) : Int32
+impl Comparable for Ranked
+  def <=>(other : self) : Int32
     n - other.n
   end
 end
@@ -188,13 +189,14 @@ puts Ranked.new(7).best.n
 # What this sample would report as an error
 # ---------------------------------------------------------------------------
 #
-# * `impl Ord for X` with no `impl Cmp for X` before it — the error names the
-#   required trait. The impls have to be written in dependency order, because
-#   the check runs where the impl is and nothing has looked ahead.
+# * `impl Ord for X` with no `impl Comparable for X` before it — the error
+#   names the required trait. The impls have to be written in dependency
+#   order, because the check runs where the impl is and nothing has looked
+#   ahead.
 #
 # * `Ranked.new(1).best` if `Item` were answered with a type that does not
-#   implement `Cmp` — the error names the element type and the bound, which is
-#   the whole reason the bound is written.
+#   implement `Comparable` — the error names the element type and the bound,
+#   which is the whole reason the bound is written.
 #
 # * A second `impl Container for Names` — a trait with associated types is
 #   implementable only once for a type. That restriction *is* the difference

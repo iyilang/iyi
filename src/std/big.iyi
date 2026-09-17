@@ -35,7 +35,7 @@
 module std/big
 
 import std/traits
-using std/traits::{Cmp, Num, Hashable}
+using std/traits::{Comparable, Num, Hashable}
 
 pub struct BigInt
   getter sign : Int32
@@ -303,70 +303,66 @@ pub struct BigInt
     0
   end
 
-  # Three-way comparison is `cmp`, from `impl Cmp` below.
-  def <=>(other : BigInt) : Int32
-    cmp(other)
-  end
-
+  # Three-way comparison is `<=>`, from `impl Comparable` below.
   def !=(other : BigInt) : Bool
-    cmp(other) != 0
+    (self <=> other) != 0
   end
 
   # Comparison overloads for Int64 and Int32
-  def cmp(other : Int64) : Int32
-    cmp(BigInt.new(other))
+  def <=>(other : Int64) : Int32
+    (self <=> BigInt.new(other))
   end
 
   def ==(other : Int64) : Bool
-    cmp(other) == 0
+    (self <=> other) == 0
   end
 
   def !=(other : Int64) : Bool
-    cmp(other) != 0
+    (self <=> other) != 0
   end
 
   def <(other : Int64) : Bool
-    cmp(other) < 0
+    (self <=> other) < 0
   end
 
   def <=(other : Int64) : Bool
-    cmp(other) <= 0
+    (self <=> other) <= 0
   end
 
   def >(other : Int64) : Bool
-    cmp(other) > 0
+    (self <=> other) > 0
   end
 
   def >=(other : Int64) : Bool
-    cmp(other) >= 0
+    (self <=> other) >= 0
   end
 
-  def cmp(other : Int32) : Int32
-    cmp(other.to_i64)
+  def <=>(other : Int32) : Int32
+    (self <=> other.to_i64)
   end
 
   def ==(other : Int32) : Bool
-    cmp(other) == 0
+    (self <=> other) == 0
   end
 
   def !=(other : Int32) : Bool
-    cmp(other) != 0
+    (self <=> other) != 0
   end
 
   def <(other : Int32) : Bool
-    cmp(other) < 0
+    (self <=> other) < 0
   end
 
   def <=(other : Int32) : Bool
-    cmp(other) <= 0
+    (self <=> other) <= 0
   end
 
   def >(other : Int32) : Bool
-    cmp(other) > 0
+    (self <=> other) > 0
   end
 
   def >=(other : Int32) : Bool
-    cmp(other) >= 0
+    (self <=> other) >= 0
   end
 
   # Addition
@@ -1331,8 +1327,8 @@ pub struct BigInt
   end
 end
 
-impl Cmp for BigInt
-  def cmp(other : self) : Int32
+impl Comparable for BigInt
+  def <=>(other : self) : Int32
     if @sign != other.sign
       return @sign < other.sign ? -1 : 1
     end
@@ -1546,7 +1542,7 @@ pub struct BigDecimal
     q = qr[0]
     r = qr[1]
     return BigDecimal.new(q, precision).normalized if r.zero?
-    if (r.abs * 2).cmp(den.abs) >= 0
+    if ((r.abs * 2) <=> den.abs) >= 0
       q = @value.sign == other.value.sign ? q + 1 : q - 1
     end
     BigDecimal.new(q, precision)
@@ -1591,12 +1587,8 @@ pub struct BigDecimal
     BigDecimal.new(v, s)
   end
 
-  def <=>(other : BigDecimal) : Int32
-    cmp(other)
-  end
-
   def !=(other : BigDecimal) : Bool
-    cmp(other) != 0
+    (self <=> other) != 0
   end
 
   # Zero is `0` whatever its scale; every other value prints every digit of
@@ -1666,13 +1658,13 @@ pub struct BigDecimal
   end
 end
 
-impl Cmp for BigDecimal
-  def cmp(other : self) : Int32
+impl Comparable for BigDecimal
+  def <=>(other : self) : Int32
     if @value.sign != other.value.sign
       return @value.sign < other.value.sign ? -1 : 1
     end
     tup = BigDecimal.align(self, other)
-    tup[0].cmp(tup[1])
+    (tup[0] <=> tup[1])
   end
 end
 
@@ -1815,12 +1807,8 @@ pub struct BigRational
     end
   end
 
-  def <=>(other : BigRational) : Int32
-    cmp(other)
-  end
-
   def !=(other : BigRational) : Bool
-    cmp(other) != 0
+    (self <=> other) != 0
   end
 
   def to_s : String
@@ -1853,9 +1841,9 @@ pub struct BigRational
   end
 end
 
-impl Cmp for BigRational
-  def cmp(other : self) : Int32
-    (@numerator * other.denominator).cmp(other.numerator * @denominator)
+impl Comparable for BigRational
+  def <=>(other : self) : Int32
+    ((@numerator * other.denominator) <=> other.numerator * @denominator)
   end
 end
 

@@ -1,4 +1,4 @@
-# Cmp, Num and Hashable over the prelude's scalars.
+# Comparable, Num and Hashable over the prelude's scalars.
 #
 # The two imports are what makes `Hashable` true rather than declared.
 # `hash_key` forwards to the value's own `hash`, and the prelude defines
@@ -17,27 +17,27 @@ module std/traits
 import std/int
 import std/float
 
-pub trait Cmp
-  abstract def cmp(other : self) : Int32
+pub trait Comparable
+  abstract def <=>(other : self) : Int32
 
   def <(other : self) : Bool
-    cmp(other) < 0
+    (self <=> other) < 0
   end
 
   def <=(other : self) : Bool
-    cmp(other) <= 0
+    (self <=> other) <= 0
   end
 
   def >(other : self) : Bool
-    cmp(other) > 0
+    (self <=> other) > 0
   end
 
   def >=(other : self) : Bool
-    cmp(other) >= 0
+    (self <=> other) >= 0
   end
 
   def ==(other : self) : Bool
-    cmp(other) == 0
+    (self <=> other) == 0
   end
 
   def clamp(min : self, max : self) : self
@@ -54,17 +54,9 @@ pub trait Cmp
   def between?(min : self, max : self) : Bool
     min <= self && self <= max
   end
-
-  def lt(other : self) : Bool
-    cmp(other) < 0
-  end
-
-  def gt(other : self) : Bool
-    cmp(other) > 0
-  end
 end
 
-pub trait Num : Cmp
+pub trait Num : Comparable
   # Class-level requirements. `Enumerable#sum` and `#product` need an additive
   # and a multiplicative identity, and an identity belongs to the type, not to
   # any value of it — there is no element to ask when the collection is empty.
@@ -80,8 +72,8 @@ pub trait Hashable
 end
 
 # Compared, not subtracted: a difference is only a comparison while it
-# fits, and `2000000000.cmp(-2000000000)` left `Int32` and panicked with
-# "arithmetic overflow" - so every `Enumerable` method that reads `cmp`
+# fits, and `(2000000000 <=> -2000000000)` left `Int32` and panicked with
+# "arithmetic overflow" - so every `Enumerable` method that reads `<=>`
 # (`sorted`, `min`, `max`, `includes?`, `clamp`) refused two numbers that
 # `<` answers for. The same three-way is used for every prelude integer.
 {% begin %}
@@ -92,8 +84,8 @@ end
        {"UInt64", "0_u64", "1_u64"},
      ] %}
   {% for t in prelude_ints %}
-    impl Cmp for {{ t[0].id }}
-      def cmp(other : self) : Int32
+    impl Comparable for {{ t[0].id }}
+      def <=>(other : self) : Int32
         self < other ? -1 : (self == other ? 0 : 1)
       end
     end
@@ -124,8 +116,8 @@ end
   {% end %}
 {% end %}
 
-impl Cmp for Float64
-  def cmp(other : self) : Int32
+impl Comparable for Float64
+  def <=>(other : self) : Int32
     self < other ? -1 : (self == other ? 0 : 1)
   end
 end
@@ -154,10 +146,10 @@ impl Hashable for Float64
   end
 end
 
-impl Cmp for String
+impl Comparable for String
   # `<=>` is not a method the prelude's `String` has, so this was a call
   # nobody could make; `<` and `==` are what it does have.
-  def cmp(other : self) : Int32
+  def <=>(other : self) : Int32
     self < other ? -1 : (self == other ? 0 : 1)
   end
 end
@@ -168,8 +160,8 @@ impl Hashable for String
   end
 end
 
-impl Cmp for Char
-  def cmp(other : self) : Int32
+impl Comparable for Char
+  def <=>(other : self) : Int32
     self < other ? -1 : (self == other ? 0 : 1)
   end
 end
@@ -231,8 +223,8 @@ end
        {"UInt128", "0_u128", "1_u128"},
      ] %}
   {% for t in rest %}
-    impl Cmp for {{ t[0].id }}
-      def cmp(other : self) : Int32
+    impl Comparable for {{ t[0].id }}
+      def <=>(other : self) : Int32
         self < other ? -1 : (self == other ? 0 : 1)
       end
     end
@@ -263,8 +255,8 @@ end
   {% end %}
 {% end %}
 
-impl Cmp for Float32
-  def cmp(other : self) : Int32
+impl Comparable for Float32
+  def <=>(other : self) : Int32
     self < other ? -1 : (self == other ? 0 : 1)
   end
 end

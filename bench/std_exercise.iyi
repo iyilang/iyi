@@ -1,6 +1,6 @@
 # The standard library foundation exercise.
 #
-# Exercises std/traits (Cmp, Num, Hashable), std/cmp, std/enumerable (all 71
+# Exercises std/traits (Comparable, Num, Hashable), std/enumerable (all 71
 # methods), std/list, and std/derives.
 #
 # Exits with panic if any assertion fails. Prints section progress and
@@ -9,14 +9,13 @@
 module bench/std_exercise
 
 import std/traits
-import std/cmp
 import std/enumerable
 import std/list
 import std/derives
 import std/slice
 import std/iterator
 
-using std/traits::{Cmp, Num, Hashable}
+using std/traits::{Comparable, Num, Hashable}
 using std/enumerable::{Enumerable}
 using std/list::{List}
 using std/derives::{Show}
@@ -33,8 +32,8 @@ struct Score
   end
 end
 
-impl Cmp for Score
-  def cmp(other : self) : Int32
+impl Comparable for Score
+  def <=>(other : self) : Int32
     @val - other.val
   end
 end
@@ -80,41 +79,33 @@ end
 
 # ---- Main Verification ------------------------------------------------------
 
-puts "== std/traits: Cmp operators and methods"
+puts "== std/traits: Comparable operators and methods"
 s1 = Score.new(10)
 s2 = Score.new(20)
 s3 = Score.new(20)
 
-assert_true(s1 < s2, "Cmp: <")
-assert_true(s1 <= s2, "Cmp: <=")
-assert_true(s2 <= s3, "Cmp: <= equal")
-assert_true(s2 > s1, "Cmp: >")
-assert_true(s2 >= s1, "Cmp: >=")
-assert_true(s2 >= s3, "Cmp: >= equal")
-assert_true(s2 == s3, "Cmp: ==")
-assert_true(s1.lt(s2), "Cmp: lt")
-assert_true(s2.gt(s1), "Cmp: gt")
-assert_true(Score.new(15).between?(s1, s2), "Cmp: between?")
-assert_true(!Score.new(5).between?(s1, s2), "Cmp: between? low")
-assert_true(!Score.new(25).between?(s1, s2), "Cmp: between? high")
+assert_true(s1 < s2, "Comparable: <")
+assert_true(s1 <= s2, "Comparable: <=")
+assert_true(s2 <= s3, "Comparable: <= equal")
+assert_true(s2 > s1, "Comparable: >")
+assert_true(s2 >= s1, "Comparable: >=")
+assert_true(s2 >= s3, "Comparable: >= equal")
+assert_true(s2 == s3, "Comparable: ==")
+assert_true(((s1 <=> s2) < 0), "Comparable: lt")
+assert_true(((s2 <=> s1) > 0), "Comparable: gt")
+assert_true(Score.new(15).between?(s1, s2), "Comparable: between?")
+assert_true(!Score.new(5).between?(s1, s2), "Comparable: between? low")
+assert_true(!Score.new(25).between?(s1, s2), "Comparable: between? high")
 
 clamped_low = Score.new(5).clamp(s1, s2)
-assert_eq(clamped_low.val, 10, "Cmp: clamp min")
+assert_eq(clamped_low.val, 10, "Comparable: clamp min")
 clamped_high = Score.new(35).clamp(s1, s2)
-assert_eq(clamped_high.val, 20, "Cmp: clamp max")
+assert_eq(clamped_high.val, 20, "Comparable: clamp max")
 clamped_mid = Score.new(14).clamp(s1, s2)
-assert_eq(clamped_mid.val, 14, "Cmp: clamp mid")
+assert_eq(clamped_mid.val, 14, "Comparable: clamp mid")
 
 clamped_rng = Score.new(2).clamp(s1..s2)
-assert_eq(clamped_rng.val, 10, "Cmp: clamp range")
-
-puts "== std/cmp: standalone functions"
-assert_eq(Std::Cmp.min(10, 20), 10, "cmp: min")
-assert_eq(Std::Cmp.max(10, 20), 20, "cmp: max")
-assert_eq(Std::Cmp.clamp(5, 10, 20), 10, "cmp: clamp min")
-assert_eq(Std::Cmp.clamp(25, 10, 20), 20, "cmp: clamp max")
-assert_eq(Std::Cmp.clamp(15, 10, 20), 15, "cmp: clamp mid")
-assert_eq(Std::Cmp.clamp(2, 10..20), 10, "cmp: clamp range")
+assert_eq(clamped_rng.val, 10, "Comparable: clamp range")
 
 puts "== std/enumerable: all 71 methods"
 seq = SimpleSeq.new([3, 1, 4, 1, 5, 9, 2, 6])
@@ -488,10 +479,10 @@ puts "== std/traits: the arithmetic a comparison and a hash are made of"
 # panicked - and every `Enumerable` method that reads `cmp` refused a pair
 # that `<` answers for. `Indexable#hash` mixed with the checked `*` and `+`,
 # so a collection of six two-digit numbers panicked while five passed.
-assert_eq(2000000000.cmp(-2000000000), 1, "cmp: a wide span")
-assert_eq((-2000000000).cmp(2000000000), -1, "cmp: the other way")
-assert_eq(5.cmp(5), 0, "cmp: equal")
-assert_eq("a".cmp("b"), -1, "cmp: strings")
+assert_eq((2000000000 <=> -2000000000), 1, "cmp: a wide span")
+assert_eq(((-2000000000) <=> 2000000000), -1, "cmp: the other way")
+assert_eq((5 <=> 5), 0, "cmp: equal")
+assert_eq(("a" <=> "b"), -1, "cmp: strings")
 assert_eq([2000000000, -2000000000].sorted[0], -2000000000, "cmp: sorted reads it")
 
 # The trait named Hashable, then hashed by the length; "aa" and "bb" were one

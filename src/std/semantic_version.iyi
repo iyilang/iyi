@@ -19,7 +19,7 @@
 module std/semantic_version
 
 import std/traits
-using std/traits::{Cmp}
+using std/traits::{Comparable}
 
 pub struct SemanticVersion
   getter major : Int32
@@ -121,8 +121,8 @@ pub struct SemanticVersion
     end
   end
 
-  impl Cmp for Prerelease
-    def cmp(other : self) : Int32
+  impl Comparable for Prerelease
+    def <=>(other : self) : Int32
       self <=> other
     end
   end
@@ -320,8 +320,8 @@ pub struct SemanticVersion
   end
 end
 
-impl Cmp for SemanticVersion
-  def cmp(other : self) : Int32
+impl Comparable for SemanticVersion
+  def <=>(other : self) : Int32
     self <=> other
   end
 end

@@ -51,7 +51,7 @@ fi
 
 echo
 echo "== every std section reported"
-for phrase in "std/traits:" "std/cmp:" "std/enumerable:" "std/list:" "std/derives:"; do
+for phrase in "std/traits:" "std/enumerable:" "std/list:" "std/derives:"; do
   grep -q "$phrase" "$WORK/std-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
@@ -100,12 +100,12 @@ prove_fails() {
     "$(grep -m1 "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')"
 }
 
-# 1. Cmp operator < inverted
-prove_fails "Cmp < inverted" no_lt "traits.iyi" "Cmp: <" \
-  's/cmp(other) < 0/cmp(other) > 0/'
+# 1. Comparable operator < inverted
+prove_fails "Comparable < inverted" no_lt "traits.iyi" "Comparable: <" \
+  's/(self <=> other) < 0/(self <=> other) > 0/'
 
-# 2. Cmp clamp broken (returns max instead of min when low)
-prove_fails "Cmp clamp broken" no_clamp "traits.iyi" "Cmp: clamp min" \
+# 2. Comparable clamp broken (returns max instead of min when low)
+prove_fails "Comparable clamp broken" no_clamp "traits.iyi" "Comparable: clamp min" \
   's/return min if self < min/return max if self < min/'
 
 # 3. Enumerable present? inverted

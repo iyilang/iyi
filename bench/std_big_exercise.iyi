@@ -77,7 +77,7 @@ raise "negate: positive" unless 5.to_big.negate == -5
 raise "negate: negative" unless (-5).to_big.negate == 5
 raise "negate: zero" unless 0.to_big.negate == 0
 
-# Comparisons (Cmp trait)
+# Comparisons (Comparable trait)
 a10 = 10.to_big
 b20 = 20.to_big
 raise "cmp: <" unless a10 < b20
@@ -90,7 +90,7 @@ raise "cmp: with int64" unless a10 == 10_i64 && a10 < 20_i64
 raise "cmp: with int32" unless a10 == 10 && a10 < 20
 raise "cmp: negative comparison" unless (-20).to_big < (-10).to_big
 
-puts "    predicates and comparisons: zero?, even?, odd?, abs, negate, and Cmp ordering verified"
+puts "    predicates and comparisons: zero?, even?, odd?, abs, negate, and Comparable ordering verified"
 
 # 3. Basic Arithmetic and Exponentiation
 x = 123456789.to_big

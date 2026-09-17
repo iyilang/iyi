@@ -11,7 +11,7 @@
 #   * Span construction, accessors, operators (+, -, -@), and Time arithmetic.
 #   * ISO 8601 / RFC 3339 serialization (fraction digits 0, 3, 6, 9) and parsing
 #     with timezone offset conversions.
-#   * Comparable trait implementation via `Std::Traits::Cmp`.
+#   * Comparable trait implementation via `Std::Traits::Comparable`.
 #
 # Run via:
 #     ./bin/iyi run bench/std_time_exercise.iyi
@@ -205,7 +205,7 @@ assert_equal(-6_i64 * 3600_i64, s_neg.to_i, "Span negation")
 s_diff = s_hours - s_mins
 assert_equal(6_i64 * 3600_i64 - 45_i64 * 60_i64, s_diff.to_i, "Span subtraction")
 
-# Comparisons via Cmp
+# Comparisons via Comparable
 assert_true(s_mins < s_hours, "Span <")
 assert_true(s_hours > s_mins, "Span >")
 assert_true(s_hours == Span.hours(6_i64), "Span ==")
@@ -286,10 +286,10 @@ puts "  the years -0001, 12345 and Int32's edges round-trip, and offsets reach 2
 puts "  to_rfc3339 (0, 3, 6, 9 digits) and parse_rfc3339 (UTC, offsets, fractions) verified"
 
 # ---------------------------------------------------------------------------
-# Time comparison via Cmp
+# Time comparison via Comparable
 # ---------------------------------------------------------------------------
 
-puts "\n== time comparison via Cmp"
+puts "\n== time comparison via Comparable"
 t_early = Time.utc(2024, 1, 1, 0, 0, 0)
 t_late = Time.utc(2024, 1, 2, 0, 0, 0)
 assert_true(t_early < t_late, "Time <")

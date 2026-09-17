@@ -1,14 +1,14 @@
-# A binary heap over `Cmp`.
+# A binary heap over `Comparable`.
 #
 # `push` and `pop` keep the smallest element at the root, so
 # `Heap(Int32)` is a min-heap. Empty `pop` / `peek` is
-# `pop of an empty heap`. The order is the trait's `cmp`, the same
+# `pop of an empty heap`. The order is the trait's `<=>`, the same
 # three-way `Enumerable#sorted` reads.
 
 module std/heap
 
 import std/traits
-using std/traits::{Cmp}
+using std/traits::{Comparable}
 
 pub class Heap(T)
   @items : Array(T)
@@ -25,17 +25,17 @@ pub class Heap(T)
     @items.empty?
   end
 
-  def push(value : T) : Nil where T : Cmp
+  def push(value : T) : Nil where T : Comparable
     @items << value
     sift_up(@items.size - 1)
   end
 
-  def peek : T where T : Cmp
+  def peek : T where T : Comparable
     raise "peek of an empty heap" if empty?
     @items[0]
   end
 
-  def pop : T where T : Cmp
+  def pop : T where T : Comparable
     raise "pop of an empty heap" if empty?
     n = @items.size
     top = @items[0]
@@ -51,7 +51,7 @@ pub class Heap(T)
   private def sift_up(i : Int32) : Nil
     while i > 0
       p = (i - 1) // 2
-      break unless @items[i].cmp(@items[p]) < 0
+      break unless (@items[i] <=> @items[p]) < 0
       tmp = @items[i]
       @items[i] = @items[p]
       @items[p] = tmp
@@ -65,8 +65,8 @@ pub class Heap(T)
       left = i * 2 + 1
       right = left + 1
       smallest = i
-      smallest = left if left < n && @items[left].cmp(@items[smallest]) < 0
-      smallest = right if right < n && @items[right].cmp(@items[smallest]) < 0
+      smallest = left if left < n && (@items[left] <=> @items[smallest]) < 0
+      smallest = right if right < n && (@items[right] <=> @items[smallest]) < 0
       break if smallest == i
       tmp = @items[i]
       @items[i] = @items[smallest]

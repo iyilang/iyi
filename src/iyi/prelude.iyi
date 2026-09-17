@@ -48,12 +48,12 @@ require "./atomic"
   require "./thread"
 {% elsif flag?(:wasm32) %}
   # wasm32-wasi has no concurrency runtime (SPEC.md III.4): no
-  # stack-switching instruction, wasmtime 48 disables the proposal,
-  # wasi-threads is unsupported, asyncify needs a host event loop. The
-  # compile error names the refusal rather than leaving `group` undefined.
+  # stack-switching instruction, no wasi-threads, asyncify needs a host
+  # loop. The compile error names the refusal.
   macro group(*args, **kwargs)
     \{% raise "group is not available on wasm32-wasi: WebAssembly cannot switch stacks, wasmtime 48 disables the stack-switching proposal, wasi-threads is unsupported, and asyncify cannot run without a host event loop (SPEC.md III.4)" %}
   end
+
   # `sleep` parks a task on the scheduler, so it is the runtime's too.
   macro sleep(*args, **kwargs)
     \{% raise "sleep is not available on wasm32-wasi: it parks a task on the scheduler, and wasm32-wasi has no runtime to park it on (SPEC.md III.4)" %}

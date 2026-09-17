@@ -55,6 +55,15 @@ end
     fds
   end
 {% elsif flag?(:win32) %}
+  # The prelude's `LibC` carries only the wide `CreateFileW` now: a path a
+  # program hands iyi is UTF-8, and Windows' narrow entry points cannot
+  # take it. A pipe name is this exercise's own ASCII literal, so it
+  # declares the narrow call it wants instead of widening one.
+  lib LibC
+    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+  end
+
   def make_pipe : Pointer(Int64)
     pipe_name = "\\\\.\\pipe\\iyi_runtime_pipe_#{__iyi_monotonic_ns}".to_unsafe
     h_read = LibC.CreateNamedPipeA(pipe_name, 0x40000001_i32, 0_i32, 1_i32, 4096_i32, 4096_i32, 0_i32, Pointer(Void).new(0_u64))

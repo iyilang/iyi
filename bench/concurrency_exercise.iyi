@@ -35,6 +35,13 @@ end
     fds
   end
 {% elsif flag?(:win32) %}
+  # Same as `runtime_exercise`: the prelude's `LibC` is wide-only now, and
+  # this pipe name is the exercise's own ASCII.
+  lib LibC
+    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+  end
+
   def make_pipe : Pointer(Int64)
     pipe_name = "\\\\.\\pipe\\iyi_conc_pipe_#{__iyi_monotonic_ns}".to_unsafe
     h_read = LibC.CreateNamedPipeA(pipe_name, 0x40000001_i32, 0_i32, 1_i32, 4096_i32, 4096_i32, 0_i32, Pointer(Void).new(0_u64))

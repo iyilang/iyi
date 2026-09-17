@@ -1044,9 +1044,14 @@ marked PROPOSED are the parts that will move under you.
   is still capped at `MAX_PATH`; there is no subprocess and no
   `Time::Location`; arm64 Windows is refused at compile time rather than
   broken at run time, and the x86-64 build runs there under emulation.
-  CI links the cross-compiled probe, collector and runtime exercises on a
-  Windows runner; it does not yet build the compiler there, so these
-  numbers are a measurement on one machine and not a gate.
+  Building it there is `make -f Makefile.win crystal` then
+  `make -f Makefile.win iyi`, with Crystal's own Windows package and the
+  Visual C++ build tools and nothing else; `windows-native` in CI is that
+  command pair on a `windows-2025` runner, and it then runs iyi's own
+  specs, every sample, the verbs and those 85 exercises — so the numbers
+  above are a gate and not a measurement on one machine. The three older
+  Windows jobs stay: they link objects cross-compiled on Linux, which is
+  the other half of the claim.
 - **A wasm program needs a wasi toolchain, not just a linker.** A wasm32-wasi
   module is a program only once wasi-libc's entry stub is linked in, and only
   the compiler driver knows where its sysroot keeps that object — so this fork

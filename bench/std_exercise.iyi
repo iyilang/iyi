@@ -515,4 +515,28 @@ h64[2_i64] = 20
 assert_eq(h64[1_i64], 10, "hash: Int64 key 1")
 assert_eq(h64[2_i64], 20, "hash: Int64 key 2")
 
+# And the rest of the tower, which `impl Hashable` promised and did not
+# have. `hash_key` forwards to `hash`, the prelude defines `hash` for
+# `Int32` and a handful more, and every other integer's lives in `std/int`
+# with both floats' in `std/float` — neither of which `std/traits` imported.
+# A program that imported `std/traits` and nothing else got `Object#hash`,
+# the type's id: `1_i16.hash == 31337_i16.hash` was true, one slot for every
+# value of six integer types and both floats. This file imports `std/traits`
+# (line 19) and not `std/int`, so these lines are the import's work.
+assert_true(1_i8.hash != 97_i8.hash, "hash: Int8 values differ")
+assert_true(1_i16.hash != 31337_i16.hash, "hash: Int16 values differ")
+assert_true(1_u16.hash != 31337_u16.hash, "hash: UInt16 values differ")
+assert_true(1_u32.hash != 31337_u32.hash, "hash: UInt32 values differ")
+assert_true(1_i128.hash != 31337_i128.hash, "hash: Int128 values differ")
+assert_true(1_u128.hash != 31337_u128.hash, "hash: UInt128 values differ")
+assert_true(1.5.hash != 31337.5.hash, "hash: Float64 values differ")
+assert_true(1.5_f32.hash != 31337.5_f32.hash, "hash: Float32 values differ")
+assert_true(1_i16.hash_key != 31337_i16.hash_key, "Hashable: Int16 hash_key is the value")
+assert_true(1.5.hash_key != 31337.5.hash_key, "Hashable: Float64 hash_key is the value")
+h16 = {} of Int16 => Int32
+h16[1_i16] = 10
+h16[31337_i16] = 20
+assert_eq(h16[1_i16], 10, "hash: Int16 key 1")
+assert_eq(h16[31337_i16], 20, "hash: Int16 key 31337")
+
 puts "all std checks passed"

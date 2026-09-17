@@ -128,6 +128,25 @@ prove_fails "Enumerable to_h corrupted" no_to_h "enumerable.iyi" "enum: to_h" \
 prove_fails "Hashable String hash_key is length" no_strhash "traits.iyi" "Hashable: String hash_key is the string" \
   's/hash # FNV, not the length/size/'
 
+# 8. The rest of the tower's `hash`, which `impl Hashable` promised and did
+#    not have: it lives in `std/int`, which `std/traits` did not import, so
+#    `Int8#hash` was `Object#hash` — the type's id, one slot for every value
+#    of the type. Renaming the definition puts the program back where it was,
+#    and `Int8` is the first of the six the exercise asks.
+prove_fails "the tower's hash falls back to the type id" no_inthash "int.iyi" "hash: Int8 values differ" \
+  's/def hash : Int32/def hash_elsewhere : Int32/'
+
+# 9. The same for both floats, whose `hash` lives in `std/float`.
+prove_fails "Float64 hash falls back to the type id" no_floathash "float.iyi" "hash: Float64 values differ" \
+  's/def hash : Int32/def hash_elsewhere : Int32/'
+
+# 10. And the import itself is load-bearing, not decoration: `std/traits` is
+#     the only module this exercise imports for the scalars, so taking the
+#     `std/float` line out of it leaves both floats hashing to their type id
+#     however complete `std/float` is.
+prove_fails "traits without its std/float import" no_floatimport "traits.iyi" "hash: Float64 values differ" \
+  's|^import std/float$||'
+
 echo
 echo "== one mistake, one sentence, whichever tower answers"
 # `first` of an empty receiver, a negative count and a zero step used to be

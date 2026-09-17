@@ -77,6 +77,23 @@
   holds both directions — an edited shard is refused by name, and a
   boundary whose checkout is gone still builds.
 
+- **`Hashable` promised what `std/traits` had not loaded.** `hash_key`
+  forwards to the value's own `hash`; the prelude defines `hash` for
+  `Int32`, `String` and a handful more, every other integer's lives in
+  `std/int` and both floats' in `std/float`, and `std/traits` imported
+  neither while writing `impl Hashable` for all of them. So a program that
+  imported `std/traits` got `Object#hash` — the type's id — for `Int8`,
+  `Int16`, `UInt16`, `UInt32`, `Int128`, `UInt128`, `Float32` and
+  `Float64`: `1_i16.hash == 31337_i16.hash` was true, one slot for every
+  value of eight types, and a `Hash` or `Set` keyed on any of them probed
+  linearly. The two imports are named in `std/traits` now — both, though
+  `std/float` imports `std/int` itself, because an integer's hash is not a
+  thing to reach through a float. `bench/std_exercise.iyi` asks all eight
+  by value and keys a `Hash(Int16, Int32)` on two of them, and
+  `bench/std_exercise.sh` proves the three ways it can fail: the tower's
+  `hash` renamed away, both floats' renamed away, and the import taken out
+  of `std/traits`.
+
 - **The twenty-two merge modules were probed, the way the other
   fifty-three were.** Nearly 1,200 programs against `bit_array`, `dir`,
   `docs_pseudo_methods`, `fiber`, `file`, `levenshtein`, `named_tuple`,

@@ -1,4 +1,21 @@
+# Cmp, Num and Hashable over the prelude's scalars.
+#
+# The two imports are what makes `Hashable` true rather than declared.
+# `hash_key` forwards to the value's own `hash`, and the prelude defines
+# `hash` for `Int32`, `String` and a handful more; every other integer's
+# lives in `std/int` and both floats' in `std/float`. Importing neither,
+# `impl Hashable for Int16` forwarded to `Object#hash` — the type's id, one
+# slot for every value of the type — so `1_i16.hash == 31337_i16.hash` was
+# true, and `1.5.hash == 31337.5.hash` with it. A trait may not promise what
+# the module implementing it has not loaded (SPEC.md II.8).
+#
+# Both named, though `std/float` imports `std/int` itself: an integer's hash
+# is not a thing to reach through a float, and a rule that holds only while
+# somebody else's import survives is not held.
 module std/traits
+
+import std/int
+import std/float
 
 pub trait Cmp
   abstract def cmp(other : self) : Int32

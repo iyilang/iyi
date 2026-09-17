@@ -10,6 +10,12 @@
     {% llvm_targets = env("LLVM_TARGETS") || (lines && lines[1]) %}
     {% llvm_ldflags = env("LLVM_LDFLAGS") || (lines && lines[2]) %}
 
+    # The msvc path never runs `llvm-config`, so nothing above set this and
+    # the reference below is to an undefined macro variable: a Windows build
+    # of the compiler failed in `lib_llvm.cr` before it reached codegen.
+    # Empty is the honest answer here — LLVM arrives as `LLVM-C.dll`.
+    {% llvm_shared_mode = "" %}
+
     @[Link("llvm")]
     {% if compare_versions(Crystal::VERSION, "1.11.0-dev") >= 0 %}
       @[Link(dll: "LLVM-C.dll")]

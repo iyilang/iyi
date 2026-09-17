@@ -22,6 +22,25 @@ module Iyi
     filename
   end
 
+  # iyi: *path* written with the separators this platform uses.
+  #
+  # A module path is posix by grammar (R-1) and `File.join` translates nothing
+  # inside a part it is handed, so `mods` and `m1/a` came out as
+  # `mods\m1/a.iyimod` — half native, half not, in a sentence naming a file the
+  # reader has to go and open. `Dir.glob` needs none of this: it splits its
+  # pattern on `/` and rejoins with `File.join`, so a posix pattern still
+  # answers in the platform's own separators.
+  #
+  # Swapped rather than normalised: `Path#normalize` also collapses `./` and
+  # `//`, which would change what a POSIX build prints, and `Path#to_native`
+  # translates no separators at all — it only relabels the kind.
+  def self.native_path(path : String) : String
+    {% if flag?(:win32) %}
+      return path.tr("/", "\\") if path.includes?('/')
+    {% end %}
+    path
+  end
+
   def self.print_error(msg, color, stderr = STDERR, leading_error = true)
     stderr.print "Error: ".colorize.toggle(color).red.bold if leading_error
     stderr.puts msg.colorize.toggle(color).bright

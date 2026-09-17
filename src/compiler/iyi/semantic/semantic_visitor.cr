@@ -503,7 +503,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     dir = @program.iyi_module_dir
     return unless dir
 
-    candidate = File.join(dir, "#{path}.iyimod")
+    candidate = Iyi.native_path(File.join(dir, "#{path}.iyimod"))
     return unless File.file?(candidate)
 
     reason = iyi_artifact_stale(path, dir)
@@ -574,7 +574,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   private def iyi_compute_artifact_stale(module_path : String, dir : String) : String?
-    candidate = File.join(dir, "#{module_path}.iyimod")
+    candidate = Iyi.native_path(File.join(dir, "#{module_path}.iyimod"))
     return "there is no artifact for it" unless File.file?(candidate)
 
     summary =
@@ -667,7 +667,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         return "\"#{edge.module_name}\", which it imports, has: #{reason}"
       end
 
-      dependency = IyiMod.read_summary(File.join(dir, "#{edge.module_name}.iyimod"))
+      dependency = IyiMod.read_summary(Iyi.native_path(File.join(dir, "#{edge.module_name}.iyimod")))
       # An edge `tool bind` wrote records the name and nothing else: a
       # boundary is written before there is anything to compare, and the two
       # hashes it leaves empty are not a claim that the far end hashed to

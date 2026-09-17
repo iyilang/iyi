@@ -102,6 +102,32 @@ def main():
     c.diagnostics(big_uri)
     step("a 1,500-def module", hover_alive(c, uri))
 
+    # A cursor next to a node the front end never typed: a variable
+    # assigned only inside a macro branch this target does not take, and
+    # one assigned inside an `if` nobody reaches. `ContextVisitor` read
+    # `.type` off both and the answer was -32603 "BUG: ... has no type";
+    # 96,608 requests over the whole standard library found 18 of them.
+    dead = ("module dead\n\n"
+            "def whole(s : String) : Int32\n"
+            "  {% if flag?(:win32) %}\n    w = s.bytesize\n  {% else %}\n    w = 0\n  {% end %}\n"
+            "  if s.empty? && !s.empty?\n    s_len = s.bytesize\n  end\n"
+            "  w\nend\n\nputs whole(\"x\")\n")
+    dead_uri = "file://" + os.path.join(work, "dead.iyi")
+    with open(os.path.join(work, "dead.iyi"), "w") as f:
+        f.write(dead)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": dead_uri, "languageId": "iyi",
+                             "version": 1, "text": dead}}, wait=False)
+    c.diagnostics(dead_uri)
+    untyped_ok = True
+    for line, ch in ((4, 8), (8, 8), (9, 4)):
+        for method in ("textDocument/hover", "textDocument/completion"):
+            reply = c.send(method, {"textDocument": {"uri": dead_uri},
+                                    "position": {"line": line, "character": ch}})
+            if reply.get("error", {}).get("code") == -32603:
+                untyped_ok = False
+    step("a cursor beside a node the front end never typed", untyped_ok)
+
     c.send("shutdown", {})
     c.send("exit", {}, wait=False)
     step("shutdown still orderly", c.proc.wait(timeout=10) == 0)

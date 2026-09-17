@@ -178,6 +178,24 @@
 
 ### Fixed
 
+- **A cursor beside a node the front end never typed was -32603.**
+  96,608 requests over every position of every std module - hover,
+  definition, completion, references, rename, signature help, highlights,
+  call hierarchy, selection ranges, symbols, tokens, folding, lenses,
+  links, inlay hints - found eighteen internal errors and two causes:
+  `ContextVisitor` read `.type` off a variable assigned only inside a
+  macro branch this target does not take (`{% if flag?(:win32) %}` in
+  `std/dir`) and off one assigned inside an `if` nobody reaches
+  (`s_len` in `std/path`), and the answer was "BUG: ... has no type". An
+  untyped node is no context now. `bench/lsp_soak.py` holds it. The
+  soak also measured the server's memory: `iyi lsp` is built without a
+  collector, like every binary, and a long session grows without bound -
+  40 edits of a ten-line file are 1.6 GB, and the `references` sweep over
+  `std/big` was killed by the kernel at 19 GB; with `collector=1` the same
+  session holds at 210 MB. Whether the long-lived verbs (`lsp`, `daemon`)
+  should carry the collector the one-shot compiler does not is a decision
+  this entry records rather than makes.
+
 - **A list of floats did not sort.** `std/float` writes `Float64#<=>`
   itself, answering `Int32?` - nil for NaN - and `std/traits` imports
   it; the type's own def wins over the impl's, so `Comparable`'s bound

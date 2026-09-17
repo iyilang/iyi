@@ -251,6 +251,28 @@ def main():
     step("a plain build refuses it too - the rule is the language's",
          proc.returncode == 1, "")
 
+    # And a def nobody exports. R-2c's probe used to call from outside the
+    # module, so it could only reach what outside reaches: `def f : Int32`
+    # with a body answering `"s"` passed `check` and `build` whenever
+    # nothing called it, and `pub` was what decided whether the rule
+    # applied. The probe is the definition asking about itself now.
+    write("unexported.iyi", (
+        "module app3\n\n"
+        "def f : Int32\n  \"s\"\nend\n\n"
+        "pub struct P\n  private def g : Int32\n    \"s\"\n  end\nend\n"
+    ))
+    proc = run("check", "unexported.iyi", cwd=work)
+    step("an unexported def is typed at its definition too",
+         proc.returncode == 1 and "must return Int32 but it is returning String" in (proc.stdout + proc.stderr),
+         "R-2c is not `pub`'s")
+    write("unexported.iyi", (
+        "module app3\n\n"
+        "def f : Int32\n  1\nend\n\n"
+        "pub struct P\n  private def g : Int32\n    2\n  end\nend\n"
+    ))
+    step("and the honest unexported def is clean",
+         run("check", "unexported.iyi", cwd=work).returncode == 0, "")
+
     # 4b'. the generic half: a trait bound is written, and a bound is
     # enough — the body is typed against a synthesized witness, so a
     # generic def calling anything outside its bound dies at the

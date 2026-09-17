@@ -4694,7 +4694,9 @@ require "./file"
       # every arena and the large list at once, what `IyiMark.collect` runs
       # for a program that asked for its memory back now.
       def self.sweep : Nil
-        while sweep_one
+        # Any class (0), until nothing is left: 2 is a slice another
+        # walker is inside, and the batch is microseconds away.
+        while sweep_one(0_u64) != 0_u64
         end
         sweep_large
       end

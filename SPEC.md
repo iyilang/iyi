@@ -36,7 +36,7 @@ The compilation model, stated only as far as Part II needs it.
 | R-1 | A module is the unit of compilation. `import` forms a DAG. Compiling a module reads only its dependencies' **export metadata**, never their bodies. |
 | R-2 | Everything a module exports (`pub`) carries full parameter and return types. Non-exported code infers. |
 | R-2b | `using` brings a module's exported names into unqualified scope, written by the consumer. |
-| R-2c | **Definition-site typing.** A def whose parameters and return are all written is typed at its definition, caller or no caller — R-2's declared types stand in for the missing call. A trait-restricted parameter is typed too: the bound is written, and a bound is enough — the compiler synthesizes one witness type per simple trait, implements its abstract requirements as stubs, and types the body against exactly the bound, so a generic body cannot quietly use what it did not declare (the half duck-typed generics never check and Rust checks always). Out of reach and stated: supertrait/generic/associated-type traits, block-taking and unannotated defs, `.cr` sources. *(Added with the agentic waves: a build, `check`, and the LSP may not disagree about what "clean" means. Mechanism: `semantic/definition_typing.cr`, probes from resolved signatures under `if false`, anchored at the def. First catch: this spec's own gate fixture — a signature edited to `Int64` over a body still returning `Int32`.)* |
+| R-2c | **Definition-site typing.** A def whose parameters and return are all written is typed at its definition, caller or no caller — R-2's declared types stand in for the missing call. A trait-restricted parameter is typed too: the bound is written, and a bound is enough — the compiler synthesizes one witness type per simple trait, implements its abstract requirements as stubs, and types the body against exactly the bound, so a generic body cannot quietly use what it did not declare (the half duck-typed generics never check and Rust checks always). `pub` is not the condition: a module's unmarked function and a type's `private def` are typed at their definition too, since the probe is the definition asking about itself and R-2's wall is for callers. Out of reach and stated: supertrait/generic/associated-type traits, block-taking and unannotated defs, defs of a mixin `module` (whose `self` is the includer's), a type not nameable from the top level, `.cr` sources. *(Added with the agentic waves: a build, `check`, and the LSP may not disagree about what "clean" means. Mechanism: `semantic/definition_typing.cr`, probes from resolved signatures under `if false`, anchored at the def. First catch: this spec's own gate fixture — a signature edited to `Int64` over a body still returning `Int32`.)* |
 | R-3 | Open classes are gone. `impl Trait for Type` must live in the module defining the trait or the type. |
 | R-4 | Generic calls crossing a module boundary pass a dictionary keyed on GC shape. Within a module, monomorphisation. `@[Monomorphize]` forces specialisation across a boundary. |
 | R-5 | Macros are derive-scoped: they see the declaration they are attached to, and nothing global. |
@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 14,418 lines, of which 3,841 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,461 lines, none of it written in iyi |
+| iyi's own prelude | 14,420 lines, of which 3,841 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 111,476 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 14,418 lines
+> "No standard library worth the name" is still true of iyi's own 14,420 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 14,418 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 14,420 lines,
 primitives included, of which the library is 3,841.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -299,7 +299,7 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**3,841 lines** of the 14,418, measured by `bench/doc_numbers.py` as
+**3,841 lines** of the 14,420, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three. The whole-prelude figure is
 stated beside it because a reader sees the whole file, and a "tiny prelude"
 claim that hid 9,000 lines of runtime would be a claim about the wrong number.
@@ -950,8 +950,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,461 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 14,418-line own prelude + 36,962 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 111,476 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 14,420-line own prelude + 36,962 in std |
 | Specs | 21,146 lines | 10,284 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9187,7 +9187,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 14,418-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 14,420-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

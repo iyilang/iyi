@@ -178,6 +178,21 @@
 
 ### Fixed
 
+- **Definition-site typing (R-2c) skipped every def that was not `pub`.**
+  `def f : Int32` with a body answering `"s"` passed `check` and `build`
+  whenever nothing called it; make it `pub def` and the same body was
+  refused. The probe called from outside the module and so could only
+  reach what outside reaches, which made `pub` the condition of a rule
+  that is about the definition. The probe is the definition asking about
+  itself now - `Call#check_visibility` lets a synthetic call through the
+  wall and past `protected` - so a module's unmarked function and a
+  type's `private def` are typed like an exported one; a mixin `module`'s
+  defs stay caller-typed, since `self` there is the includer's. Typing
+  every def in the tree this way found one: the runtime's eager
+  `IyiMark.sweep` called `sweep_one` with no argument, an arity that had
+  moved under it, and nothing native ever called `sweep`.
+  `bench/agent_loop.py` holds the rule; SPEC.md R-2c says it.
+
 - **Three typos `iyi fix` had nothing for.** Found by injecting one to
   three typos into every sample and asking `fix` to converge: 5 of 25
   did not. A prelude method with an optional parameter - `"ab".ljuts(5)`
@@ -6948,7 +6963,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 14,418-line library and nothing else. Every other
+  written against iyi's own 14,420-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

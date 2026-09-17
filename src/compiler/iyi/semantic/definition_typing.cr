@@ -36,10 +36,13 @@
 # is the half duck-typed generics never check and Rust checks
 # always; here it costs one synthetic type per trait_type per compile.
 #
-# The probe calls from outside and may only reach what outside reaches
-# — every fence below was earned by a failure, kept on record:
-# non-`pub` module functions and non-`pub` types are behind R-2's wall
-# (a spec's private `struct User`), impl-carried defs stay inside their
+# The probe is written at the top level and stamped with the def's own
+# location, and `Call#check_visibility` lets a synthetic call through R-2's
+# wall: it is the definition asking about itself, so a module's unmarked
+# function and a type's `private def` are typed like an exported one.
+# The fences that remain were each earned by a failure, kept on record:
+# a non-`pub` *type* is not nameable from the top level and stays
+# caller-typed (a spec's private `struct User`), impl-carried defs stay inside their
 # trait_type context (R-3, the collections sample's `<=>`), `Program` is its
 # own namespace so the nameable climb must stop there or hang, and
 # witnesses are only built for simple traits — supertraits, generic and
@@ -151,18 +154,22 @@ module Iyi::DefinitionTyping
       location = a_def.location
       return unless location
 
-      # The probe calls from *outside*, so it can only honestly reach
-      # what outside reaches: R-2's wall applies to probes exactly as it
-      # applies to people, and R-3 keeps impl-carried defs inside their
-      # trait_type context.
+      # R-3 keeps impl-carried defs inside their trait_type context. R-2's
+      # wall does not stop the probe: it is the def's own site asking, and
+      # `Call#check_visibility` lets a synthetic call through - so a module's
+      # unmarked function and a type's `private def` are typed at their
+      # definition like anything else. Before that, `def f : Int32` with a
+      # body answering `"s"` passed `check` and `build` whenever nothing
+      # called it, and `pub` was what decided whether the rule applied.
+      # The owner still has to be nameable from the top level: a spec's
+      # `private struct User` is not, and stays caller-typed.
       return if a_def.iyi_from_impl?
-      case owner
-      when NonGenericModuleType
-        return unless a_def.exported?
-      else
-        return unless a_def.visibility.public?
-      end
       return unless nameable?(owner)
+      # A plain `module` that is not a unit is a mixin: its instance defs
+      # mean something on the type that includes it (`self` in
+      # `Colorize::ObjectExtensions#colorize : Object(self)` is the includer),
+      # and calling one on the module itself typed `self` as the module.
+      return if owner.is_a?(NonGenericModuleType) && !owner.iyi_unit?
 
       argument_texts = [] of String
       a_def.args.each do |arg|

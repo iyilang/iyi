@@ -1357,6 +1357,13 @@ class Iyi::Call
           return
         end
 
+        # iyi: a definition-typing probe (`DefinitionTyping`) is the def's
+        # own site asking, not a caller outside the wall. It reaches a
+        # module's unmarked function and a type's `private def` the way the
+        # module's own code does, which is what typing the body at its
+        # definition means (SPEC.md R-2c).
+        return if iyi_synthetic?
+
         if name == "initialize" && parent_visitor.call.try(&.name) == "new"
           # Special case: initialize call inside automatically defined new
           return
@@ -1370,6 +1377,7 @@ class Iyi::Call
         raise "private method '#{match.def.name}' called for #{owner}"
       end
     when .protected?
+      return if iyi_synthetic?
       scope_type = scope.instance_type
       owner_type = match.def.owner.instance_type
 

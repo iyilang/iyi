@@ -137,6 +137,38 @@ else
 fi
 
 echo
+echo "== and they build with bdw-gc unreachable, not merely absent from the link line"
+# A library the binaries do not link can still be a library the build needs,
+# and two obvious ways of checking that are worthless. Unsetting LIBRARY_PATH
+# proves nothing, because brew symlinks libgc into a directory already on the
+# search path. Emptying CRYSTAL_LIBRARY_PATH proves nothing either, because
+# `@[Link("gc", pkg_config: "bdw-gc")]` emits its own -L from pkg-config. Both
+# were tried here and both passed while the dependency was still required.
+#
+# Blanking pkg-config as well is what makes it genuinely unreachable, and
+# `pkg-config --libs bdw-gc` failing first is the control: without it this
+# section would pass on a machine where the isolation silently did nothing.
+EMPTY="$WORK/no-libs"
+mkdir -p "$EMPTY"
+if env PKG_CONFIG_LIBDIR="$EMPTY" PKG_CONFIG_PATH="$EMPTY" \
+     pkg-config --libs bdw-gc > "$WORK/pc.log" 2>&1; then
+  echo "  FAIL: the isolation does not isolate, pkg-config still finds bdw-gc"
+  status=1
+else
+  echo "  pkg-config cannot find bdw-gc, so the isolation holds"
+  rm -f .build/iyi .build/crystal
+  if env -u LIBRARY_PATH PKG_CONFIG_LIBDIR="$EMPTY" PKG_CONFIG_PATH="$EMPTY" \
+       CRYSTAL_LIBRARY_PATH="$EMPTY" make -j8 > "$WORK/isolated.log" 2>&1; then
+    echo "  the binaries build with no bdw-gc reachable"
+  else
+    echo "  FAIL: the build needs bdw-gc installed"
+    grep -aoE "library not found for -l[a-z0-9+_]+|ld: .{0,60}" "$WORK/isolated.log" \
+      | sort -u | head -3 | sed 's/^/    /'
+    status=1
+  fi
+fi
+
+echo
 echo "== the default build is unchanged"
 rm -f .build/iyi .build/crystal
 if make -j8 > "$WORK/default.log" 2>&1; then

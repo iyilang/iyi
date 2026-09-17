@@ -975,8 +975,9 @@ marked PROPOSED are the parts that will move under you.
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
   `stdin`, `stdout` and `stderr` are buffered streams: `gets` reads a
-  line (nil at the end), `read_all` the rest, `write` and `flush` go the
-  other way, and `read_input` is `stdin.read_all` under its old name.
+  line with its newline (`gets(chomp: true)` drops it; nil at the end),
+  `read_all` the rest, `write` and `flush` go the other way, and
+  `read_input` is `stdin.read_all` under its old name.
   `File.read`, `File.write`, `File.exists?` and `File.delete` are the
   whole-file surface, and `File.open(path, "r"|"w")` is the same stream
   over a file. `samples/iyi/files.iyi` writes, reads and deletes its file;

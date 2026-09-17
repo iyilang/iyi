@@ -112,6 +112,18 @@
 
 ### Fixed
 
+- **Three more arrivals get a sentence.** `def f(a : Int32) -> Int32` was
+  "expecting token '.', not 'NEWLINE'" - the arrow parsed as a proc
+  literal opening the body - and says a return type is `: Type` here;
+  `a : int32` and `: bool` were "unexpected token" and name the capital
+  (`Int32`, `Bool`); `else if` with one `end` was "expecting 'end' to
+  close the if that began at line 1", true and unhelpful, and adds that
+  `else if` opened a second `if` and `elsif` is the spelling. A `.cr`
+  keeps the parse it had. `spec/compiler/parser/parser_spec.cr` holds
+  the three; the other thirty shapes probed - a missing `end` at every
+  depth, a stray one, `fn`/`let`/`var`/`elif`, an open bracket, brace or
+  paren, a bare `def f a` - already answered by name.
+
 - **`bind --mods` and `migrate --out` died of the filesystem's words for a
   directory that will not take a file.** `--mods ro/` was
   `ro/x.bind.log: Permission denied`, naming the log and no flag;

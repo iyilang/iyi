@@ -4691,6 +4691,8 @@ module Iyi
         unexpected_token "parentheses are mandatory for def parameters"
       when .symbol?
         raise "a space is mandatory between ':' and return type", @token
+      when .op_minus_gt?
+        iyi_return_arrow
       else
         if is_abstract && @token.type.eof?
           # OK
@@ -4698,6 +4700,9 @@ module Iyi
           unexpected_token
         end
       end
+
+      # With parameters the arrow arrives after the `)`, past the case.
+      iyi_return_arrow if iyi? && @token.type.op_minus_gt?
 
       if @token.type.op_colon?
         unless last_was_space
@@ -4761,6 +4766,15 @@ module Iyi
       set_visibility node
       node.end_location = end_location
       node
+    end
+
+    # iyi: `def f(a : Int32) -> Int32` is another language's return arrow.
+    # It parsed as a proc literal opening the body, and the report was
+    # "expecting token '.', not 'NEWLINE'" - true of the parse and nothing
+    # to do with the mistake. A `.cr` keeps the parse it always had.
+    private def iyi_return_arrow
+      unexpected_token unless iyi?
+      raise "unexpected token: \"->\": a return type is `: Type` here, not `-> Type` - `def name(args) : Type`", @token
     end
 
     # iyi: `def max : Elem where Elem : Comparable` (SPEC.md II.6).
@@ -5320,7 +5334,11 @@ module Iyi
         case @token.value
         when Keyword::ELSE
           else_location = @token.location
-          next_token_skip_statement_end
+          next_token_skip_space
+          if iyi? && @token.keyword?(:if) && @token.line_number == else_location.try(&.line_number)
+            @iyi_else_if = @token.location
+          end
+          skip_statement_end
           a_else = parse_expressions
         when Keyword::ELSIF
           else_location = @token.location
@@ -6181,6 +6199,11 @@ module Iyi
         when Keyword::TYPEOF
           parse_typeof
         else
+          # iyi: `int32`, `string`, `bool` where a type goes are another
+          # language's spelling of a name this one capitalises.
+          if iyi? && (proper = IYI_TYPE_SPELLINGS[@token.value.to_s]?)
+            raise "unexpected token: #{@token.to_s.inspect}: a type name is capitalised here - `#{proper}`", @token
+          end
           unexpected_token
         end
       when .underscore?
@@ -7579,7 +7602,15 @@ module Iyi
       # sent a reader back through the whole file to find the one
       # unclosed `if`.
       if value == Keyword::END && @token.type.eof? && (open = @iyi_open.last?)
-        raise "expecting 'end' to close the #{open[0]} that began at line #{open[1].try(&.line_number)}, not the end of the file", @token
+        message = "expecting 'end' to close the #{open[0]} that began at line #{open[1].try(&.line_number)}, not the end of the file"
+        # `else if` is legal and opens a second `if` that wants its own
+        # `end`; the inner one takes the only `end` written, and the outer
+        # is what is left open - the one the writer thought `elsif` had
+        # folded away.
+        if (else_if = @iyi_else_if) && open[0] == "if" && (began = open[1].try(&.line_number)) && began < else_if.line_number
+          message += " - `else if` at line #{else_if.line_number} opens a second `if` that needs its own `end`; `elsif` is the spelling here"
+        end
+        raise message, @token
       end
       raise "expecting identifier '#{value}', not '#{@token}'", @token
     end
@@ -7589,6 +7620,10 @@ module Iyi
     # popped once its `end` was seen. A failed parse abandons the stack
     # with the parser.
     @iyi_open = [] of {String, Location?}
+
+    # iyi: where an `else` was followed by `if` on its own line, for the
+    # missing-`end` sentence above.
+    @iyi_else_if : Location?
 
     def iyi_opened(what : String, location : Location?) : Nil
       @iyi_open << {what, location}
@@ -7631,6 +7666,32 @@ module Iyi
     IYI_SPELLINGS = {
       "and" => "`&&` is the spelling here",
       "or"  => "`||` is the spelling here",
+    }
+
+    # iyi: lowercase spellings of the prelude's scalar names, met where a
+    # type is expected, and the name each one is here.
+    IYI_TYPE_SPELLINGS = {
+      "int"     => "Int32",
+      "int8"    => "Int8",
+      "int16"   => "Int16",
+      "int32"   => "Int32",
+      "int64"   => "Int64",
+      "int128"  => "Int128",
+      "uint8"   => "UInt8",
+      "uint16"  => "UInt16",
+      "uint32"  => "UInt32",
+      "uint64"  => "UInt64",
+      "float"   => "Float64",
+      "float32" => "Float32",
+      "float64" => "Float64",
+      "double"  => "Float64",
+      "string"  => "String",
+      "str"     => "String",
+      "bool"    => "Bool",
+      "boolean" => "Bool",
+      "char"    => "Char",
+      "nil"     => "Nil",
+      "void"    => "Nil",
     }
 
     # iyi: the first `fn`, `func` or `function` parsed as a command call

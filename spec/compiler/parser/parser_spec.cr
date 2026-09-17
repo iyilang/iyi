@@ -4492,6 +4492,40 @@ end").as(ClassDef)
         end
       end
 
+      # Three more arrivals, each a sentence rather than the token the
+      # parser wanted: another language's return arrow, its lowercase
+      # type names, and `else if` taking the one `end` written. A `.cr`
+      # keeps the parse it always had.
+      it "explains a `->` return type" do
+        expect_raises(SyntaxException, "a return type is `: Type` here, not `-> Type`") do
+          parse("def f(a : Int32) -> Int32\n  a\nend", filename: "x.iyi")
+        end
+        expect_raises(SyntaxException, "a return type is `: Type` here, not `-> Type`") do
+          parse("def f -> Int32\n  1\nend", filename: "x.iyi")
+        end
+        ex = expect_raises(SyntaxException) { parse("def f(a : Int32) -> Int32\n  a\nend", filename: "x.cr") }
+        ex.message.to_s.should_not contain("a return type is")
+      end
+
+      it "explains a lowercase type name" do
+        expect_raises(SyntaxException, "a type name is capitalised here - `Int32`") do
+          parse("def f(a : int32) : Int32\n  a\nend", filename: "x.iyi")
+        end
+        expect_raises(SyntaxException, "a type name is capitalised here - `Bool`") do
+          parse("def f : bool\n  true\nend", filename: "x.iyi")
+        end
+      end
+
+      it "explains `else if` when the outer `if` is left open" do
+        expect_raises(SyntaxException, "`else if` at line 3 opens a second `if` that needs its own `end`; `elsif` is the spelling here") do
+          parse("if true\n  1\nelse if false\n  2\nend\n", filename: "x.iyi")
+        end
+        # Closed properly it is legal, and a plain missing `end` says nothing about it.
+        parse("if true\n  1\nelse if false\n  2\nend\nend\n", filename: "x.iyi")
+        ex = expect_raises(SyntaxException) { parse("if true\n  1\nelsif false\n  2\n", filename: "x.iyi") }
+        ex.message.to_s.should_not contain("else if")
+      end
+
       # iyi: `expr!` — the propagation operator the name was freed for
       # (SPEC.md III.1.2). At a call site `!` is now the operator, which is the
       # whole reason it was taken out of names.

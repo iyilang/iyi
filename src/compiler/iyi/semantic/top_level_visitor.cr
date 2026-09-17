@@ -1475,10 +1475,24 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   end
 
   # Whether *node* was written in one of the prelude's own files.
+  #
+  # Both sides are read as posix paths, because on Windows they arrive in
+  # different spellings and the prefix test then answered no for every
+  # prelude file: `File::SEPARATOR` is `'/'` on every platform (`src/file.cr`),
+  # while `iyi_prelude_dir` comes from `File.dirname` of a resolved require
+  # and the location's filename from `File.expand_path`, both of which use
+  # `\` there. So `C:\...\prelude/` was tested against
+  # `C:\...\prelude\shout.iyi`, nothing was ever in the prelude, and R-3's
+  # two refusals — a module replacing a prelude method, and one replacing a
+  # prelude macro — said nothing at all. `to_posix` is the identity on a
+  # posix path, so the rule fires for the same declarations it always did.
   private def iyi_written_in_prelude?(node : Def | Macro) : Bool
     return false unless dir = @program.iyi_prelude_dir
+    prefix = "#{::Path[dir].to_posix}/"
     !!node.location.try(&.expanded_location).try do |at|
-      at.filename.as?(String).try &.starts_with?("#{dir}#{File::SEPARATOR}")
+      at.filename.as?(String).try do |filename|
+        ::Path[filename].to_posix.to_s.starts_with?(prefix)
+      end
     end
   end
 

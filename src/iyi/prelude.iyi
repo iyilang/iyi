@@ -7375,9 +7375,45 @@ end
 # On wasm32 there is no environment to read and `env` answers nil for
 # every name: the sandbox story (SPEC.md III.12) is that the runtime
 # hands the program nothing, and an absent surface beats a permission.
-{% unless flag?(:wasm32) %}
+#
+# On Windows the exported name is not `environ`. The CRT's data symbol is
+# `_environ`, so a program that read one variable failed to link with
+# `unresolved external symbol __imp_environ` — the accessor `__p__environ`
+# is what the CRT exports for this, it hands back the address of that
+# pointer, and using it needs no fourth CRT library on the link line.
+{% if flag?(:win32) %}
+  lib LibIyiEnv
+    fun environ_table = __p__environ : UInt8***
+  end
+{% elsif !flag?(:wasm32) %}
   lib LibIyiEnv
     $environ : UInt8**
+  end
+{% end %}
+
+# The environment's table, and the only two operations anything here
+# performs on it: read the current one, and put a new one in its place.
+# Windows reaches it through the accessor, everything else through the
+# symbol, and no caller above has to know which.
+{% unless flag?(:wasm32) %}
+  def __iyi_environ : UInt8**
+    {% if flag?(:win32) %}
+      table = LibIyiEnv.environ_table
+      return Pointer(Pointer(UInt8)).new(0_u64) if table.address == 0_u64
+      table.value
+    {% else %}
+      LibIyiEnv.environ
+    {% end %}
+  end
+
+  def __iyi_set_environ(entries : UInt8**) : Nil
+    {% if flag?(:win32) %}
+      table = LibIyiEnv.environ_table
+      table.value = entries if table.address != 0_u64
+    {% else %}
+      LibIyiEnv.environ = entries
+    {% end %}
+    nil
   end
 {% end %}
 
@@ -7402,7 +7438,7 @@ class Program
     {% if flag?(:wasm32) %}
       nil
     {% else %}
-      pointer = LibIyiEnv.environ
+      pointer = __iyi_environ
       return nil if pointer.address == 0_u64
 
       length = name.bytesize

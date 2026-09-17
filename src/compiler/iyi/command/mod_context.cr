@@ -247,7 +247,15 @@ class Iyi::Command
     unless source_path
       return {written, nil, "does not resolve: no file and no requirement covers it"}
     end
-    module_root = source_path.chomp("#{expected_name}.iyi").chomp("/")
+    # The root the module path hangs under, reached by dropping a directory
+    # per segment of it. Chomping the name off the end arrived there only by
+    # coincidence: `File.join` leaves a module path's own `/` alone and
+    # spells the joint with `\`, so the tail matched while the `chomp("/")`
+    # after it fired on no Windows path at all and the root kept a separator
+    # glued to its end. `Path` needs neither coincidence.
+    root = ::Path[source_path]
+    (expected_name.count('/') + 1).times { root = root.parent }
+    module_root = root.to_s
 
     entry = File.join(emit_dir, "context_entry.iyi")
     File.write(entry, "import #{expected_name}\n")

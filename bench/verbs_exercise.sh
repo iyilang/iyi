@@ -93,7 +93,13 @@ refuses() { # refuses <label> <phrase> -- <command...>
   # `-- "$phrase"`: a refusal about a flag begins with one, and `grep -qF`
   # read `--out takes a directory` as its own options and failed the case
   # it was asked to check.
-  if ! grep -qF -- "$phrase" "$WORK/out"; then
+  #
+  # Both sides are read with their separators folded to `/`: a phrase built
+  # here out of `$WORK` carries this shell's `/`, while a path iyi prints is
+  # the platform's, so on Windows a case whose refusal was exactly right
+  # reported "refused, but not with ...". Folding changes nothing where the
+  # separator already is `/`.
+  if ! tr '\\' '/' < "$WORK/out" | grep -qF -- "$(printf '%s' "$phrase" | tr '\\' '/')"; then
     echo "  $label: refused, but not with \"$phrase\""
     sed -n '1,3p' "$WORK/out"
     status=1

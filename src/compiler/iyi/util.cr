@@ -41,6 +41,26 @@ module Iyi
     path
   end
 
+  # iyi: *path* as it reads from under *base*, or nil when it is not under it.
+  #
+  # Both sides are filesystem paths, so the question is `Path`'s and not a
+  # string's. `path.lchop(base + "/")` is the same sentence on posix and
+  # answers nothing on Windows: `File.expand_path` and `Dir.current` both
+  # spell a path with `\` there, the prefix never matched, and every verb that
+  # chops a root off a path to print it short printed the absolute path
+  # instead — `migrate` said `C:\...\out\app.iyi` where it meant `app.iyi`,
+  # and copied an asset under a name still carrying its leading separator.
+  #
+  # A path that is not under *base* answers nil rather than a `../..` climb,
+  # because the callers print what they get: the short name when there is one
+  # and the full path when there is not.
+  def self.path_under?(path : String, base : String) : String?
+    return nil unless relative = ::Path[path].relative_to?(base)
+    first = relative.parts.first?
+    return nil if first.nil? || first == ".."
+    relative.to_s
+  end
+
   def self.print_error(msg, color, stderr = STDERR, leading_error = true)
     stderr.print "Error: ".colorize.toggle(color).red.bold if leading_error
     stderr.puts msg.colorize.toggle(color).bright

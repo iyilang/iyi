@@ -544,7 +544,14 @@ module Iyi::Lsp
       module_path = header.lchop("module ").strip
       return nil if module_path.empty? || module_path.includes?(' ')
       suffix = "/#{module_path}.iyi"
-      return nil unless path.ends_with?(suffix)
+      # Asked of the posix reading, the way `Compiler.header_root_of` asks
+      # the same question of a build's entry: a module path is posix by
+      # grammar (R-1) and a path is the platform's, so on Windows no file
+      # ever ended with its own header and the server kept the entry-dir
+      # rule for every one of them. The root is sliced off the path itself,
+      # so what comes back is still the platform's spelling — `to_posix`
+      # swaps separator for separator and changes no length.
+      return nil unless ::Path[path].to_posix.to_s.ends_with?(suffix)
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end

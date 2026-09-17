@@ -5,8 +5,10 @@ require "semantic_version"
 module Iyi
   class MacroInterpreter
     private def find_source_file(filename, &)
-      # Support absolute paths
-      if filename.starts_with?('/')
+      # Whether the path names a root is `Path`'s question: a leading `/` is
+      # only the whole of it on posix, so `run("C:/tools/gen")` was taken for
+      # a name to look for down the search path, where a drive is not a shard.
+      if !::Path[filename].root.nil?
         filename = "#{filename}.cr" unless filename.ends_with?(".cr")
 
         if File.exists?(filename)

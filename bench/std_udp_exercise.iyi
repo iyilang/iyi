@@ -47,7 +47,7 @@ client = UdpSocket.client
 sent = client.send_to("ping loopback", "127.0.0.1", server_port)
 assert_int 13, sent, "sent byte count"
 
-dg = server.receive_datagram
+dg = server.receive_datagram.or_panic
 assert_str "ping loopback", dg.text, "received datagram text"
 assert_str "127.0.0.1", dg.host, "sender host is 127.0.0.1"
 client_port = dg.port
@@ -56,21 +56,21 @@ assert_int 13, dg.data.size, "datagram byte size"
 assert_str "ping loopback", dg.to_s, "datagram to_s matches text"
 
 server.send_to("pong reply", dg.host, client_port)
-reply_dg = client.receive_datagram
+reply_dg = client.receive_datagram.or_panic
 assert_str "pong reply", reply_dg.text, "reply text"
 assert_str "127.0.0.1", reply_dg.host, "reply sender host"
 assert_int server_port, reply_dg.port, "reply sender port matches server port"
 
 client.send_to("slice payload", "127.0.0.1", server_port)
 buf = Bytes.new(32)
-slice, r_host, r_port = server.receive_from(buf)
+slice, r_host, r_port = server.receive_from(buf).or_panic
 assert_int 13, slice.size, "caller buffer received slice size"
 assert_str "127.0.0.1", r_host, "caller buffer received sender host"
 assert_int client_port, r_port, "caller buffer received sender port"
 
 self_sent = server.send_to("self datagram", "127.0.0.1", server_port)
 assert_int 13, self_sent, "self-sent byte count"
-self_dg = server.receive_datagram
+self_dg = server.receive_datagram.or_panic
 assert_str "self datagram", self_dg.text, "self datagram text"
 assert_str "127.0.0.1", self_dg.host, "self datagram sender host"
 assert_int server_port, self_dg.port, "self datagram sender port is own port"
@@ -86,7 +86,7 @@ c1.connect("127.0.0.1", cp2)
 c2.connect("127.0.0.1", cp1)
 
 c1.send("connected datagram")
-c2_recv = c2.receive
+c2_recv = c2.receive.or_panic
 assert_int 18, c2_recv.size, "connected receive byte size"
 c1.close
 c2.close
@@ -104,26 +104,22 @@ max_payload[32768] = 0x55_u8
 max_payload[65506] = 0xFF_u8
 
 client.send_to(max_payload, "127.0.0.1", server_port)
-big_dg = server.receive_datagram(65536)
+big_dg = server.receive_datagram(65536).or_panic
 assert_int 65507, big_dg.data.size, "received max payload size"
 assert_true big_dg.data[0] == 0xAA_u8 && big_dg.data[32768] == 0x55_u8 && big_dg.data[65506] == 0xFF_u8, "payload contents intact"
 puts "  65,507-byte datagram sent and received intact"
 
-puts "\n== non-blocking and timeout receive with no data"
-assert_true !server.non_blocking?, "non_blocking default is false"
-server.non_blocking = true
-assert_true server.non_blocking?, "non_blocking is true"
+puts "\n== nothing queued: the ? variants answer nil, and a bounded wait ends"
 assert_true !server.poll_read(0), "poll_read is false when no data pending"
-assert_true server.receive_from?.nil?, "receive_from? returns nil when would block"
-assert_true server.receive_datagram?.nil?, "receive_datagram? returns nil when would block"
-
-server.non_blocking = false
-server.read_timeout = 10
-assert_int 10, server.read_timeout, "read_timeout is 10ms"
-assert_true server.receive_from?.nil?, "receive_from? returns nil on timeout"
-assert_true server.receive_datagram?.nil?, "receive_datagram? returns nil on timeout"
-server.read_timeout = 0
-puts "  receive_from? and receive_datagram? return nil when no data pending"
+assert_true server.receive_from?.nil?, "receive_from? is nil when nothing is queued"
+assert_true server.receive_datagram?.nil?, "receive_datagram? is nil when nothing is queued"
+assert_true server.receive?.nil?, "receive? is nil when nothing is queued"
+assert_true !server.poll_read(10), "poll_read(10) is false after 10ms with nothing queued"
+client.send_to("late", "127.0.0.1", server_port)
+assert_true server.poll_read(1000), "poll_read is true once a datagram is queued"
+late = server.receive_datagram?
+assert_true !late.nil? && late.text == "late", "receive_datagram? answers the queued one"
+puts "  the ? variants never park, and poll_read bounds a wait"
 
 puts "\n== socket lifecycle and close"
 assert_true !client.closed?, "client initially not closed"

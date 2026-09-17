@@ -18,6 +18,19 @@
 
 ### Changed
 
+- **`UdpSocket` parks the way `IyiSocket` does.** Every receive is
+  `MSG_DONTWAIT`, and when nothing is queued the task waits on the
+  descriptor - the poller under the runtime, a `poll` without one - so
+  `receive_from`, `receive` and `receive_datagram` answer `T | Cancelled`
+  (SPEC.md III.4.2) and a sibling on the same thread keeps running; a
+  `close` under a parked receive wakes it with `Cancelled`. Before, a
+  receive was a blocking `recvfrom` that pinned the worker, and the
+  module carried `non_blocking=`, `read_timeout=` and `write_timeout=`
+  to work around it. Those are gone: the `?` variants answer nil when
+  nothing is queued and never park, and `poll_read(ms)` bounds a wait.
+  Four receive bodies are two. `bench/std_udp_exercise.sh` runs the two
+  tasks on one thread and proves a blocking copy hangs.
+
 - **One comparison trait, and it is `Comparable`.** `std/traits` had
   `Cmp` with `cmp(other) : Int32`, nine modules and `Enumerable`'s bounds
   leaned on it, and `std/comparable` carried a second, generic
@@ -361,8 +374,7 @@
   - `std/capsule`: overlong datagram varints name overlong, not
     truncated; a quarter-stream id at `2^62` is refused; a negative
     encode length is refused before `Bytes.new`.
-  - `std/udp`: `Datagram[i]` panics unless `i` is 0, 1 or 2. Receive
-    still blocks the worker (`MSG_DONTWAIT` is not parking).
+  - `std/udp`: `Datagram[i]` panics unless `i` is 0, 1 or 2.
   - `std/bit_array`: `hash` mixes the bits; `fill`/`rotate`/`new` past
     `Int32` refuse with the module's sentence.
   - `std/comparable`: inverted `clamp` panics; `==` follows `<=>`;

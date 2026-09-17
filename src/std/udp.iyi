@@ -11,16 +11,15 @@
 # purity (zero undefined symbols) and Darwin programs only link standard socket symbols
 # provided by libSystem.
 #
-# Concurrency and QUIC:
-# UDP is connectionless and datagram-oriented. Protocols such as QUIC run entirely over
-# UDP and require timeouts and non-blocking operation for connection loss timers, keepalives,
-# and packet scheduling.
-# In iyi's concurrency architecture (SPEC.md III.4), fibers run on scheduler worker threads.
-# Standard blocking socket calls would stall an entire worker thread.
-# Non-blocking mode (@non_blocking) and kernel receive timeouts (read_timeout= via SO_RCVTIMEO)
-# provide non-blocking and timed receive semantics. Full event-loop integration with III.4
-# (group/Channel) will register the non-blocking fd with the runtime poller (kqueue on Darwin,
-# epoll on Linux), parking the calling fiber when EAGAIN is encountered.
+# Concurrency: every receive is `MSG_DONTWAIT`, and when nothing is queued
+# the calling task parks on the descriptor the way `std/socket` does
+# (SPEC.md III.4.2) - under the runtime on the poller, without one on a
+# `poll`. So `receive_from` answers `T | Cancelled`: `!` passes a cancelled
+# task through, `.or_panic` refuses it at the top level, and a socket
+# closed by another task under a parked receive answers it too. The `?`
+# variants answer nil when nothing is queued right now, and never park.
+# There are no kernel timeouts and no non-blocking flag: a wait that must
+# end is `poll_read(ms)` followed by `receive_from?`.
 
 module std/udp
 
@@ -75,9 +74,6 @@ pub class UdpSocket
   getter fd : Int32
   getter family : Int32
   @closed : Bool
-  @non_blocking : Bool
-  @read_timeout : Int32
-  @write_timeout : Int32
 
   def initialize(fd : Int32 = -1, @family : Int32 = 2)
     if fd < 0
@@ -87,9 +83,6 @@ pub class UdpSocket
       @fd = fd
     end
     @closed = false
-    @non_blocking = false
-    @read_timeout = 0
-    @write_timeout = 0
   end
 
   def to_unsafe : Int32
@@ -179,128 +172,92 @@ pub class UdpSocket
 
   # --- Receiving Datagrams ---
 
+  # One receive, parked when nothing is queued: `MSG_DONTWAIT`, and on
+  # EAGAIN the task waits for the descriptor and asks again. A socket
+  # closed while the task is parked wakes it, and `@fd` is gone.
+  private def receive_into(buffer : Pointer(UInt8), capacity : Int32, addr : Pointer(UInt8)) : Int32 | Cancelled
+    len = 28_u32
+    while true
+      raise "socket is closed" if @fd < 0
+      count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
+      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      raise "cannot receive from UDP socket" unless UdpSocket.__is_eagain(count)
+      waited = IyiSocket.await_readable(@fd)
+      return waited if waited.is_a?(Cancelled)
+      return Cancelled.new if @fd < 0
+    end
+  end
+
+  # One receive that does not wait: what is queued now, or nil.
+  private def receive_now(buffer : Pointer(UInt8), capacity : Int32, addr : Pointer(UInt8)) : Int32?
+    check_open
+    len = 28_u32
+    while true
+      count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
+      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      return nil if UdpSocket.__is_eagain(count)
+      raise "cannot receive from UDP socket"
+    end
+  end
+
   # Receives a datagram into a newly allocated Bytes slice up to max_bytes.
-  # Returns {payload, peer_host, peer_port}.
-  # Raises if an error occurs, or if the receive timed out / would block.
-  def receive_from(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)
+  # Answers {payload, peer_host, peer_port}, parking until one arrives.
+  def receive_from(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32) | Cancelled
     check_open
     raise "negative count: #{max_bytes}" if max_bytes < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     addr = Pointer(UInt8).malloc(28_u64)
-    len = 28_u32
-    flags = @non_blocking ? MSG_DONTWAIT : 0
-
-    count = 0_i64
-    while true
-      count = UdpSocket.__sys_recvfrom(@fd, buffer, max_bytes.to_u64, flags, addr, pointerof(len))
-      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
-    end
-    if count < 0_i64
-      if UdpSocket.__is_eagain(count)
-        if @non_blocking
-          raise "receive would block"
-        else
-          raise "receive timed out"
-        end
-      else
-        raise "cannot receive from UDP socket"
-      end
-    end
-
-    bytes = Bytes.new(count.to_i32)
-    bytes.to_unsafe.copy_from(buffer, count.to_i32)
+    count = receive_into(buffer, max_bytes, addr)
+    return count if count.is_a?(Cancelled)
+    bytes = Bytes.new(count)
+    bytes.to_unsafe.copy_from(buffer, count)
     host, port = UdpSocket.format_address(addr)
     {bytes, host, port}
   end
 
   # Receives a datagram into a caller-supplied Bytes buffer.
-  # Returns {subslice_of_received_bytes, peer_host, peer_port}.
-  def receive_from(buffer : Bytes) : Tuple(Bytes, String, Int32)
+  # Answers {subslice_of_received_bytes, peer_host, peer_port}.
+  def receive_from(buffer : Bytes) : Tuple(Bytes, String, Int32) | Cancelled
     check_open
     addr = Pointer(UInt8).malloc(28_u64)
-    len = 28_u32
-    flags = @non_blocking ? MSG_DONTWAIT : 0
-
-    count = 0_i64
-    while true
-      count = UdpSocket.__sys_recvfrom(@fd, buffer.to_unsafe, buffer.size.to_u64, flags, addr, pointerof(len))
-      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
-    end
-    if count < 0_i64
-      if UdpSocket.__is_eagain(count)
-        if @non_blocking
-          raise "receive would block"
-        else
-          raise "receive timed out"
-        end
-      else
-        raise "cannot receive from UDP socket"
-      end
-    end
-
+    count = receive_into(buffer.to_unsafe, buffer.size, addr)
+    return count if count.is_a?(Cancelled)
     host, port = UdpSocket.format_address(addr)
-    {buffer[0, count.to_i32], host, port}
+    {buffer[0, count], host, port}
   end
 
-  # Receives a datagram, or returns nil if non-blocking or timed out with no data.
+  # What is queued now, or nil. Never parks.
   def receive_from?(max_bytes : Int32 = 65536) : Tuple(Bytes, String, Int32)?
-    check_open
     raise "negative count: #{max_bytes}" if max_bytes < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     addr = Pointer(UInt8).malloc(28_u64)
-    len = 28_u32
-    flags = @non_blocking ? MSG_DONTWAIT : 0
-
-    count = 0_i64
-    while true
-      count = UdpSocket.__sys_recvfrom(@fd, buffer, max_bytes.to_u64, flags, addr, pointerof(len))
-      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
-    end
-    if count < 0_i64
-      if UdpSocket.__is_eagain(count)
-        return nil
-      else
-        raise "cannot receive from UDP socket"
-      end
-    end
-
-    bytes = Bytes.new(count.to_i32)
-    bytes.to_unsafe.copy_from(buffer, count.to_i32)
+    count = receive_now(buffer, max_bytes, addr)
+    return nil if count.nil?
+    bytes = Bytes.new(count)
+    bytes.to_unsafe.copy_from(buffer, count)
     host, port = UdpSocket.format_address(addr)
     {bytes, host, port}
   end
 
-  # Receives into a buffer, returning nil on timeout or would block.
+  # Into a buffer: what is queued now, or nil. Never parks.
   def receive_from?(buffer : Bytes) : Tuple(Bytes, String, Int32)?
-    check_open
     addr = Pointer(UInt8).malloc(28_u64)
-    len = 28_u32
-    flags = @non_blocking ? MSG_DONTWAIT : 0
-
-    count = 0_i64
-    while true
-      count = UdpSocket.__sys_recvfrom(@fd, buffer.to_unsafe, buffer.size.to_u64, flags, addr, pointerof(len))
-      break unless count < 0_i64 && UdpSocket.__is_eintr(count)
-    end
-    if count < 0_i64
-      if UdpSocket.__is_eagain(count)
-        return nil
-      else
-        raise "cannot receive from UDP socket"
-      end
-    end
-
+    count = receive_now(buffer.to_unsafe, buffer.size, addr)
+    return nil if count.nil?
     host, port = UdpSocket.format_address(addr)
-    {buffer[0, count.to_i32], host, port}
+    {buffer[0, count], host, port}
   end
 
   # Receives a Datagram struct containing data, host, and port.
-  def receive_datagram(max_bytes : Int32 = 65536) : Datagram
-    data, host, port = receive_from(max_bytes)
-    Datagram.new(data, host, port)
+  def receive_datagram(max_bytes : Int32 = 65536) : Datagram | Cancelled
+    res = receive_from(max_bytes)
+    return res if res.is_a?(Cancelled)
+    Datagram.new(res[0], res[1], res[2])
   end
 
-  # Receives a Datagram struct, or nil if timed out or would block.
+  # A Datagram of what is queued now, or nil.
   def receive_datagram?(max_bytes : Int32 = 65536) : Datagram?
     res = receive_from?(max_bytes)
     return nil if res.nil?
@@ -330,13 +287,14 @@ pub class UdpSocket
     send(Bytes.new(str.to_unsafe, str.bytesize))
   end
 
-  # Receives payload bytes from the connected peer.
-  def receive(max_bytes : Int32 = 65536) : Bytes
-    data, _, _ = receive_from(max_bytes)
-    data
+  # Receives payload bytes from the connected peer, parking until some arrive.
+  def receive(max_bytes : Int32 = 65536) : Bytes | Cancelled
+    res = receive_from(max_bytes)
+    return res if res.is_a?(Cancelled)
+    res[0]
   end
 
-  # Receives payload bytes from the connected peer, or nil on timeout.
+  # Payload bytes queued now from the connected peer, or nil.
   def receive?(max_bytes : Int32 = 65536) : Bytes?
     res = receive_from?(max_bytes)
     return nil if res.nil?
@@ -374,6 +332,11 @@ pub class UdpSocket
       fd = @fd
       @fd = -1
       @closed = true
+      {% if @top_level.has_constant?("IyiScheduler") %}
+        # A task parked on this socket is woken first, and finds `@fd`
+        # already gone; then the descriptor goes.
+        wake_closed(fd)
+      {% end %}
       __iyi_close(fd.to_i64)
     end
   end
@@ -412,38 +375,7 @@ pub class UdpSocket
     raise "cannot set send buffer size" if res < 0
   end
 
-  # --- Timeouts and Non-Blocking Mode ---
-
-  getter read_timeout : Int32
-
-  # Sets the socket receive timeout in milliseconds. 0 disables timeout.
-  def read_timeout=(ms : Int32) : Nil
-    check_open
-    raise "negative timeout: #{ms}" if ms < 0
-    @read_timeout = ms
-    res = UdpSocket.__sys_set_timeout(@fd, SO_RCVTIMEO, ms)
-    raise "cannot set read timeout" if res < 0
-  end
-
-  getter write_timeout : Int32
-
-  # Sets the socket send timeout in milliseconds. 0 disables timeout.
-  def write_timeout=(ms : Int32) : Nil
-    check_open
-    raise "negative timeout: #{ms}" if ms < 0
-    @write_timeout = ms
-    res = UdpSocket.__sys_set_timeout(@fd, SO_SNDTIMEO, ms)
-    raise "cannot set write timeout" if res < 0
-  end
-
-  # Sets whether receive calls operate in non-blocking mode.
-  def non_blocking=(flag : Bool) : Nil
-    @non_blocking = flag
-  end
-
-  def non_blocking? : Bool
-    @non_blocking
-  end
+  # --- Waiting with a bound ---
 
   # Polls whether the socket is readable within timeout_ms milliseconds.
   # Returns true if a datagram is ready to be read, false on timeout.
@@ -695,8 +627,6 @@ pub class UdpSocket
     SO_REUSEADDR      = 0x0004
     SO_RCVBUF         = 0x1002
     SO_SNDBUF         = 0x1001
-    SO_RCVTIMEO       = 0x1006
-    SO_SNDTIMEO       = 0x1005
     MSG_DONTWAIT      =   0x80
     SOCKADDR_IN_SIZE  = 16_u32
     SOCKADDR_IN6_SIZE = 28_u32
@@ -763,18 +693,6 @@ pub class UdpSocket
       LibC.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, pointerof(val).as(Void*), 4_u32)
     end
 
-    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
-      sec = (ms // 1000).to_i64
-      usec = ((ms % 1000) * 1000).to_i32
-      tv = Pointer(UInt8).malloc(16_u64)
-      i = 0; while i < 16
-        tv[i] = 0_u8; i = i + 1
-      end
-      tv.as(Pointer(Int64)).value = sec
-      Pointer(Int32).new(tv.address + 8_u64).value = usec
-      LibC.setsockopt(fd, SOL_SOCKET, optname, tv.as(Void*), 16_u32)
-    end
-
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
       kq = LibC.kqueue
       return false if kq < 0
@@ -826,8 +744,6 @@ pub class UdpSocket
     SO_REUSEADDR       = 2
     SO_RCVBUF          = 8
     SO_SNDBUF          = 7
-    SO_RCVTIMEO        = 20
-    SO_SNDTIMEO        = 21
     MSG_DONTWAIT       = 0x40
     SOCKADDR_IN_SIZE   = 16_i64
     SOCKADDR_IN6_SIZE  = 28_i64
@@ -954,15 +870,6 @@ pub class UdpSocket
       __sys5(SYS_SETSOCKOPT, fd.to_i64, SOL_SOCKET.to_i64, SO_REUSEADDR.to_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
 
-    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
-      sec = (ms // 1000).to_i64
-      usec = ((ms % 1000) * 1000).to_i64
-      tv = Pointer(UInt8).malloc(16_u64)
-      tv.as(Pointer(Int64)).value = sec
-      Pointer(Int64).new(tv.address + 8_u64).value = usec
-      __sys5(SYS_SETSOCKOPT, fd.to_i64, SOL_SOCKET.to_i64, optname.to_i64, tv.address.to_i64, 16_i64).to_i32
-    end
-
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
       epfd = __sys3(SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
       return false if epfd < 0_i64
@@ -999,8 +906,6 @@ pub class UdpSocket
     SO_REUSEADDR      =      2
     SO_RCVBUF         =      8
     SO_SNDBUF         =      7
-    SO_RCVTIMEO       =     20
-    SO_SNDTIMEO       =     21
     MSG_DONTWAIT      =   0x40
     SOCKADDR_IN_SIZE  = 16_i64
     SOCKADDR_IN6_SIZE = 28_i64
@@ -1042,10 +947,6 @@ pub class UdpSocket
     end
 
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      -1
-    end
-
-    def self.__sys_set_timeout(fd : Int32, optname : Int32, ms : Int32) : Int32
       -1
     end
 

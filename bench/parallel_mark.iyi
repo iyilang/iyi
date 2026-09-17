@@ -84,10 +84,26 @@
 
   puts "mark: #{alone[0] // 1000_i64} us alone, #{helped[0] // 1000_i64} us with helpers, which blackened #{helped[1]} of the last mark's nodes"
 
+  wide = Array(Node?).new
+  index = 0
+  while index < 300000
+    wide << Node.new(nil, nil, index.to_i64)
+    index = index + 1
+  end
+
   # The pool's memory is the most batches ever in it at once, not every
   # batch a mark published: a batch taken is a batch's words free again.
-  # Eleven marks of a million nodes with fifteen helpers published tens
-  # of thousands of batches; the pool holds a handful of 64 KB pieces.
+  # The tree's marks publish only by donation - when the pool is empty and
+  # a helper is idle - which is a number of batches that depends on the
+  # cores the machine has, and on a three-core runner stayed inside the
+  # first piece with the recycling removed, so the proof below it did not
+  # fire. The wide object publishes by spilling: a stack past SPILL_AT
+  # gives a batch to the pool on every push after it, 300,000 pointers
+  # are thousands of batches on any machine, and thousands of batches
+  # never recycled are megabytes.
+  puts "phase: one mark of the wide object with helpers"
+  IyiMark.collect
+  fail("the wide object lost a node under the shared mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
   pool = IyiMark.pool_bytes
   fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 1048576_u64
   puts "pool: #{pool.to_i64} bytes mapped for the marks' batches"
@@ -96,12 +112,6 @@
   # holding 300,000 pointers pushes them all, and the stack of 8,192
   # entries it began with doubles until they fit.
   IyiMark.workers = 0_u64
-  wide = Array(Node?).new
-  index = 0
-  while index < 300000
-    wide << Node.new(nil, nil, index.to_i64)
-    index = index + 1
-  end
   grown_before = IyiMark.stacks_grown
   IyiMark.collect
   fail("stack: a 300,000-wide object was marked alone and the stack never grew past its #{IyiMark::STACK_START.to_i64} entries") if IyiMark.stacks_grown == grown_before

@@ -178,6 +178,15 @@
 
 ### Fixed
 
+- **The parallel marker's "pool never recycles" proof did not fire on a
+  three-core runner.** The tree's marks publish batches only by donation -
+  when the pool is empty and a helper is idle - so how many they publish
+  is the machine's, and on darwin CI a copy with `free_batch` removed
+  stayed inside the pool's first piece. `bench/parallel_mark.iyi` marks
+  the 300,000-wide object with helpers before the pool check now: a stack
+  past `SPILL_AT` publishes on every push, which is thousands of batches
+  on any machine, and thousands never recycled are eleven megabytes.
+
 - **A type the standard library declares names its module.** `Deque`,
   `JSON`, `Random`, `BigInt`, `Path`, `UUID`, `Base64`, `CSV`, `Log`,
   `OptionParser`, `Comparable`, `HTTP` - each was a bare "undefined

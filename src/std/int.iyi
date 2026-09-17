@@ -182,28 +182,32 @@ module std/int
           # A value this wide may not be a double: `9007199254740993_i128 ==
           # 9007199254740992.0` was true, the integer rounded to the double
           # before the comparison. `<=>` below compares exactly.
+          # IEEE against NaN: only `!=` is true. `<=>` places NaN for
+          # sorting and would answer `<` here.
           def ==(other : Float64) : Bool
-            (self <=> other) == 0
+            !(other != other) && (self <=> other) == 0
           end
 
           def !=(other : Float64) : Bool
-            (self <=> other) != 0
+            (other != other) || (self <=> other) != 0
           end
 
           def <(other : Float64) : Bool
-            (self <=> other) == -1
+            !(other != other) && (self <=> other) == -1
           end
 
           def <=(other : Float64) : Bool
+            return false if other != other
             c = self <=> other
             c == -1 || c == 0
           end
 
           def >(other : Float64) : Bool
-            (self <=> other) == 1
+            !(other != other) && (self <=> other) == 1
           end
 
           def >=(other : Float64) : Bool
+            return false if other != other
             c = self <=> other
             c == 1 || c == 0
           end
@@ -224,11 +228,11 @@ module std/int
 
       # Exact for every width: the double is placed against the type's
       # edges, then its floor - one of the type, once inside them - against
-      # the value, then its fraction decides a tie. nil when the double is
-      # NaN, as `Float64#<=>` answers. The prelude's `Int64 == Float64` is
-      # not exact, and is the prelude's to mend; this one is.
-      def <=>(other : Float64) : Int32?
-        return nil if other != other
+      # the value, then its fraction decides a tie. NaN is after every
+      # number, as `Float64#<=>` places it. The prelude's `Int64 == Float64`
+      # is not exact, and is the prelude's to mend; this one is.
+      def <=>(other : Float64) : Int32
+        return -1 if other != other
         return -1 if other >= {{ float_limits[from[0]].id }}
         return 1 if other < {{ (from[2] ? mins[from[0]] : "0").id }}.0
         whole = other.floor

@@ -7,7 +7,7 @@
 # the prelude does for `Float64` - arithmetic, comparisons and conversions
 # against every numeric type, instructions and nothing underneath - and
 # gives it `abs`, `floor`, `ceil`, `round`, `trunc`, unary `-`, `%`, `//`,
-# `remainder`, `<=>`, `nan?`, `infinite?`, `finite?`, the constants `NAN`,
+# `remainder`, `<=>` (a total order, NaN last), `nan?`, `infinite?`, `finite?`, the constants `NAN`,
 # `INFINITY`, `MIN`, `MAX`, `EPSILON`, `MIN_POSITIVE`, and a printer of its
 # own: the shortest decimal that reads back as the same *single*, on the
 # prelude's exact bignum, so `0.1_f32` prints `0.1` and `Float32::MAX`
@@ -117,6 +117,9 @@ import std/number
       {% if wide_ints.includes?(int) %}
         {% for pair in [{"==", "c == 0"}, {"!=", "c != 0"}, {"<", "c == 1"}, {"<=", "c == 1 || c == 0"}, {">", "c == -1"}, {">=", "c == -1 || c == 0"}] %}
           def {{ pair[0].id }}(other : {{ int.id }}) : Bool
+            # IEEE against NaN: only `!=` is true. `<=>` places NaN for
+            # sorting and would answer the wrong way here.
+            return {{ pair[0] == "!=" }} if nan?
             c = other <=> to_f64
             {{ pair[1].id }}
           end
@@ -241,10 +244,17 @@ import std/number
         -1.0{{ sfx.id }} * self
       end
 
-      # nil when either side is NaN: NaN is ordered against nothing.
-      def <=>(other : {{ name.id }}) : Int32?
-        return nil if nan? || other.nan?
-        self < other ? -1 : (self > other ? 1 : 0)
+      # A total order, so `Comparable` holds and a list of floats sorts:
+      # NaN is after everything and equal to NaN. `<` and `==` keep IEEE's
+      # answer, false against NaN; this is the one place NaN is placed.
+      def <=>(other : {{ name.id }}) : Int32
+        if nan?
+          other.nan? ? 0 : 1
+        elsif other.nan?
+          -1
+        else
+          self < other ? -1 : (self > other ? 1 : 0)
+        end
       end
 
       # The remainder of the truncated division, the dividend's sign (C's

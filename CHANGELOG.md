@@ -178,6 +178,22 @@
 
 ### Fixed
 
+- **A list of floats did not sort.** `std/float` writes `Float64#<=>`
+  itself, answering `Int32?` - nil for NaN - and `std/traits` imports
+  it; the type's own def wins over the impl's, so `Comparable`'s bound
+  held and the body did not: `List(Float64).new([...]).sorted` was
+  refused with "expected block to return Int32, not (Int32 | Nil)", and
+  so was `Float32`, `max`, `Heap(Float64)`. One `<=>` per type now, and
+  it is a total order: NaN after everything and equal to NaN, which is
+  what a sort needs and what Rust calls `total_cmp`. `<`, `==` and the
+  rest keep IEEE's answer against NaN - only `!=` is true - including
+  the exact wide-integer comparisons that had been reading `<=>` and
+  would have said `NaN > 5_u128`. The other half of the round: two tasks
+  parked on one socket is refused by name by the runtime, as designed;
+  a sibling's error releases a parked `receive_from` with `Cancelled`,
+  and `receive_datagram?` beside it answers nil at once - both held by
+  `bench/std_udp_exercise.sh` now, the sort by `bench/std_exercise.sh`.
+
 - **Definition-site typing (R-2c) skipped every def that was not `pub`.**
   `def f : Int32` with a body answering `"s"` passed `check` and `build`
   whenever nothing called it; make it `pub def` and the same body was

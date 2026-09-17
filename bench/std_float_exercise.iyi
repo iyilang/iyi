@@ -91,6 +91,12 @@ assert_true 1.5_f32 > 1_u16 && 1_u16 < 1.5_f32, "1.5 against 1, both ways"
 nan32 = 0.0_f32 / 0.0_f32
 assert_true !(nan32 == 1_i64) && nan32 != 1_i64 && !(nan32 < 1_i64) && !(nan32 >= 1_i64), "NaN is ordered against no Int64"
 assert_true !(1_i8 == nan32) && 1_i8 != nan32 && !(1_i8 > nan32) && !(1_i8 <= nan32), "and no Int8"
+nan64 = 0.0 / 0.0
+assert_true !(nan64 == 5_u128) && nan64 != 5_u128 && !(nan64 > 5_u128) && !(nan64 <= 5_u128), "and no UInt128, through the exact comparison"
+assert_true !(5_u128 == nan64) && 5_u128 != nan64 && !(5_u128 > nan64) && !(5_u128 <= nan64), "nor the other way"
+# `<=>` is a total order, so a list of floats sorts: NaN after everything,
+# equal to NaN. The prelude's `<` and `==` keep IEEE's answer above.
+assert_true (nan64 <=> nan64) == 0 && (1.0 <=> nan64) == -1 && (nan64 <=> 1.0) == 1 && (5_u128 <=> nan64) == -1, "<=> places NaN last"
 puts "  the integer is not rounded to the single first"
 
 # `%` takes the divisor's sign even for its zero, as Python does; `//` is

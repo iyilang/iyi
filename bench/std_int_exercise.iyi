@@ -53,7 +53,7 @@ assert_true (9223372036854775807_i64 <=> 9223372036854775808.0) == -1, "Int64::M
 assert_true (18446744073709551615_u64 <=> 18446744073709551616.0) == -1, "UInt64::MAX <=> 2^64"
 assert_true (2147483647 <=> 2147483647.5) == -1 && (200_u8 <=> 200.0) == 0, "the narrow spaceship"
 nan = 0.0 / 0.0
-assert_true (5_u128 <=> nan).nil?, "<=> NaN is nil"
+assert_true (5_u128 <=> nan) == -1, "<=> places NaN after every number"
 assert_true !(5_u128 == nan) && 5_u128 != nan && !(5_u128 < nan) && !(5_u128 >= nan), "NaN is ordered against nothing"
 assert_true !(nan == 5_i16) && nan != 5_i16 && !(nan > 5_i16) && !(nan <= 5_i16), "from the double's side too"
 puts "  the integer is not rounded to a double first"

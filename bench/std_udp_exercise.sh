@@ -263,6 +263,35 @@ group do |g|
   end
 end
 puts "closed under a parked receive: #{closed_answer}"
+
+# A group cancelled by a sibling's error releases the parked receive too,
+# and the ? variant asked beside a parked sibling answers nil at once.
+struct Boom
+end
+
+impl Error for Boom
+  def message : String
+    "boom"
+  end
+end
+
+third = UdpSocket.bind("127.0.0.1", 0)
+third_port = third.local_port
+cancel_answer = ""
+probe_answer = ""
+group do |g|
+  g.spawn do
+    r = third.receive_datagram
+    cancel_answer = r.is_a?(Cancelled) ? "cancelled" : "datagram"
+    0
+  end
+  g.spawn do
+    sleep(10)
+    probe_answer = third.receive_datagram?.nil? ? "nil" : "datagram"
+    Boom.new
+  end
+end
+puts "sibling error under a parked receive: #{cancel_answer}, probe beside it: #{probe_answer}"
 IYI
 if ! "$IYI" build -o "$WORK/park" "$WORK/park.iyi" > "$WORK/park.build" 2>&1; then
   echo "  the parking program did not build:"
@@ -270,7 +299,8 @@ if ! "$IYI" build -o "$WORK/park" "$WORK/park.iyi" > "$WORK/park.build" 2>&1; th
   status=1
 elif timeout 10 "$WORK/park" > "$WORK/park.out" 2>&1; then
   if grep -q "parked receive answered: after a wait" "$WORK/park.out" &&
-     grep -q "closed under a parked receive: cancelled" "$WORK/park.out"; then
+     grep -q "closed under a parked receive: cancelled" "$WORK/park.out" &&
+     grep -q "sibling error under a parked receive: cancelled, probe beside it: nil" "$WORK/park.out"; then
     echo "  the sibling ran under a parked receive, and close woke it with Cancelled"
   else
     echo "  the parking program answered otherwise:"

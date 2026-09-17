@@ -28,7 +28,9 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs whatever compiler the caller names; `bin/iyi` is a shell
+# wrapper, and on Windows the caller has to point at the built exe itself.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -370,7 +372,7 @@ echo "== what the library declares, reached or not"
 # library against the day somebody calls it is invisible to everything above.
 # It is also the shape a link line grows in: one annotation, no caller yet,
 # and the floor moves the first time a module uses it. So the annotations are
-# read as text, and the list is the three the library has reasons for.
+# read as text, and the list is the ones the library has reasons for.
 while IFS= read -r annotation; do
   [ -n "$annotation" ] || continue
   case "$annotation" in
@@ -381,10 +383,17 @@ while IFS= read -r annotation; do
     # advapi32, which ships with every Windows the way kernel32 does, and
     # `std/random` is its one caller (SPEC.md III.10's inventory says so).
     '@[Link("advapi32")]') ;;
+    # Windows' sockets are Winsock's: `ws2_32` is the platform's network
+    # interface the way kernel32 is its process interface, it ships with
+    # every Windows, and `std/socket` and `std/udp` are its only callers
+    # (SPEC.md III.10's inventory says so). The completion port's
+    # `AcceptEx` and `ConnectEx` are mswsock's exports reached through
+    # `WSAIoctl`, so they add no second annotation.
+    '@[Link("ws2_32")]') ;;
     *)
       echo "  THE FLOOR MOVED: the library declares $annotation"
       echo "  A library iyi ships links the platform libc and, opt-in, a"
-      echo "  collector. A fifth annotation needs a reason in SPEC.md III.10"
+      echo "  collector. Another annotation needs a reason in SPEC.md III.10"
       echo "  before it needs a line here."
       status=1
       ;;

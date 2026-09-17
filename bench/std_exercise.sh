@@ -15,7 +15,15 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -75,7 +83,7 @@ prove_fails() {
   mkdir -p "$WORK/$dir/std"
   cp -R "$REPO/src/std/." "$WORK/$dir/std/"
   sed -e "$sed_script" "$REPO/src/std/$file" > "$WORK/$dir/std/$file"
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/std_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched std library did not build"
@@ -236,13 +244,15 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32'
-# The `@[Link]`s an exempt module may carry: the two DLLs Windows itself
-# ships, named in SPEC.md III.10's inventory. `std/random` is here for one
-# of them — the OS entropy `Random.new` seeds from is `RtlGenRandom`, and
-# Windows has no kernel32 name for it — and everything else in this list
-# reaches the platform through a `lib` block alone.
-PLATFORM_LINKS='@\[Link\("(kernel32|advapi32)"\)\]'
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32'
+# The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
+# named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
+# the OS entropy `Random.new` seeds from is `RtlGenRandom`, and Windows has
+# no kernel32 name for it — and `std/socket` and `std/udp` for `ws2_32`,
+# because Winsock is the whole of Windows' network interface and a socket
+# call has nowhere else to come from. Everything else in this list reaches
+# the platform through a `lib` block alone.
+PLATFORM_LINKS='@\[Link\("(kernel32|advapi32|ws2_32)"\)\]'
 reaching=""
 foreign=""
 for source in "$REPO"/src/std/*.iyi; do

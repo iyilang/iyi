@@ -261,7 +261,9 @@ class Iyi::Command
     compiler.stderr = IO::Memory.new
     previous_path = ENV["IYI_PATH"]?
     begin
-      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(':')
+      # The delimiter is the platform's, because `IyiPath` splits on the
+      # platform's: a `:`-joined list is one unusable entry on Windows.
+      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
       compiler.compile(
         Compiler::Source.new(entry, File.read(entry)),
         File.join(emit_dir, "unused"))

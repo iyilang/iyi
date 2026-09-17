@@ -224,7 +224,10 @@ class Iyi::Command
       compiler.stderr = IO::Memory.new
       previous_path = ENV["IYI_PATH"]?
       begin
-        ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(':')
+        # `IyiPath` splits this back apart on `Process::PATH_DELIMITER`,
+        # and on Windows that is `;`: a colon-joined list arrives as one
+        # entry with a drive letter in the middle of it.
+        ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
         compiler.compile(
           Compiler::Source.new(entry, File.read(entry)),
           File.join(emit_dir, "unused"))

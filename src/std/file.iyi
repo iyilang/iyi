@@ -135,6 +135,12 @@ using std/path::{Path}
                         out_buffer : Void*, out_size : Int32, returned : Int32*,
                         overlapped : Void*) : Int32
     fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
+    # What the last call's failure was, for a message that says why. A
+    # Windows program reads `GetLastError` where a POSIX one reads `errno`,
+    # and `FormatMessageW` is the system's own sentence for that number.
+    fun GetLastError : Int32
+    fun FormatMessageW(flags : Int32, source : Void*, message_id : Int32, language_id : Int32,
+                       buffer : UInt16*, size : Int32, arguments : Void*) : Int32
   end
 {% else %}
   # Linux: the kernel's own calls, as `socket` and the prelude make them
@@ -457,6 +463,39 @@ class ::File
     buffer[n] = 0_u8
     buffer
   end
+
+  {% if flag?(:win32) %}
+    # Why the last call failed, in Windows' own words. A message that names
+    # only what was attempted — "Cannot symlink A to B" — leaves the caller
+    # with nothing to act on, and on Windows the difference between "a
+    # required privilege is not held" and "the file already exists" is the
+    # difference between a machine setting and a bug in the program. The
+    # code is kept beside the text because the text is localised and the
+    # number is not.
+    #
+    # FORMAT_MESSAGE_FROM_SYSTEM is 0x1000 and FORMAT_MESSAGE_IGNORE_INSERTS
+    # 0x200: without the second, a message with an insert in it fails rather
+    # than printing the placeholder. Windows ends these sentences with CRLF
+    # and sometimes a trailing space, which is a line break in the middle of
+    # a panic, so the tail comes off.
+    private def self.win_error : String
+      code = Std::File::LibKernel32.GetLastError
+      room = 1024
+      wide = Pointer(UInt16).malloc(room.to_u64)
+      written = Std::File::LibKernel32.FormatMessageW(0x1200, Pointer(Void).new(0_u64), code, 0,
+                                                     wide, room - 1, Pointer(Void).new(0_u64))
+      return "Windows error #{code}" if written <= 0
+      while written > 0 && (wide[written - 1] == 13_u16 || wide[written - 1] == 10_u16 ||
+                           wide[written - 1] == 32_u16 || wide[written - 1] == 46_u16)
+        written = written - 1
+      end
+      wide[written] = 0_u16
+      size = __iyi_utf8_size_from_wide(wide)
+      return "Windows error #{code}" if size <= 1
+      text = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
+      "Windows error #{code}: #{text}"
+    end
+  {% end %}
 
   enum Type : UInt8
     File            = 0
@@ -895,11 +934,11 @@ class ::File
       # is the clock, which the kernel reads out in those ticks already.
       wpath = __iyi_wide_path(sys_path(p))
       if wpath.address == 0_u64
-        raise "Cannot touch #{p}"
+        raise "Cannot touch #{p}: the path is not valid UTF-8"
       end
       handle = Std::File::LibKernel32.CreateFileW(wpath, 0x100, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
-        raise "Cannot touch #{p}"
+        raise "Cannot touch #{p}: #{win_error}"
       end
       ticks = uninitialized Int64
       if time == 0_i64
@@ -910,7 +949,7 @@ class ::File
       written = Std::File::LibKernel32.SetFileTime(handle, Pointer(Int64).new(0_u64), pointerof(ticks), pointerof(ticks))
       Std::File::LibKernel32.CloseHandle(handle)
       if written == 0
-        raise "Cannot touch #{p}"
+        raise "Cannot touch #{p}: #{win_error}"
       end
     {% end %}
   end
@@ -934,9 +973,11 @@ class ::File
       # copy rather than a refusal.
       old_wide = __iyi_wide_path(sys_path(o))
       new_wide = __iyi_wide_path(sys_path(n))
-      if old_wide.address == 0_u64 || new_wide.address == 0_u64 ||
-         Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
-        raise "Cannot rename #{o} to #{n}"
+      if old_wide.address == 0_u64 || new_wide.address == 0_u64
+        raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
+      end
+      if Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
+        raise "Cannot rename #{o} to #{n}: #{win_error}"
       end
     {% end %}
   end
@@ -951,9 +992,11 @@ class ::File
     {% elsif flag?(:win32) %}
       old_wide = __iyi_wide_path(sys_path(o))
       new_wide = __iyi_wide_path(sys_path(n))
-      if old_wide.address == 0_u64 || new_wide.address == 0_u64 ||
-         Std::File::LibKernel32.CreateHardLinkW(new_wide, old_wide, Pointer(Void).new(0_u64)) == 0
-        raise "Cannot link #{o} to #{n}"
+      if old_wide.address == 0_u64 || new_wide.address == 0_u64
+        raise "Cannot link #{o} to #{n}: a path is not valid UTF-8"
+      end
+      if Std::File::LibKernel32.CreateHardLinkW(new_wide, old_wide, Pointer(Void).new(0_u64)) == 0
+        raise "Cannot link #{o} to #{n}: #{win_error}"
       end
     {% end %}
   end
@@ -979,7 +1022,7 @@ class ::File
       old_wide = __iyi_wide_path(sys_path(o))
       new_wide = __iyi_wide_path(sys_path(n))
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
-        raise "Cannot symlink #{o} to #{n}"
+        raise "Cannot symlink #{o} to #{n}: the path is not valid UTF-8"
       end
       target_attrs = Std::File::LibKernel32.GetFileAttributesW(old_wide)
       link_flags = 0x2_u32
@@ -987,7 +1030,7 @@ class ::File
         link_flags = link_flags | 0x1_u32
       end
       if Std::File::LibKernel32.CreateSymbolicLinkW(new_wide, old_wide, link_flags) == 0_u8
-        raise "Cannot symlink #{o} to #{n}"
+        raise "Cannot symlink #{o} to #{n}: #{win_error}"
       end
     {% end %}
   end
@@ -1015,17 +1058,18 @@ class ::File
       # object-manager spelling of the same path and not something a caller
       # can hand back to `File.read`, so those four bytes come off.
       wide = __iyi_wide_path(sys_path(p))
-      raise "Cannot readlink: #{p}" if wide.address == 0_u64
+      raise "Cannot readlink: #{p} is not valid UTF-8" if wide.address == 0_u64
       handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
         3, 0x2200000, Pointer(Void).new(0_u64))
-      raise "Cannot readlink: #{p}" if handle.address &+ 1_u64 == 0_u64
+      raise "Cannot readlink: #{p}: #{win_error}" if handle.address &+ 1_u64 == 0_u64
       buffer = Pointer(UInt8).malloc(16384_u64)
       returned = 0
       ok = Std::File::LibKernel32.DeviceIoControl(handle, 0x900A8, Pointer(Void).new(0_u64), 0,
         buffer.as(Void*), 16384, pointerof(returned),
         Pointer(Void).new(0_u64))
       Std::File::LibKernel32.CloseHandle(handle)
-      raise "Cannot readlink: #{p}" if ok == 0 || returned < 9
+      raise "Cannot readlink: #{p}: #{win_error}" if ok == 0
+      raise "Cannot readlink: #{p}: the reparse point is #{returned} bytes, too few to hold a target" if returned < 9
       tag = buffer.as(UInt32*).value
       names_at = if tag == 0xA000000C_u32
                    20
@@ -1036,7 +1080,7 @@ class ::File
                  end
       name_offset = (buffer + 8).as(UInt16*).value.to_i32
       name_bytes = (buffer + 10).as(UInt16*).value.to_i32
-      raise "Cannot readlink: #{p}" if name_bytes <= 0 || names_at + name_offset + name_bytes > returned
+      raise "Cannot readlink: #{p}: the reparse point names #{name_bytes} bytes at #{names_at + name_offset} of #{returned}" if name_bytes <= 0 || names_at + name_offset + name_bytes > returned
       chars = name_bytes // 2
       target = Pointer(UInt16).malloc((chars + 1).to_u64)
       target.copy_from((buffer + (names_at + name_offset).to_i64).as(UInt16*), chars)
@@ -1045,7 +1089,7 @@ class ::File
         target = target + 4
       end
       size = __iyi_utf8_size_from_wide(target)
-      raise "Cannot readlink: #{p}" if size <= 0
+      raise "Cannot readlink: #{p}: the target Windows stored is not convertible to UTF-8" if size <= 0
       String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(target, t, size) }
     {% else %}
       ""
@@ -1079,15 +1123,16 @@ class ::File
       # wrong for every path with a link, a dot or a relative segment in it,
       # and said nothing about a path that does not exist.
       wide = __iyi_wide_path(sys_path(p))
-      raise "Cannot resolve realpath for #{p}" if wide.address == 0_u64
+      raise "Cannot resolve realpath for #{p}: the path is not valid UTF-8" if wide.address == 0_u64
       handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
         3, 0x2000000, Pointer(Void).new(0_u64))
-      raise "Cannot resolve realpath for #{p}" if handle.address &+ 1_u64 == 0_u64
+      raise "Cannot resolve realpath for #{p}: #{win_error}" if handle.address &+ 1_u64 == 0_u64
       room = 32768
       full = Pointer(UInt16).malloc(room.to_u64)
       written = Std::File::LibKernel32.GetFinalPathNameByHandleW(handle, full, room - 1, 0)
       Std::File::LibKernel32.CloseHandle(handle)
-      raise "Cannot resolve realpath for #{p}" if written <= 0 || written >= room
+      raise "Cannot resolve realpath for #{p}: #{win_error}" if written <= 0
+      raise "Cannot resolve realpath for #{p}: the resolved path is #{written} characters, past the #{room} this asks for" if written >= room
       resolved = full
       if written > 8 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
         if full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
@@ -1099,7 +1144,7 @@ class ::File
         end
       end
       size = __iyi_utf8_size_from_wide(resolved)
-      raise "Cannot resolve realpath for #{p}" if size <= 0
+      raise "Cannot resolve realpath for #{p}: the path Windows resolved is not convertible to UTF-8" if size <= 0
       String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(resolved, t, size) }
     {% else %}
       p
@@ -1137,20 +1182,21 @@ class ::File
       # does.
       wpath = __iyi_wide_path(sys_path(p))
       if wpath.address == 0_u64
-        raise "Cannot truncate #{p}"
+        raise "Cannot truncate #{p}: the path is not valid UTF-8"
       end
       handle = Std::File::LibKernel32.CreateFileW(wpath, 0x40000000, 0x7, Pointer(Void).new(0_u64), 3, 0, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
-        raise "Cannot truncate #{p}"
+        raise "Cannot truncate #{p}: #{win_error}"
       end
       if Std::File::LibKernel32.SetFilePointerEx(handle, size, Pointer(Int64).new(0_u64), 0) == 0
+        message = "Cannot truncate #{p}: #{win_error}"
         Std::File::LibKernel32.CloseHandle(handle)
-        raise "Cannot truncate #{p}"
+        raise message
       end
       cut = Std::File::LibKernel32.SetEndOfFile(handle)
       Std::File::LibKernel32.CloseHandle(handle)
       if cut == 0
-        raise "Cannot truncate #{p}"
+        raise "Cannot truncate #{p}: #{win_error}"
       end
     {% end %}
   end

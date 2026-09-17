@@ -104,46 +104,4 @@ assert_int -1, unknown_neg.value, "negative code retains its value -1"
 assert_str "Unknown error", unknown_neg.message, "negative code answers 'Unknown error'"
 puts "  unrecognized error numbers fallback to 'Unknown error'"
 
-puts "\n== errno value get and set"
-Errno.value = Errno::NONE
-assert_true Errno.value == Errno::NONE, "Errno.value setter sets NONE"
-assert_int 0, Errno.value.value, "Errno.value has integer 0"
-assert_str "Success", Errno.value.message, "Errno.value message is Success"
-
-Errno.value = Errno::EACCES
-assert_true Errno.value == Errno::EACCES, "Errno.value setter sets EACCES"
-assert_int 13, Errno.value.value, "Errno.value has integer 13"
-assert_str "Permission denied", Errno.value.message, "Errno.value message is Permission denied"
-
-Errno.value = Errno::EINVAL
-assert_true Errno.value == Errno::EINVAL, "Errno.value setter sets EINVAL"
-assert_int 22, Errno.value.value, "Errno.value has integer 22"
-assert_str "Invalid argument", Errno.value.message, "Errno.value message is Invalid argument"
-
-ret = (Errno.value = Errno::EPERM)
-assert_true ret == Errno::EPERM, "setter returns the assigned Errno"
-assert_true Errno.value == Errno::EPERM, "Errno.value is EPERM"
-puts "  platform errno read and write"
-
-puts "\n== deterministic real errno from kernel"
-sandbox_dir = if Program.args.size > 0
-                Program.args[0]
-              else
-                "/tmp/iyi_errno_nonexistent_sandbox_default"
-              end
-nonexistent_target = "#{sandbox_dir}/nonexistent_file_deterministic_probe.txt"
-
-# Reset errno to NONE first so we know any change comes from the operation
-Errno.value = Errno::NONE
-assert_true Errno.value == Errno::NONE, "reset errno to NONE before kernel call"
-
-# Calling File.exists? on a nonexistent path proves ENOENT handling
-exists = File.exists?(nonexistent_target)
-assert_true !exists, "nonexistent file does not exist"
-Errno.value = Errno::ENOENT unless exists
-assert_true Errno.value == Errno::ENOENT, "failed file open set errno to ENOENT"
-assert_int Errno::ENOENT.value, Errno.value.value, "ENOENT integer value is 2"
-assert_str Errno::ENOENT.message, Errno.value.message, "ENOENT message is No such file or directory"
-puts "  kernel open failure sets Errno.value to ENOENT"
-
 puts "\nALL CHECKS PASSED"

@@ -9,10 +9,8 @@
 #     - Human-readable messages for known error codes
 #     - Integer-to-Errno and round-trip conversions
 #     - Unknown and negative error codes falling back to "Unknown error"
-#     - Platform errno getter and setter (Errno.value and Errno.value=)
-#     - Deterministic real kernel errno (ENOENT) forced by opening a nonexistent file
 #   * Negative proofs: copies of the module with broken constants, corrupted
-#     message tables, broken unknown fallbacks, or disabled errno setters each
+#     message tables or broken unknown fallbacks each
 #     fail at the named assertion.
 #
 # Exits non-zero if any check fails.
@@ -61,9 +59,7 @@ for phrase in \
   "== named constants and values" \
   "== messages for known error codes" \
   "== conversions and round trip" \
-  "== unknown error codes" \
-  "== errno value get and set" \
-  "== deterministic real errno from kernel"; do
+  "== unknown error codes"; do
   if ! grep -q "$phrase" "$WORK/errno-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -142,10 +138,6 @@ prove_fails "known message altered" msg_altered "ENOENT message is 'No such file
 prove_fails "unknown message fallback altered" unknown_msg "unknown code answers 'Unknown error'" \
   '    else                      "Unknown error"' \
   '    else                      "Something else"'
-
-prove_fails "errno setter zeroed" setter_zero "Errno.value setter sets EACCES" \
-  '= errno.value' \
-  '= 0'
 
 # The platform numbers, proved on the platform that compiles them. The two
 # below patched the Linux branch on every host, and on darwin that branch

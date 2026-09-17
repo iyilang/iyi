@@ -68,11 +68,12 @@ echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
 python3 - <<PY
 from pathlib import Path
-src = Path("$REPO/src/std/udp.iyi").read_text()
+# The parser is std/socket's now, so the module broken is that one.
+src = Path("$REPO/src/std/socket.iyi").read_text()
 old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/udp.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
+Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
 PY
 if [ $? -ne 0 ]; then
   echo "  the patch did not apply"
@@ -88,7 +89,7 @@ echo
 echo "== what address parsing refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/udp\nusing std/udp::{UdpSocket}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/udp\nimport std/socket\nusing std/udp::{UdpSocket}\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -112,18 +113,18 @@ refuses() { # refuses <label> <name> <phrase> <expression>
   printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
 }
 
-refuses "an invalid host string" bad_host "cannot resolve address: invalid.ip" \
-  'UdpSocket.parse_ipv4("invalid.ip")'
-refuses "an out-of-range octet" octet_range "cannot resolve address: 999.1.1.1" \
-  'UdpSocket.parse_ipv4("999.1.1.1")'
-refuses "an incomplete IPv4 address" incomplete_ip "cannot resolve address: 1.2.3" \
-  'UdpSocket.parse_ipv4("1.2.3")'
+refuses "an invalid host string" bad_host "cannot resolve address: \"invalid.ip\"" \
+  'IyiSocket.parse_ip("invalid.ip")'
+refuses "an out-of-range octet" octet_range "cannot resolve address: \"999.1.1.1\"" \
+  'IyiSocket.parse_ip("999.1.1.1")'
+refuses "an incomplete IPv4 address" incomplete_ip "cannot resolve address: \"1.2.3\"" \
+  'IyiSocket.parse_ip("1.2.3")'
 refuses "an invalid hex character in IPv6" bad_hex "invalid hex character in IPv6 address: x" \
   'UdpSocket.parse_ipv6("2001:xyz::1")'
 refuses "a leading-zero octet" leading_zero "an octet with a leading zero is not decimal" \
-  'UdpSocket.parse_ipv4("010.1.1.1")'
-refuses "an overflowing octet" overflow_octet "cannot resolve address: 2147483648.1.1.1" \
-  'UdpSocket.parse_ipv4("2147483648.1.1.1")'
+  'IyiSocket.parse_ip("010.1.1.1")'
+refuses "an overflowing octet" overflow_octet "cannot resolve address: \"2147483648.1.1.1\"" \
+  'IyiSocket.parse_ip("2147483648.1.1.1")'
 refuses "a second IPv6 compression" two_compressions "invalid IPv6 address: 1::2::3" \
   'UdpSocket.parse_ipv6("1::2::3")'
 refuses "a five-digit IPv6 group" long_group "invalid IPv6 address group" \

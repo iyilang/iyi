@@ -245,15 +245,4 @@ pub enum Errno
     else                      "Unknown error"
     end
   end
-
-  @@value = Errno::NONE
-
-  def self.value : self
-    @@value
-  end
-
-  def self.value=(errno : Errno) : Errno
-    @@value = Errno.new(val = errno.value)
-    errno
-  end
 end

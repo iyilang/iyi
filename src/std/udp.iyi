@@ -26,23 +26,13 @@ module std/udp
 
 pub import std/slice
 using std/slice::{Bytes, Slice}
+import std/socket
+using std/socket::{IPv4Address, IyiSocket}
 
 pub alias Bytes = Std::Slice::Bytes
-
-# An IPv4 address represented as four octets.
-pub struct IPv4Address
-  getter b0 : UInt8
-  getter b1 : UInt8
-  getter b2 : UInt8
-  getter b3 : UInt8
-
-  def initialize(@b0 : UInt8, @b1 : UInt8, @b2 : UInt8, @b3 : UInt8)
-  end
-
-  def to_s : String
-    "#{@b0}.#{@b1}.#{@b2}.#{@b3}"
-  end
-end
+# The address type, its parser and the `sockaddr_in` writer are `std/socket`'s;
+# this module had copies of all three, and the copies had drifted.
+pub alias IPv4Address = Std::Socket::IPv4Address
 
 # An incoming datagram with payload bytes and remote peer origin.
 pub struct Datagram
@@ -465,45 +455,6 @@ pub class UdpSocket
 
   # --- Address Parsing and Formatting ---
 
-  def self.parse_ipv4(host : String) : IPv4Address
-    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"
-    return IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8) if host == "0.0.0.0" || host == ""
-
-    parts = 0
-    curr = 0
-    has_digit = false
-    bytes = Pointer(UInt8).malloc(4_u64)
-    index = 0
-    len = host.bytesize
-
-    while index < len
-      ch = host[index]
-      if ch == '.'
-        raise "cannot resolve address: #{host}" unless has_digit
-        raise "cannot resolve address: #{host}" if curr > 255 || parts >= 4
-        bytes[parts] = curr.to_u8
-        parts = parts + 1
-        curr = 0
-        has_digit = false
-      elsif ch >= '0' && ch <= '9'
-        raise "cannot resolve address: #{host}" if curr > 255
-        raise "cannot resolve address: #{host}: an octet with a leading zero is not decimal" if has_digit && curr == 0
-        curr = curr * 10 + (ch.ord - 48)
-        has_digit = true
-      else
-        raise "cannot resolve address: #{host}"
-      end
-      index = index + 1
-    end
-
-    raise "cannot resolve address: #{host}" unless has_digit
-    raise "cannot resolve address: #{host}" if curr > 255
-    raise "cannot resolve address: #{host}" unless parts == 3
-    bytes[3] = curr.to_u8
-
-    IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])
-  end
-
   private def self.parse_hex_group(str : String) : Int32
     raise "invalid IPv6 address group" if str.bytesize == 0 || str.bytesize > 4
     val = 0
@@ -643,33 +594,6 @@ pub class UdpSocket
     bytes
   end
 
-  def self.make_sockaddr_in(ip : IPv4Address, port : Int32) : Pointer(UInt8)
-    buffer = Pointer(UInt8).malloc(16_u64)
-    i = 0
-    while i < 16
-      buffer[i] = 0_u8
-      i = i + 1
-    end
-
-    {% if flag?(:darwin) %}
-      buffer[0] = 16_u8 # sin_len = 16
-      buffer[1] = 2_u8  # sin_family = AF_INET (2)
-    {% else %}
-      buffer[0] = 2_u8 # sin_family = AF_INET (2)
-      buffer[1] = 0_u8
-    {% end %}
-
-    buffer[2] = ((port >> 8) & 255).to_u8
-    buffer[3] = (port & 255).to_u8
-
-    buffer[4] = ip.b0
-    buffer[5] = ip.b1
-    buffer[6] = ip.b2
-    buffer[7] = ip.b3
-
-    buffer
-  end
-
   def self.make_sockaddr_in6(v6_bytes : Pointer(UInt8), port : Int32) : Pointer(UInt8)
     buffer = Pointer(UInt8).malloc(28_u64)
     i = 0
@@ -706,8 +630,8 @@ pub class UdpSocket
       v6_bytes = parse_ipv6(host)
       {make_sockaddr_in6(v6_bytes, port), SOCKADDR_IN6_SIZE, AF_INET6}
     else
-      ip = parse_ipv4(host)
-      {make_sockaddr_in(ip, port), SOCKADDR_IN_SIZE, 2}
+      ip = IyiSocket.parse_ip(host)
+      {IyiSocket.make_sockaddr_in(ip, port), SOCKADDR_IN_SIZE, 2}
     end
   end
 

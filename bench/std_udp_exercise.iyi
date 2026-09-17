@@ -18,17 +18,19 @@ def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
 end
 
 import std/udp
+import std/socket
 using std/udp::{UdpSocket, Datagram, IPv4Address, Bytes}
+using std/socket::{IyiSocket}
 
 puts "== address parsing"
-ip = UdpSocket.parse_ipv4("127.0.0.1")
+ip = IyiSocket.parse_ip("127.0.0.1")
 assert_str "127.0.0.1", ip.to_s, "ipv4 to_s"
 assert_true ip.b0 == 127_u8 && ip.b1 == 0_u8 && ip.b2 == 0_u8 && ip.b3 == 1_u8, "ipv4 octets"
 
-ip_local = UdpSocket.parse_ipv4("localhost")
+ip_local = IyiSocket.parse_ip("localhost")
 assert_str "127.0.0.1", ip_local.to_s, "localhost resolves to 127.0.0.1"
 
-ip_zero = UdpSocket.parse_ipv4("0.0.0.0")
+ip_zero = IyiSocket.parse_ip("0.0.0.0")
 assert_str "0.0.0.0", ip_zero.to_s, "0.0.0.0 resolves to 0.0.0.0"
 
 v6 = UdpSocket.parse_ipv6("::1")

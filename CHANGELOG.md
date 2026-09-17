@@ -97,6 +97,22 @@
 
 ### Removed
 
+- **`std/iterable`, `std/nil`, `udp`'s own `IPv4Address`, and
+  `Errno.value`.** Four more things with two names or none. `Iterable`
+  was Crystal's mixin beside `Enumerable`, which nothing implemented and
+  whose two methods `Enumerable` already has. `std/nil` reopened `Nil`
+  with `not_nil`, `try` and `presence` - `not_nil` on `Nil` alone, so
+  `x.not_nil` on an `Int32?` did not compile for the half that matters -
+  and a `NilAssertionError` class that existed to carry one sentence;
+  `!` and `or_panic` are how a nil is refused here. `std/udp` declared a
+  second `IPv4Address`, a second address parser and a second
+  `sockaddr_in` writer, all three drifted from `std/socket`'s (no port
+  bound, no `inspect` in the sentence); it imports `std/socket` and uses
+  its now. `Errno.value`/`value=` was a class variable no syscall ever
+  set - the raw calls answer the negative number - and its exercise set
+  it by hand and read it back. The enum stays. Sixty-eight modules,
+  36,828 lines.
+
 - **`std/comparable` and `std/cmp`.** The second trait above, and a
   module of four free functions (`min`, `max`, `clamp`) over the first,
   which `Enumerable` and the trait itself already answer.

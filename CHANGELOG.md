@@ -125,6 +125,16 @@
 
 ### Fixed
 
+- **A type the standard library declares names its module.** `Deque`,
+  `JSON`, `Random`, `BigInt`, `Path`, `UUID`, `Base64`, `CSV`, `Log`,
+  `OptionParser`, `Comparable`, `HTTP` - each was a bare "undefined
+  constant" while `std/<module>.iyi` declared it under `pub`. The compiler
+  reads the search path's `std/` for a top-level `pub` declaration of the
+  name, on the error path only, and says `import std/deque` and `using
+  std/deque::{Deque}`; the hand-written sentences (`Time`, `ENV`) keep
+  their place above it, and "Did you mean" comes after, since `Deque` is
+  not a misspelling. `spec/compiler/semantic/iyi_spec.cr` holds it.
+
 - **Three arrival hints denied modules the tree has.** `p 1` was told
   "there is no `p`" while `std/kernel` declares `p` and `pp`; `rand` was
   told there is no random source "in `std` yet" while `std/random` has

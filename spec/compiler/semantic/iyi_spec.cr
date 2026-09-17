@@ -263,6 +263,12 @@ describe "Semantic: iyi" do
       assert_error "rand(10)", "comes with `import std/random`"
     end
 
+    it "names the std module that declares an unimported type" do
+      assert_error "x = Deque(Int32).new", "`Deque` comes with `import std/deque` and `using std/deque::{Deque}`"
+      assert_error "x = JSON.parse(\"1\")", "comes with `import std/json`"
+      assert_error "x = Nosuch.new", "undefined constant Nosuch"
+    end
+
     it "names puts value.inspect for p" do
       assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel`"
     end

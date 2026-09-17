@@ -270,7 +270,11 @@ module Iyi
       module_path = header.lchop("module ").strip
       return nil if module_path.empty? || module_path.includes?(' ')
       suffix = "/#{module_path}.iyi"
-      return nil unless path.ends_with?(suffix)
+      # Asked of the posix reading: a module path is posix by grammar (R-1) and
+      # a path is the platform's, so on Windows no entry ever ended with its own
+      # header — every build fell back to the entry-dir rule and `import
+      # shared/helper` from `pkg/eps_test.iyi` could not be found.
+      return nil unless ::Path[path].to_posix.to_s.ends_with?(suffix)
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end

@@ -229,21 +229,11 @@ class Iyi::Command
     nil
   end
 
+  # IV.6 read backwards, which is the build's own rule: one reading of it,
+  # because a selection that placed a test differently from the build that
+  # compiles it would discount the wrong tests.
   private def closure_root_of(path : String) : String?
-    header = nil
-    File.read(path).each_line do |line|
-      line = line.strip
-      next if line.empty? || line.starts_with?('#')
-      header = line
-      break
-    end
-    return nil unless header && header.starts_with?("module ")
-    module_path = header.lchop("module ").strip
-    return nil if module_path.empty? || module_path.includes?(' ')
-    suffix = "/#{module_path}.iyi"
-    return nil unless path.ends_with?(suffix)
-    root = path[0, path.size - suffix.size]
-    root.empty? ? "/" : root
+    Compiler.header_root_of(path, File.read(path))
   rescue IO::Error
     nil
   end

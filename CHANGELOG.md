@@ -125,6 +125,14 @@
 
 ### Fixed
 
+- **Three arrival hints denied modules the tree has.** `p 1` was told
+  "there is no `p`" while `std/kernel` declares `p` and `pp`; `rand` was
+  told there is no random source "in `std` yet" while `std/random` has
+  had one; `ENV` was told there is no map of the environment while
+  `std/env` is that map. Each names the module and the `using` line now,
+  the way `sprintf` and `Time` already did. `spec/compiler/semantic/iyi_spec.cr`
+  holds the three.
+
 - **Three more arrivals get a sentence.** `def f(a : Int32) -> Int32` was
   "expecting token '.', not 'NEWLINE'" - the arrow parsed as a proc
   literal opening the body - and says a return type is `: Type` here;

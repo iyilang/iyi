@@ -254,12 +254,17 @@ describe "Semantic: iyi" do
       assert_error "ARGV", "The arguments are `Program.args`"
     end
 
-    it "names Program.env for ENV" do
+    it "names Program.env for ENV, and the module that has the map" do
       assert_error "ENV", "`Program.env(\"NAME\")`"
+      assert_error "ENV", "comes with `import std/env`"
+    end
+
+    it "names the module that has rand" do
+      assert_error "rand(10)", "comes with `import std/random`"
     end
 
     it "names puts value.inspect for p" do
-      assert_error "p 1", "`puts value.inspect` is the spelling here; there is no `p`."
+      assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel`"
     end
 
     it "names elsif for elif, and a plain assignment for let" do

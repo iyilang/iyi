@@ -234,6 +234,31 @@ end
     __iyi_read(fd.to_i32, buffer, count)
   end
 
+  # Whether a descriptor is a terminal. There is no `isatty` syscall: the
+  # question is asked by making a terminal-only `ioctl` and seeing whether
+  # the kernel refuses it, which is what libc's `isatty` does too (TCGETS,
+  # 0x5401; `ioctl` is 16 on x86_64 and 29 on aarch64). The buffer is a
+  # `termios` the answer is written into and nothing reads: 60 bytes is
+  # larger than the struct on both architectures.
+  def __iyi_isatty(fd : Int32) : Bool
+    termios = uninitialized UInt8[60]
+    result = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(result)
+                    : "{rax}"(16_i64), "{rdi}"(fd.to_i64), "{rsi}"(0x5401_i64),
+                      "{rdx}"(pointerof(termios).as(Void*))
+                    : "rcx", "r11", "memory"
+                    : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(result)
+                   : "{x8}"(29_i64), "{x0}"(fd.to_i64), "{x1}"(0x5401_i64),
+                     "{x2}"(pointerof(termios).as(Void*))
+                   : "memory"
+                   : "volatile")
+    {% end %}
+    result >= 0_i64
+  end
+
   def __iyi_exit(status : Int32) : NoReturn
     {% if flag?(:x86_64) %}
       asm("syscall" :: "{rax}"(231_i64), "{rdi}"(status.to_i64) : "rcx", "r11", "memory" : "volatile")
@@ -258,6 +283,11 @@ end
     fun exit(status : Int32) : NoReturn
     fun backtrace(buffer : Void**, size : Int32) : Int32
     fun backtrace_symbols_fd(buffer : Void**, size : Int32, fd : Int32) : Void
+    # `std/colorize` asks whether standard output is a terminal before it
+    # writes an escape. Apple's answer is libSystem's, the same as every
+    # other call in this block; the Linux arm above makes the `ioctl` by
+    # hand because there is no libc there to ask.
+    fun isatty(fd : Int32) : Int32
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -274,6 +304,10 @@ end
 
   def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.read(fd.to_i32, buffer, count)
+  end
+
+  def __iyi_isatty(fd : Int32) : Bool
+    LibC.isatty(fd) != 0
   end
 
   def __iyi_open_read(path : UInt8*) : Int64
@@ -342,10 +376,17 @@ end
                   number_of_bytes_written : Int32*, overlapped : Void*) : Int32
     fun ReadFile(handle : Void*, buffer : Void*, number_of_bytes_to_read : Int32,
                  number_of_bytes_read : Int32*, overlapped : Void*) : Int32
-    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
-    fun DeleteFileA(name : UInt8*) : Int32
-    fun GetFileAttributesA(name : UInt8*) : Int32
+    fun DeleteFileW(name : UInt16*) : Int32
+    fun GetFileAttributesW(name : UInt16*) : Int32
+    fun MultiByteToWideChar(code_page : Int32, flags : Int32, bytes : UInt8*,
+                            byte_count : Int32, wide : UInt16*, wide_count : Int32) : Int32
+    fun WideCharToMultiByte(code_page : Int32, flags : Int32, wide : UInt16*,
+                            wide_count : Int32, bytes : UInt8*, byte_count : Int32,
+                            default_char : UInt8*, used_default : Int32*) : Int32
+    fun GetFullPathNameW(name : UInt16*, buffer_count : Int32, buffer : UInt16*,
+                         file_part : UInt16**) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
   end
@@ -382,45 +423,153 @@ end
     fun GetActiveProcessorCount(group_number : UInt16) : Int32
     fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
     fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
+    # The console's own three: whether a handle is one, its mode, and the
+    # wide write. `GetConsoleMode` failing is how a pipe is told apart from
+    # a terminal here.
+    fun GetConsoleMode(handle : Void*, mode : Int32*) : Int32
+    fun SetConsoleMode(handle : Void*, mode : Int32) : Int32
+    fun WriteConsoleW(handle : Void*, buffer : Void*, count : Int32,
+                      written : Int32*, reserved : Void*) : Int32
+    fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
+                     read : Int32*, control : Void*) : Int32
   end
 
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
   # STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12). They are negative
   # identifiers reinterpreted as DWORD; as Int32 they spell themselves.
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
-    if fd == 1
-      handle = LibC.GetStdHandle(-11)
-    elsif fd == 2
-      handle = LibC.GetStdHandle(-12)
-    elsif fd == 0
-      handle = LibC.GetStdHandle(-10)
-    else
-      handle = Pointer(Void).new(fd.to_i64.to_u64)
+  def __iyi_std_handle(fd : Int64) : Void*
+    return LibC.GetStdHandle(-11) if fd == 1_i64
+    return LibC.GetStdHandle(-12) if fd == 2_i64
+    return LibC.GetStdHandle(-10) if fd == 0_i64
+    Pointer(Void).new(fd.to_u64)
+  end
+
+  # The console, which is not a file even though Windows hands it out as a
+  # handle. Three things follow from that and all three were wrong:
+  #
+  #   * A console renders the bytes `WriteFile` gives it in the console's
+  #     *output code page*, which is 437 on an ordinary machine: `puts "çay"`
+  #     printed `‡ay`. `WriteConsoleW` takes UTF-16 and renders what the
+  #     program meant, so console output is converted and file output is not
+  #     — a redirected stream must stay the program's own bytes.
+  #   * VT sequences are off unless a program asks. Windows Terminal turns
+  #     them on for its own session and `conhost.exe` does not, which is why
+  #     `std/colorize` looked fine in one terminal and printed `←[31m` in the
+  #     other. ENABLE_VIRTUAL_TERMINAL_PROCESSING is 0x4, asked once.
+  #   * "Is this a terminal?" has no `isatty` here, and `GetConsoleMode`
+  #     answering at all *is* the test: it fails for a pipe and for a file.
+  #
+  # A write may end inside a UTF-8 sequence, because `IyiIO` flushes a full
+  # buffer wherever it fills. The tail is carried here, packed into a word,
+  # and goes out in front of the next write; the whole count is reported
+  # written because the caller's loop retries a short write with the same
+  # incomplete bytes and would never make progress.
+  module IyiConsole
+    @@probed : UInt64 = 0_u64
+    @@console : UInt64 = 0_u64
+    @@vt : UInt64 = 0_u64
+    @@carry : UInt64 = 0_u64
+    @@carry_length : Int32 = 0
+
+    def self.console?(fd : Int64, handle : Void*) : Bool
+      return false if fd < 0_i64 || fd > 2_i64
+      bit = 1_u64.unsafe_shl(fd.to_u64)
+      if @@probed & bit == 0_u64
+        mode = uninitialized Int32
+        @@console = @@console | bit if LibC.GetConsoleMode(handle, pointerof(mode)) != 0
+        @@probed = @@probed | bit
+      end
+      @@console & bit != 0_u64
     end
+
+    def self.enable_vt(fd : Int64, handle : Void*) : Nil
+      bit = 1_u64.unsafe_shl(fd.to_u64)
+      return if @@vt & bit != 0_u64
+      @@vt = @@vt | bit
+      mode = uninitialized Int32
+      return if LibC.GetConsoleMode(handle, pointerof(mode)) == 0
+      LibC.SetConsoleMode(handle, mode | 4)
+      nil
+    end
+
+    # How many of *count* bytes at *bytes* end a UTF-8 sequence. A lead byte
+    # says how many follow: 0xC0 two, 0xE0 three, 0xF0 four.
+    private def self.complete_length(bytes : UInt8*, count : Int32) : Int32
+      back = 1
+      while back <= 3 && back <= count
+        lead = bytes[count - back]
+        if lead >= 0xC0_u8
+          needed = lead >= 0xF0_u8 ? 4 : (lead >= 0xE0_u8 ? 3 : 2)
+          return count - back if needed > back
+          return count
+        end
+        return count if lead < 0x80_u8
+        back = back + 1
+      end
+      count
+    end
+
+    def self.write(fd : Int64, handle : Void*, buffer : Void*, count : UInt64) : Int64
+      enable_vt(fd, handle)
+      staged = buffer.as(UInt8*)
+      total = count.to_i32
+      if @@carry_length > 0
+        joined = Pointer(UInt8).malloc((@@carry_length + total).to_u64)
+        index = 0
+        while index < @@carry_length
+          joined[index] = (@@carry.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
+          index = index + 1
+        end
+        (joined + @@carry_length).copy_from(staged, total)
+        staged = joined
+        total = total + @@carry_length
+        @@carry = 0_u64
+        @@carry_length = 0
+      end
+      whole = complete_length(staged, total)
+      tail = total - whole
+      if tail > 0
+        index = 0
+        while index < tail
+          @@carry = @@carry | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
+          index = index + 1
+        end
+        @@carry_length = tail
+      end
+      return count.to_i64 if whole == 0
+      wide_count = LibC.MultiByteToWideChar(65001, 0, staged, whole, Pointer(UInt16).new(0_u64), 0)
+      # Not UTF-8 after all: the bytes are the program's and go out as they
+      # are, which is what every other platform does with them.
+      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if wide_count <= 0
+      wide = Pointer(UInt16).malloc(wide_count.to_u64)
+      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if LibC.MultiByteToWideChar(65001, 0, staged, whole, wide, wide_count) <= 0
+      written = uninitialized Int32
+      return -1_i64 if LibC.WriteConsoleW(handle, wide.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
+      count.to_i64
+    end
+  end
+
+  def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
     written = uninitialized Int32
-    if LibC.WriteFile(handle, buffer,
-         count.to_i32, pointerof(written), nil) == 0
+    if LibC.WriteFile(handle, buffer, count.to_i32, pointerof(written), nil) == 0
       return -1_i64
     end
     written.to_i64
   end
 
+  # Whether a descriptor is a terminal, which only the console answers yes to.
+  def __iyi_isatty(fd : Int32) : Bool
+    IyiConsole.console?(fd.to_i64, __iyi_std_handle(fd.to_i64))
+  end
+
+  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+    __iyi_write(fd.to_i64, buffer, count)
+  end
+
   def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
-    if fd == 1_i64
-      handle = LibC.GetStdHandle(-11)
-    elsif fd == 2_i64
-      handle = LibC.GetStdHandle(-12)
-    elsif fd == 0_i64
-      handle = LibC.GetStdHandle(-10)
-    else
-      handle = Pointer(Void).new(fd.to_u64)
-    end
-    written = uninitialized Int32
-    if LibC.WriteFile(handle, buffer,
-         count.to_i32, pointerof(written), nil) == 0
-      return -1_i64
-    end
-    written.to_i64
+    handle = __iyi_std_handle(fd)
+    return IyiConsole.write(fd, handle, buffer, count) if IyiConsole.console?(fd, handle)
+    __iyi_win_write_file(handle, buffer, count)
   end
 
   def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -451,6 +600,101 @@ end
     read.to_i64
   end
 
+  # A path is UTF-16 on Windows, and this is where iyi's UTF-8 becomes it.
+  #
+  # The `*A` entry points read a path in the process's *active code page*,
+  # so the UTF-8 bytes an iyi string carries arrived as whatever those bytes
+  # spell in that page: `File.write("ünïcode-ü.txt", …)` created a file
+  # Explorer shows as `Ã¼nÃ¯code-Ã¼.txt`, and reading it back worked only
+  # because both directions were wrong in the same way. `MultiByteToWideChar`
+  # with CP_UTF8 (65001) is the conversion Windows itself offers, so no
+  # decoder is written here.
+  #
+  # Long paths come with it. A `*W` call still stops at MAX_PATH unless the
+  # path carries the `\\?\` prefix, and that prefix turns off all path
+  # normalisation: `.`, `..` and `/` are no longer understood, so it may only
+  # be put on a full path. The rule is therefore: convert, and if the result
+  # is long, ask `GetFullPathNameW` for the absolute form and prefix that —
+  # `\\?\` for a drive path, `\\?\UNC\` for a share, which is the one shape
+  # where the leading `\\` is replaced rather than kept.
+  #
+  # 248 rather than 260 is deliberate: MAX_PATH is the limit for a *file*,
+  # and a directory a file is later created in has to leave room for a name,
+  # which is the number `CreateDirectoryW` documents.
+  IYI_WIN_PATH_LIMIT = 248
+
+  def __iyi_wide_path(path : UInt8*) : UInt16*
+    needed = LibC.MultiByteToWideChar(65001, 0, path, -1, Pointer(UInt16).new(0_u64), 0)
+    return Pointer(UInt16).new(0_u64) if needed <= 0
+    wide = Pointer(UInt16).malloc(needed.to_u64)
+    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 0, path, -1, wide, needed) <= 0
+    # `needed` counts the terminator; the length does not.
+    return wide if needed - 1 < IYI_WIN_PATH_LIMIT
+    __iyi_wide_long_path(wide)
+  end
+
+  private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
+    full_needed = LibC.GetFullPathNameW(wide, 0, Pointer(UInt16).new(0_u64), Pointer(Pointer(UInt16)).new(0_u64))
+    return wide if full_needed <= 0
+    full = Pointer(UInt16).malloc(full_needed.to_u64)
+    written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
+    return wide if written <= 0
+    # Already prefixed: `\\?\` in the source survives GetFullPathNameW.
+    return full if full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16
+    unc = full[0] == 92_u16 && full[1] == 92_u16
+    # `\\?\` is four characters, `\\?\UNC\` eight, and a share drops the two
+    # leading separators it replaces.
+    prefix_length = unc ? 8 : 4
+    body = unc ? full + 2 : full
+    body_length = written - (unc ? 2 : 0)
+    prefixed = Pointer(UInt16).malloc((prefix_length + body_length + 1).to_u64)
+    prefixed[0] = 92_u16 # '\'
+    prefixed[1] = 92_u16
+    prefixed[2] = 63_u16 # '?'
+    prefixed[3] = 92_u16
+    if unc
+      prefixed[4] = 85_u16 # 'U'
+      prefixed[5] = 78_u16 # 'N'
+      prefixed[6] = 67_u16 # 'C'
+      prefixed[7] = 92_u16
+    end
+    index = 0
+    while index < body_length
+      prefixed[prefix_length + index] = body[index]
+      index = index + 1
+    end
+    prefixed[prefix_length + body_length] = 0_u16
+    prefixed
+  end
+
+  # The way back, for every Windows call that *answers* with UTF-16: a
+  # directory entry's name, the current directory, a resolved path. The
+  # library asks for it here rather than each module writing a decoder, and
+  # `String` is the right answer rather than a byte buffer because every
+  # caller wants one. The bytes are UTF-8 (CP_UTF8, 65001), which is what an
+  # iyi string is.
+  def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
+    LibC.WideCharToMultiByte(65001, 0, wide, -1, buffer, limit,
+      Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+  end
+
+  # How many bytes the UTF-8 of *wide* needs, terminator included, or 0 when
+  # Windows refuses the conversion.
+  def __iyi_utf8_size_from_wide(wide : UInt16*) : Int32
+    needed = LibC.WideCharToMultiByte(65001, 0, wide, -1, Pointer(UInt8).new(0_u64), 0,
+      Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+    needed > 0 ? needed : 0
+  end
+
+  # The attributes of a path, or -1 (INVALID_FILE_ATTRIBUTES) when there is
+  # nothing there. `File` asks this rather than opening, because
+  # `CreateFileW` without FILE_FLAG_BACKUP_SEMANTICS refuses a directory.
+  def __iyi_path_attributes(path : UInt8*) : Int32
+    wide = __iyi_wide_path(path)
+    return -1 if wide.address == 0_u64
+    LibC.GetFileAttributesW(wide)
+  end
+
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE
   # is all bits set, which as an unsigned address plus one wraps to zero.
   #
@@ -462,15 +706,19 @@ end
   # still open came back as ERROR_SHARING_VIOLATION: that is what
   # `bench/io_exercise.iyi`'s flush check read as "cannot read".
   def __iyi_open_read(path : UInt8*) : Int64
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
     # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
+    handle = LibC.CreateFileW(wide, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
     # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
+    handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
@@ -480,7 +728,9 @@ end
   end
 
   def __iyi_unlink(path : UInt8*) : Int64
-    return 0_i64 if LibC.DeleteFileA(path) != 0
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
+    return 0_i64 if LibC.DeleteFileW(wide) != 0
     -1_i64
   end
 
@@ -577,6 +827,13 @@ end
 
   def __iyi_exit(status : Int32) : NoReturn
     LibWasi.proc_exit(status)
+  end
+
+  # WASI has `fd_fdstat_get` and a character-device filetype, which is as
+  # close to a terminal as the sandbox gets. Nothing here asks yet, and a
+  # guess would be the wrong kind of answer: no terminal, so no escapes.
+  def __iyi_isatty(fd : Int32) : Bool
+    false
   end
 {% else %}
   {% raise "iyi: this target is not one iyi's prelude has platform bindings for. " \

@@ -110,6 +110,19 @@
   which the `HAS_FINALIZER` bit in the object header already reserves room
   for — and not an address test.
 
+- **`std/empty` and `std/docs_pseudo_methods`, two stubs.** The first was
+  four lines of comment binding a vacant `Std::Empty`, named after
+  Crystal's `empty.cr` - which is a *prelude*, selected with
+  `--prelude=empty`, and still is; `"".empty?` is the prelude's and never
+  came from here. The second was Crystal's documentation costume: seven
+  private `__crystal_pseudo_*` defs no module could reach, six on `Object`
+  whose empty bodies answered `Nil` for `as` and did not compile for the
+  rest, and `CRYSTAL_PSEUDO__NoReturn`/`__Void` - two structs that were not
+  `NoReturn` and `Void`, could be allocated where the real ones cannot,
+  and were refused in a `lib`. `iyi doc` never loaded it, and nothing in
+  the tree imported either. `import std/empty` is "can't find module"
+  now, which is what it is. Seventy-two modules, 37,127 lines.
+
 ### Fixed
 
 - **Three more arrivals get a sentence.** `def f(a : Int32) -> Int32` was

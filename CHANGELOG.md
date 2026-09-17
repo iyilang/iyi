@@ -120,6 +120,12 @@
     could not reach. Each host patches the block it builds now: a
     collision with a neighbour and the other platform's number leaking in,
     which are the two mistakes the numbers have had.
+  - `spec/compiler-cli/crystal-daemon_spec.cr` asked for a socket at
+    `daemon-absent/absent.sock` under `$TMPDIR`, which on darwin is
+    `/var/folders/xx/<thirty characters>/T/` and made the path 106 bytes
+    against the kernel's 103. The compiler refused it with its own
+    sentence about the limit, correctly, and the spec — which is about the
+    *other* refusal, "no daemon listening" — never reached it. Short names.
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a

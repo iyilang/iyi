@@ -76,9 +76,15 @@ describe "`crystal daemon`" do
   end
 
   it "fails clearly when no daemon is listening" do
-    with_tempfile("daemon-absent") do |dir|
+    # Short names on purpose. A unix socket's path is a fixed field in
+    # `sockaddr_un` and darwin's takes 103 bytes; `with_tempfile` sits under
+    # `$TMPDIR`, which on darwin is `/var/folders/xx/<thirty characters>/T/`,
+    # and `daemon-absent/absent.sock` under it came to 106. The compiler
+    # refused that path with its own sentence about the limit — correctly —
+    # and this spec, which is about the *other* refusal, never reached it.
+    with_tempfile("d") do |dir|
       Dir.mkdir_p(dir)
-      socket = File.join(dir, "absent.sock")
+      socket = File.join(dir, "a.sock")
 
       result = Process.capture_result(crystal, "daemon", "build", "--socket", socket,
         fixture_path("hello-world.cr"))

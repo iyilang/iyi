@@ -9,7 +9,7 @@
   Windows 11 machine, and the tree's own gates run there: every
   `bench/*.sh` honours the platform's path-list delimiter (`;`, because a
   drive letter already owns the colon), converts the shell's own path
-  mapping before a native compiler reads it, honours `IYI` and `CRYSTAL`
+  mapping before a native compiler reads it, honours `$IYI` and `$CRYSTAL`
   from the environment, and names what it could not measure instead of
   passing on an empty pipeline — a gate that counted symbols out of a
   missing `nm` used to report "every step held". What is new underneath

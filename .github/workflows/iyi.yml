@@ -1611,7 +1611,7 @@ jobs:
       # What a person who downloads it does: unpack it somewhere that is not
       # this checkout and build a program out of it, with PATH cut down to
       # Windows' own directories so that nothing this job installed — the
-      # bootstrap Crystal, its LLVM, the MSVC prompt — can answer for the
+      # the bootstrap compiler, its LLVM, the MSVC prompt — can answer for the
       # zip. The script's header says what that proves and what it does not.
       - name: The zip, unpacked elsewhere and built with PATH trimmed
         shell: pwsh

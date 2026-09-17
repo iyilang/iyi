@@ -2212,7 +2212,7 @@ module Iyi
     # absolute path in a `require`, and the shard is not on `IYI_PATH`.
     #
     # POSIX-form, because the next thing that happens to this path is that it
-    # is read back out of a double-quoted Crystal string. On Windows
+    # is read back out of a double-quoted string in a `.cr` file. On Windows
     # `relative_to?` answers `..\entry.cr`, and `\a` and `\e` are escapes
     # there, so the fill build went looking for a file called `..try.cr`.
     # `require` resolves `/` on every platform Crystal builds on.

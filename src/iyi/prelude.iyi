@@ -3236,9 +3236,23 @@ require "./file"
       # from a fixed top on both targets, so the number does not change over
       # a run and reading it lazily is the same answer as recording it at
       # startup, without the startup cost for a program that never collects.
+      #
+      # Except on Windows, where it is not one number: the fiber switch
+      # rewrites the TEB's StackBase and StackLimit so that a Windows API
+      # called on a fiber's stack sees that stack (concurrency.iyi's
+      # `switch_stack`), which means this answers *the current stack's*
+      # base and memoizing it stores whichever stack asked first. A run
+      # that first collected inside a spawned fiber then walked the main
+      # fiber's stack from its saved sp to that fiber's top — two
+      # unrelated mappings, gigabytes apart — and died of a memory fault
+      # in the scan. The read is two instructions, so Windows re-reads.
       def self.stack_base : UInt64
-        @@stack_base = discover_stack_base if @@stack_base == 0
-        @@stack_base
+        {% if flag?(:win32) %}
+          discover_stack_base
+        {% else %}
+          @@stack_base = discover_stack_base if @@stack_base == 0
+          @@stack_base
+        {% end %}
       end
 
       {% if flag?(:darwin) %}

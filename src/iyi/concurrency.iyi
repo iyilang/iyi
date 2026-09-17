@@ -727,13 +727,25 @@ class IyiScheduler
   # own stack, wearing the thread's top where the main thread's wears 0
   # (the base `IyiRoots` found), so a walk from a parked main fiber's
   # saved sp stops at the right mapping's end.
+  #
+  # On Windows the main thread's top is taken here instead of left at 0
+  # for the walk to fill in later, because later is too late: this runs
+  # on the thread's own stack, where the TEB still describes it, and
+  # `switch_stack` rewrites those two TEB words for every fiber it
+  # enters. A zero left here was read back from inside a spawned fiber
+  # as that fiber's top, and the scan of main's stack then ran off the
+  # end of the mapping.
   def self.current : IyiFiber
     state = self.state
     fiber = state.current
     return fiber if fiber.is_a?(IyiFiber)
     main = IyiFiber.main
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      main.stack_top = IyiThread.current_stack_top
+      top = IyiThread.current_stack_top
+      {% if flag?(:win32) %}
+        top = IyiRoots.stack_base if top == 0
+      {% end %}
+      main.stack_top = top
     {% end %}
     state.current = main
     register(main)

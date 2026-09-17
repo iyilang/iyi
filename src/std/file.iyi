@@ -123,6 +123,18 @@ using std/path::{Path}
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
     fun SetFilePointerEx(handle : Void*, distance : Int64, new_pointer : Int64*, method : Int32) : Int32
     fun SetEndOfFile(handle : Void*) : Int32
+    # What a link points at, and where a path really goes. Both were
+    # missing, and both answers were made up rather than asked for:
+    # `readlink` returned the empty string for every link on this
+    # platform and `real_path` handed the caller its own argument back,
+    # so a program that followed a link on Windows followed nothing and
+    # was told it had succeeded. The reparse point is read raw —
+    # `GetFinalPathNameByHandleW` resolves the whole chain, which is
+    # `real_path`'s question and not `readlink`'s.
+    fun DeviceIoControl(handle : Void*, code : Int32, in_buffer : Void*, in_size : Int32,
+                        out_buffer : Void*, out_size : Int32, returned : Int32*,
+                        overlapped : Void*) : Int32
+    fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
   end
 {% else %}
   # Linux: the kernel's own calls, as `socket` and the prelude make them
@@ -977,6 +989,52 @@ class ::File
         raise "Cannot readlink: #{p}"
       end
       String.new(res.to_i) { |t| t.copy_from(buf, res.to_i) }
+    {% elsif flag?(:win32) %}
+      # The stored target, not the resolved one: this is `readlink`, so the
+      # reparse point is read as it was written. FILE_FLAG_OPEN_REPARSE_POINT
+      # (0x200000) opens the link instead of following it, and
+      # FILE_FLAG_BACKUP_SEMANTICS (0x2000000) is what lets a directory link
+      # be opened at all. FSCTL_GET_REPARSE_POINT is 0x900A8, and the buffer
+      # it fills is the tag (4 bytes), the data length (2), two reserved (2),
+      # and then, for a symbolic link, four 16-bit offsets and a 32-bit flag
+      # word before the wide characters at offset 20. A junction —
+      # IO_REPARSE_TAG_MOUNT_POINT — has no flag word, so its names start at
+      # 16. Windows writes the substitute name as `\??\C:\...`, which is the
+      # object-manager spelling of the same path and not something a caller
+      # can hand back to `File.read`, so those four bytes come off.
+      wide = __iyi_wide_path(sys_path(p))
+      raise "Cannot readlink: #{p}" if wide.address == 0_u64
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
+        3, 0x2200000, Pointer(Void).new(0_u64))
+      raise "Cannot readlink: #{p}" if handle.address &+ 1_u64 == 0_u64
+      buffer = Pointer(UInt8).malloc(16384_u64)
+      returned = 0
+      ok = Std::File::LibKernel32.DeviceIoControl(handle, 0x900A8, Pointer(Void).new(0_u64), 0,
+        buffer.as(Void*), 16384, pointerof(returned),
+        Pointer(Void).new(0_u64))
+      Std::File::LibKernel32.CloseHandle(handle)
+      raise "Cannot readlink: #{p}" if ok == 0 || returned < 9
+      tag = buffer.as(UInt32*).value
+      names_at = if tag == 0xA000000C_u32
+                   20
+                 elsif tag == 0xA0000003_u32
+                   16
+                 else
+                   raise "Cannot readlink: #{p} is not a link"
+                 end
+      name_offset = (buffer + 8).as(UInt16*).value.to_i32
+      name_bytes = (buffer + 10).as(UInt16*).value.to_i32
+      raise "Cannot readlink: #{p}" if name_bytes <= 0 || names_at + name_offset + name_bytes > returned
+      chars = name_bytes // 2
+      target = Pointer(UInt16).malloc((chars + 1).to_u64)
+      target.copy_from((buffer + (names_at + name_offset).to_i64).as(UInt16*), chars)
+      target[chars] = 0_u16
+      if chars >= 4 && target[0] == 92_u16 && target[1] == 63_u16 && target[2] == 63_u16 && target[3] == 92_u16
+        target = target + 4
+      end
+      size = __iyi_utf8_size_from_wide(target)
+      raise "Cannot readlink: #{p}" if size <= 0
+      String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(target, t, size) }
     {% else %}
       ""
     {% end %}
@@ -995,6 +1053,42 @@ class ::File
         len = len + 1
       end
       String.new(len) { |t| t.copy_from(res, len) }
+    {% elsif flag?(:win32) %}
+      # `realpath`'s answer is the path with every link followed and every
+      # `.`, `..` and short name gone, and the only thing on Windows that
+      # knows it is the file system: `GetFinalPathNameByHandleW` over an
+      # open handle. FILE_FLAG_BACKUP_SEMANTICS (0x2000000) is there so a
+      # directory can be opened; VOLUME_NAME_DOS (0) asks for a drive letter
+      # rather than a volume GUID. The answer arrives with the `\\?\`
+      # prefix, which is Windows' own spelling for "do not parse this
+      # again" and not part of the name, so it comes off — except for a UNC
+      # path, where `\\?\UNC\server\share` goes back to `\\server\share`.
+      # This used to hand the caller its argument back unchanged, which was
+      # wrong for every path with a link, a dot or a relative segment in it,
+      # and said nothing about a path that does not exist.
+      wide = __iyi_wide_path(sys_path(p))
+      raise "Cannot resolve realpath for #{p}" if wide.address == 0_u64
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
+        3, 0x2000000, Pointer(Void).new(0_u64))
+      raise "Cannot resolve realpath for #{p}" if handle.address &+ 1_u64 == 0_u64
+      room = 32768
+      full = Pointer(UInt16).malloc(room.to_u64)
+      written = Std::File::LibKernel32.GetFinalPathNameByHandleW(handle, full, room - 1, 0)
+      Std::File::LibKernel32.CloseHandle(handle)
+      raise "Cannot resolve realpath for #{p}" if written <= 0 || written >= room
+      resolved = full
+      if written > 8 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
+        if full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
+          resolved = full + 6
+          resolved[0] = 92_u16
+          resolved[1] = 92_u16
+        else
+          resolved = full + 4
+        end
+      end
+      size = __iyi_utf8_size_from_wide(resolved)
+      raise "Cannot resolve realpath for #{p}" if size <= 0
+      String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(resolved, t, size) }
     {% else %}
       p
     {% end %}

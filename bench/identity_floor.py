@@ -279,6 +279,15 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # they do not have. Backticked or quoted, by the rule above — a bare
     # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
     (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
+    # The linker's search path, in the gate that proves the binaries build
+    # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
+    # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and
+    # the swap made that gate pass with the collector back on the binaries,
+    # which is to say it stopped measuring anything. The build runs through
+    # `./bin/crystal`, so the variable that governs it is Crystal's. Backticked
+    # or assigned, by the rule above, so a bare mention is still caught.
+    (r'`CRYSTAL_LIBRARY_PATH`|CRYSTAL_LIBRARY_PATH="\$EMPTY"',
+     "the search path the build's own compiler reads, where iyi's adds instead of replacing"),
     (r"Crystal on the machine|a Crystal\b", "a sentence about the other language"),
     # Comments citing Crystal's own source, DWARF producer strings, and the
     # version banner's "a fork of Crystal X" clause. All name the other

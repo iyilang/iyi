@@ -997,7 +997,8 @@ jobs:
       # brew's shared libLLVM in `lib/` and, by the bundler's fixed point,
       # everything it names outside `/usr/lib` and `/System` — because the
       # compiler linked `/opt/homebrew/opt/llvm`.
-      # Now it links a static minimal LLVM and `lib/` is libgc alone. Built
+      # Now it links a static minimal LLVM, and with the collector off the
+      # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
       # SDK it was compiled against; cached on the recipe's hash and the
       # platform, so the build is paid once per recipe change. `$HOME`
@@ -1047,6 +1048,25 @@ jobs:
 
       - name: The build tool floor
         run: bash bench/build_tool_floor.sh
+
+      # A gate nobody runs is not a gate. This one rebuilds the compiler with
+      # and without a collector, so it lives here rather than in a job that
+      # would pay for a second toolchain: darwin is also where the property
+      # was lost, because Apple's `malloc` hands back exactly the size asked
+      # for while bdw-gc rounds a block up and hides a byte written past it.
+      #
+      # One run per sample rather than three, because CI is not the place to
+      # measure a rate: the shapes it has to catch, a terminator outside its
+      # allocation and a build that needs bdw-gc installed, fail on the first
+      # run or not at all.
+      # `LLVM_CONFIG` because this step rebuilds the compiler, and in this job
+      # only the steps that rebuild are told where the static LLVM is. Without
+      # it the gate reported "the compiler does not build with -Dgc_none",
+      # which was true and had nothing to do with the collector.
+      - name: The collector-free floor (III.9)
+        run: |
+          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" \
+            bash bench/collector_free_floor.sh
 
       # What a thread costs *this* floor, where every call is libSystem's:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`

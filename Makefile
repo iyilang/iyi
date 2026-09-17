@@ -51,38 +51,62 @@ override FLAGS += -D strict_multi_assign -D preview_overload_order $(if $(releas
 # iyi: -Dwithout_iconv because iyi's String has no encoding conversion, so the
 # compiler asks libiconv for nothing.
 #
-# -Dgc_none was tried here too and is not viable, which is worth recording so
-# nobody spends the afternoon again. The conclusion has held through a
-# re-measurement on 2026-09-16; the symptom has not, so the old one is replaced
-# rather than left to mislead. A collector-free compiler now builds clean and
-# emits no invalid IR at all. What it does instead is drop symbols and fall
-# over: building samples/iyi/collections.iyi failed 9 runs out of 10 with
-# `Undefined symbols for architecture arm64` naming a generic instantiation the
-# compiler had already agreed to emit
-# (`Nums@Std::Enumerable::Enumerable#zip<Words>`), one of those runs taking a
-# `Trace/BPT trap: 5` in the compiler itself, and bench/std_iterator_exercise.sh
-# failing the same way. The same compiler with bdw-gc: 0 failures in 5 runs of
-# that sample, 0 across two passes of every sample, and that exercise green.
+# -Dgc_none was not viable here for a long time, and the reason was never a
+# collector. It was one byte. `String::Builder` grew its buffer to
+# `real_bytesize + count` while `to_s` writes the string's terminator at
+# `@buffer[real_bytesize]`, so a string whose final size landed exactly on its
+# capacity had its terminator written one byte outside its allocation, and the
+# reclaiming shrink was skipped because the capacity was not bigger than what
+# was needed. bdw-gc rounds a block up and never reissues an address something
+# still points at, so under the collector every program was correct. Plain
+# `malloc` returns exactly the size asked for, and the next allocation
+# overwrote the byte.
 #
-# The cause was half right and the half that named parallel codegen is wrong,
-# which matters because it is also the exit condition. Tested against the
-# switch two lines below, which removes the parallel half:
+# What that looked like from outside: a 116-byte mangled function name in a
+# 128-byte block, needing 129, clean at `target_def_fun` and corrupt at the
+# same address by `check_mod_fun`, LLVM's `strlen` reading into the next
+# allocation, and `samples/iyi/collections.iyi` failing to link 10 runs out of
+# 10. Four mechanisms were written down before it and all four were wrong:
+# invalid IR, a dropped symbol, an empty link line, and parallel codegen. The
+# switch two lines below removes the parallel half and changed nothing, 5/5
+# either way, which is what finally ruled threading out.
 #
-#   gc_none                 collections.iyi failed 5/5
-#   gc_none + sequential    collections.iyi failed 5/5
+# Fixed in src/string/builder.cr, and measured: the same sample now builds 0
+# failures in 10 runs with a fresh cache each, every sample builds, and the
+# collector-free compiler links libLLVM and libSystem only. bench/collector_
+# free_floor.sh is the gate, and it fails if the reservation is removed again.
 #
-# Identical, so threading is not the discriminator, and the failure is
-# deterministic rather than "some runs": the same `Undefined symbols` reached
-# from `__iyi_main`, with a `Trace/BPT trap: 5` still showing up
-# single-threaded. What is left of the reason is the part that does not mention
-# threads: the compiler is a long walk over ASTs and `src/gc/none.cr` never
-# frees. So the compiler keeps bdw-gc and the programs it builds do not, which
-# is the split SPEC.md III.9 already draws.
-#
-# What ends this is therefore a collector that frees, not one that serves
-# parallel codegen. Waiting on the parallel milestone would be waiting on the
-# wrong thing.
+# The compiler still builds with bdw-gc by default, and that is now a trade
+# with numbers on it rather than a limit. Collector-free against default, zero
+# failures in ten runs each: the 7,207-line generated project 598MB peak
+# against 464MB, the compiler's own source 7,430MB against 5,702MB, wall time
+# within noise both times. So it is 29% more peak memory for one fewer library
+# on a binary whose floor already permits libc, and flipping this is a one-line
+# change here whenever that is judged worth taking. What this note no longer
+# says is that a collector is required: it is not, and the bug it was hiding
+# was in the standard library the whole time.
 override COMPILER_FLAGS += -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv$(if $(sequential_codegen), -Dwithout_mt,)
+
+# The collector choice, and it is deliberately not in COMPILER_FLAGS, because
+# the shipped binary and the spec harness want opposite answers.
+#
+# `-Dgc_none` is the default because the objective is a compiler carrying no
+# ancestor library, and `libgc` was the last one that was not a deliberate
+# toolchain choice. `src/gc/none.cr` never frees, so peak memory is a function
+# of how much a process allocates: a compiler invocation compiles one program
+# and exits, measured at 598MB against 464MB on the 7,207-line project and
+# 7,430MB against 5,702MB self-hosting.
+#
+# `compiler_spec` is the opposite shape. It compiles thousands of programs
+# inside one long-lived process, and with no collector that process was
+# `Killed` on CI, `Error 137`, which is the honest upper bound on an allocator
+# that never frees rather than a bug. So the harness keeps bdw-gc and the
+# binaries do not, which is the same split SPEC.md III.9 draws between the
+# compiler and the programs it builds.
+#
+# `collector=1` puts bdw-gc back on the binaries too, and is the configuration
+# every number above was measured against.
+BINARY_GC_FLAGS := $(if $(collector),,-Dgc_none)
 SPEC_WARNINGS_OFF := --exclude-warnings spec/std --exclude-warnings spec/compiler --exclude-warnings spec/primitives --exclude-warnings src/float/printer --exclude-warnings src/random.cr
 override SPEC_FLAGS += $(if $(verbose),-v )$(if $(junit_output),--junit_output $(junit_output) )$(if $(order),--order=$(order) )
 IYI_CONFIG_LIBRARY_PATH := '$$ORIGIN/../lib/iyi'
@@ -469,11 +493,15 @@ iyi-tarball: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN) check_iyi_is_release
 	find "$(O)/iyi-package/share/iyi/samples" -type f -perm -u+x -delete
 	find "$(O)/iyi-package/share/iyi/samples" -type d -empty -delete
 # What the binaries need at runtime and a fresh machine has no reason to
-# own — libgc, and libstdc++ on Linux; LLVM is inside the binary when it
-# was linked against `scripts/build-static-llvm.sh`'s archive, and the
-# script refuses a package that carries libLLVM in that case. Not a
-# curated list: the script takes what the loader reports, and CI's clean
-# room (a bare image with nothing but a C toolchain) is what judges it.
+# own. The collector is no longer among them by default; `collector=1` puts
+# libgc back and the bundle follows it. What is left depends on how LLVM was
+# linked, and both cases are measured: against `scripts/build-static-llvm.sh`
+# LLVM is inside the binary and `lib/` is empty, and the script refuses a
+# package that carries libLLVM in that case; against a shared LLVM, `lib/`
+# carries it and whatever it names (here libLLVM, libz3, libzstd), plus
+# libstdc++ on Linux. Not a curated list: the script takes what the loader
+# reports, which is why it needed no change when the collector left, and
+# CI's clean room (a bare image with nothing but a C toolchain) judges it.
 	bash scripts/bundle-runtime-libs.sh "$(O)/iyi-package"
 	tar -czf "$(O)/$(IYI_PACKAGE).tar.gz" -C "$(O)/iyi-package" .
 	@echo "wrote $(O)/$(IYI_PACKAGE).tar.gz"
@@ -553,7 +581,7 @@ $(O)/cli_spec$(EXE): $(O)/$(CRYSTAL_BIN) $(O)/$(IYI_DAEMON_BIN) $(DEPS) $(SOURCE
 $(O)/$(CRYSTAL_BIN): $(DEPS) $(SOURCES)
 	$(call check_llvm_config)
 	@mkdir -p $(O)
-	$(EXPORTS) $(EXPORTS_BUILD) ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) -o $(if $(WINDOWS),$(O)/crystal-next.exe,$@) src/compiler/crystal.cr
+	$(EXPORTS) $(EXPORTS_BUILD) ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) -o $(if $(WINDOWS),$(O)/crystal-next.exe,$@) src/compiler/crystal.cr
 	@# NOTE: on MSYS2 it is not possible to overwrite a running program, so the compiler must be first built with
 	@# a different filename and then moved to the final destination.
 	$(if $(WINDOWS),mv $(O)/crystal-next.exe $@)
@@ -569,7 +597,7 @@ $(O)/iyi$(EXE): $(DEPS) $(SOURCES)
 	$(call check_llvm_config)
 	@mkdir -p $(O)
 	$(EXPORTS) $(EXPORTS_BUILD) IYI_CONFIG_PATH='$$ORIGIN/../share/iyi/src:$$ORIGIN/../share/iyi/crystal:$$ORIGIN/../src' \
-	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(SELF_RPATH) -o $@ src/compiler/iyi.cr
+	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) $(SELF_RPATH) -o $@ src/compiler/iyi.cr
 	@echo "built $@ — run it as ./bin/iyi"
 
 # iyi: the same compiler, single-threaded, which is what lets it fork.
@@ -582,7 +610,7 @@ $(O)/$(IYI_DAEMON_BIN): $(DEPS) $(SOURCES)
 	$(call check_llvm_config)
 	@mkdir -p $(O)
 	$(EXPORTS) $(EXPORTS_BUILD) IYI_CONFIG_PATH='$$ORIGIN/../share/iyi/src:$$ORIGIN/../share/iyi/crystal:$$ORIGIN/../src' \
-	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(SELF_RPATH) -Dwithout_mt -o $@ src/compiler/iyi.cr
+	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) $(SELF_RPATH) -Dwithout_mt -o $@ src/compiler/iyi.cr
 	@echo "built $@ — \`iyi daemon start\` finds it beside iyi"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time
@@ -597,12 +625,12 @@ $(O)/crystal-front$(EXE): $(DEPS) $(SOURCES) $(O)/$(CRYSTAL_BIN)
 	$(EXPORTS) $(EXPORTS_BUILD) \
 	  IYI_CONFIG_TARGET="$$($(O)/$(CRYSTAL_BIN) --version | sed -n 's/^Default target: //p')" \
 	  IYI_CONFIG_LLVM_VERSION="$$($(O)/$(CRYSTAL_BIN) --version | sed -n 's/^LLVM: //p')" \
-	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) -Dwithout_llvm -o $@ src/compiler/crystal_front.cr
+	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) -Dwithout_llvm -o $@ src/compiler/crystal_front.cr
 
 $(O)/$(CRYSTAL_DAEMON_BIN): $(DEPS) $(SOURCES)
 	$(call check_llvm_config)
 	@mkdir -p $(O)
-	$(EXPORTS) $(EXPORTS_BUILD) ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) -Dwithout_mt -o $@ src/compiler/crystal.cr
+	$(EXPORTS) $(EXPORTS_BUILD) ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) -Dwithout_mt -o $@ src/compiler/crystal.cr
 
 ifneq ($(DEPS),)
 $(LLVM_EXT_OBJ): $(LLVM_EXT_DIR)/llvm_ext.cc

@@ -5064,56 +5064,90 @@ default stopped linking libgc, so the floor stopped arguing for the collector
 — and then the collector arrived and became the default without giving the
 floor back (GC_DESIGN.md, `bench/gc_default.py`). The price this paragraph
 recorded — a default that allocates and never frees — is paid no longer; it
-is `-Dgc_none`'s price now, chosen rather than shipped. One shortcut stays
-closed by measurement: **`-Dgc_none` is not viable for the compiler itself.**
-The verdict has survived a re-measurement on 2026-09-16 and the symptom has
-not, so what stands here is today's, because a reason nobody can reproduce is
-worse than no reason. A collector-free compiler now builds clean and emits no
-invalid IR at all. What it does instead is lose work it had already agreed to
-do: building `samples/iyi/collections.iyi` failed **9 runs out of 10** with
-`Undefined symbols for architecture arm64` naming a generic instantiation,
-`Nums@Std::Enumerable::Enumerable#zip<Words>`, with one run taking a
-`Trace/BPT trap: 5` inside the compiler, and
-`bench/std_iterator_exercise.sh` failing the same way. The same compiler with
-bdw-gc, measured in the same session: **0 failures in 5 runs** of that sample,
-0 across two passes of every sample, and that exercise green. The cause is
-unchanged: a long walk over ASTs with parallel codegen and fibers under an
-allocator that never frees. So the compiler keeps
-its collector, and the collected default for programs arrived through the
-real collector, exactly as this sentence once predicted.
+is `-Dgc_none`'s price now, chosen rather than shipped. One shortcut was
+recorded here as closed by measurement, and it is now open, because the
+measurement was of a bug rather than of a limit.
+
+**`-Dgc_none` was not viable for the compiler itself, and the reason was never
+a collector. It was one byte, in the standard library.**
+`String::Builder#increase_capacity_by` grew its buffer to
+`real_bytesize + count`, while `to_s` writes the string's terminator at
+`@buffer[real_bytesize]`. A string whose final size landed exactly on its
+capacity therefore had its terminator written one byte outside its allocation,
+and the reclaiming shrink in `to_s` was skipped, because the capacity was not
+bigger than what was needed. bdw-gc rounds a block up and never reissues an
+address something still points at, so under the collector every program was
+correct; plain `malloc` returns exactly the size asked for, and the next
+allocation overwrote the byte.
+
+The symptom was a 116-byte mangled function name in a 128-byte block that
+needed 129: clean at `target_def_fun`, corrupt at the same address by
+`check_mod_fun`, LLVM's `strlen` reading into whatever was allocated next, and
+`samples/iyi/collections.iyi` failing to link **10 runs out of 10** with
+`Undefined symbols for architecture arm64` naming
+`Nums@Std::Enumerable::Enumerable#zip<Words>`, sometimes with a
+`Trace/BPT trap: 5` inside the compiler.
+
+Fixed, and measured on the fix: that sample builds **0 failures in 10 runs**
+with a fresh cache each, **every one of the 27 samples builds**, the iterator
+exercise is green, and the collector-free compiler links **libLLVM and
+libSystem only**. `bench/collector_free_floor.sh` is the gate, and removing
+the reservation again fails it.
+
+**Four mechanisms were recorded for this blocker before the right one, and all
+four were wrong:** invalid IR, a dropped symbol, an empty link line, and
+parallel codegen. Each was a plausible reading of an error message promoted to
+a cause before it was isolated. What settled it was measuring the allocation
+rather than reasoning about the compiler: the block was 128 bytes and the
+string needed 129.
+
+So the compiler keeps bdw-gc by default because it is a permitted toolchain
+dependency and dropping it is a decision about peak memory, not about
+correctness. What this section no longer claims is that a collector is
+required for the compiler to work. It is not.
 
 That finding now has a boundary drawn around it, and the collector inside it
 has a decision. **The owner decided (Appendix B #20, overruling the adopt-gcry
 recommendation this section carried): iyi writes its own collector, and gcry
 stays as prior art whose measurements are inherited.** The decision is for the
 language, the runtime iyi programs run on, and it does not reach the compiler
-yet. The reason it does not, though, is narrower than this paragraph used to
-claim, and the difference is the revisit condition itself.
+yet, though the reason it does not is now a choice rather than a wall.
 
-The claim was that a collector has to serve parallel codegen before it can
-host a compiler that runs parallel codegen over fibers. Measured against the
-Makefile's own `sequential_codegen` switch, which removes the parallel half:
+Parallel codegen was blamed for this and cleared, which is worth keeping
+because it is the second time. Measured against the Makefile's own
+`sequential_codegen` switch, which removes the parallel half:
 
 | build | `collections.iyi` |
 |---|---|
 | `-Dgc_none` | failed 5/5 |
 | `-Dgc_none` + `sequential_codegen=1` | failed 5/5 |
 
-Identical, so **threading is not the discriminator**, and the failure is
-deterministic rather than intermittent: the same `Undefined symbols` reached
-from `__iyi_main`, and a `Trace/BPT trap: 5` still arriving single-threaded.
-This is the second time parallel codegen has been blamed for something it did
-not do, and cleared the same way, by the single-threaded path failing
-identically: III.11's cache-cleaner bug is the first, and its lesson was that
-a symptom shared by the failing builds is not a cause.
+Identical, so **threading was not the discriminator**. III.11's cache-cleaner
+bug is the first instance, and the lesson is the same both times: a symptom
+shared by the failing builds is not a cause. The right cause turned out to be
+smaller than every mechanism proposed for it, and in the standard library
+rather than the compiler.
 
-What is left is the part that never mentioned threads: the compiler is a long
-walk over ASTs and `src/gc/none.cr` never frees. So the exit condition is a
-collector that **frees**, not one that serves parallel codegen; gcry's
-parallelism record is evidence about a milestone this no longer waits on.
-III.9 has the measurements; bdw-gc stays on the compiler as a
-recorded exception (Appendix B #24, superseded and restated) until iyi's own
-collector reclaims what the compiler allocates.
+**The exit condition recorded here was "a collector that frees", and that is
+withdrawn.** A compiler built with no collector at all now compiles every
+sample, the 7,207-line generated project, and the compiler's own source, so
+freeing was never what stood in the way. What a collector buys the compiler is
+peak memory, and that is now a number rather than a worry:
+
+| build | 30-module project (7,207 lines) | the compiler's own source |
+|---|---|---|
+| with bdw-gc | 464 MB peak, 0.74s | 5,702 MB peak, 22.3s |
+| collector-free | 598 MB peak, 0.78s | 7,430 MB peak, 20.3s |
+
+**+29% peak, and wall time within noise**, both at zero failures in ten runs.
+So bdw-gc stays on the compiler by decision rather than by necessity
+(Appendix B #24, superseded and restated): it is a permitted toolchain
+dependency, and 1.7 GB of extra peak on a self-host is a real cost to put on
+every contributor's machine for a library the floor already permits.
+`bench/collector_free_floor.sh` keeps the collector-free path working, gating
+the samples, the project, and the terminator property directly, so the option
+stays open rather than rotting. Flipping the default is a one-line change to
+`COMPILER_FLAGS` whenever that memory trade is judged worth taking.
 
 **3. Regex, and the semantics are the interesting part. Decided (#22), built,
 and measured off the binary.** Owning PCRE2 removes a dependency from iyi

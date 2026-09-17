@@ -25,6 +25,12 @@ using std/path::{Path}
     fun RemoveDirectoryA(path : UInt8*) : Int32
     fun GetCurrentDirectoryA(buf_len : UInt32, buf : UInt8*) : UInt32
     fun SetCurrentDirectoryA(path : UInt8*) : Int32
+    fun FindFirstFileA(pattern : UInt8*, data : Void*) : Void*
+    fun FindNextFileA(handle : Void*, data : Void*) : Int32
+    fun FindClose(handle : Void*) : Int32
+    # A DWORD is declared Int32 here, as the prelude declares it: the same 32
+    # bits at the ABI, and one signature per symbol is what a program gets.
+    fun GetFileAttributesA(name : UInt8*) : Int32
   end
 {% else %}
   # Linux: the kernel's own calls (SPEC.md III.9), in libc's shape so the
@@ -159,6 +165,24 @@ pub class Dir
         raise "Cannot open directory: #{dir_path}"
       end
       p.as(Void*)
+    {% elsif flag?(:win32) %}
+      # The stream: three words — the find handle, the WIN32_FIND_DATAA the
+      # kernel writes into, and whether the name already sitting in it is
+      # still owed to a reader. FindFirstFileA fetches the first entry while
+      # it opens the search, so that first name has to be remembered here or
+      # the first `read` would skip it. The shape is the POSIX arm's: a
+      # malloc'd block behind the `Void*` the class holds. WIN32_FIND_DATAA
+      # is 320 bytes, the last 274 of them the two name fields.
+      find_data = Pointer(UInt8).malloc(320_u64)
+      handle = LibKernel32.FindFirstFileA(Dir.c_str(dir_path + "\\*"), find_data.as(Void*))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        raise "Cannot open directory: #{dir_path}"
+      end
+      stream = Pointer(Int64).malloc(3_u64)
+      stream[0] = handle.address.to_i64
+      stream[1] = find_data.address.to_i64
+      stream[2] = 1_i64
+      stream.as(Void*)
     {% else %}
       Pointer(Void).new(0_u64)
     {% end %}
@@ -183,6 +207,28 @@ pub class Dir
       String.new(len) do |target|
         target.copy_from(name_ptr, len)
       end
+    {% elsif flag?(:win32) %}
+      stream = @handle.as(Int64*)
+      if stream[2] == 0_i64
+        if LibKernel32.FindNextFileA(Pointer(Void).new(stream[0].to_u64), Pointer(Void).new(stream[1].to_u64)) == 0
+          return nil
+        end
+      end
+      stream[2] = 0_i64
+
+      # `cFileName` sits at byte 44 of WIN32_FIND_DATAA, the way the linux
+      # record's name sits at byte 19. `.` and `..` come back as they do from
+      # `readdir`: the callers that do not want them filter them themselves,
+      # and `children` reads the same on every platform because of it.
+      name_ptr = Pointer(UInt8).new(stream[1].to_u64) + 44
+
+      len = 0
+      while name_ptr[len] != 0_u8
+        len = len + 1
+      end
+      String.new(len) do |target|
+        target.copy_from(name_ptr, len)
+      end
     {% else %}
       nil
     {% end %}
@@ -192,6 +238,18 @@ pub class Dir
     raise "Cannot rewind closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
       LibC.rewinddir(@handle)
+    {% elsif flag?(:win32) %}
+      # A find handle cannot be rewound: the search is closed and reopened,
+      # which puts the first entry back in the buffer and owes it to a reader
+      # again.
+      stream = @handle.as(Int64*)
+      LibKernel32.FindClose(Pointer(Void).new(stream[0].to_u64))
+      handle = LibKernel32.FindFirstFileA(Dir.c_str(@path + "\\*"), Pointer(Void).new(stream[1].to_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        raise "Cannot rewind directory: #{@path}"
+      end
+      stream[0] = handle.address.to_i64
+      stream[2] = 1_i64
     {% end %}
     self
   end
@@ -200,6 +258,9 @@ pub class Dir
     return if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
       LibC.closedir(@handle)
+    {% elsif flag?(:win32) %}
+      stream = @handle.as(Int64*)
+      LibKernel32.FindClose(Pointer(Void).new(stream[0].to_u64))
     {% end %}
     @closed = true
   end
@@ -350,6 +411,12 @@ pub class Dir
       else
         false
       end
+    {% elsif flag?(:win32) %}
+      # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
+      # spells as the Int32 it is declared as, and 0x10 is
+      # FILE_ATTRIBUTE_DIRECTORY.
+      attrs = LibKernel32.GetFileAttributesA(c_str(p))
+      attrs != -1 && (attrs & 0x10) != 0
     {% else %}
       false
     {% end %}
@@ -485,20 +552,25 @@ pub class Dir
     end
   end
 
-  # Segments before the first `**`; `.` when the pattern is recursive from cwd.
+  # The pattern's own bytes up to the separator before the first `**`, sliced
+  # rather than rebuilt. The walk below compares the paths it builds against
+  # the pattern, so the root has to be the pattern's own text: rebuilding it
+  # from `Path#parts` put a Windows root back together as `C:\/Windows`, and
+  # every comparison after that failed on the one byte nobody wrote.
   private def self.glob_walk_root(pattern : String) : String
-    acc = ""
-    Path.new(pattern).parts.each do |seg|
-      break if seg == "**"
-      if acc.empty?
-        acc = seg
-      elsif acc == "/" || acc == "\\"
-        acc = acc + seg
-      else
-        acc = acc + "/" + seg
-      end
+    bytes = pattern.to_unsafe
+    n = pattern.bytesize
+    cut = -1
+    at = 0
+    while at < n
+      break if bytes[at] == 42_u8 && (at + 1) < n && bytes[at + 1] == 42_u8
+      cut = at if glob_sep?(bytes[at])
+      at = at + 1
     end
-    acc.empty? ? "." : acc
+    return "." if cut < 0
+    # A pattern rooted at a separator keeps it: the root is that one byte.
+    len = cut == 0 ? 1 : cut
+    String.new(len) { |t| t.copy_from(bytes, len) }
   end
 
   private def self.walk_recursive(dir : String, pattern : String, depth : Int32, &block : String -> Nil) : Nil
@@ -515,16 +587,27 @@ pub class Dir
     end
   end
 
-  # `*` / `?` stay inside one segment; `**` crosses `/`. A leading `.` in a
-  # segment matches only when the pattern has a `.` there (FNM_PERIOD).
+  # `*` / `?` stay inside one segment; `**` crosses a separator. A leading `.`
+  # in a segment matches only when the pattern has a `.` there (FNM_PERIOD).
   private def self.match_pattern(pattern : String, name : String) : Bool
     glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)
+  end
+
+  # Windows has two separators and a program mixes them without meaning to:
+  # `Dir.current` answers backslashes, every caller here joins with `/`, and a
+  # pattern arrives carrying whatever the two of them produced. On posix a
+  # backslash is an ordinary byte in a name and stays one.
+  private def self.glob_sep?(c : UInt8) : Bool
+    {% if flag?(:win32) %}
+      c == 47_u8 || c == 92_u8
+    {% else %}
+      c == 47_u8
+    {% end %}
   end
 
   private def self.glob_match(p : UInt8*, pi : Int32, pn : Int32, s : UInt8*, si : Int32, sn : Int32) : Bool
     star = 42_u8
     qst = 63_u8
-    slash = 47_u8
     dot = 46_u8
     while pi < pn
       pc = p[pi]
@@ -532,7 +615,7 @@ pub class Dir
         while pi < pn && p[pi] == star
           pi = pi + 1
         end
-        pi = pi + 1 if pi < pn && p[pi] == slash
+        pi = pi + 1 if pi < pn && glob_sep?(p[pi])
         return true if pi >= pn
         i = si
         while i <= sn
@@ -543,13 +626,13 @@ pub class Dir
         return false
       elsif pc == star
         pi = pi + 1
-        at_seg = si == 0 || (si > 0 && s[si - 1] == slash)
+        at_seg = si == 0 || (si > 0 && glob_sep?(s[si - 1]))
         hide_dot = at_seg && si < sn && s[si] == dot
         if pi >= pn
           return false if hide_dot
           j = si
           while j < sn
-            return false if s[j] == slash
+            return false if glob_sep?(s[j])
             j = j + 1
           end
           return true
@@ -557,15 +640,21 @@ pub class Dir
         i = si
         while i <= sn
           return true if glob_match(p, pi, pn, s, i, sn)
-          break if i >= sn || s[i] == slash
+          break if i >= sn || glob_sep?(s[i])
           break if hide_dot && i == si
           i = i + 1
         end
         return false
       elsif pc == qst
-        at_seg = si == 0 || (si > 0 && s[si - 1] == slash)
-        return false if si >= sn || s[si] == slash
+        at_seg = si == 0 || (si > 0 && glob_sep?(s[si - 1]))
+        return false if si >= sn || glob_sep?(s[si])
         return false if at_seg && s[si] == dot
+        pi = pi + 1
+        si = si + 1
+      elsif glob_sep?(pc)
+        # One separator answers for the other where both are separators: the
+        # pattern was written with one and the walk joins with `/`.
+        return false if si >= sn || !glob_sep?(s[si])
         pi = pi + 1
         si = si + 1
       else

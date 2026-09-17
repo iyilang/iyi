@@ -97,6 +97,14 @@
 
 ### Removed
 
+- **`std/fiber`.** It handed the runtime's `IyiFiber` out as `Fiber.new {
+  }`, `resume`, `yield` and `suspend` - a second way to start concurrent
+  work beside `group`, with no boundary: a panic in one climbed to
+  nothing, a cancel reached it never, and `resume` was an enqueue rather
+  than a switch. SPEC.md III.4 had already said `Fiber` does not carry
+  over as a user-facing primitive, because a raw spawn puts III.4.1's
+  leak straight back. Sixty-seven modules, 36,743 lines.
+
 - **`std/iterable`, `std/nil`, `udp`'s own `IPv4Address`, and
   `Errno.value`.** Four more things with two names or none. `Iterable`
   was Crystal's mixin beside `Enumerable`, which nothing implemented and
@@ -110,8 +118,7 @@
   bound, no `inspect` in the sentence); it imports `std/socket` and uses
   its now. `Errno.value`/`value=` was a class variable no syscall ever
   set - the raw calls answer the negative number - and its exercise set
-  it by hand and read it back. The enum stays. Sixty-eight modules,
-  36,828 lines.
+  it by hand and read it back. The enum stays.
 
 - **`std/comparable` and `std/cmp`.** The second trait above, and a
   module of four free functions (`min`, `max`, `clamp`) over the first,

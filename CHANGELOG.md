@@ -53,6 +53,30 @@
   `bench/agent_loop.py` hold both halves: the capped run is not clean and
   the file does not compile, and the next run finishes it.
 
+- **A boundary never went stale, so an edited shard was compiled against
+  last week's surface.** A module compiled from source answers staleness
+  with the digest of the one file at its module path (IV.3); a bound shard
+  has no such file, `tool bind` wrote no hashes at all, and the reader's
+  "an artifact from before the hashes cannot answer" branch then reported
+  it fresh — unconditionally, forever. Edit the checkout, rebuild, and the
+  consumer type-checked against the declarations the boundary had when it
+  was written and linked the object code beside them, with nothing said:
+  the one failure a build cache must not have, and the only path left that
+  could produce a wrong build from a stale artifact. A boundary records the
+  files it was written from now, each with what it hashed to
+  (`Section::Inputs`, `.iyimod` is **v51**), and every one still on the
+  machine is asked again; one that is gone is not, because a boundary
+  travels without its checkout and then the artifact is all there is. The
+  module-path questions are not asked of a boundary at all — its
+  `source_path` is the entry file the bind ran on, and asking anyway
+  answered "the name moved" about a name that had never pointed there —
+  and an edge `tool bind` wrote, which records a name and no hashes, is not
+  read as a claim that the far end hashed to nothing. The refusal names
+  the verb that rebuilds what it is about: `iyi bind` for a boundary,
+  `--emit-iyimod` for a module of one's own. `bench/bind_roundtrip.sh`
+  holds both directions — an edited shard is refused by name, and a
+  boundary whose checkout is gone still builds.
+
 - **The twenty-two merge modules were probed, the way the other
   fifty-three were.** Nearly 1,200 programs against `bit_array`, `dir`,
   `docs_pseudo_methods`, `fiber`, `file`, `levenshtein`, `named_tuple`,

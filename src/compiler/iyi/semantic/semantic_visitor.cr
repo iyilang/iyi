@@ -517,6 +517,27 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # iyi: the reason gets its own sentence. It used to be spliced into "is not
     # X any more", which reads as staleness — and a truncated file is not
     # stale, it is broken, and the two want different things done about them.
+    #
+    # And the remedy names the verb that wrote the file. `--emit-iyimod` has
+    # nothing to do with a boundary: a reader told to rebuild with a switch
+    # that does not write this artifact has been given a sentence it cannot
+    # act on. Read defensively, because a damaged artifact is one of the
+    # reasons to be here and its summary will not read twice.
+    bound =
+      begin
+        IyiMod.read_summary(candidate).crystal_library
+      rescue IyiMod::Error
+        false
+      end
+
+    remedy =
+      if bound
+        "Rebuild the boundary with `iyi bind`."
+      else
+        "Rebuild it with --emit-iyimod, or pass --emit-iyimod to this build " \
+        "and let it rewrite what has moved."
+      end
+
     node.raise <<-MESSAGE
       #{candidate} cannot be read as "#{path}".
 
@@ -524,8 +545,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
       An artifact is read only while it still describes its module, or a build
       would compile against a surface nobody has and link code nobody wrote
-      (SPEC.md IV.3). Rebuild it with --emit-iyimod, or pass --emit-iyimod to
-      this build and let it rewrite what has moved.
+      (SPEC.md IV.3). #{remedy}
       MESSAGE
   end
 
@@ -583,13 +603,40 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
              "not \"#{module_path}\""
     end
 
+    # A boundary's source is a checkout, not a file at the module path, so the
+    # source hash below cannot answer for one: `resolve_import("kemal/router")`
+    # finds nothing and the whole content question was skipped. The files
+    # `iyi bind` read travel with what each hashed to, and every one still on
+    # the machine is asked again. One that is gone is not asked: a boundary
+    # travels without the checkout it was written from, and then the artifact
+    # is all there is — which is the same reading the missing-source case gets
+    # below.
+    #
+    # Above the hashes for the same reason the identity check is: these are
+    # the boundary's own answer and do not need them.
+    summary.inputs.each do |entry|
+      recorded, _, file = entry.partition(' ')
+      next if recorded.empty? || file.empty?
+      next unless File.file?(file)
+      unless IyiMod.digest(File.read(file)) == recorded
+        return "#{Iyi.relative_filename(file)}, which `iyi bind` read to write it, has changed"
+      end
+    end
+
     # An artifact from before the hashes existed cannot answer, and IV.5's
     # equality on the header is checked where the artifact is read rather than
     # here: this is about whether the file still describes its module, not
     # about whether this compiler may adopt it at all.
     return nil if summary.hashes.source.empty?
 
-    if source = resolve_import(module_path)
+    # `inputs.empty?` — the module-path questions below are not about a
+    # boundary. Its `source_path` is the entry file the bind ran on rather
+    # than a file at this module's path, and a `shard.cr` sitting beside that
+    # entry is not "what `shard` resolves to now": asking anyway answered
+    # "the name moved" about a name that had never pointed there, and refused
+    # every boundary this compiler wrote. A boundary's answer is its inputs,
+    # taken above.
+    if summary.inputs.empty? && (source = resolve_import(module_path))
       # iyi: a module path is a file path (SPEC.md R-1), so the same name can
       # come to mean a different file — delete a program's own `std/text.iyi`
       # and `import std/text` reaches the library's module of that path. The
@@ -621,6 +668,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
 
       dependency = IyiMod.read_summary(File.join(dir, "#{edge.module_name}.iyimod"))
+      # An edge `tool bind` wrote records the name and nothing else: a
+      # boundary is written before there is anything to compare, and the two
+      # hashes it leaves empty are not a claim that the far end hashed to
+      # nothing. Comparing "" against a real digest would call every boundary
+      # stale the moment the one beside it grew hashes of its own, which is
+      # exactly what happened when they did.
+      next if edge.interface.empty? && edge.implementation.empty?
+
       unless dependency.hashes.interface == edge.interface
         return "the surface of \"#{edge.module_name}\", which it imports, has changed"
       end

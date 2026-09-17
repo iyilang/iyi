@@ -654,6 +654,33 @@ module Iyi
     io.puts "# --- end ---"
   end
 
+  # The files this boundary was written from, `<md5> <path>` each, sorted.
+  #
+  # `Program#requires` is insertion-ordered and holds the resolved path of
+  # everything this build read, so the shard's own files are the ones under
+  # its directory — the same rule `initialiser_source` and
+  # `top_level_fun_sources` read them by. Crystal's library is not among
+  # them on purpose: which compiler built the artifact is already an equality
+  # on `compiler_version` (IV.5), and a checkout of the standard library is
+  # not a thing a consumer edits.
+  #
+  # Sorted rather than in require order, because this is a cache key: two
+  # binds of an unchanged checkout have to produce the same bytes.
+  private def self.bind_inputs(program : Program) : Array(String)
+    source = program.filename
+    return [] of String unless source.is_a?(String)
+    directory = File.dirname(source)
+    return [] of String if directory.empty?
+
+    entries = [] of String
+    program.requires.each do |path|
+      next unless path.starts_with?(directory)
+      next unless File.file?(path)
+      entries << "#{IyiMod.digest(File.read(path))} #{File.expand_path(path)}"
+    end
+    entries.sort!
+  end
+
   # The artifact itself: declarations a consumer type-checks against.
   #
   # There is nothing new in it. The two sides mangle names identically, being
@@ -982,6 +1009,16 @@ module Iyi
     # Last, once every name is written the way the consumer will read it.
     carried_types = carried_types.map { |declaration| qualify_self_references declaration, @@self_shadowed }
 
+    # The files this boundary is written from, each with what it hashed to
+    # (IV.3). Without them the artifact said nothing a staleness check could
+    # read: `iyi_compute_artifact_stale` looks for the one file at the
+    # module path, a bound shard has none, and the empty source hash was
+    # taken to mean "cannot answer" — so every consumer read the boundary as
+    # current however long ago the checkout had changed, compiled against
+    # last week's surface and linked last week's object code. The artifact is
+    # a cache and a cache that cannot go stale is a claim.
+    inputs = bind_inputs(program)
+
     artifact = IyiMod::Artifact.new(
       module_name: iyi_module_name(root),
       # The shard's own constants, as the assignments that make them.
@@ -1034,7 +1071,14 @@ module Iyi
       # travels. See `IyiMod::Artifact#top_level_funs`.
       top_level_funs: @@top_level_fun_sources,
       reopened: reopened,
+      inputs: inputs,
     )
+
+    # After construction, the way `Compiler#emit_iyi_artifacts` takes them:
+    # the interface hash is over the exports the record now carries. The
+    # source half is over `inputs`, which is this artifact's answer to "is the
+    # module still the module".
+    artifact.hashes = IyiMod.hashes_for(artifact, inputs.join('\n'))
 
     path = File.join(dir, "#{iyi_module_name(root).gsub('/', '-')}.iyimod")
     IyiMod.write artifact, path

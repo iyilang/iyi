@@ -806,6 +806,43 @@ if [ -f out-source.txt ] && [ -f out-artifact.txt ]; then
   fi
 fi
 
+# The boundary goes stale when the checkout it was written from changes.
+#
+# It did not, and that is what this section is for. A module compiled from
+# source answers staleness with the digest of the one file at its module path
+# (SPEC.md IV.3); a bound shard has no such file, so `tool bind` wrote no
+# hashes at all and the reader's "an artifact from before the hashes cannot
+# answer" branch reported it fresh — forever. Edit the shard, rebuild, and
+# the consumer compiled against the surface the boundary had last week and
+# linked the object code beside it, with nothing said. The artifact carries
+# the files it was written from now, each with what it hashed to.
+echo "== an edited shard makes its boundary stale"
+printf '\n# a comment the boundary was not written from\n' >> shard.cr
+if "$IYI" build --crystal --use-iyimod mods -o out_stale app_artifact.iyi > stale.log 2>&1; then
+  echo "  the edited shard still built against the old boundary"
+  status=1
+elif grep -q "which \`iyi bind\` read to write it, has changed" stale.log &&
+     grep -q "Rebuild the boundary with \`iyi bind\`" stale.log; then
+  echo "  the consumer refuses by name, and names the verb that rebuilds it"
+else
+  echo "  the staleness was not named:"
+  sed 's/^/    /' stale.log | head -12
+  status=1
+fi
+
+# And a boundary that travelled without its checkout still builds: the files
+# are asked only where they are, because an artifact handed to somebody else
+# is all there is (IV.3).
+mv shard.cr shard.cr.away
+if "$IYI" build --crystal --use-iyimod mods -o out_travelled app_artifact.iyi > travelled.log 2>&1; then
+  echo "  a boundary whose checkout is gone still builds"
+else
+  echo "  a boundary whose checkout is gone was refused:"
+  sed 's/^/    /' travelled.log | head -12
+  status=1
+fi
+mv shard.cr.away shard.cr
+
 echo "== two shards that declare the same root"
 CLASH="$WORK/clash"
 mkdir -p "$CLASH/lib/alpha/src" "$CLASH/lib/beta/src"

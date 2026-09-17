@@ -49,7 +49,11 @@ module Iyi::IyiMod
   # a union of virtual types is not the way it prints.
   # v50: a nested module says whether it writes `extend self`, so a body that
   # travels can call it the way the shard does (SPEC.md III.6).
-  FORMAT_VERSION = 50_u32
+  # v51: a boundary records the files it was written from, each with what it
+  # hashed to, because a bound shard's source is a checkout rather than one
+  # file at a module path — and without them a consumer read the artifact as
+  # current forever (`Section::Inputs`).
+  FORMAT_VERSION = 51_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -150,6 +154,22 @@ module Iyi::IyiMod
     # iyi: under `--crystal`, the shard's own top-level `fun`s, as source. See
     # `Artifact#top_level_funs`.
     TopLevelFuns = 19
+
+    # iyi: under `--crystal`, the files `iyi bind` read to write this
+    # boundary, each as `<md5> <path>`.
+    #
+    # A module compiled from source answers staleness with the digest of the
+    # one file at its module path (IV.3), and `tool bind` has no such file:
+    # `resolve_import("kemal/router")` finds nothing, so the whole content
+    # question was skipped and the artifact was read as current however long
+    # ago the checkout had changed. The files are what the digest is over, so
+    # they travel with it: any that is still on the machine is asked again,
+    # and one that is gone is not — a boundary travels without the checkout
+    # it was written from, and then the artifact is all there is.
+    #
+    # A file *added* to a shard that requires by glob moves no recorded
+    # digest and is not seen. What is recorded is what was read.
+    Inputs = 20
 
     # iyi: the pointer maps of the types this module owns, one `TypeLayout`
     # per type, keyed in the file by the type's name. Same reason as
@@ -1194,6 +1214,11 @@ module Iyi::IyiMod
     # only be taken once they are in it.
     property hashes : Hashes
 
+    # IV.3's inputs for a boundary: `<md5> <path>` per file `tool bind` read.
+    # Empty for a module compiled from its own source, whose one file the
+    # source hash already answers for. See `Section::Inputs`.
+    property inputs : Array(String)
+
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
                    @object_code = [] of ObjectUnit, @has_initialiser = false,
@@ -1207,7 +1232,8 @@ module Iyi::IyiMod
                    @match_types = [] of String, @symbols = [] of String,
                    @top_level = [] of Signature, @top_level_funs = [] of String,
                    @reopened = [] of TypeDecl, @libs = [] of String,
-                   @layouts = [] of {String, TypeLayout})
+                   @layouts = [] of {String, TypeLayout},
+                   @inputs = [] of String)
     end
   end
 
@@ -1234,6 +1260,12 @@ module Iyi::IyiMod
     # world: what has to be loaded before these declarations mean anything.
     unless artifact.requires.empty?
       sections << {Section::Requires, encode_requires(artifact)}
+    end
+
+    # Beside the requires, and for the staleness check rather than for the
+    # consumer's program: these are the files the boundary was written from.
+    unless artifact.inputs.empty?
+      sections << {Section::Inputs, encode_strings(artifact.inputs)}
     end
 
     sections << {Section::Exports, encode_exports(artifact)}
@@ -1379,7 +1411,15 @@ module Iyi::IyiMod
     target_triple : String,
     flags : Array(String),
     hashes : Hashes,
-    imports : Array(ImportEdge)
+    imports : Array(ImportEdge),
+    # The files a boundary was written from, `<md5> <path>` each. A staleness
+    # check reads these where a module compiled from source reads the one file
+    # at its module path. See `Section::Inputs`.
+    inputs : Array(String) = [] of String,
+    # Which library the artifact was built under, so a refusal can name the
+    # verb that rebuilds it: `iyi bind` for a boundary, `--emit-iyimod` for a
+    # module of one's own.
+    crystal_library : Bool = false
 
   def self.read_summary(path : String) : Summary
     File.open(path, "rb") do |file|
@@ -1388,10 +1428,12 @@ module Iyi::IyiMod
       header = nil
       hashes = Hashes.empty
       imports = [] of ImportEdge
+      inputs = [] of String
 
       table.each do |(kind, length, sum)|
         section = Section.from_value?(kind)
-        unless section == Section::Header || section == Section::Hashes || section == Section::Imports
+        unless section == Section::Header || section == Section::Hashes ||
+               section == Section::Imports || section == Section::Inputs
           file.skip length
           next
         end
@@ -1403,6 +1445,7 @@ module Iyi::IyiMod
         when Section::Header  then header = decode_header(payload)
         when Section::Hashes  then hashes = decode_hashes(payload)
         when Section::Imports then imports = decode_imports(payload)[:imports]
+        when Section::Inputs  then inputs = decode_strings(payload)
         end
       end
 
@@ -1412,7 +1455,7 @@ module Iyi::IyiMod
 
       Summary.new(header[:module_name], header[:source_path],
         header[:compiler_version], header[:target_triple], header[:flags],
-        hashes, imports)
+        hashes, imports, inputs, header[:crystal_library])
     end
   rescue ex : Error
     raise ex
@@ -1470,6 +1513,7 @@ module Iyi::IyiMod
       requires = [] of String
       hashes = Hashes.empty
       layouts = [] of {String, TypeLayout}
+      inputs = [] of String
 
       table.each do |(kind, length, sum)|
         section = Section.from_value?(kind)
@@ -1506,6 +1550,7 @@ module Iyi::IyiMod
         when Section::Requires     then requires = decode_requires(payload)
         when Section::Hashes       then hashes = decode_hashes(payload)
         when Section::Layouts      then layouts = decode_layouts(payload)
+        when Section::Inputs       then inputs = decode_strings(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1522,7 +1567,7 @@ module Iyi::IyiMod
         hashes, constants, macro_bodies, requires, header[:crystal_library],
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
-        top_level, top_level_funs, reopened, libs, layouts)
+        top_level, top_level_funs, reopened, libs, layouts, inputs)
     end
   rescue ex : Error
     raise ex
@@ -1565,6 +1610,11 @@ module Iyi::IyiMod
       io.puts "  interface      #{hashes.interface}"
       io.puts "  implementation #{hashes.implementation}"
       io.puts "  source         #{hashes.source}"
+    end
+
+    unless artifact.inputs.empty?
+      io.puts "inputs        #{artifact.inputs.size} file(s) the boundary was written from"
+      artifact.inputs.each { |entry| io.puts "  #{entry}" }
     end
 
     if artifact.imports.empty?

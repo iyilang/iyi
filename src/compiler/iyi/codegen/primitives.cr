@@ -1407,10 +1407,17 @@ class Iyi::CodeGenVisitor
     node.value
   end
 
-  def void_ptr_type_descriptor
+  # The two MSVC exception globals a `raise` and a `rescue` name. Each is
+  # defined once, in the main module, and only declared in every other one:
+  # an initializer may name globals of its own module and no other, and one
+  # built here that named another module's `??_7type_info@@6B@` is what made
+  # LLVM's verifier refuse a Windows build of any program whose imported
+  # module raises — "Referencing global in another module!", on the default
+  # multi-module path, where `--single-module` was fine.
+  def void_ptr_type_descriptor(mod = @llvm_mod)
     void_ptr_type_descriptor_name = "\u{1}??_R0PEAX@8"
 
-    if existing = @llvm_mod.globals[void_ptr_type_descriptor_name]?
+    if existing = mod.globals[void_ptr_type_descriptor_name]?
       return existing
     end
 
@@ -1420,78 +1427,81 @@ class Iyi::CodeGenVisitor
       llvm_context.int8.array(6),
     ])
 
-    if !@main_mod.globals[void_ptr_type_descriptor_name]?
-      base_type_descriptor = external_constant(llvm_context.void_pointer, "\u{1}??_7type_info@@6B@")
-
-      # .PEAX is void*
-      void_ptr_type_descriptor = @main_mod.globals.add(
-        type_descriptor, void_ptr_type_descriptor_name)
-      void_ptr_type_descriptor.initializer = llvm_context.const_struct [
-        base_type_descriptor,
-        llvm_context.void_pointer.null,
-        llvm_context.const_string(".PEAX"),
-      ]
+    unless mod == @main_mod
+      void_ptr_type_descriptor(@main_mod)
+      return external_constant(type_descriptor, void_ptr_type_descriptor_name, mod)
     end
 
-    # if @llvm_mod == @main_mod, this will find the previously created void_ptr_type_descriptor
-    external_constant(type_descriptor, void_ptr_type_descriptor_name)
+    base_type_descriptor = external_constant(
+      llvm_context.void_pointer, "\u{1}??_7type_info@@6B@", mod)
+
+    # .PEAX is void*
+    void_ptr_type_descriptor = mod.globals.add(
+      type_descriptor, void_ptr_type_descriptor_name)
+    void_ptr_type_descriptor.initializer = llvm_context.const_struct [
+      base_type_descriptor,
+      llvm_context.void_pointer.null,
+      llvm_context.const_string(".PEAX"),
+    ]
+    void_ptr_type_descriptor
   end
 
-  def void_ptr_throwinfo
+  def void_ptr_throwinfo(mod = @llvm_mod)
     void_ptr_throwinfo_name = "_TI1PEAX"
 
-    if existing = @llvm_mod.globals[void_ptr_throwinfo_name]?
+    if existing = mod.globals[void_ptr_throwinfo_name]?
       return existing
     end
 
     eh_throwinfo = llvm_context.struct([llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32])
 
-    if !@main_mod.globals[void_ptr_throwinfo_name]?
-      catchable_type = llvm_context.struct([llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32])
-      void_ptr_catchable_type = @main_mod.globals.add(
-        catchable_type, "_CT??_R0PEAX@88")
-      void_ptr_catchable_type.initializer = llvm_context.const_struct [
-        int32(1),
-        sub_image_base(void_ptr_type_descriptor),
-        int32(0),
-        int32(-1),
-        int32(0),
-        int32(8),
-        int32(0),
-      ]
-
-      catchable_type_array = llvm_context.struct([llvm_context.int32, llvm_context.int32.array(1)])
-      catchable_void_ptr = @main_mod.globals.add(
-        catchable_type_array, "_CTA1PEAX")
-      catchable_void_ptr.initializer = llvm_context.const_struct [
-        int32(1),
-        llvm_context.int32.const_array([sub_image_base(void_ptr_catchable_type)]),
-      ]
-
-      void_ptr_throwinfo = @main_mod.globals.add(
-        eh_throwinfo, void_ptr_throwinfo_name)
-      void_ptr_throwinfo.initializer = llvm_context.const_struct [
-        int32(0),
-        int32(0),
-        int32(0),
-        sub_image_base(catchable_void_ptr),
-      ]
+    unless mod == @main_mod
+      void_ptr_throwinfo(@main_mod)
+      return external_constant(eh_throwinfo, void_ptr_throwinfo_name, mod)
     end
 
-    # if @llvm_mod == @main_mod, this will find the previously created void_ptr_throwinfo
-    external_constant(eh_throwinfo, void_ptr_throwinfo_name)
+    catchable_type = llvm_context.struct([llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32])
+    void_ptr_catchable_type = mod.globals.add(
+      catchable_type, "_CT??_R0PEAX@88")
+    void_ptr_catchable_type.initializer = llvm_context.const_struct [
+      int32(1),
+      sub_image_base(void_ptr_type_descriptor(mod), mod),
+      int32(0),
+      int32(-1),
+      int32(0),
+      int32(8),
+      int32(0),
+    ]
+
+    catchable_type_array = llvm_context.struct([llvm_context.int32, llvm_context.int32.array(1)])
+    catchable_void_ptr = mod.globals.add(
+      catchable_type_array, "_CTA1PEAX")
+    catchable_void_ptr.initializer = llvm_context.const_struct [
+      int32(1),
+      llvm_context.int32.const_array([sub_image_base(void_ptr_catchable_type, mod)]),
+    ]
+
+    void_ptr_throwinfo = mod.globals.add(
+      eh_throwinfo, void_ptr_throwinfo_name)
+    void_ptr_throwinfo.initializer = llvm_context.const_struct [
+      int32(0),
+      int32(0),
+      int32(0),
+      sub_image_base(catchable_void_ptr, mod),
+    ]
+    void_ptr_throwinfo
   end
 
-  def external_constant(type, name)
-    @llvm_mod.globals[name]? || begin
-      c = @llvm_mod.globals.add(type, name)
+  def external_constant(type, name, mod = @llvm_mod)
+    mod.globals[name]? || begin
+      c = mod.globals.add(type, name)
       c.global_constant = true
       c
     end
   end
 
-  def sub_image_base(value)
-    image_base = external_constant(llvm_context.int8, "__ImageBase")
+  def sub_image_base(value, mod = @llvm_mod)
+    image_base = external_constant(llvm_context.int8, "__ImageBase", mod)
 
     @builder.trunc(
       @builder.sub(

@@ -63,6 +63,17 @@
   what they assert. No list changed by a name: the five rebuilt from the
   base are set-identical to what they replaced.
 
+- **The stack guard's Linux-only code says Linux.** Three guards in
+  `concurrency.iyi` read `flag?(:x86_64)` inside `unless flag?(:win32)`
+  and meant Linux: the constants under them are Linux syscall numbers, the
+  `SA_RESTORER` flag and the `rt_sigreturn` trampoline are Linux's signal
+  ABI, and an x86_64 darwin — excluded today only by the prelude's require
+  line — would have been handed all three without a word. They read
+  `flag?(:linux) && flag?(:x86_64)` now, and the darwin fault handler's
+  offsets say which structs they are arm64's. No program is built
+  differently: every target this file is required on takes the same
+  branch it did.
+
 ### Removed
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The

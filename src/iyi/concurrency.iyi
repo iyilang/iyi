@@ -2043,7 +2043,12 @@ end
 # a frame. Linux by raw syscall and darwin by libSystem, the same split
 # the rest of this file makes; Windows keeps its own report.
 {% unless flag?(:win32) %}
-  {% if flag?(:x86_64) %}
+  # Linux by name, not "not Windows": the numbers below are Linux syscall
+  # numbers and the `SA_RESTORER` flag and the `rt_sigreturn` trampoline
+  # beside them are Linux's signal ABI. darwin x86_64 is excluded by the
+  # prelude's require line today; were it not, a guard reading "x86_64"
+  # would have handed it Linux's numbers without a word.
+  {% if flag?(:linux) && flag?(:x86_64) %}
     IYI_SG_SYS_RT_SIGACTION = 13_i64
     IYI_SG_SYS_SIGALTSTACK  = 131_i64
     # SA_SIGINFO | SA_ONSTACK | SA_RESTORER: the restorer the stop's
@@ -2125,7 +2130,7 @@ end
         action = Pointer(UInt64).malloc(4_u64)
         action[0] = handler_entry
         action[1] = IYI_SG_SA_FLAGS
-        {% if flag?(:x86_64) %}
+        {% if flag?(:linux) && flag?(:x86_64) %}
           action[2] = __iyi_sg_sigreturn_address
         {% else %}
           action[2] = 0_u64
@@ -2140,6 +2145,10 @@ end
     # kernel's own structs; nothing here allocates or takes a lock.
     def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
       {% if flag?(:darwin) %}
+        # darwin arm64's structs: `si_addr` at 24, `uc_mcontext` at 48, and
+        # in `__darwin_mcontext64` the `__ss.__sp` at 264 — past the 16-byte
+        # exception state and x0..x28, fp and lr. An x86_64 darwin would keep
+        # `rsp` at 72, and is not built with this file.
         address = Pointer(UInt64).new(info + 24_u64).value
         mcontext = Pointer(UInt64).new(context + 48_u64).value
         sp = Pointer(UInt64).new(mcontext + 264_u64).value
@@ -2179,7 +2188,7 @@ end
     end
   end
 
-  {% if flag?(:x86_64) %}
+  {% if flag?(:linux) && flag?(:x86_64) %}
     @[NoInline]
     @[Naked]
     fun __iyi_sg_sigreturn : Nil

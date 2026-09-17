@@ -30,6 +30,12 @@ name: iyi
 #                    `src/crystal/system` is invisible here until somebody
 #   binary           the thing a person downloads, unpacked somewhere else
 #   std              the native standard library (src/std/) and its module exercises
+#
+# Every job carries a `timeout-minutes`. The default is six hours, and these
+# jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
+# aarch64 under qemu: one that hangs used to hold a runner for a working day
+# and report nothing. The number is the job's own worst honest case, not a
+# guess at its average.
 on: [push, pull_request]
 
 permissions: {}
@@ -41,6 +47,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Build the compiler"
@@ -68,6 +75,7 @@ jobs:
   iyi:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The rules, the artifact and the import path"
@@ -119,6 +127,7 @@ jobs:
   compiler-specs:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Crystal's compiler specs"
@@ -140,6 +149,7 @@ jobs:
   stdlib-specs:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Crystal's standard library specs"
@@ -164,6 +174,7 @@ jobs:
   samples:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"
@@ -682,6 +693,7 @@ jobs:
   std:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The native standard library and its module exercises"
@@ -702,6 +714,7 @@ jobs:
   targets:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The platforms the library still carries"
@@ -793,6 +806,7 @@ jobs:
   cross-objects:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Objects for other targets"
@@ -905,6 +919,7 @@ jobs:
   cross-run:
     needs: cross-objects
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     name: "An iyi program, run on musl and on aarch64"
     steps:
       - uses: actions/download-artifact@v5
@@ -976,6 +991,7 @@ jobs:
   # unpacking it somewhere else could have caught that.
   darwin:
     runs-on: macos-14
+    timeout-minutes: 45
     name: "An iyi program, run on darwin arm64"
     steps:
       - uses: actions/checkout@v7
@@ -1236,6 +1252,7 @@ jobs:
   windows-probe:
     needs: cross-objects
     runs-on: windows-2022
+    timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
       - uses: actions/download-artifact@v5
@@ -1298,6 +1315,7 @@ jobs:
   windows-collector:
     needs: cross-objects
     runs-on: windows-2022
+    timeout-minutes: 30
     name: "The collector on Windows x86_64"
     steps:
       - uses: actions/download-artifact@v5
@@ -1339,6 +1357,7 @@ jobs:
   windows-runtime:
     needs: cross-objects
     runs-on: windows-2022
+    timeout-minutes: 30
     name: "The concurrency runtime on Windows x86_64"
     steps:
       - uses: actions/download-artifact@v5
@@ -1399,6 +1418,7 @@ jobs:
   wasi-run:
     needs: [cross-objects, binary]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     name: "An iyi program, run on wasm32-wasi"
     steps:
       # Checkout first: it clears the workspace, so an artifact downloaded
@@ -1499,6 +1519,7 @@ jobs:
   wasm32-collector:
     needs: binary
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     name: "The collector on wasm32-wasi"
     steps:
       # Checkout first: it clears the workspace, so an artifact downloaded
@@ -1538,6 +1559,7 @@ jobs:
   binary:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 180
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The iyi binary and its tarball"
@@ -1694,6 +1716,7 @@ jobs:
   clean-room:
     needs: binary
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     name: "The tarball, on a machine with nothing on it"
     steps:
       # Checkout first: it clears the workspace, so an artifact
@@ -1759,10 +1782,20 @@ jobs:
   # unpacked somewhere else, samples run, daemon served — and attaches
   # them. The notes come from the annotated tag's own message, so the
   # sentence a release opens with is written where the version is named.
+  #
+  # Every job that *runs* something is named here. The four Windows and
+  # wasm32 jobs and the cross-object audit were not, so a `v*` tag published
+  # while the only jobs that execute on those two targets were red — and
+  # README.md's portability claim is about targets a build is run on. A job
+  # whose failure cannot stop a release is not protecting the claim it tests.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs, samples, std, targets, cross-run, wasi-run]
+    needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
+            samples, std, targets, cross-objects, cross-run, wasi-run,
+            windows-probe, windows-collector, windows-runtime,
+            wasm32-collector]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

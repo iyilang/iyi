@@ -51,6 +51,18 @@
   `sleep`, `using std/kernel::{sleep}` is refused by name, and a `Float64`
   argument is refused with the unit in the sentence.
 
+- **`std/weak_ref`.** Thirty-one lines that kept the target as a bare
+  `UInt64` and validated it with `GC.is_heap_ptr`, which answers for any
+  address inside the heap. Nothing registered the reference and no sweep
+  nulled it, so `value` handed back a slot the collector had freed — and
+  after the allocator gave that address to something else, handed it back
+  as `T`, which is type confusion rather than a stale read. The doc had it
+  right and the module contradicted it: GC_DESIGN.md says weak references
+  are registration-based and that there is no table here to walk. There is
+  not. What would bring it back is that table — a list the sweep nulls,
+  which the `HAS_FINALIZER` bit in the object header already reserves room
+  for — and not an address test.
+
 ### Fixed
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**

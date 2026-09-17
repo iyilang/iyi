@@ -1059,8 +1059,14 @@ jobs:
       # measure a rate: the shapes it has to catch, a terminator outside its
       # allocation and a build that needs bdw-gc installed, fail on the first
       # run or not at all.
+      # `LLVM_CONFIG` because this step rebuilds the compiler, and in this job
+      # only the steps that rebuild are told where the static LLVM is. Without
+      # it the gate reported "the compiler does not build with -Dgc_none",
+      # which was true and had nothing to do with the collector.
       - name: The collector-free floor (III.9)
-        run: COLLECTOR_FREE_RUNS=1 bash bench/collector_free_floor.sh
+        run: |
+          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" \
+            bash bench/collector_free_floor.sh
 
       # What a thread costs *this* floor, where every call is libSystem's:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`

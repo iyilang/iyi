@@ -15,8 +15,6 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/nil
-import std/dir
-using std/dir::{Dir}
 
 class RefSample
 end
@@ -62,18 +60,11 @@ assert_str "nil", nil.inspect, "inspect is 'nil'"
 assert_str "value: []", "value: [#{nil}]", "interpolation uses to_s"
 
 # A literal `/tmp` is a POSIX name and there is no such directory on
-# Windows: the scratch directory is an argument, then an environment
-# variable, then the platform's own temporary one, the way the other
-# exercises pick theirs.
+# Windows. The scratch directory is an argument, and this file's own
+# directory otherwise: no environment read, for the reason
+# `bench/std_io_exercise.iyi` records beside the same choice.
 args = Program.args
-env_sandbox = Program.env("IYI_NIL_SANDBOX")
-sandbox = if args.size > 0
-            args[0]
-          elsif !env_sandbox.nil?
-            env_sandbox
-          else
-            Dir.tempdir
-          end
+sandbox = args.size > 0 ? args[0] : __DIR__
 
 tmp_to_s = sandbox + "/iyi_std_nil_test_to_s.txt"
 tmp_inspect = sandbox + "/iyi_std_nil_test_inspect.txt"

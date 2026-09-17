@@ -24,8 +24,6 @@ module bench/std_io_exercise
 
 import std/io
 using std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}
-import std/dir
-using std/dir::{Dir}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond
@@ -146,18 +144,14 @@ puts "  write, print, puts, <<, write_byte, read_bytes, read_byte, read_char, re
 
 puts "\n== descriptor stream"
 # A literal `/tmp` is a POSIX name and there is no such directory on
-# Windows: the scratch directory is an argument, then an environment
-# variable, then the platform's own temporary one, the way the other
-# exercises pick theirs.
+# Windows. The scratch directory is an argument — `bench/std_io_exercise.sh`
+# passes its own — and this file's own directory otherwise, which exists
+# wherever the exercise does. Reading it from the environment was the first
+# shape of this and it cost the floor below a dependency: `Program.env` is
+# the CRT's `environ`, and the audit reads what this binary asks the machine
+# for, so a harness's convenience became std/io's floor.
 args = Program.args
-env_sandbox = Program.env("IYI_IO_SANDBOX")
-sandbox = if args.size > 0
-            args[0]
-          elsif !env_sandbox.nil?
-            env_sandbox
-          else
-            Dir.tempdir
-          end
+sandbox = args.size > 0 ? args[0] : __DIR__
 
 path = sandbox + "/std_io_exercise_#{args.size}.txt"
 File.write(path, "alpha\nb\u00e9\u0442\u0430\ngamma\n")

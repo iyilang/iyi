@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 14,418 lines, of which 3,841 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,313 lines, none of it written in iyi |
+| iyi's own prelude | 15,196 lines, of which 4,228 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 111,404 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 14,418 lines
+> "No standard library worth the name" is still true of iyi's own 15,196 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 14,418 lines,
-primitives included, of which the library is 3,841.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 15,196 lines,
+primitives included, of which the library is 4,228.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,7 +299,7 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**3,841 lines** of the 14,418, measured by `bench/doc_numbers.py` as
+**4,228 lines** of the 15,196, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three. The whole-prelude figure is
 stated beside it because a reader sees the whole file, and a "tiny prelude"
 claim that hid 9,000 lines of runtime would be a claim about the wrong number.
@@ -391,16 +391,31 @@ for the programs that do. They are `src/std/format.iyi` and
 std/socket`, and the library is **3,405 lines**, 353 under. `io.iyi` stays:
 it is the write path behind `puts`, which every program has.
 
-**And it is breached again, by Windows' own floor: 3,841 of 3,734, 107
+**And it is breached again, by Windows' own floor: 4,228 of 3,734, 494
 over.** What entered is not API. It is the platform: the kernel32 names the
 runtime calls, moved out of the collector's macro arm so a `-Dgc_none` or
 `-Dgc_boehm` build on Windows can link at all; the environment read through
 the accessor the C runtime exports, because the POSIX symbol `environ` is
 not one of Windows'; `File.exists?` and `File.read` answering for a
-directory, which `CreateFileA` refuses to open where POSIX opens and fails
-at the read. Each is a declaration or a branch, none of them a method a
-program calls by a new name, and each carries the sentence that says why —
-which is where most of the 107 lines are.
+directory, which `CreateFileW` refuses to open where POSIX opens and fails
+at the read; a UTF-16 path layer, because Windows' narrow entry points read
+a path in the process's code page and a name iyi was handed as UTF-8 is not
+that; a console writer, because those same code pages are what turned a
+Turkish or Japanese filename into mojibake on the way to the screen; a
+fault handler that names a stack overflow and an access violation instead
+of showing a dialog; and the 128-bit divide LLVM emits a call to, which
+every other platform gets from compiler-rt and Windows-MSVC has nowhere to
+get. Each is a declaration or a branch, none of them a method a program
+calls by a new name, and each carries the sentence that says why — which is
+where most of the 494 lines are.
+
+**And the whole breach is that floor, measured.** Of the 4,228, the lines
+inside a `flag?(:win32)` arm are 596: take them out and the library is
+**3,632**, which is 102 *under* the ceiling. The other platforms' arms in
+the same count are 186 for Linux, 133 for darwin and 124 for wasm32 — so
+Windows' floor is not merely larger, it is larger than the other three put
+together, which is what a platform whose every path, console byte and
+integer division needs its own answer costs.
 
 Recorded rather than moved, by the procedure above: the number stands at
 3,734 and this says what sits over it. What closing it is *not* is the
@@ -408,15 +423,17 @@ answer `format` and `socket` got, and measuring said so: those two left the
 prelude for `src/std/`, which the figure does not count, while a
 `src/iyi/windows.iyi` is still a file under `src/iyi/` and every line of it
 counts. The move is worth making for a reader — the Windows floor in one
-file rather than three macro arms of a 7,574-line prelude — and it moves
+file rather than several macro arms of an 8,283-line prelude — and it moves
 this number by nothing.
 
 So the choice is a rule, not a rewrite, and it is the owner's: either the
-figure stops counting *every* platform's floor, which is symmetric and
-would take Linux's syscalls and darwin's libSystem arms out with Windows'
-kernel32 — a different ceiling, measured against a Crystal library whose
-own floor was libc and uncounted — or the library gives back 107 lines
-elsewhere. Until one of those is decided, the breach is what is true.
+figure stops counting *every* platform's floor, which is symmetric, would
+take Linux's syscalls and darwin's libSystem arms out with Windows'
+kernel32, and lands the library at 3,632 of 3,734 with 102 to spare — a
+different ceiling, measured against a Crystal library whose own floor was
+libc and uncounted — or the library gives back 494 lines elsewhere, which
+at this size means giving back a method a program calls. Until one of those
+is decided, the breach is what is true.
 
 **Moving them broke Windows, and what broke was already broken.** With the
 two files out of the prelude, `bench/tls_probe.iyi` exited `0xC0000005`
@@ -959,8 +976,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,313 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 14,418-line own prelude + 36,980 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 111,404 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 15,196-line own prelude + 37,904 in std |
 | Specs | 21,146 lines | 10,253 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -5391,6 +5408,39 @@ tolerates and none needs to: it was never a `DT_NEEDED` entry at all. The kernel
 maps it and `ldd` merely said so, and reading NEEDED entries makes it disappear
 rather than excusing it.
 
+**On Windows the same property has a third reader, and it is the
+toolchain's own.** A PE binary's imports are its import table, which
+`dumpbin -dependents` reports as DLLs and `dumpbin -imports` as the
+symbols under each; that is the same question `otool -L` and `readelf -d`
+answer, and it is asked per program rather than transitively, so LLVM's
+own imports never arrive as iyi's. `dumpbin` is not on a shell's `PATH`,
+so the gate locates it through `vswhere` the way `codegen/link.cr` locates
+the linker. Two Windows-shaped details are written into the gate because
+each cost a run: the flags are spelled `-imports` and `-dependents`,
+because a POSIX shell rewrites `/imports` into a path before `dumpbin`
+sees it, and every argument carries its `.exe`, because `dumpbin` reads an
+extensionless file as an object.
+
+Measured over 114 program binaries — every sample plain and `--release`,
+every std exercise — the answer is four distinct import sets and nothing
+outside the allowlist: 103 programs import `kernel32.dll`,
+`vcruntime140.dll` and five UCRT façades (runtime, math, stdio, locale,
+heap); five add `api-ms-win-crt-environment` (the `Program.env` readers);
+four add `ws2_32.dll` (`std/socket`, `std/udp`); two add `advapi32.dll`
+(`std/random`). The teeth were proven the way the POSIX ones were: with
+`kernel32.dll` taken off the allowlist in a throwaway copy, the gate exits
+1 naming the program and the DLL.
+
+**And the branch that judged an unread floor is gone, on every platform.**
+Before this, a box without `nm` read no symbols and the gate then printed
+"The floor got lower and this script is out of date. No longer needed:"
+followed by the entire allowlist and an invitation to delete it — advice
+that would have disarmed the check, produced by a measurement that never
+happened. It is guarded on having read something now, which is a Linux
+defect as much as a Windows one; a missing reader prints one line naming
+what went unmeasured, and the summary counts it rather than claiming the
+floor held.
+
 **The distinction is real, and it was proven in both directions.** Rebuilding
 the compiler with an explicit `-lxml2` fails the gate by name; the same library
 sitting inside libLLVM passes; and `otool -L` on `libLLVM.dylib` confirms it is
@@ -9197,7 +9247,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 14,418-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 15,196-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -15,8 +15,17 @@ curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
-Linux x86-64 and macOS arm64; the tarball by hand, and building from source,
-are under [Getting it](#getting-it).
+Linux x86-64 and macOS arm64. On Windows, PowerShell installs the same
+release from the zip:
+
+```powershell
+irm https://raw.githubusercontent.com/iyilang/iyi/master/install.ps1 | iex
+& "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
+```
+
+That needs the Visual C++ build tools on the machine, for the reason under
+[Getting it](#getting-it), which is also where the tarball by hand and
+building from source are.
 
 Those four are one design decision seen from four sides. A module is the unit of
 compilation and it is compiled against its dependencies' **declarations**, never
@@ -328,9 +337,13 @@ own toolchain, which is the command `--cross-compile` prints.
 
 **Windows x86-64 is a run target now, and its own entry below says how far
 that reaches.** The runtime is there — the collector, kernel threads, fibers
-over an I/O completion port — and of the 87 programs under `bench/`, 79 run
-and pass on a Windows 11 machine. What is missing is named: sockets, and
-with them HTTP.
+over an I/O completion port, and sockets over Winsock — and of the 87
+programs under `bench/`, 84 run and pass unattended on a Windows 11
+machine. The three that do not are the three that cannot: one whose pass
+*is* a crash, one that waits for a client its gate supplies, and one that
+reads the two environment variables its gate pins. What is missing is named
+in the entry: no subprocess, no `Time::Location`, and a symbolic link needs
+a privilege Windows does not hand out.
 
 **Performance — Crystal's backend, and now one measurement of its own.**
 Native code through LLVM, the same GC. `python3 bench/runtime.py` runs the same
@@ -384,8 +397,8 @@ line so it cannot move unread.
 **Efficiency — built, and it is mostly subtraction.** `puts "hello"` is a 36 KB
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
-it uses, and iyi's own library is 14,418 lines rather than 8,161. The whole
-library is 562 KB on disk beside the binary.
+it uses, and iyi's own library is 15,196 lines rather than 8,161. The whole
+library is 598 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
@@ -418,7 +431,7 @@ tar -xzf iyi-0.13.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 562 KB prelude, the 1,175 KB of `src/std` that `import std/...`
+iyi's own 598 KB prelude, the 1,221 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -433,6 +446,31 @@ not bring is a C toolchain, because iyi links through `cc`; CI proves the
 rest by unpacking the tarball in a bare image with nothing but `gcc` in it
 and building a program there, and on darwin by `otool -L` naming nothing
 outside the package but `/usr/lib` and `/System`.
+
+**On Windows the same release is a zip, and the one prerequisite is the
+build tools.** `make -f Makefile.win iyi-zip` writes
+`iyi-0.13.0-windows-x86_64.zip` (26.8 MB) with a `SHA256SUMS` beside it,
+and [`install.ps1`](install.ps1) is `install.sh`'s twin: Windows
+PowerShell 5.1 or newer, `Invoke-WebRequest` and .NET's own zip reader,
+the release's sums checked before anything is unpacked and a mismatch
+refused with nothing written, `IYI_PREFIX` and `IYI_VERSION` honoured the
+same way, and `<prefix>\bin` added to the user's `PATH` without
+disturbing what is already there. What the zip carries is `bin\iyi.exe`,
+the `LLVM-C.dll` the compiler loads, and the same three libraries the
+tarball has; what it does not carry is the daemon, because
+`iyi daemon`'s server loop is `poll(2)` and its worker is `fork`
+(`src/compiler/iyi/command/daemon.cr`), neither of which Windows has.
+
+You need the Visual C++ build tools — the MSVC toolset and the Windows
+SDK, e.g. Visual Studio Build Tools with "Desktop development with C++".
+iyi links a program with `cl.exe` and finds it, and the SDK's libraries,
+through the registry, so no developer prompt and nothing on `PATH` is
+needed. Everything else comes out of the zip, including the LLVM the
+compiler loads. `scripts/package-windows.ps1` is the gate for that
+sentence: it unpacks the zip outside the checkout, cuts `PATH` back to
+Windows' own four directories, removes `IYI_PATH`, `CRYSTAL_PATH`, `CC`
+and the MSVC variables from the environment, and builds and runs a
+program that imports `std/text` out of the unpacked tree.
 
 ### An editor, in one stanza
 
@@ -539,9 +577,10 @@ travels. On macOS that is not on offer, and it is said here rather than left
 to be found: Apple ships no static libc, and the linker refuses, `ld: library
 'crt0.o' not found`. The default build there links one library, `libSystem`,
 part of the OS, so the file still copies to another Mac and runs. Windows is
-the same shape, importing only `kernel32`, which ships with the machine, and
-`--static` links the static CRT there. A wasm32 build is one self-contained
-module already.
+the same shape, importing `kernel32` and, for a program that asks for
+entropy or a socket, `advapi32` and `ws2_32` — all three ship with the
+machine — and `--static` links the static CRT there. A wasm32 build is one
+self-contained module already.
 
 Building it instead needs LLVM 19 and a Crystal compiler to bootstrap from:
 
@@ -591,7 +630,7 @@ $ curl localhost:3000/json
 `pub`, traits with defaults, `impl … forall`, error unions and `!`, `.or`,
 `or_panic`, `defer` — all of them, on a program that requires a shard. R-2
 still refuses an export that does not write its types. What changes is what the
-program *has*: 8,161 lines of Crystal's standard library instead of 14,418
+program *has*: 8,161 lines of Crystal's standard library instead of 15,196
 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -973,7 +1012,7 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 14,418 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 15,196 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`**: integers, booleans, a string, one
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
@@ -1025,34 +1064,57 @@ marked PROPOSED are the parts that will move under you.
   `x86_64-windows-msvc` and `arm-linux-gnueabihf` are not among them.
   Nothing here claims that the test suite runs on any target but the one CI
   builds on.
-- **Windows x86-64 runs the runtime, and what is missing is sockets.**
-  `x86_64-windows-msvc` compiles, links and runs: `kernel32` and the
-  *dynamic* CRT are the whole link line (the static one, `libcmt`, links
-  just as cleanly and access-violates before `main`, which is why the
-  choice is written down). On a Windows 11 machine the compiler builds
-  from source with the Visual C++ build tools and an LLVM of Crystal's
-  own, and of the 87 programs under `bench/` **79 pass**: the collector
-  with its PE-section and TEB roots, kernel threads stopped with
-  `SuspendThread` — a thread caught inside the allocator is left running
-  with a request and parks itself on the way out, the way the POSIX
-  handler defers — fibers over an I/O completion port, `Channel`,
-  `select`, cancellation, files, directories, clocks, entropy from the OS.
-  `bench/thread_exercise.iyi` holds there: 8 threads, 3.92M allocations,
-  292 collections, every live list intact.
-  What is *not* here: **sockets**, and therefore UDP and HTTP — five of
-  those 87 refuse by name; paths and the console are the ANSI Win32
-  entry points, so a non-ACP filename is stored mojibake and a long path
-  is still capped at `MAX_PATH`; there is no subprocess and no
-  `Time::Location`; arm64 Windows is refused at compile time rather than
-  broken at run time, and the x86-64 build runs there under emulation.
+- **Windows x86-64 runs the runtime, the sockets and the gates.**
+  `x86_64-windows-msvc` compiles, links and runs: `kernel32`, `ws2_32`,
+  `advapi32` and the *dynamic* CRT are the whole link line (the static
+  one, `libcmt`, links just as cleanly and access-violates before `main`,
+  which is why the choice is written down). On a Windows 11 machine the
+  compiler builds from source with the Visual C++ build tools and an LLVM
+  of Crystal's own, and of the 87 programs under `bench/` **84 pass**
+  unattended: the collector with its PE-section and TEB roots, kernel
+  threads stopped with `SuspendThread` — a thread caught inside the
+  allocator is left running with a request and parks itself on the way
+  out, the way the POSIX handler defers — fibers over an I/O completion
+  port, `Channel`, `select`, cancellation, files, directories, clocks,
+  entropy from the OS, and TCP, UDP and HTTP over Winsock, where `accept`
+  posts `AcceptEx`, `connect` posts `ConnectEx` and a datagram receive
+  posts `WSARecvFrom` on the same port the poller already runs (the
+  extension pointers come from `WSAIoctl`, so `mswsock` is not a second
+  DLL). `bench/thread_exercise.iyi` holds there: 8 threads, 3.92M
+  allocations, 292 collections, every live list intact.
+  A path is UTF-16 end to end, so `File.write("ünïcode-çğış-日本.txt")`
+  creates that name and not mojibake, and a 364-character path opens
+  through `\\?\`; the console writes UTF-16 with `WriteConsoleW` and asks
+  for VT once per handle, so colour and Turkish render under code page
+  437 and a redirected stream stays raw UTF-8; a crash names itself —
+  stack overflow and access violation, printed by a vectored handler,
+  with `SetErrorMode` keeping the dialog off a CI runner; and the 128-bit
+  divide LLVM asks a library for is supplied in iyi, because
+  Windows-MSVC has no compiler-rt to ask.
+  The tree's own gates run there too: every `bench/*.sh` honours the
+  platform's path-list delimiter, the shell's path mapping and the
+  environment it pins, and `bench/dependency_floor.sh` reads a PE
+  import table with `dumpbin` — so "no new dependency" is measured on
+  Windows and not assumed. 114 program binaries import kernel32,
+  `vcruntime140` and five UCRT façades, four of them `ws2_32` and two
+  `advapi32`, and nothing else.
+  What is *not* here: there is no subprocess and no `Time::Location`; a
+  symbolic link needs a privilege Windows grants to an administrator or
+  to Developer Mode, so the file exercise asks first and says what it
+  skipped; a fault on a *fiber's* stack is still an access violation
+  rather than a named stack overflow, because a vectored handler runs on
+  the stack that faulted; the daemon is POSIX-only (`poll(2)` and
+  `fork`), so the Windows zip ships the compiler alone; and arm64 Windows
+  is refused at compile time rather than broken at run time, with the
+  x86-64 build running there under emulation.
   Building it there is `make -f Makefile.win crystal` then
   `make -f Makefile.win iyi`, with Crystal's own Windows package and the
   Visual C++ build tools and nothing else; `windows-native` in CI is that
   command pair on a `windows-2025` runner, and it then runs iyi's own
-  specs, every sample, the verbs and those 85 exercises — so the numbers
-  above are a gate and not a measurement on one machine. The three older
-  Windows jobs stay: they link objects cross-compiled on Linux, which is
-  the other half of the claim.
+  specs, every sample, the verbs and those exercises, builds the zip and
+  installs it — so the numbers above are a gate and not a measurement on
+  one machine. The three older Windows jobs stay: they link objects
+  cross-compiled on Linux, which is the other half of the claim.
 - **A wasm program needs a wasi toolchain, not just a linker.** A wasm32-wasi
   module is a program only once wasi-libc's entry stub is linked in, and only
   the compiler driver knows where its sysroot keeps that object — so this fork
@@ -1094,7 +1156,7 @@ marked PROPOSED are the parts that will move under you.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 14,418 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 15,196 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

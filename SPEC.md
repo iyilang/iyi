@@ -403,11 +403,20 @@ program calls by a new name, and each carries the sentence that says why —
 which is where most of the 107 lines are.
 
 Recorded rather than moved, by the procedure above: the number stands at
-3,734 and this says what sits over it. What would close it is the same
-answer `format` and `socket` got — the Windows platform layer is a file of
-its own, `src/iyi/windows.iyi`, required by the prelude rather than written
-inside it, and the declarations leave the library figure with it. That is a
-move, not a rewrite, and it is owed.
+3,734 and this says what sits over it. What closing it is *not* is the
+answer `format` and `socket` got, and measuring said so: those two left the
+prelude for `src/std/`, which the figure does not count, while a
+`src/iyi/windows.iyi` is still a file under `src/iyi/` and every line of it
+counts. The move is worth making for a reader — the Windows floor in one
+file rather than three macro arms of a 7,574-line prelude — and it moves
+this number by nothing.
+
+So the choice is a rule, not a rewrite, and it is the owner's: either the
+figure stops counting *every* platform's floor, which is symmetric and
+would take Linux's syscalls and darwin's libSystem arms out with Windows'
+kernel32 — a different ceiling, measured against a Crystal library whose
+own floor was libc and uncounted — or the library gives back 107 lines
+elsewhere. Until one of those is decided, the breach is what is true.
 
 **Moving them broke Windows, and what broke was already broken.** With the
 two files out of the prelude, `bench/tls_probe.iyi` exited `0xC0000005`

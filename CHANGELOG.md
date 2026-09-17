@@ -18,6 +18,32 @@
 
 ### Changed
 
+- **`UdpSocket` parks the way `IyiSocket` does.** Every receive is
+  `MSG_DONTWAIT`, and when nothing is queued the task waits on the
+  descriptor - the poller under the runtime, a `poll` without one - so
+  `receive_from`, `receive` and `receive_datagram` answer `T | Cancelled`
+  (SPEC.md III.4.2) and a sibling on the same thread keeps running; a
+  `close` under a parked receive wakes it with `Cancelled`. Before, a
+  receive was a blocking `recvfrom` that pinned the worker, and the
+  module carried `non_blocking=`, `read_timeout=` and `write_timeout=`
+  to work around it. Those are gone: the `?` variants answer nil when
+  nothing is queued and never park, and `poll_read(ms)` bounds a wait.
+  Four receive bodies are two. `bench/std_udp_exercise.sh` runs the two
+  tasks on one thread and proves a blocking copy hangs.
+
+- **One comparison trait, and it is `Comparable`.** `std/traits` had
+  `Cmp` with `cmp(other) : Int32`, nine modules and `Enumerable`'s bounds
+  leaned on it, and `std/comparable` carried a second, generic
+  `Comparable(T)` with `<=>` that nothing implemented - so a type written
+  against the Crystal-shaped one got `<`, `clamp` and `between?` and could
+  not be sorted, `max`ed or put in a `Heap`. The trait is `Comparable`
+  now, in `std/traits` beside `Num` and `Hashable`, its one requirement
+  `<=>(other : self) : Int32`, and `<`, `<=`, `>`, `>=`, `==`, `clamp`
+  and `between?` come with it; `lt`/`gt` are gone, `(a <=> b) < 0` is
+  what they said. Every `impl` and every `where Elem : Comparable` in std,
+  the samples and the gates follows. SPEC II.6 had written `Comparable`
+  all along.
+
 - **`IyiSocket` parks instead of blocking.** On the targets that have the
   runtime, every socket is non-blocking and `connect`, `accept`, `read`
   and `write` park the calling fiber on the poller — `wait_writable`
@@ -46,7 +72,70 @@
   serve HTTP, soak an LSP and run aarch64 under qemu, and one that hangs
   held a runner for a working day and reported nothing.
 
+- **The floor every program carries has one home.** `bench/floor_base.sh`
+  names what a darwin program leaves undefined by being an iyi program at
+  all — the prelude's, the poller's, the collector's, the thread layer's
+  and the panic path's libSystem symbols — and what a Linux program
+  carries from the C runtime, and the gates that audit a program's floor
+  source it and add what their own program asks for on top:
+  `bench/dependency_floor.sh`, whose list is this plus the platform
+  modules' and which keeps the reason for every name, and the root, eiy,
+  io and time exercises. It was copied into eleven gates before, and when
+  panics learned to print a backtrace two of them were not told; a floor
+  written in eleven places is eleven floors, and the one nobody updates is
+  the one that fails. The lists whose point is being *exact* — the
+  runtime's own twelve in the thread exercise, the thread floor's
+  variants, the collector's — stay written out, because "nothing else" is
+  what they assert. No list changed by a name: the five rebuilt from the
+  base are set-identical to what they replaced.
+
+- **The stack guard's Linux-only code says Linux.** Three guards in
+  `concurrency.iyi` read `flag?(:x86_64)` inside `unless flag?(:win32)`
+  and meant Linux: the constants under them are Linux syscall numbers, the
+  `SA_RESTORER` flag and the `rt_sigreturn` trampoline are Linux's signal
+  ABI, and an x86_64 darwin — excluded today only by the prelude's require
+  line — would have been handed all three without a word. They read
+  `flag?(:linux) && flag?(:x86_64)` now, and the darwin fault handler's
+  offsets say which structs they are arm64's. No program is built
+  differently: every target this file is required on takes the same
+  branch it did.
+
+- **The darwin job runs the standard library's gates.** The std job ran
+  all seventy-odd on Linux and nothing ran them on the platform the darwin
+  tarball is shipped for — the gap the collector's five gates had once,
+  with the same cost: run on a darwin machine, six of them were red, one
+  for the module's own defect (`File.touch`) and five for the gates', and
+  every one had been green on Linux for a release. `bench/std_exercise.sh`
+  runs in the darwin job now, and its timeout is sixty minutes for it.
+
 ### Removed
+
+- **`std/fiber`.** It handed the runtime's `IyiFiber` out as `Fiber.new {
+  }`, `resume`, `yield` and `suspend` - a second way to start concurrent
+  work beside `group`, with no boundary: a panic in one climbed to
+  nothing, a cancel reached it never, and `resume` was an enqueue rather
+  than a switch. SPEC.md III.4 had already said `Fiber` does not carry
+  over as a user-facing primitive, because a raw spawn puts III.4.1's
+  leak straight back. Sixty-seven modules, 36,743 lines.
+
+- **`std/iterable`, `std/nil`, `udp`'s own `IPv4Address`, and
+  `Errno.value`.** Four more things with two names or none. `Iterable`
+  was Crystal's mixin beside `Enumerable`, which nothing implemented and
+  whose two methods `Enumerable` already has. `std/nil` reopened `Nil`
+  with `not_nil`, `try` and `presence` - `not_nil` on `Nil` alone, so
+  `x.not_nil` on an `Int32?` did not compile for the half that matters -
+  and a `NilAssertionError` class that existed to carry one sentence;
+  `!` and `or_panic` are how a nil is refused here. `std/udp` declared a
+  second `IPv4Address`, a second address parser and a second
+  `sockaddr_in` writer, all three drifted from `std/socket`'s (no port
+  bound, no `inspect` in the sentence); it imports `std/socket` and uses
+  its now. `Errno.value`/`value=` was a class variable no syscall ever
+  set - the raw calls answer the negative number - and its exercise set
+  it by hand and read it back. The enum stays.
+
+- **`std/comparable` and `std/cmp`.** The second trait above, and a
+  module of four free functions (`min`, `max`, `clamp`) over the first,
+  which `Enumerable` and the trait itself already answer.
 
 - **`std/kernel`'s `sleep`, which took seconds and busy-waited.** The
   prelude has a `sleep` and it takes **milliseconds** as an `Int32`, parking
@@ -74,7 +163,73 @@
   which the `HAS_FINALIZER` bit in the object header already reserves room
   for — and not an address test.
 
+- **`std/empty` and `std/docs_pseudo_methods`, two stubs.** The first was
+  four lines of comment binding a vacant `Std::Empty`, named after
+  Crystal's `empty.cr` - which is a *prelude*, selected with
+  `--prelude=empty`, and still is; `"".empty?` is the prelude's and never
+  came from here. The second was Crystal's documentation costume: seven
+  private `__crystal_pseudo_*` defs no module could reach, six on `Object`
+  whose empty bodies answered `Nil` for `as` and did not compile for the
+  rest, and `CRYSTAL_PSEUDO__NoReturn`/`__Void` - two structs that were not
+  `NoReturn` and `Void`, could be allocated where the real ones cannot,
+  and were refused in a `lib`. `iyi doc` never loaded it, and nothing in
+  the tree imported either. `import std/empty` is "can't find module"
+  now, which is what it is. Seventy-two modules, 37,127 lines.
+
 ### Fixed
+
+- **A type the standard library declares names its module.** `Deque`,
+  `JSON`, `Random`, `BigInt`, `Path`, `UUID`, `Base64`, `CSV`, `Log`,
+  `OptionParser`, `Comparable`, `HTTP` - each was a bare "undefined
+  constant" while `std/<module>.iyi` declared it under `pub`. The compiler
+  reads the search path's `std/` for a top-level `pub` declaration of the
+  name, on the error path only, and says `import std/deque` and `using
+  std/deque::{Deque}`; the hand-written sentences (`Time`, `ENV`) keep
+  their place above it, and "Did you mean" comes after, since `Deque` is
+  not a misspelling. `spec/compiler/semantic/iyi_spec.cr` holds it.
+
+- **Three arrival hints denied modules the tree has.** `p 1` was told
+  "there is no `p`" while `std/kernel` declares `p` and `pp`; `rand` was
+  told there is no random source "in `std` yet" while `std/random` has
+  had one; `ENV` was told there is no map of the environment while
+  `std/env` is that map. Each names the module and the `using` line now,
+  the way `sprintf` and `Time` already did. `spec/compiler/semantic/iyi_spec.cr`
+  holds the three.
+
+- **Three more arrivals get a sentence.** `def f(a : Int32) -> Int32` was
+  "expecting token '.', not 'NEWLINE'" - the arrow parsed as a proc
+  literal opening the body - and says a return type is `: Type` here;
+  `a : int32` and `: bool` were "unexpected token" and name the capital
+  (`Int32`, `Bool`); `else if` with one `end` was "expecting 'end' to
+  close the if that began at line 1", true and unhelpful, and adds that
+  `else if` opened a second `if` and `elsif` is the spelling. A `.cr`
+  keeps the parse it had. `spec/compiler/parser/parser_spec.cr` holds
+  the three; the other thirty shapes probed - a missing `end` at every
+  depth, a stray one, `fn`/`let`/`var`/`elif`, an open bracket, brace or
+  paren, a bare `def f a` - already answered by name.
+
+- **`bind --mods` and `migrate --out` died of the filesystem's words for a
+  directory that will not take a file.** `--mods ro/` was
+  `ro/x.bind.log: Permission denied`, naming the log and no flag;
+  `migrate --out ro/` the first module's; and `--out` naming a file was
+  `mkdir`'s `File exists`. Each is refused up front by the flag it was
+  given, in the sentence `build -o` already uses. `bench/verbs_exercise.sh`
+  holds the three. A probe of forty edges found nothing else: an empty
+  shard, a missing entry file, a cyclic require, a hyphenated name, a
+  shard depending on a shard, `--out` inside the tree, and a syntax error
+  each answer by name.
+
+- **`sleep` on wasm32-wasi was a bare "undefined method".** The prelude's
+  `sleep` parks a task on the scheduler and lives with the runtime, which
+  wasm32-wasi does not carry (SPEC.md III.4); `group` had its reason at
+  the same spot and `sleep` had none. It is refused by name now, in the
+  same macro block, and `bench/wasm_concurrency_probe.sh` step 4 holds
+  it. A probe of thirty-odd programs under wasmtime found nothing else:
+  a panic prints and exits 1 with its defers run, overflow, a bad index
+  and a missing key panic by name, `File` refuses by name, `Program.env`
+  is nil, stdin/stdout/stderr work, `std/time`, `std/format`, `std/env`
+  and `std/random` answer. The stack running out is still wasmtime's
+  trap (exit 134), as the stack-guard entry says.
 
 - **`File.touch(path, time)` set "now" on darwin whatever `time` said.**
   The Linux branch writes the second it is given through `utimensat`;
@@ -165,7 +320,12 @@
   the verb that rebuilds what it is about: `iyi bind` for a boundary,
   `--emit-iyimod` for a module of one's own. `bench/bind_roundtrip.sh`
   holds both directions — an edited shard is refused by name, and a
-  boundary whose checkout is gone still builds.
+  boundary whose checkout is gone still builds — and that the inputs are
+  the shard's own: "under the shard's directory" was a bare `starts_with?`
+  on the dirname, so `lib/radix/src-extra/extra.cr` was recorded as
+  `lib/radix/src`'s and the boundary went stale whenever the neighbour
+  changed. The same rule decided which types and defs were the shard's;
+  the directory carries its separator now, in every one of those places.
 
 - **`Hashable` promised what `std/traits` had not loaded.** `hash_key`
   forwards to the value's own `hash`; the prelude defines `hash` for
@@ -214,8 +374,7 @@
   - `std/capsule`: overlong datagram varints name overlong, not
     truncated; a quarter-stream id at `2^62` is refused; a negative
     encode length is refused before `Bytes.new`.
-  - `std/udp`: `Datagram[i]` panics unless `i` is 0, 1 or 2. Receive
-    still blocks the worker (`MSG_DONTWAIT` is not parking).
+  - `std/udp`: `Datagram[i]` panics unless `i` is 0, 1 or 2.
   - `std/bit_array`: `hash` mixes the bits; `fill`/`rotate`/`new` past
     `Int32` refuse with the module's sentence.
   - `std/comparable`: inverted `clamp` panics; `==` follows `<=>`;

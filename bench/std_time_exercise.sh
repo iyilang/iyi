@@ -13,7 +13,7 @@
 #   * Span construction, accessors, operators (+, -, -@), and Time arithmetic.
 #   * ISO 8601 / RFC 3339 serialization (fraction digits 0, 3, 6, 9) and parsing
 #     with timezone offset conversions.
-#   * Comparable trait implementation via `Std::Traits::Cmp`.
+#   * Comparable trait implementation via `Std::Traits::Comparable`.
 #   * Negative proofs: the exercise script breaks the leap-year rule, roundtrip
 #     arithmetic, and RFC 3339 offset handling, asserting each is caught.
 #   * Dependency floor: audits symbols and libraries to prove zero new dependencies.
@@ -23,6 +23,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/floor_base.sh"
 IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -94,7 +95,7 @@ for check in "known-value table" "leap-year rules" "scattered roundtrip" "platfo
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Cmp all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Comparable all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs
@@ -249,22 +250,20 @@ echo
 echo "== the dependency floor, measured against the std_time exercise binary"
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main"
+    allowed_symbols="$FLOOR_BASE_LINUX"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
     fi
     ;;
   *)
-    # On Darwin, libSystem supplies clock_gettime_nsec_np, which concurrency already links.
-    # `backtrace` and `backtrace_symbols_fd` are the panic path's: a panic on
-    # darwin prints its frames through libSystem, so every darwin program
-    # carries the two, this one included. bench/dependency_floor.sh records
-    # them; this copy of the list had been written before they arrived.
-    allowed_symbols="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+    # The base is every darwin program's (bench/floor_base.sh); the socket
+    # and file names beside it are what this exercise's binary asks for on
+    # top, each libSystem's, which the `allowed_libs` check below proves.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
-allowed_libs="libSystem libc.so ld-linux libgcc_s"
+allowed_libs="$FLOOR_LIBS_PROGRAM"
 
 if [ -x "$WORK/exercise-time" ]; then
   time_syms="$(symbols "$WORK/exercise-time")"

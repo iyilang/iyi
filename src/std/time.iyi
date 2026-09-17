@@ -26,7 +26,7 @@
 module std/time
 
 import std/traits
-using std/traits::{Cmp}
+using std/traits::{Comparable}
 
 pub struct DayOfWeek
   getter value : Int32
@@ -325,8 +325,8 @@ pub struct Span
   end
 end
 
-impl Cmp for Span
-  def cmp(other : self) : Int32
+impl Comparable for Span
+  def <=>(other : self) : Int32
     self <=> other
   end
 end
@@ -1068,8 +1068,8 @@ pub struct Time
   end
 end
 
-impl Cmp for Time
-  def cmp(other : self) : Int32
+impl Comparable for Time
+  def <=>(other : self) : Int32
     self <=> other
   end
 end

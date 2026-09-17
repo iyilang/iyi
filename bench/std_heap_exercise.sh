@@ -64,10 +64,10 @@ mkdir -p "$WORK/patched/std"
 python3 - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/heap.iyi").read_text()
-old = 'break unless @items[i].cmp(@items[p]) < 0'
+old = 'break unless (@items[i] <=> @items[p]) < 0'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/heap.iyi").write_text(src.replace(old, 'break unless @items[i].cmp(@items[p]) > 0', 1))
+Path("$WORK/patched/std/heap.iyi").write_text(src.replace(old, 'break unless (@items[i] <=> @items[p]) > 0', 1))
 PY
 if [ $? -ne 0 ]; then
   echo "  the patch did not apply"

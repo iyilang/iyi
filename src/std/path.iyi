@@ -30,7 +30,7 @@
 module std/path
 
 import std/traits
-using std/traits::{Cmp}
+using std/traits::{Comparable}
 
 pub struct Path
   pub enum Kind : UInt8
@@ -591,8 +591,8 @@ pub struct Path
   end
 end
 
-impl Cmp for Path
-  def cmp(other : self) : Int32
+impl Comparable for Path
+  def <=>(other : self) : Int32
     self <=> other
   end
 end

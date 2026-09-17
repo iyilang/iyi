@@ -53,7 +53,7 @@ for phrase in "== normalize corpus" "== join" "== relative_to" "== expand" "== w
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  normalize, join, relative_to, expand, windows and Cmp all reported"
+[ "$status" -eq 0 ] && echo "  normalize, join, relative_to, expand, windows and Comparable all reported"
 
 echo
 echo "== normalize and relpath against python3 posixpath"

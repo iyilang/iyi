@@ -9,7 +9,7 @@
 module samples/std_iterator
 
 import std/traits
-using std/traits::{Cmp, Num}
+using std/traits::{Comparable, Num}
 
 import std/iterator
 using std/iterator::{Iterator, ArrayIterator}

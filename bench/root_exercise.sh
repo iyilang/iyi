@@ -42,6 +42,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/floor_base.sh"
 IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -169,17 +170,17 @@ echo "== what root discovery asks the machine for"
 # entry nothing uses is a check without teeth.
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main __data_start _end"
+    allowed_symbols="$FLOOR_BASE_LINUX __data_start _end"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
     fi
     ;;
   *)
-    allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd madvise pipe pthread_create pthread_kill sigaction sigaltstack sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap pthread_get_stackaddr_np pthread_self write"
+    allowed_symbols="$FLOOR_BASE_DARWIN"
     ;;
 esac
-allowed_libs="libSystem libc.so ld-linux libgcc_s"
+allowed_libs="$FLOOR_LIBS_PROGRAM"
 
 if [ -x "$WORK/roots-gc" ]; then
   gc_syms="$(symbols "$WORK/roots-gc")"

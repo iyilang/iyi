@@ -10,7 +10,7 @@
 #   * expand under an explicit base and under `PWD`, `home:` under `HOME`.
 #   * Windows kind: drive, root, UNC share, rooted-but-not-absolute,
 #     case-insensitive equality and hashing.
-#   * Cmp: sorted, <, ==.
+#   * Comparable: sorted, <, ==.
 #
 # Run via:
 #     ./bin/iyi run bench/std_path_exercise.iyi
@@ -191,7 +191,7 @@ h[Path.windows("C:\\A")] = 1
 assert_true(h[Path.windows("c:\\a")]? == 1, "hash folds case on windows")
 puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
 
-puts "\n== path comparison via Cmp"
+puts "\n== path comparison via Comparable"
 assert_true(Path.posix("a") < Path.posix("b"), "Path <")
 assert_true(Path.posix("b") > Path.posix("a"), "Path >")
 assert_str("a,b,c", [Path.posix("c"), Path.posix("a"), Path.posix("b")].sorted.map { |p| p.to_s }.join(","), "sorted")

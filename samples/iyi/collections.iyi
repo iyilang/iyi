@@ -115,12 +115,13 @@ puts "as a type       #{describe(n)} / #{describe(w)}"
 # ---------------------------------------------------------------------------
 #
 # * `Words.new([...]).sum` — `sum` is bounded `where Elem : Num` and
-#   `String` implements `Cmp` but not `Num`. The error names the element type
-#   and the bound rather than failing somewhere inside the method body.
+#   `String` implements `Comparable` but not `Num`. The error names the element
+#   type and the bound rather than failing somewhere inside the method body.
 #
 # * A second `impl Enumerable for Nums` — a trait with an associated type is
 #   implementable once per type, because a second answer for `Elem` would make
 #   every call on `Nums` ambiguous.
 #
-# * `impl Num for X` with no `impl Cmp for X` before it — `Num : Cmp` requires
-#   it, and the impls have to be written in dependency order.
+# * `impl Num for X` with no `impl Comparable for X` before it —
+#   `Num : Comparable` requires it, and the impls have to be written in
+#   dependency order.

@@ -669,7 +669,7 @@ module Iyi
   private def self.bind_inputs(program : Program) : Array(String)
     source = program.filename
     return [] of String unless source.is_a?(String)
-    directory = File.dirname(source)
+    directory = directory_of(source)
     return [] of String if directory.empty?
 
     entries = [] of String
@@ -3052,7 +3052,18 @@ module Iyi
   # its own to measure against.
   private def self.library_root(program : Program) : String?
     library = program.requires.find(&.ends_with?("prelude.cr"))
-    library ? File.dirname(library) : nil
+    library ? directory_of(library) : nil
+  end
+
+  # The directory a file sits in, *with* its separator, because every
+  # question below is `starts_with?` and a bare dirname answers it for the
+  # wrong files too: `/x/lib/radix` is a prefix of `/x/lib/radix-tree/src`,
+  # and a library root of its own neighbour. `bind_inputs`
+  # would have recorded the neighbour's files as this shard's, and a
+  # boundary read as stale whenever they changed.
+  private def self.directory_of(file : String) : String
+    directory = File.dirname(file)
+    directory.ends_with?('/') ? directory : directory + "/"
   end
 
   # Whether a type is the *library's* rather than the shard's.
@@ -3076,7 +3087,7 @@ module Iyi
   private def self.other_namespaces(program : Program, root : String) : Array(String)
     source = program.filename
     return [] of String unless source.is_a?(String)
-    directory = File.dirname(source)
+    directory = directory_of(source)
     return [] of String if directory.empty?
 
     names = [] of String
@@ -3342,7 +3353,7 @@ module Iyi
 
     source = program.filename
     if source.is_a?(String)
-      directory = File.dirname(source)
+      directory = directory_of(source)
       unless directory.empty?
         program.requires.each do |path|
           next unless path.starts_with?(directory)
@@ -3429,7 +3440,7 @@ module Iyi
   private def self.top_level_funs(program : Program) : Array(String)
     source = program.filename
     return [] of String unless source.is_a?(String)
-    directory = File.dirname(source)
+    directory = directory_of(source)
     return [] of String if directory.empty?
 
     funs = [] of String
@@ -4507,7 +4518,7 @@ module Iyi
     declarations = [] of IyiMod::TypeDecl
     source = program.filename
     return declarations unless source.is_a?(String)
-    directory = File.dirname(source)
+    directory = directory_of(source)
     return declarations if directory.empty?
 
     library = library_root(program)
@@ -4988,7 +4999,7 @@ module Iyi
                                      methods : Array(BindMethod)) : Nil
     source = program.filename
     return unless source.is_a?(String)
-    directory = File.dirname(source)
+    directory = directory_of(source)
     return if directory.empty?
 
     each_bind_def(program) do |a_def|

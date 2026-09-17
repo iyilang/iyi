@@ -42,15 +42,27 @@ class Iyi::Path
       self.raise("undefined constant #{self}\n#{hint}")
     end
 
+    # iyi: Crystal's name for a thing the prelude spells otherwise, for
+    # someone arriving with Crystal's spelling in their fingers. First,
+    # because where the table has a sentence it says more than the scan
+    # below can (`Time.utc`, and that there is no `Time.now`).
+    if hint = Iyi::IYI_ARRIVAL_CONSTANT_HINTS[to_s]?
+      self.raise("undefined constant #{self}\n#{hint}")
+    end
+
+    # iyi: a name the standard library declares and this program never
+    # imported. `Deque`, `JSON`, `Random`, `Socket` and thirty more were a
+    # bare "undefined constant" while `std/<module>.iyi` had each of them
+    # under `pub`; the file is read, so the hint is the tree's rather than
+    # a table's. Above the spelling suggestion, because `Deque` is not a
+    # misspelling of anything.
+    if hint = iyi_std_declares_hint(type.program, names.first)
+      self.raise("undefined constant #{self}\n#{hint}")
+    end
+
     similar_name = type.lookup_similar_path(self)
     if similar_name
       self.raise("undefined constant #{self}\nDid you mean '#{similar_name}'?", suggestion: similar_name.to_s)
-    end
-
-    # iyi: Crystal's name for a thing the prelude spells otherwise, for
-    # someone arriving with Crystal's spelling in their fingers.
-    if hint = Iyi::IYI_ARRIVAL_CONSTANT_HINTS[to_s]?
-      self.raise("undefined constant #{self}\n#{hint}")
     end
 
     self.raise("undefined constant #{self}")
@@ -82,6 +94,43 @@ class Iyi::Path
     nil
   end
 
+  # The `std/<module>` whose file declares `pub class|struct|module|trait|
+  # enum|alias NAME` at the top level, with the two lines that bring it in.
+  # Read off the search path the way an import is resolved, and only on
+  # the error path. A string walk rather than a `Regex`: the compiler
+  # links no pcre2 (SPEC.md III.9), and one regex here was enough to make
+  # it.
+  IYI_STD_DECLARERS = {"pub class ", "pub struct ", "pub module ", "pub trait ", "pub enum ", "pub alias "}
+
+  private def iyi_std_declares_hint(program, name : String) : String?
+    program.iyi_path.entries.each do |entry|
+      dir = File.join(entry, "std")
+      next unless Dir.exists?(dir)
+      Dir.each_child(dir) do |file|
+        next unless file.ends_with?(".iyi")
+        path = File.join(dir, file)
+        next unless File.file?(path) && iyi_declares_at_top_level?(File.read(path), name)
+        written = "std/#{file.rchop(".iyi")}"
+        return "`#{name}` comes with `import #{written}` and `using #{written}::{#{name}}`."
+      end
+    end
+    nil
+  end
+
+  private def iyi_declares_at_top_level?(text : String, name : String) : Bool
+    text.each_line do |line|
+      next unless line.starts_with?("pub ")
+      IYI_STD_DECLARERS.each do |declarer|
+        next unless line.starts_with?(declarer)
+        rest = line[declarer.size..]
+        next unless rest.starts_with?(name)
+        after = rest[name.size]?
+        return true if after.nil? || !(after.alphanumeric? || after == '_')
+      end
+    end
+    false
+  end
+
   private def iyi_each_unit(type, &block : ModuleType ->) : Nil
     type.types?.try &.each_value do |nested|
       block.call(nested) if nested.is_a?(ModuleType) && nested.iyi_unit?
@@ -97,7 +146,7 @@ module Iyi
   # first, not a list of everything the prelude lacks.
   IYI_ARRIVAL_CONSTANT_HINTS = {
     "ARGV"       => "The arguments are `Program.args`: an `Array(String)` of what followed the program's name.",
-    "ENV"        => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`; there is no map of the whole environment.",
+    "ENV"        => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`. The whole map, `ENV[\"NAME\"]?` and `ENV.to_h`, comes with `import std/env` and `using std/env::{ENV}`.",
     "Time"       => "`Time` lives in `std/time`: write `import std/time` and `using std/time::{Time}`. The clock is `Time.utc`; there is no `Time.now`.",
     "Int32::MAX" => "There is no `Int32::MAX`: the edges are the literals, 2147483647 and -2147483648, and arithmetic past them panics rather than wrapping.",
     "Int32::MIN" => "There is no `Int32::MIN`: the edges are the literals, -2147483648 and 2147483647, and arithmetic past them panics rather than wrapping.",
@@ -106,14 +155,14 @@ module Iyi
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
-    "p"       => "`puts value.inspect` is the spelling here; there is no `p`.",
-    "pp"      => "`puts value.inspect` is the spelling here; there is no `pp`.",
+    "p"       => "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel` and `using std/kernel::{p}`.",
+    "pp"      => "`puts value.inspect` is the spelling here; `pp` comes with `import std/kernel` and `using std/kernel::{pp}`.",
     "require" => "iyi has no `require`: a module is reached with `import`, and `--crystal` gives a program Crystal's library.",
     "exit"    => "There is no `exit`: a program ends when its last line runs, and a failure is a panic - `raise \"why\"`, or `assert` - which exits 1 with the sentence (SPEC.md III.1.4).",
     "gets"    => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no bare `gets`.",
     "printf"  => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{printf}`.",
     "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{sprintf}`.",
-    "rand"    => "There is no random number source in the prelude or in `std` yet.",
+    "rand"    => "There is no `rand` in the prelude: `Random.new.rand(n)` comes with `import std/random` and `using std/random::{Random}`.",
     "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
     "let"     => "There is no `let`: a variable is `x = 1`, and its type is the value's.",
     "var"     => "There is no `var`: a variable is `x = 1`, and its type is the value's.",

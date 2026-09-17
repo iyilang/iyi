@@ -130,6 +130,15 @@ class Iyi::Command
     if single.nil? && (out_dir == src || out_dir.starts_with?(src + "/"))
       abort! "migrate: --out #{out_dir} is inside the tree it reads (#{src}); the modules go beside it, not into it", :USAGE_ERROR
     end
+    # `--out` naming a file died of `mkdir`'s own "File exists", which
+    # names no flag; and a directory that will not take a file died of
+    # the first module's "Permission denied".
+    if File.exists?(out_dir) && !Dir.exists?(out_dir)
+      abort! "migrate: --out needs a directory for the modules, and #{out_dir} is a file", :USAGE_ERROR
+    end
+    if Dir.exists?(out_dir) && !File.writable?(out_dir)
+      abort! "migrate: --out #{out_dir} will not take the modules: no permission to write there", :USAGE_ERROR
+    end
 
     # A project root is not a source tree. A shards project keeps its
     # library in `src` and its *programs* beside the manifest - a spec

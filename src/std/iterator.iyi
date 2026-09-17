@@ -68,7 +68,7 @@
 module std/iterator
 
 import std/traits
-using std/traits::{Cmp, Num}
+using std/traits::{Comparable, Num}
 
 pub trait Iterator
   type Elem
@@ -282,11 +282,11 @@ pub trait Iterator
     raise "first of an empty collection"
   end
 
-  def max : Elem where Elem : Cmp
+  def max : Elem where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.gt(current)
+      best = e if current.nil? || ((e <=> current) > 0)
     end
     found = best
     return found unless found.nil?
@@ -297,20 +297,20 @@ pub trait Iterator
   # an empty source has no largest element, so the plain name raising is
   # the common case. This file keeps the same pair for `first?`/`first`,
   # and answers `find` with nil, where not finding is the ordinary outcome.
-  def max? : Elem? where Elem : Cmp
+  def max? : Elem? where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.gt(current)
+      best = e if current.nil? || ((e <=> current) > 0)
     end
     best
   end
 
-  def min : Elem where Elem : Cmp
+  def min : Elem where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.lt(current)
+      best = e if current.nil? || ((e <=> current) < 0)
     end
     found = best
     return found unless found.nil?
@@ -318,11 +318,11 @@ pub trait Iterator
   end
 
   # And the same pair at the other end.
-  def min? : Elem? where Elem : Cmp
+  def min? : Elem? where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.lt(current)
+      best = e if current.nil? || ((e <=> current) < 0)
     end
     best
   end

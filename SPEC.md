@@ -1486,19 +1486,19 @@ whatever the element type is; only the bounded one is withheld.
 methods is only sound if an implementer of the trait that uses them has them.
 
 ```
-trait Ord : Cmp
+trait Ord : Comparable
   def beats(other : self) : Bool
-    cmp(other) > 0        # Ord never declared `cmp`
+    (self <=> other) > 0        # Ord never declared `<=>`
   end
 end
 ```
 
-**A requirement, not an inclusion.** Were `Ord` to include `Cmp`, every
-implementer of `Ord` would satisfy `Cmp` with no `impl Cmp for` it anywhere,
+**A requirement, not an inclusion.** Were `Ord` to include `Comparable`, every
+implementer of `Ord` would satisfy `Comparable` with no `impl Comparable for` it anywhere,
 the open-class hole R-3 exists to close. So `impl Ord for X` is refused unless
-an `impl Cmp for X` already exists, and `Ord`'s default bodies still reach
-`cmp` because a module's body resolves against the type it is included in.
-Transitivity is free: if `Cmp` required `Show`, the `impl Cmp for X` this one
+an `impl Comparable for X` already exists, and `Ord`'s default bodies still reach
+`<=>` because a module's body resolves against the type it is included in.
+Transitivity is free: if `Comparable` required `Show`, the `impl Comparable for X` this one
 insists on was checked the same way.
 
 The price is that impls have to be written in dependency order. The check needs
@@ -1613,7 +1613,7 @@ impl's answer to an associated type becomes an argument of the `include` the
 compiler writes, and that argument may name a parameter of the *target*,
 `List`'s `T`, which is not in scope where the impl was written. Pushing the
 target's scope to find it loses the trait, whose name lives in the impl's own
-module, and breaks every `impl Cmp for Int32` in `src/std/traits.iyi`.
+module, and breaks every `impl Comparable for Int32` in `src/std/traits.iyi`.
 The parameters have to be passed as **free variables** into a lookup that still
 happens in the impl's scope, which is what resolving a superclass from inside a
 generic already does. Both names then resolve, each from where it actually
@@ -1672,7 +1672,7 @@ accepting it opens no coherence hole.
 types (`type Elem` in a trait, `type Elem = T` in an impl, II.6) parse and
 check — `src/std/enumerable.iyi` declares one and `std/list.iyi`
 answers it — and a trait requires another with `trait Ord : Eq`
-(`std/traits.iyi`'s `Num : Cmp`); `spec/compiler/semantic/iyi_spec.cr`'s
+(`std/traits.iyi`'s `Num : Comparable`); `spec/compiler/semantic/iyi_spec.cr`'s
 "supertraits" and "associated types" hold both. What II.7's table still
 marks **not built** is the conditional impl, `impl Show for Box(T) forall T
 : Show`, which the compiler refuses by name.
@@ -1864,8 +1864,8 @@ Two things the build found, both since closed:
 
   This is not special-casing `Error`. It is the same correction for a prelude
   type, which belongs to no module either, and it leaves both real sides of the
-  rule open: `std/traits` still writes `impl Cmp for Int32`, because it owns
-  `Cmp`. The one place the top level still answers is a program that never
+  rule open: `std/traits` still writes `impl Comparable for Int32`, because it owns
+  `Comparable`. The one place the top level still answers is a program that never
   writes a module header. A single compilation unit, with no other module an
   impl could have gone in, and nothing for the rule to say.
 
@@ -5656,7 +5656,7 @@ afterwards. An impl leaves no record of its own. It works by making the target
 type include the trait, and once analysis is over that is indistinguishable
 from any other ancestor. R-3 is what makes the collected set complete: an impl
 may only live in the trait's module or the type's, so `std/traits` carries
-`impl Cmp for Int32` and no third module could have carried it instead.
+`impl Comparable for Int32` and no third module could have carried it instead.
 
 Because the section is still partial, **`mod dump` says so on every dump**. A
 reader cannot tell an absent field list from an empty one, and taking a partial
@@ -5718,7 +5718,7 @@ real module rather than by reading:
    `Enumerable`'s `map(& : Elem -> U) : Array(U) forall U` needs three of the
    five in one signature.
 2. **An impl's own methods.** They are the impl's, not the target's:
-   `impl Cmp for Int32` puts `cmp` on a prelude type this module does not
+   `impl Comparable for Int32` puts `<=>` on a prelude type this module does not
    export, so recording it against the target loses it. This is also why
    `each` appears under the impl in the dump above and not under `List`.
 3. **The module's `using` directives.** A signature is stored as the annotation
@@ -6050,7 +6050,7 @@ answers it, for the same reason its parameter types are.
 **An impl is the third case, and it is the one that fixes the rule.** An impl
 defines methods *on its target*, so they are emitted into the target's unit,
 and the artifact carries a unit only for a non-generic type the module
-declares. `impl Cmp for Int32` in `std/traits` therefore puts `cmp` in the
+declares. `impl Comparable for Int32` in `std/traits` therefore puts `<=>` in the
 *prelude's* `Int32` unit, which no artifact can carry without defining every
 other `Int32` method the consumer also defines. So an impl's bodies travel
 **unless** its target is a non-generic type this module declares, and the
@@ -7349,6 +7349,18 @@ dependency can be rebuilt while the dependent is not touched. Edit
 the program links the new body through the linker. Add a `pub def` to
 `app/inner` instead, and `app/outer` is refused by name. Both are in
 `spec/compiler/iyimod_spec.cr`.
+
+**A boundary answers the source question with its inputs.** A module
+compiled from source is one file at its module path, and the source hash is
+over that file. A shard `iyi bind` wrote has no such file - its source is a
+checkout - so the artifact records every file the bind read, each with what
+it hashed to (`Section::Inputs`), and a consumer digests each one that is
+still on the machine before reading the artifact. That is a read of the
+whole checkout per `import` of the boundary, per build: the price of a cache
+that can go stale, paid where a module of one's own pays one file. A file
+that is gone is not asked, because a boundary travels without its checkout;
+a file *added* to a shard that requires by glob is not seen, because what is
+recorded is what was read. `bench/bind_roundtrip.sh` holds both.
 
 **One bug it found, in the build nothing had run before.** Reading one module
 from its artifact while compiling another from source is what an incremental

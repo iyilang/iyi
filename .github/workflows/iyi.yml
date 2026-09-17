@@ -991,7 +991,9 @@ jobs:
   # unpacking it somewhere else could have caught that.
   darwin:
     runs-on: macos-14
-    timeout-minutes: 45
+    # Sixty, not forty-five: the standard library's exercises below cost
+    # eleven minutes on an M2 and a shared runner is slower.
+    timeout-minutes: 60
     name: "An iyi program, run on darwin arm64"
     steps:
       - uses: actions/checkout@v7
@@ -1137,6 +1139,20 @@ jobs:
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
           bash bench/collect_trigger.sh
+
+      # The standard library's own gates, on the platform the darwin tarball
+      # is shipped for. The std job runs all of them on Linux and nothing
+      # ran them here, which is the same gap the collector's five had — and
+      # it cost the same way: run on a darwin machine, six of them were red.
+      # One was the module's (`File.touch` set "now" whatever second it was
+      # given, because darwin's branch passed `utimes` a null), five were
+      # the gates' own (a Python 3.11 oracle, an IR audit reading aarch64's
+      # lowering, two floor lists that predated backtraces, proofs that
+      # patched a branch this platform never compiles). Every one had been
+      # green on Linux for a release. `std_exercise.sh` drives the whole
+      # set and fails on any of them, and the gate-per-module rule with it.
+      - name: The native standard library and its module exercises
+        run: bash bench/std_exercise.sh
 
       # Budgeted, unlike the pauses above: the budget is generous by design
       # and a defer that blew it on a shared runner would be a finding.

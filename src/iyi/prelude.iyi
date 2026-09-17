@@ -31,24 +31,20 @@ require "./enum"
 require "./range"
 require "./hash"
 require "./set"
-# `Atomic(T)`, on every target: the instructions are LLVM's and lower to
-# plain loads and stores where a target has one thread (wasm32), so the
-# type costs nothing where nothing can race and needs no gate here.
+# `Atomic(T)`, on every target: LLVM's instructions lower to plain loads
+# and stores where a target has one thread (wasm32), so no gate here.
 require "./atomic"
 
 # iyi: the concurrency runtime — a cooperative scheduler, cancellable
-# blocking primitives, `group`/`spawn` and `Channel`, in exactly III.4.8's
-# order. Required here rather than gated inside itself, because iyi-only
-# syntax (`!`, `defer`, `impl`) does not survive a macro expansion's
-# re-parse; the platforms that cannot carry the model are given nothing
-# rather than a sequential imitation, which III.4.8 refused by name.
-# darwin rides the aarch64 arm of the same runtime through libSystem —
-# its own branch below says why libSystem — and the Linux pair keeps its
-# raw syscalls.
+# blocking primitives, `group`/`spawn` and `Channel`, in III.4.8's order.
+# Required here rather than gated inside itself, because iyi-only syntax
+# (`!`, `defer`, `impl`) does not survive a macro expansion's re-parse;
+# platforms that cannot carry the model are given nothing, not a
+# sequential imitation (III.4.8). darwin rides the aarch64 arm through
+# libSystem — its branch below says why — and Linux keeps raw syscalls.
 {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
   require "./concurrency"
-  # A kernel thread, and the stop-the-world over them (GC_DESIGN.md Stage
-  # 4); the file itself says which builds get one.
+  # Kernel threads and the stop-the-world over them (GC_DESIGN.md Stage 4).
   require "./thread"
 {% elsif flag?(:win32) %}
   # Windows on anything but x86-64. The runtime's Windows arm is x86-64
@@ -60,12 +56,16 @@ require "./atomic"
   # x86-64 build runs on those machines under emulation.
   {% raise "iyi's runtime on Windows is x86-64 only: the fiber switch, the stack bounds and the thread context are x86-64's. Build for x86_64-windows-msvc; an arm64 Windows machine runs that build under emulation (SPEC.md III.4.8)" %}
 {% elsif flag?(:wasm32) %}
-  # wasm32-wasi has no concurrency runtime (SPEC.md III.4): core WebAssembly
-  # has no stack-switching instruction, wasmtime 48 disables the stack-switching
-  # proposal, wasi-threads is unsupported, and asyncify cannot run without a host event loop.
-  # The compile error names the refusal rather than leaving `group` undefined.
+  # wasm32-wasi has no concurrency runtime (SPEC.md III.4): no
+  # stack-switching instruction, no wasi-threads, asyncify needs a host
+  # loop. The compile error names the refusal.
   macro group(*args, **kwargs)
     \{% raise "group is not available on wasm32-wasi: WebAssembly cannot switch stacks, wasmtime 48 disables the stack-switching proposal, wasi-threads is unsupported, and asyncify cannot run without a host event loop (SPEC.md III.4)" %}
+  end
+
+  # `sleep` parks a task on the scheduler, so it is the runtime's too.
+  macro sleep(*args, **kwargs)
+    \{% raise "sleep is not available on wasm32-wasi: it parks a task on the scheduler, and wasm32-wasi has no runtime to park it on (SPEC.md III.4)" %}
   end
 {% end %}
 

@@ -24,6 +24,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/floor_base.sh"
 IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -231,27 +232,21 @@ echo
 echo "== the dependency floor, measured against the std_eiy exercise binary"
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="ITM_deregisterTMCloneTable ITM_registerTMCloneTable _cxa_finalize _gmon_start__ _libc_start_main"
+    allowed_symbols="$FLOOR_BASE_LINUX"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
     fi
     ;;
   *)
-    # On Darwin, libSystem supplies clock_gettime_nsec_np, which concurrency already links.
-    #
-    # `backtrace` and `backtrace_symbols_fd` are on the list for the reason the
-    # prelude already records where it binds them: on Apple's platform that is
-    # how a panic prints its own frames, and both are libSystem symbols, the
-    # platform libc `bench/dependency_floor.sh` already permits. So they cost
-    # no library, which the `allowed_libs` check below proves independently:
-    # this binary still links libSystem and nothing else. They are named here
-    # rather than waved through, because a symbol nobody wrote down is the
-    # thing this audit exists to catch.
-    allowed_symbols="__error _tlv_bootstrap accept backtrace backtrace_symbols_fd bind chmod clock_gettime_nsec_np close connect exit getsockname kevent kqueue listen madvise mmap mprotect munmap open pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read recv send setsockopt sigaction sigaltstack socket sysctlbyname unlink write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+    # The base is every darwin program's (bench/floor_base.sh); the socket
+    # and file names beside it are what this exercise's binary asks for on
+    # top, each libSystem's, which the `allowed_libs` check below proves
+    # independently: this binary still links libSystem and nothing else.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
-allowed_libs="libSystem libc.so ld-linux libgcc_s"
+allowed_libs="$FLOOR_LIBS_PROGRAM"
 
 if [ -x "$WORK/exercise-eiy" ]; then
   eiy_syms="$(symbols "$WORK/exercise-eiy")"

@@ -843,6 +843,31 @@ else
 fi
 mv shard.cr.away shard.cr
 
+# And the inputs are the shard's own files, not a neighbour's whose directory
+# merely begins the same way: `lib/radix/src` is a prefix of
+# `lib/radix/src-extra/extra.cr`, and a bare dirname under `starts_with?`
+# recorded that file as the shard's — so the boundary went stale whenever the
+# neighbour changed, and the same rule decided which types were the shard's.
+echo "== a neighbour directory with the same prefix is not the shard's"
+NEAR="$WORK/near"
+mkdir -p "$NEAR/lib/radix/src" "$NEAR/lib/radix/src-extra"
+printf 'module Extra\n  def self.e\n    3\n  end\nend\n' > "$NEAR/lib/radix/src-extra/extra.cr"
+printf 'require "../src-extra/extra"\n\nmodule Radix\n  def self.r\n    Extra.e\n  end\nend\n' > "$NEAR/lib/radix/src/radix.cr"
+printf 'name: radix\n' > "$NEAR/lib/radix/shard.yml"
+if ! (cd "$NEAR" && "$IYI" bind --lib lib --mods mods > "$NEAR/bind.log" 2>&1); then
+  echo "  the shard with a neighbour did not bind:"
+  sed 's/^/    /' "$NEAR/bind.log" | head -12
+  status=1
+elif "$IYI" mod dump "$NEAR/mods/radix.iyimod" > "$NEAR/dump.txt" 2>&1 &&
+     grep -q 'src/radix\.cr$' "$NEAR/dump.txt" &&
+     ! grep -q 'src-extra' "$NEAR/dump.txt"; then
+  echo "  the inputs are the shard's file and not the neighbour's"
+else
+  echo "  the neighbour's file was taken as the shard's:"
+  grep -n 'inputs\|\.cr$' "$NEAR/dump.txt" | sed 's/^/    /' | head -8
+  status=1
+fi
+
 echo "== two shards that declare the same root"
 CLASH="$WORK/clash"
 mkdir -p "$CLASH/lib/alpha/src" "$CLASH/lib/beta/src"

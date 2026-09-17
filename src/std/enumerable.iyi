@@ -21,8 +21,8 @@
 #   * `forall U` on methods — `map`, `flat_map`, `group_by`, `min_by`,
 #     `reduce`, `accumulate` and eight more. `U` belongs to the method, not to
 #     the trait.
-#   * `where Elem : Cmp` — about a quarter of `Enumerable` is valid only for
-#     some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`,
+#   * `where Elem : Comparable` — about a quarter of `Enumerable` is valid
+#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`,
 #     `includes?` and `minmax` say so instead of duck-typing. `sum` and
 #     `product` also need `Num` to require `self.zero` and `self.one`: an
 #     identity belongs to the type, since an empty collection has no element
@@ -45,7 +45,7 @@
 module std/enumerable
 
 import std/traits
-using std/traits::{Cmp, Num, Hashable}
+using std/traits::{Comparable, Num, Hashable}
 
 pub trait Enumerable
   type Elem
@@ -302,36 +302,36 @@ pub trait Enumerable
   # and failing at instantiation with a message naming neither the bound nor
   # the element type.
 
-  def includes?(value : Elem) : Bool where Elem : Cmp
-    each { |e| return true if e.cmp(value) == 0 }
+  def includes?(value : Elem) : Bool where Elem : Comparable
+    each { |e| return true if (e <=> value) == 0 }
     false
   end
 
-  def max? : Elem? where Elem : Cmp
+  def max? : Elem? where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.gt(current)
+      best = e if current.nil? || ((e <=> current) > 0)
     end
     best
   end
 
-  def max : Elem where Elem : Cmp
+  def max : Elem where Elem : Comparable
     found = max?
     return found unless found.nil?
     raise "max of an empty collection"
   end
 
-  def min? : Elem? where Elem : Cmp
+  def min? : Elem? where Elem : Comparable
     best = nil
     each do |e|
       current = best
-      best = e if current.nil? || e.lt(current)
+      best = e if current.nil? || ((e <=> current) < 0)
     end
     best
   end
 
-  def min : Elem where Elem : Cmp
+  def min : Elem where Elem : Comparable
     found = min?
     return found unless found.nil?
     raise "min of an empty collection"
@@ -355,19 +355,19 @@ pub trait Enumerable
     counts
   end
 
-  def sorted : Array(Elem) where Elem : Cmp
-    to_a.sorted { |a, b| a.cmp(b) }
+  def sorted : Array(Elem) where Elem : Comparable
+    to_a.sorted { |a, b| (a <=> b) }
   end
 
   # ---- needing something of the block's result type -------------------------
 
-  def max_by?(& : Elem -> U) : Elem? forall U : Cmp
+  def max_by?(& : Elem -> U) : Elem? forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
       key = yield e
       current = best_key
-      if current.nil? || key.gt(current)
+      if current.nil? || ((key <=> current) > 0)
         best = e
         best_key = key
       end
@@ -375,7 +375,7 @@ pub trait Enumerable
     best
   end
 
-  def max_by(& : Elem -> U) : Elem forall U : Cmp
+  def max_by(& : Elem -> U) : Elem forall U : Comparable
     found = max_by? { |e| yield e }
     return found unless found.nil?
     raise "max_by of an empty collection"
@@ -588,13 +588,13 @@ pub trait Enumerable
     result
   end
 
-  def min_by?(& : Elem -> U) : Elem? forall U : Cmp
+  def min_by?(& : Elem -> U) : Elem? forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
       key = yield e
       current = best_key
-      if current.nil? || key.lt(current)
+      if current.nil? || ((key <=> current) < 0)
         best = e
         best_key = key
       end
@@ -602,45 +602,45 @@ pub trait Enumerable
     best
   end
 
-  def min_by(& : Elem -> U) : Elem forall U : Cmp
+  def min_by(& : Elem -> U) : Elem forall U : Comparable
     found = min_by? { |e| yield e }
     return found unless found.nil?
     raise "min_by of an empty collection"
   end
 
-  def max_of?(& : Elem -> U) : U? forall U : Cmp
+  def max_of?(& : Elem -> U) : U? forall U : Comparable
     best = nil
     each do |e|
       key = yield e
       current = best
-      best = key if current.nil? || key.gt(current)
+      best = key if current.nil? || ((key <=> current) > 0)
     end
     best
   end
 
-  def max_of(& : Elem -> U) : U forall U : Cmp
+  def max_of(& : Elem -> U) : U forall U : Comparable
     found = max_of? { |e| yield e }
     return found unless found.nil?
     raise "max_of of an empty collection"
   end
 
-  def min_of?(& : Elem -> U) : U? forall U : Cmp
+  def min_of?(& : Elem -> U) : U? forall U : Comparable
     best = nil
     each do |e|
       key = yield e
       current = best
-      best = key if current.nil? || key.lt(current)
+      best = key if current.nil? || ((key <=> current) < 0)
     end
     best
   end
 
-  def min_of(& : Elem -> U) : U forall U : Cmp
+  def min_of(& : Elem -> U) : U forall U : Comparable
     found = min_of? { |e| yield e }
     return found unless found.nil?
     raise "min_of of an empty collection"
   end
 
-  def minmax? : Tuple(Elem?, Elem?) where Elem : Cmp
+  def minmax? : Tuple(Elem?, Elem?) where Elem : Comparable
     low = min?
     high = max?
     {low, high}
@@ -649,7 +649,7 @@ pub trait Enumerable
   # Refuses under its own name rather than letting `min`'s refusal surface
   # from a call the reader never wrote: `minmax` of an empty collection is
   # `minmax`'s mistake, not `min`'s.
-  def minmax : Tuple(Elem, Elem) where Elem : Cmp
+  def minmax : Tuple(Elem, Elem) where Elem : Comparable
     pair = minmax?
     low = pair[0]
     high = pair[1]
@@ -659,7 +659,7 @@ pub trait Enumerable
     {low, high}
   end
 
-  def minmax_by?(& : Elem -> U) : Tuple(Elem?, Elem?) forall U : Cmp
+  def minmax_by?(& : Elem -> U) : Tuple(Elem?, Elem?) forall U : Comparable
     min_elem = nil
     max_elem = nil
     min_key = nil
@@ -667,12 +667,12 @@ pub trait Enumerable
     each do |e|
       key = yield e
       cur_min = min_key
-      if cur_min.nil? || key.cmp(cur_min) < 0
+      if cur_min.nil? || (key <=> cur_min) < 0
         min_elem = e
         min_key = key
       end
       cur_max = max_key
-      if cur_max.nil? || key.cmp(cur_max) > 0
+      if cur_max.nil? || (key <=> cur_max) > 0
         max_elem = e
         max_key = key
       end
@@ -680,7 +680,7 @@ pub trait Enumerable
     {min_elem, max_elem}
   end
 
-  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Cmp
+  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
     pair = minmax_by? { |e| yield e }
     low = pair[0]
     high = pair[1]
@@ -690,24 +690,24 @@ pub trait Enumerable
     {low, high}
   end
 
-  def minmax_of?(& : Elem -> U) : Tuple(U?, U?) forall U : Cmp
+  def minmax_of?(& : Elem -> U) : Tuple(U?, U?) forall U : Comparable
     low = nil
     high = nil
     each do |e|
       key = yield e
       cur_low = low
-      if cur_low.nil? || key.cmp(cur_low) < 0
+      if cur_low.nil? || (key <=> cur_low) < 0
         low = key
       end
       cur_high = high
-      if cur_high.nil? || key.cmp(cur_high) > 0
+      if cur_high.nil? || (key <=> cur_high) > 0
         high = key
       end
     end
     {low, high}
   end
 
-  def minmax_of(& : Elem -> U) : Tuple(U, U) forall U : Cmp
+  def minmax_of(& : Elem -> U) : Tuple(U, U) forall U : Comparable
     pair = minmax_of? { |e| yield e }
     low = pair[0]
     high = pair[1]
@@ -763,6 +763,6 @@ end
 # ---------------------------------------------------------------------------
 #
 # All 71 method names of the trait are written here against `each`.
-# Methods taking block transforms map element keys into `Cmp`, `Num`, or
+# Methods taking block transforms map element keys into `Comparable`, `Num`, or
 # `Hashable` traits, providing full coverage for sorting, min/max calculations,
 # grouping, counting, and slicing.

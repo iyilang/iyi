@@ -26,9 +26,11 @@
 
 # The stopwatch. Linux reads CLOCK_MONOTONIC with a raw syscall for the
 # prelude's own reason (libc is not bound there); darwin asks libSystem,
-# which is the platform's documented interface. Either way the answer is
-# nanoseconds; what it costs is two allocations of sixteen bytes, once per
-# call, which a per-allocation measurement can afford at the ends of a run.
+# which is the platform's documented interface; Windows has no
+# `clock_gettime` at all, so its own monotonic clock is kernel32's
+# performance counter. Whichever it is, the answer is nanoseconds; what it
+# costs is two allocations of sixteen bytes, once per call, which a
+# per-allocation measurement can afford at the ends of a run.
 {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
   def monotonic_ns : UInt64
     stamp = Pointer(UInt64).malloc(2_u64)
@@ -60,6 +62,25 @@
     # figure in nanoseconds wants the ticks.
     LibC.clock_gettime(4, stamp.as(Void*))
     stamp[0] * 1000000000_u64 + stamp[1]
+  end
+{% elsif flag?(:win32) && flag?(:x86_64) %}
+  lib LibKernel32
+    fun QueryPerformanceCounter(count : Int64*) : Int32
+    fun QueryPerformanceFrequency(freq : Int64*) : Int32
+  end
+
+  def monotonic_ns : UInt64
+    count = uninitialized Int64
+    freq = uninitialized Int64
+    LibKernel32.QueryPerformanceCounter(pointerof(count))
+    LibKernel32.QueryPerformanceFrequency(pointerof(freq))
+    return 0_u64 if freq == 0_i64
+    # The divide goes first: the counter is in its own ticks, and
+    # `count * 1000000000` overflows a UInt64 half an hour into an uptime
+    # on a 10 MHz counter.
+    sec = count.to_u64 // freq.to_u64
+    rem = count.to_u64 % freq.to_u64
+    sec * 1000000000_u64 + (rem * 1000000000_u64) // freq.to_u64
   end
 {% end %}
 
@@ -134,7 +155,7 @@ fill(nothing, 64, 9)
 verify(nothing, 64, 9, "realloc of null")
 puts "realloc: same-class, cross-class and null all hold their bytes"
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   # The allocation-pressure trigger is off for this exercise: it
   # choreographs colours and free lists across explicit collections,
   # and a string interpolation running a collection mid-check would be
@@ -536,7 +557,7 @@ while pass < 3
 end
 puts "speed: #{best.unsafe_div(runs.to_u64).to_i64} ns per allocation over #{runs} (sink #{(sink & 1023).to_i64})"
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   # The pair loop: what an allocation costs when its chunk is freed each
   # time, which is the shape a collecting heap's mutator actually takes.
   best = 0_u64

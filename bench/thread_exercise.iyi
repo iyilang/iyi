@@ -17,7 +17,7 @@
 # removes the thread-root walk from a copy of the prelude to prove the
 # live-list check fails by name.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64))) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
@@ -299,5 +299,5 @@
   puts "speed: #{one} ns per allocation with 1 thread, #{four} ns with 4, #{many} ns with #{count} — wall time per allocation per thread, collections included"
   puts "thread exercise: every property held"
 {% else %}
-  puts "thread exercise: needs the collector and a concurrency target (linux x86_64/aarch64, darwin arm64); nothing to exercise here"
+  puts "thread exercise: needs the collector and a concurrency target (linux x86_64/aarch64, darwin arm64, windows x86_64); nothing to exercise here"
 {% end %}

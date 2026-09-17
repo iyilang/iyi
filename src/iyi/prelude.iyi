@@ -46,6 +46,15 @@ require "./atomic"
   require "./concurrency"
   # Kernel threads and the stop-the-world over them (GC_DESIGN.md Stage 4).
   require "./thread"
+{% elsif flag?(:win32) %}
+  # Windows on anything but x86-64. The runtime's Windows arm is x86-64
+  # throughout — the fiber switch is Win64 assembly, the stack bounds and
+  # the TEB are read through `gs`, and `GetThreadContext` is unpacked at
+  # x86-64's CONTEXT offsets — so an arm64 Windows build used to compile
+  # with no scheduler and no threads and then die at its first collection
+  # in `discover_stack_base`. It is refused here instead, by name, and the
+  # x86-64 build runs on those machines under emulation.
+  {% raise "iyi's runtime on Windows is x86-64 only: the fiber switch, the stack bounds and the thread context are x86-64's. Build for x86_64-windows-msvc; an arm64 Windows machine runs that build under emulation (SPEC.md III.4.8)" %}
 {% elsif flag?(:wasm32) %}
   # wasm32-wasi has no concurrency runtime (SPEC.md III.4): no
   # stack-switching instruction, no wasi-threads, asyncify needs a host
@@ -336,8 +345,43 @@ end
     fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileA(name : UInt8*) : Int32
+    fun GetFileAttributesA(name : UInt8*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
+  end
+
+  # The rest of the kernel32 surface this runtime names: virtual memory,
+  # threads and their contexts, the performance counter, and the I/O
+  # completion port. It sits here, beside the floor, rather than inside the
+  # collector's arm below, because the scheduler and the threads are chosen
+  # by the target (`concurrency.iyi`, required at the top of this file) and
+  # not by which allocator a build asked for. Declared there, a
+  # `-Dgc_none` or `-Dgc_boehm` build on Windows got as far as codegen and
+  # stopped at `undefined fun 'CancelIoEx' for LibC`, since the fiber that
+  # cancels an IO exists in every build.
+  lib LibC
+    fun VirtualAlloc(lpAddress : Void*, dwSize : UInt64, flAllocationType : Int32, flProtect : Int32) : Void*
+    fun VirtualFree(lpAddress : Void*, dwSize : UInt64, dwFreeType : Int32) : Int32
+    fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
+    fun GetCurrentThread : Void*
+    fun SuspendThread(hThread : Void*) : Int32
+    fun ResumeThread(hThread : Void*) : Int32
+    fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
+    fun QueryPerformanceCounter(lpPerformanceCount : Int64*) : Int32
+    fun QueryPerformanceFrequency(lpFrequency : Int64*) : Int32
+    fun CreateThread(lpThreadAttributes : Void*, dwStackSize : UInt64, lpStartAddress : Void*, lpParameter : Void*, dwCreationFlags : Int32, lpThreadId : Int32*) : Void*
+    fun GetLastError : Int32
+    fun CreateIoCompletionPort(file_handle : Void*, existing_completion_port : Void*, completion_key : UInt64, number_of_concurrent_threads : Int32) : Void*
+    fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
+    fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
+    fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
+    fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
+    fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
+    fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
+    fun SwitchToThread : Int32
+    fun GetActiveProcessorCount(group_number : UInt16) : Int32
+    fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
+    fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
   end
 
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
@@ -409,16 +453,24 @@ end
 
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE
   # is all bits set, which as an unsigned address plus one wraps to zero.
+  #
+  # Both opens name every share right there is — FILE_SHARE_READ |
+  # FILE_SHARE_WRITE | FILE_SHARE_DELETE — because POSIX `open` grants no
+  # exclusivity and this prelude's `File` is POSIX's. A read handle asked
+  # for FILE_SHARE_READ alone, so a later write to the same path failed,
+  # and a write handle asked for nothing, so reading a file while it was
+  # still open came back as ERROR_SHARING_VIOLATION: that is what
+  # `bench/io_exercise.iyi`'s flush check read as "cannot read".
   def __iyi_open_read(path : UInt8*) : Int64
-    # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, -2147483648, 1, nil, 3, 128, Pointer(Void).new(0_u64))
+    # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+    handle = LibC.CreateFileA(path, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
-    # GENERIC_WRITE, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, 1073741824, 0, nil, 2, 128, Pointer(Void).new(0_u64))
+    # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
+    handle = LibC.CreateFileA(path, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
@@ -777,31 +829,6 @@ require "./file"
         LibC.madvise(Pointer(Void).new(address), length, 7_i32)
       end
     {% elsif flag?(:win32) %}
-      lib LibC
-        fun VirtualAlloc(lpAddress : Void*, dwSize : UInt64, flAllocationType : Int32, flProtect : Int32) : Void*
-        fun VirtualFree(lpAddress : Void*, dwSize : UInt64, dwFreeType : Int32) : Int32
-        fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
-        fun GetCurrentThread : Void*
-        fun SuspendThread(hThread : Void*) : Int32
-        fun ResumeThread(hThread : Void*) : Int32
-        fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
-        fun QueryPerformanceCounter(lpPerformanceCount : Int64*) : Int32
-        fun QueryPerformanceFrequency(lpFrequency : Int64*) : Int32
-        fun CreateThread(lpThreadAttributes : Void*, dwStackSize : UInt64, lpStartAddress : Void*, lpParameter : Void*, dwCreationFlags : Int32, lpThreadId : Int32*) : Void*
-        fun GetLastError : Int32
-        fun CreateIoCompletionPort(file_handle : Void*, existing_completion_port : Void*, completion_key : UInt64, number_of_concurrent_threads : Int32) : Void*
-        fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
-        fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
-        fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
-        fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
-        fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
-        fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
-        fun SwitchToThread : Int32
-        fun GetActiveProcessorCount(group_number : UInt16) : Int32
-        fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
-        fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
-      end
-
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.VirtualAlloc(nil, length, 0x3000_i32, 4_i32)
         if result.address == 0_u64
@@ -1246,9 +1273,7 @@ require "./file"
       SLICE         = 65536_u64
       CENTRAL_ALLOCATED = 1280_u64
 
-      {% unless flag?(:win32) %}
-        @[ThreadLocal]
-      {% end %}
+      @[ThreadLocal]
       @@cache : UInt64 = 0_u64
       @@caches : UInt64 = 0_u64
       @@central : UInt64 = 0_u64
@@ -1339,6 +1364,30 @@ require "./file"
       def self.in_allocator? : Bool
         page = @@cache
         page != 0 && read64(page + CACHE_INSIDE) != 0
+      end
+
+      # The same two questions, asked about a named cache rather than this
+      # thread's, which is what Windows needs: a stop there is
+      # `SuspendThread` and not a handler running on the thread itself, so
+      # a suspended thread cannot answer for itself. The thread that
+      # stopped it reads the cache the stopped thread published on its line
+      # and, finding a `take` half done, leaves the request there and lets
+      # it run on — a chunk live in a register the scan has no name for, or
+      # the centre's lock held against the sweep, is the same hazard the
+      # POSIX handler refuses to park into. The park happens at `leave`,
+      # where a deferred stop is always paid.
+      def self.cache_inside?(page : UInt64) : Bool
+        page != 0 && read64(page + CACHE_INSIDE) != 0
+      end
+
+      def self.request_stop_at(page : UInt64) : Nil
+        write64(page + CACHE_REQUEST, 1_u64)
+      end
+
+      # This thread's cache page, for a thread that wants to publish it
+      # where another thread can find it.
+      def self.cache_page : UInt64
+        cache.address
       end
 
       def self.request_stop : Nil
@@ -2946,6 +2995,20 @@ require "./file"
           teb
         end
 
+        # Every general register a suspended thread holds, onto its line.
+        # Eight of them were spilled here once — the callee-saved set — on
+        # the reasoning that a call's caller-saved registers are already on
+        # the stack. That reasoning belongs to a *voluntary* stop, which
+        # `stop_here` is: a thread suspended by another one stopped at an
+        # instruction nobody chose, and an object whose only reference sits
+        # in `rax` between an allocation and its store is live. The POSIX
+        # handler copies all sixteen the kernel saved for the same reason
+        # (`IYI_UC_COUNT`), and the line has room for thirty-two.
+        #
+        # The offsets are CONTEXT's on x86-64: ContextFlags at 48, and the
+        # integer registers from Rax at 120 through Rip at 248. Rsp is not
+        # spilled — it is the answer, and the range above it is the stack
+        # the collector walks.
         def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
           ctx_buf = uninitialized UInt8[1280]
           addr = pointerof(ctx_buf).address + 15_u64
@@ -2955,14 +3018,22 @@ require "./file"
           if LibC.GetThreadContext(thread_handle, ctx_ptr) == 0
             return 0_u64
           end
-          IyiHeap.write64(out_spill + 0_u64, IyiHeap.read64(ctx_addr + 144_u64))  # Rbx
-          IyiHeap.write64(out_spill + 8_u64, IyiHeap.read64(ctx_addr + 160_u64))  # Rbp
-          IyiHeap.write64(out_spill + 16_u64, IyiHeap.read64(ctx_addr + 176_u64)) # Rdi
-          IyiHeap.write64(out_spill + 24_u64, IyiHeap.read64(ctx_addr + 168_u64)) # Rsi
-          IyiHeap.write64(out_spill + 32_u64, IyiHeap.read64(ctx_addr + 216_u64)) # R12
-          IyiHeap.write64(out_spill + 40_u64, IyiHeap.read64(ctx_addr + 224_u64)) # R13
-          IyiHeap.write64(out_spill + 48_u64, IyiHeap.read64(ctx_addr + 232_u64)) # R14
-          IyiHeap.write64(out_spill + 56_u64, IyiHeap.read64(ctx_addr + 240_u64)) # R15
+          IyiHeap.write64(out_spill + 0_u64, IyiHeap.read64(ctx_addr + 120_u64))   # Rax
+          IyiHeap.write64(out_spill + 8_u64, IyiHeap.read64(ctx_addr + 128_u64))   # Rcx
+          IyiHeap.write64(out_spill + 16_u64, IyiHeap.read64(ctx_addr + 136_u64))  # Rdx
+          IyiHeap.write64(out_spill + 24_u64, IyiHeap.read64(ctx_addr + 144_u64))  # Rbx
+          IyiHeap.write64(out_spill + 32_u64, IyiHeap.read64(ctx_addr + 160_u64))  # Rbp
+          IyiHeap.write64(out_spill + 40_u64, IyiHeap.read64(ctx_addr + 168_u64))  # Rsi
+          IyiHeap.write64(out_spill + 48_u64, IyiHeap.read64(ctx_addr + 176_u64))  # Rdi
+          IyiHeap.write64(out_spill + 56_u64, IyiHeap.read64(ctx_addr + 184_u64))  # R8
+          IyiHeap.write64(out_spill + 64_u64, IyiHeap.read64(ctx_addr + 192_u64))  # R9
+          IyiHeap.write64(out_spill + 72_u64, IyiHeap.read64(ctx_addr + 200_u64))  # R10
+          IyiHeap.write64(out_spill + 80_u64, IyiHeap.read64(ctx_addr + 208_u64))  # R11
+          IyiHeap.write64(out_spill + 88_u64, IyiHeap.read64(ctx_addr + 216_u64))  # R12
+          IyiHeap.write64(out_spill + 96_u64, IyiHeap.read64(ctx_addr + 224_u64))  # R13
+          IyiHeap.write64(out_spill + 104_u64, IyiHeap.read64(ctx_addr + 232_u64)) # R14
+          IyiHeap.write64(out_spill + 112_u64, IyiHeap.read64(ctx_addr + 240_u64)) # R15
+          IyiHeap.write64(out_spill + 120_u64, IyiHeap.read64(ctx_addr + 248_u64)) # Rip
           IyiHeap.read64(ctx_addr + 152_u64) # Rsp
         end
       {% else %}
@@ -3442,9 +3513,7 @@ require "./file"
       #   +24  the arena its pending live count is for   +32  the count
       #   +40  the type id whose layout entry is cached   +48  the entry
       #   +88  the stack's capacity in entries
-      {% unless flag?(:win32) %}
-        @[ThreadLocal]
-      {% end %}
+      @[ThreadLocal]
       @@worker : UInt64 = 0_u64
       @@collector_worker : UInt64 = 0_u64
       W_STACK = 0_u64
@@ -7375,9 +7444,45 @@ end
 # On wasm32 there is no environment to read and `env` answers nil for
 # every name: the sandbox story (SPEC.md III.12) is that the runtime
 # hands the program nothing, and an absent surface beats a permission.
-{% unless flag?(:wasm32) %}
+#
+# On Windows the exported name is not `environ`. The CRT's data symbol is
+# `_environ`, so a program that read one variable failed to link with
+# `unresolved external symbol __imp_environ` — the accessor `__p__environ`
+# is what the CRT exports for this, it hands back the address of that
+# pointer, and using it needs no fourth CRT library on the link line.
+{% if flag?(:win32) %}
+  lib LibIyiEnv
+    fun environ_table = __p__environ : UInt8***
+  end
+{% elsif !flag?(:wasm32) %}
   lib LibIyiEnv
     $environ : UInt8**
+  end
+{% end %}
+
+# The environment's table, and the only two operations anything here
+# performs on it: read the current one, and put a new one in its place.
+# Windows reaches it through the accessor, everything else through the
+# symbol, and no caller above has to know which.
+{% unless flag?(:wasm32) %}
+  def __iyi_environ : UInt8**
+    {% if flag?(:win32) %}
+      table = LibIyiEnv.environ_table
+      return Pointer(Pointer(UInt8)).new(0_u64) if table.address == 0_u64
+      table.value
+    {% else %}
+      LibIyiEnv.environ
+    {% end %}
+  end
+
+  def __iyi_set_environ(entries : UInt8**) : Nil
+    {% if flag?(:win32) %}
+      table = LibIyiEnv.environ_table
+      table.value = entries if table.address != 0_u64
+    {% else %}
+      LibIyiEnv.environ = entries
+    {% end %}
+    nil
   end
 {% end %}
 
@@ -7402,7 +7507,7 @@ class Program
     {% if flag?(:wasm32) %}
       nil
     {% else %}
-      pointer = LibIyiEnv.environ
+      pointer = __iyi_environ
       return nil if pointer.address == 0_u64
 
       length = name.bytesize

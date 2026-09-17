@@ -1420,6 +1420,179 @@ jobs:
             exit $LASTEXITCODE
           }
 
+  # The compiler built on Windows by the machine that then runs what it
+  # builds — the gate the three jobs above cannot be. They link objects
+  # cross-compiled on Linux, so nothing in them ever compiled a program on
+  # Windows, ran `iyi test`, read a directory or started a thread from a
+  # Windows binary of the compiler. Everything that was wrong in that gap
+  # was found by hand on a Windows 11 machine and is fixed; this job is
+  # what keeps it fixed. It was red for all of it once: the compiler did
+  # not build at all (`lib_llvm.cr`'s msvc path referenced a macro
+  # variable nothing set), a multi-module program failed LLVM's verifier,
+  # `Program.env` did not link, `iyi test` found no tests, and two threads
+  # shared one allocator cache and corrupted the heap.
+  #
+  # No toolchain is set up beyond what a Windows developer already has:
+  # the Visual C++ build tools for the linker and `rc`, and Crystal's own
+  # Windows package, whose `lib` carries `LLVM-C.dll` and the
+  # `llvm_VERSION` beside it — this fork needs no `llvm-config` on the
+  # msvc path and the package ships none.
+  windows-native:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "iyi, built and run on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      # `make` is what both makefiles are written for, and the image does
+      # not promise it. The LLVM version is read rather than pinned: it is
+      # whatever the Crystal package was built against, and both make's
+      # readiness check and `src/llvm/lib_llvm.cr` want that number.
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+            exit 1
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler
+        shell: cmd
+        run: make -f Makefile.win crystal
+
+      # `iyi` bakes `$ORIGIN\..\src` as its path, so the binary in `.build`
+      # finds this checkout's prelude with nothing set in the environment:
+      # every step below runs it the way a person would.
+      - name: Build `iyi`
+        shell: cmd
+        run: make -f Makefile.win iyi
+
+      - name: Every rule this fork adds, on Windows
+        shell: cmd
+        run: |
+          .\bin\crystal spec --no-color ^
+            spec\compiler\iyimod_spec.cr ^
+            spec\compiler\iyi_import_spec.cr ^
+            spec\compiler\semantic\iyi_spec.cr ^
+            spec\compiler\iyi_derive_spec.cr ^
+            spec\compiler\compiler_spec.cr
+
+      # Each sample documents a part of the design, and `calc` reads, so
+      # every one of them is given nothing on standard input rather than
+      # the runner's closed handle. `socket.iyi` is the one that cannot
+      # run here: the native std has no Winsock yet and `IyiSocket` says
+      # so by name, so the sample's own refusal is the expected answer and
+      # a tally cannot read it. Delete the line when sockets land.
+      - name: Run every sample
+        shell: pwsh
+        run: |
+          $skip = @("socket.iyi")
+          $failed = @()
+          foreach ($sample in Get-ChildItem samples\iyi\*.iyi) {
+            if ($skip -contains $sample.Name) { continue }
+            Write-Host "== $($sample.Name)"
+            "" | .\.build\iyi.exe run $sample.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $sample.Name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "samples that failed on Windows: $($failed -join ', ')"
+            exit 1
+          }
+
+      # The verbs, run as a person runs them: a module's surface, a
+      # type-check, the test glob (which found nothing on Windows for as
+      # long as it built its pattern with backslashes), and a build.
+      - name: The commands
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "verbs"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText("$work\main.iyi", "module main`r`n`r`nputs 1 + 1`r`n", $utf8)
+          [System.IO.File]::WriteAllText("$work\alpha_test.iyi", "module alpha_test`r`n`r`nputs `"the test ran`"`r`n", $utf8)
+          $iyi = "$pwd\.build\iyi.exe"
+          & $iyi check "$work\main.iyi"; if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $iyi vet "$work\main.iyi"; if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $iyi build -o "$work\main.exe" "$work\main.iyi"; if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$work\main.exe"; if ($LASTEXITCODE -ne 0) { exit 1 }
+          Push-Location $work
+          $tests = & $iyi test
+          Pop-Location
+          Write-Host $tests
+          if ($LASTEXITCODE -ne 0) { Write-Host "iyi test failed"; exit 1 }
+          if (-not ($tests -match "1 passed")) {
+            Write-Host "iyi test found no tests, which is what a backslash in a glob pattern does"
+            exit 1
+          }
+
+      # Every exercise under bench/, run by the compiler built above. The
+      # exclusions are named one by one, because a list nobody has to
+      # justify is how a target quietly stops being tested:
+      #
+      #   socket, udp, http, server_load   no Winsock in the native std yet
+      #   arena_large_probe                its pass *is* the memory fault,
+      #                                    which bench/arena_exercise.sh
+      #                                    asserts and a tally cannot
+      #   wasm32_exercise                  a wasm32 program
+      #   std_file_exercise                creates a symlink, which needs a
+      #                                    privilege this image may not
+      #                                    grant; drop this line once a run
+      #                                    here shows it does
+      - name: Every exercise the runtime can hold
+        shell: pwsh
+        run: |
+          $skip = @(
+            "socket_exercise.iyi", "std_udp_exercise.iyi", "std_http_exercise.iyi",
+            "std_http_server.iyi", "server_load.iyi", "arena_large_probe.iyi",
+            "wasm32_exercise.iyi", "std_file_exercise.iyi"
+          )
+          $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
+          New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
+          $iyi = "$pwd\.build\iyi.exe"
+          $failed = @()
+          $ran = 0
+          foreach ($program in Get-ChildItem bench\*.iyi | Sort-Object Name) {
+            if ($skip -contains $program.Name) { continue }
+            $ran = $ran + 1
+            # bench/std_path_exercise.sh pins these for the expand checks.
+            if ($program.Name -eq "std_path_exercise.iyi") {
+              $env:HOME = "/home/gate"; $env:PWD = "/pwd/gate"
+            }
+            "" | & $iyi run $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $failed += $program.Name
+              Write-Host "== $($program.Name) failed with $LASTEXITCODE"
+              Get-Content "$env:RUNNER_TEMP\$($program.BaseName).out" | Select-Object -Last 15
+            } else {
+              Write-Host "ok   $($program.Name)"
+            }
+            if ($program.Name -eq "std_path_exercise.iyi") {
+              Remove-Item Env:\HOME, Env:\PWD -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "$ran exercises run on Windows, $($failed.Count) failed"
+          if ($failed.Count -gt 0) {
+            Write-Host "failed: $($failed -join ', ')"
+            exit 1
+          }
+
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
   # program a host can start is wasi-libc's entry stub — which calls
@@ -1804,11 +1977,14 @@ jobs:
   # while the only jobs that execute on those two targets were red — and
   # README.md's portability claim is about targets a build is run on. A job
   # whose failure cannot stop a release is not protecting the claim it tests.
+  # `windows-native` is here for the same reason and one more: it is the
+  # only job that builds the compiler on Windows, so a tag cut while it is
+  # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, std, targets, cross-objects, cross-run, wasi-run,
-            windows-probe, windows-collector, windows-runtime,
+            windows-probe, windows-collector, windows-runtime, windows-native,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

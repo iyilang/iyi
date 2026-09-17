@@ -7,6 +7,13 @@
 # the documentation, render as plain text.
 *.iyi text eol=lf linguist-language=Crystal
 
+# iyi: a template's bytes are what `Eiy.embed` renders, and an exercise
+# compares the render against a string written in its source. Checked out
+# with CRLF — which is what a Windows clone does to a file nothing pins —
+# every line of the render gained a byte and
+# `bench/std_eiy_exercise.iyi` failed on Windows alone.
+*.eiy text eol=lf
+
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.
 *.iyimod binary

@@ -23,7 +23,9 @@
 # `Program.env("PWD")` when not given — the prelude has no way to ask
 # the kernel for the working directory, so a program whose `PWD` is
 # unset or stale passes its own base; with no base at all `expand`
-# panics rather than guess. `home: true` reads a leading `~` from `HOME`.
+# panics rather than guess. `home: true` reads a leading `~` from
+# `HOME`, or from `USERPROFILE` on Windows, which is where that platform
+# keeps it.
 
 module std/path
 
@@ -489,11 +491,12 @@ pub struct Path
 
   # Absolute and normalized, under *base* when relative. *base* is
   # `Program.env("PWD")` when not given, and a relative path with neither
-  # is refused. `home: true` reads a leading `~` from `Program.env("HOME")`.
+  # is refused. `home: true` reads a leading `~` from the home directory
+  # the platform names (see `home_directory`).
   def expand(base : Path | String | Nil = nil, home : Bool = false) : Path
     name_str = @name
     if home && (name_str == "~" || name_str.starts_with?("~/") || (windows? && name_str.starts_with?("~\\")))
-      home_dir = Program.env("HOME") || raise "cannot expand #{@name.inspect}: HOME is not set"
+      home_dir = home_directory || raise "cannot expand #{@name.inspect}: HOME is not set"
       name_str = name_str == "~" ? home_dir : home_dir + name_str[1, name_str.bytesize - 1]
     end
 
@@ -510,6 +513,20 @@ pub struct Path
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?
     base_dir.join(p).normalize
+  end
+
+  # Windows shells do not set `HOME`: the home directory there is named
+  # `USERPROFILE`, and `HOME` shows up only under a POSIX-shaped shell
+  # such as MSYS or a CI runner. So win32 asks both, its own name first;
+  # every other platform asks `HOME` alone.
+  private def home_directory : String | Nil
+    {% if flag?(:win32) %}
+      profile = Program.env("USERPROFILE")
+      return profile if profile && !profile.empty?
+      Program.env("HOME")
+    {% else %}
+      Program.env("HOME")
+    {% end %}
   end
 
   def sibling(name : String | Path) : Path

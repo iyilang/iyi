@@ -1958,7 +1958,14 @@ module Iyi
       unless var
         var = llvm_mod.globals.add(llvm_c_return_type(type), name)
         var.linkage = LLVM::Linkage::External
-        if @program.has_flag?("win32") && !@program.has_flag?("static")
+        # `dllimport` says the symbol lives in another image, and two of
+        # the prelude's `lib` globals do not: codegen defines the layout
+        # table and the marking byte in this program's own main module
+        # (gc_layouts.cr, which sets their storage class back to Default).
+        # Declaring them as imports made every Windows link print an
+        # LNK4217 or LNK4286 for each module that read one.
+        if @program.has_flag?("win32") && !@program.has_flag?("static") &&
+           name != MARKING_NAME && name != GC_LAYOUTS_NAME
           var.dll_storage_class = LLVM::DLLStorageClass::DLLImport
         end
         var.thread_local = thread_local

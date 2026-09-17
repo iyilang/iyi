@@ -76,6 +76,19 @@ endif
 export_vars       = $(eval export CRYSTAL_CONFIG_BUILD_COMMIT CRYSTAL_CONFIG_PATH SOURCE_DATE_EPOCH)
 export_build_vars = $(eval export CRYSTAL_CONFIG_LIBRARY_PATH)
 
+# iyi: what `make -f Makefile.win iyi` bakes into the binary. The paths are
+# the Linux Makefile's, spelled Windows's way: `;` separates them and either
+# separator follows `$ORIGIN`, which the compiler expands to its own
+# directory at run time (`src\compiler\iyi\iyi_path.cr`). A binary in
+# `.build` therefore finds this checkout's `src`, and the same binary
+# unpacked beside a `share\iyi` finds that instead.
+collector                   ?= ## iyi: link the owned collector into `iyi` itself
+IYI_CONFIG_BUILD_COMMIT     := $(shell git rev-parse --short HEAD)
+IYI_CONFIG_PATH             := $$ORIGIN\..\share\iyi\src;$$ORIGIN\..\share\iyi\crystal;$$ORIGIN\..\src
+IYI_CONFIG_LIBRARY_PATH     := $$ORIGIN\..\lib\iyi
+IYI_COMPILER_FLAGS          := -Dwithout_iconv$(if $(collector),,  -Dgc_none)
+export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
+
 ifeq ($(LLVM_VERSION),)
 LLVM_CONFIG  ?=
 LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version))
@@ -142,6 +155,12 @@ all_spec: $(O)\all_spec.exe ## Run all specs (note: this builds a huge program; 
 
 .PHONY: crystal
 crystal: $(O)\crystal.exe ## Build the compiler [default]
+
+.PHONY: iyi
+iyi: $(O)\iyi.exe ## iyi: build `iyi` itself, runnable as .build\iyi.exe
+
+.PHONY: iyi-daemon
+iyi-daemon: $(O)\iyi-daemon.exe ## iyi: build iyi's own single-threaded build daemon
 
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler)
@@ -224,6 +243,31 @@ $(O)\crystal.exe: $(DEPS) $(SOURCES) $(O)\crystal.res
 	.\bin\crystal build $(FLAGS) $(COMPILER_FLAGS)  -o "$(O)\crystal-next.exe" src\compiler\crystal.cr --link-flags=/PDBALTPATH:crystal.pdb "--link-flags=$(realpath $(O)\crystal.res)"
 	$(call MV,"$(O)\crystal-next.exe","$@")
 	$(call MV,"$(O)\crystal-next.pdb","$(O)\crystal.pdb")
+
+# iyi: the binary a person types, and the daemon `iyi daemon start` looks up
+# beside it. Built through `-next.exe` and moved, for the reason the compiler
+# above is: Windows will not overwrite a running program, and the compiler
+# that builds this one is usually the one in this directory.
+$(O)\iyi.exe: $(DEPS) $(SOURCES)
+	$(call check_llvm_config)
+	@$(call MKDIR,"$(O)")
+	$(call export_vars)
+	$(call export_build_vars)
+	$(call export_iyi_vars)
+	.\bin\crystal build $(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS) -o "$(O)\iyi-next.exe" src\compiler\iyi.cr --link-flags=/PDBALTPATH:iyi.pdb
+	$(call MV,"$(O)\iyi-next.exe","$@")
+	$(call MV,"$(O)\iyi-next.pdb","$(O)\iyi.pdb")
+	@echo built $@
+
+$(O)\iyi-daemon.exe: $(DEPS) $(SOURCES)
+	$(call check_llvm_config)
+	@$(call MKDIR,"$(O)")
+	$(call export_vars)
+	$(call export_build_vars)
+	$(call export_iyi_vars)
+	.\bin\crystal build $(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS) -Dwithout_mt -o "$(O)\iyi-daemon-next.exe" src\compiler\iyi.cr --link-flags=/PDBALTPATH:iyi-daemon.pdb
+	$(call MV,"$(O)\iyi-daemon-next.exe","$@")
+	$(call MV,"$(O)\iyi-daemon-next.pdb","$(O)\iyi-daemon.pdb")
 
 $(O)\crystal.res: $(O)\crystal.rc
 	@$(call MKDIR,"$(O)")

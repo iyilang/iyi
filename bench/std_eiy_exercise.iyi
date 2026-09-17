@@ -158,7 +158,11 @@ generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
 assert_text(generated_expected, generated, "process_string output")
 
 template_path = Eiy.locate("std_eiy_exercise.eiy", __FILE__)
-assert_true(template_path.ends_with?("bench/std_eiy_exercise.eiy"), "locate puts the template beside its caller: #{template_path}")
+# The directory part comes from `__FILE__`, so it carries whatever separator
+# the compiler was handed the path with: `bench/` here, `bench\` on Windows.
+# The check is still that the template sits beside its caller.
+beside = {% if flag?(:win32) %}"bench\\std_eiy_exercise.eiy"{% else %}"bench/std_eiy_exercise.eiy"{% end %}
+assert_true(template_path.ends_with?(beside), "locate puts the template beside its caller: #{template_path}")
 assert_text("/abs/t.eiy", Eiy.locate("/abs/t.eiy", "/elsewhere/main.iyi"), "locate keeps an absolute path")
 assert_text("t.eiy", Eiy.locate("t.eiy", "main.iyi"), "locate with a caller in the current directory")
 from_file = Eiy.process_file(template_path, "io")

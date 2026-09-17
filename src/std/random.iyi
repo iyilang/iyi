@@ -1,8 +1,9 @@
 # A PCG-32 generator, and a handful of random values from it.
 #
-# `Random.new(seed)` is deterministic. `Random.new` seeds from
-# `/dev/urandom` (eight bytes) on native platforms; wasm32 has no
-# such device and seeds from the clocks. Neither is a lock: this is
+# `Random.new(seed)` is deterministic. `Random.new` seeds from eight
+# bytes of the platform's own entropy: `/dev/urandom` on unix,
+# `RtlGenRandom` on Windows, which has no such device. wasm32 has
+# neither and seeds from the clocks. Neither is a lock: this is
 # shuffle-the-deck randomness, not a secret.
 #
 # `rand` is in `[0, 1)`. `rand(n)` is an `Int32` in `0...n`. A
@@ -15,6 +16,24 @@ module std/random
 import std/int
 import std/time
 using std/time::{Time}
+
+{% if flag?(:win32) %}
+  # The entropy source Windows offers a program that only wants bytes.
+  # `RtlGenRandom` lives in advapi32.dll, which ships with the machine, and is
+  # exported under its ordinal alias `SystemFunction036` — the name the import
+  # library carries, so that is the name to bind. Upstream Crystal names the
+  # same call in `src/crystal/system/win32/random.cr`, and naming a second
+  # source (a bcrypt/CNG provider, opened and closed for eight bytes) would
+  # leave the repo with two answers to one question. advapi32 is not the
+  # prelude's kernel32, so this `lib` has to ask for it.
+  #
+  # A BOOLEAN is one byte at this ABI and a ULong is 32 bits, declared as the
+  # integers they are.
+  @[Link("advapi32")]
+  lib LibAdvapi32
+    fun RtlGenRandom = SystemFunction036(buffer : Void*, length : UInt32) : UInt8
+  end
+{% end %}
 
 pub class Random
   @state : UInt64
@@ -61,6 +80,20 @@ pub class Random
   private def self.entropy : UInt64
     {% if flag?(:wasm32) %}
       Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64
+    {% elsif flag?(:win32) %}
+      # Eight bytes into a heap cell, then out little-endian, the same shape
+      # the `/dev/urandom` arm reads: one call, no device to open or close.
+      p = Pointer(UInt8).malloc(8_u64)
+      if LibAdvapi32.RtlGenRandom(p.as(Void*), 8_u32) == 0_u8
+        raise "Random: RtlGenRandom answered no bytes"
+      end
+      v = 0_u64
+      i = 0
+      while i < 8
+        v = v | (p[i].to_u64 << (i * 8))
+        i = i + 1
+      end
+      v
     {% else %}
       io = File.open("/dev/urandom")
       bytes = io.read_bytes(8)

@@ -323,14 +323,42 @@ pub struct Eiy
   # Where `embed` reads *template* from when it is written in *caller*: the
   # template itself when absolute, otherwise beside the caller.
   def self.locate(template : String, caller : String) : String
-    return template if template.starts_with?('/') || caller.empty?
+    return template if absolute?(template) || caller.empty?
     raw = caller.to_unsafe
     i = caller.bytesize - 1
     while i >= 0
-      return caller[0, i + 1] + template if raw[i] == 47_u8 # '/'
+      return caller[0, i + 1] + template if separator?(raw[i])
       i -= 1
     end
     template
+  end
+
+  # A backslash is an ordinary byte in a POSIX filename and a separator on
+  # Windows, so it is read as one only where it is one. The caller's own
+  # filename arrives from the macro as `C:\...\bench\program.iyi`, and a
+  # resolver that knew only `/` found no separator in it at all: it then
+  # looked for the template in the current directory and reported it
+  # missing, which is what `bench/std_eiy_exercise.iyi` did on Windows.
+  private def self.separator?(byte : UInt8) : Bool
+    {% if flag?(:win32) %}
+      byte == 47_u8 || byte == 92_u8
+    {% else %}
+      byte == 47_u8
+    {% end %}
+  end
+
+  # Absolute on POSIX is a leading separator. On Windows it is that, or a
+  # drive letter and a colon before one.
+  private def self.absolute?(path : String) : Bool
+    return true if path.starts_with?('/')
+    {% if flag?(:win32) %}
+      return true if path.starts_with?('\\')
+      if path.bytesize >= 3
+        bytes = path.to_unsafe
+        return true if bytes[1] == 58_u8 && separator?(bytes[2])
+      end
+    {% end %}
+    false
   end
 
   private def self.generate(lexer : Lexer, filename : String, io_name : String) : String?

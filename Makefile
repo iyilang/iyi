@@ -375,7 +375,7 @@ uninstall: uninstall_compiler uninstall_man uninstall_completions
 
 # iyi: the binary and its prelude, and nothing else — an iyi program requires
 # only the prelude and the prelude requires only itself, so what is installed
-# beside `bin/iyi` is 551 KB rather than a standard library.
+# beside `bin/iyi` is 562 KB rather than a standard library.
 .PHONY: install_iyi
 install_iyi: ## iyi: install `iyi` and its prelude at DESTDIR
 install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
@@ -401,7 +401,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 # iyi: the other library, because `--crystal` is not a developer's switch.
 #
 # A program built with it gets Crystal's standard library, and an install that
-# ships only iyi's own 551 KB answers `require "json"` with "can't find file",
+# ships only iyi's own 562 KB answers `require "json"` with "can't find file",
 # which is the headline feature failing in the thing people download.
 #
 # `compiler/` was cut from this, on the grounds that a compiler carrying its own
@@ -423,7 +423,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 	cp -R -p $(if $(deref_symlinks),-L,-P) src/. "$(DESTDIR)$(DATADIR)/iyi/crystal/"
 	rm -rf "$(DESTDIR)$(DATADIR)/iyi/crystal/iyi"
 # And `std/`, for the reason it is above under its own name: nothing in
-# Crystal's library requires `std/...`, the directory's 1,160, KB is a second
+# Crystal's library requires `std/...`, the directory's 1,175 KB is a second
 # copy of a library that already shipped, and while it is there it answers
 # `import std/text` out of `share/iyi/crystal` — which is how the accident
 # looked before `src/std` was installed at all, and which would let that
@@ -589,7 +589,7 @@ $(O)/$(CRYSTAL_BIN): $(DEPS) $(SOURCES)
 # iyi: the same compiler under its own name — the commands iyi has, a usage
 # line that names them, and a version that says what it is a fork of. It links
 # what `crystal` links, because it *is* `crystal`; what differs is the surface.
-# Its prelude is its own, and it is 551 KB: `iyi` installed as `bin/iyi` finds
+# Its prelude is its own, and it is 562 KB: `iyi` installed as `bin/iyi` finds
 # `share/iyi/src/iyi/prelude.iyi` beside it and needs nothing else — no
 # `IYI_PATH`, no standard library, because an iyi program requires only the
 # prelude and the prelude requires only itself.

@@ -2129,7 +2129,11 @@ describe Iyi::IyiMod do
       reader = create_spec_compiler
       reader.prelude = "iyi/prelude"
       reader.use_iyimod = "mods"
-      expect_raises(Iyi::TypeException, /"std\/text" is .+ now, and this was written from .+std\/text\.iyi/) do
+      # The module path is posix by grammar (R-1); the *file* it named is
+      # printed the way this platform writes a path, so the expectation asks
+      # for the file by its own separator rather than by a literal slash.
+      moved = Regex.escape(File.join("std", "text.iyi"))
+      expect_raises(Iyi::TypeException, /"std\/text" is .+ now, and this was written from .+#{moved}/) do
         reader.compile source, File.expand_path("moved")
       end
     end

@@ -176,7 +176,7 @@ class Iyi::Command
       walking = File.dirname(walking)
     end
 
-    files = single ? [single] : Dir.glob(File.join(src, "**", "*.cr")).sort
+    files = single ? [single] : Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort
 
     # One file at a time only works from the *top*: a `.cr` file cannot
     # require an iyi module, and a `require` that finds one gets a
@@ -186,7 +186,7 @@ class Iyi::Command
     # a script.
     still_crystal = nil
     if single
-      requirers = Dir.glob(File.join(project_root, "**", "*.{cr,iyi}")).sort.reject do |file|
+      requirers = Dir.glob(::Path[project_root].to_posix.join("**", "*.{cr,iyi}")).sort.reject do |file|
         file == single || shards_install?(file, project_root)
       end.select do |file|
         here = File.dirname(file)
@@ -208,17 +208,17 @@ class Iyi::Command
       # source, and that is worth saying rather than discovering.
       by_module = requirers.select(&.ends_with?(".iyi"))
       unless by_module.empty?
-        named = by_module.first(4).map { |file| file.lchop(project_root + "/") }.join(", ")
+        named = by_module.first(4).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
         more = by_module.size > 4 ? " and #{by_module.size - 4} more" : ""
-        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{single.lchop(project_root + "/")} (#{named}#{more}); " \
+        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); " \
                "a `require` that finds a `.iyi` gets a compilation unit and none of its names, so that consumer needs an `import` - which is the whole tree's job: " \
                "#{Command.program_name} migrate #{File.dirname(single)} --out DIR", :USAGE_ERROR
       end
       by_crystal = requirers.reject(&.ends_with?(".iyi"))
       unless by_crystal.empty?
-        named = by_crystal.first(3).map { |file| file.lchop(project_root + "/") }.join(", ")
+        named = by_crystal.first(3).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
         more = by_crystal.size > 3 ? " and #{by_crystal.size - 3} more" : ""
-        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{single.lchop(project_root + "/")} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
+        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
       end
     end
     # A shards directory is other projects' source. `shards install`
@@ -262,7 +262,7 @@ class Iyi::Command
     # unit and has to require what it uses, and what one file uses was
     # required by another - `base_log_handler.cr` names `HTTP::Handler`
     # and requires nothing.
-    (single ? Dir.glob(File.join(src, "**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
+    (single ? Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
       migrate_source(file).each_line do |line|
         next unless (match = MigrateUnit::REQUIRE.match(line))
         target = match[1] || ""
@@ -370,11 +370,11 @@ class Iyi::Command
     # and its `lib` are where they were, and the module is written beside
     # them. Copying them onto themselves is all that would happen.
     assets = 0
-    Dir.glob(single ? [] of String : File.join(src, "**", "*")).sort.each do |file|
+    Dir.glob(single ? [] of String : ::Path[src].to_posix.join("**", "*").to_s).sort.each do |file|
       next unless File.file?(file)
       next if file.ends_with?(".cr")
       next if shards_install?(file, src)
-      relative_asset = file.lchop(project_root).lchop('/')
+      relative_asset = file.lchop(project_root).lchop(File::SEPARATOR)
       target = File.join(out_dir, relative_asset)
       Dir.mkdir_p(File.dirname(target))
       if TEMPLATE_EXTENSIONS.any? { |extension| file.ends_with?(extension) }
@@ -829,7 +829,7 @@ class Iyi::Command
     # compiled the way it runs, as one program, because a front end per
     # file would cost a minute on a project with fifty of them.
     spec_dir = File.join(File.dirname(src), "spec")
-    specs = Dir.glob(File.join(spec_dir, "**", "*_spec.cr")).sort
+    specs = Dir.glob(::Path[spec_dir].to_posix.join("**", "*_spec.cr")).sort
     unless specs.empty?
       # Named one by one rather than as `spec/**`, because the requires are
       # resolved from this source's own directory and a glob of them is
@@ -837,7 +837,10 @@ class Iyi::Command
       # `require` inside a spec still means what it meant.
       suite = String.build do |io|
         specs.each do |spec|
-          io << %(require ".) << spec.lchop(spec_dir).rchop(".cr") << %("\n)
+          # The path is native so it can be chopped against `spec_dir`, and
+          # posix again inside the `require`: that string is Crystal's to
+          # resolve, and its grammar has one separator.
+          io << %(require ".) << ::Path[spec.lchop(spec_dir).rchop(".cr")].to_posix << %("\n)
         end
       end
       programs << {"#{specs.size} spec file#{specs.size == 1 ? "" : "s"}",
@@ -1861,9 +1864,13 @@ class Iyi::Command
 
     private def resolve_require(target : String, by_source : Hash(String, MigrateUnit)) : Array(MigrateUnit)
       base = File.expand_path(target, File.dirname(source))
-      if base.ends_with?("/**") || base.ends_with?("/*")
-        dir = base.rchop("*").rchop("*").rchop("/")
-        pattern = base.ends_with?("/**") ? File.join(dir, "**", "*.cr") : File.join(dir, "*.cr")
+      # Asked of the posix reading: `File.expand_path` answers in the
+      # platform's separators, so `require "./parts/*"` came back as
+      # `…\parts\*` and neither test saw a glob at all.
+      posix = ::Path[base].to_posix.to_s
+      if posix.ends_with?("/**") || posix.ends_with?("/*")
+        dir = posix.rchop("*").rchop("*").rchop("/")
+        pattern = posix.ends_with?("/**") ? ::Path[dir].to_posix.join("**", "*.cr") : ::Path[dir].to_posix.join("*.cr")
         Dir.glob(pattern).sort.compact_map { |file| by_source[file]? }
       else
         file = base.ends_with?(".cr") ? base : base + ".cr"

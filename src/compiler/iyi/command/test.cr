@@ -79,7 +79,10 @@ class Iyi::Command
       # path at all means the working directory on purpose; "" is not that.
       abort! "test takes paths, and '' is not one (no path at all runs the working directory)", :USAGE_ERROR if path.empty?
       if File.directory?(path)
-        Dir.glob(File.join(path, "**", "*_test.iyi")) { |file| files << file }
+        # The pattern is built in posix form because a backslash is an escape
+        # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
+        # nothing, so `iyi test` in a directory of tests found no tests.
+        Dir.glob(::Path[path].to_posix.join("**", "*_test.iyi")) { |file| files << file }
       elsif File.file?(path)
         files << path
       else
@@ -226,21 +229,11 @@ class Iyi::Command
     nil
   end
 
+  # IV.6 read backwards, which is the build's own rule: one reading of it,
+  # because a selection that placed a test differently from the build that
+  # compiles it would discount the wrong tests.
   private def closure_root_of(path : String) : String?
-    header = nil
-    File.read(path).each_line do |line|
-      line = line.strip
-      next if line.empty? || line.starts_with?('#')
-      header = line
-      break
-    end
-    return nil unless header && header.starts_with?("module ")
-    module_path = header.lchop("module ").strip
-    return nil if module_path.empty? || module_path.includes?(' ')
-    suffix = "/#{module_path}.iyi"
-    return nil unless path.ends_with?(suffix)
-    root = path[0, path.size - suffix.size]
-    root.empty? ? "/" : root
+    Compiler.header_root_of(path, File.read(path))
   rescue IO::Error
     nil
   end

@@ -28,6 +28,27 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg} (expected #{expected.inspect}, got #{actual.inspect})" if expected != actual
 end
 
+# `Path[]` and `Path.new` take the platform's own kind, so a joined name
+# is separated with `\` on Windows: an expectation spelled with `/` was
+# pinning POSIX rather than checking the join.
+def native_sep : String
+  {% if flag?(:win32) %}
+    "\\"
+  {% else %}
+    "/"
+  {% end %}
+end
+
+# `expand(home: true)` reads the home directory from the variable the
+# platform names: `USERPROFILE` on Windows, `HOME` everywhere else.
+def home_env : String | Nil
+  {% if flag?(:win32) %}
+    Program.env("USERPROFILE") || Program.env("HOME")
+  {% else %}
+    Program.env("HOME")
+  {% end %}
+end
+
 # ---------------------------------------------------------------------------
 # Lexical corpus, checked here against known values and replayed by the
 # script through python3 (posixpath.normpath / relpath).
@@ -95,7 +116,7 @@ joins.each do |row|
   assert_str(row[2], Path.posix(row[0]).join(row[1]).to_s, "join #{row[0].inspect} #{row[1].inspect}")
   puts "oracle join\t#{row[0]}\t#{row[1]}\t#{row[2]}"
 end
-assert_str("a/b/c", Path["a", "b", "c"].to_s, "Path[a, b, c]")
+assert_str(["a", "b", "c"].join(native_sep), Path["a", "b", "c"].to_s, "Path[a, b, c]")
 assert_str("usr/local/bin", (Path.posix("usr") / "local" / Path.posix("bin")).to_s, "/ joins")
 assert_str("/a/c", Path.posix("/a/b").sibling("c").to_s, "sibling")
 assert_str("x/y/z", Path.posix("x").join(["y", "z"]).to_s, "join an array")
@@ -121,12 +142,17 @@ puts "\n== expand"
 assert_str("/x/b", Path.posix("a/../b").expand("/x").to_s, "expand under a base")
 assert_str("/x/b", Path.posix("a/../b").expand(Path.posix("/x")).to_s, "expand under a Path base")
 assert_str("/a/b", Path.posix("/a/./b").expand("/ignored").to_s, "an absolute path ignores the base")
-home = Program.env("HOME")
-raise "HOME is not set" if home.nil?
+home = home_env
+raise "no home directory is named in the environment" if home.nil?
 pwd = Program.env("PWD")
 raise "PWD is not set" if pwd.nil?
-assert_str(home + "/x", Path.posix("~/x").expand(home: true).to_s, "~ expands from HOME")
-assert_str(home, Path.posix("~").expand(home: true).to_s, "~ alone is HOME")
+# The home directory comes from the platform, in the platform's own form,
+# so these two read the native kind rather than pinning POSIX: on POSIX
+# the native kind *is* POSIX and the answers are the same strings as
+# before. `PWD` below is a value the driver pins, and it pins a POSIX one,
+# so that check keeps the POSIX kind on every platform.
+assert_str(Path.new(home).join("x").normalize.to_s, Path.new("~/x").expand(home: true).to_s, "~ expands from the home variable")
+assert_str(Path.new(home).normalize.to_s, Path.new("~").expand(home: true).to_s, "~ alone is the home directory")
 assert_str("/cwd/~/x", Path.posix("~/x").expand("/cwd").to_s, "~ is a name unless home: true")
 assert_str(Path.posix(pwd).join("z").normalize.to_s, Path.posix("z").expand.to_s, "no base reads PWD")
 puts "  base, Path base, absolute, ~, PWD verified"

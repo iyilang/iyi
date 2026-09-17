@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 14,217 lines, of which 3,734 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,235 lines, none of it written in iyi |
+| iyi's own prelude | 14,418 lines, of which 3,841 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 111,313 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 14,217 lines
+> "No standard library worth the name" is still true of iyi's own 14,418 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 14,217 lines,
-primitives included, of which the library is 3,734.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 14,418 lines,
+primitives included, of which the library is 3,841.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,7 +299,7 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**3,734 lines** of the 14,217, measured by `bench/doc_numbers.py` as
+**3,841 lines** of the 14,418, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three. The whole-prelude figure is
 stated beside it because a reader sees the whole file, and a "tiny prelude"
 claim that hid 9,000 lines of runtime would be a claim about the wrong number.
@@ -390,6 +390,24 @@ for the programs that do. They are `src/std/format.iyi` and
 `src/std/socket.iyi` now, reached by `import std/format` and `import
 std/socket`, and the library is **3,405 lines**, 353 under. `io.iyi` stays:
 it is the write path behind `puts`, which every program has.
+
+**And it is breached again, by Windows' own floor: 3,841 of 3,734, 107
+over.** What entered is not API. It is the platform: the kernel32 names the
+runtime calls, moved out of the collector's macro arm so a `-Dgc_none` or
+`-Dgc_boehm` build on Windows can link at all; the environment read through
+the accessor the C runtime exports, because the POSIX symbol `environ` is
+not one of Windows'; `File.exists?` and `File.read` answering for a
+directory, which `CreateFileA` refuses to open where POSIX opens and fails
+at the read. Each is a declaration or a branch, none of them a method a
+program calls by a new name, and each carries the sentence that says why —
+which is where most of the 107 lines are.
+
+Recorded rather than moved, by the procedure above: the number stands at
+3,734 and this says what sits over it. What would close it is the same
+answer `format` and `socket` got — the Windows platform layer is a file of
+its own, `src/iyi/windows.iyi`, required by the prelude rather than written
+inside it, and the declarations leave the library figure with it. That is a
+move, not a rewrite, and it is owed.
 
 **Moving them broke Windows, and what broke was already broken.** With the
 two files out of the prelude, `bench/tls_probe.iyi` exited `0xC0000005`
@@ -932,9 +950,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,235 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 14,217-line own prelude + 36,644, in std |
-| Specs | 21,146 lines | 10,249 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 111,313 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 14,418-line own prelude + 36,980 in std |
+| Specs | 21,146 lines | 10,253 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -5019,6 +5037,7 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | Library | What it is for | Reachable | iyi's answer |
 |---|---|---|---|
 | libc | everything | yes: `write`, `exit`, `memset` and the collector's `mmap`/`munmap` on darwin | keep. On Linux the prelude issues the raw syscalls instead, so the object asks libc for nothing and the executable carries only the link template's five |
+| kernel32, advapi32 (Windows) | the platform itself | yes: `WriteFile`, `ExitProcess`, `VirtualAlloc`, `CreateThread`, the completion port — and `RtlGenRandom` for `std/random` | keep, and only these two. Windows has no libc of its own: the C runtime's POSIX shims are a person-installed choice of CRT and the Win32 API is the platform's contract, which is the same answer Go gives. `kernel32` is the floor; `advapi32` is one function, the OS entropy `Random.new` seeds from, and there is no kernel32 name for it. Both ship with every Windows, so an `.exe` iyi builds still needs nothing installed |
 | Boehm GC | allocation | no: the default is the owned collector, arena over the platform's own `mmap`; `-Dgc_boehm` opts libgc back in, `-Dgc_none` opts out of collecting | **owned, shipped, default.** II.5 already required a precise collector for R-4; GC_DESIGN.md is the record and `bench/gc_default.py` the measurement that flipped the default. Present on the compiler only as a temporary bootstrap runtime dependency with an exit condition: leaves when the compiler stops being a Crystal program |
 | compiler-rt builtins | 128-bit divide, float conversion, overflow-checked multiply | no | **already owned**: `src/crystal/compiler_rt/` ports them to Crystal. Keep porting |
 | libunwind / libgcc | exception backtraces | no | own the walk. III.1 is what makes this cheap: errors are union members, so only a panic unwinds |
@@ -9168,7 +9187,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 14,217-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 14,418-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

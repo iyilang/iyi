@@ -13,6 +13,23 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# Windows answers `Dir.current` in its own form, backslashes and all, while
+# every path below is joined with `/`; both name the same directory to every
+# Win32 call. So a path compare normalises the separator instead of pinning
+# one platform's spelling.
+def slashed(path : String) : String
+  n = path.bytesize
+  bytes = path.to_unsafe
+  String.new(n) do |target|
+    target.copy_from(bytes, n)
+    i = 0
+    while i < n
+      target[i] = 47_u8 if target[i] == 92_u8
+      i = i + 1
+    end
+  end
+end
+
 import std/dir
 using std/dir::{Dir}
 
@@ -166,7 +183,7 @@ puts "  glob matching, hidden names, recursion, and empty results"
 puts "\n== current working directory and cd"
 current_before = Dir.current
 Dir.cd(sub_created) do
-  assert_str sub_created, Dir.current, "Dir.current inside cd block matches target"
+  assert_str slashed(sub_created), slashed(Dir.current), "Dir.current inside cd block matches target"
 end
 assert_str current_before, Dir.current, "Dir.current restored after cd block"
 puts "  temporary directory change with automatic restore"

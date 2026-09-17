@@ -394,8 +394,12 @@ class Iyi::Command
         end
         if match = SHARD_REQUIRE.match(line)
           required = File.expand_path(match[1] || "", File.dirname(file))
-          if required.ends_with?("/*") || required.ends_with?("/**")
-            Dir.glob(File.join(required.rchop("*").rchop("*"), "**", "*.cr")).sort.each { |part| queue << part }
+          # Asked of the posix reading: `File.expand_path` answers in the
+          # platform's separators, so `require "./parts/*"` came back as
+          # `…\parts\*` and this test saw no glob at all.
+          posix = ::Path[required].to_posix.to_s
+          if posix.ends_with?("/*") || posix.ends_with?("/**")
+            Dir.glob(::Path[posix.rchop("*").rchop("*")].to_posix.join("**", "*.cr")).sort.each { |part| queue << part }
           else
             queue << (required.ends_with?(".cr") ? required : required + ".cr")
           end
@@ -426,7 +430,7 @@ class Iyi::Command
     # come made every file of every part look like an entry of its own -
     # `asn1/identifier.cr` among them, which is one file of `asn1.cr`.
     reached = required_files(entry)
-    rest = Dir.glob(File.join(source, "**", "*.cr")).map { |path| File.expand_path(path) }
+    rest = Dir.glob(::Path[source].to_posix.join("**", "*.cr")).map { |path| File.expand_path(path) }
       .sort.reject { |path| reached.includes?(path) }
     return [] of String if rest.empty?
 
@@ -447,8 +451,9 @@ class Iyi::Command
       File.each_line(current) do |line|
         next unless match = SHARD_REQUIRE.match(line)
         required = File.expand_path(match[1] || "", File.dirname(current))
-        if required.ends_with?("/*") || required.ends_with?("/**")
-          Dir.glob(File.join(required.rchop("*").rchop("*"), "**", "*.cr")).sort.each { |part| queue << part }
+        posix = ::Path[required].to_posix.to_s
+        if posix.ends_with?("/*") || posix.ends_with?("/**")
+          Dir.glob(::Path[posix.rchop("*").rchop("*")].to_posix.join("**", "*.cr")).sort.each { |part| queue << part }
         else
           queue << (required.ends_with?(".cr") ? required : required + ".cr")
         end

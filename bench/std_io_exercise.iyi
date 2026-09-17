@@ -143,7 +143,17 @@ puts "  write, print, puts, <<, write_byte, read_bytes, read_byte, read_char, re
 # ---------------------------------------------------------------------------
 
 puts "\n== descriptor stream"
-path = "/tmp/std_io_exercise_#{Program.args.size}.txt"
+# A literal `/tmp` is a POSIX name and there is no such directory on
+# Windows. The scratch directory is an argument — `bench/std_io_exercise.sh`
+# passes its own — and this file's own directory otherwise, which exists
+# wherever the exercise does. Reading it from the environment was the first
+# shape of this and it cost the floor below a dependency: `Program.env` is
+# the CRT's `environ`, and the audit reads what this binary asks the machine
+# for, so a harness's convenience became std/io's floor.
+args = Program.args
+sandbox = args.size > 0 ? args[0] : __DIR__
+
+path = sandbox + "/std_io_exercise_#{args.size}.txt"
 File.write(path, "alpha\nb\u00e9\u0442\u0430\ngamma\n")
 file = File.open(path, "r", 4)
 assert_true(file.read_byte == 97_u8, "read_byte on a file")

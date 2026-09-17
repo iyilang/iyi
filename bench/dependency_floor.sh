@@ -371,10 +371,14 @@ while IFS= read -r annotation; do
     '@[Link("kernel32")]') ;;
     '@[Link(ldflags: "msvcrt.lib ucrt.lib vcruntime.lib")]') ;;
     '@[Link("gc", pkg_config: "bdw-gc")]') ;;
+    # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
+    # advapi32, which ships with every Windows the way kernel32 does, and
+    # `std/random` is its one caller (SPEC.md III.10's inventory says so).
+    '@[Link("advapi32")]') ;;
     *)
       echo "  THE FLOOR MOVED: the library declares $annotation"
       echo "  A library iyi ships links the platform libc and, opt-in, a"
-      echo "  collector. A fourth annotation needs a reason in SPEC.md III.10"
+      echo "  collector. A fifth annotation needs a reason in SPEC.md III.10"
       echo "  before it needs a line here."
       status=1
       ;;

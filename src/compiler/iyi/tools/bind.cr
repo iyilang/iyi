@@ -2481,7 +2481,7 @@ module Iyi
   # boundary silently contributing nothing is the failure worth seeing.
   private def self.bound_names(program : Program, dir : String, io : IO) : Set(String)
     names = Set(String).new
-    paths = Dir.glob(File.join(dir, "*.iyimod")).sort
+    paths = Dir.glob(::Path[dir].to_posix.join("*.iyimod")).sort
     return names if paths.empty?
 
     io.puts "boundaries already written:"
@@ -3061,9 +3061,17 @@ module Iyi
   # and a library root of its own neighbour. `bind_inputs`
   # would have recorded the neighbour's files as this shard's, and a
   # boundary read as stale whenever they changed.
+  #
+  # The separator is the one the path itself used, not `File::SEPARATOR`,
+  # which is `'/'` on every platform in this library: `File.dirname` of a
+  # Windows path answers `C:\x\lib\radix\src`, and `+ "/"` made that a
+  # prefix of nothing at all, which puts every file of the shard *outside*
+  # its own directory — the same defect the other way round.
   private def self.directory_of(file : String) : String
     directory = File.dirname(file)
-    directory.ends_with?('/') ? directory : directory + "/"
+    return directory if directory.ends_with?('/') || directory.ends_with?('\\')
+    following = file[directory.size]?
+    directory + (following == '\\' ? "\\" : "/")
   end
 
   # Whether a type is the *library's* rather than the shard's.

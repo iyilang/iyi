@@ -808,9 +808,13 @@ module Iyi::Lsp
           # Read as posix before the skip tests: a glob yields the platform's
           # own separators, so a backslashed path went past `/.` and `/lib/`
           # and the `.git` and `lib` trees were indexed anyway.
+          #
+          # And the posix reading is what the URI is built from — a `file://`
+          # URI has one separator, and this side's spelling has to be the one
+          # `path_of` hands back for a buffer the client named.
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          uri = uri_of(file)
+          uri = uri_of(posix)
           uris << uri unless uris.includes?(uri)
           break if uris.size >= 200
         end
@@ -975,9 +979,9 @@ module Iyi::Lsp
             outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
             next
           end
-          next if nodes.has_key?(file)
+          next if nodes.has_key?(posix)
           header, imports = header_and_imports(file, info)
-          nodes[file] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
+          nodes[posix] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
         end
         Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
           info = File.info?(file)
@@ -1496,8 +1500,8 @@ module Iyi::Lsp
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          next if @documents.has_key?(uri_of(file))
-          entries << {file, File.read(file)}
+          next if @documents.has_key?(uri_of(posix))
+          entries << {posix, File.read(file)}
           break if entries.size >= 200
         end
       end
@@ -1914,7 +1918,7 @@ module Iyi::Lsp
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          paths << file unless paths.includes?(file)
+          paths << posix unless paths.includes?(posix)
           break if paths.size >= 2000
         end
       end

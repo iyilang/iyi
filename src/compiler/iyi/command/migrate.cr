@@ -1852,9 +1852,13 @@ class Iyi::Command
 
     private def resolve_require(target : String, by_source : Hash(String, MigrateUnit)) : Array(MigrateUnit)
       base = File.expand_path(target, File.dirname(source))
-      if base.ends_with?("/**") || base.ends_with?("/*")
-        dir = base.rchop("*").rchop("*").rchop("/")
-        pattern = base.ends_with?("/**") ? ::Path[dir].to_posix.join("**", "*.cr") : ::Path[dir].to_posix.join("*.cr")
+      # Asked of the posix reading: `File.expand_path` answers in the
+      # platform's separators, so `require "./parts/*"` came back as
+      # `…\parts\*` and neither test saw a glob at all.
+      posix = ::Path[base].to_posix.to_s
+      if posix.ends_with?("/**") || posix.ends_with?("/*")
+        dir = posix.rchop("*").rchop("*").rchop("/")
+        pattern = posix.ends_with?("/**") ? ::Path[dir].to_posix.join("**", "*.cr") : ::Path[dir].to_posix.join("*.cr")
         Dir.glob(pattern).sort.compact_map { |file| by_source[file]? }
       else
         file = base.ends_with?(".cr") ? base : base + ".cr"

@@ -178,6 +178,19 @@
 
 ### Fixed
 
+- **Three typos `iyi fix` had nothing for.** Found by injecting one to
+  three typos into every sample and asking `fix` to converge: 5 of 25
+  did not. A prelude method with an optional parameter - `"ab".ljuts(5)`
+  - was never a suggestion, because the Levenshtein pass only tested defs
+  whose *maximum* arity was the call's, and `ljust(width, char = ' ')`
+  has two; the sentence then said the prelude is "small by rule", which
+  was false. The range is what is asked now. A module's own function
+  called inside one of its impls (`shut` for `shout`) was not in the
+  candidate list, though it is in scope there; it is. And the compiler's
+  pseudo-methods (`i_a?` for `is_a?`, `or_pnic` for `or_panic`) are on no
+  def list; they are candidates by name. `bench/agent_loop.py` holds the
+  three; 100 injected samples now converge 100.
+
 - **`bench/generic_boundary.py` counts a reopening module apart.** Once
   `std/int` and `std/float` carried what they add to the prelude's types,
   every body of theirs travels - the machine code sits in the owner's

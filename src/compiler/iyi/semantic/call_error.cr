@@ -887,10 +887,19 @@ class Iyi::Call
   # using walk), seeded the same way: `owner.instance_type`, because the
   # owner of code in a module body is the metaclass and the directive was
   # recorded on the module itself.
+  IYI_PSEUDO_METHODS = %w(is_a? nil? responds_to? as as? or_panic or)
+
   private def lookup_similar_using_name(owner, def_name : String) : String?
     candidates = [] of String
     scope_type = owner.instance_type
     while scope_type
+      # The unit's own functions are in scope for the types declared in it
+      # - `shout(...)` inside `impl Greet for User` reaches the module's
+      # `def shout` - so they are candidates for a call inside one of its
+      # types too; `shut` went unsuggested while `shout` sat in the file.
+      if scope_type.is_a?(ModuleType) && scope_type.iyi_unit?
+        scope_type.defs.try &.each_key { |name| candidates << name }
+      end
       if used = scope_type.using_modules?
         used.each do |using_module|
           if names = using_module.names
@@ -920,6 +929,10 @@ class Iyi::Call
     # the file's own `using` line. Receiverless calls only: a `using`
     # name is by definition unqualified.
     similar_name ||= lookup_similar_using_name(owner, def_name) unless obj
+    # iyi: the compiler's own pseudo-methods are on no type's def list, so
+    # `x.i_a?(T)` was "undefined method" with nothing near it. They are
+    # names a call can be a typo of like any other.
+    similar_name ||= Levenshtein.find(def_name, IYI_PSEUDO_METHODS) if obj
 
     # The name that the span under this error can be *replaced with* — set
     # only where that is literally true: the suggestion names a different

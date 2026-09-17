@@ -180,6 +180,31 @@ def main():
          and run("check", "bumps.iyi", cwd=work).returncode == 0,
          f"applied {fixed['applied']}")
 
+    # 4a-3. three typos `fix` had nothing for, found by injecting typos
+    # into every sample: a prelude method with an optional parameter
+    # (`ljust(width, char = ' ')` called with one argument was never a
+    # Levenshtein candidate, since the filter wanted the call's arity to
+    # be the def's maximum), a module function called from inside one of
+    # the module's own impls (`shout` is in scope there and was not in the
+    # candidate list), and a compiler pseudo-method (`is_a?` is on no
+    # def list). Each is one edit away and `fix` applies it.
+    write("typos.iyi", (
+        "module typos\n\n"
+        "pub trait Loud\n  abstract def loud : String\nend\n\n"
+        "pub struct Word\n  getter text : String\n\n  def initialize(@text : String)\n  end\nend\n\n"
+        "impl Loud for Word\n  def loud : String\n    shut(text)\n  end\nend\n\n"
+        "def shout(text : String) : String\n  text.upcase\nend\n\n"
+        "puts Word.new(\"ab\").loud.ljuts(5)\n"
+        "x = 1 || \"a\"\nputs x.i_a?(Int32)\n"
+    ))
+    proc = run("fix", "--json", "typos.iyi", cwd=work)
+    fixed = json.loads(proc.stdout)
+    step("a prelude method, a module function inside an impl, and a pseudo-method are each one edit away",
+         proc.returncode == 0 and fixed["clean"]
+         and sorted(a["to"] for a in fixed["applied"]) == ["is_a?", "ljust", "shout"]
+         and run("check", "typos.iyi", cwd=work).returncode == 0,
+         f"applied {[a['to'] for a in fixed.get('applied', [])]}")
+
     # 4a''. the cap, and the verdict after it. `fix` applies at most
     # thirty-two edits in a run, and the verdict used to be read from a
     # variable only the `break` paths set - so a run whose every round

@@ -50,7 +50,13 @@ module Iyi
           defs.each do |def_name, hash|
             if SuggestableDefName.matches?(def_name)
               hash.each do |def_with_metadata|
-                if def_with_metadata.max_size == args_size && def_with_metadata.yields == !!block && def_with_metadata.def.name != name
+                # iyi: the arity the call has, anywhere in the def's range,
+                # not its maximum: `ljust(width, char = ' ')` has a maximum of
+                # two, `"ab".ljuts(5)` passed one, and the one def that was the
+                # answer was never tested - so the sentence became "the prelude
+                # is small by rule" and `iyi fix` had nothing to apply.
+                fits = def_with_metadata.min_size <= args_size && args_size <= def_with_metadata.max_size
+                if fits && def_with_metadata.yields == !!block && def_with_metadata.def.name != name
                   finder.test(def_name)
                   if finder.best_match != best_match
                     best_match = finder.best_match

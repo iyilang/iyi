@@ -98,6 +98,16 @@
     inside a block" — about a file that was never written. It uses
     `compressobj` now, which every Python 3 has, refuses to continue when
     the oracle cannot be produced, and counts the 79 fixtures it expects.
+  - `bench/std_atomic_exercise.sh` read the instruction each verb emits
+    off the host's IR, and on aarch64 the back end has rewritten every
+    `atomicrmw` into a load-linked / store-conditional loop by the time the
+    `.ll` is written, so its six `atomicrmw` patterns could never match
+    there. The audit reads x86_64-linux's IR on every host now, through
+    `--cross-compile`, which writes the IR and links nothing: what it
+    asserts is the ordering the module asks for, and that is the same
+    request on every target. The strengthened-copy proof catches exactly
+    the six relaxed instructions it patches, where before it counted
+    nine with three of them always missing.
 
 - **`iyi fix` answered `"clean": true` over a file it had not finished.**
   The loop applies one edit per round and the verdict was read from a

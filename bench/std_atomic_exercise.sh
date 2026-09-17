@@ -12,7 +12,8 @@
 #     is `atomicrmw add ... monotonic`, an acquire load is `load atomic ...
 #     acquire`, a release store is `store atomic ... release`, the acq_rel
 #     exchange is `cmpxchg ... acq_rel acquire`, and the four fences are
-#     four `fence` instructions. No ordering is chosen at runtime.
+#     four `fence` instructions. No ordering is chosen at runtime. The IR
+#     is x86_64-linux's whatever the host is: see `IR_TARGET` below.
 #   * Negative proofs: copies of the module with `add_relaxed` subtracting,
 #     with unsigned max made signed, and with a compare_and_set that never
 #     exchanges each fail at the named check; a copy that strengthens every
@@ -28,6 +29,20 @@ trap 'rm -rf "$WORK"' EXIT
 
 status=0
 export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+
+# The IR audit reads one target's IR, and it is not the host's.
+#
+# The `.ll` a build writes is the module after the back end has had it, and
+# on aarch64 the back end rewrites every `atomicrmw` into a load-linked /
+# store-conditional loop before that — so the file holds `atomicrmw.start`
+# labels and no `atomicrmw` instruction, and the six patterns below could
+# never match on a darwin arm64 or Linux aarch64 host. x86_64 keeps the
+# instruction. What this audit is about is the ordering the *module* asks
+# for, which is the same request on every target; reading it off a pinned
+# target is what makes the text an assertion about the compiler rather than
+# about the host's CPU. `--cross-compile` writes the object and the IR and
+# links nothing, so no toolchain for the target is needed.
+IR_TARGET=(--cross-compile --target x86_64-unknown-linux-gnu)
 
 build_and_run() {
   local label="$1" name="$2" source="$3"
@@ -116,7 +131,7 @@ ir_audit() { # ir_audit <ir file> ; prints failures, returns 1 on any
   fi
   return $ok
 }
-if ! "$IYI" build --emit llvm-ir -o "$WORK/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/ir.build.log" 2>&1 || [ ! -s "$WORK/ir.ll" ]; then
+if ! "$IYI" build --emit llvm-ir "${IR_TARGET[@]}" -o "$WORK/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/ir.build.log" 2>&1 || [ ! -s "$WORK/ir.ll" ]; then
   echo "  could not emit IR"
   tail -5 "$WORK/ir.build.log"
   status=1
@@ -174,7 +189,7 @@ echo
 echo "== proving the IR audit can fail: every relaxed verb strengthened to seq_cst"
 mkdir -p "$WORK/strong/std"
 sed -e 's/:monotonic/:sequentially_consistent/g' "$REPO/src/std/atomic.iyi" > "$WORK/strong/std/atomic.iyi"
-if IYI_PATH="$WORK/strong:$REPO/src" "$IYI" build --emit llvm-ir -o "$WORK/strong/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/strong/build.log" 2>&1 \
+if IYI_PATH="$WORK/strong:$REPO/src" "$IYI" build --emit llvm-ir "${IR_TARGET[@]}" -o "$WORK/strong/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/strong/build.log" 2>&1 \
    && [ -s "$WORK/strong/ir.ll" ]; then
   if ir_audit "$WORK/strong/ir.ll" >"$WORK/strong/audit.out"; then
     echo "  the audit PASSED with every relaxed verb strengthened (it should have failed)"

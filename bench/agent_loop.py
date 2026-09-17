@@ -180,6 +180,36 @@ def main():
          and run("check", "bumps.iyi", cwd=work).returncode == 0,
          f"applied {fixed['applied']}")
 
+    # 4a''. the cap, and the verdict after it. `fix` applies at most
+    # thirty-two edits in a run, and the verdict used to be read from a
+    # variable only the `break` paths set - so a run whose every round
+    # applied an edit fell out of the loop and answered `"clean": true`
+    # with exit 0 over a file that still did not compile. Forty typos is
+    # the shape that found it: an agent branching on `clean` shipped the
+    # file. The check after the last edit is the verdict now, `capped`
+    # says why it is not clean, and the next run finishes the file.
+    write("capped.iyi", (
+        "module capped\n\n"
+        + "".join(f"value{i} = {i}\n" for i in range(40))
+        + "\n"
+        + "".join(f"puts valeu{i}\n" for i in range(40))
+    ))
+    proc = run("fix", "--json", "capped.iyi", cwd=work)
+    fixed = json.loads(proc.stdout)
+    step("a run that hits the edit cap is not clean, and says it is capped",
+         proc.returncode == 1 and not fixed["clean"] and fixed.get("capped") is True
+         and len(fixed["applied"]) == 32 and "valeu32" in fixed["remaining"]
+         and run("check", "capped.iyi", cwd=work).returncode == 1,
+         f"applied {len(fixed['applied'])}, clean {fixed['clean']}, capped {fixed.get('capped')}")
+    proc = run("fix", "--json", "capped.iyi", cwd=work)
+    fixed = json.loads(proc.stdout)
+    step("and the next run finishes it, clean with no cap",
+         proc.returncode == 0 and fixed["clean"] and "capped" not in fixed
+         and len(fixed["applied"]) == 8
+         and run("check", "capped.iyi", cwd=work).returncode == 0,
+         f"applied {len(fixed['applied'])}, clean {fixed['clean']}")
+    os.remove(os.path.join(work, "capped.iyi"))
+
     # 4b. the blind spot, closed as a language rule: an uncalled body is
     # typed against its declared signature (definition-site typing,
     # R-2's dividend) — by check AND by a plain build; fix converges to

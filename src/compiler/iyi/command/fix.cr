@@ -72,11 +72,25 @@ class Iyi::Command
     analysis = Lsp::Analysis.new
     applied = [] of {Int32, Int32, String, String}
     remaining = nil
+    capped = false
 
-    # 32 rounds is not a tuning knob: a file that genuinely carries more
-    # consecutive fixable typos than that is not being fixed, it is being
-    # generated, and a loop that long deserves a look rather than a run.
-    32.times do
+    # Thirty-two is a cap on the *edits*, and the verdict is always the check
+    # after the last one. A file that genuinely carries more consecutive
+    # fixable typos than that is not being fixed, it is being generated, and a
+    # loop that long deserves a look rather than a run; the cap is also what
+    # keeps two suggestions that undo each other from ping-ponging forever.
+    #
+    # It was written `32.times` with the verdict read from `remaining`, which
+    # only the `break` paths ever set — so a run whose every round applied an
+    # edit fell out of the loop with `remaining` still nil and answered
+    # `"clean": true` and exit 0. Forty typos went in, thirty-two were fixed,
+    # eight were left, and the one sentence this verb exists to say was the
+    # wrong one. Nothing infers cleanliness from having stopped now: the loop
+    # is unbounded and the *edit* count is what ends it, so the compiler is
+    # asked once more after the thirty-second edit and its answer is the
+    # answer.
+    edit_cap = 32
+    loop do
       text = File.read(path)
       unless text.valid_encoding?
         # `Lsp::Analysis` compiles with `stderr` set to an `IO::Memory`, so
@@ -98,6 +112,14 @@ class Iyi::Command
       end
 
       diag = diags.first
+      # Asked with a diagnostic in hand, so a capped run names what is left
+      # rather than reporting nothing at all.
+      if applied.size >= edit_cap
+        capped = true
+        remaining = diag
+        break
+      end
+
       replacement = diag.suggestion
       unless replacement && diag.size > 0
         remaining = diag
@@ -160,6 +182,11 @@ class Iyi::Command
           if remaining
             json.field "remaining", remaining.message
           end
+          # Not clean *because of the cap* rather than because the compiler has
+          # no edit for what is left. The two want opposite things done about
+          # them: one says look at the file, the other says run this again and
+          # get thirty-two more.
+          json.field "capped", true if capped
           if elsewhere
             json.field "cause" do
               json.object do
@@ -181,6 +208,10 @@ class Iyi::Command
         if elsewhere
           STDERR.puts "the cause is in #{Iyi.relative_filename(elsewhere[0])}:#{elsewhere[1]}:#{elsewhere[2]}, " \
                       "which this run does not edit: run `#{Command.program_name} fix #{Iyi.relative_filename(elsewhere[0])}`"
+        end
+        if capped
+          STDERR.puts "#{applied.size} edits is this run's cap and the file still " \
+                      "reports an error: run `#{Command.program_name} fix #{file}` again"
         end
       elsif applied.empty?
         puts "#{file}: already clean"

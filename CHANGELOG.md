@@ -37,6 +37,22 @@
 
 ### Fixed
 
+- **`iyi fix` answered `"clean": true` over a file it had not finished.**
+  The loop applies one edit per round and the verdict was read from a
+  variable only its `break` paths ever set, so a run whose every round
+  applied an edit fell out of `32.times` with that variable still nil:
+  forty consecutive fixable typos went in, thirty-two were fixed, eight
+  were left, and the verb answered clean with exit 0. `iyi check` on the
+  same file exited 1 in the next breath. It is the one sentence this verb
+  exists to say, it was wrong in the one case that is entirely its own
+  doing, and an agent branching on `clean` shipped the file. The cap is on
+  the edits now and the loop is unbounded, so the compiler is asked once
+  more after the thirty-second edit and its answer is the answer; `--json`
+  carries `capped` beside `clean` so a caller can tell "look at this file"
+  from "run me again", and the prose says which. Two steps in
+  `bench/agent_loop.py` hold both halves: the capped run is not clean and
+  the file does not compile, and the next run finishes it.
+
 - **The twenty-two merge modules were probed, the way the other
   fifty-three were.** Nearly 1,200 programs against `bit_array`, `dir`,
   `docs_pseudo_methods`, `fiber`, `file`, `levenshtein`, `named_tuple`,

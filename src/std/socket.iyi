@@ -726,11 +726,12 @@ pub class IyiSocket
     # Windows has no `fcntl`, and the flag cannot be read back.
     FIONBIO = -2147195266
 
-    # WSAEWOULDBLOCK, the one Winsock number this arm reads by name, and
-    # ERROR_IO_PENDING, the one kernel32 number a posted operation answers
-    # with.
-    WSAEWOULDBLOCK   = 10035
-    ERROR_IO_PENDING =   997
+    # The three numbers this arm reads by name: what a non-blocking call with
+    # nothing to do says, what a posted operation says, and what an
+    # operation that is not over yet says when it is asked how it went.
+    WSAEWOULDBLOCK    = 10035
+    ERROR_IO_PENDING  =   997
+    WSA_IO_INCOMPLETE =   996
 
     INVALID_SOCKET                     = 0xffffffffffffffff_u64
     SIO_GET_EXTENSION_FUNCTION_POINTER =         0xc8000006_u32
@@ -823,9 +824,12 @@ pub class IyiSocket
       # Answering "would block" sends the caller into the wait it already
       # has, which answers `Cancelled` for exactly this.
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
+      # The extension pointer before the socket: the ask raises when Winsock
+      # cannot answer it, and a `client` created first is a socket nobody is
+      # left to close. Nothing between the two depends on the order.
+      post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
       client = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
       return __sys_error.to_i32 if client == INVALID_SOCKET
-      post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
       ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
@@ -838,11 +842,32 @@ pub class IyiSocket
           return -err
         end
         parked = IyiScheduler.park_overlapped_current
-        # Cancelled, or the listener was closed under the park — a close
-        # does complete a posted AcceptEx, measured — or the connection died
-        # in the handshake. None of them accepted anything, and all three are
-        # the caller's wait to answer.
-        if parked.is_a?(Cancelled) || __sys_overlapped_result(s, ov) < 0_i64
+        if parked.is_a?(Cancelled)
+          # `CancelIoEx` is a request, not an end: `addresses` and the
+          # OVERLAPPED are the kernel's until the operation is really over,
+          # and both are this frame's. Returning on the flag alone left the
+          # kernel writing into a frame that is gone and an OVERLAPPED the
+          # collector may already have handed to somebody else, so the
+          # operation is waited out first — see `__sys_overlapped_await` for
+          # what that wait has to be here.
+          #
+          # The connection is closed even when that wait says the AcceptEx
+          # succeeded: one nobody will receive has to be closed by somebody,
+          # and this frame is its only owner. Handing the descriptor back
+          # instead would give a cancelled caller a socket it drops
+          # unclosed and defer the cancellation it asked for, and a
+          # `shutdown` before the close would want a drain nobody is left to
+          # do. What the peer sees is this frame's close, which is the honest
+          # story: the server accepted, and then went away.
+          __sys_overlapped_await(s, ov)
+          LibWs2_32.closesocket(client)
+          return -WSAEWOULDBLOCK
+        end
+        # The listener was closed under the park — a close does complete a
+        # posted AcceptEx, measured — or the connection died in the
+        # handshake. Neither accepted anything, and both are the caller's
+        # wait to answer.
+        if __sys_overlapped_result(s, ov) < 0_i64
           LibWs2_32.closesocket(client)
           return -WSAEWOULDBLOCK
         end
@@ -884,7 +909,14 @@ pub class IyiSocket
         # is WSAEWOULDBLOCK: the shared `connect` above then waits, and
         # `wait_writable` answers `Cancelled` for a cancelled task, which is
         # the answer it wants.
-        return -WSAEWOULDBLOCK if parked.is_a?(Cancelled)
+        #
+        # `sent` and the OVERLAPPED are the kernel's until the operation is
+        # really over, though, and both are this frame's, so it is waited out
+        # before the frame leaves: `CancelIoEx` is a request, not an end.
+        if parked.is_a?(Cancelled)
+          __sys_overlapped_await(s, ov)
+          return -WSAEWOULDBLOCK
+        end
         # A refused connection is here and nowhere else. SO_ERROR is 0 after
         # a ConnectEx that was refused (measured), and the port's byte count
         # is 0 whether it succeeded or failed, so the operation's own result
@@ -926,11 +958,23 @@ pub class IyiSocket
       err = LibWs2_32.WSAGetLastError
       return -(err.to_i64) if err != ERROR_IO_PENDING
       parked = IyiScheduler.park_overlapped_current
-      return -(WSAEWOULDBLOCK.to_i64) if parked.is_a?(Cancelled)
-      # Nothing went: cancelled, closed under the park, or a peer that is
-      # gone. Answering "would block" sends the caller through the wait it
-      # already has, which answers `Cancelled` for the first two and comes
-      # back here for the third, where a plain `send` names the error.
+      if parked.is_a?(Cancelled)
+        # What the send did is read before the flag is honoured: Windows may
+        # have sent the bytes already — the port can deliver the completion
+        # first, and a sibling's cancel then only sets the flag — and
+        # answering "would block" over bytes that went made the shared
+        # `write` say `Cancelled`, so a caller that retried the buffer sent
+        # it twice. The read is the waiting one because the descriptor above
+        # and the OVERLAPPED are the kernel's until the operation is really
+        # over, and both are this frame's.
+        result = __sys_overlapped_await(s, ov)
+        return result if result > 0_i64
+        return -(WSAEWOULDBLOCK.to_i64)
+      end
+      # Nothing went: closed under the park, or a peer that is gone.
+      # Answering "would block" sends the caller through the wait it already
+      # has, which answers `Cancelled` for the first and comes back here for
+      # the second, where a plain `send` names the error.
       result = __sys_overlapped_result(s, ov)
       return -(WSAEWOULDBLOCK.to_i64) if result <= 0_i64
       result
@@ -1018,6 +1062,32 @@ pub class IyiSocket
         pointerof(flags))
       return transferred.to_i64 if answered != 0
       __sys_error
+    end
+
+    # The wait a cancelled post still owes the kernel. `CancelIoEx` is a
+    # request, and on a socket tied to a completion port the operation is not
+    # over when it returns: measured here, the status stays STATUS_PENDING
+    # and the address block, the descriptor and the OVERLAPPED are the
+    # kernel's until the completion packet is taken *off the port* — the
+    # poller's `GetQueuedCompletionStatus` is what writes them. The same
+    # measurement on an unassociated socket had the status written by
+    # `CancelIoEx` itself, which is why this is not obvious. So
+    # `WSAGetOverlappedResult`'s own wait flag cannot be the wait either: it
+    # waits on the OVERLAPPED's event, the scheduler's OVERLAPPED has none,
+    # and the socket handle it falls back to is never signalled for a socket
+    # on a port — it hung forever on the first cancelled receive tried.
+    #
+    # What ends the operation is the poller, so the frame parks once more and
+    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
+    # which is what would have left the packet to be dropped; parking puts it
+    # back, and the wake means the dequeue has happened. Asked first, because
+    # a completion the poller delivered *before* the cancel is already over
+    # and no second packet is coming — parking on one would never wake.
+    def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
+      result = __sys_overlapped_result(s, ov)
+      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
+      IyiScheduler.park_overlapped_current
+      __sys_overlapped_result(s, ov)
     end
   {% else %}
     def self.__sys_socket : Int32

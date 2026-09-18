@@ -114,6 +114,9 @@ using std/path::{Path}
     # A DWORD is declared Int32 here, as the prelude declares it: the same 32
     # bits at the ABI, and one signature per symbol is what a program gets.
     fun GetFileAttributesW(name : UInt16*) : Int32
+    # The one bit of a POSIX mode Windows has: `File.chmod` turns the
+    # owner's write bit into FILE_ATTRIBUTE_READONLY with this.
+    fun SetFileAttributesW(name : UInt16*, attributes : Int32) : Int32
     fun GetFileAttributesExW(path : UInt16*, level : Int32, data : WIN32_FILE_ATTRIBUTE_DATA*) : Int32
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
@@ -814,7 +817,15 @@ class ::File
       # 0o755 a directory and the 0o644 a file get from a default umask on
       # posix, and the ids are the "0" a posix stat answers for root — said
       # here rather than dressed up as an owner nobody set.
-      perms = Permissions.new(file_type.directory? ? 0o755 : 0o644)
+      #
+      # The one real bit is FILE_ATTRIBUTE_READONLY (0x1), which is what
+      # `File.chmod` writes and therefore what `writable?` has to read: with
+      # the default alone, a file `File.chmod(path, 0o444)` had just made
+      # read-only still answered `writable? true` and the next write
+      # panicked, which is the library disagreeing with itself.
+      mode = file_type.directory? ? 0o755 : 0o644
+      mode = mode & ~0o222 if (attrs & 0x1_u32) != 0_u32
+      perms = Permissions.new(mode)
 
       # A FILETIME is 100-nanosecond ticks from 1601-01-01, and
       # `modification_time` is the unix second the posix arms read out of
@@ -1157,6 +1168,27 @@ class ::File
       if Std::File::LibC.chmod(sys_path(p), mode) != 0
         raise "Cannot chmod #{p}"
       end
+    {% elsif flag?(:win32) %}
+      # Windows has one bit of this, and it is the one callers use: a file
+      # is read-only or it is not (FILE_ATTRIBUTE_READONLY, 0x1). There are
+      # no owner, group and other bits to set — an ACL is a different
+      # model and a different call — so the owner's write bit decides, and
+      # the rest of *mode* has nowhere to go.
+      #
+      # This used to do nothing at all, and the silence was the defect:
+      # `File.chmod(path, 0o444)` left `File.writable?` answering true and
+      # the next `File.write` succeeded, so a program that asked for a
+      # file to be unwritable was told it had been.
+      attrs = __iyi_path_attributes(sys_path(p))
+      raise "Cannot chmod #{p}: #{win_error}" if attrs == -1
+      wanted = mode & 0o200 == 0 ? attrs | 0x1 : attrs & ~0x1
+      if wanted != attrs
+        wide = __iyi_wide_path(sys_path(p))
+        raise "Cannot chmod #{p}: the path is not valid UTF-8" if wide.address == 0_u64
+        if Std::File::LibKernel32.SetFileAttributesW(wide, wanted) == 0
+          raise "Cannot chmod #{p}: #{win_error}"
+        end
+      end
     {% end %}
   end
 
@@ -1167,6 +1199,12 @@ class ::File
         raise "Cannot chown #{p}"
       end
     {% end %}
+    # Nothing on Windows, deliberately: a file's owner there is a SID in a
+    # security descriptor, not a numeric uid and gid, so there is no
+    # honest thing to do with the two numbers this takes. A Windows
+    # program that means to change an owner wants a different call and a
+    # different signature, and inventing one here would be a method that
+    # looks portable and is not.
   end
 
   def self.truncate(path : String | Path, size : Int64 = 0_i64) : Nil
@@ -1302,10 +1340,33 @@ class ::File
   @@temp_counter = 1000_u64
 
   def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
-    tmpdir = "/tmp"
-    {% if flag?(:win32) %}
-      tmpdir = "C:\\Windows\\Temp"
-    {% end %}
+    # Where the environment says, and the platform's own default only when
+    # it says nothing — the same order `Dir.tempdir` reads, because the two
+    # answering different directories is how a program writes a temporary
+    # file somewhere it cannot later find it. On Windows the hardcoded
+    # fallback was `C:\Windows\Temp`, which is a system directory an
+    # ordinary account cannot write to: measured, this answered
+    # `C:\Windows\Temp/wperm_0_1001` — a mixed separator and a path that
+    # only worked because the session was elevated — while `TEMP` named the
+    # per-user directory all along.
+    tmpdir = ""
+    named = Program.env("TMPDIR")
+    tmpdir = named if named && !named.empty?
+    if tmpdir.empty?
+      named = Program.env("TEMP")
+      tmpdir = named if named && !named.empty?
+    end
+    if tmpdir.empty?
+      named = Program.env("TMP")
+      tmpdir = named if named && !named.empty?
+    end
+    if tmpdir.empty?
+      {% if flag?(:win32) %}
+        tmpdir = "C:\\Windows\\Temp"
+      {% else %}
+        tmpdir = "/tmp"
+      {% end %}
+    end
     pid = 0_i64
     {% if flag?(:linux) %}
       pid = Std::File::LibC.sys(Std::File::LibC::SYS_GETPID, 0_i64, 0_i64, 0_i64)
@@ -1313,7 +1374,7 @@ class ::File
     i = 0
     while i < 1000
       @@temp_counter = @@temp_counter + 1_u64
-      path = tmpdir + "/" + prefix + "_" + pid.to_s + "_" + @@temp_counter.to_s + suffix
+      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + pid.to_s + "_" + @@temp_counter.to_s + suffix
       unless File.exists?(path)
         File.write(path, "")
         return path

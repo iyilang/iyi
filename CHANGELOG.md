@@ -304,6 +304,32 @@
 
 ### Fixed
 
+- **Three things `std/file` answered wrongly on Windows, each silently.**
+  Measured with one probe, all three visible in its output:
+
+  - `File.tempfile` wrote into `C:\Windows\Temp`, a system directory an
+    ordinary account cannot write to, with a POSIX separator glued on:
+    `C:\Windows\Temp/wperm_0_1001`. It reads `TMPDIR`, `TEMP` and `TMP`
+    first now — the order `Dir.tempdir` already read, because the two
+    answering different directories is how a program loses a file it just
+    wrote — and joins with the platform's separator:
+    `C:\Users\dogru\AppData\Local\Temp\wperm2_0_1001`.
+  - `File.chmod` did nothing at all. Windows has one bit of a POSIX mode,
+    FILE_ATTRIBUTE_READONLY, and the owner's write bit is what decides it;
+    before, `File.chmod(path, 0o444)` returned normally and the next
+    `File.write` succeeded, so a program that asked for a file to be
+    unwritable was told it had been. Now the write is refused.
+  - `File.writable?` ignored that attribute, so it disagreed with the
+    library beside it: after a `chmod` to `0o444` it answered `true` while
+    the write panicked. `info?` clears the write bits of its default mode
+    when the attribute is set, and the probe now reads `false`, `true` for
+    `readable?`, and `true` again after `0o644`.
+
+  `File.chown` still does nothing on Windows, and that is now written down
+  rather than left blank: an owner there is a SID in a security descriptor,
+  not a numeric uid and gid, so there is no honest thing to do with the two
+  numbers the method takes.
+
 - **SPEC.md's ceiling breach quoted two figures that did not agree.**
   "624 lines for Windows' arms" and "the library at 3,618" is one
   platform's arms subtracted from a sentence about every platform's, and

@@ -1199,12 +1199,13 @@ jobs:
           python3 bench/lsp_token_boundaries.py
           python3 bench/lsp_soak.py
 
-      # The position sweep on the other kernel: a cursor question is
-      # answered from the typed program, and the one thing this job has
-      # that the Linux one does not is darwin's own front end. Coarser,
-      # because a shared macOS runner is the slowest machine in the fleet.
-      - name: Every cursor question, sampled (III.8)
-        run: python3 bench/lsp_positions.py 600
+      # `bench/lsp_positions.py` is the Linux job's and stays there. A
+      # cursor question is answered from the typed program by the same
+      # front end on both kernels, so the sweep measures nothing here that
+      # is darwin's — and this job builds the compiler and walks the
+      # collector-free floor before it starts, which is 34 of its 42
+      # minutes against a 60-minute bound. A step whose value is a repeat
+      # is not what the remaining eight are for.
 
       # What a person who downloads it does: unpack it somewhere else and run
       # programs — iyi's own prelude with its kqueue runtime, `--crystal` with

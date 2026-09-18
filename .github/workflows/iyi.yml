@@ -488,6 +488,16 @@ jobs:
       - name: The language server does not flinch
         run: python3 bench/lsp_soak.py
 
+      # And the question from a position nobody chose. The soak above asks
+      # one hover after each abuse; this asks every cursor question at
+      # thousands of positions across `src/std`, including the two shapes
+      # the answers were wrong on — a macro directive line and a local
+      # assignment, where a variable an arm this target does not take has
+      # no type and a visitor read it anyway. Eighteen internal errors
+      # were found that way and nothing here had asked.
+      - name: Every cursor question, everywhere in the library
+        run: python3 bench/lsp_positions.py
+
       # The same question asked of the other kind of artifact: one whose object
       # code is a shard's and whose declarations `tool bind` wrote. III.6 rule 1
       # names an undefined symbol and a call returning another type, and
@@ -1188,6 +1198,13 @@ jobs:
         run: |
           python3 bench/lsp_token_boundaries.py
           python3 bench/lsp_soak.py
+
+      # The position sweep on the other kernel: a cursor question is
+      # answered from the typed program, and the one thing this job has
+      # that the Linux one does not is darwin's own front end. Coarser,
+      # because a shared macOS runner is the slowest machine in the fleet.
+      - name: Every cursor question, sampled (III.8)
+        run: python3 bench/lsp_positions.py 600
 
       # What a person who downloads it does: unpack it somewhere else and run
       # programs — iyi's own prelude with its kqueue runtime, `--crystal` with

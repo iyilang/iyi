@@ -4,6 +4,29 @@
 
 ### Added
 
+- **`bench/lsp_positions.py`: every cursor question, everywhere in the
+  library.** `lsp_session.py` asks the protocol's questions once each on a
+  file written for them and `lsp_soak.py` abuses the transport; neither
+  asked a question *from a position nobody chose*, which is where the
+  answers were wrong. 23,553 questions over the 67 modules of `src/std` -
+  hover, definition, completion, type definition, implementation,
+  highlights, signature help, prepare rename, call hierarchy, selection
+  ranges, the whole-file questions and a few `references` - at a strided
+  sweep plus the two shapes the eighteen internal errors were found on: a
+  macro directive line and a local assignment, where a variable an arm
+  this target does not take never got a type. Six minutes on Linux, a
+  coarser stride on darwin. Teeth, measured: against the commit before
+  the fix it reports seventeen `-32603`s over `std/dir` and `std/path`
+  alone.
+
+  A fresh server per module, and another every 400 questions, which is
+  not a detail: `iyi lsp` is the compiler's binary and carries no
+  collector (III.9), so a process that compiles module after module never
+  gives a byte back - this sweep against one long-lived server was killed
+  by the kernel at 19 GB. A compiler invocation compiles one program and
+  exits; so does a server here, and what one takes is measured and held
+  under a bound (1.2 GB against 4).
+
 - **Windows x86-64 is a platform the tree measures, not one it hopes
   about.** Of the 87 programs under `bench/`, 84 pass unattended on a
   Windows 11 machine, and the tree's own gates run there: every

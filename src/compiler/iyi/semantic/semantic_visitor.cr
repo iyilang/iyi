@@ -452,8 +452,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # the project root have none, so they keep their name.
   private def iyi_module_name(filename : String) : String
     root = project_root
-    if root && filename.starts_with?("#{root}/")
-      strip_source_suffix(filename[(root.size + 1)..])
+    # The file's path from the root, spelled as a module path: posix by
+    # grammar (R-1), while both sides of the question arrive in the
+    # platform's own separators. `starts_with?("#{root}/")` therefore
+    # answered no for every file of the project on Windows, and an import
+    # cycle was reported as a list of absolute file names.
+    if root && (relative = Iyi.path_under?(filename, root))
+      strip_source_suffix(::Path[relative].to_posix.to_s)
     else
       filename
     end

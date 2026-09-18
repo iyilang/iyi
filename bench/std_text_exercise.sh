@@ -15,9 +15,30 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 status=0
 
@@ -74,7 +95,7 @@ prove_fails() {
   local label="$1" dir="$2" phrase="$3" sed_script="$4"
   mkdir -p "$WORK/$dir/std"
   sed -e "$sed_script" "$REPO/src/std/text.iyi" > "$WORK/$dir/std/text.iyi"
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/std_text_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched text library did not build"
@@ -156,7 +177,7 @@ prove_fails_prelude() {
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/std_text_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"

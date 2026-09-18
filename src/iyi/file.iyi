@@ -28,7 +28,7 @@ class File
       # same diagnosis has to be made here or a directory would come back
       # as the flat "cannot read", naming no reason.
       {% if flag?(:win32) %}
-        attributes = LibC.GetFileAttributesA(c_path(path))
+        attributes = __iyi_path_attributes(c_path(path))
         if attributes != -1 && attributes & 0x10 != 0 # FILE_ATTRIBUTE_DIRECTORY
           raise "cannot read #{path}: it is a directory, or the read failed"
         end
@@ -55,12 +55,12 @@ class File
     {% if flag?(:wasm32) %}
       raise "File.exists? is not available on wasm32-wasi: path_open needs a preopened directory fd"
     {% elsif flag?(:win32) %}
-      # Not an open: `CreateFileA` without FILE_FLAG_BACKUP_SEMANTICS
+      # Not an open: `CreateFileW` without FILE_FLAG_BACKUP_SEMANTICS
       # cannot open a directory, so opening to answer this said `false`
       # for every directory on Windows where POSIX says `true`. The
       # attributes are the question being asked, and they cost no handle;
       # INVALID_FILE_ATTRIBUTES is the DWORD -1 this file's Int32 spells.
-      LibC.GetFileAttributesA(c_path(path)) != -1
+      __iyi_path_attributes(c_path(path)) != -1
     {% else %}
       fd = __iyi_open_read(c_path(path))
       return false if fd < 0

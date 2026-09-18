@@ -79,7 +79,7 @@ pub class IyiSocket
     __sys_set_nonblock(fd)
     res = __sys_connect(fd, addr)
     if res < 0 && !__sys_in_progress?(res)
-      __iyi_close(fd.to_i64)
+      __sys_close(fd)
       raise "cannot connect to #{host}:#{port}"
     end
     if res < 0
@@ -87,11 +87,11 @@ pub class IyiSocket
       # done, and SO_ERROR says how it went.
       waited = IyiSocket.await_writable(fd)
       if waited.is_a?(Cancelled)
-        __iyi_close(fd.to_i64)
+        __sys_close(fd)
         return waited
       end
       if __sys_sock_error(fd) != 0
-        __iyi_close(fd.to_i64)
+        __sys_close(fd)
         raise "cannot connect to #{host}:#{port}"
       end
     end
@@ -109,10 +109,16 @@ pub class IyiSocket
         return IyiSocket.new(client_fd)
       end
       raise "cannot accept socket" unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+      # Closed by another fiber, which is the same answer whether it
+      # happened under the accept or under the wait: the wait is over and
+      # nothing is coming, which is what `Cancelled` says. Asked before the
+      # wait as well as after, because on Windows the accept above is
+      # itself the wait — a posted `AcceptEx` that a close completed comes
+      # back here with the descriptor already gone, and a wait cannot be
+      # asked about a socket that no longer exists.
+      return Cancelled.new if @fd < 0
       waited = IyiSocket.await_readable(@fd)
       return waited if waited.is_a?(Cancelled)
-      # Closed under the wait, by another fiber: the wait is over and
-      # nothing is coming, which is what `Cancelled` says.
       return Cancelled.new if @fd < 0
     end
   end
@@ -219,12 +225,12 @@ pub class IyiSocket
     ip = parse_ip(host)
     addr = make_sockaddr_in(ip, port)
     if __sys_bind(fd, addr) < 0
-      __iyi_close(fd.to_i64)
+      __sys_close(fd)
       raise "cannot bind socket to #{host}:#{port}"
     end
 
     if __sys_listen(fd, backlog) < 0
-      __iyi_close(fd.to_i64)
+      __sys_close(fd)
       raise "cannot listen on socket"
     end
 
@@ -247,7 +253,7 @@ pub class IyiSocket
         # already gone; then the descriptor goes.
         wake_closed(fd)
       {% end %}
-      __iyi_close(fd.to_i64)
+      IyiSocket.__sys_close(fd)
     end
   end
 
@@ -357,6 +363,19 @@ pub class IyiSocket
     buffer[7] = ip.b3
 
     buffer
+  end
+
+  # Every close of a socket in this file goes through here. `__iyi_close` is
+  # the descriptor close, and on Windows a socket is not a descriptor:
+  # `CloseHandle` on a SOCKET releases the kernel handle and leaves Winsock's
+  # half of it standing, and the graceful close that makes a peer's read
+  # answer EOF rather than a reset is `closesocket`'s.
+  def self.__sys_close(fd : Int32) : Nil
+    {% if flag?(:win32) %}
+      LibWs2_32.closesocket(__sys_handle(fd))
+    {% else %}
+      __iyi_close(fd.to_i64)
+    {% end %}
   end
 
   # --- Platform System Call Bindings ---
@@ -611,6 +630,464 @@ pub class IyiSocket
       len = 4_i32
       __sys5(SYS_GETSOCKOPT, fd.to_i64, 1_i64, 4_i64, pointerof(err).address.to_i64, pointerof(len).address.to_i64)
       err
+    end
+  {% elsif flag?(:win32) %}
+    # Windows' sockets are Winsock's, not a descriptor table's: `socket`
+    # answers a SOCKET, which is a pointer-sized kernel handle and not an fd
+    # — `read`, `write` and `close` on one are `recv`, `send` and
+    # `closesocket`. Windows guarantees a handle value fits in 32 bits, so
+    # that a 64-bit process can hand one to a 32-bit one, which is what lets
+    # this class go on carrying a socket in its `Int32` `@fd`; and
+    # INVALID_SOCKET, which is all ones, narrows to -1, the failure every
+    # caller above already reads.
+    #
+    # The parking is the other half of the difference. Windows has no
+    # readiness model: a completion port answers an operation that was
+    # *posted*, not a descriptor that became ready. Where the scheduler's
+    # `wait_readable` works — it is a zero-byte overlapped read, which a
+    # connected socket answers exactly when bytes arrive, measured at 63.7 ms
+    # for a peer that sent at 60, with the bytes still in the socket buffer
+    # afterwards — the shared bodies above are used unchanged. Where it does
+    # not, the operation itself is the wait: `accept` posts `AcceptEx` and a
+    # send with no room posts `WSASend`, both parked on the same completion
+    # port through `IyiScheduler.arm_overlapped_current` and
+    # `park_overlapped_current` (SPEC.md III.4.8). A listening socket answers
+    # the zero-byte read in 32 us with a failure, so an accept that waited
+    # that way would spin without ever rescheduling, and the sleep it would
+    # otherwise fall back to costs 15.6 ms a round on Windows' default timer
+    # tick — both measured here before this arm was written.
+    @[Link("ws2_32")]
+    lib LibWs2_32
+      fun WSAStartup(version : UInt16, data : Void*) : Int32
+      fun WSAGetLastError : Int32
+      fun socket(af : Int32, type : Int32, protocol : Int32) : UInt64
+      fun bind(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      fun listen(s : UInt64, backlog : Int32) : Int32
+      fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
+      fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun send(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun closesocket(s : UInt64) : Int32
+      fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
+      fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32) : Int32
+      fun getsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32*) : Int32
+      fun ioctlsocket(s : UInt64, cmd : Int32, argp : Int32*) : Int32
+      fun WSASend(s : UInt64, buffers : WSABuf*, count : Int32, sent : Int32*, flags : Int32,
+                  overlapped : Void*, routine : Void*) : Int32
+      fun WSAIoctl(s : UInt64, code : UInt32, inbuf : Void*, inlen : Int32, outbuf : Void*,
+                   outlen : Int32, returned : Int32*, overlapped : Void*, routine : Void*) : Int32
+      fun WSAGetOverlappedResult(s : UInt64, overlapped : Void*, transferred : Int32*,
+                                 wait : Int32, flags : Int32*) : Int32
+
+      # A WSABUF, and the two address slots AcceptEx fills in - each a
+      # `sockaddr_in` and the sixteen bytes it insists on after one. They are
+      # declared here so that the callers below can keep them on the stack:
+      # the kernel reads and writes these while the fiber is parked, and a
+      # heap chunk whose only reference is a local the posting call has
+      # finished with is a chunk the collector can hand to somebody else
+      # first. `bench/server_load.iyi` died of a memory fault on exactly
+      # that, with the accepted addresses on the heap.
+      struct WSABuf
+        len : Int32
+        buf : UInt8*
+      end
+
+      struct AddressSlot
+        address_low : UInt64
+        address_high : UInt64
+        slack_low : UInt64
+        slack_high : UInt64
+      end
+
+      struct AcceptAddresses
+        local : AddressSlot
+        remote : AddressSlot
+      end
+    end
+
+    # The length of a `sockaddr_in` in the type Winsock's calls want, which
+    # is a plain `int`. See the darwin branch's note for why each branch
+    # spells its own rather than converting one.
+    SOCKADDR_IN_SIZE = 16
+
+    AF_INET     = 2
+    SOCK_STREAM = 1
+    IPPROTO_TCP = 6
+
+    SOL_SOCKET = 0xffff
+    SO_ERROR   = 0x1007
+    # The two that tell a socket AcceptEx or ConnectEx made where it came
+    # from: without them `getsockname` on one answers 0.0.0.0:0 and
+    # `shutdown` answers WSAEINVAL.
+    SO_UPDATE_ACCEPT_CONTEXT  = 0x700b
+    SO_UPDATE_CONNECT_CONTEXT = 0x7010
+
+    # FIONBIO, `_IOW('f', 126, u_long)`, as the signed 32-bit code the call
+    # takes. It is the whole of how a socket is made non-blocking here:
+    # Windows has no `fcntl`, and the flag cannot be read back.
+    FIONBIO = -2147195266
+
+    # The three numbers this arm reads by name: what a non-blocking call with
+    # nothing to do says, what a posted operation says, and what an
+    # operation that is not over yet says when it is asked how it went.
+    WSAEWOULDBLOCK    = 10035
+    ERROR_IO_PENDING  =   997
+    WSA_IO_INCOMPLETE =   996
+
+    INVALID_SOCKET                     = 0xffffffffffffffff_u64
+    SIO_GET_EXTENSION_FUNCTION_POINTER =         0xc8000006_u32
+
+    # `AcceptEx` and `ConnectEx` are mswsock's exports, and Winsock's own way
+    # to reach one without linking a second DLL is to ask a socket for the
+    # pointer by GUID. A GUID in memory is two 64-bit words; these are
+    # WSAID_ACCEPTEX {b5367df1-cbac-11cf-95ca-00805f48a192} and
+    # WSAID_CONNECTEX {25a207b9-ddf3-4660-8ee9-76e58c74063e}.
+    WSAID_ACCEPTEX_LOW   = 0x11cfcbacb5367df1_u64
+    WSAID_ACCEPTEX_HIGH  = 0x92a1485f8000ca95_u64
+    WSAID_CONNECTEX_LOW  = 0x4660ddf325a207b9_u64
+    WSAID_CONNECTEX_HIGH = 0x3e06748ce576e98e_u64
+
+    alias AcceptExFn = Proc(UInt64, UInt64, Void*, Int32, Int32, Int32, Pointer(Int32), Void*, Int32)
+    alias ConnectExFn = Proc(UInt64, Void*, Int32, Void*, Int32, Pointer(Int32), Void*, Int32)
+
+    # Winsock answers WSANOTINITIALISED to every call until the process has
+    # called `WSAStartup`, and a library has no startup of its own to do it
+    # in: the first socket is the first moment it is known to be needed. The
+    # flag makes it once instead of per socket, and two threads that race
+    # here both call it, which is what the call being counted is for. There
+    # is no matching `WSACleanup`: it would have to be the last socket's
+    # close, a library that guessed wrong would answer WSANOTINITIALISED to
+    # the next socket the program opened, and process exit releases it
+    # anyway — the same answer Go and Rust give.
+    @@winsock : Bool = false
+
+    def self.__sys_winsock : Nil
+      return if @@winsock
+      # A WSADATA is 408 bytes here and none of its fields is read; only
+      # whether the call answered 0 matters.
+      data = Pointer(UInt8).malloc(512_u64)
+      raise "cannot start Winsock" if LibWs2_32.WSAStartup(0x0202_u16, data.as(Void*)) != 0
+      @@winsock = true
+    end
+
+    # A SOCKET from the `Int32` the class carries, and back: see the note
+    # above the `lib` block for why that is lossless.
+    def self.__sys_handle(fd : Int32) : UInt64
+      fd.to_i64.to_u64!
+    end
+
+    # The failure the last call left, negated. The POSIX arms answer the
+    # kernel's errno this way — Linux the negative return itself, darwin
+    # `errno` read after a -1 — and this answers Winsock's number in the same
+    # shape, so nothing above learns a second convention: a negative result
+    # is the failure, and the two predicates below are the only things that
+    # read which failure it was.
+    def self.__sys_error : Int64
+      -(LibWs2_32.WSAGetLastError.to_i64)
+    end
+
+    def self.__sys_socket : Int32
+      __sys_winsock
+      s = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      return -1 if s == INVALID_SOCKET
+      s.to_i32!
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
+      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), SOCKADDR_IN_SIZE) != 0
+      0
+    end
+
+    def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), backlog) != 0
+      0
+    end
+
+    # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
+    # the same width and the same bytes, so the callers above keep one
+    # signature.
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      s = __sys_handle(fd)
+      client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
+      return client.to_i32! if client != INVALID_SOCKET
+      err = LibWs2_32.WSAGetLastError
+      return -err if err != WSAEWOULDBLOCK
+      # Nothing was queued, and a listening socket has no readable state a
+      # completion port can answer. `AcceptEx` is the accept it does answer,
+      # and it takes the socket it will fill in, so here the wait and the
+      # accept are one call.
+      __sys_accept_posted(s, addr, addrlen)
+    end
+
+    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      # A cancelled task must not post: nothing would wake it but the
+      # completion, and a listener nobody connects to never produces one.
+      # Answering "would block" sends the caller into the wait it already
+      # has, which answers `Cancelled` for exactly this.
+      return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
+      # The extension pointer before the socket: the ask raises when Winsock
+      # cannot answer it, and a `client` created first is a socket nobody is
+      # left to close. Nothing between the two depends on the order.
+      post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
+      client = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      return __sys_error.to_i32 if client == INVALID_SOCKET
+      addresses = uninitialized LibWs2_32::AcceptAddresses
+      received = 0_i32
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      answered = post.call(s, client, pointerof(addresses).as(Void*), 0,
+        SOCKADDR_IN_SIZE + 16, SOCKADDR_IN_SIZE + 16, pointerof(received), ov.as(Void*))
+      if answered == 0
+        err = LibWs2_32.WSAGetLastError
+        if err != ERROR_IO_PENDING
+          LibWs2_32.closesocket(client)
+          return -err
+        end
+        parked = IyiScheduler.park_overlapped_current
+        if parked.is_a?(Cancelled)
+          # `CancelIoEx` is a request, not an end: `addresses` and the
+          # OVERLAPPED are the kernel's until the operation is really over,
+          # and both are this frame's. Returning on the flag alone left the
+          # kernel writing into a frame that is gone and an OVERLAPPED the
+          # collector may already have handed to somebody else, so the
+          # operation is waited out first — see `__sys_overlapped_await` for
+          # what that wait has to be here.
+          #
+          # The connection is closed even when that wait says the AcceptEx
+          # succeeded: one nobody will receive has to be closed by somebody,
+          # and this frame is its only owner. Handing the descriptor back
+          # instead would give a cancelled caller a socket it drops
+          # unclosed and defer the cancellation it asked for, and a
+          # `shutdown` before the close would want a drain nobody is left to
+          # do. What the peer sees is this frame's close, which is the honest
+          # story: the server accepted, and then went away.
+          __sys_overlapped_await(s, ov)
+          LibWs2_32.closesocket(client)
+          return -WSAEWOULDBLOCK
+        end
+        # The listener was closed under the park — a close does complete a
+        # posted AcceptEx, measured — or the connection died in the
+        # handshake. Neither accepted anything, and both are the caller's
+        # wait to answer.
+        if __sys_overlapped_result(s, ov) < 0_i64
+          LibWs2_32.closesocket(client)
+          return -WSAEWOULDBLOCK
+        end
+      end
+      # The peer, where the POSIX `accept` leaves it: AcceptEx answers it in
+      # its second slot instead, so the two arms agree on what the caller's
+      # buffer holds when this returns.
+      peer = pointerof(addresses).as(Pointer(UInt8)) + (SOCKADDR_IN_SIZE + 16)
+      index = 0
+      while index < SOCKADDR_IN_SIZE
+        addr[index] = peer[index]
+        index = index + 1
+      end
+      addrlen.value = 16_u32
+      owner = s
+      LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
+      client.to_i32!
+    end
+
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
+      s = __sys_handle(fd)
+      return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
+      # `ConnectEx` is the connect a completion port can answer, and it
+      # insists on a socket that is already bound; the POSIX `connect` binds
+      # implicitly, so that is done here, to the wildcard address and the
+      # ephemeral port the implicit bind would have picked anyway.
+      any = make_sockaddr_in(IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8), 0)
+      return __sys_error.to_i32 if LibWs2_32.bind(s, any.as(Void*), SOCKADDR_IN_SIZE) != 0
+      post = __sys_extension(s, WSAID_CONNECTEX_LOW, WSAID_CONNECTEX_HIGH).as(Pointer(ConnectExFn)).value
+      sent = 0_i32
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      answered = post.call(s, addr.as(Void*), SOCKADDR_IN_SIZE, Pointer(Void).new(0_u64), 0,
+        pointerof(sent), ov.as(Void*))
+      if answered == 0
+        err = LibWs2_32.WSAGetLastError
+        return -err if err != ERROR_IO_PENDING
+        parked = IyiScheduler.park_overlapped_current
+        # A cancelled task answers Winsock's "under way", which for a connect
+        # is WSAEWOULDBLOCK: the shared `connect` above then waits, and
+        # `wait_writable` answers `Cancelled` for a cancelled task, which is
+        # the answer it wants.
+        #
+        # `sent` and the OVERLAPPED are the kernel's until the operation is
+        # really over, though, and both are this frame's, so it is waited out
+        # before the frame leaves: `CancelIoEx` is a request, not an end.
+        if parked.is_a?(Cancelled)
+          __sys_overlapped_await(s, ov)
+          return -WSAEWOULDBLOCK
+        end
+        # A refused connection is here and nowhere else. SO_ERROR is 0 after
+        # a ConnectEx that was refused (measured), and the port's byte count
+        # is 0 whether it succeeded or failed, so the operation's own result
+        # is the only thing that knows: WSAECONNREFUSED comes back as -10061
+        # and the shared `connect` refuses it by name.
+        result = __sys_overlapped_result(s, ov)
+        return result.to_i32 if result < 0_i64
+      end
+      LibWs2_32.setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, Pointer(Void).new(0_u64), 0)
+      0
+    end
+
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      s = __sys_handle(fd)
+      n = LibWs2_32.send(s, buf.as(Void*), len.to_i32, 0)
+      return n.to_i64 if n >= 0
+      err = LibWs2_32.WSAGetLastError
+      return -(err.to_i64) if err != WSAEWOULDBLOCK
+      # The send buffer is full — 2 MiB of it to a peer that never reads,
+      # measured — and there is nothing to wait for: `wait_writable` answers
+      # nil at once on win32, honest for the file and pipe paths it was
+      # written for, and a zero-byte overlapped send cannot stand in for it,
+      # since one completes on its own within 50 ms on a socket with no room
+      # at all. So the send is the wait.
+      __sys_send_posted(s, buf, len)
+    end
+
+    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64) : Int64
+      return -(WSAEWOULDBLOCK.to_i64) if IyiScheduler.current.cancelled
+      # The buffer descriptor stays on this frame for the whole operation:
+      # the kernel reads it after the post, and the fiber is parked in
+      # between.
+      descriptor = LibWs2_32::WSABuf.new(len: len.to_i32, buf: buf)
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      sent = 0_i32
+      answered = LibWs2_32.WSASend(s, pointerof(descriptor), 1, pointerof(sent), 0, ov.as(Void*),
+        Pointer(Void).new(0_u64))
+      return sent.to_i64 if answered == 0
+      err = LibWs2_32.WSAGetLastError
+      return -(err.to_i64) if err != ERROR_IO_PENDING
+      parked = IyiScheduler.park_overlapped_current
+      if parked.is_a?(Cancelled)
+        # What the send did is read before the flag is honoured: Windows may
+        # have sent the bytes already — the port can deliver the completion
+        # first, and a sibling's cancel then only sets the flag — and
+        # answering "would block" over bytes that went made the shared
+        # `write` say `Cancelled`, so a caller that retried the buffer sent
+        # it twice. The read is the waiting one because the descriptor above
+        # and the OVERLAPPED are the kernel's until the operation is really
+        # over, and both are this frame's.
+        result = __sys_overlapped_await(s, ov)
+        return result if result > 0_i64
+        return -(WSAEWOULDBLOCK.to_i64)
+      end
+      # Nothing went: closed under the park, or a peer that is gone.
+      # Answering "would block" sends the caller through the wait it already
+      # has, which answers `Cancelled` for the first and comes back here for
+      # the second, where a plain `send` names the error.
+      result = __sys_overlapped_result(s, ov)
+      return -(WSAEWOULDBLOCK.to_i64) if result <= 0_i64
+      result
+    end
+
+    def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      n = LibWs2_32.recv(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
+      return n.to_i64 if n >= 0
+      __sys_error
+    end
+
+    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
+    end
+
+    # Nothing, and not for want of the option. SO_REUSEADDR on Windows lets a
+    # *different* socket bind a port this one is already bound to, and the
+    # last binder takes the packets; what the POSIX arms ask for with it is
+    # only the waiver of the TIME_WAIT wait on a port nobody holds. Setting
+    # it here would hand any program on the machine the port `listen` just
+    # took. Windows does not need the waiver either: a listening socket's
+    # port is free again as soon as it closes.
+    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      0
+    end
+
+    def self.__sys_set_nonblock(fd : Int32) : Int32
+      on = 1
+      LibWs2_32.ioctlsocket(__sys_handle(fd), FIONBIO, pointerof(on))
+    end
+
+    # WSAEWOULDBLOCK answers both questions here: it is what a non-blocking
+    # call with nothing to do says, and it is what a connect that is under
+    # way says, where POSIX has EAGAIN and EINPROGRESS for the two.
+    def self.__sys_would_block?(result : Int64) : Bool
+      result == -WSAEWOULDBLOCK
+    end
+
+    def self.__sys_in_progress?(result : Int32) : Bool
+      result == -WSAEWOULDBLOCK
+    end
+
+    # SO_ERROR at SOL_SOCKET, as on the POSIX arms. `__sys_connect` above has
+    # already waited for the handshake and answered what it ended with, so
+    # the shared `connect` reaches this only when its task was cancelled —
+    # and `wait_writable` answers `Cancelled` before it gets here. It reads
+    # the option rather than guessing, so it is the truth for anything that
+    # does ask.
+    def self.__sys_sock_error(fd : Int32) : Int32
+      err = 0_i32
+      len = 4
+      LibWs2_32.getsockopt(__sys_handle(fd), SOL_SOCKET, SO_ERROR, pointerof(err).as(Void*), pointerof(len))
+      err
+    end
+
+    # The pointer to one of mswsock's extension functions, asked of the
+    # socket that will use it. Fetched where it is used rather than cached:
+    # it is one call, and both callers are about to do a TCP handshake.
+    def self.__sys_extension(s : UInt64, low : UInt64, high : UInt64) : Pointer(UInt64)
+      guid = Pointer(UInt64).malloc(2_u64)
+      guid[0] = low
+      guid[1] = high
+      # Two words, because that is what a Proc is: the function, and the
+      # closure data it does not have. The second must be zero and `malloc`
+      # does not promise it.
+      slot = Pointer(UInt64).malloc(2_u64)
+      slot[0] = 0_u64
+      slot[1] = 0_u64
+      returned = 0_i32
+      answered = LibWs2_32.WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, guid.as(Void*), 16,
+        slot.as(Void*), 8, pointerof(returned), Pointer(Void).new(0_u64), Pointer(Void).new(0_u64))
+      raise "cannot reach Winsock's extension functions" if answered != 0
+      slot
+    end
+
+    # What a posted operation ended with, read off the operation itself. The
+    # completion port's byte count cannot tell a failure from a success that
+    # transferred nothing, and a successful `AcceptEx` or `ConnectEx` is
+    # exactly that — both complete with zero bytes. Nothing waits here: the
+    # completion has already arrived, which is what the 0 says.
+    def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
+      transferred = 0_i32
+      flags = 0_i32
+      answered = LibWs2_32.WSAGetOverlappedResult(s, ov.as(Void*), pointerof(transferred), 0,
+        pointerof(flags))
+      return transferred.to_i64 if answered != 0
+      __sys_error
+    end
+
+    # The wait a cancelled post still owes the kernel. `CancelIoEx` is a
+    # request, and on a socket tied to a completion port the operation is not
+    # over when it returns: measured here, the status stays STATUS_PENDING
+    # and the address block, the descriptor and the OVERLAPPED are the
+    # kernel's until the completion packet is taken *off the port* — the
+    # poller's `GetQueuedCompletionStatus` is what writes them. The same
+    # measurement on an unassociated socket had the status written by
+    # `CancelIoEx` itself, which is why this is not obvious. So
+    # `WSAGetOverlappedResult`'s own wait flag cannot be the wait either: it
+    # waits on the OVERLAPPED's event, the scheduler's OVERLAPPED has none,
+    # and the socket handle it falls back to is never signalled for a socket
+    # on a port — it hung forever on the first cancelled receive tried.
+    #
+    # What ends the operation is the poller, so the frame parks once more and
+    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
+    # which is what would have left the packet to be dropped; parking puts it
+    # back, and the wake means the dequeue has happened. Asked first, because
+    # a completion the poller delivered *before* the cancel is already over
+    # and no second packet is coming — parking on one would never wake.
+    def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
+      result = __sys_overlapped_result(s, ov)
+      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
+      IyiScheduler.park_overlapped_current
+      __sys_overlapped_result(s, ov)
     end
   {% else %}
     def self.__sys_socket : Int32

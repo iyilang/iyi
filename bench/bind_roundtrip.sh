@@ -18,9 +18,28 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CRYSTAL="$REPO/bin/crystal"
-IYI="$REPO/bin/iyi"
+# the wrappers in bin are posix shell scripts, so a caller that already has
+# compilers of its own names them through the environment.
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+IYI="${IYI:-$REPO/bin/iyi}"
+
+# A reader that is not installed reads nothing: with no `strings` the
+# evidence line below comes out empty and the gate reads straight past it,
+# which is a measurement that never happened rather than one that held.
+STRINGS=""
+command -v strings >/dev/null 2>&1 && STRINGS=strings
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and the sources
+# written into a scratch directory named `/tmp/tmp.X` are named by a path it
+# cannot read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 # Four methods, and each is a shape this boundary got wrong once.
 #
@@ -771,8 +790,13 @@ fi
 # Printed because it is the evidence: without this line the union above could
 # be one the consumer forms for itself, and the gate would be checking nothing.
 printf 'the nested-in-a-generic method, emitted against its declaration: '
-grep -c 'Shard::Holder::Note' mods/shard_keep.cr > /dev/null && \
-  strings -a mods/shard.iyimod | grep -oE '\*Shard::Holder::Note#write[^ ]*' | sort -u | head -1 || echo "MISSING"
+if [ -z "$STRINGS" ]; then
+  echo "no strings here, so the emitted method is not read"
+elif grep -c 'Shard::Holder::Note' mods/shard_keep.cr > /dev/null; then
+  "$STRINGS" -a mods/shard.iyimod | grep -oE '\*Shard::Holder::Note#write[^ ]*' | sort -u | head -1 || echo "MISSING"
+else
+  echo "MISSING"
+fi
 
 printf 'the union this shard matches against, carried: '
 "$IYI" mod dump mods/shard.iyimod | grep -F '(Char | Int32)' | tr -d ' ' || echo "MISSING"
@@ -859,7 +883,10 @@ if ! (cd "$NEAR" && "$IYI" bind --lib lib --mods mods > "$NEAR/bind.log" 2>&1); 
   sed 's/^/    /' "$NEAR/bind.log" | head -12
   status=1
 elif "$IYI" mod dump "$NEAR/mods/radix.iyimod" > "$NEAR/dump.txt" 2>&1 &&
-     grep -q 'src/radix\.cr$' "$NEAR/dump.txt" &&
+     # Either separator: the dump names its inputs the way the platform
+     # writes a path, and a check that only knows `/` called a correct
+     # answer the neighbour's file.
+     grep -qE 'src[/\\]radix\.cr$' "$NEAR/dump.txt" &&
      ! grep -q 'src-extra' "$NEAR/dump.txt"; then
   echo "  the inputs are the shard's file and not the neighbour's"
 else

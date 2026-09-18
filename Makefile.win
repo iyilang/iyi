@@ -89,6 +89,27 @@ IYI_CONFIG_LIBRARY_PATH     := $$ORIGIN\..\lib\iyi
 IYI_COMPILER_FLAGS          := -Dwithout_iconv$(if $(collector),,  -Dgc_none)
 export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
 
+# iyi: what a downloadable build of iyi is called. The Linux Makefile asks
+# `uname` for the two last words; here the platform is the makefile, so they
+# are written out.
+IYI_VERSION     ?= $(shell type src\IYI_VERSION)
+IYI_PACKAGE     := iyi-$(IYI_VERSION)-windows-x86_64
+IYI_PACKAGE_DIR := $(O)\$(IYI_PACKAGE)
+
+# iyi: the one library a packaged `iyi.exe` cannot find on a machine that has
+# never seen LLVM. `dumpbin /dependents` on the binary names two libraries
+# Windows does not ship, LLVM-C.dll and VCRUNTIME140.dll, and the second one
+# comes with the Visual C++ build tools the compiler needs anyway for its
+# linker — so this is the only file the zip has to carry beside the binary.
+#
+# Taken out of `$(O)`, where the build already put it: on msvc the compiler
+# copies every DLL a binary needs beside that binary
+# (`src\compiler\iyi\compiler.cr`, `copy_dlls`), so this is the exact
+# LLVM-C.dll the link resolved. A `where LLVM-C.dll` instead would take
+# whatever is first on PATH, which on this machine is a second LLVM install
+# of its own version.
+IYI_PACKAGE_LLVM ?= $(O)\LLVM-C.dll
+
 ifeq ($(LLVM_VERSION),)
 LLVM_CONFIG  ?=
 LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version))
@@ -162,6 +183,89 @@ iyi: $(O)\iyi.exe ## iyi: build `iyi` itself, runnable as .build\iyi.exe
 .PHONY: iyi-daemon
 iyi-daemon: $(O)\iyi-daemon.exe ## iyi: build iyi's own single-threaded build daemon
 
+.PHONY: iyi-zip
+iyi-zip: ## iyi: build a relocatable zip at .build
+# bake-format off: Mbake bug with Duplicate target rule https://github.com/EbodShojaei/bake/issues/106
+iyi-zip: release := 1
+iyi-zip: $(O)\iyi.exe check_iyi_is_release
+# bake-format on
+# iyi: the layout the binary already bakes. `IYI_CONFIG_PATH` above says
+# `$ORIGIN\..\share\iyi\src`, so a `bin\iyi.exe` unpacked beside a
+# `share\iyi` finds its prelude with nothing set in the environment — which
+# is what makes the zip relocatable and what `scripts\package-windows.ps1`
+# then proves by unpacking it somewhere else and building a program with
+# PATH cut down to Windows' own directories.
+	$(call RMDIR,"$(IYI_PACKAGE_DIR)")
+	$(call MKDIR,"$(IYI_PACKAGE_DIR)\bin")
+	$(call CP,"$(O)\iyi.exe","$(IYI_PACKAGE_DIR)\bin\iyi.exe")
+
+# `iyi-daemon.exe` is not here, and cannot be yet: `make -f Makefile.win
+# iyi-daemon` stops at `can't find file 'c/poll'` from
+# `src\compiler\iyi\command\daemon.cr:4`, and the design behind that line is
+# the rest of it — the server loop is `poll(2)` and the per-build worker is
+# `fork`, neither of which is Windows. The Linux tarball ships the binary
+# this one has to leave out.
+
+# In `bin`, not in `lib`: the loader reads a binary's own directory before it
+# reads PATH, so LLVM-C.dll beside the binary is found by it and by nothing
+# else on the machine.
+	if not exist "$(IYI_PACKAGE_LLVM)" ( \
+	  echo LLVM-C.dll is not at $(IYI_PACKAGE_LLVM) and iyi.exe cannot start without it.& \
+	  echo The build copies it there; if it did not, it warned that it could not locate it in CRYSTAL_LIBRARY_PATH or on PATH. Set IYI_PACKAGE_LLVM to the DLL to package another one.& \
+	  exit 1 \
+	)
+	$(call CP,"$(IYI_PACKAGE_LLVM)","$(IYI_PACKAGE_DIR)\bin\LLVM-C.dll")
+
+	$(call MKDIR,"$(IYI_PACKAGE_DIR)\share\iyi\src")
+	$(call CPDIR,src\iyi,"$(IYI_PACKAGE_DIR)\share\iyi\src\iyi")
+
+# And the standard library beside it under its own name, because `import
+# std/text` is a program's line and not a checkout's. 0.11.0 shipped none of
+# it and answered that line with "can't find module".
+	$(call CPDIR,src\std,"$(IYI_PACKAGE_DIR)\share\iyi\src\std")
+
+# Crystal's library is not here, and the zip is honest about it rather than
+# large. `--crystal` gives a program Crystal's prelude, which links pcre2-8,
+# gc, iconv and the rest, and the only `.lib` files for those on a Windows
+# machine are the ones in the bootstrap package's `lib`: measured here,
+# `--crystal` builds and runs out of this checkout with
+# `CRYSTAL_LIBRARY_PATH` pointing at that directory and cannot find the
+# libraries without it. So a zip carrying the library and not those would
+# reach the linker and stop there. The Linux tarball can ship the library
+# because a Linux machine has the libraries.
+
+# A sample that builds leaves its binary beside it and a copy takes whatever
+# is on disk, which is how the Linux tarball once shipped 82 MB of a shard's
+# `mods/`. Pruned by shape rather than by name, so the next sample of that
+# shape is covered too.
+	$(call CPDIR,samples\iyi,"$(IYI_PACKAGE_DIR)\share\iyi\samples" /XF *.exe *.pdb /XD lib mods)
+
+	$(call CP,README.md,"$(IYI_PACKAGE_DIR)\share\iyi\README.md")
+	$(call CP,SPEC.md,"$(IYI_PACKAGE_DIR)\share\iyi\SPEC.md")
+	$(call MKDIR,"$(IYI_PACKAGE_DIR)\share\licenses\iyi")
+	$(call CP,LICENSE,"$(IYI_PACKAGE_DIR)\share\licenses\iyi\LICENSE")
+	$(call CP,NOTICE.md,"$(IYI_PACKAGE_DIR)\share\licenses\iyi\NOTICE.md")
+
+# Entry by entry rather than `ZipFile.CreateFromDirectory`, and the
+# separator is the whole reason: .NET Framework's CreateFromDirectory names
+# entries with the separator it found on disk, so the first zip built here
+# carried `bin\iyi.exe` — one filename with a backslash in it to Explorer's
+# own extractor, to 7-Zip, and to `unzip` on the machine of anybody who
+# looks inside it from Linux. The zip format says `/`, so each name is
+# spelled that way here. `Compress-Archive` is not the alternative: it walks
+# the tree through the pipeline, which over 85 MB of LLVM is minutes rather
+# than the seconds this takes.
+	$(call RM,"$(O)\$(IYI_PACKAGE).zip")
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; $$src = (Resolve-Path '$(IYI_PACKAGE_DIR)').Path; $$zip = [System.IO.Compression.ZipFile]::Open((Join-Path (Resolve-Path '$(O)').Path '$(IYI_PACKAGE).zip'), 'Create'); Get-ChildItem -LiteralPath $$src -Recurse -File | ForEach-Object { [void] [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($$zip, $$_.FullName, $$_.FullName.Substring($$src.Length + 1).Replace('\', '/')) }; $$zip.Dispose()"
+
+# The line `install.ps1` checks the download against, in `sha256sum`'s
+# format, because the release publishes one SHA256SUMS for every platform's
+# file and the Linux job writes its lines with `sha256sum`. Written with a
+# single LF for the same reason: `sha256sum -c` reads its own file back and
+# a CR is part of the filename to it.
+	powershell -NoProfile -ExecutionPolicy Bypass -Command "$$zip = (Resolve-Path '$(O)\$(IYI_PACKAGE).zip').Path; $$line = (Get-FileHash -LiteralPath $$zip -Algorithm SHA256).Hash.ToLower() + '  ' + [System.IO.Path]::GetFileName($$zip) + [char]10; [System.IO.File]::WriteAllText((Join-Path (Split-Path $$zip) 'SHA256SUMS'), $$line)"
+	@echo wrote $(O)\$(IYI_PACKAGE).zip
+
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler)
 
@@ -209,6 +313,29 @@ uninstall_compiler:
 
 	$(call RM,"$(BINDIR)\crystal.exe")
 	$(call RM,"$(BINDIR)\crystal.pdb")
+
+# iyi: the binary about to be packaged is an optimised one.
+#
+# `release := 1` on `iyi-zip` asks for that, and asking is not enough: make
+# rebuilds on file times, so an `iyi.exe` left over from an ordinary `make -f
+# Makefile.win iyi` is newer than every source and gets packaged as it is.
+# Nothing about the zip would look wrong. The binary would simply be an
+# unoptimised compiler, and every build every user ran would go through it — a
+# release nobody could see was slow.
+#
+# So it is asked of the binary rather than of the build: `--version` says which
+# it is. `exit`, not `exit /B`: make runs a recipe through a batch file and
+# `exit /B` inside a parenthesised block returns from the block without
+# failing the line, which passed a debug build through the first time this was
+# written.
+.PHONY: check_iyi_is_release
+check_iyi_is_release: $(O)\iyi.exe
+	@$(O)\iyi.exe --version | findstr /C:"not built in release mode" >NUL && ( \
+	  echo $(O)\iyi.exe is not an optimised build, and a zip ships what it packages.& \
+	  echo It is up to date by file times, so make will not rebuild it. Force it:& \
+	  echo   make -f Makefile.win -B iyi release=1& \
+	  exit 1 \
+	) || rem the binary does not say it, which is the pass
 
 $(O)\all_spec.exe: $(DEPS) $(SOURCES) $(SPEC_SOURCES)
 	$(call check_llvm_config)

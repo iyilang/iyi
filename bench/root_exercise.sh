@@ -43,16 +43,51 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/floor_base.sh"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
 
+# A floor measured with a reader that is not installed is not measured at
+# all: `nm -u` in a shell with no `nm` prints nothing, and an empty symbol
+# list reads as a floor that held. The readers are resolved once here, and
+# the arm that needs them says what it could not measure instead.
+NM=""
+command -v nm >/dev/null 2>&1 && NM=nm
+LIBS_READER=""
+for candidate in otool readelf; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    LIBS_READER="$candidate"
+    break
+  fi
+done
+unmeasured=0
+
 # The same readers `bench/dependency_floor.sh` uses, for the same reason: what
 # a binary itself leaves undefined and what it itself asks to have loaded.
 symbols() {
-  nm -u "$1" 2>/dev/null |
+  "$NM" -u "$1" 2>/dev/null |
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
@@ -61,7 +96,7 @@ symbols() {
 }
 
 libraries() {
-  if command -v otool >/dev/null 2>&1; then
+  if [ "$LIBS_READER" = otool ]; then
     otool -L "$1" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
   else
     readelf -d "$1" 2>/dev/null |
@@ -107,18 +142,31 @@ build_and_run() {
 echo "== the exercise, the default allocator"
 build_and_run "default" roots-gc
 
+# Where the collector's allocator is not the default the program says so and
+# exercises nothing. The arms below would then be reading an empty run, and a
+# negative proof whose program has nothing to fail at reports the opposite of
+# the truth, so they say what went unmeasured instead.
+EXERCISED=yes
+grep -q "root discovery needs the collector" "$WORK/roots-gc.out" 2>/dev/null &&
+  EXERCISED=no
+
 echo
 echo "== every check reported"
-for check in "stack bounds:" "global range:" "stack root:" "register root:" \
-             "global root:" "interior pointer:" "not a pointer:" "arena tail:" \
-             "freed chunk:" "freed large:" "many roots:" "maps parser:" \
-             "all root checks passed"; do
-  if ! grep -q "$check" "$WORK/roots-gc.out" 2>/dev/null; then
-    echo "  MISSING: $check"
-    status=1
-  fi
-done
-[ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, tail, freed, many and the maps parser all reported"
+if [ "$EXERCISED" = no ]; then
+  echo "  the collector's allocator is not the default here, so there is nothing reported to check"
+  unmeasured=$((unmeasured + 1))
+else
+  for check in "stack bounds:" "global range:" "stack root:" "register root:" \
+               "global root:" "interior pointer:" "not a pointer:" "arena tail:" \
+               "freed chunk:" "freed large:" "many roots:" "maps parser:" \
+               "all root checks passed"; do
+    if ! grep -q "$check" "$WORK/roots-gc.out" 2>/dev/null; then
+      echo "  MISSING: $check"
+      status=1
+    fi
+  done
+  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, tail, freed, many and the maps parser all reported"
+fi
 
 echo
 echo "== the same program, opted out with -Dgc_none"
@@ -140,7 +188,10 @@ echo "== the same program with optimisation on"
 # run is not a formality: it is the one that would catch the ordering that
 # lets the optimiser reuse the register before the scan reaches it.
 build_and_run "release" roots-release --release
-if ! grep -q "all root checks passed" "$WORK/roots-release.out" 2>/dev/null; then
+if [ "$EXERCISED" = no ]; then
+  echo "  nothing was exercised here, so the optimised run is unmeasured too"
+  unmeasured=$((unmeasured + 1))
+elif ! grep -q "all root checks passed" "$WORK/roots-release.out" 2>/dev/null; then
   echo "  MISSING: the optimised build did not reach the end"
   status=1
 fi
@@ -176,13 +227,25 @@ case "$(uname -s)" in
       exit 2
     fi
     ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # no floor has been measured on windows, and a list borrowed from another
+    # platform would name every import here as new, so this arm reports what
+    # it could not measure rather than a number it did not take.
+    allowed_symbols=""
+    ;;
   *)
     allowed_symbols="$FLOOR_BASE_DARWIN"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"
 
-if [ -x "$WORK/roots-gc" ]; then
+if [ -z "$allowed_symbols" ]; then
+  echo "  no floor is on record for this platform, so what root discovery asks for is unmeasured"
+  unmeasured=$((unmeasured + 1))
+elif [ -z "$NM" ] || [ -z "$LIBS_READER" ]; then
+  echo "  no nm and no otool or readelf here, so what root discovery asks for is unmeasured"
+  unmeasured=$((unmeasured + 1))
+elif [ -x "$WORK/roots-gc" ]; then
   gc_syms="$(symbols "$WORK/roots-gc")"
   gc_libs="$(libraries "$WORK/roots-gc")"
   printf '  symbols   %s\n' "$(echo $gc_syms)"
@@ -218,6 +281,10 @@ case "$(uname -s)" in
   Linux) other_targets="x86_64-darwin aarch64-darwin" ; other_expect="" ;;
   *)     other_targets="x86_64-linux-gnu aarch64-linux-gnu" ; other_expect="__data_start __ehdr_start _end" ;;
 esac
+if [ -z "$NM" ]; then
+  echo "  no nm here, so what these objects leave undefined is unmeasured; they still have to compile"
+  unmeasured=$((unmeasured + 1))
+fi
 for target in $other_targets; do
   if ! "$IYI" build --cross-compile --target "$target" \
        -o "$WORK/roots-$target" "$REPO/bench/root_exercise.iyi" \
@@ -227,7 +294,10 @@ for target in $other_targets; do
     status=1
     continue
   fi
-  found="$(nm -u "$WORK/roots-$target.o" 2>/dev/null |
+  # the object compiled, which is half of what this arm says; with no reader
+  # the other half goes unsaid rather than reading as an empty symbol list.
+  [ -z "$NM" ] && continue
+  found="$("$NM" -u "$WORK/roots-$target.o" 2>/dev/null |
     sed -e 's/^ *//' -e 's/^U  *//' | awk '{ print $NF }' | sort -u | tr '\n' ' ')"
   printf '  %-20s undefined: %s\n' "$target" "${found:-(none)}"
   if [ -n "$other_expect" ]; then
@@ -256,10 +326,15 @@ prove_fails() {
   # $1 label, $2 directory name, $3 expected phrase, rest: the awk program
   local label="$1" dir="$2" phrase="$3"
   shift 3
+  if [ "$EXERCISED" = no ]; then
+    echo "  $label: the exercise has nothing to run here, so this proof is unmeasured"
+    unmeasured=$((unmeasured + 1))
+    return
+  fi
   mkdir -p "$WORK/$dir/iyi"
   cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
   awk "$1" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/root_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"
@@ -310,10 +385,17 @@ prove_fails "no fiber walk" nofiber "fiber root:" '
 '
 
 echo
-if [ "$status" -eq 0 ]; then
+if [ "$status" -ne 0 ]; then
+  echo "Roots: something above failed."
+elif [ "$unmeasured" -eq 1 ]; then
+  # A summary may not claim more than was measured: an arm with no reader,
+  # no floor on record, or nothing to exercise is counted here rather than
+  # folded into the pass.
+  echo "Roots: what ran holds, with 1 check not measured here."
+elif [ "$unmeasured" -gt 1 ]; then
+  echo "Roots: what ran holds, with $unmeasured checks not measured here."
+else
   echo "Roots: stack, registers and globals are all found, an interior pointer"
   echo "resolves to its base, and nothing that is not a live chunk is reported."
-else
-  echo "Roots: something above failed."
 fi
 exit $status

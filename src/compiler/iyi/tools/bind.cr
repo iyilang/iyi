@@ -2210,9 +2210,15 @@ module Iyi
                              dir : String) : String
     # Relative, and written from where this file will sit: Crystal refuses an
     # absolute path in a `require`, and the shard is not on `IYI_PATH`.
+    #
+    # POSIX-form, because the next thing that happens to this path is that it
+    # is read back out of a double-quoted string in a `.cr` file. On Windows
+    # `relative_to?` answers `..\entry.cr`, and `\a` and `\e` are escapes
+    # there, so the fill build went looking for a file called `..try.cr`.
+    # `require` resolves `/` on every platform Crystal builds on.
     source = ::Path[File.expand_path(program.filename || "")]
     base = ::Path[File.expand_path(dir)]
-    relative = source.relative_to?(base).try(&.to_s) || source.to_s
+    relative = source.relative_to?(base).try(&.to_posix.to_s) || source.to_posix.to_s
     relative = "./#{relative}" unless relative.starts_with?(".")
 
     String.build do |io|

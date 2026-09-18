@@ -2302,13 +2302,21 @@ module Iyi::Lsp
         next unless text
         old_mod = Exports.header_of(text)
         next unless old_mod
+        # Read as posix, the way `Compiler.header_root_of` reads the same
+        # question: a module path is posix by grammar (R-1) and these two are
+        # filesystem paths. A `file://` URI spells `/` on Windows as well, so
+        # this is the one of the three that was not already answering for the
+        # wrong files, and now it does not depend on where its paths came
+        # from either.
+        old_posix = ::Path[old_path].to_posix.to_s
+        new_posix = ::Path[new_path].to_posix.to_s
         suffix = "/#{old_mod}.iyi"
-        next unless old_path.ends_with?(suffix)
+        next unless old_posix.ends_with?(suffix)
 
-        root = old_path[0, old_path.size - suffix.size]
+        root = old_posix[0, old_posix.size - suffix.size]
         prefix = root.empty? ? "/" : root + "/"
-        next unless new_path.starts_with?(prefix)
-        new_mod = new_path[prefix.size..].rchop(".iyi")
+        next unless new_posix.starts_with?(prefix)
+        new_mod = new_posix[prefix.size..].rchop(".iyi")
         next if new_mod.empty? || new_mod == old_mod || !clean_module?(new_mod)
 
         (edits[uri_of(old_path)] ||= [] of {Int32, Int32, Int32, String})

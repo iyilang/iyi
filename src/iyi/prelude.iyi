@@ -234,6 +234,31 @@ end
     __iyi_read(fd.to_i32, buffer, count)
   end
 
+  # Whether a descriptor is a terminal. There is no `isatty` syscall: the
+  # question is asked by making a terminal-only `ioctl` and seeing whether
+  # the kernel refuses it, which is what libc's `isatty` does too (TCGETS,
+  # 0x5401; `ioctl` is 16 on x86_64 and 29 on aarch64). The buffer is a
+  # `termios` the answer is written into and nothing reads: 60 bytes is
+  # larger than the struct on both architectures.
+  def __iyi_isatty(fd : Int32) : Bool
+    termios = uninitialized UInt8[60]
+    result = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(result)
+                    : "{rax}"(16_i64), "{rdi}"(fd.to_i64), "{rsi}"(0x5401_i64),
+                      "{rdx}"(pointerof(termios).as(Void*))
+                    : "rcx", "r11", "memory"
+                    : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(result)
+                   : "{x8}"(29_i64), "{x0}"(fd.to_i64), "{x1}"(0x5401_i64),
+                     "{x2}"(pointerof(termios).as(Void*))
+                   : "memory"
+                   : "volatile")
+    {% end %}
+    result >= 0_i64
+  end
+
   def __iyi_exit(status : Int32) : NoReturn
     {% if flag?(:x86_64) %}
       asm("syscall" :: "{rax}"(231_i64), "{rdi}"(status.to_i64) : "rcx", "r11", "memory" : "volatile")
@@ -258,6 +283,11 @@ end
     fun exit(status : Int32) : NoReturn
     fun backtrace(buffer : Void**, size : Int32) : Int32
     fun backtrace_symbols_fd(buffer : Void**, size : Int32, fd : Int32) : Void
+    # `std/colorize` asks whether standard output is a terminal before it
+    # writes an escape. Apple's answer is libSystem's, the same as every
+    # other call in this block; the Linux arm above makes the `ioctl` by
+    # hand because there is no libc there to ask.
+    fun isatty(fd : Int32) : Int32
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -274,6 +304,10 @@ end
 
   def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.read(fd.to_i32, buffer, count)
+  end
+
+  def __iyi_isatty(fd : Int32) : Bool
+    LibC.isatty(fd) != 0
   end
 
   def __iyi_open_read(path : UInt8*) : Int64
@@ -342,10 +376,17 @@ end
                   number_of_bytes_written : Int32*, overlapped : Void*) : Int32
     fun ReadFile(handle : Void*, buffer : Void*, number_of_bytes_to_read : Int32,
                  number_of_bytes_read : Int32*, overlapped : Void*) : Int32
-    fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
-    fun DeleteFileA(name : UInt8*) : Int32
-    fun GetFileAttributesA(name : UInt8*) : Int32
+    fun DeleteFileW(name : UInt16*) : Int32
+    fun GetFileAttributesW(name : UInt16*) : Int32
+    fun MultiByteToWideChar(code_page : Int32, flags : Int32, bytes : UInt8*,
+                            byte_count : Int32, wide : UInt16*, wide_count : Int32) : Int32
+    fun WideCharToMultiByte(code_page : Int32, flags : Int32, wide : UInt16*,
+                            wide_count : Int32, bytes : UInt8*, byte_count : Int32,
+                            default_char : UInt8*, used_default : Int32*) : Int32
+    fun GetFullPathNameW(name : UInt16*, buffer_count : Int32, buffer : UInt16*,
+                         file_part : UInt16**) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
   end
@@ -382,45 +423,188 @@ end
     fun GetActiveProcessorCount(group_number : UInt16) : Int32
     fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
     fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
+    # The console's own three: whether a handle is one, its mode, and the
+    # wide write. `GetConsoleMode` failing is how a pipe is told apart from
+    # a terminal here.
+    fun GetConsoleMode(handle : Void*, mode : Int32*) : Int32
+    fun SetConsoleMode(handle : Void*, mode : Int32) : Int32
+    fun WriteConsoleW(handle : Void*, buffer : Void*, count : Int32,
+                      written : Int32*, reserved : Void*) : Int32
+    fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
+                     read : Int32*, control : Void*) : Int32
+    # The crash path's three, and the only thing a program of this shape
+    # asks Windows for at startup: no error dialog, room reserved for the
+    # overflow handler, and the handler itself.
+    fun SetErrorMode(mode : Int32) : Int32
+    fun SetThreadStackGuarantee(size : Int32*) : Int32
+    fun SetUnhandledExceptionFilter(filter : Void*) : Void*
+    fun AddVectoredExceptionHandler(first : Int32, handler : Void*) : Void*
   end
 
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
   # STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12). They are negative
   # identifiers reinterpreted as DWORD; as Int32 they spell themselves.
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
-    if fd == 1
-      handle = LibC.GetStdHandle(-11)
-    elsif fd == 2
-      handle = LibC.GetStdHandle(-12)
-    elsif fd == 0
-      handle = LibC.GetStdHandle(-10)
-    else
-      handle = Pointer(Void).new(fd.to_i64.to_u64)
+  def __iyi_std_handle(fd : Int64) : Void*
+    return LibC.GetStdHandle(-11) if fd == 1_i64
+    return LibC.GetStdHandle(-12) if fd == 2_i64
+    return LibC.GetStdHandle(-10) if fd == 0_i64
+    Pointer(Void).new(fd.to_u64)
+  end
+
+  # The console, which is not a file even though Windows hands it out as a
+  # handle. Three things follow from that and all three were wrong:
+  #
+  #   * A console renders the bytes `WriteFile` gives it in the console's
+  #     *output code page*, which is 437 on an ordinary machine: `puts "çay"`
+  #     printed `‡ay`. `WriteConsoleW` takes UTF-16 and renders what the
+  #     program meant, so console output is converted and file output is not
+  #     — a redirected stream must stay the program's own bytes.
+  #   * VT sequences are off unless a program asks. Windows Terminal turns
+  #     them on for its own session and `conhost.exe` does not, which is why
+  #     `std/colorize` looked fine in one terminal and printed `←[31m` in the
+  #     other. ENABLE_VIRTUAL_TERMINAL_PROCESSING is 0x4, asked once.
+  #   * "Is this a terminal?" has no `isatty` here, and `GetConsoleMode`
+  #     answering at all *is* the test: it fails for a pipe and for a file.
+  #
+  # A write may end inside a UTF-8 sequence, because `IyiIO` flushes a full
+  # buffer wherever it fills. The tail is carried here, packed into a word,
+  # and goes out in front of the next write; the whole count is reported
+  # written because the caller's loop retries a short write with the same
+  # incomplete bytes and would never make progress.
+  module IyiConsole
+    @@probed : UInt64 = 0_u64
+    @@console : UInt64 = 0_u64
+    @@vt : UInt64 = 0_u64
+    # A carry per stream, not one for the module: stdout and stderr are
+    # separate console handles and separate byte streams, and a single pair
+    # here put a tail held back from one of them in front of the next write
+    # to the *other* — measured, a character whose lead byte went to stdout
+    # and whose continuation byte went to stderr came out whole, on stderr.
+    # Two pairs rather than an array indexed by the descriptor, because the
+    # prelude's `StaticArray` has no `[]=` and a heap slot for two words
+    # would be a mapping to keep alive for nothing.
+    @@carry_out : UInt64 = 0_u64
+    @@carry_out_length : Int32 = 0
+    @@carry_err : UInt64 = 0_u64
+    @@carry_err_length : Int32 = 0
+
+    def self.console?(fd : Int64, handle : Void*) : Bool
+      return false if fd < 0_i64 || fd > 2_i64
+      bit = 1_u64.unsafe_shl(fd.to_u64)
+      if @@probed & bit == 0_u64
+        mode = uninitialized Int32
+        @@console = @@console | bit if LibC.GetConsoleMode(handle, pointerof(mode)) != 0
+        @@probed = @@probed | bit
+      end
+      @@console & bit != 0_u64
     end
+
+    def self.enable_vt(fd : Int64, handle : Void*) : Nil
+      bit = 1_u64.unsafe_shl(fd.to_u64)
+      return if @@vt & bit != 0_u64
+      @@vt = @@vt | bit
+      mode = uninitialized Int32
+      return if LibC.GetConsoleMode(handle, pointerof(mode)) == 0
+      LibC.SetConsoleMode(handle, mode | 4)
+      nil
+    end
+
+    # How many of *count* bytes at *bytes* end a UTF-8 sequence. A lead byte
+    # says how many follow: 0xC0 two, 0xE0 three, 0xF0 four.
+    private def self.complete_length(bytes : UInt8*, count : Int32) : Int32
+      back = 1
+      while back <= 3 && back <= count
+        lead = bytes[count - back]
+        if lead >= 0xC0_u8
+          needed = lead >= 0xF0_u8 ? 4 : (lead >= 0xE0_u8 ? 3 : 2)
+          return count - back if needed > back
+          return count
+        end
+        return count if lead < 0x80_u8
+        back = back + 1
+      end
+      count
+    end
+
+    def self.write(fd : Int64, handle : Void*, buffer : Void*, count : UInt64) : Int64
+      enable_vt(fd, handle)
+      # Anything that is not the error stream carries as the output one:
+      # `console?` has already refused every descriptor outside 0..2, and 0
+      # is read from rather than written to.
+      on_error = fd == 2_i64
+      staged = buffer.as(UInt8*)
+      total = count.to_i32
+      held = on_error ? @@carry_err_length : @@carry_out_length
+      if held > 0
+        packed = on_error ? @@carry_err : @@carry_out
+        joined = Pointer(UInt8).malloc((held + total).to_u64)
+        index = 0
+        while index < held
+          joined[index] = (packed.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
+          index = index + 1
+        end
+        (joined + held).copy_from(staged, total)
+        staged = joined
+        total = total + held
+        if on_error
+          @@carry_err = 0_u64
+          @@carry_err_length = 0
+        else
+          @@carry_out = 0_u64
+          @@carry_out_length = 0
+        end
+      end
+      whole = complete_length(staged, total)
+      tail = total - whole
+      if tail > 0
+        packed = 0_u64
+        index = 0
+        while index < tail
+          packed = packed | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
+          index = index + 1
+        end
+        if on_error
+          @@carry_err = packed
+          @@carry_err_length = tail
+        else
+          @@carry_out = packed
+          @@carry_out_length = tail
+        end
+      end
+      return count.to_i64 if whole == 0
+      wide_count = LibC.MultiByteToWideChar(65001, 0, staged, whole, Pointer(UInt16).new(0_u64), 0)
+      # Not UTF-8 after all: the bytes are the program's and go out as they
+      # are, which is what every other platform does with them.
+      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if wide_count <= 0
+      wide = Pointer(UInt16).malloc(wide_count.to_u64)
+      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if LibC.MultiByteToWideChar(65001, 0, staged, whole, wide, wide_count) <= 0
+      written = uninitialized Int32
+      return -1_i64 if LibC.WriteConsoleW(handle, wide.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
+      count.to_i64
+    end
+  end
+
+  def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
     written = uninitialized Int32
-    if LibC.WriteFile(handle, buffer,
-         count.to_i32, pointerof(written), nil) == 0
+    if LibC.WriteFile(handle, buffer, count.to_i32, pointerof(written), nil) == 0
       return -1_i64
     end
     written.to_i64
   end
 
+  # Whether a descriptor is a terminal, which only the console answers yes to.
+  def __iyi_isatty(fd : Int32) : Bool
+    IyiConsole.console?(fd.to_i64, __iyi_std_handle(fd.to_i64))
+  end
+
+  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+    __iyi_write(fd.to_i64, buffer, count)
+  end
+
   def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
-    if fd == 1_i64
-      handle = LibC.GetStdHandle(-11)
-    elsif fd == 2_i64
-      handle = LibC.GetStdHandle(-12)
-    elsif fd == 0_i64
-      handle = LibC.GetStdHandle(-10)
-    else
-      handle = Pointer(Void).new(fd.to_u64)
-    end
-    written = uninitialized Int32
-    if LibC.WriteFile(handle, buffer,
-         count.to_i32, pointerof(written), nil) == 0
-      return -1_i64
-    end
-    written.to_i64
+    handle = __iyi_std_handle(fd)
+    return IyiConsole.write(fd, handle, buffer, count) if IyiConsole.console?(fd, handle)
+    __iyi_win_write_file(handle, buffer, count)
   end
 
   def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -451,6 +635,124 @@ end
     read.to_i64
   end
 
+  # A path is UTF-16 on Windows, and this is where iyi's UTF-8 becomes it.
+  #
+  # The `*A` entry points read a path in the process's *active code page*,
+  # so the UTF-8 bytes an iyi string carries arrived as whatever those bytes
+  # spell in that page: `File.write("ünïcode-ü.txt", …)` created a file
+  # Explorer shows as `Ã¼nÃ¯code-Ã¼.txt`, and reading it back worked only
+  # because both directions were wrong in the same way. `MultiByteToWideChar`
+  # with CP_UTF8 (65001) is the conversion Windows itself offers, so no
+  # decoder is written here.
+  #
+  # Long paths come with it. A `*W` call still stops at MAX_PATH unless the
+  # path carries the `\\?\` prefix, and that prefix turns off all path
+  # normalisation: `.`, `..` and `/` are no longer understood, so it may only
+  # be put on a full path. The rule is therefore: convert, and if the result
+  # is long, ask `GetFullPathNameW` for the absolute form and prefix that —
+  # `\\?\` for a drive path, `\\?\UNC\` for a share, which is the one shape
+  # where the leading `\\` is replaced rather than kept.
+  #
+  # 248 rather than 260 is deliberate: MAX_PATH is the limit for a *file*,
+  # and a directory a file is later created in has to leave room for a name,
+  # which is the number `CreateDirectoryW` documents.
+  IYI_WIN_PATH_LIMIT = 248
+
+  def __iyi_wide_path(path : UInt8*) : UInt16*
+    needed = LibC.MultiByteToWideChar(65001, 0, path, -1, Pointer(UInt16).new(0_u64), 0)
+    return Pointer(UInt16).new(0_u64) if needed <= 0
+    wide = Pointer(UInt16).malloc(needed.to_u64)
+    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 0, path, -1, wide, needed) <= 0
+    # `needed` counts the terminator; the length does not.
+    # The limit is on the path Windows resolves, not on the text handed in:
+    # `needed` measures a relative name without the current directory in
+    # front of it, and a short name in a deep directory is a long path.
+    # Measured before this line said so: a 215-byte relative name in a
+    # 48-byte directory is 264 bytes absolute — past MAX_PATH, under this
+    # threshold, so no prefix went on and the call failed, while the same
+    # path written absolutely worked. A rooted path is its own absolute
+    # form, so there its own length is the answer and nothing is asked.
+    return wide if needed - 1 < IYI_WIN_PATH_LIMIT && __iyi_wide_rooted?(wide)
+    __iyi_wide_long_path(wide)
+  end
+
+  # `\\server\share` and `\\?\…` are rooted, and so is `C:\`. `C:x` is
+  # relative to that drive's own current directory and `\x` to the current
+  # drive, and neither one's length says what the absolute one is.
+  private def __iyi_wide_rooted?(wide : UInt16*) : Bool
+    return false if wide[0] == 0_u16
+    return true if wide[0] == 92_u16 && wide[1] == 92_u16
+    return false if wide[1] != 58_u16 # ':'
+    wide[2] == 92_u16 || wide[2] == 47_u16
+  end
+
+  private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
+    full_needed = LibC.GetFullPathNameW(wide, 0, Pointer(UInt16).new(0_u64), Pointer(Pointer(UInt16)).new(0_u64))
+    return wide if full_needed <= 0
+    full = Pointer(UInt16).malloc(full_needed.to_u64)
+    written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
+    return wide if written <= 0
+    # Resolved short: the path was relative and shallow, so the plain
+    # relative form is the one to keep — a `\\?\` prefix may only sit on a
+    # full path, and putting one on a short path costs a resolution nothing
+    # asked for.
+    return wide if written < IYI_WIN_PATH_LIMIT
+    # Already prefixed: `\\?\` in the source survives GetFullPathNameW.
+    return full if full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16
+    unc = full[0] == 92_u16 && full[1] == 92_u16
+    # `\\?\` is four characters, `\\?\UNC\` eight, and a share drops the two
+    # leading separators it replaces.
+    prefix_length = unc ? 8 : 4
+    body = unc ? full + 2 : full
+    body_length = written - (unc ? 2 : 0)
+    prefixed = Pointer(UInt16).malloc((prefix_length + body_length + 1).to_u64)
+    prefixed[0] = 92_u16 # '\'
+    prefixed[1] = 92_u16
+    prefixed[2] = 63_u16 # '?'
+    prefixed[3] = 92_u16
+    if unc
+      prefixed[4] = 85_u16 # 'U'
+      prefixed[5] = 78_u16 # 'N'
+      prefixed[6] = 67_u16 # 'C'
+      prefixed[7] = 92_u16
+    end
+    index = 0
+    while index < body_length
+      prefixed[prefix_length + index] = body[index]
+      index = index + 1
+    end
+    prefixed[prefix_length + body_length] = 0_u16
+    prefixed
+  end
+
+  # The way back, for every Windows call that *answers* with UTF-16: a
+  # directory entry's name, the current directory, a resolved path. The
+  # library asks for it here rather than each module writing a decoder, and
+  # `String` is the right answer rather than a byte buffer because every
+  # caller wants one. The bytes are UTF-8 (CP_UTF8, 65001), which is what an
+  # iyi string is.
+  def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
+    LibC.WideCharToMultiByte(65001, 0, wide, -1, buffer, limit,
+      Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+  end
+
+  # How many bytes the UTF-8 of *wide* needs, terminator included, or 0 when
+  # Windows refuses the conversion.
+  def __iyi_utf8_size_from_wide(wide : UInt16*) : Int32
+    needed = LibC.WideCharToMultiByte(65001, 0, wide, -1, Pointer(UInt8).new(0_u64), 0,
+      Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+    needed > 0 ? needed : 0
+  end
+
+  # The attributes of a path, or -1 (INVALID_FILE_ATTRIBUTES) when there is
+  # nothing there. `File` asks this rather than opening, because
+  # `CreateFileW` without FILE_FLAG_BACKUP_SEMANTICS refuses a directory.
+  def __iyi_path_attributes(path : UInt8*) : Int32
+    wide = __iyi_wide_path(path)
+    return -1 if wide.address == 0_u64
+    LibC.GetFileAttributesW(wide)
+  end
+
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE
   # is all bits set, which as an unsigned address plus one wraps to zero.
   #
@@ -462,15 +764,19 @@ end
   # still open came back as ERROR_SHARING_VIOLATION: that is what
   # `bench/io_exercise.iyi`'s flush check read as "cannot read".
   def __iyi_open_read(path : UInt8*) : Int64
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
     # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
+    handle = LibC.CreateFileW(wide, -2147483648, 7, nil, 3, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
     # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
-    handle = LibC.CreateFileA(path, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
+    handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
@@ -480,7 +786,9 @@ end
   end
 
   def __iyi_unlink(path : UInt8*) : Int64
-    return 0_i64 if LibC.DeleteFileA(path) != 0
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
+    return 0_i64 if LibC.DeleteFileW(wide) != 0
     -1_i64
   end
 
@@ -577,6 +885,13 @@ end
 
   def __iyi_exit(status : Int32) : NoReturn
     LibWasi.proc_exit(status)
+  end
+
+  # WASI has `fd_fdstat_get` and a character-device filetype, which is as
+  # close to a terminal as the sandbox gets. Nothing here asks yet, and a
+  # guess would be the wrong kind of answer: no terminal, so no escapes.
+  def __iyi_isatty(fd : Int32) : Bool
+    false
   end
 {% else %}
   {% raise "iyi: this target is not one iyi's prelude has platform bindings for. " \
@@ -2949,9 +3264,23 @@ require "./file"
       # from a fixed top on both targets, so the number does not change over
       # a run and reading it lazily is the same answer as recording it at
       # startup, without the startup cost for a program that never collects.
+      #
+      # Except on Windows, where it is not one number: the fiber switch
+      # rewrites the TEB's StackBase and StackLimit so that a Windows API
+      # called on a fiber's stack sees that stack (concurrency.iyi's
+      # `switch_stack`), which means this answers *the current stack's*
+      # base and memoizing it stores whichever stack asked first. A run
+      # that first collected inside a spawned fiber then walked the main
+      # fiber's stack from its saved sp to that fiber's top — two
+      # unrelated mappings, gigabytes apart — and died of a memory fault
+      # in the scan. The read is two instructions, so Windows re-reads.
       def self.stack_base : UInt64
-        @@stack_base = discover_stack_base if @@stack_base == 0
-        @@stack_base
+        {% if flag?(:win32) %}
+          discover_stack_base
+        {% else %}
+          @@stack_base = discover_stack_base if @@stack_base == 0
+          @@stack_base
+        {% end %}
       end
 
       {% if flag?(:darwin) %}
@@ -4694,8 +5023,15 @@ require "./file"
       # every arena and the large list at once, what `IyiMark.collect` runs
       # for a program that asked for its memory back now.
       def self.sweep : Nil
-        # Any class (0), until nothing is left: 2 is a slice another
-        # walker is inside, and the batch is microseconds away.
+        # `sweep_one` takes the size class the caller wants and answers 0
+        # when there is nothing left, 1 for a slice swept and 2 for a
+        # slice a helper is inside. This loop called it with no argument
+        # at all, so `IyiMark.sweep` — a public verb — did not compile on
+        # any target: a program that asked for its memory back was told
+        # "wrong number of arguments for 'IyiMark.sweep_one'". The class
+        # asked for is the smallest, because a class with nothing left
+        # sweeps any other, and 2 is a slice that is microseconds away, so
+        # only 0 ends the loop.
         while sweep_one(0_u64) != 0_u64
         end
         sweep_large
@@ -7216,6 +7552,318 @@ require "./file"
     result
   end
 {% end %}
+
+{% if flag?(:win32) %}
+  # The four division helpers LLVM calls for a 128-bit `/` and `%`, and why
+  # Windows is the target that has to carry them.
+  #
+  # LLVM has no 128-bit divide instruction to lower to on any target: an
+  # `sdiv`/`udiv`/`srem`/`urem` on `i128` becomes a call to `__divti3`,
+  # `__udivti3`, `__modti3` or `__umodti3`, the compiler-rt names. Linux and
+  # darwin have that library on the link line already, as libgcc or as the
+  # platform's own compiler-rt; the msvc link step has neither, so every
+  # program that divided a 128-bit integer failed to link:
+  #
+  #   I-nt128.o0.obj : error LNK2019: unresolved external symbol __modti3
+  #   referenced in function .2A.Int128.23..25..3C.Int128.3E..3A.Int128
+  #
+  # which is `std/int`'s `Int128#%`. Linking `clang_rt.builtins-x86_64.lib`
+  # for four functions would move this tree's dependency floor
+  # (`bench/dependency_floor.sh`: kernel32, advapi32, ws2_32, the CRT import
+  # libraries and the opt-in collector), so the four are defined here
+  # instead, the same way `__multi3` above is defined for the targets that
+  # ask for it.
+  #
+  # These are ABI, not library API: LLVM emits the calls behind the
+  # program's back, so the names, the parameters and the return are the
+  # backend's, and a definition that merely looks right is a silently wrong
+  # quotient. The shape below is measured, from `--emit asm` on a program
+  # that divides a `UInt128`: the call site passes each operand *by
+  # address*, dividend in rcx and divisor in rdx, and reads the answer out
+  # of xmm0 —
+  #
+  #   lea rcx, [rsp + 80]   ; the dividend's two words
+  #   lea rdx, [rsp + 64]   ; the divisor's two words
+  #   call __udivti3
+  #   movq rax, xmm0
+  #   pshufd xmm0, xmm0, 238
+  #   movq rdx, xmm0
+  #
+  # which is the Win64 rule for a 16-byte value, and not the rax:rdx pair
+  # that `fun __udivti3(a : UInt128, b : UInt128) : UInt128` is lowered
+  # to. Written that way first, every quotient was 0 and the program then
+  # died of a divide by zero fault: the callee was reading register halves
+  # nobody had put operands in. So the parameters here are pointers, the
+  # answer is put in xmm0 by hand, and the functions return nothing —
+  # `__iyi_win_answer128` below says what happened to the one iyi return
+  # type that reaches that register.
+  #
+  # Nothing below divides a 128-bit value, because `/` and `%` on one are
+  # calls to these very functions and the program would recurse until the
+  # stack ran out. The arithmetic is 64-bit words throughout, read out of
+  # the operands through a pointer the way `__multi3` reads them; win32 is
+  # little-endian, so word 0 is the low half.
+
+  # How many bits the word occupies: the highest set bit's index plus one,
+  # and zero for zero. It is what keeps the long division below off the
+  # leading zeros of the dividend — 2^100 over a divisor above 2^64 costs
+  # the 101 steps its bits ask for, not 128.
+  def __iyi_win_bit_span(word : UInt64) : Int32
+    value = word
+    span = 0
+    if value.unsafe_shr(32) != 0_u64
+      value = value.unsafe_shr(32)
+      span = span + 32
+    end
+    if value.unsafe_shr(16) != 0_u64
+      value = value.unsafe_shr(16)
+      span = span + 16
+    end
+    if value.unsafe_shr(8) != 0_u64
+      value = value.unsafe_shr(8)
+      span = span + 8
+    end
+    if value.unsafe_shr(4) != 0_u64
+      value = value.unsafe_shr(4)
+      span = span + 4
+    end
+    if value.unsafe_shr(2) != 0_u64
+      value = value.unsafe_shr(2)
+      span = span + 2
+    end
+    if value.unsafe_shr(1) != 0_u64
+      value = value.unsafe_shr(1)
+      span = span + 1
+    end
+    value == 0_u64 ? 0 : span + 1
+  end
+
+  # A word the optimiser cannot see the value of. It exists for the
+  # divide-by-zero case below: inside a branch that has just tested the
+  # divisor's low word against zero, LLVM knows what that word is, and it
+  # folds a divide by a known zero to poison rather than emitting the
+  # instruction. Measured: at `--release` the 128-bit divide by zero over
+  # a dividend wider than a word printed 1554060939272 and exited 0, while
+  # the same program at -O0 faulted. The word travels through an empty asm
+  # here, so the divide that follows is a real one.
+  def __iyi_win_opaque_word(word : UInt64) : UInt64
+    answer = uninitialized UInt64
+    asm("" : "=r"(answer) : "r"(word) :: "volatile")
+    answer
+  end
+
+  # The unsigned kernel: quotient and remainder of one 128-bit division,
+  # both written through the caller's pointers, which is compiler-rt's own
+  # `__udivmodti4` shape. One kernel answers all four names, and the
+  # remainder falls out of the same loop the quotient does, so `%` costs a
+  # division and not a division plus a multiply.
+  #
+  # Division by zero is the processor's, not this file's. Measured on this
+  # machine, an iyi program whose 64-bit divisor is zero prints nothing and
+  # the process dies with exit code 0xC0000094,
+  # STATUS_INTEGER_DIVIDE_BY_ZERO — the runtime's vectored filter answers
+  # only for a stack overflow and an access violation, so the fault travels
+  # to Windows untouched. The two word-sized cases below are therefore left
+  # to the hardware `div`, which is the instruction that raises exactly
+  # that, rather than given a check of their own: a second behaviour for a
+  # divisor of zero, invented here and different at 128 bits than at 64,
+  # would be the worse answer. It is also what compiler-rt does —
+  # `n.s.high % d.s.low` on a zero low word is in `udivmodti4.c` for this
+  # reason. `std/int`'s `//` and `%` still refuse a zero divisor with a
+  # sentence before any of this is reached; what is matched here is what
+  # `unsafe_div` and `unsafe_mod` do.
+  def __iyi_win_udivmod128(a : UInt128, b : UInt128, quotient : Pointer(UInt128), remainder : Pointer(UInt128)) : Nil
+    dividend = a
+    divisor = b
+    dividend_words = pointerof(dividend).as(Pointer(UInt64))
+    divisor_words = pointerof(divisor).as(Pointer(UInt64))
+    a_low = dividend_words.value
+    a_high = (dividend_words + 1_i64).value
+    b_low = divisor_words.value
+    b_high = (divisor_words + 1_i64).value
+
+    quotient_words = quotient.as(Pointer(UInt64))
+    remainder_words = remainder.as(Pointer(UInt64))
+
+    if b_high == 0_u64
+      if a_high == 0_u64
+        # Both operands inside one word: one 64-bit divide answers it, and
+        # a zero divisor faults here.
+        quotient_words.value = a_low.unsafe_div(b_low)
+        (quotient_words + 1_i64).value = 0_u64
+        remainder_words.value = a_low.unsafe_mod(b_low)
+        (remainder_words + 1_i64).value = 0_u64
+        return nil
+      end
+      if b_low == 0_u64
+        # A zero divisor under a dividend too wide for a word: the high
+        # word divided by it raises the same fault, and the divisor goes
+        # through `__iyi_win_opaque_word` so that the divide is still there
+        # at -O3.
+        zero = __iyi_win_opaque_word(b_low)
+        quotient_words.value = a_high.unsafe_div(zero)
+        (quotient_words + 1_i64).value = 0_u64
+        remainder_words.value = a_high.unsafe_mod(zero)
+        (remainder_words + 1_i64).value = 0_u64
+        return nil
+      end
+    end
+
+    # Shift-subtract long division, most significant bit first: the
+    # remainder takes one bit of the dividend per step, and the step where
+    # it reaches the divisor subtracts and sets that bit of the quotient.
+    # A 128-bit compare is the high words, then the low; a 128-bit subtract
+    # is the low words with the borrow carried into the high.
+    q_low = 0_u64
+    q_high = 0_u64
+    r_low = 0_u64
+    r_high = 0_u64
+    bit = a_high == 0_u64 ? __iyi_win_bit_span(a_low) - 1 : __iyi_win_bit_span(a_high) + 63
+    while bit >= 0
+      r_high = r_high.unsafe_shl(1) | r_low.unsafe_shr(63)
+      r_low = r_low.unsafe_shl(1)
+      r_low = r_low | (bit >= 64 ? a_high.unsafe_shr(bit - 64) & 1_u64 : a_low.unsafe_shr(bit) & 1_u64)
+      if r_high > b_high || (r_high == b_high && r_low >= b_low)
+        borrow = r_low < b_low ? 1_u64 : 0_u64
+        r_low = r_low &- b_low
+        r_high = (r_high &- b_high) &- borrow
+        if bit >= 64
+          q_high = q_high | 1_u64.unsafe_shl(bit - 64)
+        else
+          q_low = q_low | 1_u64.unsafe_shl(bit)
+        end
+      end
+      bit = bit - 1
+    end
+
+    quotient_words.value = q_low
+    (quotient_words + 1_i64).value = q_high
+    remainder_words.value = r_low
+    (remainder_words + 1_i64).value = r_high
+    nil
+  end
+
+  # The signed pair, built out of the unsigned kernel: each operand's sign
+  # is the top bit of its high word, the magnitudes are the two's
+  # complement negations, and C's rules put the signs back — the quotient
+  # takes the two signs multiplied, the remainder takes the dividend's.
+  #
+  # The one magnitude that does not fit needs no case of its own: negating
+  # the most negative Int128 yields the same two words, and read unsigned
+  # they are 2^127, which is its magnitude exactly. That also settles
+  # `MIN / -1`, whose true quotient is one past the type: the unsigned
+  # quotient is 2^127, negating it gives back 2^127, and the words read
+  # signed are MIN again — the wrap the hardware and compiler-rt both
+  # answer for a division C leaves undefined. `std/int`'s `//` and `%`
+  # refuse that pair before ever reaching here.
+  def __iyi_win_divmod128_signed(a : Int128, b : Int128, quotient : Pointer(Int128), remainder : Pointer(Int128)) : Nil
+    left = a
+    right = b
+    left_words = pointerof(left).as(Pointer(UInt64))
+    right_words = pointerof(right).as(Pointer(UInt64))
+    a_low = left_words.value
+    a_high = (left_words + 1_i64).value
+    b_low = right_words.value
+    b_high = (right_words + 1_i64).value
+
+    a_negative = a_high.unsafe_shr(63) != 0_u64
+    b_negative = b_high.unsafe_shr(63) != 0_u64
+    if a_negative
+      a_borrow = a_low != 0_u64 ? 1_u64 : 0_u64
+      a_low = 0_u64 &- a_low
+      a_high = (0_u64 &- a_high) &- a_borrow
+    end
+    if b_negative
+      b_borrow = b_low != 0_u64 ? 1_u64 : 0_u64
+      b_low = 0_u64 &- b_low
+      b_high = (0_u64 &- b_high) &- b_borrow
+    end
+
+    magnitude_a = uninitialized UInt128
+    magnitude_b = uninitialized UInt128
+    magnitude_a_words = pointerof(magnitude_a).as(Pointer(UInt64))
+    magnitude_b_words = pointerof(magnitude_b).as(Pointer(UInt64))
+    magnitude_a_words.value = a_low
+    (magnitude_a_words + 1_i64).value = a_high
+    magnitude_b_words.value = b_low
+    (magnitude_b_words + 1_i64).value = b_high
+
+    unsigned_quotient = uninitialized UInt128
+    unsigned_remainder = uninitialized UInt128
+    __iyi_win_udivmod128(magnitude_a, magnitude_b, pointerof(unsigned_quotient), pointerof(unsigned_remainder))
+
+    quotient_source = pointerof(unsigned_quotient).as(Pointer(UInt64))
+    remainder_source = pointerof(unsigned_remainder).as(Pointer(UInt64))
+    q_low = quotient_source.value
+    q_high = (quotient_source + 1_i64).value
+    r_low = remainder_source.value
+    r_high = (remainder_source + 1_i64).value
+
+    if a_negative != b_negative
+      q_borrow = q_low != 0_u64 ? 1_u64 : 0_u64
+      q_low = 0_u64 &- q_low
+      q_high = (0_u64 &- q_high) &- q_borrow
+    end
+    if a_negative
+      r_borrow = r_low != 0_u64 ? 1_u64 : 0_u64
+      r_low = 0_u64 &- r_low
+      r_high = (0_u64 &- r_high) &- r_borrow
+    end
+
+    quotient_words = quotient.as(Pointer(UInt64))
+    quotient_words.value = q_low
+    (quotient_words + 1_i64).value = q_high
+    remainder_words = remainder.as(Pointer(UInt64))
+    remainder_words.value = r_low
+    (remainder_words + 1_i64).value = r_high
+    nil
+  end
+
+  # The answer, into the register the call site reads it from: one
+  # unaligned 16-byte load, and it is the last thing each entry point
+  # does. Nothing after it touches xmm0, so the register still holds both
+  # words at the `ret`.
+  #
+  # The value is not handed back as a return value, because a 128-bit one
+  # has no iyi type that lands in xmm0. A `Float64` out of the asm was
+  # tried and answered every wide quotient with its low word and a zero
+  # high word: a double is 64 bits, so LLVM rounded the register through
+  # the stack — `movsd qword ptr [rsp + 8], xmm0` and back — and the high
+  # lane went with it. These functions therefore return nothing, and the
+  # register is the answer.
+  def __iyi_win_answer128(value : Void*) : Nil
+    asm("movups ($0), %xmm0" :: "r"(value) : "xmm0" : "volatile")
+    nil
+  end
+
+  fun __udivti3(a : Pointer(UInt128), b : Pointer(UInt128)) : Nil
+    quotient = uninitialized UInt128
+    remainder = uninitialized UInt128
+    __iyi_win_udivmod128(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(quotient).as(Void*))
+  end
+
+  fun __umodti3(a : Pointer(UInt128), b : Pointer(UInt128)) : Nil
+    quotient = uninitialized UInt128
+    remainder = uninitialized UInt128
+    __iyi_win_udivmod128(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(remainder).as(Void*))
+  end
+
+  fun __divti3(a : Pointer(Int128), b : Pointer(Int128)) : Nil
+    quotient = uninitialized Int128
+    remainder = uninitialized Int128
+    __iyi_win_divmod128_signed(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(quotient).as(Void*))
+  end
+
+  fun __modti3(a : Pointer(Int128), b : Pointer(Int128)) : Nil
+    quotient = uninitialized Int128
+    remainder = uninitialized Int128
+    __iyi_win_divmod128_signed(a.value, b.value, pointerof(quotient), pointerof(remainder))
+    __iyi_win_answer128(pointerof(remainder).as(Void*))
+  end
+{% end %}
 # ── end of the memory layer ─────────────────────────────────────────────
 
 # The three symbols an `ensure` names and a `defer` links: a personality,
@@ -7546,12 +8194,98 @@ lib LibIyiMain
   fun __iyi_main(argc : Int32, argv : UInt8**)
 end
 
+{% if flag?(:win32) %}
+  # What Windows does with an unhandled fault, and what it should do.
+  #
+  # Left alone, a fault raises Windows Error Reporting: a dialog on a
+  # desktop and a process that waits for somebody to click it in CI, and
+  # then an exit code with no sentence anywhere. `SetErrorMode` with
+  # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX (0x1 | 0x2) turns the
+  # dialog off, and the filter below is what replaces it: the two faults a
+  # program of this runtime's shape actually takes, each named.
+  #
+  # A stack overflow is the reason the filter exists. On the POSIX targets
+  # `IyiStackGuard` catches it on an alternate signal stack and prints
+  # where it happened; Windows has no sigaltstack, and the guard page is
+  # already spent by the time anything runs, so the handler needs room
+  # reserved in advance — `SetThreadStackGuarantee`, 16 KB, which is what
+  # makes printing from here safe at all.
+  #
+  # The write is `WriteFile` on the standard error handle rather than
+  # `print`: a fault may have landed inside the allocator, and the console
+  # path above allocates.
+  IYI_WIN_STACK_OVERFLOW = -1073741571 # 0xC00000FD, as the Int32 this file spells a DWORD with
+  IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
+
+  fun __iyi_win_fault(info : Void*) : Int32
+    record = Pointer(UInt64).new(info.address).value
+    code = Pointer(Int32).new(record).value
+    handle = LibC.GetStdHandle(-12)
+    written = uninitialized Int32
+    if code == IYI_WIN_STACK_OVERFLOW
+      message = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
+      LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
+      LibC.ExitProcess(1)
+    end
+    if code == IYI_WIN_ACCESS_VIOLATION
+      # An access violation is a wild pointer *or* a fiber's stack running
+      # out: a fiber stack's guard is the first page of its reservation,
+      # left uncommitted, and Windows raises STACK_OVERFLOW only for a
+      # thread's own stack. The faulting address is the second of the
+      # record's exception parameters — code 0, flags 4, record 8, address
+      # 16, parameter count 24, parameters from 32 — and the scheduler
+      # knows which page belongs to which stack.
+      faulting = Pointer(UInt64).new(record + 40_u64).value
+      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+        if IyiScheduler.fiber_guard_hit?(faulting)
+          overflow = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
+          LibC.WriteFile(handle, overflow.to_unsafe.as(Void*), overflow.bytesize, pointerof(written), nil)
+          LibC.ExitProcess(1)
+        end
+      {% end %}
+      message = "iyi: the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory it does not own: if the program uses `Pointer`, that is the place to look. If it does not, it is a bug in iyi's own runtime, and ours to fix: https://github.com/iyilang/iyi/issues\n"
+      LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
+      LibC.ExitProcess(1)
+    end
+    # EXCEPTION_CONTINUE_SEARCH: not one of ours, so whatever Windows would
+    # have done with it, it still does.
+    0
+  end
+
+  def __iyi_win_install_fault_handler : Nil
+    LibC.SetErrorMode(3)
+    guarantee = 16384_i32
+    LibC.SetThreadStackGuarantee(pointerof(guarantee))
+    # A proc's first word is its function, which is the address Windows
+    # wants — the same way `IyiThread.address_of` hands a thread entry to
+    # `CreateThread`. This one closes over nothing, so there is no second
+    # word and it is callable from outside iyi.
+    filter = ->__iyi_win_fault(Void*)
+    address = Pointer(Void).new(Pointer(UInt64).new(pointerof(filter).address).value)
+    # Both, and the vectored one is the one that works: a program whose
+    # entry point is the CRT's `mainCRTStartup` runs inside
+    # `__scrt_common_main_seh`, whose own `__except` takes a stack overflow
+    # before the unhandled-exception filter is ever asked — measured, with
+    # `SetUnhandledExceptionFilter` alone the process exited 0xC00000FD and
+    # printed nothing. A vectored handler is asked first, before any
+    # frame-based one. The filter answers only for the two codes it names,
+    # so a C++ exception (0xE06D7363, which is how `rescue` travels on
+    # msvc) passes straight through.
+    LibC.AddVectoredExceptionHandler(1, address)
+    LibC.SetUnhandledExceptionFilter(address)
+    nil
+  end
+{% end %}
+
 fun main(argc : Int32, argv : UInt8**) : Int32
   # There is nothing to start under the default allocator, and nothing missing
   # either: `gc/none.cr`'s `GC.init` sets up thread suspend and resume, and
   # 0.1.0 has one thread. Only Boehm has an `init` worth calling.
   {% if flag?(:gc_boehm) %}
     LibGC.init
+  {% end %}
+  {% if flag?(:win32) %}
+    __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
   0

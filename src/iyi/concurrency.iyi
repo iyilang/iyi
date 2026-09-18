@@ -727,13 +727,25 @@ class IyiScheduler
   # own stack, wearing the thread's top where the main thread's wears 0
   # (the base `IyiRoots` found), so a walk from a parked main fiber's
   # saved sp stops at the right mapping's end.
+  #
+  # On Windows the main thread's top is taken here instead of left at 0
+  # for the walk to fill in later, because later is too late: this runs
+  # on the thread's own stack, where the TEB still describes it, and
+  # `switch_stack` rewrites those two TEB words for every fiber it
+  # enters. A zero left here was read back from inside a spawned fiber
+  # as that fiber's top, and the scan of main's stack then ran off the
+  # end of the mapping.
   def self.current : IyiFiber
     state = self.state
     fiber = state.current
     return fiber if fiber.is_a?(IyiFiber)
     main = IyiFiber.main
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      main.stack_top = IyiThread.current_stack_top
+      top = IyiThread.current_stack_top
+      {% if flag?(:win32) %}
+        top = IyiRoots.stack_base if top == 0
+      {% end %}
+      main.stack_top = top
     {% end %}
     state.current = main
     register(main)
@@ -833,6 +845,29 @@ class IyiScheduler
     end
     0_u64
   end
+
+  {% if flag?(:win32) %}
+    # Whether *address* is in the guard page of a live fiber stack, which
+    # is how a fiber's stack running out is told from a wild pointer on
+    # Windows. There is no signal and no `sigaltstack` here: the fault
+    # arrives as an access violation, because a fiber stack's guard is the
+    # first page of its reservation left uncommitted (`settle_stack`) and
+    # Windows raises STACK_OVERFLOW only for a thread's own stack, which
+    # carries the guard attribute the kernel set. So the runtime answers
+    # the question itself, from the stacks it already knows the bounds of.
+    def self.fiber_guard_hit?(address : UInt64) : Bool
+      fiber = @@all_head
+      while fiber.is_a?(IyiFiber)
+        top = fiber.stack_top
+        if top != 0
+          low = top - IyiFiber::STACK_BYTES
+          return true if address >= low && address < low + IyiFiber::PAGE
+        end
+        fiber = fiber.next_fiber
+      end
+      false
+    end
+  {% end %}
 
   # The running fiber's stack top, 0 when it is the main fiber (or no
   # fiber has run yet). Read without making anything: the collector asks
@@ -942,6 +977,48 @@ class IyiScheduler
     nil
   end
 
+  # The two halves of an overlapped operation, so a caller that is not a
+  # read can use the same park. Windows has no readiness model: a socket's
+  # `accept` and a `send` that filled the peer's window cannot be waited
+  # for, they can only be *posted* and completed, so `std/socket` posts
+  # `AcceptEx` and `WSASend` itself and parks here. Measured before this
+  # existed: a listening socket answers the zero-byte read trick in 32 us
+  # with a failure, so an accept loop over it hot-spun, and the sleep it
+  # would otherwise fall back to costs 15.6 ms a round on the default
+  # Windows timer tick.
+  #
+  # `arm` associates the handle with the port, zeroes the running fiber's
+  # OVERLAPPED and answers it; `park` waits for the port to name that
+  # operation. Between the two the caller makes exactly one overlapped
+  # call, and reads `GetLastError` itself: ERROR_IO_PENDING (997) means
+  # park, anything else means the call answered on the spot.
+  def self.arm_overlapped_current(handle : Void*) : Pointer(UInt8)
+    fiber = current
+    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
+    LibC.SetFileCompletionNotificationModes(handle, 1_u8)
+
+    ov = fiber.wait_overlapped
+    Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
+    Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
+
+    fiber.wait_handle = handle
+    fiber.io_bytes_read = 0_i64
+    ov
+  end
+
+  def self.park_overlapped_current : Int64 | Cancelled
+    fiber = current
+    fiber.state = IyiFiberState::WaitingIo
+    fiber.next_io = state.io_head
+    state.io_head = fiber
+    reschedule
+
+    return Cancelled.new if fiber.cancelled
+    fiber.io_bytes_read
+  end
+
   def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64) : Int64 | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
@@ -954,20 +1031,19 @@ class IyiScheduler
     elsif fd == 2_i32 || fd == 2_i64
       handle = LibC.GetStdHandle(-12)
     else
+      # A descriptor a caller already closed is -1, and `to_u64` on a
+      # negative number is a *checked* convert: a wait on a closed
+      # descriptor died of "arithmetic overflow" — a sentence with
+      # nothing in it about descriptors — in a frame the caller never
+      # wrote. std/socket met it by closing a listener from inside a
+      # handler while an accept was parked. A read of something already
+      # gone is a read of nothing, and the convert below keeps its check
+      # for every value that is not that.
+      return 0_i64 if fd.to_i64 < 0_i64
       handle = Pointer(Void).new(fd.to_i64.to_u64)
     end
 
-    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
-    LibC.SetFileCompletionNotificationModes(handle, 1_u8)
-
-    ov = fiber.wait_overlapped
-    Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
-    Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
-
-    fiber.wait_handle = handle
-    fiber.io_bytes_read = 0_i64
+    ov = arm_overlapped_current(handle)
 
     read_bytes = uninitialized Int32
     ok = LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read_bytes), ov.as(Void*))
@@ -988,13 +1064,7 @@ class IyiScheduler
       return 0_i64
     end
 
-    fiber.state = IyiFiberState::WaitingIo
-    fiber.next_io = state.io_head
-    state.io_head = fiber
-    reschedule
-
-    return Cancelled.new if fiber.cancelled
-    fiber.io_bytes_read
+    park_overlapped_current
   end
 
   def self.wait_readable_current(fd : Int32 | Int64) : Nil | Cancelled
@@ -1125,6 +1195,25 @@ class IyiScheduler
       enqueue(fiber)
     elsif fiber.state == IyiFiberState::WaitingIo
       {% if flag?(:win32) %}
+        # `CancelIoEx` is a request, and on a handle tied to a completion
+        # port it does not finish the operation here: measured, the
+        # OVERLAPPED's status stays STATUS_PENDING (0x103) after a
+        # successful cancel and only becomes STATUS_CANCELLED (0xC0000120)
+        # when `GetQueuedCompletionStatus` takes the packet off the port —
+        # three million reads of the status in between saw no change. On a
+        # handle that is *not* on a port the cancel writes the status
+        # itself, immediately, which is what makes the difference easy to
+        # miss. So a caller cannot wait for the operation with
+        # `WSAGetOverlappedResult(wait = 1)`: this OVERLAPPED has no event
+        # and the handle is never signalled, and such a wait never returns.
+        # `std/socket`'s cancelled paths therefore ask once and park again,
+        # and the poller's dequeue is what ends them.
+        #
+        # The shorter answer, not taken: drop the `io_remove` and `enqueue`
+        # below and let the completion wake the fiber, which would make the
+        # operation provably over at every wake. It changes cancellation
+        # for every kind of handle on this platform — files, the console,
+        # pipes — and each would need its own measurement first.
         fiber.cancelled = true
         LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*))
         io_remove(fiber)

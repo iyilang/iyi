@@ -127,7 +127,11 @@ class Iyi::Command
     # `--out src` did it, and left a `src/src` behind. One file is the
     # exception: `x.cr` becomes `x.iyi` beside it, which is what converting
     # a file at a time means, and an import prefers the `.iyi`.
-    if single.nil? && (out_dir == src || out_dir.starts_with?(src + "/"))
+    # Asked of `Path` rather than of a string prefix: `--out` and the tree
+    # both arrive from `File.expand_path`, which spells them with `\` on
+    # Windows, so `starts_with?(src + "/")` answered no for a directory that
+    # was inside the tree and the run wrote its modules into its own source.
+    if single.nil? && Iyi.path_under?(out_dir, src)
       abort! "migrate: --out #{out_dir} is inside the tree it reads (#{src}); the modules go beside it, not into it", :USAGE_ERROR
     end
     # `--out` naming a file died of `mkdir`'s own "File exists", which
@@ -168,12 +172,18 @@ class Iyi::Command
     # and the `lib` its shards are in is two directories above it.
     project_root = src
     walking = src
-    while !walking.empty? && walking != "/"
+    # Up while there is somewhere to go, which is not "up while this is not
+    # `/`": `File.dirname` of `C:\` answers `C:\`, so on Windows a tree with
+    # no manifest above it walked the same directory for ever and the verb
+    # never printed anything at all.
+    while !walking.empty?
+      up = File.dirname(walking)
+      break if up == walking
       if File.file?(File.join(walking, MANIFEST_FILE))
         project_root = walking
         break
       end
-      walking = File.dirname(walking)
+      walking = up
     end
 
     files = single ? [single] : Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort
@@ -196,7 +206,7 @@ class Iyi::Command
           next false unless target.starts_with?('.')
           resolved = File.expand_path(target, here)
           resolved == single || resolved + ".cr" == single ||
-            (target.ends_with?("*") && single.starts_with?(File.dirname(resolved) + "/"))
+            (target.ends_with?("*") && Iyi.path_under?(single, File.dirname(resolved)) != nil)
         end
       end
       # A *module* that requires it is the one that breaks: a `require`
@@ -208,17 +218,17 @@ class Iyi::Command
       # source, and that is worth saying rather than discovering.
       by_module = requirers.select(&.ends_with?(".iyi"))
       unless by_module.empty?
-        named = by_module.first(4).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
+        named = by_module.first(4).map { |file| Iyi.path_under?(file, project_root) || file }.join(", ")
         more = by_module.size > 4 ? " and #{by_module.size - 4} more" : ""
-        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); " \
+        abort! "migrate: #{by_module.size} module#{by_module.size == 1 ? "" : "s"} already require #{Iyi.path_under?(single, project_root) || single} (#{named}#{more}); " \
                "a `require` that finds a `.iyi` gets a compilation unit and none of its names, so that consumer needs an `import` - which is the whole tree's job: " \
                "#{Command.program_name} migrate #{File.dirname(single)} --out DIR", :USAGE_ERROR
       end
       by_crystal = requirers.reject(&.ends_with?(".iyi"))
       unless by_crystal.empty?
-        named = by_crystal.first(3).map { |file| file.lchop(project_root).lchop(File::SEPARATOR) }.join(", ")
+        named = by_crystal.first(3).map { |file| Iyi.path_under?(file, project_root) || file }.join(", ")
         more = by_crystal.size > 3 ? " and #{by_crystal.size - 3} more" : ""
-        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{single.lchop(project_root).lchop(File::SEPARATOR)} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
+        still_crystal = "#{by_crystal.size} Crystal file#{by_crystal.size == 1 ? "" : "s"} still require #{Iyi.path_under?(single, project_root) || single} (#{named}#{more}); they keep reading the `.cr`, which stays where it is - so what they build and what a module builds are two programs over one source until they are migrated too"
       end
     end
     # A shards directory is other projects' source. `shards install`
@@ -374,7 +384,7 @@ class Iyi::Command
       next unless File.file?(file)
       next if file.ends_with?(".cr")
       next if shards_install?(file, src)
-      relative_asset = file.lchop(project_root).lchop(File::SEPARATOR)
+      relative_asset = Iyi.path_under?(file, project_root) || file
       target = File.join(out_dir, relative_asset)
       Dir.mkdir_p(File.dirname(target))
       if TEMPLATE_EXTENSIONS.any? { |extension| file.ends_with?(extension) }
@@ -402,8 +412,31 @@ class Iyi::Command
     linked = File.join(out_dir, "lib")
     if single.nil? && Dir.exists?(shards_dir) && !File.exists?(linked) && !File.symlink?(linked)
       Dir.mkdir_p(out_dir)
-      File.symlink(shards_dir, linked)
-      notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+      {% if flag?(:win32) %}
+        # A *symbolic* link on Windows needs SeCreateSymbolicLinkPrivilege,
+        # which an ordinary account does not hold unless Developer Mode is on
+        # or the process is elevated, so `File.symlink` answered `A required
+        # privilege is not held by the client` and the migration died there
+        # with the modules never written. A junction needs no privilege at
+        # all and, for a directory named by an absolute local path - which
+        # `lib` beside the manifest is - resolves the way a directory
+        # symbolic link does. And if even that is refused the tree is still
+        # written: the link is a convenience, the migration is what the
+        # person asked for, and a note can say what is missing.
+        begin
+          File.symlink(shards_dir, linked)
+          notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+        rescue File::Error
+          if migrate_junction(shards_dir, linked)
+            notes.add "vendored", "lib -> #{shards_dir} as a junction, since a symbolic link here wants a privilege this account does not hold; `shards install` here writes its own copy over it"
+          else
+            notes.add "vendored", "lib is not linked: neither a symbolic link nor a junction could be made at #{linked}, so a migrated `require` of a shard has nothing to resolve from. The modules are written; run `shards install` in #{out_dir}, or name #{shards_dir} on the search path, before building them"
+          end
+        end
+      {% else %}
+        File.symlink(shards_dir, linked)
+        notes.add "vendored", "lib -> #{shards_dir}, the shards this tree requires; `shards install` here writes its own copy over it"
+      {% end %}
     end
 
     [MANIFEST_FILE, "shard.lock"].each do |manifest|
@@ -622,10 +655,13 @@ class Iyi::Command
     end
 
     if single
-      puts "#{single.lchop(Dir.current + "/")} → #{(written_paths.values.first? || "").lchop(Dir.current + "/")}"
+      puts "#{Iyi.relative_filename(single)} → #{Iyi.relative_filename(written_paths.values.first? || "")}"
       puts "its own requires stayed Crystal: those files are still the other language, and a module may require them"
     else
-      puts "#{units.size} files → #{written.size} modules under #{out_dir}/"
+      # The directory as it is, without a separator glued on the end to say
+      # it is one: that separator is only the platform's on posix, and the
+      # sentence read `under C:\...\out1/` on Windows.
+      puts "#{units.size} files → #{written.size} modules under #{out_dir}"
     end
     if verbose
       units.each do |unit|
@@ -708,8 +744,9 @@ class Iyi::Command
       end
       exit 1 unless broke.empty?
       if single
+        written_path = written_paths.values.first? || ""
         puts
-        puts "#{(written_paths.values.first? || "").lchop(project_root + "/")} is a module now, and the rest of the tree is still Crystal."
+        puts "#{Iyi.path_under?(written_path, project_root) || written_path} is a module now, and the rest of the tree is still Crystal."
         puts "Convert top down: the next file is one that requires this one, since a `.iyi` module may require a `.cr` file and not the other way round."
         return
       end
@@ -720,13 +757,78 @@ class Iyi::Command
       puts "  #{Command.program_name} check --crystal <one module>.iyi        # what an editor asks per change"
       puts "  #{Command.program_name} bind                                     # the shards behind a boundary, next"
     elsif single
+      written_path = written_paths.values.first? || ""
       puts
-      puts "next: #{Command.program_name} check --crystal #{(written_paths.values.first? || "").lchop(project_root + "/")}   # from #{project_root}"
+      puts "next: #{Command.program_name} check --crystal #{Iyi.path_under?(written_path, project_root) || written_path}   # from #{project_root}"
     else
       puts
       puts "next: #{Command.program_name} migrate #{src} --out #{out_dir} --check"
     end
   end
+
+  {% if flag?(:win32) %}
+    # The junction the block above falls back to, written the way the kernel
+    # stores one: `CreateDirectoryW` makes the empty directory a reparse
+    # point hangs on, and `FSCTL_SET_REPARSE_POINT` writes an
+    # IO_REPARSE_TAG_MOUNT_POINT buffer over it - eight bytes of header (tag,
+    # data length, reserved), then `SubstituteNameOffset`,
+    # `SubstituteNameLength`, `PrintNameOffset` and `PrintNameLength`, then
+    # the names: the substitute name in the object-manager spelling
+    # `\??\C:\path`, the print name the plain `C:\path` a person reads, each
+    # NUL-terminated. `File.readlink` reads this same structure back
+    # (src/std/file.iyi's win32 arm, whose names start at 16 for a mount
+    # point rather than 20, there being no flag word), which is what says
+    # these offsets are the ones Windows means. The kernel is asked rather
+    # than `cmd /c mklink /J` spawned: mklink writes exactly this buffer, and
+    # a compiler that shells out for a filesystem operation takes on a
+    # shell's quoting and its exit codes for nothing. A refusal is `false`
+    # and not a raise, because the caller's answer to one is a note.
+    private def migrate_junction(target : String, link : String) : Bool
+      # Absolute, because a junction's stored name is resolved against
+      # nothing: a relative one would be read against whichever directory a
+      # later process happened to be in.
+      native = File.expand_path(target).gsub('/', '\\')
+      substitute = "\\??\\#{native}".to_utf16
+      printed = native.to_utf16
+      # Both names and both NULs, after the four offsets: the print name
+      # begins two bytes past the end of the substitute name's own.
+      data_bytes = 8 + (substitute.size + printed.size + 2) * 2
+      buffer = Bytes.new(8 + data_bytes)
+      head = buffer.to_unsafe
+      head.as(UInt32*).value = 0xA0000003_u32
+      (head + 4).as(UInt16*).value = data_bytes.to_u16
+      (head + 8).as(UInt16*).value = 0_u16
+      (head + 10).as(UInt16*).value = (substitute.size * 2).to_u16
+      (head + 12).as(UInt16*).value = (substitute.size * 2 + 2).to_u16
+      (head + 14).as(UInt16*).value = (printed.size * 2).to_u16
+      names = (head + 16).as(UInt16*)
+      names.copy_from(substitute.to_unsafe, substitute.size)
+      (names + substitute.size + 1).copy_from(printed.to_unsafe, printed.size)
+      wide_link = Crystal::System.to_wstr(link)
+      return false if LibC.CreateDirectoryW(wide_link, nil) == 0
+      # FILE_FLAG_BACKUP_SEMANTICS is what opens a directory at all, and
+      # FILE_FLAG_OPEN_REPARSE_POINT opens this one rather than following it.
+      handle = LibC.CreateFileW(wide_link, LibC::GENERIC_WRITE, LibC::DEFAULT_SHARE_MODE, nil,
+        LibC::OPEN_EXISTING, LibC::FILE_FLAG_BACKUP_SEMANTICS | LibC::FILE_FLAG_OPEN_REPARSE_POINT,
+        LibC::HANDLE.null)
+      if handle == LibC::INVALID_HANDLE_VALUE
+        LibC.RemoveDirectoryW(wide_link)
+        return false
+      end
+      written = LibC.DeviceIoControl(handle, LibC::FSCTL_SET_REPARSE_POINT, buffer.to_unsafe.as(Void*),
+        buffer.size.to_u32, nil, 0, out _, nil)
+      LibC.CloseHandle(handle)
+      # An empty `lib` beside the modules is worse than no `lib`: a build
+      # resolves a shard require against it, finds nothing, and the reason
+      # reads as the shard's absence rather than the link's. So the directory
+      # goes back if the reparse point did not take.
+      if written == 0
+        LibC.RemoveDirectoryW(wide_link)
+        return false
+      end
+      true
+    end
+  {% end %}
 
   # A flag's value, which is not the flag written after it. `--out` only
   # tested for the end of argv, so `migrate tree --out --check` took
@@ -1130,7 +1232,7 @@ class Iyi::Command
 
     def self.read(file : String, source : String, root : String, tree_roots : Set(String), notes : Notes) : MigrateUnit
       all = source.split('\n')
-      relative = file.lchop(root).lchop('/')
+      relative = Iyi.path_under?(file, root) || file
       # A file name is not a module name: `micrate-wrapper.cr` gave
       # `module micrate-wrapper`, which parses as a subtraction and left
       # the module refusing its own header. Everything a name cannot
@@ -1821,16 +1923,25 @@ class Iyi::Command
     end
 
     # `to` seen from `from_dir`, with a `./` or as many `../` as it takes.
+    #
+    # Both sides are filesystem paths and the answer is posix, because it is
+    # written into a `require`: `/` resolves on every platform and a `\`
+    # inside the literal is an escape. `lchop(from_dir + "/")` asked with a
+    # separator neither side uses on Windows, so a file inside *from_dir* was
+    # never seen to be one, and the walk that then looked for a shared
+    # directory stopped at `"/"` — which `File.dirname` of `C:\` never
+    # answers. `migrate a.cr --out elsewhere` spun at 100% CPU appending
+    # `..` and printed nothing at all.
+    #
+    # Sharing nothing but the root keeps the absolute spelling the caller
+    # handed over, which is what the walk did when it ran out of directories
+    # above `/`.
     def self.relative_to(to : String, from_dir : String) : String
-      return "./" + to.lchop(from_dir + "/") if to.starts_with?(from_dir + "/")
-      up = [] of String
-      dir = from_dir
-      while !dir.empty? && dir != "/"
-        up << ".."
-        dir = File.dirname(dir)
-        return (up + [to.lchop(dir + "/")]).join("/") if to.starts_with?(dir + "/")
-      end
-      to
+      base = ::Path[from_dir]
+      return to unless relative = ::Path[to].relative_to?(base)
+      return to if relative.parts.count("..") >= base.parts.size - (base.anchor ? 1 : 0)
+      posix = relative.to_posix.to_s
+      posix.starts_with?("..") ? posix : "./" + posix
     end
 
     # Every unit this file's relative requires name, split by whether the

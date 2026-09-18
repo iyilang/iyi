@@ -15,12 +15,43 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_FILE_SANDBOX="$WORK/sandbox"
 mkdir -p "$WORK/sandbox"
 
@@ -80,7 +111,9 @@ fi
 echo
 echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
+elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/file.iyi").read_text()
 old = '    info(path).size\n  end'
@@ -88,10 +121,10 @@ if old not in src:
     raise SystemExit("patch site missing")
 Path("$WORK/patched/std/file.iyi").write_text(src.replace(old, '    info(path).size + 1_i64\n  end', 1))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "  the patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut.out" 2>&1; then
+elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut.out" 2>&1; then
   echo "  the exercise PASSED on a broken module"
   status=1
 else
@@ -101,7 +134,9 @@ fi
 echo
 echo "== proving a truncating touch is caught"
 mkdir -p "$WORK/patched_touch/std"
-python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
+elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/file.iyi").read_text()
 old = '    File.write(p, "") unless File.exists?(p)'
@@ -109,10 +144,10 @@ if old not in src:
     raise SystemExit("touch patch site missing")
 Path("$WORK/patched_touch/std/file.iyi").write_text(src.replace(old, '    File.write(p, "")', 1))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "  the touch patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched_touch:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_touch.out" 2>&1; then
+elif IYI_PATH="$WORK/patched_touch${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_touch.out" 2>&1; then
   echo "  the exercise PASSED on a truncating touch"
   status=1
 else
@@ -135,7 +170,9 @@ case "$(uname -s)" in
   *)     touch_site='        tv[2] = time' ;;
 esac
 mkdir -p "$WORK/patched_time/std"
-TOUCH_SITE="$touch_site" python3 - <<PY
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
+elif ! TOUCH_SITE="$touch_site" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/file.iyi").read_text()
@@ -144,10 +181,10 @@ if old not in src:
     raise SystemExit(f"touch time patch site missing: {old!r}")
 Path("$WORK/patched_time/std/file.iyi").write_text(src.replace(old, old.replace("time", "0_i64").replace("sec", "0_i64"), 1))
 PY
-if [ $? -ne 0 ]; then
+then
   echo "  the touch time patch did not apply"
   status=1
-elif IYI_PATH="$WORK/patched_time:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_time.out" 2>&1; then
+elif IYI_PATH="$WORK/patched_time${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_time.out" 2>&1; then
   echo "  the exercise PASSED on a touch that ignores its argument"
   status=1
 elif grep -q "touch sets the given unix time" "$WORK/mut_time.out"; then

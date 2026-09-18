@@ -195,7 +195,8 @@ class Iyi::Command
       optional_entries(shard.entry).each do |part|
         next unless part_root = shard_root(part)
         next if part_root == root
-        label = "    #{part_root} (#{part.lchop(File.dirname(File.dirname(shard.entry)) + "/")})"
+        shard_dir = File.dirname(File.dirname(shard.entry))
+        label = "    #{part_root} (#{Iyi.path_under?(part, shard_dir) || part})"
         print "\n#{label}"
         STDOUT.flush
         report_boundary mods, bind_namespaces(executable, env, mods, mods_path, shard,

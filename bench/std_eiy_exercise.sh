@@ -25,14 +25,45 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/floor_base.sh"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+# the patches and oracles below are written in python, and windows answers
+# `python3` with a store stub that prints and exits rather than running it, so
+# the interpreter is measured here instead of assumed.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
 
 # Ensure IYI_PATH can find std modules in src/ and samples/iyi/
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 symbols() {
   nm -u "$1" 2>/dev/null |
@@ -121,7 +152,7 @@ patched_std() { # patched_std <dir> <python replace expression>
   mkdir -p "$WORK/$dir/std/eiy"
   cp "$REPO/src/std/eiy.iyi" "$WORK/$dir/std/eiy.iyi"
   cp "$REPO/src/std/eiy/process.iyi" "$WORK/$dir/std/eiy/process.iyi"
-  python3 -c "
+  "$PY" -c "
 import sys
 path = '$WORK/$dir/std/eiy.iyi'
 with open(path) as f:
@@ -138,8 +169,12 @@ prove_fails() { # prove_fails <label> <dir> <named check> <python replace expres
   local label="$1" dir="$2" check="$3" replace="$4"
   echo
   echo "== negative proof: $label is caught"
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so this proof is unmeasured"
+    return
+  fi
   patched_std "$dir" "$replace"
-  if (IYI_PATH="$WORK/$dir:$REPO/src:$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_eiy_exercise.iyi" >"$WORK/$dir.out" 2>&1); then
+  if (IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_eiy_exercise.iyi" >"$WORK/$dir.out" 2>&1); then
     echo "  the exercise PASSED with $label (it should have failed):"
     head -15 "$WORK/$dir.out" | sed 's/^/    /'
     status=1
@@ -175,7 +210,11 @@ eiy_build_refuses() { # eiy_build_refuses <label> <name> <phrase>
     status=1
     return
   fi
-  if ! grep -qF -- "$phrase" "$WORK/$name.build"; then
+  # A path inside an iyi message is rendered the platform's own way, so the
+  # output's separators are normalised before the sentence is looked for.
+  # Pinning either spelling fails on the other platform, and what this arm
+  # is about is the refusal, not the slash. Same shape as `bench/panics.sh`.
+  if ! tr '\\' '/' < "$WORK/$name.build" | grep -qF -- "$phrase"; then
     echo "  $label: refused, but not with '$phrase'"
     sed -n '1,12p' "$WORK/$name.build"
     status=1

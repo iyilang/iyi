@@ -21,17 +21,33 @@ using std/path::{Path}
   end
 {% elsif flag?(:win32) %}
   lib LibKernel32
-    fun CreateDirectoryA(path : UInt8*, sec : Void*) : Int32
-    fun RemoveDirectoryA(path : UInt8*) : Int32
-    fun GetCurrentDirectoryA(buf_len : UInt32, buf : UInt8*) : UInt32
-    fun SetCurrentDirectoryA(path : UInt8*) : Int32
-    fun FindFirstFileA(pattern : UInt8*, data : Void*) : Void*
-    fun FindNextFileA(handle : Void*, data : Void*) : Int32
+    fun CreateDirectoryW(path : UInt16*, sec : Void*) : Int32
+    fun RemoveDirectoryW(path : UInt16*) : Int32
+    fun GetCurrentDirectoryW(buf_len : UInt32, buf : UInt16*) : UInt32
+    fun SetCurrentDirectoryW(path : UInt16*) : Int32
+    fun FindFirstFileW(pattern : UInt16*, data : Void*) : Void*
+    fun FindNextFileW(handle : Void*, data : Void*) : Int32
     fun FindClose(handle : Void*) : Int32
-    # A DWORD is declared Int32 here, as the prelude declares it: the same 32
-    # bits at the ABI, and one signature per symbol is what a program gets.
-    fun GetFileAttributesA(name : UInt8*) : Int32
   end
+
+  # The `*A` twins of the calls above read a path in the process's active code
+  # page and answer a name in it, so a directory whose name is not spellable
+  # there could not be opened and an entry that was came back as mojibake;
+  # and a path past MAX_PATH was refused outright, because the `\\?\` prefix
+  # that lifts the limit is understood by the wide calls alone. The prelude's
+  # `__iyi_wide_path` is the one conversion into UTF-16 and the one place the
+  # prefix is put on, `__iyi_utf8_size_from_wide` and
+  # `__iyi_utf8_bytes_from_wide` the way back for a name Windows answers.
+  # `GetFileAttributesW` is not declared here because the prelude's
+  # `__iyi_path_attributes` is that call with the conversion already in it.
+  #
+  # WIN32_FIND_DATAW, byte by byte: 4 for dwFileAttributes, 24 for the three
+  # FILETIMEs, 16 for the four DWORDs behind them — both halves of the size
+  # and the two reserved — 520 for cFileName's 260 wide characters and 28 for
+  # cAlternateFileName's 14. That is 592, where the ANSI struct was 320.
+  # Nothing in front of the name is wider than a DWORD, so `cFileName` keeps
+  # the byte offset of 44 it had.
+  WIN32_FIND_DATAW_BYTES = 4 + 24 + 16 + 260 * 2 + 14 * 2
 {% else %}
   # Linux: the kernel's own calls (SPEC.md III.9), in libc's shape so the
   # callers below read the same. A directory stream is a descriptor and
@@ -166,15 +182,18 @@ pub class Dir
       end
       p.as(Void*)
     {% elsif flag?(:win32) %}
-      # The stream: three words — the find handle, the WIN32_FIND_DATAA the
+      # The stream: three words — the find handle, the WIN32_FIND_DATAW the
       # kernel writes into, and whether the name already sitting in it is
-      # still owed to a reader. FindFirstFileA fetches the first entry while
+      # still owed to a reader. FindFirstFileW fetches the first entry while
       # it opens the search, so that first name has to be remembered here or
       # the first `read` would skip it. The shape is the POSIX arm's: a
-      # malloc'd block behind the `Void*` the class holds. WIN32_FIND_DATAA
-      # is 320 bytes, the last 274 of them the two name fields.
-      find_data = Pointer(UInt8).malloc(320_u64)
-      handle = LibKernel32.FindFirstFileA(Dir.c_str(dir_path + "\\*"), find_data.as(Void*))
+      # malloc'd block behind the `Void*` the class holds.
+      find_data = Pointer(UInt8).malloc(WIN32_FIND_DATAW_BYTES.to_u64)
+      pattern = Dir.find_pattern(dir_path)
+      if pattern.address == 0_u64
+        raise "Cannot open directory: #{dir_path}"
+      end
+      handle = LibKernel32.FindFirstFileW(pattern, find_data.as(Void*))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot open directory: #{dir_path}"
       end
@@ -209,25 +228,34 @@ pub class Dir
       end
     {% elsif flag?(:win32) %}
       stream = @handle.as(Int64*)
-      if stream[2] == 0_i64
-        if LibKernel32.FindNextFileA(Pointer(Void).new(stream[0].to_u64), Pointer(Void).new(stream[1].to_u64)) == 0
-          return nil
+      while true
+        if stream[2] == 0_i64
+          if LibKernel32.FindNextFileW(Pointer(Void).new(stream[0].to_u64), Pointer(Void).new(stream[1].to_u64)) == 0
+            return nil
+          end
         end
-      end
-      stream[2] = 0_i64
+        stream[2] = 0_i64
 
-      # `cFileName` sits at byte 44 of WIN32_FIND_DATAA, the way the linux
-      # record's name sits at byte 19. `.` and `..` come back as they do from
-      # `readdir`: the callers that do not want them filter them themselves,
-      # and `children` reads the same on every platform because of it.
-      name_ptr = Pointer(UInt8).new(stream[1].to_u64) + 44
+        # `cFileName` sits at byte 44 of WIN32_FIND_DATAW, the way the linux
+        # record's name sits at byte 19 — UTF-16 there, so the name is decoded
+        # rather than copied out. `.` and `..` come back as they do from
+        # `readdir`: the callers that do not want them filter them themselves,
+        # and `children` reads the same on every platform because of it.
+        name_ptr = Pointer(UInt16).new(stream[1].to_u64 + 44_u64)
 
-      len = 0
-      while name_ptr[len] != 0_u8
-        len = len + 1
-      end
-      String.new(len) do |target|
-        target.copy_from(name_ptr, len)
+        # The size counts the terminator, which a String does not carry in
+        # its length but does have room for behind it. A name Windows will
+        # not convert has no UTF-8 spelling and so no iyi String — an
+        # unpaired surrogate, which NTFS stores and UTF-8 cannot say — and
+        # the loop steps over it rather than reading it as the end of the
+        # directory, which is what a bare `nil` here would mean.
+        size = __iyi_utf8_size_from_wide(name_ptr)
+        if size > 0
+          name = String.new(size - 1) do |target|
+            __iyi_utf8_bytes_from_wide(name_ptr, target, size)
+          end
+          return name
+        end
       end
     {% else %}
       nil
@@ -244,7 +272,11 @@ pub class Dir
       # again.
       stream = @handle.as(Int64*)
       LibKernel32.FindClose(Pointer(Void).new(stream[0].to_u64))
-      handle = LibKernel32.FindFirstFileA(Dir.c_str(@path + "\\*"), Pointer(Void).new(stream[1].to_u64))
+      pattern = Dir.find_pattern(@path)
+      if pattern.address == 0_u64
+        raise "Cannot rewind directory: #{@path}"
+      end
+      handle = LibKernel32.FindFirstFileW(pattern, Pointer(Void).new(stream[1].to_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot rewind directory: #{@path}"
       end
@@ -324,9 +356,24 @@ pub class Dir
       end
       String.new(len) { |t| t.copy_from(res, len) }
     {% elsif flag?(:win32) %}
-      buf = Pointer(UInt8).malloc(4096_u64)
-      len = LibKernel32.GetCurrentDirectoryA(4096_u32, buf)
-      String.new(len.to_i) { |t| t.copy_from(buf, len.to_i) }
+      # GetCurrentDirectoryW answers the character count it wrote, or, when
+      # the buffer is too small, the count it needs with the terminator in
+      # it — which is how a current directory past 4096 characters is still
+      # read out rather than truncated. 0 is the only failure.
+      wide = Pointer(UInt16).malloc(4096_u64)
+      chars = LibKernel32.GetCurrentDirectoryW(4096_u32, wide)
+      if chars > 4096_u32
+        wide = Pointer(UInt16).malloc(chars.to_u64)
+        chars = LibKernel32.GetCurrentDirectoryW(chars, wide)
+      end
+      if chars == 0_u32
+        raise "Error getting current working directory"
+      end
+      size = __iyi_utf8_size_from_wide(wide)
+      if size <= 0
+        raise "Error getting current working directory"
+      end
+      String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
     {% else %}
       "/"
     {% end %}
@@ -343,7 +390,8 @@ pub class Dir
         raise "Cannot change directory to: #{target}"
       end
     {% elsif flag?(:win32) %}
-      if LibKernel32.SetCurrentDirectoryA(c_str(target)) == 0
+      wide = __iyi_wide_path(c_str(target))
+      if wide.address == 0_u64 || LibKernel32.SetCurrentDirectoryW(wide) == 0
         raise "Cannot change directory to: #{target}"
       end
     {% end %}
@@ -413,9 +461,11 @@ pub class Dir
       end
     {% elsif flag?(:win32) %}
       # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
-      # spells as the Int32 it is declared as, and 0x10 is
-      # FILE_ATTRIBUTE_DIRECTORY.
-      attrs = LibKernel32.GetFileAttributesA(c_str(p))
+      # spells as the Int32 the prelude's helper answers, and 0x10 is
+      # FILE_ATTRIBUTE_DIRECTORY. The helper is GetFileAttributesW with the
+      # wide conversion in front of it, so a long or non-ASCII directory
+      # answers here the same as a short ASCII one.
+      attrs = __iyi_path_attributes(c_str(p))
       attrs != -1 && (attrs & 0x10) != 0
     {% else %}
       false
@@ -438,7 +488,8 @@ pub class Dir
         raise "Cannot create directory: #{p}"
       end
     {% elsif flag?(:win32) %}
-      if LibKernel32.CreateDirectoryA(c_str(p), Pointer(Void).new(0_u64)) == 0
+      wide = __iyi_wide_path(c_str(p))
+      if wide.address == 0_u64 || LibKernel32.CreateDirectoryW(wide, Pointer(Void).new(0_u64)) == 0
         raise "Cannot create directory: #{p}"
       end
     {% end %}
@@ -467,7 +518,14 @@ pub class Dir
         {% if flag?(:darwin) || flag?(:linux) %}
           LibC.mkdir(c_str(acc), mode)
         {% elsif flag?(:win32) %}
-          LibKernel32.CreateDirectoryA(c_str(acc), Pointer(Void).new(0_u64))
+          # Each segment is converted on its own, so the `\\?\` prefix goes on
+          # exactly the ones long enough to need it: the whole path can be
+          # past MAX_PATH while the first segments are not, and those are
+          # created by their plain relative names.
+          acc_wide = __iyi_wide_path(c_str(acc))
+          if acc_wide.address != 0_u64
+            LibKernel32.CreateDirectoryW(acc_wide, Pointer(Void).new(0_u64))
+          end
         {% end %}
       end
     end
@@ -482,7 +540,8 @@ pub class Dir
         raise "Cannot remove directory: #{p}"
       end
     {% elsif flag?(:win32) %}
-      if LibKernel32.RemoveDirectoryA(c_str(p)) == 0
+      wide = __iyi_wide_path(c_str(p))
+      if wide.address == 0_u64 || LibKernel32.RemoveDirectoryW(wide) == 0
         raise "Cannot remove directory: #{p}"
       end
     {% end %}
@@ -493,7 +552,8 @@ pub class Dir
     {% if flag?(:darwin) || flag?(:linux) %}
       LibC.rmdir(c_str(p)) == 0
     {% elsif flag?(:win32) %}
-      LibKernel32.RemoveDirectoryA(c_str(p)) != 0
+      wide = __iyi_wide_path(c_str(p))
+      wide.address != 0_u64 && LibKernel32.RemoveDirectoryW(wide) != 0
     {% else %}
       false
     {% end %}
@@ -679,4 +739,43 @@ pub class Dir
     buf[n] = 0_u8
     buf
   end
+
+  {% if flag?(:win32) %}
+    # The search pattern FindFirstFileW is opened with: the directory, wide,
+    # with a separator and a `*` behind it. The directory is converted on its
+    # own and the wildcard appended to the result, not converted with it,
+    # because a long path's conversion runs through `GetFullPathNameW` and
+    # that is a path normaliser rather than a pattern one — the `\\?\` prefix
+    # it produces is what a long directory needs here, and a `*` is no
+    # business of its. A null pointer is the conversion having failed, which
+    # the callers read as the directory not opening.
+    protected def self.find_pattern(dir_path : String) : UInt16*
+      wide = __iyi_wide_path(c_str(dir_path))
+      return wide if wide.address == 0_u64
+      length = 0
+      while wide[length] != 0_u16
+        length = length + 1
+      end
+      # One separator, not two. A path this library hands on unprefixed is
+      # normalised by Windows, which collapses `\\` in the middle of a
+      # pattern, so a caller's trailing separator cost nothing; past 248
+      # characters `__iyi_wide_path` puts the `\\?\` prefix on, and that
+      # prefix means "do not parse this again" — the doubled separator then
+      # reaches the file system as it is and `FindFirstFileW` refuses a
+      # directory `Dir.exists?` accepts on the same string.
+      while length > 1 && (wide[length - 1] == 92_u16 || wide[length - 1] == 47_u16)
+        length = length - 1
+      end
+      pattern = Pointer(UInt16).malloc((length + 3).to_u64)
+      index = 0
+      while index < length
+        pattern[index] = wide[index]
+        index = index + 1
+      end
+      pattern[length] = 92_u16     # '\'
+      pattern[length + 1] = 42_u16 # '*'
+      pattern[length + 2] = 0_u16
+      pattern
+    end
+  {% end %}
 end

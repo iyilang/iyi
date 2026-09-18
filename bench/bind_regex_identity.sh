@@ -30,9 +30,22 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CRYSTAL="$REPO/bin/crystal"
-IYI="$REPO/bin/iyi"
+# the wrappers in bin are posix shell scripts, so a caller that already has
+# compilers of its own names them through the environment.
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and the sources
+# written into a scratch directory named `/tmp/tmp.X` are named by a path it
+# cannot read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 # Each shard matches as well as naming its pattern, and the match is the half
 # that took longest to make true. Reading the constant says which one the unit

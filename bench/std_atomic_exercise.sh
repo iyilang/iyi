@@ -23,12 +23,32 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 # The IR audit reads one target's IR, and it is not the host's.
 #
@@ -156,7 +176,7 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched module did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
     status=1
@@ -189,7 +209,7 @@ echo
 echo "== proving the IR audit can fail: every relaxed verb strengthened to seq_cst"
 mkdir -p "$WORK/strong/std"
 sed -e 's/:monotonic/:sequentially_consistent/g' "$REPO/src/std/atomic.iyi" > "$WORK/strong/std/atomic.iyi"
-if IYI_PATH="$WORK/strong:$REPO/src" "$IYI" build --emit llvm-ir "${IR_TARGET[@]}" -o "$WORK/strong/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/strong/build.log" 2>&1 \
+if IYI_PATH="$WORK/strong${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "${IR_TARGET[@]}" -o "$WORK/strong/ir" "$REPO/bench/std_atomic_exercise.iyi" >"$WORK/strong/build.log" 2>&1 \
    && [ -s "$WORK/strong/ir.ll" ]; then
   if ir_audit "$WORK/strong/ir.ll" >"$WORK/strong/audit.out"; then
     echo "  the audit PASSED with every relaxed verb strengthened (it should have failed)"

@@ -14,9 +14,30 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# The gate runs the compiler the caller names; bin/iyi is a POSIX shell
+# wrapper a Windows build cannot run.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 status=0
 
@@ -27,7 +48,7 @@ if [ ! -f "$REPO/src/std/traits.iyi" ]; then
   mkdir -p "$WORK/foundation/std"
   git show origin/std/foundation:src/std/traits.iyi > "$WORK/foundation/std/traits.iyi" 2>/dev/null || true
   git show origin/std/foundation:src/std/enumerable.iyi > "$WORK/foundation/std/enumerable.iyi" 2>/dev/null || true
-  EXTRA_PATH="$WORK/foundation:"
+  EXTRA_PATH="$WORK/foundation${PSEP}"
 fi
 
 BASE_IYI_PATH="${EXTRA_PATH}${REPO}/src"
@@ -115,7 +136,7 @@ prove_fails() {
     cp -R "$WORK/foundation/std/." "$WORK/$dir/std/"
   fi
   sed -e "$sed_script" "$REPO/src/std/iterator.iyi" > "$WORK/$dir/std/iterator.iyi"
-  if ! IYI_PATH="$WORK/$dir:$BASE_IYI_PATH" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$BASE_IYI_PATH" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/std_iterator_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched iterator library did not build"

@@ -16,7 +16,24 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # machine with nothing on it — so CI points this at the tarball's binary and
 # the whole driver, proofs included, runs in one place.
 IYI="${IYI:-$REPO/bin/iyi}"
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on the search path, so
+# the patched copy is never read and the proof that a check can fail
+# quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
@@ -123,7 +140,7 @@ prove_fails() {
   awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
 
   local link_cmd
-  link_cmd="$(IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build --cross-compile --target wasm32-wasi \
+  link_cmd="$(IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build --cross-compile --target wasm32-wasi \
     -o "$WORK/$dir/prog" "$REPO/bench/wasm32_exercise.iyi" 2>"$WORK/$dir/build.log")"
   local build_code=$?
   if [ "$build_code" -ne 0 ] || [ -z "$link_cmd" ]; then

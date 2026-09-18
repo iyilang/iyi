@@ -1496,17 +1496,15 @@ jobs:
 
       # Each sample documents a part of the design, and `calc` reads, so
       # every one of them is given nothing on standard input rather than
-      # the runner's closed handle. `socket.iyi` is the one that cannot
-      # run here: the native std has no Winsock yet and `IyiSocket` says
-      # so by name, so the sample's own refusal is the expected answer and
-      # a tally cannot read it. Delete the line when sockets land.
+      # the runner's closed handle. Every sample runs here now, `socket.iyi`
+      # included: the native std has a Winsock arm, so the sample that used
+      # to be skipped because `IyiSocket` refused by name is a sample that
+      # connects, accepts and exchanges a message.
       - name: Run every sample
         shell: pwsh
         run: |
-          $skip = @("socket.iyi")
           $failed = @()
           foreach ($sample in Get-ChildItem samples\iyi\*.iyi) {
-            if ($skip -contains $sample.Name) { continue }
             Write-Host "== $($sample.Name)"
             "" | .\.build\iyi.exe run $sample.FullName
             if ($LASTEXITCODE -ne 0) { $failed += $sample.Name }
@@ -1546,25 +1544,30 @@ jobs:
       # exclusions are named one by one, because a list nobody has to
       # justify is how a target quietly stops being tested:
       #
-      #   socket, udp, http, server_load   no Winsock in the native std yet
-      #   arena_large_probe                its pass *is* the memory fault,
-      #                                    which bench/arena_exercise.sh
-      #                                    asserts and a tally cannot
-      #   wasm32_exercise                  a wasm32 program
-      #   std_file_exercise                creates a symlink, which needs a
-      #                                    privilege this image may not
-      #                                    grant; drop this line once a run
-      #                                    here shows it does
+      #   std_http_server    a server, which waits for the client its own
+      #                      gate supplies; a bare run has nobody to talk
+      #                      to and would sit there until the job's timeout
+      #   arena_large_probe  its pass *is* the memory fault, which
+      #                      bench/arena_exercise.sh asserts and a tally
+      #                      cannot
+      #   wasm32_exercise    a wasm32 program
+      #
+      # The sockets came off this list when `std/socket` and `std/udp` got
+      # their Winsock arms, and `std_file_exercise` came off it when the
+      # exercise learned to ask Windows whether it may make a symbolic link
+      # and to say what it skipped when the answer is no. `IYI_FILE_SANDBOX`
+      # is what keeps that exercise out of `/tmp`, which is not a directory
+      # here.
       - name: Every exercise the runtime can hold
         shell: pwsh
         run: |
           $skip = @(
-            "socket_exercise.iyi", "std_udp_exercise.iyi", "std_http_exercise.iyi",
-            "std_http_server.iyi", "server_load.iyi", "arena_large_probe.iyi",
-            "wasm32_exercise.iyi", "std_file_exercise.iyi"
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
+          $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
           New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
           $iyi = "$pwd\.build\iyi.exe"
           $failed = @()
           $ran = 0
@@ -1592,6 +1595,127 @@ jobs:
             Write-Host "failed: $($failed -join ', ')"
             exit 1
           }
+
+      # The package a Windows person downloads, built and judged by the run
+      # that builds the compiler. Kept inside this job rather than given its
+      # own: a second job would check the tree out again and build
+      # the compatibility binary before it could build `iyi` at all, which is
+      # this job's minutes, to save the one release build below — the only
+      # work here that is actually new.
+      #
+      # `-B` is that guard working rather than a way around it: the steps
+      # above built an ordinary `iyi`, make finds it up to date by file
+      # times, and `check_iyi_is_release` refuses to package an unoptimised
+      # compiler. `-B` is what rebuilds it with `--release`.
+      - name: Build the zip a Windows person downloads
+        shell: cmd
+        run: make -f Makefile.win -B iyi-zip release=1
+
+      # What a person who downloads it does: unpack it somewhere that is not
+      # this checkout and build a program out of it, with PATH cut down to
+      # Windows' own directories so that nothing this job installed — the
+      # the bootstrap compiler, its LLVM, the MSVC prompt — can answer for the
+      # zip. The script's header says what that proves and what it does not.
+      - name: The zip, unpacked elsewhere and built with PATH trimmed
+        shell: pwsh
+        run: .\scripts\package-windows.ps1
+
+      # The one-liner, against the zip this run built and before a release
+      # exists for it: -ReleaseUrl points the installer at a directory
+      # holding the zip and the SHA256SUMS `iyi-zip` wrote, which is the file
+      # the release job publishes beside it. The install runs under Windows
+      # PowerShell 5.1, because that is the PowerShell somebody pasting the
+      # one-liner has, and the refusal runs under PowerShell 7, so both hosts
+      # are covered. Then the same directory with one hex digit wrong, which
+      # has to be refused with nothing unpacked — an installer that verifies
+      # is only worth having if this step can fail.
+      - name: install.ps1 installs that zip, and refuses a wrong checksum
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item .build\iyi-*-windows-x86_64.zip -Destination $dist
+          Copy-Item .build\SHA256SUMS -Destination $dist
+          $zip = Get-ChildItem (Join-Path $dist 'iyi-*-windows-x86_64.zip')
+          if ($zip.Name -notmatch '^iyi-(.+)-windows-x86_64\.zip$') {
+            throw "unexpected asset name $($zip.Name)"
+          }
+          $version = $Matches[1]
+          $prefix = Join-Path $env:RUNNER_TEMP 'installed'
+
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
+            -ReleaseUrl $dist -Version $version -Prefix $prefix
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with $LASTEXITCODE" }
+
+          # The PATH edit, because the install is only useful if `iyi` is a
+          # word the next terminal knows. It is the user's PATH in HKCU, so
+          # nothing here needs administrator and the runner is thrown away.
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -notlike "*$(Join-Path $prefix 'bin')*") {
+            throw "install.ps1 did not add its bin to the user PATH: $userPath"
+          }
+
+          # The installed copy, run from a directory that is neither the
+          # checkout nor the prefix, which is where a person's own project is.
+          $work = Join-Path $env:RUNNER_TEMP 'project'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Push-Location $work
+          & (Join-Path $prefix 'bin\iyi.exe') run (Join-Path $prefix 'share\iyi\samples\hello.iyi')
+          if ($LASTEXITCODE -ne 0) { throw 'the installed iyi cannot run hello.iyi' }
+          Pop-Location
+
+          # And the whole install under PowerShell 7, into a prefix of its
+          # own: the two hosts report a redirect's destination differently
+          # and disagree about `-UseBasicParsing`, so the install is run by
+          # both rather than the refusal alone. `-NoPath` because the PATH
+          # edit is already proven above and the second one would only find
+          # its own entry.
+          $seven = Join-Path $env:RUNNER_TEMP 'installed-pwsh'
+          pwsh -NoProfile -File .\install.ps1 -ReleaseUrl $dist -Version $version -Prefix $seven -NoPath
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 under PowerShell 7 failed with $LASTEXITCODE" }
+          & (Join-Path $seven 'bin\iyi.exe') version
+          if ($LASTEXITCODE -ne 0) { throw 'the copy PowerShell 7 installed does not start' }
+
+          # One hex digit wrong. `-RedirectStandardError`, because the
+          # refusal is written to the process's own stderr and a `2>` inside
+          # PowerShell only redirects PowerShell's error stream, which is how
+          # this check first passed while capturing nothing.
+          $sums = Join-Path $dist 'SHA256SUMS'
+          $text = [IO.File]::ReadAllText($sums)
+          $first = if ($text[0] -eq '0') { 'f' } else { '0' }
+          [IO.File]::WriteAllText($sums, $first + $text.Substring(1))
+          $tampered = Join-Path $env:RUNNER_TEMP 'tampered'
+          $refusal = Join-Path $env:RUNNER_TEMP 'refusal.txt'
+          $child = Start-Process -FilePath 'pwsh' -RedirectStandardError $refusal -NoNewWindow -Wait -PassThru `
+            -ArgumentList @('-NoProfile', '-File', '.\install.ps1', '-ReleaseUrl', "`"$dist`"",
+                            '-Version', $version, '-Prefix', "`"$tampered`"", '-NoPath')
+          $message = [IO.File]::ReadAllText($refusal)
+          Write-Host $message
+          if ($child.ExitCode -eq 0) { throw 'a zip that does not match SHA256SUMS was installed' }
+          if ($message -notmatch "does not match the release's SHA256SUMS") {
+            throw 'the refusal did not say why'
+          }
+          if (Test-Path (Join-Path $tampered 'bin\iyi.exe')) { throw 'something was unpacked anyway' }
+
+      # The zip the three steps above proved is the artifact a release
+      # attaches — built once, here, never rebuilt on somebody's laptop.
+      # Staged out of `.build` first, and that is the whole bug the copy
+      # exists for: upload-artifact excludes hidden paths by default, so a
+      # wildcard under `.build/` matches nothing and the step says so in a
+      # warning and passes. `error` is the rest of it: a release asset that
+      # silently does not exist is worth a step to catch.
+      - name: Stage the zip for the release job
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item .build\iyi-*-windows-x86_64.zip -Destination dist
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: iyi-windows-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
@@ -2000,15 +2124,25 @@ jobs:
         with:
           name: iyi-darwin-arm64
           path: dist/
-      # The checksums ride beside the tarballs, and install.sh refuses a
-      # tarball that does not match them: what comes out of one reaches
-      # the linker.
-      - name: Create the release from the proven tarballs
+      # And the Windows zip `windows-native` built, unpacked elsewhere and
+      # installed by `install.ps1` in the same run. Without this line the
+      # installer has nothing to download: it asks a release for
+      # `iyi-<version>-windows-x86_64.zip` by name.
+      - uses: actions/download-artifact@v5
+        with:
+          name: iyi-windows-x86_64
+          path: dist/
+      # The checksums ride beside the archives, and install.sh and
+      # install.ps1 both refuse one that does not match them: what comes out
+      # of an archive reaches the linker. One SHA256SUMS for every platform's
+      # file, which is the file both installers read a line out of.
+      - name: Create the release from the proven archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
-          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md dist/*.tar.gz dist/SHA256SUMS
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS

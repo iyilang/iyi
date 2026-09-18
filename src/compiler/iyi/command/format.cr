@@ -129,8 +129,13 @@ class Iyi::Command
           format_file filename
         end
       elsif Dir.exists?(filename)
-        filename = ::Path[filename.chomp('/')].to_posix
-        filenames = Dir["#{filename}/**/*.cr"] + Dir["#{filename}/**/*.iyi"]
+        # Composed by `Path` rather than by interpolation, because a trailing
+        # separator is its business: `chomp('/')` knew only the posix one, so
+        # a `src\` would have made the pattern `src\/**/*.cr` and matched
+        # nothing. Nothing arrives spelled that way while `normalize_path`
+        # chops it first, and now nothing depends on that.
+        directory = ::Path[filename].to_posix
+        filenames = Dir[directory.join("**", "*.cr")] + Dir[directory.join("**", "*.iyi")]
         format_many filenames
       else
         # iyi: and a failure, which it was not. `--check` printed this and

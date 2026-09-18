@@ -94,6 +94,18 @@ pub enum Errno
     ETIME           = 101
     ENOTRECOVERABLE = 104
     EOWNERDEAD      = 105
+    # Linux's numbers, and Windows falls here with them. That is deliberate
+    # and it is not a claim: nothing in iyi's Windows arms produces an
+    # `Errno`, because Windows does not have one to produce. A failed call
+    # there carries `GetLastError` — `std/file` renders it with
+    # `FormatMessageW`, so a refused link reads "Windows error 183: Cannot
+    # create a file when that file already exists" — and a failed socket call
+    # carries `WSAGetLastError` negated, which `std/socket`'s two predicates
+    # are the only readers of. So this table is the *values* a program that
+    # names `Errno::ENOENT` gets, and a Windows program must not expect one
+    # of them to come back out of the library. Giving the arm the C runtime's
+    # own numbers would make the table agree with a `errno.h` no arm here
+    # reads, which is a different fiction.
   {% else %}
     EAGAIN          =  11
     EWOULDBLOCK     =  11

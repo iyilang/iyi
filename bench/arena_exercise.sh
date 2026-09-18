@@ -25,16 +25,53 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# the wrapper in bin is a posix shell script, so a caller that already has a
+# compiler of its own names it through the environment.
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` is silently ignored on that path, so the
+# patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
 
+# A floor measured with a reader that is not installed is not measured at
+# all: `nm -u` in a shell with no `nm` prints nothing, and an empty symbol
+# list reads as a floor that held. The readers are resolved once here, and
+# the arm that needs them says what it could not measure instead.
+NM=""
+command -v nm >/dev/null 2>&1 && NM=nm
+LIBS_READER=""
+for candidate in otool readelf; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    LIBS_READER="$candidate"
+    break
+  fi
+done
+unmeasured=0
+
 # The same readers `bench/dependency_floor.sh` uses, for the same reason: what
 # a binary itself leaves undefined and what it itself asks to have loaded.
 symbols() {
-  nm -u "$1" 2>/dev/null |
+  "$NM" -u "$1" 2>/dev/null |
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
@@ -43,7 +80,7 @@ symbols() {
 }
 
 libraries() {
-  if command -v otool >/dev/null 2>&1; then
+  if [ "$LIBS_READER" = otool ]; then
     otool -L "$1" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
   else
     readelf -d "$1" 2>/dev/null |
@@ -162,7 +199,7 @@ if [ "$(uname -s)" = Linux ]; then
     if cmp -s "$WORK/$dir/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
       echo "  $label: the awk found nothing to change"; status=1; return
     fi
-    if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
       echo "  $label: the patched prelude did not build"; sed -n '1,12p' "$WORK/$dir/build.log"; status=1; return
     fi
     "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
@@ -216,7 +253,10 @@ case "$(uname -s)" in
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"
 
-if [ -x "$WORK/exercise-gc" ]; then
+if [ -z "$NM" ] || [ -z "$LIBS_READER" ]; then
+  echo "  no nm and no otool or readelf here, so the allocation floor is not measured"
+  unmeasured=$((unmeasured + 1))
+elif [ -x "$WORK/exercise-gc" ]; then
   gc_syms="$(symbols "$WORK/exercise-gc")"
   gc_libs="$(libraries "$WORK/exercise-gc")"
   printf '  symbols   %s\n' "$(echo $gc_syms)"
@@ -352,9 +392,13 @@ ratio_holds "an allocation" "$arena_rel" "$bump_rel"
 ratio_holds "an alloc+free pair" "$pair_rel" "$bump_rel"
 
 echo
-if [ "$status" -eq 0 ]; then
-  echo "the arena allocator holds"
-else
+if [ "$status" -ne 0 ]; then
   echo "the arena allocator did not hold"
+elif [ "$unmeasured" -gt 0 ]; then
+  # A summary may not claim more than was measured: an arm whose reader is
+  # missing is counted here rather than folded into the pass.
+  echo "the arena allocator holds, with $unmeasured check not measured here"
+else
+  echo "the arena allocator holds"
 fi
 exit $status

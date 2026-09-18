@@ -7,12 +7,15 @@
 # `bold`).
 #
 # `Colorize.enabled?` decides whether escapes are written at all. Until
-# set, it reads the environment the way the NO_COLOR convention asks:
-# false when `NO_COLOR` is set to anything but the empty string, false
-# when `TERM` is `dumb`, true otherwise. The prelude has no way to ask
-# whether the output is a terminal, so a program writing to a pipe sets
-# `Colorize.enabled = false` itself or leaves it to the reader's
-# `NO_COLOR`. `Colorize.reset(io)` writes `\e[0m`; `Colorize.with` is an
+# set, it asks two things: whether standard output is a terminal, and
+# whether the environment refuses colour the way the NO_COLOR convention
+# asks — false when `NO_COLOR` is set to anything but the empty string,
+# false when `TERM` is `dumb`, true otherwise. The terminal question is
+# the prelude's `__iyi_isatty`, which is `isatty` on POSIX and
+# `GetConsoleMode` answering at all on Windows; before it existed this
+# module wrote escapes into pipes and files and said so here, and a
+# program redirecting its own output had to set `Colorize.enabled = false`
+# by hand. `Colorize.reset(io)` writes `\e[0m`; `Colorize.with` is an
 # empty coloured object to build a prefix from.
 #
 # `.colorize` is added to every value by reopening the prelude's
@@ -94,9 +97,14 @@ pub struct Colorize
     @@enabled = value
   end
 
-  # The environment's answer, read once: `NO_COLOR` set to anything but
-  # `""` refuses, `TERM=dumb` refuses, and nothing else is asked.
+  # The environment's answer, read once: standard output must be a terminal,
+  # `NO_COLOR` set to anything but `""` refuses, `TERM=dumb` refuses, and
+  # nothing else is asked. The terminal test is first because it is the one
+  # a reader cannot set: escapes in a file are a defect in every
+  # environment, and this module wrote them there until the prelude could
+  # answer the question (`__iyi_isatty`).
   def self.environment_allows? : Bool
+    return false unless __iyi_isatty(1)
     if no_color = Program.env("NO_COLOR")
       return false unless no_color.empty?
     end

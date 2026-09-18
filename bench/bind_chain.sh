@@ -23,9 +23,28 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CRYSTAL="$REPO/bin/crystal"
-IYI="$REPO/bin/iyi"
+# the wrappers in bin are posix shell scripts, so a caller that already has
+# compilers of its own names them through the environment.
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and the shard
+# in a scratch directory named `/tmp/tmp.X` is never read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 KEMAL_VERSION="1.12.0"
 
@@ -54,8 +73,8 @@ fi
 
 # Absolute, because the fill build runs with `mods` as its working directory
 # and a relative `lib` would resolve under it.
-export CRYSTAL_PATH="$WORK/lib:$REPO/src"
-export IYI_PATH="$WORK/lib:$REPO/share/iyi/src:$REPO/share/iyi/crystal:$REPO/src"
+export CRYSTAL_PATH="$WORK/lib${PSEP}$REPO/src"
+export IYI_PATH="$WORK/lib${PSEP}$REPO/share/iyi/src${PSEP}$REPO/share/iyi/crystal${PSEP}$REPO/src"
 
 mkdir mods
 

@@ -14,6 +14,13 @@
 # `bench/std_eiy_exercise.iyi` failed on Windows alone.
 *.eiy text eol=lf
 
+# iyi: a gate is a shell script, and a shell script with CRLF is not a
+# program: Linux reads `#!/usr/bin/env bash\r` as an interpreter it cannot
+# find. A Windows clone gives CRLF to anything nothing pins, and an editor
+# on Windows gives it back on every save, so 27 gates in `bench/` arrived
+# that way in one night's work.
+*.sh text eol=lf
+
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.
 *.iyimod binary

@@ -23,9 +23,30 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CRYSTAL="$REPO/bin/crystal"
-IYI="$REPO/bin/iyi"
+# Both compilers are whichever ones the caller names; `bin/crystal` and
+# `bin/iyi` are shell wrappers, and on Windows the caller has to point at
+# the built exes themselves.
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from the shell's `pwd` finds no prelude at all, and a scratch
+# directory named `/tmp/tmp.X` on it is silently ignored, so the shard the
+# boundary is built from is never read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
 
 # Pinned, and the version SPEC.md Part V item 12 measured, so a number here is
 # comparable to the numbers there.
@@ -58,8 +79,8 @@ fi
 
 # Absolute, because the fill build runs with `mods` as its working directory
 # and a relative `lib` would resolve under it.
-export CRYSTAL_PATH="$WORK/lib:$REPO/src"
-export IYI_PATH="$WORK/lib:$REPO/share/iyi/src:$REPO/share/iyi/crystal:$REPO/src"
+export CRYSTAL_PATH="$WORK/lib${PSEP}$REPO/src"
+export IYI_PATH="$WORK/lib${PSEP}$REPO/share/iyi/src${PSEP}$REPO/share/iyi/crystal${PSEP}$REPO/src"
 
 mkdir mods
 

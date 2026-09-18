@@ -4,6 +4,84 @@
 
 ### Added
 
+- **Windows x86-64 is a platform the tree measures, not one it hopes
+  about.** Of the 87 programs under `bench/`, 84 pass unattended on a
+  Windows 11 machine, and the tree's own gates run there: every
+  `bench/*.sh` honours the platform's path-list delimiter (`;`, because a
+  drive letter already owns the colon), converts the shell's own path
+  mapping before a native compiler reads it, honours `$IYI` and `$CRYSTAL`
+  from the environment, and names what it could not measure instead of
+  passing on an empty pipeline — a gate that counted symbols out of a
+  missing `nm` used to report "every step held". What is new underneath
+  them:
+  - **Sockets.** `std/socket` and `std/udp` have Winsock arms, so TCP,
+    UDP and HTTP work: `accept` posts `AcceptEx`, `connect` posts
+    `ConnectEx`, a blocked `write` posts `WSASend` and a datagram
+    receive posts `WSARecvFrom`, all on the completion port the poller
+    already runs. The extension pointers come from `WSAIoctl`, so
+    `mswsock` is not a second DLL; `ws2_32` is, and SPEC.md III.10 says
+    why.
+  - **A path is UTF-16 end to end.** The narrow entry points read a path
+    in the process's code page, so a name iyi was handed as UTF-8 named
+    a different file: `File.write("ünïcode-çğış-日本.txt")` created
+    `Ã¼nÃ¯code-...` on disk and now creates the name it was given. The
+    conversion is one prelude helper, which also puts on the `\\?\`
+    prefix past 248 characters — a 364-character path writes, reads and
+    deletes.
+  - **The console writes what the program printed.** `WriteConsoleW`
+    with UTF-16, VT asked for once per handle, and a UTF-8 tail carried
+    across writes, so Turkish and Japanese render under code page 437
+    and colour works; a redirected stream stays raw UTF-8, because
+    `std/colorize` now asks whether the handle is a console before it
+    writes an escape.
+  - **A crash says what it was.** A vectored handler names a stack
+    overflow and an access violation, `SetErrorMode` keeps the
+    Windows-error dialog off a runner, and `bench/panics.sh` runs on
+    Windows for the first time. The defect that hid this was a DWORD
+    read as `UInt32` where the file's own rule says `Int32`: the
+    comparison never matched, so the handler ran and printed nothing.
+  - **A collection inside a fiber no longer walks off the stack.** The
+    fiber switch rewrites the TEB's `StackBase`, and the collector
+    memoized that word as "the main thread's stack base", so a
+    collection that happened inside a spawned fiber scanned the parked
+    main fiber from its real stack pointer to *that fiber's* top — two
+    mappings, gigabytes apart — and died of a memory fault. Eleven lines
+    with no IO in them reproduced it, and it predates this release.
+  - **The 128-bit divide.** LLVM emits a call to `__divti3`,
+    `__modti3`, `__udivti3` and `__umodti3`; every other platform has
+    compiler-rt and Windows-MSVC has nothing, so any program dividing an
+    `Int128` failed to *link*. The four are written in iyi now, in the
+    win32 arm, on a shift-subtract kernel that uses 64-bit words only,
+    and a divisor of zero faults exactly where a 64-bit one does.
+  - **`File.readlink` and `File.real_path` answer.** They returned the
+    empty string and the caller's own argument: a program that followed
+    a link on Windows followed nothing and was told it had succeeded.
+    The reparse point is read with `FSCTL_GET_REPARSE_POINT` and the
+    resolved path with `GetFinalPathNameByHandleW`; `File::SEPARATOR` is
+    the platform's, which is what `File.join` had been writing all
+    along.
+  - **A failure says why.** Every Windows call in `std/file` that fails
+    now carries `FormatMessageW`'s own sentence with the code beside it,
+    so a refused link reads `Windows error 183: Cannot create a file
+    when that file already exists` instead of naming only what was
+    attempted.
+  - **The dependency floor is measured on Windows.**
+    `bench/dependency_floor.sh` reads a PE import table with `dumpbin`,
+    located through `vswhere` the way the linker is, and audits every
+    program against an allowlist with a reason per DLL. Measured: 114
+    binaries import `kernel32`, `vcruntime140` and five UCRT façades,
+    four of them `ws2_32`, two `advapi32`, and nothing else. The same
+    change guards, on every platform, a branch that used to invite
+    deleting a floor it had not read.
+  - **A release for Windows.** `make -f Makefile.win iyi-zip` writes the
+    zip with its `SHA256SUMS`, `install.ps1` installs it the way
+    `install.sh` installs the tarball (checksum refused before anything
+    is unpacked, `IYI_PREFIX` and `IYI_VERSION` honoured, user `PATH`
+    extended in place), `bin\iyi.ps1` and `bin\iyi.bat` are the
+    checkout's launchers, and CI's `windows-native` job builds the zip,
+    runs the package gate and installs it twice. The daemon is not in
+    it: `iyi daemon`'s loop is `poll(2)` and its worker is `fork`.
+
 - **A server written in iyi serves HTTP.** `Server.serve(listener) {
   |request| Response }` in `std/http`: a fiber per connection under a
   group, keep-alive across requests (HTTP/1.0 and `Connection: close`
@@ -177,6 +255,13 @@
   now, which is what it is. Seventy-two modules, 37,127 lines.
 
 ### Fixed
+
+- **`std/udp`'s Winsock arm and the night's `SockLen` met at the merge.**
+  The `make_sockaddr` return type names an alias each platform arm
+  declares; the Windows arm (#97) was written beside it and did not, so
+  the merged tree's `std/udp` would not have compiled on Windows. The arm
+  declares it now, and every program under `bench/` cross-compiles to
+  `x86_64-windows-msvc` from the merged tree.
 
 - **A cursor beside a node the front end never typed was -32603.**
   96,608 requests over every position of every std module - hover,
@@ -6997,7 +7082,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 14,420-line library and nothing else. Every other
+  written against iyi's own 15,243-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -17,12 +17,32 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
+IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
+
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 build_and_run() {
   local label="$1" name="$2" source="$3"
@@ -133,7 +153,7 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_gc_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_gc_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched module did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
     status=1

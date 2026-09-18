@@ -13,6 +13,13 @@ set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
 work=$(mktemp -d /tmp/iyi-defer-cost.XXXXXX)
+# A native compiler cannot resolve this shell's own path mapping: a
+# scratch directory named `/tmp/tmp.X` is silently ignored on the search
+# path, so the patched copy is never read and the proof that a check can
+# fail quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) work="$(cygpath -m "$work")" ;;
+esac
 trap 'rm -rf "$work"' EXIT
 
 N=20000000

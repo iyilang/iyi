@@ -247,7 +247,15 @@ class Iyi::Command
     unless source_path
       return {written, nil, "does not resolve: no file and no requirement covers it"}
     end
-    module_root = source_path.chomp("#{expected_name}.iyi").chomp("/")
+    # The root the module path hangs under, reached by dropping a directory
+    # per segment of it. Chomping the name off the end arrived there only by
+    # coincidence: `File.join` leaves a module path's own `/` alone and
+    # spells the joint with `\`, so the tail matched while the `chomp("/")`
+    # after it fired on no Windows path at all and the root kept a separator
+    # glued to its end. `Path` needs neither coincidence.
+    root = ::Path[source_path]
+    (expected_name.count('/') + 1).times { root = root.parent }
+    module_root = root.to_s
 
     entry = File.join(emit_dir, "context_entry.iyi")
     File.write(entry, "import #{expected_name}\n")
@@ -261,7 +269,9 @@ class Iyi::Command
     compiler.stderr = IO::Memory.new
     previous_path = ENV["IYI_PATH"]?
     begin
-      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(':')
+      # The delimiter is the platform's, because `IyiPath` splits on the
+      # platform's: a `:`-joined list is one unusable entry on Windows.
+      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
       compiler.compile(
         Compiler::Source.new(entry, File.read(entry)),
         File.join(emit_dir, "unused"))

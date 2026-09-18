@@ -27,9 +27,24 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+# A native compiler cannot resolve this shell's own path mapping: the
+# fixture and the tree's own sources are named to the compiler as paths,
+# and ones built from the shell's `pwd` are not directories it can open.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) REPO="$(cygpath -m "$REPO")" ;;
+esac
+# The gate runs whatever compiler the caller names; `bin/iyi` is a shell
+# wrapper, and on Windows the caller has to point at the built exe itself.
+IYI="${IYI:-$REPO/bin/iyi}"
 FIXTURE="$REPO/bench/open_dispatch_fixture"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a
+# scratch directory named `/tmp/tmp.X` is silently ignored on the search
+# path, so the patched copy is never read and the proof that a check can
+# fail quietly stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) WORK="$(cygpath -m "$WORK")" ;;
+esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0

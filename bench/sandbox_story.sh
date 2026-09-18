@@ -17,6 +17,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
 # Overridable for the same reason `bench/wasm32_exercise.sh` says: in CI the
 # compiler here is the tarball's, because that is the one that runs beside
 # wasmtime.
@@ -24,6 +25,17 @@ IYI="${IYI:-$REPO/bin/iyi}"
 WASI_SDK="${WASI_SDK:-/opt/wasi-sdk}"
 WASMTIME="${WASMTIME:-$HOME/.wasmtime/bin/wasmtime}"
 WORK="$(mktemp -d)"
+# A native compiler cannot resolve this shell's own path mapping: a search
+# path built from `pwd` is `/c/...` and finds no prelude at all, and a
+# scratch directory named `/tmp/tmp.X` is silently ignored on that path, so
+# the patched copy is never read and the proof that a check can fail quietly
+# stops proving it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    ;;
+esac
 
 cd "$WORK" || exit 1
 step() { echo "== $1"; }

@@ -127,7 +127,7 @@ pub class UdpSocket
     __sys_set_reuseaddr(fd)
 
     if __sys_bind(fd, addr, addrlen) < 0
-      __iyi_close(fd.to_i64)
+      IyiSocket.__sys_close(fd)
       raise "cannot bind UDP socket to #{host}:#{port}"
     end
 
@@ -183,9 +183,20 @@ pub class UdpSocket
       next if count < 0_i64 && UdpSocket.__is_eintr(count)
       return count.to_i32 if count >= 0_i64
       raise "cannot receive from UDP socket" unless UdpSocket.__is_eagain(count)
-      waited = IyiSocket.await_readable(@fd)
-      return waited if waited.is_a?(Cancelled)
-      return Cancelled.new if @fd < 0
+      {% if flag?(:win32) %}
+        # Windows' readable-wait is destructive on a datagram socket: the
+        # zero-byte overlapped read the scheduler posts takes the datagram
+        # and answers nothing, and the `recvfrom` after one answers
+        # WSAEWOULDBLOCK — measured. So the receive itself is the wait,
+        # posted with this buffer, and the completion port answers it when a
+        # datagram lands.
+        posted = UdpSocket.__sys_recvfrom_posted(@fd, buffer, capacity, addr, pointerof(len))
+        return posted
+      {% else %}
+        waited = IyiSocket.await_readable(@fd)
+        return waited if waited.is_a?(Cancelled)
+        return Cancelled.new if @fd < 0
+      {% end %}
     end
   end
 
@@ -337,7 +348,7 @@ pub class UdpSocket
         # already gone; then the descriptor goes.
         wake_closed(fd)
       {% end %}
-      __iyi_close(fd.to_i64)
+      IyiSocket.__sys_close(fd)
     end
   end
 
@@ -537,6 +548,9 @@ pub class UdpSocket
     {% if flag?(:darwin) %}
       buffer[0] = 28_u8 # sin6_len = 28
       buffer[1] = 30_u8 # sin6_family = AF_INET6 (30 on Darwin)
+    {% elsif flag?(:win32) %}
+      buffer[0] = 23_u8 # sin6_family = AF_INET6 (23 on Windows)
+      buffer[1] = 0_u8
     {% else %}
       buffer[0] = 10_u8 # sin6_family = AF_INET6 (10 on Linux)
       buffer[1] = 0_u8
@@ -570,7 +584,7 @@ pub class UdpSocket
   def self.format_address(addr : Pointer(UInt8)) : Tuple(String, Int32)
     port = (addr[2].to_i32 << 8) | addr[3].to_i32
     family = {% if flag?(:darwin) %} addr[1].to_i32 {% else %} addr[0].to_i32 {% end %}
-    is_v6 = {% if flag?(:darwin) %} family == 30 {% else %} family == 10 {% end %}
+    is_v6 = {% if flag?(:darwin) %} family == 30 {% elsif flag?(:win32) %} family == 23 {% else %} family == 10 {% end %}
 
     host = if is_v6
              unspec = true
@@ -902,6 +916,280 @@ pub class UdpSocket
       res == -4_i64 # -EINTR on Linux
     end
 
+  {% elsif flag?(:win32) %}
+    # AF_INET6 is 23 here, not Linux's 10 and not darwin's 30; the other
+    # option numbers are Winsock's own too. `MSG_DONTWAIT` is 0 because
+    # Winsock has no such flag — it answers WSAEOPNOTSUPP to the POSIX bit,
+    # measured — so `__sys_socket` below makes every datagram socket
+    # non-blocking instead, which is what makes the 0 honest.
+    AF_INET6          =     23
+    SOL_SOCKET        = 0xffff
+    SO_RCVBUF         = 0x1002
+    SO_SNDBUF         = 0x1001
+    MSG_DONTWAIT      =      0
+    SOCKADDR_IN_SIZE  =     16
+    SOCKADDR_IN6_SIZE =     28
+    alias SockLen = Int32
+
+    SOCK_DGRAM  =  2
+    IPPROTO_UDP = 17
+
+    # See `std/socket`'s win32 arm for all three: the ioctl that is the only
+    # route to a non-blocking socket on Windows, the SOCKET that is not a
+    # descriptor, and the one kernel32 error a posted operation answers
+    # with.
+    FIONBIO          =            -2147195266
+    INVALID_SOCKET   = 0xffffffffffffffff_u64
+    ERROR_IO_PENDING =                    997
+    # POLLRDNORM: a datagram is there to be read.
+    POLLRDNORM = 0x0100_i16
+    # SIO_UDP_CONNRESET, the ioctl that turns off the report below.
+    SIO_UDP_CONNRESET = 0x9800000c_u32
+    # WSA_IO_INCOMPLETE: what the read below answers while the operation it
+    # is asked about is still under way.
+    WSA_IO_INCOMPLETE = 996
+
+    # This module's own bindings, the way each arm in this file has its own
+    # `lib LibC`: `std/socket`'s block declares the stream calls it needs and
+    # this one declares the datagram calls, which do not overlap. What is
+    # *not* duplicated is `WSAStartup`, which is once per process rather than
+    # once per module, so `__sys_socket` below asks `std/socket` for it.
+    @[Link("ws2_32")]
+    lib LibWs2_32
+      fun WSAGetLastError : Int32
+      fun socket(af : Int32, type : Int32, protocol : Int32) : UInt64
+      fun bind(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      fun connect(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      fun send(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun sendto(s : UInt64, buf : Void*, len : Int32, flags : Int32, addr : Void*,
+                 addrlen : Int32) : Int32
+      fun recvfrom(s : UInt64, buf : Void*, len : Int32, flags : Int32, addr : Void*,
+                   addrlen : Int32*) : Int32
+      fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
+      fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*,
+                     optlen : Int32) : Int32
+      fun getsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*,
+                     optlen : Int32*) : Int32
+      fun ioctlsocket(s : UInt64, cmd : Int32, argp : Int32*) : Int32
+      fun WSAIoctl(s : UInt64, code : UInt32, inbuf : Void*, inlen : Int32, outbuf : Void*,
+                   outlen : Int32, returned : Int32*, overlapped : Void*, routine : Void*) : Int32
+      fun WSARecvFrom(s : UInt64, buffers : WSABuf*, count : Int32, received : Int32*,
+                      flags : Int32*, from : Void*, fromlen : Int32*, overlapped : Void*,
+                      routine : Void*) : Int32
+      fun WSAGetOverlappedResult(s : UInt64, overlapped : Void*, transferred : Int32*,
+                                 wait : Int32, flags : Int32*) : Int32
+      fun WSAPoll(fdarray : PollFd*, nfds : Int32, timeout : Int32) : Int32
+
+      # Both are kept on the caller's frame rather than the heap: the kernel
+      # reads and writes them after a post, while the fiber is parked, and a
+      # heap chunk whose only reference is a local the posting call has
+      # finished with is a chunk the collector can hand to somebody else
+      # first.
+      struct WSABuf
+        len : Int32
+        buf : UInt8*
+      end
+
+      struct PollFd
+        fd : UInt64
+        events : Int16
+        revents : Int16
+      end
+    end
+
+    def self.__sys_handle(fd : Int32) : UInt64
+      fd.to_i64.to_u64!
+    end
+
+    # Winsock's error number, negated, which is the shape the POSIX arms
+    # answer the kernel's errno in; the two predicates at the bottom are the
+    # only things that read which number it was.
+    def self.__sys_error : Int64
+      -(LibWs2_32.WSAGetLastError.to_i64)
+    end
+
+    def self.__sys_socket(domain : Int32 = 2) : Int32
+      IyiSocket.__sys_winsock
+      s = LibWs2_32.socket(domain, SOCK_DGRAM, IPPROTO_UDP)
+      return -1 if s == INVALID_SOCKET
+      on = 1
+      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
+      # Windows tells an *unconnected* datagram socket about the ICMP
+      # port-unreachable its own earlier `sendto` provoked: the next receive
+      # on it answers WSAECONNRESET instead of "nothing queued", and since
+      # only WSAEWOULDBLOCK is read as that below, the receive panicked and
+      # a server died of its first stale peer. Measured: a socket that sent
+      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX never
+      # reports this, which is why the shared bodies have no case for it, so
+      # the report is turned off here rather than taught to them — the cure
+      # Windows itself offers.
+      off = 0_i32
+      returned = 0_i32
+      LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
+        Pointer(Void).new(0_u64), 0, pointerof(returned), Pointer(Void).new(0_u64),
+        Pointer(Void).new(0_u64))
+      s.to_i32!
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), len) != 0
+      0
+    end
+
+    # A datagram socket's `connect` only records the peer, so there is no
+    # handshake to wait for and nothing to post.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.connect(__sys_handle(fd), addr.as(Void*), len) != 0
+      0
+    end
+
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+      n = LibWs2_32.send(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
+      return n.to_i64 if n >= 0
+      __sys_error
+    end
+
+    def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
+                          addr : Pointer(UInt8), addrlen : Int32) : Int64
+      n = LibWs2_32.sendto(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*), addrlen)
+      return n.to_i64 if n >= 0
+      __sys_error
+    end
+
+    # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
+    # the same width and the same bytes, so the callers keep one signature.
+    def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
+                            addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+      n = LibWs2_32.recvfrom(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*),
+        addrlen.as(Pointer(Int32)))
+      return n.to_i64 if n >= 0
+      __sys_error
+    end
+
+    # The receive that waits, which on Windows is a posted one: see the note
+    # in `receive_into` for why the readable-wait cannot be used here. The
+    # buffer descriptor and the flags stay on this frame for the whole
+    # operation, and the address and its length are the caller's, which
+    # `receive_from` reads after this returns.
+    def self.__sys_recvfrom_posted(fd : Int32, buf : Pointer(UInt8), capacity : Int32,
+                                   addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32 | Cancelled
+      # A cancelled task must not post: nothing would wake it but the
+      # completion, and a datagram nobody sends never produces one.
+      return Cancelled.new if IyiScheduler.current.cancelled
+      s = __sys_handle(fd)
+      descriptor = LibWs2_32::WSABuf.new(len: capacity, buf: buf)
+      flags = 0_i32
+      received = 0_i32
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      answered = LibWs2_32.WSARecvFrom(s, pointerof(descriptor), 1, pointerof(received),
+        pointerof(flags), addr.as(Void*), addrlen.as(Pointer(Int32)), ov.as(Void*),
+        Pointer(Void).new(0_u64))
+      return received if answered == 0
+      err = LibWs2_32.WSAGetLastError
+      raise "cannot receive from UDP socket" if err != ERROR_IO_PENDING
+      parked = IyiScheduler.park_overlapped_current
+      if parked.is_a?(Cancelled)
+        # `CancelIoEx` is a request, not an end: the descriptor above, the
+        # caller's address and length, and the OVERLAPPED are the kernel's
+        # until the operation is really over, and all of them are this
+        # frame's or the caller's. Returning on the flag alone left the
+        # kernel writing into a frame that is gone and an OVERLAPPED the
+        # collector may already have handed to somebody else, so the
+        # operation is waited out first — see `__sys_overlapped_await` for
+        # what that wait has to be here. No datagram arrived that the caller
+        # can have, which is what `Cancelled` says.
+        __sys_overlapped_await(s, ov)
+        return Cancelled.new
+      end
+      # The socket was closed under the park: a close does complete a posted
+      # receive, and no datagram arrived, which is the same answer.
+      result = __sys_overlapped_result(s, ov)
+      return Cancelled.new if result < 0_i64
+      result.to_i32
+    end
+
+    # What the posted operation ended with, read off the operation itself:
+    # the completion port's byte count cannot tell a failure from a datagram
+    # of no bytes, which is a legal datagram. Nothing waits here, which is
+    # what the 0 says.
+    def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
+      transferred = 0_i32
+      flags = 0_i32
+      answered = LibWs2_32.WSAGetOverlappedResult(s, ov.as(Void*), pointerof(transferred), 0,
+        pointerof(flags))
+      return transferred.to_i64 if answered != 0
+      __sys_error
+    end
+
+    # The wait a cancelled post still owes the kernel. `CancelIoEx` is a
+    # request, and on a socket tied to a completion port the operation is not
+    # over when it returns: measured here, the status stays STATUS_PENDING
+    # and the descriptor, the caller's address and the OVERLAPPED are the
+    # kernel's until the completion packet is taken *off the port* — the
+    # poller's `GetQueuedCompletionStatus` is what writes them. The same
+    # measurement on an unassociated socket had the status written by
+    # `CancelIoEx` itself, which is why this is not obvious. So
+    # `WSAGetOverlappedResult`'s own wait flag cannot be the wait either: it
+    # waits on the OVERLAPPED's event, the scheduler's OVERLAPPED has none,
+    # and the socket handle it falls back to is never signalled for a socket
+    # on a port — it hung forever on the first cancelled receive tried.
+    #
+    # What ends the operation is the poller, so the frame parks once more and
+    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
+    # which is what would have left the packet to be dropped; parking puts it
+    # back, and the wake means the dequeue has happened. Asked first, because
+    # a completion the poller delivered *before* the cancel is already over
+    # and no second packet is coming — parking on one would never wake.
+    def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
+      result = __sys_overlapped_result(s, ov)
+      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
+      IyiScheduler.park_overlapped_current
+      __sys_overlapped_result(s, ov)
+    end
+
+    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
+    end
+
+    def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
+      val = size
+      LibWs2_32.setsockopt(__sys_handle(fd), level, optname, pointerof(val).as(Void*), 4)
+    end
+
+    def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
+      val = 0_i32
+      len = 4
+      res = LibWs2_32.getsockopt(__sys_handle(fd), level, optname, pointerof(val).as(Void*),
+        pointerof(len))
+      raise "cannot get buffer size" if res < 0
+      val
+    end
+
+    # Nothing, for the reason `std/socket`'s win32 arm gives: SO_REUSEADDR on
+    # Windows lets a different socket take a port this one is bound to, which
+    # is not what the POSIX arms ask for with it. A datagram socket needs the
+    # waiver even less than a listening one — there is no TIME_WAIT on a
+    # port that never had a connection.
+    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      0
+    end
+
+    # One descriptor, one event, and a bound on the wait, which is what the
+    # epoll and kqueue arms do with theirs.
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+      entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: POLLRDNORM, revents: 0_i16)
+      LibWs2_32.WSAPoll(pointerof(entry), 1, timeout_ms) > 0
+    end
+
+    def self.__is_eagain(res : Int64) : Bool
+      res == -10035_i64 # -WSAEWOULDBLOCK, Winsock's own number
+    end
+
+    # Never: Winsock has no EINTR. A call either answers, or answers
+    # WSAEWOULDBLOCK, or is posted and completed.
+    def self.__is_eintr(res : Int64) : Bool
+      false
+    end
   {% else %}
     AF_INET6          =     10
     SOL_SOCKET        =      1

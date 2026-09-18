@@ -113,12 +113,11 @@ def measured() -> dict[str, int]:
     return {
         "prelude": wc(sorted((REPO / "src/iyi").glob("*.iyi"))),
         "prelude_library": prelude_library_lines(),
-        # What of that library exists only for a platform, and what is left
-        # without it: the two numbers SPEC.md I.4's breach hands the owner a
-        # rule choice on. Measured, because the pair it was first written
-        # with did not agree.
+        # The platform floor the rule above excludes, and the library with it
+        # still in: both are stated in SPEC.md beside the figure itself, so
+        # that what the ceiling does not count is as visible as what it does.
         "platform_floor": platform_floor_lines(),
-        "library_less_floor": prelude_library_lines() - platform_floor_lines(),
+        "library_with_floor": library_with_floor_lines(),
         "std": wc(sorted((REPO / "src/std").glob("*.iyi"))),
         "compiler": wc(sorted((REPO / "src/compiler").rglob("*.cr"))),
         "samples": len(sorted((REPO / "samples/iyi").glob("*.iyi"))),
@@ -141,14 +140,38 @@ def measured() -> dict[str, int]:
     }
 
 
+# The other language's 0.1.0 core library: 3,551 lines of core files plus 183
+# of fibers over pthreads, remeasured from that tree (SPEC.md I.4). The number
+# iyi's own library is held under, and a check rather than a habit since the
+# night Windows' floor walked 508 lines over it and nothing failed.
+CEILING = 3_734
+
+
 def prelude_library_lines() -> int:
-    """The prelude's lines that do what Crystal's 0.1.0 core did, which is
-    the figure SPEC.md holds to the 3,734-line ceiling: everything under
-    `src/iyi/` except what that core got from outside its own count - the
-    allocator and collector (Boehm's libgc; the block between two marks in
-    prelude.iyi), the scheduler and kernel thread (pthreads and libevent,
-    beyond the 183 lines the ceiling already carries for fibers), and the
-    float printer and parser (libc's printf and strtod)."""
+    """The figure SPEC.md holds to the 3,734-line ceiling: the library
+    without any platform's floor.
+
+    Everything under `src/iyi/` except two things. First, what Crystal's
+    0.1.0 core got from outside its own count - the allocator and collector
+    (Boehm's libgc; the block between two marks in prelude.iyi), the
+    scheduler and kernel thread (pthreads and libevent, beyond the 183 lines
+    the ceiling already carries for fibers), and the float printer and parser
+    (libc's printf and strtod). Second, every platform's floor
+    (`platform_floor_lines`), which is the rule SPEC.md I.4 settled after
+    Windows: 0.1.0's own floor was libc and was not in its 3,734 either, so
+    counting iyi's kernel32, syscall and libSystem arms compared a library
+    that carries its floor against one that did not.
+
+    `library_with_floor` is the same walk without that second exclusion, and
+    is stated beside this everywhere this is, because a reader opening
+    `src/iyi/` sees those lines too.
+    """
+    return library_with_floor_lines() - platform_floor_lines()
+
+
+def library_with_floor_lines() -> int:
+    """The library with every platform's floor still in it: the number a
+    reader counts by opening the files. See `prelude_library_lines`."""
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
     outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
     total = 0
@@ -278,7 +301,9 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude", r"iyi's own prelude \| ([\d,]+) lines", "SPEC.md", 1),
     ("prelude_library", r"of which ([\d,]+) are the library held to the", "SPEC.md", 1),
     ("platform_floor", r"the platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
-    ("library_less_floor", r"lands the library at \*\*([\d,]+)\*\*", "SPEC.md", 1),
+    ("platform_floor", r"floor of ([\d,]+) lines", "SPEC.md", 1),
+    ("library_with_floor", r"([\d,]+) with every platform's floor", "SPEC.md", 1),
+    ("library_with_floor", r"pening `src/iyi/` counts ([\d,]+)", "SPEC.md", 1),
     ("prelude_library", r"of which the library is ([\d,]+)", "SPEC.md", 1),
     ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\* of the", "SPEC.md", 1),
     ("prelude", r"still true of iyi's own ([\d,]+) lines", "SPEC.md", 1),
@@ -402,6 +427,19 @@ def main() -> int:
                 wrong.append(
                     f"{rel}:{line}  says {key} is {stated:,}, tree measures {truth[key]:,}"
                 )
+
+    # The ceiling itself, which was prose and a habit until Windows walked
+    # 508 lines over it and nothing failed. SPEC.md I.4 holds the library -
+    # the figure above, every platform's floor excluded - to the lines that
+    # core carried, and the rule is that a method entering
+    # the library moves another out first. That is a number, so it is a
+    # check: a library over the ceiling fails here, with what it is over by.
+    if truth["prelude_library"] > CEILING:
+        wrong.append(
+            f"the library is {truth['prelude_library']:,} lines, {truth['prelude_library'] - CEILING:,} "
+            f"over the {CEILING:,} ceiling (SPEC.md I.4). What enters the library moves something "
+            f"out of it first, or moves to `src/std/`, which this figure does not count"
+        )
 
     if show_all:
         for f in found:

@@ -96,6 +96,31 @@
 
 ### Changed
 
+- **The ceiling stops counting every platform's floor, and it is a check
+  now.** Windows' arrival put the library 508 lines over the 3,734 it is
+  held to (SPEC.md I.4), and the section recorded the breach and handed
+  the owner a choice: a rule or a rewrite. The rule, decided: the figure
+  excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
+  `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
+  a conditional, `else` included - which is **1,075 lines**, and the
+  library is **3,167** of 3,734 with 567 to spare. `4,242` is what opening
+  `src/iyi/` still counts and is stated beside it everywhere.
+
+  What makes it the honest reading rather than the convenient one is what
+  3,734 is measured against: that core did not carry its own floor either
+  - libgc, libc's `printf`, libevent, libc's platform calls, none of them
+  in its 8,161 lines - and the three largest pieces of iyi's own floor
+  (the collector, the scheduler, the float printer) were already excluded
+  for exactly this reason. The platform arms are the fourth piece of the
+  same kind. What the rule does not forgive: a `pub def` a program calls
+  is API and counts wherever it is written.
+
+  And the number has teeth it did not have. The ceiling was prose and a
+  habit: 508 lines walked over it and nothing failed.
+  `bench/doc_numbers.py` fails now when the library is over it, with what
+  it is over by and what to do about it - proven by six hundred lines of
+  ballast, which it reports as 33 over.
+
 - **`UdpSocket` parks the way `IyiSocket` does.** Every receive is
   `MSG_DONTWAIT`, and when nothing is queued the task waits on the
   descriptor - the poller under the runtime, a `poll` without one - so

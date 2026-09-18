@@ -475,8 +475,18 @@ end
     @@probed : UInt64 = 0_u64
     @@console : UInt64 = 0_u64
     @@vt : UInt64 = 0_u64
-    @@carry : UInt64 = 0_u64
-    @@carry_length : Int32 = 0
+    # A carry per stream, not one for the module: stdout and stderr are
+    # separate console handles and separate byte streams, and a single pair
+    # here put a tail held back from one of them in front of the next write
+    # to the *other* — measured, a character whose lead byte went to stdout
+    # and whose continuation byte went to stderr came out whole, on stderr.
+    # Two pairs rather than an array indexed by the descriptor, because the
+    # prelude's `StaticArray` has no `[]=` and a heap slot for two words
+    # would be a mapping to keep alive for nothing.
+    @@carry_out : UInt64 = 0_u64
+    @@carry_out_length : Int32 = 0
+    @@carry_err : UInt64 = 0_u64
+    @@carry_err_length : Int32 = 0
 
     def self.console?(fd : Int64, handle : Void*) : Bool
       return false if fd < 0_i64 || fd > 2_i64
@@ -518,30 +528,48 @@ end
 
     def self.write(fd : Int64, handle : Void*, buffer : Void*, count : UInt64) : Int64
       enable_vt(fd, handle)
+      # Anything that is not the error stream carries as the output one:
+      # `console?` has already refused every descriptor outside 0..2, and 0
+      # is read from rather than written to.
+      on_error = fd == 2_i64
       staged = buffer.as(UInt8*)
       total = count.to_i32
-      if @@carry_length > 0
-        joined = Pointer(UInt8).malloc((@@carry_length + total).to_u64)
+      held = on_error ? @@carry_err_length : @@carry_out_length
+      if held > 0
+        packed = on_error ? @@carry_err : @@carry_out
+        joined = Pointer(UInt8).malloc((held + total).to_u64)
         index = 0
-        while index < @@carry_length
-          joined[index] = (@@carry.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
+        while index < held
+          joined[index] = (packed.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
           index = index + 1
         end
-        (joined + @@carry_length).copy_from(staged, total)
+        (joined + held).copy_from(staged, total)
         staged = joined
-        total = total + @@carry_length
-        @@carry = 0_u64
-        @@carry_length = 0
+        total = total + held
+        if on_error
+          @@carry_err = 0_u64
+          @@carry_err_length = 0
+        else
+          @@carry_out = 0_u64
+          @@carry_out_length = 0
+        end
       end
       whole = complete_length(staged, total)
       tail = total - whole
       if tail > 0
+        packed = 0_u64
         index = 0
         while index < tail
-          @@carry = @@carry | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
+          packed = packed | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
           index = index + 1
         end
-        @@carry_length = tail
+        if on_error
+          @@carry_err = packed
+          @@carry_err_length = tail
+        else
+          @@carry_out = packed
+          @@carry_out_length = tail
+        end
       end
       return count.to_i64 if whole == 0
       wide_count = LibC.MultiByteToWideChar(65001, 0, staged, whole, Pointer(UInt16).new(0_u64), 0)

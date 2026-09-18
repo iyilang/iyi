@@ -439,6 +439,17 @@ end
                       written : Int32*, reserved : Void*) : Int32
     fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
                      read : Int32*, control : Void*) : Int32
+    # The stack, walked by the kernel's own unwinder. x86-64 Windows has no
+    # frame pointer to chase — a frame is described by the unwind data in
+    # `.pdata`, which is what `RtlCaptureStackBackTrace` reads — so a panic
+    # that wants to name its callers asks for them here rather than walking
+    # anything itself.
+    # It answers a USHORT, which returns in AX with the rest of the
+    # register unpromised, so the declaration takes the Int32 this file
+    # spells a machine word with and the caller masks the low sixteen
+    # bits rather than trusting them to be zero.
+    fun RtlCaptureStackBackTrace(frames_to_skip : Int32, frames_to_capture : Int32,
+                                 back_trace : Void**, back_trace_hash : Int32*) : Int32
     # The crash path's three, and the only thing a program of this shape
     # asks Windows for at startup: no error dialog, room reserved for the
     # overflow handler, and the handler itself.
@@ -8014,6 +8025,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   {% if flag?(:darwin) %}
     callstack = uninitialized Void*[64]
     count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
+  {% elsif flag?(:win32) && flag?(:x86_64) %}
+    # Captured before anything is printed, and two frames skipped: this
+    # function and the kernel's own collector. Sixty-four is what the
+    # darwin arm asks for, so a resolver written against one works on the
+    # other.
+    callstack = uninitialized Void*[64]
+    count = LibC.RtlCaptureStackBackTrace(2, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
@@ -8034,6 +8052,18 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**) + 1, count - 1, 2)
     elsif count == 1
       LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**), 1, 2)
+    end
+  {% end %}
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    # A resolver if a program imported one (`std/debug` installs itself),
+    # and otherwise nothing: Windows has no `backtrace_symbols_fd`, and an
+    # address with no name and no line beside it is noise on the error
+    # stream rather than a frame. What names them is `std/debug`, which
+    # reads the program's own PDB.
+    if r = IyiPanic.resolver
+      if count > 0
+        r.call(pointerof(callstack).as(Void**), count)
+      end
     end
   {% end %}
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}

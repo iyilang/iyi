@@ -940,6 +940,11 @@ pub class UdpSocket
     ERROR_IO_PENDING =                    997
     # POLLRDNORM: a datagram is there to be read.
     POLLRDNORM = 0x0100_i16
+    # SIO_UDP_CONNRESET, the ioctl that turns off the report below.
+    SIO_UDP_CONNRESET = 0x9800000c_u32
+    # WSA_IO_INCOMPLETE: what the read below answers while the operation it
+    # is asked about is still under way.
+    WSA_IO_INCOMPLETE = 996
 
     # This module's own bindings, the way each arm in this file has its own
     # `lib LibC`: `std/socket`'s block declares the stream calls it needs and
@@ -963,6 +968,8 @@ pub class UdpSocket
       fun getsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*,
                      optlen : Int32*) : Int32
       fun ioctlsocket(s : UInt64, cmd : Int32, argp : Int32*) : Int32
+      fun WSAIoctl(s : UInt64, code : UInt32, inbuf : Void*, inlen : Int32, outbuf : Void*,
+                   outlen : Int32, returned : Int32*, overlapped : Void*, routine : Void*) : Int32
       fun WSARecvFrom(s : UInt64, buffers : WSABuf*, count : Int32, received : Int32*,
                       flags : Int32*, from : Void*, fromlen : Int32*, overlapped : Void*,
                       routine : Void*) : Int32
@@ -1004,6 +1011,20 @@ pub class UdpSocket
       return -1 if s == INVALID_SOCKET
       on = 1
       LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
+      # Windows tells an *unconnected* datagram socket about the ICMP
+      # port-unreachable its own earlier `sendto` provoked: the next receive
+      # on it answers WSAECONNRESET instead of "nothing queued", and since
+      # only WSAEWOULDBLOCK is read as that below, the receive panicked and
+      # a server died of its first stale peer. Measured: a socket that sent
+      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX never
+      # reports this, which is why the shared bodies have no case for it, so
+      # the report is turned off here rather than taught to them — the cure
+      # Windows itself offers.
+      off = 0_i32
+      returned = 0_i32
+      LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
+        Pointer(Void).new(0_u64), 0, pointerof(returned), Pointer(Void).new(0_u64),
+        Pointer(Void).new(0_u64))
       s.to_i32!
     end
 
@@ -1064,10 +1085,21 @@ pub class UdpSocket
       err = LibWs2_32.WSAGetLastError
       raise "cannot receive from UDP socket" if err != ERROR_IO_PENDING
       parked = IyiScheduler.park_overlapped_current
-      return Cancelled.new if parked.is_a?(Cancelled)
-      # Cancelled, or the socket was closed under the park: a close does
-      # complete a posted receive, and either way no datagram arrived, which
-      # is what `Cancelled` says here.
+      if parked.is_a?(Cancelled)
+        # `CancelIoEx` is a request, not an end: the descriptor above, the
+        # caller's address and length, and the OVERLAPPED are the kernel's
+        # until the operation is really over, and all of them are this
+        # frame's or the caller's. Returning on the flag alone left the
+        # kernel writing into a frame that is gone and an OVERLAPPED the
+        # collector may already have handed to somebody else, so the
+        # operation is waited out first — see `__sys_overlapped_await` for
+        # what that wait has to be here. No datagram arrived that the caller
+        # can have, which is what `Cancelled` says.
+        __sys_overlapped_await(s, ov)
+        return Cancelled.new
+      end
+      # The socket was closed under the park: a close does complete a posted
+      # receive, and no datagram arrived, which is the same answer.
       result = __sys_overlapped_result(s, ov)
       return Cancelled.new if result < 0_i64
       result.to_i32
@@ -1084,6 +1116,32 @@ pub class UdpSocket
         pointerof(flags))
       return transferred.to_i64 if answered != 0
       __sys_error
+    end
+
+    # The wait a cancelled post still owes the kernel. `CancelIoEx` is a
+    # request, and on a socket tied to a completion port the operation is not
+    # over when it returns: measured here, the status stays STATUS_PENDING
+    # and the descriptor, the caller's address and the OVERLAPPED are the
+    # kernel's until the completion packet is taken *off the port* — the
+    # poller's `GetQueuedCompletionStatus` is what writes them. The same
+    # measurement on an unassociated socket had the status written by
+    # `CancelIoEx` itself, which is why this is not obvious. So
+    # `WSAGetOverlappedResult`'s own wait flag cannot be the wait either: it
+    # waits on the OVERLAPPED's event, the scheduler's OVERLAPPED has none,
+    # and the socket handle it falls back to is never signalled for a socket
+    # on a port — it hung forever on the first cancelled receive tried.
+    #
+    # What ends the operation is the poller, so the frame parks once more and
+    # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
+    # which is what would have left the packet to be dropped; parking puts it
+    # back, and the wake means the dequeue has happened. Asked first, because
+    # a completion the poller delivered *before* the cancel is already over
+    # and no second packet is coming — parking on one would never wake.
+    def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
+      result = __sys_overlapped_result(s, ov)
+      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
+      IyiScheduler.park_overlapped_current
+      __sys_overlapped_result(s, ov)
     end
 
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32

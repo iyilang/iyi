@@ -125,8 +125,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,075 lines**, and the
-  library is **3,167** of 3,734 with 567 to spare. `4,242` is what opening
+  a conditional, `else` included - which is **1,115 lines**, and the
+  library is **3,167** of 3,734 with 567 to spare. `4,282` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -311,11 +311,47 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,075** and **3,167**, held to the sentences that quote
+  without it: **1,115** and **3,167**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still 508 over; what changed is that the two numbers the
-  rule choice rests on are now arithmetic that checks rather than
-  arithmetic that disagreed with itself.
+  breach is still what the floor costs — 548 over, as the library with
+  every platform's floor stands today; what changed is that the two
+  numbers the rule choice rests on are now arithmetic that checks rather
+  than arithmetic that disagreed with itself.
+
+- **A fiber's stack running out died of a bare access violation on
+  Windows, with no sentence anywhere.** The main thread's overflow was
+  named; a fiber's was not, and the reason is that a vectored exception
+  handler runs on the stack that faulted. A fiber stack's only guard was
+  the first page of its reservation, left uncommitted, so at the moment
+  the handler was asked to print there was nothing under the fault to
+  stand on and the process died of the fault it was handling. Windows has
+  no `sigaltstack` to move it to.
+
+  A fiber stack ends in three parts now (`IyiFiber#map_stack`): the
+  uncommitted page at the bottom, which is the hard wall a frame big
+  enough to jump the guard lands in; 16 KB of committed slack, which is
+  the handler's room and the same size `SetThreadStackGuarantee` reserves
+  for the same code on a thread's own stack; and one committed page
+  carrying PAGE_GUARD, which is what the program trips on.
+
+  Measured, not assumed. The fault arrives as STATUS_STACK_OVERFLOW
+  (0xC00000FD) rather than a guard-page violation, because
+  `switch_stack` writes the fiber's bounds into the TEB's StackBase and
+  StackLimit and the kernel therefore reads a fiber stack as the thread's
+  own; the handler entered with its stack pointer inside the page it had
+  just tripped (fault at `0x21504254ff8`, entry `rsp` `0x215042545d0`);
+  and with the slack filled with a pattern and read back inside the
+  handler, the deepest byte it touched was 6,968 below the top of the
+  guard page — 4,096 of that is the guard page itself, so 2,872 bytes of
+  slack were used and 13,512 were spare. With `GUARD_SLACK = 0` the same
+  program prints its sentence and then dies of an access violation on the
+  way out, which is the handler walking off the bottom of the guard page
+  into the page nobody committed: that is what the slack buys.
+
+  `bench/panics.sh` runs its overflow loop on all three stacks on Windows
+  now — main, a fiber's and a thread's — and still holds the wild pointer
+  apart as a memory fault. The Windows skip and the comment that named
+  this as owed work are gone.
 
 - **`std/udp`'s Winsock arm and the night's `SockLen` met at the merge.**
   The `make_sockaddr` return type names an alias each platform arm
@@ -7143,7 +7179,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,243-line library and nothing else. Every other
+  written against iyi's own 15,338-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

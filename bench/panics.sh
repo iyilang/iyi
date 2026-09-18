@@ -326,22 +326,14 @@ step "a panic the library raises names no library line, prelude or std"
 #      edge is left to the signal, so a memory fault stays a memory fault.
 #      This was "Segmentation fault" from the shell and exit 139 ───────
 for where in main fiber thread; do
-  # On Windows only the main stack's overflow is named. A fault on a
-  # fiber's stack arrives as an access violation — Windows raises
-  # STACK_OVERFLOW only for a thread's own stack, whose guard page the
-  # kernel set — and the runtime's vectored handler cannot print it,
-  # because a vectored handler runs on the stack that faulted and that
-  # stack is the exhausted one. There is no `sigaltstack` to move it to.
-  # `IyiScheduler.fiber_guard_hit?` already tells the two faults apart;
-  # what is missing is room for the handler to run in, which is a
-  # committed PAGE_GUARD page with slack under it in `settle_stack`.
-  # Recorded here rather than expected-to-fail, so the day it is built
-  # this loop is what says so.
-  case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      [ "$where" = main ] || continue
-      ;;
-  esac
+  # Every stack here, on every platform. Windows used to name only the
+  # main one: a fiber's overflow arrived with no room for the handler to
+  # print from, because a vectored handler runs on the stack that faulted
+  # and Windows has no `sigaltstack`. A fiber stack now ends in a
+  # committed PAGE_GUARD page with 16 KB of committed slack under it
+  # (`IyiFiber#map_stack`), which is the room, and the fault arrives as
+  # STATUS_STACK_OVERFLOW rather than a guard-page violation because the
+  # switch has told the TEB that this is the thread's stack.
   case "$where" in
     main)   body='puts down(0)' ;;
     fiber)  body='group do |g|

@@ -234,6 +234,56 @@ def killed_mid_compile(argv, direct, work):
     return client
 
 
+def binary_gone():
+    """The compiler's binary, moved out from under a live session.
+
+    Which binary is asked of the kernel rather than assumed: the worker
+    is started from the path the proxy captured at startup, and reading
+    `/proc/<pid>/exe` is how this gate learns it without hardcoding a
+    build layout. Where there is no `/proc`, the step says so."""
+    text = MODULE.read_text()
+    client = Client(("lsp",))
+    uri = open_module(client, MODULE, text)
+    line, character, _ = hovering_position(client, uri, text)
+    workers = children(client.proc.pid)
+    if not workers:
+        step("a session outlives the binary it was started from", False,
+             "no worker process to look at")
+        return
+    try:
+        binary = os.readlink(f"/proc/{workers[0]}/exe")
+    except OSError:
+        print("memory ---- no /proc/<pid>/exe here, so which binary the "
+              "worker runs is not knowable; step skipped")
+        client.proc.kill()
+        return
+
+    aside = binary + ".gate-aside"
+    os.rename(binary, aside)
+    try:
+        os.kill(workers[0], 9)
+        time.sleep(0.4)
+        reply = client.send("textDocument/hover",
+                            {"textDocument": {"uri": uri},
+                             "position": {"line": line,
+                                          "character": character}})
+        error = reply.get("error", {})
+        step("a session outlives the binary it was started from",
+             error.get("code") == -32603
+             and "could not be started" in error.get("message", "")
+             and client.proc.poll() is None,
+             json.dumps(error)[:100] or "no error, and no binary either")
+    finally:
+        os.rename(aside, binary)
+
+    reply = client.send("textDocument/hover",
+                        {"textDocument": {"uri": uri},
+                         "position": {"line": line, "character": character}})
+    step("and answers again the moment it is back",
+         "error" not in reply and bool(reply.get("result")),
+         f"worker(s) now {children(client.proc.pid)}")
+    client.proc.kill()
+
 def main():
     direct = "--direct" in sys.argv
     argv = ("lsp", "--worker") if direct else ("lsp",)
@@ -272,6 +322,18 @@ def main():
              detail + f", bound {PACED_CEILING_MB} MB")
     step("the paced session's hover is right too",
          bool(first) and first == last, f"{len(first)} chars")
+
+    # A rebuild unlinks the binary under a running session, which
+    # `lsp_session.py` step 46 holds for the process the editor talks to.
+    # The worker is a *second* process started from that same path, so
+    # the split opened a new window: no worker, no binary, a client
+    # holding buffers. The answer has to be a refusal that names the
+    # path, not a session that ends.
+    if direct:
+        print("memory ---- the missing-binary step needs a worker to "
+              "respawn; there is none in this shape")
+    else:
+        binary_gone()
 
     with tempfile.TemporaryDirectory(prefix="iyi-lsp-memory") as work:
         client = killed_mid_compile(argv, direct, work)

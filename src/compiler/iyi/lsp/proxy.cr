@@ -199,10 +199,10 @@ module Iyi::Lsp
       # frame still reaches the worker below, so a method this case
       # does not name is not a method this proxy has to know.
       case method
-      when "initialize"
-        @initialize_frame = body
-      when "initialized"
-        @initialized_frame = body
+      when "initialize", "initialized"
+        # Kept for a successor to be handed, and kept *after* the frame
+        # is forwarded (below): a worker spawned by this very frame must
+        # not also be handed a replay of it.
       when "textDocument/didOpen"
         if params && (document = params["textDocument"]?)
           uri = document["uri"].as_s
@@ -271,6 +271,11 @@ module Iyi::Lsp
       # `error` is what tells the two apart.
       answering = table ? (table.has_key?("result") || table.has_key?("error")) : false
       post(body, id, request: !answering)
+
+      case method
+      when "initialize"  then @initialize_frame = body
+      when "initialized" then @initialized_frame = body
+      end
     end
 
     # Take whatever the client has already sent, so a burst can be seen
@@ -334,7 +339,20 @@ module Iyi::Lsp
     # registering that id would leave the worker for ever busy and so
     # never retired.
     private def post(body : Bytes, id : JSON::Any?, request : Bool = true) : Nil
-      worker = @worker || spawn_worker
+      worker = @worker
+      unless worker
+        unless worker = spawn_worker
+          # There is no compiler to run any more — the binary this
+          # server started from is gone. Saying so is the honest answer;
+          # dying is not, because the client is holding open buffers.
+          unstartable(id) if id && request
+          return
+        end
+        @worker = worker
+        # A worker the session did not start with inherits the session:
+        # the handshake it never saw, the buffers, the focused file.
+        hand_over(worker) if @initialize_frame
+      end
       worker.outstanding << id.to_json if id && request
       worker.worked += 1
       return if write_frame(worker, body)
@@ -409,14 +427,24 @@ module Iyi::Lsp
     # nothing is interrupted and nothing is lost: the successor is handed
     # the buffers and asked for the focused file's verdict, which is the
     # state its predecessor had.
+    #
+    # The successor is started *before* the predecessor is stopped, and
+    # a failure to start is a retirement that does not happen rather than
+    # a session that ends. That is not hypothetical: rebuilding `iyi`
+    # unlinks the binary under the running server, which the session gate
+    # does on purpose, and a retirement a second later would otherwise
+    # have taken the editor down with an exception where before there was
+    # one warm process that needed nothing from the disk.
     private def retire : Nil
-      return unless worker = @worker
-      stop(worker)
-      @worker = nil
-      spawn_worker
+      return unless old = @worker
+      return unless successor = spawn_worker
+      @worker = successor
+      stop(old)
+      hand_over(successor)
     end
 
-    private def spawn_worker : Worker
+    # A worker, or nil if this binary can no longer be started.
+    private def spawn_worker : Worker?
       process = Process.new(
         @self_exe,
         ["lsp", "--worker"],
@@ -425,7 +453,6 @@ module Iyi::Lsp
         error: Process::Redirect::Inherit,
       )
       worker = Worker.new(process)
-      @worker = worker
       answers = @answers
       output = process.output.not_nil!
       spawn do
@@ -435,10 +462,15 @@ module Iyi::Lsp
           break unless body
         end
       end
+      worker
+    rescue File::Error | IO::Error | RuntimeError
+      nil
+    end
 
-      # The handshake, then the buffers, then the file the person is in.
-      # The two replayed frames are answered to nobody: their ids are not
-      # outstanding, so `answer` drops them.
+    # The handshake, then the buffers, then the file the person is in.
+    # The replayed frames are answered to nobody: their ids are not
+    # outstanding, so `answer` drops them.
+    private def hand_over(worker : Worker) : Nil
       if frame = @initialize_frame
         write_frame(worker, frame)
       end
@@ -447,7 +479,6 @@ module Iyi::Lsp
       end
       adopt(worker)
       warm(worker)
-      worker
     end
 
     # Hand over the open buffers without asking for a verdict. A replayed
@@ -567,6 +598,29 @@ module Iyi::Lsp
               json.field "code", -32603
               json.field "message", "the compile this request ran in did not survive it: #{how}. " \
                                     "The session continues; ask again."
+            end
+          end
+        end
+      end
+      @outbox.send frame.to_slice
+    end
+
+    # And what it is told when there is nothing left to start. Rebuilding
+    # `iyi` unlinks the binary a running session started from; the warm
+    # worker survives that, a successor cannot be born from it, and this
+    # is the honest answer for the window in between. Restoring the
+    # binary is all it takes: the next request spawns again.
+    private def unstartable(id : JSON::Any) : Nil
+      frame = JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" { id.to_json(json) }
+          json.field "error" do
+            json.object do
+              json.field "code", -32603
+              json.field "message", "the compiler this server runs to answer is not there: " \
+                                    "#{@self_exe} could not be started. The session is still " \
+                                    "here; put the binary back and ask again."
             end
           end
         end

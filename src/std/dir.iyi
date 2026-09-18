@@ -756,6 +756,16 @@ pub class Dir
       while wide[length] != 0_u16
         length = length + 1
       end
+      # One separator, not two. A path this library hands on unprefixed is
+      # normalised by Windows, which collapses `\\` in the middle of a
+      # pattern, so a caller's trailing separator cost nothing; past 248
+      # characters `__iyi_wide_path` puts the `\\?\` prefix on, and that
+      # prefix means "do not parse this again" — the doubled separator then
+      # reaches the file system as it is and `FindFirstFileW` refuses a
+      # directory `Dir.exists?` accepts on the same string.
+      while length > 1 && (wide[length - 1] == 92_u16 || wide[length - 1] == 47_u16)
+        length = length - 1
+      end
       pattern = Pointer(UInt16).malloc((length + 3).to_u64)
       index = 0
       while index < length

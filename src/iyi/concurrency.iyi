@@ -1195,6 +1195,25 @@ class IyiScheduler
       enqueue(fiber)
     elsif fiber.state == IyiFiberState::WaitingIo
       {% if flag?(:win32) %}
+        # `CancelIoEx` is a request, and on a handle tied to a completion
+        # port it does not finish the operation here: measured, the
+        # OVERLAPPED's status stays STATUS_PENDING (0x103) after a
+        # successful cancel and only becomes STATUS_CANCELLED (0xC0000120)
+        # when `GetQueuedCompletionStatus` takes the packet off the port —
+        # three million reads of the status in between saw no change. On a
+        # handle that is *not* on a port the cancel writes the status
+        # itself, immediately, which is what makes the difference easy to
+        # miss. So a caller cannot wait for the operation with
+        # `WSAGetOverlappedResult(wait = 1)`: this OVERLAPPED has no event
+        # and the handle is never signalled, and such a wait never returns.
+        # `std/socket`'s cancelled paths therefore ask once and park again,
+        # and the poller's dequeue is what ends them.
+        #
+        # The shorter answer, not taken: drop the `io_remove` and `enqueue`
+        # below and let the completion wake the fiber, which would make the
+        # operation provably over at every wake. It changes cancellation
+        # for every kind of handle on this platform — files, the console,
+        # pipes — and each would need its own measurement first.
         fiber.cancelled = true
         LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*))
         io_remove(fiber)

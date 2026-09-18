@@ -421,6 +421,30 @@ class IyiFiber
   STACK_BYTES = 262144_u64
   PAGE        =   4096_u64
 
+  {% if flag?(:win32) %}
+    # The room a fault handler has to stand in, on the one platform where
+    # it has to stand on the stack that faulted. Windows has no
+    # `sigaltstack`: a vectored handler runs where the fault happened, so a
+    # fiber whose stack ran out had nowhere to print from and the process
+    # died of a bare access violation. The stack therefore ends in three
+    # parts rather than one — from `base` up: one uncommitted page, the
+    # hard wall a frame that jumped the guard lands in; `GUARD_SLACK`
+    # committed bytes, which is the handler's room; and one committed page
+    # carrying PAGE_GUARD, which is what the program trips on.
+    #
+    # 16 KB because that is what `SetThreadStackGuarantee` reserves for the
+    # same handler on a thread's own stack, and it is measured rather than
+    # guessed. With the slack filled with a pattern and read back inside
+    # the handler, the deepest byte it touched was 6,968 below the top of
+    # the guard page — the guard page is 4,096 of that, so 2,872 bytes of
+    # slack were used and 13,512 were spare. And the slack is what makes
+    # the difference: with `GUARD_SLACK = 0` the same program prints its
+    # sentence and then dies of an access violation on the way out, which
+    # is the handler walking off the bottom of the guard page into the
+    # page nobody committed.
+    GUARD_SLACK = 16384_u64
+  {% end %}
+
   def initialize
     @state = IyiFiberState::Runnable
     @cancelled = false
@@ -492,6 +516,22 @@ class IyiFiber
       base = base_ptr.address
       committed = LibC.VirtualAlloc(Pointer(Void).new(base + PAGE), STACK_BYTES - PAGE, 0x1000_i32, 4_i32)
       raise "VirtualAlloc commit failed" if committed.address == 0_u64
+      # The trip wire: PAGE_READWRITE | PAGE_GUARD (0x4 | 0x100) on the one
+      # page above the slack. Windows raises STATUS_GUARD_PAGE_VIOLATION
+      # the first time anything touches it and clears the attribute in the
+      # same breath, so the handler that runs next has this page *and* the
+      # slack under it committed and writable — which is the whole point,
+      # and the difference from the uncommitted page below, where a handler
+      # would fault again and the process would die without a word.
+      #
+      # Armed here and not in `settle_stack`: a stack comes back to the
+      # pool only from a fiber that finished, and a fiber that trips this
+      # guard never finishes — the handler exits the process. So a pooled
+      # stack's guard is still armed, and re-arming on every fiber start
+      # would be a syscall per connection for a page nobody disarmed.
+      old = uninitialized Int32
+      armed = LibC.VirtualProtect(Pointer(Void).new(base + PAGE + GUARD_SLACK), PAGE, 0x104_i32, pointerof(old))
+      raise "VirtualProtect for the fiber stack's guard page failed" if armed == 0
     {% elsif flag?(:darwin) %}
       # libSystem's mmap: MAP_PRIVATE|MAP_ANON is 0x1002 here rather
       # than Linux's 0x22, and failure is MAP_FAILED (every bit set)
@@ -521,7 +561,14 @@ class IyiFiber
       Pointer(UInt64).new(ret_slot).value = __iyi_fiber_entry_address
 
       saved = ret_slot - 80_u64
-      Pointer(UInt64).new(saved + 0_u64).value = base + PAGE
+      # The TEB's StackLimit the switch installs, and it is the *usable*
+      # low end now: above the uncommitted page, above the handler's slack
+      # and above the guard page, because that is the first byte the
+      # program may have. Left at `base + PAGE` it named memory the
+      # program must not reach, and anything reading the limit — a Windows
+      # API asked on a fiber, the collector's `stack_base` — was told the
+      # stack was 20 KB longer than it is.
+      Pointer(UInt64).new(saved + 0_u64).value = base + PAGE + GUARD_SLACK + PAGE
       Pointer(UInt64).new(saved + 8_u64).value = top
       index = 0_i64
       while index < 8_i64
@@ -847,21 +894,29 @@ class IyiScheduler
   end
 
   {% if flag?(:win32) %}
-    # Whether *address* is in the guard page of a live fiber stack, which
-    # is how a fiber's stack running out is told from a wild pointer on
-    # Windows. There is no signal and no `sigaltstack` here: the fault
-    # arrives as an access violation, because a fiber stack's guard is the
-    # first page of its reservation left uncommitted (`settle_stack`) and
-    # Windows raises STACK_OVERFLOW only for a thread's own stack, which
-    # carries the guard attribute the kernel set. So the runtime answers
-    # the question itself, from the stacks it already knows the bounds of.
+    # Whether *address* is below the usable low end of a live fiber stack,
+    # which is how a fiber's stack running out is told from a wild pointer
+    # on Windows. There is no signal and no `sigaltstack` here, so the two
+    # faults a fiber's edge can raise both arrive at the same handler and
+    # it has to tell them apart by address:
+    #
+    #   * a guard-page violation on the PAGE_GUARD page `map_stack` armed,
+    #     which is the ordinary way a fiber runs out; and
+    #   * an access violation in the uncommitted page under the slack,
+    #     which is a frame big enough to step over the guard page whole.
+    #
+    # The range is therefore the reservation's first page, the slack and
+    # the guard page — everything below the limit `settle_stack` installs.
+    # The slack itself is committed and never faults, so including it
+    # costs nothing and means a handler that overran its own room still
+    # says what happened rather than calling it a memory fault.
     def self.fiber_guard_hit?(address : UInt64) : Bool
       fiber = @@all_head
       while fiber.is_a?(IyiFiber)
         top = fiber.stack_top
         if top != 0
           low = top - IyiFiber::STACK_BYTES
-          return true if address >= low && address < low + IyiFiber::PAGE
+          return true if address >= low && address < low + IyiFiber::PAGE + IyiFiber::GUARD_SLACK + IyiFiber::PAGE
         end
         fiber = fiber.next_fiber
       end

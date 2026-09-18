@@ -113,6 +113,12 @@ def measured() -> dict[str, int]:
     return {
         "prelude": wc(sorted((REPO / "src/iyi").glob("*.iyi"))),
         "prelude_library": prelude_library_lines(),
+        # What of that library exists only for a platform, and what is left
+        # without it: the two numbers SPEC.md I.4's breach hands the owner a
+        # rule choice on. Measured, because the pair it was first written
+        # with did not agree.
+        "platform_floor": platform_floor_lines(),
+        "library_less_floor": prelude_library_lines() - platform_floor_lines(),
         "std": wc(sorted((REPO / "src/std").glob("*.iyi"))),
         "compiler": wc(sorted((REPO / "src/compiler").rglob("*.cr"))),
         "samples": len(sorted((REPO / "samples/iyi").glob("*.iyi"))),
@@ -156,6 +162,70 @@ def prelude_library_lines() -> int:
             total += len(lines) - (end - start + 1)
         else:
             total += len(lines)
+    return total
+
+
+# The OS, architecture and ABI flags. A build-configuration flag
+# (`gc_boehm`, `release`, `preview_mt`) is not one: its arm is a choice
+# about this build, not a platform's floor, and it stays in the count.
+PLATFORM_FLAGS = frozenset("""
+    linux darwin win32 wasm32 wasi unix bsd openbsd freebsd netbsd dragonfly
+    solaris android musl gnu msvc x86_64 aarch64 arm armhf i386 avr bits32 bits64
+""".split())
+
+MACRO_DIRECTIVE = re.compile(r"\{%-?\s*(if|unless|elsif|else|end)\b(.*?)-?%\}")
+MACRO_FLAG = re.compile(r"flag\?\(\s*:(\w+)")
+
+
+def platform_floor_lines(only: str | None = None) -> int:
+    """Lines of the library that exist only for a platform: inside a macro
+    conditional whose condition names an OS, architecture or ABI flag.
+
+    Every arm of such a conditional counts, `else` included: an `else` under
+    `flag?(:linux)` is the code the other platforms take, and it exists for
+    the same reason. Measured over exactly what `prelude_library_lines`
+    counts, so the two subtract.
+
+    SPEC.md I.4 holds the library to 3,734 lines and records that Windows
+    breached it. This is the number that says what closing the breach by
+    rule rather than by rewrite would cost, and it is measured rather than
+    counted by hand: the two figures the breach was first written with
+    disagreed, one of them having subtracted Windows' arms alone from a
+    sentence about every platform's.
+
+    *only* narrows it to the arms naming one flag, for the breakdown.
+    """
+    files = sorted((REPO / "src/iyi").glob("*.iyi"))
+    outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
+    total = 0
+    for path in files:
+        if path.name in outside:
+            continue
+        lines = path.read_text().splitlines()
+        if path.name == "prelude.iyi":
+            start = next(i for i, l in enumerate(lines) if l.startswith("# ── The memory layer"))
+            end = next(i for i, l in enumerate(lines) if l.startswith("# ── end of the memory layer"))
+            lines = lines[:start] + lines[end + 1:]
+        stack: list[bool] = []
+        for line in lines:
+            inside_before = any(stack)
+            for kind, rest in MACRO_DIRECTIVE.findall(line):
+                named = set(MACRO_FLAG.findall(rest))
+                if only is None:
+                    platform = bool(named) and named <= PLATFORM_FLAGS
+                else:
+                    platform = only in named
+                if kind in ("if", "unless"):
+                    stack.append(platform)
+                elif kind in ("elsif", "else"):
+                    if stack:
+                        stack[-1] = stack[-1] or platform
+                elif kind == "end":
+                    if stack:
+                        stack.pop()
+            # The line carrying `{% if flag?(:win32) %}` is the arm's own.
+            if inside_before or any(stack):
+                total += 1
     return total
 
 
@@ -207,6 +277,8 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude", r"standard library instead of ([\d,]+)", "README.md", 1),
     ("prelude", r"iyi's own prelude \| ([\d,]+) lines", "SPEC.md", 1),
     ("prelude_library", r"of which ([\d,]+) are the library held to the", "SPEC.md", 1),
+    ("platform_floor", r"the platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
+    ("library_less_floor", r"lands the library at \*\*([\d,]+)\*\*", "SPEC.md", 1),
     ("prelude_library", r"of which the library is ([\d,]+)", "SPEC.md", 1),
     ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\* of the", "SPEC.md", 1),
     ("prelude", r"still true of iyi's own ([\d,]+) lines", "SPEC.md", 1),

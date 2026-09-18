@@ -256,6 +256,19 @@
 
 ### Fixed
 
+- **SPEC.md's ceiling breach quoted two figures that did not agree.**
+  "624 lines for Windows' arms" and "the library at 3,618" is one
+  platform's arms subtracted from a sentence about every platform's, and
+  both numbers were counted by hand. `bench/doc_numbers.py` measures the
+  platform floor now - the lines inside a macro conditional whose
+  condition names an OS, architecture or ABI flag, every arm of it, a
+  build-configuration flag like `gc_boehm` excluded - and the library
+  without it: **1,075** and **3,167**, held to the sentences that quote
+  them like every other number. The ceiling is still 3,734 and the
+  breach is still 508 over; what changed is that the two numbers the
+  rule choice rests on are now arithmetic that checks rather than
+  arithmetic that disagreed with itself.
+
 - **`std/udp`'s Winsock arm and the night's `SockLen` met at the merge.**
   The `make_sockaddr` return type names an alias each platform arm
   declares; the Windows arm (#97) was written beside it and did not, so

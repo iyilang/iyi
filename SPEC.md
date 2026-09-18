@@ -409,13 +409,22 @@ get. Each is a declaration or a branch, none of them a method a program
 calls by a new name, and each carries the sentence that says why — which is
 where most of the 508 lines are.
 
-**And the whole breach is that floor, measured.** Of the 4,242, the lines
-inside a `flag?(:win32)` arm are 624: take them out and the library is
-**3,618**, which is 116 *under* the ceiling. The other platforms' arms in
-the same count are 186 for Linux, 133 for darwin and 124 for wasm32 — so
-Windows' floor is not merely larger, it is larger than the other three put
-together, which is what a platform whose every path, console byte and
+**And the whole breach is that floor, measured by the script rather than
+by hand.** Counting the lines inside a macro conditional whose condition
+names an OS, architecture or ABI flag — every arm of it, `else` included,
+since an `else` under `flag?(:linux)` is what the other platforms take and
+exists for the same reason — the platform floor measures **1,075 lines**
+of the 4,242, and taking it out lands the library at **3,167**, which is
+567 *under* the ceiling. Windows is the largest arm of it by a wide
+margin, which is what a platform whose every path, console byte and
 integer division needs its own answer costs.
+
+The first writing of this paragraph counted by hand and gave two figures
+that did not agree: 624 lines for Windows' arms and a library of 3,618,
+which is that one platform subtracted from a sentence about every
+platform's. `bench/doc_numbers.py` measures both numbers now
+(`platform_floor`, `library_less_floor`) and holds the two above to them,
+so the rule choice below is made against arithmetic that checks.
 
 Recorded rather than moved, by the procedure above: the number stands at
 3,734 and this says what sits over it. What closing it is *not* is the
@@ -427,13 +436,14 @@ file rather than several macro arms of an 8,283-line prelude — and it moves
 this number by nothing.
 
 So the choice is a rule, not a rewrite, and it is the owner's: either the
-figure stops counting *every* platform's floor, which is symmetric, would
-take Linux's syscalls and darwin's libSystem arms out with Windows'
-kernel32, and lands the library at 3,618 of 3,734 with 116 to spare — a
-different ceiling, measured against a Crystal library whose own floor was
-libc and uncounted — or the library gives back 508 lines elsewhere, which
-at this size means giving back a method a program calls. Until one of those
-is decided, the breach is what is true.
+figure stops counting *every* platform's floor, which is symmetric, takes
+Linux's syscalls and darwin's libSystem arms out with Windows' kernel32,
+and lands the library 567 under a ceiling that then means something
+different — a library measured against Crystal's, whose own floor was libc
+and uncounted — or the library gives back 508 lines elsewhere, which at
+this size means giving back a method a program calls. Until one of those
+is decided, the breach is what is true, and the number that would follow
+either decision is measured rather than estimated.
 
 **Moving them broke Windows, and what broke was already broken.** With the
 two files out of the prelude, `bench/tls_probe.iyi` exited `0xC0000005`

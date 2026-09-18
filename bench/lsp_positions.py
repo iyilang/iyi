@@ -21,15 +21,18 @@ them is answered `-32603` (which says *this server* is broken — a client's
 mistake is -32602 and an unknown method -32601), the module opens with no
 diagnostics, and the process exits 0 on `shutdown`.
 
-**A fresh server per module, which is not a detail.** `iyi lsp` is the same
-binary as the compiler and carries no collector (SPEC.md III.9, `-Dgc_none`),
-so a process that compiles module after module never gives a byte back: this
-sweep against one long-lived server was killed by the kernel at 19 GB, and
-that is the honest upper bound of an allocator that never frees rather than a
-leak. A compiler invocation compiles one program and exits; so does a server
-here, once per module, and the memory each one reaches is measured below and
-held under a bound. What a session of hours costs an editor is a separate
-question, recorded in CHANGELOG under 0.13.0.
+**One server per module, and the memory is the server's problem now.**
+`iyi lsp` is the same binary as the compiler and carries no collector
+(SPEC.md III.9, `-Dgc_none`), so a process that compiles module after module
+never gives a byte back: this sweep against one long-lived *single-process*
+server was killed by the kernel at 19 GB, and that is the honest upper bound
+of an allocator that never frees rather than a leak. The answer was to make
+the server two processes — a proxy that keeps the protocol and the buffers,
+and a worker that compiles and is retired once it has cost enough
+(`lsp/proxy.cr`) — so this sweep no longer restarts anything on a counter it
+had to tune. It opens one server per module, asks every question, and holds
+the *tree's* resident megabytes under a bound. `bench/lsp_memory.py` is the
+gate for the bounding itself.
 
     python3 bench/lsp_positions.py [stride]
 
@@ -47,7 +50,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lsp_session import Client  # noqa: E402
+from lsp_session import Client, tree_mb  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MODULES = sorted((REPO / "src/std").glob("*.iyi"))
@@ -80,36 +83,15 @@ WHOLE_FILE = (
 # for the cursor questions, and this is the reminder that the two cost more.
 EXPENSIVE_POSITIONS = 3
 
-# A fresh server every this many questions, and the reason is the paragraph
-# above: with no collector each answered question keeps what it allocated -
-# measured at some 3 MB a question - so density is paid for in memory rather
-# than in time. Restarting is what a compiler invocation does anyway, and it
-# costs one compile of the module.
-RESTART_AFTER = 400
-
-# The bound on one server's memory. A chunk of `RESTART_AFTER` questions on
-# the largest module of the library reaches 1.4 GB here; four leaves room for
-# a module that grows and is far under what a long-lived session reached
-# (19 GB, killed by the kernel).
-RSS_CEILING_MB = 4096
+# The bound on the session's whole cost while a module is swept. The worker
+# retires itself at half a gigabyte and the proxy holds the buffers, so the
+# tree was measured here at around 600 MB over the library's largest module;
+# a gigabyte leaves room for a module that grows and still fails loudly if
+# retirement ever stops happening. Before the split, this sweep against one
+# long-lived server reached 19 GB and was killed.
+RSS_CEILING_MB = 1024
 
 FAILURES: list[str] = []
-
-
-def rss_mb(pid: int) -> int:
-    """Resident megabytes, or 0 where the kernel does not say.
-
-    `/proc` is Linux's. On darwin and Windows this answers 0 and the bound
-    below goes unmeasured rather than unasserted-and-claimed: the sweep is
-    about the answers, and the memory is the Linux job's to hold."""
-    try:
-        with open(f"/proc/{pid}/status") as status:
-            for line in status:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) // 1024
-    except OSError:
-        return 0
-    return 0
 
 
 MACRO_LINE = re.compile(r"\{%")
@@ -173,64 +155,64 @@ def questions(path: Path, stride: int) -> list[tuple[str, dict, str]]:
     return asks
 
 
-def sweep(path: Path, stride: int) -> tuple[int, int, int]:
-    """One module. Answers the requests asked, the peak RSS of any one server,
-    and how many servers it took."""
+def sweep(path: Path, stride: int) -> tuple[int, int]:
+    """One module, one server. Answers the requests asked and the peak
+    resident megabytes of the session — the proxy and whichever worker was
+    compiling when it was read."""
     text = path.read_text()
     uri = "file://" + str(path)
     asks = questions(path, stride)
     asked = 0
     peak = 0
-    servers = 0
-    checked_diagnostics = False
 
-    for start in range(0, len(asks), RESTART_AFTER):
-        chunk = asks[start:start + RESTART_AFTER]
-        servers += 1
-        client = Client()
-        try:
-            client.send("initialize", {"rootUri": "file://" + str(REPO), "capabilities": {}})
-            client.send("initialized", {}, wait=False)
-            client.send("textDocument/didOpen",
-                        {"textDocument": {"uri": uri, "languageId": "iyi",
-                                          "version": 1, "text": text}}, wait=False)
-            published = client.diagnostics(uri)
-            if not checked_diagnostics:
-                checked_diagnostics = True
-                if published["diagnostics"]:
-                    first = published["diagnostics"][0]
-                    FAILURES.append(
-                        f"{path.name} opened with {len(published['diagnostics'])} diagnostic(s), "
-                        f"first: {first.get('message', '')[:100]}"
-                    )
-            for method, params, where in chunk:
-                asked += 1
-                reply = client.send(method, params)
-                error = reply.get("error")
-                if error and error.get("code") == -32603:
-                    FAILURES.append(f"{where} {method}: -32603 {error.get('message', '')[:120]}")
-            peak = max(peak, rss_mb(client.proc.pid))
-            client.send("shutdown", {})
-            client.send("exit", {}, wait=False)
-            code = client.proc.wait(timeout=30)
-            if code != 0:
-                FAILURES.append(f"{path.name}: the server exited {code} on shutdown, wanted 0")
-        except SystemExit as died:
-            FAILURES.append(f"{path.name}: the server stopped answering ({died})")
-        except subprocess.TimeoutExpired:
-            FAILURES.append(f"{path.name}: the server did not exit on shutdown")
-        finally:
-            if client.proc.poll() is None:
-                client.proc.kill()
+    client = Client()
+    try:
+        client.send("initialize", {"rootUri": "file://" + str(REPO), "capabilities": {}})
+        client.send("initialized", {}, wait=False)
+        client.send("textDocument/didOpen",
+                    {"textDocument": {"uri": uri, "languageId": "iyi",
+                                      "version": 1, "text": text}}, wait=False)
+        published = client.diagnostics(uri)
+        if published["diagnostics"]:
+            first = published["diagnostics"][0]
+            FAILURES.append(
+                f"{path.name} opened with {len(published['diagnostics'])} diagnostic(s), "
+                f"first: {first.get('message', '')[:100]}"
+            )
+        for number, (method, params, where) in enumerate(asks):
+            asked += 1
+            reply = client.send(method, params)
+            error = reply.get("error")
+            if error and error.get("code") == -32603:
+                FAILURES.append(f"{where} {method}: -32603 {error.get('message', '')[:120]}")
+            # Read the tree now and then rather than once at the end: the
+            # question is what the session *reached*, and a retirement
+            # between the peak and the last question would hide it.
+            if number % 50 == 0:
+                peak = max(peak, tree_mb(client.proc.pid))
+        peak = max(peak, tree_mb(client.proc.pid))
+        client.send("shutdown", {})
+        client.send("exit", {}, wait=False)
+        code = client.proc.wait(timeout=30)
+        if code != 0:
+            FAILURES.append(f"{path.name}: the server exited {code} on shutdown, wanted 0")
+    except SystemExit as died:
+        FAILURES.append(f"{path.name}: the server stopped answering ({died})")
+    except subprocess.TimeoutExpired:
+        FAILURES.append(f"{path.name}: the server did not exit on shutdown")
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
 
     if peak == 0:
         pass  # no /proc here; see `rss_mb`
     elif peak > RSS_CEILING_MB:
         FAILURES.append(
-            f"{path.name} took {peak} MB, over the {RSS_CEILING_MB} MB bound: a server here "
-            f"carries no collector, so this is what {RESTART_AFTER} questions cost"
+            f"{path.name} took {peak} MB, over the {RSS_CEILING_MB} MB bound: the worker is "
+            f"supposed to retire itself long before this, so either it stopped or one "
+            f"question costs more than a retirement saves"
         )
-    return asked, peak, servers
+    return asked, peak
 
 
 def prove_it_can_fail(stride: int) -> None:
@@ -254,7 +236,7 @@ def prove_it_can_fail(stride: int) -> None:
     os.environ["IYI_PATH"] = f"{work}{os.pathsep}{REPO / 'src'}"
     before = len(FAILURES)
     try:
-        asked, _, _ = sweep(target, stride)
+        asked, _ = sweep(target, stride)
         seen = [f for f in FAILURES[before:] if "opened with" in f]
         del FAILURES[before:]
         if not seen:
@@ -292,14 +274,12 @@ def main() -> int:
     print(f"== every cursor question, every {stride} lines, one server per module")
     total = 0
     worst = (0, "")
-    servers = 0
     for path in modules:
-        asked, peak, started = sweep(path, stride)
+        asked, peak = sweep(path, stride)
         total += asked
-        servers += started
         if peak > worst[0]:
             worst = (peak, path.name)
-        print(f"  {path.name:28s} {asked:5d} questions, {started:2d} server(s), {peak:5d} MB")
+        print(f"  {path.name:28s} {asked:5d} questions, {peak:5d} MB")
 
     print()
     print("== proving the sweep sees a module that stopped compiling")
@@ -309,10 +289,11 @@ def main() -> int:
 
     print()
     if worst[0]:
-        print(f"asked {total:,} questions over {len(modules)} modules on {servers} servers; "
-              f"the largest was {worst[0]} MB ({worst[1]}), under the {RSS_CEILING_MB} MB bound")
+        print(f"asked {total:,} questions over {len(modules)} modules, one server each; "
+              f"the largest session held {worst[0]} MB ({worst[1]}), under the "
+              f"{RSS_CEILING_MB} MB bound")
     else:
-        print(f"asked {total:,} questions over {len(modules)} modules on {servers} servers; "
+        print(f"asked {total:,} questions over {len(modules)} modules, one server each; "
               f"what each one took went unmeasured here (no /proc)")
     if FAILURES:
         print()

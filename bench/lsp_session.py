@@ -31,10 +31,44 @@ import time
 IYI = os.environ.get("IYI", "./bin/iyi")
 
 
+def rss_mb(pid):
+    """Resident megabytes of one process, or 0 where the kernel does not
+    say. `/proc` is Linux's; on darwin and Windows this answers 0 and
+    whoever asked reports its bound unmeasured rather than
+    unasserted-and-claimed."""
+    try:
+        with open(f"/proc/{pid}/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        return 0
+    return 0
+
+
+def children(pid):
+    listed = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)],
+                            capture_output=True, text=True)
+    return [int(line) for line in listed.stdout.split() if line.isdigit()]
+
+
+def tree_mb(pid):
+    """A session's whole cost: `iyi lsp` keeps the buffers and runs a
+    child that compiles, so counting only the parent would make the
+    split look free and prove nothing — the memory moved to the child,
+    it did not vanish."""
+    return rss_mb(pid) + sum(rss_mb(child) for child in children(pid))
+
+
 class Client:
-    def __init__(self):
+    def __init__(self, argv=("lsp",)):
+        """*argv* is the verb to run. `("lsp",)` is the server a person
+        points an editor at — a proxy that keeps the buffers and a child
+        that compiles. `("lsp", "--worker")` is that child alone, which
+        is the single-process shape `lsp_memory.py --direct` measures to
+        show what the split is worth."""
         self.proc = subprocess.Popen(
-            [IYI, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.next_id = 0
 
     def send(self, method, params, wait=True):

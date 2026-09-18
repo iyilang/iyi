@@ -60,6 +60,8 @@ require "./outline"
 require "./tokens"
 require "./exports"
 require "../tools/formatter"
+require "./text"
+require "./footprint"
 
 module Iyi::Lsp
   class Server
@@ -134,6 +136,26 @@ module Iyi::Lsp
           next
         end
         handle(message)
+        report_footprint
+      end
+    end
+
+    # What this process has cost, last time it said so, and the step
+    # that is worth saying. `Lsp::Proxy` listens for this and replaces a
+    # worker that has grown enough: a front end with no collector cannot
+    # give the memory back, so the only way to bound a session is for
+    # the process to end, and the only one who knows when that is due is
+    # the process. Thirty-two megabytes keeps the wire quiet — a session
+    # of pure hovers on unchanged text never says anything at all.
+    FOOTPRINT_STEP = 32
+    @footprint_said = 0
+
+    private def report_footprint : Nil
+      now = Lsp.footprint
+      return if now < @footprint_said + FOOTPRINT_STEP
+      @footprint_said = now
+      notify("iyi/footprint") do |json|
+        json.object { json.field "megabytes", now }
       end
     end
 
@@ -383,6 +405,17 @@ module Iyi::Lsp
       when "exit"
         @exit_code = @shut_down ? 0 : 1
         @running = false
+      when "iyi/adopt"
+        # Not a client's method: `Proxy` hands a fresh worker the buffers
+        # its predecessor held, and this is the handover. A replayed
+        # `didOpen` would publish a verdict per open file that the client
+        # already has on screen; adopting is the same state with nothing
+        # said back. The compile comes when something is asked.
+        params.not_nil!["documents"].as_a.each do |document|
+          uri = document["uri"].as_s
+          @documents[uri] = document["text"].as_s
+          @analysis.open(path_of(uri))
+        end
       when "textDocument/didOpen"
         uri = params.not_nil!["textDocument"]["uri"].as_s
         @documents[uri] = params.not_nil!["textDocument"]["text"].as_s
@@ -394,7 +427,7 @@ module Iyi::Lsp
         # carries the whole text; both apply in order.
         text = @documents[uri]? || ""
         params.not_nil!["contentChanges"].as_a.each do |change|
-          text = apply_change(text, change)
+          text = Text.apply(text, change)
         end
         # A typing burst is one verdict: every didChange for this
         # document already queued applies now, and the compile runs
@@ -404,7 +437,7 @@ module Iyi::Lsp
               queued["params"]["textDocument"]["uri"].as_s == uri
           @inbox.shift
           queued["params"]["contentChanges"].as_a.each do |change|
-            text = apply_change(text, change)
+            text = Text.apply(text, change)
           end
         end
         @documents[uri] = text
@@ -2765,41 +2798,9 @@ module Iyi::Lsp
     end
 
     # ── Incremental sync ─────────────────────────────────────────────────
-
-    # One contentChange: a range in wire units replaced by new text, or
-    # the whole document when the range is absent.
-    private def apply_change(text : String, change : JSON::Any) : String
-      new_text = change["text"].as_s
-      range = change["range"]?
-      return new_text unless range
-
-      start_offset = offset_at(text, range["start"]["line"].as_i, range["start"]["character"].as_i)
-      end_offset = offset_at(text, range["end"]["line"].as_i, range["end"]["character"].as_i)
-      end_offset = start_offset if end_offset < start_offset
-      String.build(text.bytesize + new_text.bytesize) do |io|
-        io.write text.to_slice[0, start_offset]
-        io << new_text
-        io.write text.to_slice[end_offset, text.bytesize - end_offset]
-      end
-    end
-
-    # Byte offset of an LSP position: 0-based line, UTF-16 character.
-    private def offset_at(text : String, line : Int32, character : Int32) : Int32
-      reader = Char::Reader.new(text)
-      current = 0
-      while current < line && reader.pos < text.bytesize
-        current += 1 if reader.current_char == '\n'
-        reader.next_char
-      end
-      units = 0
-      while units < character && reader.pos < text.bytesize
-        ch = reader.current_char
-        break if ch == '\n'
-        units += ch.ord >= 0x10000 ? 2 : 1
-        reader.next_char
-      end
-      reader.pos
-    end
+    #
+    # The arithmetic is `Text`'s: the proxy in front of this server keeps
+    # the same buffers and has to apply the same changes.
 
     # The workspace root the client named at initialize, for
     # workspace/symbol to glob under.

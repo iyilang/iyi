@@ -498,6 +498,18 @@ jobs:
       - name: Every cursor question, everywhere in the library
         run: python3 bench/lsp_positions.py
 
+      # The server is two processes because `iyi` carries no collector: a
+      # proxy that keeps the protocol and the buffers, and a worker that
+      # compiles and is retired once it has cost enough. Measured before
+      # the split: forty edits and hovers took one server to 1,636 MB,
+      # and a session of `references` reached 19 GB and was killed by
+      # the kernel mid-keystroke. This drives the same traffic and reads
+      # the tree's resident megabytes from `/proc` — and kills the
+      # worker outright, because "a crash is one bad answer" is the
+      # other half of what the split bought.
+      - name: An hour of editing costs what is open, not how long
+        run: python3 bench/lsp_memory.py
+
       # The same question asked of the other kind of artifact: one whose object
       # code is a shard's and whose declarations `tool bind` wrote. III.6 rule 1
       # names an undefined symbol and a call returning another type, and

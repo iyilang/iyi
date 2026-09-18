@@ -1101,12 +1101,14 @@ marked PROPOSED are the parts that will move under you.
   What is *not* here: there is no subprocess and no `Time::Location`; a
   symbolic link needs a privilege Windows grants to an administrator or
   to Developer Mode, so the file exercise asks first and says what it
-  skipped; a fault on a *fiber's* stack is still an access violation
-  rather than a named stack overflow, because a vectored handler runs on
-  the stack that faulted; the daemon is POSIX-only (`poll(2)` and
-  `fork`), so the Windows zip ships the compiler alone; and arm64 Windows
-  is refused at compile time rather than broken at run time, with the
-  x86-64 build running there under emulation.
+  skipped; the daemon is POSIX-only (`poll(2)` and `fork`), so the
+  Windows zip ships the compiler alone; and arm64 Windows is refused at
+  compile time rather than broken at run time, with the x86-64 build
+  running there under emulation. A fiber's stack running out *is* named
+  now: Windows has no alternate signal stack, so the room the handler
+  prints from is reserved in the stack itself — a committed PAGE_GUARD
+  page with 16 KB of committed slack beneath it, of which the handler
+  measured 2,872 bytes used.
   Building it there is `make -f Makefile.win crystal` then
   `make -f Makefile.win iyi`, with Crystal's own Windows package and the
   Visual C++ build tools and nothing else; `windows-native` in CI is that

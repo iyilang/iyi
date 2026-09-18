@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 15,196 lines, of which 4,228 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,404 lines, none of it written in iyi |
+| iyi's own prelude | 15,196 lines, of which 4,214 are the library held to the 3,734 ceiling; the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 111,491 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -271,7 +271,7 @@ initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
 **3. A deliberately tiny prelude, written in iyi. Done: 15,196 lines,
-primitives included, of which the library is 4,228.** Not a standard library:
+primitives included, of which the library is 4,214.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,7 +299,7 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,228 lines** of the 15,196, measured by `bench/doc_numbers.py` as
+**4,214 lines** of the 15,196, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three. The whole-prelude figure is
 stated beside it because a reader sees the whole file, and a "tiny prelude"
 claim that hid 9,000 lines of runtime would be a claim about the wrong number.
@@ -391,7 +391,7 @@ for the programs that do. They are `src/std/format.iyi` and
 std/socket`, and the library is **3,405 lines**, 353 under. `io.iyi` stays:
 it is the write path behind `puts`, which every program has.
 
-**And it is breached again, by Windows' own floor: 4,228 of 3,734, 494
+**And it is breached again, by Windows' own floor: 4,214 of 3,734, 480
 over.** What entered is not API. It is the platform: the kernel32 names the
 runtime calls, moved out of the collector's macro arm so a `-Dgc_none` or
 `-Dgc_boehm` build on Windows can link at all; the environment read through
@@ -407,11 +407,11 @@ of showing a dialog; and the 128-bit divide LLVM emits a call to, which
 every other platform gets from compiler-rt and Windows-MSVC has nowhere to
 get. Each is a declaration or a branch, none of them a method a program
 calls by a new name, and each carries the sentence that says why — which is
-where most of the 494 lines are.
+where most of the 480 lines are.
 
-**And the whole breach is that floor, measured.** Of the 4,228, the lines
+**And the whole breach is that floor, measured.** Of the 4,214, the lines
 inside a `flag?(:win32)` arm are 596: take them out and the library is
-**3,632**, which is 102 *under* the ceiling. The other platforms' arms in
+**3,618**, which is 116 *under* the ceiling. The other platforms' arms in
 the same count are 186 for Linux, 133 for darwin and 124 for wasm32 — so
 Windows' floor is not merely larger, it is larger than the other three put
 together, which is what a platform whose every path, console byte and
@@ -429,9 +429,9 @@ this number by nothing.
 So the choice is a rule, not a rewrite, and it is the owner's: either the
 figure stops counting *every* platform's floor, which is symmetric, would
 take Linux's syscalls and darwin's libSystem arms out with Windows'
-kernel32, and lands the library at 3,632 of 3,734 with 102 to spare — a
+kernel32, and lands the library at 3,618 of 3,734 with 116 to spare — a
 different ceiling, measured against a Crystal library whose own floor was
-libc and uncounted — or the library gives back 494 lines elsewhere, which
+libc and uncounted — or the library gives back 480 lines elsewhere, which
 at this size means giving back a method a program calls. Until one of those
 is decided, the breach is what is true.
 
@@ -976,7 +976,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,404 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 111,491 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 15,196-line own prelude + 37,904 in std |
 | Specs | 21,146 lines | 10,253 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |

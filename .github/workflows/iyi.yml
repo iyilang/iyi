@@ -1496,17 +1496,15 @@ jobs:
 
       # Each sample documents a part of the design, and `calc` reads, so
       # every one of them is given nothing on standard input rather than
-      # the runner's closed handle. `socket.iyi` is the one that cannot
-      # run here: the native std has no Winsock yet and `IyiSocket` says
-      # so by name, so the sample's own refusal is the expected answer and
-      # a tally cannot read it. Delete the line when sockets land.
+      # the runner's closed handle. Every sample runs here now, `socket.iyi`
+      # included: the native std has a Winsock arm, so the sample that used
+      # to be skipped because `IyiSocket` refused by name is a sample that
+      # connects, accepts and exchanges a message.
       - name: Run every sample
         shell: pwsh
         run: |
-          $skip = @("socket.iyi")
           $failed = @()
           foreach ($sample in Get-ChildItem samples\iyi\*.iyi) {
-            if ($skip -contains $sample.Name) { continue }
             Write-Host "== $($sample.Name)"
             "" | .\.build\iyi.exe run $sample.FullName
             if ($LASTEXITCODE -ne 0) { $failed += $sample.Name }
@@ -1546,25 +1544,30 @@ jobs:
       # exclusions are named one by one, because a list nobody has to
       # justify is how a target quietly stops being tested:
       #
-      #   socket, udp, http, server_load   no Winsock in the native std yet
-      #   arena_large_probe                its pass *is* the memory fault,
-      #                                    which bench/arena_exercise.sh
-      #                                    asserts and a tally cannot
-      #   wasm32_exercise                  a wasm32 program
-      #   std_file_exercise                creates a symlink, which needs a
-      #                                    privilege this image may not
-      #                                    grant; drop this line once a run
-      #                                    here shows it does
+      #   std_http_server    a server, which waits for the client its own
+      #                      gate supplies; a bare run has nobody to talk
+      #                      to and would sit there until the job's timeout
+      #   arena_large_probe  its pass *is* the memory fault, which
+      #                      bench/arena_exercise.sh asserts and a tally
+      #                      cannot
+      #   wasm32_exercise    a wasm32 program
+      #
+      # The sockets came off this list when `std/socket` and `std/udp` got
+      # their Winsock arms, and `std_file_exercise` came off it when the
+      # exercise learned to ask Windows whether it may make a symbolic link
+      # and to say what it skipped when the answer is no. `IYI_FILE_SANDBOX`
+      # is what keeps that exercise out of `/tmp`, which is not a directory
+      # here.
       - name: Every exercise the runtime can hold
         shell: pwsh
         run: |
           $skip = @(
-            "socket_exercise.iyi", "std_udp_exercise.iyi", "std_http_exercise.iyi",
-            "std_http_server.iyi", "server_load.iyi", "arena_large_probe.iyi",
-            "wasm32_exercise.iyi", "std_file_exercise.iyi"
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
+          $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
           New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
           $iyi = "$pwd\.build\iyi.exe"
           $failed = @()
           $ran = 0

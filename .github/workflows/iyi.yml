@@ -1596,7 +1596,7 @@ jobs:
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build
-      # `crystal.exe` before it could build `iyi` at all, which is most of
+      # the compatibility binary before it could build `iyi` at all, which is
       # this job's minutes, to save the one release build below — the only
       # work here that is actually new.
       #

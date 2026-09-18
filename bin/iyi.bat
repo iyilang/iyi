@@ -1,7 +1,7 @@
 @echo off
 rem iyi, run out of this checkout from cmd: `bin\iyi run samples\iyi\hello.iyi`.
 rem
-rem `bin\crystal.bat` hands its arguments to `bin\crystal.ps1` through cmd's
+rem `bin/crystal.bat` hands its arguments to `bin/crystal.ps1` through cmd's
 rem and PowerShell's stop-parsing token, and that hop cannot carry them:
 rem measured here, `bin\iyi.bat run samples\iyi\hello.iyi` arrived at the
 rem script as the single argument `run samples\iyi\hello.iyi` and the compiler

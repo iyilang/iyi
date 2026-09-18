@@ -344,12 +344,17 @@ EOF
     run "$work/named.iyi"
     [ "$code" = 1 ] || fail "the named-frames panic exited $code, wanted 1"
     echo "$out" | grep -q "^iyi: panic: named frames" || fail "no panic line: $out"
-    echo "$out" | grep -q "inner at .*named\.iyi:[0-9]" ||
+    # Each platform names a frame in the form its debug information holds:
+    # darwin's Mach-O symbol is the mangled `*Named@Named::inner<Int32>:Int32`
+    # and Windows' PDB procedure record is the display name `inner`, so the
+    # pattern asks for the function's own name followed by the file and a
+    # line and does not pin either spelling.
+    echo "$out" | grep -qE "inner[^ ]* at .*named\.iyi:[0-9]" ||
       fail "no frame named the program's own function and line:
 $out"
-    # Three frames of the same recursion, so the walk is a walk and not one
-    # resolved address repeated by accident.
-    frames="$(echo "$out" | grep -c "inner at .*named\.iyi:")"
+    # More than one frame of the same recursion, so the walk is a walk and
+    # not one resolved address repeated by accident.
+    frames="$(echo "$out" | grep -cE "inner[^ ]* at .*named\.iyi:")"
     [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
 $out"
     step "a panic names its callers where the program imported a resolver"

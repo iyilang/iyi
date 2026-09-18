@@ -312,13 +312,52 @@ run "$work/index.iyi"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
 echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
 # On Darwin, the panic raises a backtrace through libSystem's backtrace and
-# points at the program rather than the library. On Linux/Windows raw-syscall
-# runtimes, backtrace capture is not yet built.
+# points at the program rather than the library. Windows captures its
+# callers too (`RtlCaptureStackBackTrace`) but prints none without a
+# resolver, which is the next step's subject; on the Linux raw-syscall
+# runtime capture is not built yet.
 if [ "$(uname -s)" = Darwin ]; then
   echo "$out" | grep -qE "index\.iyi|Index@Index::go|Index::go" \
     || fail "library panic named no frame in the program: $out"
 fi
 step "a panic the library raises names no library line, prelude or std"
+
+# ── 9a. a program that imports `std/debug` gets its callers named: the
+#      resolver reads the program's own debug information — DWARF beside a
+#      Mach-O, the CodeView PDB the linker wrote beside a PE — and a frame
+#      is a function and a source line rather than an address. This is the
+#      whole of what `std/debug` is for, and it was never gated. ────────
+case "$(uname -s)" in
+  Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    cat > "$work/named.iyi" <<'EOF'
+module named
+
+import std/debug
+
+def inner(n : Int32) : Int32
+  raise "named frames" if n == 2
+  inner(n + 1)
+end
+
+puts inner(0)
+EOF
+    run "$work/named.iyi"
+    [ "$code" = 1 ] || fail "the named-frames panic exited $code, wanted 1"
+    echo "$out" | grep -q "^iyi: panic: named frames" || fail "no panic line: $out"
+    echo "$out" | grep -q "inner at .*named\.iyi:[0-9]" ||
+      fail "no frame named the program's own function and line:
+$out"
+    # Three frames of the same recursion, so the walk is a walk and not one
+    # resolved address repeated by accident.
+    frames="$(echo "$out" | grep -c "inner at .*named\.iyi:")"
+    [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
+$out"
+    step "a panic names its callers where the program imported a resolver"
+    ;;
+  *)
+    step "a panic names its callers where the program imported a resolver: not measured here, because backtrace capture is not built on this runtime"
+    ;;
+esac
 
 # ── 10. the stack running out is a panic the program prints itself: on
 #      the main stack, on a fiber's (its guard page), on a thread's (its

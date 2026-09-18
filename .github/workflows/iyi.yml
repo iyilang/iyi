@@ -1001,9 +1001,14 @@ jobs:
   # unpacking it somewhere else could have caught that.
   darwin:
     runs-on: macos-14
-    # Sixty, not forty-five: the standard library's exercises below cost
-    # eleven minutes on an M2 and a shared runner is slower.
-    timeout-minutes: 60
+    # Ninety, and the number is this job's own measurement rather than a
+    # guess: the run before this one took 54m32s of a sixty-minute bound,
+    # and 34 of those minutes are two steps nothing can shorten - building
+    # the compiler, its daemon and the tarball (22m07s) and walking the
+    # collector-free floor (11m32s). Five minutes of headroom is a red
+    # build for the next step anybody adds, and the step that found this
+    # was measured at 2m20s.
+    timeout-minutes: 90
     name: "An iyi program, run on darwin arm64"
     steps:
       - uses: actions/checkout@v7
@@ -1199,13 +1204,14 @@ jobs:
           python3 bench/lsp_token_boundaries.py
           python3 bench/lsp_soak.py
 
-      # `bench/lsp_positions.py` is the Linux job's and stays there. A
-      # cursor question is answered from the typed program by the same
-      # front end on both kernels, so the sweep measures nothing here that
-      # is darwin's — and this job builds the compiler and walks the
-      # collector-free floor before it starts, which is 34 of its 42
-      # minutes against a 60-minute bound. A step whose value is a repeat
-      # is not what the remaining eight are for.
+      # `bench/lsp_positions.py` is the Linux job's and stays there, on
+      # merit rather than on time: a cursor question is answered from the
+      # typed program by the same front end on both kernels, so the sweep
+      # measures nothing here that is darwin's. What *is* darwin's about
+      # the server is the transport and the runtime under it, and
+      # `lsp_session.py` and `lsp_soak.py` above run here for that. It was
+      # measured here before it was moved out — 2m20s at stride 600 — so
+      # this is a choice about repetition, not about the clock.
 
       # What a person who downloads it does: unpack it somewhere else and run
       # programs — iyi's own prelude with its kqueue runtime, `--crystal` with

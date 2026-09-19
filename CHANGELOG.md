@@ -389,6 +389,30 @@
 
 ### Fixed
 
+- **The first completion after the language server replaced its worker
+  came back empty.** `iyi lsp` runs two processes and retires the one
+  that compiles — on a memory bound, or after a pause — handing its
+  successor the open buffers with `iyi/adopt` and warming it on the
+  *focused* file. Every other open buffer arrived with the text and no
+  program behind it, and a cursor question in a buffer that does not
+  compile is answered from the last program that did. Mid-edit is what
+  a buffer being typed in *is*, so the answer was nothing: `s.up`
+  offered `upcase` before the replacement and an empty list after it,
+  which an editor shows as no suggestions at all.
+
+  The successor compiles every buffer it adopts now, bounded by what
+  the analysis keeps anyway and paid in the silence the replacement is
+  already scheduled in. Nothing is published: the client has those
+  verdicts on screen.
+
+  `bench/lsp_memory.py` holds it — the same question either side of a
+  retirement, in a buffer that does not compile, with the focus moved
+  elsewhere so the warm-up cannot cover it. The memory bounds are
+  unchanged: 551 MB peak while typing without a pause, 186 MB at rest.
+  `bench/lsp_session.py` step 37 had been failing on this defect
+  whenever a worker happened to retire at that point, which is a gate
+  that fails for a real reason and names none of it.
+
 - **An enum travelled with no methods, including the ones its author
   wrote.** An enum gets a question method per member wherever it is
   declared, so carrying those hands a consumer a second copy of what

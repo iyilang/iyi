@@ -410,11 +410,31 @@ module Iyi::Lsp
         # its predecessor held, and this is the handover. A replayed
         # `didOpen` would publish a verdict per open file that the client
         # already has on screen; adopting is the same state with nothing
-        # said back. The compile comes when something is asked.
+        # said back.
+        adopted = [] of String
         params.not_nil!["documents"].as_a.each do |document|
           uri = document["uri"].as_s
           @documents[uri] = document["text"].as_s
           @analysis.open(path_of(uri))
+          adopted << uri
+        end
+
+        # And one compile each, because the buffers are not the state the
+        # predecessor had. A cursor question in a buffer that does not
+        # compile — which is what mid-edit means, and mid-edit is where a
+        # person asks — is answered from the last program that did, and a
+        # successor that only records the text has none. `Proxy` warms it
+        # on the *focused* file, so every other open buffer answered the
+        # first completion with nothing: `s.up` offered `upcase` before
+        # the replacement and an empty list after it.
+        #
+        # Paid in the silence the replacement is scheduled in, and
+        # bounded by what `Analysis` keeps anyway — warming more than
+        # that would evict the ones warmed first. Nothing is published:
+        # the client already has these verdicts.
+        adopted.last(Analysis::KEEP).each do |uri|
+          path = path_of(uri)
+          @analysis.check(path, @documents[uri], overrides_for(path))
         end
       when "textDocument/didOpen"
         uri = params.not_nil!["textDocument"]["uri"].as_s

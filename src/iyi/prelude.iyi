@@ -450,6 +450,10 @@ end
     # bits rather than trusting them to be zero.
     fun RtlCaptureStackBackTrace(frames_to_skip : Int32, frames_to_capture : Int32,
                                  back_trace : Void**, back_trace_hash : Int32*) : Int32
+    # The command line the kernel kept, in UTF-16. The C runtime's `argv`
+    # is the same line put through the active code page, which is lossy
+    # for every character the page has no letter for (`Program.args`).
+    fun GetCommandLineW : UInt16*
     # The crash path's three, and the only thing a program of this shape
     # asks Windows for at startup: no error dialog, room reserved for the
     # overflow handler, and the handler itself.
@@ -8178,13 +8182,114 @@ class Program
   # The arguments after the program's own name, the way every shell
   # hands them over.
   def self.args : Array(String)
-    result = [] of String
-    index = 1
-    while index < ARGC_UNSAFE
-      result << string_from(ARGV_UNSAFE[index])
-      index = index + 1
-    end
-    result
+    {% if flag?(:win32) %}
+      # The command line, as Windows kept it, and not as the C runtime
+      # handed it over. `ARGV_UNSAFE` is the CRT's `argv`, which is the
+      # *ANSI* command line: measured, a program given `ünïcode-çğış` and
+      # `日本` from PowerShell saw `ünïcode-çgis` — `ğ`, `ı` and `ş`
+      # replaced by the code page's best-fit letters — and `??`. A file
+      # named in an argument therefore named a different file, or none.
+      #
+      # `GetCommandLineW` is the line the kernel kept, in UTF-16, and the
+      # splitting is done here rather than by `CommandLineToArgvW`
+      # because that one lives in shell32 and a second DLL is a floor this
+      # library does not move (SPEC.md III.10). The rules are Microsoft's
+      # own, and they are about backslashes only where a quote follows:
+      # 2n backslashes before a `"` are n backslashes and the quote
+      # toggles, 2n+1 are n backslashes and a literal quote, and a
+      # backslash with no quote after it is a backslash. Inside quotes,
+      # `""` is a literal quote — the rule that lets a quoted argument
+      # carry one.
+      line = LibC.GetCommandLineW
+      return [] of String if line.address == 0_u64
+      result = [] of String
+      # One buffer for the argument being built: an argument is never
+      # longer than the whole line, and the line is read once.
+      length = 0
+      while line[length] != 0_u16
+        length = length + 1
+      end
+      piece = Pointer(UInt16).malloc((length + 1).to_u64)
+      index = 0
+      first = true
+      while index < length
+        # Whitespace between arguments: space and tab, as the parser
+        # Windows documents treats them.
+        while index < length && (line[index] == 32_u16 || line[index] == 9_u16)
+          index = index + 1
+        end
+        break if index >= length
+        taken = 0
+        quoted = false
+        while index < length
+          ch = line[index]
+          break if !quoted && (ch == 32_u16 || ch == 9_u16)
+          if ch == 92_u16
+            slashes = 0
+            while index < length && line[index] == 92_u16
+              slashes = slashes + 1
+              index = index + 1
+            end
+            if index < length && line[index] == 34_u16
+              pairs = slashes // 2
+              written = 0
+              while written < pairs
+                piece[taken] = 92_u16
+                taken = taken + 1
+                written = written + 1
+              end
+              if slashes % 2 == 1
+                piece[taken] = 34_u16
+                taken = taken + 1
+                index = index + 1
+              else
+                quoted = !quoted
+                index = index + 1
+              end
+            else
+              written = 0
+              while written < slashes
+                piece[taken] = 92_u16
+                taken = taken + 1
+                written = written + 1
+              end
+            end
+          elsif ch == 34_u16
+            if quoted && index + 1 < length && line[index + 1] == 34_u16
+              piece[taken] = 34_u16
+              taken = taken + 1
+              index = index + 2
+            else
+              quoted = !quoted
+              index = index + 1
+            end
+          else
+            piece[taken] = ch
+            taken = taken + 1
+            index = index + 1
+          end
+        end
+        piece[taken] = 0_u16
+        # The first argument is the program's own name, which every shell
+        # drops before handing the rest over.
+        unless first
+          size = __iyi_utf8_size_from_wide(piece)
+          if size > 0
+            result << String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(piece, target, size) }
+          end
+        end
+        first = false
+      end
+      result
+    {% else %}
+      result = [] of String
+      index = 1
+      while index < ARGC_UNSAFE
+        result << string_from(ARGV_UNSAFE[index])
+        index = index + 1
+      end
+      result
+    {% end %}
   end
 
   # One variable, or nil. No map of everything: the asking program names

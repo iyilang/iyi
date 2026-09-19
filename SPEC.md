@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 15,411 lines, of which 3,210 are the library held to the 3,734 ceiling (4,355 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 111,660 lines, none of it written in iyi |
+| iyi's own prelude | 15,243 lines, of which 3,167 are the library held to the 3,734 ceiling (4,242 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 112,393 lines, none of it written in iyi |
 | artifact format | `.iyimod` v19, checksum per section |
 | samples | 27 programs, of which 6 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1005,8 +1005,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 111,660 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 15,411-line own prelude + 38,917 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 112,393 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 15,243-line own prelude + 38,051 in std |
 | Specs | 21,146 lines | 10,284 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4674,6 +4674,42 @@ of a typed `Program` per request or an invalidation story for a shared
 one, and what it buys is 44 ms to about 15 under a debounce every editor
 already applies. Not built, on the number: the server stays a compile
 per question, and the daemon stays withdrawn.
+
+**But the daemon's *process shape* was right, and the server took it.**
+Declining the daemon's cache left one thing unanswered, and it was the
+one a person meets after an hour rather than after a keystroke: `iyi`
+carries no collector by III.9, so a front end hands its memory back by
+exiting, and a server does not exit. Measured, not feared: forty edits
+and hovers on a 327-line module took one server from 87 MB to
+**1,636 MB**, and a sweep of cursor questions over the library reached
+**19 GB**, at which point the kernel killed it — mid-session, with the
+person's answers inside it. Three ways out, and two of them cost more
+than they fix. A collector on the compiler binary is the ancestor
+library III.9 spent a release shedding, and it taxes every one-shot
+build (the Makefile's own measure: 29% more peak memory). A second
+binary with a collector keeps the floor but adds an exception to it.
+What the daemon does needs neither: **analyse, work, exit, and let the
+next process be the forgetting.** So `iyi lsp` is two processes — a
+proxy that speaks the protocol and keeps the open buffers, and a worker
+(`iyi lsp --worker`, today's server unchanged) that compiles and is
+*retired*: when it has cost half a gigabyte, which it measures and says
+(`iyi/footprint`), or when the wire has been quiet for two seconds, so
+the replacement's first compile is paid out of the silence instead of
+the next keystroke. A worker with a request in flight is never retired,
+which is what keeps the code lens that runs the person's program from
+being killed to save memory. The result is a session whose cost is what
+is open rather than how long it has been open: the same forty edits
+peak at 518 MB and rest at **95–112 MB**, measured by
+`bench/lsp_memory.py`, whose `--direct` flag drives the single process
+so the numbers it rules out stay reproducible rather than remembered.
+Two properties fell out and are worth as much as the megabytes: a
+front-end crash is now one bad answer — whoever was waiting is told
+`-32603` and the next question is answered by a fresh worker, where
+before the session died with the process — and the proxy is small
+enough to be boring, because it parses four notifications and two
+requests and relays everything else as bytes, malformed frames
+included, so the protocol's refusals still come from the one place that
+implements them.
 
 #### 3. The rest of the verbs, and which are design consequences
 

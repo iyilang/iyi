@@ -497,6 +497,18 @@ harnesses: `iyi/contextPack` returns the file's grounding pack and
 `iyi/surface` a module's rendered surface, unsaved buffers included
 (`bench/lsp_session.py` is the whole contract, runnable).
 
+`iyi lsp` is two processes, and the reason is the one the rest of this
+file keeps repeating: the compiler carries no collector, so it hands its
+memory back by exiting. A server does not exit, and a single-process one
+was measured reaching 1.6 GB in forty edits and 19 GB over a library
+sweep, where the kernel killed it. So the process an editor talks to
+keeps the protocol and the buffers and nothing else, and the compiling
+happens in a worker it replaces — at half a gigabyte, or after two
+seconds of quiet, so the replacement is warmed while nobody is typing.
+A session now rests at about 100 MB, and a compiler crash is one `-32603`
+instead of a dead editor (`bench/lsp_memory.py`, and `--direct` drives
+the old shape to show the numbers it rules out).
+
 ### Your first module, and then the rule that matters
 
 Two files. `app/greeter.iyi` is a module, and its path is its file's path:

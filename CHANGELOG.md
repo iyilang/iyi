@@ -64,13 +64,12 @@
   the fix it reports seventeen `-32603`s over `std/dir` and `std/path`
   alone.
 
-  A fresh server per module, and another every 400 questions, which is
-  not a detail: `iyi lsp` is the compiler's binary and carries no
-  collector (III.9), so a process that compiles module after module never
-  gives a byte back - this sweep against one long-lived server was killed
-  by the kernel at 19 GB. A compiler invocation compiles one program and
-  exits; so does a server here, and what one takes is measured and held
-  under a bound (1.2 GB against 4).
+  One server per module, and the memory is the server's own problem now:
+  this sweep against one long-lived *single-process* server was killed by
+  the kernel at 19 GB, which is what sent `iyi lsp` to the two-process
+  shape under Changed below. The sweep no longer restarts anything on a
+  counter it had to tune - it holds the whole session's resident
+  megabytes under a bound instead, measured at 560 MB against 1,024.
 
 - **Windows x86-64 is a platform the tree measures, not one it hopes
   about.** Of the 87 programs under `bench/`, 84 pass unattended on a
@@ -163,6 +162,47 @@
   236,296 requests, every one answered 200.
 
 ### Changed
+
+- **`iyi lsp` is two processes, because a compiler that never frees must
+  not be a server that never exits.** `iyi` carries no collector (III.9):
+  a front end allocates for one program, answers, and hands the memory
+  back by exiting. A server does not exit. Measured here: forty edits and
+  hovers on a 327-line module took one server from 87 MB to **1,636 MB**,
+  and a sweep of cursor questions over the library reached **19 GB**,
+  where the kernel killed it mid-session. Neither a collector on the
+  compiler's binary (the ancestor library III.9 spent a release shedding,
+  and 29% more peak memory on every one-shot build) nor a second binary
+  with one (an exception to the floor) was needed: the build daemon
+  already had the shape - analyse, work, exit, let the next process do
+  the forgetting.
+
+  So `iyi lsp` is now a proxy that speaks the protocol and keeps the open
+  buffers, and a worker (`iyi lsp --worker`, today's server unchanged)
+  that compiles and is retired - at half a gigabyte, which it measures
+  and reports itself (`getrusage`, one call per request), or after two
+  seconds of quiet, so its replacement's first compile is paid out of the
+  silence rather than out of the next keystroke. A worker with a request
+  in flight is never retired, which is what keeps the code lens running
+  the person's program from being killed to save memory; a fresh one is
+  handed the buffers with `iyi/adopt` and warmed on the focused file.
+  The same forty edits now peak at **518 MB** and rest at **95-112 MB**.
+
+  Two properties came with it. A front-end crash is one bad answer
+  instead of a dead session: whoever was waiting is told `-32603` naming
+  how the compile died, and the next question is answered by a new
+  worker. And a typing burst is still one compile - the coalescing moved
+  to the proxy, which is where the client's stream arrives, and the
+  worker keeps its own for whoever points an editor at `--worker`.
+  The proxy parses four notifications and two requests and relays
+  everything else as bytes, malformed frames included, so the protocol's
+  refusals still come from the one place that implements them.
+
+  `bench/lsp_memory.py` is the gate: the same client traffic, the whole
+  process tree's resident megabytes read from the kernel, the hover
+  compared either side of a retirement, and the worker killed outright
+  mid-run. `--direct` drives the single process so the numbers the bounds
+  rule out stay reproducible: 1,638 MB peak, 1,637 MB at rest, and a
+  session that dies with its compile.
 
 - **The ceiling stops counting every platform's floor, and it is a check
   now.** Windows' arrival put the library 508 lines over the 3,734 it is

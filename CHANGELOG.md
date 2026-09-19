@@ -420,6 +420,37 @@
   `bench/windows_exercise.sh` gates both: an 18-byte argument and a
   13-byte variable arrive whole, and the step runs only on Windows,
   because everywhere else the bytes are the bytes.
+- **Installing iyi over iyi left the last release's files in the
+  library, and that is a broken `--crystal`.** `install.sh` unpacked the
+  tarball into the prefix, and `tar` knows nothing about files a release
+  has deleted, so they stayed - and `share/iyi/crystal` is a library,
+  not a pile of files: `crystal/dwarf.cr` requires `./dwarf/**`, so a
+  file nobody ships any more is still *required* by the glob that
+  outlived it. Found on a machine that had upgraded in place:
+  `crystal/dwarf/line_numbers.cr` from an older release was still there
+  and **every `--crystal` build died** with `Error: undefined constant
+  FORM`, naming a file inside the install that the person never wrote
+  and cannot find in the repository. The fresh-install gate could not
+  see it, because it installs into an empty directory - the path only a
+  first-time user takes.
+
+  Each install now writes down what it unpacked
+  (`share/iyi/installed-files`, straight from `tar -tzf`) and the next
+  one removes exactly that, so `bin/` and `lib/` - shared with whatever
+  else lives under the prefix - lose only iyi's own files. An install
+  from before that list exists leaves none, and for it the two
+  directories iyi owns whole are replaced instead, which is where the
+  library that poisons a build lives. `make install_iyi` clears
+  `$(DATADIR)/iyi` for the same reason. `install.ps1` already did this
+  and said why; the sh installer never learned it.
+
+  `bench/install_upgrade.sh` is the gate, in the clean room beside the
+  fresh-install one: install, plant the exact shape (a `.cr` under the
+  library, in a directory a `**` require reaches, that does not
+  compile), install again, and demand that the file is gone and a
+  `--crystal` program builds. It holds both upgrade paths, refuses a
+  file list that climbs out of the prefix, and against the installer
+  before this fix three of its steps fail.
 
 - **`UInt16` had no operations, and answered `false` instead of saying so.**
   The prelude crosses five numeric types for comparison and `UInt16` was

@@ -110,6 +110,12 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # src/xml, src/compress, src/digest, src/crypto and src/big, so the
     # sentence names the other language because that is what it denotes.
     (r"vendored Crystal bindings under", "the ancestor's bindings the std floor warns about"),
+    # An install ships the other language's library under
+    # `share/iyi/crystal`, and the file that made a stale upgrade fatal is
+    # a file of *that* library: `crystal/dwarf.cr` requires `./dwarf/**`,
+    # so a module a release deleted was still required. The installer, the
+    # Makefile and the gate name it because that is the path on disk.
+    (r"`crystal/dwarf\.cr`", "the other library's own file, named as a path"),
     (r"crystal_front", "the front-end bench binary"),
     (r"CRYSTAL_ONLY", "the list of commands that belong to Crystal"),
     (r"Crystal 1\.", "the upstream version this forked from"),

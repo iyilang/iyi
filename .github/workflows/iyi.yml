@@ -2137,6 +2137,19 @@ jobs:
           grep -q "does not match the release's SHA256SUMS" err
           [ ! -e tampered/bin/iyi ]
 
+      # And the install *every machine that already has iyi* takes. The
+      # step above unpacks into an empty directory, which only a
+      # first-time user does; unpacking over an install used to leave
+      # every file the release had deleted behind, and
+      # `share/iyi/crystal` is a library whose `dwarf.cr` requires
+      # `./dwarf/**` — so a file from an older release was still
+      # *required*, and on a machine that had upgraded in place every
+      # `--crystal` build died on a constant it mentioned. This installs,
+      # plants that shape, installs again, and asks for the file to be
+      # gone and the build to work.
+      - name: Installing over an install leaves one install
+        run: bash bench/install_upgrade.sh "$PWD/dist"
+
   # A release is a tag, and nothing else is manual: push `v*` and this
   # job collects the two tarballs the platform jobs built and *proved* —
   # unpacked somewhere else, samples run, daemon served — and attaches

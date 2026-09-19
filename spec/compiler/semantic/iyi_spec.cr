@@ -290,6 +290,41 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "names the std module that implements the trait the method is on" do
+      # "undefined method 'clamp' for String" is true and useless when
+      # `import std/traits` is the whole answer: std implements the
+      # trait for the prelude's types, so the method is one line away
+      # rather than absent.
+      assert_error <<-CODE, "`std/traits` implements `Comparable` for String"
+        "b".clamp("a", "c")
+        CODE
+    end
+
+    it "still says the size rule when no std module has the method" do
+      assert_error <<-CODE, "iyi's prelude has no `frobnicate` on String"
+        "a".frobnicate
+        CODE
+    end
+
+    it "names the `_by` sibling when a block is given to the plain name" do
+      # This library pairs a method with `_by` where Crystal passes a
+      # block to the same name, and the pair is looked up on the
+      # receiver rather than listed, so it cannot go stale.
+      assert_error <<-CODE, "`total_by` is the block form"
+        class Ledger
+          def total : Int32
+            0
+          end
+
+          def total_by(& : Int32 -> Int32) : Int32
+            yield 1
+          end
+        end
+
+        Ledger.new.total { |x| x }
+        CODE
+    end
+
     it "says nothing about the rule for a class the program declares" do
       exception = expect_raises(Iyi::TypeException) do
         semantic <<-CODE

@@ -123,33 +123,19 @@ class Array(T)
     result
   end
 
-  # No zero to start from — that would need a trait this prelude does not
-  # have — so an empty array is a panic rather than a 0. The trait's own `sum`
-  # does have one (`Num.zero`) and answers for the empty case.
-  def sum : T
-    raise "sum of an empty array" if empty?
-
-    total = @buffer[0]
-    index = 1
-    while index < @size
-      total = total + @buffer[index]
-      index = index + 1
-    end
-    total
-  end
-
-  # The sum of what the block answers for each element.
-  def sum(& : T -> U) : U forall U
-    raise "sum of an empty array" if empty?
-
-    total = yield @buffer[0]
-    index = 1
-    while index < @size
-      total = total + (yield @buffer[index])
-      index = index + 1
-    end
-    total
-  end
+  # No `sum` here, and the reason is the answer it would have to give for
+  # an empty array. A sum needs a zero, a zero is a property of the
+  # element type, and this prelude has no trait to ask for one - so the
+  # method that lived here raised "sum of an empty array" while
+  # `std/enumerable`'s, which *can* ask (`Elem : Num`, `Elem.zero`),
+  # answered 0. One program could see both: `Set(Int32).new.sum` was 0
+  # and `([] of Int32).sum` panicked, two empty collections of the same
+  # element type disagreeing.
+  #
+  # So there is one `sum`, in the module that owns the trait that can
+  # define it: `import std/enumerable` (and `sum_by` for the block
+  # form). Nothing in this repository called this one, which is III.1's
+  # own rule for whether a method belongs in the prelude.
 
   def map(& : T -> U) : Array(U) forall U
     result = Array(U).new(@size)

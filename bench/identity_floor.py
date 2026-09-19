@@ -262,7 +262,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r'program_name : String = "crystal"', "the documented default, set by the entrypoint"),
     (r"with crystal\]|the crystal compiler package|~/\.cache/crystal", "the compatibility binary's build and cache"),
     (r"'crystal deps' has been removed", "a message about a removed Crystal command"),
-    (r"Crystal (requires|spells|duck-types|monomorphises|exception|Core Team)", "a sentence about the other language"),
+    (r"Crystal (requires|spells|passes|duck-types|monomorphises|exception|Core Team)", "a sentence about the other language"),
     (r"the way Crystal|way Crystal does|rather than a Crystal|than Crystal", "a comparison with the other language"),
     (r"crystal@manas\.tech", "the copyright holder's address"),
     (r'"Crystal"\.scan|/Crystal/|"Crystal"\.', "the word as test data in a macro spec"),

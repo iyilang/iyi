@@ -389,6 +389,29 @@
 
 ### Fixed
 
+- **An alias travelled as what it resolved to, and a resolved type is
+  not always something that can be written down again.** `pub alias
+  Ary = ::Array` came back as `alias Ary = Array(T)` — a generic prints
+  with its type variables — and the consumer said `undefined constant
+  T` about a letter nobody wrote. `pub alias BitArray = ::BitArray`
+  came back as `alias BitArray = BitArray`, because a resolved name has
+  no `::` on it, and inside `module Std::BitArray` that name is the
+  alias being declared: `infinite recursive definition of alias`.
+  `std/annotations`, `std/bit_array` and `std/static_array` each hand a
+  prelude type out under its own name.
+
+  It travels as the module wrote it now. The argument for resolving it
+  was that a name resolved where the module was read may not resolve
+  where the artifact is, and that is the wrong way round: the
+  declarations text replays the module's imports, its requires and its
+  `using` directives and declares its own nested types, so a name the
+  module could write is a name that text can write. The resolved type
+  is kept for the one case the written value cannot be read back — an
+  expression the parser does not take as a type.
+
+  Two more of the 60 `bench/std_*_exercise.iyi` round-trip through
+  `--emit-iyimod` and `--use-iyimod`: 32 before this, 34 after.
+
 - **A method with keyword-only parameters crashed the compiler when it
   was read from an artifact.** Not refused — crashed: `Nil assertion
   failed` or `Index out of bounds`, a page of this compiler's own

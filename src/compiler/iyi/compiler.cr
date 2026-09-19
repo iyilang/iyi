@@ -1466,11 +1466,8 @@ module Iyi
       # below for an annotation's instance variables ended the build on
       # "BUG: Shapes::Marked doesn't implement instance_vars".
       # iyi: an exported `alias` has neither a layout nor an id either, and
-      # travels as what it resolved to - the same rule `iyi_carried_types`
-      # applies to one declared *under* an exported type, because a name
-      # that resolved where the module was read may not resolve here.
+      # travels as what the module *wrote* — see `iyi_alias_value`.
       if type.is_a?(AliasType)
-        type.process_value
         return IyiMod::TypeDecl.new(
           name: name,
           kind: type.type_desc,
@@ -1480,7 +1477,7 @@ module Iyi
           fields: [] of {String, String, String},
           methods: [] of IyiMod::Signature,
           visibility: "pub",
-          value: type.aliased_type?.try(&.to_s) || type.@value.to_s,
+          value: iyi_alias_value(type, name),
           doc: type.doc || "",
         )
       end
@@ -1615,6 +1612,37 @@ module Iyi
       )
     end
 
+    # iyi: what an `alias` travels as — the type expression the module wrote.
+    #
+    # It used to travel as what the name *resolved to*, on the argument that a
+    # name resolved where the module was read may not resolve where the
+    # artifact is. That argument is the wrong way round: the declarations text
+    # replays the module's imports, its requires and its `using` directives,
+    # and declares its own nested types, so a name the module could write is a
+    # name that text can write — and a resolved type is not always writable at
+    # all. Two ways it was not:
+    #
+    # * A generic prints with its type variables. `pub alias Ary = ::Array`
+    #   came back `alias Ary = Array(T)`, and the consumer said `undefined
+    #   constant T` about a letter nobody wrote.
+    # * A resolved name has no `::` on it. `pub alias BitArray = ::BitArray`
+    #   came back `alias BitArray = BitArray` inside `module Std::BitArray`,
+    #   where that name is the alias being declared: `infinite recursive
+    #   definition of alias Std::BitArray::BitArray`. `std/annotations`,
+    #   `std/bit_array` and `std/static_array` each hand a prelude type out
+    #   under its own name, and all three were unusable as artifacts.
+    #
+    # The resolved type is kept for the one case the written value cannot be
+    # read back: a `typeof` or any other expression the parser does not take
+    # as a type. *name* is the alias's own name, which a value equal to it
+    # would be a definition of itself.
+    private def iyi_alias_value(type : AliasType, name : String) : String
+      type.process_value
+      written = type.@value.to_s
+      return written unless written.empty? || written == name
+      type.aliased_type?.try(&.to_s) || written
+    end
+
     # iyi: the types declared under *type* that a consumer needs to have rather
     # than to call, for `Exports` (SPEC.md IV.1g). *carried* is the names
     # already travelling as part of the module's surface.
@@ -1642,26 +1670,20 @@ module Iyi
         # An alias has neither a layout nor an id, and it travels for the other
         # reason a declaration does: the text that travels names it. A carried
         # record's `handler : Handler` is what the module was written with, and
-        # a consumer without the alias reads it as an undefined constant. It
-        # arrives as what it resolved to, which is also how a field's type
-        # arrives — the name it was written as resolved where the module was
-        # read from source, and this file is read somewhere else.
+        # a consumer without the alias reads it as an undefined constant.
         if declared.is_a?(AliasType)
-          declared.process_value
-          if aliased = declared.aliased_type?
-            declarations << IyiMod::TypeDecl.new(
-              name: name,
-              kind: declared.type_desc,
-              type_parameters: [] of String,
-              assoc_types: [] of String,
-              supertraits: [] of String,
-              fields: [] of {String, String, String},
-              methods: [] of IyiMod::Signature,
-              visibility: declared.private? ? "private" : "",
-              types: [] of IyiMod::TypeDecl,
-              value: aliased.to_s,
-            )
-          end
+          declarations << IyiMod::TypeDecl.new(
+            name: name,
+            kind: declared.type_desc,
+            type_parameters: [] of String,
+            assoc_types: [] of String,
+            supertraits: [] of String,
+            fields: [] of {String, String, String},
+            methods: [] of IyiMod::Signature,
+            visibility: declared.private? ? "private" : "",
+            types: [] of IyiMod::TypeDecl,
+            value: iyi_alias_value(declared, name),
+          )
           next
         end
 

@@ -1047,9 +1047,12 @@ describe Iyi::IyiMod do
       # The alias travels because a declaration that travels names it: the
       # carried record's `step : Step` is the text this module was written
       # with, and a consumer without the alias reads an undefined constant.
+      #
+      # As written, not as resolved — `it "carries an alias as the module
+      # wrote it"` is why, and `Proc(Int32, Int32)` is what this used to say.
       step = box.types.find! { |nested| nested.name == "Step" }
       step.kind.should eq "alias"
-      step.value.should eq "Proc(Int32, Int32)"
+      step.value.should eq "(Int32 -> Int32)"
 
       File.delete "app/box.iyi"
 
@@ -2293,6 +2296,76 @@ describe Iyi::IyiMod do
       `./from-source`.chomp.should eq expected
 
       File.delete "boot/span.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # An alias travels as the type expression the module wrote.
+  #
+  # It used to travel as what the name resolved to, and a resolved type is
+  # not always something that can be written down again. Two shapes here,
+  # both taken from `src/std`:
+  #
+  # * `pub alias Ary = ::Array` is an uninstantiated generic, and one prints
+  #   with its type variables — the consumer read `alias Ary = Array(T)` and
+  #   said `undefined constant T` about a letter nobody wrote.
+  # * `pub alias Array = ::Array` hands a prelude type out under its own
+  #   name, and a resolved name has no `::` on it: inside `module Boot::Ring`
+  #   the consumer read `alias Array = Array`, which is the alias itself —
+  #   `infinite recursive definition of alias`. `std/annotations`,
+  #   `std/bit_array` and `std/static_array` each do exactly this.
+  #
+  # The written form resolves on the far side because the declarations text
+  # replays the module's imports, requires and `using` directives and
+  # declares its own nested types, which is the whole of what the module
+  # itself could name.
+  it "carries an alias as the module wrote it" do
+    with_tempdir("iyimod_alias_value") do
+      Dir.mkdir_p "boot"
+      File.write "boot/ring.iyi", <<-IYI
+        module boot/ring
+
+        pub alias Array = ::Array
+        pub alias Ary = ::Array
+
+        pub def first(items : Array(Int32)) : Int32
+          items[0]
+        end
+
+        pub def last(items : Ary(Int32)) : Int32
+          items[items.size - 1]
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/ring
+
+        puts Boot::Ring.first([7, 8])
+        puts Boot::Ring.last([7, 8])
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "7\n8"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "ring.iyimod")), io)
+      end
+      declarations.should contain "pub alias Array = ::Array"
+      declarations.should contain "pub alias Ary = ::Array"
+
+      File.delete "boot/ring.iyi"
 
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"

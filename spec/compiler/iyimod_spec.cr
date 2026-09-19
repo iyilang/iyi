@@ -2007,6 +2007,83 @@ describe Iyi::IyiMod do
     end
   end
 
+  # Two more things the check read as code, both of them declarations.
+  #
+  # A `lib` body is the first: a `fun` is a C prototype, a `type` names a
+  # pointer, a `struct` is a layout. Nothing in one runs, so nothing in one
+  # can be the piece of setup III.5 is about — and every module with a `lib`
+  # in it was refused. `std/math` binds two LLVM intrinsics and its consumers
+  # were told it "has code inside a type body that has to run".
+  #
+  # A macro is the second, and it is where the constants of the modules that
+  # bind a platform live: `std/file` writes `AT_FDCWD` inside a `{% if
+  # flag?(:linux) %}`. A `{% for %}` here rather than a `flag?`, so the
+  # expansion is the same on every machine this spec runs on; the node is the
+  # same `ExpandableNode` either way.
+  #
+  # Run, with the source deleted, because the point is not that the build is
+  # allowed: it is that `LOW` is 1 on the far side and the `fun` still reaches
+  # the intrinsic.
+  it "carries a lib's declarations and the constants a macro writes" do
+    with_tempdir("iyimod_lib_and_macro") do
+      Dir.mkdir_p "boot"
+      File.write "boot/plat.iyi", <<-IYI
+        module boot/plat
+
+        lib LibPlat
+          type Handle = Void*
+
+          struct Pair
+            a : Int32
+            b : Int32
+          end
+
+          fun plat_abs = "llvm.fabs.f64"(x : Float64) : Float64
+        end
+
+        pub struct Plat
+          {% for name, value in {"LOW" => 1, "HIGH" => 2} %}
+            pub {{name.id}} = {{value}}
+          {% end %}
+
+          pub def self.magnitude(x : Float64) : Float64
+            LibPlat.plat_abs(x)
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/plat
+
+        puts Boot::Plat::Plat::LOW
+        puts Boot::Plat::Plat::HIGH
+        puts Boot::Plat::Plat.magnitude(-2.5)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "1\n2\n2.5"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "plat.iyimod"))
+      artifact.has_initialiser.should be_false
+      artifact.initialiser.lines.should eq ["pub Plat::LOW = 1", "pub Plat::HIGH = 2"]
+
+      File.delete "boot/plat.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

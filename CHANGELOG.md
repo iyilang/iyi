@@ -389,6 +389,35 @@
 
 ### Fixed
 
+- **A `lib`'s `fun` and a constant a macro wrote were read as code that
+  has to run, and refused the module they were written in.** Both are
+  declarations, and the check that asks whether a module's type body
+  has code an artifact cannot carry did not recognise either — so it
+  answered its conservative "yes" and the consumer was refused.
+
+  A `lib` body holds a `fun` (a C prototype), a `type` (a name for a
+  pointer), a `struct` or `union` (a layout) and a `$name` (an external
+  symbol). None of the four runs, so none of them can be the piece of
+  setup the rule exists to protect. `std/math` binds `llvm.sqrt.f64`
+  and `llvm.copysign.f64`, and every program that imported it as an
+  artifact was told it "has code inside a type body that has to run",
+  about two intrinsics. A constant in a `lib` is deliberately still
+  refused: nothing carries one yet.
+
+  A macro is where the constants of the modules that bind a platform
+  live — `std/file` writes `AT_FDCWD` inside a `{% if flag?(:linux) %}`
+  — and the walk that now carries a type's constants reads what a macro
+  expanded to, the same way the module's own top level already did. The
+  expansion is the right thing to carry: an artifact is rejected unless
+  the consumer's target and flags match the producer's (IV.5).
+
+  Measured the same way as the entry below, over the 60
+  `bench/std_*_exercise.iyi` built with `--emit-iyimod` and consumed
+  with `--use-iyimod`: 25 round-tripped, 28 do now, and the refusal
+  that names a type body is down from 4 of them to 1. That last one is
+  `std/file`'s `@@temp_counter = 1000_u64` — a class variable, which is
+  the case the rule was written for.
+
 - **A constant in a type body was in the artifact nowhere, so thirteen
   of `src/std`'s own modules could not be consumed as one.** `pub struct
   Math` writes `PI = 3.14…` inside itself. That is a declaration with a

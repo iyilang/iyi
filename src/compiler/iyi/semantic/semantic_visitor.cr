@@ -1179,8 +1179,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     case node
     when Expressions
       node.expressions.any? { |child| iyi_initialiser?(child) }
-    when ModuleDef, ClassDef, TraitDef, ImplDef, LibDef
+    when ModuleDef, ClassDef, TraitDef, ImplDef
       iyi_initialiser?(node.body)
+    when LibDef
+      iyi_lib_body_initialiser?(node.body)
     when EnumDef
       node.members.any? { |member| iyi_initialiser?(member) }
     when Arg
@@ -1206,6 +1208,31 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       else
         true
       end
+    end
+  end
+
+  # iyi: a `lib` body, which is declarations and no code at all.
+  #
+  # A `fun` is a C prototype, a `type` names a pointer, a `struct` or `union`
+  # is a layout, and a `$name` is an external symbol the loader binds. None of
+  # the four runs, and none of them can be the thing III.5 is about — a piece
+  # of a module's setup that an artifact would leave out.
+  #
+  # Read as code, they refused the module they were written in: `std/math`
+  # binds `llvm.sqrt.f64` and `llvm.copysign.f64` and every consumer was told
+  # it "has code inside a type body that has to run", about two intrinsics.
+  #
+  # A constant is deliberately not in the list. `SOL_SOCKET = 0xffff` inside a
+  # `lib` is a value, nothing carries a lib's constants today, and the
+  # conservative answer is the right one until something does.
+  private def iyi_lib_body_initialiser?(node : ASTNode) : Bool
+    case node
+    when Expressions
+      node.expressions.any? { |child| iyi_lib_body_initialiser?(child) }
+    when FunDef, TypeDef, CStructOrUnionDef, ExternalVar
+      false
+    else
+      iyi_initialiser?(node)
     end
   end
 
@@ -1314,6 +1341,12 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # rather than carried — a qualified assignment has nowhere to put one — and
   # `pub` rides on the path, which is where `Assign#exported=` puts it and
   # where `to_s` looks for it.
+  #
+  # A macro contributes what it expanded to, the way `iyi_collect_initialiser`
+  # reads one at the top level. `std/file` writes its `AT_FDCWD` inside a `{%
+  # if flag?(:linux) %}`, and the expansion is the only place that constant
+  # exists — which is right for an artifact, whose target and flags a consumer
+  # has to match anyway (IV.5).
   private def iyi_collect_type_constants(node : ASTNode, statements : Array(ASTNode),
                                          prefix : String) : Nil
     case node
@@ -1330,6 +1363,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       path.exported = target.exported?
       path.at(target.location)
       statements << Assign.new(path, node.value).at(node.location)
+    else
+      if expansion = iyi_expansion(node)
+        iyi_collect_type_constants expansion, statements, prefix
+      end
     end
   end
 
@@ -1351,7 +1388,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when Assign
       !node.target.is_a?(Path)
     else
-      iyi_initialiser?(node)
+      if expansion = iyi_expansion(node)
+        iyi_type_body_initialiser?(expansion)
+      else
+        iyi_initialiser?(node)
+      end
     end
   end
 
@@ -1375,8 +1416,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       iyi_uncarried_initialiser?(node.exp)
     when ClassDef
       iyi_type_body_initialiser?(node.body)
-    when TraitDef, ImplDef, LibDef
+    when TraitDef, ImplDef
       iyi_initialiser?(node.body)
+    when LibDef
+      iyi_lib_body_initialiser?(node.body)
     when EnumDef
       node.members.any? { |member| iyi_initialiser?(member) }
     else

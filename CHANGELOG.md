@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,145 lines**, and the
-  library is **3,210** of 3,734 with 524 to spare. `4,355` is what opening
+  a conditional, `else` included - which is **1,362 lines**, and the
+  library is **3,219** of 3,734 with 515 to spare. `4,581` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -389,6 +389,38 @@
 
 ### Fixed
 
+- **A Windows program could not be told anything it could not spell in a
+  code page.** Two surfaces, one cause, both measured from PowerShell so
+  what was sent really was UTF-16:
+
+  - **Arguments.** `ARGV_UNSAFE` is the C runtime's `argv`, which is the
+    *ANSI* command line: `ünïcode-çğış` arrived as `ünïcode-çgis` —
+    `ğ`, `ı` and `ş` replaced by the code page's best-fit letters — and
+    `日本` as `??`, so a file named in an argument named a different file
+    or none. `Program.args` reads `GetCommandLineW` now and splits it
+    itself, by Microsoft's own rules (2n backslashes before a quote are n
+    and the quote toggles, 2n+1 are n and a literal quote, `""` inside
+    quotes is a literal quote), because `CommandLineToArgvW` lives in
+    shell32 and a second DLL is a floor this library does not move.
+    Checked against `CommandLineToArgvW` itself on seven command lines —
+    quotes, doubled quotes, trailing backslashes, an empty argument, tabs
+    and non-ASCII — seven of seven identical.
+  - **The environment.** The CRT's `_environ` is the ANSI environment,
+    so `değer-日本` read back as `deger-??`; and the worse half, which
+    the reading defect hid: `ENV[]=` *wrote* the CRT's table, which
+    `CreateProcess` does not copy, so a variable an iyi program set was
+    never in the block a child inherits — proven with a probe reading
+    both tables, where the Win32 block answered nil for a variable the
+    CRT table held. Windows' own block is the single source of truth now:
+    `GetEnvironmentVariableW` to read, `SetEnvironmentVariableW` to write
+    and delete, `GetEnvironmentStringsW` to enumerate. A name or value
+    that is not valid UTF-8 answers nil rather than half a conversion,
+    and a write with one is refused by name.
+
+  `bench/windows_exercise.sh` gates both: an 18-byte argument and a
+  13-byte variable arrive whole, and the step runs only on Windows,
+  because everywhere else the bytes are the bytes.
+
 - **`UInt16` had no operations, and answered `false` instead of saying so.**
   The prelude crosses five numeric types for comparison and `UInt16` was
   not among them, so every comparison on one fell through to
@@ -473,9 +505,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,145** and **3,210**, held to the sentences that quote
+  without it: **1,362** and **3,219**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 621 over, as the library with
+  breach is still what the floor costs — 847 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7341,7 +7373,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,411-line library and nothing else. Every other
+  written against iyi's own 15,637-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

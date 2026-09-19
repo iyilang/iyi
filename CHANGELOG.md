@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,362 lines**, and the
-  library is **3,219** of 3,734 with 515 to spare. `4,581` is what opening
+  a conditional, `else` included - which is **1,383 lines**, and the
+  library is **3,219** of 3,734 with 515 to spare. `4,602` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -389,6 +389,26 @@
 
 ### Fixed
 
+- **A line typed into a Windows console was read in the code page too.**
+  The write side became `WriteConsoleW` two branches ago and the read
+  side stayed `ReadFile`, which on a console handle answers the *active
+  code page*: measured on a real console under code page 437, typing
+  `Türkçe-日本` — fifteen bytes of UTF-8 — gave the program eleven bytes,
+  `T?rk?e-??`, with `ü` and `ç` folded to one byte each and the two
+  Japanese characters gone. `IyiConsole.read` uses `ReadConsoleW` now and
+  converts back through Windows' own conversion; the same line arrives as
+  its seventeen bytes (fifteen, and the CR and LF the console adds). The
+  wide buffer is a third of the caller's, which is the bound that cannot
+  overflow it — a character of the basic plane is at most three UTF-8
+  bytes, a surrogate pair two wide characters for four — so a longer line
+  is read in pieces, which is what reading a stream does anyway.
+
+  A redirected stdin is untouched and still byte-transparent: sixteen
+  bytes of UTF-8 through `< file` arrive as the same sixteen. The console
+  half cannot be gated here — a runner has no console attached, and the
+  measurement above needed a pseudo-terminal — so the gate covers the
+  pipe and this entry carries the console evidence.
+
 - **A Windows program could not be told anything it could not spell in a
   code page.** Two surfaces, one cause, both measured from PowerShell so
   what was sent really was UTF-16:
@@ -536,9 +556,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,362** and **3,219**, held to the sentences that quote
+  without it: **1,383** and **3,219**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 847 over, as the library with
+  breach is still what the floor costs — 868 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7404,7 +7424,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,637-line library and nothing else. Every other
+  written against iyi's own 15,658-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

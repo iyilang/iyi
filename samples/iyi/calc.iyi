@@ -7,7 +7,7 @@
 # here for a different reason: everything else in `samples/iyi` is a page long,
 # and a language that has only been used for pages has not been used. This is
 # three modules and a scanner, a parser and an evaluator, the shape of every
-# real program that reads something, written against iyi's own 15,637-line
+# real program that reads something, written against iyi's own 15,658-line
 # library and nothing else.
 #
 # What it cost to write is recorded where it landed. `String#[]`, `String#[](start,

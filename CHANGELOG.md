@@ -389,6 +389,37 @@
 
 ### Fixed
 
+- **A parameter written wider than its callers linked against a symbol
+  nobody emitted.** The consumer keys a call on what the declaration
+  says — that is the contract, and widening to it is what makes the
+  call reach the artifact's machine code — so the object code has to
+  have been keyed the same way. Inside an ordinary build it is not:
+  codegen is demand-driven, so `path : Path | String` called with a
+  `String` is compiled as `cd<String>` and the consumer asks the
+  linker for `cd<(Std::Path::Path | String)>`. Five of the library's
+  own modules stopped there — `std/dir`, `std/env`, `std/gc`,
+  `std/big` and `std/capsule` — on a union, a nilable, or an abstract
+  number's `Int+`.
+
+  This was written down in `collect_iyi_object_code`'s own comment,
+  eight lines of reproduction and no fix: what `iyi bind` does about
+  it is a keep file, a second build that names every declared
+  signature, and an `--emit-iyimod` build has no second build to do it
+  in. So the body travels instead, the way a block-taking def's
+  already does, and the consumer compiles it at the types it asked
+  for. The producer's own narrow instantiation stays in the object
+  code for its own callers; the two have different names and do not
+  collide.
+
+  Only where the two can disagree: a parameter written as a leaf type
+  is the type every argument to it has, so the ordinary method keeps
+  its body behind, which is what IV.2 is for and most of what an
+  artifact saves. The price, measured on the module set `std/dir`
+  pulls in: 667,199 bytes of `.iyimod` became 674,638, up 1.1%.
+
+  34 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 38 do now.
+
 - **An alias travelled as what it resolved to, and a resolved type is
   not always something that can be written down again.** `pub alias
   Ary = ::Array` came back as `alias Ary = Array(T)` — a generic prints

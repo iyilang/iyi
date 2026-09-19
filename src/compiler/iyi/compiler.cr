@@ -908,7 +908,8 @@ module Iyi
               # A module's own `pub def` that takes a block is the consumer's
               # to compile for the same reason, and the module name is the
               # container the far side looks it up under.
-              if iyi_takes_block?(item.def) && !item.def.abstract?
+              if !item.def.abstract? &&
+                 (iyi_takes_block?(item.def) || iyi_widened_parameters?(type, item.def))
                 iyi_record_mono_body program, filename, module_name, signature, item.def
               end
             end
@@ -1757,7 +1758,8 @@ module Iyi
           # which calls one that does, for the reason III.6 gives: the set is
           # the whole program's, so the answer is too. `Iyi::OpenTravel` marked
           # it before this ran.
-          if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel?) &&
+          if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
+             iyi_widened_parameters?(type, item.def)) &&
              !item.def.abstract?
             iyi_record_mono_body program, filename, container, signature, item.def
           end
@@ -1824,6 +1826,46 @@ module Iyi
     # block — `&block : …` or a bare `yield` (SPEC.md IV.1g).
     private def iyi_takes_block?(a_def : Def) : Bool
       !!(a_def.block_arg || a_def.block_arity)
+    end
+
+    # iyi: whether a consumer would ask for a symbol this build had no reason
+    # to emit (SPEC.md IV.1g).
+    #
+    # A consumer keys a call on what the *declaration* says, not on what it
+    # passes: `Call#iyi_artifact_arg_types` widens every argument to the
+    # parameter's written type, because that is the contract and because the
+    # producer's object code is supposed to have been keyed the same way.
+    # Inside an ordinary build it is not. Codegen is demand-driven, so a
+    # parameter written `Path | String` and called with a `String` is compiled
+    # as `cd<String>` and the consumer asks the linker for
+    # `cd<(Std::Path::Path | String)>` — a symbol nobody emitted. Five of the
+    # library's own modules linked no further: `std/dir`, `std/env`,
+    # `std/gc`, `std/big` and `std/capsule`, each on a union or on an
+    # abstract number's `Int+`.
+    #
+    # What `iyi bind` does about it is a keep file — a second build that names
+    # every declared signature — and an `--emit-iyimod` build has no second
+    # build to do it in. So the body travels instead, the way a block-taking
+    # def's already does: the consumer compiles it at the types it asked for,
+    # and there is no symbol to miss. The producer's own narrow instantiation
+    # stays in the object code for its own callers; the two have different
+    # names and do not collide.
+    #
+    # Only where the two can disagree. A parameter written as a leaf type is
+    # the type every argument to it has, so the ordinary method is untouched
+    # and keeps its body behind — which is the whole point of IV.2 and most
+    # of what an artifact saves.
+    private def iyi_widened_parameters?(scope : Type, a_def : Def) : Bool
+      a_def.args.each do |arg|
+        restriction = arg.restriction
+        next unless restriction
+        declared = (a_def.owner? || scope).lookup_type?(restriction)
+        next unless declared.is_a?(Type)
+        # A free variable is bound per call and is not a widening.
+        next if declared.is_a?(TypeParameter)
+        return true if declared.is_a?(UnionType) || declared.virtual_type != declared
+      end
+      false
     end
 
     # Records one body against `IyiMod.mono_body_key`.

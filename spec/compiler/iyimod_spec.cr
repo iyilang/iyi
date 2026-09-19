@@ -2375,6 +2375,96 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A parameter written wider than the argument this build passed.
+  #
+  # The consumer keys a call on what the declaration says — that is the
+  # contract, and `Call#iyi_artifact_arg_types` widens every argument to it —
+  # so the object code has to have been keyed the same way. Inside an
+  # ordinary build it is not: codegen is demand-driven, `note = "hi"`
+  # compiles `note=<String>`, and the consumer asks the linker for
+  # `note=<(String | Nil)>`. It linked no further, with the artifact's own
+  # object file naming the line.
+  #
+  # `iyi bind` answers this with a keep file, a second build that names every
+  # declared signature. An `--emit-iyimod` build has no second build, so the
+  # body travels instead and the consumer compiles it at the types it asked
+  # for.
+  #
+  # Three shapes, because "wider" has three spellings: a union, a nilable
+  # (which is one), and an abstract number, where the declared type is `Int`
+  # and a value of it is held as `Int+`.
+  #
+  # Run with the source deleted, because a link is the whole of what fails
+  # here — the front end was always happy.
+  it "carries the body of a method whose parameter is wider than its callers" do
+    with_tempdir("iyimod_widened_parameters") do
+      Dir.mkdir_p "boot"
+      File.write "boot/crate.iyi", <<-IYI
+        module boot/crate
+
+        pub class Crate
+          @note : String?
+
+          def initialize
+            @note = nil
+          end
+
+          pub def note=(value : String?) : Nil
+            @note = value
+          end
+
+          pub def note : String
+            @note || "none"
+          end
+
+          pub def tag(kind : Int32 | Symbol) : String
+            kind.to_s
+          end
+        end
+
+        pub def sized(n : Int) : Int64
+          n.to_i64 * 2_i64
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/crate
+
+        crate = Boot::Crate::Crate.new
+        crate.note = "hi"
+        puts crate.note
+        puts crate.tag(7)
+        puts Boot::Crate.sized(21)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "hi\n7\n42"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      # The bodies are in the artifact, which is what makes the link work.
+      keys = Iyi::IyiMod.read(File.join("mods", "boot", "crate.iyimod")).mono_bodies.keys
+      keys.should contain "Crate#note=(value : String | ::Nil)"
+      keys.should contain "Crate#tag(kind : Int32 | Symbol)"
+      keys.should contain "boot/crate#sized(n : Int)"
+      # And the one whose parameters cannot disagree is not among them.
+      keys.should_not contain "Crate#note()"
+
+      File.delete "boot/crate.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

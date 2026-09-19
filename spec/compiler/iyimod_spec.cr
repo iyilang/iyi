@@ -1931,6 +1931,82 @@ describe Iyi::IyiMod do
     end
   end
 
+  # And what it does reach, which is the other half of the same rule. A
+  # constant in a type body is not runnable code the artifact drops: it is a
+  # declaration with a value, and it travels qualified — `Point::MAX = 10` —
+  # the way `iyi tool bind` has always carried a bound Crystal namespace's.
+  #
+  # Without that it was in the artifact nowhere at all: not in `Exports`,
+  # which carries types and signatures, and not in the initialiser, which
+  # stopped at the type's body. So the module read as one whose type body has
+  # to run and every consumer of it was refused — thirteen of `src/std`'s own
+  # modules, `std/math` over `PI`.
+  #
+  # The sources are deleted before the consuming build, so nothing here can
+  # pass by reading them, and the program is *run*: a constant that arrives
+  # declared and never initialised answers zero, which a compile would not
+  # catch.
+  #
+  # All three spellings, because they reach the consumer by different paths:
+  # `pub` is read by the consumer's own source, the private one only by a body
+  # this module compiled into the artifact's object code, and the nested one
+  # has a name that is two namespaces deep.
+  it "carries the constants a type body declares" do
+    with_tempdir("iyimod_type_constants") do
+      Dir.mkdir_p "boot"
+      File.write "boot/limits.iyi", <<-IYI
+        module boot/limits
+
+        pub struct Limits
+          pub MAX = 10
+          private SCALE = 3
+
+          pub struct Inner
+            pub DEPTH = 2
+          end
+
+          pub def self.scaled : Int32
+            MAX * SCALE
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/limits
+
+        puts Boot::Limits::Limits::MAX
+        puts Boot::Limits::Limits.scaled
+        puts Boot::Limits::Limits::Inner::DEPTH
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "10\n30\n2"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "limits.iyimod"))
+      artifact.has_initialiser.should be_false
+      artifact.initialiser.lines.should eq [
+        "pub Limits::MAX = 10",
+        "Limits::SCALE = 3",
+        "pub Limits::Inner::DEPTH = 2",
+      ]
+
+      File.delete "boot/limits.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

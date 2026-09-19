@@ -1234,11 +1234,20 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
   # iyi: the module's initialiser as source text, for the artifact (IV.1g).
   #
-  # Only the module's *own* top level — this walks `Expressions` and the
-  # `ModuleDef` the file is wrapped in, and no further. Runnable code inside a
-  # type body is a class variable's initialiser, which belongs to that type and
-  # is not this; `iyi_initialiser?` still sees it, which is what leaves such a
-  # module refused rather than carried with a piece missing.
+  # The module's *own* top level, and the constants its types declare. The
+  # first is this file's body — `Expressions` and the `ModuleDef` the header
+  # desugars to, marked `iyi_unit`. The second is reached into deliberately:
+  # a constant in a type body is neither an export nor part of the module's
+  # own top level, so it was in the artifact nowhere at all, and a consumer
+  # was refused over `Math::PI`. It travels qualified — `Math::PI = 3.14` —
+  # which is how `Iyi::Bind.collect_constant_source` already carries a bound
+  # Crystal namespace's constants, and it works for the reason that one
+  # gives: a qualified assignment defines wherever the namespace exists, and
+  # the declarations this text is written after are what make it exist.
+  #
+  # Runnable code that is *not* a constant stays where it is, uncarried and
+  # refused: a class variable's initialiser belongs to the type, and
+  # `iyi_uncarried_initialiser?` still sees it.
   #
   # In text order, because that is the order III.5 gives a module's own code.
   private def iyi_initialiser_source(node : ASTNode) : String
@@ -1252,11 +1261,24 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when Expressions
       node.expressions.each { |child| iyi_collect_initialiser child, statements }
     when ModuleDef
-      iyi_collect_initialiser node.body, statements
-    when ClassDef, TraitDef, ImplDef, LibDef, EnumDef, Nop, ModuleHeader,
+      # The module the header desugars to *is* the file, and its body is the
+      # module's own top level. A `module` written inside the file is a type
+      # like any other, and what it holds is reached through its name.
+      if node.iyi_unit?
+        iyi_collect_initialiser node.body, statements
+      else
+        iyi_collect_type_constants node.body, statements, iyi_type_prefix(node, "")
+      end
+    when ClassDef
+      iyi_collect_type_constants node.body, statements, iyi_type_prefix(node, "")
+    when TraitDef, ImplDef, LibDef, EnumDef, Nop, ModuleHeader,
          ImportDecl, UsingDecl, Def, Macro, AnnotationDef, Alias,
          TypeDeclaration, AssocTypeDecl, Annotation, Include, Extend, Require
       # A declaration, or a body this does not reach into.
+      #
+      # A `lib`'s constants and an `enum`'s members are declarations that
+      # already travel: both render as `NAME = value` inside the type from
+      # `TypeDecl#members`, so reaching in here would declare them twice.
       #
       # `Require` is here for the same reason `ImportDecl` is: it is a
       # directive about which files this build reads, not code the module runs.
@@ -1284,6 +1306,55 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     end
   end
 
+  # iyi: the constants a type body declares, under the name a consumer reaches
+  # them by.
+  #
+  # Nested types are walked for the same reason the outer one is, and the
+  # prefix grows with them: `Capsule::Frame::MAX`. A `private` here is dropped
+  # rather than carried — a qualified assignment has nowhere to put one — and
+  # `pub` rides on the path, which is where `Assign#exported=` puts it and
+  # where `to_s` looks for it.
+  private def iyi_collect_type_constants(node : ASTNode, statements : Array(ASTNode),
+                                         prefix : String) : Nil
+    case node
+    when Expressions
+      node.expressions.each { |child| iyi_collect_type_constants child, statements, prefix }
+    when ClassDef, ModuleDef
+      iyi_collect_type_constants node.body, statements, iyi_type_prefix(node, prefix)
+    when VisibilityModifier
+      iyi_collect_type_constants node.exp, statements, prefix
+    when Assign
+      target = node.target
+      return unless target.is_a?(Path)
+      path = Path.new(prefix.split("::") + target.names)
+      path.exported = target.exported?
+      path.at(target.location)
+      statements << Assign.new(path, node.value).at(node.location)
+    end
+  end
+
+  private def iyi_type_prefix(node : ClassDef | ModuleDef, prefix : String) : String
+    name = node.name.to_s
+    prefix.empty? ? name : "#{prefix}::#{name}"
+  end
+
+  # iyi: a type body asked what a file's top level is asked, with the constants
+  # `iyi_collect_type_constants` carries left out of the answer.
+  private def iyi_type_body_initialiser?(node : ASTNode) : Bool
+    case node
+    when Expressions
+      node.expressions.any? { |child| iyi_type_body_initialiser?(child) }
+    when ClassDef, ModuleDef
+      iyi_type_body_initialiser?(node.body)
+    when VisibilityModifier
+      iyi_type_body_initialiser?(node.exp)
+    when Assign
+      !node.target.is_a?(Path)
+    else
+      iyi_initialiser?(node)
+    end
+  end
+
   # iyi: whether the module has runnable code `iyi_initialiser_source` leaves
   # behind — which is the thing a consumer has to be refused over.
   #
@@ -1295,10 +1366,16 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when Expressions
       node.expressions.any? { |child| iyi_uncarried_initialiser?(child) }
     when ModuleDef
-      iyi_uncarried_initialiser?(node.body)
+      if node.iyi_unit?
+        iyi_uncarried_initialiser?(node.body)
+      else
+        iyi_type_body_initialiser?(node.body)
+      end
     when VisibilityModifier
       iyi_uncarried_initialiser?(node.exp)
-    when ClassDef, TraitDef, ImplDef, LibDef
+    when ClassDef
+      iyi_type_body_initialiser?(node.body)
+    when TraitDef, ImplDef, LibDef
       iyi_initialiser?(node.body)
     when EnumDef
       node.members.any? { |member| iyi_initialiser?(member) }

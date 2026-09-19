@@ -389,6 +389,36 @@
 
 ### Fixed
 
+- **A constant in a type body was in the artifact nowhere, so thirteen
+  of `src/std`'s own modules could not be consumed as one.** `pub struct
+  Math` writes `PI = 3.14…` inside itself. That is a declaration with a
+  value, and a `.iyimod` had no place for it: `Exports` carries types
+  and signatures, and the initialiser — which is where a module's own
+  constants travel as source — stopped at the type's body. So the
+  producer marked the module as one with code inside a type body that
+  has to run, and every consuming build was refused: `"std/math" has
+  code inside a type body that has to run`, about `PI`.
+
+  It travels qualified now — `pub Math::PI = 3.14…`, written after the
+  declarations that make the namespace exist — which is exactly how
+  `iyi tool bind` has always carried a bound Crystal namespace's
+  constants. `pub` rides along, nesting is kept (`Capsule::Frame::MAX`),
+  and a `private` one is carried without the word, which is the same
+  trade the bind side makes: a qualified assignment has nowhere to put
+  it, and iyi does not gate a constant on it.
+
+  What is still refused is unchanged and is the point of the rule: a
+  class variable's initialiser belongs to the type, is not carried, and
+  a build given one would link and run with that part missing.
+  Measured over `bench/std_*_exercise.iyi`, each built with
+  `--emit-iyimod` and then consumed with `--use-iyimod`: 21 of the 60
+  round-tripped before, 25 do now, and the refusal that named a type
+  body fell from 20 exercises to 4. Those 4 are a second defect behind
+  the same message — a `lib`'s `fun` read as code — not this one.
+  `spec/compiler/iyimod_spec.cr` holds it: the module's source is
+  deleted before the consuming build and the program is run, because a
+  constant that arrives declared and never initialised answers zero.
+
 - **One empty collection answered 0 and another panicked, in the same
   program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
   `iyi: panic: sum of an empty array`: the prelude's own `Array#sum`

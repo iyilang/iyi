@@ -112,6 +112,20 @@ module Iyi::Lsp
     # The document the person is in, so a fresh worker is warmed on the
     # file the next question will be about.
     @focus : String?
+
+    # The version of each buffer as this proxy has applied it, and the
+    # text of the last version a worker called clean.
+    #
+    # A successor inherits the buffers, and the buffers are not the
+    # state its predecessor had: a cursor question in one that does not
+    # compile is answered from the last program that did, and nothing
+    # crossed the handover to build one from. The last *clean* text is
+    # that thing, and the version is what makes it exact — a verdict can
+    # arrive about a version the person has already typed past, and
+    # pairing it with whatever the buffer holds now would hand over a
+    # text that never compiled.
+    @versions = {} of String => Int64
+    @clean = {} of String => String
     @shut_down = false
     @running = true
     @private_id = 0
@@ -207,6 +221,7 @@ module Iyi::Lsp
         if params && (document = params["textDocument"]?)
           uri = document["uri"].as_s
           @documents[uri] = document["text"].as_s
+          @versions[uri] = document["version"]?.try(&.as_i64?) || 0_i64
           @focus = uri
         end
       when "textDocument/didChange"
@@ -240,6 +255,8 @@ module Iyi::Lsp
             end
           end
           @documents[uri] = text
+          @versions[uri] = newest.dig?("textDocument", "version").try(&.as_i64?) ||
+                           (@versions[uri]? || 0_i64) + 1
           @focus = uri
           post(one_change(newest, changes), nil)
           return
@@ -378,6 +395,21 @@ module Iyi::Lsp
         # A notification — diagnostics, progress, a log line — or a
         # request the server is making of the client. Whoever the worker
         # is, the client hears it.
+        #
+        # A clean verdict is also the one thing that says a text
+        # compiled, and the successor needs one to answer a cursor
+        # question in a buffer that has stopped compiling. Taken only
+        # where the version it names is the version this proxy holds:
+        # a verdict about a version already typed past says nothing
+        # about what the buffer is now. See `@clean`.
+        if table && table["method"]?.try(&.as_s?) == "textDocument/publishDiagnostics" &&
+           (params = table["params"]?) &&
+           (uri = params["uri"]?.try(&.as_s?)) &&
+           params["diagnostics"]?.try(&.as_a?).try(&.empty?) &&
+           params["version"]?.try(&.as_i64?) == @versions[uri]? &&
+           (held = @documents[uri]?)
+          @clean[uri] = held
+        end
         @outbox.send body
         return
       end
@@ -498,6 +530,13 @@ module Iyi::Lsp
                     json.object do
                       json.field "uri", uri
                       json.field "text", text
+                      # The last text a verdict called clean, where the
+                      # buffer has stopped compiling since. It is what a
+                      # cursor question in one is answered from, and the
+                      # successor has no other way to get it.
+                      if (clean = @clean[uri]?) && clean != text
+                        json.field "clean", clean
+                      end
                     end
                   end
                 end

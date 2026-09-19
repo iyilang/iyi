@@ -400,10 +400,19 @@
   offered `upcase` before the replacement and an empty list after it,
   which an editor shows as no suggestions at all.
 
-  The successor compiles every buffer it adopts now, bounded by what
-  the analysis keeps anyway and paid in the silence the replacement is
-  already scheduled in. Nothing is published: the client has those
-  verdicts on screen.
+  The handover carries the last text a verdict called *clean*, and the
+  successor keeps it as a seed: the first question about a buffer that
+  no longer compiles compiles the seed, once, and answers from it.
+  Which text that is has to be exact, so `publishDiagnostics` carries
+  LSP's optional `version` now and the proxy pairs a clean verdict with
+  the version it holds — a verdict about a version the person has
+  already typed past says nothing about what the buffer is.
+
+  Compiling every adopted buffer at the handover was the first shape
+  and it was the wrong one: it put that work in front of whatever the
+  person typed next, and `bench/lsp_latency.py` measured a didChange
+  2,032 ms against its 2 s budget. Seeded and lazy, the same run
+  measures 226 ms.
 
   `bench/lsp_memory.py` holds it — the same question either side of a
   retirement, in a buffer that does not compile, with the focus moved

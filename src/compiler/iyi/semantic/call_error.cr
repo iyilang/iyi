@@ -186,6 +186,10 @@ module Iyi
     "/"           => "Integer division is `//` here (`7 // 2` is 3); `/` is the floats' and answers a `Float64` only for them.",
     "%"           => "`%` on a String is a format string, and it comes with `import std/format` (`printf`, `sprintf` and `String#%`).",
     "gets_to_end" => "`read_all` reads the rest of an IO here; `gets` reads a line.",
+    # `Array#sum` asks the element type for its zero, because an empty
+    # array has no element to ask. A type that is not a number has none,
+    # and the sentence a person is missing is what to use instead.
+    "zero" => "A sum starts from the type's zero, and only numbers have one (`Int32.zero`). Strings are put together with `join`, and anything else with `reduce`.",
   }
 
   # A top-level call whose argument arrived in Crystal's unit: the type

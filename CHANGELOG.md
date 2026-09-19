@@ -389,6 +389,24 @@
 
 ### Fixed
 
+- **One empty collection answered 0 and another panicked, in the same
+  program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
+  `iyi: panic: sum of an empty array`: the prelude's own `Array#sum`
+  won over the trait's, and it had no zero to start from, because an
+  identity belongs to the *type* and there is no element to ask when
+  the collection is empty. The prelude has one now - `Int32.zero` and
+  its four siblings, a table beside the numbers themselves
+  (`src/iyi/number.iyi`) - so both answer 0, and `std/traits` stops
+  writing `self.zero` for those five because a `.iyi` file may not
+  redefine a method the prelude has (R-3).
+
+  Summing something that is not a number is a compile error now rather
+  than a panic at run time: `["a", "b"].sum` says a sum starts from the
+  type's zero, that only numbers have one, and that strings are put
+  together with `join`. Crystal refuses the same program for the same
+  reason. `bench/std_set_exercise.iyi` holds the agreement - the empty
+  set and the empty array, in one line, both `0`.
+
 - **"undefined method 'tally' for Array(Int32)" was true and useless
   when `import std/enumerable` was the whole answer.** std implements
   the traits for the prelude's types (R-3 gives the line to the module
@@ -7392,7 +7410,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,411-line library and nothing else. Every other
+  written against iyi's own 15,450-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

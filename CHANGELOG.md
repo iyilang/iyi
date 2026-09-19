@@ -439,6 +439,32 @@
   rather than left blank: an owner there is a SID in a security descriptor,
   not a numeric uid and gid, so there is no honest thing to do with the two
   numbers the method takes.
+- **`iyi build --debug` aborted on every program, and described the
+  wrong fields on the compilers where it did not.** iyi does not keep a
+  class's type id in the object's struct - it is the high half of the
+  header word under the pointer (GC_DESIGN.md Stage 5), which is why a
+  binary tree's node is 16 bytes here and not 24. Every place in
+  codegen that indexes a field asks `iyi_object_layout?` about that
+  except the one that wrote debug info, which kept Crystal's rule that
+  field zero is the type id and so asked LLVM for the field *after* the
+  last one, for every class in the program. On LLVM 21 and later - what
+  a current distribution ships - `LLVMOffsetOfElement` past the end
+  calls `report_fatal_error`, so the compiler died on `SIGABRT` with a
+  message about scalable vectors: `puts 1` was enough. On LLVM 20 and
+  earlier it answered a garbage offset instead, so a debugger read the
+  neighbouring field's bytes and the last field's off the end - wrong
+  quietly, for as long as the flag has existed.
+
+  The index is computed the way the rest of codegen computes it now,
+  and `LLVM::TargetData#offset_of_element` has its bounds check back
+  (it was commented out, inherited): a compiler bug there is a named
+  error rather than a fatal error from a library about a type nobody
+  wrote. `bench/debug_info.py` is the gate - the build, the offsets read
+  out of the compiler's own `--emit llvm-ir` so no `llvm-dwarfdump` has
+  to exist, all 27 samples built with `--debug`, and where the machine
+  has `gdb`, a breakpoint and `print *shape` reading `width = 3,
+  height = 4`. Against the commit before the fix, every one of the 27
+  samples fails to build.
 
 - **SPEC.md's ceiling breach quoted two figures that did not agree.**
   "624 lines for Windows' arms" and "the library at 3,618" is one

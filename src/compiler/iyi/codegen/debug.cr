@@ -137,6 +137,25 @@ module Iyi
       di_builder.create_enumeration_type(nil, original_type.to_s, nil, 0, size_in_bits, align_in_bits, elements, get_debug_type(type.base_type))
     end
 
+    # Which field of the LLVM struct an instance variable is.
+    #
+    # Under iyi's object layout a class's fields start at zero: the type
+    # id is the high half of the header word under the pointer, not a
+    # field of the struct (GC_DESIGN.md Stage 5, `llvm_typer.cr` says
+    # the same thing where it builds the type). Under Crystal's layout
+    # the id *is* field zero and the fields start at one. Every other
+    # place that indexes a field asks `iyi_object_layout?`; this file
+    # kept Crystal's rule and so asked for one field past the last.
+    #
+    # That is not a wrong number in a dump nobody reads. On LLVM 21 and
+    # later `LLVMOffsetOfElement` past the last field aborts the
+    # process, so `iyi build --debug` died on every program, `p 1`
+    # included; before that it silently returned a garbage offset and a
+    # debugger showed the wrong field's bytes.
+    private def debug_field_index(type, index : Int32) : Int32
+      index + (!type.struct? && !@program.iyi_object_layout? ? 1 : 0)
+    end
+
     def create_debug_type(type : InstanceVarContainer, original_type : Type)
       ivars = type.all_instance_vars
       element_types = [] of LibLLVM::MetadataRef
@@ -148,7 +167,7 @@ module Iyi
       ivars.each_with_index do |(name, ivar), idx|
         next if ivar.type.is_a?(NilType)
         if (ivar_type = ivar.type?) && (ivar_debug_type = get_debug_type(ivar_type))
-          offset = type.extern_union? ? 0_u64 : @program.target_machine.data_layout.offset_of_element(struct_type, idx &+ (type.struct? ? 0 : 1))
+          offset = type.extern_union? ? 0_u64 : @program.target_machine.data_layout.offset_of_element(struct_type, debug_field_index(type, idx))
           size = @program.target_machine.data_layout.size_in_bits(llvm_embedded_type(ivar_type))
 
           member = di_builder.create_member_type(nil, name[1..-1], nil, 0, size, size, 8u64 * offset, LLVM::DIFlags::Zero, ivar_debug_type)
@@ -256,7 +275,7 @@ module Iyi
       ivars.each_with_index do |ivar_type, idx|
         next if ivar_type.is_a?(NilType)
         if ivar_debug_type = get_debug_type(ivar_type)
-          offset = @program.target_machine.data_layout.offset_of_element(struct_type, idx &+ (type.struct? ? 0 : 1))
+          offset = @program.target_machine.data_layout.offset_of_element(struct_type, debug_field_index(type, idx))
           size = @program.target_machine.data_layout.size_in_bits(llvm_embedded_type(ivar_type))
 
           member = di_builder.create_member_type(nil, "[#{idx}]", nil, 0, size, size, 8u64 * offset, LLVM::DIFlags::Zero, ivar_debug_type)
@@ -284,7 +303,7 @@ module Iyi
       ivars.each_with_index do |ivar, idx|
         next if (ivar_type = ivar.type).is_a?(NilType)
         if ivar_debug_type = get_debug_type(ivar_type)
-          offset = @program.target_machine.data_layout.offset_of_element(struct_type, idx &+ (type.struct? ? 0 : 1))
+          offset = @program.target_machine.data_layout.offset_of_element(struct_type, debug_field_index(type, idx))
           size = @program.target_machine.data_layout.size_in_bits(llvm_embedded_type(ivar_type))
 
           member = di_builder.create_member_type(nil, ivar.name, nil, 0, size, size, 8u64 * offset, LLVM::DIFlags::Zero, ivar_debug_type)

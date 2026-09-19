@@ -221,6 +221,17 @@ jobs:
             ./bin/iyi run --crystal "$sample"
           done
 
+      # `--debug` is a flag nothing here used to build with, and it was
+      # broken for every program: iyi keeps a class's type id in the
+      # object header word rather than in the struct, debug info kept
+      # Crystal's rule that the id is field zero, and asking LLVM for
+      # the field after the last one aborts the process on LLVM 21 and
+      # answers a garbage offset before that. This builds with it, reads
+      # the field offsets out of the compiler's own IR, and — where the
+      # image has a debugger — asks it what the fields hold.
+      - name: A program built with --debug, and its fields
+        run: python3 bench/debug_info.py
+
       # The ecosystem and R-1 in one build (SPEC.md Part V item 12d). Built
       # twice with the module's source deleted in between, and the two runs
       # compared: the second one has Crystal's standard library *and* a module

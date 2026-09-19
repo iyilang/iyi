@@ -604,6 +604,34 @@ end
       return -1_i64 if LibC.WriteConsoleW(handle, wide.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
       count.to_i64
     end
+
+    # The other direction, and the last leg of it. `ReadFile` on a console
+    # handle answers the *active code page*, so a line typed as
+    # `Türkçe-日本` — fifteen bytes of UTF-8 — was read as eleven bytes
+    # under code page 437, with `ü` and `ç` folded to one byte each and
+    # `日本` gone as `??`. `ReadConsoleW` reads what was typed, and the
+    # conversion back to UTF-8 is Windows' own.
+    #
+    # The wide buffer is a third of the caller's, which is the bound that
+    # cannot overflow it: a character of the basic plane is at most three
+    # UTF-8 bytes, and a surrogate pair is two wide characters for four.
+    # A line longer than that is read in pieces, which is what a reader
+    # of a stream does anyway.
+    def self.read(handle : Void*, buffer : Void*, count : UInt64) : Int64
+      room = count // 3_u64
+      room = 1_u64 if room == 0_u64
+      wide = Pointer(UInt16).malloc(room + 1_u64)
+      read = uninitialized Int32
+      return 0_i64 if LibC.ReadConsoleW(handle, wide.as(Void*), room.to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+      return 0_i64 if read <= 0
+      wide[read] = 0_u16
+      size = __iyi_utf8_size_from_wide(wide)
+      return 0_i64 if size <= 1
+      bytes = size - 1
+      return 0_i64 if bytes.to_u64 > count
+      __iyi_utf8_bytes_from_wide(wide, buffer.as(UInt8*), size)
+      bytes.to_i64
+    end
   end
 
   def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
@@ -630,17 +658,7 @@ end
   end
 
   def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
-    if fd == 0
-      handle = LibC.GetStdHandle(-10)
-    else
-      handle = Pointer(Void).new(fd.to_i64.to_u64)
-    end
-    read = uninitialized Int32
-    if LibC.ReadFile(handle, buffer,
-         count.to_i32, pointerof(read), nil) == 0
-      return 0_i64
-    end
-    read.to_i64
+    __iyi_read(fd.to_i64, buffer, count)
   end
 
   def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
@@ -649,6 +667,9 @@ end
     else
       handle = Pointer(Void).new(fd.to_u64)
     end
+    # A console is read wide, for the reason `IyiConsole.read` gives; a
+    # pipe or a file is bytes and stays bytes.
+    return IyiConsole.read(handle, buffer, count) if IyiConsole.console?(fd, handle)
     read = uninitialized Int32
     if LibC.ReadFile(handle, buffer,
          count.to_i32, pointerof(read), nil) == 0

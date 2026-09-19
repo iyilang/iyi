@@ -12,11 +12,26 @@
 #
 # The five are `Int32`, `Int64`, `UInt8`, `UInt64` and `Float64`: the default
 # integer, the one a byte count grows into, the byte itself, the one an address
-# and a size are, and a float. `Int8`, `Int16`, `Int128` and the unsigned
-# middle exist as types and have no arithmetic, because no sample writes one —
-# the same rule the rest of the prelude is built on. Writing `1_i8 + 1_i8` is
-# an "undefined method" and that is the honest answer: 0.1.0 does not have
+# and a size are, and a float. `UInt16` joins them for comparison alone, for
+# the reason written at the cross below: a wide character is compared on
+# every Windows path. `Int8`, `Int16`, `Int128` and the unsigned middle exist
+# as types and have no arithmetic, because no sample writes one — the same
+# rule the rest of the prelude is built on. Writing `1_i8 + 1_i8` is an
+# "undefined method" and that is the honest answer: 0.1.0 does not have
 # eight-bit arithmetic rather than having it slowly.
+#
+# **Comparison is not refused the same way, and that is a defect this file
+# cannot close.** `Object#==` answers `false` for anything no type claimed,
+# which is right about two objects and a lie about two numbers: without
+# `import std/int`, `1_i8 == 1_i8` is `false` rather than an error, and it
+# was `92_u16 == 92_u16` answering false that hid two Windows defects for a
+# week. Refusing it needs both sides' types at once, which a method body
+# does not have — a guard on the receiver alone refuses `5 == nil`, where
+# `false` is the correct answer, and it was measured doing exactly that to
+# eleven exercises. The fix belongs in overload resolution, where the
+# compiler knows both types; until then `UInt16` being in the cross is what
+# the library's own callers needed, and this paragraph is the rest of the
+# truth.
 class Object
   @[Primitive(:class)]
   def class
@@ -167,6 +182,18 @@ end
   {% ints = %w(Int32 Int64 UInt8 UInt64) %}
   {% floats = %w(Float64) %}
   {% nums = %w(Int32 Int64 UInt8 UInt64 Float64) %}
+  # `UInt16` compares and converts, and does not add. A wide character is
+  # the one value of that width this prelude holds — Windows' every path,
+  # console write and reparse point is UTF-16 — and what the code does with
+  # one is compare it against a separator or a prefix byte and convert it,
+  # never arithmetic. It was outside the list entirely, and the failure was
+  # silent rather than loud: `Object#==` answers `false` for anything it
+  # does not know, so `92_u16 == 92_u16` was *false* and two call sites
+  # quietly did nothing — `__iyi_wide_rooted?` said no about every rooted
+  # path, and `File.readlink` never stripped the `\??\` a reparse point
+  # stores. Measured with `46_u16 == 46_u16`, which answered false, and
+  # `46_u16.to_s`, which printed `UInt16`.
+  {% comparables = %w(Int32 Int64 UInt8 UInt64 Float64 UInt16) %}
   {% binaries = %w(+ - *) %}
 
   {% for num in nums %}
@@ -192,12 +219,28 @@ end
         def {{ name.id }}! : {{ type }}
         end
       {% end %}
+    end
+  {% end %}
 
-      {% for num2 in nums %}
-        {% for op in %w(== != < <= > >=) %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ num2.id }}) : Bool
-          end
+  # The comparison cross is the one `UInt16` joins, and only it: the
+  # conversions above stay at five, because `std/int` declares the whole
+  # tower's conversions and a prelude that also declared `UInt16#to_i32`
+  # would be redefining one of them (SPEC.md R-3, which is how this split
+  # announced itself).
+  #
+  # A wide character against a double is left out for the same reason and
+  # a better one: `std/int` defines that comparison by converting, because
+  # every value narrower than a double *is* a double exactly, and an
+  # instruction that compares the two directly is not what it means.
+  {% for num in comparables %}
+    struct {{ num.id }}
+      {% for num2 in comparables %}
+        {% unless (num == "UInt16" && num2 == "Float64") || (num == "Float64" && num2 == "UInt16") %}
+          {% for op in %w(== != < <= > >=) %}
+            @[::Primitive(:binary)]
+            def {{ op.id }}(other : {{ num2.id }}) : Bool
+            end
+          {% end %}
         {% end %}
       {% end %}
     end

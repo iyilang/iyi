@@ -397,8 +397,8 @@ line so it cannot move unread.
 **Efficiency — built, and it is mostly subtraction.** `puts "hello"` is a 36 KB
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
-it uses, and iyi's own library is 15,243 lines rather than 8,161. The whole
-library is 600 KB on disk beside the binary.
+it uses, and iyi's own library is 15,411 lines rather than 8,161. The whole
+library is 610 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
@@ -431,7 +431,7 @@ tar -xzf iyi-0.13.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 600 KB prelude, the 1,231 KB of `src/std` that `import std/...`
+iyi's own 610 KB prelude, the 1,269 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -642,7 +642,7 @@ $ curl localhost:3000/json
 `pub`, traits with defaults, `impl … forall`, error unions and `!`, `.or`,
 `or_panic`, `defer` — all of them, on a program that requires a shard. R-2
 still refuses an export that does not write its types. What changes is what the
-program *has*: 8,161 lines of Crystal's standard library instead of 15,243
+program *has*: 8,161 lines of Crystal's standard library instead of 15,411
 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -1024,7 +1024,7 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 15,243 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 15,411 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`**: integers, booleans, a string, one
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
@@ -1102,7 +1102,12 @@ marked PROPOSED are the parts that will move under you.
   stack overflow and access violation, printed by a vectored handler,
   with `SetErrorMode` keeping the dialog off a CI runner; and the 128-bit
   divide LLVM asks a library for is supplied in iyi, because
-  Windows-MSVC has no compiler-rt to ask.
+  Windows-MSVC has no compiler-rt to ask. A panic names its callers:
+  `RtlCaptureStackBackTrace` walks the stack through `.pdata`, and
+  `import std/debug` turns each address into a function and a source line
+  by reading the CodeView PDB the linker wrote beside the exe — there is
+  no DWARF in a Windows build to read, so the reader is a PDB reader, in
+  iyi, asking kernel32 and nothing else.
   The tree's own gates run there too: every `bench/*.sh` honours the
   platform's path-list delimiter, the shell's path mapping and the
   environment it pins, and `bench/dependency_floor.sh` reads a PE
@@ -1113,12 +1118,14 @@ marked PROPOSED are the parts that will move under you.
   What is *not* here: there is no subprocess and no `Time::Location`; a
   symbolic link needs a privilege Windows grants to an administrator or
   to Developer Mode, so the file exercise asks first and says what it
-  skipped; a fault on a *fiber's* stack is still an access violation
-  rather than a named stack overflow, because a vectored handler runs on
-  the stack that faulted; the daemon is POSIX-only (`poll(2)` and
-  `fork`), so the Windows zip ships the compiler alone; and arm64 Windows
-  is refused at compile time rather than broken at run time, with the
-  x86-64 build running there under emulation.
+  skipped; the daemon is POSIX-only (`poll(2)` and `fork`), so the
+  Windows zip ships the compiler alone; and arm64 Windows is refused at
+  compile time rather than broken at run time, with the x86-64 build
+  running there under emulation. A fiber's stack running out *is* named
+  now: Windows has no alternate signal stack, so the room the handler
+  prints from is reserved in the stack itself — a committed PAGE_GUARD
+  page with 16 KB of committed slack beneath it, of which the handler
+  measured 2,872 bytes used.
   Building it there is `make -f Makefile.win crystal` then
   `make -f Makefile.win iyi`, with Crystal's own Windows package and the
   Visual C++ build tools and nothing else; `windows-native` in CI is that
@@ -1168,7 +1175,7 @@ marked PROPOSED are the parts that will move under you.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 15,243 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 15,411 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

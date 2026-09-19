@@ -312,13 +312,57 @@ run "$work/index.iyi"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
 echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
 # On Darwin, the panic raises a backtrace through libSystem's backtrace and
-# points at the program rather than the library. On Linux/Windows raw-syscall
-# runtimes, backtrace capture is not yet built.
+# points at the program rather than the library. Windows captures its
+# callers too (`RtlCaptureStackBackTrace`) but prints none without a
+# resolver, which is the next step's subject; on the Linux raw-syscall
+# runtime capture is not built yet.
 if [ "$(uname -s)" = Darwin ]; then
   echo "$out" | grep -qE "index\.iyi|Index@Index::go|Index::go" \
     || fail "library panic named no frame in the program: $out"
 fi
 step "a panic the library raises names no library line, prelude or std"
+
+# ── 9a. a program that imports `std/debug` gets its callers named: the
+#      resolver reads the program's own debug information — DWARF beside a
+#      Mach-O, the CodeView PDB the linker wrote beside a PE — and a frame
+#      is a function and a source line rather than an address. This is the
+#      whole of what `std/debug` is for, and it was never gated. ────────
+case "$(uname -s)" in
+  Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    cat > "$work/named.iyi" <<'EOF'
+module named
+
+import std/debug
+
+def inner(n : Int32) : Int32
+  raise "named frames" if n == 2
+  inner(n + 1)
+end
+
+puts inner(0)
+EOF
+    run "$work/named.iyi"
+    [ "$code" = 1 ] || fail "the named-frames panic exited $code, wanted 1"
+    echo "$out" | grep -q "^iyi: panic: named frames" || fail "no panic line: $out"
+    # Each platform names a frame in the form its debug information holds:
+    # darwin's Mach-O symbol is the mangled `*Named@Named::inner<Int32>:Int32`
+    # and Windows' PDB procedure record is the display name `inner`, so the
+    # pattern asks for the function's own name followed by the file and a
+    # line and does not pin either spelling.
+    echo "$out" | grep -qE "inner[^ ]* at .*named\.iyi:[0-9]" ||
+      fail "no frame named the program's own function and line:
+$out"
+    # More than one frame of the same recursion, so the walk is a walk and
+    # not one resolved address repeated by accident.
+    frames="$(echo "$out" | grep -cE "inner[^ ]* at .*named\.iyi:")"
+    [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
+$out"
+    step "a panic names its callers where the program imported a resolver"
+    ;;
+  *)
+    step "a panic names its callers where the program imported a resolver: not measured here, because backtrace capture is not built on this runtime"
+    ;;
+esac
 
 # ── 10. the stack running out is a panic the program prints itself: on
 #      the main stack, on a fiber's (its guard page), on a thread's (its
@@ -326,22 +370,14 @@ step "a panic the library raises names no library line, prelude or std"
 #      edge is left to the signal, so a memory fault stays a memory fault.
 #      This was "Segmentation fault" from the shell and exit 139 ───────
 for where in main fiber thread; do
-  # On Windows only the main stack's overflow is named. A fault on a
-  # fiber's stack arrives as an access violation — Windows raises
-  # STACK_OVERFLOW only for a thread's own stack, whose guard page the
-  # kernel set — and the runtime's vectored handler cannot print it,
-  # because a vectored handler runs on the stack that faulted and that
-  # stack is the exhausted one. There is no `sigaltstack` to move it to.
-  # `IyiScheduler.fiber_guard_hit?` already tells the two faults apart;
-  # what is missing is room for the handler to run in, which is a
-  # committed PAGE_GUARD page with slack under it in `settle_stack`.
-  # Recorded here rather than expected-to-fail, so the day it is built
-  # this loop is what says so.
-  case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      [ "$where" = main ] || continue
-      ;;
-  esac
+  # Every stack here, on every platform. Windows used to name only the
+  # main one: a fiber's overflow arrived with no room for the handler to
+  # print from, because a vectored handler runs on the stack that faulted
+  # and Windows has no `sigaltstack`. A fiber stack now ends in a
+  # committed PAGE_GUARD page with 16 KB of committed slack under it
+  # (`IyiFiber#map_stack`), which is the room, and the fault arrives as
+  # STATUS_STACK_OVERFLOW rather than a guard-page violation because the
+  # switch has told the TEB that this is the thread's stack.
   case "$where" in
     main)   body='puts down(0)' ;;
     fiber)  body='group do |g|

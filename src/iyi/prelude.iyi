@@ -403,6 +403,13 @@ end
   lib LibC
     fun VirtualAlloc(lpAddress : Void*, dwSize : UInt64, flAllocationType : Int32, flProtect : Int32) : Void*
     fun VirtualFree(lpAddress : Void*, dwSize : UInt64, dwFreeType : Int32) : Int32
+    # A page's protection, changed after it was committed: the fiber
+    # stack's guard page is committed like the rest of the stack and then
+    # given PAGE_GUARD, because a page that is not committed cannot carry
+    # the attribute and a page that is not there raises an access
+    # violation with nowhere for the handler to stand
+    # (`IyiFiber#map_stack`).
+    fun VirtualProtect(lpAddress : Void*, dwSize : UInt64, flNewProtect : Int32, lpflOldProtect : Int32*) : Int32
     fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
     fun GetCurrentThread : Void*
     fun SuspendThread(hThread : Void*) : Int32
@@ -432,6 +439,17 @@ end
                       written : Int32*, reserved : Void*) : Int32
     fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
                      read : Int32*, control : Void*) : Int32
+    # The stack, walked by the kernel's own unwinder. x86-64 Windows has no
+    # frame pointer to chase — a frame is described by the unwind data in
+    # `.pdata`, which is what `RtlCaptureStackBackTrace` reads — so a panic
+    # that wants to name its callers asks for them here rather than walking
+    # anything itself.
+    # It answers a USHORT, which returns in AX with the rest of the
+    # register unpromised, so the declaration takes the Int32 this file
+    # spells a machine word with and the caller masks the low sixteen
+    # bits rather than trusting them to be zero.
+    fun RtlCaptureStackBackTrace(frames_to_skip : Int32, frames_to_capture : Int32,
+                                 back_trace : Void**, back_trace_hash : Int32*) : Int32
     # The crash path's three, and the only thing a program of this shape
     # asks Windows for at startup: no error dialog, room reserved for the
     # overflow handler, and the handler itself.
@@ -8007,6 +8025,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   {% if flag?(:darwin) %}
     callstack = uninitialized Void*[64]
     count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
+  {% elsif flag?(:win32) && flag?(:x86_64) %}
+    # Captured before anything is printed, and two frames skipped: this
+    # function and the kernel's own collector. Sixty-four is what the
+    # darwin arm asks for, so a resolver written against one works on the
+    # other.
+    callstack = uninitialized Void*[64]
+    count = LibC.RtlCaptureStackBackTrace(2, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
@@ -8027,6 +8052,18 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**) + 1, count - 1, 2)
     elsif count == 1
       LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**), 1, 2)
+    end
+  {% end %}
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    # A resolver if a program imported one (`std/debug` installs itself),
+    # and otherwise nothing: Windows has no `backtrace_symbols_fd`, and an
+    # address with no name and no line beside it is noise on the error
+    # stream rather than a frame. What names them is `std/debug`, which
+    # reads the program's own PDB.
+    if r = IyiPanic.resolver
+      if count > 0
+        r.call(pointerof(callstack).as(Void**), count)
+      end
     end
   {% end %}
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
@@ -8208,14 +8245,18 @@ end
   # `IyiStackGuard` catches it on an alternate signal stack and prints
   # where it happened; Windows has no sigaltstack, and the guard page is
   # already spent by the time anything runs, so the handler needs room
-  # reserved in advance — `SetThreadStackGuarantee`, 16 KB, which is what
-  # makes printing from here safe at all.
+  # reserved in advance. On a thread's own stack that is
+  # `SetThreadStackGuarantee`, 16 KB, below; on a fiber's it is the
+  # committed slack under the guard page `IyiFiber#map_stack` arms, the
+  # same 16 KB for the same code. Both are what make printing from here
+  # safe at all.
   #
   # The write is `WriteFile` on the standard error handle rather than
   # `print`: a fault may have landed inside the allocator, and the console
   # path above allocates.
   IYI_WIN_STACK_OVERFLOW = -1073741571 # 0xC00000FD, as the Int32 this file spells a DWORD with
   IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
+  IYI_WIN_GUARD_PAGE = -2147483647 # 0x80000001, STATUS_GUARD_PAGE_VIOLATION
 
   fun __iyi_win_fault(info : Void*) : Int32
     record = Pointer(UInt64).new(info.address).value
@@ -8227,14 +8268,43 @@ end
       LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
       LibC.ExitProcess(1)
     end
+    if code == IYI_WIN_GUARD_PAGE
+      # A guard-page violation on a fiber stack, which is a fiber's stack
+      # running out reported the other way. Measured, the ordinary case is
+      # *not* this one: `switch_stack` writes the fiber's bounds into the
+      # TEB's StackBase and StackLimit, so the kernel reads a fiber stack
+      # as the thread's own and answers a hit on the PAGE_GUARD page
+      # `IyiFiber#map_stack` armed with STATUS_STACK_OVERFLOW (0xC00000FD)
+      # — the branch above. This branch is what answers the same page
+      # touched while the TEB names another stack, where the alternative
+      # is calling a stack overflow a memory fault. Either way Windows has
+      # cleared the attribute by now, so the handler stands on that page
+      # and the committed slack beneath it.
+      #
+      # A guard page is the kernel's own mechanism for other things too,
+      # so the address is checked against the stacks the scheduler knows
+      # rather than assumed, and anything else is left to whoever armed
+      # it: EXCEPTION_CONTINUE_SEARCH, not a sentence of ours.
+      faulting = Pointer(UInt64).new(record + 40_u64).value
+      {% if flag?(:x86_64) %}
+        if IyiScheduler.fiber_guard_hit?(faulting)
+          overflow = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
+          LibC.WriteFile(handle, overflow.to_unsafe.as(Void*), overflow.bytesize, pointerof(written), nil)
+          LibC.ExitProcess(1)
+        end
+      {% end %}
+      return 0
+    end
     if code == IYI_WIN_ACCESS_VIOLATION
-      # An access violation is a wild pointer *or* a fiber's stack running
-      # out: a fiber stack's guard is the first page of its reservation,
-      # left uncommitted, and Windows raises STACK_OVERFLOW only for a
-      # thread's own stack. The faulting address is the second of the
-      # record's exception parameters — code 0, flags 4, record 8, address
-      # 16, parameter count 24, parameters from 32 — and the scheduler
-      # knows which page belongs to which stack.
+      # An access violation is a wild pointer *or* a frame that stepped
+      # over the fiber's guard page whole and landed in the uncommitted
+      # page at the bottom of its reservation — one `sub rsp` past the
+      # guard and the slack together. Windows raises STACK_OVERFLOW only
+      # for a thread's own stack, so the runtime tells the two apart by
+      # address. The faulting one is the second of the record's exception
+      # parameters — code 0, flags 4, record 8, address 16, parameter
+      # count 24, parameters from 32 — and the scheduler knows which page
+      # belongs to which stack.
       faulting = Pointer(UInt64).new(record + 40_u64).value
       {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
         if IyiScheduler.fiber_guard_hit?(faulting)

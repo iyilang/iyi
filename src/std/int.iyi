@@ -44,6 +44,7 @@ module std/int
        {"UInt128", 128, false, "u128"},
      ] %}
   {% prelude = %w(Int32 Int64 UInt8 UInt64) %}
+  {% prelude_comparables = %w(Int32 Int64 UInt8 UInt64 UInt16) %}
   {% mins = {
        "Int8"   => "-128",
        "Int16"  => "-32768",
@@ -143,12 +144,22 @@ module std/int
       {% end %}
 
       {% for other in types %}
-        {% unless prelude.includes?(from[0]) && prelude.includes?(other[0]) %}
+        # The prelude compares six types and adds five: `UInt16` is in its
+        # comparison cross (a wide character is compared against a
+        # separator on every Windows path) and not in its arithmetic one,
+        # so the comparisons for a pair it already declares are skipped
+        # here and the arithmetic below is not. Redefining a prelude
+        # method is refused by name (SPEC.md R-3), which is how the split
+        # announced itself.
+        {% unless prelude_comparables.includes?(from[0]) && prelude_comparables.includes?(other[0]) %}
           {% for op in %w(== != < <= > >=) %}
             @[::Primitive(:binary)]
             def {{ op.id }}(other : {{ other[0].id }}) : Bool
             end
           {% end %}
+        {% end %}
+
+        {% unless prelude.includes?(from[0]) && prelude.includes?(other[0]) %}
 
           {% for op in %w(+ - *) %}
             @[::Primitive(:binary)]

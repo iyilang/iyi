@@ -2154,6 +2154,78 @@ describe Iyi::IyiMod do
     end
   end
 
+  # An enum the module keeps to itself travels as its members, which is what
+  # an enum is.
+  #
+  # The exported side has always written them down. The carried side — a type
+  # a consumer cannot name but the module's own object code does — fell
+  # through to the branch built for a class, and wrote the *question methods*
+  # the consumer's own compiler generates from the members while writing no
+  # members at all. The consumer read `private enum Kind` with a `Large?` in
+  # it and nothing to number, and said `enum Kind must have at least one
+  # member` about a type nobody outside the module can write.
+  #
+  # The numbers are asserted, not just the names: the module's object code was
+  # compiled against these, and a consumer that renumbered from zero would
+  # agree with it only by luck. `@[Flags]` is here for the pair the compiler
+  # adds wherever a flags enum is declared — writing `None` and `All` down
+  # hands the consumer its own two back.
+  it "carries the members of an enum it does not export" do
+    with_tempdir("iyimod_carried_enum") do
+      Dir.mkdir_p "boot"
+      File.write "boot/kinds.iyi", <<-IYI
+        module boot/kinds
+
+        enum Kind
+          Small  = 3
+          Large  = 9
+        end
+
+        @[Flags]
+        enum Mode
+          Read
+          Write
+        end
+
+        pub struct Holder
+          pub def self.describe : String
+            Kind::Large.to_s + ":" + Kind::Large.value.to_s + ":" + (Mode::Read | Mode::Write).to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/kinds
+
+        puts Boot::Kinds::Holder.describe
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "Large:9:Read | Write"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "kinds.iyimod")), io)
+      end
+      declarations.should contain "private enum Kind : Int32\n  Small = 3\n  Large = 9\nend"
+      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\nend"
+
+      File.delete "boot/kinds.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

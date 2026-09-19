@@ -389,6 +389,29 @@
 
 ### Fixed
 
+- **An enum a module keeps to itself arrived with its question methods
+  and none of its members.** A `.iyimod` carries two kinds of type: the
+  ones a consumer can name, and the ones it cannot but the module's own
+  object code does. The second kind went through a branch written for a
+  class, so an `enum Kind` was described by the `Small?`/`Large?`
+  methods the consumer's own compiler generates from the members —
+  while the members themselves, which are the whole of what an enum
+  is, were left out. The consumer read the file and said `enum Kind
+  must have at least one member`, about a type nothing outside the
+  module can write.
+
+  Both sides build the declaration the same way now, members and the
+  integer they are numbered on included: the module's object code was
+  compiled against those numbers, and a consumer that counted from zero
+  again would agree with it only by luck. `@[Flags]` rides along, minus
+  the `None` and `All` the compiler adds wherever a flags enum is
+  declared.
+
+  Seven of the 60 `bench/std_*_exercise.iyi` were refused this way.
+  Round-tripping through `--emit-iyimod` and `--use-iyimod`, 28 built
+  and ran before this and 29 do now — the other six reach a further
+  defect apiece, which is what this measurement is for.
+
 - **A class variable refused the module it was written in, over a value
   the artifact was already carrying.** The rule that stops a build from
   linking against a module whose type body has code to run was written

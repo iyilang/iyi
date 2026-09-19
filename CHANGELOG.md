@@ -4,6 +4,51 @@
 
 ### Added
 
+- **A Windows panic names its callers.** `raise` captures the stack with
+  `RtlCaptureStackBackTrace` — x86-64 Windows has no frame pointer to
+  chase, a frame is described by the unwind data in `.pdata`, so the
+  kernel's own unwinder is what walks it — and `std/debug` resolves each
+  address by reading the program's own debug information. There is no
+  DWARF in a Windows build to read: `dumpbin -headers` shows `.text
+  .rdata .data .pdata .reloc` and a Debug Directory, and the line numbers
+  are CodeView in the PDB the linker wrote beside the exe. So the reader
+  is a PDB reader, in iyi, kernel32 and nothing else: the PE headers the
+  loader mapped, the CodeView record's PDB path, the MSF container, the
+  DBI stream's module infos and section contributions, the C13
+  `DEBUG_S_LINES` and `DEBUG_S_FILECHKSMS` subsections, the `/names`
+  string table, and `S_GPROC32`/`S_LPROC32` for the function name.
+
+      iyi: panic: deliberate
+        at ...\p_bt.iyi:6
+      0   inner at C:\Users\dogru\playground\iyi\.winprobe\p_bt.iyi:7
+      1   inner at C:\Users\dogru\playground\iyi\.winprobe\p_bt.iyi:7
+      2   inner at C:\Users\dogru\playground\iyi\.winprobe\p_bt.iyi:7
+      3   __iyi_main at C:\Users\dogru\playground\iyi\.winprobe\p_bt.iyi:10
+      4   main at C:\Users\dogru\playground\iyi\src\iyi\prelude.iyi:8360
+      5   __scrt_common_main_seh at ...\exe_common.inl:288
+      6   [0x7ffc911ccd87]
+      7   [0x7ffc9188caec]
+
+  Every answer was checked against two oracles on the same addresses:
+  `llvm-symbolizer --adjust-vma` and `llvm-pdbutil dump -l`'s raw
+  `section:offset` blocks, four of four agreeing, plus the stream count,
+  block size and owning module compared against `dump --summary`,
+  `--streams` and `--section-contribs`. A panic inside a spawned fiber
+  names every frame on the fiber stack down to `__iyi_fiber_main`, where
+  the kernel unwinder stops because a fiber's bottom frame has no unwind
+  data tying it to the stack that switched in. The last two frames of any
+  trace are ntdll's and kernel32's, whose symbols are on Microsoft's
+  symbol server and not in this program's PDB.
+
+  It refuses rather than guesses: no PDB (a released zip ships none), the
+  *wrong* PDB (rejected by the GUID in the image's CodeView record — the
+  dangerous case, because a wrong PDB parses perfectly and answers
+  confidently), a truncated one, and a block count claiming blocks the
+  file does not have all print the panic and the addresses and exit 1.
+  `bench/panics.sh` gates it now, on darwin and on Windows: a program that
+  imports `std/debug` must name its own function and line, in at least
+  two frames of a recursion.
+
 - **`bench/lsp_positions.py`: every cursor question, everywhere in the
   library.** `lsp_session.py` asks the protocol's questions once each on a
   file written for them and `lsp_soak.py` abuses the transport; neither
@@ -125,8 +170,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,115 lines**, and the
-  library is **3,167** of 3,734 with 567 to spare. `4,282` is what opening
+  a conditional, `else` included - which is **1,145 lines**, and the
+  library is **3,210** of 3,734 with 524 to spare. `4,355` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -304,6 +349,57 @@
 
 ### Fixed
 
+- **`UInt16` had no operations, and answered `false` instead of saying so.**
+  The prelude crosses five numeric types for comparison and `UInt16` was
+  not among them, so every comparison on one fell through to
+  `Object#==`, whose answer for anything it does not know is `false`.
+  Measured: `46_u16 == 46_u16` was **false**, and `46_u16.to_s` printed
+  the string `UInt16`. Two Windows call sites did nothing because of it,
+  both silently: `__iyi_wide_rooted?` answered no about every rooted path
+  (so every path took the `GetFullPathNameW` route, which is why nothing
+  failed visibly) and `File.readlink` never stripped the `\??\` a
+  reparse point stores. A third was found while writing the PDB reader —
+  scanning a UTF-16 path for its last `.` found no dots in a
+  forty-character path — and had to be written over the byte view.
+  `UInt16` is in the prelude's comparison cross now, and only there: the
+  conversions stay at five types because `std/int` declares the whole
+  tower's, and a wide character against a double is `std/int`'s too,
+  since every value narrower than a double is one exactly.
+
+  Not closed, and written into `src/iyi/primitives.iyi`'s header: the same
+  silence still covers `Int8`, `Int16`, `UInt32` and the rest of the
+  tower without `import std/int`. Refusing it needs both operands' types
+  at once, which a method body does not have — a guard on the receiver
+  alone refuses `5 == nil`, where `false` is the right answer, and was
+  measured breaking eleven exercises. The fix belongs in overload
+  resolution.
+
+- **Three things `std/file` answered wrongly on Windows, each silently.**
+  Measured with one probe, all three visible in its output:
+
+  - `File.tempfile` wrote into `C:\Windows\Temp`, a system directory an
+    ordinary account cannot write to, with a POSIX separator glued on:
+    `C:\Windows\Temp/wperm_0_1001`. It reads `TMPDIR`, `TEMP` and `TMP`
+    first now — the order `Dir.tempdir` already read, because the two
+    answering different directories is how a program loses a file it just
+    wrote — and joins with the platform's separator:
+    `C:\Users\dogru\AppData\Local\Temp\wperm2_0_1001`.
+  - `File.chmod` did nothing at all. Windows has one bit of a POSIX mode,
+    FILE_ATTRIBUTE_READONLY, and the owner's write bit is what decides it;
+    before, `File.chmod(path, 0o444)` returned normally and the next
+    `File.write` succeeded, so a program that asked for a file to be
+    unwritable was told it had been. Now the write is refused.
+  - `File.writable?` ignored that attribute, so it disagreed with the
+    library beside it: after a `chmod` to `0o444` it answered `true` while
+    the write panicked. `info?` clears the write bits of its default mode
+    when the attribute is set, and the probe now reads `false`, `true` for
+    `readable?`, and `true` again after `0o644`.
+
+  `File.chown` still does nothing on Windows, and that is now written down
+  rather than left blank: an owner there is a SID in a security descriptor,
+  not a numeric uid and gid, so there is no honest thing to do with the two
+  numbers the method takes.
+
 - **SPEC.md's ceiling breach quoted two figures that did not agree.**
   "624 lines for Windows' arms" and "the library at 3,618" is one
   platform's arms subtracted from a sentence about every platform's, and
@@ -311,9 +407,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,115** and **3,167**, held to the sentences that quote
+  without it: **1,145** and **3,210**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 548 over, as the library with
+  breach is still what the floor costs — 621 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7179,7 +7275,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,338-line library and nothing else. Every other
+  written against iyi's own 15,411-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

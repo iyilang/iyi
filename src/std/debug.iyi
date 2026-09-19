@@ -1,13 +1,16 @@
 # Debug symbols and backtrace resolution for iyi programs.
 #
 # Resolves instruction addresses to source locations (file:line:column)
-# and function names by reading the program's own DWARF sections natively,
-# without external libraries or foreign dependencies.
+# and function names by reading the program's own debug information
+# natively, without external libraries or foreign dependencies.
 #
 # Supported platforms:
 #   Darwin (macOS): Mach-O binary and companion .dwarf / .dSYM bundle
+#   Windows (x86-64): the PE headers the loader mapped, and the CodeView
+#     PDB the linker wrote beside the exe. A program with no PDB next to
+#     it — a released zip ships none — prints its frames as addresses.
 #
-# Linux ELF and Windows PE readers: not yet built.
+# Linux ELF reader: not yet built.
 
 module std/debug
 
@@ -29,6 +32,36 @@ module std/debug
     fun close(fd : Int32) : Int32
     fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
     fun _dyld_get_image_vmaddr_slide(index : Int32) : Int64
+  end
+{% end %}
+
+{% if flag?(:win32) %}
+  # Windows ships no DWARF. A linked iyi program carries `.text`, `.rdata`,
+  # `.data`, `.pdata` and `.reloc` and a Debug Directory; the symbols are
+  # CodeView in a separate PDB written beside the exe. Naming a frame here
+  # therefore means reading the program's own PE headers where the loader
+  # mapped them, and then that file.
+  #
+  # Eight calls, every one of them kernel32, which is the floor
+  # `bench/dependency_floor.sh` holds this runtime to: the running module's
+  # base address and its path, a file opened, measured, read and closed, and
+  # pages to hold what was read. `lib LibC` inside a module is that module's
+  # own — `Std::Debug::LibC` — so the four the prelude already names are
+  # named again here rather than reached for, which is how `std/file`
+  # declares the handle calls it uses. A DWORD is declared Int32, as the
+  # prelude declares it: the same 32 bits at the ABI.
+  lib LibC
+    fun GetModuleHandleW(name : UInt16*) : Void*
+    fun GetModuleFileNameW(handle : Void*, buffer : UInt16*, size : Int32) : Int32
+    fun GetFileSizeEx(handle : Void*, size : Int64*) : Int32
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+    fun ReadFile(handle : Void*, buffer : Void*, number_of_bytes_to_read : Int32,
+                 number_of_bytes_read : Int32*, overlapped : Void*) : Int32
+    fun CloseHandle(handle : Void*) : Int32
+    fun VirtualAlloc(address : Void*, size : UInt64, allocation_type : Int32,
+                     protect : Int32) : Void*
+    fun VirtualFree(address : Void*, size : UInt64, free_type : Int32) : Int32
   end
 {% end %}
 
@@ -228,6 +261,722 @@ struct DwarfResolver
     nil
   end
 
+  {% if flag?(:win32) %}
+    # What the walk holds while it runs: the PDB itself, its stream
+    # directory, the DBI stream, the `/names` string table, and the stream
+    # of whichever module was asked about last. Every frame asks the same
+    # four, and most frames of one panic come from one module, so each is
+    # read once rather than per frame. `pdb_close` gives all of it back.
+    @@pdb : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    @@pdb_size = 0_i64
+    @@dir : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    @@dir_size = 0_i64
+    @@block_size = 0_i64
+    @@block_count = 0_i64
+    @@dbi : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    @@dbi_size = 0_i64
+    @@modi_size = 0_i64
+    @@contrib_size = 0_i64
+    @@names : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    @@names_size = 0_i64
+    @@names_bytes = 0_i64
+    @@mod : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    @@mod_size = 0_i64
+    @@mod_index = -1
+    @@sym_bytes = 0_i64
+    @@c13_at = 0_i64
+    @@c13_bytes = 0_i64
+
+    # Every field of the PE headers and of the PDB below is read through
+    # these three, which answer zero past the end of the buffer they were
+    # given rather than reading it. A panic that panics while printing a
+    # panic is worse than a frame that stays an address, and a PDB is a file
+    # on disk: truncated, stale or another program's.
+    def self.u8_at(buf : Pointer(UInt8), size : Int64, off : Int64) : Int32
+      return 0 if off < 0_i64 || off >= size
+      (buf + off).value.to_i32
+    end
+
+    def self.u16_at(buf : Pointer(UInt8), size : Int64, off : Int64) : Int32
+      u8_at(buf, size, off) | u8_at(buf, size, off + 1_i64).unsafe_shl(8)
+    end
+
+    # Int64, because a 32-bit field in these formats is unsigned and iyi
+    # carries arithmetic on Int32/Int64/UInt8/UInt64 only: widening is the
+    # one spelling where a length near two gigabytes stays positive.
+    def self.u32_at(buf : Pointer(UInt8), size : Int64, off : Int64) : Int64
+      u16_at(buf, size, off).to_i64 | u16_at(buf, size, off + 2_i64).to_i64.unsafe_shl(16)
+    end
+
+    # The headers are mapped at the image base, and the first page of an
+    # image is always mapped, so the walk down to `SizeOfImage` bounds itself
+    # at 4096 and everything after it at the size it finds there.
+    #
+    # `e_lfanew` is the Int32 at 0x3C and points at the 4-byte "PE\0\0"
+    # signature; the COFF header follows it, and the optional header follows
+    # that 20-byte header, so the optional header is at `e_lfanew` + 24. Its
+    # magic is 0x20B for PE32+, which is the only shape x86-64 links, and
+    # `SizeOfImage` sits 56 bytes into it.
+    def self.pe_image_size(base : Pointer(UInt8)) : Int64
+      return 0_i64 if u16_at(base, 4096_i64, 0_i64) != 0x5A4D
+      e_lfanew = u32_at(base, 4096_i64, 0x3C_i64)
+      return 0_i64 if e_lfanew <= 0_i64 || e_lfanew + 120_i64 > 4096_i64
+      return 0_i64 if u32_at(base, 4096_i64, e_lfanew) != 0x4550_i64
+      opt = e_lfanew + 24_i64
+      return 0_i64 if u16_at(base, 4096_i64, opt) != 0x20B
+      u32_at(base, 4096_i64, opt + 56_i64)
+    end
+
+    # The CodeView record in the image's Debug Directory, as an RVA, and
+    # zero when the linker wrote none. Data directory 6 is the Debug
+    # Directory: the count of directories is 108 bytes into the optional
+    # header and the directories themselves 112, eight bytes each, so entry
+    # 6's RVA is at 160 and its size at 164. Each `IMAGE_DEBUG_DIRECTORY` is
+    # 28 bytes with Type at 12 — 2 is CODEVIEW — and AddressOfRawData, an
+    # RVA, at 20.
+    def self.codeview_record(base : Pointer(UInt8), image_size : Int64) : Int64
+      return 0_i64 if image_size <= 0_i64
+      e_lfanew = u32_at(base, image_size, 0x3C_i64)
+      opt = e_lfanew + 24_i64
+      return 0_i64 if u32_at(base, image_size, opt + 108_i64) < 7_i64
+      debug_rva = u32_at(base, image_size, opt + 160_i64)
+      debug_size = u32_at(base, image_size, opt + 164_i64)
+      return 0_i64 if debug_rva <= 0_i64 || debug_size < 28_i64
+      off = debug_rva
+      stop = debug_rva + debug_size
+      while off + 28_i64 <= stop
+        if u32_at(base, image_size, off + 12_i64) == 2_i64
+          cv = u32_at(base, image_size, off + 20_i64)
+          # "RSDS" little-endian, then a 16-byte GUID and a 4-byte age.
+          return cv if cv > 0_i64 && u32_at(base, image_size, cv) == 0x53445352_i64
+        end
+        off = off + 28_i64
+      end
+      0_i64
+    end
+
+    # The path in that record: NUL-terminated UTF-8, 24 bytes in, after the
+    # signature, the GUID and the age.
+    def self.pdb_path_at(base : Pointer(UInt8), image_size : Int64, cv : Int64) : String
+      return "" if cv <= 0_i64
+      len = 0_i64
+      while len < 1024_i64 && u8_at(base, image_size, cv + 24_i64 + len) != 0
+        len = len + 1_i64
+      end
+      return "" if len == 0_i64
+      text = base + (cv + 24_i64)
+      n = len.to_i32
+      String.new(n) { |dst| dst.copy_from(text, n) }
+    end
+
+    # The exe's own path with its extension replaced by `.pdb`, written into
+    # the caller's wide buffer. `GetModuleFileNameW` with no module answers
+    # the running image, and the edit is made in UTF-16 rather than on a
+    # converted string because UTF-16 is the form `CreateFileW` wants back.
+    #
+    # A byte at a time, not a UTF-16 unit at a time: `UInt16` carries
+    # neither arithmetic nor `to_i32` in this library, and a comparison
+    # written against `46_u16` matched nothing at all — measured, on the
+    # path `C:\Users\dogru\AppData\Local\Temp\bt.exe`, where it found zero
+    # dots and zero separators in forty characters. Every character this
+    # looks at is ASCII, and in UTF-16LE an ASCII character is its own byte
+    # followed by a zero, so the pair is read and written directly.
+    #
+    # The extension is the last dot after the last separator: a program in
+    # a directory named `my.tools` keeps its own name.
+    def self.exe_pdb_wide(buffer : Pointer(UInt16), limit : Int32) : Bool
+      n = LibC.GetModuleFileNameW(Pointer(Void).new(0_u64), buffer, limit)
+      return false if n <= 0 || n >= limit
+      text = buffer.as(Pointer(UInt8))
+      dot = -1
+      i = 0
+      while i < n
+        if text[i * 2 + 1] == 0_u8
+          low = text[i * 2]
+          dot = i if low == 46_u8
+          dot = -1 if low == 92_u8 || low == 47_u8
+        end
+        i = i + 1
+      end
+      cut = dot >= 0 ? dot : n
+      return false if cut + 5 > limit
+      ext = ".pdb"
+      j = 0
+      while j < 5
+        text[(cut + j) * 2] = j < 4 ? ext.to_unsafe[j] : 0_u8
+        text[(cut + j) * 2 + 1] = 0_u8
+        j = j + 1
+      end
+      true
+    end
+
+    # The whole file in one allocation. A PDB is small — three quarters of a
+    # megabyte for a program of this size — and every structure in it is a
+    # graph of offsets into blocks scattered through it, so reading it once
+    # beats seeking per frame. `ReadFile` counts bytes in an Int32, so a
+    # large one arrives in pieces.
+    def self.load_whole_file(handle : Void*, size_out : Pointer(Int64)) : Pointer(UInt8)
+      none = Pointer(UInt8).new(0_u64)
+      size = 0_i64
+      return none if LibC.GetFileSizeEx(handle, pointerof(size)) == 0
+      return none if size < 64_i64 || size > 268435456_i64
+      # MEM_COMMIT | MEM_RESERVE (0x3000) and PAGE_READWRITE (4).
+      buf = LibC.VirtualAlloc(Pointer(Void).new(0_u64), size.to_u64, 0x3000, 4).as(Pointer(UInt8))
+      return none if buf.address == 0_u64
+      done = 0_i64
+      while done < size
+        want = size - done
+        want = 16777216_i64 if want > 16777216_i64
+        got = 0
+        if LibC.ReadFile(handle, (buf + done).as(Void*), want.to_i32, pointerof(got),
+             Pointer(Void).new(0_u64)) == 0 || got <= 0
+          release(buf)
+          return none
+        end
+        done = done + got.to_i64
+      end
+      size_out.value = size
+      buf
+    end
+
+    # MEM_RELEASE (0x8000), which frees the whole reservation and wants a
+    # size of zero.
+    def self.release(buf : Pointer(UInt8)) : Nil
+      LibC.VirtualFree(buf.as(Void*), 0_u64, 0x8000) if buf.address != 0_u64
+    end
+
+    # The MSF container the PDB is written in. Nothing in it is contiguous
+    # except by accident: a stream is a list of fixed-size blocks scattered
+    # through the file. The superblock is the 32-byte magic
+    # "Microsoft C/C++ MSF 7.00\r\n" then 0x1A and "DS", and after it, as
+    # Int32s: the block size at 0x20, the free-block-map index at 0x24, the
+    # number of blocks at 0x28, the stream directory's size in bytes at
+    # 0x2C, four unused bytes, and the block index of the *block map* at
+    # 0x34. The block map is an array of block numbers holding the
+    # directory, which is the one structure read eagerly here.
+    def self.msf_open : Bool
+      buf = @@pdb
+      size = @@pdb_size
+      magic = "Microsoft C/C++ MSF 7.00\r\n"
+      i = 0
+      while i < magic.bytesize
+        return false if u8_at(buf, size, i.to_i64) != magic.to_unsafe[i].to_i32
+        i = i + 1
+      end
+      return false if u8_at(buf, size, 26_i64) != 26 || u8_at(buf, size, 27_i64) != 68 ||
+                      u8_at(buf, size, 28_i64) != 83
+      block_size = u32_at(buf, size, 0x20_i64)
+      block_count = u32_at(buf, size, 0x28_i64)
+      dir_bytes = u32_at(buf, size, 0x2C_i64)
+      map_block = u32_at(buf, size, 0x34_i64)
+      return false if block_size < 512_i64 || block_size > 65536_i64
+      return false if block_count <= 0_i64 || block_count * block_size > size
+      return false if dir_bytes <= 4_i64 || dir_bytes > 67108864_i64
+      return false if map_block <= 0_i64 || map_block >= block_count
+      @@block_size = block_size
+      @@block_count = block_count
+      dir_blocks = (dir_bytes + block_size - 1_i64) // block_size
+      return false if map_block * block_size + dir_blocks * 4_i64 > size
+      dir = LibC.VirtualAlloc(Pointer(Void).new(0_u64), (dir_blocks * block_size).to_u64,
+        0x3000, 4).as(Pointer(UInt8))
+      return false if dir.address == 0_u64
+      k = 0_i64
+      while k < dir_blocks
+        bn = u32_at(buf, size, map_block * block_size + k * 4_i64)
+        if bn <= 0_i64 || bn >= block_count
+          release(dir)
+          return false
+        end
+        (dir + k * block_size).copy_from(buf + bn * block_size, block_size.to_i32)
+        k = k + 1_i64
+      end
+      @@dir = dir
+      @@dir_size = dir_bytes
+      true
+    end
+
+    # A stream's byte size. 0xFFFFFFFF is how the directory spells a stream
+    # that does not exist, and it is not a length: taken as one it asks for
+    # four gigabytes of block numbers and walks off the directory.
+    def self.stream_bytes(index : Int64) : Int64
+      v = u32_at(@@dir, @@dir_size, 4_i64 + index * 4_i64)
+      v == 4294967295_i64 ? 0_i64 : v
+    end
+
+    # A stream, gathered into one buffer. The directory is the number of
+    # streams, then every stream's byte size, then, in the same order, each
+    # stream's list of block numbers. There is no index into those lists —
+    # stream i's begins after the lists of every stream before it — so
+    # finding one walks the sizes.
+    def self.read_stream(index : Int32, size_out : Pointer(Int64)) : Pointer(UInt8)
+      none = Pointer(UInt8).new(0_u64)
+      size_out.value = 0_i64
+      dir = @@dir
+      dir_size = @@dir_size
+      return none if dir.address == 0_u64 || index < 0
+      count = u32_at(dir, dir_size, 0_i64)
+      return none if index.to_i64 >= count
+      block_size = @@block_size
+      bytes = stream_bytes(index.to_i64)
+      return none if bytes <= 0_i64
+      blocks_at = 4_i64 + count * 4_i64
+      j = 0_i64
+      while j < index.to_i64
+        blocks_at = blocks_at + ((stream_bytes(j) + block_size - 1_i64) // block_size) * 4_i64
+        j = j + 1_i64
+      end
+      nblocks = (bytes + block_size - 1_i64) // block_size
+      return none if blocks_at + nblocks * 4_i64 > dir_size
+      buf = LibC.VirtualAlloc(Pointer(Void).new(0_u64), (nblocks * block_size).to_u64,
+        0x3000, 4).as(Pointer(UInt8))
+      return none if buf.address == 0_u64
+      k = 0_i64
+      while k < nblocks
+        bn = u32_at(dir, dir_size, blocks_at + k * 4_i64)
+        if bn <= 0_i64 || bn >= @@block_count
+          release(buf)
+          return none
+        end
+        (buf + k * block_size).copy_from(@@pdb + bn * block_size, block_size.to_i32)
+        k = k + 1_i64
+      end
+      size_out.value = bytes
+      buf
+    end
+
+    # The record in the image and the file on disk must be the same build.
+    # The CodeView record carries a GUID; the PDB Info stream (stream 1)
+    # repeats it after a version, a signature and an age, 12 bytes in. The
+    # age is not compared: the PDB's own advances when a tool rewrites the
+    # file, while the GUID is the link's identity. Without this a stale
+    # `bt.pdb` in the current directory is read as this program's and every
+    # line it answers is wrong.
+    def self.pdb_matches?(base : Pointer(UInt8), image_size : Int64, cv : Int64) : Bool
+      info_size = 0_i64
+      info = read_stream(1, pointerof(info_size))
+      return false if info.address == 0_u64
+      ok = true
+      i = 0_i64
+      while ok && i < 16_i64
+        ok = u8_at(info, info_size, 12_i64 + i) == u8_at(base, image_size, cv + 4_i64 + i)
+        i = i + 1_i64
+      end
+      release(info)
+      ok
+    end
+
+    # Opened, read and checked, or false and nothing held. The PDB the image
+    # names comes first; a linker given a relative `-o` writes a relative
+    # name into the record, and a program is not always run from the
+    # directory it was linked in, so the exe's own path with `.pdb` is tried
+    # after it. Neither being there is not an error — a released zip ships
+    # no PDB — and a panic then prints the addresses it captured.
+    def self.pdb_open(base : Pointer(UInt8), image_size : Int64, cv : Int64) : Bool
+      path = pdb_path_at(base, image_size, cv)
+      unless path.empty?
+        wide = __iyi_wide_path(path.to_unsafe)
+        return true if wide.address != 0_u64 && pdb_load(wide, base, image_size, cv)
+      end
+      buffer = uninitialized UInt16[1024]
+      beside = pointerof(buffer).as(Pointer(UInt16))
+      return true if exe_pdb_wide(beside, 1024) && pdb_load(beside, base, image_size, cv)
+      false
+    end
+
+    def self.pdb_load(wide : Pointer(UInt16), base : Pointer(UInt8), image_size : Int64,
+                      cv : Int64) : Bool
+      # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL:
+      # the same four the prelude opens a file for reading with.
+      handle = LibC.CreateFileW(wide, -2147483648, 7, Pointer(Void).new(0_u64), 3, 128,
+        Pointer(Void).new(0_u64))
+      return false if handle.address &+ 1_u64 == 0_u64
+      size = 0_i64
+      buf = load_whole_file(handle, pointerof(size))
+      LibC.CloseHandle(handle)
+      return false if buf.address == 0_u64
+      @@pdb = buf
+      @@pdb_size = size
+      return true if msf_open && pdb_matches?(base, image_size, cv)
+      pdb_close
+      false
+    end
+
+    # Everything the walk held, given back. The darwin arm unmaps its DWARF
+    # at the end of the same method and this is that line.
+    def self.pdb_close : Nil
+      release(@@mod)
+      release(@@names)
+      release(@@dbi)
+      release(@@dir)
+      release(@@pdb)
+      @@mod = Pointer(UInt8).new(0_u64)
+      @@names = Pointer(UInt8).new(0_u64)
+      @@dbi = Pointer(UInt8).new(0_u64)
+      @@dir = Pointer(UInt8).new(0_u64)
+      @@pdb = Pointer(UInt8).new(0_u64)
+      @@mod_size = 0_i64
+      @@mod_index = -1
+      @@names_size = 0_i64
+      @@dbi_size = 0_i64
+      @@dir_size = 0_i64
+      @@pdb_size = 0_i64
+    end
+
+    # A NUL-terminated name inside a buffer, measured without running off
+    # the end of it.
+    def self.cstr_len(buf : Pointer(UInt8), size : Int64, off : Int64) : Int64
+      len = 0_i64
+      while off + len < size && u8_at(buf, size, off + len) != 0
+        len = len + 1_i64
+      end
+      len
+    end
+
+    def self.cstr_at(buf : Pointer(UInt8), size : Int64, off : Int64, len : Int64) : String
+      return "" if len <= 0_i64 || off < 0_i64 || off + len > size
+      text = buf + off
+      n = len.to_i32
+      String.new(n) { |dst| dst.copy_from(text, n) }
+    end
+
+    # The image's section table, which CodeView is keyed by: a line record
+    # and a procedure record name a 1-based section number and an offset
+    # inside that section, never an RVA. The section headers begin after the
+    # optional header — the number of sections is 2 bytes into the COFF
+    # header and `SizeOfOptionalHeader` 16 — and each header is 40 bytes
+    # with `Misc.VirtualSize` at 8, VirtualAddress at 12 and SizeOfRawData
+    # at 16. The span a section covers in memory is the larger of the two
+    # sizes: the raw size is rounded up to the file's alignment and the
+    # virtual size is not, and either one can be the bigger.
+    def self.section_of_rva(base : Pointer(UInt8), image_size : Int64, rva : Int64,
+                            off_out : Pointer(Int64)) : Int32
+      off_out.value = 0_i64
+      return 0 if rva <= 0_i64 || rva >= image_size
+      e_lfanew = u32_at(base, image_size, 0x3C_i64)
+      coff = e_lfanew + 4_i64
+      count = u16_at(base, image_size, coff + 2_i64)
+      table = coff + 20_i64 + u16_at(base, image_size, coff + 16_i64).to_i64
+      i = 0
+      while i < count
+        header = table + i.to_i64 * 40_i64
+        va = u32_at(base, image_size, header + 12_i64)
+        virtual_size = u32_at(base, image_size, header + 8_i64)
+        raw_size = u32_at(base, image_size, header + 16_i64)
+        span = virtual_size > raw_size ? virtual_size : raw_size
+        if rva >= va && rva < va + span
+          off_out.value = rva - va
+          return i + 1
+        end
+        i = i + 1
+      end
+      0
+    end
+
+    # The DBI stream is stream 3 and opens with a 64-byte header whose
+    # version signature is -1. Two of its fields are read here: the
+    # module-info substream's byte size at 24 and the section-contribution
+    # substream's at 28. The substreams follow the header in the order
+    # module info, section contributions, section map, file info, type
+    # server map, EC, optional debug header, so those two sizes alone place
+    # both of the substreams this reader wants and the rest are never
+    # walked.
+    def self.dbi_open : Bool
+      size = 0_i64
+      dbi = read_stream(3, pointerof(size))
+      return false if dbi.address == 0_u64
+      modi = u32_at(dbi, size, 24_i64)
+      contributions = u32_at(dbi, size, 28_i64)
+      if size < 64_i64 || u32_at(dbi, size, 0_i64) != 4294967295_i64 ||
+         64_i64 + modi + contributions > size
+        release(dbi)
+        return false
+      end
+      @@dbi = dbi
+      @@dbi_size = size
+      @@modi_size = modi
+      @@contrib_size = contributions
+      true
+    end
+
+    # Which module owns an address. The section-contribution substream maps
+    # (section, offset) ranges onto module indices: a version word first —
+    # 0xF12EBA2D is the 1997 layout, 0xF13151E4 the 2014 one, which carries
+    # one more word per entry — and then fixed-size entries with the
+    # 1-based section number at 0, the offset at 4, the size at 8 and the
+    # module index at 16.
+    def self.module_of(sec : Int32, off : Int64) : Int32
+      dbi = @@dbi
+      size = @@dbi_size
+      at = 64_i64 + @@modi_size
+      stride = u32_at(dbi, size, at) == 4046541284_i64 ? 32_i64 : 28_i64
+      cursor = at + 4_i64
+      stop = at + @@contrib_size
+      while cursor + stride <= stop
+        if u16_at(dbi, size, cursor) == sec
+          start = u32_at(dbi, size, cursor + 4_i64)
+          if off >= start && off < start + u32_at(dbi, size, cursor + 8_i64)
+            return u16_at(dbi, size, cursor + 16_i64)
+          end
+        end
+        cursor = cursor + stride
+      end
+      -1
+    end
+
+    # Where module `index`'s record begins in the module-info substream, or
+    # -1. The records are variable length and carry no index: each is 64
+    # fixed bytes — the stream holding that module's symbols at 34, the byte
+    # size of its symbol area at 36, its C11 line-info size at 40 and its
+    # C13 line-info size at 44 — then the module name and the object name,
+    # both NUL-terminated, and then padding up to a multiple of four.
+    def self.module_record(index : Int32) : Int64
+      return -1_i64 if index < 0
+      dbi = @@dbi
+      size = @@dbi_size
+      off = 64_i64
+      stop = 64_i64 + @@modi_size
+      i = 0
+      while off + 64_i64 <= stop
+        return off if i == index
+        name_len = cstr_len(dbi, stop, off + 64_i64)
+        obj_len = cstr_len(dbi, stop, off + 64_i64 + name_len + 1_i64)
+        step = ((64_i64 + name_len + 1_i64 + obj_len + 1_i64 + 3_i64) // 4_i64) * 4_i64
+        break if step <= 64_i64
+        off = off + step
+        i = i + 1
+      end
+      -1_i64
+    end
+
+    # A name in a buffer compared without building a string out of it:
+    # this runs after a panic, and the one question asked of the PDB's
+    # named-stream map is whether an entry is `/names`.
+    def self.name_is?(buf : Pointer(UInt8), size : Int64, off : Int64, want : String) : Bool
+      i = 0
+      while i < want.bytesize
+        return false if u8_at(buf, size, off + i.to_i64) != want.to_unsafe[i].to_i32
+        i = i + 1
+      end
+      u8_at(buf, size, off + want.bytesize.to_i64) == 0
+    end
+
+    # `/names` is a stream with a name rather than a number, and the PDB
+    # Info stream (stream 1) is where names are given out: a version, a
+    # signature, an age and a 16-byte GUID, then the byte size of a string
+    # buffer at 28, that buffer, and a hash table over it — the number of
+    # entries present, the capacity, a present bit vector and a deleted bit
+    # vector, each a word count followed by that many words, and then one
+    # {key, value} pair per present entry, the key an offset into the
+    # string buffer and the value the stream index this is looking for.
+    def self.names_stream : Int32
+      size = 0_i64
+      info = read_stream(1, pointerof(size))
+      return -1 if info.address == 0_u64
+      strings = 32_i64
+      at = strings + u32_at(info, size, 28_i64)
+      entries = u32_at(info, size, at)
+      at = at + 8_i64
+      at = at + 4_i64 + u32_at(info, size, at) * 4_i64
+      at = at + 4_i64 + u32_at(info, size, at) * 4_i64
+      found = -1
+      if entries > 0_i64 && at + entries * 8_i64 <= size
+        i = 0_i64
+        while found < 0 && i < entries
+          if name_is?(info, size, strings + u32_at(info, size, at + i * 8_i64), "/names")
+            found = u32_at(info, size, at + i * 8_i64 + 4_i64).to_i32
+          end
+          i = i + 1_i64
+        end
+      end
+      release(info)
+      found
+    end
+
+    # That stream's own header: 0xEFFEEFFE, a version, the byte size of the
+    # string data, and then the strings at 12. Every file a line record
+    # names is an offset into those bytes.
+    def self.names_open : Bool
+      index = names_stream
+      return false if index <= 0
+      size = 0_i64
+      buf = read_stream(index, pointerof(size))
+      return false if buf.address == 0_u64
+      bytes = u32_at(buf, size, 8_i64)
+      if u32_at(buf, size, 0_i64) != 4026462206_i64 || bytes <= 0_i64 || 12_i64 + bytes > size
+        release(buf)
+        return false
+      end
+      @@names = buf
+      @@names_size = size
+      @@names_bytes = bytes
+      true
+    end
+
+    # A module's own stream, which holds both its symbols and its line
+    # info, kept until another module is asked for: the frames of one panic
+    # come from a handful of modules and most of them from the same one.
+    # The stream is a 4-byte signature, the symbol records up to
+    # `SymByteSize`, the C11 line area, and then the C13 line area.
+    def self.module_open(index : Int32) : Bool
+      return true if index >= 0 && index == @@mod_index && @@mod.address != 0_u64
+      release(@@mod)
+      @@mod = Pointer(UInt8).new(0_u64)
+      @@mod_size = 0_i64
+      @@mod_index = -1
+      record = module_record(index)
+      return false if record < 0_i64
+      # 0xFFFF is how a module with no symbols of its own spells its stream.
+      stream = u16_at(@@dbi, @@dbi_size, record + 34_i64)
+      return false if stream == 65535
+      symbols = u32_at(@@dbi, @@dbi_size, record + 36_i64)
+      c11 = u32_at(@@dbi, @@dbi_size, record + 40_i64)
+      c13 = u32_at(@@dbi, @@dbi_size, record + 44_i64)
+      size = 0_i64
+      buf = read_stream(stream, pointerof(size))
+      return false if buf.address == 0_u64
+      @@mod = buf
+      @@mod_size = size
+      @@mod_index = index
+      @@sym_bytes = symbols
+      @@c13_at = symbols + c11
+      @@c13_bytes = c13
+      true
+    end
+
+    # The C13 area is a list of subsections: a 4-byte kind, a 4-byte byte
+    # length, that many bytes, and padding up to a multiple of four. This
+    # answers where the first subsection of one kind begins, which is what
+    # DEBUG_S_FILECHKSMS (0xF4) needs — there is one of it, and a module
+    # may write it after the line subsections that index into it.
+    def self.c13_subsection(kind : Int64, length_out : Pointer(Int64)) : Int64
+      length_out.value = 0_i64
+      mod = @@mod
+      size = @@mod_size
+      cursor = @@c13_at
+      stop = @@c13_at + @@c13_bytes
+      stop = size if stop > size
+      while cursor + 8_i64 <= stop
+        length = u32_at(mod, size, cursor + 4_i64)
+        break if length <= 0_i64 || cursor + 8_i64 + length > stop
+        if u32_at(mod, size, cursor) == kind
+          length_out.value = length
+          return cursor + 8_i64
+        end
+        cursor = cursor + 8_i64 + ((length + 3_i64) // 4_i64) * 4_i64
+      end
+      -1_i64
+    end
+
+    # The line covering a section offset, and the file index that line
+    # belongs to. A DEBUG_S_LINES (0xF2) subsection covers one run of code:
+    # its section offset at 0, its 1-based section at 4, flags at 6 and the
+    # byte size of the run at 8. After that come blocks of {file index into
+    # the checksums subsection, number of lines, byte size of this block}
+    # and then that many {offset from the run's start, line and flags}
+    # pairs, the line number being the low 24 bits. The answer is the last
+    # entry at or before the address: line entries are starts, and an
+    # address inside a statement belongs to the statement it is inside.
+    def self.line_for(sec : Int32, off : Int64, line_out : Pointer(Int64)) : Int64
+      line_out.value = 0_i64
+      mod = @@mod
+      size = @@mod_size
+      cursor = @@c13_at
+      stop = @@c13_at + @@c13_bytes
+      stop = size if stop > size
+      best_file = -1_i64
+      best_delta = -1_i64
+      best_line = 0_i64
+      while cursor + 8_i64 <= stop
+        kind = u32_at(mod, size, cursor)
+        length = u32_at(mod, size, cursor + 4_i64)
+        break if length <= 0_i64 || cursor + 8_i64 + length > stop
+        payload = cursor + 8_i64
+        if kind == 242_i64 && u16_at(mod, size, payload + 4_i64) == sec
+          start = u32_at(mod, size, payload)
+          if off >= start && off < start + u32_at(mod, size, payload + 8_i64)
+            want = off - start
+            block = payload + 12_i64
+            block_stop = payload + length
+            while block + 12_i64 <= block_stop
+              file_index = u32_at(mod, size, block)
+              lines = u32_at(mod, size, block + 4_i64)
+              block_bytes = u32_at(mod, size, block + 8_i64)
+              break if block_bytes < 12_i64 || block + block_bytes > block_stop
+              k = 0_i64
+              while k < lines && block + 20_i64 + k * 8_i64 <= block + block_bytes
+                entry = block + 12_i64 + k * 8_i64
+                delta = u32_at(mod, size, entry)
+                if delta <= want && delta > best_delta
+                  best_delta = delta
+                  best_line = u32_at(mod, size, entry + 4_i64) & 16777215_i64
+                  best_file = file_index
+                end
+                k = k + 1_i64
+              end
+              block = block + block_bytes
+            end
+          end
+        end
+        cursor = payload + ((length + 3_i64) // 4_i64) * 4_i64
+      end
+      line_out.value = best_line
+      best_file
+    end
+
+    # The file a line block names. DEBUG_S_FILECHKSMS is a list of entries
+    # — an offset into `/names`, a checksum length, a checksum kind, the
+    # checksum, padding to four — and a line block's file index is the byte
+    # offset of its entry in that list, not an ordinal.
+    def self.file_for(index : Int64) : String
+      return "" if index < 0_i64 || @@names.address == 0_u64
+      length = 0_i64
+      table = c13_subsection(244_i64, pointerof(length))
+      return "" if table < 0_i64 || index + 4_i64 > length
+      at = u32_at(@@mod, @@mod_size, table + index)
+      return "" if at >= @@names_bytes
+      cstr_at(@@names, @@names_size, 12_i64 + at, cstr_len(@@names, 12_i64 + @@names_bytes, 12_i64 + at))
+    end
+
+    # The frame's function, from the same module stream's symbol records. A
+    # record is a 2-byte length that does not count itself, a 2-byte kind,
+    # and then its fields; S_GPROC32 (0x1110) and S_LPROC32 (0x110F) carry
+    # the procedure's code size 16 bytes in, its section offset at 32, its
+    # 1-based section at 36, a flags byte at 38 and its name at 39. The
+    # publics stream would answer too, but with the nearest symbol at or
+    # before the address rather than the one whose range contains it, which
+    # names a static function's neighbour when the function itself is not
+    # public.
+    #
+    # The name in a procedure record is already the one the program spells
+    # — `inner`, `*IyiHeap::cache`, `->` — and needs no unescaping: what
+    # `Iyi.safe_mangling` rewrites into `.2A.` and `.3A.` is the *linkage*
+    # symbol, which lives in the publics stream that this does not read.
+    # Measured on this program: none of its 504 procedure records carries
+    # an escape.
+    def self.proc_name(sec : Int32, off : Int64) : String
+      mod = @@mod
+      size = @@mod_size
+      cursor = 4_i64
+      stop = @@sym_bytes
+      stop = size if stop > size
+      while cursor + 4_i64 <= stop
+        length = u16_at(mod, size, cursor).to_i64
+        break if length < 2_i64 || cursor + 2_i64 + length > stop
+        kind = u16_at(mod, size, cursor + 2_i64)
+        if (kind == 4368 || kind == 4367) && u16_at(mod, size, cursor + 36_i64) == sec
+          start = u32_at(mod, size, cursor + 32_i64)
+          if off >= start && off < start + u32_at(mod, size, cursor + 16_i64)
+            record_end = cursor + 2_i64 + length
+            return cstr_at(mod, record_end, cursor + 39_i64,
+              cstr_len(mod, record_end, cursor + 39_i64))
+          end
+        end
+        cursor = cursor + 2_i64 + length
+      end
+      ""
+    end
+  {% end %}
+
   def self.resolve_frames(frames : Pointer(Void*), count : Int32) : Nil
     {% if flag?(:darwin) %}
       slide = LibC._dyld_get_image_vmaddr_slide(0).to_u64
@@ -331,6 +1080,51 @@ struct DwarfResolver
       if m.address != 0_u64 && m.address != 0xffffffffffffffff_u64
         LibC.munmap(m, fsize.to_u64)
       end
+    {% elsif flag?(:win32) %}
+      # The running image's base, which is where every RVA in its headers
+      # and every address in its PDB is measured from: the loader relocates
+      # the image, so the address a frame carries is the preferred one plus
+      # a slide that changes per boot.
+      base = LibC.GetModuleHandleW(Pointer(UInt16).new(0_u64)).as(Pointer(UInt8))
+      image_size = pe_image_size(base)
+      cv = codeview_record(base, image_size)
+      resolving = pdb_open(base, image_size, cv) && dbi_open && names_open
+      i = 0
+      while i < count
+        raw_pc = (frames + i).value.address
+        fn_name = ""
+        location = ""
+        if resolving && raw_pc > base.address
+          section_off = 0_i64
+          # A return address points after the call, so the frame is named
+          # by the instruction before it — the step the darwin arm takes
+          # with `ip - 4`, one byte here because x86-64 instructions are
+          # not a fixed width.
+          sec = section_of_rva(base, image_size, (raw_pc - base.address).to_i64 - 1_i64,
+            pointerof(section_off))
+          if sec > 0 && module_open(module_of(sec, section_off))
+            fn_name = proc_name(sec, section_off)
+            line = 0_i64
+            file = file_for(line_for(sec, section_off, pointerof(line)))
+            location = file + ":" + line.to_s if !file.empty? && line > 0_i64
+          end
+        end
+
+        line_out = i.to_s + "   "
+        if fn_name.empty? && location.empty?
+          # Neither a name nor a line: a frame in ntdll or kernel32, or a
+          # program with no PDB beside it. The address alone, which is what
+          # this printed before it could read a PDB at all.
+          line_out = line_out + "[0x" + raw_pc.to_s(16) + "]"
+        else
+          line_out = line_out + (fn_name.empty? ? "[0x" + raw_pc.to_s(16) + "]" : fn_name)
+          line_out = line_out + " at " + location unless location.empty?
+        end
+        say(line_out + "\n")
+
+        i = i + 1
+      end
+      pdb_close
     {% else %}
       # Fallback for platforms without native DWARF reader yet
       i = 0

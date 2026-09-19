@@ -158,14 +158,6 @@ class Iyi::Def
       expansion.owner = owner
     end
     expansion.original_name = original_name
-    # iyi: the expansion of a header is a header. Codegen refuses to inline a
-    # def that came from a `.iyimod` — an absent body reads there as the
-    # simplest possible one, and inlining it would replace a call to the
-    # module's machine code with nothing at all — and it asks the def in front
-    # of it, which for a call with named arguments is this one. Unmarked, the
-    # `Nop` was inlined and the build died in codegen reading a type off it.
-    expansion.iyi_from_artifact = iyi_from_artifact?
-
     if retain_body
       new_body = [] of ASTNode
       body = self.body.clone
@@ -236,6 +228,21 @@ class Iyi::Def
       # A body that travelled is not a `Nop` and is not this.
       if iyi_from_artifact? && body.is_a?(Nop)
         expansion.body = body.clone
+        # And it has to say so. Codegen refuses to inline a def that came from
+        # a `.iyimod` — an absent body reads there as the simplest possible
+        # one, and inlining it would replace a call to the module's machine
+        # code with nothing at all — and it asks the def in front of it, which
+        # for a call with named arguments is this one. Unmarked, the `Nop` was
+        # inlined and the build died in codegen reading a type off it.
+        #
+        # Here and not beside the other properties above: the forwarding
+        # branch below builds a real body, out of this program's own code, and
+        # a def marked as the artifact's is *declared* rather than defined.
+        # Marked there too, the consumer stopped emitting the `new` it
+        # compiles for itself and kemal's four boundaries would not link:
+        # `undefined reference to Kemal::Exceptions::CustomException::new`,
+        # from the artifact's own object code.
+        expansion.iyi_from_artifact = true
       else
         new_body.push body
         expansion.body = Expressions.new(new_body).at(body)

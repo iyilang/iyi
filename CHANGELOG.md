@@ -412,6 +412,14 @@
   one, which makes the expansion a header as well; unmarked, codegen
   inlined the nothing it saw and the call disappeared.
 
+  A header *and no more*: the mark says "declared elsewhere", so it
+  belongs only on the expansion that keeps the empty body. Put on
+  every expansion, it stopped the consumer emitting the ordinary `new`
+  it compiles for itself, and kemal's four boundaries would not link —
+  `undefined reference to Kemal::Exceptions::CustomException::new`,
+  from the artifact's own object code, which is what
+  `bench/kemal_serves.sh` is for.
+
   Round-tripping the 60 `bench/std_*_exercise.iyi` through
   `--emit-iyimod` and `--use-iyimod`: 29 built and ran before this, 32
   do now. With the three entries below it, 21 before this session's

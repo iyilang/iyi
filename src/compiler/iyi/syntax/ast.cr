@@ -1551,6 +1551,17 @@ module Iyi
     # longer enough to say whose machine code this is.
     property? iyi_body_travelled = false
 
+    # iyi: written by the compiler rather than by the module (SPEC.md IV.2).
+    #
+    # An `enum` gets a question method per member wherever it is declared, so
+    # a consumer that read one out of an artifact would be handed a second
+    # copy of a method its own compiler already made. The author's own methods
+    # on that enum are a different thing entirely and have to travel — `Path::
+    # Kind.native` is one, and without it `std/path` and `std/dir` could not
+    # be consumed as artifacts — so the two have to be told apart, and the
+    # place that knows is the one that writes them.
+    property? iyi_compiler_made = false
+
     # iyi: the *written* def this one was instantiated from (SPEC.md III.6).
     #
     # A typed def is a clone of it, and the clone is what holds the body every
@@ -1604,6 +1615,7 @@ module Iyi
       a_def.iyi_from_impl = iyi_from_impl?
       a_def.iyi_from_artifact = iyi_from_artifact?
       a_def.iyi_body_travelled = iyi_body_travelled?
+      a_def.iyi_compiler_made = iyi_compiler_made?
       # The clone of an instance answers for the same written def: an expansion
       # of one is still that method's code.
       a_def.iyi_origin = iyi_origin

@@ -389,6 +389,26 @@
 
 ### Fixed
 
+- **An enum travelled with no methods, including the ones its author
+  wrote.** An enum gets a question method per member wherever it is
+  declared, so carrying those hands a consumer a second copy of what
+  its own compiler already made — and the rule that avoided it carried
+  nothing at all. A `def self.native` on `Path::Kind` is neither the
+  compiler's nor optional: `std/path` and `std/dir` were refused with
+  `undefined method 'native' for Std::Path::Path::Kind.class`, about a
+  method the module's own source has.
+
+  The two are told apart where they are written rather than by
+  guessing at names: `Def#iyi_compiler_made` is set on the question
+  methods as the enum visitor makes them, and everything else on the
+  enum goes through the same walk every other type's methods go
+  through — both sides of it, because a `def self.` lives on the
+  metaclass and that is most of what an enum's author writes.
+
+  38 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 41 do now: `std/dir`,
+  `std/path` and `std/errno`.
+
 - **A parameter written wider than its callers linked against a symbol
   nobody emitted.** The consumer keys a call on what the declaration
   says — that is the contract, and widening to it is what makes the

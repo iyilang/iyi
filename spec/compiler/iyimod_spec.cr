@@ -2229,6 +2229,72 @@ describe Iyi::IyiMod do
     end
   end
 
+  # And the methods the author wrote on an enum, which are not the ones the
+  # compiler writes.
+  #
+  # An enum gets a question method per member wherever it is declared, so
+  # carrying those hands the consumer a second copy of what its own compiler
+  # already made — which is why an enum travelled with no methods at all. A
+  # `def self.native` is neither: nobody but the module wrote it, and a
+  # consumer without it said `undefined method 'native' for
+  # Std::Path::Path::Kind.class`. `std/path` and `std/dir` stopped there.
+  #
+  # Both sides, because a `def self.` lives on the metaclass and that is most
+  # of what an enum's author writes. Run, because the point is the call: a
+  # declaration that arrived without machine code behind it would link
+  # against nothing.
+  it "carries the methods an enum's author wrote, and not the compiler's" do
+    with_tempdir("iyimod_enum_methods") do
+      Dir.mkdir_p "boot"
+      File.write "boot/kind.iyi", <<-IYI
+        module boot/kind
+
+        pub enum Kind : UInt8
+          POSIX   = 0
+          WINDOWS = 1
+
+          def self.native : Kind
+            Kind::POSIX
+          end
+
+          def label : String
+            posix? ? "posix" : "windows"
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/kind
+
+        puts Boot::Kind::Kind.native.label
+        puts Boot::Kind::Kind::WINDOWS.label
+        puts Boot::Kind::Kind::WINDOWS.windows?
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "posix\nwindows\ntrue"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      kind = Iyi::IyiMod.read(File.join("mods", "boot", "kind.iyimod"))
+        .exports.types.find! { |declaration| declaration.name == "Kind" }
+      kind.methods.map(&.name).should eq ["label", "native"]
+
+      File.delete "boot/kind.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   # A header with a splat in it: keyword-only parameters, called by name.
   #
   # This crashed the compiler rather than refusing anything. A def read from

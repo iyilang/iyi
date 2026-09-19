@@ -1500,7 +1500,7 @@ module Iyi
       # iyi: an `enum` travels as its members and the integer they are
       # numbered on (SPEC.md IV.2). See `iyi_enum_declaration`.
       if type.is_a?(EnumType)
-        return iyi_enum_declaration(type, name, "pub")
+        return iyi_enum_declaration(program, filename, type, name, "pub")
       end
 
       travels = iyi_bodies_travel?(type)
@@ -1568,7 +1568,12 @@ module Iyi
     # again would agree with it only by luck. Everything else an enum has, the
     # consumer's own compiler makes from this declaration — `value`, `new` and
     # a question method per member — so carrying them would declare each of
-    # them twice.
+    # them twice. The methods the *author* wrote on it are not among those and
+    # do travel: `Path::Kind.native` is one, and a consumer without it said
+    # `undefined method 'native' for Std::Path::Path::Kind.class` — which is
+    # what kept `std/path` and `std/dir` out of an artifact build. The two are
+    # told apart by `Def#iyi_compiler_made`, set where the question methods
+    # are written.
     #
     # Fields are nobody's: an enum has no instance variables, and the walk in
     # `iyi_type_declaration` asked for them anyway — `BUG: Level::Level
@@ -1582,7 +1587,8 @@ module Iyi
     # own code was the only thing using it. Seven of the sixty
     # `bench/std_*_exercise.iyi` failed that way, `std/path` and `std/dir`
     # among them.
-    private def iyi_enum_declaration(type : EnumType, name : String,
+    private def iyi_enum_declaration(program : Program, filename : String,
+                                     type : EnumType, name : String,
                                      visibility : String) : IyiMod::TypeDecl
       members = [] of {String, String}
       type.types?.try &.each do |member, constant|
@@ -1595,6 +1601,16 @@ module Iyi
         members << {member, constant.value.to_s}
       end
 
+      # Both sides, and through the same walk every other type's methods go
+      # through, so an enum's method gets the block, open-type and widened
+      # rules the rest of the library gets. Its bodies do not travel by being
+      # an enum's: it is a non-generic type with a unit of its own in the
+      # object code.
+      methods = [] of IyiMod::Signature
+      iyi_collect_type_methods program, filename, name, type, false, methods
+      iyi_collect_type_methods program, filename, name, type.metaclass, false, methods
+      methods.sort_by! &.name
+
       IyiMod::TypeDecl.new(
         name: name,
         kind: type.type_desc,
@@ -1602,7 +1618,7 @@ module Iyi
         assoc_types: [] of String,
         supertraits: [] of String,
         fields: [] of {String, String, String},
-        methods: [] of IyiMod::Signature,
+        methods: methods,
         visibility: visibility,
         # Written even when it is the default, because a member's number is
         # only the same number if the width is.
@@ -1694,7 +1710,7 @@ module Iyi
         # question methods the consumer's own compiler generates and none of
         # the members, and the consumer refused the file.
         if declared.is_a?(EnumType)
-          declarations << iyi_enum_declaration(declared, name,
+          declarations << iyi_enum_declaration(program, filename, declared, name,
             declared.private? ? "private" : "")
           next
         end
@@ -1746,6 +1762,13 @@ module Iyi
           # module's, and describing it as part of the module's surface would
           # be describing this compiler instead.
           next if item.def.body.is_a?(Primitive)
+
+          # And an enum's question methods, for the same reason one line up
+          # and a different mechanism: their bodies are ordinary code, so
+          # `Primitive` does not catch them, and the consumer's own compiler
+          # writes one per member out of the members it reads. See
+          # `Def#iyi_compiler_made`.
+          next if item.def.iyi_compiler_made?
 
           signature = IyiMod.signature(item.def)
           methods << signature

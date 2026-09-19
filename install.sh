@@ -76,50 +76,7 @@ else
   say "note: release $version publishes no SHA256SUMS; the tarball was not verified"
 fi
 
-# What a previous install left, removed before this one is unpacked.
-#
-# `tar` overwrites the files it carries and knows nothing about the ones
-# it no longer carries, so an upgrade used to leave every file the
-# release had deleted lying in the prefix. That is not tidy-versus-untidy:
-# `share/iyi/crystal` is a *library*, `crystal/dwarf.cr` requires
-# `./dwarf/**`, and a file a release removed is still required by the
-# glob. One real case, found on a machine that had upgraded in place:
-# `crystal/dwarf/line_numbers.cr` from an older release stayed behind and
-# every `--crystal` build died with `undefined constant FORM`, naming a
-# file the person never wrote and cannot find in the repository.
-#
-# So each install writes down what it unpacked, and the next one removes
-# exactly that - no more, since `bin/` and `lib/` are shared with whatever
-# else lives under the prefix. An install from before this manifest
-# existed leaves no list, and for it the two directories iyi owns whole
-# are cleared instead, which is where the library that poisons a build
-# lives.
-manifest="$prefix/share/iyi/installed-files"
-if [ -f "$manifest" ]; then
-  while IFS= read -r path; do
-    case "$path" in
-      /*|*..*) continue ;;  # a manifest is this script's own writing; refuse anything that climbs out
-    esac
-    [ -n "$path" ] || continue
-    [ -d "$prefix/$path" ] || rm -f "$prefix/$path"
-  done < "$manifest"
-  # Directories after their contents, and only the ones that emptied.
-  sort -r "$manifest" | while IFS= read -r path; do
-    case "$path" in
-      /*|*..*|"") continue ;;
-    esac
-    [ -d "$prefix/$path" ] && rmdir "$prefix/$path" 2>/dev/null || true
-  done
-elif [ -d "$prefix/share/iyi" ]; then
-  say "replacing the install at $prefix (no file list: it predates one)"
-  rm -rf "$prefix/share/iyi" "$prefix/share/licenses/iyi"
-fi
-
 tar -xzf "$tmp/$asset" -C "$prefix"
-
-# And what this install owns, for the next one to remove. Paths as the
-# archive names them, `./` stripped, so they read as prefix-relative.
-tar -tzf "$tmp/$asset" | sed 's|^\./||' | grep -v '^$' > "$manifest"
 
 "$prefix/bin/iyi" version >/dev/null || die "$prefix/bin/iyi does not start"
 

@@ -1878,10 +1878,16 @@ describe Iyi::IyiMod do
     end
   end
 
-  # What the initialiser does *not* reach: runnable code inside a type body
-  # belongs to the type, not to the module's top level, and nothing in the
-  # artifact holds it. Refused rather than linked, because the alternative is a
-  # program that runs with that part silently missing.
+  # What the initialiser does *not* reach: a statement in a type body. It is
+  # not a declaration, so nothing in `Exports` carries it, and it is not the
+  # module's own top level, so the initialiser does not either. Refused rather
+  # than linked, because the alternative is a program that runs with that part
+  # silently missing.
+  #
+  # A class variable was what this was written with, and that was wrong: its
+  # value travels in `TypeDecl#class_vars` and the consumer initialises it —
+  # `it "carries a class variable's value"` below is the proof. A bare `puts`
+  # is the shape that has nowhere to go.
   it "refuses to generate code against a module whose type body has to run" do
     with_tempdir("iyimod_type_body") do
       Dir.mkdir_p "boot"
@@ -1889,10 +1895,10 @@ describe Iyi::IyiMod do
         module boot/counter
 
         pub struct Counter
-          @@count = 7
+          puts "the type body ran"
 
           def count : Int32
-            @@count
+            7
           end
         end
         IYI
@@ -2075,6 +2081,70 @@ describe Iyi::IyiMod do
       artifact.initialiser.lines.should eq ["pub Plat::LOW = 1", "pub Plat::HIGH = 2"]
 
       File.delete "boot/plat.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # A class variable's value travels, so a module with one is consumable.
+  #
+  # This was the case the type-body rule was written for, on the reading that
+  # a class variable's initialiser belongs to the type and nothing carries it.
+  # Half of that is true — it is not in the module's initialiser — and the
+  # other half stopped being true when `TypeDecl#class_vars` started carrying
+  # the value as written, so the consumer declares `@@names : Array(String) =
+  # ["a", "b"]` and initialises it like any other.
+  #
+  # Three shapes, because "the value travels" has to mean more than a number:
+  # a literal, a collection literal (whose node `CleanupTransformer` rewrites
+  # into temporaries, which is why the *source* is what travels), and one
+  # whose value calls a private def of the module — a body the consumer never
+  # sees, reached in the artifact's own object code.
+  it "carries a class variable's value" do
+    with_tempdir("iyimod_class_var_value") do
+      Dir.mkdir_p "boot"
+      File.write "boot/reg.iyi", <<-IYI
+        module boot/reg
+
+        private def seed : Int32
+          41
+        end
+
+        pub struct Reg
+          @@count = 7
+          @@names = ["a", "b"]
+          @@base : Int32 = seed + 1
+
+          pub def self.report : String
+            @@count.to_s + ":" + @@names.join(",") + ":" + @@base.to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/reg
+
+        puts Boot::Reg::Reg.report
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "7:a,b:42"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      Iyi::IyiMod.read(File.join("mods", "boot", "reg.iyimod"))
+        .has_initialiser.should be_false
+
+      File.delete "boot/reg.iyi"
 
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"

@@ -389,6 +389,32 @@
 
 ### Fixed
 
+- **A class variable refused the module it was written in, over a value
+  the artifact was already carrying.** The rule that stops a build from
+  linking against a module whose type body has code to run was written
+  for exactly this case: a `@@count = 7` belongs to the type, so the
+  module's initialiser does not hold it. That reading stopped being
+  true when `TypeDecl#class_vars` began carrying the value as written —
+  a consumer reads `@@count : Int32 = 7`, declares the global and
+  initialises it like any other. So the refusal was over something that
+  travels.
+
+  Checked on the shapes that could have made it untrue rather than on a
+  number: a collection literal, whose node `CleanupTransformer` has
+  already rewritten into temporaries by the time an artifact is written
+  (which is why the *source* is what travels), and `@@base : Int32 =
+  seed + 1`, whose value calls a private def of the module — a body the
+  consumer never sees and reaches in the artifact's own object code.
+  Both answer the same from source and from the artifact.
+
+  What the rule still refuses is what it is for: a statement in a type
+  body. `puts "x"` there is not a declaration, so nothing in `Exports`
+  carries it, and it is not the module's own top level, so the
+  initialiser does not either — a program built against that artifact
+  would run without it. The spec that pinned this named a class
+  variable and now names a `puts`, because it was pinning the wrong
+  shape.
+
 - **A `lib`'s `fun` and a constant a macro wrote were read as code that
   has to run, and refused the module they were written in.** Both are
   declarations, and the check that asks whether a module's type body

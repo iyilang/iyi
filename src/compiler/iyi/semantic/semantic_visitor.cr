@@ -1375,8 +1375,25 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     prefix.empty? ? name : "#{prefix}::#{name}"
   end
 
-  # iyi: a type body asked what a file's top level is asked, with the constants
-  # `iyi_collect_type_constants` carries left out of the answer.
+  # iyi: a type body asked what a file's top level is asked, with the two
+  # things a type body *does* carry left out of the answer.
+  #
+  # A constant is one: `iyi_collect_type_constants` puts it in the initialiser.
+  # A class variable is the other, and it is a correction to this file's own
+  # comment. Its initialiser was the case this rule was written for — it
+  # belongs to the type rather than to the module's top level, so the
+  # initialiser does not hold it — but `TypeDecl#class_vars` has carried the
+  # value as written since the day a `@@seen` cost a consumer an undefined
+  # symbol, and `render_class_var` writes it back as `@@count : Int32 = 7`.
+  # So the consumer declares it, initialises it, and the refusal was over
+  # something that already travels: measured on `@@names = ["a", "b"]` and on
+  # `@@base : Int32 = seed + 1`, which calls a private def of the module whose
+  # body is in the artifact's object code — both answer the same from source
+  # and from the artifact.
+  #
+  # What is left is what the rule is for: a statement in a type body. `puts
+  # "x"` there has no declaration to ride on and nothing carries it, so a
+  # program built against the artifact would run without it.
   private def iyi_type_body_initialiser?(node : ASTNode) : Bool
     case node
     when Expressions
@@ -1386,7 +1403,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when VisibilityModifier
       iyi_type_body_initialiser?(node.exp)
     when Assign
-      !node.target.is_a?(Path)
+      target = node.target
+      !(target.is_a?(Path) || target.is_a?(ClassVar))
     else
       if expansion = iyi_expansion(node)
         iyi_type_body_initialiser?(expansion)

@@ -8126,24 +8126,47 @@ end
 # demand from what already exists — no captured state, no boot order to
 # get wrong. `ARGC_UNSAFE`/`ARGV_UNSAFE` are the compiler's predefined
 # constants, initialised from `main`'s own parameters before anything
-# else runs (codegen/const.cr); `environ` is the C runtime's exported
-# global. A first draft captured argv in class variables from `main` and
-# read zeros: `__iyi_main` runs the class-variable initialisers
-# *after* `main`'s prologue stored, wiping it — symbols do not have that
-# ordering problem.
+# else runs (codegen/const.cr); on the POSIX targets `environ` is the C
+# runtime's exported global. A first draft captured argv in class
+# variables from `main` and read zeros: `__iyi_main` runs the
+# class-variable initialisers *after* `main`'s prologue stored, wiping
+# it — symbols do not have that ordering problem.
 #
 # On wasm32 there is no environment to read and `env` answers nil for
 # every name: the sandbox story (SPEC.md III.12) is that the runtime
 # hands the program nothing, and an absent surface beats a permission.
 #
-# On Windows the exported name is not `environ`. The CRT's data symbol is
-# `_environ`, so a program that read one variable failed to link with
-# `unresolved external symbol __imp_environ` — the accessor `__p__environ`
-# is what the CRT exports for this, it hands back the address of that
-# pointer, and using it needs no fourth CRT library on the link line.
+# On Windows there is no `environ` worth reaching. The CRT's `_environ`,
+# whose address `__p__environ` hands back, is the *ANSI* environment: a
+# copy of the real block folded into the process's code page. Measured
+# with PowerShell setting `IYI_PROBE_TR` to `değer-日本`, 13 bytes of
+# UTF-8, and the program reading it back through that table: `deger-??`,
+# 8 bytes — `ğ` best-fitted to `g`, `ı` to `i`, `ş` to `s`, and `日本` to
+# two question marks, the same defect the paths and the console had.
+#
+# It is also not the environment anybody else reads. `ENV["X"] = …` used
+# to install a table of its own here, and measured, after that write
+# `GetEnvironmentStringsW` — the block `CreateProcess` copies into a
+# child — did not carry the variable at all, while the CRT table did. Two
+# environments that disagreed, and the one every child inherits was the
+# one iyi was not writing.
+#
+# So on Windows the platform's own block is the only environment: a lookup
+# is `GetEnvironmentVariableW`, a write and a delete are
+# `SetEnvironmentVariableW`, and enumeration is `GetEnvironmentStringsW`
+# (`src/std/env.iyi`). UTF-16 both ways, nothing folded, and one
+# environment instead of two.
 {% if flag?(:win32) %}
+  @[Link("kernel32")]
   lib LibIyiEnv
-    fun environ_table = __p__environ : UInt8***
+    fun GetEnvironmentVariableW(name : UInt16*, buffer : UInt16*, size : Int32) : Int32
+    fun SetEnvironmentVariableW(name : UInt16*, value : UInt16*) : Int32
+    fun GetEnvironmentStringsW : UInt16*
+    fun FreeEnvironmentStringsW(block : UInt16*) : Int32
+    # The last-error slot is half of `GetEnvironmentVariableW`'s answer and
+    # the call leaves it alone when it succeeds, so it is cleared before
+    # asking; `LibC.GetLastError` reads it back.
+    fun SetLastError(error : Int32)
   end
 {% elsif !flag?(:wasm32) %}
   lib LibIyiEnv
@@ -8151,28 +8174,121 @@ end
   end
 {% end %}
 
-# The environment's table, and the only two operations anything here
-# performs on it: read the current one, and put a new one in its place.
-# Windows reaches it through the accessor, everything else through the
-# symbol, and no caller above has to know which.
-{% unless flag?(:wasm32) %}
+{% if flag?(:win32) %}
+  # A name and a value are UTF-8 on iyi's side and UTF-16 on Windows', and
+  # these two are the whole of the conversion: `MultiByteToWideChar` and
+  # `WideCharToMultiByte` at CP_UTF8 (65001), the same pair
+  # `__iyi_wide_path` and `__iyi_utf8_size_from_wide` put a path through.
+  #
+  # Two differences from those, both of them the environment's. The flags
+  # are strict — MB_ERR_INVALID_CHARS (8) and WC_ERR_INVALID_CHARS (128) —
+  # where a path passes 0: with 0, bytes that are not UTF-8 become U+FFFD
+  # and a lone surrogate in a value becomes U+FFFD too, so what comes back
+  # is a half-converted string that no longer matches the name it was asked
+  # for, and nil is the honest answer for both. And the count is explicit
+  # rather than `-1`: a name in `GetEnvironmentStringsW`'s block is the
+  # slice in front of the first `=` and carries no terminator of its own,
+  # which a NUL-terminated-only conversion cannot express.
+  #
+  # Windows documents a zero count as a failed call, so the empty string is
+  # answered here rather than asked about — a variable whose value is `""`
+  # exists, and `ENV["X"] = ""` is a write the platform keeps.
+  def __iyi_win_env_wide(text : UInt8*, bytes : Int32) : UInt16*
+    if bytes == 0
+      empty = Pointer(UInt16).malloc(1_u64)
+      empty[0] = 0_u16
+      return empty
+    end
+    needed = LibC.MultiByteToWideChar(65001, 8, text, bytes, Pointer(UInt16).new(0_u64), 0)
+    return Pointer(UInt16).new(0_u64) if needed <= 0
+    # An explicit byte count leaves the terminator out of the answer and out
+    # of the buffer, and every one of these goes to a `*W` call that wants
+    # one, so it is written on.
+    wide = Pointer(UInt16).malloc((needed + 1).to_u64)
+    written = LibC.MultiByteToWideChar(65001, 8, text, bytes, wide, needed)
+    return Pointer(UInt16).new(0_u64) if written <= 0
+    wide[written] = 0_u16
+    wide
+  end
+
+  def __iyi_win_env_text(wide : UInt16*, count : Int32) : String | Nil
+    return "" if count == 0
+    needed = LibC.WideCharToMultiByte(65001, 128, wide, count, Pointer(UInt8).new(0_u64), 0,
+      Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+    return nil if needed <= 0
+    String.new(needed) do |target|
+      LibC.WideCharToMultiByte(65001, 128, wide, count, target, needed,
+        Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
+    end
+  end
+
+  # ERROR_ENVVAR_NOT_FOUND, which is the one thing a zero answer from
+  # `GetEnvironmentVariableW` can mean besides a value of `""`.
+  IYI_WIN_ENVVAR_NOT_FOUND = 203
+
+  # One variable out of the block. `GetEnvironmentVariableW` says three
+  # different things with one number, and reading two of them as one is the
+  # confusion this shape exists to avoid: the characters it copied when the
+  # buffer held the value, the characters the value *needs* — terminator
+  # included — when it did not, and 0 both when the variable is absent and
+  # when its value is the empty string. Only the error slot separates the
+  # last two, and the call does not write it on success, so it is cleared
+  # first.
+  #
+  # 256 characters is one call for every ordinary variable and two for
+  # `PATH`; the retry asks for exactly what the first call said it needed,
+  # so it repeats only if something grew the value in between.
+  def __iyi_win_env_get(name : UInt8*, name_bytes : Int32) : String | Nil
+    wide = __iyi_win_env_wide(name, name_bytes)
+    return nil if wide.address == 0_u64
+    room = 256
+    buffer = Pointer(UInt16).malloc(room.to_u64)
+    LibIyiEnv.SetLastError(0)
+    length = LibIyiEnv.GetEnvironmentVariableW(wide, buffer, room)
+    while length >= room
+      room = length
+      buffer = Pointer(UInt16).malloc(room.to_u64)
+      LibIyiEnv.SetLastError(0)
+      length = LibIyiEnv.GetEnvironmentVariableW(wide, buffer, room)
+    end
+    if length == 0
+      return nil if LibC.GetLastError == IYI_WIN_ENVVAR_NOT_FOUND
+      return ""
+    end
+    __iyi_win_env_text(buffer, length)
+  end
+
+  # A write and a delete are the same call: Windows spells the deletion
+  # with a null value and has no separate entry point for it. Both answer
+  # false rather than raising when the name or the value is not UTF-8,
+  # because the caller in `src/std/env.iyi` is the one that knows whether
+  # that is a refusal or a nil.
+  def __iyi_win_env_set(name : UInt8*, name_bytes : Int32, value : UInt8*, value_bytes : Int32) : Bool
+    wide_name = __iyi_win_env_wide(name, name_bytes)
+    return false if wide_name.address == 0_u64
+    wide_value = __iyi_win_env_wide(value, value_bytes)
+    return false if wide_value.address == 0_u64
+    LibIyiEnv.SetEnvironmentVariableW(wide_name, wide_value) != 0
+  end
+
+  def __iyi_win_env_unset(name : UInt8*, name_bytes : Int32) : Bool
+    wide_name = __iyi_win_env_wide(name, name_bytes)
+    return false if wide_name.address == 0_u64
+    LibIyiEnv.SetEnvironmentVariableW(wide_name, Pointer(UInt16).new(0_u64)) != 0
+  end
+{% end %}
+
+# The environment's table, and the only two operations anything performs on
+# it: read the current one, and put a new one in its place. Windows is
+# absent from both because it has no table to edit — nothing there reads
+# `_environ` any more.
+{% if !flag?(:wasm32) && !flag?(:win32) %}
   def __iyi_environ : UInt8**
-    {% if flag?(:win32) %}
-      table = LibIyiEnv.environ_table
-      return Pointer(Pointer(UInt8)).new(0_u64) if table.address == 0_u64
-      table.value
-    {% else %}
-      LibIyiEnv.environ
-    {% end %}
+    LibIyiEnv.environ
   end
 
   def __iyi_set_environ(entries : UInt8**) : Nil
-    {% if flag?(:win32) %}
-      table = LibIyiEnv.environ_table
-      table.value = entries if table.address != 0_u64
-    {% else %}
-      LibIyiEnv.environ = entries
-    {% end %}
+    LibIyiEnv.environ = entries
     nil
   end
 {% end %}
@@ -8298,6 +8414,11 @@ class Program
   def self.env(name : String) : String | Nil
     {% if flag?(:wasm32) %}
       nil
+    {% elsif flag?(:win32) %}
+      # Windows' own block, not the CRT's ANSI copy of it: that copy
+      # answered a variable PowerShell had set to `değer-日本` as
+      # `deger-??`.
+      __iyi_win_env_get(name.to_unsafe, name.bytesize)
     {% else %}
       pointer = __iyi_environ
       return nil if pointer.address == 0_u64

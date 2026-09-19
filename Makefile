@@ -379,6 +379,15 @@ uninstall: uninstall_compiler uninstall_man uninstall_completions
 .PHONY: install_iyi
 install_iyi: ## iyi: install `iyi` and its prelude at DESTDIR
 install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
+# The library is replaced, not merged into. `cp -R` writes the files it has
+# and leaves the ones a release deleted where they are, and this directory is
+# not a pile of files - `crystal/dwarf.cr` requires `./dwarf/**`, so one stale
+# file from an older install is still *required*, and a machine that upgraded
+# in place had every `--crystal` build die on a constant a deleted file
+# mentioned. Under `DESTDIR` (packaging, and the tarball rule above) the
+# directory is fresh and this does nothing; installing over yourself is where
+# it matters.
+	rm -rf "$(DESTDIR)$(DATADIR)/iyi"
 	$(INSTALL) -d -m 0755 "$(DESTDIR)$(BINDIR)/"
 	$(INSTALL) -m 0755 "$(O)/iyi$(EXE)" "$(DESTDIR)$(BINDIR)/iyi$(EXE)"
 

@@ -2531,6 +2531,81 @@ describe Iyi::IyiMod do
     end
   end
 
+  # `@[Primitive]` is a declaration a module makes, so it travels.
+  #
+  # A def wearing it has no body — the instruction is the body, and the
+  # compiler puts one there — so the rule that keeps `allocate` and the
+  # prelude's own instructions out of an artifact ("anything whose body is a
+  # `Primitive` is the compiler's") swept it up too. `std/float` declares the
+  # whole matrix for `Float32` the way the prelude declares it for `Float64`,
+  # and a consumer that read the artifact got a `Float32` with no arithmetic:
+  # `wrong number of arguments for 'Float32#+' (given 1, expected 0)`, about
+  # the prelude's unary plus, which was the only `+` left.
+  #
+  # The annotation is what makes the consumer's copy the same instruction, so
+  # it travels on the signature — the format change this needed. No body
+  # travels with it: there is none, and one would be a promise of a symbol
+  # nobody emitted.
+  #
+  # On a reopened prelude type, which is where a module writes these, and run
+  # with the source deleted so the arithmetic is the artifact's.
+  it "carries a @[Primitive] the module declared" do
+    with_tempdir("iyimod_primitive") do
+      Dir.mkdir_p "boot"
+      File.write "boot/f32.iyi", <<-IYI
+        module boot/f32
+
+        struct ::Float32
+          @[::Primitive(:binary)]
+          def +(other : Float32) : Float32
+          end
+
+          @[::Primitive(:convert)]
+          def to_i32 : Int32
+          end
+
+          def doubled : Float32
+            self + self
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/f32
+
+        puts (1.5_f32 + 2.0_f32).to_i32
+        puts 1.5_f32.doubled.to_i32
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "3\n3"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/f32.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+
+      # And what carried it: the annotation on the signature, and no body,
+      # because an instruction has none.
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "f32.iyimod"))
+      float = artifact.reopened.find! { |declaration| declaration.name == "::Float32" }
+      plus = float.methods.find! { |signature| signature.name == "+" }
+      plus.annotations.should eq ["@[::Primitive(:binary)]"]
+      artifact.mono_bodies.keys.should_not contain "::Float32#+(other : Float32)"
+      artifact.mono_bodies.keys.should contain "::Float32#doubled()"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

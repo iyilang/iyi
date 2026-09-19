@@ -137,6 +137,7 @@ def measured() -> dict[str, int]:
         "generated": generated_project_lines(),
         "spec_iyi": iyi_spec_lines(),
         "targets": targets(),
+        "iyimod_format": iyimod_format(),
     }
 
 
@@ -289,6 +290,26 @@ def targets() -> int:
         )
     return len([t for t in m.group(1).replace("\\", "").split() if t])
 
+
+def iyimod_format() -> int:
+    """The `.iyimod` format version the compiler writes.
+
+    SPEC.md quotes it as a current fact about the artifact, and it said v19
+    while the compiler wrote v51 — thirty-three bumps, none of which anyone
+    thought to carry into the sentence. Read out of the constant, like every
+    other number here.
+    """
+    text = (REPO / "src/compiler/iyi/iyimod.cr").read_text()
+    m = re.search(r"^\s*FORMAT_VERSION = (\d+)_u32", text, re.M)
+    if not m:
+        raise SystemExit(
+            "doc_numbers: src/compiler/iyi/iyimod.cr no longer states "
+            "`FORMAT_VERSION = N_u32`, so this check cannot find it and is "
+            "not checking anything"
+        )
+    return int(m.group(1))
+
+
 # Each entry: the measured key, the pattern that quotes it as current, the file,
 # and how many times that pattern is expected to appear there. The count is
 # load-bearing: two sites in one file shared a pattern, and dropping one of them
@@ -320,6 +341,9 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # first of them existed.
     ("compiler", r"\| ([\d,]+) lines, none of it written in iyi", "SPEC.md", 1),
     ("spec_iyi", r"\| ([\d,]+) for iyi \|", "SPEC.md", 1),
+    # The artifact format, which drifted furthest of anything here: the
+    # sentence said v19 while the compiler wrote v51.
+    ("iyimod_format", r"`\.iyimod` v([\d,]+), checksum per section", "SPEC.md", 1),
     ("prelude_kb", r"library is ([\d,]+) KB on disk", "README.md", 1),
     ("prelude_kb", r"iyi's own ([\d,]+) KB prelude", "README.md", 1),
     ("std_kb", r"the ([\d,]+) KB of `src/std`", "README.md", 1),

@@ -53,7 +53,10 @@ module Iyi::IyiMod
   # hashed to, because a bound shard's source is a checkout rather than one
   # file at a module path — and without them a consumer read the artifact as
   # current forever (`Section::Inputs`).
-  FORMAT_VERSION = 51_u32
+  # v52: a signature carries the annotations written above it, because
+  # `@[Primitive]` is a declaration a module makes and not one the compiler
+  # made — see `Signature#annotations`.
+  FORMAT_VERSION = 52_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -439,7 +442,23 @@ module Iyi::IyiMod
     # drift. Empty when the author wrote none; a consumer of `--json` or
     # `mod context` renders it, and a model reading the surface gets the
     # intent line with the shape.
-    doc : String = ""
+    doc : String = "",
+    # iyi: the annotations written above the `def`, as source text.
+    #
+    # `@[::Primitive(:binary)]` is the one that made this necessary. A def
+    # wearing it has no body — the instruction *is* the body, and the compiler
+    # puts one there — so `iyi_collect_type_methods`' "anything whose body is
+    # a `Primitive` is the compiler's" read it as the compiler's and dropped
+    # it. It is the module's: `std/float` declares the whole `@[Primitive]`
+    # matrix for `Float32` the way the prelude does for `Float64`, and a
+    # consumer that read the artifact got a `Float32` with no arithmetic at
+    # all — `wrong number of arguments for 'Float32#+' (given 1, expected 0)`,
+    # about the prelude's unary `+`, which was the only one left.
+    #
+    # Text, like `TypeDecl#annotations` beside it and for the same reason: an
+    # annotation is source a reader parses back, and translating it through a
+    # record would be a second spelling of something that already has one.
+    annotations : Array(String) = [] of String
 
   # A type the module declares: `pub struct`, `pub class`, `pub trait` — and,
   # since the object code started travelling, the ones it does not export.
@@ -2075,6 +2094,8 @@ module Iyi::IyiMod
       required: a_def.abstract?,
       doc: a_def.doc || "",
       visibility: a_def.visibility.private? ? "private" : "",
+      # As the module wrote them. See `Signature#annotations`.
+      annotations: a_def.all_annotations.try(&.map(&.to_s)) || [] of String,
     )
   end
 
@@ -2254,6 +2275,11 @@ module Iyi::IyiMod
     # comment lines a consumer's parser reattaches. Surface for a reader —
     # a model most of all — and absent from the interface hash on purpose.
     signature.doc.each_line { |line| io << indent << "# " << line << '\n' } unless signature.doc.empty?
+    # Above the declaration too, and before `pub`: that is where they were
+    # written and the only place they mean anything. `@[::Primitive(:binary)]`
+    # is what makes the def a machine instruction rather than a promise of a
+    # symbol nobody emitted.
+    signature.annotations.each { |source| io << indent << source << '\n' }
     io << indent
     io << "pub " if exported
     io << "private " if signature.visibility == "private"
@@ -2963,6 +2989,7 @@ module Iyi::IyiMod
       io.write_byte(signature.required ? 1_u8 : 0_u8)
       write_string io, (docs ? signature.doc : "")
       write_string io, signature.visibility
+      write_strings io, signature.annotations
     end
   end
 
@@ -2977,8 +3004,9 @@ module Iyi::IyiMod
       required = io.read_byte == 1_u8
       doc = read_string(io)
       visibility = read_string(io)
+      annotations = read_strings(io)
       Signature.new(name, receiver, parameters, block_parameter, return_type,
-        free_variables, required, visibility, doc)
+        free_variables, required, visibility, doc, annotations)
     end
   end
 

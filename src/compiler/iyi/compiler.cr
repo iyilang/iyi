@@ -999,10 +999,17 @@ module Iyi
               # macro wrote is located in its expansion, not in the file.
               next unless a_def.location.try(&.original_filename) == filename
               next if a_def.iyi_from_impl? || a_def.new? || a_def.abstract?
-              next if a_def.body.is_a?(Primitive)
+              # The compiler's instructions are not this module's to describe;
+              # the ones it wrote `@[Primitive]` above are. `std/float` writes
+              # the whole matrix for `::Float32` this way.
+              primitive = a_def.body.is_a?(Primitive)
+              next if primitive && !iyi_primitive_written?(a_def)
               signature = IyiMod.signature(a_def, check_block: false)
               methods << signature
-              iyi_record_mono_body program, filename, container, signature, a_def
+              # An instruction has no body to carry — it *is* the body — and
+              # the annotation travelling on the signature is what makes the
+              # consumer's copy the same instruction.
+              iyi_record_mono_body program, filename, container, signature, a_def unless primitive
             end
           end
         end
@@ -1761,7 +1768,17 @@ module Iyi
           # whose body is a `Primitive` is the compiler's rather than the
           # module's, and describing it as part of the module's surface would
           # be describing this compiler instead.
-          next if item.def.body.is_a?(Primitive)
+          #
+          # Unless the module asked for it. `@[Primitive]` is a declaration a
+          # module makes — `std/float` writes the whole matrix for `Float32`
+          # the way the prelude writes it for `Float64` — and the body it has
+          # no need of is the instruction itself. Dropped, a consumer got a
+          # `Float32` with no arithmetic: `wrong number of arguments for
+          # 'Float32#+' (given 1, expected 0)`, about the prelude's unary
+          # plus, the only `+` left. The annotation travels with the
+          # signature, which is what makes the consumer's copy the same
+          # instruction rather than a promise of a symbol nobody emitted.
+          next if item.def.body.is_a?(Primitive) && !iyi_primitive_written?(item.def)
 
           # And an enum's question methods, for the same reason one line up
           # and a different mechanism: their bodies are ordinary code, so
@@ -1828,7 +1845,9 @@ module Iyi
       type.as?(ModuleType).try &.defs.try &.each_value do |items|
         items.each do |item|
           next if item.def.new?
-          next if item.def.body.is_a?(Primitive)
+          # The module's own `@[Primitive]` is not the compiler's — see the
+          # exported side.
+          next if item.def.body.is_a?(Primitive) && !iyi_primitive_written?(item.def)
           next if item.def.abstract?
 
           signature = IyiMod.signature(item.def, check_block: false)
@@ -1843,6 +1862,17 @@ module Iyi
         end
       end
       signatures.sort_by! &.name
+    end
+
+    # iyi: whether the *module* asked for this def's `Primitive` body.
+    #
+    # `allocate` and the prelude's instructions arrive with one and no
+    # annotation on the `Def` node, because the compiler puts them there. A
+    # `@[Primitive(:binary)]` in a module's own source is on the node, which
+    # is the difference. Written absolutely or not — `@[::Primitive]` is how
+    # `src/std` spells it — so the last name is what is compared.
+    private def iyi_primitive_written?(a_def : Def) : Bool
+      !!a_def.all_annotations.try &.any? { |ann| ann.path.names.last? == "Primitive" }
     end
 
     # iyi: whether a def is instantiated per call site because it takes a

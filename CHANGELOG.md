@@ -412,6 +412,35 @@
   `bench/lsp_session.py` step 37 had been failing on this defect
   whenever a worker happened to retire at that point, which is a gate
   that fails for a real reason and names none of it.
+- **`@[Primitive]` is a declaration a module makes, and the artifact
+  threw it away.** A def wearing one has no body — the instruction is
+  the body, and the compiler puts one there — so the rule that keeps
+  `allocate` and the prelude's own instructions out of an artifact
+  ("anything whose body is a `Primitive` is the compiler's") swept up
+  the module's too. `std/float` declares the whole `@[Primitive]`
+  matrix for `Float32` the way the prelude declares it for `Float64`,
+  and a consumer that read the artifact got a `Float32` with no
+  arithmetic at all: `wrong number of arguments for 'Float32#+' (given
+  1, expected 0)`, about the prelude's unary plus, which was the only
+  `+` left.
+
+  The two are told apart by whether the annotation is on the `Def` —
+  the compiler's instructions arrive without one — and the annotation
+  travels with the signature, which is what makes the consumer's copy
+  the same instruction rather than a promise of a symbol nobody
+  emitted. No body travels with it: there is none.
+
+  **`.iyimod` is format v52**, because a signature carries its
+  annotations now. An artifact from v51 is refused and rebuilt, never
+  migrated (SPEC.md IV.5), which is what the version is for. SPEC.md
+  said v19 — thirty-three bumps behind, and nothing checked it, so
+  `bench/doc_numbers.py` reads the constant now like it reads every
+  other number there.
+
+  41 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 46 do now:
+  `std/atomic`, `std/compress`, `std/int`, `std/number` and
+  `std/reference_storage`.
 
 - **An enum travelled with no methods, including the ones its author
   wrote.** An enum gets a question method per member wherever it is

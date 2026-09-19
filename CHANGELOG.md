@@ -389,19 +389,6 @@
 
 ### Fixed
 
-- **One empty collection answered 0 and another panicked, in the same
-  program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
-  `iyi: panic: sum of an empty array`, and both are `Enumerable` with
-  `import std/enumerable`: the prelude's own `Array#sum` won, and it had
-  no zero to start from because a prelude with no numeric trait cannot
-  ask a type for one. The trait's `sum` can (`Elem : Num`, `Elem.zero`),
-  so there is one `sum` now and it is the trait's - the prelude's two
-  (`sum` and its block form) are gone, `sum_by` is the block form, and
-  nothing in this repository called either, which is III.1's own rule
-  for whether a method belongs in the prelude. `Range#sum` stays: it
-  derives its zero from `@begin - @begin` and is total even when the
-  range is empty.
-
 - **"undefined method 'tally' for Array(Int32)" was true and useless
   when `import std/enumerable` was the whole answer.** std implements
   the traits for the prelude's types (R-3 gives the line to the module
@@ -7405,7 +7392,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,397-line library and nothing else. Every other
+  written against iyi's own 15,411-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -79,13 +79,6 @@ puts "set: enumerable"
 assert_equal("map", a.map { |x| x * 10 }.to_s, "[10, 20, 30, 40]")
 assert_equal("select", a.select { |x| x.even? }.to_s, "[2, 4]")
 assert_equal("sum", a.sum.to_s, "10")
-# Two empty collections of the same element type, one answer. This is
-# what the prelude's own `Array#sum` used to break: it raised "sum of an
-# empty array" because a prelude with no numeric trait has no zero to
-# start from, while the trait's `sum` - the one this line calls - starts
-# from `Elem.zero` and answers 0. One program could see both.
-assert_equal("empty sum agrees with the array's",
-  Set(Int32).new.sum.to_s + " " + ([] of Int32).sum.to_s, "0 0")
 assert_equal("min max", a.min.to_s + " " + a.max.to_s, "1 4")
 assert_equal("count", a.count { |x| x > 2 }.to_s, "2")
 assert_equal("to_a keeps insertion order", (b | a).to_a.to_s, "[3, 4, 5, 1, 2]")

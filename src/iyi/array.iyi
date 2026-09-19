@@ -123,11 +123,17 @@ class Array(T)
     result
   end
 
-  # No zero to start from — that would need a trait this prelude does not
-  # have — so an empty array is a panic rather than a 0. The trait's own `sum`
-  # does have one (`Num.zero`) and answers for the empty case.
+  # The sum of the elements, and the type's zero when there are none.
+  #
+  # The zero is `T.zero` (src/iyi/number.iyi), and it is why this method
+  # no longer disagrees with `std/enumerable`'s `sum` about an empty
+  # collection: `Set(Int32).new.sum` answered 0 while this one raised
+  # "sum of an empty array", in one program. Something that is not a
+  # number has no zero, so `["a", "b"].sum` is a compile error here -
+  # where Crystal puts the same refusal - and `join` is how strings are
+  # put together.
   def sum : T
-    raise "sum of an empty array" if empty?
+    return T.zero if empty?
 
     total = @buffer[0]
     index = 1
@@ -138,9 +144,10 @@ class Array(T)
     total
   end
 
-  # The sum of what the block answers for each element.
+  # The sum of what the block answers for each element, and the block's
+  # own zero when there are none.
   def sum(& : T -> U) : U forall U
-    raise "sum of an empty array" if empty?
+    return U.zero if empty?
 
     total = yield @buffer[0]
     index = 1

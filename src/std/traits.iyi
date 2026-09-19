@@ -90,11 +90,11 @@ end
       end
     end
 
+    # No `self.zero` here: the prelude declares these five numbers and
+    # gives each its zero (src/iyi/number.iyi), because `Array#sum` needs
+    # one for an empty array and a `.iyi` file may not redefine a method
+    # the prelude has (R-3). The requirement is satisfied by that one.
     impl Num for {{ t[0].id }}
-      def self.zero : self
-        {{ t[1].id }}
-      end
-
       def self.one : self
         {{ t[2].id }}
       end
@@ -122,11 +122,8 @@ impl Comparable for Float64
   end
 end
 
+# `self.zero` is the prelude's too, as above.
 impl Num for Float64
-  def self.zero : self
-    0.0
-  end
-
   def self.one : self
     1.0
   end

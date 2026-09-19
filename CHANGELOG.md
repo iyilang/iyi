@@ -211,7 +211,7 @@
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
   a conditional, `else` included - which is **1,383 lines**, and the
-  library is **3,219** of 3,734 with 515 to spare. `4,602` is what opening
+  library is **3,258** of 3,734 with 476 to spare. `4,641` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -440,6 +440,42 @@
   `bench/windows_exercise.sh` gates both: an 18-byte argument and a
   13-byte variable arrive whole, and the step runs only on Windows,
   because everywhere else the bytes are the bytes.
+- **One empty collection answered 0 and another panicked, in the same
+  program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
+  `iyi: panic: sum of an empty array`: the prelude's own `Array#sum`
+  won over the trait's, and it had no zero to start from, because an
+  identity belongs to the *type* and there is no element to ask when
+  the collection is empty. The prelude has one now - `Int32.zero` and
+  its four siblings, a table beside the numbers themselves
+  (`src/iyi/number.iyi`) - so both answer 0, and `std/traits` stops
+  writing `self.zero` for those five because a `.iyi` file may not
+  redefine a method the prelude has (R-3).
+
+  Summing something that is not a number is a compile error now rather
+  than a panic at run time: `["a", "b"].sum` says a sum starts from the
+  type's zero, that only numbers have one, and that strings are put
+  together with `join`. Crystal refuses the same program for the same
+  reason. `bench/std_set_exercise.iyi` holds the agreement - the empty
+  set and the empty array, in one line, both `0`.
+
+- **"undefined method 'tally' for Array(Int32)" was true and useless
+  when `import std/enumerable` was the whole answer.** std implements
+  the traits for the prelude's types (R-3 gives the line to the module
+  that owns the trait), so the method a person asked for is often one
+  import away rather than absent - and the message sent them to `iyi
+  doc` or to `--crystal` for something the library already has. It now
+  names the module and the trait: "`std/enumerable` implements
+  `Enumerable` for Array and that is where `tally` is". A file walk, on
+  the error path only, no `Regex` (the compiler links no pcre2, III.9).
+  Where no std module has the method, the size rule is still what the
+  reader is shown.
+
+- **A block given to the plain name now names the `_by` sibling.** This
+  library pairs `sum` with `sum_by` and `min` with `min_by` where
+  Crystal passes a block to the same name, so "'Array(Int32)#sum' is
+  not expected to be invoked with a block" was a full stop one word
+  from the answer. The pair is looked up on the receiver rather than
+  listed, so it cannot go stale.
 - **Installing iyi over iyi left the last release's files in the
   library, and that is a broken `--crystal`.** `install.sh` unpacked the
   tarball into the prefix, and `tar` knows nothing about files a release
@@ -556,9 +592,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,383** and **3,219**, held to the sentences that quote
+  without it: **1,383** and **3,258**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 868 over, as the library with
+  breach is still what the floor costs — 907 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7424,7 +7460,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,658-line library and nothing else. Every other
+  written against iyi's own 15,697-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

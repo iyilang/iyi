@@ -186,6 +186,10 @@ module Iyi
     "/"           => "Integer division is `//` here (`7 // 2` is 3); `/` is the floats' and answers a `Float64` only for them.",
     "%"           => "`%` on a String is a format string, and it comes with `import std/format` (`printf`, `sprintf` and `String#%`).",
     "gets_to_end" => "`read_all` reads the rest of an IO here; `gets` reads a line.",
+    # `Array#sum` asks the element type for its zero, because an empty
+    # array has no element to ask. A type that is not a number has none,
+    # and the sentence a person is missing is what to use instead.
+    "zero" => "A sum starts from the type's zero, and only numbers have one (`Int32.zero`). Strings are put together with `join`, and anything else with `reduce`.",
   }
 
   # A top-level call whose argument arrived in Crystal's unit: the type
@@ -345,6 +349,20 @@ class Iyi::Call
       else
         "'#{full_name(owner, def_name)}' is expected to be invoked with a block, but no block was given"
       end
+
+    # iyi: where Crystal passes a block to the same name, this library
+    # pairs the method with a `_by` sibling — `sum` and `sum_by`, `min`
+    # and `min_by`. Somebody who wrote the block is one word away, and
+    # the pair is asked for rather than listed: a `_by` on this very
+    # receiver is the answer, and a table would go stale.
+    if block && !def_name.ends_with?("_by")
+      paired = "#{def_name}_by"
+      unless owner.lookup_defs(paired).empty?
+        error_message += "\n\n`#{paired}` is the block form: this library " \
+                         "spells \"the same question, answered per element\" " \
+                         "with `_by` rather than with an overload (SPEC.md III.1.7a)"
+      end
+    end
 
     raise error_message
   end
@@ -815,6 +833,85 @@ class Iyi::Call
     filename.is_a?(String) && (filename.includes?("/src/iyi/") || filename.starts_with?("src/iyi/"))
   end
 
+  # The `std/<module>` that would put `name` on this receiver, and how.
+  #
+  # "undefined method 'tally' for Array(Int32)" is true and useless when
+  # `import std/enumerable` is the whole answer: std implements
+  # `Enumerable` for the prelude's collections (R-3 lets the module that
+  # owns the trait say so), and the method the person asked for is one
+  # line away. The prelude-is-small note that used to be printed here
+  # sent them to `iyi doc` or to `--crystal` for something the library
+  # already has.
+  #
+  # Read off the search path the way an import is resolved, on the error
+  # path only, and by walking strings rather than a `Regex`: the
+  # compiler links no pcre2 (SPEC.md III.9).
+  private def iyi_std_method_hint(program, name : String, owner) : String?
+    bare = owner.instance_type.to_s.split('(').first
+    return nil if bare.empty?
+
+    program.iyi_path.entries.each do |entry|
+      dir = File.join(entry, "std")
+      next unless Dir.exists?(dir)
+      Dir.each_child(dir) do |file|
+        next unless file.ends_with?(".iyi")
+        path = File.join(dir, file)
+        next unless File.file?(path)
+        text = File.read(path)
+        next unless implemented = iyi_std_trait_with_method(text, name, bare)
+        written = "std/#{file.rchop(".iyi")}"
+        return "`#{written}` implements `#{implemented}` for #{bare} and that is where " \
+               "`#{name}` is: `import #{written}` puts it on this receiver " \
+               "(SPEC.md R-3)."
+      end
+    end
+    nil
+  end
+
+  # The trait in *text* that declares `def name` and is implemented for
+  # `bare` in the same file. Both halves have to be there: a trait with
+  # the method and no impl for this type would name an import that
+  # changes nothing.
+  private def iyi_std_trait_with_method(text : String, name : String, bare : String) : String?
+    # `trait` is a keyword here, so the name of the thing this walk is
+    # tracking cannot be spelled the obvious way.
+    enclosing = nil
+    found = nil
+    text.each_line do |line|
+      if line.starts_with?("pub trait ")
+        rest = line["pub trait ".size..]
+        enclosing = rest.split('(').first.split(' ').first.strip
+      elsif line.starts_with?("pub ") || line.starts_with?("class ")
+        # A top-level declaration that is not a trait ends the one above.
+        enclosing = nil
+      end
+      next unless enclosing
+      stripped = line.lstrip
+      next unless stripped.starts_with?("def ")
+      rest = stripped["def ".size..]
+      next unless rest.starts_with?(name)
+      after = rest[name.size]?
+      next unless after.nil? || !(after.alphanumeric? || after == '_')
+      found = enclosing
+      break
+    end
+    return nil unless declares = found
+
+    # `impl Enumerable for Array(T)` - the line R-3 makes the owning
+    # module write.
+    text.each_line do |line|
+      next unless line.starts_with?("impl ")
+      rest = line["impl ".size..]
+      next unless rest.starts_with?(declares)
+      after_trait = rest[declares.size..]
+      index = after_trait.index(" for ")
+      next unless index
+      target = after_trait[(index + 5)..].strip.split('(').first.split(' ').first
+      return declares if target == bare
+    end
+    nil
+  end
+
   private def iyi_out_of_reach_hint(def_name : String, obj) : String?
     return nil if obj
 
@@ -1031,9 +1128,15 @@ class Iyi::Call
       elsif obj && !similar_name && !participle && iyi_prelude_type?(owner)
         # iyi: a method Crystal's library has and this one does not, on a
         # type the prelude declares, with nothing near it in spelling:
-        # the reader is looking at the library's size rule, not a typo.
+        # the reader is looking at the library's size rule, not a typo —
+        # unless std has the method for this very type, in which case the
+        # rule is not what they need to hear and the import is.
         bare = owner.instance_type.to_s.split('(').first
-        msg << '\n' << "iyi's prelude has no `#{def_name}` on #{owner}: it is small by rule - a method enters when a program in the repository needs it (SPEC.md III.1). `iyi doc #{bare}` lists what it has; `iyi build --crystal` gives a program Crystal's library instead (README.md, \"The library a program has\")."
+        if reachable = iyi_std_method_hint(program, def_name, owner)
+          msg << '\n' << reachable
+        else
+          msg << '\n' << "iyi's prelude has no `#{def_name}` on #{owner}: it is small by rule - a method enters when a program in the repository needs it (SPEC.md III.1). `iyi doc #{bare}` lists what it has; `iyi build --crystal` gives a program Crystal's library instead (README.md, \"The library a program has\")."
+        end
       end
 
       # Check if it's an instance variable that was never assigned a value

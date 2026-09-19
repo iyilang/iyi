@@ -5,6 +5,38 @@
 # instructions for. What is left is the two operators Crystal writes in
 # `int.cr` rather than in the compiler, and turning a number into text.
 
+# The zero of each number the prelude declares, which is what an empty
+# sum answers with.
+#
+# It is here because the alternative was a hole a program could fall
+# into: `Array#sum` had no zero to start from and raised "sum of an
+# empty array", while `std/enumerable`'s `sum` - bounded `Elem : Num`,
+# so it *can* ask a type for one - answered 0. One program saw both,
+# `Set(Int32).new.sum` and `([] of Int32).sum` disagreeing about the
+# same empty question.
+#
+# An identity belongs to the type and not to any value of it: there is
+# no element to ask when the collection is empty, which is the whole
+# difficulty. Something that is not a number has no zero, so
+# `["a", "b"].sum` is a compile error rather than a panic at run time -
+# where Crystal puts the same refusal - and `join` is how strings are
+# put together.
+#
+# `std/traits` writes the same table for the numbers *it* declares
+# (`Int8` and the rest); these five are the prelude's, and a `.iyi` file
+# may not redefine a method the prelude has (R-3), so the trait's impls
+# for them take this one.
+{% begin %}
+  {% for t in [{"Int32", "0"}, {"Int64", "0_i64"}, {"UInt8", "0_u8"},
+               {"UInt64", "0_u64"}, {"Float64", "0.0"}] %}
+    struct {{ t[0].id }}
+      def self.zero : self
+        {{ t[1].id }}
+      end
+    end
+  {% end %}
+{% end %}
+
 # A 32-bit signed integer, the literal `1`: `//` and `%` for integer
 # division and remainder, `times`, `to_s` in any base.
 struct Int32

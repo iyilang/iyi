@@ -389,6 +389,34 @@
 
 ### Fixed
 
+- **A method with keyword-only parameters crashed the compiler when it
+  was read from an artifact.** Not refused — crashed: `Nil assertion
+  failed` or `Index out of bounds`, a page of this compiler's own
+  frames, and an invitation to file an issue. `Time::Span.new(days:
+  2)` is the shape, and `std/time`, `std/json` and `std/kernel` were
+  all unusable as artifacts because of it.
+
+  A def read from a `.iyimod` is a header: the machine code is in the
+  artifact and the call reaches it by symbol, so the compiler fills the
+  defaults locally and forwards the whole parameter list to that
+  symbol. That forwarding is written for a plain parameter list and
+  passes everything by position, and a bare `*` is a nameless
+  parameter in the middle of one — upstream never sends a def with a
+  splat down that path, because it keeps the body instead.
+
+  So a header with a splat keeps its body too, which is also the thing
+  that links: a producer emits one symbol per named-argument
+  combination — `Span::new:days<Int64>` — and the expansion the
+  consumer builds is named from the same named arguments, so it is the
+  one the artifact carries. The body it keeps is the header's empty
+  one, which makes the expansion a header as well; unmarked, codegen
+  inlined the nothing it saw and the call disappeared.
+
+  Round-tripping the 60 `bench/std_*_exercise.iyi` through
+  `--emit-iyimod` and `--use-iyimod`: 29 built and ran before this, 32
+  do now. With the three entries below it, 21 before this session's
+  work and 32 after.
+
 - **An enum a module keeps to itself arrived with its question methods
   and none of its members.** A `.iyimod` carries two kinds of type: the
   ones a consumer can name, and the ones it cannot but the module's own

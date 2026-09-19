@@ -2226,6 +2226,82 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A header with a splat in it: keyword-only parameters, called by name.
+  #
+  # This crashed the compiler rather than refusing anything. A def read from
+  # an artifact is a header, and headers take the forwarding path through
+  # `expand_default_arguments` — evaluate the defaults here, call the symbol
+  # there — which is written for a plain parameter list and passes the whole
+  # of it by position. A bare `*` is a nameless `Arg` in that list: the build
+  # died on `Nil assertion failed` reading its missing default, or on `Index
+  # out of bounds` where the call named fewer parameters than the def has.
+  #
+  # A def with a splat keeps its body instead, which is what upstream does
+  # with one and what links: the producer emits a symbol per named-argument
+  # combination — `Span::new:days<Int64>` — and the expansion built here
+  # carries the same name, built from the same named arguments. The body it
+  # keeps is the header's `Nop`, so the expansion has to be marked a header
+  # too, or codegen inlines the nothing it sees and the call vanishes.
+  #
+  # `self.new` because that is the shape the library writes — `Time::Span`
+  # has one, and `std/time`, `std/json` and `std/kernel` were all refused
+  # over it — and one more named `make`, because `new` has an expansion path
+  # of its own and the defect is in the other one.
+  it "carries a header whose parameters are keyword-only" do
+    with_tempdir("iyimod_splat_header") do
+      Dir.mkdir_p "boot"
+      File.write "boot/span.iyi", <<-IYI
+        module boot/span
+
+        pub struct Span
+          @ticks : Int64
+
+          def initialize(@ticks : Int64)
+          end
+
+          pub def self.new(*, days : Int64 = 0_i64, hours : Int64 = 0_i64) : Span
+            Span.new(days * 24_i64 + hours)
+          end
+
+          pub def self.make(*, hours : Int64) : Span
+            Span.new(hours)
+          end
+
+          pub def ticks : Int64
+            @ticks
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/span
+
+        puts Boot::Span::Span.new(days: 2_i64).ticks
+        puts Boot::Span::Span.new(hours: 5_i64).ticks
+        puts Boot::Span::Span.new(days: 1_i64, hours: 3_i64).ticks
+        puts Boot::Span::Span.make(hours: 9_i64).ticks
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "48\n5\n27\n9"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/span.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

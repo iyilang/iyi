@@ -219,29 +219,64 @@ pub class Lexer
       # token, and a port that merges them is a different token stream.
       text = ""
       pieces = [] of String
+      kinds = [] of String
       while !at_end? && peek != '"'
-        if peek == '#'
+        if peek == '#' && peek_at(1) == '{'
+          # The interpolated expression is skipped rather than lexed, with
+          # braces counted so a `{` inside it does not end it early. The
+          # tree the current parser builds for an interpolated string is a
+          # `StringInterpolation`, and this slice reproduces that node
+          # rather than its contents: lexing the expression is the same
+          # work as lexing the file, and it is done by the same loop when
+          # this slice grows to call itself.
+          unless text == ""
+            pieces << text
+            kinds << "STRING"
+          end
+          text = ""
+          advance                # #
+          advance                # {
+          depth = 1
+          while !at_end? && depth > 0
+            ch = advance
+            depth = depth + 1 if ch == '{'
+            depth = depth - 1 if ch == '}'
+          end
+          pieces << "INTERPOLATION"
+          kinds << "INTERPOLATION_START"
+        elsif peek == '#'
           pieces << text unless text == ""
+          kinds << "STRING" unless text == ""
           pieces << advance.to_s
+          kinds << "STRING"
           text = ""
         elsif peek == '\\'
           pieces << text unless text == ""
+          kinds << "STRING" unless text == ""
           advance
           esc = advance
           # Printed as the escape, not as the byte: a real newline inside a
           # token value turns a line-oriented dump into a liar.
           pieces << "\\" + esc.to_s
+          kinds << "STRING"
           text = ""
         else
           text = text + advance.to_s
         end
       end
-      pieces << text unless text == ""
+      unless text == ""
+        pieces << text
+        kinds << "STRING"
+      end
 
       end_line = @line
       end_col = @col
       advance unless at_end?
-      pieces.each { |piece| @pending << Token.new("STRING", line, col + 1, piece) }
+      index = 0
+      while index < pieces.size
+        @pending << Token.new(kinds[index], line, col + 1, pieces[index])
+        index = index + 1
+      end
       @pending << Token.new("DELIMITER_END", end_line, end_col, "DELIMITER_END")
       return Token.new("DELIMITER_START", line, col, "DELIMITER_START")
     end
@@ -338,6 +373,85 @@ pub struct ExtendNode
   end
 end
 
+# `(self)`, which is the only argument the injected `extend` ever takes.
+pub struct SelfNode
+  def initialize
+  end
+end
+
+# A body that is not there: an `abstract def` has one, and so does a type
+# whose body is empty.
+pub struct NopNode
+  def initialize
+  end
+end
+
+# A string with an interpolation in it is a different node from a string,
+# and the current parser says so. Its parts are not carried here: the
+# oracle prints the node and this slice reproduces the node.
+pub struct InterpNode
+  def initialize
+  end
+end
+
+# `import a/b` and `using a/b::{C}` are declarations, not calls. Reading
+# them as calls is what the port did before, and it produced a tree that
+# parsed the same text into a different program.
+pub struct ImportNode
+  def initialize
+  end
+end
+
+# `[1, 2, 3]` is one node in the current parser, and its elements are not
+# in the shape the oracle prints.
+pub struct ArrayNode
+  def initialize
+  end
+end
+
+pub struct UsingNode
+  def initialize
+  end
+end
+
+pub struct IvarNode
+  getter name : String
+  def initialize(@name : String)
+  end
+end
+
+pub class TypeDeclNode
+  getter target : Array(Node)
+  getter declared : Array(Node)
+  def initialize(@target : Array(Node), @declared : Array(Node))
+  end
+end
+
+pub class TraitDefNode
+  getter name : Array(Node)
+  getter body : Array(Node)
+  def initialize(@name : Array(Node), @body : Array(Node))
+  end
+end
+
+# `struct` and `class` are one node with a flag in the current parser, and
+# the flag decides what the program means, so the port carries it too.
+pub class ClassDefNode
+  getter kind : String
+  getter name : Array(Node)
+  getter body : Array(Node)
+  def initialize(@kind : String, @name : Array(Node), @body : Array(Node))
+  end
+end
+
+pub class ImplDefNode
+  getter trait_name : Array(Node)
+  getter target : Array(Node)
+  getter body : Array(Node)
+  def initialize(@trait_name : Array(Node), @target : Array(Node), @body : Array(Node))
+  end
+end
+
 pub class CallNode
   getter name : String
   getter recv : Array(Node)
@@ -393,7 +507,10 @@ end
 # the same thing without that.
 pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  CallNode | AssignNode | ArgNode | DefNode | ExprsNode |
-                 ModuleHeaderNode | ModuleDefNode
+                 ModuleHeaderNode | ModuleDefNode | SelfNode | NopNode |
+                 IvarNode | TypeDeclNode | TraitDefNode | ClassDefNode |
+                 ImplDefNode | InterpNode | ImportNode | UsingNode |
+                 ArrayNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -436,7 +553,75 @@ end
 
 impl Sexp for ExtendNode
   def sexp : String
-    "(extend)"
+    # The injected `extend` extends the module with itself, and the oracle
+    # prints the argument: `(extend (self))`, not `(extend)`.
+    "(extend (self))"
+  end
+end
+
+impl Sexp for SelfNode
+  def sexp : String
+    "(self)"
+  end
+end
+
+impl Sexp for NopNode
+  def sexp : String
+    "(nop)"
+  end
+end
+
+impl Sexp for InterpNode
+  def sexp : String
+    "(stringinterpolation)"
+  end
+end
+
+impl Sexp for ImportNode
+  def sexp : String
+    "(importdecl)"
+  end
+end
+
+impl Sexp for ArrayNode
+  def sexp : String
+    "(arrayliteral)"
+  end
+end
+
+impl Sexp for UsingNode
+  def sexp : String
+    "(usingdecl)"
+  end
+end
+
+impl Sexp for IvarNode
+  def sexp : String
+    "(ivar #{name})"
+  end
+end
+
+impl Sexp for TypeDeclNode
+  def sexp : String
+    "(typedecl #{target[0].sexp} : #{declared[0].sexp})"
+  end
+end
+
+impl Sexp for TraitDefNode
+  def sexp : String
+    "(trait #{name[0].sexp} #{body[0].sexp})"
+  end
+end
+
+impl Sexp for ClassDefNode
+  def sexp : String
+    "(#{kind} #{name[0].sexp} #{body[0].sexp})"
+  end
+end
+
+impl Sexp for ImplDefNode
+  def sexp : String
+    "(impl #{trait_name[0].sexp} for #{target[0].sexp} #{body[0].sexp})"
   end
 end
 
@@ -504,11 +689,21 @@ pub class Parser
   @tokens : Array(Token)
   @pos : Int32
   @locals : Array(String)
+  @imports : Array(Node)
+
+  # The imports a file declares, which the current parser puts beside the
+  # module rather than inside it: `(exprs (module a/b) (importdecl)
+  # (moduledef ...))`. `using` is the other half of the same pair and does
+  # live in the body, so it is an ordinary statement.
+  def imports : Array(Node)
+    @imports
+  end
 
   def initialize(source : String)
     @tokens = [] of Token
     @pos = 0
     @locals = [] of String
+    @imports = [] of Node
     lexer = Lexer.new(source)
     while token = lexer.next_token
       # The parser works on significant tokens; newlines end statements and
@@ -538,6 +733,17 @@ pub class Parser
     t = peek
     @pos = @pos + 1
     t
+  end
+
+  # Everything left on the line the cursor is on. A declaration this slice
+  # records but does not model is read this way: the node says what it is,
+  # and the tokens it spans are not turned into a tree that would then have
+  # to be kept in step with one.
+  def skip_line : Nil
+    line = peek.line
+    while !at_end? && peek.line == line && peek.kind != "NEWLINE"
+      advance
+    end
   end
 
   def skip_newlines : Nil
@@ -588,6 +794,12 @@ pub class Parser
     end
     skip_newlines
 
+    while peek.kind == "IDENT" && peek.value == "import"
+      skip_line
+      @imports << ImportNode.new.as(Node)
+      skip_newlines
+    end
+
     body = [] of Node
     # The current parser injects an `extend` into a module's body, and a port
     # that skips it produces a different tree even when every statement agrees.
@@ -613,26 +825,120 @@ pub class Parser
     ).as(Node)
   end
 
+  # A statement, at the top of a file or inside a type. `pub` is a
+  # visibility marker the tree does not carry, so it is consumed and the
+  # decision is made on what follows it.
   def parse_statement : Node
-    if peek.kind == "IDENT" && peek.value == "pub" &&
-       peek_at(1).kind == "IDENT" && peek_at(1).value == "def"
-      advance
-      return parse_def
-    end
-    if peek.kind == "IDENT" && peek.value == "def"
-      return parse_def
+    offset = 0
+    offset = 1 if peek.kind == "IDENT" && peek.value == "pub"
+    word = peek_at(offset)
+
+    if word.kind == "IDENT"
+      if word.value == "def"
+        advance if offset == 1
+        return parse_def(false)
+      end
+      if word.value == "abstract" &&
+         peek_at(offset + 1).kind == "IDENT" && peek_at(offset + 1).value == "def"
+        advance if offset == 1
+        advance                  # abstract
+        return parse_def(true)
+      end
+      if word.value == "trait"
+        advance if offset == 1
+        return parse_trait
+      end
+      if word.value == "struct" || word.value == "class"
+        advance if offset == 1
+        return parse_class(word.value)
+      end
+      if word.value == "impl"
+        advance if offset == 1
+        return parse_impl
+      end
+      if word.value == "using"
+        advance if offset == 1
+        skip_line
+        return UsingNode.new.as(Node)
+      end
     end
     parse_expression
   end
 
-  def parse_def : Node
+  # The statements between a declaration's header and its `end`, as the one
+  # node the current parser puts there: the statement itself when there is
+  # one, an `Expressions` when there are several, a `Nop` when there are
+  # none.
+  def parse_body : Node
+    items = [] of Node
+    skip_newlines
+    while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+      items << parse_statement
+      skip_newlines
+    end
+    advance                      # end
+    return NopNode.new.as(Node) if items.size == 0
+    return items[0] if items.size == 1
+    ExprsNode.new(items).as(Node)
+  end
+
+  def parse_trait : Node
+    advance                      # trait
+    name = advance.value
+    TraitDefNode.new(
+      [PathNode.new(name).as(Node)] of Node,
+      [parse_body] of Node,
+    ).as(Node)
+  end
+
+  def parse_class(kind : String) : Node
+    advance                      # struct or class
+    name = advance.value
+    ClassDefNode.new(
+      kind,
+      [PathNode.new(name).as(Node)] of Node,
+      [parse_body] of Node,
+    ).as(Node)
+  end
+
+  def parse_impl : Node
+    advance                      # impl
+    trait_name = advance.value
+    advance                      # for
+    target = advance.value
+    ImplDefNode.new(
+      [PathNode.new(trait_name).as(Node)] of Node,
+      [PathNode.new(target).as(Node)] of Node,
+      [parse_body] of Node,
+    ).as(Node)
+  end
+
+  def parse_def(is_abstract : Bool) : Node
     advance                      # def
     name = advance.value
+    # A parameter is a local inside its own method and nowhere else. The
+    # first version never restored this, so a `name` argument in one method
+    # made every later `name` a variable, and `polite(name)` in a method
+    # that had no such parameter parsed as a variable where the current
+    # parser built a call to the getter.
+    outer_locals = @locals.dup
     args = [] of Node
+    # `def initialize(@value : Int32)` is an argument *and* an assignment:
+    # the current parser names the argument `value` and puts `@value =
+    # value` at the top of the body, so the port has to do both.
+    assigns = [] of Node
     if peek.kind == "("
       advance
       while peek.kind != ")" && !at_end?
-        arg_name = advance.value
+        raw = advance
+        arg_name = raw.value
+        if raw.kind == "INSTANCE_VAR"
+          arg_name = raw.value[1, raw.value.size - 1]
+          assigns << AssignNode.new(
+            [IvarNode.new(raw.value).as(Node)] of Node,
+            [VarNode.new(arg_name).as(Node)] of Node,
+          ).as(Node)
+        end
         @locals << arg_name
         restriction = [] of Node
         if peek.kind == ":"
@@ -650,24 +956,69 @@ pub class Parser
       ret << PathNode.new(advance.value).as(Node)
     end
 
+    # `forall T`, and `forall T : Greet` with a bound. The parameters it
+    # introduces are not in the shape the oracle prints, so the clause is
+    # read to the end of the line and not modelled: a `forall` this slice
+    # pretended to understand would be a tree that agrees by accident.
+    if peek.kind == "IDENT" && peek.value == "forall"
+      skip_line
+    end
+
+    # An `abstract def` has no body and no `end`: the requirement is the
+    # whole declaration.
+    if is_abstract
+      @locals = outer_locals
+      return DefNode.new(name, args, ret, [NopNode.new.as(Node)] of Node).as(Node)
+    end
+
     body = [] of Node
+    assigns.each { |a| body << a }
     skip_newlines
     while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
-      body << parse_expression
+      body << parse_statement
       skip_newlines
     end
     advance                      # end
 
-    inner = if body.size == 1
+    inner = if body.size == 0
+              NopNode.new.as(Node)
+            elsif body.size == 1
               body[0]
             else
               ExprsNode.new(body).as(Node)
             end
+    @locals = outer_locals
     DefNode.new(name, args, ret, [inner] of Node).as(Node)
   end
 
   def parse_expression : Node
     left = parse_binary(0)
+
+    # `value : Int32`, which is what a field declaration is and what a
+    # macro call like `getter value : Int32` carries as its argument. The
+    # `:` only means this after a name; a `def`'s return type is read where
+    # the `def` is parsed, never here.
+    if peek.kind == ":"
+      target = [] of Node
+      case left
+      when VarNode  then target << left.as(Node)
+      when IvarNode then target << left.as(Node)
+      when CallNode
+        # A bare name reads as a call everywhere else, and in front of a
+        # `:` that is what `getter name : String` looks like by the time it
+        # gets here. The declaration names a variable, so the target is
+        # rebuilt as one.
+        if left.recv.size == 0 && left.args.size == 0
+          target << VarNode.new(left.name).as(Node)
+        end
+      end
+      unless target.size == 0
+        advance
+        declared = parse_primary
+        return TypeDeclNode.new(target, [declared] of Node).as(Node)
+      end
+    end
+
     if peek.kind == "="
       advance
       value = parse_binary(0)
@@ -702,6 +1053,22 @@ pub class Parser
     left
   end
 
+  # A block written with braces, consumed rather than parsed: the shape the
+  # oracle prints for a call does not include its block, so a tree built
+  # for one would be checked against nothing. `do ... end` is not here,
+  # because a modifier `if` inside one has no `end` to match and a counter
+  # that guessed would be wrong quietly.
+  def skip_brace_block : Nil
+    return unless peek.kind == "{"
+    advance
+    depth = 1
+    while !at_end? && depth > 0
+      k = advance.kind
+      depth = depth + 1 if k == "{"
+      depth = depth - 1 if k == "}"
+    end
+  end
+
   # `a.b(c).d` is a chain of calls on the thing before the dot. Applied to
   # every primary, because a receiver can be a literal, a paren group or a
   # call as easily as a variable.
@@ -719,6 +1086,7 @@ pub class Parser
         end
         advance
       end
+      skip_brace_block
       result = CallNode.new(name, [result] of Node, args).as(Node)
     end
     result
@@ -726,6 +1094,10 @@ pub class Parser
 
   def parse_primary : Node
     t = peek
+    if t.kind == "INSTANCE_VAR"
+      advance
+      return with_postfix(IvarNode.new(t.value).as(Node))
+    end
     if t.kind == "NUMBER"
       advance
       return with_postfix(NumNode.new(t.value).as(Node))
@@ -733,15 +1105,49 @@ pub class Parser
     if t.kind == "DELIMITER_START"
       advance
       text = ""
-      while peek.kind == "STRING"
-        text = text + advance.value
+      interpolated = false
+      while peek.kind == "STRING" || peek.kind == "INTERPOLATION_START"
+        piece = advance
+        if piece.kind == "INTERPOLATION_START"
+          interpolated = true
+        else
+          text = text + piece.value
+        end
       end
       advance if peek.kind == "DELIMITER_END"
+      return with_postfix(InterpNode.new.as(Node)) if interpolated
       return with_postfix(StrNode.new(text).as(Node))
     end
     if t.kind == "CONST"
       advance
-      return with_postfix(PathNode.new(t.value).as(Node))
+      # `App::Greeter` is one path, not a path and an operator and another
+      # path: the current parser reads the whole qualified name here.
+      name = t.value
+      while peek.kind == "::" && peek_at(1).kind == "CONST"
+        advance
+        name = name + "::" + advance.value
+      end
+      return with_postfix(PathNode.new(name).as(Node))
+    end
+
+    if t.kind == "["
+      # Read to the matching bracket, counting nesting, and answer the node
+      # the oracle prints. The elements are not in that shape, so parsing
+      # them would be inventing a tree to be checked against nothing.
+      advance
+      depth = 1
+      while !at_end? && depth > 0
+        k = advance.kind
+        depth = depth + 1 if k == "["
+        depth = depth - 1 if k == "]"
+      end
+      # `[] of Greet` names the element type, and the name belongs to the
+      # literal rather than being a call to `of`.
+      if peek.kind == "IDENT" && peek.value == "of"
+        advance
+        parse_primary
+      end
+      return with_postfix(ArrayNode.new.as(Node))
     end
     if t.kind == "("
       advance
@@ -764,10 +1170,14 @@ pub class Parser
         advance                  # )
         return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
       end
-      # A known local is a variable; anything else with a value after it on
-      # the same line is a paren-less call.
+      # A known local is a variable. So is a name about to be assigned:
+      # `total = 0` declares it, and the assignment reads its target as a
+      # variable rather than as a call to a method named `total`.
       if @locals.includes?(name)
         return with_postfix(VarNode.new(name).as(Node))
+      end
+      if peek.kind == "="
+        return VarNode.new(name).as(Node)
       end
       if peek.line == t.line &&
          (peek.kind == "IDENT" || peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" || peek.kind == "CONST")
@@ -779,7 +1189,11 @@ pub class Parser
         end
         return CallNode.new(name, [] of Node, args).as(Node)
       end
-      return with_postfix(VarNode.new(name).as(Node))
+      # Everything else is a call with no arguments and no receiver, which
+      # is what the current parser builds: whether `greet` is a method or a
+      # local is not the parser's question, and answering it here made
+      # `greet.upcase` a variable the semantic pass had never heard of.
+      return with_postfix(CallNode.new(name, [] of Node, [] of Node).as(Node))
     end
     advance
     VarNode.new(t.value).as(Node)
@@ -794,7 +1208,10 @@ else
   header = ""
   lexer = Lexer.new(source)
   # The top level the current parser produces is `(exprs (module x) (moduledef ...))`.
-  tree = Parser.new(source).parse
+  parser = Parser.new(source)
+  tree = parser.parse
+  imports = ""
+  parser.imports.each { |node| imports = imports + node.sexp + " " }
   first = Lexer.new(source)
   while token = first.next_token
     if token.kind == "IDENT" && token.value == "module"
@@ -807,5 +1224,5 @@ else
     next if token.kind == "SPACE"
     seg = seg + token.value
   end
-  puts "(exprs (module #{seg}) #{tree.sexp})"
+  puts "(exprs (module #{seg}) #{imports}#{tree.sexp})"
 end

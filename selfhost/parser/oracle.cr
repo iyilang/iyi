@@ -35,6 +35,32 @@ def sexp(node : Iyi::ASTNode) : String
     "(var #{node.name})"
   when Iyi::Path
     "(path #{node.names.join("::")})"
+  when Iyi::ClassDef
+    # `struct` and `class` are one node with a flag, and the flag decides
+    # what the program means, so it is in the shape rather than beside it.
+    kind = node.struct? ? "struct" : "class"
+    vars = node.type_vars.try { |v| "(#{v.join(" ")})" } || ""
+    sup = node.superclass.try { |s| " < #{sexp(s)}" } || ""
+    "(#{kind} #{sexp(node.name)}#{vars}#{sup} #{sexp(node.body)})"
+  when Iyi::TraitDef
+    vars = node.type_vars.try { |v| "(#{v.join(" ")})" } || ""
+    "(trait #{sexp(node.name)}#{vars} #{sexp(node.body)})"
+  when Iyi::ImplDef
+    # The trait, what it is implemented for, and the `forall` that
+    # introduces the parameters: an impl is the three together.
+    vars = node.type_vars.try { |v| " forall #{v.join(" ")}" } || ""
+    "(impl #{sexp(node.trait)} for #{sexp(node.target)}#{vars} #{sexp(node.body)})"
+  when Iyi::Generic
+    args = node.type_vars.map { |a| sexp(a) }.join(" ")
+    "(generic #{sexp(node.name)} #{args})"
+  when Iyi::Include
+    "(include #{sexp(node.name)})"
+  when Iyi::Extend
+    "(extend #{sexp(node.name)})"
+  when Iyi::TypeDeclaration
+    "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
+  when Iyi::InstanceVar
+    "(ivar #{node.name})"
   when Iyi::NumberLiteral
     "(num #{node.value})"
   when Iyi::StringLiteral
@@ -47,5 +73,12 @@ def sexp(node : Iyi::ASTNode) : String
 end
 
 path = ARGV[0]
-node = Iyi::Parser.parse(File.read(path))
-puts sexp(node)
+
+# The filename, not just the source. `Lexer#filename=` is what turns iyi
+# mode on (`@iyi = filename.ends_with?(".iyi")`), and without it the
+# current parser reads an `.iyi` file as Crystal: `errors.iyi` died on the
+# `!` that propagates, and every other file was being compared against a
+# parse in the wrong language.
+parser = Iyi::Parser.new(File.read(path))
+parser.filename = path
+puts sexp(parser.parse)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Every import in the tree is grounded by `iyi mod context`.
+# What the two commands that read an import *without building* answer:
+# `iyi mod context` and `iyi check --affected`.
 #
 #     bash bench/mod_context.sh
 #
@@ -70,4 +71,44 @@ if [ -n "$ungrounded" ]; then
 else
   echo "every import in samples/iyi is grounded: $grounded of them, across $(ls "$REPO"/samples/iyi/*.iyi | wc -l | tr -d ' ') files"
 fi
+
+# The same resolution, asked by the other command that uses it. `check
+# --affected FILE` names the files a change reaches and compiles each one,
+# which is what a CI job branches on — and reading an import without the
+# search path it answered `{"checked":[]}` for a library module with a
+# consumer sitting beside it: nothing affected, all compile, about a change
+# that breaks the next build.
+mkdir -p "$WORK/affected"
+cat > "$WORK/affected/consumer.iyi" <<'EOF'
+module consumer
+
+import std/text
+
+puts "x"
+EOF
+cat > "$WORK/affected/stranger.iyi" <<'EOF'
+module stranger
+
+puts "y"
+EOF
+answer="$(cd "$WORK/affected" && "$IYI" check --affected "$REPO/src/std/text.iyi" --json 2>&1)"
+case "$answer" in
+  *'"consumer.iyi"'*)
+    case "$answer" in
+      *'"stranger.iyi"'*)
+        echo "FAIL: check --affected named a file that does not import the change"
+        echo "  $answer"
+        status=1
+        ;;
+      *)
+        echo "check --affected names the consumer of a library module and nobody else"
+        ;;
+    esac
+    ;;
+  *)
+    echo "FAIL: check --affected did not name the consumer of src/std/text.iyi"
+    echo "  $answer"
+    status=1
+    ;;
+esac
 exit "$status"

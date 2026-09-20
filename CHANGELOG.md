@@ -402,9 +402,17 @@
   AI_FIRST.md §2 offers a model, and an import it cannot resolve is one
   line saying so inside an answer that otherwise looks complete — a
   model reading it concludes the module does not exist and writes
-  around it. `bench/mod_context.sh` sweeps every sample and fails on a
-  hole where a surface belongs; the same resolution feeds `iyi test`'s
-  closure walk, which was missing the library for the same reason.
+  around it.
+
+  The same resolution feeds two other commands, and one of them fails
+  the same way for a script rather than a model: `iyi check --affected
+  src/std/text.iyi` answered `{"checked":[],"failed":[]}` — nothing
+  affected, all compile — with a file importing `std/text` sitting
+  beside it. A CI job branching on that skips the consumers a library
+  change breaks. (`iyi test`'s closure walk is the third, and was
+  missing the library for the same reason.) `bench/mod_context.sh`
+  sweeps every sample for a hole where a surface belongs and asks
+  `check --affected` for the consumer it used not to find.
 
 - **`iyi mod diff` said "consumers do not have to be rebuilt" about a
   body consumers compile.** The verdict — and the `--exit-code` a build

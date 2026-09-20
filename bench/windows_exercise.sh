@@ -150,6 +150,65 @@ EOF
         status=1
       fi
     fi
+
+    # 2c. The other half of that wait: a completion arriving while the
+    # deadline is armed. The poller waits on the port *and* the timer,
+    # because a high-resolution timer takes no completion routine to
+    # wake an alertable port wait with. A fiber parks on a read with no
+    # data, another writes fifty milliseconds later, and a third holds a
+    # one-second deadline open. Measured: 52 ms with the port in the
+    # wait, 150 with it taken out — the read then waits for whichever
+    # deadline comes next, which is the shape of the bug this would be.
+    echo
+    echo "== A completion under an armed deadline =="
+    cat > "$WORK/late.iyi" <<'EOF'
+module late
+
+import std/socket
+using std/socket::{IyiSocket}
+
+server = IyiSocket.listen(0)
+port = server.local_port
+
+group do |g|
+  g.spawn do
+    sleep(1000)
+  end
+
+  g.spawn do
+    conn = server.accept.or_panic
+    start = __iyi_monotonic_ns
+    conn.read(1024).or_panic
+    puts "read after " + ((__iyi_monotonic_ns - start) // 1000000_i64).to_s + " ms"
+    conn.close
+  end
+
+  g.spawn do
+    client = IyiSocket.connect("127.0.0.1", port).or_panic
+    sleep(50)
+    client.write("late\n")
+    sleep(100)
+    client.close
+  end
+end
+
+server.close
+EOF
+    if ! "$IYI" build -o "$WORK/late.exe" "$WORK/late.iyi" > "$WORK/late.log" 2>&1; then
+      echo "  the completion probe did not build"
+      tail -5 "$WORK/late.log"
+      status=1
+    else
+      "$WORK/late.exe" > "$WORK/late.out" 2>&1 || true
+      after="$(sed -n 's/^read after \([0-9]*\) ms$/\1/p' "$WORK/late.out")"
+      if [ -n "$after" ] && [ "$after" -lt 100 ]; then
+        echo "  the read came back after ${after} ms, not at the next deadline"
+      else
+        echo "  the read did not come back before the next deadline:"
+        sed -n '1,3p' "$WORK/late.out"
+        status=1
+      fi
+    fi
     ;;
 esac
 

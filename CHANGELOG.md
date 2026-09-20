@@ -422,7 +422,13 @@
 
   A hundred `sleep 1` calls take 156 ms. `bench/windows_exercise.sh`
   gates it at 800 ms — under the tick-rounded floor, five times over the
-  measurement — and the gate reads 1,568 ms with the timer taken out.
+  measurement — and the gate reads 1,568 ms with the timer taken out. The
+  other half of the wait is gated beside it: a fiber parks on a read with
+  no data, another writes fifty milliseconds later, a third holds a
+  one-second deadline open, and the read comes back after 52 ms. With the
+  port taken out of the wait pair it comes back after 150 — at whichever
+  deadline lands next, which is what a poller that hears only its timer
+  does.
 
 - **A module the module keeps to itself did not travel, and its object
   code did.** A `.iyimod` carries the types a consumer cannot name but

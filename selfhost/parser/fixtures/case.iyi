@@ -1,0 +1,11 @@
+module main
+
+pub def name(n : Int32) : String
+  case n
+  when 0 then "zero"
+  when 1, 2
+    "small"
+  else
+    "big"
+  end
+end

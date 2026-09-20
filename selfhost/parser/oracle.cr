@@ -61,6 +61,23 @@ def sexp(node : Iyi::ASTNode) : String
     "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
   when Iyi::InstanceVar
     "(ivar #{node.name})"
+  when Iyi::Case
+    # Exhaustive or not is the difference between `in` and `when`, and it
+    # changes what the compiler checks, so it is in the shape.
+    kind = node.exhaustive? ? "case-in" : "case"
+    cond = node.cond.try { |c| sexp(c) } || "(nop)"
+    arms = node.whens.map { |w| sexp(w) }.join(" ")
+    els = node.else.try { |e| " else #{sexp(e)}" } || ""
+    "(#{kind} #{cond} #{arms}#{els})"
+  when Iyi::When
+    conds = node.conds.map { |c| sexp(c) }.join(" ")
+    "(when (#{conds}) #{sexp(node.body)})"
+  when Iyi::EnumDef
+    base = node.base_type.try { |b| " : #{sexp(b)}" } || ""
+    members = node.members.map { |m| sexp(m) }.join(" ")
+    "(enum #{sexp(node.name)}#{base} #{members})"
+  when Iyi::Annotation
+    "(annotation #{sexp(node.path)})"
   when Iyi::AssocTypeDecl
     # `type Elem = Int32` in a trait declares the requirement; the same
     # line in an impl answers it. Both are this node, and the value is

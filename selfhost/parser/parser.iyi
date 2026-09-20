@@ -102,6 +102,15 @@ pub class Lexer
       return Token.new("COMMENT", line, col, text)
     end
 
+    # `@[Flags]` opens an annotation, not an instance variable named
+    # nothing followed by an index: the port read it as `@` and `[` and
+    # built a call to `[]` on an ivar with an empty name.
+    if c == '@' && peek_at(1) == '['
+      advance
+      advance
+      return Token.new("@[", line, col, "@[")
+    end
+
     if c == '@'
       advance
       kind = "INSTANCE_VAR"
@@ -445,6 +454,36 @@ pub struct UnionNode
   end
 end
 
+pub class EnumDefNode
+  getter name : Array(Node)
+  getter base : Array(Node)
+  getter members : Array(Node)
+  def initialize(@name : Array(Node), @base : Array(Node), @members : Array(Node))
+  end
+end
+
+pub class WhenNode
+  getter conds : Array(Node)
+  getter body : Array(Node)
+  def initialize(@conds : Array(Node), @body : Array(Node))
+  end
+end
+
+pub class CaseNode
+  getter kind : String
+  getter cond : Array(Node)
+  getter arms : Array(Node)
+  getter else_branch : Array(Node)
+  def initialize(@kind : String, @cond : Array(Node), @arms : Array(Node), @else_branch : Array(Node))
+  end
+end
+
+pub class AnnotationNode
+  getter name : Array(Node)
+  def initialize(@name : Array(Node))
+  end
+end
+
 pub class AssocTypeNode
   getter name : String
   getter value : Array(Node)
@@ -626,7 +665,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
-                 UnionNode | AssocTypeNode
+                 UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
+                 WhenNode | CaseNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -738,6 +778,34 @@ end
 impl Sexp for UnionNode
   def sexp : String
     "(union)"
+  end
+end
+
+impl Sexp for EnumDefNode
+  def sexp : String
+    out = "(enum #{name[0].sexp}"
+    out = out + " : " + base[0].sexp unless base.size == 0
+    out + " " + sexp_list(members) + ")"
+  end
+end
+
+impl Sexp for WhenNode
+  def sexp : String
+    "(when (#{sexp_list(conds)}) #{body[0].sexp})"
+  end
+end
+
+impl Sexp for CaseNode
+  def sexp : String
+    out = "(#{kind} #{cond[0].sexp} #{sexp_list(arms)}"
+    out = out + " else " + else_branch[0].sexp unless else_branch.size == 0
+    out + ")"
+  end
+end
+
+impl Sexp for AnnotationNode
+  def sexp : String
+    "(annotation #{name[0].sexp})"
   end
 end
 
@@ -1118,6 +1186,14 @@ pub class Parser
       # `type Elem` in a trait, `type Elem = Int32` in an impl: the
       # requirement and the answer are the same node. Only a declaration
       # body writes this; anywhere else `type` is an ordinary name.
+      if word.value == "enum"
+        advance if offset == 1
+        return parse_enum
+      end
+      if word.value == "case"
+        advance if offset == 1
+        return parse_case
+      end
       if word.value == "type" && peek_at(offset + 1).kind == "CONST"
         advance if offset == 1
         advance                  # type
@@ -1147,7 +1223,78 @@ pub class Parser
       end
       return with_modifiers(ReturnNode.new(value).as(Node))
     end
+    # `@[Flags]` is a statement of its own in the tree, sitting in front
+    # of what it annotates rather than inside it.
+    if peek.kind == "@["
+      advance
+      path = parse_primary
+      advance if peek.kind == "]"
+      return AnnotationNode.new([path] of Node).as(Node)
+    end
+
     with_modifiers(parse_expression)
+  end
+
+  # `case` with `when`, and `case` with `in`, which is the exhaustive
+  # form: the compiler checks every member is covered, so which word was
+  # written is part of the tree rather than a spelling.
+  def parse_case : Node
+    advance                      # case
+    cond = parse_expression
+    kind = "case"
+
+    arms = [] of Node
+    else_branch = [] of Node
+    skip_newlines
+    while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+      if peek.kind == "IDENT" && peek.value == "else"
+        advance
+        else_branch << parse_branch_body
+        next
+      end
+
+      word = advance.value       # when or in
+      kind = "case-in" if word == "in"
+      conds = [] of Node
+      conds << parse_expression
+      while peek.kind == ","
+        advance
+        conds << parse_expression
+      end
+      advance if peek.kind == "IDENT" && peek.value == "then"
+      arms << WhenNode.new(conds, [parse_branch_body] of Node).as(Node)
+    end
+    advance                      # end
+
+    CaseNode.new(kind, [cond] of Node, arms, else_branch).as(Node)
+  end
+
+  # `enum Level : Int32` and its members, which the current parser builds
+  # as arguments: a member is a name and, where it is given one, a value
+  # that does not appear in the shape.
+  def parse_enum : Node
+    advance                      # enum
+    name = advance.value
+    base = [] of Node
+    if peek.kind == ":"
+      advance
+      base << parse_type
+    end
+
+    members = [] of Node
+    skip_newlines
+    while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+      member = advance.value
+      if peek.kind == "="
+        advance
+        parse_expression
+      end
+      members << ArgNode.new(member, [] of Node).as(Node)
+      skip_newlines
+    end
+    advance                      # end
+
+    EnumDefNode.new([PathNode.new(name).as(Node)] of Node, base, members).as(Node)
   end
 
   # The statements between a declaration's header and its `end`, as the one
@@ -1185,7 +1332,9 @@ pub class Parser
     items = [] of Node
     skip_newlines
     while !at_end? && !(peek.kind == "IDENT" &&
-                        (peek.value == "end" || peek.value == "else" || peek.value == "elsif"))
+                        (peek.value == "end" || peek.value == "else" ||
+                         peek.value == "elsif" || peek.value == "when" ||
+                         peek.value == "in"))
       items << parse_statement
       skip_newlines
     end
@@ -1490,6 +1639,10 @@ pub class Parser
       6
     elsif op == "+" || op == "-"
       5
+    elsif op == "|" || op == "^"
+      4
+    elsif op == "&"
+      4
     elsif op == "<<" || op == ">>"
       4
     elsif op == "==" || op == "!=" || op == "<" || op == ">" ||
@@ -1753,6 +1906,18 @@ pub class Parser
     if t.kind == "!"
       advance
       return NotNode.new([parse_primary] of Node).as(Node)
+    end
+
+    # `verdict = case level ... end` puts a case on the right of an
+    # assignment, which is an expression position: these are statements
+    # and expressions both, and reading them only as statements made
+    # `case` a call to a method of that name.
+    if t.kind == "IDENT" && t.value == "case"
+      return parse_case
+    end
+
+    if t.kind == "IDENT" && (t.value == "if" || t.value == "unless")
+      return parse_if(t.value == "unless")
     end
 
     if t.kind == "IDENT" && (t.value == "true" || t.value == "false")

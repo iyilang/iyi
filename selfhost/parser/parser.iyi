@@ -1,0 +1,811 @@
+module main
+
+import std/file
+import std/text
+using std/file::{File}
+
+pub struct Token
+  getter kind : String
+  getter line : Int32
+  getter col : Int32
+  getter value : String
+
+  def initialize(@kind : String, @line : Int32, @col : Int32, @value : String)
+  end
+
+  def dump : String
+    "#{kind}\t#{line}\t#{col}\t#{value}"
+  end
+end
+
+pub class Lexer
+  @src : String
+  @pending : Array(Token)
+  @prev_kind : String
+  @pos : Int32
+  @line : Int32
+  @col : Int32
+
+  def initialize(@src : String)
+    @pending = [] of Token
+    @prev_kind = ""
+    @pos = 0
+    @line = 1
+    @col = 1
+  end
+
+  def at_end? : Bool
+    @pos >= @src.bytesize
+  end
+
+  def peek : Char
+    return '\0' if at_end?
+    @src[@pos]
+  end
+
+  def peek_at(offset : Int32) : Char
+    i = @pos + offset
+    return '\0' if i >= @src.bytesize
+    @src[i]
+  end
+
+  def advance : Char
+    c = peek
+    @pos = @pos + 1
+    if c == '\n'
+      @line = @line + 1
+      @col = 1
+    else
+      @col = @col + 1
+    end
+    c
+  end
+
+  def ident_start?(c : Char) : Bool
+    c.ascii_letter? || c == '_'
+  end
+
+  def ident_char?(c : Char) : Bool
+    c.ascii_alphanumeric? || c == '_'
+  end
+
+  # One token, or nil at end of input.
+  def next_token : Token?
+    # A string lexes as three tokens the way the current lexer does it:
+    # the opening delimiter, the body, the closing delimiter. Queued here
+    # rather than returned as an array, so the caller stays a simple loop.
+    unless @pending.empty?
+      return @pending.shift
+    end
+    return nil if at_end?
+    line = @line
+    col = @col
+    c = peek
+
+    if c == '\n'
+      advance
+      return Token.new("NEWLINE", line, col, "NEWLINE")
+    end
+
+    if c == ' ' || c == '\t'
+      while !at_end? && (peek == ' ' || peek == '\t')
+        advance
+      end
+      return Token.new("SPACE", line, col, "SPACE")
+    end
+
+    if c == '#'
+      text = ""
+      while !at_end? && peek != '\n'
+        text = text + advance.to_s
+      end
+      return Token.new("COMMENT", line, col, text)
+    end
+
+    if c == '@'
+      advance
+      kind = "INSTANCE_VAR"
+      if peek == '@'
+        advance
+        kind = "CLASS_VAR"
+      end
+      text = if kind == "CLASS_VAR"
+               "@@"
+             else
+               "@"
+             end
+      while !at_end? && ident_char?(peek)
+        text = text + advance.to_s
+      end
+      return Token.new(kind, line, col, text)
+    end
+
+    if ident_start?(c)
+      text = ""
+      while !at_end? && ident_char?(peek)
+        text = text + advance.to_s
+      end
+      # `foo?` and `bar!` are one identifier, which is a lexing rule and
+      # not a parsing one.
+      if !at_end? && (peek == '?' || peek == '!')
+        text = text + advance.to_s
+      end
+      if text == "_"
+        return Token.new("_", line, col, "_")
+      end
+      kind = if c.ascii_uppercase?
+               "CONST"
+             else
+               "IDENT"
+             end
+      return Token.new(kind, line, col, text)
+    end
+
+    # `-42` is one NUMBER, but `a - 42` is three tokens. What separates them
+    # is what came before: after a value, a minus is subtraction.
+    if c == '-' && peek_at(1).ascii_number? &&
+       @prev_kind != "IDENT" && @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
+       @prev_kind != ")" && @prev_kind != "]" && @prev_kind != "INSTANCE_VAR"
+      advance
+      text = "-"
+      while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+        text = text + advance.to_s
+      end
+      if peek == '.' && peek_at(1).ascii_number?
+        text = text + advance.to_s
+        while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+          text = text + advance.to_s
+        end
+      end
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, text)
+    end
+
+    if c.ascii_number?
+      text = ""
+      while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+        text = text + advance.to_s
+      end
+      # A suffix (`_i64`, `_u8`, `_f32`) is consumed and dropped: the current
+      # lexer records it as the number's kind rather than part of its text.
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+        return Token.new("NUMBER", line, col, text)
+      end
+
+      # A float is one token. The dot only belongs to the number when a
+      # digit follows it: `3.14` is a literal, `3.times` is a call.
+      if peek == '.' && peek_at(1).ascii_number?
+        text = text + advance.to_s
+        while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+          text = text + advance.to_s
+        end
+      end
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, text)
+    end
+
+    if c == '\''
+      advance
+      text = ""
+      if peek == '\\'
+        advance
+        esc = advance
+        text = "\\" + esc.to_s
+      else
+        text = advance.to_s
+      end
+      advance unless at_end?
+      return Token.new("CHAR", line, col, text)
+    end
+
+    if c == '"'
+      advance
+      # An escape closes the piece it is in: the current lexer reports a
+      # string body as runs of literal text with each escape as its own
+      # token, and a port that merges them is a different token stream.
+      text = ""
+      pieces = [] of String
+      while !at_end? && peek != '"'
+        if peek == '#'
+          pieces << text unless text == ""
+          pieces << advance.to_s
+          text = ""
+        elsif peek == '\\'
+          pieces << text unless text == ""
+          advance
+          esc = advance
+          # Printed as the escape, not as the byte: a real newline inside a
+          # token value turns a line-oriented dump into a liar.
+          pieces << "\\" + esc.to_s
+          text = ""
+        else
+          text = text + advance.to_s
+        end
+      end
+      pieces << text unless text == ""
+
+      end_line = @line
+      end_col = @col
+      advance unless at_end?
+      pieces.each { |piece| @pending << Token.new("STRING", line, col + 1, piece) }
+      @pending << Token.new("DELIMITER_END", end_line, end_col, "DELIMITER_END")
+      return Token.new("DELIMITER_START", line, col, "DELIMITER_START")
+    end
+
+    # `[]`, `[]=` and `[]?` are one token: they are method names, and the
+    # lexer is where that is decided.
+    if c == '[' && peek_at(1) == ']'
+      advance
+      advance
+      if peek == '=' || peek == '?'
+        op = "[]#{advance}"
+        return Token.new(op, line, col, op)
+      end
+      return Token.new("[]", line, col, "[]")
+    end
+
+    # Three characters before two before one. `...` is not `..` and `.`,
+    # and `<=>` is not `<=` and `>`.
+    three = "#{c}#{peek_at(1)}#{peek_at(2)}"
+    if three == "..." || three == "<=>" || three == "===" || three == "**=" ||
+       three == "||=" || three == "&&=" || three == "<<=" || three == ">>="
+      advance
+      advance
+      advance
+      return Token.new(three, line, col, three)
+    end
+
+    # Two-character operators before one, or `==` lexes as two `=`.
+    two = "#{c}#{peek_at(1)}"
+    if two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+       two == "&&" || two == "||" || two == "->" || two == "=>" ||
+       two == "::" || two == ".." || two == "+=" || two == "-=" ||
+       two == "*=" || two == "/=" || two == "%=" || two == "|=" ||
+       two == "&=" || two == "^=" || two == "<<" || two == ">>" ||
+       two == "=~" || two == "!~" || two == "&+" || two == "&-" ||
+       two == "&*"
+      advance
+      advance
+      return Token.new(two, line, col, two)
+    end
+
+    advance
+    Token.new(c.to_s, line, col, c.to_s)
+  end
+
+  def dump_all : Nil
+    while token = next_token
+      # SPACE and NEWLINE do not count as "what came before": `x = -1`
+      # has a space in it and the minus is still part of the literal.
+      unless token.kind == "SPACE" || token.kind == "NEWLINE" || token.kind == "COMMENT"
+        @prev_kind = token.kind
+      end
+      puts token.dump
+    end
+  end
+end# The parser slice, written in iyi, over the lexer slice above.
+#
+# The AST is the shape the model experiment settled on: a union of node types
+# with traits for the passes, rather than a class hierarchy iyi cannot have.
+# One pass here, `sexp`, because the diff against the current parser is what
+# this is for.
+#
+# Scope: a module header, `pub def` with typed arguments and a return type,
+# assignment, calls with and without parentheses, identifiers, integer and
+# string literals, and binary operators with precedence. Not yet: blocks,
+# `if`/`while`, generics, traits and impls, macros, string interpolation.
+
+pub struct PathNode
+  getter names : String
+  def initialize(@names : String)
+  end
+end
+
+pub struct NumNode
+  getter value : String
+  def initialize(@value : String)
+  end
+end
+
+pub struct StrNode
+  getter value : String
+  def initialize(@value : String)
+  end
+end
+
+pub struct VarNode
+  getter name : String
+  def initialize(@name : String)
+  end
+end
+
+pub struct ExtendNode
+  def initialize
+  end
+end
+
+pub class CallNode
+  getter name : String
+  getter recv : Array(Node)
+  getter args : Array(Node)
+  def initialize(@name : String, @recv : Array(Node), @args : Array(Node))
+  end
+end
+
+pub class AssignNode
+  getter target : Array(Node)
+  getter value : Array(Node)
+  def initialize(@target : Array(Node), @value : Array(Node))
+  end
+end
+
+pub class ArgNode
+  getter name : String
+  getter restriction : Array(Node)
+  def initialize(@name : String, @restriction : Array(Node))
+  end
+end
+
+pub class DefNode
+  getter name : String
+  getter args : Array(Node)
+  getter ret : Array(Node)
+  getter body : Array(Node)
+  def initialize(@name : String, @args : Array(Node), @ret : Array(Node), @body : Array(Node))
+  end
+end
+
+pub class ExprsNode
+  getter items : Array(Node)
+  def initialize(@items : Array(Node))
+  end
+end
+
+pub class ModuleHeaderNode
+  getter path : String
+  def initialize(@path : String)
+  end
+end
+
+pub class ModuleDefNode
+  getter name : Array(Node)
+  getter body : Array(Node)
+  def initialize(@name : Array(Node), @body : Array(Node))
+  end
+end
+
+# A single-element Array(Node) stands in for a nilable child: `Node?` would
+# need Nil to implement every trait the union does, and an array of one says
+# the same thing without that.
+pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
+                 CallNode | AssignNode | ArgNode | DefNode | ExprsNode |
+                 ModuleHeaderNode | ModuleDefNode
+
+pub trait Sexp
+  abstract def sexp : String
+end
+
+def sexp_list(nodes : Array(Node)) : String
+  out = ""
+  first = true
+  nodes.each do |n|
+    out = out + " " unless first
+    out = out + n.sexp
+    first = false
+  end
+  out
+end
+
+impl Sexp for PathNode
+  def sexp : String
+    "(path #{names})"
+  end
+end
+
+impl Sexp for NumNode
+  def sexp : String
+    "(num #{value})"
+  end
+end
+
+impl Sexp for StrNode
+  def sexp : String
+    "(str \"#{value}\")"
+  end
+end
+
+impl Sexp for VarNode
+  def sexp : String
+    "(var #{name})"
+  end
+end
+
+impl Sexp for ExtendNode
+  def sexp : String
+    "(extend)"
+  end
+end
+
+impl Sexp for CallNode
+  def sexp : String
+    head = if recv.empty?
+             "(call #{name}"
+           else
+             "(call #{recv[0].sexp}.#{name}"
+           end
+    if args.empty?
+      head + ")"
+    else
+      head + " " + sexp_list(args) + ")"
+    end
+  end
+end
+
+impl Sexp for AssignNode
+  def sexp : String
+    "(assign #{target[0].sexp} #{value[0].sexp})"
+  end
+end
+
+impl Sexp for ArgNode
+  def sexp : String
+    if restriction.empty?
+      "(arg #{name})"
+    else
+      "(arg #{name} : #{restriction[0].sexp})"
+    end
+  end
+end
+
+impl Sexp for DefNode
+  def sexp : String
+    r = if ret.empty?
+          ""
+        else
+          " -> #{ret[0].sexp}"
+        end
+    "(def #{name} (args #{sexp_list(args)})#{r} #{body[0].sexp})"
+  end
+end
+
+impl Sexp for ExprsNode
+  def sexp : String
+    "(exprs #{sexp_list(items)})"
+  end
+end
+
+impl Sexp for ModuleHeaderNode
+  def sexp : String
+    "(module #{path})"
+  end
+end
+
+impl Sexp for ModuleDefNode
+  def sexp : String
+    "(moduledef #{name[0].sexp} #{body[0].sexp})"
+  end
+end
+
+pub class Parser
+  @tokens : Array(Token)
+  @pos : Int32
+  @locals : Array(String)
+
+  def initialize(source : String)
+    @tokens = [] of Token
+    @pos = 0
+    @locals = [] of String
+    lexer = Lexer.new(source)
+    while token = lexer.next_token
+      # The parser works on significant tokens; newlines end statements and
+      # are handled by looking at line numbers rather than by token.
+      unless token.kind == "SPACE" || token.kind == "COMMENT"
+        @tokens << token
+      end
+    end
+  end
+
+  def at_end? : Bool
+    @pos >= @tokens.size
+  end
+
+  def peek : Token
+    return Token.new("EOF", 0, 0, "EOF") if at_end?
+    @tokens[@pos]
+  end
+
+  def peek_at(offset : Int32) : Token
+    i = @pos + offset
+    return Token.new("EOF", 0, 0, "EOF") if i >= @tokens.size
+    @tokens[i]
+  end
+
+  def advance : Token
+    t = peek
+    @pos = @pos + 1
+    t
+  end
+
+  def skip_newlines : Nil
+    while peek.kind == "NEWLINE"
+      advance
+    end
+  end
+
+  def accept(value : String) : Bool
+    if peek.kind == "IDENT" && peek.value == value
+      advance
+      true
+    else
+      false
+    end
+  end
+
+  def accept_kind(kind : String) : Bool
+    if peek.kind == kind
+      advance
+      true
+    else
+      false
+    end
+  end
+
+  # module a/b -> the header, and the name the body is wrapped in
+  def parse_module_header : String
+    advance                      # module
+    path = advance.value         # first segment
+    while peek.kind == "/"
+      advance
+      path = path + "/" + advance.value
+    end
+    path
+  end
+
+  def capitalize_first(text : String) : String
+    return text if text == ""
+    text[0].upcase.to_s + text[1, text.size - 1]
+  end
+
+  def parse : Node
+    skip_newlines
+    header = ""
+    if peek.kind == "IDENT" && peek.value == "module"
+      header = parse_module_header
+    end
+    skip_newlines
+
+    body = [] of Node
+    # The current parser injects an `extend` into a module's body, and a port
+    # that skips it produces a different tree even when every statement agrees.
+    body << ExtendNode.new.as(Node)
+    while !at_end?
+      skip_newlines
+      break if at_end?
+      body << parse_statement
+      skip_newlines
+    end
+
+    # `module samples/hello` names the type `Samples::Hello`: every segment
+    # is capitalised and the path is kept, not just its last piece.
+    mod_name = ""
+    header.split("/").each do |segment|
+      mod_name = mod_name + "::" unless mod_name == ""
+      mod_name = mod_name + capitalize_first(segment)
+    end
+
+    ModuleDefNode.new(
+      [PathNode.new(mod_name).as(Node)] of Node,
+      [ExprsNode.new(body).as(Node)] of Node,
+    ).as(Node)
+  end
+
+  def parse_statement : Node
+    if peek.kind == "IDENT" && peek.value == "pub" &&
+       peek_at(1).kind == "IDENT" && peek_at(1).value == "def"
+      advance
+      return parse_def
+    end
+    if peek.kind == "IDENT" && peek.value == "def"
+      return parse_def
+    end
+    parse_expression
+  end
+
+  def parse_def : Node
+    advance                      # def
+    name = advance.value
+    args = [] of Node
+    if peek.kind == "("
+      advance
+      while peek.kind != ")" && !at_end?
+        arg_name = advance.value
+        @locals << arg_name
+        restriction = [] of Node
+        if peek.kind == ":"
+          advance
+          restriction << PathNode.new(advance.value).as(Node)
+        end
+        args << ArgNode.new(arg_name, restriction).as(Node)
+        advance if peek.kind == ","
+      end
+      advance                    # )
+    end
+    ret = [] of Node
+    if peek.kind == ":"
+      advance
+      ret << PathNode.new(advance.value).as(Node)
+    end
+
+    body = [] of Node
+    skip_newlines
+    while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+      body << parse_expression
+      skip_newlines
+    end
+    advance                      # end
+
+    inner = if body.size == 1
+              body[0]
+            else
+              ExprsNode.new(body).as(Node)
+            end
+    DefNode.new(name, args, ret, [inner] of Node).as(Node)
+  end
+
+  def parse_expression : Node
+    left = parse_binary(0)
+    if peek.kind == "="
+      advance
+      value = parse_binary(0)
+      case left
+      when VarNode then @locals << left.name
+      end
+      return AssignNode.new([left] of Node, [value] of Node).as(Node)
+    end
+    left
+  end
+
+  def precedence(op : String) : Int32
+    if op == "*" || op == "/" || op == "%"
+      2
+    elsif op == "+" || op == "-"
+      1
+    else
+      0
+    end
+  end
+
+  def parse_binary(min : Int32) : Node
+    left = parse_primary
+    while !at_end?
+      op = peek.kind
+      prec = precedence(op)
+      break if prec == 0 || prec < min
+      advance
+      right = parse_binary(prec + 1)
+      left = CallNode.new(op, [left] of Node, [right] of Node).as(Node)
+    end
+    left
+  end
+
+  # `a.b(c).d` is a chain of calls on the thing before the dot. Applied to
+  # every primary, because a receiver can be a literal, a paren group or a
+  # call as easily as a variable.
+  def with_postfix(node : Node) : Node
+    result = node
+    while peek.kind == "."
+      advance
+      name = advance.value
+      args = [] of Node
+      if peek.kind == "("
+        advance
+        while peek.kind != ")" && !at_end?
+          args << parse_expression
+          advance if peek.kind == ","
+        end
+        advance
+      end
+      result = CallNode.new(name, [result] of Node, args).as(Node)
+    end
+    result
+  end
+
+  def parse_primary : Node
+    t = peek
+    if t.kind == "NUMBER"
+      advance
+      return with_postfix(NumNode.new(t.value).as(Node))
+    end
+    if t.kind == "DELIMITER_START"
+      advance
+      text = ""
+      while peek.kind == "STRING"
+        text = text + advance.value
+      end
+      advance if peek.kind == "DELIMITER_END"
+      return with_postfix(StrNode.new(text).as(Node))
+    end
+    if t.kind == "CONST"
+      advance
+      return with_postfix(PathNode.new(t.value).as(Node))
+    end
+    if t.kind == "("
+      advance
+      inner = parse_expression
+      advance if peek.kind == ")"
+      # A paren group is an Expressions node in the current parser, not a
+      # transparent wrapper, and the tree says so.
+      return with_postfix(ExprsNode.new([inner] of Node).as(Node))
+    end
+    if t.kind == "IDENT"
+      advance
+      name = t.value
+      if peek.kind == "("
+        advance
+        args = [] of Node
+        while peek.kind != ")" && !at_end?
+          args << parse_expression
+          advance if peek.kind == ","
+        end
+        advance                  # )
+        return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
+      end
+      # A known local is a variable; anything else with a value after it on
+      # the same line is a paren-less call.
+      if @locals.includes?(name)
+        return with_postfix(VarNode.new(name).as(Node))
+      end
+      if peek.line == t.line &&
+         (peek.kind == "IDENT" || peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" || peek.kind == "CONST")
+        args = [] of Node
+        args << parse_expression
+        while peek.kind == ","
+          advance
+          args << parse_expression
+        end
+        return CallNode.new(name, [] of Node, args).as(Node)
+      end
+      return with_postfix(VarNode.new(name).as(Node))
+    end
+    advance
+    VarNode.new(t.value).as(Node)
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: parser <file.iyi>"
+else
+  source = File.read(path)
+  header = ""
+  lexer = Lexer.new(source)
+  # The top level the current parser produces is `(exprs (module x) (moduledef ...))`.
+  tree = Parser.new(source).parse
+  first = Lexer.new(source)
+  while token = first.next_token
+    if token.kind == "IDENT" && token.value == "module"
+      break
+    end
+  end
+  seg = ""
+  while token = first.next_token
+    break if token.kind == "NEWLINE"
+    next if token.kind == "SPACE"
+    seg = seg + token.value
+  end
+  puts "(exprs (module #{seg}) #{tree.sexp})"
+end

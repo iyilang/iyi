@@ -1,0 +1,8 @@
+module main
+
+pub def greet(name : String) : String
+  name
+end
+
+msg = greet("world")
+puts msg

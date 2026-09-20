@@ -61,6 +61,26 @@ def sexp(node : Iyi::ASTNode) : String
     "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
   when Iyi::InstanceVar
     "(ivar #{node.name})"
+  when Iyi::If
+    # The branches, not just the node. `(if)` on its own would let a port
+    # that mis-read the condition agree with the oracle anyway.
+    "(if #{sexp(node.cond)} #{sexp(node.then)} #{sexp(node.else)})"
+  when Iyi::Unless
+    "(unless #{sexp(node.cond)} #{sexp(node.then)} #{sexp(node.else)})"
+  when Iyi::While
+    "(while #{sexp(node.cond)} #{sexp(node.body)})"
+  when Iyi::Return
+    node.exp.try { |e| "(return #{sexp(e)})" } || "(return)"
+  when Iyi::And
+    "(and #{sexp(node.left)} #{sexp(node.right)})"
+  when Iyi::Or
+    "(or #{sexp(node.left)} #{sexp(node.right)})"
+  when Iyi::Not
+    "(not #{sexp(node.exp)})"
+  when Iyi::BoolLiteral
+    "(bool #{node.value})"
+  when Iyi::NilLiteral
+    "(nil)"
   when Iyi::NumberLiteral
     "(num #{node.value})"
   when Iyi::StringLiteral

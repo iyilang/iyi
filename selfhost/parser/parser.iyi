@@ -409,6 +409,62 @@ pub struct ArrayNode
   end
 end
 
+pub class IfNode
+  getter cond : Array(Node)
+  getter then_branch : Array(Node)
+  getter else_branch : Array(Node)
+  def initialize(@cond : Array(Node), @then_branch : Array(Node), @else_branch : Array(Node))
+  end
+end
+
+pub class WhileNode
+  getter cond : Array(Node)
+  getter body : Array(Node)
+  def initialize(@cond : Array(Node), @body : Array(Node))
+  end
+end
+
+pub class ReturnNode
+  getter value : Array(Node)
+  def initialize(@value : Array(Node))
+  end
+end
+
+# `&&` and `||` are their own nodes in the current parser, not calls to a
+# method named `&&`: they short-circuit, and a call cannot.
+pub class AndNode
+  getter left : Array(Node)
+  getter right : Array(Node)
+  def initialize(@left : Array(Node), @right : Array(Node))
+  end
+end
+
+pub class OrNode
+  getter left : Array(Node)
+  getter right : Array(Node)
+  def initialize(@left : Array(Node), @right : Array(Node))
+  end
+end
+
+pub struct BoolNode
+  getter value : String
+  def initialize(@value : String)
+  end
+end
+
+pub struct NilNode
+  def initialize
+  end
+end
+
+# `!x`, and what `until` is written as: the current parser has no `until`
+# node, it negates the condition of a `while`.
+pub class NotNode
+  getter exp : Array(Node)
+  def initialize(@exp : Array(Node))
+  end
+end
+
 pub struct UsingNode
   def initialize
   end
@@ -510,7 +566,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ModuleHeaderNode | ModuleDefNode | SelfNode | NopNode |
                  IvarNode | TypeDeclNode | TraitDefNode | ClassDefNode |
                  ImplDefNode | InterpNode | ImportNode | UsingNode |
-                 ArrayNode
+                 ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
+                 OrNode | BoolNode | NilNode | NotNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -586,6 +643,55 @@ end
 impl Sexp for ArrayNode
   def sexp : String
     "(arrayliteral)"
+  end
+end
+
+impl Sexp for IfNode
+  def sexp : String
+    "(if #{cond[0].sexp} #{then_branch[0].sexp} #{else_branch[0].sexp})"
+  end
+end
+
+impl Sexp for WhileNode
+  def sexp : String
+    "(while #{cond[0].sexp} #{body[0].sexp})"
+  end
+end
+
+impl Sexp for ReturnNode
+  def sexp : String
+    return "(return)" if value.size == 0
+    "(return #{value[0].sexp})"
+  end
+end
+
+impl Sexp for AndNode
+  def sexp : String
+    "(and #{left[0].sexp} #{right[0].sexp})"
+  end
+end
+
+impl Sexp for OrNode
+  def sexp : String
+    "(or #{left[0].sexp} #{right[0].sexp})"
+  end
+end
+
+impl Sexp for BoolNode
+  def sexp : String
+    "(bool #{value})"
+  end
+end
+
+impl Sexp for NilNode
+  def sexp : String
+    "(nil)"
+  end
+end
+
+impl Sexp for NotNode
+  def sexp : String
+    "(not #{exp[0].sexp})"
   end
 end
 
@@ -690,6 +796,7 @@ pub class Parser
   @pos : Int32
   @locals : Array(String)
   @imports : Array(Node)
+  @header : String
 
   # The imports a file declares, which the current parser puts beside the
   # module rather than inside it: `(exprs (module a/b) (importdecl)
@@ -699,11 +806,19 @@ pub class Parser
     @imports
   end
 
+  # The module path as written, empty when the file has no header. The
+  # driver used to re-lex the file to find this and printed a header for a
+  # file that had none.
+  def header : String
+    @header
+  end
+
   def initialize(source : String)
     @tokens = [] of Token
     @pos = 0
     @locals = [] of String
     @imports = [] of Node
+    @header = ""
     lexer = Lexer.new(source)
     while token = lexer.next_token
       # The parser works on significant tokens; newlines end statements and
@@ -781,9 +896,17 @@ pub class Parser
     path
   end
 
-  def capitalize_first(text : String) : String
-    return text if text == ""
-    text[0].upcase.to_s + text[1, text.size - 1]
+  # `samples/init_order` names the type `Samples::InitOrder`: a segment is
+  # camelised on its underscores, not just capitalised on its first letter.
+  # Capitalising only the first produced `Init_order`, and four samples in
+  # the corpus differed on their module name alone.
+  def camelize(text : String) : String
+    out = ""
+    text.split('_').each do |part|
+      next if part == ""
+      out = out + part[0].upcase.to_s + part[1, part.size - 1]
+    end
+    out
   end
 
   def parse : Node
@@ -791,19 +914,26 @@ pub class Parser
     header = ""
     if peek.kind == "IDENT" && peek.value == "module"
       header = parse_module_header
+      @header = header
     end
     skip_newlines
 
-    while peek.kind == "IDENT" && peek.value == "import"
-      skip_line
-      @imports << ImportNode.new.as(Node)
-      skip_newlines
+    # Only a module hoists its leading imports out of itself. A file with
+    # no header has nothing to hoist them out of, and they stay where they
+    # were written.
+    unless header == ""
+      while peek.kind == "IDENT" && peek.value == "import"
+        skip_line
+        @imports << ImportNode.new.as(Node)
+        skip_newlines
+      end
     end
 
     body = [] of Node
     # The current parser injects an `extend` into a module's body, and a port
     # that skips it produces a different tree even when every statement agrees.
-    body << ExtendNode.new.as(Node)
+    # A file with no module has no body to extend.
+    body << ExtendNode.new.as(Node) unless header == ""
     while !at_end?
       skip_newlines
       break if at_end?
@@ -816,7 +946,14 @@ pub class Parser
     mod_name = ""
     header.split("/").each do |segment|
       mod_name = mod_name + "::" unless mod_name == ""
-      mod_name = mod_name + capitalize_first(segment)
+      mod_name = mod_name + camelize(segment)
+    end
+
+    # A file with no `module` line is not wrapped in anything: the current
+    # parser builds the statements and stops. `samples/iyi/std_text.iyi` is
+    # one, and the port used to invent a module named after nothing.
+    if header == ""
+      return ExprsNode.new(body).as(Node)
     end
 
     ModuleDefNode.new(
@@ -861,14 +998,117 @@ pub class Parser
         skip_line
         return UsingNode.new.as(Node)
       end
+      # An `import` before any statement is hoisted out of the module by
+      # the current parser; one that comes after a statement stays where it
+      # was written. `samples/init_order` is the file that says so, and it
+      # is the file that exists to say so.
+      if word.value == "import"
+        advance if offset == 1
+        skip_line
+        return ImportNode.new.as(Node)
+      end
+      if word.value == "if" || word.value == "unless"
+        advance if offset == 1
+        return with_modifiers(parse_if(word.value == "unless"))
+      end
+      if word.value == "while" || word.value == "until"
+        advance if offset == 1
+        return with_modifiers(parse_while(word.value == "until"))
+      end
     end
-    parse_expression
+    if peek.kind == "IDENT" && peek.value == "return"
+      advance
+      value = [] of Node
+      unless at_end? || peek.kind == "NEWLINE" ||
+             (peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless"))
+        value << parse_expression
+      end
+      return with_modifiers(ReturnNode.new(value).as(Node))
+    end
+    with_modifiers(parse_expression)
   end
 
   # The statements between a declaration's header and its `end`, as the one
   # node the current parser puts there: the statement itself when there is
   # one, an `Expressions` when there are several, a `Nop` when there are
   # none.
+  # `expr if cond` and `expr unless cond`, applied to a statement once it
+  # has been read. The trailing form is an `If` with the statement as its
+  # only branch, which is the tree the current parser builds.
+  def with_modifiers(node : Node) : Node
+    result = node
+    while peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless" ||
+                                   peek.value == "while" || peek.value == "until")
+      word = advance.value
+      cond = parse_expression
+      if word == "if"
+        result = IfNode.new([cond] of Node, [result] of Node,
+                            [NopNode.new.as(Node)] of Node).as(Node)
+      elsif word == "unless"
+        result = IfNode.new([cond] of Node, [NopNode.new.as(Node)] of Node,
+                            [result] of Node).as(Node)
+      elsif word == "while"
+        result = WhileNode.new([cond] of Node, [result] of Node).as(Node)
+      else
+        result = WhileNode.new([NotNode.new([cond] of Node).as(Node)] of Node,
+                               [result] of Node).as(Node)
+      end
+    end
+    result
+  end
+
+  # The statements up to one of the words that can end a branch, as the one
+  # node the current parser puts there.
+  def parse_branch_body : Node
+    items = [] of Node
+    skip_newlines
+    while !at_end? && !(peek.kind == "IDENT" &&
+                        (peek.value == "end" || peek.value == "else" || peek.value == "elsif"))
+      items << parse_statement
+      skip_newlines
+    end
+    return NopNode.new.as(Node) if items.size == 0
+    return items[0] if items.size == 1
+    ExprsNode.new(items).as(Node)
+  end
+
+  # `if`, `elsif` and `else`, and `unless`, which is the same node with the
+  # branches the other way round.
+  def parse_if(negated : Bool) : Node
+    advance                      # if or unless
+    cond = parse_expression
+    then_branch = parse_branch_body
+
+    else_branch = NopNode.new.as(Node)
+    if peek.kind == "IDENT" && peek.value == "elsif"
+      # An `elsif` is an `if` in the else branch, and it consumes the `end`
+      # that closes the whole chain.
+      else_branch = parse_if(false)
+      return build_if(negated, cond, then_branch, else_branch)
+    end
+    if peek.kind == "IDENT" && peek.value == "else"
+      advance
+      else_branch = parse_branch_body
+    end
+    advance                      # end
+    build_if(negated, cond, then_branch, else_branch)
+  end
+
+  def build_if(negated : Bool, cond : Node, then_branch : Node, else_branch : Node) : Node
+    if negated
+      return IfNode.new([cond] of Node, [else_branch] of Node, [then_branch] of Node).as(Node)
+    end
+    IfNode.new([cond] of Node, [then_branch] of Node, [else_branch] of Node).as(Node)
+  end
+
+  def parse_while(negated : Bool) : Node
+    advance                      # while or until
+    cond = parse_expression
+    cond = NotNode.new([cond] of Node).as(Node) if negated
+    body = parse_body
+    WhileNode.new([cond] of Node, [body] of Node).as(Node)
+  end
+
   def parse_body : Node
     items = [] of Node
     skip_newlines
@@ -1024,16 +1264,33 @@ pub class Parser
       value = parse_binary(0)
       case left
       when VarNode then @locals << left.name
+      when CallNode
+        # `a[i] = v` is one call, `[]=`, not an assignment to a call.
+        if left.name == "[]"
+          args = [] of Node
+          left.args.each { |a| args << a }
+          args << value
+          return CallNode.new("[]=", left.recv, args).as(Node)
+        end
       end
       return AssignNode.new([left] of Node, [value] of Node).as(Node)
     end
     left
   end
 
+  # Tighter binds higher. `||` loosest, then `&&`, then the comparisons,
+  # then the arithmetic: `a + 1 > b && c` groups the way it reads.
   def precedence(op : String) : Int32
     if op == "*" || op == "/" || op == "%"
-      2
+      5
     elsif op == "+" || op == "-"
+      4
+    elsif op == "==" || op == "!=" || op == "<" || op == ">" ||
+          op == "<=" || op == ">=" || op == "<=>"
+      3
+    elsif op == "&&"
+      2
+    elsif op == "||"
       1
     else
       0
@@ -1048,7 +1305,13 @@ pub class Parser
       break if prec == 0 || prec < min
       advance
       right = parse_binary(prec + 1)
-      left = CallNode.new(op, [left] of Node, [right] of Node).as(Node)
+      if op == "&&"
+        left = AndNode.new([left] of Node, [right] of Node).as(Node)
+      elsif op == "||"
+        left = OrNode.new([left] of Node, [right] of Node).as(Node)
+      else
+        left = CallNode.new(op, [left] of Node, [right] of Node).as(Node)
+      end
     end
     left
   end
@@ -1074,7 +1337,20 @@ pub class Parser
   # call as easily as a variable.
   def with_postfix(node : Node) : Node
     result = node
-    while peek.kind == "."
+    while peek.kind == "." || peek.kind == "["
+      # `parts[0]` is a call to `[]` on what precedes it, which is why it
+      # chains with the dot rather than being its own kind of expression.
+      if peek.kind == "["
+        advance
+        args = [] of Node
+        while peek.kind != "]" && !at_end?
+          args << parse_expression
+          advance if peek.kind == ","
+        end
+        advance                  # ]
+        result = CallNode.new("[]", [result] of Node, args).as(Node)
+        next
+      end
       advance
       name = advance.value
       args = [] of Node
@@ -1157,6 +1433,21 @@ pub class Parser
       # transparent wrapper, and the tree says so.
       return with_postfix(ExprsNode.new([inner] of Node).as(Node))
     end
+    if t.kind == "!"
+      advance
+      return NotNode.new([parse_primary] of Node).as(Node)
+    end
+
+    if t.kind == "IDENT" && (t.value == "true" || t.value == "false")
+      advance
+      return with_postfix(BoolNode.new(t.value).as(Node))
+    end
+
+    if t.kind == "IDENT" && t.value == "nil"
+      advance
+      return with_postfix(NilNode.new.as(Node))
+    end
+
     if t.kind == "IDENT"
       advance
       name = t.value
@@ -1205,24 +1496,14 @@ if path.nil?
   puts "usage: parser <file.iyi>"
 else
   source = File.read(path)
-  header = ""
-  lexer = Lexer.new(source)
-  # The top level the current parser produces is `(exprs (module x) (moduledef ...))`.
   parser = Parser.new(source)
   tree = parser.parse
   imports = ""
   parser.imports.each { |node| imports = imports + node.sexp + " " }
-  first = Lexer.new(source)
-  while token = first.next_token
-    if token.kind == "IDENT" && token.value == "module"
-      break
-    end
+  if parser.header == ""
+    # No header, no wrapper: the file's statements are the whole tree.
+    puts tree.sexp
+  else
+    puts "(exprs (module #{parser.header}) #{imports}#{tree.sexp})"
   end
-  seg = ""
-  while token = first.next_token
-    break if token.kind == "NEWLINE"
-    next if token.kind == "SPACE"
-    seg = seg + token.value
-  end
-  puts "(exprs (module #{seg}) #{imports}#{tree.sexp})"
 end

@@ -22,15 +22,19 @@ for f in "$@"; do
     | grep -v "Using compiled" > "$WORK/a.txt"
   "$WORK/parser" "$f" > "$WORK/b.txt" 2>/dev/null
   python3 - "$f" "$WORK/a.txt" "$WORK/b.txt" <<'PY'
-import sys
+import sys, os
 name, left, right = sys.argv[1], open(sys.argv[2]).read(), open(sys.argv[3]).read()
+base = os.path.basename(name)
+if not left.strip():
+    print(f"  {base:22s} no oracle")
+    raise SystemExit
 if left == right:
-    print(f"  {name}: agree")
+    print(f"  {base:22s} agree           100%")
     raise SystemExit
 i = next((i for i, (x, y) in enumerate(zip(left, right)) if x != y), min(len(left), len(right)))
-start = max(0, i - 60)
-print(f"  {name}: first differs at column {i}")
-print(f"    oracle: ...{left[start:i]}<<{left[i:i+50]}")
-print(f"    port:   ...{right[start:i]}<<{right[i:i+50]}")
+# How much of the tree the port got right before it went wrong. Whole-file
+# agreement is the only thing that counts as done, but it moves one file at
+# a time and hides a slice that fixed nine tenths of twenty files.
+print(f"  {base:22s} differs at {i:6d}  {100 * i // len(left):3d}%  {left[i:i+44]}")
 PY
 done

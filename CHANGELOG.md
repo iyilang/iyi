@@ -389,6 +389,20 @@
 
 ### Fixed
 
+- **A generic's splat parameter did not travel, so the two types the
+  prelude declares with one could not be read back.** `*T` and `T` are
+  different declarations and the parser says so: `struct ::Tuple(T)` is
+  `type var must be *T, not T`. The artifact carried the parameter
+  names and not the marker, so `std/tuple` and `std/named_tuple` — both
+  of which reopen `Tuple` and `NamedTuple` — were refused before
+  anything in them was looked at.
+
+  The marker rides in the list, which is the convention a def's splat
+  already uses in `Signature#parameters`: the renderer joins those
+  verbatim, so the marker *is* the text and no field had to be added
+  for it. 49 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 51 do now.
+
 - **A module the module keeps to itself did not travel, and its object
   code did.** A `.iyimod` carries the types a consumer cannot name but
   the module's own machine code does — and the walk that collects them

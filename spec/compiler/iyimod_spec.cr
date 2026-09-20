@@ -2675,6 +2675,60 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A generic's splat parameter is part of its declaration.
+  #
+  # `*T` and `T` are different things and the parser says so: `struct
+  # ::Tuple(T)` is `type var must be *T, not T`. The artifact carried the
+  # names and not the marker, so the two types the prelude declares that way
+  # — `Tuple` and `NamedTuple`, both reopened by `src/std` — could not be
+  # read back at all, and `std/tuple` and `std/named_tuple` were refused
+  # before anything in them was looked at.
+  #
+  # The marker travels in the list, which is the convention a def's splat
+  # already uses in `Signature#parameters`: the renderer joins these
+  # verbatim, so the marker is the text.
+  it "carries a generic's splat parameter" do
+    with_tempdir("iyimod_splat_parameter") do
+      Dir.mkdir_p "boot"
+      File.write "boot/pack.iyi", <<-IYI
+        module boot/pack
+
+        pub struct Bag(*T)
+          pub def self.count : Int32
+            {{ T.size }}
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/pack
+
+        puts Boot::Pack::Bag(Int32, String, Bool).count
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "3"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "pack.iyimod"))
+      bag = artifact.exports.types.find! { |declaration| declaration.name == "Bag" }
+      bag.type_parameters.should eq ["*T"]
+
+      File.delete "boot/pack.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "3"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

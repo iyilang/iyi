@@ -1023,7 +1023,7 @@ module Iyi
         declarations << IyiMod::TypeDecl.new(
           name: container,
           kind: kind,
-          type_parameters: type.as?(GenericType).try(&.type_vars) || [] of String,
+          type_parameters: iyi_type_parameters(type),
           assoc_types: [] of String,
           supertraits: [] of String,
           fields: [] of {String, String, String},
@@ -1046,6 +1046,26 @@ module Iyi
         end
       end
       walk.call(program)
+    end
+
+    # iyi: a generic type's parameters, with the splat one marked.
+    #
+    # `*T` and `T` are different declarations, and the parser says so:
+    # `struct ::Tuple(T)` is "type var must be *T, not T". `Tuple` and
+    # `NamedTuple` are the two the prelude declares that way and both are
+    # reopened by `src/std`, so `std/tuple` and `std/named_tuple` could not
+    # be consumed as artifacts at all.
+    #
+    # Written into the list rather than carried beside it, which is the
+    # convention `Signature#parameters` already uses for a def's splat: the
+    # renderer joins these verbatim, so the marker is the text.
+    private def iyi_type_parameters(type : Type) : Array(String)
+      generic = type.as?(GenericType)
+      return [] of String unless generic
+      splat = generic.splat_index
+      generic.type_vars.map_with_index do |name, index|
+        index == splat ? "*#{name}" : name
+      end
     end
 
     # iyi: the machine code for a module's own definitions, for `ObjectCode`
@@ -1534,7 +1554,7 @@ module Iyi
         type_parameters = generic_trait.trait_params
         assoc_types = generic_trait.assoc_types
       else
-        type_parameters = type.as?(GenericType).try(&.type_vars) || [] of String
+        type_parameters = iyi_type_parameters(type)
         assoc_types = [] of String
       end
 
@@ -1759,7 +1779,7 @@ module Iyi
         declarations << IyiMod::TypeDecl.new(
           name: name,
           kind: declared.type_desc,
-          type_parameters: declared.as?(GenericType).try(&.type_vars) || [] of String,
+          type_parameters: iyi_type_parameters(declared),
           assoc_types: [] of String,
           supertraits: [] of String,
           fields: collect_iyi_fields(declared),

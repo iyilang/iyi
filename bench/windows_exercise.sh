@@ -256,6 +256,58 @@ EOF
         status=1
       fi
     fi
+
+    # 2e. What a killed `iyi run` leaves behind. On POSIX the runner
+    # traps SIGTERM and passes it on; Windows delivers nothing to trap
+    # and `TerminateProcess` — which is what an editor, a CI step and
+    # `taskkill /F` use — runs no code in the runner at all. Measured
+    # before the job object: killing the runner left the program alive
+    # and its port LISTENING, and the next build of the same program
+    # failed to link, because the orphan holds its own exe open. The
+    # runner puts the program in a job with
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE now, so the kernel ends it.
+    echo
+    echo "== A killed runner takes its program with it =="
+    cat > "$WORK/holds.iyi" <<'EOF'
+module holds
+
+import std/socket
+using std/socket::{IyiSocket}
+
+server = IyiSocket.listen(0)
+puts "listening on " + server.local_port.to_s
+slept = 0
+while slept < 600
+  sleep(100)
+  slept = slept + 1
+end
+server.close
+EOF
+    "$IYI" run "$WORK/holds.iyi" > "$WORK/holds.out" 2>&1 &
+    runner=$!
+    held=""
+    for _ in $(seq 1 90); do
+      held="$(sed -n 's/^listening on \([0-9]*\)$/\1/p' "$WORK/holds.out")"
+      [ -n "$held" ] && break
+      sleep 1
+    done
+    if [ -z "$held" ]; then
+      echo "  the program never came up under the runner"
+      sed -n '1,5p' "$WORK/holds.out"
+      status=1
+    else
+      # `kill -9` from this shell is TerminateProcess on a native
+      # process: the unblockable kill, which is the whole point.
+      kill -9 "$runner" 2>/dev/null || true
+      wait "$runner" 2>/dev/null || true
+      sleep 3
+      if netstat -ano | grep "LISTENING" | grep -q ":$held "; then
+        echo "  the program outlived its runner and still holds port $held"
+        status=1
+      else
+        echo "  the runner was killed and port $held came back"
+      fi
+    fi
     ;;
 esac
 

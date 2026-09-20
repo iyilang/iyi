@@ -389,6 +389,39 @@
 
 ### Fixed
 
+- **A class hierarchy did not cross the boundary: not the `<`, not the
+  `abstract`, and not the field types the hierarchy makes virtual.**
+  Three things the artifact dropped, each enough on its own to stop a
+  consumer, and all three were the compiler's own emit path missing
+  what `iyi tool bind` already wrote for a Crystal shard.
+
+  - **The edge.** A subclass's `fields` are its own — the inherited
+    ones come with the superclass — so `pub class Memory < IyiIO` came
+    back as `pub class Memory` and the consumer said `undefined method
+    'puts' for Std::Io::Memory`. Worse than the method: a type id is
+    assigned by walking that tree, so a consumer with a missing edge
+    numbers it differently, and a match against a virtual type answers
+    wrongly and links cleanly. It is written relative to the namespace
+    it is declared in, which is what lets the renderer's inheritance
+    ordering place it — that walk matches names against *siblings*, and
+    a full path matched none of them, so a subclass was rendered above
+    the class it names.
+  - **The word.** An `abstract def` is only allowed on an abstract
+    type, so a class that lost `abstract` arrived carrying a
+    requirement it could not hold: `can't define abstract def on
+    non-abstract class`, where `std/log` stopped.
+  - **The field's type.** `IyiIO+` is how a virtual type prints and not
+    a name anybody can write. The parser read `IyiIO`, then `+` as an
+    operator, and the line after it as its operand: `can't declare def
+    dynamically`, pointing at a `def` that was fine. Declaring the base
+    is not a narrowing — an instance variable of a class type holds
+    that class or a subclass, so the consumer's front end puts the `+`
+    back.
+
+  51 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 53 do now: `std/log`
+  and `std/symbol`. Seven are left, each on a defect of its own.
+
 - **A generic's splat parameter did not travel, so the two types the
   prelude declares with one could not be read back.** `*T` and `T` are
   different declarations and the parser says so: `struct ::Tuple(T)` is

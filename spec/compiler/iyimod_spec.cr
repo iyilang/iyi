@@ -2729,6 +2729,106 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A class hierarchy crosses the boundary: the `<` edge, the `abstract`
+  # word, and the field types the hierarchy makes virtual.
+  #
+  # Three things the artifact dropped, and each of them alone is enough to
+  # stop a consumer:
+  #
+  # * The edge. A subclass's `fields` are its *own* — the inherited ones come
+  #   with the superclass — so `pub class Memory < IyiIO` came back as `pub
+  #   class Memory` and the consumer said `undefined method 'puts' for
+  #   Std::Io::Memory`. Worse than the method: a type id is assigned by
+  #   walking that tree, so a consumer with a missing edge numbers it
+  #   differently and a match against a virtual type answers wrongly and
+  #   links cleanly.
+  # * The word. An `abstract def` is only allowed on an abstract type, so a
+  #   class that lost `abstract` carried a requirement it could not hold:
+  #   `can't define abstract def on non-abstract class`, which is where
+  #   `std/log` stopped.
+  # * The field's type. `Sink+` is how a virtual type prints and not a name
+  #   anybody can write: the parser read `Sink`, then `+` as an operator, and
+  #   the line after it as its operand — `can't declare def dynamically`,
+  #   pointing at a def that was fine. `std/io` and `std/symbol` stopped
+  #   there.
+  #
+  # The superclass is written relative to the namespace it is declared in,
+  # which is what lets `inheritance_order` place it: that walk matches names
+  # against *siblings*, and a full path matched none of them, so a subclass
+  # was rendered above the class it names.
+  #
+  # Run with the source deleted, and through the base: the answer needs the
+  # inherited field, the inherited method and the subclass's own.
+  it "carries a class hierarchy" do
+    with_tempdir("iyimod_hierarchy") do
+      Dir.mkdir_p "boot"
+      File.write "boot/sink.iyi", <<-IYI
+        module boot/sink
+
+        pub abstract class Sink
+          @tag : String
+
+          def initialize(@tag : String)
+          end
+
+          pub def label : String
+            @tag
+          end
+
+          pub abstract def take(n : Int32) : Int32
+        end
+
+        pub class Doubler < Sink
+          pub def take(n : Int32) : Int32
+            n * 2
+          end
+        end
+
+        pub class Holder
+          @sink : Sink
+
+          def initialize(@sink : Sink)
+          end
+
+          pub def run(n : Int32) : String
+            @sink.label + ":" + @sink.take(n).to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/sink
+
+        puts Boot::Sink::Holder.new(Boot::Sink::Doubler.new("d")).run(21)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "d:42"
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "sink.iyimod")), io)
+      end
+      declarations.should contain "pub abstract class Sink"
+      declarations.should contain "pub class Doubler < Sink"
+      # The field, named and not printed: no `+`.
+      declarations.should contain "@sink : Boot::Sink::Sink\n"
+
+      File.delete "boot/sink.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "d:42"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

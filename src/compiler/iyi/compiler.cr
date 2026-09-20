@@ -1572,7 +1572,7 @@ module Iyi
 
       IyiMod::TypeDecl.new(
         name: name,
-        kind: type.type_desc,
+        kind: iyi_type_kind(type),
         type_parameters: type_parameters,
         assoc_types: assoc_types,
         supertraits: type.responds_to?(:supertraits) ? type.supertraits.map(&.to_s) : [] of String,
@@ -1584,6 +1584,7 @@ module Iyi
         macros: iyi_macros_on(type),
         annotations: annotations,
         doc: type.doc || "",
+        superclass: iyi_superclass_name(type),
       )
     end
 
@@ -1778,7 +1779,7 @@ module Iyi
 
         declarations << IyiMod::TypeDecl.new(
           name: name,
-          kind: declared.type_desc,
+          kind: iyi_type_kind(declared),
           type_parameters: iyi_type_parameters(declared),
           assoc_types: [] of String,
           supertraits: [] of String,
@@ -1788,9 +1789,60 @@ module Iyi
           visibility: declared.private? ? "private" : "",
           types: iyi_carried_types(program, filename, declared),
           macros: iyi_macros_on(declared),
+          superclass: iyi_superclass_name(declared),
         )
       end
       declarations.sort_by! &.name
+    end
+
+    # iyi: a type's kind, with `abstract` in front of it where it is one.
+    #
+    # The word is part of the declaration and not decoration: an `abstract
+    # def` is only allowed on an abstract type, so a class that lost the word
+    # arrived carrying a requirement it could not hold — `can't define
+    # abstract def on non-abstract class`, which is where `std/log` stopped.
+    # `Iyi::Bind` writes it into `kind` the same way, and
+    # `render_type_header` prints the string as it is.
+    private def iyi_type_kind(type : Type) : String
+      abstract_type = type.responds_to?(:abstract?) && type.abstract?
+      abstract_type ? "abstract #{type.type_desc}" : type.type_desc
+    end
+
+    # iyi: what a class inherits from, empty where it inherits from the root
+    # its kind implies.
+    #
+    # The edge, and not decoration either. A subclass's `fields` are its
+    # *own* — the inherited ones come with the superclass — so a class that
+    # lost its `<` arrived missing both the fields and the methods above it:
+    # `pub class Memory < IyiIO` came back as `pub class Memory` and the
+    # consumer said `undefined method 'puts' for Std::Io::Memory`. Worse, a
+    # type id is assigned by walking that same tree, so a consumer with a
+    # missing edge numbers the tree differently and a match against a virtual
+    # type answers wrongly and links cleanly (`TypeDecl#superclass`).
+    #
+    # `Reference`, `Struct` and `Value` are what a `class` and a `struct`
+    # inherit from when the author wrote no `<`, so writing them down would
+    # be writing what the keyword already says. Devirtualised, for the reason
+    # `iyi_type_name` gives.
+    #
+    # Written relative to the namespace the class is declared in, which is
+    # what makes `inheritance_order` able to place it: that walk matches the
+    # names in a declaration against its *siblings*, so a superclass spelled
+    # `Std::Io::Reader` beside a sibling called `Reader` matched nothing and
+    # `pub class Sized < Std::Io::Reader` was rendered above the class it
+    # names — `undefined constant Std::Io::Reader`, about a type eleven
+    # lines below.
+    private def iyi_superclass_name(type : Type) : String
+      return "" unless type.responds_to?(:superclass)
+      superclass = type.superclass
+      return "" unless superclass
+      name = superclass.devirtualize.to_s
+      return "" if name == "Reference" || name == "Struct" || name == "Value"
+      if type.is_a?(NamedType)
+        prefix = "#{type.namespace}::"
+        return name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
+      end
+      name
     end
 
     # One side of a type's methods — its own, or its metaclass's.
@@ -2071,9 +2123,36 @@ module Iyi
         # A variable whose type never resolved is a rule broken elsewhere, and
         # recorded as `?` rather than guessed at — the same convention an
         # unannotated signature takes, and equally visible in `mod dump`.
-        fields << {name, variable.type?.try(&.to_s) || "?", defaults[name]? || ""}
+        resolved = variable.type?
+        fields << {name, resolved ? iyi_type_name(resolved) : "?", defaults[name]? || ""}
       end
       fields
+    end
+
+    # iyi: a resolved type as a *name*, which is not always how it prints.
+    #
+    # `IyiIO+` is how a virtual type prints and not a name anybody can write.
+    # Rendered into a field declaration the parser read `IyiIO`, then `+` as
+    # an operator, and the line after it as its operand: `@out : IyiIO+`
+    # above a `def` was `can't declare def dynamically`, pointing at the def.
+    # `std/io`'s `Hexdump` holds an `IyiIO+`, and `std/io` and `std/symbol`
+    # both stopped there.
+    #
+    # Declaring the base is not a narrowing: an instance variable of a class
+    # type holds that class *or a subclass*, so the consumer's own front end
+    # puts the `+` back when it reads the declaration.
+    #
+    # The top level and a union's members, which is where the two shapes
+    # measured are. A virtual type inside a generic argument —
+    # `Array(IyiIO+)` — would still print as it prints; a rule that covers
+    # what was measured is the one worth having.
+    private def iyi_type_name(type : Type) : String
+      if type.is_a?(UnionType) && type.union_types.any? { |member| member.devirtualize != member }
+        names = [] of String
+        type.union_types.each { |member| names << member.devirtualize.to_s }
+        return names.join(" | ")
+      end
+      type.devirtualize.to_s
     end
 
     # iyi: a type's own class variables, for `TypeDecl#class_vars` (SPEC.md
@@ -2109,7 +2188,9 @@ module Iyi
         # variable without it writes to a different global than this module's
         # object code does. See `IyiMod::ClassVarDecl`.
         annotations = variable.thread_local? ? ["@[ThreadLocal]"] : [] of String
-        class_vars << IyiMod::ClassVarDecl.new(name, variable.type?.try(&.to_s) || "?",
+        # The same reading a field's type gets, and for the same reason.
+        resolved = variable.type?
+        class_vars << IyiMod::ClassVarDecl.new(name, resolved ? iyi_type_name(resolved) : "?",
           initialiser, annotations)
       end
       class_vars

@@ -2675,6 +2675,344 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A generic's splat parameter is part of its declaration.
+  #
+  # `*T` and `T` are different things and the parser says so: `struct
+  # ::Tuple(T)` is `type var must be *T, not T`. The artifact carried the
+  # names and not the marker, so the two types the prelude declares that way
+  # — `Tuple` and `NamedTuple`, both reopened by `src/std` — could not be
+  # read back at all, and `std/tuple` and `std/named_tuple` were refused
+  # before anything in them was looked at.
+  #
+  # The marker travels in the list, which is the convention a def's splat
+  # already uses in `Signature#parameters`: the renderer joins these
+  # verbatim, so the marker is the text.
+  it "carries a generic's splat parameter" do
+    with_tempdir("iyimod_splat_parameter") do
+      Dir.mkdir_p "boot"
+      File.write "boot/pack.iyi", <<-IYI
+        module boot/pack
+
+        pub struct Bag(*T)
+          pub def self.count : Int32
+            {{ T.size }}
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/pack
+
+        puts Boot::Pack::Bag(Int32, String, Bool).count
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "3"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "pack.iyimod"))
+      bag = artifact.exports.types.find! { |declaration| declaration.name == "Bag" }
+      bag.type_parameters.should eq ["*T"]
+
+      File.delete "boot/pack.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "3"
+    end
+  end
+
+  # A class hierarchy crosses the boundary: the `<` edge, the `abstract`
+  # word, and the field types the hierarchy makes virtual.
+  #
+  # Three things the artifact dropped, and each of them alone is enough to
+  # stop a consumer:
+  #
+  # * The edge. A subclass's `fields` are its *own* — the inherited ones come
+  #   with the superclass — so `pub class Memory < IyiIO` came back as `pub
+  #   class Memory` and the consumer said `undefined method 'puts' for
+  #   Std::Io::Memory`. Worse than the method: a type id is assigned by
+  #   walking that tree, so a consumer with a missing edge numbers it
+  #   differently and a match against a virtual type answers wrongly and
+  #   links cleanly.
+  # * The word. An `abstract def` is only allowed on an abstract type, so a
+  #   class that lost `abstract` carried a requirement it could not hold:
+  #   `can't define abstract def on non-abstract class`, which is where
+  #   `std/log` stopped.
+  # * The field's type. `Sink+` is how a virtual type prints and not a name
+  #   anybody can write: the parser read `Sink`, then `+` as an operator, and
+  #   the line after it as its operand — `can't declare def dynamically`,
+  #   pointing at a def that was fine. `std/io` and `std/symbol` stopped
+  #   there.
+  #
+  # The superclass is written relative to the namespace it is declared in,
+  # which is what lets `inheritance_order` place it: that walk matches names
+  # against *siblings*, and a full path matched none of them, so a subclass
+  # was rendered above the class it names.
+  #
+  # Run with the source deleted, and through the base: the answer needs the
+  # inherited field, the inherited method and the subclass's own.
+  it "carries a class hierarchy" do
+    with_tempdir("iyimod_hierarchy") do
+      Dir.mkdir_p "boot"
+      File.write "boot/sink.iyi", <<-IYI
+        module boot/sink
+
+        pub abstract class Sink
+          @tag : String
+
+          def initialize(@tag : String)
+          end
+
+          pub def label : String
+            @tag
+          end
+
+          pub abstract def take(n : Int32) : Int32
+        end
+
+        pub class Doubler < Sink
+          pub def take(n : Int32) : Int32
+            n * 2
+          end
+        end
+
+        pub class Holder
+          @sink : Sink
+
+          def initialize(@sink : Sink)
+          end
+
+          pub def run(n : Int32) : String
+            @sink.label + ":" + @sink.take(n).to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/sink
+
+        puts Boot::Sink::Holder.new(Boot::Sink::Doubler.new("d")).run(21)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "d:42"
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "sink.iyimod")), io)
+      end
+      declarations.should contain "pub abstract class Sink"
+      declarations.should contain "pub class Doubler < Sink"
+      # The field, named and not printed: no `+`.
+      declarations.should contain "@sink : Boot::Sink::Sink\n"
+
+      File.delete "boot/sink.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "d:42"
+    end
+  end
+
+  # A signature the consumer keys a symbol on differently from the build
+  # that compiled it, in all three places a symbol carries one.
+  #
+  # A consumer types a call from the declaration, so what it asks the linker
+  # for is what the declaration says; the producer's codegen is
+  # demand-driven, so what it wrote is what its own program happened to
+  # need. Where the two can differ the body travels instead, the way a
+  # block-taking def's already does. Three ways they differ, and this
+  # program hits all three at once:
+  #
+  # * the **return** — `def self.square(side : Int32) : Shape` was asked for
+  #   as `square<Int32>:Shape+`, where the producer, whose body returns
+  #   exactly a `Square`, wrote the answer it had;
+  # * the **receiver** — `shape.twice` on a `Shape+` is dispatched through a
+  #   unit of its own, `Shape+@Shape#twice`, and the producer emits the ones
+  #   its own program dispatched virtually;
+  # * the **parameter** — `doubled(shape : Shape)` was asked for as
+  #   `doubled<Shape+>`.
+  #
+  # `Factory` is a module nested in an exported struct, which is the other
+  # half: a nested type's travelling body is keyed on the path the renderer
+  # looks it up under, and keyed on the bare name it was recorded and never
+  # rendered — so the body did not travel however loudly this rule asked
+  # for it.
+  #
+  # `std/io` and `std/xml` were the two the library had, and the link named
+  # the line each time.
+  it "carries the body of a method whose signature is wider than its callers" do
+    with_tempdir("iyimod_widened_signature") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shape.iyi", <<-IYI
+        module boot/shape
+
+        pub abstract class Shape
+          pub abstract def area : Int32
+
+          pub def twice : Int32
+            area * 2
+          end
+        end
+
+        pub class Square < Shape
+          @side : Int32
+
+          def initialize(@side : Int32)
+          end
+
+          pub def area : Int32
+            @side * @side
+          end
+        end
+
+        pub struct Make
+          module Factory
+            def self.square(side : Int32) : Shape
+              Square.new(side)
+            end
+
+            def self.doubled(shape : Shape) : Int32
+              shape.twice
+            end
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/shape
+
+        shape = Boot::Shape::Make::Factory.square(3)
+        puts shape.twice
+        puts Boot::Shape::Make::Factory.doubled(shape)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "18\n18"
+
+      # The nested module's bodies are keyed under the path the renderer
+      # reads them back by, not under its bare name.
+      keys = Iyi::IyiMod.read(File.join("mods", "boot", "shape.iyimod")).mono_bodies.keys
+      keys.should contain "Make::Factory#self.doubled(shape : Shape)"
+      keys.should contain "Shape#twice()"
+
+      File.delete "boot/shape.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "18\n18"
+    end
+  end
+
+  # A module whose methods have no unit of their own, in the two shapes a
+  # module gets them that way.
+  #
+  # Codegen files an instance method under the type that *includes* the
+  # module, and files a generic's method under the instantiation. Include a
+  # module into a type this module declares and the result is in this
+  # module's object code; include it into `::Object` and the result is in
+  # the prelude's, which is not this module's to ship. A generic nested
+  # inside an exported module is the same gap reached the other way: the
+  # exported path already knew a generic's bodies travel and the carried
+  # path, which is where a nested type goes, did not ask.
+  #
+  # `std/colorize` is both at once and nothing else — `class ::Object;
+  # include ObjectExtensions; end` over a `Colorize::Object(T)` — so a
+  # consumer reading it from its artifact was told `undefined method
+  # 'colorize' for String`, and once that was found, `undefined reference
+  # to Object(String)@Object(T)#to_s`.
+  it "carries the bodies of a module it included into a type it does not own" do
+    with_tempdir("iyimod_stencilled_module") do
+      Dir.mkdir_p "boot"
+      File.write "boot/loud.iyi", <<-IYI
+        module boot/loud
+
+        pub struct Loud
+          # Nested rather than exported, which is the shape that went
+          # missing: the exported path knew a generic's bodies travel.
+          struct Wrap(T)
+            @value : T
+
+            def initialize(@value : T)
+            end
+
+            def shout : String
+              @value.to_s + "!"
+            end
+          end
+
+          module Extensions
+            def loud : String
+              Wrap.new(self).shout
+            end
+          end
+        end
+
+        class ::Object
+          include Boot::Loud::Loud::Extensions
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/loud
+
+        puts "hi".loud
+        puts 42.loud
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "hi!\n42!"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "loud.iyimod"))
+      # The include itself, which is the whole of what this module does to
+      # `::Object` and carries no def of its own.
+      artifact.reopened.find { |decl| decl.name == "::Object" }
+        .try(&.includes).should eq ["Boot::Loud::Loud::Extensions"]
+      # The body of the method that include installs, which is compiled
+      # once per including type and so never into this module's own code.
+      artifact.mono_bodies.keys.should contain "Loud::Extensions#loud()"
+      # And the nested generic's, which the carried path did not ask for.
+      artifact.mono_bodies.keys.should contain "Loud::Wrap#shout()"
+
+      File.delete "boot/loud.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "hi!\n42!"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

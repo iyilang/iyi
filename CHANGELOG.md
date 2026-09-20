@@ -503,6 +503,123 @@
   port taken out of the wait pair it comes back after 150 — at whichever
   deadline lands next, which is what a poller that hears only its timer
   does.
+- **A method with no unit of its own did not travel, in the two shapes a
+  method gets that way.** Codegen files an instance method under the type
+  that *includes* the module it is written in, and files a generic's
+  method under the instantiation. Neither is a symbol the producer can be
+  relied on to have emitted, which is the rule a trait's defaults already
+  travel under — and two ways in, nothing asked.
+
+  - **A module included into a type this module does not own.** Include
+    it into a type declared here and the result is in this module's
+    object code; include it into `::Object` and the result is in the
+    prelude's, which is not this module's to ship.
+  - **A generic nested inside another type.** The exported path knew a
+    generic's bodies travel; the carried path, which is where a nested
+    type goes whether or not the author exported its container, did not
+    ask.
+
+  And the `include` line itself. A module that reopens a foreign type to
+  add methods was carried, and one that reopens it to *include* something
+  had nothing to carry, so it was dropped entirely — `TypeDecl#includes`
+  existed and the emitter never filled it, on a reopened type or on the
+  module's own.
+
+  `std/colorize` is all three at once and nothing else: `class ::Object;
+  include ObjectExtensions; end` over a `Colorize::Object(T)`. A consumer
+  reading it from its artifact was told `undefined method 'colorize' for
+  String`, then `undefined reference to
+  Object(String)@Object(T)#to_s`. 55 of the 60
+  `bench/std_*_exercise.iyi` round-tripped before this, 56 do now, and
+  the module set `std/dir` pulls in is the same 870,472 bytes it was.
+
+- **The rest of the signature can be wider than its callers too, and a
+  symbol carries all of it.** A consumer types a call from the
+  declaration and asks the linker for what the declaration says; the
+  producer's codegen is demand-driven and wrote what its own program
+  needed. A parameter was the half of this already fixed; the other two
+  places a symbol carries a type went on missing.
+
+  - **The receiver.** A method on a class something inherits from is
+    reached through the virtual type wherever a declaration names the
+    base — `@sink : Sink` holds a `Sink+` — and codegen puts those
+    calls in a unit of their own, `Sink+@Sink#take`. The producer emits
+    the ones its own program dispatched virtually: `std/io`'s `Reader`
+    has two subclasses and the link ended on
+    `Reader+@Std::Io::Reader#read_all`.
+  - **The return.** `def self.new_element(name : String) : Node` was
+    asked for as `new_element<String>:Std::Xml::Node+`, because a
+    consumer holds the answer as its virtual type, where the producer —
+    whose body returns exactly a `Node` — wrote the answer it had.
+
+  And the other half of why the rule looked ineffective: a nested
+  type's travelling body was recorded under its bare name while the
+  renderer looks it up under the path it is nested in, so a body inside
+  `ByteFormat::BigEndian` was carried and never written out. It is
+  keyed on the path now, which is what a nested type's body has always
+  needed and what nothing had asked of it.
+
+  Only the *virtual* half of the question applies to a return. A union
+  is written into the symbol on both sides — the producer's body types
+  to the annotation it was written under — so `def scan(source :
+  String) : Array(Token) | BadCharacter` has nothing to disagree
+  about, and reading one as a widening shipped the body of every
+  module that returns a union: `bench/generic_boundary.py` caught it
+  on `calc/lexer`, which has no generic and should ship object code
+  and no body.
+
+  The price, measured on the module set `std/dir` pulls in: 870,472
+  bytes of `.iyimod`, which is what it was before — a signature this
+  rule fires on is rare enough in that set to cost nothing. 53 of the
+  60 `bench/std_*_exercise.iyi` round-tripped through `--emit-iyimod`
+  and `--use-iyimod` before this, 55 do now: `std/io` and `std/xml`.
+
+- **A class hierarchy did not cross the boundary: not the `<`, not the
+  `abstract`, and not the field types the hierarchy makes virtual.**
+  Three things the artifact dropped, each enough on its own to stop a
+  consumer, and all three were the compiler's own emit path missing
+  what `iyi tool bind` already wrote for a Crystal shard.
+
+  - **The edge.** A subclass's `fields` are its own — the inherited
+    ones come with the superclass — so `pub class Memory < IyiIO` came
+    back as `pub class Memory` and the consumer said `undefined method
+    'puts' for Std::Io::Memory`. Worse than the method: a type id is
+    assigned by walking that tree, so a consumer with a missing edge
+    numbers it differently, and a match against a virtual type answers
+    wrongly and links cleanly. It is written relative to the namespace
+    it is declared in, which is what lets the renderer's inheritance
+    ordering place it — that walk matches names against *siblings*, and
+    a full path matched none of them, so a subclass was rendered above
+    the class it names.
+  - **The word.** An `abstract def` is only allowed on an abstract
+    type, so a class that lost `abstract` arrived carrying a
+    requirement it could not hold: `can't define abstract def on
+    non-abstract class`, where `std/log` stopped.
+  - **The field's type.** `IyiIO+` is how a virtual type prints and not
+    a name anybody can write. The parser read `IyiIO`, then `+` as an
+    operator, and the line after it as its operand: `can't declare def
+    dynamically`, pointing at a `def` that was fine. Declaring the base
+    is not a narrowing — an instance variable of a class type holds
+    that class or a subclass, so the consumer's front end puts the `+`
+    back.
+
+  51 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 53 do now: `std/log`
+  and `std/symbol`. Seven are left, each on a defect of its own.
+
+- **A generic's splat parameter did not travel, so the two types the
+  prelude declares with one could not be read back.** `*T` and `T` are
+  different declarations and the parser says so: `struct ::Tuple(T)` is
+  `type var must be *T, not T`. The artifact carried the parameter
+  names and not the marker, so `std/tuple` and `std/named_tuple` — both
+  of which reopen `Tuple` and `NamedTuple` — were refused before
+  anything in them was looked at.
+
+  The marker rides in the list, which is the convention a def's splat
+  already uses in `Signature#parameters`: the renderer joins those
+  verbatim, so the marker *is* the text and no field had to be added
+  for it. 49 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 51 do now.
 
 - **A module the module keeps to itself did not travel, and its object
   code did.** A `.iyimod` carries the types a consumer cannot name but

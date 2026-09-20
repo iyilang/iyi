@@ -145,3 +145,19 @@ a program cannot be imported and the semantic pass reads the same tree.
 The gate is load-bearing: changing one method name the pass reports
 turns `agree 1` into `differ 1`, and restoring the file byte-for-byte
 turns it back.
+
+## The first inference slice
+
+`semantic/infer.iyi` infers the return type of every called internal method
+in `semantic/fixtures/infer.iyi`. The oracle runs `Program#semantic` and
+reads the typed `DefInstance` objects the current compiler created:
+
+    bash selfhost/semantic/infer_diff.sh
+    agree: <Program>#integer=Int32 <Program>#maybe=(Int32 | Nil) <Program>#text=String <Program>#truth=Bool
+
+This slice is call-driven rather than another declaration walk. The fixture
+contains an uncalled method and neither side reports it. The iyi pass carries
+literal types, typed parameters, local assignment and lookup, expression-list
+results, and branch unions. Its gate is load-bearing: changing the inferred
+integer type to `Int64` changes two answers and exits non-zero; restoring the
+source byte-for-byte returns the exact four rows above.

@@ -1,0 +1,143 @@
+module main
+
+# The first inference slice, written in iyi: return types of internal methods
+# a call actually reaches.
+#
+# This is deliberately smaller than "the semantic pass". It carries the first
+# five things inference needs: literal types, typed arguments, local assignment
+# and lookup, the value of an expression list, and the union of two branches.
+# The oracle asks the current compiler the same question after `semantic`, and
+# the fixture includes an uncalled method so mere declaration collection cannot
+# pass for call-driven inference.
+
+import std/file
+import parser/parser
+using std/file::{File}
+using parser/parser::{Parser, Node, NumNode, StrNode, BoolNode, NilNode, NopNode, VarNode, AssignNode, ExprsNode, IfNode, UnlessNode, DefNode, ArgNode, PathNode, CallNode}
+
+pub class TypeEnv
+  @names : Array(String)
+  @types : Array(String)
+
+  def initialize
+    @names = [] of String
+    @types = [] of String
+  end
+
+  def set(name : String, type : String) : Nil
+    index = @names.index(name)
+    if index.nil?
+      @names << name
+      @types << type
+    else
+      @types[index] = type
+    end
+  end
+
+  def get(name : String) : String
+    index = @names.index(name)
+    return "Unknown" if index.nil?
+    @types[index]
+  end
+end
+
+pub def one(nodes : Array(Node), env : TypeEnv) : String
+  return "Nil" if nodes.size == 0
+  infer(nodes[0], env)
+end
+
+pub def union(left : String, right : String) : String
+  return left if left == right
+  "(#{left} | #{right})"
+end
+
+pub def infer(node : Node, env : TypeEnv) : String
+  case node
+  when NumNode
+    "Int32"
+  when StrNode
+    "String"
+  when BoolNode
+    "Bool"
+  when NilNode
+    "Nil"
+  when NopNode
+    "Nil"
+  when VarNode
+    env.get(node.name)
+  when AssignNode
+    type = one(node.value, env)
+    if node.target.size > 0
+      target = node.target[0]
+      case target
+      when VarNode then env.set(target.name, type)
+      end
+    end
+    type
+  when ExprsNode
+    type = "Nil"
+    node.items.each { |item| type = infer(item, env) }
+    type
+  when IfNode
+    union(one(node.then_branch, env), one(node.else_branch, env))
+  when UnlessNode
+    union(one(node.then_branch, env), one(node.else_branch, env))
+  else
+    "Unknown"
+  end
+end
+
+pub def restriction(arg : ArgNode) : String
+  return "Unknown" if arg.restriction.size == 0
+  node = arg.restriction[0]
+  case node
+  when PathNode then node.names
+  else               "Unknown"
+  end
+end
+
+pub def infer_def(node : DefNode) : String
+  env = TypeEnv.new
+  node.args.each do |arg|
+    case arg
+    when ArgNode then env.set(arg.name, restriction(arg))
+    end
+  end
+  one(node.body, env)
+end
+
+pub def top_items(tree : Node) : Array(Node)
+  case tree
+  when ExprsNode then tree.items
+  else                [tree] of Node
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: infer <file.iyi>"
+else
+  source = File.read(path)
+  tree = Parser.new(source).parse
+  defs = [] of DefNode
+  calls = [] of String
+
+  top_items(tree).each do |node|
+    case node
+    when DefNode
+      defs << node
+    when CallNode
+      calls << node.name if node.recv.size == 0
+    end
+  end
+
+  rows = [] of String
+  calls.uniq.each do |called|
+    defs.each do |definition|
+      if definition.name == called
+        rows << "<Program>##{definition.name}=#{infer_def(definition)}"
+      end
+    end
+  end
+  puts rows.uniq.sorted.join(" ")
+end

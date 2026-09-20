@@ -463,6 +463,15 @@ end
 # method and `!` a stray token.
 # `defer` names the cleanup where the thing is acquired, and runs it on
 # return, on a propagation and on a panic (SPEC.md III.1.4).
+# `x.is_a?(T)` asks a question about a type, and the answer narrows the
+# variable: it is not a method call, it is a node the semantic pass reads.
+pub class IsANode
+  getter obj : Array(Node)
+  getter const : Array(Node)
+  def initialize(@obj : Array(Node), @const : Array(Node))
+  end
+end
+
 pub class DeferNode
   getter exp : Array(Node)
   def initialize(@exp : Array(Node))
@@ -714,7 +723,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                  UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
                  WhenNode | CaseNode | BreakNode | NextNode |
-                 PropagateNode | RecoverNode | DeferNode
+                 PropagateNode | RecoverNode | DeferNode | IsANode
 
 pub trait Sexp
   abstract def sexp : String
@@ -745,7 +754,27 @@ end
 
 impl Sexp for StrNode
   def sexp : String
-    "(str \"#{value}\")"
+    # A string can carry a real newline: `samples/iyi/calc` opens one and
+    # closes it three lines later. The oracle prints the value inspected,
+    # so a literal control character has to be written as its escape here
+    # too. The backslash is left alone on purpose: an escape written in
+    # the source already arrives as the two characters that spell it, and
+    # escaping it again would double every one of them.
+    out = ""
+    value.each_char do |ch|
+      if ch == '\n'
+        out = out + "\\n"
+      elsif ch == '\t'
+        out = out + "\\t"
+      elsif ch == '\r'
+        out = out + "\\r"
+      elsif ch == '"'
+        out = out + "\\\""
+      else
+        out = out + ch.to_s
+      end
+    end
+    "(str \"" + out + "\")"
   end
 end
 
@@ -820,6 +849,12 @@ end
 impl Sexp for CharNode
   def sexp : String
     "(charliteral)"
+  end
+end
+
+impl Sexp for IsANode
+  def sexp : String
+    "(isa #{obj[0].sexp} #{const[0].sexp})"
   end
 end
 
@@ -1919,6 +1954,13 @@ pub class Parser
       name = advance.value
       # `.or_panic` is not a method call: it is the node that stops the
       # program with the error rather than returning it.
+      if name == "is_a?" && peek.kind == "("
+        advance
+        asked = parse_type
+        advance if peek.kind == ")"
+        result = IsANode.new([result] of Node, [asked] of Node).as(Node)
+        next
+      end
       if name == "or_panic"
         result = RecoverNode.new([result] of Node, [] of Node).as(Node)
         next

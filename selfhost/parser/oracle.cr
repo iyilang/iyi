@@ -61,6 +61,8 @@ def sexp(node : Iyi::ASTNode) : String
     "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
   when Iyi::InstanceVar
     "(ivar #{node.name})"
+  when Iyi::IsA
+    "(isa #{sexp(node.obj)} #{sexp(node.const)})"
   when Iyi::Defer
     "(defer #{sexp(node.exp)})"
   when Iyi::Propagate

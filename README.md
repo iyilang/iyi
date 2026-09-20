@@ -307,8 +307,11 @@ Consumers have to be rebuilt: what they compile against moved.
 ```
 
 Rename a local and it says the interface is unchanged; add a parameter and it
-says what moved and who it reaches. `--exit-code` makes that a branch in a
-script. Nothing here is agent-specific: it is R-1's boundary, asked a question.
+says what moved and who it reaches. A body that *travels* — a block-taking
+`def`, a generic's method, a macro — is compiled by the consumer rather than
+by the module, so moving one is a rebuild too, and the second line is the one
+that says so. `--exit-code` makes the verdict a branch in a script. Nothing
+here is agent-specific: it is R-1's boundary, asked a question.
 
 What *is* here is deliberately unspecial: `iyi lsp` is a standard protocol
 over the same rules — completion, references, rename, hover and diagnostics are the front end

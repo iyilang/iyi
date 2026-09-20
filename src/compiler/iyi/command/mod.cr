@@ -182,6 +182,21 @@ class Iyi::Command
     puts "implementation  #{moved.call(old_hashes.implementation, new_hashes.implementation)}  the bodies a consumer compiles: macros, generics, the initialiser"
     puts "source          #{moved.call(old_hashes.source, new_hashes.source)}  the file"
 
+    # The verdict is over *both* of the first two lines, and the second one
+    # is why: a body that travels is compiled by the consumer, so moving
+    # one moves the consumer's own machine code. Read on the interface
+    # alone this said "consumers do not have to be rebuilt" about a
+    # block-taking `def` whose body had changed — a build system branching
+    # on it would have kept a program printing the old answer, which is
+    # the one way a boundary can be wrong quietly rather than loudly.
+    #
+    # An ordinary body is not in either hash and rightly moves nothing: it
+    # stays behind as machine code, and a consumer relinks it without
+    # compiling anything. A doc edit moves neither — the interface is
+    # encoded without docs and a comment is not part of a body — so the
+    # rebuild-nobody case the loop is named for is still the common one.
+    implementation_moved = old_hashes.implementation != new_hashes.implementation
+
     if interface_moved
       before = iyi_export_lines(old_artifact)
       after = iyi_export_lines(new_artifact)
@@ -191,6 +206,12 @@ class Iyi::Command
       (after - before).each { |line| puts "  new    #{line}" }
       puts
       puts "Consumers have to be rebuilt: what they compile against moved."
+      exit 1 if exit_code
+    elsif implementation_moved
+      # Nothing to list: no name changed. What changed is a body the
+      # consumer compiles for itself.
+      puts
+      puts "Consumers have to be rebuilt: what they compile against is the same, and a body they compile moved."
       exit 1 if exit_code
     else
       puts

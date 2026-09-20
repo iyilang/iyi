@@ -389,6 +389,28 @@
 
 ### Fixed
 
+- **`iyi mod diff` said "consumers do not have to be rebuilt" about a
+  body consumers compile.** The verdict — and the `--exit-code` a build
+  system branches on — read the interface hash alone. But the line
+  above it in the command's own output names the other half: *the
+  bodies a consumer compiles: macros, generics, the initialiser*. A
+  block-taking `def` is instantiated at the call site, so its body is
+  the consumer's to compile, and moving one moved the consumer's
+  machine code while `mod diff` answered that nobody had to rebuild. A
+  script trusting that keeps a binary running code its source no longer
+  says — the one way a boundary can be wrong quietly rather than
+  loudly.
+
+  The verdict is over both hashes now, with its own sentence for the
+  case where no name moved. The rebuild-nobody answer the loop is named
+  for is untouched and still the common one: a doc comment is in
+  neither hash, and an ordinary body is in neither either — it stays
+  behind as machine code, and a consumer that is *not* rebuilt links
+  the new artifact and answers the new number. `bench/mod_diff.sh`
+  checks all four kinds of edit against what the program actually
+  prints, which is the comparison that was missing: the verdict was
+  never measured against a rebuild.
+
 - **An impl method written wider than its body did not ship one, and six
   of the twelve samples that import a module were not being asked.** An
   impl defines methods on its target, so when the target is a type the

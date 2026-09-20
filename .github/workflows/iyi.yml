@@ -115,6 +115,14 @@ jobs:
             spec/compiler/iyi_derive_spec.cr \
             spec/compiler/compiler_spec.cr
 
+      # What `iyi mod diff` answers, against what a rebuild would show. It
+      # is the one question a build system branches on, and it was wrong
+      # for the edit that matters most: a block-taking def's body is
+      # compiled by the *consumer*, and the verdict read the interface
+      # hash alone and said nobody had to rebuild.
+      - name: mod diff answers what a rebuild would show
+        run: bash bench/mod_diff.sh
+
       # The command surface and the build daemon, which is iyi's own (SPEC.md
       # IV.1d) and which nothing else here runs. It caught two things the day
       # it was added: a spec still asking for a command this fork removed, and

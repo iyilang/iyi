@@ -1047,9 +1047,12 @@ describe Iyi::IyiMod do
       # The alias travels because a declaration that travels names it: the
       # carried record's `step : Step` is the text this module was written
       # with, and a consumer without the alias reads an undefined constant.
+      #
+      # As written, not as resolved — `it "carries an alias as the module
+      # wrote it"` is why, and `Proc(Int32, Int32)` is what this used to say.
       step = box.types.find! { |nested| nested.name == "Step" }
       step.kind.should eq "alias"
-      step.value.should eq "Proc(Int32, Int32)"
+      step.value.should eq "(Int32 -> Int32)"
 
       File.delete "app/box.iyi"
 
@@ -1878,10 +1881,16 @@ describe Iyi::IyiMod do
     end
   end
 
-  # What the initialiser does *not* reach: runnable code inside a type body
-  # belongs to the type, not to the module's top level, and nothing in the
-  # artifact holds it. Refused rather than linked, because the alternative is a
-  # program that runs with that part silently missing.
+  # What the initialiser does *not* reach: a statement in a type body. It is
+  # not a declaration, so nothing in `Exports` carries it, and it is not the
+  # module's own top level, so the initialiser does not either. Refused rather
+  # than linked, because the alternative is a program that runs with that part
+  # silently missing.
+  #
+  # A class variable was what this was written with, and that was wrong: its
+  # value travels in `TypeDecl#class_vars` and the consumer initialises it —
+  # `it "carries a class variable's value"` below is the proof. A bare `puts`
+  # is the shape that has nowhere to go.
   it "refuses to generate code against a module whose type body has to run" do
     with_tempdir("iyimod_type_body") do
       Dir.mkdir_p "boot"
@@ -1889,10 +1898,10 @@ describe Iyi::IyiMod do
         module boot/counter
 
         pub struct Counter
-          @@count = 7
+          puts "the type body ran"
 
           def count : Int32
-            @@count
+            7
           end
         end
         IYI
@@ -1928,6 +1937,672 @@ describe Iyi::IyiMod do
       checker.use_iyimod = "mods"
       checker.no_codegen = true
       checker.compile source, File.expand_path("unused-too")
+    end
+  end
+
+  # And what it does reach, which is the other half of the same rule. A
+  # constant in a type body is not runnable code the artifact drops: it is a
+  # declaration with a value, and it travels qualified — `Point::MAX = 10` —
+  # the way `iyi tool bind` has always carried a bound Crystal namespace's.
+  #
+  # Without that it was in the artifact nowhere at all: not in `Exports`,
+  # which carries types and signatures, and not in the initialiser, which
+  # stopped at the type's body. So the module read as one whose type body has
+  # to run and every consumer of it was refused — thirteen of `src/std`'s own
+  # modules, `std/math` over `PI`.
+  #
+  # The sources are deleted before the consuming build, so nothing here can
+  # pass by reading them, and the program is *run*: a constant that arrives
+  # declared and never initialised answers zero, which a compile would not
+  # catch.
+  #
+  # All three spellings, because they reach the consumer by different paths:
+  # `pub` is read by the consumer's own source, the private one only by a body
+  # this module compiled into the artifact's object code, and the nested one
+  # has a name that is two namespaces deep.
+  it "carries the constants a type body declares" do
+    with_tempdir("iyimod_type_constants") do
+      Dir.mkdir_p "boot"
+      File.write "boot/limits.iyi", <<-IYI
+        module boot/limits
+
+        pub struct Limits
+          pub MAX = 10
+          private SCALE = 3
+
+          pub struct Inner
+            pub DEPTH = 2
+          end
+
+          pub def self.scaled : Int32
+            MAX * SCALE
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/limits
+
+        puts Boot::Limits::Limits::MAX
+        puts Boot::Limits::Limits.scaled
+        puts Boot::Limits::Limits::Inner::DEPTH
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "10\n30\n2"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "limits.iyimod"))
+      artifact.has_initialiser.should be_false
+      artifact.initialiser.lines.should eq [
+        "pub Limits::MAX = 10",
+        "Limits::SCALE = 3",
+        "pub Limits::Inner::DEPTH = 2",
+      ]
+
+      File.delete "boot/limits.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # Two more things the check read as code, both of them declarations.
+  #
+  # A `lib` body is the first: a `fun` is a C prototype, a `type` names a
+  # pointer, a `struct` is a layout. Nothing in one runs, so nothing in one
+  # can be the piece of setup III.5 is about — and every module with a `lib`
+  # in it was refused. `std/math` binds two LLVM intrinsics and its consumers
+  # were told it "has code inside a type body that has to run".
+  #
+  # A macro is the second, and it is where the constants of the modules that
+  # bind a platform live: `std/file` writes `AT_FDCWD` inside a `{% if
+  # flag?(:linux) %}`. A `{% for %}` here rather than a `flag?`, so the
+  # expansion is the same on every machine this spec runs on; the node is the
+  # same `ExpandableNode` either way.
+  #
+  # Run, with the source deleted, because the point is not that the build is
+  # allowed: it is that `LOW` is 1 on the far side and the `fun` still reaches
+  # the intrinsic.
+  it "carries a lib's declarations and the constants a macro writes" do
+    with_tempdir("iyimod_lib_and_macro") do
+      Dir.mkdir_p "boot"
+      File.write "boot/plat.iyi", <<-IYI
+        module boot/plat
+
+        lib LibPlat
+          type Handle = Void*
+
+          struct Pair
+            a : Int32
+            b : Int32
+          end
+
+          fun plat_abs = "llvm.fabs.f64"(x : Float64) : Float64
+        end
+
+        pub struct Plat
+          {% for name, value in {"LOW" => 1, "HIGH" => 2} %}
+            pub {{name.id}} = {{value}}
+          {% end %}
+
+          pub def self.magnitude(x : Float64) : Float64
+            LibPlat.plat_abs(x)
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/plat
+
+        puts Boot::Plat::Plat::LOW
+        puts Boot::Plat::Plat::HIGH
+        puts Boot::Plat::Plat.magnitude(-2.5)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "1\n2\n2.5"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "plat.iyimod"))
+      artifact.has_initialiser.should be_false
+      artifact.initialiser.lines.should eq ["pub Plat::LOW = 1", "pub Plat::HIGH = 2"]
+
+      File.delete "boot/plat.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # A class variable's value travels, so a module with one is consumable.
+  #
+  # This was the case the type-body rule was written for, on the reading that
+  # a class variable's initialiser belongs to the type and nothing carries it.
+  # Half of that is true — it is not in the module's initialiser — and the
+  # other half stopped being true when `TypeDecl#class_vars` started carrying
+  # the value as written, so the consumer declares `@@names : Array(String) =
+  # ["a", "b"]` and initialises it like any other.
+  #
+  # Three shapes, because "the value travels" has to mean more than a number:
+  # a literal, a collection literal (whose node `CleanupTransformer` rewrites
+  # into temporaries, which is why the *source* is what travels), and one
+  # whose value calls a private def of the module — a body the consumer never
+  # sees, reached in the artifact's own object code.
+  it "carries a class variable's value" do
+    with_tempdir("iyimod_class_var_value") do
+      Dir.mkdir_p "boot"
+      File.write "boot/reg.iyi", <<-IYI
+        module boot/reg
+
+        private def seed : Int32
+          41
+        end
+
+        pub struct Reg
+          @@count = 7
+          @@names = ["a", "b"]
+          @@base : Int32 = seed + 1
+
+          pub def self.report : String
+            @@count.to_s + ":" + @@names.join(",") + ":" + @@base.to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/reg
+
+        puts Boot::Reg::Reg.report
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "7:a,b:42"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      Iyi::IyiMod.read(File.join("mods", "boot", "reg.iyimod"))
+        .has_initialiser.should be_false
+
+      File.delete "boot/reg.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # An enum the module keeps to itself travels as its members, which is what
+  # an enum is.
+  #
+  # The exported side has always written them down. The carried side — a type
+  # a consumer cannot name but the module's own object code does — fell
+  # through to the branch built for a class, and wrote the *question methods*
+  # the consumer's own compiler generates from the members while writing no
+  # members at all. The consumer read `private enum Kind` with a `Large?` in
+  # it and nothing to number, and said `enum Kind must have at least one
+  # member` about a type nobody outside the module can write.
+  #
+  # The numbers are asserted, not just the names: the module's object code was
+  # compiled against these, and a consumer that renumbered from zero would
+  # agree with it only by luck. `@[Flags]` is here for the pair the compiler
+  # adds wherever a flags enum is declared — writing `None` and `All` down
+  # hands the consumer its own two back.
+  it "carries the members of an enum it does not export" do
+    with_tempdir("iyimod_carried_enum") do
+      Dir.mkdir_p "boot"
+      File.write "boot/kinds.iyi", <<-IYI
+        module boot/kinds
+
+        enum Kind
+          Small  = 3
+          Large  = 9
+        end
+
+        @[Flags]
+        enum Mode
+          Read
+          Write
+        end
+
+        pub struct Holder
+          pub def self.describe : String
+            Kind::Large.to_s + ":" + Kind::Large.value.to_s + ":" + (Mode::Read | Mode::Write).to_s
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/kinds
+
+        puts Boot::Kinds::Holder.describe
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "Large:9:Read | Write"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "kinds.iyimod")), io)
+      end
+      declarations.should contain "private enum Kind : Int32\n  Small = 3\n  Large = 9\nend"
+      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\nend"
+
+      File.delete "boot/kinds.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # And the methods the author wrote on an enum, which are not the ones the
+  # compiler writes.
+  #
+  # An enum gets a question method per member wherever it is declared, so
+  # carrying those hands the consumer a second copy of what its own compiler
+  # already made — which is why an enum travelled with no methods at all. A
+  # `def self.native` is neither: nobody but the module wrote it, and a
+  # consumer without it said `undefined method 'native' for
+  # Std::Path::Path::Kind.class`. `std/path` and `std/dir` stopped there.
+  #
+  # Both sides, because a `def self.` lives on the metaclass and that is most
+  # of what an enum's author writes. Run, because the point is the call: a
+  # declaration that arrived without machine code behind it would link
+  # against nothing.
+  it "carries the methods an enum's author wrote, and not the compiler's" do
+    with_tempdir("iyimod_enum_methods") do
+      Dir.mkdir_p "boot"
+      File.write "boot/kind.iyi", <<-IYI
+        module boot/kind
+
+        pub enum Kind : UInt8
+          POSIX   = 0
+          WINDOWS = 1
+
+          def self.native : Kind
+            Kind::POSIX
+          end
+
+          def label : String
+            posix? ? "posix" : "windows"
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/kind
+
+        puts Boot::Kind::Kind.native.label
+        puts Boot::Kind::Kind::WINDOWS.label
+        puts Boot::Kind::Kind::WINDOWS.windows?
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "posix\nwindows\ntrue"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      kind = Iyi::IyiMod.read(File.join("mods", "boot", "kind.iyimod"))
+        .exports.types.find! { |declaration| declaration.name == "Kind" }
+      kind.methods.map(&.name).should eq ["label", "native"]
+
+      File.delete "boot/kind.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # A header with a splat in it: keyword-only parameters, called by name.
+  #
+  # This crashed the compiler rather than refusing anything. A def read from
+  # an artifact is a header, and headers take the forwarding path through
+  # `expand_default_arguments` — evaluate the defaults here, call the symbol
+  # there — which is written for a plain parameter list and passes the whole
+  # of it by position. A bare `*` is a nameless `Arg` in that list: the build
+  # died on `Nil assertion failed` reading its missing default, or on `Index
+  # out of bounds` where the call named fewer parameters than the def has.
+  #
+  # A def with a splat keeps its body instead, which is what upstream does
+  # with one and what links: the producer emits a symbol per named-argument
+  # combination — `Span::new:days<Int64>` — and the expansion built here
+  # carries the same name, built from the same named arguments. The body it
+  # keeps is the header's `Nop`, so the expansion has to be marked a header
+  # too, or codegen inlines the nothing it sees and the call vanishes.
+  #
+  # `self.new` because that is the shape the library writes — `Time::Span`
+  # has one, and `std/time`, `std/json` and `std/kernel` were all refused
+  # over it — and one more named `make`, because `new` has an expansion path
+  # of its own and the defect is in the other one.
+  it "carries a header whose parameters are keyword-only" do
+    with_tempdir("iyimod_splat_header") do
+      Dir.mkdir_p "boot"
+      File.write "boot/span.iyi", <<-IYI
+        module boot/span
+
+        pub struct Span
+          @ticks : Int64
+
+          def initialize(@ticks : Int64)
+          end
+
+          pub def self.new(*, days : Int64 = 0_i64, hours : Int64 = 0_i64) : Span
+            Span.new(days * 24_i64 + hours)
+          end
+
+          pub def self.make(*, hours : Int64) : Span
+            Span.new(hours)
+          end
+
+          pub def ticks : Int64
+            @ticks
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/span
+
+        puts Boot::Span::Span.new(days: 2_i64).ticks
+        puts Boot::Span::Span.new(hours: 5_i64).ticks
+        puts Boot::Span::Span.new(days: 1_i64, hours: 3_i64).ticks
+        puts Boot::Span::Span.make(hours: 9_i64).ticks
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "48\n5\n27\n9"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/span.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # An alias travels as the type expression the module wrote.
+  #
+  # It used to travel as what the name resolved to, and a resolved type is
+  # not always something that can be written down again. Two shapes here,
+  # both taken from `src/std`:
+  #
+  # * `pub alias Ary = ::Array` is an uninstantiated generic, and one prints
+  #   with its type variables — the consumer read `alias Ary = Array(T)` and
+  #   said `undefined constant T` about a letter nobody wrote.
+  # * `pub alias Array = ::Array` hands a prelude type out under its own
+  #   name, and a resolved name has no `::` on it: inside `module Boot::Ring`
+  #   the consumer read `alias Array = Array`, which is the alias itself —
+  #   `infinite recursive definition of alias`. `std/annotations`,
+  #   `std/bit_array` and `std/static_array` each do exactly this.
+  #
+  # The written form resolves on the far side because the declarations text
+  # replays the module's imports, requires and `using` directives and
+  # declares its own nested types, which is the whole of what the module
+  # itself could name.
+  it "carries an alias as the module wrote it" do
+    with_tempdir("iyimod_alias_value") do
+      Dir.mkdir_p "boot"
+      File.write "boot/ring.iyi", <<-IYI
+        module boot/ring
+
+        pub alias Array = ::Array
+        pub alias Ary = ::Array
+
+        pub def first(items : Array(Int32)) : Int32
+          items[0]
+        end
+
+        pub def last(items : Ary(Int32)) : Int32
+          items[items.size - 1]
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/ring
+
+        puts Boot::Ring.first([7, 8])
+        puts Boot::Ring.last([7, 8])
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "7\n8"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "ring.iyimod")), io)
+      end
+      declarations.should contain "pub alias Array = ::Array"
+      declarations.should contain "pub alias Ary = ::Array"
+
+      File.delete "boot/ring.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # A parameter written wider than the argument this build passed.
+  #
+  # The consumer keys a call on what the declaration says — that is the
+  # contract, and `Call#iyi_artifact_arg_types` widens every argument to it —
+  # so the object code has to have been keyed the same way. Inside an
+  # ordinary build it is not: codegen is demand-driven, `note = "hi"`
+  # compiles `note=<String>`, and the consumer asks the linker for
+  # `note=<(String | Nil)>`. It linked no further, with the artifact's own
+  # object file naming the line.
+  #
+  # `iyi bind` answers this with a keep file, a second build that names every
+  # declared signature. An `--emit-iyimod` build has no second build, so the
+  # body travels instead and the consumer compiles it at the types it asked
+  # for.
+  #
+  # Three shapes, because "wider" has three spellings: a union, a nilable
+  # (which is one), and an abstract number, where the declared type is `Int`
+  # and a value of it is held as `Int+`.
+  #
+  # Run with the source deleted, because a link is the whole of what fails
+  # here — the front end was always happy.
+  it "carries the body of a method whose parameter is wider than its callers" do
+    with_tempdir("iyimod_widened_parameters") do
+      Dir.mkdir_p "boot"
+      File.write "boot/crate.iyi", <<-IYI
+        module boot/crate
+
+        pub class Crate
+          @note : String?
+
+          def initialize
+            @note = nil
+          end
+
+          pub def note=(value : String?) : Nil
+            @note = value
+          end
+
+          pub def note : String
+            @note || "none"
+          end
+
+          pub def tag(kind : Int32 | Symbol) : String
+            kind.to_s
+          end
+        end
+
+        pub def sized(n : Int) : Int64
+          n.to_i64 * 2_i64
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/crate
+
+        crate = Boot::Crate::Crate.new
+        crate.note = "hi"
+        puts crate.note
+        puts crate.tag(7)
+        puts Boot::Crate.sized(21)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "hi\n7\n42"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      # The bodies are in the artifact, which is what makes the link work.
+      keys = Iyi::IyiMod.read(File.join("mods", "boot", "crate.iyimod")).mono_bodies.keys
+      keys.should contain "Crate#note=(value : String | ::Nil)"
+      keys.should contain "Crate#tag(kind : Int32 | Symbol)"
+      keys.should contain "boot/crate#sized(n : Int)"
+      # And the one whose parameters cannot disagree is not among them.
+      keys.should_not contain "Crate#note()"
+
+      File.delete "boot/crate.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # `@[Primitive]` is a declaration a module makes, so it travels.
+  #
+  # A def wearing it has no body — the instruction is the body, and the
+  # compiler puts one there — so the rule that keeps `allocate` and the
+  # prelude's own instructions out of an artifact ("anything whose body is a
+  # `Primitive` is the compiler's") swept it up too. `std/float` declares the
+  # whole matrix for `Float32` the way the prelude declares it for `Float64`,
+  # and a consumer that read the artifact got a `Float32` with no arithmetic:
+  # `wrong number of arguments for 'Float32#+' (given 1, expected 0)`, about
+  # the prelude's unary plus, which was the only `+` left.
+  #
+  # The annotation is what makes the consumer's copy the same instruction, so
+  # it travels on the signature — the format change this needed. No body
+  # travels with it: there is none, and one would be a promise of a symbol
+  # nobody emitted.
+  #
+  # On a reopened prelude type, which is where a module writes these, and run
+  # with the source deleted so the arithmetic is the artifact's.
+  it "carries a @[Primitive] the module declared" do
+    with_tempdir("iyimod_primitive") do
+      Dir.mkdir_p "boot"
+      File.write "boot/f32.iyi", <<-IYI
+        module boot/f32
+
+        struct ::Float32
+          @[::Primitive(:binary)]
+          def +(other : Float32) : Float32
+          end
+
+          @[::Primitive(:convert)]
+          def to_i32 : Int32
+          end
+
+          def doubled : Float32
+            self + self
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/f32
+
+        puts (1.5_f32 + 2.0_f32).to_i32
+        puts 1.5_f32.doubled.to_i32
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "3\n3"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/f32.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
+
+      # And what carried it: the annotation on the signature, and no body,
+      # because an instruction has none.
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "f32.iyimod"))
+      float = artifact.reopened.find! { |declaration| declaration.name == "::Float32" }
+      plus = float.methods.find! { |signature| signature.name == "+" }
+      plus.annotations.should eq ["@[::Primitive(:binary)]"]
+      artifact.mono_bodies.keys.should_not contain "::Float32#+(other : Float32)"
+      artifact.mono_bodies.keys.should contain "::Float32#doubled()"
     end
   end
 

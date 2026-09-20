@@ -48,7 +48,24 @@ class Iyi::Def
     #
     # A body that *travelled* is not this case — it has a real body and the
     # consumer compiles it like its own.
-    retain_body = false if iyi_from_artifact?
+    #
+    # Except with a splat in it, where the forwarding path is not available:
+    # it passes the whole parameter list by position, and a bare `*` is a
+    # nameless `Arg` that cannot be passed at all. Upstream never arrives
+    # there with one — the line above keeps the body instead — so the branch
+    # was written without splats in mind, and sending a header down it
+    # crashed the compiler rather than refusing anything: `Nil assertion
+    # failed` on the splat's missing default, or `Index out of bounds` where
+    # the call supplied fewer arguments than the parameter list has.
+    #
+    # Keeping the body is also what links. A def with a splat has no
+    # unexpanded symbol to forward *to*: the producer emits one symbol per
+    # named-argument combination — `Span::make:days<Int64>` — and that name is
+    # built from the same named arguments on both sides, so the expansion the
+    # consumer makes here is the one the artifact carries. The body it retains
+    # is the header's `Nop`, and the type is marked as the artifact's, so
+    # codegen declares the symbol instead of defining it.
+    retain_body = false if iyi_from_artifact? && !splat_index && !double_splat
 
     splat_index = self.splat_index
     double_splat = self.double_splat
@@ -141,7 +158,6 @@ class Iyi::Def
       expansion.owner = owner
     end
     expansion.original_name = original_name
-
     if retain_body
       new_body = [] of ASTNode
       body = self.body.clone
@@ -199,8 +215,38 @@ class Iyi::Def
         new_body << Assign.new(Var.new(double_splat.name).at(double_splat), named_tuple).at(double_splat)
       end
 
-      new_body.push body
-      expansion.body = Expressions.new(new_body).at(body)
+      # iyi: a header stays a header. The producer emitted one symbol per
+      # named-argument combination, defaults already folded into it, and this
+      # expansion carries the same name — so there is nothing here to run and
+      # nothing to set up: the assignments above would be a second, local copy
+      # of work the artifact's object code has done. Left in, they made the
+      # expansion's body `Nop`-plus-assignments rather than a `Nop`, which is
+      # the shape `Call#instantiate` reads to tell a header from a body that
+      # travelled — so the call was typed from the assignments and came back
+      # `Nil`: "method Span.new must return Span but it is returning Nil".
+      #
+      # A body that travelled is not a `Nop` and is not this.
+      if iyi_from_artifact? && body.is_a?(Nop)
+        expansion.body = body.clone
+        # And it has to say so. Codegen refuses to inline a def that came from
+        # a `.iyimod` — an absent body reads there as the simplest possible
+        # one, and inlining it would replace a call to the module's machine
+        # code with nothing at all — and it asks the def in front of it, which
+        # for a call with named arguments is this one. Unmarked, the `Nop` was
+        # inlined and the build died in codegen reading a type off it.
+        #
+        # Here and not beside the other properties above: the forwarding
+        # branch below builds a real body, out of this program's own code, and
+        # a def marked as the artifact's is *declared* rather than defined.
+        # Marked there too, the consumer stopped emitting the `new` it
+        # compiles for itself and kemal's four boundaries would not link:
+        # `undefined reference to Kemal::Exceptions::CustomException::new`,
+        # from the artifact's own object code.
+        expansion.iyi_from_artifact = true
+      else
+        new_body.push body
+        expansion.body = Expressions.new(new_body).at(body)
+      end
     else
       new_args = [] of ASTNode
       body = [] of ASTNode

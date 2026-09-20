@@ -48,6 +48,14 @@ REPO = Path(__file__).resolve().parent.parent
 # A module with imports and traits, so a compile is a real compile: this
 # is the file the 1,636 MB was measured on.
 MODULE = REPO / "src/std/semantic_version.iyi"
+# A second open buffer, so the question below can be asked about the one
+# a successor's warm-up does not cover.
+OTHER = REPO / "src/std/levenshtein.iyi"
+
+# `Proxy::RETIRE_IDLE`, in seconds: the quiet the proxy replaces a
+# worker in. Read here as a number rather than measured, because the
+# gate waits it out.
+RETIRE_IDLE = 2.0
 
 # What the tree may hold while typing without a single pause. The proxy
 # was measured at 401-504 MB here (the worker's 512 MB budget, plus the
@@ -146,6 +154,85 @@ def hovering_position(client, uri, text, tries=80):
     raise SystemExit(
         f"no hover in {MODULE} answered in {tries} tries: the gate cannot "
         f"watch an answer it cannot get")
+
+
+# A def the gate appends to the buffer and never saves. `s` is a String,
+# so what `s.up` may become is a question with one answer the whole
+# library agrees on.
+PROBE_GOOD = "\n\npub def probe_mid_edit(s : String) : String\n  s\nend\n"
+PROBE_EDIT = "\n\npub def probe_mid_edit(s : String) : String\n  s.up\nend\n"
+
+
+def completion_across_retirement(argv):
+    """The same completion in a buffer that does not compile, asked
+    before a retirement and after one.
+
+    Mid-edit is the normal state of the buffer a person is typing in, and
+    a cursor question there is answered from the last program that held
+    together. A fresh worker has none: `iyi/adopt` hands it the buffers
+    and says the compile comes when something is asked — and the one
+    compile a successor is warmed with is the *focused* file's. Every
+    other open buffer arrives with no program behind it, so the first
+    completion in one came back empty, which an editor shows as no
+    suggestions at all.
+
+    Two files for that reason: the question is asked about the one the
+    warm-up does not cover. The retirement is the idle one — the wire
+    goes quiet for `RETIRE_IDLE` and the successor is built in the
+    silence — because it is the retirement that happens on a schedule
+    rather than on a memory bound, and a gate wants the same shape every
+    time.
+
+    The hover steps above cannot see this: they ask about a buffer that
+    compiles, and a successor can answer that from scratch.
+    """
+    text = MODULE.read_text()
+    good, broken = text + PROBE_GOOD, text + PROBE_EDIT
+    probe_line = broken.count("\n") - 2
+    other_text = OTHER.read_text()
+    client = Client(argv)
+    uri = open_module(client, MODULE, good)
+    other_uri = "file://" + str(OTHER)
+    client.send("textDocument/didOpen",
+                {"textDocument": {"uri": other_uri, "languageId": "iyi",
+                                  "version": 1, "text": other_text}},
+                wait=False)
+    client.diagnostics(other_uri)
+
+    def ask(version):
+        client.send("textDocument/didChange",
+                    {"textDocument": {"uri": uri, "version": version},
+                     "contentChanges": [{"text": broken}]}, wait=False)
+        client.diagnostics(uri)
+        reply = client.send("textDocument/completion",
+                            {"textDocument": {"uri": uri},
+                             "position": {"line": probe_line,
+                                          "character": 6}})
+        labels = sorted(item["label"] for item in reply["result"]["items"])
+        client.send("textDocument/didChange",
+                    {"textDocument": {"uri": uri, "version": version + 1},
+                     "contentChanges": [{"text": good}]}, wait=False)
+        client.diagnostics(uri)
+        return labels
+
+    first = ask(2)
+    # The focus moves to the other file — the proxy follows the buffer
+    # that changes, not the one that is asked about — and then the wire
+    # goes quiet for longer than `Proxy::RETIRE_IDLE`: the worker that
+    # compiled both is replaced, and its successor is warmed on the
+    # other one.
+    client.send("textDocument/didChange",
+                {"textDocument": {"uri": other_uri, "version": 2},
+                 "contentChanges": [{"text": other_text + "\n"}]},
+                wait=False)
+    client.diagnostics(other_uri)
+    time.sleep(RETIRE_IDLE + 1.5)
+    last = ask(10)
+
+    client.send("shutdown", {})
+    client.send("exit", {}, wait=False)
+    client.proc.wait(timeout=30)
+    return first, last
 
 
 def typing_session(argv, pause_every=None):
@@ -322,6 +409,12 @@ def main():
              detail + f", bound {PACED_CEILING_MB} MB")
     step("the paced session's hover is right too",
          bool(first) and first == last, f"{len(first)} chars")
+
+    first, last = completion_across_retirement(argv)
+    step("a completion mid-edit survives every replacement",
+         bool(first) and first == last,
+         f"{len(first)} item(s) for `s.up`, identical" if first == last
+         else f"{first} -> {last}")
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.

@@ -66,6 +66,9 @@ require "./footprint"
 module Iyi::Lsp
   class Server
     @documents = {} of String => String # uri => current text
+    # uri => the version the text above came in as, for the verdict's
+    # own `version` field. See `publish_diagnostics`.
+    @versions = {} of String => Int64
     # The last published diagnostics, kept for codeAction to read back:
     # {line0, start_ch, end_ch, message, suggestion} per document.
     @published = {} of String => Array({Int32, Int32, Int32, String, String?})
@@ -410,15 +413,38 @@ module Iyi::Lsp
         # its predecessor held, and this is the handover. A replayed
         # `didOpen` would publish a verdict per open file that the client
         # already has on screen; adopting is the same state with nothing
-        # said back. The compile comes when something is asked.
+        # said back.
+        #
+        # The text is also kept as the buffer's *seed*, because the
+        # buffers alone are not the state the predecessor had. A cursor
+        # question in a buffer that does not compile — which is what
+        # mid-edit means, and mid-edit is where a person asks — is
+        # answered from the last program that did, and a successor has
+        # none: `Proxy` warms it on the *focused* file, so every other
+        # open buffer answered the first completion with nothing. `s.up`
+        # offered `upcase` before the replacement and an empty list
+        # after it.
+        #
+        # A seed rather than a compile here: compiling every adopted
+        # buffer at the handover puts that work in front of whatever the
+        # person types next, and `bench/lsp_latency.py` measured a
+        # didChange 32 ms past its 2 s budget for it.
+        # `Analysis#result_for` pays for one only when a question about
+        # it needs the fallback.
         params.not_nil!["documents"].as_a.each do |document|
           uri = document["uri"].as_s
-          @documents[uri] = document["text"].as_s
+          text = document["text"].as_s
+          @documents[uri] = text
           @analysis.open(path_of(uri))
+          # The seed is the last text a verdict called clean where the
+          # buffer has stopped compiling since, and the buffer itself
+          # otherwise — which is the same thing when it still compiles.
+          @analysis.seed(path_of(uri), document["clean"]?.try(&.as_s?) || text)
         end
       when "textDocument/didOpen"
         uri = params.not_nil!["textDocument"]["uri"].as_s
         @documents[uri] = params.not_nil!["textDocument"]["text"].as_s
+        @versions[uri] = params.not_nil!["textDocument"]["version"]?.try(&.as_i64?) || 0_i64
         @analysis.open(path_of(uri))
         publish_diagnostics(uri)
       when "textDocument/didChange"
@@ -426,6 +452,7 @@ module Iyi::Lsp
         # Incremental sync: each change names a range in wire units, or
         # carries the whole text; both apply in order.
         text = @documents[uri]? || ""
+        version = params.not_nil!.dig?("textDocument", "version").try(&.as_i64?)
         params.not_nil!["contentChanges"].as_a.each do |change|
           text = Text.apply(text, change)
         end
@@ -436,17 +463,20 @@ module Iyi::Lsp
               queued["method"]?.try(&.as_s?) == "textDocument/didChange" &&
               queued["params"]["textDocument"]["uri"].as_s == uri
           @inbox.shift
+          version = queued.dig?("params", "textDocument", "version").try(&.as_i64?) || version
           queued["params"]["contentChanges"].as_a.each do |change|
             text = Text.apply(text, change)
           end
         end
         @documents[uri] = text
+        @versions[uri] = version || (@versions[uri]? || 0_i64) + 1
         publish_diagnostics(uri)
       when "textDocument/didSave"
         publish_diagnostics(params.not_nil!["textDocument"]["uri"].as_s)
       when "textDocument/didClose"
         uri = params.not_nil!["textDocument"]["uri"].as_s
         @documents.delete(uri)
+        @versions.delete(uri)
         @published.delete(uri)
         @analysis.close(path_of(uri))
       when "textDocument/hover"
@@ -758,11 +788,20 @@ module Iyi::Lsp
       end
     end
 
+    # LSP's optional `version` rides along, and it is not decoration
+    # here: `Proxy` keeps the last text a verdict called clean so a
+    # successor can be handed something to answer from, and a verdict
+    # can arrive about a version the person has already typed past.
+    # Without the number, pairing it with whatever the buffer holds now
+    # would hand over a text that never compiled.
     private def publish_diagnostics(uri : String) : Nil
       rows = diagnostic_rows(uri)
       notify("textDocument/publishDiagnostics") do |json|
         json.object do
           json.field "uri", uri
+          if version = @versions[uri]?
+            json.field "version", version
+          end
           json.field "diagnostics" do
             json.array do
               rows.each do |(line0, start_ch, end_ch, diag)|

@@ -51,6 +51,7 @@ module Iyi::Lsp
     # compiles again when it is next asked about.
     @last_good = {} of String => Compiler::Result
     @open = Set(String).new
+    @seed = {} of String => String
     KEEP = 8
 
     # The last compile, keyed by exactly what determines it: the path,
@@ -81,9 +82,29 @@ module Iyi::Lsp
       @open << path
     end
 
+    # iyi: the text a buffer was handed over with, kept until the first
+    # question about that buffer needs it (`iyi/adopt`).
+    #
+    # A cursor question in a buffer that does not compile — which is
+    # what mid-edit means, and mid-edit is where a person asks — is
+    # answered from the last program that did. A fresh worker has none:
+    # `Proxy` warms it on the focused file and every other buffer
+    # arrives with the text and nothing behind it, so the first
+    # completion in one came back empty.
+    #
+    # A seed rather than a compile at handover: compiling every adopted
+    # buffer there put the work in front of whatever the person typed
+    # next, and `bench/lsp_latency.py` measured a didChange 32 ms past
+    # its 2 s budget. This pays for a buffer only when a question about
+    # it actually needs the fallback, and once.
+    def seed(path : String, text : String) : Nil
+      @seed[path] = text
+    end
+
     def close(path : String) : Nil
       @open.delete(path)
       @last_good.delete(path)
+      @seed.delete(path)
       @memo = @memo_key = nil if @memo_key.try(&.[0]) == path
     end
 
@@ -112,6 +133,9 @@ module Iyi::Lsp
         @last_good.delete(path)
         @last_good[path] = result
         @last_good.shift if @last_good.size > KEEP
+        # The handover's text has nothing left to offer once this
+        # buffer has a program of its own again.
+        @seed.delete(path)
       end
       {result, [] of Diag}
     rescue ex : CodeError
@@ -121,10 +145,29 @@ module Iyi::Lsp
     end
 
     # The typed result to answer a cursor question from: this buffer's
-    # compile if it passes, the last one that did otherwise.
+    # compile if it passes, the last one that did otherwise — and, where
+    # there is no last one because this worker has only just adopted the
+    # buffer, the text it was adopted with, compiled here and once. See
+    # `seed`.
     def result_for(path : String, text : String, overrides : Hash(String, String)) : Compiler::Result?
       result, _ = check(path, text, overrides)
-      result || @last_good[path]?
+      return result if result
+      if cached = @last_good[path]?
+        return cached
+      end
+      # Kept until one of the two compiles works: dropping it on a try
+      # that failed — a sibling buffer mid-edit is enough — would spend
+      # the fallback on the one question that could not use it and
+      # leave the buffer silent for the rest of the session. `check`
+      # memoises, so asking twice with the same inputs costs once.
+      if adopted = @seed[path]?
+        seeded, _ = check(path, adopted, overrides)
+        if seeded
+          @seed.delete(path)
+          return seeded
+        end
+      end
+      nil
     end
 
     def context_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : ContextResult?

@@ -440,6 +440,285 @@
   `bench/windows_exercise.sh` gates both: an 18-byte argument and a
   13-byte variable arrive whole, and the step runs only on Windows,
   because everywhere else the bytes are the bytes.
+- **The first completion after the language server replaced its worker
+  came back empty.** `iyi lsp` runs two processes and retires the one
+  that compiles — on a memory bound, or after a pause — handing its
+  successor the open buffers with `iyi/adopt` and warming it on the
+  *focused* file. Every other open buffer arrived with the text and no
+  program behind it, and a cursor question in a buffer that does not
+  compile is answered from the last program that did. Mid-edit is what
+  a buffer being typed in *is*, so the answer was nothing: `s.up`
+  offered `upcase` before the replacement and an empty list after it,
+  which an editor shows as no suggestions at all.
+
+  The handover carries the last text a verdict called *clean*, and the
+  successor keeps it as a seed: the first question about a buffer that
+  no longer compiles compiles the seed, once, and answers from it.
+  Which text that is has to be exact, so `publishDiagnostics` carries
+  LSP's optional `version` now and the proxy pairs a clean verdict with
+  the version it holds — a verdict about a version the person has
+  already typed past says nothing about what the buffer is.
+
+  Compiling every adopted buffer at the handover was the first shape
+  and it was the wrong one: it put that work in front of whatever the
+  person typed next, and `bench/lsp_latency.py` measured a didChange
+  2,032 ms against its 2 s budget. Seeded and lazy, the same run
+  measures 226 ms.
+
+  `bench/lsp_memory.py` holds it — the same question either side of a
+  retirement, in a buffer that does not compile, with the focus moved
+  elsewhere so the warm-up cannot cover it. The memory bounds are
+  unchanged: 551 MB peak while typing without a pause, 186 MB at rest.
+  `bench/lsp_session.py` step 37 had been failing on this defect
+  whenever a worker happened to retire at that point, which is a gate
+  that fails for a real reason and names none of it.
+- **`@[Primitive]` is a declaration a module makes, and the artifact
+  threw it away.** A def wearing one has no body — the instruction is
+  the body, and the compiler puts one there — so the rule that keeps
+  `allocate` and the prelude's own instructions out of an artifact
+  ("anything whose body is a `Primitive` is the compiler's") swept up
+  the module's too. `std/float` declares the whole `@[Primitive]`
+  matrix for `Float32` the way the prelude declares it for `Float64`,
+  and a consumer that read the artifact got a `Float32` with no
+  arithmetic at all: `wrong number of arguments for 'Float32#+' (given
+  1, expected 0)`, about the prelude's unary plus, which was the only
+  `+` left.
+
+  The two are told apart by whether the annotation is on the `Def` —
+  the compiler's instructions arrive without one — and the annotation
+  travels with the signature, which is what makes the consumer's copy
+  the same instruction rather than a promise of a symbol nobody
+  emitted. No body travels with it: there is none.
+
+  **`.iyimod` is format v52**, because a signature carries its
+  annotations now. An artifact from v51 is refused and rebuilt, never
+  migrated (SPEC.md IV.5), which is what the version is for. SPEC.md
+  said v19 — thirty-three bumps behind, and nothing checked it, so
+  `bench/doc_numbers.py` reads the constant now like it reads every
+  other number there.
+
+  41 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 46 do now:
+  `std/atomic`, `std/compress`, `std/int`, `std/number` and
+  `std/reference_storage`.
+
+- **An enum travelled with no methods, including the ones its author
+  wrote.** An enum gets a question method per member wherever it is
+  declared, so carrying those hands a consumer a second copy of what
+  its own compiler already made — and the rule that avoided it carried
+  nothing at all. A `def self.native` on `Path::Kind` is neither the
+  compiler's nor optional: `std/path` and `std/dir` were refused with
+  `undefined method 'native' for Std::Path::Path::Kind.class`, about a
+  method the module's own source has.
+
+  The two are told apart where they are written rather than by
+  guessing at names: `Def#iyi_compiler_made` is set on the question
+  methods as the enum visitor makes them, and everything else on the
+  enum goes through the same walk every other type's methods go
+  through — both sides of it, because a `def self.` lives on the
+  metaclass and that is most of what an enum's author writes.
+
+  38 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 41 do now: `std/dir`,
+  `std/path` and `std/errno`.
+
+- **A parameter written wider than its callers linked against a symbol
+  nobody emitted.** The consumer keys a call on what the declaration
+  says — that is the contract, and widening to it is what makes the
+  call reach the artifact's machine code — so the object code has to
+  have been keyed the same way. Inside an ordinary build it is not:
+  codegen is demand-driven, so `path : Path | String` called with a
+  `String` is compiled as `cd<String>` and the consumer asks the
+  linker for `cd<(Std::Path::Path | String)>`. Five of the library's
+  own modules stopped there — `std/dir`, `std/env`, `std/gc`,
+  `std/big` and `std/capsule` — on a union, a nilable, or an abstract
+  number's `Int+`.
+
+  This was written down in `collect_iyi_object_code`'s own comment,
+  eight lines of reproduction and no fix: what `iyi bind` does about
+  it is a keep file, a second build that names every declared
+  signature, and an `--emit-iyimod` build has no second build to do it
+  in. So the body travels instead, the way a block-taking def's
+  already does, and the consumer compiles it at the types it asked
+  for. The producer's own narrow instantiation stays in the object
+  code for its own callers; the two have different names and do not
+  collide.
+
+  Only where the two can disagree: a parameter written as a leaf type
+  is the type every argument to it has, so the ordinary method keeps
+  its body behind, which is what IV.2 is for and most of what an
+  artifact saves. The price, measured on the module set `std/dir`
+  pulls in: 667,199 bytes of `.iyimod` became 674,638, up 1.1%.
+
+  34 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 38 do now.
+
+- **An alias travelled as what it resolved to, and a resolved type is
+  not always something that can be written down again.** `pub alias
+  Ary = ::Array` came back as `alias Ary = Array(T)` — a generic prints
+  with its type variables — and the consumer said `undefined constant
+  T` about a letter nobody wrote. `pub alias BitArray = ::BitArray`
+  came back as `alias BitArray = BitArray`, because a resolved name has
+  no `::` on it, and inside `module Std::BitArray` that name is the
+  alias being declared: `infinite recursive definition of alias`.
+  `std/annotations`, `std/bit_array` and `std/static_array` each hand a
+  prelude type out under its own name.
+
+  It travels as the module wrote it now. The argument for resolving it
+  was that a name resolved where the module was read may not resolve
+  where the artifact is, and that is the wrong way round: the
+  declarations text replays the module's imports, its requires and its
+  `using` directives and declares its own nested types, so a name the
+  module could write is a name that text can write. The resolved type
+  is kept for the one case the written value cannot be read back — an
+  expression the parser does not take as a type.
+
+  Two more of the 60 `bench/std_*_exercise.iyi` round-trip through
+  `--emit-iyimod` and `--use-iyimod`: 32 before this, 34 after.
+
+- **A method with keyword-only parameters crashed the compiler when it
+  was read from an artifact.** Not refused — crashed: `Nil assertion
+  failed` or `Index out of bounds`, a page of this compiler's own
+  frames, and an invitation to file an issue. `Time::Span.new(days:
+  2)` is the shape, and `std/time`, `std/json` and `std/kernel` were
+  all unusable as artifacts because of it.
+
+  A def read from a `.iyimod` is a header: the machine code is in the
+  artifact and the call reaches it by symbol, so the compiler fills the
+  defaults locally and forwards the whole parameter list to that
+  symbol. That forwarding is written for a plain parameter list and
+  passes everything by position, and a bare `*` is a nameless
+  parameter in the middle of one — upstream never sends a def with a
+  splat down that path, because it keeps the body instead.
+
+  So a header with a splat keeps its body too, which is also the thing
+  that links: a producer emits one symbol per named-argument
+  combination — `Span::new:days<Int64>` — and the expansion the
+  consumer builds is named from the same named arguments, so it is the
+  one the artifact carries. The body it keeps is the header's empty
+  one, which makes the expansion a header as well; unmarked, codegen
+  inlined the nothing it saw and the call disappeared.
+
+  A header *and no more*: the mark says "declared elsewhere", so it
+  belongs only on the expansion that keeps the empty body. Put on
+  every expansion, it stopped the consumer emitting the ordinary `new`
+  it compiles for itself, and kemal's four boundaries would not link —
+  `undefined reference to Kemal::Exceptions::CustomException::new`,
+  from the artifact's own object code, which is what
+  `bench/kemal_serves.sh` is for.
+
+  Round-tripping the 60 `bench/std_*_exercise.iyi` through
+  `--emit-iyimod` and `--use-iyimod`: 29 built and ran before this, 32
+  do now. With the three entries below it, 21 before this session's
+  work and 32 after.
+
+- **An enum a module keeps to itself arrived with its question methods
+  and none of its members.** A `.iyimod` carries two kinds of type: the
+  ones a consumer can name, and the ones it cannot but the module's own
+  object code does. The second kind went through a branch written for a
+  class, so an `enum Kind` was described by the `Small?`/`Large?`
+  methods the consumer's own compiler generates from the members —
+  while the members themselves, which are the whole of what an enum
+  is, were left out. The consumer read the file and said `enum Kind
+  must have at least one member`, about a type nothing outside the
+  module can write.
+
+  Both sides build the declaration the same way now, members and the
+  integer they are numbered on included: the module's object code was
+  compiled against those numbers, and a consumer that counted from zero
+  again would agree with it only by luck. `@[Flags]` rides along, minus
+  the `None` and `All` the compiler adds wherever a flags enum is
+  declared.
+
+  Seven of the 60 `bench/std_*_exercise.iyi` were refused this way.
+  Round-tripping through `--emit-iyimod` and `--use-iyimod`, 28 built
+  and ran before this and 29 do now — the other six reach a further
+  defect apiece, which is what this measurement is for.
+
+- **A class variable refused the module it was written in, over a value
+  the artifact was already carrying.** The rule that stops a build from
+  linking against a module whose type body has code to run was written
+  for exactly this case: a `@@count = 7` belongs to the type, so the
+  module's initialiser does not hold it. That reading stopped being
+  true when `TypeDecl#class_vars` began carrying the value as written —
+  a consumer reads `@@count : Int32 = 7`, declares the global and
+  initialises it like any other. So the refusal was over something that
+  travels.
+
+  Checked on the shapes that could have made it untrue rather than on a
+  number: a collection literal, whose node `CleanupTransformer` has
+  already rewritten into temporaries by the time an artifact is written
+  (which is why the *source* is what travels), and `@@base : Int32 =
+  seed + 1`, whose value calls a private def of the module — a body the
+  consumer never sees and reaches in the artifact's own object code.
+  Both answer the same from source and from the artifact.
+
+  What the rule still refuses is what it is for: a statement in a type
+  body. `puts "x"` there is not a declaration, so nothing in `Exports`
+  carries it, and it is not the module's own top level, so the
+  initialiser does not either — a program built against that artifact
+  would run without it. The spec that pinned this named a class
+  variable and now names a `puts`, because it was pinning the wrong
+  shape.
+
+- **A `lib`'s `fun` and a constant a macro wrote were read as code that
+  has to run, and refused the module they were written in.** Both are
+  declarations, and the check that asks whether a module's type body
+  has code an artifact cannot carry did not recognise either — so it
+  answered its conservative "yes" and the consumer was refused.
+
+  A `lib` body holds a `fun` (a C prototype), a `type` (a name for a
+  pointer), a `struct` or `union` (a layout) and a `$name` (an external
+  symbol). None of the four runs, so none of them can be the piece of
+  setup the rule exists to protect. `std/math` binds `llvm.sqrt.f64`
+  and `llvm.copysign.f64`, and every program that imported it as an
+  artifact was told it "has code inside a type body that has to run",
+  about two intrinsics. A constant in a `lib` is deliberately still
+  refused: nothing carries one yet.
+
+  A macro is where the constants of the modules that bind a platform
+  live — `std/file` writes `AT_FDCWD` inside a `{% if flag?(:linux) %}`
+  — and the walk that now carries a type's constants reads what a macro
+  expanded to, the same way the module's own top level already did. The
+  expansion is the right thing to carry: an artifact is rejected unless
+  the consumer's target and flags match the producer's (IV.5).
+
+  Measured the same way as the entry below, over the 60
+  `bench/std_*_exercise.iyi` built with `--emit-iyimod` and consumed
+  with `--use-iyimod`: 25 round-tripped, 28 do now, and the refusal
+  that names a type body is down from 4 of them to 1. That last one is
+  `std/file`'s `@@temp_counter = 1000_u64` — a class variable, which is
+  the case the rule was written for.
+
+- **A constant in a type body was in the artifact nowhere, so thirteen
+  of `src/std`'s own modules could not be consumed as one.** `pub struct
+  Math` writes `PI = 3.14…` inside itself. That is a declaration with a
+  value, and a `.iyimod` had no place for it: `Exports` carries types
+  and signatures, and the initialiser — which is where a module's own
+  constants travel as source — stopped at the type's body. So the
+  producer marked the module as one with code inside a type body that
+  has to run, and every consuming build was refused: `"std/math" has
+  code inside a type body that has to run`, about `PI`.
+
+  It travels qualified now — `pub Math::PI = 3.14…`, written after the
+  declarations that make the namespace exist — which is exactly how
+  `iyi tool bind` has always carried a bound Crystal namespace's
+  constants. `pub` rides along, nesting is kept (`Capsule::Frame::MAX`),
+  and a `private` one is carried without the word, which is the same
+  trade the bind side makes: a qualified assignment has nowhere to put
+  it, and iyi does not gate a constant on it.
+
+  What is still refused is unchanged and is the point of the rule: a
+  class variable's initialiser belongs to the type, is not carried, and
+  a build given one would link and run with that part missing.
+  Measured over `bench/std_*_exercise.iyi`, each built with
+  `--emit-iyimod` and then consumed with `--use-iyimod`: 21 of the 60
+  round-tripped before, 25 do now, and the refusal that named a type
+  body fell from 20 exercises to 4. Those 4 are a second defect behind
+  the same message — a `lib`'s `fun` read as code — not this one.
+  `spec/compiler/iyimod_spec.cr` holds it: the module's source is
+  deleted before the consuming build and the program is run, because a
+  constant that arrives declared and never initialised answers zero.
 - **One empty collection answered 0 and another panicked, in the same
   program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
   `iyi: panic: sum of an empty array`: the prelude's own `Array#sum`

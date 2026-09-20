@@ -1841,6 +1841,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
                   "Returns `true` if this enum value #{is_flags ? "contains" : "equals"} `#{member.name}`"
                 end
 
+    # Not the module's, so an artifact leaves it out: the consumer's own
+    # compiler writes this one from the members it reads. See
+    # `Def#iyi_compiler_made`.
+    a_def.iyi_compiler_made = true
     enum_type.add_def a_def
   end
 
@@ -1848,6 +1852,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     body = Call.new(Call.new(nil, "value").at(node), "==", NumberLiteral.new(0)).at(node)
     # Its return type for the reason the one above carries one.
     a_def = Def.new("none?", body: body, return_type: Path.global("Bool").at(node)).at(node)
+    a_def.iyi_compiler_made = true
     enum_type.add_def a_def
   end
 

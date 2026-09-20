@@ -228,7 +228,12 @@ pub class Lexer
       # An escape closes the piece it is in: the current lexer reports a
       # string body as runs of literal text with each escape as its own
       # token, and a port that merges them is a different token stream.
-      text = ""
+      # The literal runs are taken as substrings rather than built a
+      # character at a time. `String#[]` is byte-indexed and answers the
+      # byte as a `Char`, so appending them one by one re-encoded every
+      # byte of a multi-byte character on its own: `héllo` came out as
+      # `hÃ©llo`.
+      run = @pos
       pieces = [] of String
       kinds = [] of String
       while !at_end? && peek != '"'
@@ -240,11 +245,10 @@ pub class Lexer
           # rather than its contents: lexing the expression is the same
           # work as lexing the file, and it is done by the same loop when
           # this slice grows to call itself.
-          unless text == ""
-            pieces << text
+          if @pos > run
+            pieces << @src[run, @pos - run]
             kinds << "STRING"
           end
-          text = ""
           advance                # #
           advance                # {
           depth = 1
@@ -255,28 +259,33 @@ pub class Lexer
           end
           pieces << "INTERPOLATION"
           kinds << "INTERPOLATION_START"
+          run = @pos
         elsif peek == '#'
-          pieces << text unless text == ""
-          kinds << "STRING" unless text == ""
+          if @pos > run
+            pieces << @src[run, @pos - run]
+            kinds << "STRING"
+          end
           pieces << advance.to_s
           kinds << "STRING"
-          text = ""
+          run = @pos
         elsif peek == '\\'
-          pieces << text unless text == ""
-          kinds << "STRING" unless text == ""
+          if @pos > run
+            pieces << @src[run, @pos - run]
+            kinds << "STRING"
+          end
           advance
           esc = advance
           # Printed as the escape, not as the byte: a real newline inside a
           # token value turns a line-oriented dump into a liar.
           pieces << "\\" + esc.to_s
           kinds << "STRING"
-          text = ""
+          run = @pos
         else
-          text = text + advance.to_s
+          advance
         end
       end
-      unless text == ""
-        pieces << text
+      if @pos > run
+        pieces << @src[run, @pos - run]
         kinds << "STRING"
       end
 

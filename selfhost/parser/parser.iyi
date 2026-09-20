@@ -134,11 +134,16 @@ pub class Lexer
       while !at_end? && ident_char?(peek)
         text = text + advance.to_s
       end
-      # `foo?` is one identifier. `bar!` is not: `!` is not part of a name
-      # in iyi (SPEC.md III.1.7a), it propagates what precedes it, and
-      # joining it made `end!` an identifier that closed nothing, so the
-      # block it ended ran to the end of the file.
-      if !at_end? && peek == '?'
+      # `foo?` is one identifier: a question mark ends a predicate's name.
+      # `Session?` is not: a constant with a question after it is the
+      # nilable type, and joining them made the union a path whose name
+      # ended in a question mark.
+      #
+      # `bar!` is not one either: `!` is not part of a name in iyi
+      # (SPEC.md III.1.7a), it propagates what precedes it, and joining it
+      # made `end!` an identifier that closed nothing, so the block it
+      # ended ran to the end of the file.
+      if !at_end? && peek == '?' && !c.ascii_uppercase?
         text = text + advance.to_s
       end
       if text == "_"
@@ -1705,6 +1710,12 @@ pub class Parser
   # are read here, and nowhere else is.
   def parse_type : Node
     first = parse_primary
+    # `Session?` is the union of the type and nothing, and the current
+    # parser builds the union rather than a type with a question mark.
+    if peek.kind == "?"
+      advance
+      return UnionNode.new.as(Node)
+    end
     return first unless peek.kind == "|"
     while peek.kind == "|"
       advance
@@ -1753,7 +1764,16 @@ pub class Parser
           target << VarNode.new(left.name).as(Node)
         end
       end
-      unless target.size == 0
+      # `chomp: true` inside an argument list is a named argument, not a
+      # declaration: `name :` declares a type, `name:` names an argument,
+      # and the space is again the difference.
+      colon = peek
+      named = false
+      if @pos > 0
+        before = @tokens[@pos - 1]
+        named = colon.line == before.line && colon.col == before.col + before.value.size
+      end
+      unless target.size == 0 || named
         advance
         declared = parse_type
         return TypeDeclNode.new(target, [declared] of Node).as(Node)
@@ -1899,6 +1919,22 @@ pub class Parser
   # `.map &.abs` is a block written as a shorthand, and it is not an
   # argument: reading it as one made `&` a variable and `.abs` a call on
   # it. Answers whether it consumed one.
+  # `read_line(chomp: true)`: a named argument. The current parser keeps
+  # the name beside the arguments and the shape does not print it, so this
+  # reads the pair and answers that it did. `name :` with a space is a
+  # type declaration and is left alone.
+  def skip_named_arg? : Bool
+    return false unless peek.kind == "IDENT"
+    colon = peek_at(1)
+    return false unless colon.kind == ":"
+    return false unless colon.line == peek.line && colon.col == peek.col + peek.value.size
+    advance                      # the name
+    advance                      # the colon
+    parse_expression
+    advance if peek.kind == ","
+    true
+  end
+
   def skip_short_block? : Bool
     return false unless peek.kind == "&" && peek_at(1).kind == "."
     advance                      # &
@@ -1978,6 +2014,7 @@ pub class Parser
         advance
         while peek.kind != ")" && !at_end?
           next if skip_short_block?
+          next if skip_named_arg?
           args << parse_expression
           advance if peek.kind == ","
         end
@@ -2149,15 +2186,23 @@ pub class Parser
     if t.kind == "IDENT"
       advance
       name = t.value
-      if peek.kind == "("
+      # `f(x)` is a call with an argument list; `puts (1..3).map` is a
+      # call with one argument that happens to start with a paren, and the
+      # space is the whole difference. The lexer drops spaces, so the
+      # question is asked of the columns: an argument list opens where the
+      # name ended.
+      attached = peek.line == t.line && peek.col == t.col + t.value.size
+      if peek.kind == "(" && attached
         advance
         args = [] of Node
         while peek.kind != ")" && !at_end?
           next if skip_short_block?
+          next if skip_named_arg?
           args << parse_expression
           advance if peek.kind == ","
         end
         advance                  # )
+        skip_block
         return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
       end
       # A known local is a variable. So is a name about to be assigned:
@@ -2182,8 +2227,15 @@ pub class Parser
         # return from here dropped it.
         return with_postfix(CallNode.new(name, [] of Node, [] of Node).as(Node))
       end
+      # What can begin an argument written without parentheses. `(` is in
+      # the list because `puts (1..3).map` passes one, and it is only
+      # reached when the paren was not attached to the name, which is the
+      # test above.
       if peek.line == t.line &&
-         (peek.kind == "IDENT" || peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" || peek.kind == "CONST")
+         (peek.kind == "IDENT" || peek.kind == "NUMBER" ||
+          peek.kind == "DELIMITER_START" || peek.kind == "CONST" ||
+          peek.kind == "(" || peek.kind == "[" || peek.kind == "[]" ||
+          peek.kind == "INSTANCE_VAR" || peek.kind == "CHAR")
         args = [] of Node
         args << parse_expression
         while peek.kind == ","
@@ -2191,7 +2243,11 @@ pub class Parser
           args << parse_expression
         end
         skip_short_block?
-        return CallNode.new(name, [] of Node, args).as(Node)
+        # `get "/" do |env| ... end` is a call with an argument and a
+        # block, and reading the `do` as a second argument made it a call
+        # to a method of that name and `|env|` a bitwise or.
+        skip_block
+        return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
       end
       # Everything else is a call with no arguments and no receiver, which
       # is what the current parser builds: whether `greet` is a method or a

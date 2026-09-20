@@ -742,29 +742,37 @@ class IyiSchedulerState
     # reference the collector cannot see. Zero timer means the machine
     # refused a high-resolution one and the poller is back on the
     # millisecond timeout.
-    property deadline_timer : Int64 = 0_i64
-    property wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    #
+    # Declared with their zeroes and read by hand, rather than through
+    # `property`: that macro writes the type alone, and a field the
+    # `initialize` below does not list is nilable, while listing them
+    # there means writing that method twice — once per platform, since
+    # an assignment inside a macro conditional is not counted either.
+    @deadline_timer : Int64 = 0_i64
+    @wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+
+    def deadline_timer : Int64
+      @deadline_timer
+    end
+
+    def deadline_timer=(handle : Int64) : Int64
+      @deadline_timer = handle
+    end
+
+    def wait_handles : Pointer(UInt8)
+      @wait_handles
+    end
+
+    def wait_handles=(pair : Pointer(UInt8)) : Pointer(UInt8)
+      @wait_handles = pair
+    end
   {% end %}
 
-  # Zero throughout. Windows keeps two fields more, and the initializer
-  # is written twice rather than guarded inside one: a field assigned
-  # inside a `{% if %}` in the body is not counted as initialized, and
-  # the build stops at "rendering it nilable".
-  {% if flag?(:win32) %}
-    def initialize
-      @pollfd = 0_i64
-      @events = Pointer(UInt8).new(0_u64)
-      @stack_pool = 0_u64
-      @deadline_timer = 0_i64
-      @wait_handles = Pointer(UInt8).new(0_u64)
-    end
-  {% else %}
-    def initialize
-      @pollfd = 0_i64
-      @events = Pointer(UInt8).new(0_u64)
-      @stack_pool = 0_u64
-    end
-  {% end %}
+  def initialize
+    @pollfd = 0_i64
+    @events = Pointer(UInt8).new(0_u64)
+    @stack_pool = 0_u64
+  end
 end
 
 class IyiScheduler

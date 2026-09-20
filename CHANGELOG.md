@@ -389,6 +389,40 @@
 
 ### Fixed
 
+- **The rest of the signature can be wider than its callers too, and a
+  symbol carries all of it.** A consumer types a call from the
+  declaration and asks the linker for what the declaration says; the
+  producer's codegen is demand-driven and wrote what its own program
+  needed. A parameter was the half of this already fixed; the other two
+  places a symbol carries a type went on missing.
+
+  - **The receiver.** A method on a class something inherits from is
+    reached through the virtual type wherever a declaration names the
+    base — `@sink : Sink` holds a `Sink+` — and codegen puts those
+    calls in a unit of their own, `Sink+@Sink#take`. The producer emits
+    the ones its own program dispatched virtually: `std/io`'s `Reader`
+    has two subclasses and the link ended on
+    `Reader+@Std::Io::Reader#read_all`.
+  - **The return.** `def self.new_element(name : String) : Node` was
+    asked for as `new_element<String>:Std::Xml::Node+`, because a
+    consumer holds the answer as its virtual type, where the producer —
+    whose body returns exactly a `Node` — wrote the answer it had.
+
+  And the other half of why the rule looked ineffective: a nested
+  type's travelling body was recorded under its bare name while the
+  renderer looks it up under the path it is nested in, so a body inside
+  `ByteFormat::BigEndian` was carried and never written out. It is
+  keyed on the path now, which is what a nested type's body has always
+  needed and what nothing had asked of it.
+
+  The price, measured on the module set `std/dir` pulls in: 870,472
+  bytes of `.iyimod` became 872,997, up 0.3%. 53 of the 60
+  `bench/std_*_exercise.iyi` round-tripped through `--emit-iyimod` and
+  `--use-iyimod` before this, 54 do now — `std/xml`. `std/io` is left
+  on the gap neither half covers: an *inherited* method instantiated
+  for a receiver the producer never called it on, which is the keep
+  file's job and still has no equivalent inside one build.
+
 - **A class hierarchy did not cross the boundary: not the `<`, not the
   `abstract`, and not the field types the hierarchy makes virtual.**
   Three things the artifact dropped, each enough on its own to stop a

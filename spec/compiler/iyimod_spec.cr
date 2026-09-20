@@ -2829,6 +2829,104 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A signature the consumer keys a symbol on differently from the build
+  # that compiled it, in all three places a symbol carries one.
+  #
+  # A consumer types a call from the declaration, so what it asks the linker
+  # for is what the declaration says; the producer's codegen is
+  # demand-driven, so what it wrote is what its own program happened to
+  # need. Where the two can differ the body travels instead, the way a
+  # block-taking def's already does. Three ways they differ, and this
+  # program hits all three at once:
+  #
+  # * the **return** — `def self.square(side : Int32) : Shape` was asked for
+  #   as `square<Int32>:Shape+`, where the producer, whose body returns
+  #   exactly a `Square`, wrote the answer it had;
+  # * the **receiver** — `shape.twice` on a `Shape+` is dispatched through a
+  #   unit of its own, `Shape+@Shape#twice`, and the producer emits the ones
+  #   its own program dispatched virtually;
+  # * the **parameter** — `doubled(shape : Shape)` was asked for as
+  #   `doubled<Shape+>`.
+  #
+  # `Factory` is a module nested in an exported struct, which is the other
+  # half: a nested type's travelling body is keyed on the path the renderer
+  # looks it up under, and keyed on the bare name it was recorded and never
+  # rendered — so the body did not travel however loudly this rule asked
+  # for it.
+  #
+  # `std/io` and `std/xml` were the two the library had, and the link named
+  # the line each time.
+  it "carries the body of a method whose signature is wider than its callers" do
+    with_tempdir("iyimod_widened_signature") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shape.iyi", <<-IYI
+        module boot/shape
+
+        pub abstract class Shape
+          pub abstract def area : Int32
+
+          pub def twice : Int32
+            area * 2
+          end
+        end
+
+        pub class Square < Shape
+          @side : Int32
+
+          def initialize(@side : Int32)
+          end
+
+          pub def area : Int32
+            @side * @side
+          end
+        end
+
+        pub struct Make
+          module Factory
+            def self.square(side : Int32) : Shape
+              Square.new(side)
+            end
+
+            def self.doubled(shape : Shape) : Int32
+              shape.twice
+            end
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/shape
+
+        shape = Boot::Shape::Make::Factory.square(3)
+        puts shape.twice
+        puts Boot::Shape::Make::Factory.doubled(shape)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "18\n18"
+
+      # The nested module's bodies are keyed under the path the renderer
+      # reads them back by, not under its bare name.
+      keys = Iyi::IyiMod.read(File.join("mods", "boot", "shape.iyimod")).mono_bodies.keys
+      keys.should contain "Make::Factory#self.doubled(shape : Shape)"
+      keys.should contain "Shape#twice()"
+
+      File.delete "boot/shape.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "18\n18"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

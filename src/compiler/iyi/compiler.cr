@@ -1527,7 +1527,7 @@ module Iyi
       # iyi: an `enum` travels as its members and the integer they are
       # numbered on (SPEC.md IV.2). See `iyi_enum_declaration`.
       if type.is_a?(EnumType)
-        return iyi_enum_declaration(program, filename, type, name, "pub")
+        return iyi_enum_declaration(program, filename, type, name, "pub", name)
       end
 
       travels = iyi_bodies_travel?(type)
@@ -1580,7 +1580,7 @@ module Iyi
         class_vars: collect_iyi_class_vars(type),
         methods: methods,
         visibility: "pub",
-        types: iyi_carried_types(program, filename, type),
+        types: iyi_carried_types(program, filename, type, path: name),
         macros: iyi_macros_on(type),
         annotations: annotations,
         doc: type.doc || "",
@@ -1615,9 +1615,14 @@ module Iyi
     # own code was the only thing using it. Seven of the sixty
     # `bench/std_*_exercise.iyi` failed that way, `std/path` and `std/dir`
     # among them.
+    #
+    # *container* is the key a travelling body of one of its methods is
+    # recorded under — the enum's own name where it is declared at the
+    # module's top level, and the path it is nested under otherwise.
     private def iyi_enum_declaration(program : Program, filename : String,
                                      type : EnumType, name : String,
-                                     visibility : String) : IyiMod::TypeDecl
+                                     visibility : String,
+                                     container : String = name) : IyiMod::TypeDecl
       members = [] of {String, String}
       type.types?.try &.each do |member, constant|
         next unless constant.is_a?(Const)
@@ -1635,8 +1640,8 @@ module Iyi
       # an enum's: it is a non-generic type with a unit of its own in the
       # object code.
       methods = [] of IyiMod::Signature
-      iyi_collect_type_methods program, filename, name, type, false, methods
-      iyi_collect_type_methods program, filename, name, type.metaclass, false, methods
+      iyi_collect_type_methods program, filename, container, type, false, methods
+      iyi_collect_type_methods program, filename, container, type.metaclass, false, methods
       methods.sort_by! &.name
 
       IyiMod::TypeDecl.new(
@@ -1706,11 +1711,20 @@ module Iyi
     # them would make R-2's block rule refuse a module over a *private*
     # method's unannotated block, which is a rule about what another module
     # reads.
+    #
+    # *path* is the container half of a travelling body's key: the names this
+    # type is nested inside, joined the way `render_type_declaration` joins
+    # them on the way back. Without it a nested type's body was recorded
+    # under its own bare name and the renderer looked for
+    # `ByteFormat::BigEndian#…`, so the body never came out and the link
+    # ended on a symbol nobody emitted.
     private def iyi_carried_types(program : Program, filename : String, type : Type,
-                                  carried : Set(String)? = nil) : Array(IyiMod::TypeDecl)
+                                  carried : Set(String)? = nil,
+                                  path : String = "") : Array(IyiMod::TypeDecl)
       declarations = [] of IyiMod::TypeDecl
       type.types?.try &.each do |name, declared|
         next if carried.try &.includes?(name)
+        container = path.empty? ? name : "#{path}::#{name}"
 
         # An alias has neither a layout nor an id, and it travels for the other
         # reason a declaration does: the text that travels names it. A carried
@@ -1739,7 +1753,7 @@ module Iyi
         # the members, and the consumer refused the file.
         if declared.is_a?(EnumType)
           declarations << iyi_enum_declaration(program, filename, declared, name,
-            declared.private? ? "private" : "")
+            declared.private? ? "private" : "", container)
           next
         end
 
@@ -1760,9 +1774,9 @@ module Iyi
             supertraits: [] of String,
             fields: [] of {String, String, String},
             class_vars: collect_iyi_class_vars(declared),
-            methods: iyi_carried_methods(program, filename, name, declared),
+            methods: iyi_carried_methods(program, filename, container, declared),
             visibility: declared.private? ? "private" : "",
-            types: iyi_carried_types(program, filename, declared),
+            types: iyi_carried_types(program, filename, declared, path: container),
             macros: iyi_macros_on(declared),
             # Read the way `Iyi::Bind` reads it: a module that extends itself
             # is one whose metaclass has it as an ancestor, which is what
@@ -1785,9 +1799,9 @@ module Iyi
           supertraits: [] of String,
           fields: collect_iyi_fields(declared),
           class_vars: collect_iyi_class_vars(declared),
-          methods: iyi_carried_methods(program, filename, name, declared),
+          methods: iyi_carried_methods(program, filename, container, declared),
           visibility: declared.private? ? "private" : "",
-          types: iyi_carried_types(program, filename, declared),
+          types: iyi_carried_types(program, filename, declared, path: container),
           macros: iyi_macros_on(declared),
           superclass: iyi_superclass_name(declared),
         )
@@ -1960,11 +1974,17 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             signatures << signature
-            # The same two reasons the exported side travels for: a
-            # block-taking body is the caller's, and one whose code answers
-            # for an open set is the program's (SPEC.md III.6). A header for
-            # either would promise a symbol nobody emitted.
-            if iyi_takes_block?(item.def) || item.def.iyi_open_travel?
+            # The same three reasons the exported side travels for: a
+            # block-taking body is the caller's, one whose code answers for
+            # an open set is the program's (SPEC.md III.6), and one whose
+            # parameter is written wider than its callers has no symbol the
+            # consumer can ask for. A header for any of them would promise a
+            # symbol nobody emitted — `std/io` writes
+            # `ByteFormat::BigEndian.decode_int32(io : IyiIO)` inside a
+            # module it keeps to itself, and the link ended on
+            # `decode_int32<IyiIO+>`.
+            if iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
+               iyi_widened_parameters?(type, item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end
           end
@@ -2013,21 +2033,58 @@ module Iyi
     # stays in the object code for its own callers; the two have different
     # names and do not collide.
     #
-    # Only where the two can disagree. A parameter written as a leaf type is
-    # the type every argument to it has, so the ordinary method is untouched
-    # and keeps its body behind — which is the whole point of IV.2 and most
-    # of what an artifact saves.
+    # Three places the declaration can be wider than what this build
+    # compiled, and a symbol carries all three:
+    #
+    # * a **parameter**, which is where this started;
+    # * the **receiver**, because a method on a class something inherits from
+    #   is reached through the virtual type wherever a declaration names the
+    #   base — `@sink : Sink` holds a `Sink+` — and codegen puts those calls
+    #   in a unit of their own, `Sink+@Sink#take`. The producer emits the
+    #   ones its own program dispatched virtually and no others, so
+    #   `std/io`'s `Reader` has two subclasses and the link ended on
+    #   `Reader+@Std::Io::Reader#read_all`;
+    # * the **return**, because it is in the name too. A consumer types a
+    #   call from the declaration's return annotation and holds the answer as
+    #   its virtual type, so `def self.new_element(name : String) : Node`
+    #   was asked for as `new_element<String>:Std::Xml::Node+` where the
+    #   producer, whose body returns exactly a `Node`, wrote
+    #   `…:Std::Xml::Node`.
+    #
+    # Only where the two can disagree. A signature written in leaf types is
+    # the one every call to it has, so the ordinary method is untouched and
+    # keeps its body behind — which is the whole point of IV.2 and most of
+    # what an artifact saves.
     private def iyi_widened_parameters?(scope : Type, a_def : Def) : Bool
+      owner = a_def.owner? || scope
+
+      # The receiver. Asked of the instance side, because a `def self.` is
+      # stored on the metaclass and it is the instance's subclasses that make
+      # either of them virtual.
+      instance = owner.is_a?(MetaclassType) ? owner.instance_type : owner
+      return true if instance.is_a?(ClassType) && instance.virtual_type != instance
+
+      if return_type = a_def.return_type
+        return true if iyi_widened_type?(owner, return_type)
+      end
+
       a_def.args.each do |arg|
         restriction = arg.restriction
         next unless restriction
-        declared = (a_def.owner? || scope).lookup_type?(restriction)
-        next unless declared.is_a?(Type)
-        # A free variable is bound per call and is not a widening.
-        next if declared.is_a?(TypeParameter)
-        return true if declared.is_a?(UnionType) || declared.virtual_type != declared
+        return true if iyi_widened_type?(owner, restriction)
       end
       false
+    end
+
+    # One written type, asked whether the consumer would key a symbol on
+    # something else. A free variable is bound per call and is not a
+    # widening; a name this scope cannot resolve is not this check's to
+    # guess at.
+    private def iyi_widened_type?(owner : Type, written : ASTNode) : Bool
+      declared = owner.lookup_type?(written)
+      return false unless declared.is_a?(Type)
+      return false if declared.is_a?(TypeParameter)
+      declared.is_a?(UnionType) || declared.virtual_type != declared
     end
 
     # Records one body against `IyiMod.mono_body_key`.

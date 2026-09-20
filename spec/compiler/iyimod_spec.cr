@@ -2927,6 +2927,92 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A module whose methods have no unit of their own, in the two shapes a
+  # module gets them that way.
+  #
+  # Codegen files an instance method under the type that *includes* the
+  # module, and files a generic's method under the instantiation. Include a
+  # module into a type this module declares and the result is in this
+  # module's object code; include it into `::Object` and the result is in
+  # the prelude's, which is not this module's to ship. A generic nested
+  # inside an exported module is the same gap reached the other way: the
+  # exported path already knew a generic's bodies travel and the carried
+  # path, which is where a nested type goes, did not ask.
+  #
+  # `std/colorize` is both at once and nothing else — `class ::Object;
+  # include ObjectExtensions; end` over a `Colorize::Object(T)` — so a
+  # consumer reading it from its artifact was told `undefined method
+  # 'colorize' for String`, and once that was found, `undefined reference
+  # to Object(String)@Object(T)#to_s`.
+  it "carries the bodies of a module it included into a type it does not own" do
+    with_tempdir("iyimod_stencilled_module") do
+      Dir.mkdir_p "boot"
+      File.write "boot/loud.iyi", <<-IYI
+        module boot/loud
+
+        pub struct Loud
+          # Nested rather than exported, which is the shape that went
+          # missing: the exported path knew a generic's bodies travel.
+          struct Wrap(T)
+            @value : T
+
+            def initialize(@value : T)
+            end
+
+            def shout : String
+              @value.to_s + "!"
+            end
+          end
+
+          module Extensions
+            def loud : String
+              Wrap.new(self).shout
+            end
+          end
+        end
+
+        class ::Object
+          include Boot::Loud::Loud::Extensions
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/loud
+
+        puts "hi".loud
+        puts 42.loud
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "hi!\n42!"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "loud.iyimod"))
+      # The include itself, which is the whole of what this module does to
+      # `::Object` and carries no def of its own.
+      artifact.reopened.find { |decl| decl.name == "::Object" }
+        .try(&.includes).should eq ["Boot::Loud::Loud::Extensions"]
+      # The body of the method that include installs, which is compiled
+      # once per including type and so never into this module's own code.
+      artifact.mono_bodies.keys.should contain "Loud::Extensions#loud()"
+      # And the nested generic's, which the carried path did not ask for.
+      artifact.mono_bodies.keys.should contain "Loud::Wrap#shout()"
+
+      File.delete "boot/loud.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "hi!\n42!"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

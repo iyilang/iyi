@@ -1013,7 +1013,19 @@ module Iyi
             end
           end
         end
-        next if methods.empty?
+        # And what this module *included* into a type it does not own, which
+        # is the whole of what some of them do. `std/colorize` writes `class
+        # ::Object; include ObjectExtensions; end` and nothing else outside
+        # its own namespace, so read for defs alone it added nothing to
+        # `::Object` and the consumer was told `undefined method 'colorize'
+        # for String`.
+        #
+        # This module's own modules only. A foreign type's other ancestors
+        # are the prelude's or another module's, and either way they arrive
+        # with the type; an include under this module's namespace could not
+        # have been written anywhere but here.
+        included = own ? iyi_included_modules(type).select(&.starts_with?(own_prefix)) : [] of String
+        next if methods.empty? && included.empty?
         methods.sort_by! &.name
 
         # `Tuple` and `NamedTuple` describe themselves as "tuple" and "named
@@ -1029,6 +1041,7 @@ module Iyi
           fields: [] of {String, String, String},
           methods: methods,
           visibility: "",
+          includes: included,
           types: [] of IyiMod::TypeDecl,
         )
       end
@@ -1541,7 +1554,10 @@ module Iyi
       # The two are told apart by the signature's receiver, which
       # `render_signature` already writes back as `def self.zero`. Nothing else
       # needs to know: to a consumer it is one more name on the type.
-      iyi_collect_type_methods program, filename, name, type, travels, methods
+      # The instance side alone: a `def self.` on a module is owned by the
+      # module's own metaclass and its code is in this module's units.
+      iyi_collect_type_methods program, filename, name, type,
+        travels || iyi_stencilled_module?(program, type, filename), methods
       iyi_collect_type_methods program, filename, name, type.metaclass, travels, methods
       methods.sort_by! &.name
 
@@ -1782,6 +1798,7 @@ module Iyi
             # is one whose metaclass has it as an ancestor, which is what
             # makes `Helper.twice` and `Helper#twice` the same method.
             extends_self: declared.metaclass.ancestors.includes?(declared),
+            includes: iyi_included_modules(declared),
           )
           next
         end
@@ -1804,6 +1821,7 @@ module Iyi
           types: iyi_carried_types(program, filename, declared, path: container),
           macros: iyi_macros_on(declared),
           superclass: iyi_superclass_name(declared),
+          includes: iyi_included_modules(declared),
         )
       end
       declarations.sort_by! &.name
@@ -1857,6 +1875,52 @@ module Iyi
         return name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
       end
       name
+    end
+
+    # iyi: the modules a type includes, written back as the renderer's
+    # `include` lines.
+    #
+    # An edge like `superclass` and for the same reason: a consumer
+    # re-declares this type from what arrives, so an include that did not
+    # arrive is a set of methods the type no longer has. What it costs is
+    # not an error at the boundary but one at the callsite — `std/colorize`
+    # is a module whose whole surface is `class ::Object; include
+    # ObjectExtensions; end`, and a consumer reading it from its artifact
+    # was told `undefined method 'colorize' for String`.
+    #
+    # `parents` is the superclass and the includes together in resolution
+    # order, so the superclass comes off and what is left is what was
+    # written. A `GenericModuleInstanceType` — `Comparable(T)` — is an
+    # include as much as a plain module is and is not a `ModuleType`, which
+    # is the distinction `Iyi::Bind` learned the same way.
+    #
+    # Relative to the namespace, for the reason `iyi_superclass_name` is:
+    # `inheritance_order` places a declaration by matching these names
+    # against its siblings.
+    private def iyi_included_modules(type : Type) : Array(String)
+      names = [] of String
+      return names unless type.responds_to?(:parents)
+      parents = type.parents
+      return names unless parents
+
+      superclass = type.responds_to?(:superclass) ? type.superclass : nil
+      prefix = type.is_a?(NamedType) ? "#{type.namespace}::" : "::"
+      parents.each do |parent|
+        next if superclass && parent.same?(superclass)
+        next unless parent.is_a?(ModuleType) || parent.is_a?(GenericModuleInstanceType)
+        next if parent.is_a?(ClassType)
+        # A trait is a module underneath, and an `impl` installs it as one —
+        # so read for parents alone, every `impl Hashable for Bool` in
+        # `std/traits` came back as `include Std::Traits::Hashable`, which is
+        # the one thing R-3 says a trait is not. The impl travels in its own
+        # record; this is for what the author wrote `include` above.
+        next if parent.trait?
+
+        name = parent.devirtualize.to_s
+        name = name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
+        names << name unless names.includes?(name)
+      end
+      names
     end
 
     # One side of a type's methods — its own, or its metaclass's.
@@ -1935,6 +1999,38 @@ module Iyi
       type.is_a?(GenericType) || type.is_a?(TraitType)
     end
 
+    # iyi: whether *type* is a module this file included into a type declared
+    # somewhere else, which makes its instance methods travel for the reason
+    # a trait's defaults do.
+    #
+    # A module's instance method has no unit of its own: it is stencilled
+    # onto whatever includes it, and codegen files the result under the
+    # *includer*. Include it into a type this module declares and the result
+    # is in this module's object code; include it into `::Object` and the
+    # result is in the prelude's, which is not this module's to ship.
+    # `std/colorize` is nothing but that — `class ::Object; include
+    # ObjectExtensions; end` — and the link ended on
+    # `String@Std::Colorize::Colorize::ObjectExtensions#colorize`.
+    #
+    # Asked of the *namespace* and not of the file. A reopen counts as a
+    # location, so `class ::Object` written here put this file among
+    # `Object`'s and the question answered itself wrongly: what decides is
+    # whose object code the includer's unit lands in, and that is the
+    # module that declared it.
+    private def iyi_stencilled_module?(program : Program, type : Type,
+                                       filename : String) : Bool
+      return false if type.is_a?(ClassType)
+      including = type.as?(NonGenericModuleType).try &.raw_including_types
+      return false unless including
+      own = program.iyi_module_paths[filename]?.try { |name| program.iyi_module_type(name) }
+      return false unless own
+      prefix = "#{own}::"
+      including.any? do |includer|
+        name = includer.devirtualize.to_s
+        name != own.to_s && !name.starts_with?(prefix)
+      end
+    end
+
     # iyi: the methods of a type the module keeps to itself.
     #
     # They travel because a *body* that travels calls them: the router's
@@ -1962,6 +2058,19 @@ module Iyi
     private def iyi_carried_methods(program : Program, filename : String,
                                     container : String, type : Type) : Array(IyiMod::Signature)
       signatures = [] of IyiMod::Signature
+      # A generic's methods and a trait's defaults, for the reason the
+      # exported side carries them: the consumer is what compiles them, so
+      # no machine code here could serve it. Asked of the carried side too
+      # because a type is nested rather than exported by the author's
+      # choice, not by any property a consumer can see —
+      # `std/colorize`'s whole surface is `Colorize::Object(T)` nested
+      # inside an exported module, and the link ended on
+      # `Object(String)@Object(T)#to_s`.
+      travels = iyi_bodies_travel?(type)
+      # And a module this file included into a type declared elsewhere has
+      # no unit of its own for its instance methods — see
+      # `iyi_stencilled_module?`. The metaclass side keeps its code here.
+      stencilled = iyi_stencilled_module?(program, type, filename)
       {type, type.metaclass}.each do |side|
         side.as?(ModuleType).try &.defs.try &.each_value do |items|
           items.each do |item|
@@ -1983,7 +2092,8 @@ module Iyi
             # `ByteFormat::BigEndian.decode_int32(io : IyiIO)` inside a
             # module it keeps to itself, and the link ended on
             # `decode_int32<IyiIO+>`.
-            if iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
+            if travels || (stencilled && side.same?(type)) ||
+               iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
                iyi_widened_parameters?(type, item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end

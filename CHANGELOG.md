@@ -389,6 +389,36 @@
 
 ### Fixed
 
+- **A method with no unit of its own did not travel, in the two shapes a
+  method gets that way.** Codegen files an instance method under the type
+  that *includes* the module it is written in, and files a generic's
+  method under the instantiation. Neither is a symbol the producer can be
+  relied on to have emitted, which is the rule a trait's defaults already
+  travel under — and two ways in, nothing asked.
+
+  - **A module included into a type this module does not own.** Include
+    it into a type declared here and the result is in this module's
+    object code; include it into `::Object` and the result is in the
+    prelude's, which is not this module's to ship.
+  - **A generic nested inside another type.** The exported path knew a
+    generic's bodies travel; the carried path, which is where a nested
+    type goes whether or not the author exported its container, did not
+    ask.
+
+  And the `include` line itself. A module that reopens a foreign type to
+  add methods was carried, and one that reopens it to *include* something
+  had nothing to carry, so it was dropped entirely — `TypeDecl#includes`
+  existed and the emitter never filled it, on a reopened type or on the
+  module's own.
+
+  `std/colorize` is all three at once and nothing else: `class ::Object;
+  include ObjectExtensions; end` over a `Colorize::Object(T)`. A consumer
+  reading it from its artifact was told `undefined method 'colorize' for
+  String`, then `undefined reference to
+  Object(String)@Object(T)#to_s`. 55 of the 60
+  `bench/std_*_exercise.iyi` round-tripped before this, 56 do now, and
+  the module set `std/dir` pulls in is the same 870,472 bytes it was.
+
 - **The rest of the signature can be wider than its callers too, and a
   symbol carries all of it.** A consumer types a call from the
   declaration and asks the linker for what the declaration says; the

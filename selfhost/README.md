@@ -94,3 +94,28 @@ each differentially tested the same way. The bootstrap is the acceptance
 test and it is available from the first day the port parses anything: the
 Crystal-written compiler and the iyi-written one compile the same corpus
 and must agree.
+
+## The prelude
+
+`samples/iyi` was written for this language, so it says only what the
+language was built to say. `src/iyi` was not: it is the prelude, written
+before the port existed, and it is the second corpus.
+
+    bash selfhost/parser/where.sh src/iyi/*.iyi
+
+Measured: 2 of 17 files agree, and the rest diverge at a mean depth of
+20% of their tree. What they ask for next, in the order the measurement
+found it:
+
+* `pointerof`, `sizeof`, `instance_sizeof` and the casts: `as` and
+  `as?`, which the string and atomic files open with.
+* `yield`, which is a node and not a call.
+* A splat parameter, `*values`, and a double splat.
+* A symbol, which the atomic file passes to `pointerof`.
+* `{% for %}`, the macro loop, which the enum file is written around.
+* An argument whose name is a keyword: `def initialize(@begin : B)` in
+  `src/iyi/range.iyi` names its parameter `__arg0`, because `begin` is
+  a word the language already spends.
+* A parameter with a default value.
+
+Each is one shape, and the harness says which file to read for it.

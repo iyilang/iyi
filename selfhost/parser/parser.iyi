@@ -329,6 +329,16 @@ pub class Lexer
       return Token.new(three, line, col, three)
     end
 
+    # The macro delimiters, before the braces and percents they are made
+    # of: `{%` is not `{` and `%`, and reading it as two made every macro
+    # body a hash literal.
+    pair = "#{c}#{peek_at(1)}"
+    if pair == "{%" || pair == "%}" || pair == "{{" || pair == "}}"
+      advance
+      advance
+      return Token.new(pair, line, col, pair)
+    end
+
     # Two-character operators before one, or `==` lexes as two `=`.
     two = "#{c}#{peek_at(1)}"
     if two == "==" || two == "!=" || two == "<=" || two == ">=" ||
@@ -470,6 +480,41 @@ end
 # return, on a propagation and on a panic (SPEC.md III.1.4).
 # `x.is_a?(T)` asks a question about a type, and the answer narrows the
 # variable: it is not a method call, it is a node the semantic pass reads.
+pub struct ClassVarNode
+  def initialize
+  end
+end
+
+pub struct RequireNode
+  def initialize
+  end
+end
+
+pub struct MacroNode
+  def initialize
+  end
+end
+
+pub struct MacroIfNode
+  def initialize
+  end
+end
+
+pub struct MacroExpressionNode
+  def initialize
+  end
+end
+
+pub struct FunDefNode
+  def initialize
+  end
+end
+
+pub struct LibDefNode
+  def initialize
+  end
+end
+
 pub class IsANode
   getter obj : Array(Node)
   getter const : Array(Node)
@@ -728,7 +773,9 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                  UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
                  WhenNode | CaseNode | BreakNode | NextNode |
-                 PropagateNode | RecoverNode | DeferNode | IsANode
+                 PropagateNode | RecoverNode | DeferNode | IsANode |
+                 ClassVarNode | RequireNode | MacroNode | MacroIfNode |
+                 MacroExpressionNode | FunDefNode | LibDefNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -854,6 +901,48 @@ end
 impl Sexp for CharNode
   def sexp : String
     "(charliteral)"
+  end
+end
+
+impl Sexp for ClassVarNode
+  def sexp : String
+    "(classvar)"
+  end
+end
+
+impl Sexp for RequireNode
+  def sexp : String
+    "(require)"
+  end
+end
+
+impl Sexp for MacroNode
+  def sexp : String
+    "(macro)"
+  end
+end
+
+impl Sexp for MacroIfNode
+  def sexp : String
+    "(macroif)"
+  end
+end
+
+impl Sexp for MacroExpressionNode
+  def sexp : String
+    "(macroexpression)"
+  end
+end
+
+impl Sexp for FunDefNode
+  def sexp : String
+    "(fundef)"
+  end
+end
+
+impl Sexp for LibDefNode
+  def sexp : String
+    "(libdef)"
   end
 end
 
@@ -1318,6 +1407,28 @@ pub class Parser
       # `type Elem` in a trait, `type Elem = Int32` in an impl: the
       # requirement and the answer are the same node. Only a declaration
       # body writes this; anywhere else `type` is an ordinary name.
+      if word.value == "require"
+        advance if offset == 1
+        skip_line
+        return RequireNode.new.as(Node)
+      end
+      if word.value == "macro"
+        advance if offset == 1
+        advance                  # macro
+        skip_to_matching_end
+        return MacroNode.new.as(Node)
+      end
+      if word.value == "fun"
+        advance if offset == 1
+        return parse_fun
+      end
+      if word.value == "lib"
+        advance if offset == 1
+        advance                  # lib
+        advance                  # the name
+        skip_to_matching_end
+        return LibDefNode.new.as(Node)
+      end
       if word.value == "enum"
         advance if offset == 1
         return parse_enum
@@ -1419,6 +1530,97 @@ pub class Parser
     advance                      # end
 
     CaseNode.new(kind, [cond] of Node, arms, else_branch).as(Node)
+  end
+
+  # Everything up to the `end` that closes what was just opened, counting
+  # the words that open one. A macro body is read this way because its
+  # contents are a program in the macro language, not in this one.
+  # The `{% end %}` that closes a `{% if %}`, counting the macro openers
+  # on the way: a macro conditional nests like any other.
+  def skip_macro_to_end : Nil
+    depth = 1
+    while !at_end? && depth > 0
+      if peek.kind == "{%"
+        advance
+        word = peek
+        if word.kind == "IDENT" && word.value == "end"
+          depth = depth - 1
+        elsif word.kind == "IDENT" &&
+              (word.value == "if" || word.value == "unless" ||
+               word.value == "for" || word.value == "begin")
+          depth = depth + 1
+        end
+        while !at_end? && peek.kind != "%}"
+          advance
+        end
+        advance if peek.kind == "%}"
+      else
+        advance
+      end
+    end
+  end
+
+  def skip_to_matching_end : Nil
+    depth = 1
+    while !at_end? && depth > 0
+      index = @pos
+      token = advance
+      if token.kind == "{%"
+        word = peek
+        if word.kind == "IDENT" && word.value == "end"
+          depth = depth - 1
+        elsif word.kind == "IDENT" &&
+              (word.value == "if" || word.value == "unless" ||
+               word.value == "for" || word.value == "begin")
+          depth = depth + 1
+        end
+        while !at_end? && peek.kind != "%}"
+          advance
+        end
+        advance if peek.kind == "%}"
+        next
+      end
+      next unless token.kind == "IDENT"
+      if token.value == "end"
+        depth = depth - 1
+      elsif opens_block?(index, token.value)
+        depth = depth + 1
+      end
+    end
+  end
+
+  # `fun name(a : Int32) : Int32` with a body, or without one inside a
+  # `lib`. The shape does not print either, so this reads to the end of
+  # the declaration and answers the node.
+  def parse_fun : Node
+    advance                      # fun
+    line = peek.line
+    advance                      # the name
+    if peek.kind == "("
+      advance
+      depth = 1
+      while !at_end? && depth > 0
+        k = advance.kind
+        depth = depth + 1 if k == "("
+        depth = depth - 1 if k == ")"
+      end
+    end
+    if peek.kind == ":" && peek.line == line
+      advance
+      parse_type
+    end
+    # A `fun` inside a `lib` has no body; one outside does, and its `end`
+    # is on a later line.
+    skip_newlines_and_body_if_present
+    FunDefNode.new.as(Node)
+  end
+
+  def skip_newlines_and_body_if_present : Nil
+    return if peek.kind == "NEWLINE" && peek_at(1).kind == "IDENT" &&
+              (peek_at(1).value == "fun" || peek_at(1).value == "end")
+    skip_newlines
+    return if peek.kind == "IDENT" && (peek.value == "fun" || peek.value == "end")
+    skip_to_matching_end
   end
 
   # `enum Level : Int32` and its members, which the current parser builds
@@ -1625,6 +1827,10 @@ pub class Parser
   def parse_def(is_abstract : Bool) : Node
     advance                      # def
     name = advance.value
+    if name == "self" && peek.kind == "."
+      advance
+      name = advance.value
+    end
     # A parameter is a local inside its own method and nowhere else. The
     # first version never restored this, so a `name` argument in one method
     # made every later `name` a variable, and `polite(name)` in a method
@@ -1789,6 +1995,7 @@ pub class Parser
       case left
       when VarNode  then target << left.as(Node)
       when IvarNode then target << left.as(Node)
+      when ClassVarNode then target << left.as(Node)
       when CallNode
         # A bare name reads as a call everywhere else, and in front of a
         # `:` that is what `getter name : String` looks like by the time it
@@ -1810,6 +2017,13 @@ pub class Parser
       unless target.size == 0 || named
         advance
         declared = parse_type
+        # `@@word : UInt64 = 0` declares and assigns in one line. The
+        # declaration is the shape; the value is read so it does not
+        # become a statement of its own.
+        if peek.kind == "="
+          advance
+          parse_expression
+        end
         return TypeDeclNode.new(target, [declared] of Node).as(Node)
       end
     end
@@ -2106,6 +2320,10 @@ pub class Parser
       advance
       return with_postfix(IvarNode.new(t.value).as(Node))
     end
+    if t.kind == "CLASS_VAR"
+      advance
+      return with_postfix(ClassVarNode.new.as(Node))
+    end
     if t.kind == "NUMBER"
       advance
       return with_postfix(NumNode.new(t.value).as(Node))
@@ -2152,6 +2370,32 @@ pub class Parser
         return with_postfix(GenericNode.new([path] of Node, targs).as(Node))
       end
       return with_postfix(path)
+    end
+
+    if t.kind == "{%"
+      # `{% if ... %}` is a macro conditional and the rest are macro
+      # statements. Both run in the macro language, and the port reads
+      # them to their close rather than parsing a second language here.
+      advance
+      is_if = peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless")
+      while !at_end? && peek.kind != "%}"
+        advance
+      end
+      advance if peek.kind == "%}"
+      if is_if
+        skip_macro_to_end
+        return MacroIfNode.new.as(Node)
+      end
+      return MacroExpressionNode.new.as(Node)
+    end
+
+    if t.kind == "{{"
+      advance
+      while !at_end? && peek.kind != "}}"
+        advance
+      end
+      advance if peek.kind == "}}"
+      return with_postfix(MacroExpressionNode.new.as(Node))
     end
 
     if t.kind == "{"

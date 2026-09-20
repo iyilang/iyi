@@ -116,6 +116,40 @@ EOF
         status=1
       fi
     fi
+
+    # 2b. What a short sleep costs. Windows rounds a millisecond timeout
+    # up to the system timer tick, so the poller's own wait woke 15.6 ms
+    # after a `sleep 1` and a hundred of them took 1,577 ms; with the
+    # deadline on a high-resolution waitable timer the same hundred take
+    # 156 ms. The bar is 800 ms — far under the tick-rounded floor and
+    # five times over the measurement, so a loaded runner still passes.
+    # It can only fail short: another process on the machine may have
+    # raised the global timer resolution, and then even a poller without
+    # the timer would come in under the bar.
+    echo
+    echo "== A hundred one-millisecond sleeps =="
+    cat > "$WORK/naps.iyi" <<'EOF'
+module naps
+
+start = __iyi_monotonic_ns
+100.times { sleep(1) }
+puts "took " + ((__iyi_monotonic_ns - start) // 1000000_i64).to_s + " ms"
+EOF
+    if ! "$IYI" build -o "$WORK/naps.exe" "$WORK/naps.iyi" > "$WORK/naps.log" 2>&1; then
+      echo "  the sleep probe did not build"
+      tail -5 "$WORK/naps.log"
+      status=1
+    else
+      "$WORK/naps.exe" > "$WORK/naps.out" 2>&1 || true
+      took="$(sed -n 's/^took \([0-9]*\) ms$/\1/p' "$WORK/naps.out")"
+      if [ -n "$took" ] && [ "$took" -lt 800 ]; then
+        echo "  a hundred one-millisecond sleeps took ${took} ms"
+      else
+        echo "  a hundred one-millisecond sleeps did not come in under 800 ms:"
+        sed -n '1,3p' "$WORK/naps.out"
+        status=1
+      fi
+    fi
     ;;
 esac
 

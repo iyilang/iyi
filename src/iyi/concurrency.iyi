@@ -734,11 +734,37 @@ class IyiSchedulerState
   property dying : IyiFiber?
   property stack_pool : UInt64
 
-  def initialize
-    @pollfd = 0_i64
-    @events = Pointer(UInt8).new(0_u64)
-    @stack_pool = 0_u64
-  end
+  {% if flag?(:win32) %}
+    # Windows' deadline: the timer this thread arms for the nearest
+    # sleeper, and the two handles it waits on — the completion port and
+    # that timer. The pair is a heap buffer held as a typed pointer for
+    # the reason `events` above is: an address parked in a number is a
+    # reference the collector cannot see. Zero timer means the machine
+    # refused a high-resolution one and the poller is back on the
+    # millisecond timeout.
+    property deadline_timer : Int64 = 0_i64
+    property wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+  {% end %}
+
+  # Zero throughout. Windows keeps two fields more, and the initializer
+  # is written twice rather than guarded inside one: a field assigned
+  # inside a `{% if %}` in the body is not counted as initialized, and
+  # the build stops at "rendering it nilable".
+  {% if flag?(:win32) %}
+    def initialize
+      @pollfd = 0_i64
+      @events = Pointer(UInt8).new(0_u64)
+      @stack_pool = 0_u64
+      @deadline_timer = 0_i64
+      @wait_handles = Pointer(UInt8).new(0_u64)
+    end
+  {% else %}
+    def initialize
+      @pollfd = 0_i64
+      @events = Pointer(UInt8).new(0_u64)
+      @stack_pool = 0_u64
+    end
+  {% end %}
 end
 
 class IyiScheduler
@@ -1297,11 +1323,17 @@ class IyiScheduler
     end
 
     timeout = -1_i64
+    {% if flag?(:win32) %}
+      gap_ns = -1_i64
+    {% end %}
     if sleep_head.is_a?(IyiFiber)
       now = __iyi_monotonic_ns
       gap = sleep_head.deadline - now
       gap = 0_i64 if gap < 0
       timeout = (gap + 999999_i64) // 1000000_i64
+      {% if flag?(:win32) %}
+        gap_ns = gap
+      {% end %}
     end
 
     count = 0_i64
@@ -1312,13 +1344,29 @@ class IyiScheduler
       overlapped_ptr = Pointer(Void).new(0_u64)
       port = Pointer(Void).new(pollfd.to_u64)
 
-      LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
-      if overlapped_ptr.address != 0_u64
-        fiber = io_take_overlapped(overlapped_ptr.address)
-        if fiber.is_a?(IyiFiber)
-          fiber.io_bytes_read = bytes_transferred.to_i64
-          enqueue(fiber)
+      # No deadline to keep, or a Windows that refused the timer: the
+      # port's own wait, blocking or rounded up to the tick as before.
+      timer = gap_ns < 0 ? -1_i64 : deadline_timer
+      if timer <= 0
+        LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
+        if overlapped_ptr.address != 0_u64
+          fiber = io_take_overlapped(overlapped_ptr.address)
+          if fiber.is_a?(IyiFiber)
+            fiber.io_bytes_read = bytes_transferred.to_i64
+            enqueue(fiber)
+          end
         end
+      else
+        # A due time in hundred-nanosecond units, negative for "from
+        # now"; a gap of zero is an absolute time already past, which
+        # signals at once. The drain below takes whatever the port has,
+        # so this wait only has to end at the right moment.
+        due = 0_i64 - gap_ns // 100_i64
+        timer_handle = Pointer(Void).new(timer.to_u64)
+        LibC.SetWaitableTimer(timer_handle, pointerof(due), 0_i32,
+          Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), 0_i32)
+        LibC.WaitForMultipleObjects(2_i32, state.wait_handles.as(Void*), 0_i32, timeout_ms)
+        LibC.CancelWaitableTimer(timer_handle)
       end
 
       while true
@@ -1545,6 +1593,50 @@ class IyiScheduler
     st.events = buffer
     buffer.address
   end
+
+  {% if flag?(:win32) %}
+    # This thread's deadline timer, and the pair of handles the poller
+    # waits on: the completion port first, the timer second.
+    #
+    # The port's own timeout cannot keep a deadline — Windows rounds a
+    # millisecond wait up to the system timer tick, so the poller woke
+    # 15.6 ms after a `sleep 1` and a hundred of them took 1,577 ms
+    # instead of 100. A timer made with
+    # CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (0x2) keeps the millisecond
+    # (1,513 us measured) and the same object without the flag does not
+    # (15,879 us), so the flag is the whole point of asking for it here.
+    #
+    # The wake is a wait on the pair rather than the timer's completion
+    # routine because a high-resolution timer refuses one:
+    # `SetWaitableTimer` with a routine answers 0 and ERROR_INVALID_PARAMETER
+    # on this timer and 1 on a plain one. A completion port is a waitable
+    # object — measured, a packet posted to an idle port signals its
+    # handle in 1 us — and the millisecond timeout stays on the wait as
+    # the backstop, so a port that did not signal costs the deadline the
+    # program asked for and never a hung poller.
+    #
+    # A machine whose Windows does not know the flag (it arrived in
+    # 10 1803) answers a null handle; that is remembered as -1 and the
+    # poller keeps the millisecond timeout it had before.
+    def self.deadline_timer : Int64
+      st = state
+      handle = st.deadline_timer
+      return handle if handle != 0_i64
+      port = pollfd
+      timer = LibC.CreateWaitableTimerExW(Pointer(Void).new(0_u64),
+        Pointer(UInt16).new(0_u64), 2_i32, 0x1F0003_i32)
+      if timer.address == 0_u64
+        st.deadline_timer = -1_i64
+        return -1_i64
+      end
+      pair = Pointer(UInt8).malloc(16_u64)
+      Pointer(UInt64).new(pair.address).value = port.to_u64
+      Pointer(UInt64).new(pair.address + 8_u64).value = timer.address
+      st.wait_handles = pair
+      st.deadline_timer = timer.address.to_i64
+      timer.address.to_i64
+    end
+  {% end %}
 
   # ── Panics — III.1.4 ─────────────────────────────────────────────────
 

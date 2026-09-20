@@ -425,6 +425,22 @@ end
     fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
+    fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
+                               dw_milliseconds : Int32) : Int32
+    # The timer the poller's deadline needs. A millisecond timeout given to
+    # `GetQueuedCompletionStatus` is rounded up to the system timer tick,
+    # which is 15.6 ms unless something on the machine raised it: measured
+    # here, fifty one-millisecond waits took 15,707 us each and a hundred
+    # `sleep 1` calls took 1,577 ms instead of 100. A waitable timer made
+    # with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (0x2) takes 1,513 us for
+    # that millisecond and 10,393 for ten; the same object without the flag
+    # takes 15,879, so it is the flag that does the work.
+    fun CreateWaitableTimerExW(lp_timer_attributes : Void*, lp_timer_name : UInt16*,
+                               dw_flags : Int32, dw_desired_access : Int32) : Void*
+    fun SetWaitableTimer(h_timer : Void*, lp_due_time : Int64*, l_period : Int32,
+                         pfn_completion_routine : Void*, lp_arg_to_completion_routine : Void*,
+                         f_resume : Int32) : Int32
+    fun CancelWaitableTimer(h_timer : Void*) : Int32
     fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
     fun SwitchToThread : Int32
     fun GetActiveProcessorCount(group_number : UInt16) : Int32

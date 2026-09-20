@@ -2606,6 +2606,75 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A `module` the module keeps to itself, which its own travelling bodies
+  # name.
+  #
+  # The carried side of `Exports` took classes, structs and enums; a nested
+  # module fell through it, and its object code travelled all the same — one
+  # unit per non-generic type declared under the module. So the artifact
+  # carried the machine code of a type it never declared, and the first body
+  # that named it stopped the consumer: `undefined constant
+  # Std::Float::Float32Text`, about `module Float32Text`, which is how
+  # `std/float` writes the single's printer and what `::Float32#to_s` calls.
+  # `std/float`, `std/math` and `std/benchmark` were all unusable as
+  # artifacts.
+  #
+  # Its methods come from both sides, because a module keeps everything on
+  # the metaclass: `def self.twice` is not on the module's own `defs`, and
+  # walking that side alone carried a `module Helper` with nothing in it.
+  #
+  # Named through a reopened prelude type, which is the shape that makes the
+  # body travel — a reopened type's methods are the consumer's to compile —
+  # and run with the source deleted.
+  it "carries a module it keeps to itself" do
+    with_tempdir("iyimod_nested_module") do
+      Dir.mkdir_p "boot"
+      File.write "boot/num.iyi", <<-IYI
+        module boot/num
+
+        module Helper
+          def self.twice(n : Int32) : Int32
+            n * 2
+          end
+        end
+
+        struct ::Int32
+          def quadrupled : Int32
+            Boot::Num::Helper.twice(Boot::Num::Helper.twice(self))
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/num
+
+        puts 3.quadrupled
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "12"
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "num.iyimod")), io)
+      end
+      declarations.should contain "module Helper\n  def self.twice(n : Int32) : Int32"
+
+      File.delete "boot/num.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "12"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

@@ -1722,6 +1722,35 @@ module Iyi
           next
         end
 
+        # A `module` the module keeps to itself. It has no layout and no id,
+        # and it travels for the reason a private type does: this module's own
+        # machine code names it, and so does a body that travels. `std/float`
+        # writes its single printer as `module Float32Text` and calls it from
+        # `::Float32#to_s`, whose body is a reopened type's and therefore the
+        # consumer's to compile — which said `undefined constant
+        # Std::Float::Float32Text` about a module nothing outside the file can
+        # name. `std/float` and `std/math` both stopped there.
+        if declared.is_a?(NonGenericModuleType)
+          declarations << IyiMod::TypeDecl.new(
+            name: name,
+            kind: declared.type_desc,
+            type_parameters: [] of String,
+            assoc_types: [] of String,
+            supertraits: [] of String,
+            fields: [] of {String, String, String},
+            class_vars: collect_iyi_class_vars(declared),
+            methods: iyi_carried_methods(program, filename, name, declared),
+            visibility: declared.private? ? "private" : "",
+            types: iyi_carried_types(program, filename, declared),
+            macros: iyi_macros_on(declared),
+            # Read the way `Iyi::Bind` reads it: a module that extends itself
+            # is one whose metaclass has it as an ancestor, which is what
+            # makes `Helper.twice` and `Helper#twice` the same method.
+            extends_self: declared.metaclass.ancestors.includes?(declared),
+          )
+          next
+        end
+
         # A class or a struct, which is what has a layout and an id. A constant
         # lives in the same namespace and is neither, and it is IV.2's business
         # rather than this.
@@ -1839,25 +1868,33 @@ module Iyi
     # another module reads and nothing here is readable. It costs nothing to
     # skip: the annotation is what types a call to a def whose body stayed
     # behind, and these bodies do not stay behind.
+    #
+    # Both sides of it, because a `def self.` is stored on the metaclass and
+    # that is where a module keeps everything: `module Float32Text` is three
+    # `def self.` and nothing else, and walking the instance side alone
+    # carried none of them.
     private def iyi_carried_methods(program : Program, filename : String,
                                     container : String, type : Type) : Array(IyiMod::Signature)
       signatures = [] of IyiMod::Signature
-      type.as?(ModuleType).try &.defs.try &.each_value do |items|
-        items.each do |item|
-          next if item.def.new?
-          # The module's own `@[Primitive]` is not the compiler's — see the
-          # exported side.
-          next if item.def.body.is_a?(Primitive) && !iyi_primitive_written?(item.def)
-          next if item.def.abstract?
+      {type, type.metaclass}.each do |side|
+        side.as?(ModuleType).try &.defs.try &.each_value do |items|
+          items.each do |item|
+            next if item.def.new?
+            # The module's own `@[Primitive]` is not the compiler's — see the
+            # exported side.
+            next if item.def.body.is_a?(Primitive) && !iyi_primitive_written?(item.def)
+            next if item.def.abstract?
+            next if item.def.iyi_compiler_made?
 
-          signature = IyiMod.signature(item.def, check_block: false)
-          signatures << signature
-          # The same two reasons the exported side travels for: a block-taking
-          # body is the caller's, and one whose code answers for an open set is
-          # the program's (SPEC.md III.6). A header for either would promise a
-          # symbol nobody emitted.
-          if iyi_takes_block?(item.def) || item.def.iyi_open_travel?
-            iyi_record_mono_body program, filename, container, signature, item.def
+            signature = IyiMod.signature(item.def, check_block: false)
+            signatures << signature
+            # The same two reasons the exported side travels for: a
+            # block-taking body is the caller's, and one whose code answers
+            # for an open set is the program's (SPEC.md III.6). A header for
+            # either would promise a symbol nobody emitted.
+            if iyi_takes_block?(item.def) || item.def.iyi_open_travel?
+              iyi_record_mono_body program, filename, container, signature, item.def
+            end
           end
         end
       end

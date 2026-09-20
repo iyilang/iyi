@@ -389,6 +389,28 @@
 
 ### Fixed
 
+- **A module the module keeps to itself did not travel, and its object
+  code did.** A `.iyimod` carries the types a consumer cannot name but
+  the module's own machine code does — and the walk that collects them
+  took classes, structs and enums. A nested `module` fell through it,
+  while `ObjectCode` kept taking one unit per non-generic type declared
+  under the module: the artifact carried the machine code of a type it
+  never declared. The first body that named one stopped the consumer —
+  `undefined constant Std::Float::Float32Text`, about the `module
+  Float32Text` that `std/float` writes its single-precision printer in
+  and that `::Float32#to_s` calls. `std/float`, `std/math` and
+  `std/benchmark` were all unusable as artifacts.
+
+  It travels with `extend self` where the module wrote one, and with
+  its methods taken from **both** sides: a module keeps everything on
+  its metaclass, so `def self.twice` is not among its own `defs` and
+  walking that side alone carried a module with nothing in it. Carried
+  classes get the same correction, which is where it was already owed:
+  a `def self.` on one is what a travelling body calls it by.
+
+  46 of the 60 `bench/std_*_exercise.iyi` round-tripped through
+  `--emit-iyimod` and `--use-iyimod` before this, 49 do now.
+
 - **A line typed into a Windows console was read in the code page too.**
   The write side became `WriteConsoleW` two branches ago and the read
   side stayed `ReadFile`, which on a console handle answers the *active

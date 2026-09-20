@@ -389,6 +389,21 @@
 
 ### Fixed
 
+- **A datagram larger than the buffer killed the program on Windows.**
+  POSIX fills the buffer, drops the rest and answers what fit; Winsock
+  refuses the same call with WSAEMSGSIZE (10040) and fills the buffer
+  anyway. Measured: a ten-byte datagram read with a four-byte buffer
+  panicked with `cannot receive from UDP socket` where every other
+  platform answered four bytes — and on the parked path, where Windows
+  completes a posted `WSARecvFrom` instead, the same datagram came back
+  as `Cancelled`, which says no datagram arrived when one had.
+
+  `__is_msgsize` is the refusal by name, false on every other platform,
+  and both receive paths answer the capacity the caller offered. The
+  `std/udp` exercise reads a ten-byte datagram with a four-byte buffer
+  twice, immediately and parked: four bytes each, on every platform, and
+  the panic above without the arm.
+
 - **A killed `iyi run` left the program it started running.** On POSIX
   the runner traps SIGTERM and SIGHUP and passes them on; Windows
   delivers neither, and `TerminateProcess` — what an editor's run lens,

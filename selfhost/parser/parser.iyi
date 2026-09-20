@@ -65,6 +65,18 @@ pub class Lexer
     c.ascii_letter? || c == '_'
   end
 
+  def base_digit?(ch : Char, base : Int32) : Bool
+    value = digit_value(ch)
+    value >= 0 && value < base
+  end
+
+  def digit_value(ch : Char) : Int32
+    return ch.ord - '0'.ord if ch.ascii_number?
+    return ch.ord - 'a'.ord + 10 if ch >= 'a' && ch <= 'f'
+    return ch.ord - 'A'.ord + 10 if ch >= 'A' && ch <= 'F'
+    -1
+  end
+
   def ident_char?(c : Char) : Bool
     c.ascii_alphanumeric? || c == '_'
   end
@@ -182,6 +194,40 @@ pub class Lexer
       return Token.new("NUMBER", line, col, text)
     end
 
+    # A base prefix: `0x`, `0b`, `0o`. The value is what the tree
+    # carries, so the digits are converted here rather than kept.
+    if c == '0' && (peek_at(1) == 'x' || peek_at(1) == 'b' || peek_at(1) == 'o')
+      advance
+      base_char = advance
+      base = base_char == 'x' ? 16 : (base_char == 'b' ? 2 : 8)
+      value = 0_u64
+      while !at_end? && (base_digit?(peek, base) || peek == '_')
+        ch = advance
+        next if ch == '_'
+        value = value &* base.to_u64 &+ digit_value(ch).to_u64
+      end
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      elsif ident_start?(peek)
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, value.to_s)
+    end
+
+    if c == '\\'
+      advance
+      while !at_end? && (peek == ' ' || peek == '\t')
+        advance
+      end
+      advance if !at_end? && peek == '\n'
+      return next_token
+    end
+
     if c.ascii_number?
       text = ""
       while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
@@ -254,8 +300,8 @@ pub class Lexer
             pieces << @src[run, @pos - run]
             kinds << "STRING"
           end
-          advance                # #
-          advance                # {
+          advance # #
+          advance # {
           depth = 1
           while !at_end? && depth > 0
             ch = advance
@@ -347,7 +393,7 @@ pub class Lexer
        two == "*=" || two == "/=" || two == "%=" || two == "|=" ||
        two == "&=" || two == "^=" || two == "<<" || two == ">>" ||
        two == "=~" || two == "!~" || two == "&+" || two == "&-" ||
-       two == "&*" || two == "**"
+       two == "&*" || two == "**" || two == "//"
       advance
       advance
       return Token.new(two, line, col, two)
@@ -367,7 +413,8 @@ pub class Lexer
       puts token.dump
     end
   end
-end# The parser slice, written in iyi, over the lexer slice above.
+end # The parser slice, written in iyi, over the lexer slice above.
+
 #
 # The AST is the shape the model experiment settled on: a union of node types
 # with traits for the passes, rather than a class hierarchy iyi cannot have.
@@ -381,24 +428,28 @@ end# The parser slice, written in iyi, over the lexer slice above.
 
 pub struct PathNode
   getter names : String
+
   def initialize(@names : String)
   end
 end
 
 pub struct NumNode
   getter value : String
+
   def initialize(@value : String)
   end
 end
 
 pub struct StrNode
   getter value : String
+
   def initialize(@value : String)
   end
 end
 
 pub struct VarNode
   getter name : String
+
   def initialize(@name : String)
   end
 end
@@ -449,6 +500,7 @@ end
 pub class GenericNode
   getter name : Array(Node)
   getter args : Array(Node)
+
   def initialize(@name : Array(Node), @args : Array(Node))
   end
 end
@@ -480,6 +532,66 @@ end
 # return, on a propagation and on a panic (SPEC.md III.1.4).
 # `x.is_a?(T)` asks a question about a type, and the answer narrows the
 # variable: it is not a method call, it is a node the semantic pass reads.
+pub struct AliasNode
+  def initialize
+  end
+end
+
+pub struct UninitializedVarNode
+  def initialize
+  end
+end
+
+pub struct YieldNode
+  def initialize
+  end
+end
+
+pub struct SplatNode
+  def initialize
+  end
+end
+
+pub struct CastNode
+  def initialize
+  end
+end
+
+pub struct NilableCastNode
+  def initialize
+  end
+end
+
+pub struct PointerOfNode
+  def initialize
+  end
+end
+
+pub struct SizeOfNode
+  def initialize
+  end
+end
+
+pub struct InstanceSizeOfNode
+  def initialize
+  end
+end
+
+pub struct SymbolNode
+  def initialize
+  end
+end
+
+pub struct VisibilityModifierNode
+  def initialize
+  end
+end
+
+pub struct MacroForNode
+  def initialize
+  end
+end
+
 pub struct ClassVarNode
   def initialize
   end
@@ -518,18 +630,21 @@ end
 pub class IsANode
   getter obj : Array(Node)
   getter const : Array(Node)
+
   def initialize(@obj : Array(Node), @const : Array(Node))
   end
 end
 
 pub class DeferNode
   getter exp : Array(Node)
+
   def initialize(@exp : Array(Node))
   end
 end
 
 pub class PropagateNode
   getter exp : Array(Node)
+
   def initialize(@exp : Array(Node))
   end
 end
@@ -537,18 +652,21 @@ end
 pub class RecoverNode
   getter exp : Array(Node)
   getter default : Array(Node)
+
   def initialize(@exp : Array(Node), @default : Array(Node))
   end
 end
 
 pub class BreakNode
   getter value : Array(Node)
+
   def initialize(@value : Array(Node))
   end
 end
 
 pub class NextNode
   getter value : Array(Node)
+
   def initialize(@value : Array(Node))
   end
 end
@@ -564,6 +682,7 @@ pub class EnumDefNode
   getter name : Array(Node)
   getter base : Array(Node)
   getter members : Array(Node)
+
   def initialize(@name : Array(Node), @base : Array(Node), @members : Array(Node))
   end
 end
@@ -571,6 +690,7 @@ end
 pub class WhenNode
   getter conds : Array(Node)
   getter body : Array(Node)
+
   def initialize(@conds : Array(Node), @body : Array(Node))
   end
 end
@@ -580,12 +700,14 @@ pub class CaseNode
   getter cond : Array(Node)
   getter arms : Array(Node)
   getter else_branch : Array(Node)
+
   def initialize(@kind : String, @cond : Array(Node), @arms : Array(Node), @else_branch : Array(Node))
   end
 end
 
 pub class AnnotationNode
   getter name : Array(Node)
+
   def initialize(@name : Array(Node))
   end
 end
@@ -593,6 +715,7 @@ end
 pub class AssocTypeNode
   getter name : String
   getter value : Array(Node)
+
   def initialize(@name : String, @value : Array(Node))
   end
 end
@@ -601,6 +724,7 @@ pub class IfNode
   getter cond : Array(Node)
   getter then_branch : Array(Node)
   getter else_branch : Array(Node)
+
   def initialize(@cond : Array(Node), @then_branch : Array(Node), @else_branch : Array(Node))
   end
 end
@@ -612,6 +736,7 @@ pub class UnlessNode
   getter cond : Array(Node)
   getter then_branch : Array(Node)
   getter else_branch : Array(Node)
+
   def initialize(@cond : Array(Node), @then_branch : Array(Node), @else_branch : Array(Node))
   end
 end
@@ -619,12 +744,14 @@ end
 pub class WhileNode
   getter cond : Array(Node)
   getter body : Array(Node)
+
   def initialize(@cond : Array(Node), @body : Array(Node))
   end
 end
 
 pub class ReturnNode
   getter value : Array(Node)
+
   def initialize(@value : Array(Node))
   end
 end
@@ -634,6 +761,7 @@ end
 pub class AndNode
   getter left : Array(Node)
   getter right : Array(Node)
+
   def initialize(@left : Array(Node), @right : Array(Node))
   end
 end
@@ -641,12 +769,14 @@ end
 pub class OrNode
   getter left : Array(Node)
   getter right : Array(Node)
+
   def initialize(@left : Array(Node), @right : Array(Node))
   end
 end
 
 pub struct BoolNode
   getter value : String
+
   def initialize(@value : String)
   end
 end
@@ -660,6 +790,7 @@ end
 # node, it negates the condition of a `while`.
 pub class NotNode
   getter exp : Array(Node)
+
   def initialize(@exp : Array(Node))
   end
 end
@@ -671,6 +802,7 @@ end
 
 pub struct IvarNode
   getter name : String
+
   def initialize(@name : String)
   end
 end
@@ -678,6 +810,7 @@ end
 pub class TypeDeclNode
   getter target : Array(Node)
   getter declared : Array(Node)
+
   def initialize(@target : Array(Node), @declared : Array(Node))
   end
 end
@@ -686,6 +819,7 @@ pub class TraitDefNode
   getter name : Array(Node)
   getter vars : String
   getter body : Array(Node)
+
   def initialize(@name : Array(Node), @vars : String, @body : Array(Node))
   end
 end
@@ -697,6 +831,7 @@ pub class ClassDefNode
   getter name : Array(Node)
   getter vars : String
   getter body : Array(Node)
+
   def initialize(@kind : String, @name : Array(Node), @vars : String, @body : Array(Node))
   end
 end
@@ -706,6 +841,7 @@ pub class ImplDefNode
   getter target : Array(Node)
   getter vars : String
   getter body : Array(Node)
+
   def initialize(@trait_name : Array(Node), @target : Array(Node), @vars : String, @body : Array(Node))
   end
 end
@@ -714,6 +850,7 @@ pub class CallNode
   getter name : String
   getter recv : Array(Node)
   getter args : Array(Node)
+
   def initialize(@name : String, @recv : Array(Node), @args : Array(Node))
   end
 end
@@ -721,6 +858,7 @@ end
 pub class AssignNode
   getter target : Array(Node)
   getter value : Array(Node)
+
   def initialize(@target : Array(Node), @value : Array(Node))
   end
 end
@@ -728,6 +866,7 @@ end
 pub class ArgNode
   getter name : String
   getter restriction : Array(Node)
+
   def initialize(@name : String, @restriction : Array(Node))
   end
 end
@@ -737,18 +876,21 @@ pub class DefNode
   getter args : Array(Node)
   getter ret : Array(Node)
   getter body : Array(Node)
+
   def initialize(@name : String, @args : Array(Node), @ret : Array(Node), @body : Array(Node))
   end
 end
 
 pub class ExprsNode
   getter items : Array(Node)
+
   def initialize(@items : Array(Node))
   end
 end
 
 pub class ModuleHeaderNode
   getter path : String
+
   def initialize(@path : String)
   end
 end
@@ -756,6 +898,7 @@ end
 pub class ModuleDefNode
   getter name : Array(Node)
   getter body : Array(Node)
+
   def initialize(@name : Array(Node), @body : Array(Node))
   end
 end
@@ -774,6 +917,10 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
                  WhenNode | CaseNode | BreakNode | NextNode |
                  PropagateNode | RecoverNode | DeferNode | IsANode |
+                 AliasNode | UninitializedVarNode | YieldNode | SplatNode |
+                 CastNode | NilableCastNode |
+                 PointerOfNode | SizeOfNode | InstanceSizeOfNode |
+                 SymbolNode | VisibilityModifierNode | MacroForNode |
                  ClassVarNode | RequireNode | MacroNode | MacroIfNode |
                  MacroExpressionNode | FunDefNode | LibDefNode
 
@@ -822,6 +969,8 @@ impl Sexp for StrNode
         out = out + "\\r"
       elsif ch == '"'
         out = out + "\\\""
+      elsif ch == '\\'
+        out = out + "\\\\"
       else
         out = out + ch.to_s
       end
@@ -901,6 +1050,78 @@ end
 impl Sexp for CharNode
   def sexp : String
     "(charliteral)"
+  end
+end
+
+impl Sexp for AliasNode
+  def sexp : String
+    "(alias)"
+  end
+end
+
+impl Sexp for UninitializedVarNode
+  def sexp : String
+    "(uninitializedvar)"
+  end
+end
+
+impl Sexp for YieldNode
+  def sexp : String
+    "(yield)"
+  end
+end
+
+impl Sexp for SplatNode
+  def sexp : String
+    "(splat)"
+  end
+end
+
+impl Sexp for CastNode
+  def sexp : String
+    "(cast)"
+  end
+end
+
+impl Sexp for NilableCastNode
+  def sexp : String
+    "(nilablecast)"
+  end
+end
+
+impl Sexp for PointerOfNode
+  def sexp : String
+    "(pointerof)"
+  end
+end
+
+impl Sexp for SizeOfNode
+  def sexp : String
+    "(sizeof)"
+  end
+end
+
+impl Sexp for InstanceSizeOfNode
+  def sexp : String
+    "(instancesizeof)"
+  end
+end
+
+impl Sexp for SymbolNode
+  def sexp : String
+    "(symbolliteral)"
+  end
+end
+
+impl Sexp for VisibilityModifierNode
+  def sexp : String
+    "(visibilitymodifier)"
+  end
+end
+
+impl Sexp for MacroForNode
+  def sexp : String
+    "(macrofor)"
   end
 end
 
@@ -1273,8 +1494,8 @@ pub class Parser
 
   # module a/b -> the header, and the name the body is wrapped in
   def parse_module_header : String
-    advance                      # module
-    path = advance.value         # first segment
+    advance              # module
+    path = advance.value # first segment
     while peek.kind == "/"
       advance
       path = path + "/" + advance.value
@@ -1356,15 +1577,27 @@ pub class Parser
   # visibility marker the tree does not carry, so it is consumed and the
   # decision is made on what follows it.
   def parse_statement : Node
-    # The words that precede a declaration without being part of it.
-    # `pub` is iyi's; `private` and `protected` are Crystal's and the
-    # prelude is full of them, where a missing one made `private def`
-    # a call to `private` and closed the class early.
-    offset = 0
+    # `private def` and `protected def` are one node with the
+    # declaration inside, and the shape prints the node rather than what
+    # it holds. `pub` is iyi's and is part of the declaration.
     if peek.kind == "IDENT" &&
-       (peek.value == "pub" || peek.value == "private" || peek.value == "protected")
-      offset = 1
+       (peek.value == "private" || peek.value == "protected") &&
+       declares?(peek_at(1))
+      advance # private or protected
+      declaration = advance.value
+      if declaration == "alias" || declaration == "getter" ||
+         declaration == "setter" || declaration == "property"
+        skip_line
+      else
+        # The canonical shape is the modifier, not the declaration it
+        # contains. Count the contained declaration to its own end. A
+        # do block inside a private def belongs to that def.
+        skip_to_matching_end
+      end
+      return VisibilityModifierNode.new.as(Node)
     end
+    offset = 0
+    offset = 1 if peek.kind == "IDENT" && peek.value == "pub"
     word = peek_at(offset)
 
     if word.kind == "IDENT"
@@ -1375,7 +1608,7 @@ pub class Parser
       if word.value == "abstract" &&
          peek_at(offset + 1).kind == "IDENT" && peek_at(offset + 1).value == "def"
         advance if offset == 1
-        advance                  # abstract
+        advance # abstract
         return parse_def(true)
       end
       if word.value == "trait"
@@ -1407,6 +1640,20 @@ pub class Parser
       # `type Elem` in a trait, `type Elem = Int32` in an impl: the
       # requirement and the answer are the same node. Only a declaration
       # body writes this; anywhere else `type` is an ordinary name.
+      if word.value == "alias"
+        advance if offset == 1
+        skip_line
+        return AliasNode.new.as(Node)
+      end
+      if word.value == "module" && peek_at(offset + 1).kind == "CONST"
+        advance if offset == 1
+        advance # module
+        name = advance.value
+        inner = parse_body
+        advance if peek.kind == "IDENT" && peek.value == "end"
+        return ModuleDefNode.new([PathNode.new(name).as(Node)] of Node,
+          [inner] of Node).as(Node)
+      end
       if word.value == "require"
         advance if offset == 1
         skip_line
@@ -1414,7 +1661,7 @@ pub class Parser
       end
       if word.value == "macro"
         advance if offset == 1
-        advance                  # macro
+        advance # macro
         skip_to_matching_end
         return MacroNode.new.as(Node)
       end
@@ -1424,8 +1671,8 @@ pub class Parser
       end
       if word.value == "lib"
         advance if offset == 1
-        advance                  # lib
-        advance                  # the name
+        advance # lib
+        advance # the name
         skip_to_matching_end
         return LibDefNode.new.as(Node)
       end
@@ -1439,7 +1686,7 @@ pub class Parser
       end
       if word.value == "type" && peek_at(offset + 1).kind == "CONST"
         advance if offset == 1
-        advance                  # type
+        advance # type
         assoc_name = advance.value
         value = [] of Node
         if peek.kind == "="
@@ -1490,7 +1737,16 @@ pub class Parser
     # of what it annotates rather than inside it.
     if peek.kind == "@["
       advance
-      path = parse_primary
+      path = PathNode.new(advance.value).as(Node)
+      if peek.kind == "("
+        advance
+        depth = 1
+        while !at_end? && depth > 0
+          k = advance.kind
+          depth = depth + 1 if k == "("
+          depth = depth - 1 if k == ")"
+        end
+      end
       advance if peek.kind == "]"
       return AnnotationNode.new([path] of Node).as(Node)
     end
@@ -1502,7 +1758,7 @@ pub class Parser
   # form: the compiler checks every member is covered, so which word was
   # written is part of the tree rather than a spelling.
   def parse_case : Node
-    advance                      # case
+    advance # case
     cond = parse_expression
     kind = "case"
 
@@ -1516,7 +1772,7 @@ pub class Parser
         next
       end
 
-      word = advance.value       # when or in
+      word = advance.value # when or in
       kind = "case-in" if word == "in"
       conds = [] of Node
       conds << parse_expression
@@ -1527,7 +1783,7 @@ pub class Parser
       advance if peek.kind == "IDENT" && peek.value == "then"
       arms << WhenNode.new(conds, [parse_branch_body] of Node).as(Node)
     end
-    advance                      # end
+    advance # end
 
     CaseNode.new(kind, [cond] of Node, arms, else_branch).as(Node)
   end
@@ -1547,7 +1803,7 @@ pub class Parser
           depth = depth - 1
         elsif word.kind == "IDENT" &&
               (word.value == "if" || word.value == "unless" ||
-               word.value == "for" || word.value == "begin")
+              word.value == "for" || word.value == "begin")
           depth = depth + 1
         end
         while !at_end? && peek.kind != "%}"
@@ -1558,6 +1814,72 @@ pub class Parser
         advance
       end
     end
+  end
+
+  # Whether a token starts a declaration, which is what decides that a
+  # `private` in front of it is a modifier rather than a name.
+  # One piece of a string body, as the characters it means rather than
+  # the characters it was written with. The lexer reports an escape as
+  # the two characters that spell it, because that is the token stream
+  # the current lexer produces; the value is the character it names, and
+  # the shape prints that value inspected.
+  def unescape(piece : String) : String
+    return piece unless piece.size == 2 && piece[0] == '\\'
+    ch = piece[1]
+    return "\n" if ch == 'n'
+    return "\t" if ch == 't'
+    return "\r" if ch == 'r'
+    return "\0" if ch == '0'
+    return "\e" if ch == 'e'
+    return "\b" if ch == 'b'
+    return "\f" if ch == 'f'
+    return "\v" if ch == 'v'
+    ch.to_s
+  end
+
+  def pointer_kind(word : String) : Node
+    return PointerOfNode.new.as(Node) if word == "pointerof"
+    return SizeOfNode.new.as(Node) if word == "sizeof"
+    InstanceSizeOfNode.new.as(Node)
+  end
+
+  # The words that end an expression and begin a modifier: `return round
+  # if digits <= 0` is a call with no arguments, and reading the `if` as
+  # one made the rest of the method the argument.
+  def modifier_word?(token : Token) : Bool
+    return false unless token.kind == "IDENT"
+    value = token.value
+    # `end` is not in this list. `src/iyi/range.iyi` writes `getter end :
+    # E`, and a range's end is a field of it: the word closes a block
+    # only at the start of a line, which the caller has already checked.
+    value == "if" || value == "unless" || value == "while" ||
+      value == "until" || value == "rescue" || value == "ensure" ||
+      value == "then" || value == "do"
+  end
+
+  # The words a program cannot use as a name.
+  def keyword?(word : String) : Bool
+    word == "begin" || word == "end" || word == "if" || word == "unless" ||
+      word == "while" || word == "until" || word == "do" || word == "then" ||
+      word == "else" || word == "elsif" || word == "case" || word == "when" ||
+      word == "return" || word == "yield" || word == "next" || word == "break" ||
+      word == "def" || word == "class" || word == "struct" || word == "module" ||
+      word == "self" || word == "nil" || word == "true" || word == "false" ||
+      word == "ensure" || word == "rescue" || word == "require" || word == "as" ||
+      word == "in" || word == "out" || word == "of" || word == "alias" ||
+      word == "enum" || word == "lib" || word == "fun" || word == "macro" ||
+      word == "super" || word == "typeof" || word == "sizeof" ||
+      word == "pointerof" || word == "instance_sizeof" || word == "uninitialized"
+  end
+
+  def declares?(token : Token) : Bool
+    return false unless token.kind == "IDENT"
+    value = token.value
+    value == "def" || value == "class" || value == "struct" ||
+      value == "module" || value == "enum" || value == "macro" ||
+      value == "trait" || value == "impl" || value == "lib" ||
+      value == "fun" || value == "abstract" || value == "alias" ||
+      value == "getter" || value == "setter" || value == "property"
   end
 
   def skip_to_matching_end : Nil
@@ -1571,7 +1893,7 @@ pub class Parser
           depth = depth - 1
         elsif word.kind == "IDENT" &&
               (word.value == "if" || word.value == "unless" ||
-               word.value == "for" || word.value == "begin")
+              word.value == "for" || word.value == "begin")
           depth = depth + 1
         end
         while !at_end? && peek.kind != "%}"
@@ -1593,9 +1915,9 @@ pub class Parser
   # `lib`. The shape does not print either, so this reads to the end of
   # the declaration and answers the node.
   def parse_fun : Node
-    advance                      # fun
+    advance # fun
     line = peek.line
-    advance                      # the name
+    advance # the name
     if peek.kind == "("
       advance
       depth = 1
@@ -1627,7 +1949,7 @@ pub class Parser
   # as arguments: a member is a name and, where it is given one, a value
   # that does not appear in the shape.
   def parse_enum : Node
-    advance                      # enum
+    advance # enum
     name = advance.value
     base = [] of Node
     if peek.kind == ":"
@@ -1646,7 +1968,7 @@ pub class Parser
       members << ArgNode.new(member, [] of Node).as(Node)
       skip_newlines
     end
-    advance                      # end
+    advance # end
 
     EnumDefNode.new([PathNode.new(name).as(Node)] of Node, base, members).as(Node)
   end
@@ -1661,20 +1983,20 @@ pub class Parser
   def with_modifiers(node : Node) : Node
     result = node
     while peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless" ||
-                                   peek.value == "while" || peek.value == "until")
+          peek.value == "while" || peek.value == "until")
       word = advance.value
       cond = parse_expression
       if word == "if"
         result = IfNode.new([cond] of Node, [result] of Node,
-                            [NopNode.new.as(Node)] of Node).as(Node)
+          [NopNode.new.as(Node)] of Node).as(Node)
       elsif word == "unless"
         result = UnlessNode.new([cond] of Node, [result] of Node,
-                                [NopNode.new.as(Node)] of Node).as(Node)
+          [NopNode.new.as(Node)] of Node).as(Node)
       elsif word == "while"
         result = WhileNode.new([cond] of Node, [result] of Node).as(Node)
       else
         result = WhileNode.new([NotNode.new([cond] of Node).as(Node)] of Node,
-                               [result] of Node).as(Node)
+          [result] of Node).as(Node)
       end
     end
     result
@@ -1686,9 +2008,9 @@ pub class Parser
     items = [] of Node
     skip_newlines
     while !at_end? && !(peek.kind == "IDENT" &&
-                        (peek.value == "end" || peek.value == "else" ||
-                         peek.value == "elsif" || peek.value == "when" ||
-                         peek.value == "in"))
+          (peek.value == "end" || peek.value == "else" ||
+          peek.value == "elsif" || peek.value == "when" ||
+          peek.value == "in"))
       items << parse_statement
       skip_newlines
     end
@@ -1700,7 +2022,7 @@ pub class Parser
   # `if`, `elsif` and `else`, and `unless`, which is the same node with the
   # branches the other way round.
   def parse_if(negated : Bool) : Node
-    advance                      # if or unless
+    advance # if or unless
     cond = parse_expression
     then_branch = parse_branch_body
 
@@ -1715,20 +2037,20 @@ pub class Parser
       advance
       else_branch = parse_branch_body
     end
-    advance                      # end
+    advance # end
     build_if(negated, cond, then_branch, else_branch)
   end
 
   def build_if(negated : Bool, cond : Node, then_branch : Node, else_branch : Node) : Node
     if negated
       return UnlessNode.new([cond] of Node, [then_branch] of Node,
-                            [else_branch] of Node).as(Node)
+        [else_branch] of Node).as(Node)
     end
     IfNode.new([cond] of Node, [then_branch] of Node, [else_branch] of Node).as(Node)
   end
 
   def parse_while(negated : Bool) : Node
-    advance                      # while or until
+    advance # while or until
     cond = parse_expression
     cond = NotNode.new([cond] of Node).as(Node) if negated
     body = parse_body
@@ -1742,7 +2064,7 @@ pub class Parser
       items << parse_statement
       skip_newlines
     end
-    advance                      # end
+    advance # end
     return NopNode.new.as(Node) if items.size == 0
     return items[0] if items.size == 1
     ExprsNode.new(items).as(Node)
@@ -1760,12 +2082,12 @@ pub class Parser
       out = out + " " unless out == ""
       out = out + token.value
     end
-    advance                      # )
+    advance # )
     "(" + out + ")"
   end
 
   def parse_trait : Node
-    advance                      # trait
+    advance # trait
     name = advance.value
     vars = parse_type_vars
     # `pub trait Ord : Comparable` requires its implementers to implement
@@ -1783,7 +2105,7 @@ pub class Parser
   end
 
   def parse_class(kind : String) : Node
-    advance                      # struct or class
+    advance # struct or class
     name = advance.value
     vars = parse_type_vars
     ClassDefNode.new(
@@ -1795,12 +2117,12 @@ pub class Parser
   end
 
   def parse_impl : Node
-    advance                      # impl
+    advance # impl
     # Both sides are types: `impl Show for Box(T) forall T` implements a
     # trait for a generic, and reading either as a bare name lost the
     # arguments.
     trait_name = parse_type
-    advance                      # for
+    advance # for
     target = parse_type
 
     vars = ""
@@ -1825,11 +2147,20 @@ pub class Parser
   end
 
   def parse_def(is_abstract : Bool) : Node
-    advance                      # def
-    name = advance.value
+    advance # def
+    first = advance
+    name = first.value
     if name == "self" && peek.kind == "."
       advance
-      name = advance.value
+      first = advance
+      name = first.value
+    end
+    # `value=` and `[]=` are one name; the `=` is written against what
+    # precedes it, and a space would make it an assignment.
+    if peek.kind == "=" && peek.line == first.line &&
+       peek.col == first.col + first.value.size
+      advance
+      name = "#{name}="
     end
     # A parameter is a local inside its own method and nowhere else. The
     # first version never restored this, so a `name` argument in one method
@@ -1856,19 +2187,28 @@ pub class Parser
           end
           depth = 0
           while !at_end?
-            break if depth == 0 && (peek.kind == ")" || peek.kind == ",")
+            break if depth == 0 && peek.kind == ")"
             k = advance.kind
             depth = depth + 1 if k == "(" || k == "["
             depth = depth - 1 if k == ")" || k == "]"
           end
-          advance if peek.kind == ","
           next
         end
 
+        splat = false
+        if peek.kind == "*"
+          advance
+          splat = true
+        end
         raw = advance
         arg_name = raw.value
         if raw.kind == "INSTANCE_VAR"
           arg_name = raw.value[1, raw.value.size - 1]
+          # `def initialize(@begin : B, @end : E)` cannot name its
+          # parameters after the fields: those words are the language's.
+          # The current parser numbers them by position instead, and the
+          # body still assigns the field from the name it chose.
+          arg_name = "__arg#{args.size}" if keyword?(arg_name)
           assigns << AssignNode.new(
             [IvarNode.new(raw.value).as(Node)] of Node,
             [VarNode.new(arg_name).as(Node)] of Node,
@@ -1878,15 +2218,23 @@ pub class Parser
         restriction = [] of Node
         if peek.kind == ":"
           advance
+          advance if peek.kind == "*"
           # A restriction is a type, and a type can be generic or a union:
           # reading it as a bare name made `links : Hash(String, Session)`
           # a path, and `String | Nil` a call.
           restriction << parse_type
         end
+        if peek.kind == "="
+          advance
+          parse_expression
+        end
+        # A splat parameter's restriction is the splat itself, which is
+        # the node the current parser puts there for `*args : *T`.
+        restriction = [SplatNode.new.as(Node)] of Node if splat
         args << ArgNode.new(arg_name, restriction).as(Node)
         advance if peek.kind == ","
       end
-      advance                    # )
+      advance # )
     end
     ret = [] of Node
     if peek.kind == ":"
@@ -1923,7 +2271,7 @@ pub class Parser
       body << parse_statement
       skip_newlines
     end
-    advance                      # end
+    advance # end
 
     inner = if body.size == 0
               NopNode.new.as(Node)
@@ -1944,12 +2292,31 @@ pub class Parser
     # current parser builds the node that prints `(self)`. In an
     # expression it is a variable named self. Same word, two nodes, and
     # which one depends on where it is written.
+    # The lexer joins a trailing `?` to a name, so `self?` arrives as one
+    # token: it is the union of the receiver's type and nothing.
+    if peek.kind == "IDENT" && peek.value == "self?"
+      advance
+      return UnionNode.new.as(Node)
+    end
     if peek.kind == "IDENT" && peek.value == "self"
       advance
+      if peek.kind == "?"
+        advance
+        return UnionNode.new.as(Node)
+      end
       return SelfNode.new.as(Node)
     end
 
     first = parse_primary
+    # `Void*` and `UInt8**` are pointer types. In a type position the
+    # star cannot be multiplication; each one wraps what precedes it in
+    # Pointer, from the inside out.
+    while peek.kind == "*"
+      advance
+      first = GenericNode.new([PathNode.new("Pointer").as(Node)] of Node,
+        [first] of Node).as(Node)
+    end
+
     # `Session?` is the union of the type and nothing, and the current
     # parser builds the union rather than a type with a question mark.
     if peek.kind == "?"
@@ -1971,11 +2338,11 @@ pub class Parser
     # for it: one node for two spellings, because they mean one thing.
     if peek.kind == "?"
       advance
-      then_branch = parse_expression
+      then_branch = parse_binary(0)
       advance if peek.kind == ":"
-      else_branch = parse_expression
+      else_branch = parse_binary(0)
       return IfNode.new([left] of Node, [then_branch] of Node,
-                        [else_branch] of Node).as(Node)
+        [else_branch] of Node).as(Node)
     end
 
     # `1..10` and `1...10`. Looser than the arithmetic in its ends, so
@@ -1993,8 +2360,8 @@ pub class Parser
     if peek.kind == ":"
       target = [] of Node
       case left
-      when VarNode  then target << left.as(Node)
-      when IvarNode then target << left.as(Node)
+      when VarNode      then target << left.as(Node)
+      when IvarNode     then target << left.as(Node)
       when ClassVarNode then target << left.as(Node)
       when CallNode
         # A bare name reads as a call everywhere else, and in front of a
@@ -2047,8 +2414,22 @@ pub class Parser
     if peek.kind == "="
       advance
       value = parse_binary(0)
+      if peek.kind == "?"
+        advance
+        then_branch = parse_binary(0)
+        advance if peek.kind == ":"
+        else_branch = parse_binary(0)
+        value = IfNode.new([value] of Node, [then_branch] of Node,
+          [else_branch] of Node).as(Node)
+      end
       case left
       when VarNode then @locals << left.name
+      # The current parser replaces `slot = uninitialized T` with the
+      # uninitialized-variable node itself; the slot name is semantic
+      # bookkeeping, not a child in this canonical tree.
+      case value
+      when UninitializedVarNode then return value
+      end
       when CallNode
         # `a[i] = v` is one call, `[]=`, not an assignment to a call.
         if left.name == "[]"
@@ -2056,6 +2437,12 @@ pub class Parser
           left.args.each { |a| args << a }
           args << value
           return CallNode.new("[]=", left.recv, args).as(Node)
+        end
+        # `holder.value = v` is the call `value=` on the receiver. Only
+        # with a receiver: a bare `name = v` is an assignment, and the
+        # parser has already made a local of it.
+        if left.recv.size > 0 && left.args.size == 0
+          return CallNode.new("#{left.name}=", left.recv, [value] of Node).as(Node)
         end
       end
       return AssignNode.new([left] of Node, [value] of Node).as(Node)
@@ -2068,9 +2455,9 @@ pub class Parser
   def precedence(op : String) : Int32
     if op == "**"
       7
-    elsif op == "*" || op == "/" || op == "%"
+    elsif op == "*" || op == "/" || op == "%" || op == "//" || op == "&*"
       6
-    elsif op == "+" || op == "-"
+    elsif op == "+" || op == "-" || op == "&+" || op == "&-"
       5
     elsif op == "|" || op == "^"
       4
@@ -2097,6 +2484,7 @@ pub class Parser
       prec = precedence(op)
       break if prec == 0 || prec < min
       advance
+      skip_newlines
       right = parse_binary(prec + 1)
       if op == "&&"
         left = AndNode.new([left] of Node, [right] of Node).as(Node)
@@ -2140,7 +2528,7 @@ pub class Parser
     before = @tokens[index - 1]
     before.kind == "NEWLINE" || before.kind == "=" ||
       (before.kind == "IDENT" && (before.value == "do" || before.value == "else" ||
-                                  before.value == "then" || before.value == "begin"))
+        before.value == "then" || before.value == "begin"))
   end
 
   def skip_do_block : Nil
@@ -2176,18 +2564,28 @@ pub class Parser
     colon = peek_at(1)
     return false unless colon.kind == ":"
     return false unless colon.line == peek.line && colon.col == peek.col + peek.value.size
-    advance                      # the name
-    advance                      # the colon
+    advance # the name
+    advance # the colon
     parse_expression
+    advance if peek.kind == ","
+    true
+  end
+
+  # A block forwarded to another call is not one of that call's ordinary
+  # arguments: `copy.sort_in_place(&block)` prints an empty arg list.
+  def skip_forwarded_block? : Bool
+    return false unless peek.kind == "&" && peek_at(1).kind == "IDENT"
+    advance
+    advance
     advance if peek.kind == ","
     true
   end
 
   def skip_short_block? : Bool
     return false unless peek.kind == "&" && peek_at(1).kind == "."
-    advance                      # &
-    advance                      # .
-    advance                      # the method name
+    advance # &
+    advance # .
+    advance # the method name
     if peek.kind == "("
       advance
       depth = 1
@@ -2237,7 +2635,7 @@ pub class Parser
           args << parse_expression
           advance if peek.kind == ","
         end
-        advance                  # ]
+        advance # ]
         # `links[path]?` is a call to `[]?`, a different method from `[]`:
         # one raises where the other answers nil.
         name = "[]"
@@ -2262,9 +2660,20 @@ pub class Parser
       end
       # `x.nil?` asks the same question `x.is_a?(Nil)` does, and the
       # current parser builds the same node for it.
+      if (name == "as" || name == "as?") && peek.kind == "("
+        advance
+        depth = 1
+        while !at_end? && depth > 0
+          k = advance.kind
+          depth = depth + 1 if k == "("
+          depth = depth - 1 if k == ")"
+        end
+        result = name == "as" ? CastNode.new.as(Node) : NilableCastNode.new.as(Node)
+        next
+      end
       if name == "nil?"
         result = IsANode.new([result] of Node,
-                             [PathNode.new("Nil").as(Node)] of Node).as(Node)
+          [PathNode.new("Nil").as(Node)] of Node).as(Node)
         next
       end
       if name == "or_panic"
@@ -2284,6 +2693,8 @@ pub class Parser
         advance
         while peek.kind != ")" && !at_end?
           next if skip_short_block?
+          next if skip_forwarded_block?
+
           next if skip_named_arg?
           args << parse_expression
           advance if peek.kind == ","
@@ -2291,12 +2702,12 @@ pub class Parser
         advance
       elsif peek.line == start_line &&
             (peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" ||
-             peek.kind == "CONST" || peek.kind == "INSTANCE_VAR" ||
-             peek.kind == "CHAR" ||
-             (peek.kind == "IDENT" && peek.value != "do" && peek.value != "if" &&
-              peek.value != "unless" && peek.value != "while" &&
-              peek.value != "until" && peek.value != "then" &&
-              peek.value != "end" && peek.value != "rescue"))
+            peek.kind == "CONST" || peek.kind == "INSTANCE_VAR" ||
+            peek.kind == "CHAR" ||
+            (peek.kind == "IDENT" && peek.value != "do" && peek.value != "if" &&
+            peek.value != "unless" && peek.value != "while" &&
+            peek.value != "until" && peek.value != "then" &&
+            peek.value != "end" && peek.value != "rescue"))
         # `users.get "/" do |env| ... end`: a receiver, a method, an
         # argument written without parentheses, and a block. Only the
         # parenthesised form was read, so the argument became a statement
@@ -2316,6 +2727,60 @@ pub class Parser
 
   def parse_primary : Node
     t = peek
+    # `-exponent` is a call to `-` on what follows, with no arguments,
+    # which is what the current parser builds and why the port read the
+    # minus as a name of its own and lost the rest of the line.
+    if t.kind == "-" || t.kind == "+" || t.kind == "~"
+      advance
+      # `-1` is one number, not a call on one: the lexer joins the sign
+      # to a literal it is written against.
+      if peek.kind == "NUMBER" && peek.line == t.line && peek.col == t.col + 1
+        digits = advance
+        return with_postfix(NumNode.new("#{t.kind}#{digits.value}").as(Node))
+      end
+      operand = parse_primary
+      return with_postfix(CallNode.new(t.kind, [operand] of Node, [] of Node).as(Node))
+    end
+    if t.kind == ":" && peek_at(1).kind == "IDENT" &&
+       peek_at(1).line == t.line && peek_at(1).col == t.col + 1
+      advance
+      advance
+      return with_postfix(SymbolNode.new.as(Node))
+    end
+    # `uninitialized Int32` allocates a typed slot without a value. The
+    # canonical tree carries the slot node, not the type it names.
+    if t.kind == "IDENT" && t.value == "uninitialized"
+      advance
+      parse_type
+      return UninitializedVarNode.new.as(Node)
+    end
+    if t.kind == "IDENT" && t.value == "yield"
+      advance
+      if peek.line == t.line && !at_end? && peek.kind != "NEWLINE" &&
+         peek.kind != ")" && peek.kind != "}" && peek.kind != "]" &&
+         peek.kind != "," && !modifier_word?(peek)
+        parse_expression
+        while peek.kind == ","
+          advance
+          parse_expression
+        end
+      end
+      return YieldNode.new.as(Node)
+    end
+    # `pointerof(@value)`, `sizeof(T)` and `instance_sizeof(T)` ask the
+    # compiler rather than a method, and each is its own node.
+    if t.kind == "IDENT" && peek_at(1).kind == "(" &&
+       (t.value == "pointerof" || t.value == "sizeof" || t.value == "instance_sizeof")
+      advance
+      advance
+      depth = 1
+      while !at_end? && depth > 0
+        k = advance.kind
+        depth = depth + 1 if k == "("
+        depth = depth - 1 if k == ")"
+      end
+      return with_postfix(pointer_kind(t.value))
+    end
     if t.kind == "INSTANCE_VAR"
       advance
       return with_postfix(IvarNode.new(t.value).as(Node))
@@ -2342,10 +2807,24 @@ pub class Parser
         if piece.kind == "INTERPOLATION_START"
           interpolated = true
         else
-          text = text + piece.value
+          text = text + unescape(piece.value)
         end
       end
       advance if peek.kind == "DELIMITER_END"
+      # Two strings written next to each other are one string, which is
+      # how a long message is split across lines with a backslash.
+      while peek.kind == "DELIMITER_START"
+        advance
+        while peek.kind == "STRING" || peek.kind == "INTERPOLATION_START"
+          piece = advance
+          if piece.kind == "INTERPOLATION_START"
+            interpolated = true
+          else
+            text = text + unescape(piece.value)
+          end
+        end
+        advance if peek.kind == "DELIMITER_END"
+      end
       return with_postfix(InterpNode.new.as(Node)) if interpolated
       return with_postfix(StrNode.new(text).as(Node))
     end
@@ -2366,7 +2845,7 @@ pub class Parser
           targs << parse_type
           advance if peek.kind == ","
         end
-        advance                  # )
+        advance # )
         return with_postfix(GenericNode.new([path] of Node, targs).as(Node))
       end
       return with_postfix(path)
@@ -2377,7 +2856,9 @@ pub class Parser
       # statements. Both run in the macro language, and the port reads
       # them to their close rather than parsing a second language here.
       advance
-      is_if = peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless")
+      word = peek.kind == "IDENT" ? peek.value : ""
+      is_if = word == "if" || word == "unless" || word == "begin"
+      is_for = word == "for"
       while !at_end? && peek.kind != "%}"
         advance
       end
@@ -2385,6 +2866,10 @@ pub class Parser
       if is_if
         skip_macro_to_end
         return MacroIfNode.new.as(Node)
+      end
+      if is_for
+        skip_macro_to_end
+        return MacroForNode.new.as(Node)
       end
       return MacroExpressionNode.new.as(Node)
     end
@@ -2522,11 +3007,12 @@ pub class Parser
         args = [] of Node
         while peek.kind != ")" && !at_end?
           next if skip_short_block?
+          next if skip_forwarded_block?
           next if skip_named_arg?
           args << parse_expression
           advance if peek.kind == ","
         end
-        advance                  # )
+        advance # )
         skip_block
         return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
       end
@@ -2556,11 +3042,13 @@ pub class Parser
       # the list because `puts (1..3).map` passes one, and it is only
       # reached when the paren was not attached to the name, which is the
       # test above.
-      if peek.line == t.line &&
+      attached_bracket = (peek.kind == "[" || peek.kind == "[]") &&
+                         peek.line == t.line && peek.col == t.col + t.value.size
+      if peek.line == t.line && !modifier_word?(peek) && !attached_bracket &&
          (peek.kind == "IDENT" || peek.kind == "NUMBER" ||
-          peek.kind == "DELIMITER_START" || peek.kind == "CONST" ||
-          peek.kind == "(" || peek.kind == "[" || peek.kind == "[]" ||
-          peek.kind == "INSTANCE_VAR" || peek.kind == "CHAR")
+         peek.kind == "DELIMITER_START" || peek.kind == "CONST" ||
+         peek.kind == "(" || peek.kind == "[" || peek.kind == "[]" ||
+         peek.kind == "INSTANCE_VAR" || peek.kind == "CHAR")
         args = [] of Node
         args << parse_expression
         while peek.kind == ","
@@ -2574,6 +3062,11 @@ pub class Parser
         skip_block
         return with_postfix(CallNode.new(name, [] of Node, args).as(Node))
       end
+      # A call with no arguments can still take a block: `each { |v| ...
+      # }` is one, and leaving the braces made the block a tuple standing
+      # on its own.
+      skip_short_block?
+      skip_block
       # Everything else is a call with no arguments and no receiver, which
       # is what the current parser builds: whether `greet` is a method or a
       # local is not the parser's question, and answering it here made

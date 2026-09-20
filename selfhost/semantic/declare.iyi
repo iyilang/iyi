@@ -20,11 +20,7 @@ module main
 import std/file
 import parser/parser
 using std/file::{File}
-using parser/parser::{
-  Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode,
-  ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode,
-  AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode
-}
+using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
 # parameter list it prints after that, and `defs` are the methods that
@@ -116,10 +112,10 @@ pub def path_text(nodes : Array(Node)) : String
   node = nodes[0]
   case node
   when PathNode then node.names
-  # `impl Show for Box(T)` names a generic type, and the type it is for
-  # is `Box`: the parameters are the ones `Box` was declared with.
+    # `impl Show for Box(T)` names a generic type, and the type it is for
+    # is `Box`: the parameters are the ones `Box` was declared with.
   when GenericNode then path_text(node.name)
-  else ""
+  else                  ""
   end
 end
 
@@ -242,7 +238,7 @@ pub class Walk
     when CallNode then node.name
     when VarNode  then node.name
     when PathNode then node.names
-    else ""
+    else               ""
     end
   end
 

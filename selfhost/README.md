@@ -83,11 +83,10 @@ of the stage: a `struct Box` with `impl Show for Box` beside it answers
 bin/crystal run selfhost/semantic/oracle.cr -- samples/iyi/hello.iyi
 ```
 
-It runs the pass on one file with no imports resolved, so 24 of the 27
-samples answer and three do not. Those three are the measure of what
-resolving imports would add, and they fail rather than being skipped.
-
-The port side of this slice is not written yet.
+It runs the pass on one file with no imports resolved, so **23 of 27**
+samples answer and four do not. Those four are the measure of what
+resolving imports would add, and they are reported rather than skipped.
+The port is `semantic/declare.iyi`; its measured state is below.
 
 After the parser: the semantic pass, then codegen, then the bootstrap,
 each differentially tested the same way. The bootstrap is the acceptance
@@ -103,22 +102,17 @@ before the port existed, and it is the second corpus.
 
     bash selfhost/parser/where.sh src/iyi/*.iyi
 
-Measured: 2 of 17 files agree, and the rest diverge at a mean depth of
-20% of their tree. What they ask for next, in the order the measurement
-found it:
+Measured: **17 of 17 files agree**. The second corpus closed the shapes the
+samples never needed: compiler questions (`pointerof`, `sizeof`,
+`instance_sizeof`), casts, `yield`, splats, symbols, macro loops,
+keyword-named parameters, defaults, pointer types, uninitialized variables,
+forwarded blocks, wrapping arithmetic, base-prefixed numbers, visibility
+modifiers, and string escapes as values rather than spelling.
 
-* `pointerof`, `sizeof`, `instance_sizeof` and the casts: `as` and
-  `as?`, which the string and atomic files open with.
-* `yield`, which is a node and not a call.
-* A splat parameter, `*values`, and a double splat.
-* A symbol, which the atomic file passes to `pointerof`.
-* `{% for %}`, the macro loop, which the enum file is written around.
-* An argument whose name is a keyword: `def initialize(@begin : B)` in
-  `src/iyi/range.iyi` names its parameter `__arg0`, because `begin` is
-  a word the language already spends.
-* A parameter with a default value.
-
-Each is one shape, and the harness says which file to read for it.
+Two defects were in the harness rather than the language. A private method
+whose body took a `do` block let the block's `end` stand in for the
+method's, and `getter end : E` was mistaken for a block boundary. The full
+corpus, rather than a hand-picked fixture, is what exposed both.
 
 ## The declaration pass
 

@@ -438,6 +438,13 @@ pub struct CharNode
   end
 end
 
+# `String | Nil` is one type, and the current parser prints it as a node
+# with no parts, so the port answers the node rather than the members.
+pub struct UnionNode
+  def initialize
+  end
+end
+
 pub class IfNode
   getter cond : Array(Node)
   getter then_branch : Array(Node)
@@ -525,8 +532,9 @@ end
 
 pub class TraitDefNode
   getter name : Array(Node)
+  getter vars : String
   getter body : Array(Node)
-  def initialize(@name : Array(Node), @body : Array(Node))
+  def initialize(@name : Array(Node), @vars : String, @body : Array(Node))
   end
 end
 
@@ -535,16 +543,18 @@ end
 pub class ClassDefNode
   getter kind : String
   getter name : Array(Node)
+  getter vars : String
   getter body : Array(Node)
-  def initialize(@kind : String, @name : Array(Node), @body : Array(Node))
+  def initialize(@kind : String, @name : Array(Node), @vars : String, @body : Array(Node))
   end
 end
 
 pub class ImplDefNode
   getter trait_name : Array(Node)
   getter target : Array(Node)
+  getter vars : String
   getter body : Array(Node)
-  def initialize(@trait_name : Array(Node), @target : Array(Node), @body : Array(Node))
+  def initialize(@trait_name : Array(Node), @target : Array(Node), @vars : String, @body : Array(Node))
   end
 end
 
@@ -608,7 +618,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ImplDefNode | InterpNode | ImportNode | UsingNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
-                 HashNode | TupleNode | RangeNode | CharNode | UnlessNode
+                 HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
+                 UnionNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -717,6 +728,12 @@ impl Sexp for CharNode
   end
 end
 
+impl Sexp for UnionNode
+  def sexp : String
+    "(union)"
+  end
+end
+
 impl Sexp for IfNode
   def sexp : String
     "(if #{cond[0].sexp} #{then_branch[0].sexp} #{else_branch[0].sexp})"
@@ -792,19 +809,19 @@ end
 
 impl Sexp for TraitDefNode
   def sexp : String
-    "(trait #{name[0].sexp} #{body[0].sexp})"
+    "(trait #{name[0].sexp}#{vars} #{body[0].sexp})"
   end
 end
 
 impl Sexp for ClassDefNode
   def sexp : String
-    "(#{kind} #{name[0].sexp} #{body[0].sexp})"
+    "(#{kind} #{name[0].sexp}#{vars} #{body[0].sexp})"
   end
 end
 
 impl Sexp for ImplDefNode
   def sexp : String
-    "(impl #{trait_name[0].sexp} for #{target[0].sexp} #{body[0].sexp})"
+    "(impl #{trait_name[0].sexp} for #{target[0].sexp}#{vars} #{body[0].sexp})"
   end
 end
 
@@ -1200,11 +1217,29 @@ pub class Parser
     ExprsNode.new(items).as(Node)
   end
 
+  # `struct Box(T)` declares a parameter, and the current parser prints it
+  # beside the name: `(struct (path Box)(T) ...)`.
+  def parse_type_vars : String
+    return "" unless peek.kind == "("
+    advance
+    out = ""
+    while peek.kind != ")" && !at_end?
+      token = advance
+      next if token.kind == ","
+      out = out + " " unless out == ""
+      out = out + token.value
+    end
+    advance                      # )
+    "(" + out + ")"
+  end
+
   def parse_trait : Node
     advance                      # trait
     name = advance.value
+    vars = parse_type_vars
     TraitDefNode.new(
       [PathNode.new(name).as(Node)] of Node,
+      vars,
       [parse_body] of Node,
     ).as(Node)
   end
@@ -1212,21 +1247,41 @@ pub class Parser
   def parse_class(kind : String) : Node
     advance                      # struct or class
     name = advance.value
+    vars = parse_type_vars
     ClassDefNode.new(
       kind,
       [PathNode.new(name).as(Node)] of Node,
+      vars,
       [parse_body] of Node,
     ).as(Node)
   end
 
   def parse_impl : Node
     advance                      # impl
-    trait_name = advance.value
+    # Both sides are types: `impl Show for Box(T) forall T` implements a
+    # trait for a generic, and reading either as a bare name lost the
+    # arguments.
+    trait_name = parse_type
     advance                      # for
-    target = advance.value
+    target = parse_type
+
+    vars = ""
+    if peek.kind == "IDENT" && peek.value == "forall"
+      advance
+      names = ""
+      while peek.kind == "CONST" || peek.kind == ","
+        token = advance
+        next if token.kind == ","
+        names = names + " " unless names == ""
+        names = names + token.value
+      end
+      vars = " forall " + names
+    end
+
     ImplDefNode.new(
-      [PathNode.new(trait_name).as(Node)] of Node,
-      [PathNode.new(target).as(Node)] of Node,
+      [trait_name] of Node,
+      [target] of Node,
+      vars,
       [parse_body] of Node,
     ).as(Node)
   end
@@ -1261,9 +1316,10 @@ pub class Parser
         restriction = [] of Node
         if peek.kind == ":"
           advance
-          # A restriction is a type, and a type can be generic: reading it
-          # as a bare name made `links : Hash(String, Session)` a path.
-          restriction << parse_primary
+          # A restriction is a type, and a type can be generic or a union:
+          # reading it as a bare name made `links : Hash(String, Session)`
+          # a path, and `String | Nil` a call.
+          restriction << parse_type
         end
         args << ArgNode.new(arg_name, restriction).as(Node)
         advance if peek.kind == ","
@@ -1273,7 +1329,7 @@ pub class Parser
     ret = [] of Node
     if peek.kind == ":"
       advance
-      ret << parse_primary
+      ret << parse_type
     end
 
     # `forall T`, and `forall T : Greet` with a bound. The parameters it
@@ -1311,6 +1367,19 @@ pub class Parser
     DefNode.new(name, args, ret, [inner] of Node).as(Node)
   end
 
+  # A type, which is not an expression: `String | Nil` is one type and
+  # `a | b` is a call. Restrictions, return types and generic arguments
+  # are read here, and nowhere else is.
+  def parse_type : Node
+    first = parse_primary
+    return first unless peek.kind == "|"
+    while peek.kind == "|"
+      advance
+      parse_primary
+    end
+    UnionNode.new.as(Node)
+  end
+
   def parse_expression : Node
     left = parse_binary(0)
 
@@ -1342,7 +1411,7 @@ pub class Parser
       end
       unless target.size == 0
         advance
-        declared = parse_primary
+        declared = parse_type
         return TypeDeclNode.new(target, [declared] of Node).as(Node)
       end
     end
@@ -1549,7 +1618,7 @@ pub class Parser
         advance
         targs = [] of Node
         while peek.kind != ")" && !at_end?
-          targs << parse_primary
+          targs << parse_type
           advance if peek.kind == ","
         end
         advance                  # )

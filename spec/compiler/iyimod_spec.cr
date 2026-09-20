@@ -3348,11 +3348,12 @@ describe Iyi::IyiMod do
             nanos : Int64
           end
 
-          fun getpid : Int32
+          # ANSI C, so the link finds it on every platform this runs on.
+          fun abs(value : Int32) : Int32
         end
 
-        pub def with_pid(&block : Int32 -> Bool) : Bool
-          block.call(LibC.getpid)
+        pub def with_abs(&block : Int32 -> Bool) : Bool
+          block.call(LibC.abs(-3))
         end
 
         pub def span_seconds(span : LibC::Span) : Int64
@@ -3367,7 +3368,7 @@ describe Iyi::IyiMod do
         span = Boot::Clock::LibC::Span.new
         span.seconds = 3_i64
         puts Boot::Clock.span_seconds(span)
-        puts Boot::Clock.with_pid { |pid| pid > 0 }
+        puts Boot::Clock.with_abs { |value| value == 3 }
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
@@ -3381,7 +3382,7 @@ describe Iyi::IyiMod do
       artifact = Iyi::IyiMod.read(File.join("mods", "boot", "clock.iyimod"))
       lib_decl = artifact.exports.types.find { |decl| decl.name == "LibC" }.should_not be_nil
       lib_decl.kind.should eq "lib"
-      lib_decl.funs.should eq ["fun getpid : Int32"]
+      lib_decl.funs.should eq ["fun abs(value : Int32) : Int32"]
       # The struct travels with it and its accessors do not: inside a
       # `lib` those are the compiler's.
       span = lib_decl.types.find { |decl| decl.name == "Span" }.should_not be_nil

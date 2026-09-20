@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,383 lines**, and the
-  library is **3,258** of 3,734 with 476 to spare. `4,641` is what opening
+  a conditional, `else` included - which is **1,399 lines**, and the
+  library is **3,258** of 3,734 with 476 to spare. `4,657` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -388,6 +388,41 @@
   now, which is what it is. Seventy-two modules, 37,127 lines.
 
 ### Fixed
+
+- **A short sleep on Windows was fifteen times what the program asked
+  for.** The poller waits on its completion port with a millisecond
+  timeout, and Windows rounds that up to the system timer tick, which is
+  15.6 ms on a machine where nothing raised it. Measured here, before:
+
+      asked 1 ms, slept 15,441 us      asked 10 ms, slept 15,932 us
+      asked 2 ms, slept 15,701 us      asked 16 ms, slept 26,903 us
+      asked 5 ms, slept 15,770 us      asked 50 ms, slept 63,080 us
+
+  A hundred `sleep 1` calls took 1,577 ms. It is the platform's floor and
+  not the port's: `Sleep(1)` takes 15,609 us and the port's own
+  `GetQueuedCompletionStatus(1)` takes 15,707 on this machine.
+
+  The deadline is a waitable timer now, created with
+  CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, which keeps the millisecond
+  (1,513 us measured, and 10,393 for ten); the same object without the
+  flag takes 15,879, so the flag is the whole reason to ask. The wake is
+  a wait on the port *and* the timer rather than the timer's completion
+  routine, because a high-resolution timer refuses one —
+  `SetWaitableTimer` with a routine answers 0 and ERROR_INVALID_PARAMETER
+  on this timer and 1 on a plain one — and a completion port is a
+  waitable object: a packet posted to an idle port signals its handle in
+  1 us. The millisecond timeout stays on the wait as the backstop, so a
+  port that did not signal costs the deadline the program asked for and
+  never a hung poller, and a Windows too old for the flag (it arrived in
+  10 1803) keeps exactly the wait it had. After:
+
+      asked 1 ms, slept 1,538 us       asked 10 ms, slept 10,141 us
+      asked 2 ms, slept 2,402 us       asked 16 ms, slept 16,177 us
+      asked 5 ms, slept 5,071 us       asked 50 ms, slept 50,469 us
+
+  A hundred `sleep 1` calls take 156 ms. `bench/windows_exercise.sh`
+  gates it at 800 ms — under the tick-rounded floor, five times over the
+  measurement — and the gate reads 1,568 ms with the timer taken out.
 
 - **A module the module keeps to itself did not travel, and its object
   code did.** A `.iyimod` carries the types a consumer cannot name but
@@ -893,9 +928,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,383** and **3,258**, held to the sentences that quote
+  without it: **1,399** and **3,258**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 907 over, as the library with
+  breach is still what the floor costs — 923 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7761,7 +7796,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,697-line library and nothing else. Every other
+  written against iyi's own 15,805-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

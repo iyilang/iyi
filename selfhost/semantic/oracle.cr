@@ -12,10 +12,11 @@
 # nothing anyone can read.
 #
 # The pass runs on the file alone, with no imports resolved, which is why
-# 24 of the 27 samples answer and three do not: `collections`, `immutable`
-# and `webapp` declare types whose bodies name something an import brings.
-# Those three are the measure of what resolving imports would add, and
-# they are left failing rather than skipped, so the number says so.
+# 23 of the 27 samples answer and four do not: `collections`, `immutable`,
+# `std_text` and `webapp` declare types whose bodies name something an
+# import brings. Those four are the measure of what resolving imports
+# would add, and they are left failing rather than skipped, so the number
+# says so.
 # `compiler/requires` is what the specs load, and it is the set that
 # brings the semantic pass up with its dependencies in order.
 require "compiler/requires"

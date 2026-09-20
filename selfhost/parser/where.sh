@@ -13,8 +13,8 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src" \
-  "$REPO/bin/iyi" build -o "$WORK/parser" "$HERE/parser.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
+  "$REPO/bin/iyi" build -o "$WORK/parser" "$HERE/main.iyi" > "$WORK/build.log" 2>&1 || {
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|  |'; exit 1; }
 
 for f in "$@"; do

@@ -1,4 +1,4 @@
-module main
+module parser/parser
 
 import std/file
 import std/text
@@ -2582,22 +2582,5 @@ pub class Parser
     end
     advance
     VarNode.new(t.value).as(Node)
-  end
-end
-
-path = Program.args[0]?
-if path.nil?
-  puts "usage: parser <file.iyi>"
-else
-  source = File.read(path)
-  parser = Parser.new(source)
-  tree = parser.parse
-  imports = ""
-  parser.imports.each { |node| imports = imports + node.sexp + " " }
-  if parser.header == ""
-    # No header, no wrapper: the file's statements are the whole tree.
-    puts tree.sexp
-  else
-    puts "(exprs (module #{parser.header}) #{imports}#{tree.sexp})"
   end
 end

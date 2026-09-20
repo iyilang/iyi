@@ -119,3 +119,35 @@ found it:
 * A parameter with a default value.
 
 Each is one shape, and the harness says which file to read for it.
+
+## The declaration pass
+
+`selfhost/semantic/declare.iyi` is the first semantic slice written in
+iyi: what a file declares. It imports the parser, walks its tree, and
+prints the same shape `selfhost/semantic/oracle.cr` reads off the real
+top-level pass.
+
+    bash selfhost/semantic/diff.sh
+
+Measured: **23 agree, 0 differ, 4 with no oracle**. The four are
+`collections`, `immutable`, `std_text` and `webapp`, where the pass
+itself refuses the file because it resolves no imports; they are
+reported rather than skipped so the number says what it covers.
+
+Three rules in the port are the compiler's rather than the language's,
+and each was read off the oracle rather than guessed:
+
+* a trait that declares an associated type is a generic module, and
+  prints as one;
+* a generic class prints its parameters twice, in its name and again as
+  its parameter list, and a generic module only once;
+* an `impl`'s methods belong to the type it is for. `impl Show for
+  Box(T)` puts `show` on `Box`.
+
+Getting here split `selfhost/parser/parser.iyi` into a library and the
+command that was at the bottom of it, `selfhost/parser/main.iyi`, since
+a program cannot be imported and the semantic pass reads the same tree.
+
+The gate is load-bearing: changing one method name the pass reports
+turns `agree 1` into `differ 1`, and restoring the file byte-for-byte
+turns it back.

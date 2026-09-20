@@ -35,9 +35,9 @@ wrong first and made the port look better or worse than it was:
 
 ## Where it is
 
-Measured, not estimated: 12 of the 27 files in `samples/iyi` produce a
+Measured, not estimated: 15 of the 27 files in `samples/iyi` produce a
 tree identical to the current parser's, and the mean file agrees for the
-first 71% of its tree.
+first 76% of its tree.
 
 The lexer slice (`lexer/`) agrees with the current lexer token for token
 on 7 of 7 non-interpolated samples.
@@ -64,12 +64,11 @@ Run `where.sh` for the current list. As of this writing:
 
 | what | files |
 | --- | --- |
-| `enum` and annotations | enums |
-| `recover` | socket |
-| `**` | shapes |
+| `recover` and `!` propagation | socket, errors, workers |
 | heredocs and multi-line strings | calc, config |
 | non-ASCII string bodies | std_text |
-| the remaining call and block shapes | io, webapp, grid, inventory, workers, sessions |
+| `yield` and the block a def declares | generics, std_iterator |
+| the remaining call shapes | io, webapp, grid, sessions |
 
 After the parser: the semantic pass, then codegen, then the bootstrap,
 each differentially tested the same way. The bootstrap is the acceptance

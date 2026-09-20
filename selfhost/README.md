@@ -35,9 +35,9 @@ wrong first and made the port look better or worse than it was:
 
 ## Where it is
 
-Measured, not estimated: 11 of the 27 files in `samples/iyi` produce a
+Measured, not estimated: 12 of the 27 files in `samples/iyi` produce a
 tree identical to the current parser's, and the mean file agrees for the
-first 67% of its tree.
+first 71% of its tree.
 
 The lexer slice (`lexer/`) agrees with the current lexer token for token
 on 7 of 7 non-interpolated samples.
@@ -64,7 +64,6 @@ Run `where.sh` for the current list. As of this writing:
 
 | what | files |
 | --- | --- |
-| `type Elem = Int32`, the associated type declaration | collections, std_iterator, generics |
 | `enum` and annotations | enums |
 | `recover` | socket |
 | `**` | shapes |

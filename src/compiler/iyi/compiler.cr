@@ -990,6 +990,33 @@ module Iyi
         methods = [] of IyiMod::Signature
         # Without the type arguments: the header carries them itself.
         container = "::#{type.to_s(generic_args: false)}"
+
+        # A name outside the module's namespace is usually a type somebody
+        # else declared and this file added methods to. Sometimes it is a
+        # type this file *declares* at an absolute name — `struct
+        # ::BitArray` is the whole of `std/bit_array`, and `class ::File`
+        # holds an `enum Type` nobody else wrote — and then the methods are
+        # not the whole of what has to travel: what the consumer cannot
+        # infer is the *state*. `can't infer the type of instance variable
+        # '@size' of BitArray`, and `enum ::File::Type must have at least
+        # one member`.
+        #
+        # Told apart by where it is declared. A type reopened here has
+        # locations in the file that declared it as well; one declared here
+        # has this file and nothing else.
+        #
+        # State only, and not the rest of a declaration. A primitive is
+        # reopened by `std/float` and `std/int` and has no location of its
+        # own either, so it reads as declared here — and it has no field to
+        # carry, which is what makes the narrow question the safe one. Ask
+        # the wide one and `struct ::Float32` arrives with the prelude's
+        # methods and macros attached.
+        declared_here = iyi_declared_here?(type, filename)
+        if declared_here && type.is_a?(EnumType)
+          declarations << iyi_enum_declaration(program, filename, type, container, "", container,
+            travels: true)
+          next
+        end
         {type, type.metaclass}.each do |side|
           side.as?(ModuleType).try &.defs.try &.each_value do |items|
             items.each do |item|
@@ -1024,8 +1051,27 @@ module Iyi
         # are the prelude's or another module's, and either way they arrive
         # with the type; an include under this module's namespace could not
         # have been written anywhere but here.
-        included = own ? iyi_included_modules(type).select(&.starts_with?(own_prefix)) : [] of String
-        next if methods.empty? && included.empty?
+        included = (own ? iyi_included_modules(type).select(&.starts_with?(own_prefix)) : [] of String)
+          .map { |name| iyi_absolute_name(name) }
+        # The fields of a type this file declares under a foreign name.
+        # Nothing else on this side carries a field: a type the module does
+        # not own arrives with its own, and one it owns is declared in the
+        # exported or the carried section. `::BitArray` is neither.
+        #
+        # The ones written *here*, which is narrower than the type's. A
+        # `StaticArray(T, N)` has a `@buffer` its own compiler makes and
+        # refuses to be given — "can't declare instance variables in
+        # StaticArray(T, N)" — and it reads as declared here for the reason
+        # a primitive does: the file that reopens it is the only file that
+        # mentions it.
+        fields = declared_here ? iyi_fields_written_in(type, filename) : [] of {String, String, String}
+        # Whoever declared the type. A class variable is a global, its
+        # global is defined in the build that compiled it, and the methods
+        # that read it travel as machine code naming it — so a `@@temp_counter
+        # = 1000_u64` written on a reopened `::File` is this module's to
+        # carry however little of `::File` is.
+        class_vars = iyi_class_vars_written_in(type, filename)
+        next if methods.empty? && included.empty? && fields.empty? && class_vars.empty?
         methods.sort_by! &.name
 
         # `Tuple` and `NamedTuple` describe themselves as "tuple" and "named
@@ -1038,14 +1084,75 @@ module Iyi
           type_parameters: iyi_type_parameters(type),
           assoc_types: [] of String,
           supertraits: [] of String,
-          fields: [] of {String, String, String},
+          fields: fields,
+          class_vars: class_vars,
           methods: methods,
           visibility: "",
           includes: included,
+          usings: iyi_type_usings(program, type, filename),
           types: [] of IyiMod::TypeDecl,
         )
       end
       declarations.sort_by! &.name
+    end
+
+    # iyi: whether *type* was declared in this file and nowhere else.
+    #
+    # A type this module reopens has locations in the file that declared it
+    # as well as here, and one the compiler built in has none — so "every
+    # location is this file" is the question, and both of those answer no.
+    private def iyi_declared_here?(type : Type, filename : String) : Bool
+      locations = type.locations
+      return false if locations.nil? || locations.empty?
+      locations.all? { |location| location.original_filename == filename }
+    end
+
+    # iyi: one name written so it resolves from anywhere, which is what the
+    # reopened section needs: its text is rendered inside the module, where
+    # `Float` is the module `Std::Float` before it is the prelude's type.
+    private def iyi_absolute_name(name : String) : String
+      return name if name.empty? || name.starts_with?("::")
+      "::#{name}"
+    end
+
+    # iyi: the `using` directives written inside *type*'s own body, as the
+    # file wrote them (SPEC.md R-2b).
+    #
+    # For a type reopened under a foreign name, which is the one place they
+    # have to travel: the unit's own `using` does not reach inside `class
+    # ::File`, so `src/std/file.iyi` writes a second one there, and a
+    # consumer reading the reopened section without it said `undefined
+    # constant Path`.
+    #
+    # Only directives naming a module this file imports. A foreign type is
+    # reopened by whoever likes — `::Object` by four std modules — and they
+    # all share one type, so its `using` list is every reopener's together.
+    # Carrying another module's would write a directive for a module this
+    # artifact never imported.
+    private def iyi_type_usings(program : Program, type : Type,
+                                filename : String) : Array(String)
+      directives = type.using_modules?
+      return [] of String unless directives
+      imported = program.iyi_module_imports[filename]?.try do |dependencies|
+        dependencies.compact_map { |dependency| program.iyi_module_paths[dependency]? }.to_set
+      end
+      return [] of String unless imported
+
+      names = [] of String
+      directives.each do |directive|
+        path = iyi_module_path_of(directive.type)
+        next unless imported.includes?(path)
+        selected = directive.names
+        written = selected ? "#{path}::{#{selected.join(", ")}}" : path
+        names << written unless names.includes?(written)
+      end
+      names
+    end
+
+    # iyi: the module path a module type was declared under — `Std::Path` is
+    # `std/path`, which is how a `using` names it.
+    private def iyi_module_path_of(type : Type) : String
+      type.to_s.split("::").map(&.underscore).join('/')
     end
 
     # Every named type the program has, depth first, `Program` itself aside.
@@ -1638,7 +1745,8 @@ module Iyi
     private def iyi_enum_declaration(program : Program, filename : String,
                                      type : EnumType, name : String,
                                      visibility : String,
-                                     container : String = name) : IyiMod::TypeDecl
+                                     container : String = name,
+                                     travels : Bool = false) : IyiMod::TypeDecl
       members = [] of {String, String}
       type.types?.try &.each do |member, constant|
         next unless constant.is_a?(Const)
@@ -1655,9 +1763,16 @@ module Iyi
       # rules the rest of the library gets. Its bodies do not travel by being
       # an enum's: it is a non-generic type with a unit of its own in the
       # object code.
+      #
+      # Unless it is declared under a foreign name, and then they do, for the
+      # reason every reopened body travels: the unit is named after the type
+      # and this module ships the units under its own namespace only.
+      # `src/std/file.iyi` writes `enum Type` inside `class ::File` and its
+      # eight question methods by hand, and the link ended on
+      # `File::Type#file?`.
       methods = [] of IyiMod::Signature
-      iyi_collect_type_methods program, filename, container, type, false, methods
-      iyi_collect_type_methods program, filename, container, type.metaclass, false, methods
+      iyi_collect_type_methods program, filename, container, type, travels, methods
+      iyi_collect_type_methods program, filename, container, type.metaclass, travels, methods
       methods.sort_by! &.name
 
       IyiMod::TypeDecl.new(
@@ -2306,6 +2421,22 @@ module Iyi
       fields
     end
 
+    # iyi: the fields of *type* that this file declared, for a type the
+    # module wrote under a name outside its own namespace.
+    #
+    # An instance variable the compiler makes for itself — `StaticArray`'s
+    # `@buffer` — has no location in any file, and writing one back is
+    # refused by the compiler that makes it. What this file wrote has a
+    # location and it is this file.
+    private def iyi_fields_written_in(type : Type,
+                                      filename : String) : Array({String, String, String})
+      return [] of {String, String, String} unless type.is_a?(InstanceVarContainer)
+      written = type.instance_vars.each_with_object(Set(String).new) do |(name, variable), names|
+        names << name if variable.location.try(&.original_filename) == filename
+      end
+      collect_iyi_fields(type).select { |field| written.includes?(field[0]) }
+    end
+
     # iyi: a resolved type as a *name*, which is not always how it prints.
     #
     # `IyiIO+` is how a virtual type prints and not a name anybody can write.
@@ -2371,6 +2502,26 @@ module Iyi
           initialiser, annotations)
       end
       class_vars
+    end
+
+    # iyi: the class variables of *type* that this file declared, for a type
+    # the module wrote under a name outside its own namespace. The same
+    # question `iyi_fields_written_in` asks, and for the same reason: a
+    # consumer cannot infer `@@temp_counter` from methods alone, and the
+    # ones the compiler makes for itself are not this module's to write.
+    private def iyi_class_vars_written_in(type : Type,
+                                          filename : String) : Array(IyiMod::ClassVarDecl)
+      return [] of IyiMod::ClassVarDecl unless type.responds_to?(:class_vars?)
+      written = type.class_vars?.try &.each_with_object(Set(String).new) do |(name, variable), names|
+        # The declaration's location, or the initialiser's where there is no
+        # declaration: `@@temp_counter = 1000_u64` is written as an
+        # assignment and has no `location` of its own, and it is exactly the
+        # shape a consumer cannot infer.
+        location = variable.location || variable.initializer.try(&.node.location)
+        names << name if location.try(&.original_filename) == filename
+      end
+      return [] of IyiMod::ClassVarDecl unless written
+      collect_iyi_class_vars(type).select { |class_var| written.includes?(class_var.name) }
     end
 
     # Measures what a compile costs when the prelude has already been analysed,

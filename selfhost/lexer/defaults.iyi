@@ -1,0 +1,88 @@
+module main
+
+# Requirement 2 from the first probe, untested until now: a pass wants one
+# default for most nodes and an override for a few. With 120 node types and
+# a dozen passes, writing every impl by hand is the difference between a
+# port and a career.
+#
+# And requirement 4, which the first probe dodged by using immutable structs:
+# the compiler *mutates* its AST. A semantic pass writes a resolved type back
+# onto the node it just typed.
+
+pub trait Typed
+  # The associated state a node carries. An impl answers it.
+  abstract def resolved : String?
+  abstract def resolved=(t : String?) : Nil
+
+  # The default every node gets for free, written once.
+  def typed? : Bool
+    !resolved.nil?
+  end
+
+  def describe : String
+    if t = resolved
+      "typed #{t}"
+    else
+      "untyped"
+    end
+  end
+end
+
+pub class NumLit
+  property resolved : String?
+  getter value : Int32
+  def initialize(@value : Int32, @resolved : String? = nil)
+  end
+end
+
+pub class VarRef
+  property resolved : String?
+  getter name : String
+  def initialize(@name : String, @resolved : String? = nil)
+  end
+end
+
+impl Typed for NumLit
+  def resolved : String?
+    @resolved
+  end
+  def resolved=(t : String?) : Nil
+    @resolved = t
+  end
+  # `typed?` and `describe` arrive from the trait, unwritten here.
+end
+
+impl Typed for VarRef
+  def resolved : String?
+    @resolved
+  end
+  def resolved=(t : String?) : Nil
+    @resolved = t
+  end
+  # And one override, which is the point of the default existing.
+  def describe : String
+    if t = resolved
+      "#{name} : #{t}"
+    else
+      "#{name} : ?"
+    end
+  end
+end
+
+pub alias Node = NumLit | VarRef
+
+nodes = [NumLit.new(7).as(Node), VarRef.new("x").as(Node)] of Node
+
+puts nodes.map(&.typed?).join(", ")
+puts nodes.map(&.describe).join(" | ")
+
+# The semantic pass: write a type back onto each node, through the union.
+nodes.each do |n|
+  case n
+  when NumLit then n.resolved = "Int32"
+  when VarRef then n.resolved = "String"
+  end
+end
+
+puts nodes.map(&.typed?).join(", ")
+puts nodes.map(&.describe).join(" | ")

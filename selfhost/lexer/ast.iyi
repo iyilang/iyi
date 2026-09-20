@@ -1,0 +1,130 @@
+module main
+
+# Can traits and a union carry a compiler AST?
+#
+# Crystal's AST is an abstract class with ~120 subclasses and visitors that
+# overload on the concrete type. iyi has no open classes and no inheritance,
+# so the shape has to be: an alias for the union of every node type, one trait
+# per thing a pass wants to do, an impl per member, and dispatch through the
+# union's type id.
+#
+# The three things that decide whether this works, and none of them are about
+# syntax:
+#
+#   1. the union is *recursive* - a Call holds Nodes, and Node includes Call
+#   2. a pass wants a default for most nodes and an override for a few
+#   3. the same node has to answer several passes without being reopened
+
+pub struct NumLit
+  getter value : Int32
+  def initialize(@value : Int32)
+  end
+end
+
+pub struct VarRef
+  getter name : String
+  def initialize(@name : String)
+  end
+end
+
+# The recursive one: its children are Nodes, and Node is the union that
+# includes Call. If this does not compile, the whole model is dead.
+pub struct Call
+  getter name : String
+  getter args : Array(Node)
+  def initialize(@name : String, @args : Array(Node))
+  end
+end
+
+pub struct Seq
+  getter nodes : Array(Node)
+  def initialize(@nodes : Array(Node))
+  end
+end
+
+pub alias Node = NumLit | VarRef | Call | Seq
+
+# Pass one: printing. Every member answers.
+pub trait Show
+  abstract def show : String
+end
+
+impl Show for NumLit
+  def show : String
+    value.to_s
+  end
+end
+
+impl Show for VarRef
+  def show : String
+    name
+  end
+end
+
+impl Show for Call
+  def show : String
+    parts = args.map(&.show)
+    "#{name}(#{parts.join(", ")})"
+  end
+end
+
+impl Show for Seq
+  def show : String
+    "{#{nodes.map(&.show).join("; ")}}"
+  end
+end
+
+# Pass two, on the same types, added without reopening any of them. This is
+# what a second compiler pass looks like.
+pub trait CountCalls
+  abstract def count_calls : Int32
+end
+
+impl CountCalls for NumLit
+  def count_calls : Int32
+    0
+  end
+end
+
+impl CountCalls for VarRef
+  def count_calls : Int32
+    0
+  end
+end
+
+impl CountCalls for Call
+  def count_calls : Int32
+    total = 1
+    args.each { |a| total = total + a.count_calls }
+    total
+  end
+end
+
+impl CountCalls for Seq
+  def count_calls : Int32
+    total = 0
+    nodes.each { |n| total = total + n.count_calls }
+    total
+  end
+end
+
+tree = Seq.new([
+  Call.new("add", [NumLit.new(1).as(Node), Call.new("mul", [NumLit.new(2), VarRef.new("x")] of Node)] of Node),
+  VarRef.new("y"),
+] of Node)
+
+puts tree.show
+puts tree.count_calls
+
+# And dispatch the other way: a pass that asks what a node *is*, which is what
+# a visitor's overload set really does.
+describe = ->(n : Node) do
+  case n
+  when NumLit then "literal"
+  when VarRef then "reference"
+  when Call   then "call"
+  else             "sequence"
+  end
+end
+puts describe.call(tree)
+puts describe.call(VarRef.new("z").as(Node))

@@ -445,6 +445,13 @@ pub struct UnionNode
   end
 end
 
+pub class AssocTypeNode
+  getter name : String
+  getter value : Array(Node)
+  def initialize(@name : String, @value : Array(Node))
+  end
+end
+
 pub class IfNode
   getter cond : Array(Node)
   getter then_branch : Array(Node)
@@ -619,7 +626,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
-                 UnionNode
+                 UnionNode | AssocTypeNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -731,6 +738,13 @@ end
 impl Sexp for UnionNode
   def sexp : String
     "(union)"
+  end
+end
+
+impl Sexp for AssocTypeNode
+  def sexp : String
+    return "(assoctype #{name})" if value.size == 0
+    "(assoctype #{name} #{value[0].sexp})"
   end
 end
 
@@ -1101,6 +1115,20 @@ pub class Parser
         skip_line
         return ImportNode.new.as(Node)
       end
+      # `type Elem` in a trait, `type Elem = Int32` in an impl: the
+      # requirement and the answer are the same node. Only a declaration
+      # body writes this; anywhere else `type` is an ordinary name.
+      if word.value == "type" && peek_at(offset + 1).kind == "CONST"
+        advance if offset == 1
+        advance                  # type
+        assoc_name = advance.value
+        value = [] of Node
+        if peek.kind == "="
+          advance
+          value << parse_type
+        end
+        return AssocTypeNode.new(assoc_name, value).as(Node)
+      end
       if word.value == "if" || word.value == "unless"
         advance if offset == 1
         return with_modifiers(parse_if(word.value == "unless"))
@@ -1303,6 +1331,26 @@ pub class Parser
     if peek.kind == "("
       advance
       while peek.kind != ")" && !at_end?
+        # `&` and `&block : Int32 -> Nil` are the block parameter, which
+        # the current parser keeps beside the arguments rather than among
+        # them: a def that takes one prints `(args )`. Its name is still a
+        # local, because the body calls it.
+        if peek.kind == "&"
+          advance
+          if peek.kind == "IDENT"
+            @locals << advance.value
+          end
+          depth = 0
+          while !at_end?
+            break if depth == 0 && (peek.kind == ")" || peek.kind == ",")
+            k = advance.kind
+            depth = depth + 1 if k == "(" || k == "["
+            depth = depth - 1 if k == ")" || k == "]"
+          end
+          advance if peek.kind == ","
+          next
+        end
+
         raw = advance
         arg_name = raw.value
         if raw.kind == "INSTANCE_VAR"

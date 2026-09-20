@@ -61,6 +61,11 @@ def sexp(node : Iyi::ASTNode) : String
     "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
   when Iyi::InstanceVar
     "(ivar #{node.name})"
+  when Iyi::AssocTypeDecl
+    # `type Elem = Int32` in a trait declares the requirement; the same
+    # line in an impl answers it. Both are this node, and the value is
+    # what tells them apart.
+    node.value.try { |v| "(assoctype #{node.name} #{sexp(v)})" } || "(assoctype #{node.name})"
   when Iyi::If
     # The branches, not just the node. `(if)` on its own would let a port
     # that mis-read the condition agree with the oracle anyway.

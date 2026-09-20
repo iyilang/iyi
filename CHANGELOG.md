@@ -389,6 +389,46 @@
 
 ### Fixed
 
+- **A type a module declares under a name outside its own namespace
+  arrived as its methods and nothing else.** The reopened section was
+  written for what a module *adds* to somebody else's type — `12.gcd` on
+  `::Int32` — and the methods are all an addition is. A module may also
+  *declare* a type there: `struct ::BitArray` is the whole of
+  `std/bit_array`, and `class ::File` holds the `enum Type`, the
+  `@@temp_counter` and the second `using` that `std/file` wrote. Then
+  the methods are not the whole of it, and each missing piece was the
+  next error on the same module:
+
+  - **The fields.** `can't infer the type of instance variable '@size'
+    of BitArray`. The ones written *in this file*, which is narrower
+    than the type's: `StaticArray`'s `@buffer` is its own compiler's and
+    is refused when written back.
+  - **The class variable.** `@@temp_counter = 1000_u64` on a reopened
+    `::File` — carried whoever declared the type, because a class
+    variable is a global and the methods that read it travel as machine
+    code naming it.
+  - **The `enum`, with its members and its bodies.** `enum ::File::Type
+    must have at least one member`, and then `undefined reference to
+    File::Type#file?` — `std/file` writes those eight question methods
+    by hand, and a unit named after `::File::Type` is not under this
+    module's namespace and so is not this module's to ship.
+  - **The `using` written inside the type.** A reopened name is not
+    lexically inside the module unit, so the unit's `using` does not
+    reach it and the file writes a second one there. Carried now on
+    `TypeDecl#usings`, and only for a module this file imports: a
+    foreign type is reopened by whoever likes, and they share one list.
+    Without it the consumer read `def self.size(path : String | Path)`
+    and answered "undefined constant Path... this file has not written
+    `using`", about a directive eleven lines above it.
+
+  And the edges in that section are written absolutely. A bare `Float`
+  on `struct ::Float32 < Float` is read as the module `Std::Float` the
+  file itself declares — "Std::Float is not a class, it's a module".
+
+  56 of the 60 `bench/std_*_exercise.iyi` round-tripped before this, 58
+  do now: `std/bit_array` and `std/file`. The module set `std/dir` pulls
+  in went from 870,472 bytes of `.iyimod` to 870,628, up 0.02%.
+
 - **A method with no unit of its own did not travel, in the two shapes a
   method gets that way.** Codegen files an instance method under the type
   that *includes* the module it is written in, and files a generic's

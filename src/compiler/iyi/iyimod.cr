@@ -56,7 +56,7 @@ module Iyi::IyiMod
   # v52: a signature carries the annotations written above it, because
   # `@[Primitive]` is a declaration a module makes and not one the compiler
   # made — see `Signature#annotations`.
-  FORMAT_VERSION = 52_u32
+  FORMAT_VERSION = 53_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -653,7 +653,19 @@ module Iyi::IyiMod
     # The word rather than a second copy of every method on the metaclass:
     # `extend self` is what the shard wrote, one line says it, and the compiler
     # on the far side does with it what the compiler here did.
-    extends_self : Bool = false
+    extends_self : Bool = false,
+    # iyi: the `using` directives written inside this type's body, as
+    # written (R-2b).
+    #
+    # `Artifact#usings` carries the module unit's own, and those are the
+    # only ones that used to travel because they were the only ones thought
+    # to reach a consumer. A type reopened under a foreign name is the
+    # exception: `class ::File` is not lexically inside the unit, so the
+    # unit's `using` does not reach it and the file writes a second one
+    # inside the class. Without it the consumer reads `def self.size(path :
+    # String | Path)` and answers "undefined constant Path... this file has
+    # not written `using`", about a directive eleven lines above.
+    usings : Array(String) = [] of String
 
   # How a body is found again on the far side.
   #
@@ -2371,6 +2383,10 @@ module Iyi::IyiMod
 
     inner = indent + "  "
 
+    # Before anything written in terms of the names they bring, which is
+    # everything below. See `TypeDecl#usings`.
+    declaration.usings.each { |directive| io << inner << "using " << directive << '\n' }
+
     # First inside the module, because that is where the shard wrote it and
     # because everything below is reached through it: `extend self` is what
     # makes `Parser.parse` the same method as `Parser#parse`. See
@@ -2946,6 +2962,7 @@ module Iyi::IyiMod
       write_strings io, declaration.annotations
       write_string io, (docs ? declaration.doc : "")
       io.write_byte(declaration.extends_self ? 1_u8 : 0_u8)
+      write_strings io, declaration.usings
       write_signatures io, declaration.methods, docs
       write_type_declarations io, declaration.types, docs
     end
@@ -2970,10 +2987,11 @@ module Iyi::IyiMod
       annotations = read_strings(io)
       doc = read_string(io)
       extends_self = io.read_byte == 1_u8
+      usings = read_strings(io)
       methods = read_signatures(io)
       TypeDecl.new(name, kind, parameters, assoc_types, supertraits, fields, methods,
         visibility, read_type_declarations(io), value, macros, members, class_vars,
-        superclass, includes, funs, annotations, doc, extends_self)
+        superclass, includes, funs, annotations, doc, extends_self, usings)
     end
   end
 

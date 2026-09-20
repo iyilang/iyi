@@ -2996,7 +2996,7 @@ describe Iyi::IyiMod do
       # The include itself, which is the whole of what this module does to
       # `::Object` and carries no def of its own.
       artifact.reopened.find { |decl| decl.name == "::Object" }
-        .try(&.includes).should eq ["Boot::Loud::Loud::Extensions"]
+        .try(&.includes).should eq ["::Boot::Loud::Loud::Extensions"]
       # The body of the method that include installs, which is compiled
       # once per including type and so never into this module's own code.
       artifact.mono_bodies.keys.should contain "Loud::Extensions#loud()"
@@ -3010,6 +3010,128 @@ describe Iyi::IyiMod do
       consumer.use_iyimod = "mods"
       consumer.compile source, File.expand_path("from-artifact")
       `./from-artifact`.chomp.should eq "hi!\n42!"
+    end
+  end
+
+  # A type the module declares under a name outside its own namespace.
+  #
+  # The reopened section was written for what a module *adds* to somebody
+  # else's type — `12.gcd` on `::Int32` — and carried the methods and
+  # nothing else, which is all an addition is. But a module may also
+  # *declare* a type there: `struct ::BitArray` is the whole of
+  # `std/bit_array`, `class ::File` holds the `enum Type` and the
+  # `@@temp_counter` that `std/file` wrote, and then the methods are not
+  # the whole of it. What the consumer cannot infer is the state — the
+  # fields, the class variable, the members — and what it cannot resolve
+  # is a name the file brought in with a `using` written *inside* the
+  # type, which the unit's own `using` does not reach.
+  #
+  # One program, because that is how it was found: each fix uncovered the
+  # next on the same module. `can't infer the type of instance variable
+  # '@size' of BitArray`, then `enum ::File::Type must have at least one
+  # member`, then `undefined constant Path`, then `@@temp_counter : Type`,
+  # then `undefined reference to File::Type#file?`.
+  it "carries what a type it declares under a foreign name is made of" do
+    with_tempdir("iyimod_foreign_declaration") do
+      Dir.mkdir_p "boot"
+      File.write "boot/tag.iyi", <<-IYI
+        module boot/tag
+
+        pub struct Tag
+          @name : String
+
+          def initialize(@name : String)
+          end
+
+          pub def name : String
+            @name
+          end
+        end
+        IYI
+      File.write "boot/vault.iyi", <<-IYI
+        module boot/vault
+
+        import boot/tag
+        using boot/tag::{Tag}
+
+        struct ::Vault
+          # The `using` above does not reach in here: a reopened name is not
+          # lexically inside the unit, so the file writes a second one.
+          using boot/tag::{Tag}
+
+          @label : String
+          @count : Int32
+
+          @@made = 0_i64
+
+          enum Kind : UInt8
+            Small = 0
+            Large = 1
+
+            # By hand, which is what makes it the author's and not the
+            # compiler's: the consumer generates its own from the members
+            # and would never write this one.
+            def small? : Bool
+              value == 0_u8
+            end
+          end
+
+          def initialize(@label : String, @count : Int32)
+            @@made = @@made + 1_i64
+          end
+
+          def described(tag : Tag) : String
+            tag.name + ":" + @label
+          end
+
+          def kind : Kind
+            @count > 10 ? Kind::Large : Kind::Small
+          end
+
+          def self.made : Int64
+            @@made
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/vault
+        import boot/tag
+
+        vault = Vault.new("box", 3)
+        puts vault.described(Boot::Tag::Tag.new("t"))
+        puts vault.kind.small?
+        puts Vault.made
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "t:box\ntrue\n1"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "vault.iyimod"))
+      vault = artifact.reopened.find { |decl| decl.name == "::Vault" }.should_not be_nil
+      vault.fields.map(&.[0]).should eq ["@label", "@count"]
+      vault.class_vars.map(&.name).should eq ["@@made"]
+      vault.usings.should eq ["boot/tag::{Tag}"]
+
+      kind = artifact.reopened.find { |decl| decl.name == "::Vault::Kind" }.should_not be_nil
+      kind.members.should eq [{"Small", "0_u8"}, {"Large", "1_u8"}]
+      # Its unit is named after `::Vault::Kind`, which is not under this
+      # module's namespace and so is not this module's to ship.
+      artifact.mono_bodies.keys.should contain "::Vault::Kind#small?()"
+
+      File.delete "boot/vault.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "t:box\ntrue\n1"
     end
   end
 

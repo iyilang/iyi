@@ -123,6 +123,14 @@ jobs:
       - name: mod diff answers what a rebuild would show
         run: bash bench/mod_diff.sh
 
+      # And that the grounding a model reads is there at all. `mod
+      # context` resolved the requirement table and the entry file's
+      # directory and never looked at `IYI_PATH`, so every import of a
+      # library module — nine across the samples — was reported as a
+      # module that does not exist.
+      - name: Every import in the samples is grounded
+        run: bash bench/mod_context.sh
+
       # The command surface and the build daemon, which is iyi's own (SPEC.md
       # IV.1d) and which nothing else here runs. It caught two things the day
       # it was added: a spec still asking for a command this fork removed, and

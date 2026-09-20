@@ -293,9 +293,9 @@ class Iyi::Command
   end
 
   # The same resolution order the build uses: the requirement table by
-  # longest prefix, then the entry file's directory. The name an artifact
-  # carries is the in-package path for a package, the written path
-  # otherwise.
+  # longest prefix, then the entry file's directory, then `IYI_PATH`. The
+  # name an artifact carries is the in-package path for a package, the
+  # written path otherwise.
   private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String})) : {String?, String}
     candidate, name = mod_context_names(written, entry_dir, table)
     {File.file?(candidate) ? candidate : nil, name}
@@ -319,6 +319,26 @@ class Iyi::Command
       return {File.join(checkout, "#{inner}.iyi"), inner}
     end
 
-    {File.join(entry_dir, "#{written}.iyi"), written}
+    local = File.join(entry_dir, "#{written}.iyi")
+    return {local, written} if File.file?(local)
+
+    # Then the search path, which is where the library lives: a build
+    # resolves `import std/path` from `IYI_PATH` and this did not look
+    # there at all, so every import of a std module — every import most
+    # programs have — was reported as "does not resolve: no file and no
+    # requirement covers it" about a module the same file compiles
+    # against. `iyi mod context` is the grounding AI_FIRST.md §2 offers a
+    # model, and it was answering that the standard library is not there.
+    #
+    # Probed rather than assumed, and only after the entry's own
+    # directory, because a file that is *missing* has to keep naming the
+    # path it would have had: `check --affected app/lib.iyi` finds the
+    # importers a deletion breaks by that name.
+    IyiPath.default_paths.each do |entry|
+      candidate = File.join(entry, "#{written}.iyi")
+      return {candidate, written} if File.file?(candidate)
+    end
+
+    {local, written}
   end
 end

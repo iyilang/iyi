@@ -389,6 +389,23 @@
 
 ### Fixed
 
+- **`iyi mod context` answered that the standard library is not there.**
+  It resolves each import the way a build does — the requirement table
+  by longest prefix, then the entry file's directory — except that a
+  build then looks at `IYI_PATH`, and this did not look there at all.
+  So `import std/text` came back as `(does not resolve: no file and no
+  requirement covers it)` about a module the same file compiles
+  against: nine imports across `samples/iyi`, every one of them the
+  library.
+
+  The way it failed is the quiet way. `mod context` is the grounding
+  AI_FIRST.md §2 offers a model, and an import it cannot resolve is one
+  line saying so inside an answer that otherwise looks complete — a
+  model reading it concludes the module does not exist and writes
+  around it. `bench/mod_context.sh` sweeps every sample and fails on a
+  hole where a surface belongs; the same resolution feeds `iyi test`'s
+  closure walk, which was missing the library for the same reason.
+
 - **`iyi mod diff` said "consumers do not have to be rebuilt" about a
   body consumers compile.** The verdict — and the `--exit-code` a build
   system branches on — read the interface hash alone. But the line

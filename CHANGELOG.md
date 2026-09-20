@@ -389,6 +389,27 @@
 
 ### Fixed
 
+- **A killed `iyi run` left the program it started running.** On POSIX
+  the runner traps SIGTERM and SIGHUP and passes them on; Windows
+  delivers neither, and `TerminateProcess` — what an editor's run lens,
+  a CI step and `taskkill /F` all use — runs no code in the runner at
+  all. Measured: `iyi run` on a program that listens, then
+  `taskkill /PID <runner> /F`, left the child alive with its port still
+  LISTENING. The bill came later, as `LNK1104: cannot open file
+  iyi-run-....exe`, because the orphan holds its own executable open and
+  the next build of that program cannot write it — which is what the
+  `std_http_server` failure in a local run had been all along.
+
+  The runner puts the program in a job object with
+  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE now: the kernel ends everything in
+  the job when the last handle to it closes, and a process closes its
+  handles however it died. The calls are the ones
+  `src/lib_c/x86_64-windows-msvc/c/jobapi2.cr` already binds. A Windows
+  that refuses the assignment (nested jobs before Windows 8) leaves the
+  old behaviour exactly as it was rather than failing the run.
+  `bench/windows_exercise.sh` kills a runner and asks the OS for the
+  port: it comes back now, and reads LISTENING with the job taken out.
+
 - **Expanding a relative path panicked on Windows.** `Path#expand` takes
   its base from `Program.env("PWD")` when none is given, and `PWD` is a
   POSIX shell's bookkeeping: cmd and PowerShell keep none. Measured from

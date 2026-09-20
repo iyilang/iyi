@@ -351,6 +351,78 @@ else
 fi
 
 echo
+echo "== every std module exercise runs from artifacts as it runs from source"
+# The other half of the question above. Writing an artifact is the
+# producer's side; this is R-1's consumer side, which nothing measured:
+# build each exercise with `--emit-iyimod`, build the same program again
+# with `--use-iyimod`, and compare what the two binaries print. Twenty-one
+# of the sixty did that when it was first asked, and the thirty-nine that
+# did not each named a different thing a module never carried — a class
+# hierarchy's `<`, a `@[Primitive]`, an enum's members, a body whose symbol
+# the consumer keys differently, the `using` written inside a reopened
+# type. Every one of those is a defect a consumer meets and no gate here
+# could see, because every other gate compiles its module from source.
+#
+# The output is compared and not merely the exit status: a program that
+# links against the wrong body runs fine and answers differently, which is
+# the failure this is most worth catching.
+unconsumable=""
+for source in "$REPO"/bench/std_*_exercise.iyi; do
+  name="$(basename "$source" .iyi)"
+  work="$WORK/r1/$name"
+  mkdir -p "$work/mods"
+  if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o from-source "$source") \
+       > "$work/emit.log" 2>&1; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
+    continue
+  fi
+  if ! (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
+       > "$work/use.log" 2>&1; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: $(grep -m1 -E 'Error|BUG|undefined' "$work/use.log" | cut -c1-140)"
+    continue
+  fi
+  "$work/from-source" > "$work/source.out" 2>&1
+  source_status=$?
+  "$work/from-artifact" > "$work/artifact.out" 2>&1
+  artifact_status=$?
+  if [ "$source_status" -ne "$artifact_status" ]; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: exits $artifact_status from its artifacts and $source_status from source"
+    sed -n '1,6p' "$work/artifact.out" | sed 's/^/    /'
+    continue
+  fi
+  # Two exercises print something no two builds can agree on, and for them
+  # the exit status is the whole of the promise: each raises on its own
+  # assertions, so a wrong answer is a non-zero exit either way.
+  #
+  #   * `std_gc_exercise` prints how many bytes a collection freed, which
+  #     is a property of what the build allocated and not of the program.
+  #   * `std_time_exercise` prints the clock.
+  #
+  # Named rather than guessed at. A rule that decided this by running the
+  # binary twice would pass the clock and still fail the collector, whose
+  # two runs agree with each other and not across builds.
+  case "$name" in
+    std_gc_exercise | std_time_exercise)
+      continue
+      ;;
+  esac
+  if ! cmp -s "$work/source.out" "$work/artifact.out"; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: runs differently from its artifacts"
+    diff "$work/source.out" "$work/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+  fi
+done
+if [ -n "$unconsumable" ]; then
+  echo "  FAIL: cannot be consumed as artifacts:$unconsumable"
+  status=1
+else
+  echo "  all sixty exercises answer the same from source and from artifacts"
+fi
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

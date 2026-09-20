@@ -803,6 +803,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # read them out of, so the text goes where an error will look for it.
     Iyi.register_iyi_declarations artifact_path, source
     @iyi_importing << artifact_path
+    # Where this module was written, for a `run` inside a macro that
+    # travelled — see `Program#iyi_artifact_source_paths`.
+    unless artifact.source_path.empty?
+      @program.iyi_artifact_source_paths[artifact_path] = artifact.source_path
+    end
     begin
       parsed_nodes = parser.parse
       parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)

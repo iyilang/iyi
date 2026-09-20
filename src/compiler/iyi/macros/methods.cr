@@ -21,6 +21,13 @@ module Iyi
       else
         begin
           relative_to = @location.try &.original_filename
+          # A macro that travelled in a `.iyimod` names its program the way
+          # the file that wrote it could, and that file is not the artifact:
+          # `std/eiy` writes `run("./eiy/process", …)`, which is beside
+          # `src/std/eiy.iyi`. See `Program#iyi_artifact_source_paths`.
+          if relative_to
+            relative_to = @program.iyi_artifact_source_paths[relative_to]? || relative_to
+          end
           found_filenames = @program.find_in_path(filename, relative_to)
         rescue ex
           return yield ex.message

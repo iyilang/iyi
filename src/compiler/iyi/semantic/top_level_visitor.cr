@@ -990,7 +990,16 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # The one place the top level still answers is a program that never writes a
   # module header: it is a single compilation unit, there is no other module
   # for an impl to have gone in, and the rule has nothing to say.
+  # Not asked of an impl that arrived from an artifact. R-3 is a rule about
+  # *who may write* an impl, and the module that wrote this one was held to
+  # it when it compiled; what arrives is the record of a check already
+  # passed. Asking again reads the declaration in the wrong place: an impl
+  # written inside the type it targets — `impl Comparable for Prerelease`
+  # inside `struct SemanticVersion` — is rendered at the module's own level,
+  # where the enclosing type is the module and not the struct, and
+  # `std/semantic_version` could not be consumed as an artifact at all.
   private def check_impl_coherence(node, trait_type, target_type)
+    return if node.trait.iyi_from_artifact?
     return if current_type.is_a?(Program)
 
     trait_module = trait_type.namespace

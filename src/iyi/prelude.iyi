@@ -259,6 +259,26 @@ end
     result >= 0_i64
   end
 
+  # The process's own working directory, for `Program.cwd`: `getcwd` is
+  # 79 on x86_64 and 17 on aarch64, and answers the length it wrote with
+  # the terminator in it, or a negative errno. The length this returns
+  # does not count the terminator, which is what a String wants.
+  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+    result = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(result)
+                    : "{rax}"(79_i64), "{rdi}"(buffer), "{rsi}"(size)
+                    : "rcx", "r11", "memory"
+                    : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(result)
+                   : "{x8}"(17_i64), "{x0}"(buffer), "{x1}"(size)
+                   : "memory"
+                   : "volatile")
+    {% end %}
+    result <= 0_i64 ? -1_i64 : result - 1_i64
+  end
+
   def __iyi_exit(status : Int32) : NoReturn
     {% if flag?(:x86_64) %}
       asm("syscall" :: "{rax}"(231_i64), "{rdi}"(status.to_i64) : "rcx", "r11", "memory" : "volatile")
@@ -288,6 +308,10 @@ end
     # other call in this block; the Linux arm above makes the `ioctl` by
     # hand because there is no libc there to ask.
     fun isatty(fd : Int32) : Int32
+    # The process's own working directory, for `Program.cwd`. Apple's
+    # `getcwd` fills the buffer and answers it, or null when the
+    # directory does not fit or has been removed.
+    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -308,6 +332,15 @@ end
 
   def __iyi_isatty(fd : Int32) : Bool
     LibC.isatty(fd) != 0
+  end
+
+  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+    return -1_i64 if LibC.getcwd(buffer, size).address == 0_u64
+    length = 0
+    while buffer[length] != 0_u8
+      length = length + 1
+    end
+    length.to_i64
   end
 
   def __iyi_open_read(path : UInt8*) : Int64
@@ -387,6 +420,12 @@ end
                             default_char : UInt8*, used_default : Int32*) : Int32
     fun GetFullPathNameW(name : UInt16*, buffer_count : Int32, buffer : UInt16*,
                          file_part : UInt16**) : Int32
+    # The process's own working directory, in UTF-16. `Path#expand` asked
+    # `PWD` for it and Windows' shells do not set that variable: measured
+    # from cmd, expanding a relative name panicked with "no base given and
+    # PWD is not set", and every program that expands a path it was handed
+    # went down with it.
+    fun GetCurrentDirectoryW(buffer_count : Int32, buffer : UInt16*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
   end
@@ -425,6 +464,22 @@ end
     fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
+    fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
+                               dw_milliseconds : Int32) : Int32
+    # The timer the poller's deadline needs. A millisecond timeout given to
+    # `GetQueuedCompletionStatus` is rounded up to the system timer tick,
+    # which is 15.6 ms unless something on the machine raised it: measured
+    # here, fifty one-millisecond waits took 15,707 us each and a hundred
+    # `sleep 1` calls took 1,577 ms instead of 100. A waitable timer made
+    # with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (0x2) takes 1,513 us for
+    # that millisecond and 10,393 for ten; the same object without the flag
+    # takes 15,879, so it is the flag that does the work.
+    fun CreateWaitableTimerExW(lp_timer_attributes : Void*, lp_timer_name : UInt16*,
+                               dw_flags : Int32, dw_desired_access : Int32) : Void*
+    fun SetWaitableTimer(h_timer : Void*, lp_due_time : Int64*, l_period : Int32,
+                         pfn_completion_routine : Void*, lp_arg_to_completion_routine : Void*,
+                         f_resume : Int32) : Int32
+    fun CancelWaitableTimer(h_timer : Void*) : Int32
     fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
     fun SwitchToThread : Int32
     fun GetActiveProcessorCount(group_number : UInt16) : Int32
@@ -853,6 +908,27 @@ end
     written.to_i64
   end
 
+  # The directory in UTF-8, the way every other platform answers it.
+  # `GetCurrentDirectoryW` writes the character count, or, when the
+  # buffer is too small, the count it needs with the terminator in it:
+  # anything over what was offered is a refusal here and the caller
+  # comes back with room.
+  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+    wide = Pointer(UInt16).malloc(4096_u64)
+    chars = LibC.GetCurrentDirectoryW(4096, wide)
+    if chars > 4096
+      wide = Pointer(UInt16).malloc(chars.to_u64)
+      chars = LibC.GetCurrentDirectoryW(chars, wide)
+    end
+    return -1_i64 if chars <= 0
+    needed = __iyi_utf8_size_from_wide(wide)
+    return -1_i64 if needed <= 0 || needed.to_u64 > size
+    written = __iyi_utf8_bytes_from_wide(wide, buffer, needed)
+    return -1_i64 if written <= 0
+    # The conversion counts the terminator it wrote; a String does not.
+    (written - 1).to_i64
+  end
+
   def __iyi_exit(status : Int32) : NoReturn
     LibC.ExitProcess(status)
   end
@@ -935,6 +1011,13 @@ end
   # guess would be the wrong kind of answer: no terminal, so no escapes.
   def __iyi_isatty(fd : Int32) : Bool
     false
+  end
+
+  # WASI has no working directory: a path is resolved against a
+  # preopened directory capability, and the sandbox never names one to
+  # the program. `Program.cwd` answers nil here.
+  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+    -1_i64
   end
 {% else %}
   {% raise "iyi: this target is not one iyi's prelude has platform bindings for. " \
@@ -8460,6 +8543,33 @@ class Program
       end
       nil
     {% end %}
+  end
+
+  # The directory the process is in, which is not what `PWD` says.
+  # `PWD` is a variable a shell keeps: cmd and PowerShell never set it,
+  # so on Windows every program that expanded a relative path panicked
+  # ("no base given and PWD is not set"), and on POSIX it is a copy that
+  # a program's own `Dir.cd` leaves behind. Nil when the platform has no
+  # answer — wasm32-wasi resolves a path against a preopened directory
+  # and names none — or when the directory is gone from under the
+  # process.
+  #
+  # 4096 bytes covers POSIX's PATH_MAX and Windows' MAX_PATH; the second
+  # try is for a Windows path built with `\\?\`, which reaches 32,767
+  # characters and up to three UTF-8 bytes each.
+  def self.cwd : String | Nil
+    answer = cwd_into(4096_u64)
+    return answer if answer.is_a?(String)
+    cwd_into(98304_u64)
+  end
+
+  private def self.cwd_into(size : UInt64) : String | Nil
+    buffer = Pointer(UInt8).malloc(size)
+    length = __iyi_getcwd(buffer, size)
+    return nil if length <= 0_i64
+    String.new(length.to_i32) do |target|
+      target.copy_from(buffer, length.to_i32)
+    end
   end
 
   private def self.string_from(entry : UInt8*) : String

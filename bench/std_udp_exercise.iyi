@@ -109,6 +109,23 @@ assert_int 65507, big_dg.data.size, "received max payload size"
 assert_true big_dg.data[0] == 0xAA_u8 && big_dg.data[32768] == 0x55_u8 && big_dg.data[65506] == 0xFF_u8, "payload contents intact"
 puts "  65,507-byte datagram sent and received intact"
 
+puts "\n== a datagram larger than the buffer the reader offered"
+# POSIX fills the buffer, drops the rest and answers what fit; Winsock
+# refuses the call with WSAEMSGSIZE and fills the buffer anyway, so
+# without an arm for it a Windows program panicked here with "cannot
+# receive from UDP socket" — measured, on a ten-byte datagram read with
+# a four-byte buffer. Both the immediate read and the parked one, since
+# on Windows those are two different calls.
+client.send_to("0123456789", "127.0.0.1", server_port)
+assert_true server.poll_read(1000), "a datagram to truncate is queued"
+short_now = server.receive?(4)
+assert_true !short_now.nil? && short_now.size == 4, "an immediate read answers the bytes that fit"
+
+client.send_to("0123456789", "127.0.0.1", server_port)
+short_parked = server.receive(4).or_panic
+assert_int 4, short_parked.size, "a parked read answers the bytes that fit"
+puts "  a ten-byte datagram read with a four-byte buffer answers four bytes"
+
 puts "\n== nothing queued: the ? variants answer nil, and a bounded wait ends"
 assert_true !server.poll_read(0), "poll_read is false when no data pending"
 assert_true server.receive_from?.nil?, "receive_from? is nil when nothing is queued"

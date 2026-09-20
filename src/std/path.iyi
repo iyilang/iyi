@@ -20,9 +20,9 @@
 # `to_windows` keeps the name, since Windows reads `/` as a separator).
 #
 # `expand(base, home:)` makes the path absolute under *base*, which is
-# `Program.env("PWD")` when not given — the prelude has no way to ask
-# the kernel for the working directory, so a program whose `PWD` is
-# unset or stale passes its own base; with no base at all `expand`
+# `Program.env("PWD")` when not given, and the process's own directory
+# when no shell set that — cmd and PowerShell never do, so on Windows
+# this used to panic on every relative path. With neither, `expand`
 # panics rather than guess. `home: true` reads a leading `~` from
 # `HOME`, or from `USERPROFILE` on Windows, which is where that platform
 # keeps it.
@@ -490,9 +490,10 @@ pub struct Path
   end
 
   # Absolute and normalized, under *base* when relative. *base* is
-  # `Program.env("PWD")` when not given, and a relative path with neither
-  # is refused. `home: true` reads a leading `~` from the home directory
-  # the platform names (see `home_directory`).
+  # `Program.env("PWD")` when not given, the process's own directory
+  # when nothing set that, and a relative path with neither is refused.
+  # `home: true` reads a leading `~` from the home directory the
+  # platform names (see `home_directory`).
   def expand(base : Path | String | Nil = nil, home : Bool = false) : Path
     name_str = @name
     if home && (name_str == "~" || name_str.starts_with?("~/") || (windows? && name_str.starts_with?("~\\")))
@@ -508,7 +509,14 @@ pub struct Path
                elsif base.is_a?(String)
                  Path.new(base, @kind)
                else
-                 pwd = Program.env("PWD") || raise "cannot expand #{@name.inspect}: no base given and PWD is not set"
+                 # `PWD` first, because a shell that keeps it keeps the
+                 # path the person walked, symlinks and all; the
+                 # process's own directory when there is none, which is
+                 # every Windows shell — cmd and PowerShell do not set
+                 # the variable, so this raised on a relative path there
+                 # rather than expanding it.
+                 pwd = Program.env("PWD") || Program.cwd ||
+                       raise "cannot expand #{@name.inspect}: no base given, and neither PWD nor the process's own directory answers"
                  Path.new(pwd, @kind)
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?

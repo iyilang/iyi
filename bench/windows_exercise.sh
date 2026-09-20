@@ -116,6 +116,198 @@ EOF
         status=1
       fi
     fi
+
+    # 2b. What a short sleep costs. Windows rounds a millisecond timeout
+    # up to the system timer tick, so the poller's own wait woke 15.6 ms
+    # after a `sleep 1` and a hundred of them took 1,577 ms; with the
+    # deadline on a high-resolution waitable timer the same hundred take
+    # 156 ms. The bar is 800 ms — far under the tick-rounded floor and
+    # five times over the measurement, so a loaded runner still passes.
+    # It can only fail short: another process on the machine may have
+    # raised the global timer resolution, and then even a poller without
+    # the timer would come in under the bar.
+    echo
+    echo "== A hundred one-millisecond sleeps =="
+    cat > "$WORK/naps.iyi" <<'EOF'
+module naps
+
+start = __iyi_monotonic_ns
+100.times { sleep(1) }
+puts "took " + ((__iyi_monotonic_ns - start) // 1000000_i64).to_s + " ms"
+EOF
+    if ! "$IYI" build -o "$WORK/naps.exe" "$WORK/naps.iyi" > "$WORK/naps.log" 2>&1; then
+      echo "  the sleep probe did not build"
+      tail -5 "$WORK/naps.log"
+      status=1
+    else
+      "$WORK/naps.exe" > "$WORK/naps.out" 2>&1 || true
+      took="$(sed -n 's/^took \([0-9]*\) ms$/\1/p' "$WORK/naps.out")"
+      if [ -n "$took" ] && [ "$took" -lt 800 ]; then
+        echo "  a hundred one-millisecond sleeps took ${took} ms"
+      else
+        echo "  a hundred one-millisecond sleeps did not come in under 800 ms:"
+        sed -n '1,3p' "$WORK/naps.out"
+        status=1
+      fi
+    fi
+
+    # 2c. The other half of that wait: a completion arriving while the
+    # deadline is armed. The poller waits on the port *and* the timer,
+    # because a high-resolution timer takes no completion routine to
+    # wake an alertable port wait with. A fiber parks on a read with no
+    # data, another writes fifty milliseconds later, and a third holds a
+    # one-second deadline open. Measured: 52 ms with the port in the
+    # wait, 150 with it taken out — the read then waits for whichever
+    # deadline comes next, which is the shape of the bug this would be.
+    echo
+    echo "== A completion under an armed deadline =="
+    cat > "$WORK/late.iyi" <<'EOF'
+module late
+
+import std/socket
+using std/socket::{IyiSocket}
+
+server = IyiSocket.listen(0)
+port = server.local_port
+
+group do |g|
+  g.spawn do
+    sleep(1000)
+  end
+
+  g.spawn do
+    conn = server.accept.or_panic
+    start = __iyi_monotonic_ns
+    conn.read(1024).or_panic
+    puts "read after " + ((__iyi_monotonic_ns - start) // 1000000_i64).to_s + " ms"
+    conn.close
+  end
+
+  g.spawn do
+    client = IyiSocket.connect("127.0.0.1", port).or_panic
+    sleep(50)
+    client.write("late\n")
+    sleep(100)
+    client.close
+  end
+end
+
+server.close
+EOF
+    if ! "$IYI" build -o "$WORK/late.exe" "$WORK/late.iyi" > "$WORK/late.log" 2>&1; then
+      echo "  the completion probe did not build"
+      tail -5 "$WORK/late.log"
+      status=1
+    else
+      "$WORK/late.exe" > "$WORK/late.out" 2>&1 || true
+      after="$(sed -n 's/^read after \([0-9]*\) ms$/\1/p' "$WORK/late.out")"
+      if [ -n "$after" ] && [ "$after" -lt 100 ]; then
+        echo "  the read came back after ${after} ms, not at the next deadline"
+      else
+        echo "  the read did not come back before the next deadline:"
+        sed -n '1,3p' "$WORK/late.out"
+        status=1
+      fi
+    fi
+
+    # 2d. The two variables a Windows shell does not set. `PWD` is a
+    # POSIX shell's bookkeeping — cmd and PowerShell keep none — and
+    # `expand` read it for the base of a relative path, so measured from
+    # cmd every such call panicked with "no base given and PWD is not
+    # set". `TEMP` and `TMP` are usually there, and when they are not
+    # the last resort was the literal `C:\Windows\Temp`, which a
+    # standard user may not write to. Both answers come from the
+    # platform now: the process's own directory, and `GetTempPathW`.
+    echo
+    echo "== Without the variables a POSIX shell sets =="
+    cat > "$WORK/bare.iyi" <<'EOF'
+module bare
+
+import std/dir
+import std/file
+import std/path
+using std/dir::{Dir}
+using std/file::{File}
+using std/path::{Path}
+
+puts "expanded " + Path["relative.txt"].expand.to_s
+scratch = Dir.tempdir + "\\iyi_windows_exercise_scratch"
+written = File.write(scratch, "scratch")
+if written.is_a?(Error)
+  puts "tempdir refused " + scratch + ": " + written.message
+else
+  puts "wrote under " + Dir.tempdir
+  File.delete(scratch)
+end
+EOF
+    if ! "$IYI" build -o "$WORK/bare.exe" "$WORK/bare.iyi" > "$WORK/bare.log" 2>&1; then
+      echo "  the bare-environment probe did not build"
+      tail -5 "$WORK/bare.log"
+      status=1
+    else
+      ( cd "$WORK" && env -u PWD -u TMPDIR -u TEMP -u TMP "$WORK/bare.exe" ) \
+        > "$WORK/bare.out" 2>&1 || true
+      if grep -q "^expanded .*relative.txt$" "$WORK/bare.out" &&
+         grep -q "^wrote under " "$WORK/bare.out"; then
+        sed -n 's/^/  /p' "$WORK/bare.out"
+      else
+        echo "  a program without PWD, TEMP and TMP did not get platform answers:"
+        sed -n '1,4p' "$WORK/bare.out"
+        status=1
+      fi
+    fi
+
+    # 2e. What a killed `iyi run` leaves behind. On POSIX the runner
+    # traps SIGTERM and passes it on; Windows delivers nothing to trap
+    # and `TerminateProcess` — which is what an editor, a CI step and
+    # `taskkill /F` use — runs no code in the runner at all. Measured
+    # before the job object: killing the runner left the program alive
+    # and its port LISTENING, and the next build of the same program
+    # failed to link, because the orphan holds its own exe open. The
+    # runner puts the program in a job with
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE now, so the kernel ends it.
+    echo
+    echo "== A killed runner takes its program with it =="
+    cat > "$WORK/holds.iyi" <<'EOF'
+module holds
+
+import std/socket
+using std/socket::{IyiSocket}
+
+server = IyiSocket.listen(0)
+puts "listening on " + server.local_port.to_s
+slept = 0
+while slept < 600
+  sleep(100)
+  slept = slept + 1
+end
+server.close
+EOF
+    "$IYI" run "$WORK/holds.iyi" > "$WORK/holds.out" 2>&1 &
+    runner=$!
+    held=""
+    for _ in $(seq 1 90); do
+      held="$(sed -n 's/^listening on \([0-9]*\)$/\1/p' "$WORK/holds.out")"
+      [ -n "$held" ] && break
+      sleep 1
+    done
+    if [ -z "$held" ]; then
+      echo "  the program never came up under the runner"
+      sed -n '1,5p' "$WORK/holds.out"
+      status=1
+    else
+      # `kill -9` from this shell is TerminateProcess on a native
+      # process: the unblockable kill, which is the whole point.
+      kill -9 "$runner" 2>/dev/null || true
+      wait "$runner" 2>/dev/null || true
+      sleep 3
+      if netstat -ano | grep "LISTENING" | grep -q ":$held "; then
+        echo "  the program outlived its runner and still holds port $held"
+        status=1
+      else
+        echo "  the runner was killed and port $held came back"
+      fi
+    fi
     ;;
 esac
 

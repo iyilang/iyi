@@ -514,6 +514,21 @@ class Iyi::Command
             Signal::TERM.trap { process.terminate rescue nil }
             Signal::HUP.trap { process.terminate rescue nil }
           {% end %}
+
+          # iyi: Windows delivers no signal to trap, and `TerminateProcess`
+          # — which is what an editor, a CI step or `taskkill /F` uses —
+          # runs no code in this process at all. Measured: `iyi run` on a
+          # program that listens, then `taskkill /PID <runner> /F`, left
+          # the child alive and the port still LISTENING; the next build
+          # of the same program then failed to link, because the orphan
+          # holds its own exe open (`LNK1104: cannot open file
+          # iyi-run-....exe`). The kernel's own answer is a job object
+          # with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: the last handle to
+          # the job closing kills everything in it, and a dying process
+          # closes its handles however it died.
+          {% if flag?(:win32) %}
+            kill_child_with_runner(process)
+          {% end %}
         end
       end
       {$?, elapsed}
@@ -558,6 +573,44 @@ class Iyi::Command
 
     exit 1
   end
+
+  {% if flag?(:win32) %}
+    # iyi: the job this runner's child lives in. Every call is one
+    # `src/lib_c/x86_64-windows-msvc/c/jobapi2.cr` already binds, and the
+    # handle is kept in a class variable because a job dies with its last
+    # handle: a local would be closed by the collector and take the
+    # running program with it while `iyi run` was still waiting for it.
+    @@run_job : Void* = Pointer(Void).null
+
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which winnt.cr does not spell.
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000_u32
+
+    private def kill_child_with_runner(process)
+      job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+      return if job.null?
+      limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
+      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
+           pointerof(limits).as(Void*),
+           sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION).to_u32) == 0
+        LibC.CloseHandle(job)
+        return
+      end
+      # PROCESS_TERMINATE | PROCESS_SET_QUOTA, which is what assigning asks for.
+      handle = LibC.OpenProcess(0x0001_u32 | 0x0100_u32, 0, process.pid.to_u32)
+      if handle.null?
+        LibC.CloseHandle(job)
+        return
+      end
+      assigned = LibC.AssignProcessToJobObject(job, handle)
+      LibC.CloseHandle(handle)
+      if assigned == 0
+        LibC.CloseHandle(job)
+        return
+      end
+      @@run_job = job
+    end
+  {% end %}
 
   record CompilerConfig,
     compiler : Compiler,

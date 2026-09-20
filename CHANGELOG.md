@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,383 lines**, and the
-  library is **3,258** of 3,734 with 476 to spare. `4,641` is what opening
+  a conditional, `else` included - which is **1,466 lines**, and the
+  library is **3,285** of 3,734 with 449 to spare. `4,751` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -389,6 +389,120 @@
 
 ### Fixed
 
+- **A datagram larger than the buffer killed the program on Windows.**
+  POSIX fills the buffer, drops the rest and answers what fit; Winsock
+  refuses the same call with WSAEMSGSIZE (10040) and fills the buffer
+  anyway. Measured: a ten-byte datagram read with a four-byte buffer
+  panicked with `cannot receive from UDP socket` where every other
+  platform answered four bytes — and on the parked path, where Windows
+  completes a posted `WSARecvFrom` instead, the same datagram came back
+  as `Cancelled`, which says no datagram arrived when one had.
+
+  `__is_msgsize` is the refusal by name, false on every other platform,
+  and both receive paths answer the capacity the caller offered. The
+  `std/udp` exercise reads a ten-byte datagram with a four-byte buffer
+  twice, immediately and parked: four bytes each, on every platform, and
+  the panic above without the arm.
+
+- **A killed `iyi run` left the program it started running.** On POSIX
+  the runner traps SIGTERM and SIGHUP and passes them on; Windows
+  delivers neither, and `TerminateProcess` — what an editor's run lens,
+  a CI step and `taskkill /F` all use — runs no code in the runner at
+  all. Measured: `iyi run` on a program that listens, then
+  `taskkill /PID <runner> /F`, left the child alive with its port still
+  LISTENING. The bill came later, as `LNK1104: cannot open file
+  iyi-run-....exe`, because the orphan holds its own executable open and
+  the next build of that program cannot write it — which is what the
+  `std_http_server` failure in a local run had been all along.
+
+  The runner puts the program in a job object with
+  JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE now: the kernel ends everything in
+  the job when the last handle to it closes, and a process closes its
+  handles however it died. The calls are the ones
+  `src/lib_c/x86_64-windows-msvc/c/jobapi2.cr` already binds. A Windows
+  that refuses the assignment (nested jobs before Windows 8) leaves the
+  old behaviour exactly as it was rather than failing the run.
+  `bench/windows_exercise.sh` kills a runner and asks the OS for the
+  port: it comes back now, and reads LISTENING with the job taken out.
+
+- **Expanding a relative path panicked on Windows.** `Path#expand` takes
+  its base from `Program.env("PWD")` when none is given, and `PWD` is a
+  POSIX shell's bookkeeping: cmd and PowerShell keep none. Measured from
+  cmd, `Path["x.txt"].expand` died with `cannot expand "x.txt": no base
+  given and PWD is not set` — every program on that platform that
+  expanded a path it was handed, and the same in a service, a scheduled
+  task or anything else started without a shell.
+
+  The prelude answers it now. `Program.cwd` is the process's own
+  directory beside `Program.args` and `Program.env`, which are its other
+  facts: `getcwd` (79 on x86_64, 17 on aarch64) on Linux, libSystem's on
+  darwin, `GetCurrentDirectoryW` on Windows, and nil on wasm32-wasi,
+  which resolves a path against a preopened directory and names none.
+  `expand` reads `PWD` first — a shell that keeps it keeps the path the
+  person walked, symlinks and all — and asks the process when nothing
+  set it. From cmd the same call now answers
+  `C:\Users\dogru\playground\iyi\x.txt`.
+
+  `Dir.current` was the other copy of that walk and is one line now, so
+  the platform arms exist once. `std/path` could not have called it: a
+  cycle, since `std/dir` imports `std/path`, which is why the header
+  there said the prelude had no way to ask the kernel for the working
+  directory. It has one.
+
+- **`Dir.tempdir` named `C:\Windows\Temp`.** With `TMPDIR`, `TEMP` and
+  `TMP` all unset — which is a service, or any program not started from
+  a shell — the last resort was that literal, a directory a standard
+  user may not write to. Windows keeps the question itself:
+  `GetTempPathW` answers `TMP`, then `TEMP`, then the profile directory,
+  measured with both variables cleared as `C:\Users\dogru\`. The
+  trailing separator the call always writes is dropped, since no other
+  branch of `tempdir` carries one.
+
+  `bench/windows_exercise.sh` runs a program with `PWD`, `TMPDIR`,
+  `TEMP` and `TMP` all removed: it must expand a relative name and write
+  a file under `Dir.tempdir`. Before the fix that step reads the panic
+  above.
+
+- **A short sleep on Windows was fifteen times what the program asked
+  for.** The poller waits on its completion port with a millisecond
+  timeout, and Windows rounds that up to the system timer tick, which is
+  15.6 ms on a machine where nothing raised it. Measured here, before:
+
+      asked 1 ms, slept 15,441 us      asked 10 ms, slept 15,932 us
+      asked 2 ms, slept 15,701 us      asked 16 ms, slept 26,903 us
+      asked 5 ms, slept 15,770 us      asked 50 ms, slept 63,080 us
+
+  A hundred `sleep 1` calls took 1,577 ms. It is the platform's floor and
+  not the port's: `Sleep(1)` takes 15,609 us and the port's own
+  `GetQueuedCompletionStatus(1)` takes 15,707 on this machine.
+
+  The deadline is a waitable timer now, created with
+  CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, which keeps the millisecond
+  (1,513 us measured, and 10,393 for ten); the same object without the
+  flag takes 15,879, so the flag is the whole reason to ask. The wake is
+  a wait on the port *and* the timer rather than the timer's completion
+  routine, because a high-resolution timer refuses one —
+  `SetWaitableTimer` with a routine answers 0 and ERROR_INVALID_PARAMETER
+  on this timer and 1 on a plain one — and a completion port is a
+  waitable object: a packet posted to an idle port signals its handle in
+  1 us. The millisecond timeout stays on the wait as the backstop, so a
+  port that did not signal costs the deadline the program asked for and
+  never a hung poller, and a Windows too old for the flag (it arrived in
+  10 1803) keeps exactly the wait it had. After:
+
+      asked 1 ms, slept 1,538 us       asked 10 ms, slept 10,141 us
+      asked 2 ms, slept 2,402 us       asked 16 ms, slept 16,177 us
+      asked 5 ms, slept 5,071 us       asked 50 ms, slept 50,469 us
+
+  A hundred `sleep 1` calls take 156 ms. `bench/windows_exercise.sh`
+  gates it at 800 ms — under the tick-rounded floor, five times over the
+  measurement — and the gate reads 1,568 ms with the timer taken out. The
+  other half of the wait is gated beside it: a fiber parks on a read with
+  no data, another writes fifty milliseconds later, a third holds a
+  one-second deadline open, and the read comes back after 52 ms. With the
+  port taken out of the wait pair it comes back after 150 — at whichever
+  deadline lands next, which is what a poller that hears only its timer
+  does.
 - **A `lib` the module declares did not travel, and the gate now asks
   four other platforms whether one does.** A `fun` is not a symbol this
   artifact answers for — the system linker resolves `opendir` against
@@ -411,7 +525,6 @@
   a `lib` those are the compiler's, and a `fun` whose C name is not an
   identifier is quoted — `std/math` binds `llvm.copysign.f32`, and
   written bare the parser stopped on the first dot.
-
 - **All sixty std module exercises now round-trip through `.iyimod`, and
   the gate that says so is new.** `bench/std_exercise.sh` asked whether
   every module under `src/std` *writes* an artifact, which is the
@@ -1129,9 +1242,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,383** and **3,258**, held to the sentences that quote
+  without it: **1,466** and **3,285**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 907 over, as the library with
+  breach is still what the floor costs — 1,017 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -4288,7 +4401,7 @@ Identity is the released version, as ever: a 0.9.0 artifact is rejected by a
   1.33 s against 0.33, churn 0.32 against 0.061 and live churn 0.33
   against 0.124 (a ten-core M2 Pro, interleaved, min of nine; 0.9.0
   measures 0.30, 0.082 and 0.116 there). The longer wait costs the
-  round nothing - the helpers take 13,258 slices against the short
+  round nothing - the helpers take 13,285 slices against the short
   wait's 10,292, and leave the allocating thread 34 against the 471
   it swept with no retry at all.
 
@@ -7997,7 +8110,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,697-line library and nothing else. Every other
+  written against iyi's own 15,907-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

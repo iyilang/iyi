@@ -23,11 +23,16 @@ using std/path::{Path}
   lib LibKernel32
     fun CreateDirectoryW(path : UInt16*, sec : Void*) : Int32
     fun RemoveDirectoryW(path : UInt16*) : Int32
-    fun GetCurrentDirectoryW(buf_len : UInt32, buf : UInt16*) : UInt32
     fun SetCurrentDirectoryW(path : UInt16*) : Int32
     fun FindFirstFileW(pattern : UInt16*, data : Void*) : Void*
     fun FindNextFileW(handle : Void*, data : Void*) : Int32
     fun FindClose(handle : Void*) : Int32
+    # Where Windows itself says a program may write scratch files. The
+    # last resort here was the literal `C:\Windows\Temp`, which a
+    # standard user may not write to; this call answers TMP, then TEMP,
+    # then the profile directory — measured with both variables cleared,
+    # `C:\Users\dogru\`, which the person running the program owns.
+    fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
   end
 
   # The `*A` twins of the calls above read a path in the process's active code
@@ -343,40 +348,12 @@ pub class Dir
 
   # Class-level directory helpers
 
+  # One implementation, in the prelude: `Path#expand` needs the same
+  # answer and cannot import this module (`std/dir` imports `std/path`),
+  # so the platform arms live beside `Program.args` and `Program.env`,
+  # which are the process's other facts.
   def self.current : String
-    {% if flag?(:darwin) || flag?(:linux) %}
-      buf = Pointer(UInt8).malloc(4096_u64)
-      res = LibC.getcwd(buf, 4096_u64)
-      if res.address == 0_u64
-        raise "Error getting current working directory"
-      end
-      len = 0
-      while res[len] != 0_u8
-        len = len + 1
-      end
-      String.new(len) { |t| t.copy_from(res, len) }
-    {% elsif flag?(:win32) %}
-      # GetCurrentDirectoryW answers the character count it wrote, or, when
-      # the buffer is too small, the count it needs with the terminator in
-      # it — which is how a current directory past 4096 characters is still
-      # read out rather than truncated. 0 is the only failure.
-      wide = Pointer(UInt16).malloc(4096_u64)
-      chars = LibKernel32.GetCurrentDirectoryW(4096_u32, wide)
-      if chars > 4096_u32
-        wide = Pointer(UInt16).malloc(chars.to_u64)
-        chars = LibKernel32.GetCurrentDirectoryW(chars, wide)
-      end
-      if chars == 0_u32
-        raise "Error getting current working directory"
-      end
-      size = __iyi_utf8_size_from_wide(wide)
-      if size <= 0
-        raise "Error getting current working directory"
-      end
-      String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
-    {% else %}
-      "/"
-    {% end %}
+    Program.cwd || raise "Error getting current working directory"
   end
 
   def self.current=(path : String | Path) : String
@@ -413,7 +390,17 @@ pub class Dir
     tmp3 = Program.env("TMP")
     return tmp3 if tmp3 && !tmp3.empty?
     {% if flag?(:win32) %}
-      "C:\\Windows\\Temp"
+      # Windows' own answer, not a literal: `C:\Windows\Temp` is a
+      # directory a standard user may not write to, and the platform
+      # keeps the question. The call always ends its answer with a
+      # separator, which no other branch here does.
+      wide = Pointer(UInt16).malloc(4096_u64)
+      chars = LibKernel32.GetTempPathW(4096, wide)
+      return "C:\\Windows\\Temp" if chars <= 0 || chars > 4096
+      size = __iyi_utf8_size_from_wide(wide)
+      return "C:\\Windows\\Temp" if size <= 1
+      answer = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
+      answer.ends_with?("\\") ? answer[0, answer.bytesize - 1] : answer
     {% else %}
       "/tmp"
     {% end %}

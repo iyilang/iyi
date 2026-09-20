@@ -182,6 +182,14 @@ pub class UdpSocket
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
       next if count < 0_i64 && UdpSocket.__is_eintr(count)
       return count.to_i32 if count >= 0_i64
+      # A datagram larger than the buffer. POSIX fills the buffer, drops
+      # the rest and answers the bytes it wrote; Winsock refuses the call
+      # with WSAEMSGSIZE and fills the buffer anyway. Measured before
+      # this line: a ten-byte datagram read with a four-byte buffer
+      # panicked with "cannot receive from UDP socket" on Windows and
+      # answered four bytes everywhere else, so a program whose peer sent
+      # more than it asked for died on one platform only.
+      return capacity if UdpSocket.__is_msgsize(count)
       raise "cannot receive from UDP socket" unless UdpSocket.__is_eagain(count)
       {% if flag?(:win32) %}
         # Windows' readable-wait is destructive on a datagram socket: the
@@ -208,6 +216,7 @@ pub class UdpSocket
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
       next if count < 0_i64 && UdpSocket.__is_eintr(count)
       return count.to_i32 if count >= 0_i64
+      return capacity if UdpSocket.__is_msgsize(count)
       return nil if UdpSocket.__is_eagain(count)
       raise "cannot receive from UDP socket"
     end
@@ -753,6 +762,12 @@ pub class UdpSocket
     def self.__is_eintr(res : Int64) : Bool
       res < 0_i64 && LibC.__error.value == 4
     end
+
+    # No such refusal: a datagram larger than the buffer fills it, the
+    # rest is dropped and the length answered is what fit.
+    def self.__is_msgsize(res : Int64) : Bool
+      false
+    end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
     AF_INET6        = 10
     SOL_SOCKET         = 1
@@ -914,6 +929,11 @@ pub class UdpSocket
 
     def self.__is_eintr(res : Int64) : Bool
       res == -4_i64 # -EINTR on Linux
+    end
+    # No such refusal: a datagram larger than the buffer fills it, the
+    # rest is dropped and the length answered is what fit.
+    def self.__is_msgsize(res : Int64) : Bool
+      false
     end
 
   {% elsif flag?(:win32) %}
@@ -1102,8 +1122,12 @@ pub class UdpSocket
         return Cancelled.new
       end
       # The socket was closed under the park: a close does complete a posted
-      # receive, and no datagram arrived, which is the same answer.
+      # receive, and no datagram arrived, which is the same answer. A
+      # datagram too large for the buffer ends the same operation with
+      # WSAEMSGSIZE, and that one *did* arrive: the buffer holds its first
+      # bytes, which is the answer POSIX gives without an error at all.
       result = __sys_overlapped_result(s, ov)
+      return capacity if __is_msgsize(result)
       return Cancelled.new if result < 0_i64
       result.to_i32
     end
@@ -1190,6 +1214,13 @@ pub class UdpSocket
     def self.__is_eintr(res : Int64) : Bool
       false
     end
+
+    # A datagram that did not fit is an error here where it is a silent
+    # truncation everywhere else: WSAEMSGSIZE (10040), with the buffer
+    # already filled, which is why the caller answers its capacity.
+    def self.__is_msgsize(res : Int64) : Bool
+      res == -10040_i64
+    end
   {% else %}
     AF_INET6          =     10
     SOL_SOCKET        =      1
@@ -1250,6 +1281,12 @@ pub class UdpSocket
     end
 
     def self.__is_eintr(res : Int64) : Bool
+      false
+    end
+
+    # No such refusal: a datagram larger than the buffer fills it, the
+    # rest is dropped and the length answered is what fit.
+    def self.__is_msgsize(res : Int64) : Bool
       false
     end
   {% end %}

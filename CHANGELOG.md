@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,145 lines**, and the
-  library is **3,210** of 3,734 with 524 to spare. `4,355` is what opening
+  a conditional, `else` included - which is **1,383 lines**, and the
+  library is **3,258** of 3,734 with 476 to spare. `4,641` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -389,6 +389,57 @@
 
 ### Fixed
 
+- **A line typed into a Windows console was read in the code page too.**
+  The write side became `WriteConsoleW` two branches ago and the read
+  side stayed `ReadFile`, which on a console handle answers the *active
+  code page*: measured on a real console under code page 437, typing
+  `Türkçe-日本` — fifteen bytes of UTF-8 — gave the program eleven bytes,
+  `T?rk?e-??`, with `ü` and `ç` folded to one byte each and the two
+  Japanese characters gone. `IyiConsole.read` uses `ReadConsoleW` now and
+  converts back through Windows' own conversion; the same line arrives as
+  its seventeen bytes (fifteen, and the CR and LF the console adds). The
+  wide buffer is a third of the caller's, which is the bound that cannot
+  overflow it — a character of the basic plane is at most three UTF-8
+  bytes, a surrogate pair two wide characters for four — so a longer line
+  is read in pieces, which is what reading a stream does anyway.
+
+  A redirected stdin is untouched and still byte-transparent: sixteen
+  bytes of UTF-8 through `< file` arrive as the same sixteen. The console
+  half cannot be gated here — a runner has no console attached, and the
+  measurement above needed a pseudo-terminal — so the gate covers the
+  pipe and this entry carries the console evidence.
+
+- **A Windows program could not be told anything it could not spell in a
+  code page.** Two surfaces, one cause, both measured from PowerShell so
+  what was sent really was UTF-16:
+
+  - **Arguments.** `ARGV_UNSAFE` is the C runtime's `argv`, which is the
+    *ANSI* command line: `ünïcode-çğış` arrived as `ünïcode-çgis` —
+    `ğ`, `ı` and `ş` replaced by the code page's best-fit letters — and
+    `日本` as `??`, so a file named in an argument named a different file
+    or none. `Program.args` reads `GetCommandLineW` now and splits it
+    itself, by Microsoft's own rules (2n backslashes before a quote are n
+    and the quote toggles, 2n+1 are n and a literal quote, `""` inside
+    quotes is a literal quote), because `CommandLineToArgvW` lives in
+    shell32 and a second DLL is a floor this library does not move.
+    Checked against `CommandLineToArgvW` itself on seven command lines —
+    quotes, doubled quotes, trailing backslashes, an empty argument, tabs
+    and non-ASCII — seven of seven identical.
+  - **The environment.** The CRT's `_environ` is the ANSI environment,
+    so `değer-日本` read back as `deger-??`; and the worse half, which
+    the reading defect hid: `ENV[]=` *wrote* the CRT's table, which
+    `CreateProcess` does not copy, so a variable an iyi program set was
+    never in the block a child inherits — proven with a probe reading
+    both tables, where the Win32 block answered nil for a variable the
+    CRT table held. Windows' own block is the single source of truth now:
+    `GetEnvironmentVariableW` to read, `SetEnvironmentVariableW` to write
+    and delete, `GetEnvironmentStringsW` to enumerate. A name or value
+    that is not valid UTF-8 answers nil rather than half a conversion,
+    and a write with one is refused by name.
+
+  `bench/windows_exercise.sh` gates both: an 18-byte argument and a
+  13-byte variable arrive whole, and the step runs only on Windows,
+  because everywhere else the bytes are the bytes.
 - **The first completion after the language server replaced its worker
   came back empty.** `iyi lsp` runs two processes and retires the one
   that compiles — on a memory bound, or after a pause — handing its
@@ -668,7 +719,6 @@
   `spec/compiler/iyimod_spec.cr` holds it: the module's source is
   deleted before the consuming build and the program is run, because a
   constant that arrives declared and never initialised answers zero.
-
 - **One empty collection answered 0 and another panicked, in the same
   program.** `Set(Int32).new.sum` was `0` and `([] of Int32).sum` was
   `iyi: panic: sum of an empty array`: the prelude's own `Array#sum`
@@ -705,7 +755,6 @@
   not expected to be invoked with a block" was a full stop one word
   from the answer. The pair is looked up on the receiver rather than
   listed, so it cannot go stale.
-
 - **Installing iyi over iyi left the last release's files in the
   library, and that is a broken `--crystal`.** `install.sh` unpacked the
   tarball into the prefix, and `tar` knows nothing about files a release
@@ -822,9 +871,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,145** and **3,210**, held to the sentences that quote
+  without it: **1,383** and **3,258**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 621 over, as the library with
+  breach is still what the floor costs — 907 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -7690,7 +7739,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,450-line library and nothing else. Every other
+  written against iyi's own 15,697-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

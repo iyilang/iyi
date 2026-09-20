@@ -67,6 +67,58 @@ else
   status=1
 fi
 
+# 2a. What the program was told: an argument and an environment variable
+# that the active code page has no letters for. The C runtime's `argv` and
+# `environ` are the ANSI ones — measured, `ünïcode-çğış` arrived as
+# `ünïcode-çgis` and `日本` as `??` — so `Program.args` reads
+# `GetCommandLineW` and splits it itself, and the variable is read from
+# Windows' own block. Only on Windows: everywhere else the bytes are the
+# bytes and there is nothing to lose.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo
+    echo "== A non-ASCII argument and variable survive =="
+    cat > "$WORK/told.iyi" <<'EOF'
+module told
+
+n = 0
+while n < Program.args.size
+  a = Program.args[n]
+  puts "arg " + n.to_s + ": " + a + " " + a.bytesize.to_s
+  n = n + 1
+end
+v = Program.env("IYI_TOLD")
+puts "env: " + (v ? v : "(none)") + " " + (v ? v.bytesize.to_s : "0")
+EOF
+    if ! "$IYI" build -o "$WORK/told.exe" "$WORK/told.iyi" > "$WORK/told.log" 2>&1; then
+      echo "  the argument probe did not build"
+      tail -5 "$WORK/told.log"
+      status=1
+    else
+      # The value travels as UTF-8 from this shell; `printf` keeps the
+      # bytes, and a `.bat` would not — cmd reads its own file in the OEM
+      # code page and would mangle the literal before the program ran.
+      told="$(printf 'de\xc4\x9fer-\xe6\x97\xa5\xe6\x9c\xac')"
+      arg="$(printf '\xc3\xbcn\xc3\xafcode-\xc3\xa7\xc4\x9f\xc4\xb1\xc5\x9f')"
+      IYI_TOLD="$told" "$WORK/told.exe" "$arg" > "$WORK/told.out" 2>&1 || true
+      if grep -q "arg 0: $arg 18" "$WORK/told.out"; then
+        echo "  the argument arrived whole, 18 bytes"
+      else
+        echo "  the argument did not arrive whole:"
+        sed -n '1,3p' "$WORK/told.out"
+        status=1
+      fi
+      if grep -q "env: $told 13" "$WORK/told.out"; then
+        echo "  the variable arrived whole, 13 bytes"
+      else
+        echo "  the variable did not arrive whole:"
+        grep "^env:" "$WORK/told.out" || true
+        status=1
+      fi
+    fi
+    ;;
+esac
+
 # 3. Proving Checks Can Fail (Patched copy trick)
 echo
 echo "== Proving Checks Can Fail =="

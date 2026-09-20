@@ -70,6 +70,24 @@ Run `where.sh` for the current list. As of this writing:
 | `yield` and the block a def declares | generics, std_iterator |
 | the remaining call shapes | io, webapp, grid, sessions |
 
+## The semantic pass
+
+`semantic/oracle.cr` is the first slice's oracle, and the slice is what a
+file *declares*: for each type, its kind, its path, its parameters and its
+methods. It already says something the parser cannot, which is the point
+of the stage: a `struct Box` with `impl Show for Box` beside it answers
+`show`, because the impl attached it.
+
+```
+bin/crystal run selfhost/semantic/oracle.cr -- samples/iyi/hello.iyi
+```
+
+It runs the pass on one file with no imports resolved, so 24 of the 27
+samples answer and three do not. Those three are the measure of what
+resolving imports would add, and they fail rather than being skipped.
+
+The port side of this slice is not written yet.
+
 After the parser: the semantic pass, then codegen, then the bootstrap,
 each differentially tested the same way. The bootstrap is the acceptance
 test and it is available from the first day the port parses anything: the

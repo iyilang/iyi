@@ -321,7 +321,7 @@ pub class Lexer
        two == "*=" || two == "/=" || two == "%=" || two == "|=" ||
        two == "&=" || two == "^=" || two == "<<" || two == ">>" ||
        two == "=~" || two == "!~" || two == "&+" || two == "&-" ||
-       two == "&*"
+       two == "&*" || two == "**"
       advance
       advance
       return Token.new(two, line, col, two)
@@ -444,6 +444,18 @@ end
 
 pub struct CharNode
   def initialize
+  end
+end
+
+pub class BreakNode
+  getter value : Array(Node)
+  def initialize(@value : Array(Node))
+  end
+end
+
+pub class NextNode
+  getter value : Array(Node)
+  def initialize(@value : Array(Node))
   end
 end
 
@@ -666,7 +678,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                  UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
-                 WhenNode | CaseNode
+                 WhenNode | CaseNode | BreakNode | NextNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -772,6 +784,20 @@ end
 impl Sexp for CharNode
   def sexp : String
     "(charliteral)"
+  end
+end
+
+impl Sexp for BreakNode
+  def sexp : String
+    return "(break)" if value.size == 0
+    "(break #{value[0].sexp})"
+  end
+end
+
+impl Sexp for NextNode
+  def sexp : String
+    return "(next)" if value.size == 0
+    "(next #{value[0].sexp})"
   end
 end
 
@@ -1214,6 +1240,21 @@ pub class Parser
         return with_modifiers(parse_while(word.value == "until"))
       end
     end
+    if peek.kind == "IDENT" && (peek.value == "break" || peek.value == "next")
+      word = advance.value
+      value = [] of Node
+      unless at_end? || peek.kind == "NEWLINE" ||
+             (peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless"))
+        value << parse_expression
+      end
+      node = if word == "break"
+               BreakNode.new(value).as(Node)
+             else
+               NextNode.new(value).as(Node)
+             end
+      return with_modifiers(node)
+    end
+
     if peek.kind == "IDENT" && peek.value == "return"
       advance
       value = [] of Node
@@ -1613,6 +1654,22 @@ pub class Parser
       end
     end
 
+    # `side += 1` is an assignment of a call, which is what the current
+    # parser builds: the operator is the method and the variable is both
+    # the target and the receiver.
+    op = peek.kind
+    if op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "%=" ||
+       op == "|=" || op == "&=" || op == "^=" || op == "<<=" || op == ">>="
+      advance
+      right = parse_binary(0)
+      method = op[0, op.size - 1]
+      call = CallNode.new(method, [left] of Node, [right] of Node).as(Node)
+      case left
+      when VarNode then @locals << left.name
+      end
+      return AssignNode.new([left] of Node, [call] of Node).as(Node)
+    end
+
     if peek.kind == "="
       advance
       value = parse_binary(0)
@@ -1635,7 +1692,9 @@ pub class Parser
   # Tighter binds higher. `||` loosest, then `&&`, then the comparisons,
   # then the arithmetic: `a + 1 > b && c` groups the way it reads.
   def precedence(op : String) : Int32
-    if op == "*" || op == "/" || op == "%"
+    if op == "**"
+      7
+    elsif op == "*" || op == "/" || op == "%"
       6
     elsif op == "+" || op == "-"
       5
@@ -1731,6 +1790,26 @@ pub class Parser
     skip_do_block
   end
 
+  # `.map &.abs` is a block written as a shorthand, and it is not an
+  # argument: reading it as one made `&` a variable and `.abs` a call on
+  # it. Answers whether it consumed one.
+  def skip_short_block? : Bool
+    return false unless peek.kind == "&" && peek_at(1).kind == "."
+    advance                      # &
+    advance                      # .
+    advance                      # the method name
+    if peek.kind == "("
+      advance
+      depth = 1
+      while !at_end? && depth > 0
+        k = advance.kind
+        depth = depth + 1 if k == "("
+        depth = depth - 1 if k == ")"
+      end
+    end
+    true
+  end
+
   # `a.b(c).d` is a chain of calls on the thing before the dot. Applied to
   # every primary, because a receiver can be a literal, a paren group or a
   # call as easily as a variable.
@@ -1763,11 +1842,13 @@ pub class Parser
       if peek.kind == "("
         advance
         while peek.kind != ")" && !at_end?
+          next if skip_short_block?
           args << parse_expression
           advance if peek.kind == ","
         end
         advance
       end
+      skip_short_block?
       skip_block
       result = CallNode.new(name, [result] of Node, args).as(Node)
     end
@@ -1937,6 +2018,7 @@ pub class Parser
         advance
         args = [] of Node
         while peek.kind != ")" && !at_end?
+          next if skip_short_block?
           args << parse_expression
           advance if peek.kind == ","
         end
@@ -1952,6 +2034,13 @@ pub class Parser
       if peek.kind == "="
         return VarNode.new(name).as(Node)
       end
+      # `loop do ... end` is a call with a block and no arguments, and the
+      # `do` is not one: reading it as an argument made it a call to a
+      # method named `do`.
+      if peek.kind == "IDENT" && peek.value == "do"
+        skip_do_block
+        return CallNode.new(name, [] of Node, [] of Node).as(Node)
+      end
       if peek.line == t.line &&
          (peek.kind == "IDENT" || peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" || peek.kind == "CONST")
         args = [] of Node
@@ -1960,6 +2049,7 @@ pub class Parser
           advance
           args << parse_expression
         end
+        skip_short_block?
         return CallNode.new(name, [] of Node, args).as(Node)
       end
       # Everything else is a call with no arguments and no receiver, which

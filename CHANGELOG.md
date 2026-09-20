@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,399 lines**, and the
-  library is **3,258** of 3,734 with 476 to spare. `4,657` is what opening
+  a conditional, `else` included - which is **1,466 lines**, and the
+  library is **3,285** of 3,734 with 449 to spare. `4,751` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -388,6 +388,44 @@
   now, which is what it is. Seventy-two modules, 37,127 lines.
 
 ### Fixed
+
+- **Expanding a relative path panicked on Windows.** `Path#expand` takes
+  its base from `Program.env("PWD")` when none is given, and `PWD` is a
+  POSIX shell's bookkeeping: cmd and PowerShell keep none. Measured from
+  cmd, `Path["x.txt"].expand` died with `cannot expand "x.txt": no base
+  given and PWD is not set` — every program on that platform that
+  expanded a path it was handed, and the same in a service, a scheduled
+  task or anything else started without a shell.
+
+  The prelude answers it now. `Program.cwd` is the process's own
+  directory beside `Program.args` and `Program.env`, which are its other
+  facts: `getcwd` (79 on x86_64, 17 on aarch64) on Linux, libSystem's on
+  darwin, `GetCurrentDirectoryW` on Windows, and nil on wasm32-wasi,
+  which resolves a path against a preopened directory and names none.
+  `expand` reads `PWD` first — a shell that keeps it keeps the path the
+  person walked, symlinks and all — and asks the process when nothing
+  set it. From cmd the same call now answers
+  `C:\Users\dogru\playground\iyi\x.txt`.
+
+  `Dir.current` was the other copy of that walk and is one line now, so
+  the platform arms exist once. `std/path` could not have called it: a
+  cycle, since `std/dir` imports `std/path`, which is why the header
+  there said the prelude had no way to ask the kernel for the working
+  directory. It has one.
+
+- **`Dir.tempdir` named `C:\Windows\Temp`.** With `TMPDIR`, `TEMP` and
+  `TMP` all unset — which is a service, or any program not started from
+  a shell — the last resort was that literal, a directory a standard
+  user may not write to. Windows keeps the question itself:
+  `GetTempPathW` answers `TMP`, then `TEMP`, then the profile directory,
+  measured with both variables cleared as `C:\Users\dogru\`. The
+  trailing separator the call always writes is dropped, since no other
+  branch of `tempdir` carries one.
+
+  `bench/windows_exercise.sh` runs a program with `PWD`, `TMPDIR`,
+  `TEMP` and `TMP` all removed: it must expand a relative name and write
+  a file under `Dir.tempdir`. Before the fix that step reads the panic
+  above.
 
 - **A short sleep on Windows was fifteen times what the program asked
   for.** The poller waits on its completion port with a millisecond
@@ -934,9 +972,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,399** and **3,258**, held to the sentences that quote
+  without it: **1,466** and **3,285**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 923 over, as the library with
+  breach is still what the floor costs — 1,017 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -4093,7 +4131,7 @@ Identity is the released version, as ever: a 0.9.0 artifact is rejected by a
   1.33 s against 0.33, churn 0.32 against 0.061 and live churn 0.33
   against 0.124 (a ten-core M2 Pro, interleaved, min of nine; 0.9.0
   measures 0.30, 0.082 and 0.116 there). The longer wait costs the
-  round nothing - the helpers take 13,258 slices against the short
+  round nothing - the helpers take 13,285 slices against the short
   wait's 10,292, and leave the allocating thread 34 against the 471
   it swept with no retry at all.
 
@@ -7802,7 +7840,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,805-line library and nothing else. Every other
+  written against iyi's own 15,899-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

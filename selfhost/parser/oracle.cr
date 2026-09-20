@@ -61,6 +61,16 @@ def sexp(node : Iyi::ASTNode) : String
     "(typedecl #{sexp(node.var)} : #{sexp(node.declared_type)})"
   when Iyi::InstanceVar
     "(ivar #{node.name})"
+  when Iyi::Defer
+    "(defer #{sexp(node.exp)})"
+  when Iyi::Propagate
+    # `f(x)!` returns the value or gives the error to the caller, and the
+    # expression it wraps is the part worth checking.
+    "(propagate #{sexp(node.exp)})"
+  when Iyi::Recover
+    # `.or_panic`, and `recover x do |e| ... end`: the expression, and the
+    # default when one was written.
+    node.default.try { |d| "(recover #{sexp(node.exp)} #{sexp(d)})" } || "(recover #{sexp(node.exp)})"
   when Iyi::Case
     # Exhaustive or not is the difference between `in` and `when`, and it
     # changes what the compiler checks, so it is in the shape.

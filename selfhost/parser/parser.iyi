@@ -447,6 +447,30 @@ pub struct CharNode
   end
 end
 
+# `f(x)!` hands the error to the caller; `.or_panic` stops the program
+# with it. Neither is a call, and reading them as one made `or_panic` a
+# method and `!` a stray token.
+# `defer` names the cleanup where the thing is acquired, and runs it on
+# return, on a propagation and on a panic (SPEC.md III.1.4).
+pub class DeferNode
+  getter exp : Array(Node)
+  def initialize(@exp : Array(Node))
+  end
+end
+
+pub class PropagateNode
+  getter exp : Array(Node)
+  def initialize(@exp : Array(Node))
+  end
+end
+
+pub class RecoverNode
+  getter exp : Array(Node)
+  getter default : Array(Node)
+  def initialize(@exp : Array(Node), @default : Array(Node))
+  end
+end
+
 pub class BreakNode
   getter value : Array(Node)
   def initialize(@value : Array(Node))
@@ -678,7 +702,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                  UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
-                 WhenNode | CaseNode | BreakNode | NextNode
+                 WhenNode | CaseNode | BreakNode | NextNode |
+                 PropagateNode | RecoverNode | DeferNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -784,6 +809,25 @@ end
 impl Sexp for CharNode
   def sexp : String
     "(charliteral)"
+  end
+end
+
+impl Sexp for DeferNode
+  def sexp : String
+    "(defer #{exp[0].sexp})"
+  end
+end
+
+impl Sexp for PropagateNode
+  def sexp : String
+    "(propagate #{exp[0].sexp})"
+  end
+end
+
+impl Sexp for RecoverNode
+  def sexp : String
+    return "(recover #{exp[0].sexp})" if default.size == 0
+    "(recover #{exp[0].sexp} #{default[0].sexp})"
   end
 end
 
@@ -1240,6 +1284,11 @@ pub class Parser
         return with_modifiers(parse_while(word.value == "until"))
       end
     end
+    if peek.kind == "IDENT" && peek.value == "defer"
+      advance
+      return with_modifiers(DeferNode.new([parse_statement] of Node).as(Node))
+    end
+
     if peek.kind == "IDENT" && (peek.value == "break" || peek.value == "next")
       word = advance.value
       value = [] of Node
@@ -1621,6 +1670,17 @@ pub class Parser
   def parse_expression : Node
     left = parse_binary(0)
 
+    # `cond ? a : b` is an `if`, which is what the current parser builds
+    # for it: one node for two spellings, because they mean one thing.
+    if peek.kind == "?"
+      advance
+      then_branch = parse_expression
+      advance if peek.kind == ":"
+      else_branch = parse_expression
+      return IfNode.new([left] of Node, [then_branch] of Node,
+                        [else_branch] of Node).as(Node)
+    end
+
     # `1..10` and `1...10`. Looser than the arithmetic in its ends, so
     # `a + 1 .. b` is a range of two sums.
     if peek.kind == ".." || peek.kind == "..."
@@ -1815,7 +1875,15 @@ pub class Parser
   # call as easily as a variable.
   def with_postfix(node : Node) : Node
     result = node
-    while peek.kind == "." || peek.kind == "["
+    while peek.kind == "." || peek.kind == "[" || peek.kind == "!"
+      # `f(x)!` propagates what precedes it, and chains like the rest: a
+      # propagation can be indexed and a call can be propagated.
+      if peek.kind == "!"
+        advance
+        result = PropagateNode.new([result] of Node).as(Node)
+        next
+      end
+
       # `parts[0]` is a call to `[]` on what precedes it, which is why it
       # chains with the dot rather than being its own kind of expression.
       if peek.kind == "["
@@ -1838,6 +1906,20 @@ pub class Parser
       end
       advance
       name = advance.value
+      # `.or_panic` is not a method call: it is the node that stops the
+      # program with the error rather than returning it.
+      if name == "or_panic"
+        result = RecoverNode.new([result] of Node, [] of Node).as(Node)
+        next
+      end
+      # `.or(-1)` is the same node with the value to use instead.
+      if name == "or" && peek.kind == "("
+        advance
+        fallback = parse_expression
+        advance if peek.kind == ")"
+        result = RecoverNode.new([result] of Node, [fallback] of Node).as(Node)
+        next
+      end
       args = [] of Node
       if peek.kind == "("
         advance

@@ -415,13 +415,20 @@
   keyed on the path now, which is what a nested type's body has always
   needed and what nothing had asked of it.
 
+  Only the *virtual* half of the question applies to a return. A union
+  is written into the symbol on both sides — the producer's body types
+  to the annotation it was written under — so `def scan(source :
+  String) : Array(Token) | BadCharacter` has nothing to disagree
+  about, and reading one as a widening shipped the body of every
+  module that returns a union: `bench/generic_boundary.py` caught it
+  on `calc/lexer`, which has no generic and should ship object code
+  and no body.
+
   The price, measured on the module set `std/dir` pulls in: 870,472
-  bytes of `.iyimod` became 872,997, up 0.3%. 53 of the 60
-  `bench/std_*_exercise.iyi` round-tripped through `--emit-iyimod` and
-  `--use-iyimod` before this, 54 do now — `std/xml`. `std/io` is left
-  on the gap neither half covers: an *inherited* method instantiated
-  for a receiver the producer never called it on, which is the keep
-  file's job and still has no equivalent inside one build.
+  bytes of `.iyimod`, which is what it was before — a signature this
+  rule fires on is rare enough in that set to cost nothing. 53 of the
+  60 `bench/std_*_exercise.iyi` round-tripped through `--emit-iyimod`
+  and `--use-iyimod` before this, 55 do now: `std/io` and `std/xml`.
 
 - **A class hierarchy did not cross the boundary: not the `<`, not the
   `abstract`, and not the field types the hierarchy makes virtual.**

@@ -2064,8 +2064,18 @@ module Iyi
       instance = owner.is_a?(MetaclassType) ? owner.instance_type : owner
       return true if instance.is_a?(ClassType) && instance.virtual_type != instance
 
+      # The return, where only the *virtual* half of the question applies. A
+      # union is written into the symbol on both sides — the producer's body
+      # types to the annotation it was written under — so a `def scan(source
+      # : String) : Array(Token) | BadCharacter` has nothing to disagree
+      # about, and reading it as a widening shipped the bodies of every
+      # module that returns one. What does disagree is a class with
+      # subclasses: the consumer holds the answer as its virtual type.
       if return_type = a_def.return_type
-        return true if iyi_widened_type?(owner, return_type)
+        declared = owner.lookup_type?(return_type)
+        if declared.is_a?(Type) && !declared.is_a?(TypeParameter)
+          return true if declared.virtual_type != declared
+        end
       end
 
       a_def.args.each do |arg|
@@ -2076,9 +2086,9 @@ module Iyi
       false
     end
 
-    # One written type, asked whether the consumer would key a symbol on
-    # something else. A free variable is bound per call and is not a
-    # widening; a name this scope cannot resolve is not this check's to
+    # One written parameter type, asked whether the consumer would key a
+    # symbol on something else. A free variable is bound per call and is not
+    # a widening; a name this scope cannot resolve is not this check's to
     # guess at.
     private def iyi_widened_type?(owner : Type, written : ASTNode) : Bool
       declared = owner.lookup_type?(written)

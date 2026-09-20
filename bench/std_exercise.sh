@@ -423,6 +423,43 @@ else
 fi
 
 echo
+echo "== and on the platforms this runner is not"
+# The front end only, which is where a platform differs: a module's
+# `{% if flag?(:darwin) %}` branch declares a different `lib` with
+# different `fun`s, and nothing outside darwin ever read one. That is how
+# the section above passed here and failed there — `undefined fun
+# 'opendir' for LibC` — a whole day after it was written.
+#
+# `--no-codegen` because the answer is what a consumer's front end
+# resolves, and because it costs half a second per exercise instead of
+# five: the whole sweep over four targets is a minute.
+unportable=""
+for target in aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
+  for source in "$REPO"/bench/std_*_exercise.iyi; do
+    name="$(basename "$source" .iyi)"
+    work="$WORK/cross/$target/$name"
+    mkdir -p "$work/mods"
+    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
+            --emit-iyimod mods -o out "$source") > "$work/emit.log" 2>&1; then
+      unportable="$unportable $target/$name"
+      echo "  $target $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-120)"
+      continue
+    fi
+    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
+            --use-iyimod mods -o out2 "$source") > "$work/use.log" 2>&1; then
+      unportable="$unportable $target/$name"
+      echo "  $target $name: $(grep -m1 -E 'Error|BUG' "$work/use.log" | cut -c1-120)"
+    fi
+  done
+done
+if [ -n "$unportable" ]; then
+  echo "  FAIL: cannot be consumed on another platform:$unportable"
+  status=1
+else
+  echo "  every exercise reads its own artifacts on darwin, windows, aarch64 and musl"
+fi
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

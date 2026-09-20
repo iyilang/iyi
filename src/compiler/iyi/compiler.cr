@@ -1938,6 +1938,18 @@ module Iyi
           next
         end
 
+        # A `lib` the module declares. Its `fun`s are what a travelling body
+        # calls: `std/dir` writes `lib LibC` with `opendir` in it and calls
+        # it from a body the consumer compiles, which said `undefined fun
+        # 'opendir' for LibC` — and `std/file` keeps a `struct Stat` inside
+        # one, which was `undefined constant Std::File::LibC::Stat`. A
+        # `LibType` is a `ModuleType` and not a `ClassType`, so it fell
+        # through every branch here and was dropped whole.
+        if declared.is_a?(LibType)
+          declarations << iyi_lib_declaration(program, filename, declared, name, container)
+          next
+        end
+
         # A class or a struct, which is what has a layout and an id. A constant
         # lives in the same namespace and is neither, and it is IV.2's business
         # rather than this.
@@ -1960,6 +1972,132 @@ module Iyi
         )
       end
       declarations.sort_by! &.name
+    end
+
+    # iyi: a `lib` the module declares, as the lines that declare it.
+    #
+    # A `fun` is not a symbol this artifact's object code answers for — the
+    # system linker resolves `opendir` against libc — but a consumer that
+    # compiles a body calling one needs the declaration to make the call
+    # with, which is the same reason `Iyi::Bind` carries them for a shard
+    # (`TypeDecl#funs`). The types nested inside travel with it: `std/file`
+    # writes `struct Stat` in its `lib`, and a field typed `LibC::Stat` is
+    # a name the consumer has to have.
+    #
+    # As text, for the reason `Iyi::Bind` writes them as text: a `fun` has
+    # a shape no `def` has, and it is rendered back inside the same `lib`
+    # in the same module, where each restriction means what it meant where
+    # it was written.
+    private def iyi_lib_declaration(program : Program, filename : String,
+                                    type : LibType, name : String,
+                                    container : String) : IyiMod::TypeDecl
+      funs = [] of String
+      type.defs.try &.each_value do |overloads|
+        overloads.each do |entry|
+          a_def = entry.def
+          next unless a_def.is_a?(External)
+          # An external *variable* — libc's `$errno` — is not a `fun`.
+          next if a_def.external_var?
+          # Through the macro, like every other location question here: a
+          # platform's `lib` is written inside `{% if flag?(:darwin) %}`.
+          next unless a_def.location.try(&.original_filename) == filename
+          funs << iyi_render_fun(a_def)
+        end
+      end
+      funs.sort!
+
+      # A `lib`'s constants, which are the same shape as an enum's members
+      # and render on the same line.
+      members = [] of {String, String}
+      type.types?.try &.each do |member, declared|
+        next unless declared.is_a?(Const)
+        members << {member, declared.value.to_s}
+      end
+      members.sort_by! &.[0]
+
+      IyiMod::TypeDecl.new(
+        name: name,
+        kind: "lib",
+        type_parameters: [] of String,
+        assoc_types: [] of String,
+        supertraits: [] of String,
+        fields: [] of {String, String, String},
+        methods: [] of IyiMod::Signature,
+        # Not a thing a consumer writes against: it is here so a body that
+        # travels can call into it.
+        visibility: "",
+        # The types nested in it, without the methods: inside a `lib` a
+        # struct is C's, its accessors are the compiler's, and written back
+        # they were `expecting token ':', not 'initialize'`.
+        types: iyi_carried_types(program, filename, type, path: container)
+          .map { |nested| nested.copy_with(methods: [] of IyiMod::Signature) },
+        members: members,
+        funs: funs,
+        annotations: iyi_link_annotations(type),
+      )
+    end
+
+    # iyi: one `fun` line, as the module wrote it.
+    #
+    # The restriction where the node still has one and the resolved type
+    # where it does not, which is the distinction `Iyi::Bind`'s renderer
+    # found: an `External`'s args come out of semantic typed and, for some
+    # of them, stripped.
+    private def iyi_render_fun(a_def : External) : String
+      String.build do |io|
+        io << "fun " << a_def.name
+        unless a_def.name == a_def.real_name
+          # Quoted where the C name is not an identifier: `std/math` binds
+          # `llvm.copysign.f32`, and written bare the parser stopped on the
+          # first dot.
+          real = a_def.real_name
+          plain = !real.empty? && real.each_char.with_index.all? do |(character, index)|
+            character.ascii_letter? || character == '_' || (index > 0 && character.ascii_number?)
+          end
+          io << " = " << (plain ? real : real.inspect)
+        end
+        unless a_def.args.empty? && !a_def.varargs?
+          io << '('
+          a_def.args.join(io, ", ") do |argument, inner|
+            written = argument.restriction || argument.type?
+            # A `fun` parameter may have no name, and written with the
+            # colon anyway it is `unexpected token: ":"`.
+            inner << argument.name << " : " unless argument.name.empty?
+            inner << written
+          end
+          io << ", ..." if a_def.varargs?
+          io << ')'
+        end
+        if return_type = a_def.return_type
+          io << " : " << return_type
+        end
+      end
+    end
+
+    # iyi: a `lib`'s `@[Link]` annotations, written back as source.
+    #
+    # Rebuilt from what the compiler parsed rather than kept as text,
+    # because the text is not kept. Carried for the reason the `fun`s are:
+    # a consumer compiling a travelling body makes the call itself, so the
+    # library has to reach its link line.
+    private def iyi_link_annotations(type : Type) : Array(String)
+      return [] of String unless type.responds_to?(:link_annotations)
+      (type.link_annotations || [] of LinkAnnotation).map do |written|
+        parts = [] of String
+        if name = written.lib
+          parts << name.inspect
+          pkg = written.pkg_config
+          parts << "pkg_config: #{pkg.inspect}" if pkg && pkg != name
+        elsif pkg = written.pkg_config
+          parts << "pkg_config: #{pkg.inspect}"
+        end
+        written.ldflags.try { |flags| parts << "ldflags: #{flags.inspect}" }
+        written.framework.try { |framework| parts << "framework: #{framework.inspect}" }
+        written.wasm_import_module.try { |name| parts << "wasm_import_module: #{name.inspect}" }
+        written.dll.try { |dll| parts << "dll: #{dll.inspect}" }
+        parts << "static: true" if written.static?
+        "@[Link(#{parts.join(", ")})]"
+      end
     end
 
     # iyi: a type's kind, with `abstract` in front of it where it is one.

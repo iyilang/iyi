@@ -3322,6 +3322,82 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A `lib` the module declares, and the `struct` inside it.
+  #
+  # A `fun` is not a symbol this artifact answers for — the system linker
+  # resolves `getpid` against libc — so for a long time nothing here
+  # carried one and nothing missed it. A body that *travels* changes
+  # that: the consumer compiles it and makes the call itself, so it needs
+  # the declaration to make it with. `std/dir` calls `LibC.opendir` from
+  # a body it ships and `std/file` types a field `LibC::Stat`, and both
+  # were dropped whole — a `LibType` is a `ModuleType` and not a
+  # `ClassType`, so it fell through every branch the emitter had.
+  #
+  # Found on darwin and nowhere else, because the `lib` those two declare
+  # is inside `{% if flag?(:darwin) %}`. The gate reads its own artifacts
+  # for four targets' front ends now, which is where a platform differs.
+  it "carries a lib it declares, with the struct inside it" do
+    with_tempdir("iyimod_own_lib") do
+      Dir.mkdir_p "boot"
+      File.write "boot/clock.iyi", <<-IYI
+        module boot/clock
+
+        lib LibC
+          struct Span
+            seconds : Int64
+            nanos : Int64
+          end
+
+          fun getpid : Int32
+        end
+
+        pub def with_pid(&block : Int32 -> Bool) : Bool
+          block.call(LibC.getpid)
+        end
+
+        pub def span_seconds(span : LibC::Span) : Int64
+          span.seconds
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/clock
+
+        span = Boot::Clock::LibC::Span.new
+        span.seconds = 3_i64
+        puts Boot::Clock.span_seconds(span)
+        puts Boot::Clock.with_pid { |pid| pid > 0 }
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "3\ntrue"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "clock.iyimod"))
+      lib_decl = artifact.exports.types.find { |decl| decl.name == "LibC" }.should_not be_nil
+      lib_decl.kind.should eq "lib"
+      lib_decl.funs.should eq ["fun getpid : Int32"]
+      # The struct travels with it and its accessors do not: inside a
+      # `lib` those are the compiler's.
+      span = lib_decl.types.find { |decl| decl.name == "Span" }.should_not be_nil
+      span.methods.should be_empty
+      span.fields.map(&.[0]).should eq ["@seconds", "@nanos"]
+
+      File.delete "boot/clock.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "3\ntrue"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

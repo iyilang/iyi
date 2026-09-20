@@ -2391,7 +2391,7 @@ module Iyi::IyiMod
   # DB::Connection::Options`.
   def self.render_type_declaration(io : IO, declaration : TypeDecl,
                                    bodies : Hash(String, String), indent = "",
-                                   path = "") : Nil
+                                   path = "", in_lib = false) : Nil
     declaration.doc.each_line { |line| io << indent << "# " << line << '\n' } unless declaration.doc.empty?
     # Above the declaration, which is where they were written and the only
     # place they mean anything. See `TypeDecl#annotations`.
@@ -2432,7 +2432,11 @@ module Iyi::IyiMod
     # them. They are also what a `def initialize` with no body leaves
     # unassigned, which is why they arrive declared rather than inferred.
     declaration.fields.each do |(name, type, value)|
-      io << inner << name << " : " << type
+      # Inside a `lib`, a struct's fields are C's and are written without
+      # the `@`: `struct Stat; st_dev : UInt64; end`. `std/file` keeps one
+      # in its `lib`, and written as an instance variable it was
+      # `expecting identifier 'end', not '@st_dev'`.
+      io << inner << (in_lib ? name.lchop('@') : name) << " : " << type
       io << " = " << value unless value.empty?
       io << '\n'
     end
@@ -2454,7 +2458,8 @@ module Iyi::IyiMod
 
     here = path.empty? ? declaration.name : path
     inheritance_order(declaration.types).each do |nested|
-      render_type_declaration io, nested, bodies, inner, "#{here}::#{nested.name}"
+      render_type_declaration io, nested, bodies, inner, "#{here}::#{nested.name}",
+        in_lib: declaration.kind == "lib"
     end
 
     # After the types this one declares, because one of them may be the module

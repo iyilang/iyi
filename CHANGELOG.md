@@ -389,6 +389,29 @@
 
 ### Fixed
 
+- **A `lib` the module declares did not travel, and the gate now asks
+  four other platforms whether one does.** A `fun` is not a symbol this
+  artifact answers for — the system linker resolves `opendir` against
+  libc — so nothing carried one and nothing missed it. A body that
+  *travels* changes that: the consumer compiles it and makes the call
+  itself, so it needs the declaration to make it with. `std/dir` calls
+  `LibC.opendir` from a body it ships and `std/file` types a field
+  `LibC::Stat`, and both were dropped whole: a `LibType` is a
+  `ModuleType` and not a `ClassType`, so it fell through every branch
+  the emitter had.
+
+  Found on darwin and nowhere else, the day after the section above was
+  written, because the `lib` those two declare is inside `{% if
+  flag?(:darwin) %}`. So the gate reads its own artifacts for four
+  targets' front ends — darwin, windows, aarch64 and musl — which is
+  where a platform differs and costs half a second per exercise.
+
+  Three things about a `lib` had to be written the way C spells them:
+  a nested struct's fields have no `@` and no accessors, because inside
+  a `lib` those are the compiler's, and a `fun` whose C name is not an
+  identifier is quoted — `std/math` binds `llvm.copysign.f32`, and
+  written bare the parser stopped on the first dot.
+
 - **All sixty std module exercises now round-trip through `.iyimod`, and
   the gate that says so is new.** `bench/std_exercise.sh` asked whether
   every module under `src/std` *writes* an artifact, which is the

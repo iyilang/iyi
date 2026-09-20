@@ -503,6 +503,60 @@
   port taken out of the wait pair it comes back after 150 — at whichever
   deadline lands next, which is what a poller that hears only its timer
   does.
+- **All sixty std module exercises now round-trip through `.iyimod`, and
+  the gate that says so is new.** `bench/std_exercise.sh` asked whether
+  every module under `src/std` *writes* an artifact, which is the
+  producer's half. Nothing asked the consumer's: build each exercise
+  with `--emit-iyimod`, build the same program again with
+  `--use-iyimod`, and compare what the two binaries print. Twenty-one of
+  the sixty did that when it was first asked. The thirty-nine that did
+  not each named a different thing a module never carried, and every one
+  of them was a defect a consumer meets that no other gate here could
+  see, because every other gate compiles its module from source.
+
+  The output is compared and not merely the exit status, and writing
+  that down caught the worst of them straight away:
+  `std_reference_storage` built, linked, ran, and answered wrongly.
+  `@[Primitive]` decides two different things and neither travelled:
+
+  - **On a type it chooses what the compiler creates.**
+    `@[Primitive(:ReferenceStorageType)] struct ReferenceStorage(T) <
+    Value` is the type whose size is the instance size of its
+    parameter. Arriving without the annotation the consumer built the
+    ordinary struct the declaration looks like. It also needs the `<
+    Value` other structs imply, and none of the state: the `@type_id` is
+    the compiler's, and a compiler handed one back refuses it.
+  - **On a def it is the body.** A def read from an artifact is a
+    header, so codegen keys it on the type that declared it — right for
+    a method whose machine code is elsewhere, wrong for an instruction,
+    which has no elsewhere and is compiled per receiver. `std/
+    reference_storage` writes `@[Primitive(:pre_initialize)]` on `class
+    ::Reference`, so every `Point.unsafe_construct` in the consumer
+    called one symbol compiled for `Reference` and got back a pointer
+    into nothing.
+
+  Two more, each the last thing between a module and its consumer:
+
+  - **An impl the producer wrote inside the type it targets.** R-3 asks
+    that an impl live in the module that defines the trait or the one
+    that defines the type, and a declaration's module is the type
+    enclosing it — so `impl Comparable for Prerelease` inside `struct
+    SemanticVersion` satisfies it, and the same impl rendered at the
+    module's own level does not. The rule is about who may *write* an
+    impl; what arrives from an artifact is the record of a check the
+    producer passed, so it is not asked again.
+  - **A `run` inside a macro that travelled.** `run` compiles and
+    executes a program at the consumer's compile time, and a module
+    names that program the way the file that wrote the macro could:
+    `std/eiy` writes `run("./eiy/process", …)`, beside
+    `src/std/eiy.iyi`. Resolved against the artifact it was `can't find
+    "./eiy/process" relative to "mods/std"`. No artifact can carry the
+    program — it is a program — so what travels is where the module was.
+
+  Two exercises are compared by exit status alone, named in the gate
+  with the reason: `std_gc_exercise` prints how many bytes a collection
+  freed, which is a property of what the build allocated, and
+  `std_time_exercise` prints the clock.
 
 - **A type a module declares under a name outside its own namespace
   arrived as its methods and nothing else.** The reopened section was

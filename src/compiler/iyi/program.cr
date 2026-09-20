@@ -226,6 +226,21 @@ module Iyi
     # `std/list`.
     getter iyi_artifact_modules = {} of String => String
 
+    # iyi: where a `.iyimod`'s module was written, by the path the
+    # declarations were parsed under (`Artifact#source_path`).
+    #
+    # A macro travels with the module and a `run` inside one names its
+    # program the way the file that wrote it could: `std/eiy` writes
+    # `run("./eiy/process", …)`, which is beside `src/std/eiy.iyi` and
+    # nowhere near `mods/std/eiy.iyimod`. Resolved against the artifact's
+    # own path it was "can't find "./eiy/process" relative to "mods/std"".
+    #
+    # A `run` needs its program's source at the consumer's compile time,
+    # which no artifact can carry — it is a program, compiled and executed
+    # there. So this points at where it was, which is right whenever the
+    # producer's tree is present and an honest error when it is not.
+    getter iyi_artifact_source_paths = {} of String => String
+
     # iyi: true only while a `derive`'s macro is expanding (SPEC.md R-5, II.4).
     # A derive reads the declaration it is attached to, and the types that
     # declaration names. The macro questions that answer with the whole program

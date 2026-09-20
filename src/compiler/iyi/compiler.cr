@@ -1692,6 +1692,21 @@ module Iyi
       if type.is_a?(ClassType) && Iyi::Share.shareable?(type)
         annotations << "@[Share]"
       end
+      # And `@[Primitive(:ReferenceStorageType)]`, which is not decoration
+      # either: the annotation is what makes the compiler create this
+      # declaration as the special type whose size is the instance size of
+      # its parameter, rather than as the struct the declaration looks
+      # like. `std/reference_storage` promises `sizeof(ReferenceStorage(T))
+      # == instance_sizeof(T)`, and read from an artifact it answered 4 for
+      # a `T` whose instances are 0 — a module that built, linked and ran,
+      # and was wrong.
+      #
+      # Read off the type the compiler made rather than out of an
+      # annotation record, which is the same thing said once instead of
+      # twice: the annotation's only effect is to make this class of type.
+      if type.is_a?(GenericReferenceStorageType)
+        annotations << "@[Primitive(:ReferenceStorageType)]"
+      end
 
       IyiMod::TypeDecl.new(
         name: name,
@@ -1699,7 +1714,12 @@ module Iyi
         type_parameters: type_parameters,
         assoc_types: assoc_types,
         supertraits: type.responds_to?(:supertraits) ? type.supertraits.map(&.to_s) : [] of String,
-        fields: collect_iyi_fields(type),
+        # None for the type the annotation above makes: its `@type_id` is
+        # the compiler's, and a compiler handed one back refuses it —
+        # "can't declare instance variables in ReferenceStorage(T)". What
+        # the author wrote is the header, the annotation and the methods;
+        # the state is made from the parameter.
+        fields: type.is_a?(GenericReferenceStorageType) ? [] of {String, String, String} : collect_iyi_fields(type),
         class_vars: collect_iyi_class_vars(type),
         methods: methods,
         visibility: "pub",
@@ -1984,6 +2004,12 @@ module Iyi
       superclass = type.superclass
       return "" unless superclass
       name = superclass.devirtualize.to_s
+      # Except on a `@[Primitive(:ReferenceStorageType)]` struct, where the
+      # compiler reads the written superclass and refuses anything but
+      # `Value`: "BUG: Expected reference_storage_type to inherit from
+      # Value". The word is implied for every other struct and required
+      # here, which is the one place the rule below is wrong.
+      return name if type.is_a?(GenericReferenceStorageType)
       return "" if name == "Reference" || name == "Struct" || name == "Value"
       if type.is_a?(NamedType)
         prefix = "#{type.namespace}::"

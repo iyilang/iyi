@@ -3135,6 +3135,193 @@ describe Iyi::IyiMod do
     end
   end
 
+  # An impl written inside the type it targets.
+  #
+  # R-3 asks that an impl live in the module that defines the trait or the
+  # module that defines the type, and a declaration's module is the type
+  # enclosing it. Write `impl Show for Inner` inside `struct Outer` and the
+  # enclosing type is `Outer`, which is where the rule wants it; render it
+  # back at the module's own level — which is where the artifact writes
+  # every impl — and the enclosing type is the module, so the consumer
+  # refused a module that had already been checked.
+  #
+  # The rule is about who may *write* an impl. What arrives from an
+  # artifact is the record of a check the producer passed, so it is not
+  # asked again. `std/semantic_version` is the module this was found on.
+  it "accepts an impl the producer wrote inside the type it targets" do
+    with_tempdir("iyimod_impl_in_type") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shown.iyi", <<-IYI
+        module boot/shown
+
+        pub trait Show
+          abstract def show : String
+        end
+        IYI
+      File.write "boot/pair.iyi", <<-IYI
+        module boot/pair
+
+        import boot/shown
+        using boot/shown::{Show}
+
+        pub struct Pair
+          pub struct Half
+            @value : Int32
+
+            def initialize(@value : Int32)
+            end
+
+            pub def show : String
+              "half " + @value.to_s
+            end
+          end
+
+          impl Show for Half
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/pair
+        import boot/shown
+
+        def announce(item : Boot::Shown::Show) : String
+          item.show
+        end
+
+        puts announce(Boot::Pair::Pair::Half.new(2))
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "half 2"
+
+      File.delete "boot/pair.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "half 2"
+    end
+  end
+
+  # A `run` inside a macro that travelled.
+  #
+  # `run` compiles and executes a program at the consumer's compile time,
+  # and the module names that program the way the file that wrote the
+  # macro could: `std/eiy` writes `run("./eiy/process", …)`, which is
+  # beside `src/std/eiy.iyi`. Resolved against the artifact the consumer
+  # read it from, that was `can't find "./eiy/process" relative to
+  # "mods/std"`.
+  #
+  # No artifact can carry the program — it is a program, compiled and
+  # executed there — so what travels is where the module was, which is
+  # right whenever the producer's tree is present and an honest error when
+  # it is not.
+  it "resolves a travelling macro's run against the module's own directory" do
+    with_tempdir("iyimod_macro_run") do
+      Dir.mkdir_p "boot/tools"
+      File.write "boot/tools/emit.iyi", <<-IYI
+        module boot/tools/emit
+
+        print "42"
+        IYI
+      File.write "boot/gen.iyi", <<-IYI
+        module boot/gen
+
+        pub macro answer
+          {{ run("./tools/emit") }}
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/gen
+
+        puts Boot::Gen.answer
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "42"
+
+      # The module's own source goes; the program its macro runs stays,
+      # because that is what `run` needs and what nothing can carry.
+      File.delete "boot/gen.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "42"
+    end
+  end
+
+  # `@[Primitive]`, in the two places it decides something.
+  #
+  # On a *type* it chooses what the compiler creates: `@[Primitive(
+  # :ReferenceStorageType)] struct ReferenceStorage(T) < Value` is the
+  # type whose size is the instance size of its parameter, not the struct
+  # its declaration looks like. Without the annotation the consumer built
+  # an ordinary struct, and `sizeof(ReferenceStorage(T))` answered its own
+  # field's width.
+  #
+  # On a *def* it is the body. A def read from an artifact is a header —
+  # its body is elsewhere, and codegen keys it on the type that declared
+  # it — but an instruction has no elsewhere: it is compiled here, per
+  # receiver. `std/reference_storage` writes `@[Primitive(:pre_initialize)]`
+  # on `class ::Reference`, so every `Point.unsafe_construct` in the
+  # consumer called one symbol compiled for `Reference` and got back a
+  # pointer into nothing. It linked and ran, which is the way this design
+  # can be wrong quietly rather than loudly.
+  it "carries what an annotation decides, on a type and on a def" do
+    with_tempdir("iyimod_primitive_annotation") do
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import std/reference_storage
+        using std/reference_storage::{ReferenceStorage}
+
+        class Point
+          getter x : Int32
+
+          def initialize(@x : Int32)
+          end
+        end
+
+        storage = uninitialized ReferenceStorage(Point)
+        point = Point.unsafe_construct(pointerof(storage), 7)
+        puts sizeof(ReferenceStorage(Point)) == instance_sizeof(Point)
+        puts pointerof(storage).address == point.object_id
+        puts storage.to_reference.x
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "true\ntrue\n7"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "true\ntrue\n7"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

@@ -2260,8 +2260,32 @@ module Iyi::IyiMod
         return false
       end
 
+      # Nor is a def whose body is a machine instruction. `@[Primitive]` is
+      # the body — the annotation travelled for exactly that reason — and an
+      # instruction is compiled here, per receiver, whoever declared it.
+      # Marked as the artifact's it was keyed on the *declaring* type
+      # instead: `std/reference_storage` writes
+      # `@[Primitive(:pre_initialize)]` on `class ::Reference`, every
+      # `Point.unsafe_construct` in the consumer called one symbol compiled
+      # for `Reference`, and the program linked, ran, and answered with a
+      # pointer into nothing.
+      if @primitive
+        node.iyi_body_travelled = true
+        return false
+      end
+
       node.iyi_from_artifact = true
       node.uses_block_arg = true if node.block_arg.try(&.restriction)
+      false
+    end
+
+    # An annotation is a sibling of the declaration it is written above, not
+    # a property of it, so what the next `Def` is annotated with is what the
+    # last one seen said.
+    @primitive = false
+
+    def visit(node : Annotation)
+      @primitive = node.path.names.last? == "Primitive"
       false
     end
 
@@ -2276,6 +2300,9 @@ module Iyi::IyiMod
     end
 
     def visit(node : ASTNode)
+      # Anything between an annotation and a `Def` is something the
+      # annotation was not written above.
+      @primitive = false unless node.is_a?(Expressions)
       true
     end
   end

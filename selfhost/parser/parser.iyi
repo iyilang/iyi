@@ -1555,6 +1555,13 @@ pub class Parser
     advance                      # trait
     name = advance.value
     vars = parse_type_vars
+    # `pub trait Ord : Comparable` requires its implementers to implement
+    # `Comparable` too. The requirement is not in the shape the oracle
+    # prints, so it is read and not modelled rather than guessed at.
+    if peek.kind == ":"
+      advance
+      parse_type
+    end
     TraitDefNode.new(
       [PathNode.new(name).as(Node)] of Node,
       vars,
@@ -1678,6 +1685,13 @@ pub class Parser
       skip_line
     end
 
+    # `def best : Item where Item : Comparable` constrains the parameter.
+    # Read and not modelled, for the same reason as `forall`: it is not in
+    # the shape, and a tree invented for it would be checked by nothing.
+    if peek.kind == "IDENT" && peek.value == "where"
+      skip_line
+    end
+
     # An `abstract def` has no body and no `end`: the requirement is the
     # whole declaration.
     if is_abstract
@@ -1709,6 +1723,15 @@ pub class Parser
   # `a | b` is a call. Restrictions, return types and generic arguments
   # are read here, and nowhere else is.
   def parse_type : Node
+    # In a type position `self` is the type of the receiver, and the
+    # current parser builds the node that prints `(self)`. In an
+    # expression it is a variable named self. Same word, two nodes, and
+    # which one depends on where it is written.
+    if peek.kind == "IDENT" && peek.value == "self"
+      advance
+      return SelfNode.new.as(Node)
+    end
+
     first = parse_primary
     # `Session?` is the union of the type and nothing, and the current
     # parser builds the union rather than a type with a question mark.
@@ -1955,9 +1978,23 @@ pub class Parser
   # `a.b(c).d` is a chain of calls on the thing before the dot. Applied to
   # every primary, because a receiver can be a literal, a paren group or a
   # call as easily as a variable.
+  # A chain written down the page is one chain: `xs\n  .select\n  .map`
+  # continues where the next line starts with a dot. Stopping at the
+  # newline made the rest of it a statement of its own.
+  def continues_chain? : Bool
+    return true if peek.kind == "." || peek.kind == "[" || peek.kind == "!"
+    return false unless peek.kind == "NEWLINE"
+    ahead = 0
+    while peek_at(ahead).kind == "NEWLINE"
+      ahead = ahead + 1
+    end
+    peek_at(ahead).kind == "."
+  end
+
   def with_postfix(node : Node) : Node
     result = node
-    while peek.kind == "." || peek.kind == "[" || peek.kind == "!"
+    while continues_chain?
+      skip_newlines
       # `f(x)!` propagates what precedes it, and chains like the rest: a
       # propagation can be indexed and a call can be propagated.
       if peek.kind == "!"
@@ -1987,6 +2024,7 @@ pub class Parser
         next
       end
       advance
+      start_line = peek.line
       name = advance.value
       # `.or_panic` is not a method call: it is the node that stops the
       # program with the error rather than returning it.
@@ -2019,6 +2057,23 @@ pub class Parser
           advance if peek.kind == ","
         end
         advance
+      elsif peek.line == start_line &&
+            (peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" ||
+             peek.kind == "CONST" || peek.kind == "INSTANCE_VAR" ||
+             peek.kind == "CHAR" ||
+             (peek.kind == "IDENT" && peek.value != "do" && peek.value != "if" &&
+              peek.value != "unless" && peek.value != "while" &&
+              peek.value != "until" && peek.value != "then" &&
+              peek.value != "end" && peek.value != "rescue"))
+        # `users.get "/" do |env| ... end`: a receiver, a method, an
+        # argument written without parentheses, and a block. Only the
+        # parenthesised form was read, so the argument became a statement
+        # of its own and the `do` a call to a method of that name.
+        args << parse_expression
+        while peek.kind == ","
+          advance
+          args << parse_expression
+        end
       end
       skip_short_block?
       skip_block
@@ -2165,6 +2220,14 @@ pub class Parser
     # assignment, which is an expression position: these are statements
     # and expressions both, and reading them only as statements made
     # `case` a call to a method of that name.
+    # `self` is a variable named self everywhere a program writes it. The
+    # other node, the one that prints `(self)`, is the argument of the
+    # `extend` the parser injects into a module, and nothing writes that.
+    if t.kind == "IDENT" && t.value == "self"
+      advance
+      return with_postfix(VarNode.new("self").as(Node))
+    end
+
     if t.kind == "IDENT" && t.value == "case"
       return parse_case
     end

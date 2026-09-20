@@ -35,9 +35,13 @@ wrong first and made the port look better or worse than it was:
 
 ## Where it is
 
-Measured, not estimated: 15 of the 27 files in `samples/iyi` produce a
-tree identical to the current parser's, and the mean file agrees for the
-first 76% of its tree.
+Measured, not estimated: **all 27** files in `samples/iyi` produce a tree
+identical to the current parser's.
+
+```
+bash selfhost/parser/diff.sh samples/iyi/*.iyi
+  agree 27, differ 0, no oracle 0
+```
 
 The lexer slice (`lexer/`) agrees with the current lexer token for token
 on 7 of 7 non-interpolated samples.
@@ -58,17 +62,14 @@ string, interpolated string, char, array, hash, tuple, range, `true`,
 `false`, `nil`, and the empty forms that say what they are in an `of`
 clause rather than in their braces.
 
-## The next slices, in the order the corpus asks for them
+## The next slices
 
-Run `where.sh` for the current list. As of this writing:
-
-| what | files |
-| --- | --- |
-| `recover` and `!` propagation | socket, errors, workers |
-| heredocs and multi-line strings | calc, config |
-| non-ASCII string bodies | std_text |
-| `yield` and the block a def declares | generics, std_iterator |
-| the remaining call shapes | io, webapp, grid, sessions |
+The sample corpus is closed, so it no longer says what is missing. What
+it never exercised does: macros beyond `getter`, heredocs, `lib` and
+`fun`, regex literals, multiple assignment, `with ... yield`, and the
+parts of the grammar only the compiler's own source uses. The next
+corpus is `src/iyi/*.iyi` and then `src/std/*.iyi`, which are larger and
+written by someone who was not thinking about the port.
 
 ## The semantic pass
 

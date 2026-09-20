@@ -389,6 +389,23 @@
 
 ### Fixed
 
+- **An impl method written wider than its body did not ship one, and six
+  of the twelve samples that import a module were not being asked.** An
+  impl defines methods on its target, so when the target is a type the
+  module declares their machine code is in the module's own unit and the
+  header is all that has to travel. That holds while the symbol on both
+  sides is the same name, and a union is where it is not: a consumer
+  keys the call on the declaration and codegen keys the symbol on the
+  type the body inferred. `calc`'s `impl Node for Number` answers
+  `Int32` under a `def evaluate(scope) : Int32 | UnknownName |
+  DividedByZero`, so the producer emitted `…#evaluate<Hash(String,
+  Int32)>:Int32` and the consumer's link ended on the union.
+
+  `bench/samples_roundtrip.sh` named six samples — "the six that import
+  a module" — and there are twelve. It names all twelve now, which is
+  how `calc` was found: `format`, `socket`, `std_iterator`, `std_text`
+  and `std_time` were already crossing and only `calc` was not.
+
 - **A datagram larger than the buffer killed the program on Windows.**
   POSIX fills the buffer, drops the rest and answers what fit; Winsock
   refuses the same call with WSAEMSGSIZE (10040) and fills the buffer

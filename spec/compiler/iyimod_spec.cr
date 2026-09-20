@@ -3399,6 +3399,85 @@ describe Iyi::IyiMod do
     end
   end
 
+  # An impl method written wider than what its body answers.
+  #
+  # An impl defines methods on its target, so when the target is a type
+  # this module declares their machine code is in this module's own unit
+  # and the header is all that has to travel. That holds while the symbol
+  # on both sides is the same name, and a union is where it is not: a
+  # consumer keys the call on the declaration and codegen keys the symbol
+  # on the type the body inferred.
+  #
+  # The `calc` sample is the one this was found on — `impl Node for
+  # Number` answers `Int32` under a `def evaluate(scope) : Int32 |
+  # UnknownName | DividedByZero` — and it is a sample
+  # `bench/samples_roundtrip.sh` did not cover, because that gate named
+  # six of the twelve samples that import a module. It names all twelve
+  # now.
+  it "carries an impl method whose declaration is wider than its body" do
+    with_tempdir("iyimod_impl_widened") do
+      Dir.mkdir_p "boot"
+      File.write "boot/eval.iyi", <<-IYI
+        module boot/eval
+
+        pub struct Missing
+          pub def why : String
+            "missing"
+          end
+        end
+
+        pub trait Node
+          abstract def value : Int32 | Missing
+        end
+
+        pub struct Literal
+          @number : Int32
+
+          def initialize(@number : Int32)
+          end
+        end
+
+        impl Node for Literal
+          def value : Int32 | Missing
+            @number
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/eval
+
+        def answer(node : Boot::Eval::Node) : String
+          result = node.value
+          if result.is_a?(Int32)
+            result.to_s
+          else
+            result.why
+          end
+        end
+
+        puts answer(Boot::Eval::Literal.new(7))
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "7"
+
+      File.delete "boot/eval.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "7"
+    end
+  end
+
   it "round-trips a module's initialiser" do
     with_temporary_file do |path|
       artifact = Iyi::IyiMod::Artifact.new(

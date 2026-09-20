@@ -641,7 +641,20 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       signature = IyiMod.signature(a_def)
       impl_methods << signature
 
-      if bodies_travel && file
+      # And one more way the machine code ends up somewhere the consumer
+      # will not look for it: a signature written wider than what the body
+      # answers. A consumer keys a call on the declaration, codegen keys
+      # the symbol on the type the body inferred, and a union is where the
+      # two part company — `impl Node for Number` answers `Int32` under a
+      # `def evaluate(…) : Int32 | UnknownName | DividedByZero`, so the
+      # producer emitted `…#evaluate<Hash(String, Int32)>:Int32` and the
+      # `calc` sample's link ended on the union. The same question
+      # `Iyi::Compiler#iyi_widened_parameters?` asks of an ordinary def,
+      # asked here of what was written, because nothing is inferred yet.
+      if iyi_impl_signature_widened?(a_def) && file
+        bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
+        bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
+      elsif bodies_travel && file
         bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
         bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
       end
@@ -1830,6 +1843,20 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       member.accept self
       previous_counter
     end
+  end
+
+  # iyi: whether an impl method's declaration is written wider than the
+  # symbol the producer will emit for it.
+  #
+  # Syntactic, and a union is the whole of it: this runs in the top-level
+  # pass, where nothing has been inferred, and a union is the one written
+  # form a body can answer narrower than. A virtual type is the other half
+  # of the same question and belongs where the rest of it is asked, after
+  # semantic — no impl in the tree needs it yet, and the module exercises
+  # say so.
+  private def iyi_impl_signature_widened?(a_def : Def) : Bool
+    return true if a_def.return_type.is_a?(Union)
+    a_def.args.any? { |argument| argument.restriction.is_a?(Union) }
   end
 
   def define_enum_question_method(enum_type, member, is_flags)

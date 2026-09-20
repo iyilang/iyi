@@ -33,11 +33,16 @@ case "$(uname -s)" in
     ;;
 esac
 
-# The six that import a module. `hello`, `generics` and `errors` are single
-# files and exercise nothing here. `derive` is here for the reason R-5 exists:
-# the macro that generated its methods is in `std/derives`, and that source is
-# deleted below, so the artifact has to carry what the derive produced.
-SAMPLES="modules immutable collections init_order webapp derive"
+# Every sample that imports a module. A sample that imports nothing has no
+# boundary to cross, which is why `hello`, `generics` and `errors` are not
+# here; the rest are, and six of them were missing. `calc` was the one that
+# mattered — an `impl` method written `: Int32 | UnknownName |
+# DividedByZero` over a body that answers `Int32`, so the producer emitted
+# the narrow symbol and the consumer asked for the union. `derive` is here
+# for the reason R-5 exists: the macro that generated its methods is in
+# `std/derives`, and that source is deleted below, so the artifact has to
+# carry what the derive produced.
+SAMPLES="modules immutable collections init_order webapp derive calc format socket std_iterator std_text std_time"
 
 cp -r "$REPO/samples/iyi/." "$WORK/"
 cd "$WORK" || exit 1

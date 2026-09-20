@@ -134,9 +134,11 @@ pub class Lexer
       while !at_end? && ident_char?(peek)
         text = text + advance.to_s
       end
-      # `foo?` and `bar!` are one identifier, which is a lexing rule and
-      # not a parsing one.
-      if !at_end? && (peek == '?' || peek == '!')
+      # `foo?` is one identifier. `bar!` is not: `!` is not part of a name
+      # in iyi (SPEC.md III.1.7a), it propagates what precedes it, and
+      # joining it made `end!` an identifier that closed nothing, so the
+      # block it ended ran to the end of the file.
+      if !at_end? && peek == '?'
         text = text + advance.to_s
       end
       if text == "_"
@@ -2110,7 +2112,10 @@ pub class Parser
       # A known local is a variable. So is a name about to be assigned:
       # `total = 0` declares it, and the assignment reads its target as a
       # variable rather than as a call to a method named `total`.
-      if @locals.includes?(name)
+      # `it` is the block parameter a block did not name, and the current
+      # parser builds a variable for it rather than a call to a method of
+      # that name.
+      if name == "it" || @locals.includes?(name)
         return with_postfix(VarNode.new(name).as(Node))
       end
       if peek.kind == "="
@@ -2121,7 +2126,10 @@ pub class Parser
       # method named `do`.
       if peek.kind == "IDENT" && peek.value == "do"
         skip_do_block
-        return CallNode.new(name, [] of Node, [] of Node).as(Node)
+        # Through `with_postfix`, because `group do ... end!` propagates
+        # the group and the `!` is written after the block's `end`: a
+        # return from here dropped it.
+        return with_postfix(CallNode.new(name, [] of Node, [] of Node).as(Node))
       end
       if peek.line == t.line &&
          (peek.kind == "IDENT" || peek.kind == "NUMBER" || peek.kind == "DELIMITER_START" || peek.kind == "CONST")

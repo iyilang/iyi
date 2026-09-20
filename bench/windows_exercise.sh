@@ -209,6 +209,53 @@ EOF
         status=1
       fi
     fi
+
+    # 2d. The two variables a Windows shell does not set. `PWD` is a
+    # POSIX shell's bookkeeping — cmd and PowerShell keep none — and
+    # `expand` read it for the base of a relative path, so measured from
+    # cmd every such call panicked with "no base given and PWD is not
+    # set". `TEMP` and `TMP` are usually there, and when they are not
+    # the last resort was the literal `C:\Windows\Temp`, which a
+    # standard user may not write to. Both answers come from the
+    # platform now: the process's own directory, and `GetTempPathW`.
+    echo
+    echo "== Without the variables a POSIX shell sets =="
+    cat > "$WORK/bare.iyi" <<'EOF'
+module bare
+
+import std/dir
+import std/file
+import std/path
+using std/dir::{Dir}
+using std/file::{File}
+using std/path::{Path}
+
+puts "expanded " + Path["relative.txt"].expand.to_s
+scratch = Dir.tempdir + "\\iyi_windows_exercise_scratch"
+written = File.write(scratch, "scratch")
+if written.is_a?(Error)
+  puts "tempdir refused " + scratch + ": " + written.message
+else
+  puts "wrote under " + Dir.tempdir
+  File.delete(scratch)
+end
+EOF
+    if ! "$IYI" build -o "$WORK/bare.exe" "$WORK/bare.iyi" > "$WORK/bare.log" 2>&1; then
+      echo "  the bare-environment probe did not build"
+      tail -5 "$WORK/bare.log"
+      status=1
+    else
+      ( cd "$WORK" && env -u PWD -u TMPDIR -u TEMP -u TMP "$WORK/bare.exe" ) \
+        > "$WORK/bare.out" 2>&1 || true
+      if grep -q "^expanded .*relative.txt$" "$WORK/bare.out" &&
+         grep -q "^wrote under " "$WORK/bare.out"; then
+        sed -n 's/^/  /p' "$WORK/bare.out"
+      else
+        echo "  a program without PWD, TEMP and TMP did not get platform answers:"
+        sed -n '1,4p' "$WORK/bare.out"
+        status=1
+      fi
+    fi
     ;;
 esac
 

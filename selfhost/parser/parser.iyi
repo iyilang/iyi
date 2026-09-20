@@ -409,7 +409,47 @@ pub struct ArrayNode
   end
 end
 
+# `Array(Int32)` is a type applied to its arguments, not a call to a
+# method named `Array`. Nested, because `Array(Array(Int32))` is one.
+pub class GenericNode
+  getter name : Array(Node)
+  getter args : Array(Node)
+  def initialize(@name : Array(Node), @args : Array(Node))
+  end
+end
+
+pub struct HashNode
+  def initialize
+  end
+end
+
+pub struct TupleNode
+  def initialize
+  end
+end
+
+pub struct RangeNode
+  def initialize
+  end
+end
+
+pub struct CharNode
+  def initialize
+  end
+end
+
 pub class IfNode
+  getter cond : Array(Node)
+  getter then_branch : Array(Node)
+  getter else_branch : Array(Node)
+  def initialize(@cond : Array(Node), @then_branch : Array(Node), @else_branch : Array(Node))
+  end
+end
+
+# `unless` is its own node in the current parser, with its branches in
+# the order they were written. Building an `if` with them swapped is the
+# same program and a different tree.
+pub class UnlessNode
   getter cond : Array(Node)
   getter then_branch : Array(Node)
   getter else_branch : Array(Node)
@@ -567,7 +607,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  IvarNode | TypeDeclNode | TraitDefNode | ClassDefNode |
                  ImplDefNode | InterpNode | ImportNode | UsingNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
-                 OrNode | BoolNode | NilNode | NotNode
+                 OrNode | BoolNode | NilNode | NotNode | GenericNode |
+                 HashNode | TupleNode | RangeNode | CharNode | UnlessNode
 
 pub trait Sexp
   abstract def sexp : String
@@ -646,9 +687,45 @@ impl Sexp for ArrayNode
   end
 end
 
+impl Sexp for GenericNode
+  def sexp : String
+    "(generic #{name[0].sexp} #{sexp_list(args)})"
+  end
+end
+
+impl Sexp for HashNode
+  def sexp : String
+    "(hashliteral)"
+  end
+end
+
+impl Sexp for TupleNode
+  def sexp : String
+    "(tupleliteral)"
+  end
+end
+
+impl Sexp for RangeNode
+  def sexp : String
+    "(rangeliteral)"
+  end
+end
+
+impl Sexp for CharNode
+  def sexp : String
+    "(charliteral)"
+  end
+end
+
 impl Sexp for IfNode
   def sexp : String
     "(if #{cond[0].sexp} #{then_branch[0].sexp} #{else_branch[0].sexp})"
+  end
+end
+
+impl Sexp for UnlessNode
+  def sexp : String
+    "(unless #{cond[0].sexp} #{then_branch[0].sexp} #{else_branch[0].sexp})"
   end
 end
 
@@ -1045,8 +1122,8 @@ pub class Parser
         result = IfNode.new([cond] of Node, [result] of Node,
                             [NopNode.new.as(Node)] of Node).as(Node)
       elsif word == "unless"
-        result = IfNode.new([cond] of Node, [NopNode.new.as(Node)] of Node,
-                            [result] of Node).as(Node)
+        result = UnlessNode.new([cond] of Node, [result] of Node,
+                                [NopNode.new.as(Node)] of Node).as(Node)
       elsif word == "while"
         result = WhileNode.new([cond] of Node, [result] of Node).as(Node)
       else
@@ -1096,7 +1173,8 @@ pub class Parser
 
   def build_if(negated : Bool, cond : Node, then_branch : Node, else_branch : Node) : Node
     if negated
-      return IfNode.new([cond] of Node, [else_branch] of Node, [then_branch] of Node).as(Node)
+      return UnlessNode.new([cond] of Node, [then_branch] of Node,
+                            [else_branch] of Node).as(Node)
     end
     IfNode.new([cond] of Node, [then_branch] of Node, [else_branch] of Node).as(Node)
   end
@@ -1183,7 +1261,9 @@ pub class Parser
         restriction = [] of Node
         if peek.kind == ":"
           advance
-          restriction << PathNode.new(advance.value).as(Node)
+          # A restriction is a type, and a type can be generic: reading it
+          # as a bare name made `links : Hash(String, Session)` a path.
+          restriction << parse_primary
         end
         args << ArgNode.new(arg_name, restriction).as(Node)
         advance if peek.kind == ","
@@ -1193,7 +1273,7 @@ pub class Parser
     ret = [] of Node
     if peek.kind == ":"
       advance
-      ret << PathNode.new(advance.value).as(Node)
+      ret << parse_primary
     end
 
     # `forall T`, and `forall T : Greet` with a bound. The parameters it
@@ -1233,6 +1313,14 @@ pub class Parser
 
   def parse_expression : Node
     left = parse_binary(0)
+
+    # `1..10` and `1...10`. Looser than the arithmetic in its ends, so
+    # `a + 1 .. b` is a range of two sums.
+    if peek.kind == ".." || peek.kind == "..."
+      advance
+      parse_binary(0)
+      left = RangeNode.new.as(Node)
+    end
 
     # `value : Int32`, which is what a field declaration is and what a
     # macro call like `getter value : Int32` carries as its argument. The
@@ -1282,8 +1370,10 @@ pub class Parser
   # then the arithmetic: `a + 1 > b && c` groups the way it reads.
   def precedence(op : String) : Int32
     if op == "*" || op == "/" || op == "%"
-      5
+      6
     elsif op == "+" || op == "-"
+      5
+    elsif op == "<<" || op == ">>"
       4
     elsif op == "==" || op == "!=" || op == "<" || op == ">" ||
           op == "<=" || op == ">=" || op == "<=>"
@@ -1332,6 +1422,45 @@ pub class Parser
     end
   end
 
+  # Whether the word at the cursor opens something that an `end` closes.
+  # `if` does when it starts a statement and does not when it trails one:
+  # `return 0 if n < 0` has no `end`, and a counter that treated the two
+  # alike would eat the `end` of whatever contained it.
+  def opens_block?(index : Int32, word : String) : Bool
+    return true if word == "do" || word == "def" || word == "class" ||
+                   word == "struct" || word == "trait" || word == "impl" ||
+                   word == "module" || word == "case" || word == "begin" ||
+                   word == "enum" || word == "lib"
+    return false unless word == "if" || word == "unless" ||
+                        word == "while" || word == "until"
+    return true if index == 0
+    before = @tokens[index - 1]
+    before.kind == "NEWLINE" || before.kind == "=" ||
+      (before.kind == "IDENT" && (before.value == "do" || before.value == "else" ||
+                                  before.value == "then" || before.value == "begin"))
+  end
+
+  def skip_do_block : Nil
+    return unless peek.kind == "IDENT" && peek.value == "do"
+    advance
+    depth = 1
+    while !at_end? && depth > 0
+      index = @pos
+      token = advance
+      next unless token.kind == "IDENT"
+      if token.value == "end"
+        depth = depth - 1
+      elsif opens_block?(index, token.value)
+        depth = depth + 1
+      end
+    end
+  end
+
+  def skip_block : Nil
+    skip_brace_block
+    skip_do_block
+  end
+
   # `a.b(c).d` is a chain of calls on the thing before the dot. Applied to
   # every primary, because a receiver can be a literal, a paren group or a
   # call as easily as a variable.
@@ -1348,7 +1477,14 @@ pub class Parser
           advance if peek.kind == ","
         end
         advance                  # ]
-        result = CallNode.new("[]", [result] of Node, args).as(Node)
+        # `links[path]?` is a call to `[]?`, a different method from `[]`:
+        # one raises where the other answers nil.
+        name = "[]"
+        if peek.kind == "?"
+          advance
+          name = "[]?"
+        end
+        result = CallNode.new(name, [result] of Node, args).as(Node)
         next
       end
       advance
@@ -1362,7 +1498,7 @@ pub class Parser
         end
         advance
       end
-      skip_brace_block
+      skip_block
       result = CallNode.new(name, [result] of Node, args).as(Node)
     end
     result
@@ -1377,6 +1513,11 @@ pub class Parser
     if t.kind == "NUMBER"
       advance
       return with_postfix(NumNode.new(t.value).as(Node))
+    end
+
+    if t.kind == "CHAR"
+      advance
+      return with_postfix(CharNode.new.as(Node))
     end
     if t.kind == "DELIMITER_START"
       advance
@@ -1403,7 +1544,66 @@ pub class Parser
         advance
         name = name + "::" + advance.value
       end
-      return with_postfix(PathNode.new(name).as(Node))
+      path = PathNode.new(name).as(Node)
+      if peek.kind == "("
+        advance
+        targs = [] of Node
+        while peek.kind != ")" && !at_end?
+          targs << parse_primary
+          advance if peek.kind == ","
+        end
+        advance                  # )
+        return with_postfix(GenericNode.new([path] of Node, targs).as(Node))
+      end
+      return with_postfix(path)
+    end
+
+    if t.kind == "{"
+      # A brace in expression position is a literal, not a block: a block
+      # only ever follows a call, and `with_postfix` reads it there. Which
+      # literal it is depends on whether a `=>` turns up before the
+      # matching brace.
+      advance
+      empty = peek.kind == "}"
+      depth = 1
+      is_hash = false
+      while !at_end? && depth > 0
+        k = advance.kind
+        depth = depth + 1 if k == "{"
+        depth = depth - 1 if k == "}"
+        is_hash = true if depth == 1 && k == "=>"
+      end
+
+      # `{} of String => Array(String)` names both types, and both belong
+      # to the literal rather than being a call to `of`. It is also the
+      # only place an empty hash says it is one: there is no `=>` between
+      # the braces to see, and reading `{} of String => Int32` as a tuple
+      # is what the port did.
+      if peek.kind == "IDENT" && peek.value == "of"
+        advance
+        parse_primary
+        if peek.kind == "=>"
+          advance
+          parse_primary
+          is_hash = true
+        end
+      end
+
+      # `{}` on its own is an empty hash, not an empty tuple.
+      is_hash = true if empty
+      return with_postfix(HashNode.new.as(Node)) if is_hash
+      return with_postfix(TupleNode.new.as(Node))
+    end
+
+    if t.kind == "[]"
+      # `[]` is one token, because it is also a method name. Here it is an
+      # empty array, and `[] of String` names what it is empty of.
+      advance
+      if peek.kind == "IDENT" && peek.value == "of"
+        advance
+        parse_primary
+      end
+      return with_postfix(ArrayNode.new.as(Node))
     end
 
     if t.kind == "["

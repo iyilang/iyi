@@ -250,21 +250,43 @@ def main():
         # asks for another one has to be refused rather than served from the
         # wrong library — the environment travels, and this is the variable
         # that cannot.
-        elsewhere = os.path.join(work, "no-library")
-        os.makedirs(elsewhere, exist_ok=True)
+        # A second library, real and not this tree's: a copy, so the prelude
+        # it finds is a different file and a build against it still compiles.
+        # Naming a directory with no prelude would prove the refusal and
+        # nothing about the fallback below, which has to end in a binary.
+        elsewhere = os.path.join(work, "other-library")
+        shutil.copytree(os.path.join(ROOT, "src"), os.path.join(elsewhere, "src"))
+        other_library = os.path.join(elsewhere, "src")
         entry = os.path.join(elsewhere, "x.iyi")
         with open(entry, "w") as f:
             f.write("puts 1\n")
         proc = subprocess.run(
             [IYI, "daemon", "build", "--socket", socket, "-o",
              os.path.join(work, "no-library-out"), entry],
-            cwd=elsewhere, env=dict(os.environ, IYI_PATH=elsewhere),
+            cwd=elsewhere, env=dict(os.environ, IYI_PATH=other_library),
             capture_output=True, text=True, timeout=600)
         spoken = proc.stdout + proc.stderr
         say("a build asking for another library is refused",
             proc.returncode != 0 and "analysed a different library" in spoken
             and "IYI_PATH" in spoken,
             spoken.strip().splitlines()[:1])
+
+        # And the same refusal reaching a build that never asked for a
+        # daemon: `IYI_DAEMON_SOCKET` is an optimisation somebody set once,
+        # so a daemon that cannot serve this build is the same as no daemon
+        # — the reason is printed and the binary still gets built.
+        out = os.path.join(work, "fallback-out")
+        proc = subprocess.run(
+            [IYI, "build", "-o", out, entry],
+            cwd=elsewhere,
+            env=dict(os.environ, IYI_PATH=other_library, IYI_DAEMON_SOCKET=socket),
+            capture_output=True, text=True, timeout=600)
+        spoken = proc.stdout + proc.stderr
+        ran = subprocess.run([out], capture_output=True, text=True) if os.path.exists(out) else None
+        say("a build that only found a socket falls back to building",
+            proc.returncode == 0 and "building without it" in spoken
+            and ran is not None and ran.stdout.strip() == "1",
+            spoken.strip().splitlines()[-1:])
     finally:
         daemon.terminate()
         try:

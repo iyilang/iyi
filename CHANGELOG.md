@@ -407,10 +407,17 @@
   the spelling, because an unset `IYI_PATH` and one naming the directory
   it resolves to are the same library.
 
+  A daemon that cannot serve *this* build is the same as no daemon, for a
+  build that never asked for one: a refusal is its own frame now, and
+  `IYI_DAEMON_SOCKET` — an optimisation somebody set once, in a shell —
+  falls back to an ordinary build with the reason printed. `iyi daemon
+  build` asked for that daemon and still fails.
+
   `bench/daemon_agrees.py` grew the shape that found it — a dependency
   that is a package rather than a file beside the entry — and the
-  refusal; both are proven to fail, the first by taking the environment
-  back out of the request, the second by dropping the comparison.
+  refusal, and the fallback; all three are proven to fail — by taking the
+  environment back out of the request, by dropping the comparison, and by
+  making the refusal exit instead of building.
 
 
 - **The seam that produced four of this release's defects is checked

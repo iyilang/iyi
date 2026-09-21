@@ -46,6 +46,12 @@ class Iyi::Command
   DAEMON_FRAME_EXIT   = 0_u8
   DAEMON_FRAME_STDOUT = 1_u8
   DAEMON_FRAME_STDERR = 2_u8
+  # A daemon that cannot serve *this* build — rebuilt compiler, other
+  # version, other library — rather than a build that failed. Its own frame
+  # because the answer depends on who asked: `iyi daemon build` wanted this
+  # daemon and is told no, while a build that only found `IYI_DAEMON_SOCKET`
+  # in the environment wanted a binary and gets one, built without it.
+  DAEMON_FRAME_REFUSE = 3_u8
 
   private def daemon
     subcommand = options.first?
@@ -679,9 +685,7 @@ class Iyi::Command
   # correct for a command writing to a pipe and fatal for a server writing
   # to one of its clients. The daemon exited 0, quietly, mid-refusal.
   private def daemon_refuse(client, message : String) : Nil
-    message.each_line do |line|
-      daemon_frame(client, DAEMON_FRAME_STDERR, "#{line}\n".to_slice)
-    end
+    daemon_frame(client, DAEMON_FRAME_REFUSE, message.chomp.to_slice)
     client.write_byte(DAEMON_FRAME_EXIT)
     client.write_bytes(1, IO::ByteFormat::LittleEndian)
     client.flush
@@ -762,6 +766,18 @@ class Iyi::Command
       case kind
       when DAEMON_FRAME_EXIT
         exit client.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+      when DAEMON_FRAME_REFUSE
+        size = client.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+        bytes = Bytes.new(size)
+        client.read_fully(bytes)
+        STDERR.puts String.new(bytes)
+        # The build asked for a binary, not for this daemon.
+        if fallback
+          STDERR.puts "#{Command.program_name}: building without it"
+          client.close rescue nil
+          return
+        end
+        exit 1
       when DAEMON_FRAME_STDOUT, DAEMON_FRAME_STDERR
         size = client.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
         bytes = Bytes.new(size)

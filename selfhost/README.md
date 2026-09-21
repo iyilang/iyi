@@ -198,6 +198,44 @@ The gate is load-bearing: changing one method name the pass reports
 turns `agree 1` into `differ 1`, and restoring the file byte-for-byte
 turns it back.
 
+### The prelude, declared
+
+The samples corpus was written for this language and the prelude was
+not, so the declaration pass gets the same second corpus the parser did:
+
+    bash selfhost/semantic/diff.sh src/iyi/*.iyi
+
+Measured: **13 agree, 2 differ, 2 with no oracle**, from 4 agreeing when
+the corpus was first run. What it closed is what a declaration is, as
+opposed to what a file says:
+
+* A private method is a method the type has. The parser used to count
+  `private def` to its `end` and throw the declaration away, so the
+  modifier now carries it and the shape still prints the modifier alone.
+* `def self.x` belongs to the type and `def x` to its instances. They
+  print the same and land on different types, so the node carries the
+  receiver the shape does not.
+* An `alias` brings a type into being, and the pass reports it as one.
+* `struct Int32` in the prelude does not build a struct: the compiler
+  already holds that type and reports it by its own kind. The same is
+  true of `Bool`, `Nil`, `Char`, `Symbol` and `Class`, and of `Tuple`
+  and `Proc`, which the compiler holds with parameters the prelude does
+  not write down.
+* A struct answers `new`, so the compiler writes the `initialize` that
+  `new` calls when the struct declares none. `Reference` is the root the
+  compiler builds the same way.
+
+Parsing a private declaration instead of counting over it found a
+grammar gap the corpus had been hiding: `escape =` with its value on the
+next line was read as an assignment of nothing followed by a statement,
+in `src/std/eiy.iyi`, inside a private method nothing had parsed before.
+
+The two that differ are both macro expansion, and neither is this
+slice's: `primitives.iyi` writes six of `Char`'s methods with a
+`{% for %}` loop, and `prelude.iyi` uses `property`, whose definition
+arrives through a `require` this pass does not resolve. The macro
+language is the next slice and these two are its measure.
+
 ## The first inference slice
 
 `semantic/infer.iyi` infers the return type of every called internal method

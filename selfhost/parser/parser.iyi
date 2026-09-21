@@ -593,8 +593,13 @@ pub struct MetaclassNode
   end
 end
 
+# The name an alias declares. The canonical shape prints `(alias)` and
+# nothing more, but an alias brings a type into being and the semantic
+# pass has to see which one.
 pub struct AliasNode
-  def initialize
+  getter name : String
+
+  def initialize(@name : String)
   end
 end
 
@@ -668,8 +673,13 @@ pub struct SymbolNode
   end
 end
 
+# `private def` is the modifier with the declaration inside it. The
+# shape prints the modifier alone; a private method is still a method
+# the type has, so the declaration is kept rather than counted over.
 pub struct VisibilityModifierNode
-  def initialize
+  getter body : Array(Node)
+
+  def initialize(@body : Array(Node))
   end
 end
 
@@ -964,8 +974,16 @@ pub class DefNode
   getter args : Array(Node)
   getter ret : Array(Node)
   getter body : Array(Node)
+  # `self` when the method belongs to the type rather than to its
+  # instances. The canonical shape prints the two the same way; the
+  # semantic pass puts them on different types.
+  getter receiver : String
 
   def initialize(@name : String, @args : Array(Node), @ret : Array(Node), @body : Array(Node))
+    @receiver = ""
+  end
+
+  def initialize(@name : String, @args : Array(Node), @ret : Array(Node), @body : Array(Node), @receiver : String)
   end
 end
 
@@ -1842,7 +1860,7 @@ pub class Parser
        (peek.value == "private" || peek.value == "protected") &&
        peek_at(1).kind == "CONST"
       skip_line
-      return VisibilityModifierNode.new.as(Node)
+      return VisibilityModifierNode.new([] of Node).as(Node)
     end
     # `private def` and `protected def` are one node with the
     # declaration inside, and the shape prints the node rather than what
@@ -1851,17 +1869,21 @@ pub class Parser
        (peek.value == "private" || peek.value == "protected") &&
        declares?(peek_at(1))
       advance # private or protected
+      # A private method is a method the type has, so the declaration
+      # is parsed and kept. The shape prints the modifier either way.
+      if peek.kind == "IDENT" && peek.value == "def"
+        return VisibilityModifierNode.new([parse_def(false)] of Node).as(Node)
+      end
       declaration = advance.value
       if declaration == "alias" || declaration == "getter" ||
          declaration == "setter" || declaration == "property"
         skip_line
       else
-        # The canonical shape is the modifier, not the declaration it
-        # contains. Count the contained declaration to its own end. A
-        # do block inside a private def belongs to that def.
+        # Count a declaration this slice does not model to its own end.
+        # A do block inside one belongs to that declaration.
         skip_to_matching_end
       end
-      return VisibilityModifierNode.new.as(Node)
+      return VisibilityModifierNode.new([] of Node).as(Node)
     end
     # `private record Name, a : T, b : U` declares a type through a macro
     # rather than a keyword, and the modifier still covers the whole
@@ -1871,7 +1893,7 @@ pub class Parser
        peek_at(1).kind == "IDENT" && peek_at(1).line == peek.line
       advance # private or protected
       skip_declaration
-      return VisibilityModifierNode.new.as(Node)
+      return VisibilityModifierNode.new([] of Node).as(Node)
     end
     offset = 0
     offset = 1 if peek.kind == "IDENT" && peek.value == "pub"
@@ -1919,8 +1941,10 @@ pub class Parser
       # body writes this; anywhere else `type` is an ordinary name.
       if word.value == "alias"
         advance if offset == 1
+        advance # alias
+        alias_name = peek.kind == "CONST" ? declaration_path : ""
         skip_declaration
-        return AliasNode.new.as(Node)
+        return AliasNode.new(alias_name).as(Node)
       end
       module_name = peek_at(offset + 1)
       absolute_module = module_name.kind == "::" &&
@@ -2465,10 +2489,12 @@ pub class Parser
     advance # def
     first = advance
     name = first.value
+    receiver = ""
     if name == "self" && peek.kind == "."
       advance
       first = advance
       name = first.value
+      receiver = "self"
     end
     # `value=` and `[]=` are one name; the `=` is written against what
     # precedes it, and a space would make it an assignment.
@@ -2613,7 +2639,7 @@ pub class Parser
     # whole declaration.
     if is_abstract
       @locals = outer_locals
-      return DefNode.new(name, args, ret, [NopNode.new.as(Node)] of Node).as(Node)
+      return DefNode.new(name, args, ret, [NopNode.new.as(Node)] of Node, receiver).as(Node)
     end
 
     body = [] of Node
@@ -2635,7 +2661,7 @@ pub class Parser
               ExprsNode.new(body).as(Node)
             end
     @locals = outer_locals
-    DefNode.new(name, args, ret, [inner] of Node).as(Node)
+    DefNode.new(name, args, ret, [inner] of Node, receiver).as(Node)
   end
 
   # A type, which is not an expression: `String | Nil` is one type and
@@ -2847,6 +2873,10 @@ pub class Parser
 
     if peek.kind == "="
       advance
+      # `escape =` with the value on the next line is one assignment, not
+      # a statement that assigns nothing followed by an expression. The
+      # `=` cannot end a statement, so the newline after it is not one.
+      skip_newlines
       value = parse_binary(0)
       if peek.kind == "?"
         advance

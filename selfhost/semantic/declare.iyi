@@ -20,7 +20,7 @@ module main
 import std/file
 import parser/parser
 using std/file::{File}
-using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode}
+using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
 # parameter list it prints after that, and `defs` are the methods that
@@ -34,9 +34,18 @@ pub class Decl
   getter shown : String
   getter vars : String
   getter defs : Array(String)
+  # A struct the file brings into being answers `new`, and the compiler
+  # writes the `initialize` that `new` calls when the struct declares
+  # none. A type the compiler already had keeps what it already had.
+  getter defaulted : Bool
 
   def initialize(@kind : String, @key : String, @shown : String, @vars : String)
     @defs = [] of String
+    @defaulted = false
+  end
+
+  def defaults_initialize : Nil
+    @defaulted = true
   end
 
   def add(name : String) : Nil
@@ -44,7 +53,9 @@ pub class Decl
   end
 
   def line : String
-    names = @defs.uniq.sorted
+    names = @defs.dup
+    names << "initialize" if @defaulted && !names.includes?("initialize")
+    names = names.uniq.sorted
     "(#{kind} #{shown}#{vars} (defs #{names.join(" ")}))"
   end
 end
@@ -94,6 +105,46 @@ pub def name_with_vars(name : String, vars : String) : String
     joined = joined == "" ? part : joined + ", " + part
   end
   "#{name}(#{joined})"
+end
+
+# The prelude writes `struct Int32`, and the compiler does not build a
+# struct for it: these names are the compiler's own types and it reports
+# each one by its kind. The list is the compiler's rather than the
+# language's, and was read off the oracle.
+pub def compiler_kind(name : String) : String
+  return "booltype" if name == "Bool"
+  return "niltype" if name == "Nil"
+  return "chartype" if name == "Char"
+  return "symboltype" if name == "Symbol"
+  return "metaclasstype" if name == "Class"
+  return "floattype" if name == "Float32" || name == "Float64"
+  return "integertype" if name == "Int8" || name == "Int16" ||
+                          name == "Int32" || name == "Int64" ||
+                          name == "Int128" || name == "UInt8" ||
+                          name == "UInt16" || name == "UInt32" ||
+                          name == "UInt64" || name == "UInt128"
+  ""
+end
+
+# The structs the compiler already holds, which is why they are not given
+# an `initialize` the way a struct this file declares is.
+pub def compiler_struct?(name : String) : Bool
+  name == "Tuple" || name == "Proc" || name == "Enum" || name == "StaticArray"
+end
+
+# `struct Tuple` reopens a type the compiler built with parameters the
+# prelude does not write down, and the compiler reports its own name and
+# its own parameter list for it.
+pub def compiler_shown(name : String) : String
+  return "Tuple(*T)" if name == "Tuple"
+  return "Proc(*T, R)" if name == "Proc"
+  ""
+end
+
+pub def compiler_vars(name : String) : String
+  return "(T)" if name == "Tuple"
+  return "(T R)" if name == "Proc"
+  ""
 end
 
 pub def underscore(name : String) : String
@@ -162,7 +213,18 @@ pub class Walk
     when ExprsNode
       body(node.items, scope, holder)
     when DefNode
-      holder.add(node.name) unless holder.nil?
+      # `def self.x` is the type's method, not its instances'. The two
+      # print the same and land on different types.
+      holder.add(node.name) unless holder.nil? || node.receiver == "self"
+    when VisibilityModifierNode
+      # A private method is still a method the type has.
+      body(node.body, scope, holder)
+    when AliasNode
+      name = node.name
+      unless name == ""
+        full = join_scope(scope, name)
+        @into.at("aliastype", full, full, "")
+      end
     when AssignNode
       # `DEMO = 3` at the top of a module declares a constant, which the
       # pass brings into being the way it does a type.
@@ -208,7 +270,18 @@ pub class Walk
               inner : Array(Node), scope : String, twice : Bool) : Nil
     full = join_scope(scope, name)
     shown = twice ? name_with_vars(full, vars) : full
-    entry = @into.at(kind, full, shown, vars)
+    own = compiler_kind(full)
+    held = compiler_shown(full)
+    unless held == ""
+      shown = held
+      vars = compiler_vars(full)
+    end
+    entry = @into.at(own == "" ? kind : own, full, shown, vars)
+    # Every struct answers `new`, and `Reference` is the root the compiler
+    # builds the same way: each is given the `initialize` that `new` calls
+    # when it declares none.
+    defaults = (kind == "struct" && own == "" && !compiler_struct?(full)) || full == "Reference"
+    entry.defaults_initialize if defaults
     body(inner, full, entry)
   end
 

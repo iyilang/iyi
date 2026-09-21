@@ -389,6 +389,13 @@
 
 ### Fixed
 
+- **`mod context` and `mod diff` run on Windows.** Both are path-shaped
+  work — imports resolved through `IYI_PATH`, a workspace's `mods`, and a
+  hash of what a consumer compiles — and both carry the code that platform
+  needs: `cygpath` for the checkout and `;` for the search path. Neither
+  had ever run there, so that code was a claim rather than a measurement.
+
+
 - **The dependency floor read one machine's libc as a floor that moved.**
   glibc exports `environ` as a weak alias of `__environ`, and which of the
   two a binary names is the libc's choice: a newer one links the alias, so

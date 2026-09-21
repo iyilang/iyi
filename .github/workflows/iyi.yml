@@ -1710,6 +1710,18 @@ jobs:
         shell: bash
         run: bash bench/dependency_floor.sh
 
+      # The module contract, on the platform whose paths are the reason to
+      # ask. `mod context` resolves imports through `IYI_PATH` and a
+      # workspace's `mods`, and `mod diff` hashes what a consumer compiles —
+      # both of them path-shaped work that `cygpath` and a `;` separator are
+      # the whole difference in. They ran on Linux and darwin only, so the
+      # separator the gates carry code for was never exercised.
+      - name: What a module contract says, on Windows
+        shell: bash
+        run: |
+          bash bench/mod_context.sh
+          bash bench/mod_diff.sh
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

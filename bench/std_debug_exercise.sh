@@ -103,8 +103,13 @@ platform_libc_only() {
 
 # Darwin dyld names, plus libc write: a Linux import must not grow any of these
 # as undefined symbols. Bare iyi programs already have __libc_start_main.
+# A symbol may arrive versioned — `write@GLIBC_2.2.5` is what `nm -u` prints
+# for a binary linked against a glibc that versions it — and the pattern was
+# anchored on the bare name, so on such a machine this saw nothing at all.
+# That is the shape a check fails in silence: the proof below, which binds
+# `LibC.write` on purpose, passed here while the symbol sat in the table.
 forbidden_undef() {
-  nm -u "$1" 2>/dev/null | grep -E ' (write|dladdr|_NSGetExecutablePath|_dyld_get_image_vmaddr_slide)$'
+  nm -u "$1" 2>/dev/null | grep -E ' (write|dladdr|_NSGetExecutablePath|_dyld_get_image_vmaddr_slide)(@.*)?$'
 }
 
 # ── Linux: compile, refuse a fake DWARF resolution, keep the syscall write
@@ -220,7 +225,7 @@ print "ok\n"
 EOF
     if IYI_PATH="$WORK/bad${PSEP}$REPO/src" "$IYI" build -o "$WORK/badprog" "$WORK/badprog.iyi" \
          > "$WORK/badprog.build" 2>&1; then
-      if forbidden_undef "$WORK/badprog" | grep -q ' write$'; then
+      if forbidden_undef "$WORK/badprog" | grep -qE ' write(@.*)?$'; then
         echo "  a LibC.write copy leaves write undefined, so the check has teeth"
       else
         fail "a module that binds LibC.write passed the write check"

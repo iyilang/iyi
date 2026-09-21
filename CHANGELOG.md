@@ -389,6 +389,17 @@
 
 ### Fixed
 
+- **The check that `std/debug` does not bind libc's `write` could not see
+  a versioned symbol.** `nm -u` prints `write@GLIBC_2.2.5` for a binary
+  linked against a glibc that versions it, and the pattern was anchored on
+  the bare name — so on such a machine the check matched nothing at all and
+  passed by seeing nothing. The gate's own proof is what said so out loud:
+  the step that binds `LibC.write` on purpose failed there, reporting that
+  a module which *does* bind it passed the check. Both patterns take an
+  optional `@…` now, which is what every other symbol gate here already
+  did with `sed 's/@.*$//'`; that sweep found no second instance.
+
+
 - **A macro whose body used `!` was the one macro the formatter left
   alone.** A macro body is formatted by a second formatter over its text,
   and the text was handed over with no name — so it was read by the other

@@ -69,9 +69,22 @@ module Iyi::Mod
       collect_files(dir, "", files)
       files.sort!
       files.each do |relative|
+        full = File.join(dir, relative)
         digest.update(relative)
         digest.update("\0")
-        digest.update(File.read(File.join(dir, relative)))
+        # A symbolic link is hashed as the link, which is git's own model:
+        # what a repository stores for one is the target *text*, so that is
+        # the content, and retargeting it is a change this notices. Reading
+        # through it would hash something the package does not contain —
+        # and following one that points at its own parent never ends. A
+        # package with `inner/loop -> ..` died with the walker's accident:
+        # `Too many levels of symbolic links`, about a path forty levels
+        # deep, in place of a sentence about the dependency.
+        if File.symlink?(full)
+          digest.update(File.readlink(full))
+        else
+          digest.update(File.read(full))
+        end
         digest.update("\0")
       end
       "s1:#{digest.final.hexstring}"
@@ -81,7 +94,11 @@ module Iyi::Mod
       Dir.each_child(File.join(root, prefix)) do |entry|
         relative = prefix.empty? ? entry : File.join(prefix, entry)
         full = File.join(root, relative)
-        if File.directory?(full)
+        # Asked of the name and not of what it points at: `File.directory?`
+        # follows a link, so a directory link was walked *through* — into
+        # the package's own parent, or into a cycle. A link is an entry
+        # here and its target text is what `tree_hash` digests.
+        if File.info(full, follow_symlinks: false).directory?
           collect_files(root, relative, into)
         else
           into << relative

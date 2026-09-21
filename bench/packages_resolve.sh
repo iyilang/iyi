@@ -194,6 +194,67 @@ grep -q 'the checkout hashes to' mutated.log || {
   exit 1
 }
 
+# ── 5b. A package's tree may contain a symbolic link ─────────────────────
+# The hash is over the checkout's files, and a walk that asks the *target*
+# whether it is a directory walks through a link — into the package's own
+# parent, or around a cycle. `inner/loop -> ..` ended a build with the
+# walker's accident: `Too many levels of symbolic links`, about a path
+# forty levels deep, in place of any sentence about the dependency. A link
+# is hashed as the link now, which is git's own model — the target text is
+# what a repository stores for one — so the cycle is an entry rather than a
+# descent, and retargeting the link is a change the sum notices.
+step "a package with a symbolic link is hashed, cycle and all"
+mkrepo work/linked
+printf 'module example.test/user/linked
+' > work/linked/iyi.mod
+printf 'module linked
+
+pub def linked_greeting : String
+  "hello from linked"
+end
+' > work/linked/linked.iyi
+mkdir -p work/linked/inner
+ln -s .. work/linked/inner/loop
+ln -s ../linked.iyi work/linked/inner/alias.iyi
+git -C work/linked add -A && git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
+git -C work/linked ls-files -s | grep -q '^120000' || { echo "git did not store a symlink, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
+git clone -q --bare work/linked mirror/example.test/user/linked
+mkdir -p linked_app
+printf 'module example.test/user/linked_app
+require example.test/user/linked v1.0.0
+' > linked_app/iyi.mod
+cat > linked_app/main.iyi <<'IYI'
+import example.test/user/linked
+using example.test/user/linked::{linked_greeting}
+
+puts linked_greeting
+IYI
+if ! (cd linked_app && "$IYI" build main.iyi -o app) > linked.log 2>&1; then
+  echo "a package with a symbolic link did not build:"
+  tail -4 linked.log
+  exit 1
+fi
+./linked_app/app | grep -q 'hello from linked' || { echo "the linked package answered:"; ./linked_app/app; exit 1; }
+grep -q 'example.test/user/linked v1.0.0 s1:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
+
+step "retargeting a link inside the checkout is a change"
+linked_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'linked@v1.0.0' | head -1)"
+[ -n "$linked_checkout" ] || { echo "no linked@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
+ln -sfn ../iyi.mod "$linked_checkout/inner/alias.iyi"
+rm -f linked_app/app
+(cd linked_app && "$IYI" build main.iyi -o app) > retarget.log 2>&1
+retarget_status=$?
+ln -sfn ../linked.iyi "$linked_checkout/inner/alias.iyi"
+if [ "$retarget_status" -eq 0 ]; then
+  echo "a retargeted link went unnoticed, so the link's target is not in the hash"
+  exit 1
+fi
+grep -q 'is not what it was' retarget.log || {
+  echo "the retargeted link was refused for some other reason:"
+  tail -5 retarget.log
+  exit 1
+}
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }

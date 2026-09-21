@@ -389,6 +389,31 @@
 
 ### Fixed
 
+- **A package whose tree contains a symbolic link ended the build with
+  the walker's accident.** `iyi.sum` hashes a checkout's files, and the
+  walk asked `File.directory?` — which follows a link, so a directory
+  link was walked *through*: into the package's own parent, or around a
+  cycle. A package carrying `inner/loop -> ..` answered
+
+      Error: …/linked@v1.0.0/inner/loop/inner/loop/inner/loop/… : Too many
+      levels of symbolic links
+
+  forty levels deep, which is the kernel stopping a walk that would not
+  have stopped — and it is not a sentence about a dependency.
+
+  A link is hashed as the link now, which is git's own model: what a
+  repository stores for one is the target *text*, so that is the content.
+  Two things follow. The cycle is an entry rather than a descent, so the
+  package builds. And retargeting a link inside a checkout is a change
+  the sum notices, which following it could never have said: reading
+  through a link hashes something the package does not contain.
+
+  `bench/packages_resolve.sh` gates both, each proven to fail on its own:
+  without the fix the first step dies on the ELOOP path above, and with
+  the link's target left out of the digest the second reports that a
+  retargeted link went unnoticed.
+
+
 - **"Dependencies are hashed" was gated in the direction that is a typo,
   not in the direction that is the threat.** `iyi.sum` is fact written by
   the tool, and its whole job is to notice that what arrived is not what

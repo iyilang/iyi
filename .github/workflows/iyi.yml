@@ -1699,6 +1699,17 @@ jobs:
         shell: bash
         run: bash bench/panics.sh
 
+      # And the floor, for the same reason. The script has read a PE's import
+      # table since Windows was a target — `dumpbin -imports`, located through
+      # the installer the linker is found with — and the two jobs that ran it
+      # were Linux and darwin, so what a Windows program asks of the machine
+      # was a claim nothing measured. Missing `dumpbin` is a failure here
+      # rather than a sentence and exit 0: a machine that built these binaries
+      # has the toolchain that wrote them.
+      - name: The dependency floor, on Windows (III.9)
+        shell: bash
+        run: bash bench/dependency_floor.sh
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

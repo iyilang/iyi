@@ -301,6 +301,13 @@ symbols() {
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
+    # glibc exports `environ` as a weak alias of `__environ`, and which of the
+    # two a binary names is the libc's choice rather than the program's: a
+    # newer one links the alias, so this read `_environ` here (the `^_` strip
+    # above is darwin's) and `environ` on the machine the allowlist was
+    # written on — and called a floor that had not moved moved. One datum,
+    # one name.
+    sed -e 's/^_environ$/environ/' |
     grep -v '^$' |
     sort -u
 }
@@ -427,9 +434,14 @@ case "$(uname -s)" in
     allowed_libs_program="$ALLOWED_DLLS_PROGRAM"
     allowed_libs_compiler="$ALLOWED_DLLS_COMPILER"
     DUMPBIN="$(find_dumpbin || true)"
+    # Required, the way `readelf` is on Linux: a reader that prints nothing
+    # passes every check, and exiting 0 over an unmeasured floor is the
+    # failure this whole file exists to prevent. Nothing builds an iyi binary
+    # on Windows without the toolchain that carries `dumpbin`, so its absence
+    # is a broken environment rather than a platform without the tool.
     if [ -z "$DUMPBIN" ]; then
-      echo "dependency_floor: an import table is read with the toolchain's dumpbin, which is not installed here, so no floor was measured"
-      exit 0
+      echo "dependency_floor: an import table is read with the toolchain's dumpbin, which is not installed here, so no floor can be measured" >&2
+      exit 2
     fi
     ;;
   *) allowed_symbols="$ALLOWED_SYMBOLS_DARWIN" ;;
@@ -656,6 +668,16 @@ if [ -n "$allowed_symbols" ] && [ -n "$prog_syms" ]; then
     echo "Remove them from ALLOWED_SYMBOLS_* so the check keeps its teeth."
     status=1
   fi
+fi
+
+# And the reader itself, on the platform where an empty answer is not a
+# floor of zero: every PE imports something — kernel32 at the very least —
+# so a run that read no library out of any binary read nothing at all, which
+# is what a changed `dumpbin` output format would look like from here.
+if [ -n "$DUMPBIN" ] && [ ! -s "$found_libs" ]; then
+  echo "dependency_floor: no binary reported a single imported DLL, which no PE"
+  echo "does — the import table was not read, so nothing above was measured."
+  status=1
 fi
 
 [ "$status" -eq 0 ] && echo "the floor holds"

@@ -389,6 +389,27 @@
 
 ### Fixed
 
+- **The dependency floor read one machine's libc as a floor that moved.**
+  glibc exports `environ` as a weak alias of `__environ`, and which of the
+  two a binary names is the libc's choice: a newer one links the alias, so
+  the gate — whose `^_` strip is darwin's — read `_environ` here and
+  `environ` on the machine its allowlist was written on. Both complaints
+  fired at once, "gained `_environ`" and "`environ` no longer needed",
+  about a program whose dependencies had not changed. One datum, one name
+  now, and the floor holds on both.
+
+- **The dependency floor runs on Windows.** The script has read a PE's
+  import table since Windows became a target — `dumpbin -imports`, located
+  through the installer the linker is found with — and the two jobs that
+  ran it were Linux and darwin, so what a Windows program asks of the
+  machine was a claim nothing measured. It is a step in the Windows job
+  now. Two ways it could have passed without measuring anything are
+  closed: a missing `dumpbin` is a failure rather than a sentence and exit
+  0, the way `readelf` already is on Linux, and a run where no binary
+  reported a single imported DLL says so — no PE imports nothing, so an
+  empty read is a reader that did not read.
+
+
 - **`iyi bind` now says which of a shard's methods iyi cannot name.** A
   Crystal library's `sort!` crosses the boundary — the declaration has to,
   because a travelling body that calls it must typecheck — and no call

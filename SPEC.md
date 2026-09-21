@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 15,930 lines, of which 3,285 are the library held to the 3,734 ceiling (4,774 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 113,998 lines, none of it written in iyi |
+| compiler | 114,003 lines, none of it written in iyi |
 | artifact format | `.iyimod` v53, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 113,998 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 114,003 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 15,930-line own prelude + 39,063 in std |
 | Specs | 21,146 lines | 11,866 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -5893,6 +5893,41 @@ program's>`. The name a program gives a module is therefore worth choosing
 against what `src/std/` already ships, and that is a naming consequence of
 R-1 rather than a rule of its own: nothing is reserved, and whichever file
 the search order reaches is what the name means.
+
+**And where nobody says, the workspace's own `mods` is read after its
+sources.** `--use-iyimod DIR` is how a *build* is told, and its contract is
+the paragraph above: the artifact first, the source not opened. That leaves
+every other way of asking with no way to reach one, and a library arrives as
+`.iyimod` files with no source at all (III.7) — so the workspace R-1 exists
+for was `can't find module 'app/base'` under `iyi build`, `iyi run`, `iyi
+test`, `iyi check`, `iyi doc`, `iyi mod context` and the language server,
+about a module `--use-iyimod` compiles fine against. A verb has no flag to be
+told with, and a person typing `iyi test` is not saying how their dependency
+arrived.
+
+The rule is one name and one order:
+
+* **`mods` beside the project root** — the root R-1's own reading names (a
+  file whose path ends with its `module` header's path names the root above
+  both), and the name every example in this file, the README and every bench
+  already writes. Not a setting: the alternative to one name is a setting
+  every editor has to be told and no agent knows.
+* **After the sources.** A module with a file is compiled from it, and the
+  artifact is reached for one whose file is not there. Two things follow, and
+  both are why the order is this way round rather than the build flag's.
+  A workspace with its sources present compiles exactly as it did before the
+  rule existed — including the common case of a `mods` left over from an
+  earlier `--emit-iyimod` run beside a source since edited, which artifact
+  first would refuse as stale (IV.3) about a file the author is looking at.
+  And an editor answers about code somebody is looking at, so
+  go-to-definition lands in the file rather than in a rendered declaration.
+
+`--use-iyimod` still says what it always said, and a build told it is
+unchanged. `bench/mod_context.sh` gates the verbs and the left-over-artifact
+case, `bench/lsp_artifacts.py` asks the server the same questions in both
+workspaces, and `bench/daemon_agrees.py` compares a daemon-served build with
+a plain one — the daemon forks a child per build, so a switch that reaches an
+adopted program is a switch that can go missing from one.
 
 ### IV.1g `ObjectCode`. The module's own machine code
 

@@ -877,7 +877,12 @@ class Iyi::Command
       # that, and what is missing shows up as an undefined symbol at link —
       # which is the honest failure for this stage, and a great deal more
       # useful than refusing to try.
-      opts.on("--use-iyimod DIR", "iyi: compile imported modules from DIR's .iyimod files") do |dir|
+      # And the line says "first", because the workspace's own `mods` is
+      # read without being asked for — after its sources, for a module whose
+      # file is not there (`Compiler.workspace_artifacts`, SPEC.md IV.1f).
+      # A reader who has seen a build use an artifact it was never told
+      # about is owed the difference between the two.
+      opts.on("--use-iyimod DIR", "iyi: compile imported modules from DIR's .iyimod files first; `mods` beside the project root is read for a module with no source either way") do |dir|
         # iyi: a module with no artifact is ordinary — the first build of the
         # loop has none at all, and compiles from source. A *directory* that is
         # not there is a typo, and it used to be ignored: the build compiled

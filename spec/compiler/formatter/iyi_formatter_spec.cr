@@ -132,4 +132,14 @@ describe "Formatter on iyi" do
     "module m\n\npub def polite(name : String) : String\n  name\nend"
   assert_iyi_format "module m\n\nimpl Show    for    Int32\n  def show : String\n    \"i\"\n  end\nend",
     "module m\n\nimpl Show for Int32\n  def show : String\n    \"i\"\n  end\nend"
+
+  # A macro body is formatted by a second formatter over its text, and the
+  # text used to be handed over with no name — so `!` was read by the other
+  # language's rules, the body did not parse, and the rescue put it back
+  # exactly as it was typed. A macro whose body used iyi's own operator was
+  # the one macro the formatter left alone.
+  assert_iyi_format "module m\n\nmacro twice\n v = read()!\n   puts v\n  end",
+    "module m\n\nmacro twice\n  v = read()!\n  puts v\nend"
+  assert_iyi_format "module m\n\nmacro plain\n v = 1\n   puts v\n  end",
+    "module m\n\nmacro plain\n  v = 1\n  puts v\nend"
 end

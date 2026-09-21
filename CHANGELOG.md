@@ -389,6 +389,25 @@
 
 ### Fixed
 
+- **A macro whose body used `!` was the one macro the formatter left
+  alone.** A macro body is formatted by a second formatter over its text,
+  and the text was handed over with no name — so it was read by the other
+  language's rules, where `v = read()!` does not parse, and
+  `format_macro_literal_only`'s rescue put the body back exactly as it was
+  typed. The same body without the operator was reindented, which is what
+  made it look like a rule rather than an accident.
+
+  The subformat is in the file's language now, both in the parse that
+  decides whether the body is code and in the formatter that writes it.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` holds the pair — a body
+  with `!` and one without, each ruined on the way in and canonical on the
+  way out — and the first fails with the name taken back out.
+
+  This is the fourth surface of one question: the language a buffer is in
+  is the only thing the lexer cannot read out of its text. Stdin, the
+  semantic-token scanner and macro expansions were the others.
+
+
 - **An editor's link on an import of a package went nowhere.** The server
   resolved a document link by guessing a filename — `<root>/<path>.iyi`,
   with the path taken as the run of `[A-Za-z0-9_/]` after the keyword — and

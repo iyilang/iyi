@@ -1752,8 +1752,11 @@ module Iyi
     end
 
     private def format_macro_literal_only(node, source, macro_node_line)
-      # Only format the macro contents if it's valid Crystal code
-      Parser.new(source).parse
+      # Only format the macro contents if it is valid code — in this file's
+      # language, which is what decides whether `v = risky()!` is one.
+      validate = Parser.new(source)
+      validate.filename = @filename
+      validate.parse
 
       formatter, value = subformat(source)
 
@@ -2272,10 +2275,17 @@ module Iyi
       end
 
       parser = Parser.new(source, var_scopes: @vars.clone)
-      # parser.filename = formatter.filename
+      # iyi: in the file's own language. A macro body is formatted by a
+      # second formatter over its text, and the text was handed over with no
+      # name — so `!` was read by the other language's rules, `v = risky()!`
+      # was a syntax error, and `format_macro_literal_only`'s rescue put the
+      # body back exactly as it was typed. A macro whose body used iyi's own
+      # operator was the one macro the formatter left alone.
+      parser.filename = @filename
       nodes = parser.parse(mode)
 
       formatter = Formatter.new(source)
+      formatter.filename = @filename
       formatter.inside_lib = @inside_lib
       formatter.inside_enum = @inside_enum
       formatter.inside_struct_or_union = @inside_struct_or_union

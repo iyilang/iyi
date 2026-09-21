@@ -1087,6 +1087,15 @@ class Iyi::Call
         if similar_name == def_name
           # This check is for the case `a if a = 1`
           msg << "If you declared '#{def_name}' in a suffix if, declare it in a regular if for this to work. If the variable was declared in a macro it's not visible outside it."
+        elsif similar_name.size > 1 && similar_name.ends_with?('!')
+          # iyi: a name this language cannot write. `!` is not part of a name
+          # here (SPEC.md III.1.7), so the nearest thing to `not_nil` in
+          # Crystal's library — or to `sort` in a bound shard's — is a name no
+          # call in a `.iyi` file can spell. Suggesting it was worse than
+          # saying nothing: the edit travels in `check -f json` as
+          # `suggested_edit`, and `iyi fix` applies those, so the answer to an
+          # undefined method was a file that no longer parses.
+          msg << "'#{similar_name}' is what that library calls it, and `!` cannot end a name in iyi (SPEC.md III.1.7): no call written here can spell it. Reach it through a Crystal-side method whose name this language can write."
         else
           msg << "Did you mean '#{similar_name}'?"
           suggested_edit = similar_name

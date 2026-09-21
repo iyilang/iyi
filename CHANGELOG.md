@@ -389,6 +389,24 @@
 
 ### Fixed
 
+- **The compiler offered an edit that makes a file stop parsing.** `!` is
+  not part of a name in iyi (III.1.7), and the nearest name to `not_nil`
+  in Crystal's library is `not_nil!` — so "Did you mean 'not_nil!'?" was
+  the answer, and it did not stop at prose: the edit travels in
+  `check -f json` as `suggested_edit`, which is what `iyi fix` applies and
+  what an editor or an agent applies. Two lines reproduce it in the mode
+  the README recommends for Crystal's ecosystem:
+
+      x = [3, 1, 2]
+      puts x.not_nil.to_s
+
+  A bound shard is the same story with its own names — `Box#sort!` is
+  carried by the boundary and spellable by nobody. The message now says
+  what the library calls it and why no call written here can reach it, and
+  carries no edit; `bench/agent_loop.py` gates that an unspellable name is
+  explained rather than suggested, and fails with the branch removed.
+
+
 - **The check that `std/debug` does not bind libc's `write` could not see
   a versioned symbol.** `nm -u` prints `write@GLIBC_2.2.5` for a binary
   linked against a glibc that versions it, and the pattern was anchored on

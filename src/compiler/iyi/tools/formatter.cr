@@ -106,6 +106,8 @@ module Iyi
     property indent
     property subformat_nesting = 0
 
+    @filename : String? = nil
+
     def initialize(source, @flags : Array(String)? = nil)
       @lexer = Lexer.new(source)
       @lexer.comments_enabled = true
@@ -3450,8 +3452,12 @@ module Iyi
     end
 
     # iyi: the name the lexer judges `!` by, and the only thing about a `.iyi`
-    # file the formatter's own lexer cannot work out from the source.
+    # file the formatter's own lexer cannot work out from the source. Kept,
+    # not only handed to the lexer, because a fenced code block in a doc
+    # comment is formatted by a second formatter and is in the same language
+    # as the file around it.
     def filename=(filename)
+      @filename = filename
       @lexer.filename = filename
     end
 
@@ -5332,7 +5338,11 @@ module Iyi
         end
 
         begin
-          formatted_comment = Formatter.format(comment)
+          # iyi: in the file's own language. Untagged fences are formatted,
+          # and an example written in iyi's own idiom — `n = read()!` — is a
+          # syntax error under the other language's rules, so the rescue
+          # below swallowed it and every such example went unformatted.
+          formatted_comment = Formatter.format(comment, filename: @filename)
           formatted_lines = formatted_comment.lines
           formatted_lines.map! do |line|
             String.build do |str|

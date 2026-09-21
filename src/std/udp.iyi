@@ -1018,7 +1018,7 @@ pub class UdpSocket
     end
 
     def self.__sys_handle(fd : Int32) : UInt64
-      fd.to_i64.to_u64!
+      fd.to_i64.unsafe_to_u64
     end
 
     # Winsock's error number, negated, which is the shape the POSIX arms
@@ -1048,7 +1048,7 @@ pub class UdpSocket
       LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
         Pointer(Void).new(0_u64), 0, pointerof(returned), Pointer(Void).new(0_u64),
         Pointer(Void).new(0_u64))
-      s.to_i32!
+      s.unsafe_to_i32
     end
 
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32

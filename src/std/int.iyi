@@ -310,7 +310,10 @@ module std/int
             magnitude
           {% end %}
         end
-      {% else %}
+      {% elsif !prelude_convs.includes?(conv[0]) %}
+        # The prelude declares the unchecked form for its own five, as it
+        # declares the checked one, so declaring it here too would be R-3's
+        # duplicate.
         @[::Primitive(:unchecked_convert)]
         def unsafe_{{ conv[0].id }} : {{ conv[1].id }}
         end

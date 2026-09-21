@@ -34,8 +34,8 @@ module Iyi::Lsp
     # 1-based codepoint column. The server converts to UTF-16 deltas.
     record Tok, line : Int32, column : Int32, size : Int32, type : Int32
 
-    def self.scan(text : String) : Array(Tok)
-      scanner = Scanner.new(text)
+    def self.scan(text : String, path : String? = nil) : Array(Tok)
+      scanner = Scanner.new(text, path)
       scanner.scan
       scanner.toks
     end
@@ -43,8 +43,11 @@ module Iyi::Lsp
     private class Scanner
       getter toks = [] of Tok
 
-      def initialize(text : String)
+      def initialize(text : String, path : String? = nil)
         @lexer = Lexer.new(text)
+        # The one thing about a file the lexer cannot read out of the
+        # source: which language it is in, which it takes off the name.
+        @lexer.filename = path if path
         @lexer.comments_enabled = true
         @lexer.count_whitespace = true
         @lexer.wants_raw = true

@@ -2049,7 +2049,7 @@ module Iyi::Lsp
 
     private def on_semantic_tokens(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
-      data = semantic_token_data(text_of(uri))
+      data = semantic_token_data(text_of(uri), path_of(uri))
       result_id = remember_tokens(uri, data)
       respond(id) do |json|
         json.object do
@@ -2066,7 +2066,7 @@ module Iyi::Lsp
     private def on_semantic_tokens_delta(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
       previous_id = params["previousResultId"]?.try(&.as_s?)
-      data = semantic_token_data(text_of(uri))
+      data = semantic_token_data(text_of(uri), path_of(uri))
 
       previous = @token_data[uri]?
       unless previous && previous[0] == previous_id
@@ -2120,9 +2120,17 @@ module Iyi::Lsp
       result_id
     end
 
-    private def semantic_token_data(text : String) : Array(Int32)
+    # The path comes along because the lexer reads the language off the
+    # extension: `!` is not part of a name in a `.iyi` file (SPEC.md
+    # III.1.7) and is part of one in a `.cr` file. Without it the scanner
+    # lexed every buffer by the other language's rules, so `risky!` was
+    # coloured as one name — the propagation operator swallowed into it —
+    # and `end!` as a name too, which cost the block's `end` its keyword
+    # colour. No editor ships an iyi grammar, so this stream *is* the
+    # highlighting, and that is where it showed.
+    private def semantic_token_data(text : String, path : String) : Array(Int32)
       lines = text.lines
-      toks = Tokens.scan(text)
+      toks = Tokens.scan(text, path)
       toks.sort_by! { |tok| {tok.line, tok.column} }
 
       data = [] of Int32

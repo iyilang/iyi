@@ -107,9 +107,32 @@ module Iyi
       @stacked_column_number = 1
     end
 
+    # iyi: which language the source is written in is the one thing the lexer
+    # cannot read out of the source, so it comes off the name — `!` is not
+    # part of a name in a `.iyi` file (SPEC.md III.1.7) and is part of one in
+    # a `.cr` file.
+    #
+    # A macro expansion's name is a `VirtualFile`, which is no extension at
+    # all, so every expansion was reparsed by the other language's rules and
+    # no macro could generate the propagation operator: `v = risky!` became a
+    # call to a method named `risky!` — "undefined local variable or method
+    # 'risky!'", with "did you mean 'risky'?" underneath — and `v = risky(1)!`
+    # was "unexpected token: !". An expansion is in the language of the file
+    # it expands in, which is where its chain of locations ends.
     def filename=(filename)
       @filename = filename
-      @iyi = filename.is_a?(String) && filename.ends_with?(".iyi")
+      @iyi = Lexer.iyi_source?(filename)
+    end
+
+    def self.iyi_source?(filename) : Bool
+      case filename
+      when String
+        filename.ends_with?(".iyi")
+      when VirtualFile
+        iyi_source?(filename.expanded_location.try(&.filename))
+      else
+        false
+      end
     end
 
     def next_token

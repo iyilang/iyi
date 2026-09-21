@@ -211,7 +211,7 @@
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
   a conditional, `else` included - which is **1,489 lines**, and the
-  library is **3,285** of 3,734 with 449 to spare. `4,774` is what opening
+  library is **3,295** of 3,734 with 449 to spare. `4,784` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -388,6 +388,55 @@
   now, which is what it is. Seventy-two modules, 37,127 lines.
 
 ### Fixed
+
+- **A macro could not generate `!`, and the rule that `!` is not a name did
+  not hold in what a macro wrote.** Which language a file is written in is
+  the one thing the lexer cannot read out of the source, so it comes off the
+  name — and a macro expansion's name is a `VirtualFile`, which ends in no
+  extension at all. Every expansion was therefore reparsed by the other
+  language's rules, where `foo!` is a single identifier. Two consequences,
+  both measured:
+
+      # v = risky!    from a macro
+      Error: undefined local variable or method 'risky!' for top-level
+      Did you mean 'risky'?
+
+      # v = risky(1)! from a macro
+      Error: unexpected token: "!"
+
+  So the language's central operator (SPEC.md III.1) was unavailable to
+  every macro — a macro could generate a call, but not the propagation the
+  caller's signature is written for. And in the other direction the rule
+  that `!` is not part of a name (III.1.7) went unenforced, which is how
+  iyi's own prelude came to declare `to_i!`, `to_f!`, `to_i32!`, `to_i64!`,
+  `to_u8!`, `to_u64!` and `to_f64!` on five structs, and `IyiMark.gray!`:
+  thirty-six names the language refuses in source, accepted because they
+  were written by a macro.
+
+  An expansion is in the language of the file it expands in, which is where
+  its chain of locations ends, and `Lexer.iyi_source?` follows a
+  `VirtualFile` there. What that exposed is the second half of this entry.
+
+- **The prelude's unchecked conversions had no name any iyi source could
+  call.** `to_u8!` was reachable only from macro-expanded code — which is
+  where the prelude's own callers sat, and is why they worked: `memset`'s
+  `value.to_u8!` is C's "converted to `unsigned char`", `IyiHeap.write8`
+  takes a word's low byte, and Winsock's `__sys_handle` needs `-1` to
+  become `INVALID_SOCKET` rather than an overflow panic. Written in plain
+  iyi source, all of those read as `value.to_u8` with its error propagated,
+  which the compiler refuses: "`!` has no error to propagate: no member of
+  `UInt8` implements `Error`".
+
+  The unchecked form is spelled `unsafe_to_u8` now, with the prefix
+  `unsafe_chr` beside it already used, and the fifteen callers in the
+  prelude, `std/socket` and `std/udp` say which conversion they mean.
+  `std/int` skips the five the prelude declares, as it already did for the
+  checked forms, so R-3 sees no duplicate. Measured: `300.unsafe_to_u8` is
+  44 where `300.to_u8` panics, `memset(p, 0x1ff, 4)` writes `0xff` as C
+  says it must — it did before too, by the accident above — and a macro
+  that writes `to_number(text)!` now propagates through its caller's
+  union.
+
 
 - **Every file that imports a package was unformattable, and the answer was
   a request to report a bug.** A package path's host segment —
@@ -1572,7 +1621,7 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,489** and **3,285**, held to the sentences that quote
+  without it: **1,489** and **3,295**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
   breach is still what the floor costs — 1,040 over, as the library with
   every platform's floor stands today; what changed is that the two
@@ -4731,7 +4780,7 @@ Identity is the released version, as ever: a 0.9.0 artifact is rejected by a
   1.33 s against 0.33, churn 0.32 against 0.061 and live churn 0.33
   against 0.124 (a ten-core M2 Pro, interleaved, min of nine; 0.9.0
   measures 0.30, 0.082 and 0.116 there). The longer wait costs the
-  round nothing - the helpers take 13,285 slices against the short
+  round nothing - the helpers take 13,295 slices against the short
   wait's 10,292, and leave the allocating thread 34 against the 471
   it swept with no retry at all.
 
@@ -8440,7 +8489,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,930-line library and nothing else. Every other
+  written against iyi's own 15,940-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

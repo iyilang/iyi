@@ -772,7 +772,7 @@ pub class IyiSocket
     # A SOCKET from the `Int32` the class carries, and back: see the note
     # above the `lib` block for why that is lossless.
     def self.__sys_handle(fd : Int32) : UInt64
-      fd.to_i64.to_u64!
+      fd.to_i64.unsafe_to_u64
     end
 
     # The failure the last call left, negated. The POSIX arms answer the
@@ -789,7 +789,7 @@ pub class IyiSocket
       __sys_winsock
       s = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
       return -1 if s == INVALID_SOCKET
-      s.to_i32!
+      s.unsafe_to_i32
     end
 
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
@@ -808,7 +808,7 @@ pub class IyiSocket
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
-      return client.to_i32! if client != INVALID_SOCKET
+      return client.unsafe_to_i32 if client != INVALID_SOCKET
       err = LibWs2_32.WSAGetLastError
       return -err if err != WSAEWOULDBLOCK
       # Nothing was queued, and a listening socket has no readable state a
@@ -884,7 +884,7 @@ pub class IyiSocket
       addrlen.value = 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
-      client.to_i32!
+      client.unsafe_to_i32
     end
 
     def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32

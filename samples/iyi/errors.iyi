@@ -138,6 +138,35 @@ puts session("missing").or(-1)
 end
 
 # ---------------------------------------------------------------------------
+# A macro writes it too
+# ---------------------------------------------------------------------------
+#
+# `!` is ordinary syntax, so code a macro generates uses it the way code a
+# person writes does. That is worth showing because it was not true: an
+# expansion is named by a `VirtualFile`, which ends in no extension, and the
+# language a file is in comes off its name — so expansions were parsed by
+# Crystal's rules, where `foo!` is a single identifier. A macro that wrote
+# `to_number(text)!` got "undefined local variable or method 'to_number!'",
+# and one that wrote `to_number(text)!` with parentheses in front of the `!`
+# got "unexpected token". The operator the caller's signature is written for
+# was the one thing a macro could not produce.
+macro doubled(text)
+  to_number({{ text }})! * 2
+end
+
+pub def doubled_number(text : String) : Int32 | ParseError
+  doubled(text)
+end
+
+puts "macro:"
+["12", "x"].each do |text|
+  case doubled_number(text)
+  in Int32      then puts "  doubled #{it}"
+  in ParseError then puts "  #{it.message}"
+  end
+end
+
+# ---------------------------------------------------------------------------
 # What this sample would report as an error
 # ---------------------------------------------------------------------------
 #

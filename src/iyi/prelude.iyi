@@ -1673,7 +1673,7 @@ require "./file"
       end
 
       def self.write8(address : UInt64, value : UInt64) : Nil
-        Pointer(UInt8).new(address).value = value.to_u8!
+        Pointer(UInt8).new(address).value = value.unsafe_to_u8
       end
 
       # Sixteen bits as two bytes: the prelude's integers stop at
@@ -3155,7 +3155,7 @@ require "./file"
     # counts elements: eight bytes is one step, not eight. The byte loop
     # carries the tail, and the pattern word is the byte tiled eight wide.
     fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
-      byte = value.to_u8!
+      byte = value.unsafe_to_u8
 
       word = byte.to_u64 * 0x0101010101010101_u64
       words = destination.as(Pointer(UInt64))
@@ -4204,7 +4204,7 @@ require "./file"
       # White to gray, atomically where another worker may be at the same
       # object: true when this call was the one that grayed it. A byte's
       # compare-and-set for a chunk, the word's for a large object.
-      def self.gray!(base : UInt64) : Bool
+      def self.gray(base : UInt64) : Bool
         byte = IyiHeap.mark_byte_of(base)
         if byte == 0
           word_pointer = Pointer(Atomic(UInt64)).new(base - 8_u64)
@@ -4219,7 +4219,7 @@ require "./file"
           # black under this mark, and a compare-and-set that fails is
           # still a locked write of the line.
           return false if IyiHeap.read8(byte) != WHITE
-          Pointer(Atomic(UInt8)).new(byte).value.compare_and_set(WHITE.to_u8!, GRAY.to_u8!)[1]
+          Pointer(Atomic(UInt8)).new(byte).value.compare_and_set(WHITE.unsafe_to_u8, GRAY.unsafe_to_u8)[1]
         end
       end
 
@@ -4437,7 +4437,7 @@ require "./file"
       end
 
       def self.mutator_shade(w : UInt64, base : UInt64) : Nil
-        mutator_push(w, base) if gray!(base)
+        mutator_push(w, base) if gray(base)
       end
 
       def self.mutator_push(w : UInt64, base : UInt64) : Nil
@@ -4596,7 +4596,7 @@ require "./file"
         head = first + index * IyiHeap.read64(arena + IyiHeap::OFF_CHUNK)
         base = bits & IyiHeap::HEADED_FLAG != 0 ? head + IyiHeap::HEADER : head
         if @@workers > 1_u64
-          push(w, base) if Pointer(Atomic(UInt8)).new(mark).value.compare_and_set(WHITE.to_u8!, GRAY.to_u8!)[1]
+          push(w, base) if Pointer(Atomic(UInt8)).new(mark).value.compare_and_set(WHITE.unsafe_to_u8, GRAY.unsafe_to_u8)[1]
         else
           IyiHeap.write8(mark, GRAY)
           push(w, base)
@@ -4606,7 +4606,7 @@ require "./file"
       def self.shade(w : UInt64, base : UInt64) : Nil
         return if base == 0
         if @@workers > 1_u64
-          push(w, base) if gray!(base)
+          push(w, base) if gray(base)
         else
           byte = IyiHeap.mark_byte_of(base)
           if byte == 0
@@ -6705,7 +6705,7 @@ require "./file"
     # funnels through here; the byte loop carries only the tail, and the
     # pattern word is the byte tiled eight wide.
     fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
-      byte = value.to_u8!
+      byte = value.unsafe_to_u8
       word = byte.to_u64 * 0x0101010101010101_u64
       words = destination.as(Pointer(UInt64))
       filled = 0_u64
@@ -6832,7 +6832,7 @@ require "./file"
     # with the same name, types and return is the only thing that can intercept
     # it. The bulk goes eight bytes at a time; the byte loop carries the tail.
     fun memset(destination : Void*, value : Int32, count : UInt64) : Void*
-      byte = value.to_u8!
+      byte = value.unsafe_to_u8
       word = byte.to_u64 * 0x0101010101010101_u64
       words = destination.as(Pointer(UInt64))
       filled = 0_u64
@@ -7607,7 +7607,7 @@ require "./file"
     # bytes at a time because the pointers are 4-aligned at best on wasm32;
     # the byte loop carries the tail.
     fun memset(destination : Void*, value : Int32, count : Int32) : Void*
-      byte = value.to_u8!
+      byte = value.unsafe_to_u8
       word = (byte.to_u64 * 0x01010101_u64).to_i32
       words = destination.as(Pointer(Int32))
       total = count.to_i64.to_u64

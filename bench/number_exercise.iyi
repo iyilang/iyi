@@ -122,4 +122,22 @@ assert_true((-1.5).ceil == -1.0, "number: ceil goes up")
 assert_true(2.5.round == 3.0, "number: round goes away from zero")
 assert_true((-2.5).round == -3.0, "number: round is symmetric")
 
+# ---- 6. The unchecked conversion, which is a name
+#
+# Crystal spells it `to_u8!`, and `!` is not part of a name in iyi
+# (SPEC.md III.1.7): `x.to_u8!` reads as `x.to_u8` with its error
+# propagated, which the compiler refuses. So the prelude's unchecked
+# conversions were reachable only from macro-expanded code, which was
+# reparsed by the other language's rules — the accident that also stopped
+# any macro from generating `!`. They are `unsafe_to_u8` now, beside the
+# `unsafe_chr` the prelude already had, and these are the values the
+# checked forms panic on: the instruction keeps the low bits.
+assert_int(300.unsafe_to_u8.to_i, 44, "number: unchecked keeps the low byte")
+assert_int((-1).unsafe_to_u8.to_i, 255, "number: unchecked wraps a negative")
+assert_int(4294967295_u64.unsafe_to_i32, -1, "number: unchecked reinterprets the bits")
+# What Winsock needs: `-1` as a handle is `INVALID_SOCKET`, and the checked
+# conversion panics on it rather than answering.
+assert_true((-1_i64).unsafe_to_u64 == 18446744073709551615_u64,
+  "number: unchecked makes -1 the widest value")
+
 puts "all number checks passed"

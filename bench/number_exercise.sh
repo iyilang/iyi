@@ -137,6 +137,39 @@ panics_with "not a number as an int" nan_int "arithmetic overflow" "(0.0/0.0).to
 panics_with "infinity as an int" inf_int "arithmetic overflow" "(1.0/0.0).to_i"
 panics_with "the boundary float" edge_float "arithmetic overflow" "2147483647.9.to_i"
 
+# And the same value through the unchecked form, which is the pair of every
+# panic above: the instruction without the check. It is spelled
+# `unsafe_to_i32` because `!` is not part of a name in iyi (III.1.7), and
+# until an expansion was parsed in the language of the file it expands in,
+# nothing written in iyi source could name it at all — `x.to_i!` reads as
+# `x.to_i` with its error propagated, which the compiler refuses.
+answers_with() { # answers_with <label> <name> <expected> <expression>
+  local label="$1" name="$2" expected="$3" expression="$4"
+  printf 'module main\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  if ! "$WORK/$name" > "$WORK/$name.out" 2>&1; then
+    echo "  $label: panicked where the unchecked form has nothing to check"
+    tail -2 "$WORK/$name.out"
+    status=1
+    return
+  fi
+  if [ "$(cat "$WORK/$name.out")" != "$expected" ]; then
+    echo "  $label: answered $(cat "$WORK/$name.out") rather than $expected"
+    status=1
+    return
+  fi
+  printf '  %s: answers %s\n' "$label" "$expected"
+}
+
+answers_with "an int too large for a byte, unchecked" big_byte_unchecked 44 "300.unsafe_to_u8"
+answers_with "a negative as a byte, unchecked" neg_byte_unchecked 255 "(-1).unsafe_to_u8"
+answers_with "a handle of -1, unchecked" handle_unchecked 18446744073709551615 "(-1_i64).unsafe_to_u64"
+
 echo
 echo "== proving the checks can fail, one broken method at a time"
 
@@ -226,6 +259,15 @@ prove_fails "floor rounds the wrong way" bad_floor float.iyi \
 prove_fails "round is not symmetric" bad_round float.iyi \
   "number: round is symmetric" \
   's/^    self < 0.0 ? 0.0 - (0.0 - self + 0.5).floor : (self + 0.5).floor$/    (self + 0.5).floor/'
+
+# 9. And the unchecked conversions made checked, which is what the prelude
+#    had before `unsafe_to_u8` was a name: the instruction is the point, so
+#    a checked one panics where the exercise asserted a value. Anchored on
+#    the eight-space annotation inside the conversion loop, which is the one
+#    `unsafe_chr` (six spaces, in the integer loop) does not share.
+prove_fails "the unchecked conversion checked" checked_unsafe primitives.iyi \
+  "arithmetic overflow" \
+  's/^        @\[::Primitive(:unchecked_convert)\]$/        @[::Primitive(:convert)]/'
 
 echo
 echo "== and the check that keeps the processor out of it"

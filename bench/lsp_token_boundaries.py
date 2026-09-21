@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """Sweeps every sample module's semantic tokens and refuses a token
-that colors part of a word. The bug this gate exists for was literal:
-the lexer reuses one Token and leaves `raw` dirty between kinds, so an
-ident could inherit the previous number's *length* — and every editor
-showed `t`otal, the first letter colored, the rest plain. A wordy
-token must start and end on word boundaries; 8,000+ tokens across the
-samples say so on every push, so the world's best highlighting cannot
-quietly become the world's strangest.
+that colors part of a word, or a name with a `!` inside it. The first
+bug this gate exists for was literal: the lexer reuses one Token and
+leaves `raw` dirty between kinds, so an ident could inherit the
+previous number's *length* — and every editor showed `t`otal, the
+first letter colored, the rest plain. The second was the language: the
+scanner built its lexer without the file's name, which is the only
+thing about a buffer the lexer cannot read out of the source, so every
+`.iyi` file was colored by the other language's rules. There `foo!` is
+one name, so the propagation operator was swallowed into the name
+before it, and `end!` was a name too — which cost a block's `end` its
+keyword color. In iyi `!` is never part of a name (SPEC.md III.1.7),
+so a wordy token carrying one is that mistake. A wordy token must
+start and end on word boundaries; 8,000+ tokens across the samples say
+so on every push, so the world's best highlighting cannot quietly
+become the world's strangest.
 """
 
 import glob
@@ -37,6 +45,7 @@ def main():
     c.send("initialized", {}, wait=False)
 
     total = 0
+    bangs = 0
     bad = []
     for path in files:
         with open(path) as f:
@@ -59,25 +68,33 @@ def main():
             if kind not in WORDY:
                 continue
             src = lines[line] if line < len(lines) else ""
+            word = src[start:start + ln]
             before = src[start - 1] if start > 0 else " "
             last = src[start + ln - 1] if start + ln - 1 < len(src) else " "
             after = src[start + ln] if start + ln < len(src) else " "
             starts_mid = name_char(before) and kind != "number"
             ends_mid = name_char(after) and name_char(last)
-            if starts_mid or ends_mid:
+            # `!` is not part of a name in iyi, so a name carrying one is
+            # the buffer read by the other language's rules: there `foo!`
+            # is a single ident, which eats the propagation operator and,
+            # after `end`, a keyword.
+            if "!" in word:
+                bangs += 1
+            if starts_mid or ends_mid or "!" in word:
                 bad.append(f"{os.path.relpath(path, root)}:{line + 1}:{start}"
-                           f" {kind} {src[start:start + ln]!r}"
+                           f" {kind} {word!r}"
                            f" in {src.strip()!r}")
     c.send("shutdown", {})
     c.send("exit", {}, wait=False)
 
     if bad:
-        print(f"{len(bad)} of {total} tokens color part of a word:")
+        print(f"{len(bad)} of {total} tokens are not a whole word "
+              f"({bangs} of them a name with `!` in it):")
         for entry in bad[:20]:
             print(f"  {entry}")
         sys.exit(1)
     print(f"token boundaries: {total} tokens across "
-          f"{len(files)} modules, every word whole")
+          f"{len(files)} modules, every word whole and no `!` inside one")
 
 
 if __name__ == "__main__":

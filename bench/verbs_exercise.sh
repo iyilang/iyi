@@ -452,6 +452,26 @@ fi
 refuses "--stdin-filename with no pipe to read" "pass '-'" -- \
   "$IYI" tool format --stdin-filename x.cr good.iyi
 
+# The same question a third time, and this one is not a tool's: a macro
+# expansion is named by a `VirtualFile`, which ends in neither extension, so
+# expansions were parsed by the other language's rules. There `foo!` is one
+# identifier, so the rule that `!` is not part of a name (III.1.7) held in
+# source and not in what a macro wrote — which is how the prelude came to
+# declare `to_i!` and six siblings on five structs. Code a macro generates
+# is in the language of the file it expands in, so the rule reaches it.
+cat > "$WORK/macro_name.iyi" <<'IYI'
+macro declare
+  def value! : Int32
+    1
+  end
+end
+
+declare
+puts value
+IYI
+refuses "a macro that declares a name ending in !" "part of a name in iyi" -- \
+  "$IYI" build -o "$WORK/macro_name" "$WORK/macro_name.iyi"
+
 # The cache, which is the one thing here a build trusts without asking.
 # `IYI_CACHE_DIR` pointed at something that cannot be a directory was
 # skipped in silence - it is the first of a list of candidates, and the

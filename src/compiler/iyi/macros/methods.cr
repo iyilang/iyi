@@ -135,7 +135,12 @@ module Iyi
 
       if format
         begin
-          @program.stdout.puts Iyi::Formatter.format(@str.to_s)
+          # iyi: in the language of the file the macro is expanding in. The
+          # generated code is that file's, and `!` is one token there and
+          # another in the other language, so without the name the rescue
+          # below caught a syntax error and printed the code unformatted.
+          @program.stdout.puts Iyi::Formatter.format(
+            @str.to_s, filename: node.location.try(&.original_filename))
         rescue
           @program.stdout.puts @str
         end

@@ -200,7 +200,16 @@ end
     struct {{ num.id }}
       # The checked form raises on overflow — which in this prelude is a panic,
       # since `__crystal_raise_overflow` prints and exits (SPEC.md III.1.4).
-      # The `!` form is the same instruction without the check.
+      #
+      # The unchecked form is the same instruction without the check, and it
+      # is spelled the way `unsafe_chr` below is: `unsafe_to_u8`. Crystal
+      # spells it `to_u8!`, which is not a name in iyi (SPEC.md III.1.7) —
+      # those declarations were accepted only because a macro expansion was
+      # reparsed by the other language's rules, and no iyi source could call
+      # one, because `x.to_u8!` is `x.to_u8` with its error propagated. The
+      # callers wanted the instruction: `memset`'s `value.to_u8!` is C's
+      # "converted to unsigned char", and the checked form panics on 0x1ff
+      # where C writes 0xff.
       {% for name, type in {
                              to_i:   Int32,
                              to_f:   Float64,
@@ -216,8 +225,9 @@ end
         end
 
         @[::Primitive(:unchecked_convert)]
-        def {{ name.id }}! : {{ type }}
+        def unsafe_{{ name.id }} : {{ type }}
         end
+
       {% end %}
     end
   {% end %}

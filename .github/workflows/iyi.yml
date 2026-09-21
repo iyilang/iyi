@@ -106,6 +106,15 @@ jobs:
       - name: Formatted
         run: make format check=1
 
+      # A gate nothing runs passes on the machine that wrote it. Three did
+      # exactly that in one release — `format_exercise`, `io_exercise` and
+      # `socket_exercise`, nine seconds between them — and `panics.sh` was
+      # a fourth in a narrower form: it ran on Linux and darwin and the
+      # sentence it asserts is Windows' own. This is that lesson as a
+      # check, and it needs no compiler, which is why it is here.
+      - name: Every gate is reached by something that runs it
+        run: python3 bench/gates_reachable.py
+
       - name: iyi's own specs
         run: |
           ./bin/crystal spec \

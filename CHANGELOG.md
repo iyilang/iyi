@@ -389,6 +389,32 @@
 
 ### Fixed
 
+- **A gate nothing runs passes on the machine that wrote it, and that has
+  happened four times.** Three existed, held and were named in the
+  workflow by nothing — `format_exercise`, `io_exercise` and
+  `socket_exercise`, nine seconds between them — and `bench/panics.sh`
+  was a fourth in a narrower form: it ran on Linux and darwin, and the
+  sentence it asserts is Windows' own, so the one platform it is about
+  was the one platform nothing checked it on.
+
+  `bench/gates_reachable.py` is that lesson as a check. A script under
+  `bench/` counts as reached when a workflow step names it, when another
+  bench script runs or sources it — including `std_exercise.sh`'s
+  discovery glob, which is how the sixty `std_*_exercise.sh` siblings
+  run — or when a `Makefile`, a `scripts/` file or a spec names it. What
+  is left is either a gate nobody runs or a *tool*, and a tool is a file
+  that takes an argument and prints a measurement rather than passing or
+  failing: there is one, `migrate_count.py`, whose numbers SPEC.md III.6
+  reads, and it is on a list that says so.
+
+  Measured on this tree: 143 scripts, 142 reached, one tool. Two failure
+  modes, both proven: an unwired gate is named (exit 1), and so is an
+  allowlist entry that something *does* run — because an entry that is
+  run would hide the next unrun gate behind it. It caught its own first
+  draft, which counted this script's prose as a run and therefore
+  reported the tool as reached.
+
+
 - **A package whose tree contains a symbolic link ended the build with
   the walker's accident.** `iyi.sum` hashes a checkout's files, and the
   walk asked `File.directory?` — which follows a link, so a directory

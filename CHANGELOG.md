@@ -389,6 +389,20 @@
 
 ### Fixed
 
+- **`--emit-iyimod`'s one line promised an artifact per imported module,
+  and a package's is not one of them.** It never was: an artifact carries
+  what the consuming build reached, and the one this loop would write for
+  a package is hollow — the exports collector keys on the in-package type
+  name, which a canonical dotted path does not reach — so the writer skips
+  a dotted module on purpose and leaves packages to `iyi.sum` and the
+  cache. The sentence now says that, and `bench/packages_resolve.sh` holds
+  the contract rather than the prose: the workspace's own module is
+  written, no dotted artifact appears beside it, and a build against those
+  artifacts still answers, with the package coming from the cache the sum
+  pins. Proven to fail by removing the skip, which writes
+  `example.test/user/liba.iyimod` for a build that cannot fill it.
+
+
 - **A macro could not generate `!`, and the rule that `!` is not a name did
   not hold in what a macro wrote.** Which language a file is written in is
   the one thing the lexer cannot read out of the source, so it comes off the

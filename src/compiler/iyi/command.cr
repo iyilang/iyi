@@ -850,7 +850,7 @@ class Iyi::Command
         compiler.emit_bind = dir
       end
 
-      opts.on("--emit-iyimod DIR", "iyi: write a .iyimod per imported module into DIR") do |dir|
+      opts.on("--emit-iyimod DIR", "iyi: write a .iyimod per imported module this build reads from source into DIR (a package's is III.7 step 5's, and is not one of these)") do |dir|
         # iyi: answered here rather than by `Dir.mkdir_p` half an hour into a
         # build. A path that names a file, or a directory nobody may write to,
         # used to arrive as `Unable to create directory` and a stack trace.

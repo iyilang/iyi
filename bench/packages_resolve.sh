@@ -255,6 +255,51 @@ grep -q 'is not what it was' retarget.log || {
   exit 1
 }
 
+# ── 5c. What `--emit-iyimod` writes, and what it leaves to the sum ────────
+# An artifact carries what the consuming build reached, so the one this
+# would write for a *package* is hollow: the exports collector keys on the
+# in-package type name and a canonical dotted path reaches nothing. A
+# package's artifact is III.7 step 5's story — signatures, signing, a
+# registry — so a build writes artifacts for the modules it reads from
+# source and leaves the packages to `iyi.sum` and the cache, which is where
+# the next build finds them. The help line used to promise one per imported
+# module, which is every module either way.
+step "--emit-iyimod writes this workspace's modules, not its packages'"
+printf 'module helper
+
+pub def shout(s : String) : String
+  s + "!"
+end
+' > app/helper.iyi
+cat > app/emitted.iyi <<'IYI'
+import example.test/user/liba
+import helper
+using example.test/user/liba::{greeting}
+using helper::{shout}
+
+puts shout(greeting)
+IYI
+rm -rf app/emitted_mods
+(cd app && "$IYI" build --emit-iyimod emitted_mods emitted.iyi -o emitted) > emit.log 2>&1 || {
+  echo "the emitting build failed:"; tail -4 emit.log; exit 1;
+}
+[ -f app/emitted_mods/helper.iyimod ] || {
+  echo "no artifact for the workspace's own module:"; find app/emitted_mods -type f; exit 1;
+}
+dotted="$(find app/emitted_mods -name '*.iyimod' | grep '\.' | grep -v '^app/emitted_mods/helper.iyimod$' | head -1)"
+if [ -n "$dotted" ]; then
+  echo "a package module was written as an artifact, which this build cannot fill: $dotted"
+  exit 1
+fi
+# And the consumer still builds from those artifacts: the package comes from
+# the cache the sum pins, the workspace's module from the file just written.
+(cd app && "$IYI" build --use-iyimod emitted_mods emitted.iyi -o emitted_from_mods) > emit_use.log 2>&1 || {
+  echo "building against the emitted artifacts failed:"; tail -4 emit_use.log; exit 1;
+}
+./app/emitted_from_mods | grep -q 'hello from liba' || {
+  echo "the artifact build answered:"; ./app/emitted_from_mods; exit 1;
+}
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }

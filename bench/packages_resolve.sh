@@ -148,11 +148,32 @@ mv app/iyi.sum.good app/iyi.sum
 # hash is recomputed from the tree on every build, so a dependency that
 # changed under the program is a refusal naming both hashes.
 step "a mutated checkout is refused while iyi.sum is honest"
-checkout="$(find "$IYI_CACHE_DIR/mod" -name liba.iyi | head -1)"
-[ -n "$checkout" ] || { echo "no checkout to mutate under $IYI_CACHE_DIR/mod"; exit 1; }
+# The checkout `iyi.sum` pins, read out of the sum file rather than
+# searched for or written down twice. The cache holds v1.0.0 as well, and
+# `find | head -1` picked whichever the directory happened to list first —
+# v1.1.0 on Linux and v1.0.0 on darwin, where mutating a checkout no entry
+# pins proved nothing and the step failed with the program printing its
+# ordinary answer. Asking the sum file ties the tree this mutates to the
+# entry this expects the refusal about, whatever MVS chose. The layout is
+# the fetcher's: `<cache>/mod/<path>@v<version>`.
+pinned="$(awk '$1 == "example.test/user/liba" { print $2 }' app/iyi.sum)"
+[ -n "$pinned" ] || { echo "iyi.sum pins no version for liba:"; cat app/iyi.sum; exit 1; }
+checkout="$(find "$IYI_CACHE_DIR" -path "*liba@$pinned*" -name liba.iyi | head -1)"
+[ -n "$checkout" ] || { echo "no liba@$pinned checkout under $IYI_CACHE_DIR"; exit 1; }
+grep -q 'hello from liba' "$checkout" || {
+  echo "$checkout does not contain the string this step mutates:"
+  cat "$checkout"
+  exit 1
+}
 cp "$checkout" "$WORK/liba.iyi.good"
 # A change a program would notice, in the one file it calls into.
 sed -i.bak 's/hello from liba/hello from somebody else/' "$checkout" && rm -f "$checkout.bak"
+# And the mutation is asserted rather than assumed: a `sed` that edited
+# nothing would leave this step proving that an unchanged tree builds.
+grep -q 'hello from somebody else' "$checkout" || {
+  echo "the mutation did not take in $checkout"
+  exit 1
+}
 rm -f app/app
 (cd app && "$IYI" build main.iyi -o app) > mutated.log 2>&1
 mutated_status=$?

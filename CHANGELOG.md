@@ -406,6 +406,14 @@
   program runs and answers `hello from somebody else`, which is a
   dependency that changed under a program that was told nothing.
 
+  The step's own first draft assumed a directory order. The fixture's
+  cache holds two versions of the same package, `find | head -1` returned
+  v1.1.0 on Linux and v1.0.0 on darwin, and mutating a checkout no entry
+  pins is a build that succeeds — so darwin failed with the program
+  printing its ordinary answer. The checkout is read out of `iyi.sum` now:
+  the tree the step mutates is the tree the entry it expects the refusal
+  about pins, whatever MVS chose.
+
 
 - **The stack-overflow sentence was gated everywhere except on the
   platform it is about.** POSIX prints it from `IyiStackGuard` on an

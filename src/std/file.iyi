@@ -988,7 +988,23 @@ class ::File
         raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
       end
       if Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
-        raise "Cannot rename #{o} to #{n}: #{win_error}"
+        # A destination that exists *and* is read-only refuses the
+        # replacement with ERROR_ACCESS_DENIED, where posix `rename`
+        # asks the directory and overwrites whatever mode the target
+        # had — measured, renaming onto a name `File.chmod 0o444` had
+        # marked died here. The attribute comes off for one retry and
+        # goes back when that still refuses, the same shape
+        # `__iyi_unlink` and `Dir.delete` have.
+        replaced = false
+        if Std::File::LibKernel32.GetLastError == 5
+          attributes = Std::File::LibKernel32.GetFileAttributesW(new_wide)
+          if attributes != -1 && (attributes & 1) != 0 &&
+             Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes - 1) != 0
+            replaced = Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) != 0
+            Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes) unless replaced
+          end
+        end
+        raise "Cannot rename #{o} to #{n}: #{win_error}" unless replaced
       end
     {% end %}
   end

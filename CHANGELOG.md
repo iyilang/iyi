@@ -414,6 +414,36 @@
   onto a read-only name; `bench/std_dir_exercise.iyi` removes a
   read-only directory. All three pass on every platform and panic on
   Windows without the retry.
+- **Nothing asked whether the daemon builds the same program.** It
+  analyses the prelude once and forks a child per build, so the child
+  starts from a program this build's command line never configured —
+  every switch that matters has to be re-applied to it
+  (`Compiler::APPLIED_ON_ADOPT`). The compiler refuses to build when a
+  new switch is in none of the three lists, which is a good rail and a
+  narrow one: it makes somebody *name* a list and cannot tell them they
+  named the right one. Put a switch in the wrong place and the daemon
+  quietly builds something else — no error, no warning, a binary that
+  runs.
+
+  `bench/daemon_agrees.py` builds four shapes both ways and compares
+  what the two binaries *print*: a sample with imports, a workspace
+  whose dependency is only an artifact, the mixed shape, and that
+  artifact workspace under `--crystal` — twice through the daemon each,
+  because the first request warms a prelude and the second adopts one.
+  Delete the line that re-applies `use_iyimod` to an adopted program and
+  the plain builds answer while all three artifact arms fail, which is
+  the divergence this was written to catch. `bench/daemon_protocol.py`
+  asks what a daemon does when a client is not a client; this asks what
+  it hands back when the client is a client.
+
+  And the shape a developer is in most of the time, now that a build
+  reads a workspace's artifacts: a `mods` left over from an earlier
+  `--emit-iyimod` run, beside a source they have since edited. The
+  source wins — `bench/mod_context.sh` runs the program and asks for the
+  edited answer, which is what the artifact-after-source order is for.
+  Read the other way round the artifact no longer describes its module
+  and a plain build refuses (IV.3) about a file the developer is looking
+  at.
 
 - **The editor could not open the workspace R-1 exists for.** A library
   arrives as `.iyimod` files and no source (III.7), and a program built

@@ -227,4 +227,51 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And the shape a developer is in most of the time: artifacts left over
+# from an earlier `--emit-iyimod` run, and a source they have since
+# edited. The source wins — which is the whole of why these verbs read
+# artifacts *after* sources. Read the other way round the artifact no
+# longer describes its module, and a plain build would refuse (IV.3)
+# about a file the developer is looking at.
+mkdir -p "$WORK/stale/app"
+cd "$WORK/stale" || exit 1
+cat > app/base.iyi <<'EOF'
+module app/base
+
+pub def value : Int32
+  1
+end
+EOF
+cat > main.iyi <<'EOF'
+module main
+
+import app/base
+using app/base::{value}
+
+puts value
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/stale"
+if ! "$IYI" build --emit-iyimod mods -o seed main.iyi > emit.log 2>&1; then
+  echo "FAIL: the stale-artifact workspace does not build from source"
+  sed -n '1,6p' emit.log | sed 's/^/  /'
+  status=1
+else
+  # The edit the artifacts do not know about.
+  cat > app/base.iyi <<'EOF'
+module app/base
+
+pub def value : Int32
+  2
+end
+EOF
+  answer="$("$IYI" run main.iyi 2>&1 | tail -1)"
+  if [ "$answer" = "2" ]; then
+    echo "a left-over artifact loses to the source beside it"
+  else
+    echo "FAIL: run answered '$answer', expected 2 — the artifact won"
+    status=1
+  fi
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

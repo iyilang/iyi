@@ -115,22 +115,6 @@ jobs:
             spec/compiler/iyi_derive_spec.cr \
             spec/compiler/compiler_spec.cr
 
-      # What `iyi mod diff` answers, against what a rebuild would show. It
-      # is the one question a build system branches on, and it was wrong
-      # for the edit that matters most: a block-taking def's body is
-      # compiled by the *consumer*, and the verdict read the interface
-      # hash alone and said nobody had to rebuild.
-      - name: mod diff answers what a rebuild would show
-        run: bash bench/mod_diff.sh
-
-      # And that the grounding a model reads is there at all. `mod
-      # context` resolved the requirement table and the entry file's
-      # directory and never looked at `IYI_PATH`, so every import of a
-      # library module — nine across the samples — was reported as a
-      # module that does not exist.
-      - name: Every import in the samples is grounded
-        run: bash bench/mod_context.sh
-
       # The command surface and the build daemon, which is iyi's own (SPEC.md
       # IV.1d) and which nothing else here runs. It caught two things the day
       # it was added: a spec still asking for a command this fork removed, and
@@ -393,6 +377,17 @@ jobs:
       - name: One client's mistake is one client's mistake
         run: python3 bench/daemon_protocol.py
 
+      # And whether the program it built is the same program. The daemon
+      # forks a child per build, so the child starts from a prelude this
+      # build's command line never configured: every switch that matters
+      # is re-applied to it, and the compiler can force somebody to *name*
+      # the list a new switch belongs to without telling them they named
+      # the right one. Delete the line that re-applies `use_iyimod` and
+      # this is what notices — the plain build answers and the daemon's
+      # fail.
+      - name: The daemon builds the same program a plain build does
+        run: python3 bench/daemon_agrees.py
+
       # Three gates that existed, passed on the machine that wrote them, and
       # were named in this file by nothing: `format_exercise` (seven proofs
       # over patched copies of `std/format`), `io_exercise` (`IyiIO` flush,
@@ -496,6 +491,20 @@ jobs:
       # the build compiles against.
       - name: The language server answers from an artifact
         run: python3 bench/lsp_artifacts.py
+
+      # What the commands that read an import without building answer,
+      # against what a build does. Here rather than with the specs
+      # because both need the binary this job builds: `mod diff`'s
+      # verdict was wrong for the edit that matters most — a block-taking
+      # def's body is compiled by the *consumer*, and the verdict read
+      # the interface hash alone — and `mod context` never looked at
+      # `IYI_PATH`, so every import of a library module was reported as a
+      # module that does not exist.
+      - name: mod diff answers what a rebuild would show
+        run: bash bench/mod_diff.sh
+
+      - name: Every import is grounded, in every workspace shape
+        run: bash bench/mod_context.sh
 
       # The agent's loop, scripted and asserted: ground (context pack,
       # budget ladder), check (verdict as data, suggested_edit), fix

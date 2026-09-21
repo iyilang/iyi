@@ -275,6 +275,10 @@ pub def render_branches(taken : String, region : String, env : Env, flags : Arra
   render(tail, env, flags)
 end
 
+pub def unresolved?(source : String) : Bool
+  find(source, "{{", 0) >= 0
+end
+
 pub def render_loop(directive : String, region : String, env : Env, flags : Array(String)) : String
   rest = directive[3, directive.bytesize - 3].strip
   marker = find(rest, " in ", 0)
@@ -284,7 +288,12 @@ pub def render_loop(directive : String, region : String, env : Env, flags : Arra
   built = ""
   if value.kind == "list" && vars.size == 1
     value.items.each do |item|
-      built = built + render(region, env.bind(vars[0], text_value(item)), flags)
+      piece = render(region, env.bind(vars[0], text_value(item)), flags)
+      # A body that still carries `{{` asked something of its value that
+      # this pass cannot answer - indexing it, or calling a method on it.
+      # The loop wrote nothing rather than a method named `{{`.
+      return "" if unresolved?(piece)
+      built = built + piece
     end
     return built
   end
@@ -293,7 +302,9 @@ pub def render_loop(directive : String, region : String, env : Env, flags : Arra
     while index < value.keys.size
       inner = env.bind(vars[0], text_value(value.keys[index]))
         .bind(vars[1], text_value(value.items[index]))
-      built = built + render(region, inner, flags)
+      piece = render(region, inner, flags)
+      return "" if unresolved?(piece)
+      built = built + piece
       index = index + 1
     end
     return built

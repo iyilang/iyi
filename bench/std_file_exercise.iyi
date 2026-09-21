@@ -107,7 +107,9 @@ puts "  metadata, permissions, and chmod verified"
 locked = sandbox + "/readonly.txt"
 File.write(locked, "locked")
 File.chmod(locked, 0o444)
-assert_true !File.writable?(locked), "a 0o444 file is not writable"
+# Not "and it is unwritable": CI's Linux container runs as root, where
+# `access(W_OK)` answers true for a 0o444 file and the assertion said so.
+# What is being tested is the removal, which the mode never governed.
 File.delete(locked)
 assert_true !File.exists?(locked), "a read-only file is still the directory's to delete"
 puts "  a read-only file is deleted by its directory's leave"

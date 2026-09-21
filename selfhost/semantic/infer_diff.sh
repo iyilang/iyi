@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# The iyi-written first inference slice against the current compiler.
+# The iyi-written inference slice against the current compiler.
 #
-# The fixture contains four called internal methods and one uncalled one. The
-# oracle runs full semantic analysis and reads typed DefInstances; the port
-# walks its own AST and performs the same small inference. Exact bytes are the
-# gate. An empty answer from either side is a failure, not agreement.
+# Each fixture contains called internal methods and at least one uncalled
+# one. The oracle runs full semantic analysis and reads typed DefInstances;
+# the port walks its own AST and performs the same inference. Exact bytes
+# are the gate. An empty answer from either side is a failure, not
+# agreement.
+#
+# With no arguments it runs every fixture, because a slice that grew a
+# second fixture and kept checking the first proves only the first.
 set -u
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 export LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib
@@ -14,7 +18,6 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-FIXTURE="${1:-$HERE/fixtures/infer.iyi}"
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
 IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
@@ -24,19 +27,30 @@ IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
   exit 1
 }
 
-CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color \
-  "$HERE/infer_oracle.cr" -- "$FIXTURE" 2>/dev/null \
-  | grep -v "Using compiled" > "$WORK/oracle.txt"
-"$WORK/infer" "$FIXTURE" > "$WORK/port.txt" 2>/dev/null
+fixtures=("$HERE"/fixtures/infer*.iyi)
+[ "$#" -gt 0 ] && fixtures=("$@")
 
-[ -s "$WORK/oracle.txt" ] || { echo "  oracle answered nothing"; exit 1; }
-[ -s "$WORK/port.txt" ] || { echo "  port answered nothing"; exit 1; }
+status=0
+for fixture in "${fixtures[@]}"; do
+  CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color \
+    "$HERE/infer_oracle.cr" -- "$fixture" 2>/dev/null \
+    | grep -v "Using compiled" > "$WORK/oracle.txt"
+  "$WORK/infer" "$fixture" > "$WORK/port.txt" 2>/dev/null
 
-if diff -q "$WORK/oracle.txt" "$WORK/port.txt" >/dev/null; then
-  echo "  agree: $(cat "$WORK/port.txt")"
-else
-  echo "  DIFFERS $(basename "$FIXTURE")"
-  echo "    oracle: $(cat "$WORK/oracle.txt")"
-  echo "    port:   $(cat "$WORK/port.txt")"
-  exit 1
-fi
+  name="$(basename "$fixture")"
+  if [ ! -s "$WORK/oracle.txt" ]; then
+    echo "  $name: oracle answered nothing"; status=1; continue
+  fi
+  if [ ! -s "$WORK/port.txt" ]; then
+    echo "  $name: port answered nothing"; status=1; continue
+  fi
+  if diff -q "$WORK/oracle.txt" "$WORK/port.txt" >/dev/null; then
+    echo "  $name agrees: $(cat "$WORK/port.txt")"
+  else
+    echo "  DIFFERS $name"
+    echo "    oracle: $(cat "$WORK/oracle.txt")"
+    echo "    port:   $(cat "$WORK/port.txt")"
+    status=1
+  fi
+done
+exit $status

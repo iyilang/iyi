@@ -1,0 +1,62 @@
+# The second inference slice: a method is typed by what its body reaches.
+#
+# The first slice carried literals, typed arguments, local assignment and
+# lookup, expression lists and branch unions. This one carries what a body
+# does rather than what it holds: a call to another method in the file, an
+# early `return` beside the value the body ends on, a loop, recursion, and
+# the literals the first fixture left out.
+#
+# Nothing here calls a method on a value. The pass runs on this file alone
+# with no prelude, so `i < 3` is an undefined method rather than a
+# comparison, and the fixture says only what can be said without one.
+#
+# These methods are internal. R-2 requires an exported method to carry its
+# return type, so an exported unannotated method is a declaration error
+# rather than an inference example.
+
+def leaf
+  2
+end
+
+# The type of a call is the type of what it reaches, which is the first
+# thing inference does that reading one method cannot answer.
+def reaches_leaf
+  leaf
+end
+
+# Two ways out of one method: the early return and the value the body ends
+# on. The answer is both.
+def early(flag : Bool)
+  return "yes" if flag
+  1
+end
+
+# A loop is not a value. The method answers what follows it, and nothing
+# follows it here.
+def loops(flag : Bool)
+  while flag
+    flag
+  end
+end
+
+def character
+  'c'
+end
+
+def fraction
+  1.5
+end
+
+# A method that reaches itself is typed by the way out that does not.
+def recursive(flag : Bool)
+  return 0 if flag
+  recursive(flag)
+end
+
+leaf
+reaches_leaf
+early(true)
+loops(false)
+character
+fraction
+recursive(true)

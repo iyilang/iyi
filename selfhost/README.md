@@ -278,7 +278,7 @@ every method that type has, including the forty the prelude gave it.
 Reporting those means loading the prelude, which is the same work the
 bootstrap needs and is not this slice's.
 
-## The first inference slice
+## The inference slice
 
 `semantic/infer.iyi` infers the return type of every called internal method
 in `semantic/fixtures/infer.iyi`. The oracle runs `Program#semantic` and
@@ -293,3 +293,37 @@ literal types, typed parameters, local assignment and lookup, expression-list
 results, and branch unions. Its gate is load-bearing: changing the inferred
 integer type to `Int64` changes two answers and exits non-zero; restoring the
 source byte-for-byte returns the exact four rows above.
+
+The second fixture, `fixtures/infer_calls.iyi`, carries what a body does
+rather than what it holds, and `infer_diff.sh` now runs every fixture,
+because a slice that grew a second one and kept checking the first proves
+only the first:
+
+    infer.iyi agrees: <Program>#integer=Int32 <Program>#maybe=(Int32 | Nil) <Program>#text=String <Program>#truth=Bool
+    infer_calls.iyi agrees: <Program>#character=Char <Program>#early=(Int32 | String) <Program>#fraction=Float64 <Program>#leaf=Int32 <Program>#loops=Nil <Program>#reaches_leaf=Int32 <Program>#recursive=Int32
+
+Five things the first fixture did not say:
+
+* A call to a method in the same file is typed by that method, which is
+  the first answer reading one method cannot give.
+* A method that reaches itself is typed by the way out that does not.
+  The recursive call answers nothing, and nothing is what a union with it
+  drops.
+* A body has more than one way out. `early` returns a `String` and ends
+  on an `Int32`, and the answer is both. A body that ends in a `return`
+  is worth nothing on its own, which is how `recursive` answers `Int32`
+  rather than `(Nil | Int32)`.
+* A loop is not a value.
+* `1.5` is a `Float64` and `'c'` is a `Char`. A literal's suffix is not
+  here: the lexer drops it, so `1_i64` arrives as `1`, and neither
+  fixture writes one.
+
+Neither fixture calls a method on a value. The pass runs on one file with
+no prelude, so `i < 3` is an undefined method rather than a comparison,
+and the first attempt at this fixture died on exactly that. Typing
+`1 + 1` means loading the prelude, which is the work the bootstrap needs
+and the same wall `big.iyi` hit in the declaration pass.
+
+The second gate is load-bearing too: dropping the collection of `return`
+types changes two rows and exits non-zero, and restoring the file
+byte-for-byte returns the rows above.

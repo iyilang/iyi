@@ -410,12 +410,20 @@
   there, which is exactly the case that was broken and leaves every
   workspace with its sources compiled as it was before.
 
-  `check` and `doc` had the same hole, which is the agent loop's first
-  two steps: `iyi check main.iyi` answered `can't find module` about a
-  module `build --use-iyimod mods` compiles fine against, and `iyi doc`
-  said the file does not compile alone. They read the artifacts the same
-  way now, and for the same reason — a verb that answers *about a file*
-  has no flag to be told with. A build still has one and is unchanged.
+  Every other verb had the same hole, which is the whole agent loop:
+  `iyi check` answered `can't find module` about a module `build
+  --use-iyimod mods` compiles fine against, `iyi doc` said the file does
+  not compile alone, and `iyi run` and `iyi test` could not build it at
+  all. They read the artifacts the same way now — a verb has no flag to
+  be told with, and a person typing `iyi test` is not telling anybody
+  how their dependency arrived.
+
+  A build told `--use-iyimod DIR` is untouched: that flag means "read
+  these first and do not open a source", which is its contract. Told
+  nothing, a build now reads the workspace's artifacts *after* its
+  sources, so a workspace with its sources present compiles exactly as
+  it did and the one whose library is only an artifact stops being an
+  error.
 
   Where the artifacts are is one name — `mods` beside the project root,
   which is what the README, the SPEC and every bench in the tree
@@ -431,7 +439,8 @@
   completion after a dot on a type the artifact declares, and the
   context pack: five answers, and five of them were empty or wrong on
   the artifact side before this. `bench/mod_context.sh` asks `check` and
-  `doc` the same thing.
+  `doc` the same thing, and `iyi test` in that workspace now passes the
+  test it could not build.
 
 - **`iyi mod context` answered that the standard library is not there.**
   It resolves each import the way a build does — the requirement table

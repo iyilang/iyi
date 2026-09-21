@@ -51,7 +51,7 @@ class Iyi::Command
       return check_affected
     end
 
-    compile_no_codegen "check", workspace_artifacts: true
+    compile_no_codegen "check"
 
     # Nothing to print on success: the verdict is the exit code, the
     # same contract `test` and `vet` keep. Errors never reach this line —

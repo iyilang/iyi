@@ -389,6 +389,40 @@
 
 ### Fixed
 
+- **The stack-overflow sentence was gated everywhere except on the
+  platform it is about.** POSIX prints it from `IyiStackGuard` on an
+  alternate signal stack; that arm is compiled out on Windows, where the
+  line comes from the vectored handler in `src/iyi/prelude.iyi` and from
+  the room it prints in — `SetThreadStackGuarantee` on a thread's own
+  stack, and the 16,384 committed bytes of `GUARD_SLACK` under the armed
+  PAGE_GUARD page of a fiber's. `bench/panics.sh` asserts all of it and
+  ran in the Linux and darwin jobs only.
+
+  Measured on Windows 11 x86-64 before the step was added, and nothing
+  needed fixing. Each of the three stacks:
+
+      iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion
+      exit 1
+
+  and a wild `Pointer(Int32).new(16_u64)` is called what it is instead —
+  "the program died of a memory fault", exit 1. The whole script:
+  eleven steps, `panics gate: every step held`.
+
+  The falsification, because a gate nobody can fail is not a gate: with
+  `GUARD_SLACK = 0_u64` and the compiler rebuilt, the fiber stack prints
+  the sentence and then dies on the way out —
+
+      iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion
+      iyi: the program died of a memory fault. Outside `Pointer`, ...
+
+  which is the handler walking off the bottom of the guard page into the
+  page nobody committed, and `bench/panics.sh` reports
+  `panics FAIL: stack overflow on the fiber stack said:`. Restored to
+  16,384 the same program prints the one line and exits 1.
+
+  The `windows-native` job runs `bench/panics.sh` now, after the
+  exercises.
+
 - **A read-only file, directory or destination could not be removed or
   replaced on Windows.** POSIX asks the *directory* for permission to
   unlink a name, rename onto one or remove one; Windows asks the thing

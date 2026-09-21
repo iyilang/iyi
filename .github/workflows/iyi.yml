@@ -1676,6 +1676,20 @@ jobs:
             exit 1
           }
 
+      # The sentence a stack overflow prints is Windows' own: POSIX gets it
+      # from `IyiStackGuard` on an alternate signal stack, which is compiled
+      # out here, and Windows gets it from the vectored handler in
+      # `src/iyi/prelude.iyi` — from the room `SetThreadStackGuarantee`
+      # reserves on a thread's stack and the committed slack under the armed
+      # guard page a fiber stack carries. `bench/panics.sh` asserts that
+      # sentence, byte for byte, on the main stack, a fiber's and a thread's,
+      # and that a wild `Pointer` is called a memory fault instead — and it
+      # ran in the Linux and darwin jobs only, so the one platform the
+      # sentence is about was the one platform nothing checked it on.
+      - name: Panics, on the platform the sentence is about
+        shell: bash
+        run: bash bench/panics.sh
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

@@ -389,6 +389,24 @@
 
 ### Fixed
 
+- **"Dependencies are hashed" was gated in the direction that is a typo,
+  not in the direction that is the threat.** `iyi.sum` is fact written by
+  the tool, and its whole job is to notice that what arrived is not what
+  arrived last time (III.7). `bench/packages_resolve.sh` proved the
+  comparison happens — it edits a hash *in the sum file* and the build
+  refuses — which says nothing about what the comparison is *against*.
+  The case that matters is the other one: the sum file honest and the
+  **checkout** mutated, which is what a compromised module cache, a moved
+  tag or a backup restored from the wrong day looks like.
+
+  Measured: it is refused, naming both hashes, so nothing needed fixing —
+  and the assertion was still missing. It is there now, and it has teeth.
+  With `Sum.tree_hash` no longer reading file contents, the tampered-sum
+  step still passes and the new one fails with the evidence printed: the
+  program runs and answers `hello from somebody else`, which is a
+  dependency that changed under a program that was told nothing.
+
+
 - **The stack-overflow sentence was gated everywhere except on the
   platform it is about.** POSIX prints it from `IyiStackGuard` on an
   alternate signal stack; that arm is compiled out on Windows, where the

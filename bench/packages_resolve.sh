@@ -140,6 +140,39 @@ if [ $? -eq 0 ] || ! grep -q 'is not what it was' tamper.log; then
 fi
 mv app/iyi.sum.good app/iyi.sum
 
+# And the direction that is the threat rather than the typo: the sum file
+# is honest and the *checkout* is not. That is what a compromised cache, a
+# moved tag or a backup restored from the wrong day looks like, and it is
+# the one thing III.7 says this file exists to notice. The step above
+# proves the comparison happens; this one proves what it compares — the
+# hash is recomputed from the tree on every build, so a dependency that
+# changed under the program is a refusal naming both hashes.
+step "a mutated checkout is refused while iyi.sum is honest"
+checkout="$(find "$IYI_CACHE_DIR/mod" -name liba.iyi | head -1)"
+[ -n "$checkout" ] || { echo "no checkout to mutate under $IYI_CACHE_DIR/mod"; exit 1; }
+cp "$checkout" "$WORK/liba.iyi.good"
+# A change a program would notice, in the one file it calls into.
+sed -i.bak 's/hello from liba/hello from somebody else/' "$checkout" && rm -f "$checkout.bak"
+rm -f app/app
+(cd app && "$IYI" build main.iyi -o app) > mutated.log 2>&1
+mutated_status=$?
+cp "$WORK/liba.iyi.good" "$checkout"
+if [ "$mutated_status" -eq 0 ]; then
+  echo "a mutated checkout built anyway:"
+  ./app/app 2>&1 | sed 's/^/  /'
+  exit 1
+fi
+grep -q 'is not what it was' mutated.log || {
+  echo "a mutated checkout was refused for some other reason:"
+  tail -6 mutated.log
+  exit 1
+}
+grep -q 'the checkout hashes to' mutated.log || {
+  echo "the refusal did not name what the tree hashes to now:"
+  tail -6 mutated.log
+  exit 1
+}
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }

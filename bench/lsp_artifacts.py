@@ -25,6 +25,8 @@ What is asserted, per workspace:
   * `didOpen` reports no diagnostics,
   * `hover` names the local's type, which is the imported function's return,
   * `definition` answers exactly one location, in a file that is there,
+  * `completion` after a dot lists the method of a type the *artifact*
+    declares, which is the feature a person uses every few seconds,
   * `iyi/contextPack` carries the import's surface, with the same interface
     hash on both sides — the strongest form of "the same module arrived".
 
@@ -46,20 +48,46 @@ IYI = os.path.join(ROOT, "bin", "iyi")
 MAIN = """module main
 
 import app/base
-using app/base::{value}
+using app/base::{value, tag}
 
 def run : Int32
   n = value
   n
 end
 
+def named : String
+  t = tag
+  t.name
+end
+
 puts run
+puts named
 """
+
+# The dot, typed. Completion fires on a buffer that has just stopped
+# compiling, so the answer comes from the last result that held — the
+# sequence `bench/lsp_session.py` established.
+DOTTED = MAIN.replace("  t.name\n", "  t.na\n")
 
 BASE = """module app/base
 
+pub struct Tag
+  @name : String
+
+  def initialize(@name : String)
+  end
+
+  pub def name : String
+    @name
+  end
+end
+
 pub def value : Int32
   42
+end
+
+pub def tag : Tag
+  Tag.new("t")
 end
 """
 
@@ -130,6 +158,21 @@ def ask(where, env, label):
     target = locations[0]["uri"][len("file://"):] if locations else ""
     say(f"{label}: definition lands in a file that is there",
         len(locations) == 1 and os.path.isfile(target), target or "no location")
+
+    client.send("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 2},
+        "contentChanges": [{"text": DOTTED}]}, wait=False)
+    client.diagnostics(uri)
+    filled = client.send("textDocument/completion", {"textDocument": {"uri": uri},
+                                                     "position": {"line": 12, "character": 6}})
+    items = (filled.get("result") or {}).get("items") or []
+    labels = [item["label"] for item in items]
+    say(f"{label}: completion lists the artifact type's method",
+        labels == ["name"], json.dumps(labels)[:120])
+    client.send("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 3},
+        "contentChanges": [{"text": MAIN}]}, wait=False)
+    client.diagnostics(uri)
 
     pack = client.send("iyi/contextPack", {"textDocument": {"uri": uri}})
     result = pack.get("result") or {}

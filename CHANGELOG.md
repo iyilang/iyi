@@ -420,8 +420,10 @@
 
   `bench/lsp_artifacts.py` asks the same program the same questions
   twice — dependency as source, dependency as artifact — and both
-  answer with the same interface hash. Run against the commit before
-  this, four of its five checks fail.
+  answer with the same interface hash. Diagnostics, hover, definition,
+  completion after a dot on a type the artifact declares, and the
+  context pack: five answers, and five of them were empty or wrong on
+  the artifact side before this.
 
 - **`iyi mod context` answered that the standard library is not there.**
   It resolves each import the way a build does — the requirement table

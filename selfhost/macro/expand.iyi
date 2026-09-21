@@ -1,0 +1,481 @@
+module macro/expand
+
+# Macro expansion, written in iyi: the source a file means, from the source
+# it was written as.
+#
+# A macro body is not iyi until it has been expanded. `def add_{{suffix}}`
+# is not a method declaration and `{% if flag?(:darwin) %}` is not a
+# statement, so nothing downstream can read either one until the macro has
+# run. Crystal expands a macro into source and parses the result, and this
+# does the same thing for the shapes the corpora actually write.
+#
+# What it carries: `{% if %}`, `{% elsif %}`, `{% else %}`, `{% unless %}`
+# and `{% begin %}`; `{% for %}` over a literal list or a literal map; and
+# `{{ name }}` substitution. What it does not carry - a macro variable, a
+# method call on a macro value, `{% for %}` over anything but a literal -
+# it drops, which is what the reader before it did with every macro.
+# Dropping is the one safe answer: a region that cannot be evaluated has
+# no declarations rather than wrong ones.
+
+# A macro value. `text` is a written form such as `:monotonic`, a list is
+# what `%w()` and `[]` spell, and a map is what `{a: 1}` spells.
+pub class Value
+  getter kind : String
+  getter text : String
+  getter items : Array(String)
+  getter keys : Array(String)
+
+  def initialize(@kind : String, @text : String, @items : Array(String), @keys : Array(String))
+  end
+end
+
+pub def none_value : Value
+  Value.new("none", "", [] of String, [] of String)
+end
+
+pub def text_value(text : String) : Value
+  Value.new("text", text, [] of String, [] of String)
+end
+
+pub def bool_value(truth : Bool) : Value
+  Value.new("bool", truth ? "true" : "false", [] of String, [] of String)
+end
+
+pub def list_value(items : Array(String)) : Value
+  Value.new("list", "", items, [] of String)
+end
+
+pub def map_value(keys : Array(String), items : Array(String)) : Value
+  Value.new("map", "", items, keys)
+end
+
+# The flags of the machine this pass was compiled for. The pass is built
+# by the compiler it is measured against, so asking its own macro is
+# asking the same question the oracle answers.
+pub def host_flags : Array(String)
+  flags = [] of String
+  {% if flag?(:darwin) %}
+    flags << "darwin"
+  {% end %}
+  {% if flag?(:linux) %}
+    flags << "linux"
+  {% end %}
+  {% if flag?(:win32) %}
+    flags << "win32"
+  {% end %}
+  {% if flag?(:unix) %}
+    flags << "unix"
+  {% end %}
+  {% if flag?(:bits64) %}
+    flags << "bits64"
+  {% end %}
+  {% if flag?(:aarch64) %}
+    flags << "aarch64"
+  {% end %}
+  {% if flag?(:x86_64) %}
+    flags << "x86_64"
+  {% end %}
+  flags
+end
+
+# The names a macro body has bound, which is what a `for` gives its body.
+pub class Env
+  getter names : Array(String)
+  getter values : Array(Value)
+
+  def initialize
+    @names = [] of String
+    @values = [] of Value
+  end
+
+  def initialize(@names : Array(String), @values : Array(Value))
+  end
+
+  def bind(name : String, value : Value) : Env
+    names = @names.dup
+    values = @values.dup
+    names << name
+    values << value
+    Env.new(names, values)
+  end
+
+  def has?(name : String) : Bool
+    !@names.index(name).nil?
+  end
+
+  def get(name : String) : Value
+    index = @names.index(name)
+    index.nil? ? none_value : @values[index]
+  end
+end
+
+# The first index of `needle` at or after `from`, or -1. Byte indexes
+# throughout: a comment in the corpus holds characters wider than a byte,
+# and a scanner that counted them as one would cut a name in half.
+pub def find(source : String, needle : String, from : Int32) : Int32
+  return -1 if needle.bytesize == 0
+  index = from < 0 ? 0 : from
+  limit = source.bytesize - needle.bytesize
+  while index <= limit
+    if matches_at?(source, needle, index)
+      return index
+    end
+    index = index + 1
+  end
+  -1
+end
+
+pub def matches_at?(source : String, needle : String, at : Int32) : Bool
+  offset = 0
+  while offset < needle.bytesize
+    return false if source[at + offset] != needle[offset]
+    offset = offset + 1
+  end
+  true
+end
+
+pub def slice(source : String, from : Int32, to : Int32) : String
+  return "" if to <= from
+  source[from, to - from]
+end
+
+pub def first_word(text : String) : String
+  index = 0
+  while index < text.bytesize && !text[index].whitespace?
+    index = index + 1
+  end
+  text[0, index]
+end
+
+pub def opens_region?(word : String) : Bool
+  word == "if" || word == "unless" || word == "for" || word == "begin"
+end
+
+# The `{%` that closes the region opened before `from`, counting the
+# openers on the way. A macro conditional nests like any other.
+pub def matching_end(source : String, from : Int32) : Int32
+  depth = 1
+  index = from
+  while true
+    open = find(source, "{%", index)
+    return -1 if open < 0
+    close = find(source, "%}", open)
+    return -1 if close < 0
+    word = first_word(slice(source, open + 2, close).strip)
+    if word == "end"
+      depth = depth - 1
+      return open if depth == 0
+    elsif opens_region?(word)
+      depth = depth + 1
+    end
+    index = close + 2
+  end
+end
+
+# The `{% elsif %}` or `{% else %}` that belongs to this conditional
+# rather than to one inside it, or -1.
+pub def branch_split(region : String) : Int32
+  depth = 0
+  index = 0
+  while true
+    open = find(region, "{%", index)
+    return -1 if open < 0
+    close = find(region, "%}", open)
+    return -1 if close < 0
+    word = first_word(slice(region, open + 2, close).strip)
+    if word == "end"
+      depth = depth - 1
+    elsif opens_region?(word)
+      depth = depth + 1
+    elsif depth == 0 && (word == "else" || word == "elsif")
+      return open
+    end
+    index = close + 2
+  end
+end
+
+pub def expand(source : String, flags : Array(String)) : String
+  render(source, Env.new, flags)
+end
+
+pub def render(source : String, env : Env, flags : Array(String)) : String
+  built = ""
+  pos = 0
+  while true
+    open = find(source, "{%", pos)
+    if open < 0
+      built = built + interpolate(slice(source, pos, source.bytesize), env)
+      return built
+    end
+    built = built + interpolate(slice(source, pos, open), env)
+    close = find(source, "%}", open)
+    return built if close < 0
+    directive = slice(source, open + 2, close).strip
+    after = close + 2
+    word = first_word(directive)
+
+    unless opens_region?(word)
+      # `{% ints = %w(Int32 Int64) %}` binds a name for the directives
+      # below it. Anything else is a directive this pass does not carry,
+      # and it goes without taking what is around it.
+      assign = find_top(directive, "=")
+      if assign > 0 && directive[assign + 1] != '=' && directive[assign - 1] != '!'
+        name = slice(directive, 0, assign).strip
+        value = evaluate(slice(directive, assign + 1, directive.bytesize), env, flags)
+        env = env.bind(name, value) unless value.kind == "none"
+      end
+      pos = after
+      next
+    end
+
+    stop = matching_end(source, after)
+    return built if stop < 0
+    stop_close = find(source, "%}", stop)
+    return built if stop_close < 0
+    region = slice(source, after, stop)
+
+    if word == "begin"
+      built = built + render(region, env, flags)
+    elsif word == "if" || word == "unless"
+      condition = truth(directive[word.bytesize, directive.bytesize - word.bytesize], env, flags)
+      taken = word == "unless" ? negate(condition) : condition
+      built = built + render_branches(taken, region, env, flags)
+    elsif word == "for"
+      built = built + render_loop(directive, region, env, flags)
+    end
+    pos = stop_close + 2
+  end
+end
+
+pub def negate(answer : String) : String
+  return "true" if answer == "false"
+  return "false" if answer == "true"
+  answer
+end
+
+# A conditional whose condition could not be evaluated has no branches:
+# neither side is known to run, so neither is emitted.
+pub def render_branches(taken : String, region : String, env : Env, flags : Array(String)) : String
+  split = branch_split(region)
+  if split < 0
+    return taken == "true" ? render(region, env, flags) : ""
+  end
+  head = slice(region, 0, split)
+  close = find(region, "%}", split)
+  return "" if close < 0
+  directive = slice(region, split + 2, close).strip
+  tail = slice(region, close + 2, region.bytesize)
+  return render(head, env, flags) if taken == "true"
+  return "" unless taken == "false"
+  word = first_word(directive)
+  if word == "elsif"
+    condition = truth(directive[5, directive.bytesize - 5], env, flags)
+    return render_branches(condition, tail, env, flags)
+  end
+  render(tail, env, flags)
+end
+
+pub def render_loop(directive : String, region : String, env : Env, flags : Array(String)) : String
+  rest = directive[3, directive.bytesize - 3].strip
+  marker = find(rest, " in ", 0)
+  return "" if marker < 0
+  vars = split_top(slice(rest, 0, marker))
+  value = evaluate(slice(rest, marker + 4, rest.bytesize).strip, env, flags)
+  built = ""
+  if value.kind == "list" && vars.size == 1
+    value.items.each do |item|
+      built = built + render(region, env.bind(vars[0], text_value(item)), flags)
+    end
+    return built
+  end
+  if value.kind == "map" && vars.size == 2
+    index = 0
+    while index < value.keys.size
+      inner = env.bind(vars[0], text_value(value.keys[index]))
+        .bind(vars[1], text_value(value.items[index]))
+      built = built + render(region, inner, flags)
+      index = index + 1
+    end
+    return built
+  end
+  # A loop over something this pass cannot evaluate runs no times, which
+  # is what the reader before it did with the whole region.
+  ""
+end
+
+# `{{ name }}` is the text the name is bound to. A name this pass does not
+# know is left as it was written: the tree carries a macro expression for
+# it, which is what the current parser builds.
+pub def interpolate(source : String, env : Env) : String
+  built = ""
+  pos = 0
+  while true
+    open = find(source, "{{", pos)
+    if open < 0
+      return built + slice(source, pos, source.bytesize)
+    end
+    close = find(source, "}}", open)
+    return built + slice(source, pos, source.bytesize) if close < 0
+    built = built + slice(source, pos, open)
+    name = slice(source, open + 2, close).strip
+    name = slice(name, 0, name.bytesize - 3) if ends_with_id?(name)
+    if env.has?(name)
+      built = built + env.get(name).text
+    else
+      built = built + slice(source, open, close + 2)
+    end
+    pos = close + 2
+  end
+end
+
+pub def ends_with_id?(name : String) : Bool
+  return false if name.bytesize < 3
+  slice(name, name.bytesize - 3, name.bytesize) == ".id"
+end
+
+pub def truth(expression : String, env : Env, flags : Array(String)) : String
+  evaluate(expression.strip, env, flags).text
+end
+
+# The macro expressions the corpora write, and nothing else. Anything this
+# does not recognise answers nothing, and a conditional on nothing emits
+# neither branch.
+pub def evaluate(source : String, env : Env, flags : Array(String)) : Value
+  text = source.strip
+  return none_value if text.bytesize == 0
+
+  if text[0] == '!'
+    return bool_value(negate(evaluate(slice(text, 1, text.bytesize), env, flags).text) == "true")
+  end
+
+  index = find_top(text, "||")
+  if index >= 0
+    left = evaluate(slice(text, 0, index), env, flags).text
+    right = evaluate(slice(text, index + 2, text.bytesize), env, flags).text
+    return none_value if left != "true" && left != "false"
+    return bool_value(true) if left == "true"
+    return none_value if right != "true" && right != "false"
+    return bool_value(right == "true")
+  end
+
+  index = find_top(text, "&&")
+  if index >= 0
+    left = evaluate(slice(text, 0, index), env, flags).text
+    right = evaluate(slice(text, index + 2, text.bytesize), env, flags).text
+    return none_value if left != "true" && left != "false"
+    return bool_value(false) if left == "false"
+    return none_value if right != "true" && right != "false"
+    return bool_value(right == "true")
+  end
+
+  index = find_top(text, "==")
+  if index >= 0
+    left = evaluate(slice(text, 0, index), env, flags)
+    right = evaluate(slice(text, index + 2, text.bytesize), env, flags)
+    return none_value if left.kind != "text" || right.kind != "text"
+    return bool_value(left.text == right.text)
+  end
+
+  index = find_top(text, "!=")
+  if index >= 0
+    left = evaluate(slice(text, 0, index), env, flags)
+    right = evaluate(slice(text, index + 2, text.bytesize), env, flags)
+    return none_value if left.kind != "text" || right.kind != "text"
+    return bool_value(left.text != right.text)
+  end
+
+  if text[0] == '(' && text[text.bytesize - 1] == ')'
+    return evaluate(slice(text, 1, text.bytesize - 1), env, flags)
+  end
+
+  if text.starts_with?("flag?(")
+    name = slice(text, 6, text.bytesize - 1).strip
+    name = slice(name, 1, name.bytesize) if name.bytesize > 0 && name[0] == ':'
+    return bool_value(flags.includes?(name))
+  end
+
+  if text.starts_with?("%w(")
+    return list_value(split_words(slice(text, 3, text.bytesize - 1)))
+  end
+
+  if text[0] == '['
+    return list_value(split_top(slice(text, 1, text.bytesize - 1)))
+  end
+
+  if text[0] == '{'
+    return read_map(slice(text, 1, text.bytesize - 1))
+  end
+
+  if text[0] == '"'
+    return text_value(slice(text, 1, text.bytesize - 1))
+  end
+
+  return env.get(text) if env.has?(text)
+  none_value
+end
+
+pub def read_map(source : String) : Value
+  keys = [] of String
+  items = [] of String
+  split_top(source).each do |pair|
+    colon = find(pair, ":", 0)
+    next if colon < 0
+    keys << slice(pair, 0, colon).strip
+    items << slice(pair, colon + 1, pair.bytesize).strip
+  end
+  map_value(keys, items)
+end
+
+pub def split_words(source : String) : Array(String)
+  built = [] of String
+  word = ""
+  index = 0
+  while index < source.bytesize
+    ch = source[index]
+    if ch.whitespace?
+      built << word unless word == ""
+      word = ""
+    else
+      word = word + ch.to_s
+    end
+    index = index + 1
+  end
+  built << word unless word == ""
+  built
+end
+
+# The commas that belong to this list rather than to something inside it.
+pub def split_top(source : String) : Array(String)
+  built = [] of String
+  depth = 0
+  start = 0
+  index = 0
+  while index < source.bytesize
+    ch = source[index]
+    depth = depth + 1 if ch == '(' || ch == '[' || ch == '{'
+    depth = depth - 1 if ch == ')' || ch == ']' || ch == '}'
+    if depth == 0 && ch == ','
+      piece = slice(source, start, index).strip
+      built << piece unless piece == ""
+      start = index + 1
+    end
+    index = index + 1
+  end
+  piece = slice(source, start, source.bytesize).strip
+  built << piece unless piece == ""
+  built
+end
+
+pub def find_top(source : String, needle : String) : Int32
+  depth = 0
+  index = 0
+  limit = source.bytesize - needle.bytesize
+  while index <= limit
+    ch = source[index]
+    depth = depth + 1 if ch == '(' || ch == '[' || ch == '{'
+    depth = depth - 1 if ch == ')' || ch == ']' || ch == '}'
+    return index if depth == 0 && matches_at?(source, needle, index)
+    index = index + 1
+  end
+  -1
+end

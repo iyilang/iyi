@@ -1,0 +1,19 @@
+module main
+
+# The macro pass as a command: the source a file means, printed.
+#
+# The declaration pass runs the same expansion before it parses. This
+# exists so the expansion itself can be read and diffed rather than only
+# inferred from what a later pass answers.
+
+import std/file
+import macro/expand
+using std/file::{File}
+using macro/expand::{expand, host_flags}
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: macro <file.iyi>"
+else
+  print expand(File.read(path), host_flags)
+end

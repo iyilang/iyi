@@ -18,8 +18,10 @@ module main
 #     and not to a type of its own.
 
 import std/file
+import macro/expand
 import parser/parser
 using std/file::{File}
+using macro/expand::{expand, host_flags}
 using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
@@ -62,9 +64,20 @@ end
 
 pub class Declarations
   getter found : Array(Decl)
+  # A macro brings methods into being on a type that is already there,
+  # and the type it writes itself is not reported: its home is the
+  # expansion rather than the file. The second pass runs in this mode, so
+  # `def add_{{suffix}}` lands on `Atomic` and `struct {{num.id}}` lands
+  # nowhere.
+  @methods_only : Bool
 
   def initialize
     @found = [] of Decl
+    @methods_only = false
+  end
+
+  def methods_only : Nil
+    @methods_only = true
   end
 
   # The entry for a path, or a new one. Two passes reach the same type:
@@ -74,7 +87,7 @@ pub class Declarations
       return decl if decl.key == key
     end
     made = Decl.new(kind, key, shown, vars)
-    @found << made
+    @found << made unless @methods_only
     made
   end
 
@@ -409,18 +422,13 @@ pub def opens_own_module?(imports : Array(Node), header : String) : Bool
   true
 end
 
-path = Program.args[0]?
-if path.nil?
-  puts "usage: declare <file.iyi>"
-else
-  source = File.read(path)
+# The file as written and the file as expanded, walked in that order.
+# A macro body is not iyi until it has run, and what it writes belongs to
+# the types the file itself declared.
+pub def walk_file(source : String, into : Declarations) : Nil
   parser = Parser.new(source)
   tree = parser.parse
-  into = Declarations.new
   walk = Walk.new(into)
-
-  # `module samples/hello` declares two modules, and the outer one holds
-  # nothing: the file's own statements belong to the innermost.
   header = parser.header
   if header == ""
     walk.statement(tree, "", nil)
@@ -437,8 +445,6 @@ else
           prefix = prefix == "" ? part : prefix + "::" + part
           into.at("module", prefix, prefix, "")
         end
-      end
-      if resolved
         walk.body(tree.body, full, into.at("module", full, full, ""))
       else
         walk.roots(tree.body, full)
@@ -446,6 +452,27 @@ else
     else
       walk.statement(tree, "", nil)
     end
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: declare <file.iyi>"
+else
+  into = Declarations.new
+  written = File.read(path)
+
+  # The file as written says what it declares.
+  walk_file(written, into)
+
+  # The file as expanded says what its macros wrote onto those
+  # declarations. A macro body is not iyi until it has run, and the type
+  # a macro writes is not the file's: its home is the expansion. So the
+  # second pass adds methods and brings nothing new into being.
+  expanded = expand(written, host_flags)
+  unless expanded == written
+    into.methods_only
+    walk_file(expanded, into)
   end
 
   puts into.report

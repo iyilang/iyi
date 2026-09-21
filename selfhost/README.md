@@ -269,14 +269,52 @@ An enum body holds methods as well as members, and `NamedTuple` is
 another type the compiler holds with parameters the source does not
 write down.
 
-What the six that differ are measuring is two things this pass does not
-do yet. Five of them expand macros: `float.iyi` writes fifty `{% %}`
-branches and `named_tuple.iyi` thirty-three, and the methods they
-generate are real methods the port cannot see. The sixth, `big.iyi`,
-writes no macro at all: it reopens `Int32`, and the compiler reports
-every method that type has, including the forty the prelude gave it.
-Reporting those means loading the prelude, which is the same work the
-bootstrap needs and is not this slice's.
+What the six that differ measure is two things this pass did not do at
+the time: five of them expand macros, and the section below closes
+three of those. The sixth, `big.iyi`, writes no macro at all. It
+reopens `Int32`, and the compiler reports every method that type has,
+including the tower `std/int` writes, so reporting them means loading
+what the file imports.
+
+### Macros
+
+A macro body is not iyi until it has run. `def add_{{suffix}}` is not a
+method declaration and `{% if flag?(:darwin) %}` is not a statement, so
+nothing downstream can read either until expansion. Crystal expands a
+macro into source and parses the result, and `selfhost/macro/expand.iyi`
+does the same for the shapes the corpora write:
+
+    bin/iyi build -o macro selfhost/macro/main.iyi && ./macro src/std/errno.iyi
+
+It carries `{% if %}`, `{% elsif %}`, `{% else %}`, `{% unless %}`,
+`{% begin %}`, `{% for %}` over a literal list or map or over a name
+bound above it, `{% name = ... %}`, and `{{ name }}` substitution. What
+it cannot evaluate it drops, which is what the reader before it did with
+every macro: a region that cannot be evaluated has no declarations
+rather than wrong ones. Its flags come from its own `flag?`, because the
+pass is built by the compiler it is measured against.
+
+The declaration pass reads the file twice, and the second reading is
+where the rule lives. A macro's *methods* land on a type the file
+declared and are reported; the *type* a macro writes is not reported at
+all, because its home is the expansion rather than the file. So
+`errno.iyi` gains the members its platform branch lists and does not
+gain a constant for each of them, and `primitives.iyi` gains the six
+operators a loop writes onto `Char` without the file appearing to
+declare `Int32`.
+
+This closed `atomic.iyi`, `errno.iyi` and `primitives.iyi`: the prelude
+corpus went to **14 agree, 1 differ** and the standard library to
+**31 agree, 4 differ**. The expansion is load-bearing: making the map
+loop run no times turns `atomic.iyi` from `agree 1` into `differ 1`, and
+restoring the file byte-for-byte turns it back.
+
+The four that remain need what a macro cannot give them. `named_tuple`
+is missing exactly the methods `tuple.iyi` declares, `traits` and
+`float` are missing the integer tower that `std/int` writes, and
+`big.iyi` imports `std/traits`, which imports both. They are one
+capability away, and it is the same one the bootstrap needs: loading
+what a file imports.
 
 ## The inference slice
 

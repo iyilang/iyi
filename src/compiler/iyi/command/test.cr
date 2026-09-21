@@ -97,7 +97,17 @@ class Iyi::Command
 
     skipped = 0
     discount_off = [] of String
-    unless affected.empty?
+    # The manifest is not a module, so no test's import closure holds it —
+    # and a change to it is the largest change a workspace can make: every
+    # `import example.test/user/liba` resolves through the requirement it
+    # names, so bumping a version moves the code under every test at once.
+    # `--affected iyi.mod` answered "0 to run, 1 skipped: no test's imports
+    # reach the change", which is an agent bumping a dependency and being
+    # told there is nothing to run.
+    manifest_changed = affected.select do |changed|
+      File.basename(changed).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
+    end
+    unless affected.empty? || !manifest_changed.empty?
       # A changed file that no longer exists cannot be proven untouched by
       # anything. The closure does see a deleted *import* now — an import
       # names a path, and the path outlives the file — but a test also
@@ -161,6 +171,11 @@ class Iyi::Command
               json.array { discount_off.each { |missing| json.scalar missing } }
             end
           end
+          unless manifest_changed.empty?
+            json.field "affected_manifest" do
+              json.array { manifest_changed.each { |name| json.scalar name } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -169,6 +184,10 @@ class Iyi::Command
         next if result[:status] == "pass"
         STDOUT << result[:file] << ": " << result[:status] << '\n'
         result[:output].each_line { |line| STDOUT << "  " << line << '\n' }
+      end
+      unless manifest_changed.empty?
+        puts "#{manifest_changed.join(", ")} changed, so every test ran: the " \
+             "requirements are what every package import resolves through"
       end
       unless discount_off.empty?
         puts "#{discount_off.join(", ")} is not there, so every test ran: " \

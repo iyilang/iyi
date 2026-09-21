@@ -389,6 +389,26 @@
 
 ### Fixed
 
+- **Bumping a dependency selected no tests.** `--affected` narrows by
+  import closure, and a manifest is not a module: no closure holds
+  `iyi.mod`, so the largest change a workspace can make — every `import
+  example.test/user/liba` resolves through the requirement it names —
+  came back
+
+      0 to run, 1 skipped: no test's imports reach the change
+
+  and `check --affected iyi.mod` answered "0 consumer(s) checked, all
+  compile", which is a clean verdict about nothing. An agent that bumps a
+  version and asks what to re-run was told: nothing.
+
+  A change to `iyi.mod` or `iyi.sum` turns the discount off now — every
+  test runs, every module is a consumer — and both verbs say why, in
+  prose and as `affected_manifest` in their JSON, because the caller that
+  passes `--affected` is usually a program. An ordinary changed file
+  still narrows to what imports it. `bench/packages_resolve.sh` holds
+  both halves and fails when the rule is taken back out.
+
+
 - **A daemon built with its own environment, not the one the build was
   sent from.** The request carried `cwd`, `args` and a version; the child
   it forks inherited the *daemon's* variables. So a build sent from a

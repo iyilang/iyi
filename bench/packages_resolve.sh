@@ -300,6 +300,46 @@ fi
   echo "the artifact build answered:"; ./app/emitted_from_mods; exit 1;
 }
 
+# ── 5d. A requirement that moved is a change to every module ─────────────
+# `--affected` selects by import closure, and a manifest is not a module:
+# no closure holds `iyi.mod`, so bumping a dependency — the largest change
+# a workspace can make, since every `import example.test/user/liba`
+# resolves through the requirement it names — selected nothing. `iyi test
+# --affected iyi.mod` answered "0 to run, 1 skipped: no test's imports
+# reach the change", which is an agent bumping a version and being told
+# there is nothing to run.
+step "a changed requirement reaches every test and every consumer"
+cat > app/pkg_test.iyi <<'IYI'
+import example.test/user/liba
+using example.test/user/liba::{greeting}
+
+raise "greeting" unless greeting.starts_with?("hello from liba")
+puts "ok"
+IYI
+(cd app && "$IYI" test --affected iyi.mod .) > affected_mod.log 2>&1 || {
+  echo "the tests did not run for a changed manifest:"; tail -4 affected_mod.log; exit 1;
+}
+grep -q 'iyi.mod changed, so every test ran' affected_mod.log || {
+  echo "a changed manifest did not turn the discount off:"; tail -3 affected_mod.log; exit 1;
+}
+grep -q '1 passed' affected_mod.log || {
+  echo "the manifest run did not run the test:"; tail -3 affected_mod.log; exit 1;
+}
+(cd app && "$IYI" check --affected iyi.mod) > affected_check.log 2>&1 || {
+  echo "check --affected iyi.mod failed:"; tail -4 affected_check.log; exit 1;
+}
+grep -q 'every module is a consumer' affected_check.log || {
+  echo "a changed manifest named no consumers:"; tail -3 affected_check.log; exit 1;
+}
+# And the discount is still a discount: an ordinary file that exists and
+# that no test imports selects nothing.
+printf 'module untouched\n\npub def unused : Int32\n  1\nend\n' > app/untouched.iyi
+(cd app && "$IYI" test --affected untouched.iyi .) > affected_file.log 2>&1
+grep -q "no test's imports reach the change" affected_file.log || {
+  echo "an ordinary changed file no longer narrows the run:"; tail -3 affected_file.log; exit 1;
+}
+rm -f app/pkg_test.iyi app/untouched.iyi
+
 # ── 6. The context pack: surfaces, no bodies ──────────────────────────────
 step "mod context prints every import's exact surface"
 (cd app && "$IYI" mod context main.iyi) > context.txt 2>&1 || { cat context.txt; exit 1; }

@@ -96,10 +96,20 @@ class Iyi::Command
     # compile" on a typo is a clean verdict about nothing.
     missing = changed.reject { |path| File.file?(path) }.map { |path| Iyi.relative_filename(path) }
 
+    # The manifest is not a module, so no closure holds it — and a change
+    # to it moves the code under every module at once: `import
+    # example.test/user/liba` resolves through the requirement it names.
+    # `--affected iyi.mod` answered "0 consumer(s) checked, all compile",
+    # which is a clean verdict about nothing.
+    manifest_changed = changed.select do |path|
+      File.basename(path).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
+    end.map { |path| Iyi.relative_filename(path) }
+
     consumers = [] of String
     Dir.glob("**/*.iyi") do |candidate|
       closure = test_import_closure(candidate)
-      consumers << candidate if closure.nil? || changed.any? { |path| closure.includes?(path) }
+      consumers << candidate if closure.nil? || !manifest_changed.empty? ||
+                                changed.any? { |path| closure.includes?(path) }
     end
     consumers.sort!
 
@@ -131,6 +141,11 @@ class Iyi::Command
               json.array { missing.each { |path| json.string path } }
             end
           end
+          unless manifest_changed.empty?
+            json.field "affected_manifest" do
+              json.array { manifest_changed.each { |path| json.string path } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -141,6 +156,10 @@ class Iyi::Command
       end
       unless missing.empty?
         puts "#{missing.join(", ")} is not there, so the consumers are whoever imports that path"
+      end
+      unless manifest_changed.empty?
+        puts "#{manifest_changed.join(", ")} changed, so every module is a consumer: " \
+             "the requirements are what every package import resolves through"
       end
       verdict = failures.empty? ? "all compile" : "#{failures.size} broke"
       puts "#{consumers.size} consumer(s) checked, #{verdict}"

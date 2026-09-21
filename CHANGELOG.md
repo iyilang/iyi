@@ -502,9 +502,12 @@
   table, which a collector linked from a static `gc.lib` leaves no entry
   in — Windows' collector is the static `gc.lib` that ships beside the
   bootstrap compiler's libraries. So the opt-in is read there off the one
-  thing linking a library cannot avoid: the bytes. A build that asked for
-  a collector and got none is the same size as one that did not ask, and
-  that is what fails the check now, with both sizes printed. What the
+  thing linking a library cannot avoid: the bytes, held against a
+  `-Dgc_none` build. Not against a plain one: that carries the owned
+  collector, which `-Dgc_boehm` drops, and the first run of this check
+  read 46 KB against 124 KB as "no collector" when what it had measured
+  was the owned one coming out. Both of the compared builds leave it out,
+  so what is left between them is the library. What the
   import table measures on Windows is the DLL floor itself, which is the
   claim SPEC.md III.10 makes about a Windows program.
 

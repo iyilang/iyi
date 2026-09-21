@@ -530,13 +530,22 @@ else
     # is read off the one thing linking a library in cannot avoid: the
     # bytes. A build that asked for a collector and got none is the same
     # size as one that did not ask.
+    # Against `-Dgc_none`, which is the only comparable build: a plain one
+    # carries the owned collector, and `-Dgc_boehm` drops that — the first
+    # run of this check held the two against each other and read 46 KB
+    # against 124 KB as "no collector", when what it had measured was the
+    # owned one coming out. Both of these builds leave it out, so the
+    # difference between them is the library, and linking one cannot cost
+    # nothing.
+    "$IYI" build -Dgc_none -o "$WORK/gc_none_probe" "$REPO/samples/iyi/hello.iyi" >/dev/null 2>&1
     "$IYI" build -o "$WORK/gc_default" "$REPO/samples/iyi/hello.iyi" >/dev/null 2>&1
     boehm_size="$(wc -c < "$(readable "$WORK/boehm")" | tr -d ' ')"
+    none_size="$(wc -c < "$(readable "$WORK/gc_none_probe")" | tr -d ' ')"
     default_size="$(wc -c < "$(readable "$WORK/gc_default")" | tr -d ' ')"
-    printf '  -Dgc_boehm  %s bytes, against %s for the owned collector\n' \
-      "$boehm_size" "$default_size"
-    if [ "$boehm_size" -le "$default_size" ]; then
-      echo "  -Dgc_boehm linked no collector: a static one cannot cost nothing"
+    printf '  -Dgc_boehm  %s bytes, against %s for -Dgc_none and %s for the owned collector\n' \
+      "$boehm_size" "$none_size" "$default_size"
+    if [ "$boehm_size" -le "$none_size" ]; then
+      echo "  -Dgc_boehm linked no collector: it carries no more than the build with none"
       status=1
     fi
   else

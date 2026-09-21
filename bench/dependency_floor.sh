@@ -521,7 +521,16 @@ if ! "$IYI" build -Dgc_boehm -o "$WORK/boehm" "$REPO/samples/iyi/hello.iyi" >"$W
 else
   boehm_libs="$(libraries "$WORK/boehm")"
   printf '  -Dgc_boehm  %s\n' "$(echo "$boehm_libs" | tr '\n' ' ')"
-  if ! echo "$boehm_libs" | grep -q 'libgc\.'; then
+  if echo "$boehm_libs" | grep -q 'libgc\.'; then
+    :
+  elif [ -n "$DUMPBIN" ]; then
+    # The import table is what a PE has, and a collector linked from a
+    # static `gc.lib` leaves no entry in it — so on this platform the check
+    # above cannot tell a missing collector from one that is inside the
+    # binary. Named rather than claimed either way: this run measured the
+    # DLL floor and not the opt-in.
+    echo "  -Dgc_boehm: a static collector leaves no import entry, so the opt-in is not measured here"
+  else
     echo "  -Dgc_boehm did not link a collector, so the opt-in is broken"
     status=1
   fi

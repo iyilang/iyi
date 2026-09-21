@@ -451,6 +451,15 @@
   about a program whose dependencies had not changed. One datum, one name
   now, and the floor holds on both.
 
+- **The dependency floor runs on Windows, and the first run found a claim
+  it cannot make there.** The libgc opt-in is read off the library list —
+  `-Dgc_boehm` must link a collector — and a PE's list is its import
+  table, which a collector linked from a static `gc.lib` leaves no entry
+  in. So the check cannot tell a missing collector from one inside the
+  binary, and it says that on Windows instead of calling the opt-in
+  broken. What *is* measured there is the DLL floor itself, which is the
+  claim SPEC.md III.10 makes about a Windows program.
+
 - **The dependency floor runs on Windows.** The script has read a PE's
   import table since Windows became a target — `dumpbin -imports`, located
   through the installer the linker is found with — and the two jobs that

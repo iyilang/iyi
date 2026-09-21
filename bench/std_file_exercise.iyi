@@ -97,6 +97,40 @@ assert_true perms.owner_write?, "owner write"
 assert_str "rw-r--r--", perms.to_s, "permissions string"
 puts "  metadata, permissions, and chmod verified"
 
+# A read-only file is still the directory's to remove. POSIX asks the
+# directory for permission to unlink and Windows asks the file, which
+# refuses with ERROR_ACCESS_DENIED while it carries
+# FILE_ATTRIBUTE_READONLY — the attribute `File.chmod(path, 0o444)`
+# sets. Measured before the retry: write a file, make it read-only,
+# delete it, and the program died with "cannot delete" on Windows and
+# nowhere else.
+locked = sandbox + "/readonly.txt"
+File.write(locked, "locked")
+File.chmod(locked, 0o444)
+# Not "and it is unwritable": CI's Linux container runs as root, where
+# `access(W_OK)` answers true for a 0o444 file and the assertion said so.
+# What is being tested is the removal, which the mode never governed.
+File.delete(locked)
+assert_true !File.exists?(locked), "a read-only file is still the directory's to delete"
+puts "  a read-only file is deleted by its directory's leave"
+
+# And a read-only *destination* is still replaceable: posix `rename`
+# asks the directory, Windows asks the target and refuses with
+# ERROR_ACCESS_DENIED. Measured before the retry: renaming onto a name
+# `File.chmod(path, 0o444)` had marked died with "Access is denied" on
+# Windows and replaced the file everywhere else.
+from_name = sandbox + "/rename_source.txt"
+onto_name = sandbox + "/rename_target.txt"
+File.write(from_name, "source")
+File.write(onto_name, "target")
+File.chmod(onto_name, 0o444)
+File.rename(from_name, onto_name)
+assert_str "source", File.read(onto_name), "a read-only destination is replaced"
+assert_true !File.exists?(from_name), "the source is gone after the rename"
+File.chmod(onto_name, 0o644)
+File.delete(onto_name)
+puts "  a read-only destination is replaced by a rename"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"

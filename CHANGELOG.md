@@ -210,8 +210,8 @@
   the owner a choice: a rule or a rewrite. The rule, decided: the figure
   excludes the arms behind `flag?(:win32)`, `flag?(:linux)`,
   `flag?(:darwin)` and `flag?(:wasm32)` - symmetrically, every arm of such
-  a conditional, `else` included - which is **1,466 lines**, and the
-  library is **3,285** of 3,734 with 449 to spare. `4,751` is what opening
+  a conditional, `else` included - which is **1,489 lines**, and the
+  library is **3,285** of 3,734 with 449 to spare. `4,774` is what opening
   `src/iyi/` still counts and is stated beside it everywhere.
 
   What makes it the honest reading rather than the convenient one is what
@@ -389,6 +389,31 @@
 
 ### Fixed
 
+- **A read-only file, directory or destination could not be removed or
+  replaced on Windows.** POSIX asks the *directory* for permission to
+  unlink a name, rename onto one or remove one; Windows asks the thing
+  itself, and anything carrying FILE_ATTRIBUTE_READONLY refuses with
+  ERROR_ACCESS_DENIED. That attribute is what `File.chmod(path, 0o444)`
+  sets here, so the ordinary shapes died on one platform only, measured:
+
+      File.chmod(f, 0o444); File.delete(f)   iyi: panic: cannot delete ...
+      File.chmod(d, 0o444); Dir.delete(d)    iyi: panic: Cannot remove directory: ...
+      File.chmod(b, 0o444); File.rename(a, b)  ... Windows error 5: Access is denied
+
+  All three take the attribute off, try once more, and put it back when
+  the retry still refuses — a file this could not remove is not a file
+  this may leave writable. A read-only *directory* handed to
+  `File.delete` is still refused, and keeps its attribute: measured,
+  `attrib` still reads `R` on it afterwards.
+
+  The bit is cleared with `attributes - 1` rather than `& ~1`: the
+  prelude carries no `~` for Int32, and `bench/io_exercise.iyi` — a
+  program that imports nothing but the prelude — is what said so.
+
+  `bench/std_file_exercise.iyi` deletes a read-only file and renames
+  onto a read-only name; `bench/std_dir_exercise.iyi` removes a
+  read-only directory. All three pass on every platform and panic on
+  Windows without the retry.
 - **Nothing asked whether the daemon builds the same program.** It
   analyses the prelude once and forks a child per build, so the child
   starts from a program this build's command line never configured —
@@ -419,7 +444,6 @@
   Read the other way round the artifact no longer describes its module
   and a plain build refuses (IV.3) about a file the developer is looking
   at.
-
 
 - **The editor could not open the workspace R-1 exists for.** A library
   arrives as `.iyimod` files and no source (III.7), and a program built
@@ -1394,9 +1418,9 @@
   platform floor now - the lines inside a macro conditional whose
   condition names an OS, architecture or ABI flag, every arm of it, a
   build-configuration flag like `gc_boehm` excluded - and the library
-  without it: **1,466** and **3,285**, held to the sentences that quote
+  without it: **1,489** and **3,285**, held to the sentences that quote
   them like every other number. The ceiling is still 3,734 and the
-  breach is still what the floor costs — 1,017 over, as the library with
+  breach is still what the floor costs — 1,040 over, as the library with
   every platform's floor stands today; what changed is that the two
   numbers the rule choice rests on are now arithmetic that checks rather
   than arithmetic that disagreed with itself.
@@ -8262,7 +8286,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,907-line library and nothing else. Every other
+  written against iyi's own 15,930-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

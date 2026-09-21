@@ -32,6 +32,8 @@ end
 
 import std/dir
 using std/dir::{Dir}
+import std/file
+using std/file::{File}
 
 def clean_tree(dir_path : String) : Nil
   return unless Dir.exists?(dir_path)
@@ -206,6 +208,19 @@ rmdir_dir = sandbox + "/empty_for_rmdir"
 Dir.mkdir(rmdir_dir)
 Dir.rmdir(rmdir_dir)
 assert_true !Dir.exists?(rmdir_dir), "rmdir removes empty directory"
+
+# A read-only directory is still the parent's to remove. POSIX's
+# `rmdir` asks the parent for permission and Windows asks the
+# directory, which refuses with ERROR_ACCESS_DENIED while it carries
+# FILE_ATTRIBUTE_READONLY — the attribute `File.chmod(path, 0o444)`
+# sets. Measured before the retry: a directory its owner had marked
+# read-only could not be removed at all on Windows, and came off
+# everywhere else.
+locked_dir = sandbox + "/readonly_dir"
+Dir.mkdir(locked_dir)
+File.chmod(locked_dir, 0o444)
+Dir.delete(locked_dir)
+assert_true !Dir.exists?(locked_dir), "a read-only directory is still the parent's to remove"
 puts "  deletion outcomes for empty and non-empty paths"
 
 # Cleanup sandbox

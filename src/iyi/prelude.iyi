@@ -413,6 +413,12 @@ end
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileW(name : UInt16*) : Int32
     fun GetFileAttributesW(name : UInt16*) : Int32
+    # Clearing FILE_ATTRIBUTE_READONLY, which is what stands between a
+    # read-only file and `DeleteFileW`: POSIX asks the *directory* for
+    # permission to unlink and Windows asks the file, so a program that
+    # wrote a file, made it read-only and deleted it died here with
+    # "cannot delete" — measured, ERROR_ACCESS_DENIED.
+    fun SetFileAttributesW(name : UInt16*, attributes : Int32) : Int32
     fun MultiByteToWideChar(code_page : Int32, flags : Int32, bytes : UInt8*,
                             byte_count : Int32, wide : UInt16*, wide_count : Int32) : Int32
     fun WideCharToMultiByte(code_page : Int32, flags : Int32, wide : UInt16*,
@@ -883,10 +889,27 @@ end
     LibC.CloseHandle(Pointer(Void).new(fd.to_u64))
   end
 
+  # POSIX asks the directory whether the name may go; Windows asks the
+  # file, and a file carrying FILE_ATTRIBUTE_READONLY (0x1) refuses with
+  # ERROR_ACCESS_DENIED (5). `File.chmod(path, 0o444)` is what sets that
+  # attribute here, so the ordinary shape — write a file, make it
+  # read-only, delete it — died on Windows alone. The attribute is taken
+  # off and the delete tried again; if it still refuses, the attribute
+  # goes back, because a file this could not remove is not a file this
+  # may leave writable.
   def __iyi_unlink(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     return 0_i64 if LibC.DeleteFileW(wide) != 0
+    return -1_i64 if LibC.GetLastError != 5
+    attributes = LibC.GetFileAttributesW(wide)
+    return -1_i64 if attributes == -1 || (attributes & 1) == 0
+    # `attributes - 1` clears bit 0, which the line above proved is set:
+    # the prelude has no `~`, and a program that imports nothing but the
+    # prelude is what `bench/io_exercise.iyi` builds.
+    return -1_i64 if LibC.SetFileAttributesW(wide, attributes - 1) == 0
+    return 0_i64 if LibC.DeleteFileW(wide) != 0
+    LibC.SetFileAttributesW(wide, attributes)
     -1_i64
   end
 

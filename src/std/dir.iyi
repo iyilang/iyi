@@ -33,6 +33,14 @@ using std/path::{Path}
     # then the profile directory — measured with both variables cleared,
     # `C:\Users\dogru\`, which the person running the program owns.
     fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
+    # What a refused removal is asked about. A directory carrying
+    # FILE_ATTRIBUTE_READONLY (0x1) refuses `RemoveDirectoryW` with
+    # ERROR_ACCESS_DENIED (5) where POSIX's `rmdir` asks the parent and
+    # succeeds — measured, a directory `File.chmod 0o444` had marked
+    # could not be removed at all.
+    fun GetFileAttributesW(name : UInt16*) : Int32
+    fun SetFileAttributesW(name : UInt16*, attributes : Int32) : Int32
+    fun GetLastError : Int32
   end
 
   # The `*A` twins of the calls above read a path in the process's active code
@@ -528,7 +536,7 @@ pub class Dir
       end
     {% elsif flag?(:win32) %}
       wide = __iyi_wide_path(c_str(p))
-      if wide.address == 0_u64 || LibKernel32.RemoveDirectoryW(wide) == 0
+      if wide.address == 0_u64 || !remove_directory(wide)
         raise "Cannot remove directory: #{p}"
       end
     {% end %}
@@ -540,11 +548,35 @@ pub class Dir
       LibC.rmdir(c_str(p)) == 0
     {% elsif flag?(:win32) %}
       wide = __iyi_wide_path(c_str(p))
-      wide.address != 0_u64 && LibKernel32.RemoveDirectoryW(wide) != 0
+      wide.address != 0_u64 && remove_directory(wide)
     {% else %}
       false
     {% end %}
   end
+
+  {% if flag?(:win32) %}
+    # The removal, and the one retry Windows needs to mean what `rmdir`
+    # means. POSIX asks the parent directory for permission to remove a
+    # name; Windows asks the directory itself, and one carrying
+    # FILE_ATTRIBUTE_READONLY refuses with ERROR_ACCESS_DENIED —
+    # measured, a directory `File.chmod 0o444` had marked could not be
+    # removed by its owner at all. The attribute comes off for the
+    # retry and goes back when the retry still refuses, so a directory
+    # this could not remove is not a directory this left writable. It
+    # is the same shape the prelude's `__iyi_unlink` has for a file.
+    private def self.remove_directory(wide : Pointer(UInt16)) : Bool
+      return true if LibKernel32.RemoveDirectoryW(wide) != 0
+      return false if LibKernel32.GetLastError != 5
+      attributes = LibKernel32.GetFileAttributesW(wide)
+      return false if attributes == -1 || (attributes & 1) == 0
+      # `attributes - 1` clears bit 0, which the line above proved is
+      # set; `~` is not an operation the prelude carries.
+      return false if LibKernel32.SetFileAttributesW(wide, attributes - 1) == 0
+      return true if LibKernel32.RemoveDirectoryW(wide) != 0
+      LibKernel32.SetFileAttributesW(wide, attributes)
+      false
+    end
+  {% end %}
 
   def self.rmdir(path : String | Path) : Nil
     delete(path)

@@ -479,6 +479,7 @@ class Iyi::Command
           The build daemon and this client are different compilers.
           Daemon: #{Iyi::Config.description}
           Client: #{client_version}
+          Restart the daemon, from a build of this compiler.
           MSG
         client.close rescue nil
         return

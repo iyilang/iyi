@@ -67,6 +67,9 @@ write_module() {
   cat > app/twice.iyi <<EOF
 module app/twice
 
+import app/base
+using app/base::{each_base}
+
 # $1
 pub def with_each(&block : Int32 -> Nil) : Nil
   block.call(1)
@@ -74,7 +77,22 @@ pub def with_each(&block : Int32 -> Nil) : Nil
 end
 
 pub def plain : Int32
-  $3
+  total = 0
+  each_base { |n| total = total + n }
+  $3 + total
+end
+EOF
+}
+
+# The module under this one. Nothing in `app/twice` mentions its value, so
+# changing it moves none of that module's own three hashes — only the edge
+# it was compiled against.
+write_base() {
+  cat > app/base.iyi <<EOF
+module app/base
+
+pub def each_base(&block : Int32 -> Nil) : Nil
+  block.call($1)
 end
 EOF
 }
@@ -128,6 +146,7 @@ check() {
   echo "    $verdict"
 }
 
+write_base 0
 write_module "first note" 2 40
 emit base || exit 1
 baseline="$(answer_from base bin_baseline)"
@@ -153,6 +172,28 @@ emit plain && check "an ordinary body" plain 0 "1 2 41 "
 # "rebuild" even though nothing it type-checks against moved.
 write_module "first note" 9 40
 emit travels && check "a travelling body" travels 1 "1 9 40 "
+
+# A module under this one, changed. `app/twice` is byte for byte the same
+# file, so its own interface, implementation and source hashes all agree —
+# and it is a different artifact, because it was compiled against a `base`
+# that moved. The three lines read "unchanged" and the verdict was
+# "consumers do not have to be rebuilt", about a program that prints
+# something else: what an artifact records includes what it was built
+# against (IV.3), and the diff had never read those edges.
+write_module "first note" 2 40
+write_base 5
+emit dependency && check "a module underneath" dependency 1 "1 2 45 "
+# The ground truth under that verdict: the old `twice.iyimod` beside the new
+# `base.iyimod` is what a build system that believed "nothing to do" would
+# link — and the compiler refuses that set outright (IV.3). A verdict of
+# "no rebuild" would have been advice its own compiler will not take.
+rm -rf mixed && cp -r base mixed && cp dependency/app/base.iyimod mixed/app/base.iyimod
+if "$IYI" build --use-iyimod mixed -o bin_mixed main.iyi > mixed.log 2>&1; then
+  echo "FAIL: the old artifact linked against the new one, so nothing forced the rebuild"
+  status=1
+else
+  echo "    and the compiler refuses the unrebuilt artifact beside the new one"
+fi
 
 # And the case that always worked, kept here so the four are read together.
 cat > app/twice.iyi <<'EOF'
@@ -180,7 +221,7 @@ emit signature && check "a signature" signature 1 "1 2 40 "
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "mod diff answers what a rebuild would show, for all four kinds of edit."
+  echo "mod diff answers what a rebuild would show, for all five kinds of edit."
 else
   echo "mod diff: something above failed."
 fi

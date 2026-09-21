@@ -389,6 +389,31 @@
 
 ### Fixed
 
+- **`mod diff` never read what a module was compiled against.** Its three
+  lines are the module's own — interface, implementation, source — and an
+  artifact records a fourth thing: the hashes of every module it imported
+  (IV.3, which is how a build asks whether the far end still hashes the
+  same). So a module whose file did not change, whose surface did not
+  change and whose travelling bodies did not change read
+
+      interface       unchanged
+      implementation  unchanged
+      source          unchanged
+      Consumers do not have to be rebuilt: what they compile against is the same.
+
+  after its dependency moved under it — a bumped requirement, or a
+  sibling module whose block-taking body travels. The compiler itself
+  refuses that pair (an artifact is read only while it still describes
+  its module), so the verdict was advice its own compiler will not take.
+
+  There is a `dependencies` line now, naming each edge that moved and in
+  which half, and a verdict of its own: this module has to be rebuilt,
+  its own surface is the same, and what it was compiled against moved.
+  `bench/mod_diff.sh` has a fifth kind of edit — a module underneath —
+  and asserts the refusal that makes the verdict true; it fails when the
+  new branch is taken out.
+
+
 - **Bumping a dependency selected no tests.** `--affected` narrows by
   import closure, and a manifest is not a module: no closure holds
   `iyi.mod`, so the largest change a workspace can make — every `import

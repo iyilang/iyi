@@ -182,6 +182,32 @@ class Iyi::Command
     puts "implementation  #{moved.call(old_hashes.implementation, new_hashes.implementation)}  the bodies a consumer compiles: macros, generics, the initialiser"
     puts "source          #{moved.call(old_hashes.source, new_hashes.source)}  the file"
 
+    # The fourth thing an artifact records, and the one a source-shaped
+    # reading misses: what it was compiled *against*. A module whose own
+    # file, interface and bodies are identical is a different artifact when
+    # a dependency moved under it — `iyi.mod` bumped from `liba v1.0.0` to
+    # `v1.1.0` left every line above reading "unchanged" while the program
+    # printed something else. IV.3 keeps those hashes on the edge for
+    # exactly this, and the verdict has to read them.
+    old_edges = old_artifact.imports.to_h { |edge| {edge.module_name, edge} }
+    new_edges = new_artifact.imports.to_h { |edge| {edge.module_name, edge} }
+    dependencies_moved = [] of String
+    (old_edges.keys | new_edges.keys).sort!.each do |name|
+      before_edge = old_edges[name]?
+      after_edge = new_edges[name]?
+      case
+      when before_edge.nil?
+        dependencies_moved << "#{name} — new"
+      when after_edge.nil?
+        dependencies_moved << "#{name} — gone"
+      when before_edge.interface != after_edge.interface
+        dependencies_moved << "#{name} — interface"
+      when before_edge.implementation != after_edge.implementation
+        dependencies_moved << "#{name} — implementation"
+      end
+    end
+    puts "dependencies    #{dependencies_moved.empty? ? "unchanged" : "changed  "}  what this module was compiled against"
+
     # The verdict is over *both* of the first two lines, and the second one
     # is why: a body that travels is compiled by the consumer, so moving
     # one moves the consumer's own machine code. Read on the interface
@@ -212,6 +238,16 @@ class Iyi::Command
       # consumer compiles for itself.
       puts
       puts "Consumers have to be rebuilt: what they compile against is the same, and a body they compile moved."
+      exit 1 if exit_code
+    elsif !dependencies_moved.empty?
+      # This module's own three hashes agree and it is still another
+      # artifact: it was compiled against something that moved. Its
+      # consumers relink it, so what they need is this file rebuilt — and
+      # a build system reading "nothing to do" here would ship the old one.
+      puts
+      dependencies_moved.each { |line| puts "  moved  #{line}" }
+      puts
+      puts "This module has to be rebuilt: its own surface is the same, and what it was compiled against moved."
       exit 1 if exit_code
     else
       puts

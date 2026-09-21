@@ -138,8 +138,9 @@ module Iyi::Lsp
       # `--use-iyimod mods` opened in an editor with `can't find module
       # 'app/base'` on the import line, hover and definition empty, about a
       # module the build compiles against. R-1's own reading of the server
-      # is that its inner loop is what `--use-iyimod` already does (SPEC.md
-      # IV, "A language server for Crystal is hard for the same reason").
+      # is that its inner loop is what `--use-iyimod` already does: one
+      # module, type-checked against declarations, with the rest of the
+      # program absent (SPEC.md IV).
       #
       # `mods` beside the project root, which is the name every example in
       # the tree writes — the README's, the SPEC's, each bench's. Read only

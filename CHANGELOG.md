@@ -500,14 +500,17 @@
   it cannot make there.** The libgc opt-in is read off the library list —
   `-Dgc_boehm` must link a collector — and a PE's list is its import
   table, which a collector linked from a static `gc.lib` leaves no entry
-  in — Windows' collector is the static `gc.lib` that ships beside the
-  bootstrap compiler's libraries. So the opt-in is read there off the one
-  thing linking a library cannot avoid: the bytes, held against a
-  `-Dgc_none` build. Not against a plain one: that carries the owned
-  collector, which `-Dgc_boehm` drops, and the first run of this check
-  read 46 KB against 124 KB as "no collector" when what it had measured
-  was the owned one coming out. Both of the compared builds leave it out,
-  so what is left between them is the library. What the
+  in. So the opt-in is read there off something an import table cannot
+  hide: two different allocators cannot compile to the same binary, so
+  `-Dgc_boehm` and `-Dgc_none` producing the same bytes is the flag doing
+  nothing. Getting there took two wrong readings, both kept in the
+  script's comment: a plain build is not the thing to compare against —
+  it carries the owned collector, which `-Dgc_boehm` drops, which read as
+  46 KB against 124 KB — and neither is a size *ordering* against
+  `-Dgc_none`, because on Linux, where libgc is a shared object, the
+  boehm binary is the smaller of the two. The three sizes are printed
+  either way, because the next question about that platform will start
+  from them. What the
   import table measures on Windows is the DLL floor itself, which is the
   claim SPEC.md III.10 makes about a Windows program.
 

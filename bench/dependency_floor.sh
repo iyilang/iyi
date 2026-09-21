@@ -530,22 +530,28 @@ else
     # is read off the one thing linking a library in cannot avoid: the
     # bytes. A build that asked for a collector and got none is the same
     # size as one that did not ask.
-    # Against `-Dgc_none`, which is the only comparable build: a plain one
-    # carries the owned collector, and `-Dgc_boehm` drops that — the first
-    # run of this check held the two against each other and read 46 KB
-    # against 124 KB as "no collector", when what it had measured was the
-    # owned one coming out. Both of these builds leave it out, so the
-    # difference between them is the library, and linking one cannot cost
-    # nothing.
+    # The bytes, and what they can honestly be held against. Not the size
+    # of a plain build: that carries the owned collector, which
+    # `-Dgc_boehm` drops, so the first run of this check read 46 KB
+    # against 124 KB as "no collector" when what it had measured was the
+    # owned one coming out. Not a size *ordering* against `-Dgc_none`
+    # either: on Linux, where libgc is a shared object, the boehm binary
+    # is the smaller of the two (91,056 against 95,920), so "bigger" is a
+    # claim about static linking and not about collectors.
+    #
+    # What is true either way: two different allocators cannot compile to
+    # the same binary. If asking for a collector produces what asking for
+    # none produces, the flag did nothing — which is the failure this
+    # check is for, and the one the import table cannot see.
     "$IYI" build -Dgc_none -o "$WORK/gc_none_probe" "$REPO/samples/iyi/hello.iyi" >/dev/null 2>&1
     "$IYI" build -o "$WORK/gc_default" "$REPO/samples/iyi/hello.iyi" >/dev/null 2>&1
     boehm_size="$(wc -c < "$(readable "$WORK/boehm")" | tr -d ' ')"
     none_size="$(wc -c < "$(readable "$WORK/gc_none_probe")" | tr -d ' ')"
     default_size="$(wc -c < "$(readable "$WORK/gc_default")" | tr -d ' ')"
-    printf '  -Dgc_boehm  %s bytes, against %s for -Dgc_none and %s for the owned collector\n' \
+    printf '  -Dgc_boehm  %s bytes, -Dgc_none %s, the owned collector %s\n' \
       "$boehm_size" "$none_size" "$default_size"
-    if [ "$boehm_size" -le "$none_size" ]; then
-      echo "  -Dgc_boehm linked no collector: it carries no more than the build with none"
+    if cmp -s "$(readable "$WORK/boehm")" "$(readable "$WORK/gc_none_probe")"; then
+      echo "  -Dgc_boehm and -Dgc_none built the same binary, so the opt-in did nothing"
       status=1
     fi
   else

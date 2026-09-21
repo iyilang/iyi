@@ -377,6 +377,17 @@ jobs:
       - name: One client's mistake is one client's mistake
         run: python3 bench/daemon_protocol.py
 
+      # And whether the program it built is the same program. The daemon
+      # forks a child per build, so the child starts from a prelude this
+      # build's command line never configured: every switch that matters
+      # is re-applied to it, and the compiler can force somebody to *name*
+      # the list a new switch belongs to without telling them they named
+      # the right one. Delete the line that re-applies `use_iyimod` and
+      # this is what notices — the plain build answers and the daemon's
+      # fail.
+      - name: The daemon builds the same program a plain build does
+        run: python3 bench/daemon_agrees.py
+
       # Three gates that existed, passed on the machine that wrote them, and
       # were named in this file by nothing: `format_exercise` (seven proofs
       # over patched copies of `std/format`), `io_exercise` (`IyiIO` flush,

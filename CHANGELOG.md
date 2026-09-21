@@ -389,6 +389,26 @@
 
 ### Fixed
 
+- **An editor's link on an import of a package went nowhere.** The server
+  resolved a document link by guessing a filename — `<root>/<path>.iyi`,
+  with the path taken as the run of `[A-Za-z0-9_/]` after the keyword — and
+  a package's path is dotted, so the run stopped at the first `.` and
+  looked for `example.iyi`. The file it names is not under the workspace in
+  any case: it is a checkout in the cache, which `iyi.mod`, `iyi.sum` and
+  the fetcher decide between them (III.7). So ctrl-clicking a dependency's
+  import did nothing, in an editor where the same click on a sibling module
+  opens the file.
+
+  The compile already answered the question, so the server reverses its own
+  `iyi_module_paths` — filename to module path for everything the build
+  read — rather than guessing again, and the path is taken the way the
+  parser takes it, with `.` and `-` attached on both sides. A package's
+  import now opens its checkout, a sibling's opens the file beside it, and
+  `pub import` is a link too. `bench/lsp_session.py` gates all four,
+  proven to fail with the resolution removed: two links where there should
+  be four, both of them the local module.
+
+
 - **`--emit-iyimod`'s one line promised an artifact per imported module,
   and a package's is not one of them.** It never was: an artifact carries
   what the consuming build reached, and the one this loop would write for

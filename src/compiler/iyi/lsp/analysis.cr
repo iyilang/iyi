@@ -198,6 +198,32 @@ module Iyi::Lsp
       ContextVisitor.new(Location.new(path, line, column)).process(result)
     end
 
+    # iyi: the file each module path in this buffer's program was read from.
+    #
+    # A module path is not a file path, and the server's document links were
+    # guessing one: `<root>/<path>.iyi`, with the path taken as the run of
+    # `[A-Za-z0-9_/]` after the keyword. That finds a sibling and nothing
+    # else. A package's path is dotted — `example.test/user/liba` — so the
+    # run stopped at the first `.`, and the file it names is not under the
+    # workspace at all: it is a checkout in the cache, which `iyi.mod`,
+    # `iyi.sum` and the fetcher decide between them (SPEC.md III.7). So
+    # every import of a dependency was a link that went nowhere, in an
+    # editor where the same click works on a sibling module.
+    #
+    # The compile already answered the question — `iyi_module_paths` is
+    # filename to module path for everything this build read — so this
+    # reverses it rather than guessing again. A module that arrived as an
+    # artifact has no source to open and is deliberately absent.
+    def module_files(path : String, text : String, overrides : Hash(String, String)) : Hash(String, String)
+      files = {} of String => String
+      result = result_for(path, text, overrides)
+      return files unless result
+      result.program.iyi_module_paths.each do |filename, module_name|
+        files[module_name] ||= filename
+      end
+      files
+    end
+
     def implementations_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : ImplementationResult?
       result = result_for(path, text, overrides)
       return nil unless result

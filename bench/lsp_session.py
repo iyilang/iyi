@@ -177,7 +177,73 @@ def step(n, name, ok, detail=""):
         sys.exit(1)
 
 
+def package_fixture(home):
+    """A package in a bare mirror, fetched into a cache, and a buffer that
+    imports it beside a sibling module.
+
+    Returns (path, text, cache) or None where git is not there to make one.
+    The cache is warmed here so the server resolves rather than fetches.
+    """
+    iyi = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "bin", "iyi")
+    env = dict(os.environ)
+    lib = os.path.join(home, "work", "liba")
+    os.makedirs(lib, exist_ok=True)
+    steps = [["git", "init", "-q", lib],
+             ["git", "-C", lib, "config", "user.email", "t@t"],
+             ["git", "-C", lib, "config", "user.name", "t"]]
+    for command in steps:
+        if subprocess.run(command, capture_output=True).returncode != 0:
+            return None
+    with open(os.path.join(lib, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/liba\n")
+    with open(os.path.join(lib, "liba.iyi"), "w") as f:
+        f.write('module liba\n\npub def greeting : String\n'
+                '  "hello from liba"\nend\n')
+    for command in [["git", "-C", lib, "add", "-A"],
+                    ["git", "-C", lib, "commit", "-qm", "one"],
+                    ["git", "-C", lib, "tag", "v1.0.0"]]:
+        if subprocess.run(command, capture_output=True).returncode != 0:
+            return None
+    mirror = os.path.join(home, "mirror", "example.test", "user")
+    os.makedirs(mirror, exist_ok=True)
+    if subprocess.run(["git", "clone", "-q", "--bare", lib,
+                       os.path.join(mirror, "liba")],
+                      capture_output=True).returncode != 0:
+        return None
+
+    app = os.path.join(home, "app")
+    os.makedirs(app, exist_ok=True)
+    with open(os.path.join(app, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/app\n"
+                "require example.test/user/liba v1.0.0\n")
+    with open(os.path.join(app, "helper.iyi"), "w") as f:
+        f.write('module helper\n\npub def shout(s : String) : String\n'
+                '  s + "!"\nend\n')
+    text = ("import example.test/user/liba\n"
+            "import helper\n"
+            "using example.test/user/liba::{greeting}\n"
+            "using helper::{shout}\n"
+            "\n"
+            "puts shout(greeting)\n")
+    path = os.path.join(app, "main.iyi")
+    with open(path, "w") as f:
+        f.write(text)
+    warm = subprocess.run([iyi, "build", "main.iyi", "-o", "warm"],
+                          cwd=app, env=env, capture_output=True)
+    if warm.returncode != 0:
+        return None
+    return path, text, os.path.join(home, "cache")
+
+
 def main():
+    # Set before the server starts, because a child inherits the environment
+    # it was spawned with: the package step below needs the server to find a
+    # checkout in this cache rather than fetch one.
+    pkg_home = tempfile.mkdtemp(prefix="iyi-lsp-pkg")
+    os.environ["IYI_CACHE_DIR"] = os.path.join(pkg_home, "cache")
+    os.environ["IYI_MOD_MIRROR"] = os.path.join(pkg_home, "mirror")
+
     work = tempfile.mkdtemp(prefix="iyi-lsp-gate")
     lib = os.path.join(work, "greet.iyi")
     app = os.path.join(work, "app.iyi")
@@ -1322,6 +1388,39 @@ def main():
          "module calc/scanner" in moved and
          "import calc/scanner" in parser_moved and clean,
          f"{sum(len(e) for e in changes.values())} edit(s) across {touched}")
+
+    # 48b. A document link on an import, including a package's. The links
+    #      were a filename guess — `<root>/<path>.iyi`, with the path taken
+    #      as the run of `[A-Za-z0-9_/]` after the keyword — so a dotted
+    #      package path stopped at the first `.` and the file it names is
+    #      not under the workspace at all: it is a checkout in the cache,
+    #      which `iyi.mod`, `iyi.sum` and the fetcher decide between them.
+    #      Every import of a dependency was a link that went nowhere, in an
+    #      editor where the same click works on a sibling module. The
+    #      fixture lives outside the workspace because its import does not
+    #      resolve without the cache this test warms, and step 31 judges
+    #      every file the workspace holds.
+    pkg = package_fixture(pkg_home)
+    if pkg:
+        pkg_path, pkg_text, pkg_cache = pkg
+        pkg_uri = "file://" + pkg_path
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
+                                 "version": 1, "text": pkg_text}}, wait=False)
+        c.diagnostics(pkg_uri)
+        reply = c.send("textDocument/documentLink", {"textDocument": {"uri": pkg_uri}})
+        links = reply.get("result") or []
+        by_line = {l["range"]["start"]["line"]: l["target"] for l in links}
+        into_cache = [t for t in by_line.values() if pkg_cache in t]
+        beside = [t for t in by_line.values() if t.endswith("/helper.iyi")]
+        step(48, "a document link follows a package import into the cache",
+             len(links) == 4 and len(into_cache) == 2 and len(beside) == 2,
+             f"{len(links)} link(s): {sorted(os.path.basename(t) for t in by_line.values())}")
+        c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
+               wait=False)
+    else:
+        step(48, "a document link follows a package import into the cache",
+             False, "the package fixture needs git, which this run has none of")
 
     # 49-52. What the server says when it cannot answer. Every one of
     # these used to be an empty result or an "internal error": an unknown

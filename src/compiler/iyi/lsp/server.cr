@@ -2739,22 +2739,47 @@ module Iyi::Lsp
       end
       roots << File.dirname(path)
 
+      # What the compile resolved, which is the only thing that knows where a
+      # package's module lives: `iyi.mod` names the requirement, `iyi.sum`
+      # pins it and the fetcher puts the checkout in the cache, none of which
+      # a filename guess can reach.
+      resolved = @analysis.module_files(path, text, overrides_for(path))
+
       respond(id) do |json|
         json.array do
           text.lines.each_with_index do |line, index|
             stripped = line.lstrip
             keyword =
-              if stripped.starts_with?("import ")
+              if stripped.starts_with?("pub import ")
+                "pub import "
+              elsif stripped.starts_with?("import ")
                 "import "
               elsif stripped.starts_with?("using ")
                 "using "
               end
             next unless keyword
-            mod = stripped.lchop(keyword).each_char
-              .take_while { |ch| ch.alphanumeric? || ch == '_' || ch == '/' }
-              .join
+            # `.` and `-` belong to a path's host segment — `example.test`,
+            # `crystal-lang.org` — the way the parser reads them: attached on
+            # both sides. Taking the run without them stopped at the first
+            # dot, so every package import linked `example` to nothing.
+            rest = stripped.lchop(keyword)
+            mod = String.build do |io|
+              previous = '/'
+              rest.each_char_with_index do |ch, at|
+                if ch.alphanumeric? || ch == '_' || ch == '/'
+                  io << ch
+                elsif (ch == '.' || ch == '-') &&
+                      (previous.alphanumeric? || previous == '_') &&
+                      (rest[at + 1]?.try(&.alphanumeric?) || false)
+                  io << ch
+                else
+                  break
+                end
+                previous = ch
+              end
+            end
             next if mod.empty?
-            target = roots.each do |candidate_root|
+            target = resolved[mod]? || roots.each do |candidate_root|
               candidate = File.join(candidate_root, mod + ".iyi")
               break candidate if File.file?(candidate) || @documents.has_key?(uri_of(candidate))
             end

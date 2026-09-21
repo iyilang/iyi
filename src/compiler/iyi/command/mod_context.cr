@@ -79,8 +79,14 @@ class Iyi::Command
     emit_dir = File.tempname("iyi-context", nil)
     Dir.mkdir_p(emit_dir)
     begin
+      # The workspace root rather than the entry's directory, for the
+      # artifacts alone: IV.6 read backwards, the way the server and
+      # `iyi test` read it. A file whose path ends with its own `module`
+      # header's path names the root above both, and that is where a
+      # workspace keeps `mods`.
+      artifact_root = Compiler.header_root_of(filename, File.read(filename)) || entry_dir
       blocks = imports.map do |written|
-        mod_context_block(written, entry_dir, table, emit_dir)
+        mod_context_block(written, entry_dir, table, emit_dir, artifact_root)
       end
 
       if as_json
@@ -242,10 +248,19 @@ class Iyi::Command
   # in-package path, so a package's surface is produced without a manifest
   # — which is the point: the module compiles alone (R-1), and this is that
   # fact worn as a tool.
-  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String) : {String, IyiMod::Artifact?, String}
+  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String, artifact_root : String) : {String, IyiMod::Artifact?, String}
     source_path, expected_name = mod_context_resolve(written, entry_dir, table)
     unless source_path
-      return {written, nil, "does not resolve: no file and no requirement covers it"}
+      # No source anywhere, which is how a library arrives (III.7): the
+      # artifact *is* the surface, and reading one costs nothing next to
+      # the compile this method does for a module that has a file. A
+      # workspace that builds with `--use-iyimod mods` was told its
+      # imports do not resolve — the same hole the language server had,
+      # in the answer a model reads.
+      if artifact = mod_context_artifact(written, artifact_root)
+        return {written, artifact, ""}
+      end
+      return {written, nil, "does not resolve: no file, no artifact and no requirement covers it"}
     end
     # The root the module path hangs under, reached by dropping a directory
     # per segment of it. Chomping the name off the end arrived there only by
@@ -299,6 +314,17 @@ class Iyi::Command
   private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String})) : {String?, String}
     candidate, name = mod_context_names(written, entry_dir, table)
     {File.file?(candidate) ? candidate : nil, name}
+  end
+
+  # iyi: the artifact a workspace keeps for *written*, or nil. `mods`
+  # beside the root, which is the name the tree's every example uses and
+  # the one `Lsp::Analysis` looks under.
+  private def mod_context_artifact(written : String, artifact_root : String) : IyiMod::Artifact?
+    path = Iyi.native_path(File.join(artifact_root, "mods", "#{written}.iyimod"))
+    return nil unless File.file?(path)
+    IyiMod.read(path)
+  rescue IyiMod::Error
+    nil
   end
 
   # The file an import names and the module name it means, whether or not

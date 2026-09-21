@@ -54,6 +54,11 @@ module Iyi::Lsp
     @seed = {} of String => String
     KEEP = 8
 
+    # The directory a workspace keeps its artifacts in — see
+    # `artifact_dir_of`. Not configurable, because the alternative to one
+    # name is a setting every editor has to be told and no agent knows.
+    ARTIFACT_DIR = "mods"
+
     # The last compile, keyed by exactly what determines it: the path,
     # the buffer, and the sibling buffers. One keystroke triggers
     # diagnostics, then often hover, highlight, inlay hints — the same
@@ -123,8 +128,29 @@ module Iyi::Lsp
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new
-      compiler.iyi_project_root = project_root_of(path, text)
+      root = project_root_of(path, text)
+      compiler.iyi_project_root = root
       compiler.stderr = IO::Memory.new
+
+      # iyi: the artifacts, where a workspace has them. A library arrives as
+      # `.iyimod` files and no source (III.7), and the server compiled
+      # imports from source alone — so a workspace that *builds* with
+      # `--use-iyimod mods` opened in an editor with `can't find module
+      # 'app/base'` on the import line, hover and definition empty, about a
+      # module the build compiles against. R-1's own reading of the server
+      # is that its inner loop is what `--use-iyimod` already does (SPEC.md
+      # IV, "A language server for Crystal is hard for the same reason").
+      #
+      # `mods` beside the project root, which is the name every example in
+      # the tree writes — the README's, the SPEC's, each bench's. Read only
+      # for an import that resolves to no source, so a workspace with its
+      # sources present is compiled exactly as it was before this, and a
+      # directory under some other name leaves the server saying what it
+      # said.
+      if artifacts = artifact_dir_of(root || File.dirname(path))
+        compiler.use_iyimod = artifacts
+        compiler.iyi_prefers_source = true
+      end
 
       result = compiler.compile(
         Compiler::Source.new(path, text),
@@ -575,6 +601,16 @@ module Iyi::Lsp
     # `import calc/lexer` the way a build from `<root>` would. A file
     # whose header and path disagree, or that has no header, keeps the
     # entry-dir rule.
+    # iyi: the artifact directory a workspace keeps, or nil.
+    #
+    # One name, probed. A flag is how a build is told, and there is no flag
+    # here: what an editor sends at initialize is a root, so the directory
+    # has to be found under it or not at all.
+    private def artifact_dir_of(root : String) : String?
+      candidate = File.join(root, ARTIFACT_DIR)
+      Dir.exists?(candidate) ? candidate : nil
+    end
+
     private def project_root_of(path : String, text : String) : String?
       header = nil
       text.each_line do |line|

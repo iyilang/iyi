@@ -165,6 +165,11 @@ module Iyi
     # contract and the reason the file exists.
     property use_iyimod : String? = nil
 
+    # iyi: read an artifact only for a module whose source is not there —
+    # the language server's order, and nobody else's. See
+    # `Program#iyi_prefers_source`.
+    property iyi_prefers_source = false
+
     # Sets the Optimization mode.
     property optimization_mode = OptimizationMode::O0
 
@@ -318,6 +323,7 @@ module Iyi
       # and ignored, and the build compiled every module from source while
       # saying nothing.
       program.iyi_module_dir = @use_iyimod
+      program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
       # An emitting build parses docs whatever the adopted analysis wanted:
@@ -440,7 +446,7 @@ module Iyi
 
     # Re-applied by the adopt path above. `new_program` is what would otherwise
     # have set them, and adoption skips it.
-    APPLIED_ON_ADOPT = %w(use_iyimod no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root crystal_library)
+    APPLIED_ON_ADOPT = %w(use_iyimod iyi_prefers_source no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root crystal_library)
     # Neither, and two of these are judgements rather than facts. `mcpu`,
     # `mattr` and `mcmodel` reach the target machine and the target machine
     # reaches codegen, not analysis — a prelude analysed for one `-mcpu` is the
@@ -2935,6 +2941,7 @@ module Iyi
       program.iyi_header_root = @iyi_header_root
       program.optimization_mode = @optimization_mode
       program.iyi_module_dir = @use_iyimod
+      program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
       # iyi: the manifest, if the entry file's directory has one (III.7) —

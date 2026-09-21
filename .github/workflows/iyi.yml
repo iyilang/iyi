@@ -489,6 +489,14 @@ jobs:
       - name: The language server holds its session
         run: python3 bench/lsp_session.py
 
+      # And the same session in the workspace R-1 exists for: the
+      # dependency is a `.iyimod` and its source is gone. The build has
+      # been gated on that since `samples_roundtrip.sh`; the editor had
+      # never been asked, and answered `can't find module` about a module
+      # the build compiles against.
+      - name: The language server answers from an artifact
+        run: python3 bench/lsp_artifacts.py
+
       # The agent's loop, scripted and asserted: ground (context pack,
       # budget ladder), check (verdict as data, suggested_edit), fix
       # (the compiler's own edit applied to convergence), test

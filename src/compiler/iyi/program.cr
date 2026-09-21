@@ -252,6 +252,24 @@ module Iyi
     # source, or nil (SPEC.md IV.1). Set by `--use-iyimod`.
     property iyi_module_dir : String? = nil
 
+    # iyi: whether a module's *source* wins over its artifact where both
+    # are there, which reverses IV.1's order for one caller: the language
+    # server.
+    #
+    # A build prefers the artifact — that is the whole point of one, and a
+    # module's source is not opened while it has one. An editor wants the
+    # other order. It answers questions *about code somebody is looking
+    # at*, so where a file exists, go-to-definition has to land in it
+    # rather than in a rendered declaration; and the artifact is not there
+    # to be fast for the server, whose unit of work is already one module.
+    #
+    # What it is there for is the case where the source is *gone*, which is
+    # the shape a library arrives in (III.7) and the one the server could
+    # not open at all: a workspace that builds with `--use-iyimod`
+    # answered `can't find module 'app/base'` on every import, with hover
+    # and definition empty, about a module the build compiles against.
+    property iyi_prefers_source = false
+
     # iyi: the manifest's answer — `{module path prefix, checkout dir}`,
     # longest prefix first, filled from `iyi.mod` by `Mod::Installer` before
     # semantic runs (SPEC.md III.7). Empty when the program has no manifest,

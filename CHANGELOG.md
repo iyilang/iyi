@@ -389,6 +389,40 @@
 
 ### Fixed
 
+- **The editor could not open the workspace R-1 exists for.** A library
+  arrives as `.iyimod` files and no source (III.7), and a program built
+  with `--use-iyimod` compiles against them — the claim
+  `bench/samples_roundtrip.sh` has gated for the build since the
+  boundary existed. The language server was never asked. It resolved
+  imports from source alone, so that same workspace opened with `can't
+  find module 'app/base'` on the import line, hover and definition
+  empty, and `iyi/contextPack` reporting that the import does not
+  resolve — about a module the build compiles fine against. SPEC.md IV
+  says the server's inner loop *is* what `--use-iyimod` already does;
+  now it is.
+
+  The order is the server's own, and it is the reverse of a build's. A
+  build prefers the artifact and does not open the source; an editor
+  answers questions about code somebody is looking at, so where a file
+  exists go-to-definition has to land in *it* rather than in a rendered
+  declaration. `Program#iyi_prefers_source` is that one caller's
+  inversion: the artifact is read for a module whose source is not
+  there, which is exactly the case that was broken and leaves every
+  workspace with its sources compiled as it was before.
+
+  Where the artifacts are is one name — `mods` beside the project root,
+  which is what the README, the SPEC and every bench in the tree
+  already write. Not a setting, because the alternative to one name is
+  a setting every editor has to be told and no agent knows; and a
+  directory under some other name leaves the server saying what it said
+  before. `iyi mod context` reads one the same way, since an artifact
+  *is* the surface it was about to compile a module to produce.
+
+  `bench/lsp_artifacts.py` asks the same program the same questions
+  twice — dependency as source, dependency as artifact — and both
+  answer with the same interface hash. Run against the commit before
+  this, four of its five checks fail.
+
 - **`iyi mod context` answered that the standard library is not there.**
   It resolves each import the way a build does — the requirement table
   by longest prefix, then the entry file's directory — except that a

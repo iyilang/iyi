@@ -208,7 +208,20 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # arriving: a module that has a `.iyimod` is compiled against it, and its
     # source is not opened — not read, not parsed, not analysed. The source
     # need not even be there.
-    artifact_path = package ? nil : iyi_artifact_path(node, path)
+    # Source first for the language server, artifact first for everything
+    # else — see `Program#iyi_prefers_source`. Asked before
+    # `iyi_artifact_path`, not after: that method *raises* on an artifact
+    # that no longer describes its module, which is right for a build that
+    # asked for artifacts and wrong for an editor holding the source it
+    # would have compiled instead.
+    artifact_path =
+      if package
+        nil
+      elsif @program.iyi_prefers_source && resolve_import(path)
+        nil
+      else
+        iyi_artifact_path(node, path)
+      end
 
     filename = artifact_path || package.try(&.first) || resolve_import(path)
     unless filename

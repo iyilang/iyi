@@ -455,9 +455,12 @@
   it cannot make there.** The libgc opt-in is read off the library list —
   `-Dgc_boehm` must link a collector — and a PE's list is its import
   table, which a collector linked from a static `gc.lib` leaves no entry
-  in. So the check cannot tell a missing collector from one inside the
-  binary, and it says that on Windows instead of calling the opt-in
-  broken. What *is* measured there is the DLL floor itself, which is the
+  in — Windows' collector is the static `gc.lib` that ships beside the
+  bootstrap compiler's libraries. So the opt-in is read there off the one
+  thing linking a library cannot avoid: the bytes. A build that asked for
+  a collector and got none is the same size as one that did not ask, and
+  that is what fails the check now, with both sizes printed. What the
+  import table measures on Windows is the DLL floor itself, which is the
   claim SPEC.md III.10 makes about a Windows program.
 
 - **The dependency floor runs on Windows.** The script has read a PE's

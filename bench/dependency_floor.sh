@@ -524,12 +524,21 @@ else
   if echo "$boehm_libs" | grep -q 'libgc\.'; then
     :
   elif [ -n "$DUMPBIN" ]; then
-    # The import table is what a PE has, and a collector linked from a
-    # static `gc.lib` leaves no entry in it — so on this platform the check
-    # above cannot tell a missing collector from one that is inside the
-    # binary. Named rather than claimed either way: this run measured the
-    # DLL floor and not the opt-in.
-    echo "  -Dgc_boehm: a static collector leaves no import entry, so the opt-in is not measured here"
+    # The import table is what a PE has, and Windows' collector is the
+    # static `gc.lib` that ships beside the bootstrap compiler's libraries
+    # (`CRYSTAL_LIBRARY_PATH`), which leaves no entry in it. So the opt-in
+    # is read off the one thing linking a library in cannot avoid: the
+    # bytes. A build that asked for a collector and got none is the same
+    # size as one that did not ask.
+    "$IYI" build -o "$WORK/gc_default" "$REPO/samples/iyi/hello.iyi" >/dev/null 2>&1
+    boehm_size="$(wc -c < "$(readable "$WORK/boehm")" | tr -d ' ')"
+    default_size="$(wc -c < "$(readable "$WORK/gc_default")" | tr -d ' ')"
+    printf '  -Dgc_boehm  %s bytes, against %s for the owned collector\n' \
+      "$boehm_size" "$default_size"
+    if [ "$boehm_size" -le "$default_size" ]; then
+      echo "  -Dgc_boehm linked no collector: a static one cannot cost nothing"
+      status=1
+    fi
   else
     echo "  -Dgc_boehm did not link a collector, so the opt-in is broken"
     status=1

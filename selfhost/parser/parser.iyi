@@ -530,7 +530,12 @@ end
 # them as calls is what the port did before, and it produced a tree that
 # parsed the same text into a different program.
 pub struct ImportNode
-  def initialize
+  # The module path as written. The canonical shape prints
+  # `(importdecl)` and nothing else; a pass that has to find the
+  # module needs to know which one.
+  getter path : String
+
+  def initialize(@path : String)
   end
 end
 
@@ -928,9 +933,17 @@ pub class ClassDefNode
   getter vars : String
   getter superclass : Array(Node)
   getter body : Array(Node)
+  # `struct ::Bool` names the root's type rather than the enclosing
+  # module's. The canonical shape prints the path without the marker.
+  getter from_root : Bool
 
   def initialize(@kind : String, @name : Array(Node), @vars : String,
                  @superclass : Array(Node), @body : Array(Node))
+    @from_root = false
+  end
+
+  def initialize(@kind : String, @name : Array(Node), @vars : String,
+                 @superclass : Array(Node), @body : Array(Node), @from_root : Bool)
   end
 end
 
@@ -1004,8 +1017,13 @@ end
 pub class ModuleDefNode
   getter name : Array(Node)
   getter body : Array(Node)
+  getter from_root : Bool
 
   def initialize(@name : Array(Node), @body : Array(Node))
+    @from_root = false
+  end
+
+  def initialize(@name : Array(Node), @body : Array(Node), @from_root : Bool)
   end
 end
 
@@ -1587,6 +1605,10 @@ pub class Parser
   # is a local inside one and a field outside one, and the two are read
   # differently everywhere afterwards.
   @def_depth : Int32
+  # Whether the declaration just read was written against the root.
+  # `struct ::Bool` reopens the prelude's type and `struct Bool` inside
+  # a module declares that module's, and the shape prints both alike.
+  @path_from_root : Bool
 
   # The imports a file declares, which the current parser puts beside the
   # module rather than inside it: `(exprs (module a/b) (importdecl)
@@ -1610,6 +1632,7 @@ pub class Parser
     @imports = [] of Node
     @header = ""
     @def_depth = 0
+    @path_from_root = false
     lexer = Lexer.new(source)
     while token = lexer.next_token
       # The parser works on significant tokens; newlines end statements and
@@ -1656,6 +1679,18 @@ pub class Parser
   # ends a line with `|` and a macro declaration with `,`, and the rest of
   # it is not a statement of its own. Reading one line left the remainder
   # to be parsed as expressions.
+  # `std/path` as written, which is how a module is named and how the
+  # file that holds it is found.
+  def module_path : String
+    out = ""
+    line = peek.line
+    while !at_end? && peek.line == line && peek.kind != "NEWLINE" &&
+          (peek.kind == "IDENT" || peek.kind == "/" || peek.kind == "CONST")
+      out = out + advance.value
+    end
+    out
+  end
+
   def skip_declaration : Nil
     while true
       last = peek
@@ -1732,8 +1767,9 @@ pub class Parser
             (peek.kind == "IDENT" && peek.value == "pub" &&
             peek_at(1).kind == "IDENT" && peek_at(1).value == "import")
         advance if peek.value == "pub"
+        advance # import
+        @imports << ImportNode.new(module_path).as(Node)
         skip_line
-        @imports << ImportNode.new.as(Node)
         skip_newlines
       end
     end
@@ -1933,8 +1969,10 @@ pub class Parser
       # is the file that exists to say so.
       if word.value == "import"
         advance if offset == 1
+        advance # import
+        named = module_path
         skip_line
-        return ImportNode.new.as(Node)
+        return ImportNode.new(named).as(Node)
       end
       # `type Elem` in a trait, `type Elem = Int32` in an impl: the
       # requirement and the answer are the same node. Only a declaration
@@ -1954,10 +1992,11 @@ pub class Parser
         advance if offset == 1
         advance # module
         name = declaration_path
+        from_root = @path_from_root
         inner = parse_body
         advance if peek.kind == "IDENT" && peek.value == "end"
         return ModuleDefNode.new([PathNode.new(name).as(Node)] of Node,
-          [inner] of Node).as(Node)
+          [inner] of Node, from_root).as(Node)
       end
       if word.value == "require"
         advance if offset == 1
@@ -2401,6 +2440,7 @@ pub class Parser
   # name a nested path. The root marker changes lookup, not the path the
   # canonical tree prints.
   def declaration_path : String
+    @path_from_root = peek.kind == "::"
     advance if peek.kind == "::"
     name = advance.value
     while peek.kind == "::" && peek_at(1).kind == "CONST"
@@ -2432,6 +2472,7 @@ pub class Parser
   def parse_class(kind : String) : Node
     advance # struct or class
     name = declaration_path
+    from_root = @path_from_root
     vars = parse_type_vars
     superclass = [] of Node
     if peek.kind == "<"
@@ -2452,6 +2493,7 @@ pub class Parser
       vars,
       superclass,
       [inner] of Node,
+      from_root,
     ).as(Node)
   end
 

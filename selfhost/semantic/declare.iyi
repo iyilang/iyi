@@ -20,7 +20,7 @@ module main
 import std/file
 import parser/parser
 using std/file::{File}
-using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode}
+using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
 # parameter list it prints after that, and `defs` are the methods that
@@ -129,29 +129,51 @@ end
 # The structs the compiler already holds, which is why they are not given
 # an `initialize` the way a struct this file declares is.
 pub def compiler_struct?(name : String) : Bool
-  name == "Tuple" || name == "Proc" || name == "Enum" || name == "StaticArray"
+  name == "Tuple" || name == "Proc" || name == "Enum" ||
+    name == "StaticArray" || name == "Int" || name == "Float" ||
+    name == "Number" || name == "Value" || name == "Struct"
 end
 
 # `struct Tuple` reopens a type the compiler built with parameters the
 # prelude does not write down, and the compiler reports its own name and
 # its own parameter list for it.
 pub def compiler_shown(name : String) : String
+  return "NamedTuple(T)" if name == "NamedTuple"
   return "Tuple(*T)" if name == "Tuple"
   return "Proc(*T, R)" if name == "Proc"
   ""
 end
 
 pub def compiler_vars(name : String) : String
+  return "(T)" if name == "NamedTuple"
   return "(T)" if name == "Tuple"
   return "(T R)" if name == "Proc"
   ""
 end
 
+pub def upper?(ch : Char) : Bool
+  ch.upcase == ch && ch.downcase != ch
+end
+
+pub def lower?(ch : Char) : Bool
+  ch.downcase == ch && ch.upcase != ch
+end
+
+# `BeginArray` is `begin_array` and `EOF` is `eof`: a run of capitals is
+# one word, and the break goes before the capital that starts the next
+# one. Breaking before every capital spelled `EOF` as `e_o_f`.
 pub def underscore(name : String) : String
   built = ""
   index = 0
-  name.each_char do |ch|
-    built = built + "_" if index > 0 && ch.upcase == ch && ch.downcase != ch
+  size = name.size
+  while index < size
+    ch = name[index]
+    if upper?(ch) && index > 0
+      before = name[index - 1]
+      after_lower = index + 1 < size ? lower?(name[index + 1]) : false
+      digit = before >= '0' && before <= '9'
+      built = built + "_" if lower?(before) || digit || (upper?(before) && after_lower)
+    end
     built = built + ch.downcase.to_s
     index = index + 1
   end
@@ -206,6 +228,21 @@ pub class Walk
     statement(node, scope, holder, false)
   end
 
+  # What a file declares when an import it names cannot be resolved: the
+  # module its header opens is never established, so nothing written
+  # inside it is declared. A declaration written against the root is, and
+  # `src/std/file.iyi` is both: `class ::File` survives and the
+  # `alias File` beside it does not.
+  def roots(nodes : Array(Node), scope : String) : Nil
+    nodes.each do |node|
+      case node
+      when ExprsNode     then roots(node.items, scope)
+      when ClassDefNode  then statement(node, scope, nil) if node.from_root
+      when ModuleDefNode then statement(node, scope, nil) if node.from_root
+      end
+    end
+  end
+
   def statement(node : Node, scope : String, holder : Decl?, flags : Bool) : Nil
     case node
     # A body is one statement or a list of them, and the parser only
@@ -240,11 +277,15 @@ pub class Walk
         end
       end
     when ModuleDefNode
-      inner = path_text(node.name)
+      # `module ::Levenshtein` is the root's module wherever it is
+      # written, and nothing hangs off the module it was written in.
+      outer = node.from_root ? "" : scope
+      inner = join_scope(outer, path_text(node.name))
       entry = @into.at("module", inner, inner, "")
       body(node.body, inner, entry)
     when ClassDefNode
-      declare(node.kind, path_text(node.name), node.vars, node.body, scope, true)
+      declare(node.kind, path_text(node.name), node.vars, node.body,
+        node.from_root ? "" : scope, true)
     when TraitDefNode
       # A trait with an associated type is a generic module to the
       # compiler, and prints its parameters once rather than twice.
@@ -280,7 +321,8 @@ pub class Walk
     # Every struct answers `new`, and `Reference` is the root the compiler
     # builds the same way: each is given the `initialize` that `new` calls
     # when it declares none.
-    defaults = (kind == "struct" && own == "" && !compiler_struct?(full)) || full == "Reference"
+    defaults = (kind == "struct" && own == "" && !compiler_struct?(full)) ||
+               full == "Reference"
     entry.defaults_initialize if defaults
     body(inner, full, entry)
   end
@@ -295,6 +337,9 @@ pub class Walk
     entry.add("none?") if flags
     node.members.each do |member|
       case member
+      # An enum body holds methods as well as members: `device?` written
+      # beside them is one of the enum's methods.
+      when DefNode then entry.add(member.name) unless member.receiver == "self"
       when ArgNode
         @into.at("const", "#{full}::#{member.name}", "#{full}::#{member.name}", "")
         entry.add("#{underscore(member.name)}?")
@@ -338,6 +383,32 @@ pub class Walk
   end
 end
 
+pub def first_segment(path : String) : String
+  cut = path.index('/')
+  cut.nil? ? path : path[0, cut]
+end
+
+# Whether the module this file opens is the file's own to declare.
+#
+# `src/std/file.iyi` opens `Std::File` and imports `std/path`, which
+# opens `Std::Path`: the `Std` both hang off was brought into being by
+# the import, not by this file, and the pass reports only what this file
+# declared. Everything under a module the file did not bring into being
+# is invisible to it, which is why such a file reports its `class ::File`
+# and nothing else. A file that shares no root with what it imports -
+# `samples/hello` importing `app/greeter` - declares its own modules and
+# everything in them.
+pub def opens_own_module?(imports : Array(Node), header : String) : Bool
+  root = first_segment(header)
+  imports.each do |node|
+    case node
+    when ImportNode
+      return false if first_segment(node.path) == root
+    end
+  end
+  true
+end
+
 path = Program.args[0]?
 if path.nil?
   puts "usage: declare <file.iyi>"
@@ -357,15 +428,21 @@ else
     case tree
     when ModuleDefNode
       full = path_text(tree.name)
-      parts = full.split(':')
-      prefix = ""
-      parts.each do |part|
-        next if part == ""
-        prefix = prefix == "" ? part : prefix + "::" + part
-        into.at("module", prefix, prefix, "")
+      resolved = opens_own_module?(parser.imports, header)
+      if resolved
+        parts = full.split(':')
+        prefix = ""
+        parts.each do |part|
+          next if part == ""
+          prefix = prefix == "" ? part : prefix + "::" + part
+          into.at("module", prefix, prefix, "")
+        end
       end
-      inner = into.at("module", full, full, "")
-      walk.body(tree.body, full, inner)
+      if resolved
+        walk.body(tree.body, full, into.at("module", full, full, ""))
+      else
+        walk.roots(tree.body, full)
+      end
     else
       walk.statement(tree, "", nil)
     end

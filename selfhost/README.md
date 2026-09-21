@@ -236,6 +236,48 @@ slice's: `primitives.iyi` writes six of `Char`'s methods with a
 arrives through a `require` this pass does not resolve. The macro
 language is the next slice and these two are its measure.
 
+### The standard library, declared
+
+    bash selfhost/semantic/diff.sh src/std/*.iyi
+
+Measured: **29 agree, 6 differ, 32 with no oracle**, from 13 agreeing
+when the corpus was first run. Thirty-two files answer nothing because
+the pass raises on a name an import would have brought, and they are
+reported rather than skipped so the number says what it covers.
+
+Two rules came out of this corpus, and both are about which type a
+declaration names rather than what is in it:
+
+* `struct ::Bool` is the root's type and `struct Bool` inside a module
+  is that module's. Eleven files write the first and the port read them
+  all as the second, so `Bool` was reported as `Std::Bool::Bool` and the
+  prelude's type was never touched. The parser reads the marker and
+  dropped it, because the canonical shape prints the path without it;
+  now the node carries it.
+* A file that opens `Std::File` and imports `std/path` did not bring
+  `Std` into being, and the pass reports only what this file declared:
+  such a file's own module is invisible to it and so is everything
+  inside it, leaving `class ::File` and nothing else. A file that shares
+  no root with what it imports, `samples/hello` importing `app/greeter`,
+  declares its modules and their contents as usual. Getting this wrong
+  in the other direction cost the samples corpus five files before the
+  rule was measured rather than guessed.
+
+`EOF` is one word: an underscore rule that broke before every capital
+spelled the enum member `e_o_f?` where the compiler spells it `eof?`.
+An enum body holds methods as well as members, and `NamedTuple` is
+another type the compiler holds with parameters the source does not
+write down.
+
+What the six that differ are measuring is two things this pass does not
+do yet. Five of them expand macros: `float.iyi` writes fifty `{% %}`
+branches and `named_tuple.iyi` thirty-three, and the methods they
+generate are real methods the port cannot see. The sixth, `big.iyi`,
+writes no macro at all: it reopens `Int32`, and the compiler reports
+every method that type has, including the forty the prelude gave it.
+Reporting those means loading the prelude, which is the same work the
+bootstrap needs and is not this slice's.
+
 ## The first inference slice
 
 `semantic/infer.iyi` infers the return type of every called internal method

@@ -64,12 +64,12 @@ clause rather than in their braces.
 
 ## The next slices
 
-The sample corpus is closed, so it no longer says what is missing. What
-it never exercised does: macros beyond `getter`, heredocs, `lib` and
-`fun`, regex literals, multiple assignment, `with ... yield`, and the
-parts of the grammar only the compiler's own source uses. The next
-corpus is `src/iyi/*.iyi` and then `src/std/*.iyi`, which are larger and
-written by someone who was not thinking about the port.
+Three corpora are closed: the samples, the prelude, and the standard
+library. The parser also reproduces its own source, which is the largest
+single iyi file there is. What no corpus exercises is what remains:
+heredocs, regex literals, `lib` and `fun` bodies, `with ... yield`, and
+the macro language itself, which every corpus skips to its `{% end %}`
+rather than parsing.
 
 ## The semantic pass
 
@@ -113,6 +113,58 @@ Two defects were in the harness rather than the language. A private method
 whose body took a `do` block let the block's `end` stand in for the
 method's, and `getter end : E` was mistaken for a block boundary. The full
 corpus, rather than a hand-picked fixture, is what exposed both.
+
+## The standard library
+
+`src/std` is the third corpus and the one nobody wrote with a port in
+mind: 67 files, an order of magnitude more code than the prelude, and the
+only corpus large enough that a first-divergence column was the only
+usable worklist.
+
+    bash selfhost/parser/where.sh src/std/*.iyi
+
+Measured: **all 67 files agree**, from 16 when the corpus was first run.
+One parser rule moved more than a dozen files at a time, which is why the
+work was ordered by shared class rather than by file: absolute paths
+(`::Atomic`), imports hoisted out of a file with no module header,
+visibility on a declaration that is not a `def`, multiple assignment,
+proc notation in a restriction, enum bodies that carry methods, the
+semicolon as a statement separator, compound assignment, splat and
+double-splat parameters and types, typed empty arrays, and multiline
+argument lists.
+
+Three of the last six were defects in the port's own reading rather than
+missing grammar, and each one printed a plausible tree rather than an
+error:
+
+- A `do` block counted `end` without knowing that `{% end %}` closes a
+  macro conditional, so a block containing one finished an `end` early.
+  The block then swallowed the method's `end`, the method closed, its
+  locals went out of scope, and a variable two lines later printed as a
+  call. The fix was to read a `do` block with the same reader every other
+  body already used.
+- `yield (a | b).unsafe_chr` is a yield of one argument and
+  `yield(a, b) > 0` is a comparison of what the block answered. The
+  difference is the space, so the parentheses are the argument list only
+  when they are adjacent to the word.
+- A name declared with a type is a local inside a method and a field
+  outside one. Registering both made every later read of a field print as
+  a variable, in five files that had agreed before.
+
+The corpus also closed `%w(...)` as one literal, `private record Name,`
+continuing onto the next line, and a union alias wrapping after a `|`.
+With those, the parser reproduces the tree of its own source: 3,597 lines
+of iyi, printed identically by the compiler that exists and by the port.
+
+`where.sh` is the worklist and `diff.sh` is the gate, and the gate takes
+the same corpus:
+
+    bash selfhost/parser/diff.sh src/std/*.iyi
+
+It is load-bearing on this corpus too. Dropping the adjacency test that
+separates `yield (a).b` from `yield(a).b` turns `agree 1` into
+`differ 1` on `src/iyi/string.iyi`, and restoring the file byte-for-byte
+turns it back.
 
 ## The declaration pass
 

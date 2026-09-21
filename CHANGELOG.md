@@ -389,6 +389,18 @@
 
 ### Fixed
 
+- **`iyi bind` now says which of a shard's methods iyi cannot name.** A
+  Crystal library's `sort!` crosses the boundary — the declaration has to,
+  because a travelling body that calls it must typecheck — and no call
+  written in a `.iyi` file can spell it (III.1.7). That crossed in
+  silence, so the first anyone heard of it was "undefined method 'sort'"
+  at a call site. The bind's report carries the count and the log names
+  each one, with the sentence a reader needs: reach it through a
+  Crystal-side method with a name this language can write.
+  `bench/bind_roundtrip.sh` binds a shard with one and fails when the
+  section is taken back out.
+
+
 - **The compiler offered an edit that makes a file stop parsing.** `!` is
   not part of a name in iyi (III.1.7), and the nearest name to `not_nil`
   in Crystal's library is `not_nil!` — so "Did you mean 'not_nil!'?" was

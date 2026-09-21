@@ -267,7 +267,13 @@ class Iyi::Command
     macros : Bool,
     dropped : Array(String),
     message : String,
-    others : Array(String)
+    others : Array(String),
+    # How many of the shard's methods carry a name `!` ends, which iyi
+    # cannot write (SPEC.md III.1.7). The boundary still declares them —
+    # a travelling body that calls one has to typecheck — and no call a
+    # person writes can reach them, so the count belongs where somebody
+    # is looking at the shard rather than at a call site.
+    unspellable : Int32 = 0
 
   # Binds one namespace: the declarations, then the object code, then again
   # without whatever the fill build could not compile. See `DROP_CAP`.
@@ -291,6 +297,7 @@ class Iyi::Command
     File.delete?(drop_path)
     dropped = [] of String
     others = [] of String
+    unspellable = 0
     bound = false
     macros = false
     message = ""
@@ -302,6 +309,7 @@ class Iyi::Command
         break
       end
       others = other_namespaces(bind_log)
+      unspellable = unspellable_names(bind_log).as(Int32)
 
       # A shard whose surface is macros - `prop`, say - has nothing R-2 can
       # write and `tool bind` writes no file; III.6 rule 4 says macros do
@@ -342,7 +350,8 @@ class Iyi::Command
     end
 
     owners[artifact] = shard.name if bound
-    Boundary.new(root, artifact, bound, macros, dropped, message, others)
+    Boundary.new(root, artifact, bound, macros, dropped, message, others,
+      unspellable: unspellable)
   end
 
   private def report_boundary(mods : String, boundary : Boundary) : Nil
@@ -357,6 +366,22 @@ class Iyi::Command
            "(#{boundary.dropped.size} method#{boundary.dropped.size == 1 ? "" : "s"} left out, " \
            "whose body does not compile: #{mods}/#{boundary.artifact}.drop names them)"
     end
+    if boundary.unspellable > 0
+      puts "   #{boundary.unspellable} method#{boundary.unspellable == 1 ? " carries a name" : "s carry names"} " \
+           "`!` ends, which no call in iyi can spell (SPEC.md III.1.7); " \
+           "#{mods}/#{boundary.artifact}.bind.log names them"
+    end
+  end
+
+  # The count `tool bind` reported. Read back rather than recomputed: the
+  # tool is what walked the shard's types.
+  private def unspellable_names(log : String) : Int32
+    return 0 unless File.file?(log)
+    File.each_line(log) do |line|
+      next unless line.starts_with?("names iyi cannot write (")
+      return line.lchop("names iyi cannot write (").rchop("):").to_i? || 0
+    end
+    0
   end
 
   # The namespaces `tool bind` found beside the one it was given. See

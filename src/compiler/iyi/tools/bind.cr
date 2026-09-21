@@ -487,6 +487,28 @@ module Iyi
     emit_module program, methods, root, io
     write_artifact program, methods, root, artifact_dir, io if artifact_dir
 
+    # iyi: the ones a consumer cannot call, whatever the boundary carries.
+    # `!` is not part of a name here (SPEC.md III.1.7), so `sort!` is
+    # spellable by nobody writing `.iyi` — the declaration travels, because
+    # a body that calls it has to typecheck, and a call written by hand
+    # cannot reach it. Said here because this is where somebody is looking
+    # at the shard: the alternative is finding out at the call, one
+    # "undefined method" at a time.
+    unspellable = methods.select do |method|
+      method.name.size > 1 && method.name.ends_with?('!') && !method.private_def
+    end
+    unless unspellable.empty?
+      io.puts
+      io.puts "names iyi cannot write (#{unspellable.size}):"
+      unspellable.sort_by { |m| {m.owner, m.name} }.first(12).each do |method|
+        io.puts "  #{method.owner}##{method.name}"
+        io.puts "    #{method.location}"
+      end
+      io.puts "  ... and #{unspellable.size - 12} more" if unspellable.size > 12
+      io.puts "  `!` cannot end a name in iyi (SPEC.md III.1.7). Each is reachable"
+      io.puts "  only through a Crystal-side method with a name this language can write."
+    end
+
     return if human.zero?
 
     # Named, because the count is the estimate and this is the work. Each line

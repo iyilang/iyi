@@ -895,6 +895,49 @@ else
   status=1
 fi
 
+echo "== a method whose name iyi cannot write"
+# `!` is not part of a name here (SPEC.md III.1.7), so a shard's `sort!` is
+# carried by the boundary — a travelling body that calls it has to typecheck
+# — and spellable by nobody writing `.iyi`. It used to cross in silence, and
+# the first anyone heard of it was "undefined method 'sort'" at a call, with
+# the compiler suggesting `sort!` underneath: an edit that makes the file
+# stop parsing. The bind says it once, where somebody is looking at the
+# shard.
+BANGS="$WORK/bangs"
+mkdir -p "$BANGS/lib/bangs/src"
+printf 'name: bangs\n' > "$BANGS/lib/bangs/shard.yml"
+cat > "$BANGS/lib/bangs/src/bangs.cr" <<'CR'
+module Bangs
+  class Box
+    @items : Array(Int32)
+
+    def initialize(@items : Array(Int32))
+    end
+
+    def sort! : Box
+      @items = @items.sort
+      self
+    end
+
+    def sorted : Array(Int32)
+      @items.sort
+    end
+  end
+end
+CR
+if ! (cd "$BANGS" && "$IYI" bind --lib lib --mods mods > "$BANGS/bind.log" 2>&1); then
+  echo "  the shard with a bang method did not bind:"
+  sed 's/^/    /' "$BANGS/bind.log" | head -12
+  status=1
+elif grep -q "no call in iyi can spell" "$BANGS/bind.log" &&
+     grep -q "Bangs::Box#sort!" "$BANGS/mods/bangs.bind.log"; then
+  echo "  the bind names it, and the log names which method"
+else
+  echo "  a name iyi cannot write crossed without a word:"
+  sed 's/^/    /' "$BANGS/bind.log" | head -8
+  status=1
+fi
+
 echo "== two shards that declare the same root"
 CLASH="$WORK/clash"
 mkdir -p "$CLASH/lib/alpha/src" "$CLASH/lib/beta/src"

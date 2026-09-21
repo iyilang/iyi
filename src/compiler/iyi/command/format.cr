@@ -9,6 +9,7 @@ class Iyi::Command
     includes = [] of String
     check = false
     show_backtrace = false
+    stdin_filename = nil.as(String?)
 
     OptionParser.parse(@options) do |opts|
       opts.banner = <<-USAGE
@@ -17,9 +18,13 @@ class Iyi::Command
         Formats iyi and Crystal code in place.
 
         If a file or directory is omitted,
-        Crystal source files beneath the working directory are formatted.
+        iyi and Crystal source files beneath the working directory are formatted.
 
         To format STDIN to STDOUT, use '-' in place of any path arguments.
+        Which language those bytes are read as is a question a path answers
+        and a pipe does not: stdin is read as iyi, and --stdin-filename says
+        where it came from when it is Crystal, or when an editor wants its
+        own path in the errors.
 
         Options:
         USAGE
@@ -34,6 +39,10 @@ class Iyi::Command
 
       opts.on("-e <path>", "--exclude <path>", "Exclude path (default: lib)") do |f|
         excludes << f
+      end
+
+      opts.on("--stdin-filename <path>", "Path the piped source came from (its extension picks the language)") do |f|
+        stdin_filename = f
       end
 
       opts.on("-h", "--help", "Show this message") do
@@ -59,6 +68,12 @@ class Iyi::Command
       abort! "format takes a path, and '' is not one (no path at all formats the working directory)", :USAGE_ERROR
     end
 
+    # A flag that is quietly ignored is worse than one that is refused: the
+    # editor that passed it would go on believing the language was settled.
+    if stdin_filename && !(files.size == 1 && files[0] == "-")
+      abort! "--stdin-filename says where stdin's bytes came from, so pass '-' to read them", :USAGE_ERROR
+    end
+
     format_command = FormatCommand.new(
       files,
       includes,
@@ -66,6 +81,7 @@ class Iyi::Command
       check,
       show_backtrace,
       @color,
+      stdin_filename: stdin_filename,
     )
     format_command.run
     exit format_command.status_code
@@ -86,6 +102,7 @@ class Iyi::Command
       @color : Bool = true,
       # stdio is injectable for testing
       @stdin : IO = STDIN, @stdout : IO = STDOUT, @stderr : IO = STDERR,
+      @stdin_filename : String? = nil,
     )
       @format_stdin = files.size == 1 && files[0] == "-"
 
@@ -112,9 +129,21 @@ class Iyi::Command
       end
     end
 
+    # Which language a pipe carries is the one thing a path says and a pipe
+    # does not, and the whole compiler reads it off the extension: `!` is a
+    # token in a `.iyi` file and a different one in a `.cr` file. `"STDIN"`
+    # ends in neither, so stdin was read as Crystal — the one language this
+    # binary is not for. `iyi tool format -` answered valid iyi source with
+    # a syntax error on `!`, with "expecting identifier 'end'" on a `pub
+    # trait`, and an `import` line with "there's a bug formatting 'STDIN',
+    # please report a bug", because Crystal's rules made the imported path
+    # a division and the formatter's re-lex disagreed with the parse.
+    #
+    # So stdin is iyi unless the caller names the file it came from, which
+    # is what an editor formatting a buffer knows and wants in its errors.
     private def format_stdin
       source = @stdin.gets_to_end
-      format_source "STDIN", source
+      format_source(@stdin_filename || "STDIN.iyi", source)
     end
 
     private def format_many(files)

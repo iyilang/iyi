@@ -389,6 +389,68 @@ fi
 # the one case where the check certainly did not happen.
 refuses "a format check on a path that is not there" "does not exist" -- \
   "$IYI" tool format --check nosuch.iyi
+# And the formatter on a file that imports a package, which is the ordinary
+# shape of III.7. A host segment — `example.test` — is one segment to the
+# parser, which reads its dots off the characters, and three tokens to the
+# lexer; the formatter consumed one token per segment and fell behind its
+# own stream, so it raised and the command turned that into "there's a bug
+# formatting '<file>', to show more information, please run..." — a bug
+# report request about valid source. Every file importing a package was
+# unformattable. The tree-wide `--check` never saw it because this
+# repository's own `.iyi` files import local modules.
+printf 'import   example.test/user/lib\nusing example.test/user/lib::{value}\n\nx=value\n' > "$WORK/pkg.iyi"
+if ! "$IYI" tool format "$WORK/pkg.iyi" > "$WORK/pkg.txt" 2>&1; then
+  echo "  a package import: the formatter would not format it"
+  sed -n '1,4p' "$WORK/pkg.txt"
+  status=1
+elif [ "$(cat "$WORK/pkg.iyi")" != "$(printf 'import example.test/user/lib\nusing example.test/user/lib::{value}\n\nx = value')" ]; then
+  echo "  a package import: the formatter rewrote the path"
+  cat "$WORK/pkg.iyi"
+  status=1
+elif ! "$IYI" tool format --check "$WORK/pkg.iyi" > "$WORK/pkg2.txt" 2>&1; then
+  echo "  a package import: formatting it twice produced changes"
+  sed -n '1,4p' "$WORK/pkg2.txt"
+  status=1
+else
+  echo "  a package import: the spacing is tidied, the path is untouched"
+fi
+
+# Which language a pipe carries is the one question a path answers and a
+# pipe does not, and the whole compiler reads the answer off the extension:
+# `!` is one token in a `.iyi` file and another in a `.cr` one. Stdin was
+# named `STDIN`, which ends in neither, so `iyi tool format -` read iyi
+# source as Crystal — the one language this binary is not for — and
+# answered valid source with a syntax error on `!`. Stdin is iyi now, and
+# `--stdin-filename` is how an editor says where the buffer came from.
+printf 'def f : Nil | Cancelled\n  sleep(1)!\nend\n\nf\n' > "$WORK/piped.iyi"
+cp "$WORK/piped.iyi" "$WORK/piped_file.iyi"
+"$IYI" tool format "$WORK/piped_file.iyi" > /dev/null 2>&1
+if ! "$IYI" tool format - < "$WORK/piped.iyi" > "$WORK/piped.out" 2>&1; then
+  echo "  iyi source through a pipe: refused"
+  sed -n '1,3p' "$WORK/piped.out"
+  status=1
+elif ! cmp -s "$WORK/piped.out" "$WORK/piped_file.iyi"; then
+  echo "  iyi source through a pipe: formatted unlike the same bytes in a file"
+  diff "$WORK/piped_file.iyi" "$WORK/piped.out" | sed -n '1,6p'
+  status=1
+else
+  echo "  iyi source through a pipe: formats as the same bytes in a .iyi file"
+fi
+# And the flag decides, rather than being decoration: the same bytes, read
+# by the other language's rules, fail on `!` — and the message names the
+# path the caller gave rather than a pipe.
+if "$IYI" tool format --stdin-filename x.cr - < "$WORK/piped.iyi" > "$WORK/named.out" 2>&1; then
+  echo "  --stdin-filename x.cr: read iyi's ! as Crystal's and formatted it anyway"
+  status=1
+elif grep -q "syntax error in 'x.cr:" "$WORK/named.out"; then
+  echo "  --stdin-filename x.cr: reads the pipe as Crystal, and says which path"
+else
+  echo "  --stdin-filename x.cr: refused for some other reason"
+  sed -n '1,3p' "$WORK/named.out"
+  status=1
+fi
+refuses "--stdin-filename with no pipe to read" "pass '-'" -- \
+  "$IYI" tool format --stdin-filename x.cr good.iyi
 
 # The cache, which is the one thing here a build trusts without asking.
 # `IYI_CACHE_DIR` pointed at something that cannot be a directory was

@@ -3468,9 +3468,21 @@ module Iyi
         write_token :OP_SLASH if i > 0
         skip_space
         write segment
-        @lexer.wants_regex = false
-        slash_is_not_regex!
-        next_token
+        # A package path's host segment — `example.test`, `crystal-lang.org`
+        # — is one segment to the parser, which reads the `.` and `-` off the
+        # characters (`parse_import_path_segment`), and three tokens to the
+        # lexer: `example`, `.`, `test`. Consuming one token per segment left
+        # the formatter a token behind the source it was writing, so the next
+        # `write_token` found `.` where it wanted `/` and raised — and the
+        # command turned that into "there's a bug formatting '<file>', please
+        # report a bug" about valid iyi source. Every file that imports a
+        # package was unformattable, and the repository's own `.iyi` files all
+        # import local modules, which is why all of them format.
+        (1 + 2 * segment.count { |char| char == '.' || char == '-' }).times do
+          @lexer.wants_regex = false
+          slash_is_not_regex!
+          next_token
+        end
       end
     end
 

@@ -632,6 +632,43 @@ def main():
          formatted.count("\n") == sloppy.count("\n"),
          "one whole-document edit, call tightened")
 
+    # 25b. and formatting a buffer that imports a package. The host segment
+    #      is one segment to the parser and three tokens to the lexer, and
+    #      the formatter fell behind its own stream on it — raising a plain
+    #      exception, which this handler does not rescue: an editor asking
+    #      to format any file that imports a package got an error back
+    #      rather than an edit. The path has to survive the round trip.
+    # Outside the workspace on purpose: the import does not resolve — there
+    # is no such package — and step 31 judges every file the workspace
+    # holds. Formatting is a question about bytes, so the file needs no
+    # dependency to answer it.
+    outside = tempfile.mkdtemp(prefix="iyi-lsp-gate-outside")
+    pkg_path = os.path.join(outside, "pkg.iyi")
+    pkg_text = ("import example.test/user/lib\n"
+                "using example.test/user/lib::{value}\n\nx=value\n")
+    with open(pkg_path, "w") as f:
+        f.write(pkg_text)
+    pkg_uri = "file://" + pkg_path
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
+                             "version": 1, "text": pkg_text}}, wait=False)
+    c.diagnostics(pkg_uri)
+    reply = c.send("textDocument/formatting",
+                   {"textDocument": {"uri": pkg_uri},
+                    "options": {"tabSize": 2, "insertSpaces": True}})
+    edits = reply.get("result") or []
+    formatted = edits[0]["newText"] if edits else ""
+    step(25, "formatting a buffer that imports a package",
+         "error" not in reply and len(edits) == 1 and
+         "import example.test/user/lib\n" in formatted and
+         "using example.test/user/lib::{value}\n" in formatted and
+         "x = value" in formatted,
+         reply.get("error", {}).get("message", "the path survived, x = value"))
+    # Closed again, the way an editor closes a buffer: an open document is
+    # one the server judges, and step 31's verdict is about the workspace.
+    c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
+           wait=False)
+
     # 26. a trait, its impl, and the call graph around them — one
     #     fixture serves implementation, call hierarchy, and selection.
     shapes_path = os.path.join(work, "shapes.iyi")

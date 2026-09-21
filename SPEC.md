@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 15,930 lines, of which 3,285 are the library held to the 3,734 ceiling (4,774 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 114,020 lines, none of it written in iyi |
+| compiler | 114,061 lines, none of it written in iyi |
 | artifact format | `.iyimod` v53, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 114,020 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 114,061 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 15,930-line own prelude + 39,063 in std |
 | Specs | 21,146 lines | 11,866 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4366,6 +4366,20 @@ has covered `src spec samples` for as long as the concurrency work has been
 landing: it is the step that caught this repository's own unformatted
 syscall table. The nine visit methods exist; what this section asked for
 is what the tree does.
+
+Two things the surface needed afterwards, both found by asking which files
+the tree-wide check never reaches. A **package** import — `example.test/user/lib`
+— has a host segment that the parser reads dots off the characters for, and
+that the lexer sees as three tokens; the formatter consumed one token per
+segment, fell behind its own stream, and raised, which the command reported
+as "there's a bug formatting '<file>', please report a bug" about valid
+source. Every file importing a package was unformattable, and this
+repository's own `.iyi` files import local modules, which is why all of them
+format. And **stdin** is read as iyi: the language a file is in comes off its
+extension everywhere in the compiler, `"STDIN"` ends in neither extension,
+so `iyi tool format -` read iyi source by Crystal's rules and refused `!`.
+`--stdin-filename PATH` says where piped bytes came from, which is what an
+editor formatting a buffer knows, and its extension decides the language.
 
 #### 2. A language server, and why iyi can have a good one: **BUILT — `iyi lsp`, measured by `bench/lsp_session.py`**
 

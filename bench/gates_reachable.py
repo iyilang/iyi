@@ -21,6 +21,13 @@ So this is that lesson, made a check. A script counts as reached when
   * the `Makefile` or `Makefile.win` names it, or
   * a script under `scripts/` or a spec names it.
 
+Measured on this tree, the last two arms carry nothing: every reached
+script is named by a workflow step or by another bench script, so the
+`Makefile` and `scripts/` arms are there for a way of running a gate that
+nothing uses yet rather than for one it relies on. A mention in a target
+no job invokes would count as reached, which is the one way this check can
+be too generous — worth knowing where the generosity is.
+
 What is left is either a gate nobody runs — the thing to fix — or a *tool*,
 which is a different kind of file: it takes an argument and answers a
 question a person asked, rather than passing or failing. Those are listed

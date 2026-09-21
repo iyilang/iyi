@@ -389,6 +389,49 @@
 
 ### Fixed
 
+- **Every file that imports a package was unformattable, and the answer was
+  a request to report a bug.** A package path's host segment —
+  `example.test/user/lib` — is one segment to the parser, which reads its
+  dots off the characters, and three tokens to the lexer: `example`, `.`,
+  `test`. The formatter consumed one token per segment, so it fell a token
+  behind the source it was writing, the next `write_token` found `.` where
+  it wanted `/`, and it raised. `iyi tool format` turned that into
+
+      there's a bug formatting 'app.iyi', to show more information, please run:
+        $ iyi tool format --show-backtrace 'app.iyi'
+
+  about valid iyi source, and the LSP's `textDocument/formatting` — which
+  rescues `CodeError` and not a plain exception — answered an editor with
+  `expecting /, not '.', at app.iyi:1:15`. So formatting was unavailable
+  for the ordinary shape of III.7. The tree-wide `--check` never saw it
+  because this repository's own `.iyi` files import local modules.
+
+  The formatter consumes the run the parser consumed. `iyi tool format` on
+  a file that imports packages tidies the spacing and leaves the path
+  alone, twice over; `bench/verbs_exercise.sh` gates that and
+  `bench/lsp_session.py` gates the editor's request, both proven to fail
+  with the consumption reverted.
+
+- **`iyi tool format -` read iyi source as Crystal.** Which language a
+  file is written in comes off its extension everywhere in the compiler —
+  `!` is one token in a `.iyi` file and another in a `.cr` one — and the
+  name stdin was given was `"STDIN"`, which ends in neither. So the pipe
+  the command's own banner documents was read by the rules of the one
+  language this binary is not for: `sleep(1)!` came back a syntax error,
+  `pub trait` came back "expecting identifier 'end'", and an `import` line
+  came back as the bug report above, because Crystal's rules made the
+  imported path a division.
+
+  Stdin is iyi now, and `--stdin-filename PATH` says where the bytes came
+  from — what an editor formatting a buffer knows, and what prettier, ruff
+  and rustfmt call the same flag. Its extension picks the language and its
+  name appears in the errors. Passing it without `-` is refused rather
+  than ignored, because an editor that passed it would otherwise go on
+  believing the language was settled. `bench/verbs_exercise.sh` gates the
+  pipe against the same bytes in a `.iyi` file, and the flag by the
+  refusal it earns on `!` when it names a `.cr` path.
+
+
 - **A gate nothing runs passes on the machine that wrote it, and that has
   happened four times.** Three existed, held and were named in the
   workflow by nothing — `format_exercise`, `io_exercise` and

@@ -389,6 +389,30 @@
 
 ### Fixed
 
+- **A daemon built with its own environment, not the one the build was
+  sent from.** The request carried `cwd`, `args` and a version; the child
+  it forks inherited the *daemon's* variables. So a build sent from a
+  terminal with `IYI_CACHE_DIR` or `IYI_MOD_MIRROR` set was resolved
+  without them — a package went to the network instead of to the mirror
+  beside it, and the object cache filled somewhere nobody chose. It is
+  louder than it sounds only because packages fail loudly; `PATH` decides
+  which linker a build finds, and that one is silent.
+
+  The environment travels with the request now, whole, and the child runs
+  with it — a variable the daemon carries that the client does not is not
+  this build's either. `IYI_PATH` is the one exception: the prelude a
+  daemon holds came from its own, so a request asking for another library
+  is refused with both resolutions printed rather than served from the
+  wrong one. The comparison is by the prelude files a path finds, not by
+  the spelling, because an unset `IYI_PATH` and one naming the directory
+  it resolves to are the same library.
+
+  `bench/daemon_agrees.py` grew the shape that found it — a dependency
+  that is a package rather than a file beside the entry — and the
+  refusal; both are proven to fail, the first by taking the environment
+  back out of the request, the second by dropping the comparison.
+
+
 - **The seam that produced four of this release's defects is checked
   rather than remembered.** Which language a source is written in is the
   one thing the lexer cannot read out of its text, so it comes off the

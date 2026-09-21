@@ -36,7 +36,10 @@ require "socket"
 #     that many bytes
 #
 # Requests are a little-endian length followed by that many bytes of JSON,
-# `{"cwd": ..., "args": [...], "version": ...}`. The version is checked, along
+# `{"cwd": ..., "args": [...], "version": ..., "env": {...}}`. The environment
+# is the client's and the child runs with it; `IYI_PATH` is compared rather
+# than applied, because the prelude a daemon holds came from its own. The
+# version is checked, along
 # with the server's own executable, so that a rebuilt compiler cannot be served
 # from silently.
 class Iyi::Command
@@ -475,6 +478,28 @@ class Iyi::Command
         return
       end
 
+      client_env = request["env"]?.try(&.as_h?)
+      if client_env
+        # The library, not the spelling: an unset `IYI_PATH` and one naming
+        # the directory the default already resolves to are the same library,
+        # and refusing over the difference would refuse most of the gates
+        # that pass a path explicitly. `default_paths` is what an unset one
+        # means, and `expand_paths` is what the compiler itself compares.
+        theirs = client_env["IYI_PATH"]?.try(&.as_s?)
+        ours = ENV["IYI_PATH"]?
+        if daemon_library_key(theirs) != daemon_library_key(ours)
+          daemon_refuse(client, <<-MSG)
+            The build daemon analysed a different library than this build asks for.
+            Daemon: IYI_PATH=#{ours || "(unset)"} -> #{daemon_library_key(ours)}
+            Client: IYI_PATH=#{theirs || "(unset)"} -> #{daemon_library_key(theirs)}
+            The prelude is what a daemon holds, so this one cannot serve that
+            build. Start a daemon in that environment, or build without one.
+            MSG
+          client.close rescue nil
+          return
+        end
+      end
+
       refresh.call
 
       out_r, out_w = IO.pipe(read_blocking: false, write_blocking: true)
@@ -499,6 +524,19 @@ class Iyi::Command
         LibC.dup2(out_w.fd, 1)
         LibC.dup2(err_w.fd, 2)
 
+        # The request's environment, whole: every variable the compiler reads
+        # is the client's — where the cache is, which mirror a package comes
+        # from, which linker `PATH` finds — and a variable the daemon carries
+        # that the client does not is not this build's either.
+        if client_env
+          ENV.keys.each { |name| ENV.delete(name) unless client_env.has_key?(name) }
+          client_env.each do |name, value|
+            if text = value.as_s?
+              ENV[name] = text
+            end
+          end
+        end
+
         Dir.cd(cwd)
         Iyi::Command.run(args)
         LibC._exit 0
@@ -508,6 +546,33 @@ class Iyi::Command
       err_w.close
 
       builds << DaemonBuild.new(client, out_r, err_r, pid.not_nil!, args, cwd)
+    end
+
+    # Which library an `IYI_PATH` means, by the one file that decides it.
+    # Comparing the paths themselves says no to builds that mean yes: unset
+    # resolves to a list — `lib`, the installed share, the tree beside the
+    # binary — and a path naming one of those directories resolves to itself,
+    # so the two spellings differ while the prelude they find is the same
+    # file. That file is what a daemon holds.
+    # Both of them, because a daemon holds both: it analyses Crystal's at
+    # start — that is the mode it is for (IV.1d) — and warms iyi's after the
+    # first `.iyi` build. A path that finds either somewhere else is another
+    # library.
+    private def daemon_library_key(value : String?) : String
+      paths =
+        if text = value.presence
+          Iyi::IyiPath.expand_paths(text.split(Process::PATH_DELIMITER, remove_empty: true))
+        else
+          Iyi::IyiPath.default_paths
+        end
+      ["iyi/prelude.iyi", "prelude.cr"].join(" ") do |name|
+        found = paths.each do |directory|
+          candidate = File.join(directory, name)
+          break candidate if File.file?(candidate)
+        end
+        resolved = found.is_a?(String) ? (File.real_path(found) rescue found) : "(none)"
+        "#{name}=#{resolved}"
+      end
     end
 
     private def daemon_finish(build : DaemonBuild) : Bool
@@ -676,7 +741,16 @@ class Iyi::Command
 
     # The child runs a full command line, so put back the subcommand this one
     # consumed: `crystal daemon build -o x y.cr` is `crystal build -o x y.cr`.
-    request = {cwd: Dir.current, args: ["build"] + options, version: Iyi::Config.description}.to_json
+    # The environment travels with the request. A daemon is a held prelude
+    # and not a second shell: the child it forks inherited *its* variables,
+    # so a build sent from a terminal with `IYI_CACHE_DIR` or
+    # `IYI_MOD_MIRROR` set was resolved without them — a package went to the
+    # network instead of to the mirror beside it. `IYI_PATH` is the one a
+    # daemon cannot take, because the prelude it holds came from its own;
+    # the server refuses that rather than compiling against a library this
+    # build did not ask for.
+    request = {cwd: Dir.current, args: ["build"] + options,
+               version: Iyi::Config.description, env: ENV.to_h}.to_json
     client.write_bytes(request.bytesize.to_u32, IO::ByteFormat::LittleEndian)
     client.write(request.to_slice)
     client.flush

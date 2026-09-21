@@ -145,6 +145,55 @@ def compare(label, entry, cwd, env, socket, work, switches=()):
             plain == served, f"plain {plain.strip()!r}, served {served.strip()!r}")
 
 
+def package_workspace(where):
+    """A workspace whose dependency is a package: a bare mirror, a cache, a
+    requirement in `iyi.mod` and a sum beside it.
+
+    The daemon forks a child from a program this build did not configure, and
+    where a package's module comes from is decided by `iyi.mod`, `iyi.sum`,
+    the cache and the project root — `iyi_project_root` and `iyi_mod_table`
+    are on `APPLIED_ON_ADOPT` for exactly that reason. This is the shape that
+    reads them.
+
+    Returns (entry, env) or (None, reason).
+    """
+    lib = os.path.join(where, "work", "liba")
+    os.makedirs(lib, exist_ok=True)
+    env = dict(os.environ,
+               IYI_CACHE_DIR=os.path.join(where, "cache"),
+               IYI_MOD_MIRROR=os.path.join(where, "mirror"))
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True)
+    if git("init", "-q", lib).returncode != 0:
+        return None, ["git is not here to make a package with"]
+    git("-C", lib, "config", "user.email", "t@t")
+    git("-C", lib, "config", "user.name", "t")
+    with open(os.path.join(lib, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/liba\n")
+    with open(os.path.join(lib, "liba.iyi"), "w") as f:
+        f.write('module liba\n\npub def greeting : String\n'
+                '  "hello from liba"\nend\n')
+    for args in (("-C", lib, "add", "-A"), ("-C", lib, "commit", "-qm", "one"),
+                 ("-C", lib, "tag", "v1.0.0")):
+        if git(*args).returncode != 0:
+            return None, ["the package repository would not commit"]
+    mirror = os.path.join(where, "mirror", "example.test", "user")
+    os.makedirs(mirror, exist_ok=True)
+    if git("clone", "-q", "--bare", lib, os.path.join(mirror, "liba")).returncode != 0:
+        return None, ["the package would not clone into the mirror"]
+
+    app = os.path.join(where, "app")
+    os.makedirs(app, exist_ok=True)
+    with open(os.path.join(app, "iyi.mod"), "w") as f:
+        f.write("module example.test/user/app\n"
+                "require example.test/user/liba v1.0.0\n")
+    entry = os.path.join(app, "main.iyi")
+    with open(entry, "w") as f:
+        f.write("import example.test/user/liba\n"
+                "using example.test/user/liba::{greeting}\n\nputs greeting\n")
+    return entry, env
+
+
 def main():
     work = tempfile.mkdtemp(prefix="iyi-daemon-agrees")
     socket = os.path.join(work, "daemon.sock")
@@ -183,6 +232,39 @@ def main():
                 say(f"{label}: the workspace builds from source", False, failure)
                 continue
             compare(label, entry, where, env, socket, work, switches)
+
+        # And a dependency that is a package rather than a file beside the
+        # entry: where its module comes from is `iyi.mod`, `iyi.sum`, the
+        # cache and the project root, and the child is forked from a program
+        # that set none of them for itself.
+        where = os.path.join(work, "a-package-dependency")
+        entry, env = package_workspace(where)
+        if entry is None:
+            say("a package dependency: the workspace is made", False, env)
+        else:
+            compare("a package dependency", entry, os.path.join(where, "app"),
+                    env, socket, work)
+
+        # And the one thing a daemon cannot take from a request: the library.
+        # The prelude it holds came from its own `IYI_PATH`, so a build that
+        # asks for another one has to be refused rather than served from the
+        # wrong library — the environment travels, and this is the variable
+        # that cannot.
+        elsewhere = os.path.join(work, "no-library")
+        os.makedirs(elsewhere, exist_ok=True)
+        entry = os.path.join(elsewhere, "x.iyi")
+        with open(entry, "w") as f:
+            f.write("puts 1\n")
+        proc = subprocess.run(
+            [IYI, "daemon", "build", "--socket", socket, "-o",
+             os.path.join(work, "no-library-out"), entry],
+            cwd=elsewhere, env=dict(os.environ, IYI_PATH=elsewhere),
+            capture_output=True, text=True, timeout=600)
+        spoken = proc.stdout + proc.stderr
+        say("a build asking for another library is refused",
+            proc.returncode != 0 and "analysed a different library" in spoken
+            and "IYI_PATH" in spoken,
+            spoken.strip().splitlines()[:1])
     finally:
         daemon.terminate()
         try:

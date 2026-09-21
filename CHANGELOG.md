@@ -516,15 +516,15 @@
   model reading it concludes the module does not exist and writes
   around it.
 
-  The same resolution feeds two other commands, and one of them fails
-  the same way for a script rather than a model: `iyi check --affected
+  The same resolution feeds two other commands, and both fail the same
+  way for a script rather than for a model. `iyi check --affected
   src/std/text.iyi` answered `{"checked":[],"failed":[]}` — nothing
   affected, all compile — with a file importing `std/text` sitting
-  beside it. A CI job branching on that skips the consumers a library
-  change breaks. (`iyi test`'s closure walk is the third, and was
-  missing the library for the same reason.) `bench/mod_context.sh`
-  sweeps every sample for a hole where a surface belongs and asks
-  `check --affected` for the consumer it used not to find.
+  beside it. And `iyi test --affected` on the same change answered `0 to
+  run, 2 skipped: no test's imports reach the change`, which is a CI job
+  running no tests at all for a library edit. `bench/mod_context.sh`
+  sweeps every sample for a hole where a surface belongs and asks both
+  verbs for the consumer they used not to find.
 
 - **`iyi mod diff` said "consumers do not have to be rebuilt" about a
   body consumers compile.** The verdict — and the `--exit-code` a build

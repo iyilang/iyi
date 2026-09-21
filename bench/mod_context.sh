@@ -169,6 +169,39 @@ else
     fi
   fi
 fi
+
+# The other verb that branches on the same closure: `test --affected` says
+# which tests re-run, and a CI job that trusts it runs exactly those. A
+# test importing a library module has to be among them.
+mkdir -p "$WORK/selection"
+cd "$WORK/selection" || exit 1
+cat > uses_library_test.iyi <<'EOF'
+module uses_library_test
+
+import std/text
+
+def test_join : Nil
+  raise "wrong" unless [1, 2].join('-') == "1-2"
+end
+
+test_join
+EOF
+cat > stranger_test.iyi <<'EOF'
+module stranger_test
+
+puts "nothing to do with it"
+EOF
+export IYI_PATH="$REPO/src"
+selected="$("$IYI" test --affected "$REPO/src/std/text.iyi" 2>&1 | tail -1)"
+case "$selected" in
+  "1 passed, 0 failed, 1 skipped"*)
+    echo "test --affected runs the test that imports a library module, and only it"
+    ;;
+  *)
+    echo "FAIL: test --affected answered '$selected'"
+    status=1
+    ;;
+esac
 cd "$WORK" || exit 1
 
 # And the mixed workspace, which is the shape a project has: its own

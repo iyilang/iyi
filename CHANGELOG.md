@@ -389,6 +389,21 @@
 
 ### Fixed
 
+- **The seam that produced four of this release's defects is checked
+  rather than remembered.** Which language a source is written in is the
+  one thing the lexer cannot read out of its text, so it comes off the
+  file's name — and a `Parser` or `Lexer` built without one reads by the
+  other language's rules. That was stdin, the LSP's semantic-token
+  scanner, every macro expansion, and a macro body's formatter, each
+  found separately. `bench/language_is_named.py` walks the compiler's
+  parses: thirteen name their file, four are exempt with what they read
+  instead — the regex engine's parser, the factory every caller names,
+  the formatter's own lexer, and a keyword scan both languages spell the
+  same — and a fifth nameless one fails the check by name. Its list of
+  reasons is keyed on the line as written, so changing the code
+  re-asks the question.
+
+
 - **`mod context` and `mod diff` run on Windows.** Both are path-shaped
   work — imports resolved through `IYI_PATH`, a workspace's `mods`, and a
   hash of what a consumer compiles — and both carry the code that platform

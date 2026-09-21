@@ -115,6 +115,14 @@ jobs:
       - name: Every gate is reached by something that runs it
         run: python3 bench/gates_reachable.py
 
+      # Which language a source is in is the one thing the lexer cannot read
+      # out of its text, and a parse built without a name reads by the other
+      # language's rules. That was a defect four separate times in one
+      # release — stdin, the token scanner, macro expansions and a macro
+      # body's formatter — so the seam is checked rather than remembered.
+      - name: Every parse names the language it reads
+        run: python3 bench/language_is_named.py
+
       - name: iyi's own specs
         run: |
           ./bin/crystal spec \

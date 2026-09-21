@@ -45,7 +45,11 @@ describe Iyi::Command::FormatCommand do
     format_command.run
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
-    stderr.to_s.should contain("syntax error in 'STDIN:1:3': unexpected token: EOF")
+    # iyi: `STDIN` ends in neither extension, and the language a file is in
+    # comes off its name everywhere in the compiler, so a pipe was read by
+    # the other language's rules. It is `STDIN.iyi` now, which says which
+    # rules read it, and `--stdin-filename` replaces it.
+    stderr.to_s.should contain("syntax error in 'STDIN.iyi:1:3': unexpected token: EOF")
   end
 
   it "formats stdin (invalid byte sequence error)" do
@@ -57,7 +61,7 @@ describe Iyi::Command::FormatCommand do
     format_command.run
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
-    stderr.to_s.should contain("file 'STDIN' is not a valid Crystal source file: Unexpected byte 0xfe at position 0, malformed UTF-8")
+    stderr.to_s.should contain("file 'STDIN.iyi' is not a valid iyi source file: Unexpected byte 0xfe at position 0, malformed UTF-8")
   end
 
   it "formats stdin (bug)" do
@@ -69,7 +73,7 @@ describe Iyi::Command::FormatCommand do
     format_command.run
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
-    stderr.to_s.should contain("there's a bug formatting 'STDIN', to show more information, please run:")
+    stderr.to_s.should contain("there's a bug formatting 'STDIN.iyi', to show more information, please run:")
     # iyi: the advice names the binary that was run, whatever it was
     # called - it used to say `crystal tool format`, a command the reader
     # may not have.
@@ -86,7 +90,33 @@ describe Iyi::Command::FormatCommand do
     format_command.status_code.should eq(1)
     stdout.to_s.should be_empty
     stderr.to_s.should contain("format command test")
-    stderr.to_s.should contain("couldn't format 'STDIN', please report a bug including the contents of it: https://github.com/iyilang/iyi/issues")
+    stderr.to_s.should contain("couldn't format 'STDIN.iyi', please report a bug including the contents of it: https://github.com/iyilang/iyi/issues")
+  end
+
+  it "reads stdin as the language --stdin-filename names" do
+    # `x = y()!` is a propagation in iyi and a syntax error in Crystal, so
+    # the flag is observable rather than decoration: the same bytes format
+    # under the default and are refused under a `.cr` name, which is also
+    # the name the error carries.
+    source = "x = y()!\n"
+
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+    iyi = Iyi::Command::FormatCommand.new(["-"],
+      stdin: IO::Memory.new(source), stdout: stdout, stderr: stderr)
+    iyi.run
+    iyi.status_code.should eq(0)
+    stdout.to_s.should eq(source)
+    stderr.to_s.should be_empty
+
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+    as_cr = Iyi::Command::FormatCommand.new(["-"],
+      stdin: IO::Memory.new(source), stdout: stdout, stderr: stderr,
+      stdin_filename: "buffer.cr")
+    as_cr.run
+    as_cr.status_code.should eq(1)
+    stderr.to_s.should contain("syntax error in 'buffer.cr:1:8'")
   end
 
   it "formats files" do

@@ -472,6 +472,63 @@ IYI
 refuses "a macro that declares a name ending in !" "part of a name in iyi" -- \
   "$IYI" build -o "$WORK/macro_name" "$WORK/macro_name.iyi"
 
+# And the other direction, which is the one that cost something: `!` is the
+# operator a caller's signature is written for, and no macro could produce
+# it. `v = to_number(t)!` came back "undefined local variable or method
+# 'to_number!'", and with the parentheses in front of the `!`, "unexpected
+# token". Code a macro writes is iyi now, so it propagates the way code a
+# person writes does — both branches, because a propagation that never
+# carries an error proves half of it.
+cat > "$WORK/macro_bang.iyi" <<'IYI'
+struct ParseError
+  getter text : String
+
+  def initialize(@text : String)
+  end
+end
+
+impl Error for ParseError
+  def message : String
+    "not a number: #{text}"
+  end
+end
+
+def to_number(text : String) : Int32 | ParseError
+  return ParseError.new(text) unless text == "12"
+  12
+end
+
+macro doubled(text)
+  to_number({{ text }})! * 2
+end
+
+def doubled_number(text : String) : Int32 | ParseError
+  doubled(text)
+end
+
+["12", "x"].each do |text|
+  case doubled_number(text)
+  in Int32      then puts "doubled #{it}"
+  in ParseError then puts it.message
+  end
+end
+IYI
+if ! "$IYI" build -o "$WORK/macro_bang" "$WORK/macro_bang.iyi" > "$WORK/macro_bang.log" 2>&1; then
+  echo "  a macro that writes !: the program did not build"
+  sed -n '1,6p' "$WORK/macro_bang.log"
+  status=1
+elif ! "$WORK/macro_bang" > "$WORK/macro_bang.out" 2>&1; then
+  echo "  a macro that writes !: the program did not run"
+  sed -n '1,4p' "$WORK/macro_bang.out"
+  status=1
+elif [ "$(cat "$WORK/macro_bang.out")" != "$(printf 'doubled 24\nnot a number: x')" ]; then
+  echo "  a macro that writes !: answered"
+  cat "$WORK/macro_bang.out"
+  status=1
+else
+  echo "  a macro that writes !: propagates, and carries the value when there is one"
+fi
+
 # The cache, which is the one thing here a build trusts without asking.
 # `IYI_CACHE_DIR` pointed at something that cannot be a directory was
 # skipped in silence - it is the first of a list of candidates, and the

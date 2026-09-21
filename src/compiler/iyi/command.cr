@@ -455,9 +455,25 @@ class Iyi::Command
     end
   end
 
-  private def compile_no_codegen(command, wants_doc = false, hierarchy = false, no_cleanup = false, cursor_command = false, top_level = false, path_filter = false, unreachable_command = false, allowed_formats = ["text", "json"])
+  private def compile_no_codegen(command, wants_doc = false, hierarchy = false, no_cleanup = false, cursor_command = false, top_level = false, path_filter = false, unreachable_command = false, allowed_formats = ["text", "json"], workspace_artifacts = false)
     config = create_compiler command, no_codegen: true, hierarchy: hierarchy, cursor_command: cursor_command, path_filter: path_filter, unreachable_command: unreachable_command, allowed_formats: allowed_formats
     config.compiler.no_codegen = true
+    # iyi: the artifacts a workspace keeps, for a module whose source is
+    # not there. Asked by the verbs that answer *about a file* — `check`
+    # is the one here — and never by a build, which is told with a flag
+    # and prefers the artifact over the source it was given. A library
+    # arrives as `.iyimod` files (III.7), and `check` on a file importing
+    # one answered `can't find module` about a module `build --use-iyimod`
+    # compiles fine against. See `Compiler.workspace_artifacts`.
+    if workspace_artifacts && config.compiler.use_iyimod.nil?
+      if entry = config.sources.first?
+        root = Compiler.header_root_of(entry.filename, entry.code) || File.dirname(entry.filename)
+        if artifacts = Compiler.workspace_artifacts(root)
+          config.compiler.use_iyimod = artifacts
+          config.compiler.iyi_prefers_source = true
+        end
+      end
+    end
     config.compiler.no_cleanup = no_cleanup
     config.compiler.wants_doc = wants_doc
     result = top_level ? config.top_level_semantic : config.compile

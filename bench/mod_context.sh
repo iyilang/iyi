@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# What the two commands that read an import *without building* answer:
-# `iyi mod context` and `iyi check --affected`.
+# What the commands that read an import *without building* answer:
+# `iyi mod context`, `iyi check` and `iyi doc`.
 #
 #     bash bench/mod_context.sh
 #
@@ -111,4 +111,64 @@ case "$answer" in
     status=1
     ;;
 esac
+
+# And the workspace R-1 exists for: the dependency is a `.iyimod` and its
+# source is gone (III.7). A build reads it because it was told to with a
+# flag; these verbs have no flag and read `mods` beside the root, for a
+# module whose source is not there. Before that they answered `can't find
+# module` about a module `build --use-iyimod` compiles fine against — the
+# agent loop's first two steps, broken in the one workspace the boundary
+# is for.
+mkdir -p "$WORK/artifact-only/app"
+cd "$WORK/artifact-only" || exit 1
+cat > app/base.iyi <<'EOF'
+module app/base
+
+pub def value : Int32
+  42
+end
+EOF
+cat > main.iyi <<'EOF'
+module main
+
+import app/base
+using app/base::{value}
+
+def run : Int32
+  n = value
+  n
+end
+
+puts run
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/artifact-only"
+if ! "$IYI" build --emit-iyimod mods -o out main.iyi > emit.log 2>&1; then
+  echo "FAIL: the artifact-only workspace does not build from source"
+  sed -n '1,6p' emit.log | sed 's/^/  /'
+  status=1
+else
+  rm -f app/base.iyi
+  if ! "$IYI" build --use-iyimod mods -o out2 main.iyi > use.log 2>&1; then
+    echo "FAIL: the build cannot read the artifacts it just wrote"
+    sed -n '1,6p' use.log | sed 's/^/  /'
+    status=1
+  else
+    if "$IYI" check main.iyi > check.log 2>&1; then
+      echo "check types a file whose dependency is only an artifact"
+    else
+      echo "FAIL: check refuses a file the build compiles"
+      sed -n '1,6p' check.log | sed 's/^/  /'
+      status=1
+    fi
+    if "$IYI" doc main.iyi > doc.log 2>&1 && grep -q "^module main" doc.log; then
+      echo "doc reads a module whose dependency is only an artifact"
+    else
+      echo "FAIL: doc refuses a file the build compiles"
+      sed -n '1,6p' doc.log | sed 's/^/  /'
+      status=1
+    fi
+  fi
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

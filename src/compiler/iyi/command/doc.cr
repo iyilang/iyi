@@ -219,6 +219,14 @@ class Iyi::Command
       compiler.prelude = "iyi/prelude"
       compiler.no_codegen = true
       compiler.iyi_mod_table = Mod::Installer.table_for(module_root)
+      # The artifacts a workspace keeps, for an import whose source is not
+      # there — `check` and the language server read them the same way and
+      # for the same reason. This module's own surface still comes from its
+      # source, which is the file named on the command line.
+      if artifacts = Compiler.workspace_artifacts(module_root)
+        compiler.use_iyimod = artifacts
+        compiler.iyi_prefers_source = true
+      end
       compiler.emit_iyimod = emit_dir
       compiler.stdout = IO::Memory.new
       compiler.stderr = IO::Memory.new

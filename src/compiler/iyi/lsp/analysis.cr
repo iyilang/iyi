@@ -54,11 +54,6 @@ module Iyi::Lsp
     @seed = {} of String => String
     KEEP = 8
 
-    # The directory a workspace keeps its artifacts in — see
-    # `artifact_dir_of`. Not configurable, because the alternative to one
-    # name is a setting every editor has to be told and no agent knows.
-    ARTIFACT_DIR = "mods"
-
     # The last compile, keyed by exactly what determines it: the path,
     # the buffer, and the sibling buffers. One keystroke triggers
     # diagnostics, then often hover, highlight, inlay hints — the same
@@ -148,7 +143,7 @@ module Iyi::Lsp
       # sources present is compiled exactly as it was before this, and a
       # directory under some other name leaves the server saying what it
       # said.
-      if artifacts = artifact_dir_of(root || File.dirname(path))
+      if artifacts = Compiler.workspace_artifacts(root || File.dirname(path))
         compiler.use_iyimod = artifacts
         compiler.iyi_prefers_source = true
       end
@@ -602,16 +597,6 @@ module Iyi::Lsp
     # `import calc/lexer` the way a build from `<root>` would. A file
     # whose header and path disagree, or that has no header, keeps the
     # entry-dir rule.
-    # iyi: the artifact directory a workspace keeps, or nil.
-    #
-    # One name, probed. A flag is how a build is told, and there is no flag
-    # here: what an editor sends at initialize is a root, so the directory
-    # has to be found under it or not at all.
-    private def artifact_dir_of(root : String) : String?
-      candidate = File.join(root, ARTIFACT_DIR)
-      Dir.exists?(candidate) ? candidate : nil
-    end
-
     private def project_root_of(path : String, text : String) : String?
       header = nil
       text.each_line do |line|

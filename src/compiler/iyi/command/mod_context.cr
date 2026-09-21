@@ -320,7 +320,7 @@ class Iyi::Command
   # beside the root, which is the name the tree's every example uses and
   # the one `Lsp::Analysis` looks under.
   private def mod_context_artifact(written : String, artifact_root : String) : IyiMod::Artifact?
-    path = Iyi.native_path(File.join(artifact_root, "mods", "#{written}.iyimod"))
+    path = Iyi.native_path(File.join(artifact_root, Compiler::ARTIFACT_DIR, "#{written}.iyimod"))
     return nil unless File.file?(path)
     IyiMod.read(path)
   rescue IyiMod::Error

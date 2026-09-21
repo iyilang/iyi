@@ -51,7 +51,7 @@ class Iyi::Command
       return check_affected
     end
 
-    compile_no_codegen "check"
+    compile_no_codegen "check", workspace_artifacts: true
 
     # Nothing to print on success: the verdict is the exit code, the
     # same contract `test` and `vet` keep. Errors never reach this line —
@@ -158,8 +158,18 @@ class Iyi::Command
     compiler.no_codegen = true
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new
-    compiler.iyi_project_root = closure_root_of(expanded)
+    root = closure_root_of(expanded)
+    compiler.iyi_project_root = root
     compiler.iyi_mod_table = Mod::Installer.table_for(File.dirname(expanded))
+    # iyi: the artifacts a workspace keeps, for a module whose source is not
+    # there — the same reading the language server does, and for the same
+    # reason. A library arrives as `.iyimod` files (III.7), and `check` on a
+    # file importing one answered `can't find module` about a module `build
+    # --use-iyimod` compiles against. See `Compiler.workspace_artifacts`.
+    if artifacts = Compiler.workspace_artifacts(root || File.dirname(expanded))
+      compiler.use_iyimod = artifacts
+      compiler.iyi_prefers_source = true
+    end
     compiler.compile(
       Compiler::Source.new(expanded, File.read(expanded)),
       File.tempname("iyi-check", nil))

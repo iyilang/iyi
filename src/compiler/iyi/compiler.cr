@@ -261,6 +261,22 @@ module Iyi
       compile_configure_program(source, output_filename) { }
     end
 
+    # iyi: the directory a workspace keeps its artifacts in.
+    #
+    # One name, probed, because the alternative to one name is a setting
+    # every editor has to be told and no agent knows. It is the name the
+    # README, the SPEC and every bench in the tree already write, and the
+    # verbs that read it — the language server, `check`, `doc`, `mod
+    # context` — read a module's artifact only where its source is not
+    # there (`Program#iyi_prefers_source`). A build is told with a flag and
+    # asks nothing of this.
+    ARTIFACT_DIR = "mods"
+
+    def self.workspace_artifacts(root : String) : String?
+      candidate = File.join(root, ARTIFACT_DIR)
+      Dir.exists?(candidate) ? candidate : nil
+    end
+
     # The root the entry's header names, or nil: `module calc/parser` in
     # `/p/calc/parser.iyi` is `/p`.
     def self.header_root_of(path : String, text : String) : String?

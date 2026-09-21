@@ -279,6 +279,14 @@ class Iyi::Command
     compiler.prelude = "iyi/prelude"
     compiler.no_codegen = true
     compiler.iyi_mod_table = table
+    # And the workspace's artifacts, for what *this* module imports: a
+    # module with a file can depend on one without (III.7), and compiling
+    # it alone without them answered "does not compile alone" about a
+    # program that builds. See `Compiler.workspace_artifacts`.
+    if artifacts = Compiler.workspace_artifacts(artifact_root)
+      compiler.use_iyimod = artifacts
+      compiler.iyi_prefers_source = true
+    end
     compiler.emit_iyimod = emit_dir
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new

@@ -440,7 +440,10 @@
   context pack: five answers, and five of them were empty or wrong on
   the artifact side before this. `bench/mod_context.sh` asks `check` and
   `doc` the same thing, and `iyi test` in that workspace now passes the
-  test it could not build.
+  test it could not build. The mixed shape a project actually has — its
+  own modules source, its library an artifact — is asked there too:
+  `mod context` compiles an import alone to read its surface, and that
+  compile has the module's own imports in it.
 
 - **`iyi mod context` answered that the standard library is not there.**
   It resolves each import the way a build does — the requirement table

@@ -171,4 +171,60 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And the mixed workspace, which is the shape a project has: its own
+# modules are source, its library is an artifact. `mod context` compiles
+# an import alone to read its surface, and that compile has the same
+# imports the module has — so grounding `app/mid` meant compiling it
+# against an `app/base` that is only a `.iyimod`.
+mkdir -p "$WORK/mixed/app"
+cd "$WORK/mixed" || exit 1
+cat > app/base.iyi <<'EOF'
+module app/base
+
+pub def value : Int32
+  42
+end
+EOF
+cat > app/mid.iyi <<'EOF'
+module app/mid
+
+import app/base
+using app/base::{value}
+
+pub def doubled : Int32
+  value * 2
+end
+EOF
+cat > main.iyi <<'EOF'
+module main
+
+import app/mid
+using app/mid::{doubled}
+
+puts doubled
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/mixed"
+if ! "$IYI" build --emit-iyimod mods -o out main.iyi > emit.log 2>&1; then
+  echo "FAIL: the mixed workspace does not build from source"
+  sed -n '1,6p' emit.log | sed 's/^/  /'
+  status=1
+else
+  rm -f app/base.iyi
+  answer="$("$IYI" run main.iyi 2>&1 | tail -1)"
+  if [ "$answer" = "84" ]; then
+    echo "run answers through a source module whose own import is an artifact"
+  else
+    echo "FAIL: run answered '$answer', expected 84"
+    status=1
+  fi
+  if "$IYI" mod context main.iyi > ctx.log 2>&1 && ! grep -q "does not" ctx.log; then
+    echo "mod context grounds a source module whose own import is an artifact"
+  else
+    echo "FAIL: mod context left the mixed workspace ungrounded"
+    grep -m2 "does not" ctx.log | sed 's/^/  /'
+    status=1
+  fi
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

@@ -43,7 +43,7 @@ cd "$WORK" || exit 1
 # ── the project, and what it does on arrival ─────────────────────────────
 "$IYI" init example.com/me/hello app > init.txt 2>&1
 say "init writes a project and says what it wrote" \
-  "$([ $? -eq 0 ] && grep -q 'wrote app/greet.iyi' init.txt && grep -q 'iyi test' init.txt; echo $?)"
+  "$([ $? -eq 0 ] && grep -qE 'wrote app[/\\]greet.iyi' init.txt && grep -q 'iyi test' init.txt; echo $?)"
 [ -f app/iyi.mod ] && [ -f app/main.iyi ] && [ -f app/greet.iyi ] && [ -f app/main_test.iyi ]
 say "all four files are there" $?
 grep -q '^module example.com/me/hello$' app/iyi.mod

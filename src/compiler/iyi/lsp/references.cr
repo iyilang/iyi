@@ -138,8 +138,25 @@ module Iyi::Lsp
       @target_files << location.filename.to_s
     end
 
+    # The filename half of the key, in one spelling. An imported module's
+    # file is `File.join(root, "calc/lexer.iyi")`, and `File.join` spells
+    # the joint the platform's way and leaves the module path's own `/`
+    # alone — so on Windows the importer's compile names the def's file
+    # `...\gate\calc/lexer.iyi` while the cursor's names it
+    # `...\gate\calc\lexer.iyi`, and a reference from a file nobody opened
+    # never matched the def it calls (step 32 of `bench/lsp_session.py`,
+    # the first time it ran there). Compared case-blind on Windows too,
+    # which is what its filesystem does.
     private def key_of(location : Location) : {String, Int32, Int32}
-      {location.filename.to_s, location.line_number, location.column_number}
+      {canonical(location.filename.to_s), location.line_number, location.column_number}
+    end
+
+    private def canonical(filename : String) : String
+      {% if flag?(:win32) %}
+        filename.tr("/", "\\").downcase
+      {% else %}
+        filename
+      {% end %}
     end
 
     private def key?(location : Location?) : Bool

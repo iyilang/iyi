@@ -1493,6 +1493,10 @@ module Iyi::Lsp
       (declarations + references).each do |(location, size)|
         filename = location.filename
         next unless filename.is_a?(String)
+        # One key per file: an importer's compile spells an imported file
+        # with the module path's own `/` inside it (see `fs_path`), and two
+        # spellings of one file were two entries in `changes`.
+        filename = fs_path(filename)
         target_line = read_line(filename, location.line_number)
         start_ch = Lsp.character_of(target_line, location.column_number)
         end_ch = Lsp.character_of(target_line, location.column_number + size)
@@ -1648,7 +1652,7 @@ module Iyi::Lsp
     private def dedupe(sites : Array({Location, Int32})) : Array({Location, Int32})
       seen = Set({String, Int32, Int32}).new
       sites.select do |(location, _)|
-        seen.add?({location.filename.to_s, location.line_number, location.column_number})
+        seen.add?({fs_path(location.filename.to_s), location.line_number, location.column_number})
       end
     end
 

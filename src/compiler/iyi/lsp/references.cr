@@ -90,8 +90,14 @@ module Iyi::Lsp
       name_locations = node.name_locations
       return true unless names && name_locations
 
+      # Asked of the posix reading, the way `Compiler.header_root_of` asks
+      # the same question: a module path is posix by grammar (R-1) and a
+      # target's file is spelled the platform's way, so on Windows no file
+      # ever ended with `/greet.iyi` and a rename left every `using` line
+      # behind — step 13 of `bench/lsp_session.py`, the first time it ran
+      # there.
       suffix = "/#{node.path.join('/')}.iyi"
-      return true unless @target_files.any? { |file| file.ends_with?(suffix) }
+      return true unless @target_files.any? { |file| ::Path[file].to_posix.to_s.ends_with?(suffix) }
 
       names.each_with_index do |name, index|
         if @target_names.includes?(name) && (name_location = name_locations[index]?)

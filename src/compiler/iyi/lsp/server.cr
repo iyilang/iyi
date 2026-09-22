@@ -2733,12 +2733,12 @@ module Iyi::Lsp
       text = text_of(uri)
 
       roots = [] of String
-      if (header = Exports.header_of(text)) && path.ends_with?("/#{header}.iyi")
+      # The posix reading, as `project_root_of` reads the same question: a
+      # module path is posix by grammar and the path is the platform's.
+      # The root is sliced off the path itself, so its spelling is kept.
+      if (header = Exports.header_of(text)) && ::Path[path].to_posix.to_s.ends_with?("/#{header}.iyi")
         derived = path[0, path.size - header.size - 5]
         roots << (derived.empty? ? "/" : derived)
-      end
-      if root = @root
-        roots << root unless roots.includes?(root)
       end
       roots << File.dirname(path)
 

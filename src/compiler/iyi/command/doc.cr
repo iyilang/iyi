@@ -41,8 +41,12 @@ class Iyi::Command
       doc_prelude_index
     when prelude_type_name?(filename)
       doc_prelude_type(filename)
+    when resolved = doc_module_path(filename)
+      doc_from_source(resolved)
     else
-      abort! "expected a .iyi module, a .iyimod artifact, or a type of the prelude (`iyi doc String`)", :USAGE_ERROR
+      abort! "expected a module path (`#{Command.program_name} doc app/greeter`), " \
+             "a .iyi file, a .iyimod artifact, or a type of the prelude " \
+             "(`#{Command.program_name} doc String`)", :USAGE_ERROR
     end
   end
 
@@ -52,6 +56,37 @@ class Iyi::Command
   private def prelude_type_name?(name : String) : Bool
     return false unless name[0]?.try(&.ascii_uppercase?)
     name.each_char.all? { |char| char.ascii_alphanumeric? || char == '_' || char == ':' }
+  end
+
+  # iyi: the file a module path names, found the way `import` finds it —
+  # the project root, then every `IYI_PATH` entry, `.iyi` before `.cr`
+  # (R-1, IV.6).
+  #
+  # `iyi doc app/greeter` answered "expected a .iyi module, a .iyimod
+  # artifact, or a type of the prelude" for the one spelling this language
+  # is built on: a module's path *is* its file's path, it is what `import`
+  # takes, what `mod context` prints as a header, and what every error
+  # about a module names. Asking the doc verb for `std/set` — a module the
+  # same binary will happily ground an edit against — was a usage error.
+  private def doc_module_path(path : String) : String?
+    return nil if path.empty? || path.starts_with?('-') || path.ends_with?(".cr")
+
+    candidates = [File.join(Dir.current, "#{path}.iyi"), File.join(Dir.current, "#{path}.cr")]
+    IyiPath.new(iyi_path_entries).entries.each do |entry|
+      candidates << File.join(entry, "#{path}.iyi")
+      candidates << File.join(entry, "#{path}.cr")
+    end
+    candidates.find { |candidate| File.file?(candidate) }
+  end
+
+  # The search path this process was given, or the default list when it
+  # was given none — `IyiPath`'s own answer to an unset variable.
+  private def iyi_path_entries : Array(String)
+    if text = Config.env("PATH").presence
+      IyiPath.expand_paths(text.split(Process::PATH_DELIMITER, remove_empty: true))
+    else
+      IyiPath.default_paths
+    end
   end
 
   # iyi: "no such file" about a path that is there sends the reader to `ls`,
@@ -297,10 +332,12 @@ class Iyi::Command
 
   private def doc_usage
     <<-USAGE
-    Usage: #{Command.program_name} doc FILE | TYPE
+    Usage: #{Command.program_name} doc MODULE | FILE | TYPE
 
     Prints a module's exported surface with its doc comments — functions,
-    types, methods, impls; no bodies, nothing private. FILE is a `.iyimod`
+    types, methods, impls; no bodies, nothing private. MODULE is a module
+    path written the way `import` writes it — `app/greeter`, `std/set` —
+    found under the project root and `IYI_PATH`. FILE is a `.iyimod`
     artifact (read directly, source not needed) or a `.iyi` module (compiled
     alone, front end only). TYPE is a type of the prelude - `String`,
     `Array`, `Hash`, `Program` - printed the same way: what it can do, with

@@ -426,6 +426,23 @@ grep -q '^class String' index.txt || { echo "the index lacks String:"; cat index
 grep -q '^class Hash(K, V)' index.txt || { echo "the index lacks Hash(K, V):"; cat index.txt; exit 1; }
 grep -q 'Regex\|Int128\|IyiHeap' index.txt && { echo "the index lists what the prelude does not offer:"; cat index.txt; exit 1; }
 
+# ── 10b. `iyi doc app/greeter`: the spelling the language is built on ─────
+# A module's path *is* its file's path (R-1, IV.6), and it is what
+# `import` takes, what `mod context` prints as a header and what every
+# error about a module names — but `iyi doc` took only a file path, so
+# `iyi doc docs/docd` was a usage error about a module this same binary
+# will ground an edit against.
+step "iyi doc takes a module path, not only a file"
+"$IYI" doc docs/docd > modpath-doc.txt 2>&1 || { cat modpath-doc.txt; exit 1; }
+diff -u doc.txt modpath-doc.txt > modpath-diff.txt 2>&1 || {
+  echo "the module path and the file answered differently:"
+  head -10 modpath-diff.txt
+  exit 1
+}
+"$IYI" doc docs/nosuch > missing-mod.txt 2>&1 && { echo "a module that is not there was documented"; exit 1; }
+grep -q 'expected a module path' missing-mod.txt || {
+  echo "the refusal does not name the module-path form:"; cat missing-mod.txt; exit 1; }
+
 echo "workdir $WORK"
 echo "packages gate: every step held"
 exit 0

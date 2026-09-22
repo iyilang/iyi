@@ -389,6 +389,20 @@
 
 ### Fixed
 
+- **`iyi doc app/greeter` was a usage error.** A module's path *is* its
+  file's path (R-1, IV.6) — it is what `import` takes, what `mod context`
+  prints as a header, and what every error about a module names — and the
+  doc verb took a file path or a prelude type and nothing else. So `iyi
+  doc std/set`, a module this same binary will ground an edit against,
+  answered "expected a .iyi module, a .iyimod artifact, or a type of the
+  prelude", where the thing it was handed *was* a module.
+
+  A module path resolves now the way `import` resolves it: the project
+  root, then every `IYI_PATH` entry, `.iyi` before `.cr`. The refusal for
+  a path that is not there names the form, and `doc --help` says MODULE |
+  FILE | TYPE. `bench/packages_resolve.sh` asks for the same module both
+  ways and fails unless the two answers are byte-identical.
+
 - **The formatter rewrote every line of a CRLF file.** `iyi tool format`
   emits `\n`, and it wrote that back over whatever it read: a file with
   CRLF endings came back with all of its lines changed, from a command

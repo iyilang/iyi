@@ -279,24 +279,41 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
     # Load-once. A module imported by several others is compiled once, and so
     # is initialised once — the second importer adds no entry to the list.
-    if @program.requires.add?(filename)
-      @program.iyi_module_inits <<
-        if artifact_path
-          import_artifact(node, artifact_path)
-        elsif package
-          # Inside the package, short imports resolve against its checkout
-          # and nothing else: a dependency cannot quietly reach the
-          # program's own modules, or the same name would mean two things
-          # in two builds.
-          @iyi_package_stack << {package[1], package[3]}
-          begin
+    #
+    # `iyi tool dependencies` reads its tree here, and that is the whole
+    # reason this is one block rather than two. The printer is fed by
+    # `Program#run_requires`, which is `require`'s path — so the tool that
+    # says what a file depends on answered *nothing at all* for a file whose
+    # dependencies are `import`s: exit 0, empty output, a program that looks
+    # like it depends on nothing. The nesting is this walk's own, so the
+    # enter/leave pair wraps the recursion rather than the resolution, and a
+    # module reached twice is entered twice and printed once, which is what
+    # "duplicate skipped" means in the other language's tree.
+    printer = @program.compiler.try(&.dependency_printer)
+    unseen = @program.requires.add?(filename)
+    printer.try(&.enter_file(filename, unseen))
+    begin
+      if unseen
+        @program.iyi_module_inits <<
+          if artifact_path
+            import_artifact(node, artifact_path)
+          elsif package
+            # Inside the package, short imports resolve against its checkout
+            # and nothing else: a dependency cannot quietly reach the
+            # program's own modules, or the same name would mean two things
+            # in two builds.
+            @iyi_package_stack << {package[1], package[3]}
+            begin
+              import_file(node, filename)
+            ensure
+              @iyi_package_stack.pop
+            end
+          else
             import_file(node, filename)
-          ensure
-            @iyi_package_stack.pop
           end
-        else
-          import_file(node, filename)
-        end
+      end
+    ensure
+      printer.try(&.leave_file)
     end
 
     expanded = Nop.new

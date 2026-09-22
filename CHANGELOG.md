@@ -389,6 +389,28 @@
 
 ### Fixed
 
+- **`iyi tool dependencies` answered nothing for a file with imports.** The
+  tool draws the tree of files a program depends on, and it is fed from
+  `require`'s path, `Program#run_requires`. iyi's dependency edge is
+  `import`, which resolves in the semantic visitor and never goes through
+  there — so the command exited 0 and printed an empty tree. Not a wrong
+  answer: an answer that reads as "this file depends on nothing", for
+  every `.iyi` file in this repository, in a fork whose module system is
+  the `import`.
+
+  The walk records the edge now, wrapped around the recursion rather than
+  around the resolution, so the tree nests the way the other language's
+  does, a module reached twice is entered twice and printed once, and a
+  module that arrived as an artifact is named as that artifact —
+  `mods/app/base.iyimod` — because that is the file the build read. What
+  the search path finds is still filtered as library code, which is
+  Crystal's rule for `CRYSTAL_PATH`, and `-i` opts a directory back in.
+
+  `bench/mod_context.sh` is the gate for the commands that read an import
+  without building, and it now compares each sample's own `import` lines
+  against the tree the tool draws: nine local edges across `samples/iyi`.
+  Taking the recording back out fails it by naming every one of them.
+
 - **`mod diff` never read what a module was compiled against.** Its three
   lines are the module's own — interface, implementation, source — and an
   artifact records a fourth thing: the hashes of every module it imported

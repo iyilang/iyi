@@ -307,4 +307,51 @@ EOF
 fi
 cd "$WORK" || exit 1
 
+# And the third command that reads imports without building: `iyi tool
+# dependencies`, which draws the tree an editor, a build cache or a person
+# asks "what does this file depend on".
+#
+# It answered *nothing*: exit 0 and an empty tree, for files with imports
+# in them. The printer is fed from `require`'s path, and iyi's dependency
+# edge is `import` — so the answer was not wrong in a way anyone could
+# see, it was empty in a way that reads as "depends on nothing".
+#
+# The corpus is the samples again, and the comparison is the file's own
+# `import` lines: every one that names a module living under `samples/`
+# has to appear in the tree. `-i` because the samples are reached through
+# `IYI_PATH`, and everything on the search path is library code to this
+# tool — that part is Crystal's rule and stays.
+cd "$REPO" || exit 1
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
+edges=0
+missing=""
+for source in "$REPO"/samples/iyi/*.iyi; do
+  name="$(basename "$source" .iyi)"
+  tree="$WORK/$name.deps"
+  if ! "$IYI" tool dependencies -i "$REPO/samples" -f flat "$source" > "$tree" 2>&1; then
+    echo "FAIL: tool dependencies failed on $name"
+    sed -n '1,4p' "$tree" | sed 's/^/  /'
+    status=1
+    continue
+  fi
+  while read -r module; do
+    [ -f "$REPO/samples/iyi/$module.iyi" ] || continue
+    if grep -qF "samples/iyi/$module.iyi" "$tree"; then
+      edges=$((edges + 1))
+    else
+      missing="$missing $name->$module"
+      status=1
+    fi
+  done <<EOF
+$(sed -n 's/^import  *\([^ ]*\).*/\1/p' "$source")
+EOF
+done
+
+if [ -n "$missing" ]; then
+  echo "FAIL: tool dependencies left these edges out of its tree:$missing"
+else
+  echo "tool dependencies draws every local import in samples/iyi: $edges edges"
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

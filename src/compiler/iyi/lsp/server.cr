@@ -1572,8 +1572,11 @@ module Iyi::Lsp
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          next if @documents.has_key?(uri_of(posix))
-          entries << {posix, File.read(file)}
+          # By path, not by a URI rebuilt from it: an editor's own URI for
+          # this file is spelled its way (`%3A`, `%20`), and open buffers
+          # are already in the list above, with their unsaved text.
+          next if document_text(file)
+          entries << {file, File.read(file)}
           break if entries.size >= 200
         end
       end

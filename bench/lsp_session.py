@@ -534,7 +534,9 @@ def main():
     step(13, "references cross the module boundary, using line included",
          names == ["app.iyi", "greet.iyi"] and len(locs) == 3 and
          app_lines == [3, 6],
-         f"{len(locs)} site(s): call, using selection, declaration")
+         f"{len(locs)} site(s): "
+         + ", ".join(f"{l['uri'].rsplit('/', 1)[-1]}:{l['range']['start']['line']}" for l in locs)
+         + " (wanted app.iyi:3 using, app.iyi:6 call, greet.iyi:2 declaration)")
 
     # 14. rename off the typed graph: one request, two files edited —
     #     then both buffers change to the edit and the verdicts are clean.

@@ -50,11 +50,18 @@ If the binary lives somewhere the shell does not look, name it in
 
 ## Trouble
 
-Nothing highlights, nothing completes: the server did not start. Open
-**Output → iyi language server** — the client writes the spawn failure there.
-Almost always it is `iyi` not being on the `PATH` VS Code inherited (a GUI
-launch does not read your shell's profile); spell the absolute path in
-`iyi.serverPath` and reload the window.
+**`spawn iyi ENOENT`**, nothing highlights, nothing completes: the editor
+could not find the binary. The extension looks on the `PATH` it was given
+and then where the installers put it — `%LOCALAPPDATA%\Programs\iyi\bin` on
+Windows, `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, and `$IYI_PREFIX/bin`
+elsewhere — so this means iyi is not installed, or it is somewhere else.
+
+If you installed it while this window was open, reopen the window: a running
+editor keeps the environment it started with, on Windows and macOS both.
+Installed somewhere of your own choosing: put the absolute path in
+`iyi.serverPath` (on Windows, name `iyi.exe`) and reload the window.
+
+Anything else the server says goes to **Output → iyi language server**.
 
 ## Links
 

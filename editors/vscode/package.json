@@ -2,7 +2,7 @@
   "name": "iyi",
   "displayName": "iyi",
   "description": "iyi language support: diagnostics, completion with auto-import, hover, rename, and everything else `iyi lsp` speaks. A deliberately minimal TextMate grammar paints the first frame; the server's semantic tokens are the truth and override it the moment they arrive.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "iyilang",
   "license": "Apache-2.0 WITH Swift-exception",
   "icon": "icon.png",

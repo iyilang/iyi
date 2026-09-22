@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3
+
+- Find `iyi` when the PATH does not have it. An editor started before the
+  installer ran keeps the environment it was given — Windows broadcasts the
+  change and a running process does not re-read it — so `spawn iyi ENOENT`
+  was the first thing a fresh Windows install said. The client now also
+  looks where the installers put it: `%LOCALAPPDATA%\Programs\iyi\bin`,
+  `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, and `$IYI_PREFIX/bin`.
+- On Windows, resolve `iyi.exe` through PATHEXT with `.exe` preferred, and
+  spawn a `.bat` or `.cmd` through a shell, which node otherwise refuses.
+- The message for a missing binary says what to do: install it, then reopen
+  the window, or name the path in `iyi.serverPath`.
+
 ## 0.1.2
 
 - Require VS Code 1.82, which is what `vscode-languageclient` 9 requires. The

@@ -128,9 +128,14 @@ module Iyi::Lsp
       true
     end
 
+    # The file compared as a file, not a string: an importer's compile
+    # names an imported def's file with the module path's `/` inside a
+    # backslashed root on Windows (see `Location.same_file?`), and incoming
+    # calls from a file nobody opened never matched the def they call.
     private def key?(location : Location?) : Bool
       return false unless location
-      {location.filename.to_s, location.line_number, location.column_number} == @key
+      location.line_number == @key[1] && location.column_number == @key[2] &&
+        Location.same_file?(location.filename.to_s, @key[0])
     end
 
     private def record(name_location : Location, file : String, size : Int32) : Nil
@@ -159,7 +164,8 @@ module Iyi::Lsp
     def process_typed_def(typed_def : Def) : Nil
       location = typed_def.location
       return unless location
-      return unless {location.filename.to_s, location.line_number, location.column_number} == @key
+      return unless location.line_number == @key[1] && location.column_number == @key[2] &&
+                    Location.same_file?(location.filename.to_s, @key[0])
       typed_def.accept self
     end
 
@@ -194,7 +200,8 @@ module Iyi::Lsp
       location = node.location
       end_location = node.end_location
       if location && end_location &&
-         location.filename == @target.filename &&
+         (file = location.filename).is_a?(String) && (target_file = @target.filename).is_a?(String) &&
+         Location.same_file?(file, target_file) &&
          @target.between?(location, end_location)
         @spans << {location, end_location}
       end

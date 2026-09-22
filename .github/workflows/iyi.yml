@@ -1837,6 +1837,34 @@ jobs:
           & (Join-Path $seven 'bin\iyi.exe') version
           if ($LASTEXITCODE -ne 0) { throw 'the copy PowerShell 7 installed does not start' }
 
+          # And over an install. `bench/install_upgrade.sh` holds this for
+          # the tarball — a file an older release shipped and this one does
+          # not survived the upgrade and was still *required* by a glob in
+          # the library — and nothing held it for the zip, whose installer
+          # takes a different route: it replaces `share\iyi` whole. Two
+          # things are planted first, a stale file and a poisoned prelude,
+          # and the poison is what proves the check can fail: `check` has
+          # to break before the upgrade for its passing after to mean
+          # anything.
+          $installedExe = Join-Path $seven 'bin\iyi.exe'
+          $stale = Join-Path $seven 'share\iyi\crystal\crystal\dwarf\gone_in_the_next_release.cr'
+          New-Item -ItemType Directory -Force -Path (Split-Path $stale) | Out-Null
+          [IO.File]::WriteAllText($stale, "module Crystal::DWARF`n  record LeftBehind, format : A_CONSTANT_THAT_IS_NOT_THERE`nend`n")
+          $prelude = Join-Path $seven 'share\iyi\src\iyi\prelude.iyi'
+          if (-not (Test-Path -LiteralPath $prelude)) { throw "the installed library has no prelude at $prelude" }
+          [IO.File]::AppendAllText($prelude, "`nthis is not iyi`n")
+          $probe = Join-Path $env:RUNNER_TEMP 'upgrade-probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          [IO.File]::WriteAllText((Join-Path $probe 'main.iyi'), "puts 1`n")
+          & $installedExe check (Join-Path $probe 'main.iyi') 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'a poisoned prelude still checked a program, so the upgrade check is watching nothing' }
+          pwsh -NoProfile -File .\install.ps1 -ReleaseUrl $dist -Version $version -Prefix $seven -NoPath
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 over an install failed with $LASTEXITCODE" }
+          if (Test-Path -LiteralPath $stale) { throw 'a file the release does not ship survived the upgrade' }
+          & $installedExe check (Join-Path $probe 'main.iyi')
+          if ($LASTEXITCODE -ne 0) { throw 'the upgraded library does not check a program' }
+          Write-Host 'an install over an install leaves one install: the stale file is gone and the prelude is whole'
+
           # One hex digit wrong. `-RedirectStandardError`, because the
           # refusal is written to the process's own stderr and a `2>` inside
           # PowerShell only redirects PowerShell's error stream, which is how

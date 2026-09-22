@@ -22,6 +22,18 @@
   the entry runs, the test passes, `mod context` grounds the import, and
   a second `init` changes not one byte.
 
+### Changed
+
+- **An install over an install is gated on Windows too.**
+  `bench/install_upgrade.sh` holds it for the tarball: a file an older
+  release shipped and this one does not used to survive the upgrade and
+  was still *required* by a glob in the library. `install.ps1` takes a
+  different route — it replaces `share\iyi` whole — and nothing had
+  asked whether that route arrives. The Windows job now plants a stale
+  file and a poisoned prelude in an installed prefix, proves `check`
+  breaks, installs over it, and requires the stale file gone and the
+  prelude whole.
+
 ### Fixed
 
 - **The language server could not read a Windows file URI.** An editor

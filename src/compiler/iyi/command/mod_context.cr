@@ -299,7 +299,11 @@ class Iyi::Command
         Compiler::Source.new(entry, File.read(entry)),
         File.join(emit_dir, "unused"))
     rescue ex : Iyi::Error | Iyi::CodeError
-      return {written, nil, "does not compile alone: #{ex.message.to_s.lines.first?}"}
+      # The diagnostic rather than the wrapper `while importing "X"` it
+      # arrives in — the same unwrapping `iyi doc` does, and for the same
+      # reason: this answer is what a reader acts on.
+      deepest = Iyi.deepest_error(ex)
+      return {written, nil, "does not compile alone: #{deepest.message.to_s.lines.first?}"}
     ensure
       previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
     end

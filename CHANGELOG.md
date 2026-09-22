@@ -389,6 +389,34 @@
 
 ### Fixed
 
+- **A module that does not compile was answered with the wrapper around
+  the reason.** `iyi mod context` prints one line in place of a module's
+  surface when the module cannot be compiled alone, so that line is the
+  whole diagnosis — and it was `while importing "kit/all"`, the wrapper
+  `SemanticVisitor#import_file` puts around an error, which names the file
+  the reader had just typed. `iyi check` on the same file said ``can't
+  apply `pub` to const`` with the line and the column. `iyi doc` had
+  unwrapped this since the verbs gate was written; `mod context` carried
+  its own copy of that rescue without the unwrapping, so the one answer
+  written for grounding was the one without the diagnosis in it. Both go
+  through `Iyi.deepest_error` now, and `bench/mod_context.sh` fails when
+  the answer is a wrapper rather than a reason.
+
+- **`const LIMIT = 10` was answered with a sentence about dynamism.** The
+  word introduces a constant in Rust, Go, JavaScript, Swift and C++, and
+  here it parsed as a call whose argument is an assignment to a constant
+  — so the answer came from the shape, `can't declare constant
+  dynamically`, about a line at the top level of a file. `pub const LIMIT
+  = 10` answered ``can't apply `pub` to const``, which reads as though
+  `const` were a construct this language has and `pub` happened not to
+  take. The parser meets the word now, in both places, with what to write
+  instead: a constant is `LIMIT = ...`, uppercase is what makes it one,
+  and `pub LIMIT = ...` is how a module exports it (R-2). `val`, `final`,
+  `let` and `var` are met the same way when what follows them is a
+  constant. A call to something actually named `const` is still a call —
+  the shape is checked, not just the word. Specced beside `fn`, `func`,
+  `and` and `or` in `spec/compiler/parser/parser_spec.cr`.
+
 - **The caller's view of a module dropped the methods an `impl` adds.**
   `IyiMod.surface` is AI_FIRST.md §2's text form — what `iyi mod context`
   and `iyi doc` print, and what a model is grounded on — and it rendered

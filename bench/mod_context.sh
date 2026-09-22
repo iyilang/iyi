@@ -452,4 +452,42 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And what it says when the module does *not* compile. The answer is one
+# line in place of the surface, so that line is the whole diagnosis — and
+# it was the wrapper `while importing "X"`, which names the file the
+# reader already typed. `iyi doc` has unwrapped that since the verbs gate
+# was written; this command had its own copy of the same rescue without
+# the unwrapping, so the grounding answer for a module with a bad line in
+# it was "does not compile alone: while importing "kit/all"" where `iyi
+# check` said what was wrong and where.
+mkdir -p "$WORK/broken/kit"
+cd "$WORK/broken" || exit 1
+cat > kit/all.iyi <<'EOF'
+module kit/all
+
+pub def make : Int32
+  nonesuch_helper(1)
+end
+EOF
+cat > main.iyi <<'EOF'
+import kit/all
+using kit/all::{make}
+
+puts make
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/broken"
+"$IYI" mod context main.iyi > broken.txt 2>&1
+if grep -q 'while importing' broken.txt; then
+  echo "FAIL: mod context answered with the wrapper instead of the diagnostic"
+  grep 'does not compile' broken.txt | sed 's/^/  /' | head -2
+  status=1
+elif ! grep -q "undefined method 'nonesuch_helper'" broken.txt; then
+  echo "FAIL: mod context did not name why the module does not compile"
+  sed -n '1,4p' broken.txt | sed 's/^/  /'
+  status=1
+else
+  echo "a module that does not compile is answered with the reason it does not"
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

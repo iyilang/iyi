@@ -434,6 +434,17 @@ module Iyi
     assert_syntax_error "if x == 1 and y\nend", %(unexpected token: "and": `&&` is the spelling here)
     assert_syntax_error "fn f(x : Int32) : Int32\n  x\nend", %(unexpected token: ":": `fn` is a call here, not a keyword - a function is `def name(args) : Type`)
     assert_syntax_error "func f(x : Int32)\n  x\nend", "unexpected 'end': nothing is open for it to close - `func` at line 1 is a call here, not a keyword"
+    # iyi: the word somebody brought with them, met where it introduces a
+    # constant everywhere else. `const LIMIT = 10` parsed as a call and
+    # ended on the semantic's "can't declare constant dynamically", which
+    # is about the shape and never about the word; `pub const LIMIT = 10`
+    # answered "can't apply `pub` to const", which reads as if `const`
+    # were a construct here.
+    assert_syntax_error "const LIMIT = 10\nputs LIMIT\n",
+      "there is no `const`: a constant is `LIMIT = ...`, uppercase is what makes it one"
+    assert_syntax_error "let LIMIT = 10\n", "there is no `let`: a constant is `LIMIT = ...`"
+    assert_syntax_error "module kit/all\n\npub const LIMIT = 10\n",
+      "there is no `const`: a constant is `LIMIT = ...`"
 
     # #5856
     assert_syntax_error "def foo=(a,b); end", "setter method 'foo=' cannot have more than one parameter"

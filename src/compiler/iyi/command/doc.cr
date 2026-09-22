@@ -247,15 +247,7 @@ class Iyi::Command
         # `iyi doc twoheaders.iyi` answered `does not compile alone: while
         # importing "twoheaders"` where `iyi run` answered `a file declares
         # one module, and this one already declares 'main'`.
-        # A `TypeException` carries the error it wrapped in `inner` rather
-        # than in `cause`, which is why both are followed here.
-        deepest = ex
-        loop do
-          nested = deepest.responds_to?(:inner) ? deepest.inner : nil
-          nested ||= deepest.cause
-          break unless nested.is_a?(Iyi::Error | Iyi::CodeError)
-          deepest = nested
-        end
+        deepest = Iyi.deepest_error(ex)
         abort! "#{filename} does not compile alone: #{deepest.message.to_s.lines.first?}", :USAGE_ERROR
       ensure
         previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")

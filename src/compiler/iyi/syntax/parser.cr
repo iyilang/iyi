@@ -2415,6 +2415,17 @@ module Iyi
             raise "`pub abstract` takes a class, a struct or a def", @token.line_number, @token.column_number
           end
         else
+          # iyi: the word, when the word is one somebody brought with them.
+          # `pub const LIMIT = 10` answered "can't apply `pub` to const",
+          # which reads as if `const` were a construct here that `pub`
+          # happens not to take. It is not a construct at all, and the
+          # sentence a bare `const LIMIT = 10` gets is the one to give.
+          if @token.type.ident? && @token.value.to_s.in?("const", "val", "final", "let", "var")
+            raise "there is no `#{@token}`: a constant is `LIMIT = ...`, " \
+                  "uppercase is what makes it one, and `pub LIMIT = ...` " \
+                  "is how a module exports it (SPEC.md R-2)",
+              @token.line_number, @token.column_number
+          end
           raise "can't apply `pub` to #{@token}", @token.line_number, @token.column_number
         end
 
@@ -5521,6 +5532,23 @@ module Iyi
         # the `end` under it, and the sentence for either names this.
         if !is_var && !has_parentheses && name.in?("fn", "func", "function") && args.try(&.first?).is_a?(Call) && @iyi_def_lookalike.nil?
           @iyi_def_lookalike = {name, name_location}
+        end
+
+        # iyi: `const LIMIT = 10` is a call to `const` whose argument is an
+        # assignment to a constant, so it parses, and the answer it drew
+        # was the semantic's `can't declare constant dynamically` — true of
+        # the shape and silent about the word. `pub const LIMIT = 10` drew
+        # "can't apply `pub` to const", which reads as if `const` were a
+        # thing here. Every other arrival from another language is met with
+        # this one's spelling (`IYI_ARRIVAL_CALL_HINTS`), and these five
+        # words are what introduces a constant in the languages people come
+        # from. The shape is checked too, so a call to something actually
+        # named `const` is still a call.
+        if !is_var && !has_parentheses && name.in?("const", "val", "final", "let", "var") &&
+           (assignment = args.try(&.first?)).is_a?(Assign) && (constant = assignment.target).is_a?(Path)
+          raise "there is no `#{name}`: a constant is `#{constant} = ...`, " \
+                "uppercase is what makes it one, and `pub #{constant} = ...` " \
+                "is how a module exports it (SPEC.md R-2)", name_location
         end
       else
         has_parentheses = false

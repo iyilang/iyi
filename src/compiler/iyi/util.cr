@@ -47,6 +47,29 @@ module Iyi
       name.starts_with?('#')
   end
 
+  # iyi: the diagnostic inside the wrappers around it.
+  #
+  # An error raised while an import is read arrives wrapped in `while
+  # importing "X"` (`SemanticVisitor#import_file`), and the first line of
+  # *that* names the file the author already typed and nothing they can
+  # act on. `iyi doc` unwrapped it and `iyi mod context` did not, so the
+  # grounding answer for a module with a bad line in it was `(does not
+  # compile alone: while importing "kit/all")` where `iyi check` said
+  # ``can't apply `pub` to const``, with the line and the column.
+  #
+  # `inner` before `cause`, because a `TypeException` carries what it
+  # wrapped in `inner`.
+  def self.deepest_error(error : Exception) : Exception
+    deepest = error
+    loop do
+      nested = deepest.responds_to?(:inner) ? deepest.inner : nil
+      nested ||= deepest.cause
+      break unless nested.is_a?(Iyi::Error | Iyi::CodeError)
+      deepest = nested
+    end
+    deepest
+  end
+
   # iyi: *path* written with the separators this platform uses.
   #
   # A module path is posix by grammar (R-1) and `File.join` translates nothing

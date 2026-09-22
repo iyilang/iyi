@@ -31,6 +31,7 @@ end
 pub class NumLit
   property resolved : String?
   getter value : Int32
+
   def initialize(@value : Int32, @resolved : String? = nil)
   end
 end
@@ -38,6 +39,7 @@ end
 pub class VarRef
   property resolved : String?
   getter name : String
+
   def initialize(@name : String, @resolved : String? = nil)
   end
 end
@@ -46,6 +48,7 @@ impl Typed for NumLit
   def resolved : String?
     @resolved
   end
+
   def resolved=(t : String?) : Nil
     @resolved = t
   end
@@ -56,9 +59,11 @@ impl Typed for VarRef
   def resolved : String?
     @resolved
   end
+
   def resolved=(t : String?) : Nil
     @resolved = t
   end
+
   # And one override, which is the point of the default existing.
   def describe : String
     if t = resolved

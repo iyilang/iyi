@@ -495,7 +495,17 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
         index = index + 1
       end
       grew = resident_kb - resident_before
-      if grew > 2048_u64
+      # One mebibyte, which is between the two readings rather than on
+      # top of one of them. The bound was 2048 KB, which is exactly one
+      # huge page, so a single huge page landed on `>` and did not fire.
+      # Same defect the mark pool's bound had, and the same fix: put it
+      # where the populations separate.
+      #
+      # Measured across CI runs, this adds 324 KB with no huge page
+      # behind it, three runs running, and one huge page is 2048. A
+      # mebibyte is 3.2x above the first and half the second, which is
+      # about the middle of them the way they scale.
+      if grew > 1024_u64
         raise "huge: twelve arenas of one object each added #{grew.to_i64} KB resident, so small arenas are taking huge pages"
       end
       puts "huge: twelve one-object arenas added #{grew.to_i64} KB resident, none of it a huge page"

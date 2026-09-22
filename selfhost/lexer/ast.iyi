@@ -17,12 +17,14 @@ module main
 
 pub struct NumLit
   getter value : Int32
+
   def initialize(@value : Int32)
   end
 end
 
 pub struct VarRef
   getter name : String
+
   def initialize(@name : String)
   end
 end
@@ -32,12 +34,14 @@ end
 pub struct Call
   getter name : String
   getter args : Array(Node)
+
   def initialize(@name : String, @args : Array(Node))
   end
 end
 
 pub struct Seq
   getter nodes : Array(Node)
+
   def initialize(@nodes : Array(Node))
   end
 end

@@ -366,6 +366,27 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         if absent.empty?
           node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. `using` reaches only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
         else
+          # iyi: the name the module declares at the *root*. `std/set` is
+          # `module std/set` and `class ::Set(T)` inside it: the `::` puts
+          # the class beside `Array` and `String` rather than in the
+          # module, so `import std/set` alone is what brings it and a
+          # `using` naming it asks the module for something it does not
+          # have. Twenty-five modules under `src/std` are written this way,
+          # and the sentence they drew — "nothing by that name is declared
+          # in `std/set`, `pub` or not" — is true of the module and wrong
+          # about the program, where `Set` is right there. `mod context`
+          # already prints these as `class ::Set(T)` and offers no `using`
+          # line; this is the same fact, said where the mistake is made.
+          rooted = absent.select { |name| iyi_root_declared_by?(name, used_type) }
+          unless rooted.empty?
+            node.raise "#{rooted.map { |name| "`#{name}`" }.join(", ")} " \
+                       "#{rooted.size == 1 ? "is" : "are"} declared at the root by " \
+                       "`#{written}`, not as #{rooted.size == 1 ? "a name" : "names"} of it: " \
+                       "`import #{written}` is enough to write #{rooted.map { |name| "`#{name}`" }.join(", ")}, " \
+                       "and `using #{written}::{#{rooted.join(", ")}}` asks the module for " \
+                       "#{rooted.size == 1 ? "a name it does not have" : "names it does not have"} (SPEC.md R-2b)"
+          end
+
           hint = ""
           if (exported = used_type.exported_names) && (similar = Levenshtein.find(absent.first, exported.to_a))
             hint = "\nDid you mean `#{similar}`?"
@@ -440,6 +461,35 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       @program.iyi_exported_imports[file]?.try &.each { |handed| queue << handed }
     end
     false
+  end
+
+  # iyi: whether the program has *name* at its root and the file that
+  # declares it is the one *used_type* is written in.
+  #
+  # `class ::Set(T)` inside `module std/set`: the `::` puts the class at
+  # the root, and the only thing tying it to the module is that both are
+  # declared in the same file. That is the same question
+  # `Compiler#iyi_declared_here?` asks when it decides what an artifact
+  # carries, asked here against the module's own locations rather than
+  # against a filename — a module is one file (R-1, IV.6), and an inline
+  # source that declares both is that file.
+  #
+  # `any?`, not `all?`: a root type this module declares picks up further
+  # locations from anyone who reopens it or writes an `impl` for it —
+  # `std/enumerable` writes `impl Enumerable for Set(T)`, so `::Set` is
+  # located in two files and the module that declared it is only one of
+  # them. The advice is the same for a type this module reopens rather
+  # than declares: the name is at the root, `import` is what brings what
+  # this module added to it, and a `using` naming it has nothing to bring.
+  private def iyi_root_declared_by?(name : String, used_type : Type) : Bool
+    return false unless type = @program.types[name]?
+    return false unless locations = type.locations
+    return false unless module_locations = used_type.locations
+    files = module_locations.compact_map(&.original_filename).to_set
+    return false if files.empty?
+    locations.any? do |location|
+      (filename = location.original_filename) && files.includes?(filename)
+    end
   end
 
   # iyi: `trait Greet ... end`

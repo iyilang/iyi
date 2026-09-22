@@ -389,6 +389,25 @@
 
 ### Fixed
 
+- **A `using` for a name a module declares at the root was refused as a
+  typo.** `src/std/set.iyi` is `module std/set` with `class ::Set(T)`
+  inside it: the `::` puts the class beside `Array` and `String`, so
+  `import std/set` alone is what brings it. Written the way every other
+  module in the language is reached — `using std/set::{Set}` — the answer
+  was ``Std::Set has no `Set`: nothing by that name is declared in
+  `std/set`, `pub` or not``, which is true of the module and wrong about
+  the program, where `Set` is right there. Twenty-five modules under
+  `src/std` declare a root type this way, and `iyi mod context` prints
+  them as `class ::Set(T)` with no `using` line — the grounding answer was
+  right and the refusal was not.
+
+  It names the root declaration now and the spelling that works: ``\`Set\`
+  is declared at the root by `std/set`, not as a name of it: `import
+  std/set` is enough to write `Set```. A name the module really lacks
+  still gets the old sentence and its nearest match. Specced in
+  `spec/compiler/semantic/iyi_spec.cr` beside the other two mistakes
+  behind "does not export".
+
 - **A module that does not compile was answered with the wrapper around
   the reason.** `iyi mod context` prints one line in place of a module's
   surface when the module cannot be compiled alone, so that line is the

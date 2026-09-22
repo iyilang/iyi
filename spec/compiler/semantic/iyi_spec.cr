@@ -2975,6 +2975,29 @@ describe "Semantic: iyi" do
       error.message.should_not(be_nil).should contain "Did you mean `polite`?"
     end
 
+    # The third mistake behind "has no `X`": a name the module declares at
+    # the *root*. `module std/set` with `class ::Set(T)` inside it is how
+    # twenty-five modules under `src/std` are written, and `import` alone
+    # brings the class — so the answer "nothing by that name is declared
+    # in `std/set`, `pub` or not" was true of the module and wrong about
+    # the program, where `Set` is right there beside `Array`.
+    it "tells a name declared at the root from a name the module lacks" do
+      error = assert_error <<-CODE, "`Bag` is declared at the root by `app/bags`, not as a name of it"
+        module app/bags
+
+        class ::Bag
+          def size : Int32
+            0
+          end
+        end
+
+        module Consumer
+          using app/bags::{Bag}
+        end
+        CODE
+      error.message.should_not(be_nil).should contain "`import app/bags` is enough to write `Bag`"
+    end
+
     it "allows a selective `using` of exported names" do
       # `semantic` rather than `assert_type`: a `module app/greeter` header
       # scopes the whole rest of the source into the module, so the last

@@ -334,6 +334,10 @@ for source in "$REPO"/samples/iyi/*.iyi; do
     status=1
     continue
   fi
+  # The tool prints paths the way the platform spells them, which on
+  # Windows is with `\`; the module paths compared against them are
+  # posix by grammar (R-1). One spelling before the comparison.
+  tr '\\' '/' < "$tree" > "$tree.posix" && mv "$tree.posix" "$tree"
   while read -r module; do
     [ -f "$REPO/samples/iyi/$module.iyi" ] || continue
     if grep -qF "samples/iyi/$module.iyi" "$tree"; then

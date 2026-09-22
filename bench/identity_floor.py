@@ -116,6 +116,10 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # so a module a release deleted was still required. The installer, the
     # Makefile and the gate name it because that is the path on disk.
     (r"`crystal/dwarf\.cr`", "the other library's own file, named as a path"),
+    # The same file, planted by the Windows job's upgrade check under the
+    # prefix `install.ps1` writes: `share\iyi\crystal\crystal\dwarf\...`,
+    # the other library's directory spelled with the platform's separator.
+    (r"share\\iyi\\crystal\\crystal\\dwarf", "the other library's own directory, as the installed path"),
     (r"crystal_front", "the front-end bench binary"),
     (r"CRYSTAL_ONLY", "the list of commands that belong to Crystal"),
     (r"Crystal 1\.", "the upstream version this forked from"),

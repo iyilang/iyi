@@ -759,7 +759,10 @@ if [ -n "$unwritable" ]; then
     "$IYI" migrate tree --out "$unwritable"
   chmod 700 "$WORK/readonly"
 fi
-refuses "a file where --out's directory goes" "and $WORK/bindhere/shard.yml is a file" -- \
+# As the author typed it, like `--lib` and `--mods` above: the expanded
+# path was a different string on Windows — 8.3 names long, separators
+# swapped — from the one on the command line.
+refuses "a file where --out's directory goes" "and bindhere/shard.yml is a file" -- \
   "$IYI" migrate tree --out bindhere/shard.yml
 # The refusal `migrate` was asked for is the one it did not write: nothing
 # under `--out`, and no directory named after the flag.

@@ -36,6 +36,15 @@
 
 ### Fixed
 
+- **`iyi migrate --out` named a path nobody had typed.** Refusing an
+  `--out` that is a file, or a directory it cannot write, it printed the
+  path after `File.expand_path` — on Windows that also expands an 8.3
+  short name and swaps every separator, so `--out C:/Users/RUNNER~1/x`
+  was refused about `C:\Users\runneradmin\x`. It names `--out` as it
+  was written now, the way `bind --lib` and `--mods` already did, and
+  `bench/verbs_exercise.sh` — which pinned the expanded spelling — runs
+  on Windows, where the difference shows.
+
 - **A stack overflow on Windows sometimes said two things.** The fault
   handler wrote the stack-overflow sentence and called `ExitProcess`,
   which runs every loaded DLL's detach callback on the calling thread —

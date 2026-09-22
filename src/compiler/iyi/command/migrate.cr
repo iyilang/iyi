@@ -121,6 +121,11 @@ class Iyi::Command
     abort! "migrate: no such directory: #{src}", :USAGE_ERROR unless Dir.exists?(src)
     out_dir ||= abort!("migrate: --out DIR is where the modules go", :USAGE_ERROR)
     src = File.expand_path(src)
+    # The spelling the author typed, kept for the sentences that name it:
+    # `File.expand_path` on Windows also expands an 8.3 short name and
+    # swaps every separator, so `--out C:/Users/RUNNER~1/x` was refused
+    # about `C:\Users\runneradmin\x`, a path nobody had typed.
+    out_written = out_dir
     out_dir = File.expand_path(out_dir)
     # Writing the modules into the tree being read mixes the two languages
     # in one directory and hands the *next* run its own output as source.
@@ -138,10 +143,10 @@ class Iyi::Command
     # names no flag; and a directory that will not take a file died of
     # the first module's "Permission denied".
     if File.exists?(out_dir) && !Dir.exists?(out_dir)
-      abort! "migrate: --out needs a directory for the modules, and #{out_dir} is a file", :USAGE_ERROR
+      abort! "migrate: --out needs a directory for the modules, and #{out_written} is a file", :USAGE_ERROR
     end
     if Dir.exists?(out_dir) && !File.writable?(out_dir)
-      abort! "migrate: --out #{out_dir} will not take the modules: no permission to write there", :USAGE_ERROR
+      abort! "migrate: --out #{out_written} will not take the modules: no permission to write there", :USAGE_ERROR
     end
 
     # A project root is not a source tree. A shards project keeps its

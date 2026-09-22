@@ -36,6 +36,19 @@
 
 ### Fixed
 
+- **A stack overflow on Windows sometimes said two things.** The fault
+  handler wrote the stack-overflow sentence and called `ExitProcess`,
+  which runs every loaded DLL's detach callback on the calling thread —
+  the thread whose stack had just run out. A second overflow past a
+  guard page already consumed is an access violation, and the same
+  handler then wrote "the program died of a memory fault" under the
+  sentence it had just written. Whether the 16 KB guarantee covered the
+  detaches depended on where the first fault landed, so
+  `bench/panics.sh` saw it once in three runs of the same binary. The
+  handler ends the process with `TerminateProcess` now — nothing unwinds
+  on that stack, the exit code is the same 1 — and the gate runs the
+  overflow a dozen times from one binary, which makes a flake a failure.
+
 - **The language server could not read a Windows file URI.** An editor
   sends `file:///c%3A/Users/x/a.iyi`, and the server chopped the scheme
   off and read `/c:/Users/x/a.iyi` — a path with a root it does not have
@@ -9063,7 +9076,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,940-line library and nothing else. Every other
+  written against iyi's own 15,959-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -434,6 +434,8 @@ end
     fun GetCurrentDirectoryW(buffer_count : Int32, buffer : UInt16*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
+    fun TerminateProcess(process : Void*, exit_code : UInt32) : Int32
+    fun GetCurrentProcess : Void*
   end
 
   # The rest of the kernel32 surface this runtime names: virtual memory,
@@ -8638,6 +8640,23 @@ end
   IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
   IYI_WIN_GUARD_PAGE = -2147483647 # 0x80000001, STATUS_GUARD_PAGE_VIOLATION
 
+  # The exit a fault handler takes. Not `ExitProcess`: that runs every
+  # loaded DLL's detach callback *on the faulting thread's stack*, and the
+  # stack that faulted is the one that ran out — a second overflow past a
+  # guard page already consumed is an access violation, which this same
+  # handler then named a memory fault, after the stack-overflow sentence
+  # it had just written. Whether the guarantee's 16 KB were enough for the
+  # detaches was a matter of where in the reservation the first fault
+  # landed, so `bench/panics.sh` saw it once in three runs. `TerminateProcess`
+  # ends the process without unwinding anything on this stack, and the
+  # exit code is the same 1.
+  def __iyi_win_fault_exit : NoReturn
+    LibC.TerminateProcess(LibC.GetCurrentProcess, 1_u32)
+    # Unreachable: the process is gone. Spelled out because the type says
+    # nothing returns from here and the binding above returns an Int32.
+    LibC.ExitProcess(1)
+  end
+
   fun __iyi_win_fault(info : Void*) : Int32
     record = Pointer(UInt64).new(info.address).value
     code = Pointer(Int32).new(record).value
@@ -8646,7 +8665,7 @@ end
     if code == IYI_WIN_STACK_OVERFLOW
       message = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
       LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
-      LibC.ExitProcess(1)
+      __iyi_win_fault_exit
     end
     if code == IYI_WIN_GUARD_PAGE
       # A guard-page violation on a fiber stack, which is a fiber's stack
@@ -8670,7 +8689,7 @@ end
         if IyiScheduler.fiber_guard_hit?(faulting)
           overflow = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
           LibC.WriteFile(handle, overflow.to_unsafe.as(Void*), overflow.bytesize, pointerof(written), nil)
-          LibC.ExitProcess(1)
+          __iyi_win_fault_exit
         end
       {% end %}
       return 0
@@ -8690,12 +8709,12 @@ end
         if IyiScheduler.fiber_guard_hit?(faulting)
           overflow = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion\n"
           LibC.WriteFile(handle, overflow.to_unsafe.as(Void*), overflow.bytesize, pointerof(written), nil)
-          LibC.ExitProcess(1)
+          __iyi_win_fault_exit
         end
       {% end %}
       message = "iyi: the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory it does not own: if the program uses `Pointer`, that is the place to look. If it does not, it is a bug in iyi's own runtime, and ours to fix: https://github.com/iyilang/iyi/issues\n"
       LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
-      LibC.ExitProcess(1)
+      __iyi_win_fault_exit
     end
     # EXCEPTION_CONTINUE_SEARCH: not one of ours, so whatever Windows would
     # have done with it, it still does.

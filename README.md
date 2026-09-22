@@ -451,18 +451,38 @@ and building a program there, and on darwin by `otool -L` naming nothing
 outside the package but `/usr/lib` and `/System`.
 
 **On Windows the same release is a zip, and the one prerequisite is the
-build tools.** `make -f Makefile.win iyi-zip` writes
-`iyi-0.14.0-windows-x86_64.zip` (26.8 MB) with a `SHA256SUMS` beside it,
-and [`install.ps1`](install.ps1) is `install.sh`'s twin: Windows
-PowerShell 5.1 or newer, `Invoke-WebRequest` and .NET's own zip reader,
-the release's sums checked before anything is unpacked and a mismatch
-refused with nothing written, `IYI_PREFIX` and `IYI_VERSION` honoured the
-same way, and `<prefix>\bin` added to the user's `PATH` without
-disturbing what is already there. What the zip carries is `bin\iyi.exe`,
-the `LLVM-C.dll` the compiler loads, and the same three libraries the
-tarball has; what it does not carry is the daemon, because
-`iyi daemon`'s server loop is `poll(2)` and its worker is `fork`
-(`src/compiler/iyi/command/daemon.cr`), neither of which Windows has.
+build tools.** 0.14.0 is the first release to publish it:
+`iyi-0.14.0-windows-x86_64.zip` (27.0 MB) sits beside the two tarballs,
+written by `make -f Makefile.win iyi-zip` in the run that proved it, with
+its line in the same `SHA256SUMS`. The one-liner at the top runs
+[`install.ps1`](install.ps1), `install.sh`'s twin: Windows PowerShell 5.1
+or newer, `Invoke-WebRequest` and .NET's own zip reader, the release's
+sums checked before anything is unpacked and a mismatch refused with
+nothing written, `IYI_PREFIX` and `IYI_VERSION` honoured the same way,
+and `<prefix>\bin` added to the user's `PATH` without disturbing what is
+already there — the default prefix is `%LOCALAPPDATA%\Programs\iyi`, and
+nothing needs administrator. Saved to disk rather than piped, the script
+is governed by execution policy, so run it as
+`powershell -ExecutionPolicy Bypass -File install.ps1`. By hand it is the
+same two lines, because the zip is relocatable — `bin\` and `share\` at
+its top, exactly like the tarball:
+
+```powershell
+Expand-Archive iyi-0.14.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
+& "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
+```
+
+What the zip carries is `bin\iyi.exe`, the `LLVM-C.dll` the compiler
+loads, and the same three libraries the tarball has, so there is nothing
+to configure and no `IYI_PATH` to set; what it does not carry is the
+daemon, because `iyi daemon`'s server loop is `poll(2)` and its worker is
+`fork` (`src/compiler/iyi/command/daemon.cr`), neither of which Windows
+has. `check`, `vet`, `build`, `test`, `mod context` and `mod diff` run
+there in CI, along with every sample and every runtime exercise, and
+`install.ps1` is gated the way `install.sh` is: the run that built the
+zip installs it, runs the installed copy from a stranger's directory
+under both PowerShell hosts, and then refuses a sum with one hex digit
+wrong.
 
 You need the Visual C++ build tools — the MSVC toolset and the Windows
 SDK, e.g. Visual Studio Build Tools with "Desktop development with C++".

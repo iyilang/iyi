@@ -52,6 +52,61 @@ class Iyi::Command
     USAGE
   end
 
+  # iyi: what each subcommand takes, for a `--help` asked of the
+  # subcommand rather than of `mod`.
+  #
+  # `iyi mod context --help` answered "mod context: unknown flag --help",
+  # which is the one sentence that is certainly wrong: the flag list is
+  # how a harness discovers a verb, AI_FIRST.md §2b names `mod context
+  # --budget N` as one of the loop's seven, and every other verb in this
+  # binary — `check`, `fix`, `test`, `run`, `build`, `doc`, `bind` —
+  # answers `--help` with its usage.
+  private def mod_context_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod context [--json] [--budget N] FILE.iyi
+
+    Print what a change to this module is allowed to know: the exact
+    exported surface of every module FILE.iyi imports, and nothing's body.
+
+    Switches:
+        --json          the same pack as data, one object per import
+        --budget N      cut the text pack to about N tokens by a defined
+                        ladder — docs off from the last import backwards,
+                        then surfaces collapse to a header naming the
+                        module and what eliding it cost. Every import is
+                        named at every budget. A token is four bytes
+    USAGE
+  end
+
+  private def mod_diff_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod diff [--exit-code] OLD.iyimod NEW.iyimod
+
+    Say whether a change reaches this module's consumers, and what changed
+    if it does: interface, implementation, source, and the dependencies it
+    was compiled against.
+
+    Switches:
+        --exit-code     exit 1 when consumers have to be rebuilt, 0 when
+                        they do not — for a branch in a script
+    USAGE
+  end
+
+  private def mod_dump_usage
+    <<-USAGE
+    Usage: #{Command.program_name} mod dump [--declarations | --json] FILE.iyimod
+
+    Print a .iyimod as text: what a module offers a consumer, read back out
+    of the artifact itself.
+
+    Switches:
+        --declarations  the iyi declarations a consumer compiles against,
+                        which is what `import` reads instead of the source
+        --json          the module's exported surface as data: signatures,
+                        types, fields, impls, and the interface hash
+    USAGE
+  end
+
   private def mod_dump
     # Not a flag on the command, because it selects between two whole outputs:
     # the file as it is stored, and the file as the compiler reads it. The
@@ -71,6 +126,9 @@ class Iyi::Command
         declarations = true
       when "--json"
         as_json = true
+      when "--help", "-h"
+        puts mod_dump_usage
+        exit
       when .starts_with?('-')
         abort! "mod dump: unknown flag #{option}", :USAGE_ERROR
       else
@@ -144,6 +202,9 @@ class Iyi::Command
       case option
       when "--exit-code"
         exit_code = true
+      when "--help", "-h"
+        puts mod_diff_usage
+        exit
       when .starts_with?('-')
         abort! "mod diff: unknown flag #{option}", :USAGE_ERROR
       else

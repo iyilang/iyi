@@ -389,6 +389,22 @@
 
 ### Fixed
 
+- **`iyi mod context --help` answered "unknown flag --help".** Every verb
+  in this binary prints its own usage for `--help` — `check`, `fix`,
+  `test`, `run`, `build`, `doc`, `bind`, and `mod` itself — and the three
+  subcommands under `mod` did not. The answer they gave is the one that
+  is certainly wrong: it says the flag does not exist, where what does
+  not exist is the help, and a `--help` is how a harness finds a verb's
+  switches. AI_FIRST.md §2b hands `iyi mod context --budget N` to agents
+  as one of the loop's seven verbs, and nothing on the command line said
+  `--budget` was there.
+
+  `mod context`, `mod diff` and `mod dump` each print their own usage
+  now, naming the switches they read — including what a budget is counted
+  in (a token is four bytes) and that every import is named at every
+  budget. `bench/verbs_exercise.sh` checks all three, and that each usage
+  names its own switches.
+
 - **The words people arrive with.** This fork answers a spelling from
   another language with the spelling it uses — `elif`, `let`, `println`,
   `null` and a dozen more have been met that way — and the list had holes

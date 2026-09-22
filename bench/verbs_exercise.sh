@@ -151,6 +151,29 @@ if "$IYI" help build 2>/dev/null | head -1 | grep -q '^Usage: iyi build'; then
 else
   echo "  help for a verb printed the general usage"; status=1
 fi
+# And a subcommand's own help. `iyi mod context --help` answered "mod
+# context: unknown flag --help", which is the one answer that is
+# certainly wrong: a `--help` is how a harness finds a verb's flags, and
+# AI_FIRST.md §2b hands `mod context --budget N` to agents as one of the
+# loop's seven verbs. `mod diff` and `mod dump` answered the same way.
+for sub in context diff dump; do
+  if "$IYI" mod "$sub" --help 2>/dev/null | head -1 | grep -q "^Usage: .* mod $sub"; then
+    echo "  mod $sub --help is mod $sub's own usage"
+  else
+    echo "  mod $sub --help did not print its usage:"
+    "$IYI" mod "$sub" --help 2>&1 | head -1 | sed 's/^/    /'
+    status=1
+  fi
+done
+# The flags each usage names are the flags each one takes: a usage that
+# forgets a switch is a switch nobody finds.
+if "$IYI" mod context --help 2>/dev/null | grep -q -- "--budget" &&
+   "$IYI" mod diff --help 2>/dev/null | grep -q -- "--exit-code" &&
+   "$IYI" mod dump --help 2>/dev/null | grep -q -- "--declarations"; then
+  echo "  each mod usage names the switches that verb reads"
+else
+  echo "  a mod usage does not name its own switches"; status=1
+fi
 # `repl` was a verb for a while: a session on the macro evaluator, which is
 # the other language's compile-time library, so `"ab" * -3` answered
 # "Negative argument" where this compiler says "negative count: -3". One

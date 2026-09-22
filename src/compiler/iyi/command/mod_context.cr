@@ -40,6 +40,9 @@ class Iyi::Command
         value = options.shift?
         budget = value.try(&.to_i?)
         abort! "--budget takes a token count", :USAGE_ERROR unless budget && budget > 0
+      when "--help", "-h"
+        puts mod_context_usage
+        exit
       when .starts_with?('-')
         abort! "mod context: unknown flag #{option}", :USAGE_ERROR
       else

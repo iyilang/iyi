@@ -564,6 +564,13 @@ module Iyi::Lsp
       # 'r'"), which is neither true nor actionable.
       if id
         case ex
+        when File::NotFoundError
+          # One sentence on every platform. The OS's own is POSIX's "No
+          # such file or directory" on Linux and darwin and "The system
+          # cannot find the file specified." on Windows, so a client — or
+          # a model — reading the answer learned a different fact per
+          # platform about the same mistake.
+          respond_error(id, -32602, "#{ex.file}: No such file or directory")
         when File::Error
           reason = ex.os_error.try(&.message) || "it could not be read"
           respond_error(id, -32602, "#{ex.file}: #{reason}")

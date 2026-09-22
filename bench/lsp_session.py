@@ -32,6 +32,17 @@ import time
 IYI = os.environ.get("IYI", "./bin/iyi")
 
 
+def uri_path(uri):
+    """The filesystem path a `file://` URI names, spelled and cased the
+    way this platform compares paths — the inverse of `file_uri`, for a
+    check that asks whether a target lies under a directory."""
+    from urllib.parse import unquote, urlparse
+    path = unquote(urlparse(uri).path)
+    if os.name == "nt" and len(path) > 2 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return os.path.normcase(os.path.normpath(path))
+
+
 def file_uri(path):
     """The URI an editor would send for *path*: `file:///tmp/x` on POSIX
     and `file:///C:/Users/x` on Windows. `"file://" + path` was the
@@ -1460,7 +1471,11 @@ def main():
         reply = c.send("textDocument/documentLink", {"textDocument": {"uri": pkg_uri}})
         links = reply.get("result") or []
         by_line = {l["range"]["start"]["line"]: l["target"] for l in links}
-        into_cache = [t for t in by_line.values() if pkg_cache in t]
+        # As paths, not strings: `pkg_cache` is a filesystem path and a
+        # target is a URI, which on Windows share no substring at all.
+        cache_dir = os.path.normcase(os.path.normpath(pkg_cache))
+        into_cache = [t for t in by_line.values()
+                      if uri_path(t).startswith(cache_dir + os.sep)]
         beside = [t for t in by_line.values() if t.endswith("/helper.iyi")]
         step(48, "a document link follows a package import into the cache",
              len(links) == 4 and len(into_cache) == 2 and len(beside) == 2,

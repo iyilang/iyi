@@ -634,6 +634,32 @@ else
 fi
 
 echo
+# The two libraries, mixed. `--crystal` gives a program Crystal's standard
+# library (SPEC.md item 12d) and `src/std` is written in iyi against iyi's
+# prelude, so importing one from the other cannot work — and what it
+# answered was `undefined constant IyiFloatText`, an internal name of a
+# prelude this build does not have, pointing into a file the author never
+# opened. An artifact of the same module has been refused by name since
+# IV.5; this is the source it is built from.
+printf 'import std/json\n\nputs 1\n' > std_in_crystal.iyi
+refuses "iyi's std in a build that asked for Crystal's" \
+  "is iyi's standard library" -- "$IYI" check --crystal std_in_crystal.iyi
+# And the two builds it must not touch: the same import without
+# `--crystal`, and a module of the author's own with `--crystal`.
+if "$IYI" check std_in_crystal.iyi > std_ok.log 2>&1; then
+  echo "  the same import without --crystal still compiles"
+else
+  echo "  a plain build of an std import was refused:"; head -3 std_ok.log; status=1
+fi
+mkdir -p mine
+printf 'module mine/util\n\npub def two : Int32\n  2\nend\n' > mine/util.iyi
+printf 'import mine/util\nusing mine/util::{two}\n\nputs two\n' > own_crystal.iyi
+if "$IYI" check --crystal own_crystal.iyi > own_crystal.log 2>&1; then
+  echo "  a module of the author's own is not std, and --crystal takes it"
+else
+  echo "  --crystal refused a module that is not std:"; head -3 own_crystal.log; status=1
+fi
+
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,
 # and every one of them failed the standard the verbs above hold to: `doc`

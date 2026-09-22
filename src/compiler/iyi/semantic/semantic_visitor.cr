@@ -239,6 +239,22 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
                  "directory of the file being built and then from `IYI_PATH`#{hint}"
     end
 
+    # iyi: iyi's own standard library, reached by a program built against
+    # Crystal's. `src/std` is written in iyi and against iyi's prelude, so
+    # a `--crystal` build importing it died on whichever internal name it
+    # reached first — `undefined constant IyiFloatText`, pointed at a line
+    # inside a file the author never opened, about a mixture nothing had
+    # named. An artifact of the same module is already refused with the
+    # sentence below (`check_artifact_matches`, `crystal_library`); this is
+    # that rule for the source it was built from.
+    if artifact_path.nil? && package.nil? && !@program.iyi_prelude? && iyi_std_source?(filename)
+      node.raise "\"#{path}\" is iyi's standard library, and this program is " \
+                 "built against Crystal's (`--crystal`). std is written in iyi " \
+                 "against iyi's prelude, which defines types of the same names " \
+                 "with different layouts, so a program cannot hold both — drop " \
+                 "`--crystal`, or reach Crystal's library the way Crystal does"
+    end
+
     # A package module registers under its canonical path — the requirement's
     # prefix plus the in-package path — so the file is one module however it
     # was reached, and two packages' `util`s are two modules.
@@ -405,6 +421,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     candidates.find do |candidate|
       @program.iyi_file_overrides.has_key?(candidate) || File.file?(candidate)
     end
+  end
+
+  # iyi: whether *filename* is a module of iyi's own standard library — a
+  # file under a `std/` directory that sits beside the prelude those
+  # modules are written against. Asked of the resolved path rather than of
+  # the written one, because `std/json` is only iyi's when that is where
+  # it came from: a project with its own `std/` directory on `IYI_PATH`
+  # names its own modules and gets no sentence about preludes.
+  private def iyi_std_source?(filename : String) : Bool
+    posix = ::Path[filename].to_posix.to_s
+    return false unless index = posix.rindex("/std/")
+    File.file?(File.join(posix[0, index], "iyi", "prelude.iyi"))
   end
 
   # The module paths that exist in the directory a missing import named,

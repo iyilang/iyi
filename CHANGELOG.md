@@ -389,6 +389,23 @@
 
 ### Fixed
 
+- **Importing iyi's std from a `--crystal` build died on an internal
+  name.** `--crystal` gives a program Crystal's standard library (item
+  12d) and `src/std` is written in iyi, against iyi's prelude — so `iyi
+  check --crystal` on a file whose first line is `import std/json`
+  answered `undefined constant IyiFloatText`, an internal name of a
+  prelude that build does not have, pointed at a line in a file the
+  author never opened. An *artifact* of the same module has been refused
+  by name since IV.5 — "a program cannot hold one module of each" — and
+  the source it is built from was not.
+
+  The import says it now: `"std/json" is iyi's standard library, and this
+  program is built against Crystal's`. Only for iyi's own std, found by
+  where it resolved — a project with its own `std/` on `IYI_PATH` names
+  its own modules and hears nothing about preludes — and
+  `bench/verbs_exercise.sh` holds all three cases: the refusal, the same
+  import without `--crystal`, and an author's own module with it.
+
 - **`iyi doc app/greeter` was a usage error.** A module's path *is* its
   file's path (R-1, IV.6) — it is what `import` takes, what `mod context`
   prints as a header, and what every error about a module names — and the

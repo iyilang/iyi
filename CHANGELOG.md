@@ -24,6 +24,18 @@
 
 ### Fixed
 
+- **The language server could not read a Windows file URI.** An editor
+  sends `file:///c%3A/Users/x/a.iyi`, and the server chopped the scheme
+  off and read `/c:/Users/x/a.iyi` — a path with a root it does not have
+  — so every buffer opened on Windows was a file it could not find, and
+  the URIs it built itself, `file://C:\Users\x\a.iyi`, were ones no
+  editor would match. Nothing had asked: `bench/lsp_session.py` ran on
+  Linux and darwin, and its own URIs were `"file://" + path`, the right
+  spelling on POSIX by luck. The server drops the drive's slash and keeps
+  the separators posix, the way the rest of it already spells a Windows
+  path; the gate builds URIs the way an editor does, and the Windows job
+  runs the whole session.
+
 - **`iyi spec` and `iyi eval` sent the reader to a checkout.** Both are
   Crystal's and stay refused, and the refusal ended with "run it with the
   `crystal` binary in this checkout" — true of a developer's tree, false

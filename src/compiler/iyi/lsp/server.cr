@@ -3112,12 +3112,36 @@ module Iyi::Lsp
 
     # ── Paths and the shadow root ────────────────────────────────────────
 
+    # A file URI, both ways. On POSIX the two spellings differ by the
+    # scheme alone: `file:///tmp/a.iyi` is `/tmp/a.iyi`. On Windows they do
+    # not: an editor sends `file:///c%3A/Users/x/a.iyi`, and chopping the
+    # scheme off that leaves `/c:/Users/x/a.iyi`, a path with a root it
+    # does not have — every open there was read from a file that could not
+    # be found, which is what the language server was on the platform the
+    # zip is built for. The drive's slash comes off; the separators stay
+    # posix, which is how the rest of this file already spells a Windows
+    # path (see the glob above and `Compiler.header_root_of`). The way
+    # back puts the third slash in, so a URI this side builds is one the
+    # editor built for the same file.
     private def path_of(uri : String) : String
-      URI.decode(uri.lchop("file://"))
+      path = URI.decode(uri.lchop("file://"))
+      {% if flag?(:win32) %}
+        if path.size > 2 && path[0] == '/' && path[2] == ':'
+          path = path.lchop('/')
+        end
+        path = path.tr("\\", "/")
+      {% end %}
+      path
     end
 
     private def uri_of(path : String) : String
-      "file://" + path
+      {% if flag?(:win32) %}
+        posix = path.tr("\\", "/")
+        return "file:///" + posix if posix.size > 1 && posix[1] == ':'
+        "file://" + posix
+      {% else %}
+        "file://" + path
+      {% end %}
     end
 
     private def text_of(uri : String) : String

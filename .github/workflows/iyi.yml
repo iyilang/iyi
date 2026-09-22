@@ -1745,6 +1745,18 @@ jobs:
         shell: bash
         run: bash bench/init_project.sh
 
+      # The language server, on the platform whose file URIs are not the
+      # path with a scheme in front: an editor sends
+      # `file:///c%3A/Users/x/a.iyi`, and chopping the scheme off left
+      # `/c:/Users/x/a.iyi`, a path with a root it does not have. Every
+      # buffer the server opened on Windows was read from a file it could
+      # not find, and nothing here had ever asked. The exe rather than
+      # `bin/iyi`, which is a shell script, and its path spelled the way
+      # the Windows python the runner carries can start it.
+      - name: The language server holds its session, on Windows
+        shell: bash
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

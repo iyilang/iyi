@@ -22,6 +22,7 @@ semantic tokens, inlay hints, type definition, and formatting.
 
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,14 @@ import tempfile
 import time
 
 IYI = os.environ.get("IYI", "./bin/iyi")
+
+
+def file_uri(path):
+    """The URI an editor would send for *path*: `file:///tmp/x` on POSIX
+    and `file:///C:/Users/x` on Windows. `"file://" + path` was the
+    former by luck and `file://C:\\Users\\x` on Windows, a string no
+    editor sends and the server could not read back."""
+    return pathlib.Path(os.path.abspath(path)).as_uri()
 
 
 def rss_mb(pid):
@@ -184,8 +193,9 @@ def package_fixture(home):
     Returns (path, text, cache) or None where git is not there to make one.
     The cache is warmed here so the server resolves rather than fetches.
     """
-    iyi = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "bin", "iyi")
+    # The same binary the session runs, not `bin/iyi` by its path: that
+    # is a shell script, and Windows cannot start one.
+    iyi = os.path.abspath(IYI)
     env = dict(os.environ)
     lib = os.path.join(home, "work", "liba")
     os.makedirs(lib, exist_ok=True)
@@ -252,12 +262,12 @@ def main():
                 '  name.upcase\nend\n')
     with open(app, "w") as f:
         f.write("module app\n")
-    app_uri = "file://" + app
+    app_uri = file_uri(app)
 
     c = Client()
 
     # 1. initialize
-    reply = c.send("initialize", {"rootUri": "file://" + work,
+    reply = c.send("initialize", {"rootUri": file_uri(work),
                                   "capabilities": {"textDocument": {
                                       "completion": {"completionItem": {
                                           "snippetSupport": True}}}}})
@@ -382,7 +392,7 @@ def main():
     #    follow the rename in app. The verdict is clean because the
     #    import reads the buffer, not the disk — and the disk still says
     #    `shout`, which is the whole claim.
-    greet_uri = "file://" + lib
+    greet_uri = file_uri(lib)
     with open(lib) as f:
         greet_text = f.read()
     c.send("textDocument/didOpen",
@@ -423,7 +433,7 @@ def main():
                    "pub def first : String\n  token\nend\n\nputs first\n")
     with open(parser_path, "w") as f:
         f.write(parser_text)
-    parser_uri = "file://" + parser_path
+    parser_uri = file_uri(parser_path)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": parser_uri, "languageId": "iyi",
                              "version": 1, "text": parser_text}}, wait=False)
@@ -479,7 +489,7 @@ def main():
     #      Its own buffer, opened and never written: a struct with a typed
     #      method is enough to produce a probe, and the session's other
     #      steps assert over `app.iyi` and `greet.iyi` by name.
-    probe_uri = "file://" + os.path.join(work, "probe.iyi")
+    probe_uri = file_uri(os.path.join(work, "probe.iyi"))
     probe_text = ("struct Point\n  getter x : Int32\n\n"
                   "  def initialize(@x : Int32)\n  end\n\n"
                   "  def double : Int32\n    x * 2\n  end\nend\n\n"
@@ -751,7 +761,7 @@ def main():
                 "using example.test/user/lib::{value}\n\nx=value\n")
     with open(pkg_path, "w") as f:
         f.write(pkg_text)
-    pkg_uri = "file://" + pkg_path
+    pkg_uri = file_uri(pkg_path)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
                              "version": 1, "text": pkg_text}}, wait=False)
@@ -784,7 +794,7 @@ def main():
                    "  thing.paint\nend\n\nputs render(Dot.new)\n")
     with open(shapes_path, "w") as f:
         f.write(shapes_text)
-    shapes_uri = "file://" + shapes_path
+    shapes_uri = file_uri(shapes_path)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": shapes_uri, "languageId": "iyi",
                              "version": 1, "text": shapes_text}}, wait=False)
@@ -980,7 +990,7 @@ def main():
                     "pub def show : String\n  token\nend\n\nputs show\n")
     with open(printer_path, "w") as f:
         f.write(printer_text)
-    lexer_uri = "file://" + os.path.join(calc, "lexer.iyi")
+    lexer_uri = file_uri(os.path.join(calc, "lexer.iyi"))
     reply = c.send("textDocument/references",
                    {"textDocument": {"uri": lexer_uri},
                     "position": {"line": 2, "character": 9},
@@ -1043,7 +1053,7 @@ def main():
     with open(os.path.join(work, "lone.iyi"), "w") as f:
         f.write("module lone\n\nstruct Other\n  def area : Int32\n    1\n  end\nend\n\n"
                 "puts Other.new.area\n")
-    base_uri = "file://" + os.path.join(shape, "base.iyi")
+    base_uri = file_uri(os.path.join(shape, "base.iyi"))
     reply = c.send("textDocument/references",
                    {"textDocument": {"uri": base_uri},
                     "position": {"line": 6, "character": 6},
@@ -1061,7 +1071,7 @@ def main():
     scratch_path = os.path.join(work, "scratch.iyi")
     scratch_text = ("module scratch\n\ndef go : String\n  tok\nend\n\n"
                     "puts go\n")
-    scratch_uri = "file://" + scratch_path
+    scratch_uri = file_uri(scratch_path)
     with open(scratch_path, "w") as f:
         f.write(scratch_text)
     c.send("textDocument/didOpen",
@@ -1251,7 +1261,7 @@ def main():
     slow = os.path.join(work, "slow.iyi")
     with open(slow, "w") as f:
         f.write('module slow\n\nputs "started"\nsleep(2000)\nputs "done"\n')
-    slow_uri = "file://" + slow
+    slow_uri = file_uri(slow)
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": slow_uri, "languageId": "iyi",
                              "version": 1, "text": open(slow).read()}},
@@ -1356,7 +1366,7 @@ def main():
              "using calc/lexer::{glyph}\n"
              "import calc/lexer\n\n"
              "puts token\nputs glyph\n")
-    messy_uri = "file://" + messy_path
+    messy_uri = file_uri(messy_path)
     with open(messy_path, "w") as f:
         f.write(messy)
     c.send("textDocument/didOpen",
@@ -1394,8 +1404,8 @@ def main():
     lexer_path = os.path.join(calc, "lexer.iyi")
     scanner_path = os.path.join(calc, "scanner.iyi")
     reply = c.send("workspace/willRenameFiles",
-                   {"files": [{"oldUri": "file://" + lexer_path,
-                               "newUri": "file://" + scanner_path}]})
+                   {"files": [{"oldUri": file_uri(lexer_path),
+                               "newUri": file_uri(scanner_path)}]})
     changes = (reply["result"] or {}).get("changes", {})
     touched = sorted(u.rsplit("/", 1)[-1] for u in changes)
 
@@ -1410,7 +1420,7 @@ def main():
 
     with open(lexer_path) as f:
         lexer_text = f.read()
-    moved = apply(lexer_text, changes.get("file://" + lexer_path, []))
+    moved = apply(lexer_text, changes.get(file_uri(lexer_path), []))
     with open(scanner_path, "w") as f:
         f.write(moved)
     os.remove(lexer_path)
@@ -1440,7 +1450,7 @@ def main():
     pkg = package_fixture(pkg_home)
     if pkg:
         pkg_path, pkg_text, pkg_cache = pkg
-        pkg_uri = "file://" + pkg_path
+        pkg_uri = file_uri(pkg_path)
         c.send("textDocument/didOpen",
                {"textDocument": {"uri": pkg_uri, "languageId": "iyi",
                                  "version": 1, "text": pkg_text}}, wait=False)
@@ -1482,7 +1492,7 @@ def main():
          json.dumps(parse_error)[:80])
 
     reply = c.send("textDocument/hover", {
-        "textDocument": {"uri": "file://" + os.path.join(work, "nope.iyi")},
+        "textDocument": {"uri": file_uri(os.path.join(work, "nope.iyi"))},
         "position": {"line": 0, "character": 0}})
     step(51, "a file the client named that is not there is invalid params",
          reply.get("error", {}).get("code") == -32602

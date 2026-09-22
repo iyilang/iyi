@@ -284,6 +284,21 @@ describe "Semantic: iyi" do
       assert_error "x = null", "`nil` is the spelling here"
     end
 
+    # The names Python, JavaScript, Rust and Java write for values,
+    # containers and methods this language has under other names. Each of
+    # these arrived as `undefined constant X` or `undefined method X`,
+    # which is true and says nothing about what to write instead — and for
+    # a method on a prelude type, as the library's size rule, which is a
+    # sentence about policy where the reader needed a spelling.
+    it "names the spelling for a value, a container, a method and `new`" do
+      assert_error "x = None", "`nil` is the spelling here"
+      assert_error "x = True", "`true` is lowercase here"
+      assert_error "xs : List(Int32) = [1]", "`Array(T)` is the name here"
+      assert_error "puts \"abc\".length", "`size` is the spelling here"
+      assert_error "puts \"abc\".filter", "`select` is the spelling here"
+      assert_error "throw \"bad\"", "`raise \"why\"` is the spelling here"
+    end
+
     it "says the prelude's size rule for a method a prelude type lacks" do
       assert_error <<-CODE, "iyi's prelude has no `split` on String: it is small by rule"
         "a,b".split(",")

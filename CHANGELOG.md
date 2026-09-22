@@ -389,6 +389,35 @@
 
 ### Fixed
 
+- **The words people arrive with.** This fork answers a spelling from
+  another language with the spelling it uses — `elif`, `let`, `println`,
+  `null` and a dozen more have been met that way — and the list had holes
+  where the most common arrivals are. Each of these was `undefined
+  constant X`, `undefined method X`, or worse:
+
+  * `for i in 0..3` answered **"unexpected 'in': no `case` is open for
+    it"**, naming a construct the file does not contain, because `in` is
+    a keyword `case` owns. It names the loop now: `(0..3).each do |i| ...
+    end`, and `xs.each` for a collection.
+  * `pub fn greet() -> String` answered ``can't apply `pub` to fn``. A
+    bare `fn` has been met since the verbs gate was written; the `pub`
+    form is the one Rust actually writes.
+  * `None`, `True`, `False`, `List`, `Vec`, `Dict`, `Map` and `Set` — the
+    values and containers Python, Rust, Java and JavaScript name — each
+    answer with this language's: `nil`, `true`, `Array(T)`, `Hash(K, V)`,
+    and `Set(T)` with the import that brings it.
+  * `new Array(Int32)`, `throw`, `catch`, `range` and `echo` answer with
+    `Array(Int32).new`, `raise "why"`, III.1's "an error is a value",
+    `(0...3)` and `puts`.
+  * `length`, `filter`, `append`, `push`, `toString` and `parseInt` on a
+    receiver answered with the prelude's size rule — true, and silent
+    about the name three characters away. They answer `size`, `select`,
+    `<<`, `to_s` and `to_i`.
+
+  Specced beside the arrivals that were already there, in
+  `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/semantic/iyi_spec.cr`.
+
 - **A `using` for a name a module declares at the root was refused as a
   typo.** `src/std/set.iyi` is `module std/set` with `class ::Set(T)`
   inside it: the `::` puts the class beside `Array` and `String`, so

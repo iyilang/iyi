@@ -445,6 +445,16 @@ module Iyi
     assert_syntax_error "let LIMIT = 10\n", "there is no `let`: a constant is `LIMIT = ...`"
     assert_syntax_error "module kit/all\n\npub const LIMIT = 10\n",
       "there is no `const`: a constant is `LIMIT = ...`"
+    # And the loop everywhere else. `in` is a keyword `case` owns, so a
+    # `for` line ended on "unexpected 'in': no `case` is open for it",
+    # naming a construct nobody had typed.
+    assert_syntax_error "for i in 0..3\n  puts i\nend\n",
+      "`for` at line 1 is a call here, not a keyword - a range iterates with `(0..3).each do |i| ... end`"
+    # And Rust's, which is the spelling this fork is closest to: a bare
+    # `fn` has been met since the verbs gate, `pub fn` answered "can't
+    # apply `pub` to fn".
+    assert_syntax_error "module kit/all\n\npub fn greet() : String\n  \"hi\"\nend\n",
+      "there is no `fn`: a function is `pub def name(args) : Type`"
 
     # #5856
     assert_syntax_error "def foo=(a,b); end", "setter method 'foo=' cannot have more than one parameter"

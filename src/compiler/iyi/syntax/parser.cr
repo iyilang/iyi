@@ -116,6 +116,14 @@ module Iyi
         when Keyword::ELSE, Keyword::ELSIF
           raise "unexpected '#{@token}': no `if` is open for it", @token
         when Keyword::WHEN, Keyword::IN
+          # iyi: `in` with no `case` open is usually not a `case` at all.
+          # `for i in 0..3` is the loop every other language writes, and
+          # the answer it drew named a construct nobody had typed.
+          if (lookalike = @iyi_for_lookalike) && @token.value == Keyword::IN
+            raise "unexpected 'in': `for` at line #{lookalike[1].try(&.line_number)} is a call here, " \
+                  "not a keyword - a range iterates with `(0..3).each do |i| ... end` and a " \
+                  "collection with `xs.each do |x| ... end`", @token
+          end
           raise "unexpected '#{@token}': no `case` is open for it", @token
         else
           # Not a keyword with a construct to belong to.
@@ -2424,6 +2432,16 @@ module Iyi
             raise "there is no `#{@token}`: a constant is `LIMIT = ...`, " \
                   "uppercase is what makes it one, and `pub LIMIT = ...` " \
                   "is how a module exports it (SPEC.md R-2)",
+              @token.line_number, @token.column_number
+          end
+          # And the word Rust writes here, which is the language this fork
+          # is closest to in spelling: `pub fn greet() -> String` answered
+          # "can't apply `pub` to fn", where a bare `fn` has been met with
+          # the sentence below since the verbs gate was written.
+          if @token.type.ident? && @token.value.to_s.in?("fn", "func", "function")
+            raise "there is no `#{@token}`: a function is " \
+                  "`pub def name(args) : Type`, and the return type follows " \
+                  "a colon rather than an arrow",
               @token.line_number, @token.column_number
           end
           raise "can't apply `pub` to #{@token}", @token.line_number, @token.column_number
@@ -5534,6 +5552,13 @@ module Iyi
           @iyi_def_lookalike = {name, name_location}
         end
 
+        # iyi: `for i in 0..3` is a call to `for` with a variable for its
+        # argument, and the `in` after it is a keyword `case` owns.
+        if !is_var && !has_parentheses && name == "for" && args.try(&.first?).is_a?(Var | Call) &&
+           @iyi_for_lookalike.nil?
+          @iyi_for_lookalike = {name, name_location}
+        end
+
         # iyi: `const LIMIT = 10` is a call to `const` whose argument is an
         # assignment to a constant, so it parses, and the answer it drew
         # was the semantic's `can't declare constant dynamically` — true of
@@ -7751,6 +7776,12 @@ module Iyi
     # with a call for its argument - `fn f(x : Int32)` - and where. It
     # is what a stray `end` or a `: Type` after the parenthesis is about.
     @iyi_def_lookalike : {String, Location?}?
+
+    # iyi: the first `for` parsed as a command call — `for i in 0..3` — and
+    # where. `in` is a keyword `case` uses, so what the parser met was a
+    # keyword with no construct open and it said so: "unexpected 'in': no
+    # `case` is open for it", about a line with no `case` anywhere near it.
+    @iyi_for_lookalike : {String, Location?}?
 
     def unexpected_token_in_atomic
       # iyi: the file ending inside a literal or a call is what

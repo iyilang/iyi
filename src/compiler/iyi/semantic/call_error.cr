@@ -152,6 +152,18 @@ module Iyi
     "Int32::MIN" => "There is no `Int32::MIN`: the edges are the literals, -2147483648 and 2147483647, and arithmetic past them panics rather than wrapping.",
     "Int64::MAX" => "There is no `Int64::MAX`: the edge is the literal, 9223372036854775807_i64, and arithmetic past it panics rather than wrapping.",
     "Int64::MIN" => "There is no `Int64::MIN`: the edge is the literal, -9223372036854775808_i64, and arithmetic past it panics rather than wrapping.",
+    # The names Python, JavaScript, Rust and Java write for values and
+    # containers this language has under other names. Each one arrived as
+    # `undefined constant X`, which is true and says nothing about what to
+    # write instead.
+    "None"  => "`nil` is the spelling here, and a value that may be nil is `T?`.",
+    "True"  => "`true` is lowercase here.",
+    "False" => "`false` is lowercase here.",
+    "List"  => "`Array(T)` is the name here: `xs : Array(Int32) = [1, 2]`.",
+    "Vec"   => "`Array(T)` is the name here: `xs : Array(Int32) = [1, 2]`.",
+    "Dict"  => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "Map"   => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "Set"   => "`Set(T)` comes with `import std/set`; it is declared at the root, so the import alone is enough to write `Set(Int32).new`.",
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
@@ -175,6 +187,12 @@ module Iyi
     "int"     => "`.to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
     "input"   => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no `input`.",
     "null"    => "`nil` is the spelling here, and it is a type: a value that may be nil is `T?`.",
+    # The words that open a failure, a container or a loop somewhere else.
+    "new"   => "There is no `new` keyword: the type answers it — `Array(Int32).new`, `Point.new(1)`.",
+    "throw" => "`raise \"why\"` is the spelling here, and it panics rather than unwinding to a handler (SPEC.md III.1.4).",
+    "catch" => "iyi has no exceptions to catch: an error is a value the caller handles, and `!` propagates it (SPEC.md III.1, III.1.7a).",
+    "range" => "A range is written `(0...3)` — `...` excludes the end, `..` includes it — and `(0...3).each do |i| ... end` iterates it.",
+    "echo"  => "`puts` is the spelling here; it ends the line.",
   }
 
   # A method called on a receiver in Crystal's spelling, and
@@ -186,6 +204,15 @@ module Iyi
     "/"           => "Integer division is `//` here (`7 // 2` is 3); `/` is the floats' and answers a `Float64` only for them.",
     "%"           => "`%` on a String is a format string, and it comes with `import std/format` (`printf`, `sprintf` and `String#%`).",
     "gets_to_end" => "`read_all` reads the rest of an IO here; `gets` reads a line.",
+    # The spellings other languages give the methods this prelude has. The
+    # sentence they drew was the library's size rule — true, and silent
+    # about the name three characters away.
+    "length"   => "`size` is the spelling here: `xs.size`, `s.size`.",
+    "filter"   => "`select` is the spelling here: `xs.select { |x| x > 1 }`.",
+    "append"   => "`<<` appends here: `xs << 2`, and it answers the collection.",
+    "push"     => "`<<` appends here: `xs << 2`, and it answers the collection.",
+    "toString" => "`to_s` is the spelling here: `1.to_s`.",
+    "parseInt" => "`to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
     # `Array#sum` asks the element type for its zero, because an empty
     # array has no element to ask. A type that is not a number has none,
     # and the sentence a person is missing is what to use instead.

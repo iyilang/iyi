@@ -389,6 +389,24 @@
 
 ### Fixed
 
+- **The formatter rewrote every line of a CRLF file.** `iyi tool format`
+  emits `\n`, and it wrote that back over whatever it read: a file with
+  CRLF endings came back with all of its lines changed, from a command
+  asked to fix an indent — on the platform this fork builds, ships and
+  tests a binary for. `--check` said the same thing in the least useful
+  way available: ``formatting './x.iyi' produced changes`` about a file
+  whose code was already formatted, naming neither the line endings nor
+  the reason, so a Windows developer's branch failed on a difference the
+  message never mentioned.
+
+  `iyi fix` has always kept them — it splices an edit into the bytes it
+  read — so two verbs over the same file disagreed about what a line ends
+  with, and the one that disagreed was the one rewriting the whole file.
+  The formatter writes back the endings the file had, decided by the
+  first one in it, which is `rustfmt`'s `newline_style = Auto`. Specced in
+  `spec/compiler/iyi/tools/format_spec.cr`: a CRLF file is formatted and
+  stays CRLF, and a formatted CRLF file passes `--check` in silence.
+
 - **`iyi mod context --help` answered "unknown flag --help".** Every verb
   in this binary prints its own usage for `--help` — `check`, `fix`,
   `test`, `run`, `build`, `doc`, `bind`, and `mod` itself — and the three

@@ -139,6 +139,36 @@ describe Iyi::Command::FormatCommand do
     end
   end
 
+  # iyi: the file's own line endings survive it. The formatter emits `\n`,
+  # so a CRLF file used to come back with every line changed — a whole-file
+  # diff for a command asked to fix indentation, on a platform this fork
+  # ships a binary for — and `--check` called a file whose code was already
+  # formatted "produced changes" without naming the lines or the reason.
+  # `iyi fix` splices into the bytes it read and has always kept them.
+  it "formats files (keeps CRLF, and says nothing about a formatted one)" do
+    stdin = IO::Memory.new ""
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+
+    with_tempdir do
+      File.write "crlf.cr", "if true\r\n1\r\nend\r\n"
+      File.write "done.cr", "if true\r\n  1\r\nend\r\n"
+
+      format_command = Iyi::Command::FormatCommand.new([] of String, color: false, stdin: stdin, stdout: stdout, stderr: stderr)
+      format_command.run
+      format_command.status_code.should eq(0)
+
+      File.read("crlf.cr").should eq("if true\r\n  1\r\nend\r\n")
+      File.read("done.cr").should eq("if true\r\n  1\r\nend\r\n")
+      stdout.to_s.should_not contain("Format #{Path[".", "done.cr"]}")
+
+      check = Iyi::Command::FormatCommand.new([] of String, check: true, color: false, stdin: stdin, stdout: IO::Memory.new, stderr: (checked = IO::Memory.new))
+      check.run
+      check.status_code.should eq(0)
+      checked.to_s.should be_empty
+    end
+  end
+
   it "formats files (dir)" do
     stdin = IO::Memory.new ""
     stdout = IO::Memory.new

@@ -183,6 +183,23 @@ class Iyi::Command
 
     private def format_source(filename, source)
       result = format(filename, source)
+
+      # iyi: written back with the line endings the file had. The formatter
+      # emits `\n`, so a CRLF file came back with every one of its lines
+      # changed — a diff of the whole file for a tool that was asked to fix
+      # its indentation, on the platform this fork ships a binary for. And
+      # `--check` said "produced changes" about a file whose code was
+      # already formatted, naming neither the lines nor the reason.
+      #
+      # `iyi fix` has always kept them: it splices an edit into the bytes it
+      # read. Two verbs over the same file disagreed about what a line ends
+      # with, and this is the one that was rewriting.
+      #
+      # The first line ending in the file decides, which is `rustfmt`'s
+      # `newline_style = Auto`. Normalised before it is applied so that a
+      # raw CR already in the text cannot become `\r\r\n`.
+      result = result.gsub("\r\n", "\n").gsub('\n', "\r\n") if iyi_crlf?(source)
+
       @stdout.print result if @format_stdin
       return if result == source
 
@@ -217,6 +234,14 @@ class Iyi::Command
         print_error "there's a bug formatting '#{filename}', to show more information, please run:\n\n  $ #{File.basename(PROGRAM_NAME)} tool format --show-backtrace #{@format_stdin ? "-" : "'#{filename}'"}\n"
       end
       @status_code = 1
+    end
+
+    # iyi: whether this text's lines end with CRLF, decided by the first
+    # line ending in it — a file is one thing or the other, and asking the
+    # first is deterministic where counting is a tie away from surprising.
+    private def iyi_crlf?(source : String) : Bool
+      return false unless index = source.index('\n')
+      index > 0 && source[index - 1] == '\r'
     end
 
     # This method is for mocking `Iyi.format` in test.

@@ -203,6 +203,17 @@ grep -q 'the checkout hashes to' mutated.log || {
 # is hashed as the link now, which is git's own model — the target text is
 # what a repository stores for one — so the cycle is an entry rather than a
 # descent, and retargeting the link is a change the sum notices.
+# Not on Windows: Git Bash's `ln -s` needs Developer Mode or an
+# administrator to make a real link, and without one it copies or fails —
+# so the fixture this step needs cannot be built there, and a step that
+# cannot build its fixture proves nothing. Said, not skipped in silence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) symlinks=no ;;
+  *) symlinks=yes ;;
+esac
+if [ "$symlinks" = no ]; then
+  step "a package with a symbolic link: not on this platform (ln -s cannot make one here)"
+else
 step "a package with a symbolic link is hashed, cycle and all"
 mkrepo work/linked
 printf 'module example.test/user/linked
@@ -254,6 +265,7 @@ grep -q 'is not what it was' retarget.log || {
   tail -5 retarget.log
   exit 1
 }
+fi
 
 # ── 5c. What `--emit-iyimod` writes, and what it leaves to the sum ────────
 # An artifact carries what the consuming build reached, so the one this

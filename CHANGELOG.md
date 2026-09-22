@@ -58,8 +58,16 @@
   Linux and darwin, and its own URIs were `"file://" + path`, the right
   spelling on POSIX by luck. The server drops the drive's slash and keeps
   the separators posix, the way the rest of it already spells a Windows
-  path; the gate builds URIs the way an editor does, and the Windows job
-  runs the whole session.
+  path — the platform's own separators, because that path is the key an
+  unsaved buffer's override is filed under and the compiler spells the
+  joint of a resolved `import` with `\`: kept posix, the key matched
+  nothing and the sibling the editor had just edited was read off the
+  disk (step 9, the first time the session ran on Windows). And an open
+  buffer is found by the path the compiler names rather than by a URI
+  rebuilt from it: VS Code writes the drive's colon as `%3A` and a space
+  as `%20`, so `@documents[uri_of(path)]` matched nothing an editor had
+  opened, on any platform. The gate builds URIs the way an editor does,
+  and the Windows job runs the whole session.
 
 - **`iyi spec` and `iyi eval` sent the reader to a checkout.** Both are
   Crystal's and stay refused, and the refusal ended with "run it with the

@@ -1176,7 +1176,7 @@ module Iyi::Lsp
     # The `#` lines immediately above a definition — the doc comment,
     # rendered as the markdown it already is.
     private def doc_above(filename : String, line : Int32) : String
-      text = @documents[uri_of(filename)]? || (File.file?(filename) ? File.read(filename) : "")
+      text = document_text(filename) || (File.file?(filename) ? File.read(filename) : "")
       lines = text.lines
       docs = [] of String
       index = line - 2
@@ -1253,7 +1253,7 @@ module Iyi::Lsp
     end
 
     private def read_line(filename : String, line : Int32) : String
-      text = @documents[uri_of(filename)]? || (File.file?(filename) ? File.read(filename) : "")
+      text = document_text(filename) || (File.file?(filename) ? File.read(filename) : "")
       text.lines[line - 1]? || ""
     end
 
@@ -1997,7 +1997,7 @@ module Iyi::Lsp
 
       results = [] of {String, Int32, String, Int32, Int32, Int32, String?}
       paths.each do |file|
-        text = @documents[uri_of(file)]? || (File.file?(file) ? File.read(file) : nil)
+        text = document_text(file) || (File.file?(file) ? File.read(file) : nil)
         next unless text
         collect_workspace_symbols(Outline.build(text, file), file, text.lines, query, nil, results)
         break if results.size >= 400
@@ -2378,7 +2378,7 @@ module Iyi::Lsp
         new_path = path_of(file["newUri"].as_s)
         next unless old_path.ends_with?(".iyi") && new_path.ends_with?(".iyi")
 
-        text = @documents[uri_of(old_path)]? || (File.file?(old_path) ? File.read(old_path) : nil)
+        text = document_text(old_path) || (File.file?(old_path) ? File.read(old_path) : nil)
         next unless text
         old_mod = Exports.header_of(text)
         next unless old_mod
@@ -2608,7 +2608,7 @@ module Iyi::Lsp
       return respond_null(id) unless key
 
       file = key[0]
-      text = @documents[uri_of(file)]? || (File.file?(file) ? File.read(file) : nil)
+      text = document_text(file) || (File.file?(file) ? File.read(file) : nil)
       return respond_null(id) unless text
 
       visitor = @analysis.outgoing_calls_at(file, text, overrides_for(file), key)
@@ -2858,7 +2858,7 @@ module Iyi::Lsp
       context = data.try(&.["context"]?).try(&.as_s?)
       return respond_null(id) unless name && context
 
-      text = @documents[uri_of(context)]? || (File.file?(context) ? File.read(context) : nil)
+      text = document_text(context) || (File.file?(context) ? File.read(context) : nil)
       return respond_null(id) unless text
 
       sites = yield context, text, name
@@ -3118,18 +3118,22 @@ module Iyi::Lsp
     # scheme off that leaves `/c:/Users/x/a.iyi`, a path with a root it
     # does not have — every open there was read from a file that could not
     # be found, which is what the language server was on the platform the
-    # zip is built for. The drive's slash comes off; the separators stay
-    # posix, which is how the rest of this file already spells a Windows
-    # path (see the glob above and `Compiler.header_root_of`). The way
-    # back puts the third slash in, so a URI this side builds is one the
-    # editor built for the same file.
+    # zip is built for. The drive's slash comes off, and the separators
+    # become the platform's own: the path this hands back is the key an
+    # unsaved buffer's override is filed under, and the compiler builds
+    # the path an `import` resolves to with `File.join`, which spells the
+    # joint with `\` — a key kept posix matched nothing, and the sibling
+    # the editor had just edited was read off the disk instead (step 9 of
+    # `bench/lsp_session.py`, the first time it ran on Windows). The way
+    # back turns the separators around and puts the third slash in, so a
+    # URI this side builds is one the editor built for the same file.
     private def path_of(uri : String) : String
       path = URI.decode(uri.lchop("file://"))
       {% if flag?(:win32) %}
         if path.size > 2 && path[0] == '/' && path[2] == ':'
           path = path.lchop('/')
         end
-        path = path.tr("\\", "/")
+        path = path.tr("/", "\\")
       {% end %}
       path
     end
@@ -3168,6 +3172,25 @@ module Iyi::Lsp
     # Every open buffer except the one being compiled, keyed by the path
     # its file would have — the compiler reads these before the disk, so
     # cross-module answers see unsaved edits.
+    # An open buffer's text by the *path* the compiler names, not by a URI
+    # rebuilt from it. The client keys a document by the URI it sent, and
+    # the spelling is the client's: VS Code writes the drive's colon as
+    # `%3A` and a space as `%20`, so `@documents[uri_of(path)]` matched
+    # nothing an editor had opened and the disk was read instead of the
+    # buffer. Every open document is decoded and compared as a path, and
+    # on Windows without regard to case, which is what the filesystem does.
+    private def document_text(filename : String) : String?
+      @documents.each do |uri, text|
+        doc_path = path_of(uri)
+        {% if flag?(:win32) %}
+          return text if doc_path.compare(filename, case_insensitive: true) == 0
+        {% else %}
+          return text if doc_path == filename
+        {% end %}
+      end
+      nil
+    end
+
     private def overrides_for(path : String) : Hash(String, String)
       overrides = {} of String => String
       @documents.each do |uri, text|

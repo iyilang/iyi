@@ -389,6 +389,31 @@
 
 ### Fixed
 
+- **The context pack did not carry what a facade hands on.** `pub import`
+  is a promise to the consumer: a file that imports a facade may `using`
+  the module the facade re-exported, with no import of its own (R-2b).
+  `iyi mod context` listed the file's own import lines and stopped, so a
+  program that compiles — `import facade`, `using deep/core::{core_value}`
+  — was grounded with a pack that never mentioned `deep/core`. A model
+  reading it sees a name it cannot find declared anywhere and "fixes"
+  working code.
+
+  Every module the consumer may name is in the pack now, breadth-first
+  through the `pub import` edges the artifacts already carried, each
+  marked with the facade that hands it on:
+
+      ── import facade → deep/core (re-exported) ──
+      # A file that uses this writes, after its own `module` line:
+      #   import facade
+      #   using deep/core::{core_value}
+
+  The import line is the facade's, because that is the edge the language
+  needs — telling the reader to import the module directly would be
+  telling them to add one it does not. `--json` carries `via`, the budget
+  ladder cuts these blocks like any other, and `bench/mod_context.sh`
+  fails when the re-exported surface or the line that reaches it is
+  missing.
+
 - **Importing iyi's std from a `--crystal` build died on an internal
   name.** `--crystal` gives a program Crystal's standard library (item
   12d) and `src/std` is written in iyi, against iyi's prelude — so `iyi

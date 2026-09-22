@@ -21,6 +21,60 @@ require "file_utils"
 require "../mod/installer"
 
 class Iyi::Command
+  # One import's block in the pack: what the file wrote, the surface it
+  # resolved to, why it did not, and — for a module handed on by a
+  # facade's `pub import` — the import that hands it on.
+  alias ContextBlock = {String, IyiMod::Artifact?, String, String?}
+
+  # `── import app/thing ──`, and for a re-export the facade it came
+  # through, because that is the line a reader has to write to reach it.
+  private def mod_context_header(written : String, via : String?) : String
+    return "── import #{written} ──" unless via
+    "── import #{via} → #{written} (re-exported) ──"
+  end
+
+  # iyi: the modules a facade hands on. `pub import` is a promise to the
+  # consumer — a file that imports the facade may `using` the module the
+  # facade re-exported, without an import of its own (R-2b) — and the pack
+  # showed only what the file's own import lines named. So a consumer
+  # reading its context saw a facade with two functions on it, wrote
+  # `using deep/core::{core_value}` anyway because the compiler accepts
+  # it, and had no way to learn what `deep/core` offered. Every module the
+  # consumer may name is in the pack now, marked with the facade that
+  # hands it on, and the budget ladder cuts them like any other block.
+  #
+  # Breadth-first and by module name, so a facade of a facade arrives once
+  # and a cycle cannot spin: the artifacts are the ones each block's own
+  # compile already emitted into the same directory.
+  private def mod_context_reexports(blocks : Array(ContextBlock), emit_dir : String, artifact_root : String) : Nil
+    seen = Set(String).new(blocks.map(&.[0]))
+    index = 0
+    while index < blocks.size
+      written, artifact, _, _ = blocks[index]
+      index += 1
+      next unless artifact
+      artifact.imports.each do |edge|
+        next unless edge.exported
+        next unless seen.add?(edge.module_name)
+        handed = mod_context_emitted(edge.module_name, emit_dir) ||
+                 mod_context_artifact(edge.module_name, artifact_root)
+        next unless handed
+        blocks << {edge.module_name, handed, "", written}
+      end
+    end
+  end
+
+  # An artifact this run's own compiles wrote: `--emit-iyimod DIR` names a
+  # file after the module path, so a re-exported module is already on disk
+  # by the time the facade's block is read back.
+  private def mod_context_emitted(name : String, emit_dir : String) : IyiMod::Artifact?
+    path = Iyi.native_path(File.join(emit_dir, "#{name}.iyimod"))
+    return nil unless File.file?(path)
+    IyiMod.read(path)
+  rescue IyiMod::Error
+    nil
+  end
+
   private def mod_context
     # Read from either side of the path, and refuse what is left over. The
     # loop used to stop at the first word that was not a flag, so
@@ -88,9 +142,11 @@ class Iyi::Command
       # header's path names the root above both, and that is where a
       # workspace keeps `mods`.
       artifact_root = Compiler.header_root_of(filename, File.read(filename)) || entry_dir
-      blocks = imports.map do |written|
-        mod_context_block(written, entry_dir, table, emit_dir, artifact_root)
+      blocks = [] of ContextBlock
+      imports.each do |written|
+        blocks << mod_context_block(written, entry_dir, table, emit_dir, artifact_root)
       end
+      mod_context_reexports(blocks, emit_dir, artifact_root)
 
       if as_json
         JSON.build(STDOUT) do |json|
@@ -98,9 +154,10 @@ class Iyi::Command
             json.field "file", filename
             json.field "imports" do
               json.array do
-                blocks.each do |(written, artifact, failure)|
+                blocks.each do |(written, artifact, failure, via)|
                   json.object do
                     json.field "import", written
+                    json.field "via", via if via
                     if artifact
                       json.field "api" { IyiMod.api_json(artifact, json) }
                     else
@@ -119,10 +176,10 @@ class Iyi::Command
         if blocks.empty?
           puts "#{filename} imports nothing; its context is the prelude."
         end
-        blocks.each do |(written, artifact, failure)|
-          puts "── import #{written} ──"
+        blocks.each do |(written, artifact, failure, via)|
+          puts mod_context_header(written, via)
           if artifact
-            print mod_context_consumer_lines(written, artifact)
+            print mod_context_consumer_lines(written, artifact, via)
             IyiMod.surface artifact, STDOUT
           else
             puts "  (#{failure})"
@@ -145,18 +202,18 @@ class Iyi::Command
   # the commentary), then whole surfaces collapse to a header that names
   # the module and what eliding it cost. Every import is always named:
   # a pack that silently dropped an import would ground a wrong edit.
-  private def mod_context_budgeted(blocks : Array({String, IyiMod::Artifact?, String}), budget : Int32) : Nil
+  private def mod_context_budgeted(blocks : Array(ContextBlock), budget : Int32) : Nil
     if blocks.empty?
       puts "(imports nothing; the context is the prelude)"
       return
     end
 
-    render = ->(block : {String, IyiMod::Artifact?, String}, docs : Bool) do
-      written, artifact, failure = block
+    render = ->(block : ContextBlock, docs : Bool) do
+      written, artifact, failure, via = block
       String.build do |io|
-        io << "── import " << written << " ──\n"
+        io << mod_context_header(written, via) << '\n'
         if artifact
-          io << mod_context_consumer_lines(written, artifact)
+          io << mod_context_consumer_lines(written, artifact, via)
           IyiMod.surface artifact, io, docs: docs
         else
           io << "  (" << failure << ")\n"
@@ -178,9 +235,9 @@ class Iyi::Command
 
     (blocks.size - 1).downto(0) do |index|
       break if total <= budget
-      written = blocks[index][0]
+      written, _, _, via = blocks[index]
       cost = tokens.call(texts[index])
-      header = "── import #{written} ── (surface elided: ~#{cost} tokens; raise --budget to see it)\n\n"
+      header = "#{mod_context_header(written, via)} (surface elided: ~#{cost} tokens; raise --budget to see it)\n\n"
       total -= cost - tokens.call(header)
       texts[index] = header
     end
@@ -198,7 +255,7 @@ class Iyi::Command
   # called `before_all` bare, and was refused for the missing `using`
   # (AI_FIRST.md §5, the third run). The language server's completion
   # attaches the same pair to every export it offers.
-  private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact) : String
+  private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact, via : String? = nil) : String
     names = artifact.exports.functions.map(&.name)
     artifact.exports.types.each do |declaration|
       names << declaration.name if declaration.visibility == "pub"
@@ -206,7 +263,11 @@ class Iyi::Command
     names.uniq!
     String.build do |io|
       io << "# A file that uses this writes, after its own `module` line:\n"
-      io << "#   import " << written << '\n'
+      # A module handed on by a facade is reached by importing the facade:
+      # `pub import` is what makes the name reachable without an import of
+      # its own (R-2b), and telling the reader to import it directly would
+      # be telling them to add an edge the language does not need.
+      io << "#   import " << (via || written) << '\n'
       unless names.empty?
         io << "#   using " << written << "::{"
         names.join(io, ", ")
@@ -251,7 +312,7 @@ class Iyi::Command
   # in-package path, so a package's surface is produced without a manifest
   # — which is the point: the module compiles alone (R-1), and this is that
   # fact worn as a tool.
-  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String, artifact_root : String) : {String, IyiMod::Artifact?, String}
+  private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String, artifact_root : String) : ContextBlock
     source_path, expected_name = mod_context_resolve(written, entry_dir, table)
     unless source_path
       # No source anywhere, which is how a library arrives (III.7): the
@@ -261,9 +322,9 @@ class Iyi::Command
       # imports do not resolve — the same hole the language server had,
       # in the answer a model reads.
       if artifact = mod_context_artifact(written, artifact_root)
-        return {written, artifact, ""}
+        return {written, artifact, "", nil}
       end
-      return {written, nil, "does not resolve: no file, no artifact and no requirement covers it"}
+      return {written, nil, "does not resolve: no file, no artifact and no requirement covers it", nil}
     end
     # The root the module path hangs under, reached by dropping a directory
     # per segment of it. Chomping the name off the end arrived there only by
@@ -306,7 +367,7 @@ class Iyi::Command
       # arrives in — the same unwrapping `iyi doc` does, and for the same
       # reason: this answer is what a reader acts on.
       deepest = Iyi.deepest_error(ex)
-      return {written, nil, "does not compile alone: #{deepest.message.to_s.lines.first?}"}
+      return {written, nil, "does not compile alone: #{deepest.message.to_s.lines.first?}", nil}
     ensure
       previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
     end
@@ -314,12 +375,12 @@ class Iyi::Command
     Dir.glob(::Path[emit_dir].to_posix.join("**", "*.iyimod")) do |candidate|
       begin
         artifact = IyiMod.read(candidate)
-        return {written, artifact, ""} if artifact.module_name == expected_name
+        return {written, artifact, "", nil} if artifact.module_name == expected_name
       rescue IyiMod::Error
         next
       end
     end
-    {written, nil, "compiled, but no artifact carries module '#{expected_name}'"}
+    {written, nil, "compiled, but no artifact carries module '#{expected_name}'", nil}
   end
 
   # The same resolution order the build uses: the requirement table by

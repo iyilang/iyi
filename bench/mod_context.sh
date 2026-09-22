@@ -490,4 +490,58 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And what a facade hands on. `pub import` is a promise to the consumer:
+# a file that imports the facade may `using` the module the facade
+# re-exported, with no import of its own (R-2b). The pack listed only the
+# file's own import lines, so the module a consumer is allowed to name
+# was missing from the one answer written to be named from — and the
+# consumer line it did print told the reader to import the facade, which
+# is right, about a surface it never showed.
+mkdir -p "$WORK/facade/deep"
+cd "$WORK/facade" || exit 1
+cat > deep/core.iyi <<'EOF'
+module deep/core
+
+pub def core_value : Int32
+  7
+end
+EOF
+cat > facade.iyi <<'EOF'
+module facade
+
+pub import deep/core
+
+pub def facade_value : Int32
+  1
+end
+EOF
+cat > main.iyi <<'EOF'
+import facade
+using deep/core::{core_value}
+using facade::{facade_value}
+
+puts core_value + facade_value
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/facade"
+if ! "$IYI" run main.iyi > facade_run.txt 2>&1 || [ "$(tail -1 facade_run.txt)" != "8" ]; then
+  echo "FAIL: the facade fixture does not run"
+  sed -n '1,4p' facade_run.txt | sed 's/^/  /'
+  status=1
+else
+  "$IYI" mod context main.iyi > facade_pack.txt 2>&1
+  if ! grep -q 'pub def core_value : Int32' facade_pack.txt; then
+    echo "FAIL: the pack does not carry what the facade re-exports"
+    grep '^── import' facade_pack.txt | sed 's/^/  /'
+    status=1
+  elif ! grep -q '^#   using deep/core::{core_value}' facade_pack.txt ||
+       ! grep -q '^── import facade → deep/core (re-exported) ──' facade_pack.txt; then
+    echo "FAIL: the pack does not say how the re-export is reached"
+    grep -E '^── import|^#   ' facade_pack.txt | sed 's/^/  /' | head -6
+    status=1
+  else
+    echo "the pack carries what a facade re-exports, and the import that hands it on"
+  fi
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

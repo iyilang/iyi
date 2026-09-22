@@ -2355,16 +2355,28 @@ jobs:
   # exist, and a `.vsix` comes out. It needs no compiler — the extension is
   # thirty lines that spawn `iyi lsp` — so it does not wait on `build`.
   #
-  # The Marketplace release is its own tag, `editor-v<version>`, and not the
-  # compiler's `v*`: the extension's version moves on its own, and the
-  # Marketplace refuses a version it already carries, so riding every `v*`
-  # tag would fail the second time a release shipped an unchanged client.
-  # The name cannot start with `v` either, or the `release` job above would
-  # take a client tag for a compiler one and cut a GitHub release from it.
+  # One package, two registries. VS Code reads Microsoft's Marketplace;
+  # Cursor, Windsurf, VSCodium, Gitpod and Theia read Open VSX, because
+  # Microsoft's terms scope its marketplace to Microsoft's own products and
+  # a fork may not use it. Publishing to one of them is publishing to some
+  # of the editors that can run this client.
+  #
+  # The release is its own tag, `editor-v<version>`, and not the compiler's
+  # `v*`: the extension's version moves on its own, and both registries
+  # refuse a version they already carry, so riding every `v*` tag would fail
+  # the second time a release shipped an unchanged client. The name cannot
+  # start with `v` either, or the `release` job above would take a client
+  # tag for a compiler one and cut a GitHub release from it.
   vscode:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     name: "The VS Code client packages, and a tag publishes it"
+    # A step's `if` cannot read the `secrets` context, and the job's `env`
+    # can: that is what lets a registry whose token is not set yet be
+    # skipped instead of failing the tag that publishes to the other one.
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2395,14 +2407,20 @@ jobs:
 
       # `--packagePath` publishes the file the step above built and CI
       # already looked at, rather than packaging a second time.
-      - name: Publish to the Marketplace
-        if: startsWith(github.ref, 'refs/tags/editor-v')
+      - name: Publish to the Visual Studio Marketplace
+        if: startsWith(github.ref, 'refs/tags/editor-v') && env.VSCE_PAT != ''
         working-directory: editors/vscode
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           npx --yes @vscode/vsce publish \
             --packagePath "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
+
+      # The same file, to the registry every VS Code fork reads. `ovsx`
+      # takes the token from OVSX_PAT, and the namespace must exist first:
+      # `npx ovsx create-namespace iyilang`, once.
+      - name: Publish to Open VSX
+        if: startsWith(github.ref, 'refs/tags/editor-v') && env.OVSX_PAT != ''
+        working-directory: editors/vscode
+        run: npx --yes ovsx publish "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
 
       - uses: actions/upload-artifact@v5
         with:

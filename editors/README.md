@@ -18,10 +18,14 @@ absolute path where the config names the command).
 ## VS Code
 
 The extension in [`vscode/`](vscode/) is the whole client — a manifest
-and thirty lines that spawn `iyi lsp`. Published as
-[`iyilang.iyi`](https://marketplace.visualstudio.com/items?itemName=iyilang.iyi);
-installing it from the Marketplace is the usual route, and building it
-from this checkout is the other one:
+and thirty lines that spawn `iyi lsp`. It is published as `iyilang.iyi`
+to both registries a VS Code-shaped editor reads — the
+[Marketplace](https://marketplace.visualstudio.com/items?itemName=iyilang.iyi)
+for VS Code, [Open VSX](https://open-vsx.org/extension/iyilang/iyi) for
+Cursor, Windsurf, VSCodium, Gitpod and Theia, which cannot use the
+Marketplace because Microsoft's terms scope it to Microsoft's own
+products. Installing from whichever one your editor searches is the usual
+route; building it from this checkout is the other:
 
 ```console
 $ cd editors/vscode
@@ -30,26 +34,38 @@ $ npx @vscode/vsce package        # produces iyi-<version>.vsix
 $ code --install-extension iyi-0.1.2.vsix
 ```
 
+Cursor takes the same file: **Extensions → … → Install from VSIX**, or
+`cursor --install-extension iyi-0.1.2.vsix`.
+
 For hacking on it, open `editors/vscode` in VS Code and press F5.
 
 ### Publishing it
 
 A release is a tag, like every other release here: push `editor-v<version>`
 and the `vscode` job in [`.github/workflows/iyi.yml`](../.github/workflows/iyi.yml)
-packages the manifest it finds and publishes that `.vsix` with the
-`VSCE_PAT` secret. The version in `package.json` must match the tag, and
-the Marketplace refuses a version it already has, so the bump and the tag
-are one commit. By hand it is the same two commands:
+packages the manifest it finds and sends that one `.vsix` to both
+registries, with the `VSCE_PAT` and `OVSX_PAT` secrets. Either step is
+skipped when its token is not set, so a tag publishes wherever it can. The
+version in `package.json` must match the tag, and both registries refuse a
+version they already have, so the bump and the tag are one commit.
+
+By hand it is two commands per registry:
 
 ```console
-$ npx @vscode/vsce login iyilang    # once, with a Marketplace PAT
+$ npx @vscode/vsce login iyilang               # once, with a Marketplace PAT
 $ npx @vscode/vsce publish
+$ npx ovsx create-namespace iyilang -p <token> # once
+$ npx ovsx publish iyi-<version>.vsix -p <token>
 ```
 
-The publisher (`iyilang`) and the token come from
-<https://marketplace.visualstudio.com/manage>; the token is an Azure DevOps
+The Marketplace publisher (`iyilang`) and its token come from
+<https://marketplace.visualstudio.com/manage>; that token is an Azure DevOps
 PAT for **all accessible organizations** with the **Marketplace → Manage**
-scope, and nothing less works.
+scope, and nothing less works. The Open VSX namespace and token come from
+<https://open-vsx.org> — an Eclipse account, the publisher agreement signed
+once, then **Settings → Access Tokens**. The namespace is unverified until
+you [claim it](https://github.com/EclipseFdn/open-vsx.org/issues), which
+only changes the badge on the listing, not the install.
 
 ## Neovim (0.11+)
 

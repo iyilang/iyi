@@ -180,6 +180,13 @@ fi
 # name, two semantics. It was removed rather than taught the prelude, and
 # this line is what keeps it removed.
 refuses "the session that was removed" "unknown command" -- "$IYI" repl
+# The two verbs that are Crystal's and not this language's. The refusal
+# used to end with "run it with the `crystal` binary in this checkout",
+# which is true of a developer's tree and false of the tarball and the
+# zip; it names what stands in for each now. `init` was the third of
+# these until it became a verb (`bench/init_project.sh`).
+refuses "spec, which is iyi test here" "\`iyi test\` runs them" -- "$IYI" spec
+refuses "eval, which has no evaluator here" "\`iyi run\` it" -- "$IYI" eval "puts 1"
 refuses "an unknown flag" "Invalid option" -- "$IYI" build --nonesuch good.iyi
 refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 # One sentence for one mistake, from every verb that takes a file: this was

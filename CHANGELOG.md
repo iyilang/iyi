@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Added
+
+- **`iyi init MODULE [DIR]`.** A project, from nothing: `iyi.mod` naming
+  the module, an entry `main.iyi`, a module `greet.iyi` the entry imports
+  and `main_test.iyi` — the four files that show `module`, `import`,
+  `using`, `pub` and what a test is here, in a tree that runs and passes
+  the moment it is written. Between `go mod init`, which writes the
+  manifest and stops, and `cargo init`, which writes a program. The
+  module path is checked by the manifest's own grammar and refused with
+  its own sentence; nothing that is already there is written over, so a
+  second `init` is one project and not a damaged one.
+
+  It was refused for as long as this fork has had a binary: `init` sat
+  in the list of verbs that belong to Crystal, because Crystal's writes a
+  shard, and the refusal told the reader to run it "with the `crystal`
+  binary in this checkout" — a person who installed the zip has neither.
+  `bench/init_project.sh` holds the four files on Linux and on Windows:
+  the entry runs, the test passes, `mod context` grounds the import, and
+  a second `init` changes not one byte.
+
+### Fixed
+
+- **`iyi spec` and `iyi eval` sent the reader to a checkout.** Both are
+  Crystal's and stay refused, and the refusal ended with "run it with the
+  `crystal` binary in this checkout" — true of a developer's tree, false
+  of the tarball and the zip. Each names what stands in for it now: a
+  test is a `*_test.iyi` program and `iyi test` runs them; a line to
+  evaluate goes in a file and `iyi run` runs it. `bench/verbs_exercise.sh`
+  holds both sentences.
+
 ## 0.14.0 — 2026-09-22
 
 **Windows is a platform the tree measures.** A panic names its callers

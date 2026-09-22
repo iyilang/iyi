@@ -34,6 +34,7 @@ module Iyi
     Usage: iyi [command] [switches] [program file] [--] [arguments]
 
     Command:
+        init                     write a new project: iyi.mod, main.iyi, a module and a test
         build                    build an executable
         run                      build and run a program (default)
         mod                      inspect a .iyimod module artifact
@@ -73,7 +74,7 @@ module Iyi
   # artifacts it writes and the file it arrived in cannot disagree.
   VERSION = Iyi::Config.iyi_version
 
-  DELEGATED = %w(build run mod env clear_cache tool daemon test doc lsp vet check fix bind migrate mcp)
+  DELEGATED = %w(init build run mod env clear_cache tool daemon test doc lsp vet check fix bind migrate mcp)
 
   # The ones that belong to Crystal and are still in the binary underneath.
   # Named rather than swallowed, because "unknown command" would be a lie.
@@ -82,7 +83,22 @@ module Iyi
   # Crystal's prelude and Crystal's rules, and `iyi eval 'require "json"'`
   # worked. A command that answers in another language is worse than one that
   # says where it went.
-  CRYSTAL_ONLY = %w(init spec eval)
+  CRYSTAL_ONLY = %w(spec eval)
+
+  # What this language has in place of a Crystal verb it does not carry.
+  # The refusal used to end with "run it with the `crystal` binary in this
+  # checkout" — true of a developer's tree and false of the tarball and
+  # the zip, which carry no such binary and no checkout. `init` was on
+  # this list until it became a verb of its own (command/init.cr).
+  def self.crystal_only_sentence(verb : String) : String
+    instead =
+      case verb
+      when "spec" then "a test is a `*_test.iyi` program that exits 0 when it passes, and `iyi test` runs them (SPEC.md III.8)"
+      when "eval" then "write the line to a file and `iyi run` it; there is no evaluator to hand a string to"
+      else             "nothing here stands in for it"
+      end
+    "iyi has no `#{verb}`: it belongs to Crystal, which this compiler is also built on. Here #{instead}."
+  end
 
   def self.description : String
     String.build do |io|
@@ -113,7 +129,7 @@ module Iyi
         when .in?(DELEGATED)
           Iyi::Command.run([verb, "--help"])
         when .in?(CRYSTAL_ONLY)
-          STDERR.puts "iyi has no `#{verb}`: it belongs to Crystal, which this compiler is also built on."
+          STDERR.puts crystal_only_sentence(verb)
           exit 1
         else
           STDERR.puts "iyi help: there is no `#{verb}` command. Run `iyi help` for what there is."
@@ -132,8 +148,7 @@ module Iyi
       puts description
       exit
     when .in?(CRYSTAL_ONLY)
-      STDERR.puts "iyi has no `#{command}`: it belongs to Crystal, which this compiler is also built on."
-      STDERR.puts "Run it with the `crystal` binary in this checkout if you need it."
+      STDERR.puts crystal_only_sentence(command)
       exit 1
     when .in?(DELEGATED)
       Iyi::Command.run(options)

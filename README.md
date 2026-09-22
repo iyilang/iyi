@@ -495,6 +495,25 @@ Windows' own four directories, removes `IYI_PATH`, `CRYSTAL_PATH`, `CC`
 and the MSVC variables from the environment, and builds and runs a
 program that imports `std/text` out of the unpacked tree.
 
+### A project, from nothing
+
+```sh
+iyi init example.com/me/hello
+iyi run main.iyi    # hello, iyi
+iyi test            # 1 passed, 0 failed
+```
+
+`iyi init MODULE [DIR]` writes four files and never over one that is
+there: `iyi.mod` naming the module — the path other projects would import
+it by, or a bare `hello` for one nobody will — an entry `main.iyi`, a
+module `greet.iyi` the entry imports, and `main_test.iyi`. Between them
+they show `module`, `import`, `using`, `pub` and what a test is here: a
+program that passes by exiting 0, run by `iyi test` with every other
+`*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
+example.com/someone/lib v1.2.0`, and the first build fetches it and writes
+`iyi.sum`. `bench/init_project.sh` holds the claim that all four files are
+right the moment they land, on Linux and on Windows.
+
 ### An editor, in one stanza
 
 `iyi lsp` speaks the Language Server Protocol over stdio; there is nothing

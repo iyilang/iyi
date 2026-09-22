@@ -381,6 +381,14 @@ jobs:
       - name: What the verbs say when they refuse
         run: bash bench/verbs_exercise.sh
 
+      # And the first verb a person types. `iyi init` was refused with a
+      # sentence about a checkout the zip does not carry; it writes a
+      # project now, and the claim is that all four files are right the
+      # moment they land — the entry runs, the test passes, the pack grounds
+      # the import, and a second `init` changes not one byte.
+      - name: A project, from nothing
+        run: bash bench/init_project.sh
+
       # And what it does when the client is not a client. Every frame in
       # this gate used to kill the daemon outright, the analysed prelude
       # with it: a connection that closes before it speaks (Ctrl-C during
@@ -1729,6 +1737,13 @@ jobs:
         run: |
           bash bench/mod_context.sh
           bash bench/mod_diff.sh
+
+      # The first verb a Windows person types, on the platform where the
+      # old refusal was most wrong: it named a `crystal` binary in a
+      # checkout, and the zip carries neither.
+      - name: A project, from nothing, on Windows
+        shell: bash
+        run: bash bench/init_project.sh
 
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its

@@ -366,7 +366,13 @@ class Iyi::Command
   end
 
   private def init
-    Init.run(options)
+    # iyi: the `iyi` binary's `init` writes an iyi project (command/init.cr);
+    # `crystal init` underneath is still Crystal's shard scaffold.
+    if Command.program_name == "iyi"
+      iyi_init
+    else
+      Init.run(options)
+    end
   end
 
   # iyi: `iyi vet` — SPEC.md III.8 #3's row, closed the way the table

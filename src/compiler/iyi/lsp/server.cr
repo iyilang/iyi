@@ -886,7 +886,7 @@ module Iyi::Lsp
           # `path_of` hands back for a buffer the client named.
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          uri = uri_of(posix)
+          uri = uri_of(file)
           uris << uri unless uris.includes?(uri)
           break if uris.size >= 200
         end
@@ -1051,9 +1051,13 @@ module Iyi::Lsp
             outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
             next
           end
-          next if nodes.has_key?(posix)
+          # Keyed by the path the platform spells, which is what `path_of`
+          # hands back for a buffer and what the pull looks each file up by.
+          # Keyed posix, on Windows no file was ever found in this table and
+          # every pull answered "unchanged" for a file that had changed.
+          next if nodes.has_key?(file)
           header, imports = header_and_imports(file, info)
-          nodes[posix] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
+          nodes[file] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
         end
         Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
           info = File.info?(file)
@@ -1993,7 +1997,7 @@ module Iyi::Lsp
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
-          paths << posix unless paths.includes?(posix)
+          paths << file unless paths.includes?(file)
           break if paths.size >= 2000
         end
       end

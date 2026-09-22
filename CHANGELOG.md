@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.14.0 — 2026-09-22
+
+**Windows is a platform the tree measures.** A panic names its callers
+there — the stack from `RtlCaptureStackBackTrace`, the names from a PDB
+reader written in iyi over kernel32 and nothing else, checked frame by
+frame against `llvm-symbolizer` — and the dependency floor, the socket
+that parks, `UdpSocket`, the console's code page, `Dir.tempdir`, a
+`sleep` that was fifteen times what was asked and a fiber stack that
+died of a bare access violation were each measured on the platform and
+fixed where they lived. Every Windows job can now stop a release; the
+one that builds the compiler there is on the list too.
+
+**What travels, travels.** Sixty std module exercises round-trip through
+`.iyimod`, and the family of "did not travel" defects that stood in the
+way is closed: a class hierarchy, a generic's splat, an alias, an enum's
+methods, a class variable, a `lib`, a constant in a type body, a
+`@[Primitive]`, a method with no unit of its own. `iyi mod diff` reads
+what a module was compiled against, `--affected` reaches every consumer
+of a bumped requirement, and the build daemon serves a build with the
+environment it was sent from — and not, since this release, with the
+socket that would have sent the child back to it. The language server
+is two processes, so the one that never frees can be replaced.
+
+**And the answers were probed.** Ninety-four fixes, most of them in what
+a verb, a tool or the language server *says*: `tool dependencies` saw no
+`import`, `tool types` and the editor's completion list were mostly the
+compiler's own probe variables, the caller's view of a module dropped
+what an `impl` adds and what a facade hands on, `iyi doc` took no module
+path, the formatter rewrote every line of a CRLF file, and `for`, `pub
+fn`, `const`, `None`, `List`, `new`, `throw` and `length` each got the
+sentence this language uses. Two seams are checked rather than
+remembered: every gate under `bench/` is reached by something that runs
+it, and every parse in the compiler names the language it reads. `std`
+is 67 modules and 39,066 lines; `.iyimod` is v53.
+
 ### Added
 
 - **A Windows panic names its callers.** `raise` captures the stack with

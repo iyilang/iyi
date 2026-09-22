@@ -458,11 +458,27 @@
   falls back to an ordinary build with the reason printed. `iyi daemon
   build` asked for that daemon and still fails.
 
+  One variable does not travel: the one that names a daemon. A client that
+  got here by `IYI_DAEMON_SOCKET` sent it along with the rest, so the
+  forked child found a daemon too — this same server — and was served by a
+  fork that found it again. No build in that recursion ever finishes:
+  `cli_spec`'s implicit-socket example aborted after forty seconds with the
+  machine out of memory, and CI's job spent its whole thirty-minute budget
+  inside that one example, twice, reported as a cancellation rather than a
+  failure. A served build is the daemon's build and does not go looking for
+  a daemon.
+
   `bench/daemon_agrees.py` grew the shape that found it — a dependency
-  that is a package rather than a file beside the entry — and the
-  refusal, and the fallback; all three are proven to fail — by taking the
-  environment back out of the request, by dropping the comparison, and by
-  making the refusal exit instead of building.
+  that is a package rather than a file beside the entry — and the refusal,
+  the fallback, and the re-entry; all four are proven to fail — by taking
+  the environment back out of the request, by dropping the comparison, by
+  making the refusal exit instead of building, and by putting the socket
+  variable back into the child. The re-entry check names a socket that is
+  not there, so it observes the child's environment for the price of one
+  small build instead of the recursion it is about; the second library the
+  refusal needs is two files rather than a copy of `src`, because a
+  refusal is decided before anything is compiled and the copy was buying
+  two cold prelude builds in a job that has thirty minutes.
 
 
 - **The seam that produced four of this release's defects is checked

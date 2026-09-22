@@ -250,13 +250,18 @@ def main():
         # asks for another one has to be refused rather than served from the
         # wrong library — the environment travels, and this is the variable
         # that cannot.
-        # A second library, real and not this tree's: a copy, so the prelude
-        # it finds is a different file and a build against it still compiles.
-        # Naming a directory with no prelude would prove the refusal and
-        # nothing about the fallback below, which has to end in a binary.
+        # A second library, named by two files and nothing else. The
+        # refusal is decided before anything is compiled — it is a
+        # comparison of which prelude an `IYI_PATH` finds — so the library
+        # only has to *be* somewhere else. Copying this tree's `src` would
+        # buy a real compile and cost two cold prelude builds, which is
+        # minutes in a job that has thirty-five of them.
         elsewhere = os.path.join(work, "other-library")
-        shutil.copytree(os.path.join(ROOT, "src"), os.path.join(elsewhere, "src"))
         other_library = os.path.join(elsewhere, "src")
+        os.makedirs(os.path.join(other_library, "iyi"), exist_ok=True)
+        for name in (os.path.join("iyi", "prelude.iyi"), "prelude.cr"):
+            with open(os.path.join(other_library, name), "w") as f:
+                f.write("# not this tree's prelude\n")
         entry = os.path.join(elsewhere, "x.iyi")
         with open(entry, "w") as f:
             f.write("puts 1\n")
@@ -274,7 +279,10 @@ def main():
         # And the same refusal reaching a build that never asked for a
         # daemon: `IYI_DAEMON_SOCKET` is an optimisation somebody set once,
         # so a daemon that cannot serve this build is the same as no daemon
-        # — the reason is printed and the binary still gets built.
+        # — the reason is printed and the build goes on without it. What
+        # proves "goes on" here is the compiler's own answer about that
+        # library, which the daemon would never have produced: the client
+        # did not exit on the refusal.
         out = os.path.join(work, "fallback-out")
         proc = subprocess.run(
             [IYI, "build", "-o", out, entry],
@@ -282,11 +290,38 @@ def main():
             env=dict(os.environ, IYI_PATH=other_library, IYI_DAEMON_SOCKET=socket),
             capture_output=True, text=True, timeout=600)
         spoken = proc.stdout + proc.stderr
-        ran = subprocess.run([out], capture_output=True, text=True) if os.path.exists(out) else None
-        say("a build that only found a socket falls back to building",
-            proc.returncode == 0 and "building without it" in spoken
-            and ran is not None and ran.stdout.strip() == "1",
+        say("a build that only found a socket goes on without it",
+            "building without it" in spoken and "prelude" in spoken,
             spoken.strip().splitlines()[-1:])
+
+        # And a served build that is not sent looking for a daemon. The
+        # environment travels whole, and a client that got here by
+        # `IYI_DAEMON_SOCKET` sends that variable along with it: the forked
+        # child read it, connected to this same server, and was served by a
+        # fork that read it again. No build in that recursion ever finishes,
+        # so it ended as the machine out of memory — and as CI spending a
+        # whole thirty-minute job inside one spec.
+        #
+        # The variable names a socket that is not there, so this observes the
+        # child's environment without paying for the recursion it is about:
+        # what the child saw is what the built program prints, and a child
+        # that still saw it would have said "no daemon at" on the way past.
+        probe = os.path.join(work, "daemon-env-probe.iyi")
+        with open(probe, "w") as f:
+            f.write('puts {{ env("IYI_DAEMON_SOCKET") || "none" }}\n')
+        out = os.path.join(work, "probe-out")
+        absent = os.path.join(work, "not-a-socket.sock")
+        proc = subprocess.run(
+            [IYI, "daemon", "build", "--socket", socket, "-o", out, probe],
+            cwd=work,
+            env=dict(os.environ, IYI_DAEMON_SOCKET=absent),
+            capture_output=True, text=True, timeout=600)
+        spoken = proc.stdout + proc.stderr
+        saw = (subprocess.run([out], capture_output=True, text=True).stdout.strip()
+               if os.path.exists(out) else "(no binary)")
+        say("a served build is not sent looking for a daemon",
+            proc.returncode == 0 and saw == "none" and "no daemon at" not in spoken,
+            saw)
     finally:
         daemon.terminate()
         try:

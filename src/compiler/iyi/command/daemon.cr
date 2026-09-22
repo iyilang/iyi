@@ -535,6 +535,15 @@ class Iyi::Command
         # is the client's — where the cache is, which mirror a package comes
         # from, which linker `PATH` finds — and a variable the daemon carries
         # that the client does not is not this build's either.
+        #
+        # Except the one that names a daemon. This build *is* the daemon's
+        # build, and a client that reached here by `IYI_DAEMON_SOCKET` sends
+        # that variable along with the rest: the child then found a daemon
+        # too, connected to this very server, and was served by a fork that
+        # found it again. Nothing in that recursion ever finishes a build, so
+        # it ended as the machine running out of memory — `cli_spec`'s
+        # implicit-socket example aborted after forty seconds, and CI's job
+        # spent its whole thirty minutes there.
         if client_env
           ENV.keys.each { |name| ENV.delete(name) unless client_env.has_key?(name) }
           client_env.each do |name, value|
@@ -542,6 +551,8 @@ class Iyi::Command
               ENV[name] = text
             end
           end
+          ENV.delete("IYI_DAEMON_SOCKET")
+          ENV.delete("CRYSTAL_DAEMON_SOCKET")
         end
 
         Dir.cd(cwd)
@@ -577,7 +588,7 @@ class Iyi::Command
           candidate = File.join(directory, name)
           break candidate if File.file?(candidate)
         end
-        resolved = found.is_a?(String) ? (File.real_path(found) rescue found) : "(none)"
+        resolved = found.is_a?(String) ? (File.realpath(found) rescue found) : "(none)"
         "#{name}=#{resolved}"
       end
     end

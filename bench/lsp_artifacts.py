@@ -41,7 +41,9 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bench"))
-IYI = os.path.join(ROOT, "bin", "iyi")
+# The binary the session gate runs: `bin/iyi` is a shell script, and on
+# Windows the caller names the exe through `IYI`.
+IYI = os.environ.get("IYI", os.path.join(ROOT, "bin", "iyi"))
 
 # The program is one def so that `hover` has a local to name — the shape
 # `bench/lsp_session.py` established as the question an editor asks.
@@ -135,9 +137,9 @@ def ask(where, env, label):
     import lsp_session as session
 
     main = os.path.join(where, "main.iyi")
-    uri = "file://" + main
+    uri = session.file_uri(main)
     client = session.Client()
-    client.send("initialize", {"rootUri": "file://" + where, "capabilities": {}})
+    client.send("initialize", {"rootUri": session.file_uri(where), "capabilities": {}})
     client.send("initialized", {}, wait=False)
     client.send("textDocument/didOpen", {"textDocument": {
         "uri": uri, "languageId": "iyi", "version": 1, "text": MAIN}}, wait=False)
@@ -155,7 +157,7 @@ def ask(where, env, label):
     jump = client.send("textDocument/definition", {"textDocument": {"uri": uri},
                                                    "position": {"line": 6, "character": 6}})
     locations = jump.get("result") or []
-    target = locations[0]["uri"][len("file://"):] if locations else ""
+    target = session.uri_path(locations[0]["uri"]) if locations else ""
     say(f"{label}: definition lands in a file that is there",
         len(locations) == 1 and os.path.isfile(target), target or "no location")
 

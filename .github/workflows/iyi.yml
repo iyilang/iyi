@@ -1755,7 +1755,9 @@ jobs:
       # the Windows python the runner carries can start it.
       - name: The language server holds its session, on Windows
         shell: bash
-        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+        run: |
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
 
       # Four gates that carry Windows code — `cygpath`, the `;` separator,
       # the read-only directory Windows has no `chmod` for — and had never

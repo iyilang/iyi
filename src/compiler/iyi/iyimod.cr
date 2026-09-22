@@ -2518,8 +2518,44 @@ module Iyi::IyiMod
       io << "end\n"
     end
 
+    # An impl is where a caller's methods come from, so it is rendered like
+    # the types above rather than as a bare line. `impl Shape for Box` with
+    # nothing under it said Box implements a trait and left `box.area`
+    # unnameable in the one answer written to be named from: the type's own
+    # block carries `initialize` and `side`, the trait's carries an
+    # `abstract def`, and the method that exists on the type was in
+    # neither. The artifact has always carried them — `mod dump` prints
+    # them — this view dropped them.
+    #
+    # `render_impl_header` for the same reason: trait arguments and
+    # `forall` are part of which impl this is, and the line here was
+    # rebuilding a poorer version of that sentence by hand.
+    #
+    # Names relative to this module's own root, which is how every
+    # declaration above is already written: `Geo::Shape::Shape` for a trait
+    # declared right there reads as another language's, in an answer whose
+    # header line is `module geo/shape` and whose `using` line the caller
+    # is told to write. Only this module's prefix, because that is the one
+    # mapping that is certain — a camelcased segment does not invert.
+    root =
+      if artifact.class_root
+        ""
+      else
+        artifact.module_name.split('/').map(&.camelcase).join("::")
+      end
     artifact.exports.impls.each do |record|
-      io << "impl " << record.trait_name << " for " << record.type_name << '\n'
+      io << '\n'
+      header = render_impl_header(record)
+      header = header.gsub("#{root}::", "") unless root.empty?
+      io << header << '\n'
+      record.methods.each do |method|
+        next if method.visibility == "private"
+        if docs && !method.doc.empty?
+          method.doc.each_line { |line| io << "  # " << line << '\n' }
+        end
+        io << "  " << render_signature(method) << '\n'
+      end
+      io << "end\n"
     end
 
     # What the module added to types it does not own - the whole of

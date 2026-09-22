@@ -397,4 +397,59 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And the methods an `impl` puts on a type, which are the caller's whether
+# the trait is the caller's or not. The surface printed `impl T for X` and
+# stopped: the type's own block carries its `initialize` and its getters,
+# the trait's block carries an `abstract def`, and the method that exists
+# on the type — the one a caller writes `x.area` for — was in neither. The
+# artifact carried it the whole time; `mod dump` printed it.
+#
+# The line also read `impl Geo::Shape::Shape for Geo::Shape::Box`, which
+# is the other language's spelling of names this very answer tells the
+# reader to reach with `using geo/shape::{…}`.
+mkdir -p "$WORK/impls/geo"
+cd "$WORK/impls" || exit 1
+cat > geo/shape.iyi <<'EOF'
+module geo/shape
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub struct Box
+  getter side : Int32
+
+  def initialize(@side : Int32)
+  end
+end
+
+impl Shape for Box
+  # The area of a box.
+  def area : Int32
+    side * side
+  end
+end
+EOF
+cat > main.iyi <<'EOF'
+import geo/shape
+using geo/shape::{Box}
+
+b = Box.new(3)
+puts b.area
+EOF
+export IYI_PATH="$REPO/src${PSEP}$WORK/impls"
+"$IYI" mod context main.iyi > surface.txt 2>&1
+if ! grep -q '^impl Shape for Box$' surface.txt; then
+  echo "FAIL: the caller's view does not write the impl in iyi's own names"
+  grep -n 'impl ' surface.txt | sed 's/^/  /' | head -3
+  status=1
+elif ! grep -q '^  def area : Int32$' surface.txt; then
+  echo "FAIL: the caller's view names no method for an impl the caller calls"
+  sed -n '/^impl /,$p' surface.txt | sed 's/^/  /' | head -4
+  status=1
+else
+  echo "the caller's view carries the methods an impl adds, in iyi's names"
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

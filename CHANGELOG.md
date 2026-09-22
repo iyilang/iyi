@@ -389,6 +389,30 @@
 
 ### Fixed
 
+- **The caller's view of a module dropped the methods an `impl` adds.**
+  `IyiMod.surface` is AI_FIRST.md §2's text form — what `iyi mod context`
+  and `iyi doc` print, and what a model is grounded on — and it rendered
+  an impl as one bare line. So for a module whose `Box` implements
+  `Shape`, the type's block carried `initialize` and `side`, the trait's
+  block carried `abstract def area`, and `box.area`, the call a consumer
+  actually writes, was named in neither. The artifact carried those
+  methods the whole time: `mod dump` prints them, and this view had its
+  own poorer line for the same record.
+
+  It renders like the types above it now — header, the impl's own
+  methods, their docs, `end` — through `render_impl_header`, so trait
+  arguments and `forall` are part of the line rather than dropped. And in
+  this module's own names: the line read `impl Geo::Shape::Shape for
+  Geo::Shape::Box`, the other language's spelling, in an answer whose
+  first line is `module geo/shape` and which tells the reader to write
+  `using geo/shape::{Box}`. Only this module's prefix is stripped, because
+  that is the mapping that is certain — a camelcased path segment does not
+  invert.
+
+  `bench/mod_context.sh` asks a consumer's view for the impl and fails
+  unless the line is `impl Shape for Box` with `def area : Int32` under
+  it; it falls back to the old sentence when the methods are dropped.
+
 - **The compiler's own variables were offered to an editor.** Definition
   typing checks a def against its declaration by writing a probe — an
   `uninitialized` receiver, one per argument and one for the return value,

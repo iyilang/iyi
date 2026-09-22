@@ -877,6 +877,7 @@ module Iyi::Lsp
       uris = @documents.keys.dup
       if root = @root
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          file = fs_path(file)
           # Read as posix before the skip tests: a glob yields the platform's
           # own separators, so a backslashed path went past `/.` and `/lib/`
           # and the `.git` and `lib` trees were indexed anyway.
@@ -1043,6 +1044,7 @@ module Iyi::Lsp
       outside = 0_u64
       if root = @root
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          file = fs_path(file)
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.")
           info = File.info?(file)
@@ -1574,6 +1576,7 @@ module Iyi::Lsp
       entries = @documents.map { |doc_uri, doc_text| {path_of(doc_uri), doc_text} }
       if root = @root
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          file = fs_path(file)
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
           # By path, not by a URI rebuilt from it: an editor's own URI for
@@ -1995,6 +1998,7 @@ module Iyi::Lsp
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
       if root = @root
         Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
+          file = fs_path(file)
           posix = ::Path[file].to_posix.to_s
           next if posix.includes?("/.") || posix.includes?("/lib/")
           paths << file unless paths.includes?(file)
@@ -3134,6 +3138,22 @@ module Iyi::Lsp
     # `bench/lsp_session.py`, the first time it ran on Windows). The way
     # back turns the separators around and puts the third slash in, so a
     # URI this side builds is one the editor built for the same file.
+    # A filesystem path in the one spelling this server keeps: the
+    # platform's own. `Dir.glob` is handed a posix pattern and answers in
+    # the pattern's spelling, `path_of` hands back the platform's, and the
+    # compiler joins with `File::SEPARATOR` — three spellings of the same
+    # file on Windows, and every table keyed by one of them missed the
+    # other two (steps 9, 31c and 32 of `bench/lsp_session.py`, the first
+    # times it ran there). Everything that enters as a path goes through
+    # here first.
+    private def fs_path(path : String) : String
+      {% if flag?(:win32) %}
+        path.tr("/", "\\")
+      {% else %}
+        path
+      {% end %}
+    end
+
     private def path_of(uri : String) : String
       path = URI.decode(uri.lchop("file://"))
       {% if flag?(:win32) %}

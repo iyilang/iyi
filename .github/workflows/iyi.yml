@@ -1757,6 +1757,21 @@ jobs:
         shell: bash
         run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
 
+      # Four gates that carry Windows code — `cygpath`, the `;` separator,
+      # the read-only directory Windows has no `chmod` for — and had never
+      # run on Windows, so the code they carry for it was written blind.
+      # What the verbs refuse, what the test verb answers, what a package
+      # resolves to through `iyi.mod` and `iyi.sum`, and what `migrate`
+      # writes: each is path-shaped work, and this is the platform whose
+      # paths are the reason to ask.
+      - name: The gates that carry Windows code, on Windows
+        shell: bash
+        run: |
+          bash bench/verbs_exercise.sh
+          bash bench/test_verb.sh
+          bash bench/packages_resolve.sh
+          bash bench/migrate_gate.sh
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

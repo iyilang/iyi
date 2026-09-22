@@ -18,16 +18,38 @@ absolute path where the config names the command).
 ## VS Code
 
 The extension in [`vscode/`](vscode/) is the whole client — a manifest
-and thirty lines that spawn `iyi lsp`:
+and thirty lines that spawn `iyi lsp`. Published as
+[`iyilang.iyi`](https://marketplace.visualstudio.com/items?itemName=iyilang.iyi);
+installing it from the Marketplace is the usual route, and building it
+from this checkout is the other one:
 
 ```console
 $ cd editors/vscode
 $ npm install
-$ npx @vscode/vsce package        # produces iyi-0.1.0.vsix
-$ code --install-extension iyi-0.1.0.vsix
+$ npx @vscode/vsce package        # produces iyi-<version>.vsix
+$ code --install-extension iyi-0.1.2.vsix
 ```
 
 For hacking on it, open `editors/vscode` in VS Code and press F5.
+
+### Publishing it
+
+A release is a tag, like every other release here: push `editor-v<version>`
+and the `vscode` job in [`.github/workflows/iyi.yml`](../.github/workflows/iyi.yml)
+packages the manifest it finds and publishes that `.vsix` with the
+`VSCE_PAT` secret. The version in `package.json` must match the tag, and
+the Marketplace refuses a version it already has, so the bump and the tag
+are one commit. By hand it is the same two commands:
+
+```console
+$ npx @vscode/vsce login iyilang    # once, with a Marketplace PAT
+$ npx @vscode/vsce publish
+```
+
+The publisher (`iyilang`) and the token come from
+<https://marketplace.visualstudio.com/manage>; the token is an Azure DevOps
+PAT for **all accessible organizations** with the **Marketplace → Manage**
+scope, and nothing less works.
 
 ## Neovim (0.11+)
 

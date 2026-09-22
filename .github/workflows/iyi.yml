@@ -2348,3 +2348,64 @@ jobs:
           (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
+
+  # The editor client is the only artifact here that is published somewhere
+  # else, so it is proven the same way as the rest: every push packages it,
+  # which is the one check that the manifest parses, the files it names
+  # exist, and a `.vsix` comes out. It needs no compiler — the extension is
+  # thirty lines that spawn `iyi lsp` — so it does not wait on `build`.
+  #
+  # The Marketplace release is its own tag, `editor-v<version>`, and not the
+  # compiler's `v*`: the extension's version moves on its own, and the
+  # Marketplace refuses a version it already carries, so riding every `v*`
+  # tag would fail the second time a release shipped an unchanged client.
+  # The name cannot start with `v` either, or the `release` job above would
+  # take a client tag for a compiler one and cut a GitHub release from it.
+  vscode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    name: "The VS Code client packages, and a tag publishes it"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Package the extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npx --yes @vscode/vsce package
+
+      # A tag that disagrees with the manifest publishes the wrong version
+      # under the right name, and the Marketplace keeps what it is given.
+      - name: The tag names the version the manifest carries
+        if: startsWith(github.ref, 'refs/tags/editor-v')
+        working-directory: editors/vscode
+        run: |
+          manifest=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#editor-v}"
+          [ "$manifest" = "$tag" ] || {
+            echo "package.json says $manifest, the tag says $tag"
+            exit 1
+          }
+
+      # `--packagePath` publishes the file the step above built and CI
+      # already looked at, rather than packaging a second time.
+      - name: Publish to the Marketplace
+        if: startsWith(github.ref, 'refs/tags/editor-v')
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          npx --yes @vscode/vsce publish \
+            --packagePath "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: iyi-vscode
+          path: editors/vscode/*.vsix
+          retention-days: 7

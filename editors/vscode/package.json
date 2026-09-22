@@ -2,22 +2,54 @@
   "name": "iyi",
   "displayName": "iyi",
   "description": "iyi language support: diagnostics, completion with auto-import, hover, rename, and everything else `iyi lsp` speaks. A deliberately minimal TextMate grammar paints the first frame; the server's semantic tokens are the truth and override it the moment they arrive.",
-  "version": "0.1.1",
-  "publisher": "iyi-lang",
-  "license": "Apache-2.0",
+  "version": "0.1.2",
+  "publisher": "iyilang",
+  "license": "Apache-2.0 WITH Swift-exception",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0d0d0f",
+    "theme": "dark"
+  },
+  "keywords": [
+    "iyi",
+    "iyilang",
+    "language server",
+    "lsp",
+    "compiler"
+  ],
+  "homepage": "https://iyi-lang.com",
+  "bugs": {
+    "url": "https://github.com/iyilang/iyi/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/iyilang/iyi"
+    "url": "https://github.com/iyilang/iyi.git",
+    "directory": "editors/vscode"
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters",
+    "Formatters"
   ],
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:iyi"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The extension runs the `iyi` compiler as a language server, and `iyi.serverPath` names the executable."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "The language server compiles files from disk, so it needs a real filesystem."
+    }
+  },
+  "extensionKind": [
+    "workspace"
   ],
   "contributes": {
     "languages": [
@@ -50,6 +82,7 @@
         "iyi.serverPath": {
           "type": "string",
           "default": "iyi",
+          "scope": "machine-overridable",
           "description": "Path to the `iyi` binary. The server is `iyi lsp`; there is nothing else to configure."
         }
       }

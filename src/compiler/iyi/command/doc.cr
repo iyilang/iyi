@@ -139,8 +139,16 @@ class Iyi::Command
     # `original_filename`, because the number primitives are written by a
     # macro and a def's location is then the expansion's, a virtual file
     # whose real one is the prelude's.
+    #
+    # Asked of the posix reading: on Windows the expansion's real file is
+    # spelled with `\`, and `iyi doc Int32` there listed `%`, `**` and `-`
+    # — the three written by hand — and none of the operators the macro
+    # writes: no `+`, no `<`, no `to_i64`. `bench/packages_resolve.sh`
+    # said so the first time it ran on Windows.
     filename = location.original_filename
-    filename.is_a?(String) && (filename.includes?("/src/iyi/") || filename.starts_with?("src/iyi/"))
+    return false unless filename.is_a?(String)
+    posix = ::Path[filename].to_posix.to_s
+    posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
   end
 
   private def doc_prelude_program : Program

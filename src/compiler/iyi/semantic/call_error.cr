@@ -857,7 +857,12 @@ class Iyi::Call
     location = type.locations.try(&.first?)
     return true unless location
     filename = location.filename
-    filename.is_a?(String) && (filename.includes?("/src/iyi/") || filename.starts_with?("src/iyi/"))
+    return false unless filename.is_a?(String)
+    # The posix reading, for the platform whose paths are spelled with `\`:
+    # `iyi doc` asked the same question the same way and on Windows
+    # answered it wrong for every macro-written operator.
+    posix = ::Path[filename].to_posix.to_s
+    posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
   end
 
   # The `std/<module>` that would put `name` on this receiver, and how.

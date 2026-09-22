@@ -36,6 +36,16 @@
 
 ### Fixed
 
+- **`iyi doc Int32` on Windows had no `+`.** The prelude's number
+  operators are written by a macro, so a def's file is the expansion's
+  real one — spelled with `\` on Windows — and the test that keeps the
+  compiler's own methods out asked for `/src/iyi/` in the string. There,
+  `doc Int32` listed `%`, `**` and `-`, the three written by hand, and
+  none of `+`, `<` or `to_i64`; and the size-rule sentence for a method a
+  prelude type lacks asked the same question the same way. Both ask of
+  the posix reading now; `bench/packages_resolve.sh` found it the first
+  time it ran on Windows.
+
 - **`iyi migrate --out` named a path nobody had typed.** Refusing an
   `--out` that is a file, or a directory it cannot write, it printed the
   path after `File.expand_path` — on Windows that also expands an 8.3

@@ -90,7 +90,7 @@ module Iyi
   # checkout" — true of a developer's tree and false of the tarball and
   # the zip, which carry no such binary and no checkout. `init` was on
   # this list until it became a verb of its own (command/init.cr).
-  def self.crystal_only_sentence(verb : String) : String
+  def self.other_language_verb_sentence(verb : String) : String
     instead =
       case verb
       when "spec" then "a test is a `*_test.iyi` program that exits 0 when it passes, and `iyi test` runs them (SPEC.md III.8)"
@@ -129,7 +129,7 @@ module Iyi
         when .in?(DELEGATED)
           Iyi::Command.run([verb, "--help"])
         when .in?(CRYSTAL_ONLY)
-          STDERR.puts crystal_only_sentence(verb)
+          STDERR.puts other_language_verb_sentence(verb)
           exit 1
         else
           STDERR.puts "iyi help: there is no `#{verb}` command. Run `iyi help` for what there is."
@@ -148,7 +148,7 @@ module Iyi
       puts description
       exit
     when .in?(CRYSTAL_ONLY)
-      STDERR.puts crystal_only_sentence(command)
+      STDERR.puts other_language_verb_sentence(command)
       exit 1
     when .in?(DELEGATED)
       Iyi::Command.run(options)

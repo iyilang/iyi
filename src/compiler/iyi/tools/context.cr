@@ -267,7 +267,7 @@ module Iyi
     # context rather than a crash.
     private def add_context(name, type : Type?)
       return unless type
-      return if name.starts_with?("__temp_") # ignore temp vars
+      return if Iyi.compiler_variable?(name)
       return if type.is_a?(Program) || type.is_a?(FileModule)
 
       @context[name] = type

@@ -22,6 +22,31 @@ module Iyi
     filename
   end
 
+  # iyi: whether *name* names a variable this compiler wrote rather than one
+  # somebody typed.
+  #
+  # Three spellings, because two compilers wrote them. Crystal's internal
+  # variables are `#`-prefixed — a name no source can produce — or
+  # `__temp_`; iyi's definition typing writes `__iyi_dt_*`, the
+  # `uninitialized` receiver, arguments and return value it puts in an `if
+  # false` to check a def against its own declaration. Those probes live in
+  # the scope the file's top level lives in, which is where every surface
+  # that answers "what is in scope here" reads from: `iyi tool types` on
+  # `samples/iyi/calc.iyi` answered with twenty-three of them and one
+  # variable the author wrote, `tool context` printed them in its table,
+  # and the language server offered `__iyi_dt_1_r` and `__iyi_dt_1_v` to an
+  # editor as the first two completions in the list, kind "Variable" on
+  # each.
+  #
+  # One predicate rather than a prefix test at each surface, because the
+  # two that existed — `'#'` in the types visitor, `__temp_` in the context
+  # visitor — were each written for the other language's names and neither
+  # knew this one's.
+  def self.compiler_variable?(name : String) : Bool
+    name.starts_with?("__iyi_") || name.starts_with?("__temp_") ||
+      name.starts_with?('#')
+  end
+
   # iyi: *path* written with the separators this platform uses.
   #
   # A module path is posix by grammar (R-1) and `File.join` translates nothing

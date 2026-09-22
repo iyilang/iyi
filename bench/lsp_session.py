@@ -467,6 +467,43 @@ def main():
          loud["detail"] == "String",
          f"loud : {loud and loud['detail']}")
 
+    # 12b. the same question with nothing typed yet — Ctrl+Space, which is
+    #      how an editor asks for the whole scope rather than for what
+    #      starts with two letters. The scope is the compiler's, and the
+    #      compiler keeps its own variables in it: definition typing writes
+    #      `__iyi_dt_*` probes, `uninitialized` receivers and return values
+    #      in an `if false`, to check a def against its declaration. They
+    #      came back as the first two items, ahead of the author's own
+    #      name, each with kind 6 — "Variable" — on it.
+    #
+    #      Its own buffer, opened and never written: a struct with a typed
+    #      method is enough to produce a probe, and the session's other
+    #      steps assert over `app.iyi` and `greet.iyi` by name.
+    probe_uri = "file://" + os.path.join(work, "probe.iyi")
+    probe_text = ("struct Point\n  getter x : Int32\n\n"
+                  "  def initialize(@x : Int32)\n  end\n\n"
+                  "  def double : Int32\n    x * 2\n  end\nend\n\n"
+                  "spot = Point.new(2)\nputs spot.double\n")
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": probe_uri, "languageId": "iyi", "version": 1,
+        "text": probe_text}}, wait=False)
+    c.diagnostics(probe_uri)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": probe_uri, "version": 2},
+            "contentChanges": [{"text": probe_text + "\n"}]}, wait=False)
+    c.diagnostics(probe_uri)
+    reply = c.send("textDocument/completion",
+                   {"textDocument": {"uri": probe_uri},
+                    "position": {"line": 13, "character": 0}})
+    labels = [i["label"] for i in reply["result"]["items"]]
+    invented = [l for l in labels if l.startswith(("__iyi_", "__temp_", "#"))]
+    step("12b", "an empty prefix offers the author's scope and nothing invented",
+         "spot" in labels and not invented,
+         f"{len(labels)} item(s)"
+         + (f", invented: {invented[:3]}" if invented else ""))
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": probe_uri}}, wait=False)
+
     # 13. references, asked at the *def*: under R-1 the callers live in
     #     the consumers' compiles, so the session answers from every open
     #     document — the call in app.iyi, the `using` selection that

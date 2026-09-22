@@ -389,6 +389,32 @@
 
 ### Fixed
 
+- **The compiler's own variables were offered to an editor.** Definition
+  typing checks a def against its declaration by writing a probe — an
+  `uninitialized` receiver, one per argument and one for the return value,
+  inside an `if false` — and those probes live in the scope a file's top
+  level lives in. Every surface that answers "what is in scope here" read
+  them out as the author's. `iyi tool types` on `samples/iyi/calc.iyi`
+  answered with twenty-three `__iyi_dt_*` names and one variable somebody
+  had written; on `samples/iyi/modules.iyi` it was nine out of nine, an
+  answer with nothing real in it. `tool context` printed them in its
+  table. The language server returned `__iyi_dt_1_r` and `__iyi_dt_1_v` as
+  the *first two* items of a completion with nothing typed yet — kind 6,
+  "Variable", ahead of the author's own name.
+
+  Two filters were already there and neither knew this fork's names: the
+  types visitor dropped Crystal's `#`-prefixed internals, the context
+  visitor dropped `__temp_`. They are one predicate now,
+  `Iyi.compiler_variable?`, and both surfaces ask it — which is also why
+  the language server is fixed by fixing `tool context`: its completion
+  scope is that visitor's.
+
+  Gated on both paths, because they are two. Step 12b of
+  `bench/lsp_session.py` asks for completion with an empty prefix and
+  fails by naming what was invented; `bench/mod_context.sh` asserts `tool
+  types` names the variable the file writes and none of the compiler's.
+  Both fall when the predicate is taken back out.
+
 - **`iyi tool dependencies` answered nothing for a file with imports.** The
   tool draws the tree of files a program depends on, and it is fed from
   `require`'s path, `Program#run_requires`. iyi's dependency edge is

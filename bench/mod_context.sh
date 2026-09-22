@@ -354,4 +354,47 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And what those commands *call* the things they name. `iyi tool types`
+# prints the type of every variable at a file's top level, and the
+# compiler keeps variables there too: definition typing writes
+# `__iyi_dt_*` probes — an `uninitialized` receiver and return value in an
+# `if false` — to check a def against its own declaration. They were
+# printed as the author's: `tool types samples/iyi/calc.iyi` answered with
+# twenty-three of them and one real variable, and `samples/iyi/modules.iyi`
+# was twenty-three out of twenty-three. The language server's own list is
+# step 12b of `bench/lsp_session.py`; this is the other path to the same
+# names.
+mkdir -p "$WORK/names"
+cd "$WORK/names" || exit 1
+cat > shape.iyi <<'EOF'
+struct Point
+  getter x : Int32
+
+  def initialize(@x : Int32)
+  end
+
+  def double : Int32
+    x * 2
+  end
+end
+
+spot = Point.new(2)
+puts spot.double
+EOF
+export IYI_PATH="$REPO/src"
+"$IYI" tool types shape.iyi > types.txt 2>&1
+invented="$(grep -c '^__' types.txt || true)"
+if ! grep -q '^spot : Point' types.txt; then
+  echo "FAIL: tool types did not name the variable the file writes"
+  sed -n '1,4p' types.txt | sed 's/^/  /'
+  status=1
+elif [ "$invented" != "0" ]; then
+  echo "FAIL: tool types answered with $invented name(s) the compiler wrote"
+  grep '^__' types.txt | sed 's/^/  /' | head -3
+  status=1
+else
+  echo "tool types names the author's variables and none of the compiler's"
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

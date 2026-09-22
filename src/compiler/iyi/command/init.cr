@@ -54,8 +54,18 @@ class Iyi::Command
       Mod::ModFile.parse("module #{module_path}\n", "init")
     rescue ex : Mod::ModError
       # Without the `file:line:` a manifest error carries, because there is
-      # no file yet; the sentence after it is the one that matters.
-      abort! "init: #{ex.message.to_s.sub(/\Ainit(:\d+)?: /, "")}", :USAGE_ERROR
+      # no file yet; the sentence after it is the one that matters. Chopped
+      # by hand rather than by a regex: a regex literal here puts PCRE on
+      # the compiler's floor (SPEC.md III.9), and `bench/dependency_floor.sh`
+      # on Windows said so — `pcre2-8.dll` gained — the first time this
+      # line was written with one.
+      sentence = ex.message.to_s.lchop("init:")
+      digits = 0
+      while (char = sentence[digits]?) && char.ascii_number?
+        digits += 1
+      end
+      sentence = sentence[digits..].lchop(':').lchop(' ')
+      abort! "init: #{sentence}", :USAGE_ERROR
     end
 
     directory ||= Dir.current

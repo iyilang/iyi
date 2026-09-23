@@ -645,12 +645,15 @@
   on that stack, the exit code is the same 1 — and the gate runs the
   overflow a dozen times from one binary, which makes a flake a failure.
 
-  The gate repeats the overflow on the main and fiber stacks. A thread's
-  can still, now and then, say "a memory fault" on Windows:
-  `SetThreadStackGuarantee` is per thread and made on the main thread
-  alone, and making it on every `IyiThread` broke `thread_exercise` at
-  exit — the runtime rewrites a thread's stack bounds as it switches
-  fibers — so that is open, and said here rather than hidden.
+  The gate repeats the overflow on the main, fiber and thread stacks. A
+  thread's could, now and then on the runners, still say "a memory
+  fault": `SetThreadStackGuarantee` is per thread and was made on the
+  main thread alone, so a thread's handler came in with 6.7 to 9.5 KB
+  committed under it rather than 14.9 to 17.8. Every `IyiThread` makes
+  its own now. The exit crash that had it taken back out was not its
+  doing (the fiber registry's, above). Because the shortfall shows only
+  on some CPUs, `bench/panics.sh` also has a thread ask for its guarantee
+  and wants 16384, and fails with the thread's call taken out.
 
 - **The language server could not read a Windows file URI.** An editor
   sends `file:///c%3A/Users/x/a.iyi`, and the server chopped the scheme
@@ -9687,7 +9690,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,472-line library and nothing else. Every other
+  written against iyi's own 17,487-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

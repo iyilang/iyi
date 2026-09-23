@@ -611,6 +611,21 @@
       {% unless flag?(:win32) %}
         IyiStackGuard.install
       {% end %}
+      # Windows' equivalent, and just as much a thread's own:
+      # `SetThreadStackGuarantee` keeps room under the guard page for the
+      # handler that names the overflow, and the 16 KB were set on the main
+      # thread alone. Measured, a thread without it came into
+      # `__iyi_win_fault` with 6,736 to 9,472 bytes committed under it, the
+      # dispatcher having taken 2,672 of what the overflow left; with it,
+      # 14,864 to 17,760. On the Windows runners the thread's overflow was
+      # now and then reported as a memory fault, and the main thread's and
+      # a fiber's, each with 16 KB, never were (`bench/panics.sh`). Set
+      # before anything else runs here, on the thread's own stack, before
+      # any fiber rewrites the bounds the TEB holds.
+      {% if flag?(:win32) %}
+        guarantee = 16384_i32
+        LibC.SetThreadStackGuarantee(pointerof(guarantee))
+      {% end %}
       {% if flag?(:darwin) %}
         here = uninitialized UInt64
         IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)

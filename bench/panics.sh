@@ -401,12 +401,13 @@ done
 # stack-overflow sentence. Whether the 16 KB guarantee covered the
 # detaches depended on where the first fault landed, so one run in three
 # showed it and two did not. Repeated runs make a flake a failure.
-# And on a fiber's stack the same way. Not a thread's: `SetThreadStackGuarantee`
-# is a per-thread setting made on the main thread alone, and setting it on
-# every `IyiThread` broke `thread_exercise` at exit on Windows — the
-# runtime rewrites a thread's stack bounds as it switches fibers — so a
-# thread's overflow can still, now and then, say "memory fault" there.
-for where in main fiber; do
+# And on a fiber's stack and a thread's the same way. A thread's needed
+# a guarantee of its own: `SetThreadStackGuarantee` is per thread, and
+# with it set on the main thread alone a thread's handler came in with
+# 6.7 to 9.5 KB committed under it, which on the Windows runners was now
+# and then not enough, and the overflow was called a memory fault. Every
+# `IyiThread` sets its own now (14.8 to 17.8 KB measured).
+for where in main fiber thread; do
   set +e
   "$IYI" build -o "$work/deep_${where}_bin" "$work/deep_$where.iyi" > /dev/null 2>&1
   set -e
@@ -421,6 +422,41 @@ for where in main fiber; do
 $out"
   done
 done
+# The repeats catch a thread's missing guarantee only now and then: the
+# room it leaves was enough on this machine's CPUs and not always on the
+# runners'. What the guarantee is can be asked, though - a call with 0
+# changes nothing and hands back the current size - so a thread asks, and
+# a runtime with the thread's own call taken out is the proof that the
+# asking sees the difference.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    cat > "$work/guarantee.iyi" <<'EOF'
+module guarantee
+
+t = IyiThread.start do
+  size = 0_i32
+  LibC.SetThreadStackGuarantee(pointerof(size))
+  puts "thread guarantee #{size}"
+  nil
+end
+t.join
+EOF
+    "$IYI" build -o "$work/guarantee" "$work/guarantee.iyi" > "$work/guarantee.log" 2>&1 || fail "the guarantee probe did not build: $(cat "$work/guarantee.log")"
+    out=$("$work/guarantee" 2>&1) || fail "the guarantee probe exited $?: $out"
+    [ "$out" = "thread guarantee 16384" ] || fail "a thread's own stack guarantee: $out, wanted 16384"
+    mkdir -p "$work/unguaranteed/iyi"
+    cp src/iyi/*.iyi "$work/unguaranteed/iyi/"
+    awk '/^        LibC.SetThreadStackGuarantee\(pointerof\(guarantee\)\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      src/iyi/thread.iyi > "$work/unguaranteed/iyi/thread.iyi" ||
+      fail "the thread's guarantee this proof removes is not in thread.iyi any more"
+    IYI_PATH="$(cygpath -m "$work/unguaranteed");$(cygpath -m "$PWD/src")" \
+      "$IYI" build -o "$work/unguaranteed.exe" "$work/guarantee.iyi" > "$work/guarantee.log" 2>&1 ||
+      fail "the unguaranteed probe did not build: $(cat "$work/guarantee.log")"
+    out=$("$work/unguaranteed.exe" 2>&1)
+    [ "$out" != "thread guarantee 16384" ] || fail "the guarantee check passed with the thread's own call taken out"
+    step "a thread sets its own stack guarantee, and the check sees it gone ($out without it)"
+    ;;
+esac
 cat > "$work/wild.iyi" <<'EOF'
 module wild
 

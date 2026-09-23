@@ -20,15 +20,32 @@ struct Exception::CallStack
 
   @@loaded = false
 
+  # iyi: the fiber loading the debug information, while it loads. Loading
+  # it again from inside - an exception built there and unwound on
+  # Windows, where `unwind` loads first, or the failure's own backtrace
+  # decoded to be printed - met `Crystal.once`'s reentrancy check, whose
+  # raise unwound and loaded again: the process died of a stack overflow
+  # where the failure was meant to be printed and passed over. On Windows
+  # the load raises (and rescues) as soon as the running binary has been
+  # renamed, which is what rebuilding it does, so the language server's
+  # proxy died the first time it raised anything after a rebuild
+  # (`bench/lsp_memory.py`, "a session outlives the binary it was started
+  # from"). From inside, the load answers with what it has so far.
+  @@loading : Fiber? = nil
+
   # :nodoc:
   def self.load_debug_info : Nil
+    return if @@loading.same?(Fiber.current)
     Crystal.once(pointerof(@@loaded)) do
       return if ENV["CRYSTAL_LOAD_DEBUG_INFO"]? == "0"
 
+      @@loading = Fiber.current
       begin
         load_debug_info_impl
       rescue ex
         Crystal::System.print_exception "Unable to load debug information", ex
+      ensure
+        @@loading = nil
       end
     end
   end

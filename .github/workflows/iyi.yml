@@ -1761,12 +1761,17 @@ jobs:
       # buffer the server opened on Windows was read from a file it could
       # not find, and nothing here had ever asked. The exe rather than
       # `bin/iyi`, which is a shell script, and its path spelled the way
-      # the Windows python the runner carries can start it.
+      # the Windows python the runner carries can start it. And the
+      # session's workers: killed mid-compile, retired, and started again
+      # from a binary that has been renamed away - which is what a rebuild
+      # does, and what killed the proxy here with a stack overflow in the
+      # first exception it built afterwards.
       - name: The language server holds its session, on Windows
         shell: bash
         run: |
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
 
       # Four gates that carry Windows code — `cygpath`, the `;` separator,
       # the read-only directory Windows has no `chmod` for — and had never

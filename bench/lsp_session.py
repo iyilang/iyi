@@ -96,9 +96,52 @@ def rss_mb(pid):
 
 
 def children(pid):
+    """The pids *pid* started and that are still running. `ps --ppid` is
+    procps'; Windows has no `ps`, and the process snapshot kernel32 keeps
+    names every process's parent, which is the same question."""
+    if os.name == "nt":
+        return nt_children(pid)
     listed = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)],
                             capture_output=True, text=True)
     return [int(line) for line in listed.stdout.split() if line.isdigit()]
+
+
+def nt_children(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot")
+    found = []
+    try:
+        entry = Entry()
+        entry.dwSize = ctypes.sizeof(Entry)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32ParentProcessID == pid:
+                found.append(entry.th32ProcessID)
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return found
 
 
 def tree_mb(pid):
@@ -969,9 +1012,10 @@ def main():
     #       A retirement on the memory bound may have come first, and
     #       then the first quiet warms that successor and the next one
     #       replaces it, so the wait is for the pid to move, bounded.
-    #       Where `ps` cannot list the workers (Windows, BSD `ps`) the
-    #       wait is the two quiet periods that cover it, and the pid move
-    #       is reported unmeasured rather than asserted.
+    #       Where the workers cannot be listed (BSD `ps` has no `--ppid`)
+    #       the wait is the two quiet periods that cover it, and the pid
+    #       move is reported unmeasured rather than asserted. Windows lists
+    #       them from the process snapshot (`children`).
     before = children(c.proc.pid)
     if before:
         deadline = time.monotonic() + 10

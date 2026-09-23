@@ -321,6 +321,33 @@ def killed_mid_compile(argv, direct, work):
     return client
 
 
+def process_binary(pid):
+    """The file *pid* was started from. Linux's `/proc/<pid>/exe`; on
+    Windows the image name the kernel keeps for the process, which is the
+    same path, and a running `.exe` may be renamed there, not deleted."""
+    if os.name != "nt":
+        return os.readlink(f"/proc/{pid}/exe")
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess")
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW")
+        return path.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def binary_gone():
     """The compiler's binary, moved out from under a live session.
 
@@ -338,7 +365,7 @@ def binary_gone():
              "no worker process to look at")
         return
     try:
-        binary = os.readlink(f"/proc/{workers[0]}/exe")
+        binary = process_binary(workers[0])
     except OSError:
         print("memory ---- no /proc/<pid>/exe here, so which binary the "
               "worker runs is not knowable; step skipped")

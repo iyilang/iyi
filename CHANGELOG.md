@@ -336,6 +336,22 @@
 
 ### Fixed
 
+- **The language server died on Windows when the binary it runs was
+  moved away: "Stack overflow".** With `iyi.exe` renamed under a live
+  session, the proxy's next worker could not be started, and the
+  exception that said so was the first the proxy had built. On Windows
+  building one loads the debug information first, and the load asked for
+  the executable's path, whose `realpath` raised because the path was gone;
+  that exception loaded again, `Crystal.once` raised on the re-entry, and
+  that raise loaded again, 3,961 times until the stack ran out (read from
+  a dump of the proxy). The loader answers a call from inside itself with
+  what it has so far now, and the proxy says "could not be started" as it
+  does on Linux. `bench/lsp_memory.py` asks that on Windows: it lists a
+  session's workers from the process snapshot where there is no `ps`,
+  finds which binary one runs from its image name where there is no
+  `/proc`, and runs in the Windows job; before the fix it ended "server
+  closed the pipe".
+
 - **No `-Dgc_none` or `-Dgc_boehm` program compiled: "undefined
   constant IyiThread".** The once-guard a constant read before its line
   goes through waits on other threads with `IyiThread.spin_pause`, and

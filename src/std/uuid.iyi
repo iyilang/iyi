@@ -22,7 +22,7 @@ pub struct UUID
     bytes = Array(UInt8).new(16) { 0_u8 }
     i = 0
     while i < 16
-      bytes[i] = (rng.next_u32 & 255_u32).to_u8
+      bytes[i] = (rng.next_u & 255_u32).to_u8
       i = i + 1
     end
     bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8

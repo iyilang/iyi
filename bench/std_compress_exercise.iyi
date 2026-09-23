@@ -45,7 +45,7 @@ def random_bytes(n : Int32, seed : UInt64) : String
   String.new(n) do |dst|
     i = 0
     while i < n
-      dst[i] = (rng.next_u32 & 0xff_u32).to_u8
+      dst[i] = (rng.next_u & 0xff_u32).to_u8
       i = i + 1
     end
   end

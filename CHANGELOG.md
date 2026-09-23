@@ -30,6 +30,18 @@
 
 ### Changed
 
+- **`Random.new(seed)` is the other library's stream, draw for draw.** The
+  stream was taken from the seed where Crystal takes it from a separate
+  sequence (zero unless asked), `rand` was 32 bits over 2^32, and
+  `rand(n)` a plain modulo, so a seeded benchmark ported from Crystal
+  printed different numbers — the port carried seventy lines of its own
+  PCG32 to match. `Random.new(seed, sequence = 0)`, `next_u` (was
+  `next_u32`), `next_float` (53 bits from two draws), `rand(n)` with the
+  rejection that keeps every value equally likely, and
+  `shuffle(random)`, `sample(random)` and `sample(n, random)` make
+  Crystal 1.21's choices in its order; `bench/std_random_exercise.iyi`
+  checks each against the value Crystal prints.
+
 - **`Float64#to_s` is three and a half times faster.** The shortest
   round-trip printer made every one of its bignums eighty limbs wide —
   3.8 KB of garbage per double printed, most of what `to_s` cost — and

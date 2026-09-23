@@ -95,24 +95,34 @@ echo "== proving the checks can fail when the module is broken"
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
-  mkdir -p "$WORK/patched/std"
-  "$PY" - <<PY
+  # A bounded draw that answers zero, and the stream taken from the seed
+  # rather than from the sequence - which is what this module did, and
+  # why a seeded program printed other numbers than the other library's.
+  for label in bounded stream; do
+    rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
+    PROOF="$label" "$PY" - <<PY
+import os
 from pathlib import Path
 src = Path("$REPO/src/std/random.iyi").read_text()
-old = '(next_u32.to_u64 % n.to_u64).to_i32'
+proofs = {
+    "bounded": ("result.unsafe_mod(bound).to_i32", "0"),
+    "stream": ("@inc = (sequence << 1) | 1_u64", "@inc = (seed << 1) | 1_u64"),
+}
+old, new = proofs[os.environ["PROOF"]]
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/random.iyi").write_text(src.replace(old, '0', 1))
+Path("$WORK/patched/std/random.iyi").write_text(src.replace(old, new, 1))
 PY
-  if [ $? -ne 0 ]; then
-    echo "  the patch did not apply"
-    status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_random_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-    echo "  the exercise PASSED on a broken module"
-    status=1
-  else
-    echo "  a broken random is caught"
-  fi
+    if [ $? -ne 0 ]; then
+      echo "  $label: the patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_random_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+      echo "  $label: the exercise PASSED on a broken module"
+      status=1
+    else
+      echo "  $label: caught - $(grep -m1 'panic' "$WORK/mut.out" | sed 's/^iyi: panic: //')"
+    fi
+  done
 fi
 
 echo

@@ -58,14 +58,26 @@ pub struct Regex
     out
   end
 
+  # Every match replaced, into one buffer: `out = out + ...` copied all of
+  # the text so far at each match, and eleven substitutions over a 60 MB
+  # sequence with a million matches each did not finish.
   def replace(text : String, replacement : String) : String
-    out = ""
+    replace(text) { |match| replacement }
+  end
+
+  # Every match replaced by what the block answers for it — the per-match
+  # substitution (`gsub(pattern, hash)` in the other library) that a fixed
+  # replacement cannot say.
+  def replace(text : String, & : String -> String) : String
     last = 0
-    each_match(text) do |a, b|
-      out = out + text[last, a - last] + replacement
-      last = b
+    String.build(text.bytesize) do |io|
+      each_match(text) do |a, b|
+        io.write(text.to_unsafe + last, a - last)
+        io << yield text[a, b - a]
+        last = b
+      end
+      io.write(text.to_unsafe + last, text.bytesize - last)
     end
-    out + text[last, text.bytesize - last]
   end
 
   # Every non-overlapping match, leftmost first. After a full match the

@@ -113,14 +113,14 @@ class Array(T)
   end
 
   def join(separator : String) : String
-    result = ""
-    first = true
-    each do |value|
-      result = result + separator unless first
-      result = result + value.to_s
-      first = false
+    String.build do |io|
+      first = true
+      each do |value|
+        io << separator unless first
+        io << value
+        first = false
+      end
     end
-    result
   end
 
   # The sum of the elements, and the type's zero when there are none.

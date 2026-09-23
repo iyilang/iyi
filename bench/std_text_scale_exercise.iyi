@@ -1,0 +1,66 @@
+# The library's text building, at a size where the shape of the algorithm is
+# the whole answer: every method here writes megabytes, and each one checks
+# what it wrote. Linear, the run is a fraction of a second; built with
+# `result = result + piece` - which `Array#join`, `String#tr`, `gsub` with a
+# block, `delete`, `squeeze` and `Regex#replace` all were - it does not end,
+# and `bench/std_text_scale_exercise.sh` runs it under a clock.
+#
+#   ./bin/iyi run bench/std_text_scale_exercise.iyi
+#   bash bench/std_text_scale_exercise.sh
+module bench/std_text_scale_exercise
+
+import std/regex
+import std/text
+using std/regex::{Regex}
+
+def check(ok : Bool, what : String) : Nil
+  raise "text scale: #{what}" unless ok
+end
+
+# A sequence of eight megabytes, the letters of a genome and a separator.
+unit = "acgtACGT-"
+count = (8 * 1024 * 1024 + unit.bytesize - 1) // unit.bytesize
+pieces = [] of String
+i = 0
+while i < count
+  pieces << unit
+  i = i + 1
+end
+
+seq = pieces.join
+check(seq.bytesize == count * unit.bytesize, "join wrote #{seq.bytesize} bytes")
+lined = pieces.join("\n")
+check(lined.bytesize == count * (unit.bytesize + 1) - 1, "join with a separator")
+
+complement = seq.reverse.tr("acgtACGT", "tgcaTGCA")
+check(complement.bytesize == seq.bytesize, "reverse and tr keep the size")
+check(complement.starts_with?("-ACGTacgt"), "reverse and tr: #{complement[0, 9]}")
+
+dashes = seq.gsub("-") { |dash| "--" }
+check(dashes.bytesize == seq.bytesize + count, "gsub with a block")
+check(seq.delete("-").bytesize == seq.bytesize - count, "delete")
+check(dashes.squeeze("-").bytesize == seq.bytesize, "squeeze")
+
+replaced = Regex.compile("[AC]+").replace(seq, "x")
+check(replaced.bytesize == seq.bytesize - count, "Regex#replace")
+counted = Regex.compile("G").replace(seq) { |match| "gg" }
+check(counted.bytesize == seq.bytesize + count, "Regex#replace with a block")
+
+lines = 0
+bytes = 0
+lined.each_line do |line|
+  lines = lines + 1
+  bytes = bytes + line.bytesize
+end
+check(lines == count && bytes == count * unit.bytesize, "each_line")
+
+built = String.build do |io|
+  i = 0
+  while i < count
+    io << unit << 'é'
+    i = i + 1
+  end
+end
+check(built.bytesize == count * (unit.bytesize + 2), "String.build")
+
+puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line and String.build, each checked"

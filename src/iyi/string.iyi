@@ -577,3 +577,103 @@ struct Char
     self == ' ' || self == '\t' || self == '\n' || self == '\r'
   end
 end
+
+# Text built a piece at a time, the way `String.build` spells it in the
+# other library: `String.build { |io| io << "a" << 1 << 'b' }` is `"a1b"`.
+# The bytes go into one buffer that doubles when it fills and are copied
+# once, into the string, at the end — so building is linear in what is
+# written. `result = result + piece` in a loop copies everything written so
+# far on every piece: `Array#join` and `String#tr` were built that way and
+# did not finish on a 130 MB sequence.
+class String::Builder
+  @buffer : Pointer(UInt8)
+  @bytesize : Int32
+  @capacity : Int32
+
+  def initialize(capacity : Int32 = 64)
+    @capacity = capacity < 16 ? 16 : capacity
+    @buffer = Pointer(UInt8).malloc(@capacity.to_u64)
+    @bytesize = 0
+  end
+
+  def bytesize : Int32
+    @bytesize
+  end
+
+  def empty? : Bool
+    @bytesize == 0
+  end
+
+  def <<(text : String) : self
+    write(text.to_unsafe, text.bytesize)
+    self
+  end
+
+  # A character's UTF-8 bytes, written in place rather than through a
+  # string of its own.
+  def <<(char : Char) : self
+    point = char.ord
+    if point < 0x80
+      write_byte(point.to_u8)
+    elsif point < 0x800
+      reserve(2)
+      write_byte((0xC0 | (point >> 6)).to_u8)
+      write_byte((0x80 | (point & 0x3F)).to_u8)
+    elsif point < 0x10000
+      reserve(3)
+      write_byte((0xE0 | (point >> 12)).to_u8)
+      write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
+      write_byte((0x80 | (point & 0x3F)).to_u8)
+    elsif point <= 0x10FFFF
+      reserve(4)
+      write_byte((0xF0 | (point >> 18)).to_u8)
+      write_byte((0x80 | ((point >> 12) & 0x3F)).to_u8)
+      write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
+      write_byte((0x80 | (point & 0x3F)).to_u8)
+    else
+      write_byte(63_u8)
+    end
+    self
+  end
+
+  # Anything else as its `to_s`.
+  def <<(value) : self
+    self << value.to_s
+  end
+
+  def write_byte(byte : UInt8) : Nil
+    reserve(1)
+    @buffer[@bytesize] = byte
+    @bytesize = @bytesize + 1
+  end
+
+  def write(bytes : Pointer(UInt8), count : Int32) : Nil
+    return if count <= 0
+    reserve(count)
+    (@buffer + @bytesize.to_i64).copy_from(bytes, count)
+    @bytesize = @bytesize + count
+  end
+
+  def to_s : String
+    String.new(@bytesize) { |buffer| buffer.copy_from(@buffer, @bytesize) }
+  end
+
+  private def reserve(extra : Int32) : Nil
+    needed = @bytesize + extra
+    return if needed <= @capacity
+    capacity = @capacity
+    while capacity < needed
+      capacity = capacity * 2
+    end
+    @buffer = @buffer.realloc(capacity.to_u64)
+    @capacity = capacity
+  end
+end
+
+class String
+  def self.build(capacity : Int32 = 64, & : String::Builder -> _) : String
+    builder = String::Builder.new(capacity)
+    yield builder
+    builder.to_s
+  end
+end

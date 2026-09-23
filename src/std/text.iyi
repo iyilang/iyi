@@ -465,16 +465,16 @@ class ::String
     idx = index(search)
     return self unless idx
 
-    result = ""
     start = 0
     s_len = search.bytesize
-    while (idx = index(search, start))
-      result = result + byte_slice(start, idx - start)
-      result = result + yield search
-      start = idx + s_len
+    String.build(bytesize) do |io|
+      while (idx = index(search, start))
+        io.write(to_unsafe + start, idx - start)
+        io << yield search
+        start = idx + s_len
+      end
+      io.write(to_unsafe + start, bytesize - start)
     end
-    result = result + byte_slice(start, bytesize - start)
-    result
   end
 
   def gsub(search : Char, & : Char -> String) : String
@@ -482,16 +482,16 @@ class ::String
     idx = index(text)
     return self unless idx
 
-    result = ""
     start = 0
     s_len = text.bytesize
-    while (idx = index(text, start))
-      result = result + byte_slice(start, idx - start)
-      result = result + yield search
-      start = idx + s_len
+    String.build(bytesize) do |io|
+      while (idx = index(text, start))
+        io.write(to_unsafe + start, idx - start)
+        io << yield search
+        start = idx + s_len
+      end
+      io.write(to_unsafe + start, bytesize - start)
     end
-    result = result + byte_slice(start, bytesize - start)
-    result
   end
 
   def capitalize : String
@@ -513,33 +513,83 @@ class ::String
   # per byte of the character it was asked to replace once. Both sets name
   # runs the way the other library does: `a-z` is the twenty-six letters,
   # and a `-` at either end is itself.
+  #
+  # Both sets in ASCII - the common case, and a DNA complement's - are one
+  # 256-entry byte table built once and one pass over the bytes, which a
+  # character above ASCII passes through untouched because none of its
+  # bytes is under 0x80. Otherwise the map is per character. A `to`
+  # shorter than `from` repeats its last character, which is the rule the
+  # other library follows; an empty one deletes the character. Each
+  # character was looked up in an array of one-character strings and the
+  # answer appended to a string rebuilt every time, and a 130 MB `tr` did
+  # not finish.
   def tr(from : String, to : String) : String
     return self if from.empty?
     sources = tr_set(from)
     targets = tr_set(to)
+    return tr_bytes(sources, targets) if sources.all? { |c| c.ord < 0x80 } && targets.all? { |c| c.ord < 0x80 }
 
-    result = ""
-    each_char do |c|
-      text = c.to_s
-      at = sources.index(text)
-      if at == nil
-        result = result + text
-      elsif !targets.empty?
-        # A `to` shorter than `from` repeats its last character, which is the
-        # rule the other library follows; an empty one deletes the character.
-        found = at || 0
-        result = result + (found < targets.size ? targets[found] : targets[targets.size - 1])
+    String.build(bytesize) do |io|
+      each_char do |c|
+        at = sources.index(c)
+        if at.nil?
+          io << c
+        elsif !targets.empty?
+          io << (at < targets.size ? targets[at] : targets[targets.size - 1])
+        end
       end
     end
-    result
+  end
+
+  # The byte table: -1 keeps a byte, -2 deletes it, anything else is the
+  # byte it becomes. The first time a source names a byte is the one that
+  # counts, as `index` found it before.
+  private def tr_bytes(sources : Array(Char), targets : Array(Char)) : String
+    table = Pointer(Int32).malloc(256_u64)
+    i = 0
+    while i < 256
+      table[i] = -1
+      i = i + 1
+    end
+    i = sources.size - 1
+    while i >= 0
+      table[sources[i].ord] = if targets.empty?
+                                -2
+                              elsif i < targets.size
+                                targets[i].ord
+                              else
+                                targets[targets.size - 1].ord
+                              end
+      i = i - 1
+    end
+    source = to_unsafe
+    if targets.empty?
+      return String.build(bytesize) do |io|
+        at = 0
+        while at < bytesize
+          byte = source[at]
+          io.write_byte(byte) unless table[byte.to_i32] == -2
+          at = at + 1
+        end
+      end
+    end
+    String.new(bytesize) do |buffer|
+      at = 0
+      while at < bytesize
+        byte = source[at]
+        mapped = table[byte.to_i32]
+        buffer[at] = mapped < 0 ? byte : mapped.to_u8
+        at = at + 1
+      end
+    end
   end
 
   # The characters *set* names, one string each: a `-` between two of them
   # is the run from the first to the second, and one that runs backwards
   # is a mistake rather than an empty run.
-  private def tr_set(set : String) : Array(String)
+  private def tr_set(set : String) : Array(Char)
     chars = set.chars
-    named = [] of String
+    named = [] of Char
     i = 0
     while i < chars.size
       if chars[i] == '-' && i > 0 && i + 1 < chars.size
@@ -550,12 +600,12 @@ class ::String
         end
         cp = low + 1
         while cp <= high
-          named << cp.unsafe_chr.to_s
+          named << cp.unsafe_chr
           cp = cp + 1
         end
         i = i + 2
       else
-        named << chars[i].to_s
+        named << chars[i]
         i = i + 1
       end
     end
@@ -570,12 +620,10 @@ class ::String
   # above ASCII, and deleting one byte of one leaves the rest behind.
   def delete(chars : String) : String
     return self if chars.empty?
-    result = ""
-    each_char do |c|
-      text = c.to_s
-      result = result + text unless chars.includes?(text)
+    named = chars.chars
+    String.build(bytesize) do |io|
+      each_char { |c| io << c unless named.includes?(c) }
     end
-    result
   end
 
   def squeeze : String
@@ -611,17 +659,17 @@ class ::String
   # so a multi-byte one is a run rather than three bytes that never match.
   def squeeze(chars : String) : String
     return self if chars.empty?
-    result = ""
-    previous = ""
-    each_char do |c|
-      text = c.to_s
-      if text == previous && chars.includes?(text)
-        next
+    named = chars.chars
+    String.build(bytesize) do |io|
+      started = false
+      previous = ' '
+      each_char do |c|
+        next if started && c == previous && named.includes?(c)
+        io << c
+        previous = c
+        started = true
       end
-      result = result + text
-      previous = text
     end
-    result
   end
 
   def count(char : Char) : Int32
@@ -702,9 +750,25 @@ class ::String
     end
   end
 
+  # Scanned, a line at a time: `lines` first built the whole array - 2.4
+  # million strings for a 143 MB text - and `chomp` a second string for each.
+  # The same lines, a final newline closing the last rather than opening an
+  # empty one, and a `\r` before a newline left off.
   def each_line(& : String -> Nil) : Nil
-    lines.each do |line|
-      yield line.chomp('\r')
+    source = to_unsafe
+    start = 0
+    at = 0
+    while at < bytesize
+      if source[at] == 10_u8
+        stop = at > start && source[at - 1] == 13_u8 ? at - 1 : at
+        yield byte_slice(start, stop - start)
+        start = at + 1
+      end
+      at = at + 1
+    end
+    if start < bytesize
+      stop = source[bytesize - 1] == 13_u8 ? bytesize - 1 : bytesize
+      yield byte_slice(start, stop - start)
     end
   end
 
@@ -863,37 +927,27 @@ class ::String
     to_f
   end
 
+  # The characters in reverse, found from the back: a lead byte is any byte
+  # that is not `10xxxxxx`, so each character's bytes are copied as they
+  # stand. It decoded the whole string into an array of `Char`s first - four
+  # bytes each, 520 MB to reverse 130 MB of ASCII.
   def reverse : String
-    ch = chars
-    String.new(bytesize) do |buf|
+    source = to_unsafe
+    String.new(bytesize) do |buffer|
       at = 0
-      rev_idx = ch.size - 1
-      while rev_idx >= 0
-        c = ch[rev_idx]
-        cp = c.ord
-        if cp < 0x80
-          buf[at] = cp.to_u8
-          at = at + 1
-        elsif cp < 0x800
-          buf[at] = (0xC0 | (cp >> 6)).to_u8
-          buf[at + 1] = (0x80 | (cp & 0x3F)).to_u8
-          at = at + 2
-        elsif cp < 0x10000
-          buf[at] = (0xE0 | (cp >> 12)).to_u8
-          buf[at + 1] = (0x80 | ((cp >> 6) & 0x3F)).to_u8
-          buf[at + 2] = (0x80 | (cp & 0x3F)).to_u8
-          at = at + 3
-        elsif cp <= 0x10FFFF
-          buf[at] = (0xF0 | (cp >> 18)).to_u8
-          buf[at + 1] = (0x80 | ((cp >> 12) & 0x3F)).to_u8
-          buf[at + 2] = (0x80 | ((cp >> 6) & 0x3F)).to_u8
-          buf[at + 3] = (0x80 | (cp & 0x3F)).to_u8
-          at = at + 4
-        else
-          buf[at] = '?'.ord.to_u8
-          at = at + 1
+      stop = bytesize
+      while stop > 0
+        start = stop - 1
+        while start > 0 && (source[start] & 0xC0_u8) == 0x80_u8
+          start = start - 1
         end
-        rev_idx = rev_idx - 1
+        k = start
+        while k < stop
+          buffer[at] = source[k]
+          at = at + 1
+          k = k + 1
+        end
+        stop = start
       end
     end
   end

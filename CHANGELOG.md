@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`String.build { |io| ... }` and `String::Builder`.** Text a piece at a
+  time — `io << "a" << 1 << 'é'`, `io.write_byte` — into one buffer that
+  doubles and is copied once, the other library's spelling. And
+  `Regex#replace(text) { |match| ... }`, the per-match substitution a
+  fixed replacement cannot say.
+
 - **`iyi init MODULE [DIR]`.** A project, from nothing: `iyi.mod` naming
   the module, an entry `main.iyi`, a module `greet.iyi` the entry imports
   and `main_test.iyi` — the four files that show `module`, `import`,
@@ -58,6 +64,19 @@
   unbuffered, so a gate that stops says where.
 
 ### Fixed
+
+- **`Array#join`, `String#tr`, `gsub` with a block, `delete`, `squeeze`
+  and `Regex#replace` were quadratic.** Each built its answer with
+  `result = result + piece`, which copies everything so far on every
+  piece: a 130 MB `tr` ran fourteen minutes of CPU without finishing, and
+  eleven `Regex#replace` calls over 60 MB ran thirty. They write into a
+  `String::Builder` now, and `tr` over ASCII sets is one 256-entry byte
+  table and one pass. `reverse` finds each character from the back instead
+  of decoding the string into an array of `Char`s first (520 MB to reverse
+  130 MB), and `each_line` scans instead of building every line first.
+  `bench/std_text_scale_exercise.sh` puts eight megabytes through all of
+  them under a clock, and the clock stops a builder that grows by a fixed
+  step instead of doubling.
 
 - **`iyi check` passed a type's methods when nothing built the type.**
   R-2c types a fully written def at its definition, caller or no caller,
@@ -9207,7 +9226,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,999-line library and nothing else. Every other
+  written against iyi's own 16,099-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

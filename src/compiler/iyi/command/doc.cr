@@ -76,7 +76,11 @@ class Iyi::Command
       candidates << File.join(entry, "#{path}.iyi")
       candidates << File.join(entry, "#{path}.cr")
     end
-    candidates.find { |candidate| File.file?(candidate) }
+    # Expanded, as the file branch expands what it is handed: `File.join`
+    # leaves the module path's own `/` inside a root spelled with `\` on
+    # Windows, and the header check that follows read the mixed spelling
+    # as a module in the wrong place.
+    candidates.find { |candidate| File.file?(candidate) }.try { |found| File.expand_path(found) }
   end
 
   # The search path this process was given, or the default list when it

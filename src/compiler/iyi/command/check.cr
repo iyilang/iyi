@@ -68,6 +68,11 @@ class Iyi::Command
   private def check_affected : Nil
     as_json = false
     changed = [] of String
+    # What was typed, beside the expanded path the closures are matched
+    # against: the verdict names a file the way the caller did, as `test
+    # --affected` does. Chopped back from the expanded path, it came out
+    # `calc\add.iyi` on Windows for a caller who wrote `calc/add.iyi`.
+    typed = [] of String
     while option = options.shift?
       case option
       when "--affected"
@@ -79,6 +84,7 @@ class Iyi::Command
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
         changed << File.expand_path(value)
+        typed << value
       when "-f"
         as_json = options.shift? == "json"
       when "--json"
@@ -94,16 +100,16 @@ class Iyi::Command
     # closure keeps an import's path after its file is gone - and the
     # verdict says which file it was, because "0 consumer(s) checked, all
     # compile" on a typo is a clean verdict about nothing.
-    missing = changed.reject { |path| File.file?(path) }.map { |path| Iyi.relative_filename(path) }
+    missing = typed.reject { |path| File.file?(path) }
 
     # The manifest is not a module, so no closure holds it — and a change
     # to it moves the code under every module at once: `import
     # example.test/user/liba` resolves through the requirement it names.
     # `--affected iyi.mod` answered "0 consumer(s) checked, all compile",
     # which is a clean verdict about nothing.
-    manifest_changed = changed.select do |path|
+    manifest_changed = typed.select do |path|
       File.basename(path).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
-    end.map { |path| Iyi.relative_filename(path) }
+    end
 
     consumers = [] of String
     Dir.glob("**/*.iyi") do |candidate|

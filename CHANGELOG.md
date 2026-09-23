@@ -43,6 +43,13 @@
 
 ### Fixed
 
+- **`iyi check --affected` names a missing file the way it was typed.**
+  It expanded the path, then chopped the working directory back off, so on
+  Windows a caller who wrote `calc/add.iyi` read `calc\add.iyi is not
+  there` — and so did `affected_not_found`, which a tool matches against
+  what it sent. It keeps what was typed now, as `iyi test --affected`
+  already did. `bench/agent_loop.py` step 39 failed on it on Windows.
+
 - **An artifact did not name the `lib` its own object code calls.**
   `Libs` is how a consumer that links a module's units — and compiles
   none of them — learns which C libraries to pass the linker. It was

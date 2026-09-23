@@ -79,6 +79,16 @@
 
 ### Changed
 
+- **A parked channel send is one allocation, and finding the running
+  fiber is one load.** The sender's value sat in a one-element array, so
+  every send that waited for its receiver made a node, an array and the
+  array's buffer; it is a field of the node now. `IyiScheduler.state`
+  carried its first-touch allocation inline, which made it too large to
+  inline and gave every call a large function's prologue ahead of its
+  one thread-local load; the first touch is a method of its own. A ring
+  of 503 fibers passing a token fifteen million times - which parks on
+  every send - went from 1.08 s to 0.72 s (Crystal 1.21: 0.54 s).
+
 - **`BigInt` adds, subtracts, multiplies, shifts and divides through the
   limbs' pointers, and multiplies by a machine integer in one pass.**
   Every limb went through a bounds-checked `Array#[]` and a growth-checked
@@ -9403,7 +9413,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,219-line library and nothing else. Every other
+  written against iyi's own 17,232-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -652,20 +652,22 @@ class IyiWaiter
 end
 
 # A channel's sender node: the same membership plus the value being sent,
-# boxed so a rendezvous can hand it over while its owner is suspended. An
-# emptied box is the delivery receipt the woken sender reads; a box still
-# full says the send failed — the channel closed, or the task was
-# cancelled — and the value dies with the node.
+# held so a rendezvous can hand it over while its owner is suspended. The
+# taken flag is the delivery receipt the woken sender reads; a value never
+# taken says the send failed — the channel closed, or the task was
+# cancelled — and it dies with the node. The value is a field, not a
+# one-element array: a parked send is one allocation, where the box made
+# it three, and a ring of fibers parks on every send.
 class IyiSendNode(T)
   @fiber : IyiFiber
   @nonce : UInt64
   property next_node : IyiSendNode(T)?
-  @box : Array(T)
+  @value : T
+  @taken : Bool
 
-  def initialize(@fiber : IyiFiber, @nonce : UInt64, value : T)
+  def initialize(@fiber : IyiFiber, @nonce : UInt64, @value : T)
     @next_node = nil
-    @box = Array(T).new(1)
-    @box << value
+    @taken = false
   end
 
   def fiber : IyiFiber
@@ -677,11 +679,12 @@ class IyiSendNode(T)
   end
 
   def take : T
-    @box.shift
+    @taken = true
+    @value
   end
 
   def delivered? : Bool
-    @box.empty?
+    @taken
   end
 end
 
@@ -788,9 +791,19 @@ class IyiScheduler
   # This thread's state, made on first touch and linked for the roots
   # before the thread-local names it. The push is under the runtime lock:
   # two threads' first touches would otherwise race for the list's head.
+  #
+  # The first touch is its own method, kept out of line: made inline, its
+  # allocation and barriers made this accessor too large to inline and
+  # gave every call the prologue of a large function before the one load
+  # it is - a fifth of a ring of fibers passing a token.
   def self.state : IyiSchedulerState
     state = @@state
     return state if state.is_a?(IyiSchedulerState)
+    first_state_here
+  end
+
+  @[NoInline]
+  private def self.first_state_here : IyiSchedulerState
     state = IyiSchedulerState.new
     IyiRuntimeLock.lock
     state.next_state = @@states_head

@@ -355,6 +355,15 @@
 
 ### Fixed
 
+- On darwin, `File.write` to a file that already existed set its mode to
+  0644: the prelude's open-for-write followed the `open` with a `chmod`, a
+  workaround from when `open` was not bound as variadic and a created file's
+  mode came out as garbage. The binding is variadic now, so the mode reaches
+  `open` on arm64's stack, and the `chmod` only changed files the call did not
+  create - `File.tempfile`'s 0600 file became world-readable at its first
+  write. `bench/std_file_exercise.sh`'s check that a temporary file is its
+  owner's alone, made after a write, is what the darwin runner failed.
+
 - `Dir.tempdir` and `File.tempfile` drop a trailing separator from TMPDIR,
   as Crystal's `Dir.tempdir` does. darwin sets TMPDIR to `/var/folders/.../T/`,
   so every path joined onto it had two separators and `File.dirname` of a
@@ -9775,7 +9784,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,489-line library and nothing else. Every other
+  written against iyi's own 17,491-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

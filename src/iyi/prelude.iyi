@@ -348,12 +348,14 @@ end
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
-    # O_WRONLY|O_CREAT|O_TRUNC = 1|0x0200|0x0400. `open` is variadic for the
-    # mode, and `chmod` sets 0644 afterwards because a missing mode on create
-    # has produced an unreadable file (execute-only) on this machine.
-    fd = LibC.open(path, 1537, 420).to_i64
-    LibC.chmod(path, 420) if fd >= 0
-    fd
+    # O_WRONLY|O_CREAT|O_TRUNC = 1|0x0200|0x0400, and 0644 for a file the
+    # call creates. `open` is declared variadic above, so the mode reaches
+    # it on arm64's stack where darwin reads it. A `chmod` to 0644 after it
+    # dates from a binding that was not: it was a mode for the files the
+    # call created and a change of mode for every file it merely opened,
+    # so writing to `File.tempfile`'s 0600 file made it world-readable
+    # here and nowhere else.
+    LibC.open(path, 1537, 420).to_i64
   end
 
   def __iyi_close(fd : Int64) : Nil

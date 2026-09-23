@@ -4,6 +4,19 @@
 
 ### Added
 
+- `std/socket` read and write timeouts: `read_timeout_ms` and
+  `write_timeout_ms` bound how long a read or a write waits for the peer, and
+  a wait that runs out answers a `SocketError` whose `timed_out?` (now public)
+  is true, with the connection still open. Underneath, the scheduler has an
+  io wait with a deadline - `wait_readable(fd, ms)` and `wait_writable(fd, ms)`
+  answer `true` when ready and `false` when the time ran out: the fiber is in
+  the sleep list beside the io list, whichever wakes it takes it off the
+  other, and on Windows the deadline cancels the posted operation and its
+  completion is what wakes the fiber, so no packet is left to arrive at the
+  fiber's next operation. The socket gate proves a timeout that is not kept
+  and a deadline left in the sleep list are both caught, and fails on a panic
+  the program outlives.
+
 - `std/socket` unix sockets: `IyiSocket.listen_unix(path)` and
   `IyiSocket.connect_unix(path)`, parking like TCP's. The listener's
   `local_address` is its path, `local_port` refuses by name, and `close`
@@ -9656,7 +9669,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,370-line library and nothing else. Every other
+  written against iyi's own 17,446-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

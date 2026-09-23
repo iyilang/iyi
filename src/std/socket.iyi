@@ -32,6 +32,14 @@
 # socket while another writes it - a WebSocket's two halves - but two
 # fibers reading one socket, or two writing it, are refused.
 #
+# Timeouts:
+# `read_timeout_ms` and `write_timeout_ms` bound how long a read or a write
+# waits for the peer; a wait that runs out answers a `SocketError` whose
+# `timed_out?` is true, and the connection stays open. Unset, a wait takes
+# as long as the peer does. The bound is per wait, not per call: a write
+# that parks three times may wait three times as long, and a write that
+# times out may have sent part of its bytes.
+#
 # Errors:
 # What the other end or the network does is a value, not a panic: a
 # connection reset, a peer that has gone (a broken pipe), a refused or
@@ -147,6 +155,19 @@ pub struct SocketError
   def initialize(@operation : String, @code : Int32)
   end
 
+  # A wait for the peer that ran past its socket's timeout, carrying the
+  # platform's own number for it so `reason` and `timed_out?` read it as
+  # they read the kernel's.
+  def self.timed_out(operation : String) : SocketError
+    {% if flag?(:win32) %}
+      SocketError.new(operation, 10060)
+    {% elsif flag?(:darwin) %}
+      SocketError.new(operation, 60)
+    {% else %}
+      SocketError.new(operation, 110)
+    {% end %}
+  end
+
   # The peer is gone: it reset the connection, or closed it and the write
   # found the pipe broken, or the connection was aborted.
   def disconnected? : Bool
@@ -197,7 +218,9 @@ pub struct SocketError
     {% if flag?(:win32) %} @code == 10048 {% elsif flag?(:darwin) %} @code == 48 {% else %} @code == 98 {% end %}
   end
 
-  private def timed_out? : Bool
+  # The peer did not answer in time: a connect the network timed out, or a
+  # read or write past its socket's timeout.
+  def timed_out? : Bool
     {% if flag?(:win32) %} @code == 10060 {% elsif flag?(:darwin) %} @code == 60 {% else %} @code == 110 {% end %}
   end
 
@@ -230,6 +253,21 @@ pub class IyiSocket
   # The path a unix listener bound, which its `close` removes: nobody else
   # can bind it while the file is there, and the file outlives the socket.
   @path : String? = nil
+
+  # The bounds on a read's and a write's wait, in milliseconds; nil waits
+  # as long as it takes.
+  getter read_timeout_ms : Int32? = nil
+  getter write_timeout_ms : Int32? = nil
+
+  def read_timeout_ms=(ms : Int32?) : Int32?
+    raise "negative timeout: #{ms}" if ms.is_a?(Int32) && ms < 0
+    @read_timeout_ms = ms
+  end
+
+  def write_timeout_ms=(ms : Int32?) : Int32?
+    raise "negative timeout: #{ms}" if ms.is_a?(Int32) && ms < 0
+    @write_timeout_ms = ms
+  end
 
   def to_unsafe : Int32
     @fd
@@ -341,9 +379,10 @@ pub class IyiSocket
       n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
       return n.to_i32 if n >= 0_i64
       return SocketError.new("read from socket", IyiSocket.__sys_code(n)) unless IyiSocket.__sys_would_block?(n)
-      waited = IyiSocket.await_readable(@fd)
+      waited = IyiSocket.await_readable(@fd, IyiSocket.bound(@read_timeout_ms))
       return waited if waited.is_a?(Cancelled)
       return Cancelled.new if @fd < 0
+      return SocketError.timed_out("read from socket") unless waited
     end
   end
 
@@ -366,11 +405,12 @@ pub class IyiSocket
     raise "socket is closed" if @fd < 0
     written = 0
     while written < count
-      n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64)
+      n = IyiSocket.__sys_send(@fd, buffer + written, (count - written).to_u64, IyiSocket.bound(@write_timeout_ms))
       if n < 0_i64 && IyiSocket.__sys_would_block?(n)
-        waited = IyiSocket.await_writable(@fd)
+        waited = IyiSocket.await_writable(@fd, IyiSocket.bound(@write_timeout_ms))
         return waited if waited.is_a?(Cancelled)
         return Cancelled.new if @fd < 0
+        return SocketError.timed_out("write to socket") unless waited
         next
       end
       return SocketError.new("write to socket", n < 0_i64 ? IyiSocket.__sys_code(n) : 0) if n <= 0_i64
@@ -387,27 +427,35 @@ pub class IyiSocket
     write(buffer, count)
   end
 
+  # A timeout as the waits take it: milliseconds, -1 for none.
+  def self.bound(ms : Int32?) : Int32
+    ms.is_a?(Int32) ? ms : -1
+  end
+
   # The waits: the runtime's poller where there is one, a blocking `poll`
-  # on the one descriptor where there is not.
+  # on the one descriptor where there is not. True when the descriptor is
+  # ready, false when *ms* ran out first.
   {% if @top_level.has_constant?("IyiScheduler") %}
-    def self.await_readable(fd : Int32) : Nil | Cancelled
-      wait_readable(fd)
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+      wait_readable(fd, ms)
     end
 
-    def self.await_writable(fd : Int32) : Nil | Cancelled
-      wait_writable(fd)
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+      wait_writable(fd, ms)
     end
   {% else %}
     # A wait the kernel cut short (a signal, EINTR) answers `Cancelled`:
     # the one way a wait ends here without the descriptor being ready.
-    def self.await_readable(fd : Int32) : Nil | Cancelled
-      return Cancelled.new if __sys_poll(fd, 1) < 0
-      nil
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+      ready = __sys_poll(fd, 1, ms)
+      return Cancelled.new if ready < 0
+      ready > 0
     end
 
-    def self.await_writable(fd : Int32) : Nil | Cancelled
-      return Cancelled.new if __sys_poll(fd, 4) < 0
-      nil
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+      ready = __sys_poll(fd, 4, ms)
+      return Cancelled.new if ready < 0
+      ready > 0
     end
   {% end %}
 
@@ -853,7 +901,7 @@ pub class IyiSocket
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
@@ -888,16 +936,17 @@ pub class IyiSocket
       LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
     end
 
-    # One `pollfd` (fd, events, revents), no timeout: the blocking wait a
-    # program without the runtime does.
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    # One `pollfd` (fd, events, revents) for *ms* milliseconds, -1 for as
+    # long as it takes: the blocking wait a program without the runtime
+    # does. 0 when the time ran out.
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       pfd = Pointer(UInt8).malloc(8_u64)
       pfd.as(Pointer(Int32)).value = fd
       pfd[4] = events.to_u8
       pfd[5] = 0_u8
       pfd[6] = 0_u8
       pfd[7] = 0_u8
-      LibC.poll(pfd.as(Void*), 1_u32, -1)
+      LibC.poll(pfd.as(Void*), 1_u32, ms)
     end
 
     # F_SETFL with O_NONBLOCK; the flags already set are read first.
@@ -1039,7 +1088,7 @@ pub class IyiSocket
 
     # MSG_NOSIGNAL (0x4000): a write to a connection the peer closed answers
     # EPIPE instead of killing the process with SIGPIPE.
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0x4000_i64, 0_i64, 0_i64)
     end
 
@@ -1070,15 +1119,23 @@ pub class IyiSocket
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 41_i64, 26_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
 
-    # `ppoll` on one descriptor with no timeout and no signal mask.
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    # `ppoll` on one descriptor for *ms* milliseconds - a timespec, or none
+    # for -1 - and no signal mask. 0 when the time ran out.
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       pfd = Pointer(UInt8).malloc(8_u64)
       pfd.as(Pointer(Int32)).value = fd
       pfd[4] = events.to_u8
       pfd[5] = 0_u8
       pfd[6] = 0_u8
       pfd[7] = 0_u8
-      __sys5(SYS_PPOLL, pfd.address.to_i64, 1_i64, 0_i64, 0_i64, 0_i64).to_i32
+      spec = 0_i64
+      if ms >= 0
+        timespec = Pointer(Int64).malloc(2_u64)
+        timespec[0] = (ms // 1000).to_i64
+        timespec[1] = (ms % 1000).to_i64 * 1000000_i64
+        spec = timespec.address.to_i64
+      end
+      __sys5(SYS_PPOLL, pfd.address.to_i64, 1_i64, spec, 0_i64, 0_i64).to_i32
     end
 
     # F_GETFL (3), then F_SETFL (4) with O_NONBLOCK (0x800) added.
@@ -1212,6 +1269,7 @@ pub class IyiSocket
     # nothing to do says, what a posted operation says, and what an
     # operation that is not over yet says when it is asked how it went.
     WSAEWOULDBLOCK    = 10035
+    WSAETIMEDOUT      = 10060
     ERROR_IO_PENDING  =   997
     WSA_IO_INCOMPLETE =   996
 
@@ -1426,7 +1484,7 @@ pub class IyiSocket
       0
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       s = __sys_handle(fd)
       n = LibWs2_32.send(s, buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
@@ -1438,10 +1496,13 @@ pub class IyiSocket
       # written for, and a zero-byte overlapped send cannot stand in for it,
       # since one completes on its own within 50 ms on a socket with no room
       # at all. So the send is the wait.
-      __sys_send_posted(s, buf, len)
+      __sys_send_posted(s, buf, len, ms)
     end
 
-    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64) : Int64
+    # The send as the wait, with the write's deadline on it: a deadline
+    # that comes first cancels the send, and the cancellation's completion
+    # wakes this frame, so what the send did is known when it returns.
+    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       return -(WSAEWOULDBLOCK.to_i64) if IyiScheduler.current.cancelled
       # The buffer descriptor stays on this frame for the whole operation:
       # the kernel reads it after the post, and the fiber is parked in
@@ -1454,7 +1515,7 @@ pub class IyiSocket
       return sent.to_i64 if answered == 0
       err = LibWs2_32.WSAGetLastError
       return -(err.to_i64) if err != ERROR_IO_PENDING
-      parked = IyiScheduler.park_overlapped_current
+      parked = IyiScheduler.park_overlapped_current(ms)
       if parked.is_a?(Cancelled)
         # What the send did is read before the flag is honoured: Windows may
         # have sent the bytes already — the port can deliver the completion
@@ -1473,6 +1534,9 @@ pub class IyiSocket
       # has, which answers `Cancelled` for the first and comes back here for
       # the second, where a plain `send` names the error.
       result = __sys_overlapped_result(s, ov)
+      # Bytes that went are the answer whatever the clock says; nothing
+      # sent by a send the deadline cancelled is the timeout.
+      return -(WSAETIMEDOUT.to_i64) if result <= 0_i64 && IyiScheduler.current.timed_out
       return -(WSAEWOULDBLOCK.to_i64) if result <= 0_i64
       result
     end
@@ -1628,7 +1692,7 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       -1_i64
     end
 
@@ -1652,7 +1716,7 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_poll(fd : Int32, events : Int32) : Int32
+    def self.__sys_poll(fd : Int32, events : Int32, ms : Int32) : Int32
       -1
     end
 

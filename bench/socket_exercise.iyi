@@ -267,4 +267,91 @@ again = IyiSocket.listen_unix(unix_path)
 again.close
 puts "unix: ok"
 
+# 10. Timeouts. A read that waits past `read_timeout_ms` answers a
+#     `SocketError` that says so, and the connection still works; a read
+#     answered before its deadline leaves no deadline behind - its fiber
+#     sleeps past it and lives; a write into a peer that never reads times
+#     out the same way. A sibling ends each wait after two seconds if the
+#     timeout does not, so a broken one is a failure here and not a hang.
+t_server = IyiSocket.listen(0)
+t_client = IyiSocket.connect("127.0.0.1", t_server.local_port).or_panic
+t_conn = t_server.accept.or_panic
+t_conn.read_timeout_ms = 100
+timed_read = ""
+timed_ms = 0_i64
+read_done = false
+group do |g|
+  g.spawn do
+    t_started = __iyi_monotonic_ns
+    t_answer = t_conn.read(16)
+    timed_ms = (__iyi_monotonic_ns - t_started) // 1000000_i64
+    read_done = true
+    case t_answer
+    in SocketError
+      timed_read = t_answer.timed_out? ? "timed out" : t_answer.message
+    in String
+      timed_read = "read #{t_answer.inspect}"
+    in Cancelled
+      timed_read = "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    200.times do
+      sleep(10) unless read_done
+    end
+    t_client.write("late") unless read_done
+    0
+  end
+end
+raise "timeout: the read answered #{timed_read}, the timeout is not kept" unless timed_read == "timed out"
+raise "timeout: the read gave up after #{timed_ms} ms of 100" if timed_ms < 90
+t_client.write("after")
+raise "timeout: the connection did not survive its timeout" unless t_conn.read(16).or_panic == "after"
+t_early = ""
+t_slept = 0_i64
+group do |g|
+  g.spawn do
+    t_conn.read_timeout_ms = 200
+    t_early = t_conn.read(16).or_panic
+    t_started = __iyi_monotonic_ns
+    sleep(400)
+    t_slept = (__iyi_monotonic_ns - t_started) // 1000000_i64
+    0
+  end
+  g.spawn do
+    sleep(20)
+    t_client.write("soon")
+    0
+  end
+end
+raise "timeout: the early read got #{t_early.inspect}" unless t_early == "soon"
+raise "timeout: the read's old deadline woke its fiber #{400 - t_slept} ms early" if t_slept < 390
+t_client.write_timeout_ms = 100
+t_chunk = "t" * 65536
+t_wrote = t_client.write(t_chunk)
+t_writes = 0
+group do |g|
+  g.spawn do
+    while t_wrote.is_a?(Int32) && t_writes < 5000
+      t_writes = t_writes + 1
+      t_wrote = t_client.write(t_chunk)
+    end
+    0
+  end
+  g.spawn do
+    200.times do
+      sleep(10) if t_wrote.is_a?(Int32)
+    end
+    t_conn.close if t_wrote.is_a?(Int32)
+    0
+  end
+end
+t_last = t_wrote
+raise "timeout: the write answered #{t_last.inspect}" unless t_last.is_a?(SocketError) && t_last.timed_out?
+t_client.close
+t_conn.close unless t_conn.closed?
+t_server.close
+puts "timeout: ok"
+
 puts "socket_exercise: all checks passed"

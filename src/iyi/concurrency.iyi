@@ -431,6 +431,11 @@ class IyiFiber
   property stack_top : UInt64
 
   property deadline : Int64
+  # An io wait with a deadline is in the sleep list as well, by `deadline`;
+  # whichever of the two wakes it takes it off the other. `timed_out` says
+  # the deadline did.
+  property io_timed : Bool
+  property timed_out : Bool
   property wait_fd : Int32
   # Which way it waits on `wait_fd`: 1 to read, 4 to write - epoll's IN
   # and OUT bits, which the registration is the union of.
@@ -494,6 +499,8 @@ class IyiFiber
     @next_child = nil
     @joiner = nil
     @deadline = 0_i64
+    @io_timed = false
+    @timed_out = false
     @wait_fd = -1
     @wait_dir = 0
     @park_nonce = 0_u64
@@ -1146,18 +1153,19 @@ class IyiScheduler
     ov
   end
 
-  def self.park_overlapped_current : Int64 | Cancelled
+  def self.park_overlapped_current(ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     fiber.state = IyiFiberState::WaitingIo
     fiber.next_io = state.io_head
     state.io_head = fiber
+    arm_deadline(fiber, ms)
     reschedule
 
     return Cancelled.new if fiber.cancelled
     fiber.io_bytes_read
   end
 
-  def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64) : Int64 | Cancelled
+  def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64, ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
 
@@ -1202,23 +1210,32 @@ class IyiScheduler
       return 0_i64
     end
 
-    park_overlapped_current
+    park_overlapped_current(ms)
   end
 
   def self.wait_readable_current(fd : Int32 | Int64) : Nil | Cancelled
+    waited = wait_readable_current(fd, -1)
+    return waited if waited.is_a?(Cancelled)
+    nil
+  end
+
+  # The same wait with a deadline *ms* milliseconds away, -1 for none:
+  # true when *fd* is readable, false when the deadline came first.
+  def self.wait_readable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
-      res = read_current(fd, Pointer(Void).new(0_u64), 0_u64)
+      res = read_current(fd, Pointer(Void).new(0_u64), 0_u64, ms)
       return res if res.is_a?(Cancelled)
-      nil
     {% else %}
-      wait_readable_posix(fd.to_i32)
+      res = wait_posix(fd.to_i32, 1, ms)
+      return res if res.is_a?(Cancelled)
     {% end %}
+    !fiber.timed_out
   end
 
   def self.wait_readable_posix(fd : Int32) : Nil | Cancelled
-    wait_posix(fd, 1)
+    wait_posix(fd, 1, -1)
   end
 
   # The other direction: park until *fd* can take bytes. A socket's send
@@ -1226,17 +1243,28 @@ class IyiScheduler
   # block the thread; a fiber parks instead and the poller wakes it when
   # the kernel has room. Same registry, same one-waiter-per-fd rule.
   def self.wait_writable_current(fd : Int32 | Int64) : Nil | Cancelled
+    waited = wait_writable_current(fd, -1)
+    return waited if waited.is_a?(Cancelled)
+    nil
+  end
+
+  # With a deadline, as `wait_readable_current`. Windows has no readiness
+  # to wait for - a send there is posted, and the post is the wait, with
+  # its own deadline - so it answers true at once.
+  def self.wait_writable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
-      nil
+      true
     {% else %}
-      wait_writable_posix(fd.to_i32)
+      res = wait_posix(fd.to_i32, 4, ms)
+      return res if res.is_a?(Cancelled)
+      !fiber.timed_out
     {% end %}
   end
 
   def self.wait_writable_posix(fd : Int32) : Nil | Cancelled
-    wait_posix(fd, 4)
+    wait_posix(fd, 4, -1)
   end
 
   # Park until *fd* can be read (1) or written (4). One reader and one
@@ -1246,7 +1274,7 @@ class IyiScheduler
   # of what its waiters want, and the event says which half is ready. A
   # second fiber in the same direction is refused: the event would wake
   # one of the two, and the other would wait for nothing.
-  def self.wait_posix(fd : Int32, direction : Int32) : Nil | Cancelled
+  def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     others = io_interest(fd)
@@ -1284,9 +1312,29 @@ class IyiScheduler
     fiber.state = IyiFiberState::WaitingIo
     fiber.next_io = state.io_head
     state.io_head = fiber
+    arm_deadline(fiber, ms)
     reschedule
     return Cancelled.new if fiber.cancelled
     nil
+  end
+
+  # An io wait's deadline, *ms* milliseconds from now, or none for -1. The
+  # fiber goes into the sleep list beside the io list; `timed_out` starts
+  # false either way, so a caller reads it only after a wait that armed it.
+  def self.arm_deadline(fiber : IyiFiber, ms : Int32) : Nil
+    fiber.timed_out = false
+    return if ms < 0
+    fiber.deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
+    fiber.io_timed = true
+    sleep_insert(fiber)
+  end
+
+  # An io wait that ended some other way leaves the sleep list, or its
+  # deadline would wake the fiber a second time, wherever it is by then.
+  def self.untime(fiber : IyiFiber) : Nil
+    return unless fiber.io_timed
+    fiber.io_timed = false
+    sleep_remove(fiber)
   end
 
   # The directions fibers are waiting in on *fd*, as epoll bits.
@@ -1506,6 +1554,21 @@ class IyiScheduler
       return if head.deadline > now
       state.sleep_head = head.next_sleep
       head.next_sleep = nil
+      if head.io_timed
+        # An io wait whose deadline came first.
+        head.io_timed = false
+        head.timed_out = true
+        {% if flag?(:win32) %}
+          # The operation is the kernel's until its completion is taken off
+          # the port, and the OVERLAPPED is the fiber's next operation's
+          # too: it is cancelled here, and the cancellation's completion is
+          # what wakes the fiber, so nothing of it is left to arrive later.
+          LibC.CancelIoEx(head.wait_handle, head.wait_overlapped.as(Void*))
+          next
+        {% else %}
+          io_remove(head)
+        {% end %}
+      end
       enqueue(head)
     end
   end
@@ -1558,6 +1621,7 @@ class IyiScheduler
     if head.wait_overlapped.address == ptr
       state.io_head = head.next_io
       head.next_io = nil
+      untime(head)
       return head
     end
     cursor = head
@@ -1567,6 +1631,7 @@ class IyiScheduler
       if after.wait_overlapped.address == ptr
         cursor.next_io = after.next_io
         after.next_io = nil
+        untime(after)
         return after
       end
       cursor = after
@@ -1626,6 +1691,7 @@ class IyiScheduler
   # the fd's, so it is narrowed to what the other direction's waiter
   # still wants (EPOLL_CTL_MOD, 3), or removed when nobody does (DEL, 2).
   def self.io_forget(fiber : IyiFiber) : Nil
+    untime(fiber)
     {% if flag?(:win32) %}
       fiber.next_io = nil
     {% elsif flag?(:darwin) %}
@@ -1804,6 +1870,12 @@ def wait_readable(fd : Int64) : Nil | Cancelled
   IyiScheduler.wait_readable_current(fd)
 end
 
+# The same, for at most *ms* milliseconds: true when *fd* is readable,
+# false when the time ran out first.
+def wait_readable(fd : Int32, ms : Int32) : Bool | Cancelled
+  IyiScheduler.wait_readable_current(fd, ms)
+end
+
 # Tell the poller *fd* is being closed, so a fiber parked on it wakes
 # instead of waiting for an event the kernel will never deliver.
 def wake_closed(fd : Int32) : Nil
@@ -1817,6 +1889,10 @@ end
 
 def wait_writable(fd : Int64) : Nil | Cancelled
   IyiScheduler.wait_writable_current(fd)
+end
+
+def wait_writable(fd : Int32, ms : Int32) : Bool | Cancelled
+  IyiScheduler.wait_writable_current(fd, ms)
 end
 
 def iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64 | Cancelled

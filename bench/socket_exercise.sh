@@ -61,6 +61,13 @@ run_case() {
     status=1
     return 1
   fi
+  # A fiber that panics after its group has joined prints and is not
+  # propagated: the exit status alone does not see it.
+  if grep -q "iyi: panic" "$WORK/$name.out"; then
+    echo "$label: a panic the program outlived"
+    status=1
+    return 1
+  fi
   return 0
 }
 
@@ -73,13 +80,13 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix; do
+for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix timeout; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6 and unix all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6, unix and timeout all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -227,6 +234,31 @@ else
 fi ;;
 esac
 
+# 11. An io wait that ends before its deadline and stays in the sleep list:
+#     the deadline wakes the fiber a second time, after it has finished,
+#     which the runtime reports with a panic the program outlives.
+mkdir -p "$WORK/stale/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/stale/iyi/"
+awk '{ sub(/return unless fiber\.io_timed$/, "return"); print }' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/stale/iyi/concurrency.iyi"
+if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/stale/iyi/concurrency.iyi"; then
+  echo "  a deadline left behind: the patch changed nothing"
+  status=1
+elif ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build -o "$WORK/stale/program" \
+     "$REPO/bench/socket_exercise.iyi" >"$WORK/stale/build.log" 2>&1; then
+  echo "  a deadline left behind: the patched prelude did not build"
+  status=1
+else
+  timeout 60 "$WORK/stale/program" >"$WORK/stale/out" 2>&1
+  code=$?
+  if [ "$code" -eq 0 ] && ! grep -q "iyi: panic" "$WORK/stale/out"; then
+    echo "  a deadline left behind: the exercise still passed, so it does not test this"
+    status=1
+  else
+    echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "iyi: panic|timeout:" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
+  fi
+fi
+
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
   '{ sub(/best_size = 1$/, "best_size = 8"); print }'
@@ -237,6 +269,10 @@ prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to ::1:0
 #    again.
 prove_fails "a unix listener's file left behind" unixleft "cannot bind socket to .*the address is in use" \
   '{ sub(/__iyi_unlink\(IyiSocket.c_path\(path\)\)/, "IyiSocket.c_path(path)"); print }'
+
+# 10. A read whose deadline passes and which waits on regardless.
+prove_fails "a read timeout not kept" untimed "timeout: the read answered" \
+  '{ sub(/return SocketError.timed_out\("read from socket"\) unless waited/, ""); print }'
 
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
@@ -307,6 +343,8 @@ refuses "a trailing colon" addr_trailing "a trailing colon" \
   "IyiSocket.parse_ipv6(\"1::2:\")"
 refuses "a unix socket path past the platform's room" unix_long "is 300 bytes, and the platform's limit is" \
   "IyiSocket.listen_unix(\"/\" * 300).local_address"
+refuses "a negative timeout" timeout_negative "negative timeout: -1" \
+  "IyiSocket.new(0).read_timeout_ms = -1"
 refuses "an empty unix socket path" unix_empty "a unix socket path is empty" \
   "IyiSocket.connect_unix(\"\").or_panic.to_unsafe"
 refuses "a port asked of a unix socket" unix_port "a unix socket has no port" \
@@ -354,7 +392,7 @@ refuses_after_close "accept after close" closed_accept 'puts l.accept.or_panic.c
 echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
-  echo "refused connections, IPv6 and unix sockets all verified, a port and an address are checked before"
+  echo "refused connections, IPv6, unix sockets and timeouts all verified, a port and an address are checked before"
   echo "they are packed, a closed socket says so, and every check is proved to fail"
   echo "when broken."
 else

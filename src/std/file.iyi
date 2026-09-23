@@ -1402,6 +1402,12 @@ class ::File
         tmpdir = "/tmp"
       {% end %}
     end
+    # One trailing separator off, as `Dir.tempdir` does: darwin's TMPDIR
+    # ends with one, and the name below adds its own.
+    last = tmpdir[tmpdir.bytesize - 1]
+    if tmpdir.bytesize > 1 && (last == '/' || last == File::SEPARATOR)
+      tmpdir = tmpdir[0, tmpdir.bytesize - 1]
+    end
     attempt = 0
     while attempt < 100
       path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + temp_token + suffix

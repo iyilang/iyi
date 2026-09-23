@@ -355,6 +355,13 @@
 
 ### Fixed
 
+- `Dir.tempdir` and `File.tempfile` drop a trailing separator from TMPDIR,
+  as Crystal's `Dir.tempdir` does. darwin sets TMPDIR to `/var/folders/.../T/`,
+  so every path joined onto it had two separators and `File.dirname` of a
+  file made there was not the directory it was made in; the darwin runner's
+  std sweep found it. `bench/std_file_exercise.sh` runs the exercise in
+  `Dir.tempdir` with a TMPDIR written that way.
+
 - `bench/std_regex_exercise.sh` holds on Windows: its probe for a class past
   ASCII was written with Python's default encoding, which there is the ANSI
   code page, so `[é]` became the byte 0xE9 and the compiler refused the file

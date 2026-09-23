@@ -392,11 +392,11 @@ pub class Dir
 
   def self.tempdir : String
     tmp = Program.env("TMPDIR")
-    return tmp if tmp && !tmp.empty?
+    return without_trailing_separator(tmp) if tmp && !tmp.empty?
     tmp2 = Program.env("TEMP")
-    return tmp2 if tmp2 && !tmp2.empty?
+    return without_trailing_separator(tmp2) if tmp2 && !tmp2.empty?
     tmp3 = Program.env("TMP")
-    return tmp3 if tmp3 && !tmp3.empty?
+    return without_trailing_separator(tmp3) if tmp3 && !tmp3.empty?
     {% if flag?(:win32) %}
       # Windows' own answer, not a literal: `C:\Windows\Temp` is a
       # directory a standard user may not write to, and the platform
@@ -412,6 +412,20 @@ pub class Dir
     {% else %}
       "/tmp"
     {% end %}
+  end
+
+  # One trailing separator off, as Crystal's `Dir.tempdir` answers: darwin
+  # sets TMPDIR to `/var/folders/.../T/`, and every path joined onto it had
+  # two separators and a `dirname` that was not the directory it came from.
+  # The root alone is left as it is.
+  def self.without_trailing_separator(dir : String) : String
+    return dir if dir.bytesize <= 1
+    last = dir[dir.bytesize - 1]
+    trailing = last == '/'
+    {% if flag?(:win32) %}
+      trailing = trailing || last == '\\'
+    {% end %}
+    trailing ? dir[0, dir.bytesize - 1] : dir
   end
 
   def self.each(dirname : String | Path, &block : String -> Nil) : Nil

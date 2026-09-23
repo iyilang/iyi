@@ -112,6 +112,23 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/file-release.out" 2>/dev/null; then
 fi
 
 echo
+echo "== the platform's temporary directory, written as darwin writes it"
+# No sandbox argument and no IYI_FILE_SANDBOX, so the exercise works in
+# `Dir.tempdir`, and TMPDIR ends with a separator the way darwin's does.
+# `Dir.tempdir` answered it as it was, every path joined onto it had two
+# separators, and `dirname` did not answer the directory the file was in -
+# which the darwin runner found and nothing here could.
+mkdir -p "$WORK/trailing"
+if env -u IYI_FILE_SANDBOX TMPDIR="$WORK/trailing/" "$WORK/file-plain" > "$WORK/trailing.out" 2>&1 \
+   && grep -q "ALL CHECKS PASSED" "$WORK/trailing.out"; then
+  echo "  a TMPDIR ending in a separator is the directory without it"
+else
+  echo "  a TMPDIR ending in a separator broke the exercise:"
+  grep -m3 -E "panic|expected|got" "$WORK/trailing.out" | sed 's/^/    /'
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # The temporary name made predictable for the exercise's `plant` prefix -
 # all zeros, the name it plants a symlink at - is refused by the exclusive create a hundred times

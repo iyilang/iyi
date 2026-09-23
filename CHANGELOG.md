@@ -36,6 +36,20 @@
 
 ### Fixed
 
+- **An artifact did not name the `lib` its own object code calls.**
+  `Libs` is how a consumer that links a module's units — and compiles
+  none of them — learns which C libraries to pass the linker. It was
+  recorded where a `lib` fun is *declared*, and a `lib`'s funs are
+  declared in the main module and copied into the calling unit past that
+  line, so the list was empty for every module whose `lib` is its own. On
+  Windows every program built from `std/socket`'s artifact failed to link
+  on sixteen Winsock symbols, where the same program from source linked
+  `ws2_32.lib` — `bench/samples_roundtrip.sh` said so the first time it
+  ran there; on Linux a `lib` whose library is linked anyway hid it. The
+  call site records it now, in the unit that makes the call.
+  `bench/mod_context.sh` asks a class-nested `lib`'s artifact for it, on
+  Linux and Windows, and fails with the recording taken out.
+
 - **`iyi doc Int32` on Windows had no `+`.** The prelude's number
   operators are written by a macro, so a def's file is the expansion's
   real one — spelled with `\` on Windows — and the test that keeps the

@@ -20,6 +20,7 @@ class Iyi::CodeGenVisitor
   def target_def_fun(target_def, self_type) : LLVMTypedFunction
     self_type = iyi_artifact_self_type(target_def, self_type)
     mangled_name = target_def.mangled_name(@program, self_type)
+    iyi_record_unit_lib(target_def)
 
     # iyi: a method that takes a block is instantiated with the caller's block
     # inlined into it, so its machine code belongs to whoever wrote the block
@@ -75,6 +76,25 @@ class Iyi::CodeGenVisitor
 
     func = typed_fun?(self_type_mod, mangled_name) || codegen_fun(mangled_name, target_def, self_type)
     check_mod_fun self_type_mod, mangled_name, func
+  end
+
+  # iyi: the `lib` a unit calls into, recorded where the call is.
+  #
+  # `codegen_fun` records it too, at the declaration — but a `lib`'s type
+  # has no unit of its own, so its funs are declared in the main module and
+  # reach a calling unit through `check_mod_fun`, which never passes that
+  # line. The list an artifact carries was empty for every module whose
+  # `lib` is its own: `std/socket`'s `LibWs2_32` on Windows, where every
+  # program built from that artifact failed to link on sixteen Winsock
+  # symbols (`bench/samples_roundtrip.sh`, the first time it ran there), and
+  # a `lib` nested in a class on Linux, where `libm` being linked anyway
+  # was all that hid it.
+  private def iyi_record_unit_lib(target_def) : Nil
+    return unless target_def.is_a?(External) && !target_def.external_var?
+    return if @program.iyi_exported_owners.empty? || @llvm_mod == @main_mod
+    owner = target_def.owner
+    return unless owner.is_a?(LibType)
+    (@program.iyi_unit_libs[@llvm_mod.name] ||= Set(String).new) << owner.to_s
   end
 
   # iyi: the receiver a def read from a `.iyimod` is keyed on (SPEC.md IV.1g).

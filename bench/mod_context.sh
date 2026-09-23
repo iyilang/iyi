@@ -548,4 +548,43 @@ else
 fi
 cd "$WORK" || exit 1
 
+# And what an artifact says its object code links against. `Libs` names
+# each `lib` a unit calls into, so a consumer that links the unit — and
+# compiles none of it — passes the library to the linker. It was empty for
+# every module whose `lib` is its own: the lib's funs are declared in the
+# main module and copied into the calling unit past the line that recorded
+# them. On Windows every program built from `std/socket`'s artifact failed
+# to link on sixteen Winsock symbols; on Linux a `lib` whose library is
+# linked anyway hid it. A class-nested `lib` over the C library's `abs`,
+# which every platform links, asked of the dump.
+mkdir -p "$WORK/libs/m"
+cd "$WORK/libs" || exit 1
+cat > m/netty.iyi <<'EOF'
+module m/netty
+
+pub class Box
+  lib LibMathy
+    fun abs(x : Int32) : Int32
+  end
+
+  def self.c(x : Int32) : Int32
+    LibMathy.abs(x)
+  end
+end
+EOF
+printf 'import m/netty\nusing m/netty::{Box}\n\nputs Box.c(-3)\n' > main.iyi
+export IYI_PATH="$REPO/src${PSEP}$WORK/libs"
+if ! "$IYI" build --emit-iyimod mods -o libs_main main.iyi > libs_build.txt 2>&1; then
+  echo "FAIL: the lib fixture does not build"
+  sed -n '1,4p' libs_build.txt | sed 's/^/  /'
+  status=1
+elif "$IYI" mod dump mods/m/netty.iyimod | sed -n '/^libs/,/^[a-z]/p' | grep -q 'M::Netty::Box::LibMathy'; then
+  echo "an artifact names the lib its object code calls"
+else
+  echo "FAIL: the artifact's object code calls LibMathy and its libs do not say so"
+  "$IYI" mod dump mods/m/netty.iyimod | grep -n '^libs\|^object code' | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

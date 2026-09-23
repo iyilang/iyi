@@ -82,6 +82,13 @@
 
 ### Fixed
 
+- **A method the integer tower has in `std/int` was reported as missing
+  from the language.** `5_u32 + 1_u32`, `x << 3` on a `UInt64` and
+  `x.to_u32` answered that the prelude is small by rule — or "did you mean
+  `to_i32`?" — and a port concluded `UInt32` had no methods at all. It has
+  every operator, shift, conversion and `<=>`, one import away; the error
+  says so now: "`+` on UInt32 is in `std/int` ... `import std/int`".
+
 - **`Array#join`, `String#tr`, `gsub` with a block, `delete`, `squeeze`
   and `Regex#replace` were quadratic.** Each built its answer with
   `result = result + piece`, which copies everything so far on every

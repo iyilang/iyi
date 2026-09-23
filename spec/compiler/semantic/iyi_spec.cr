@@ -269,6 +269,12 @@ describe "Semantic: iyi" do
       assert_error "x = Nosuch.new", "undefined constant Nosuch"
     end
 
+    it "names std/int for a method the integer tower has there" do
+      assert_error "x = 5_u32\nx + 1_u32", "`+` on UInt32 is in `std/int`"
+      assert_error "x = 5_u64\nx << 3", "`<<` on UInt64 is in `std/int`"
+      assert_error "x = 5_u64\nx.to_u32", "`to_u32` on UInt64 is in `std/int`"
+    end
+
     it "names puts value.inspect for p" do
       assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel`"
     end

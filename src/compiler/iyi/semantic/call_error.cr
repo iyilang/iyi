@@ -865,6 +865,31 @@ class Iyi::Call
     posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
   end
 
+  # iyi: the integer tower is one module's, made by macros over a table of
+  # types, so the trait walk below cannot see it: `std/int` gives `UInt32`
+  # its arithmetic, every integer `<<`, `>>`, `<=>` and the `to_u32`
+  # family. A port that reached for `1_u32 + x` was told the prelude is
+  # small by rule and concluded `UInt32` had no methods at all. The names
+  # are read off the module's text: a `def`, a `%w(...)` operator list, or
+  # a quoted conversion name.
+  private def iyi_std_int_hint(program, name : String, owner) : String?
+    return nil unless owner.instance_type.is_a?(IntegerType)
+    program.iyi_path.entries.each do |entry|
+      path = File.join(entry, "std", "int.iyi")
+      next unless File.file?(path)
+      text = File.read(path)
+      named = text.includes?("def #{name}(") || text.includes?("def #{name} ") ||
+              text.includes?("\"#{name}\"") ||
+              text.each_line.any? do |line|
+                line.includes?("%w(") && line.split("%w(", 2)[1].split(')', 2)[0].split(' ').includes?(name)
+              end
+      return nil unless named
+      return "`#{name}` on #{owner.instance_type} is in `std/int`, the module that makes " \
+             "the whole integer tower usable: `import std/int`."
+    end
+    nil
+  end
+
   # The `std/<module>` that would put `name` on this receiver, and how.
   #
   # "undefined method 'tally' for Array(Int32)" is true and useless when
@@ -1159,7 +1184,12 @@ class Iyi::Call
       if !obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_CALL_HINTS[def_name]?)
         msg << '\n' << arrival
       end
-      if obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
+      # iyi: the method itself, on this integer, one import away: said
+      # before a spelling that is merely near it (`to_u32` is not a typo of
+      # `to_i32`) and before an arrival note meant for another receiver.
+      if obj && (integers = iyi_std_int_hint(program, def_name, owner))
+        msg << '\n' << integers
+      elsif obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
         fits = case def_name
                when "/" then owner.is_a?(IntegerType)
                when "%" then owner.to_s == "String"

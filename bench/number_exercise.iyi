@@ -119,8 +119,13 @@ assert_int(2.9.to_i, 2, "number: to_i truncates")
 assert_int((-2.9).to_i, -2, "number: to_i truncates toward zero")
 assert_true((-1.5).floor == -2.0, "number: floor goes down")
 assert_true((-1.5).ceil == -1.0, "number: ceil goes up")
-assert_true(2.5.round == 3.0, "number: round goes away from zero")
-assert_true((-2.5).round == -3.0, "number: round is symmetric")
+# A tie goes to the even integer, Crystal's `round` (SPEC.md III.1.7a); the
+# nearest is read off the fraction, so the double under a half is not moved
+# by a sum that rounds first; and a negative place count rounds to tens.
+assert_true(0.49999999999999994.round == 0.0, "number: round reads the fraction, not a sum")
+assert_true(2.5.round == 2.0 && 3.5.round == 4.0, "number: a tie rounds to the even integer")
+assert_true((-2.5).round == -2.0 && (-3.5).round == -4.0, "number: round is symmetric")
+assert_true(25.0.round(-1) == 20.0 && 1234.0.round(-2) == 1200.0, "number: round to tens and hundreds")
 
 # ---- 6. The unchecked conversion, which is a name
 #

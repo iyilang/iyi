@@ -43,7 +43,9 @@ assert_true (-2.5).round(RoundingMode::ToZero) == -2.0, "to zero -2.5"
 assert_true (-2.5).round(RoundingMode::ToPositive) == -2.0, "to positive -2.5"
 assert_true (-2.5).round(RoundingMode::ToNegative) == -3.0, "to negative -2.5"
 assert_true 3.5.round(RoundingMode::TiesEven) == 4.0, "ties even 3.5"
-assert_true 2.5.round == 3.0, "no-arg round is still ties away"
+assert_true 2.5.round == 2.0, "no-arg round is ties even, as the mode's default"
+assert_true 25.0.round(-1, RoundingMode::TiesAway) == 30.0 && 25.0.round(-1, RoundingMode::TiesEven) == 20.0, "places and a mode together"
+assert_true 2.675.round(2, RoundingMode::ToZero) == 2.67, "places toward zero"
 assert_true 5.round(RoundingMode::ToZero) == 5, "int identity"
 # The nearest integer, not the floor of the value plus a half: that sum
 # rounds, and rounded 0.49999999999999994 up to 1.0 and 4503599627370497.0

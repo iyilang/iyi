@@ -43,9 +43,9 @@ struct Float64
     self < 0.0 ? 0.0 - self : self
   end
 
-  # The integer below, above and nearest (half away from zero, Crystal's
-  # `round`), as a `Float64`. Past 2^53 every double is an integer already
-  # and is answered as it is; the conversion below is exact under it.
+  # The integer below, above and nearest, as a `Float64`. Past 2^53 every
+  # double is an integer already and is answered as it is; the conversion
+  # below is exact under it.
   def floor : Float64
     return self if self != self || abs >= 9007199254740992.0
     truncated = to_i64.to_f64
@@ -58,21 +58,41 @@ struct Float64
     truncated < self ? truncated + 1.0 : truncated
   end
 
+  # The nearest integer, a tie to the even one — Crystal's `round`, so the
+  # name means one thing in both libraries (SPEC.md III.1.7a): `2.5.round`
+  # is 2.0 and `3.5.round` is 4.0. `std/number` names the other modes.
+  # The magnitude's fraction decides, not a sum: `(x + 0.5).floor` rounded
+  # the sum first, and 0.49999999999999994 + 0.5 is 1.0. The sign goes
+  # back by a multiplication, so `(-0.25).round` is -0.0, as there.
   def round : Float64
     return self if self != self || abs >= 9007199254740992.0
-    self < 0.0 ? 0.0 - (0.0 - self + 0.5).floor : (self + 0.5).floor
+    magnitude = abs
+    whole = magnitude.floor
+    fraction = magnitude - whole
+    nearest = if fraction < 0.5
+                whole
+              elsif fraction > 0.5
+                whole + 1.0
+              else
+                (whole / 2.0).floor * 2.0 == whole ? whole : whole + 1.0
+              end
+    self < 0.0 ? nearest * -1.0 : nearest
   end
 
-  # To `digits` places: scaled up, rounded, scaled back. The scaling is a
-  # multiplication and a division by a power of ten, so `3.14159.round(2)`
-  # is the nearest double to 3.14, which prints as `3.14`. A tie goes away
-  # from zero, as in `round` above, and unlike the other library's
-  # `round(digits)`, which goes to even: `2.5.round(0)` is 3.0 here and one
-  # rule serves both spellings.
+  # To `digits` places, a tie to the even one: scaled, rounded, scaled
+  # back, so `3.14159.round(2)` is the double nearest 3.14. A negative
+  # `digits` rounds to tens, hundreds, ...: `1234.0.round(-2)` is 1200.0,
+  # and `25.0.round(-1)` is 20.0. The scale for those divides first rather
+  # than multiplying by a fraction, which no double spells exactly.
   def round(digits : Int32) : Float64
-    return round if digits <= 0
-    scale = 10.0 ** digits
-    (self * scale).round / scale
+    return round if digits == 0
+    if digits < 0
+      scale = 10.0 ** (0 - digits)
+      (self / scale).round * scale
+    else
+      scale = 10.0 ** digits
+      (self * scale).round / scale
+    end
   end
 end
 

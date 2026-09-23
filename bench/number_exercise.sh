@@ -258,7 +258,23 @@ prove_fails "floor rounds the wrong way" bad_floor float.iyi \
 # 8. And the rounding that has to be symmetric about zero.
 prove_fails "round is not symmetric" bad_round float.iyi \
   "number: round is symmetric" \
-  's/^    self < 0.0 ? 0.0 - (0.0 - self + 0.5).floor : (self + 0.5).floor$/    (self + 0.5).floor/'
+  's/^    self < 0.0 ? nearest \* -1.0 : nearest$/    nearest/'
+
+# 8b. A tie decided away from zero, which is the other library's meaning
+#     of the same name.
+prove_fails "a tie rounds away" away_round float.iyi \
+  "number: a tie rounds to the even integer" \
+  's/^                (whole \/ 2.0).floor \* 2.0 == whole ? whole : whole + 1.0$/                whole + 1.0/'
+
+# 8c. The nearest found by a sum, which rounds before the floor sees it.
+prove_fails "round adds a half" sum_round float.iyi \
+  "number: round reads the fraction, not a sum" \
+  's/^    fraction = magnitude - whole$/    fraction = (magnitude + 0.5).floor > whole ? 0.75 : 0.25/'
+
+# 8d. A place count under one read as zero.
+prove_fails "negative places ignored" places_round float.iyi \
+  "number: round to tens and hundreds" \
+  's/^    return round if digits == 0$/    return round if digits <= 0/'
 
 # 9. And the unchecked conversions made checked, which is what the prelude
 #    had before `unsafe_to_u8` was a name: the instruction is the point, so

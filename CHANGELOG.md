@@ -24,6 +24,16 @@
 
 ### Changed
 
+- **`Float64#round` sends a tie to the even integer, as Crystal's does.**
+  `2.5.round` is 2.0 and `3.5.round` is 4.0; `round(digits)` the same at
+  its place. It went away from zero, so the same name compiled under both
+  libraries and answered differently — the shape SPEC.md III.1.7a exists
+  to keep out — and a program rounding a million doubles to ten places
+  printed its first different digit a few hundred thousand values in.
+  `std/number`'s `round(mode)` still names every mode, and
+  `round(digits, mode)` joins it: `25.0.round(-1, RoundingMode::TiesAway)`
+  is 30.0.
+
 - **An install over an install is gated on Windows too.**
   `bench/install_upgrade.sh` holds it for the tarball: a file an older
   release shipped and this one does not used to survive the upgrade and
@@ -48,6 +58,15 @@
   unbuffered, so a gate that stops says where.
 
 ### Fixed
+
+- **`Float64#round` moved the double just under a half, and
+  `round(digits)` ignored a place count under one.**
+  `0.49999999999999994.round` was 1.0 — `(x + 0.5).floor` rounds the sum
+  before the floor sees it — and `25.0.round(-1)` was 25.0, because a
+  non-positive count went to `round` unscaled. The nearest integer is read
+  off the fraction now, and a negative count rounds to tens and hundreds
+  (`1234.0.round(-2)` is 1200.0). `bench/number_exercise.sh` fails on each
+  of the three with the old line put back.
 
 - **The collector handed a live object's chunk to a second object.** A
   run of dead chunks whose pages go back to the kernel keeps its lowest
@@ -9161,7 +9180,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,974-line library and nothing else. Every other
+  written against iyi's own 15,994-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -56,8 +56,8 @@ struct ::Number
   end
 
   # An integer is already whole: every mode answers self. `Float64` names
-  # the mode below; `round` with no arguments stays the prelude's (ties
-  # away from zero).
+  # the mode below; `round` with no arguments is the prelude's, a tie to
+  # the even one, which is `TiesEven`.
   def round(mode : Std::Number::RoundingMode = Std::Number::RoundingMode.new(0)) : self
     self
   end
@@ -77,9 +77,9 @@ struct ::Float64
       # the magnitude less its floor, exact for every double under 2^53
       # (under 1 the floor is zero; above it the two are within a factor of
       # two), and the fraction decides: under a half the floor, over it the
-      # next integer, and at a half the mode. Adding 0.5 first rounded the
+      # next integer, and at a half the mode. Adding 0.5 first rounds the
       # sum itself: 0.49999999999999994 + 0.5 is 1.0, and 4503599627370497.0
-      # + 0.5 is 4503599627370498.0, so the prelude's `round` moves both.
+      # + 0.5 is 4503599627370498.0; the prelude's `round` did, once.
       a = abs
       f = a.floor
       d = a - f
@@ -93,7 +93,23 @@ struct ::Float64
             even = (f / 2.0).floor * 2.0
             even == f ? f : f + 1.0
           end
-      self < 0.0 ? 0.0 - r : r
+      self < 0.0 ? r * -1.0 : r
+    end
+  end
+
+  # To `digits` places in the mode asked for — Crystal's
+  # `round(digits, mode: ...)`: `2.675.round(2, :ties_away)` spelled
+  # `2.675.round(2, RoundingMode::TiesAway)`. A negative `digits` rounds to
+  # tens, hundreds, ..., dividing by the scale first as the prelude's
+  # `round(digits)` does.
+  def round(digits : Int32, mode : Std::Number::RoundingMode) : Float64
+    return round(mode) if digits == 0
+    if digits < 0
+      scale = 10.0 ** (0 - digits)
+      (self / scale).round(mode) * scale
+    else
+      scale = 10.0 ** digits
+      (self * scale).round(mode) / scale
     end
   end
 end

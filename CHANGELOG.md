@@ -336,6 +336,15 @@
 
 ### Fixed
 
+- **No `-Dgc_none` or `-Dgc_boehm` program compiled: "undefined
+  constant IyiThread".** The once-guard a constant read before its line
+  goes through waits on other threads with `IyiThread.spin_pause`, and
+  `thread.iyi` is left out of both of those builds; the guard is a `fun`,
+  typed in every program, so every one of them failed, `hello.iyi`
+  included. The lock is compiled where threads are and nowhere else.
+  `compiler_spec`'s `-Dgc_none` examples and `bench/arena_exercise.sh`'s
+  bump-pointer arm are what failed, on every platform.
+
 - **A package could not import the standard library: "package '...'
   has no module 'std/file'".** A short import written inside a package
   resolves against the package's own checkout and nothing else, so it
@@ -9690,7 +9699,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,487-line library and nothing else. Every other
+  written against iyi's own 17,489-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

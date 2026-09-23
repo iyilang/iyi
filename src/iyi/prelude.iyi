@@ -8085,7 +8085,9 @@ end
 # constant's `i1`, read as the byte it is stored in. Two fibers reading
 # the same constant first wait on one another rather than initialise it
 # twice; the fiber holding the lock may re-enter, for an initialiser that
-# reads another constant not yet initialised.
+# reads another constant not yet initialised. The lock is there only where
+# `thread.iyi` is: a `-Dgc_none` or `-Dgc_boehm` build has no `IyiThread`
+# to pause with, and no second thread to hold it.
 fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
   byte = flag.as(Pointer(UInt8))
   return if IyiAtomic.load(byte, :acquire, false) != 0_u8
@@ -8097,7 +8099,7 @@ class IyiOnce
   @@depth : Int32 = 0
 
   def self.run(flag : Pointer(UInt8), initializer : Void*) : Nil
-    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
       me = IyiScheduler.current.as(Void*).address
       if IyiAtomic.load(pointerof(@@holder), :acquire, false) != me
         until IyiAtomic.cmpxchg(pointerof(@@holder), 0_u64, me, :acquire, :monotonic)[1]
@@ -8113,7 +8115,7 @@ class IyiOnce
       pointerof(cell).as(Pointer(Proc(Nil))).value.call
       IyiAtomic.store(flag, 1_u8, :release, false)
     end
-    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
       @@depth = @@depth - 1
       IyiAtomic.store(pointerof(@@holder), 0_u64, :release, false) if @@depth == 0
     {% end %}

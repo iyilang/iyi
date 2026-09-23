@@ -30,6 +30,18 @@
 
 ### Changed
 
+- **`Float64#to_s` is three and a half times faster.** The shortest
+  round-trip printer made every one of its bignums eighty limbs wide —
+  3.8 KB of garbage per double printed, most of what `to_s` cost — and
+  boxed the double on the heap to read its bits. Each bignum is sized to
+  the value in hand now and doubles past the estimate instead of writing
+  beyond it, the digit loop's sums share one scratch number, and a million
+  doubles print in 0.43 s where they took 1.55 s. The text is the same:
+  2.3 million bit patterns across the whole range, subnormals and every
+  power of two included, print byte for byte what Crystal 1.21 prints. The
+  number exercise pins the range's ends and the powers of two whose nearer
+  neighbour is below, and fails with the power-of-two rule taken out.
+
 - **`Float64#round` sends a tie to the even integer, as Crystal's does.**
   `2.5.round` is 2.0 and `3.5.round` is 4.0; `round(digits)` the same at
   its place. It went away from zero, so the same name compiled under both
@@ -9226,7 +9238,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 16,099-line library and nothing else. Every other
+  written against iyi's own 16,146-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

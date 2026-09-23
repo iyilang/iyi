@@ -123,9 +123,13 @@ class String
 end
 
 # The bignum the printer needs and nothing more: unsigned, 32-bit limbs in
-# 64-bit words so a limb product and a carry fit, little-endian, a fixed
-# capacity that a double's largest scaled boundary stays under (2^1076
-# times 10^308 is under 2^2100; sixty-six limbs, eighty allocated).
+# 64-bit words so a limb product and a carry fit, little-endian. Eighty
+# limbs holds anything a double asks (2^1076 times 10^308 is under 2^2100;
+# sixty-six limbs), and every number was made that size: six of them per
+# double printed, 3.8 KB of garbage, and most of the time `to_s` took. The
+# printer now asks for what the one value in hand needs - a handful of
+# limbs for most - and a number that outgrows its estimate doubles
+# (`room`) rather than writing past it.
 class IyiBig
   LIMBS =             80
   BASE  = 4294967296_u64
@@ -133,9 +137,11 @@ class IyiBig
 
   @limbs : Pointer(UInt64)
   @size : Int32
+  @capacity : Int32
 
-  def initialize(value : UInt64)
-    @limbs = Pointer(UInt64).malloc(LIMBS.to_u64)
+  def initialize(value : UInt64, capacity : Int32 = LIMBS)
+    @capacity = capacity
+    @limbs = Pointer(UInt64).malloc(capacity.to_u64)
     @size = 0
     while value != 0_u64
       @limbs[@size] = value & MASK
@@ -153,7 +159,7 @@ class IyiBig
   end
 
   def copy : IyiBig
-    other = IyiBig.new(0_u64)
+    other = IyiBig.new(0_u64, @capacity)
     index = 0
     while index < @size
       other.set_limb(index, @limbs[index])
@@ -171,6 +177,19 @@ class IyiBig
     @size = size
   end
 
+  # Room for *limbs*, doubling past it. The printer sizes a number to the
+  # value it prints, and that size is an estimate: past it this grows
+  # rather than writing beyond the buffer.
+  protected def room(limbs : Int32) : Nil
+    return if limbs <= @capacity
+    capacity = @capacity
+    while capacity < limbs
+      capacity = capacity * 2
+    end
+    @limbs = @limbs.realloc(capacity.to_u64)
+    @capacity = capacity
+  end
+
   # self * small, small under 2^32.
   def mul_small(small : UInt64) : Nil
     carry = 0_u64
@@ -182,6 +201,7 @@ class IyiBig
       index = index + 1
     end
     if carry != 0_u64
+      room(@size + 1)
       @limbs[@size] = carry
       @size = @size + 1
     end
@@ -199,6 +219,7 @@ class IyiBig
     return if @size == 0
     words = bits // 32
     rest = (bits % 32).to_u64
+    room(@size + words + 1)
     if rest != 0_u64
       carry = 0_u64
       index = 0
@@ -232,6 +253,7 @@ class IyiBig
     carry = 0_u64
     index = 0
     top = @size > other.size ? @size : other.size
+    room(top + 1)
     while index < top
       a = index < @size ? @limbs[index] : 0_u64
       b = index < other.size ? other.limb(index) : 0_u64
@@ -273,6 +295,7 @@ class IyiBig
     index = 0
     while carry != 0_u64
       if index == @size
+        room(@size + 1)
         @limbs[index] = carry & MASK
         carry = carry.unsafe_shr(32_u64)
         @size = @size + 1
@@ -354,11 +377,24 @@ class IyiBig
     0
   end
 
-  # The compare of self + addend against other, without a third number.
-  def compare_sum(addend : IyiBig, other : IyiBig) : Int32
-    sum = copy
-    sum.add(addend)
-    sum.compare(other)
+  # The compare of self + addend against other, the sum made in *scratch*
+  # rather than in a number of its own: the digit loop asks twice a digit.
+  def compare_sum(addend : IyiBig, other : IyiBig, scratch : IyiBig) : Int32
+    copy_into(scratch)
+    scratch.add(addend)
+    scratch.compare(other)
+  end
+
+  # Self's value written over *target*'s, which is answered.
+  def copy_into(target : IyiBig) : IyiBig
+    target.room(@size)
+    index = 0
+    while index < @size
+      target.set_limb(index, @limbs[index])
+      index = index + 1
+    end
+    target.set_size(@size)
+    target
   end
 
   # floor(self / other) for a quotient under ten, self reduced to the
@@ -375,9 +411,8 @@ end
 
 module IyiFloatText
   def self.bits_of(value : Float64) : UInt64
-    holder = Pointer(Float64).malloc(1_u64)
-    holder.value = value
-    Pointer(UInt64).new(holder.address).value
+    holder = value
+    pointerof(holder).as(Pointer(UInt64)).value
   end
 
   def self.from_bits(bits : UInt64) : Float64
@@ -546,25 +581,6 @@ module IyiFloatText
     # midpoints; a significand at the bottom of its binade has a nearer
     # neighbour below, so the gap above is twice the gap below.
     unequal = fraction == 0_u64 && exponent_bits > 1_u64
-    r = IyiBig.new(f)
-    s = IyiBig.new(1_u64)
-    if e >= 0
-      r.shl(e + (unequal ? 2 : 1))
-      s.shl(unequal ? 2 : 1)
-      m_plus = IyiBig.new(1_u64)
-      m_plus.shl(unequal ? e + 1 : e)
-      m_minus = IyiBig.new(1_u64)
-      m_minus.shl(e)
-    else
-      r.shl(unequal ? 2 : 1)
-      s.shl(-e + (unequal ? 2 : 1))
-      m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64)
-      m_minus = IyiBig.new(1_u64)
-    end
-
-    # An even significand owns its boundaries (round-half-even reads a
-    # midpoint back as the even neighbour), an odd one does not.
-    even = f & 1_u64 == 0_u64
 
     # k, the decimal exponent, estimated from the binary one - log10(2) as
     # 1233/4096, a shade under - and corrected below by the comparisons
@@ -578,6 +594,38 @@ module IyiFloatText
     k = ((e + length - 1) * 1233) // 4096
     k = k - 1 if (e + length - 1) < 0 && ((e + length - 1) * 1233) % 4096 != 0
     k = k + 1
+
+    # The largest any of the four gets: the significand shifted by the
+    # binary exponent's size, times ten per decimal place either way (four
+    # bits for each), and the digit loop's own few. In limbs, with room.
+    places = k < 0 ? -k : k
+    bits = 64 + (e < 0 ? -e : e) + 4 * (places + 4)
+    limbs = bits // 32 + 3
+    limbs = IyiBig::LIMBS if limbs > IyiBig::LIMBS
+
+    r = IyiBig.new(f, limbs)
+    s = IyiBig.new(1_u64, limbs)
+    if e >= 0
+      r.shl(e + (unequal ? 2 : 1))
+      s.shl(unequal ? 2 : 1)
+      m_plus = IyiBig.new(1_u64, limbs)
+      m_plus.shl(unequal ? e + 1 : e)
+      m_minus = IyiBig.new(1_u64, limbs)
+      m_minus.shl(e)
+    else
+      r.shl(unequal ? 2 : 1)
+      s.shl(-e + (unequal ? 2 : 1))
+      m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64, limbs)
+      m_minus = IyiBig.new(1_u64, limbs)
+    end
+    # Where the loops below make their sums and scaled copies: one number,
+    # written over, rather than two new ones a digit.
+    scratch = IyiBig.new(0_u64, limbs)
+    ten_r = IyiBig.new(0_u64, limbs)
+
+    # An even significand owns its boundaries (round-half-even reads a
+    # midpoint back as the even neighbour), an odd one does not.
+    even = f & 1_u64 == 0_u64
     if k >= 0
       s.mul_pow10(k)
     else
@@ -586,17 +634,16 @@ module IyiFloatText
       m_minus.mul_pow10(-k)
     end
     # Too small an estimate: the value's high boundary reaches 10^k.
-    while (c = r.compare_sum(m_plus, s)) > 0 || (c == 0 && even)
+    while (c = r.compare_sum(m_plus, s, scratch)) > 0 || (c == 0 && even)
       s.mul_small(10_u64)
       k = k + 1
     end
     # Too large: even ten times the high boundary stays under 10^k.
     while true
-      r_ten = r.copy
-      r_ten.mul_small(10_u64)
-      m_ten = m_plus.copy
-      m_ten.mul_small(10_u64)
-      c = r_ten.compare_sum(m_ten, s)
+      r.copy_into(ten_r).mul_small(10_u64)
+      m_plus.copy_into(scratch).mul_small(10_u64)
+      ten_r.add(scratch)
+      c = ten_r.compare(s)
       break if c > 0 || (c == 0 && even)
       r.mul_small(10_u64)
       m_plus.mul_small(10_u64)
@@ -613,7 +660,7 @@ module IyiFloatText
       digit = r.divide_digit(s)
       low_c = r.compare(m_minus)
       low = low_c < 0 || (low_c == 0 && even)
-      high_c = r.compare_sum(m_plus, s)
+      high_c = r.compare_sum(m_plus, s, scratch)
       high = high_c > 0 || (high_c == 0 && even)
       if !low && !high
         digits[count] = digit.to_u8
@@ -623,7 +670,7 @@ module IyiFloatText
       if low && high
         # Both neighbours are as short: the nearer, and on a tie the even
         # digit.
-        twice = r.copy
+        twice = r.copy_into(scratch)
         twice.shl(1)
         c = twice.compare(s)
         digit = digit + 1 if c > 0 || (c == 0 && digit % 2 == 1)

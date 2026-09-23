@@ -422,6 +422,7 @@ module Float32Text
       m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64)
       m_minus = IyiBig.new(1_u64)
     end
+    scratch = IyiBig.new(0_u64)
 
     # An even significand owns its boundaries (round-half-even reads a
     # midpoint back as the even neighbour), an odd one does not.
@@ -445,7 +446,7 @@ module Float32Text
       m_plus.mul_pow10(-k)
       m_minus.mul_pow10(-k)
     end
-    while (c = r.compare_sum(m_plus, s)) > 0 || (c == 0 && even)
+    while (c = r.compare_sum(m_plus, s, scratch)) > 0 || (c == 0 && even)
       s.mul_small(10_u64)
       k = k + 1
     end
@@ -454,7 +455,7 @@ module Float32Text
       r_ten.mul_small(10_u64)
       m_ten = m_plus.copy
       m_ten.mul_small(10_u64)
-      c = r_ten.compare_sum(m_ten, s)
+      c = r_ten.compare_sum(m_ten, s, scratch)
       break if c > 0 || (c == 0 && even)
       r.mul_small(10_u64)
       m_plus.mul_small(10_u64)
@@ -471,7 +472,7 @@ module Float32Text
       digit = r.divide_digit(s)
       low_c = r.compare(m_minus)
       low = low_c < 0 || (low_c == 0 && even)
-      high_c = r.compare_sum(m_plus, s)
+      high_c = r.compare_sum(m_plus, s, scratch)
       high = high_c > 0 || (high_c == 0 && even)
       if !low && !high
         digits[count] = digit.to_u8

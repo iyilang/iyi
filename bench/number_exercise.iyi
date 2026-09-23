@@ -127,6 +127,27 @@ assert_true(2.5.round == 2.0 && 3.5.round == 4.0, "number: a tie rounds to the e
 assert_true((-2.5).round == -2.0 && (-3.5).round == -4.0, "number: round is symmetric")
 assert_true(25.0.round(-1) == 20.0 && 1234.0.round(-2) == 1200.0, "number: round to tens and hundreds")
 
+# The shortest text at the ends of the range, where the printer's numbers
+# are largest - each is sized to the double in hand, and grows past the
+# estimate rather than writing beyond it - and at a power of two, whose
+# neighbour below is nearer than the one above. The other library's text,
+# every one.
+[{5e-324, "5.0e-324"}, {1.0e-323, "1.0e-323"}, {3.0e-310, "3.0e-310"},
+ {2.2250738585072014e-308, "2.2250738585072014e-308"},
+ {2.225073858507201e-308, "2.225073858507201e-308"},
+ {1.7976931348623157e308, "1.7976931348623157e+308"},
+ {1.7976931348623155e308, "1.7976931348623155e+308"},
+ {8.98846567431158e307, "8.98846567431158e+307"},
+ {1.0e-300, "1.0e-300"}, {1.0e23, "1.0e+23"}, {0.1, "0.1"},
+ {1.0e15, "1.0e+15"}, {1.0e16, "1.0e+16"},
+ {123456789012345680.0, "1.2345678901234568e+17"},
+ {1.7800590868057611e-307, "1.7800590868057611e-307"},
+ {7.120236347223045e-307, "7.120236347223045e-307"},
+ {1.8446744073709552e19, "1.8446744073709552e+19"},
+ {3.6893488147419103e19, "3.6893488147419103e+19"}].each do |pair|
+  assert_str(pair[0].to_s, pair[1], "number: shortest text at the range's ends")
+end
+
 # ---- 6. The unchecked conversion, which is a name
 #
 # Crystal spells it `to_u8!`, and `!` is not part of a name in iyi

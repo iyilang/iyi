@@ -271,6 +271,13 @@ prove_fails "round adds a half" sum_round float.iyi \
   "number: round reads the fraction, not a sum" \
   's/^    fraction = magnitude - whole$/    fraction = (magnitude + 0.5).floor > whole ? 0.75 : 0.25/'
 
+# 8e. The printer treating a power of two like any other double: its gap
+#     below is half its gap above, and read as equal the text of 2^64 and
+#     of 2^-1017 comes out a digit short, and reads back as a neighbour.
+prove_fails "a power of two's nearer neighbour" pow2_text float.iyi \
+  "number: shortest text at the range's ends" \
+  's/^      r.shl(e + (unequal ? 2 : 1))$/      r.shl(e + 1)/; s/^      s.shl(unequal ? 2 : 1)$/      s.shl(1)/; s/^      m_plus.shl(unequal ? e + 1 : e)$/      m_plus.shl(e)/; s/^      r.shl(unequal ? 2 : 1)$/      r.shl(1)/; s/^      s.shl(-e + (unequal ? 2 : 1))$/      s.shl(-e + 1)/; s/^      m_plus = IyiBig.new(unequal ? 2_u64 : 1_u64, limbs)$/      m_plus = IyiBig.new(1_u64, limbs)/'
+
 # 8d. A place count under one read as zero.
 prove_fails "negative places ignored" places_round float.iyi \
   "number: round to tens and hundreds" \

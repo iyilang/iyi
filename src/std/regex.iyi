@@ -23,22 +23,74 @@ module std/regex
 
 pub struct Regex
   @nfa : RxNfa
+  # The pattern's own text when it holds no operator at all - `B`, `ggt`,
+  # `tHa` - found by comparing bytes, the way a string is searched, rather
+  # than by stepping the machine a byte at a time. Eleven one-letter
+  # replacements over 60 MB took 8.5 s through the machine.
+  @literal : String?
 
-  def initialize(@nfa : RxNfa)
+  def initialize(@nfa : RxNfa, @literal : String? = nil)
   end
 
   def self.compile(pattern : String) : Regex
-    new(RxCompiler.new(pattern).compile)
+    new(RxCompiler.new(pattern).compile, literal_of(pattern))
+  end
+
+  # Nil for an empty pattern, which matches between every two bytes, and
+  # for any pattern with a byte the compiler reads as an operator.
+  private def self.literal_of(pattern : String) : String?
+    return nil if pattern.empty?
+    operators = "\\^$.|?*+()[]{}"
+    i = 0
+    while i < pattern.bytesize
+      b = pattern.to_unsafe[i]
+      j = 0
+      while j < operators.bytesize
+        return nil if b == operators.to_unsafe[j]
+        j = j + 1
+      end
+      i = i + 1
+    end
+    pattern
   end
 
   def match?(text : String) : Bool
+    if literal = @literal
+      return text == literal
+    end
     !@nfa.full(text).nil?
   end
 
   def find(text : String) : String?
+    if literal = @literal
+      return literal_at(text, literal, 0) ? literal : nil
+    end
     span = @nfa.search_from(text, 0)
     return nil unless span
     text[span[0], span[1] - span[0]]
+  end
+
+  # Where *literal* next starts in *text* at or after *from*: the first byte
+  # found, then the rest compared.
+  private def literal_at(text : String, literal : String, from : Int32) : Int32?
+    n = text.bytesize
+    m = literal.bytesize
+    source = text.to_unsafe
+    wanted = literal.to_unsafe
+    first = wanted[0]
+    i = from
+    last = n - m
+    while i <= last
+      if source[i] == first
+        j = 1
+        while j < m && source[i + j] == wanted[j]
+          j = j + 1
+        end
+        return i if j == m
+      end
+      i = i + 1
+    end
+    nil
   end
 
   def scan(text : String) : Array(String)
@@ -85,6 +137,14 @@ pub struct Regex
   # may not answer empty there again, so a lazy pattern still gets to
   # take the byte — Python's rule, and the byte is never lost.
   private def each_match(text : String, & : Int32, Int32 -> Nil) : Nil
+    if literal = @literal
+      at = 0
+      while (found = literal_at(text, literal, at))
+        yield found, found + literal.bytesize
+        at = found + literal.bytesize
+      end
+      return
+    end
     pos = 0
     forbid = -1
     n = text.bytesize

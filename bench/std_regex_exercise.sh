@@ -231,6 +231,9 @@ mutate "an empty match that eats a byte" '        pos = a
 mutate "a word boundary that is never one" 'before != after' 'false'
 mutate "matches? that spans the whole text" '!pattern.find(self).nil?' 'pattern.match?(self)'
 mutate "a block replacement that is ignored" 'io << yield text[a, b - a]' 'io << text[a, b - a]'
+mutate "a literal compared from its second byte on" '        j = 1
+        while j < m && source[i + j] == wanted[j]' '        j = 2
+        while j < m && source[i + j] == wanted[j]'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -68,6 +68,13 @@
 
 ### Changed
 
+- **A regex with no operator in it is searched as text.** `B`, `ggt`,
+  `tHa`: the pattern is its own bytes, found the way a string is searched
+  rather than by stepping the matching machine a byte at a time. Eleven
+  one-letter replacements over 60 MB — regexdna's substitution pass — went
+  from 8.5 s to 1.4 s; find, scan, split and replace still agree with
+  Python's `re` on every case of `bench/std_regex_exercise.sh`'s fixture.
+
 - **`Random.new(seed)` is the other library's stream, draw for draw.** The
   stream was taken from the seed where Crystal takes it from a separate
   sequence (zero unless asked), `rand` was 32 bits over 2^32, and

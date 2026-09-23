@@ -3,8 +3,8 @@
 #
 #     bash bench/std_base64_exercise.sh
 #
-# Proves the exercise holds plain and --release, that a broken encoder is
-# caught, and what `decode` refuses: a byte outside the alphabet, data after
+# Proves the exercise holds plain and --release, that a broken encoder or
+# decoder is caught, and what `decode` refuses: a byte outside the alphabet, data after
 # the padding, data inside it, more `=` than the group needs, `=` with no
 # group to close, and a final group of one character - each a panic with a
 # sentence, where before the data was silently dropped.
@@ -97,26 +97,39 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-if [ -z "$PY" ]; then
-  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
-elif ! "$PY" - <<PY
+broken() { # broken <label> <old> <new>
+  local label="$1"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
+    return
+  fi
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  if ! OLD="$2" NEW="$3" "$PY" - <<PY
+import os
 from pathlib import Path
 src = Path("$REPO/src/std/base64.iyi").read_text()
-old = 'dst[o] = table[(triple >> 18) & 63]'
-if old not in src:
-    raise SystemExit("patch site missing")
-Path("$WORK/patched/std/base64.iyi").write_text(src.replace(old, 'dst[o] = 65_u8', 1))
+old = os.environ["OLD"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path("$WORK/patched/std/base64.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
-then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_base64_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
-else
-  echo "  a broken base64 is caught"
-fi
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_base64_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+broken "a last group's first character" 'dst[o] = table[(triple >> 18) & 63]' 'dst[o] = 65_u8'
+broken "a whole group's last character" '        dst[o + 3] = table[triple & 63]
+' '        dst[o + 3] = 65_u8
+'
+broken "four characters decoded out of order" 'buf[o + 1] = ((group >> 8) & 255).to_u8' 'buf[o + 1] = (group & 255).to_u8'
+broken "whitespace taken at the size it was guessed" 'return answer if written == size' 'return answer'
 
 echo
 echo "== what decode refuses"

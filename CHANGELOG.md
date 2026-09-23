@@ -79,6 +79,17 @@
 
 ### Changed
 
+- **`Base64.encode` and `Base64.decode` are twice as fast.** Encoding
+  runs whole three-byte groups without asking how many bytes are left,
+  and the last group alone takes the padding path. Decoding reads a
+  256-entry table instead of five range tests, turns four data characters
+  into three bytes in one step between groups, and writes straight into
+  the answer, whose size is known from the text when only closing padding
+  is there; whitespace or padding elsewhere takes the byte-at-a-time path
+  it always took, and every refusal is the one it was. In the metric's
+  run, 8,192 times over 300 KB: 2.9 s to 1.2 s encoding, 3.6 s to 1.2 s
+  decoding (Crystal 1.21: 0.8 s each).
+
 - **A string the prelude builds is counted when `size` asks, not when it
   is made.** `String.new(bytesize) { ... }` scanned every byte it had
   just been handed to store the character count, and almost none of those

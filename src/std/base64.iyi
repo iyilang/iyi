@@ -11,6 +11,10 @@
 
 module std/base64
 
+# A data character's value, by byte; -1 for everything else, which the
+# byte-at-a-time path sorts into whitespace, padding and refusals.
+DECODE_VALUES = Base64.decode_values
+
 pub struct Base64
   def self.encode(data : String) : String
     encode_with(data, plus_slash, true)
@@ -23,8 +27,28 @@ pub struct Base64
   def self.decode(text : String) : String
     src = text.to_unsafe
     n = text.bytesize
-    out_cap = (n // 4) * 3 + 3
-    buf = Pointer(UInt8).malloc(out_cap.to_u64)
+    # Every data character is six bits and a byte is written per eight, so
+    # a text of data characters and closing padding decodes to six-eighths
+    # of what is left without the padding: that many bytes are written
+    # straight into the answer. Whitespace, or padding anywhere but the
+    # end, leaves fewer - never more - and the text is decoded again into a
+    # buffer the size of the bytes it did write.
+    pads = 0
+    pads = pads + 1 if n > 0 && src[n - 1] == 61_u8
+    pads = pads + 1 if n > 1 && src[n - 2] == 61_u8
+    size = ((n - pads).to_i64 * 6 // 8).to_i32
+    written = 0
+    answer = String.new(size) { |buf| written = decode_into(buf, src, n) }
+    return answer if written == size
+    buf = Pointer(UInt8).malloc(size.to_u64)
+    written = decode_into(buf, src, n)
+    String.new(written) { |dst| dst.copy_from(buf, written) }
+  end
+
+  # Decodes into *buf*, which has room for what the text can hold, and
+  # answers the bytes written.
+  private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32
+    values = DECODE_VALUES.to_unsafe
     o = 0
     acc = 0
     bits = 0
@@ -33,6 +57,24 @@ pub struct Base64
     pads_needed = 0
     i = 0
     while i < n
+      # Between groups with no padding seen, four data characters are three
+      # bytes, which is what the path below makes of them one at a time.
+      if bits == 0 && pads == 0 && i + 4 <= n
+        v0 = values[src[i].to_i32]
+        v1 = values[src[i + 1].to_i32]
+        v2 = values[src[i + 2].to_i32]
+        v3 = values[src[i + 3].to_i32]
+        if (v0 | v1 | v2 | v3) >= 0
+          group = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3
+          buf[o] = (group >> 16).to_u8
+          buf[o + 1] = ((group >> 8) & 255).to_u8
+          buf[o + 2] = (group & 255).to_u8
+          o = o + 3
+          i = i + 4
+          chars = chars + 4
+          next
+        end
+      end
       b = src[i]
       i = i + 1
       next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8
@@ -46,7 +88,7 @@ pub struct Base64
         raise "base64: excess padding" if pads > pads_needed
         next
       end
-      v = value_of(b)
+      v = values[b.to_i32]
       raise "base64: invalid byte #{b}" if v < 0
       if pads > 0
         raise "base64: discontinuous padding" if pads < pads_needed
@@ -62,7 +104,7 @@ pub struct Base64
       end
     end
     raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
-    String.new(o) { |dst| dst.copy_from(buf, o) }
+    o
   end
 
   private def self.encode_with(data : String, alphabet : String, pad : Bool) : String
@@ -70,10 +112,20 @@ pub struct Base64
     src = data.to_unsafe
     table = alphabet.to_unsafe
     out_n = ((n + 2) // 3) * 4
+    whole = n - n % 3
     String.new(out_n) do |dst|
       i = 0
       o = 0
-      while i < n
+      while i < whole
+        triple = (src[i].to_i32 << 16) | (src[i + 1].to_i32 << 8) | src[i + 2].to_i32
+        dst[o] = table[triple >> 18]
+        dst[o + 1] = table[(triple >> 12) & 63]
+        dst[o + 2] = table[(triple >> 6) & 63]
+        dst[o + 3] = table[triple & 63]
+        o = o + 4
+        i = i + 3
+      end
+      if i < n
         rest = n - i
         b0 = src[i].to_i32
         b1 = rest > 1 ? src[i + 1].to_i32 : 0
@@ -87,12 +139,7 @@ pub struct Base64
         elsif rest == 2
           dst[o + 2] = table[(triple >> 6) & 63]
           dst[o + 3] = pad ? 61_u8 : table[triple & 63]
-        else
-          dst[o + 2] = table[(triple >> 6) & 63]
-          dst[o + 3] = table[triple & 63]
         end
-        o = o + 4
-        i = i + 3
       end
     end
   end
@@ -103,6 +150,10 @@ pub struct Base64
 
   private def self.minus_underscore : String
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+  end
+
+  protected def self.decode_values : Array(Int32)
+    Array.new(256) { |b| value_of(b.to_u8) }
   end
 
   private def self.value_of(b : UInt8) : Int32

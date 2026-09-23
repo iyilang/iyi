@@ -96,6 +96,17 @@
 
 ### Changed
 
+- **One fiber may read a socket while another writes it.** The poller
+  kept one waiter per descriptor and refused a second with "two fibers
+  waiting on one fd", so a WebSocket - a fiber reading frames, another
+  writing them - could not be written (found in iyi-web). A descriptor
+  now has at most one reader and one writer: epoll's registration is the
+  union of what they wait for, widened with `EPOLL_CTL_MOD` and narrowed
+  back as each leaves, kqueue keeps a filter per direction, and the
+  event's own bits say which half to wake, both on an error or a hangup.
+  Two readers or two writers are still refused, by name. A cancelled
+  waiter is taken off by identity, not as whoever waits on its fd.
+
 - **What the other end of a socket does is a value, not a panic
   (`SocketError`, `import std/socket`).** A client that disconnected
   mid-response panicked the server with "cannot write to socket", or -
@@ -9614,7 +9625,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,340-line library and nothing else. Every other
+  written against iyi's own 17,370-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -432,6 +432,9 @@ class IyiFiber
 
   property deadline : Int64
   property wait_fd : Int32
+  # Which way it waits on `wait_fd`: 1 to read, 4 to write - epoll's IN
+  # and OUT bits, which the registration is the union of.
+  property wait_dir : Int32
   property wait_handle : Void*
   property wait_overlapped : Pointer(UInt8)
   property io_bytes_read : Int64
@@ -492,6 +495,7 @@ class IyiFiber
     @joiner = nil
     @deadline = 0_i64
     @wait_fd = -1
+    @wait_dir = 0
     @park_nonce = 0_u64
     @next_fiber = nil
     @prev_fiber = nil
@@ -1214,50 +1218,7 @@ class IyiScheduler
   end
 
   def self.wait_readable_posix(fd : Int32) : Nil | Cancelled
-    fiber = current
-    return Cancelled.new if fiber.cancelled
-
-    # One waiter per fd: the poller keys the wakeup by fd, so a second
-    # fiber on the same fd would take the first one's event. Refused
-    # loudly rather than raced quietly.
-    scan = state.io_head
-    while scan.is_a?(IyiFiber)
-      raise "two fibers waiting on one fd" if scan.wait_fd == fd
-      scan = scan.next_io
-    end
-
-    {% if flag?(:darwin) %}
-      # EV_ADD, keyed by the fd itself. kqueue accepts a regular file
-      # where epoll refuses one, but refuses the null device with EINVAL
-      # (22) — measured on /dev/null and /dev/zero — and a fd kqueue
-      # cannot watch is one whose read never parks. Same answer as
-      # epoll's -EPERM below: "readable now" instead of dying, or a
-      # program whose stdin is `< /dev/null` panics on its first wait.
-      change = __iyi_kevent_change(fd, 0x1FFFF_u64)
-      added = LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
-        Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64)).to_i64
-      return nil if added < 0 && LibC.error_location.value == 22
-      raise "kevent add failed" if added < 0
-    {% else %}
-      # EPOLL_CTL_ADD = 1, EPOLLIN = 1, data = the fd itself.
-      event = Pointer(UInt8).malloc(16_u64)
-      event.as(Pointer(UInt64)).value = 1_u64
-      Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fd.to_u64
-      added = __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 1_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
-      # -EPERM is epoll saying the fd is a regular file. A file never blocks
-      # a read, which is exactly "readable now": answer it instead of dying,
-      # or a program whose stdin is `< file` panics on its first wait.
-      return nil if added == -1_i64
-      raise "epoll_ctl add failed" if added < 0
-    {% end %}
-
-    fiber.wait_fd = fd
-    fiber.state = IyiFiberState::WaitingIo
-    fiber.next_io = state.io_head
-    state.io_head = fiber
-    reschedule
-    return Cancelled.new if fiber.cancelled
-    nil
+    wait_posix(fd, 1)
   end
 
   # The other direction: park until *fd* can take bytes. A socket's send
@@ -1275,36 +1236,68 @@ class IyiScheduler
   end
 
   def self.wait_writable_posix(fd : Int32) : Nil | Cancelled
+    wait_posix(fd, 4)
+  end
+
+  # Park until *fd* can be read (1) or written (4). One reader and one
+  # writer may wait on a fd at once - a WebSocket's reading fiber and its
+  # writing fiber on one connection - and each is woken by its own
+  # direction's event: the poller's registration for the fd is the union
+  # of what its waiters want, and the event says which half is ready. A
+  # second fiber in the same direction is refused: the event would wake
+  # one of the two, and the other would wait for nothing.
+  def self.wait_posix(fd : Int32, direction : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
-    scan = state.io_head
-    while scan.is_a?(IyiFiber)
-      raise "two fibers waiting on one fd" if scan.wait_fd == fd
-      scan = scan.next_io
-    end
+    others = io_interest(fd)
+    raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd" if others & direction != 0
+
     {% if flag?(:darwin) %}
-      # EV_ADD on EVFILT_WRITE (-2).
-      change = __iyi_kevent_change(fd, 0x1FFFE_u64)
+      # EV_ADD on the direction's own filter, keyed by the fd itself:
+      # EVFILT_READ (-1) or EVFILT_WRITE (-2). kqueue accepts a regular
+      # file where epoll refuses one, but refuses the null device with
+      # EINVAL (22) - measured on /dev/null and /dev/zero - and a fd
+      # kqueue cannot watch is one whose call never parks. Same answer as
+      # epoll's -EPERM below: ready now instead of dying, or a program
+      # whose stdin is `< /dev/null` panics on its first wait.
+      change = __iyi_kevent_change(fd, direction == 1 ? 0x1FFFF_u64 : 0x1FFFE_u64)
       added = LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64)).to_i64
       return nil if added < 0 && LibC.error_location.value == 22
       raise "kevent add failed" if added < 0
     {% else %}
-      # EPOLL_CTL_ADD = 1, EPOLLOUT = 4, data = the fd itself.
+      # EPOLL_CTL_ADD (1) for the fd's first waiter, EPOLL_CTL_MOD (3) to
+      # add a direction to one already there; the data is the fd itself.
       event = Pointer(UInt8).malloc(16_u64)
-      event.as(Pointer(UInt64)).value = 4_u64
+      event.as(Pointer(UInt64)).value = (others | direction).to_u64
       Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fd.to_u64
-      added = __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 1_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      added = __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, others == 0 ? 1_i64 : 3_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      # -EPERM is epoll saying the fd is a regular file. A file never
+      # blocks, which is exactly "ready now": answer it instead of dying,
+      # or a program whose stdin is `< file` panics on its first wait.
       return nil if added == -1_i64
       raise "epoll_ctl add failed" if added < 0
     {% end %}
+
     fiber.wait_fd = fd
+    fiber.wait_dir = direction
     fiber.state = IyiFiberState::WaitingIo
     fiber.next_io = state.io_head
     state.io_head = fiber
     reschedule
     return Cancelled.new if fiber.cancelled
     nil
+  end
+
+  # The directions fibers are waiting in on *fd*, as epoll bits.
+  def self.io_interest(fd : Int32) : Int32
+    mask = 0
+    scan = state.io_head
+    while scan.is_a?(IyiFiber)
+      mask = mask | scan.wait_dir if scan.wait_fd == fd
+      scan = scan.next_io
+    end
+    mask
   end
 
   def self.join(fiber : IyiFiber) : Nil
@@ -1460,17 +1453,38 @@ class IyiScheduler
     while index < count
       entry = events_buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
       fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
-      wake_io(fd.to_i32)
+      # Declared out here: a local born inside the `{% if %}` dies at its
+      # `{% end %}`.
+      ready = 0
+      {% if flag?(:darwin) %}
+        # A kevent is one filter's news: EVFILT_READ (0xFFFF as the low
+        # half of the word at +8) for the reader, anything else here the
+        # writer's EVFILT_WRITE.
+        ready = Pointer(UInt64).new(entry + 8_u64).value & 0xFFFF_u64 == 0xFFFF_u64 ? 1 : 4
+      {% else %}
+        # The event's mask is its first four bytes: IN (1) for the reader,
+        # OUT (4) for the writer, and ERR (8) or HUP (0x10) for both, whose
+        # next call finds out what happened.
+        mask = Pointer(UInt64).new(entry).value & 0xFFFFFFFF_u64
+        ready = ready | 1 if mask & 0x19_u64 != 0_u64
+        ready = ready | 4 if mask & 0x1C_u64 != 0_u64
+      {% end %}
+      wake_io(fd.to_i32, ready)
       index = index + 1
     end
 
     wake_expired_sleepers
   end
 
-  def self.wake_io(fd : Int32) : Nil
-    fiber = io_take(fd)
-    return unless fiber.is_a?(IyiFiber)
-    enqueue(fiber)
+  def self.wake_io(fd : Int32, ready : Int32) : Nil
+    if ready & 1 != 0
+      reader = io_take(fd, 1)
+      enqueue(reader) if reader.is_a?(IyiFiber)
+    end
+    if ready & 4 != 0
+      writer = io_take(fd, 4)
+      enqueue(writer) if writer.is_a?(IyiFiber)
+    end
   end
 
   # A descriptor being closed under a parked waiter: the kernel drops a
@@ -1480,9 +1494,7 @@ class IyiScheduler
   def self.wake_closed(fd : Int32) : Nil
     {% if flag?(:win32) %}
     {% else %}
-      fiber = io_take(fd)
-      return unless fiber.is_a?(IyiFiber)
-      enqueue(fiber)
+      wake_io(fd, 5)
     {% end %}
   end
 
@@ -1566,56 +1578,74 @@ class IyiScheduler
     __iyi_read(fd, buffer, count)
   end
 
-  def self.io_take(fd : Int32) : IyiFiber?
-    head = state.io_head
-    return nil unless head.is_a?(IyiFiber)
-    if head.wait_fd == fd
-      state.io_head = head.next_io
-      io_forget(head)
-      return head
-    end
-    cursor = head
-    while true
-      after = cursor.next_io
-      return nil unless after.is_a?(IyiFiber)
-      if after.wait_fd == fd
-        cursor.next_io = after.next_io
-        io_forget(after)
-        return after
+  # The fiber waiting on *fd* in *direction*, off the list and the poller.
+  def self.io_take(fd : Int32, direction : Int32) : IyiFiber?
+    cursor = state.io_head
+    while cursor.is_a?(IyiFiber)
+      if cursor.wait_fd == fd && cursor.wait_dir == direction
+        io_remove(cursor)
+        return cursor
       end
-      cursor = after
+      cursor = cursor.next_io
     end
+    nil
   end
 
+  # *fiber* off the io list, whichever fd and direction it waits on: a
+  # cancelled waiter is that fiber, and not whoever else waits on its fd.
   def self.io_remove(fiber : IyiFiber) : Nil
     {% if flag?(:win32) %}
       io_take_overlapped(fiber.wait_overlapped.address)
     {% else %}
-      io_take(fiber.wait_fd)
+      head = state.io_head
+      return unless head.is_a?(IyiFiber)
+      if head.sp_slot.address == fiber.sp_slot.address
+        state.io_head = head.next_io
+        io_forget(head)
+        return
+      end
+      cursor = head
+      while true
+        after = cursor.next_io
+        return unless after.is_a?(IyiFiber)
+        if after.sp_slot.address == fiber.sp_slot.address
+          cursor.next_io = after.next_io
+          io_forget(after)
+          return
+        end
+        cursor = after
+      end
     {% end %}
   end
 
-  # Deregistered on every exit from the io list — wake and cancel both —
+  # Deregistered on every exit from the io list - wake and cancel both -
   # so a level-triggered fd cannot wake a fiber that no longer exists to
-  # want it. EPOLL_CTL_DEL = 2 on Linux; EV_DELETE's packed word on
-  # darwin, where a fd already gone is kevent's problem and not ours.
+  # want it; the caller has taken *fiber* off the list already. On darwin
+  # the fiber's own filter goes (EV_DELETE's packed word; a fd already
+  # gone is kevent's problem and not ours). On Linux the registration is
+  # the fd's, so it is narrowed to what the other direction's waiter
+  # still wants (EPOLL_CTL_MOD, 3), or removed when nobody does (DEL, 2).
   def self.io_forget(fiber : IyiFiber) : Nil
     {% if flag?(:win32) %}
       fiber.next_io = nil
     {% elsif flag?(:darwin) %}
-      # EV_DELETE on both filters: the fiber waited on one of them, and
-      # the other delete answers ENOENT, which is nothing.
-      change = __iyi_kevent_change(fiber.wait_fd, 0x2FFFF_u64)
-      LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
-        Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
-      change = __iyi_kevent_change(fiber.wait_fd, 0x2FFFE_u64)
+      change = __iyi_kevent_change(fiber.wait_fd, fiber.wait_dir == 1 ? 0x2FFFF_u64 : 0x2FFFE_u64)
       LibC.kevent(pollfd.to_i32, change.as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% else %}
-      __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 2_i64, fiber.wait_fd.to_i64, 0_i64, 0_i64, 0_i64)
+      remaining = io_interest(fiber.wait_fd)
+      if remaining == 0
+        __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 2_i64, fiber.wait_fd.to_i64, 0_i64, 0_i64, 0_i64)
+      else
+        event = Pointer(UInt8).malloc(16_u64)
+        event.as(Pointer(UInt64)).value = remaining.to_u64
+        Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fiber.wait_fd.to_u64
+        __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 3_i64, fiber.wait_fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      end
     {% end %}
     fiber.next_io = nil
     fiber.wait_fd = -1
+    fiber.wait_dir = 0
   end
 
   # ── The poller's fd, lazily ──────────────────────────────────────────

@@ -107,6 +107,45 @@ raise "refused: expected a SocketError, got #{refused.inspect}" unless refused.i
 raise "refused: #{refused.message}" unless refused.message.includes?("connection refused")
 puts "refused: ok (#{refused.message})"
 
+# 7. One fiber reading and another writing the same socket, both parked
+#    at once: the write fills the kernel's buffers while nobody reads
+#    them, the read waits for bytes nobody has sent, and each is woken by
+#    its own half of the socket.
+duplex_server = IyiSocket.listen(0)
+duplex_client = IyiSocket.connect("127.0.0.1", duplex_server.local_port).or_panic
+duplex_conn = duplex_server.accept.or_panic
+payload = "y" * 8388608
+heard = ""
+sent = 0
+received = 0
+group do |g|
+  g.spawn do
+    heard = duplex_conn.read(16).or_panic
+    0
+  end
+  g.spawn do
+    sent = duplex_conn.write(payload).or_panic
+    0
+  end
+  g.spawn do
+    sleep(50)
+    duplex_client.write("ping").or_panic
+    while received < payload.bytesize
+      got = duplex_client.read(65536).or_panic
+      break if got.bytesize == 0
+      received = received + got.bytesize
+    end
+    0
+  end
+end
+raise "duplex: the reader heard #{heard.inspect}" unless heard == "ping"
+raise "duplex: the writer sent #{sent} of #{payload.bytesize}" unless sent == payload.bytesize
+raise "duplex: the peer received #{received}" unless received == payload.bytesize
+duplex_client.close
+duplex_conn.close
+duplex_server.close
+puts "duplex: ok"
+
 # 5. A read parks rather than blocks, and a cancelled task's read answers
 #    `Cancelled` (SPEC.md III.4.2). Three tasks on one thread: a reader
 #    parked on a connection nobody writes to, a sibling that answers an

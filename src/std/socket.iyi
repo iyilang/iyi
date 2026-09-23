@@ -21,7 +21,9 @@
 # another fiber under a parked call answers the same; so on those targets
 # these methods answer `T | Cancelled` on every target — where there is no
 # runtime to park in they block and never answer it, but the type is the
-# same, so a program reads the same everywhere. One fiber may wait on one fd.
+# same, so a program reads the same everywhere. One fiber may read a
+# socket while another writes it - a WebSocket's two halves - but two
+# fibers reading one socket, or two writing it, are refused.
 #
 # Errors:
 # What the other end or the network does is a value, not a panic: a

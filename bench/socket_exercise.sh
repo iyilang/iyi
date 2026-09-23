@@ -189,6 +189,30 @@ case "$(uname -s)" in
     echo "  SIGPIPE on a gone peer: Linux's MSG_NOSIGNAL, proved there" ;;
 esac
 
+# 7. The poller keeping one waiter per fd, as it did: the reading fiber
+#    and the writing fiber cannot both wait on the socket.
+mkdir -p "$WORK/onewaiter/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/onewaiter/iyi/"
+awk '{ sub(/raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd" if others & direction != 0/, "raise \"two fibers waiting on one fd\" if others != 0"); print }' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/onewaiter/iyi/concurrency.iyi"
+if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/onewaiter/iyi/concurrency.iyi"; then
+  echo "  one waiter per fd: the patch changed nothing"
+  status=1
+elif ! IYI_PATH="$WORK/onewaiter${PSEP}$REPO/src" "$IYI" build -o "$WORK/onewaiter/program" \
+     "$REPO/bench/socket_exercise.iyi" >"$WORK/onewaiter/build.log" 2>&1; then
+  echo "  one waiter per fd: the patched prelude did not build"
+  status=1
+elif timeout 60 "$WORK/onewaiter/program" >"$WORK/onewaiter/out" 2>&1; then
+  echo "  one waiter per fd: the exercise still passed, so it does not test this"
+  status=1
+elif grep -q "two fibers waiting on one fd" "$WORK/onewaiter/out"; then
+  echo "  one waiter per fd: exits at \"two fibers waiting on one fd\""
+else
+  echo "  one waiter per fd: failed, but not at the second waiter"
+  tail -2 "$WORK/onewaiter/out" | sed 's/^/    /'
+  status=1
+fi
+
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
   '{ sub(/\(high << 8\) \| low/, "0"); print }'

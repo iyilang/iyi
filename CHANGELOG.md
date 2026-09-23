@@ -256,6 +256,26 @@
 
 ### Fixed
 
+- **Seven standard-library gates failed on Windows, and none for the
+  library's sake.** `bench/std_exercise.sh` had never run there. The
+  python oracles of `std_deque`, `std_set` and `std_io` wrote CRLF, so
+  every line differed from iyi's by an invisible `\r`; they write `\n`
+  now. `std_errno`'s and `std_file`'s failure proofs edited the darwin
+  arm, which Windows does not compile, so the proof "passed" on an
+  unchanged program: errno proves the arm every non-darwin host builds,
+  and the touch proof edits Windows' own `SetFileTime` ticks. `std_udp`'s
+  blocking-receive proof removed a `MSG_DONTWAIT` that is 0 on Windows,
+  where the socket is non-blocking by `FIONBIO`; it turns that off there,
+  and kills the stuck copy with `timeout -k`, because Git Bash can lose a
+  TERM sent while a native program is still starting. `std_io`'s
+  dependency floor read nothing and said nothing new was linked; it reads
+  the import table with `dumpbin` now. `std_http` gave its server fifty
+  tenths of a second to print a port, and Defender holds an exe it has
+  never seen for up to ten seconds on its first launch — measured, 12.8
+  s once; the wait is a minute that a dying server ends at once. And the
+  file exercise wrote under `/tmp` unless told otherwise; it defaults to
+  `Dir.tempdir`. The library needed no change.
+
 - **`Params.parse` panicked on a malformed `%` in a query.** A query is
   what a client sent, and `?q=100%` is what a browser sends for "100%";
   a server reading it died. It reads the way the WHATWG URL standard

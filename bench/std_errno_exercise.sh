@@ -174,29 +174,32 @@ prove_fails "unknown message fallback altered" unknown_msg "unknown code answers
   '    else                      "Unknown error"' \
   '    else                      "Something else"'
 
-# The platform numbers, proved on the platform that compiles them. The two
-# below patched the Linux branch on every host, and on darwin that branch
-# is inside a `{% if flag?(:linux) %}` the compiler never enters — so the
-# copy built the same, the exercise passed, and the proof reported "does
-# not test this" about a check it could not reach. Each host patches the
-# block it builds: a collision with a neighbour, and the other platform's
-# number leaking in, which are the two mistakes the numbers have had.
+# The platform numbers, proved on the platform that compiles them. The
+# module has two arms, `{% if flag?(:darwin) %}` and its `{% else %}`, so
+# darwin builds the first and every other host — Linux, and Windows, which
+# takes Linux's numbers — builds the second. A patch to the arm a host never
+# enters builds the same program, the exercise passes, and the proof reports
+# "does not test this" about a check it could not reach: the Linux patches
+# did that on darwin, and the darwin patches did it on Windows, measured.
+# Each host patches the block it builds: a collision with a neighbour, and
+# the other platform's number leaking in, which are the two mistakes the
+# numbers have had.
 case "$(uname -s)" in
-  Linux)
-    prove_fails "linux EREMOTE collides with EPROTO" eremote_linux "EREMOTE is 66 on linux" \
-      '    EREMOTE         =  66' \
-      '    EREMOTE         =  71'
-    prove_fails "linux ESOCKTNOSUPPORT is Darwin 44" esock_linux "ESOCKTNOSUPPORT is 94 on linux" \
-      '    ESOCKTNOSUPPORT =  94' \
-      '    ESOCKTNOSUPPORT =  44'
-    ;;
-  *)
+  Darwin)
     prove_fails "darwin ETIMEDOUT collides with ECONNREFUSED" etimedout_darwin "ETIMEDOUT is 60 on darwin" \
       '    ETIMEDOUT       =  60' \
       '    ETIMEDOUT       =  61'
     prove_fails "darwin ECONNREFUSED is Linux 111" econnrefused_darwin "ECONNREFUSED is 61 on darwin" \
       '    ECONNREFUSED    =  61' \
       '    ECONNREFUSED    = 111'
+    ;;
+  *)
+    prove_fails "linux EREMOTE collides with EPROTO" eremote_linux "EREMOTE is 66 on linux" \
+      '    EREMOTE         =  66' \
+      '    EREMOTE         =  71'
+    prove_fails "linux ESOCKTNOSUPPORT is Darwin 44" esock_linux "ESOCKTNOSUPPORT is 94 on linux" \
+      '    ESOCKTNOSUPPORT =  94' \
+      '    ESOCKTNOSUPPORT =  44'
     ;;
 esac
 

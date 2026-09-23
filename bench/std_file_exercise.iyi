@@ -14,8 +14,15 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/file
+import std/dir
 using std/file::{File}
+using std/dir::{Dir}
 
+# The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
+# own temporary directory. It was `/tmp` last, which is not a directory on
+# Windows: every write panicked there unless a gate set the variable, and
+# `bench/std_exercise.sh`, which runs every exercise from source and from
+# artifacts without it, compared two panics whose locations differed.
 args = Program.args
 env_sandbox = Program.env("IYI_FILE_SANDBOX")
 sandbox = if args.size > 0
@@ -23,7 +30,7 @@ sandbox = if args.size > 0
           elsif !env_sandbox.nil?
             env_sandbox
           else
-            "/tmp"
+            Dir.tempdir
           end
 
 puts "== write, read, and append"

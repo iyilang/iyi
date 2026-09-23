@@ -78,9 +78,15 @@ build_and_run() {
 
 # python3 makes the same 3,000 choices on its own deque. Its `rotate(n)`
 # turns the other way, so it is handed `-n`; its `insert` and `del` take
-# the same non-negative indices the exercise draws.
+# the same non-negative indices the exercise draws. Python's text-mode stdout
+# on windows ends every line with "\r\n" while the iyi program writes "\n", so
+# all 30 snapshots differed there with identical text; the oracle is told to
+# write "\n" like the program it is diffed against, which is what it already
+# did on linux and darwin.
 oracle() {
   "$PY" - <<'PY'
+import sys
+sys.stdout.reconfigure(newline="\n")
 from collections import deque
 seed = 7
 def draw(bound):

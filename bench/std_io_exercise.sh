@@ -23,7 +23,8 @@
 #   * Dependency floor: the exercise binary asks the machine for nothing new.
 #
 # Needs bin/iyi, python3, `nm`, and `otool` on Darwin or `readelf` on
-# Linux. Exits non-zero if any check fails.
+# Linux, or the MSVC toolchain's `dumpbin` on Windows. Exits non-zero if any
+# check fails.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,8 +69,53 @@ status=0
 
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
+# A PE leaves nothing undefined and names its imports instead, so on Windows
+# both readers are the MSVC toolchain's `dumpbin`, found the way
+# bench/dependency_floor.sh finds it. `nm` and `readelf` are not on that
+# machine, and reading a Windows binary with them printed empty symbol and
+# library lines that passed every check as a floor of zero.
+DUMPBIN=""
+find_dumpbin() {
+  local vswhere root candidate
+  if command -v dumpbin >/dev/null 2>&1; then
+    printf 'dumpbin\n'
+    return 0
+  fi
+  vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+  [ -x "$vswhere" ] || return 1
+  root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
+  [ -n "$root" ] || return 1
+  root="$(cygpath -u "$root" 2>/dev/null)" || return 1
+  for candidate in "$root"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe \
+                   "$root"/VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe; do
+    [ -x "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+# The compiler writes `name.exe` beside the `-o` name on Windows, and
+# `dumpbin` reads an argument without a suffix as an object file and refuses
+# to open it.
+readable() { # readable <path>
+  if [ -n "$DUMPBIN" ] && [ -f "$1.exe" ]; then
+    printf '%s\n' "$1.exe"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 symbols() {
-  nm -u "$1" 2>/dev/null |
+  local binary
+  binary="$(readable "$1")"
+  if [ -n "$DUMPBIN" ]; then
+    "$DUMPBIN" -nologo -imports "$binary" 2>/dev/null |
+      sed -n 's/^ *[0-9A-Fa-f]\{1,4\} \([A-Za-z_?@][A-Za-z0-9_?@$.]*\)$/\1/p' |
+      sort -u
+    return 0
+  fi
+  nm -u "$binary" 2>/dev/null |
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
@@ -78,10 +124,19 @@ symbols() {
 }
 
 libraries() {
-  if command -v otool >/dev/null 2>&1; then
-    otool -L "$1" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
+  local binary
+  binary="$(readable "$1")"
+  if [ -n "$DUMPBIN" ]; then
+    # The PE's own import table, the list the loader binds: the same claim
+    # as LC_LOAD_DYLIB and NEEDED, spelled however the linker felt
+    # (KERNEL32.dll), so it is lowercased.
+    "$DUMPBIN" -nologo -dependents "$binary" 2>/dev/null |
+      sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' |
+      tr 'A-Z' 'a-z' | sort -u
+  elif command -v otool >/dev/null 2>&1; then
+    otool -L "$binary" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
   else
-    readelf -d "$1" 2>/dev/null |
+    readelf -d "$binary" 2>/dev/null |
       sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' |
       sed 's|.*/||' | sort -u
   fi
@@ -152,6 +207,11 @@ grep -E '^  (LE|BE) (Int32|Int64|UInt64|UInt8) ' "$WORK/exercise-io.out" > "$WOR
 if [ -n "$PY" ]; then
   "$PY" - "$WORK/encodings.iyi.txt" > "$WORK/encodings.py.txt" <<'PY'
 import struct, sys
+# Python's text mode writes each "\n" as "\r\n" on Windows, and a program iyi
+# builds writes "\n" there as everywhere: every one of the eighty lines then
+# differed from the program's by a carriage return the eye cannot see. The
+# oracle writes the line end the program is held to.
+sys.stdout.reconfigure(newline="\n")
 codes = {"Int32": "i", "Int64": "q", "UInt64": "Q", "UInt8": "B"}
 for line in open(sys.argv[1]):
     order, kind, value, _ = line.split()
@@ -207,7 +267,8 @@ chunks = [
     bytes((i * 7 + 30) % 256 for i in range(40)),
     b"to stdout",
 ]
-with open(sys.argv[1], "w") as out:
+# The same line end as the struct oracle's, for the same reason.
+with open(sys.argv[1], "w", newline="\n") as out:
     for chunk in chunks:
         out.write(dump_c(chunk))
 PY
@@ -443,6 +504,22 @@ case "$(uname -s)" in
       exit 2
     fi
     ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A PE has no undefined symbols to allow, so the floor is the DLLs the
+    # binary imports and the names under them are printed as a count. Both
+    # builds import kernel32 and the C runtime's DLLs and nothing else
+    # (bench/dependency_floor.sh records the reason for each); Winsock is
+    # not among them, so a std/io change that reached it would be caught.
+    allowed_symbols=""
+    DUMPBIN="$(find_dumpbin || true)"
+    # Required, the way `readelf` is on Linux: nothing builds an iyi binary
+    # on Windows without the toolchain that carries `dumpbin`, and a reader
+    # that prints nothing passes every check below.
+    if [ -z "$DUMPBIN" ]; then
+      echo "  an import table is read with the toolchain's dumpbin, which is not installed here, so no floor can be measured" >&2
+      exit 2
+    fi
+    ;;
   *)
     # The base is every darwin program's (bench/floor_base.sh); the socket
     # and file names beside it are what this exercise's binary asks for on
@@ -450,16 +527,33 @@ case "$(uname -s)" in
     allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
-allowed_libs="$FLOOR_LIBS_PROGRAM"
+if [ -n "$DUMPBIN" ]; then
+  allowed_libs="kernel32.dll vcruntime140.dll ucrtbase.dll api-ms-win-crt-"
+else
+  allowed_libs="$FLOOR_LIBS_PROGRAM"
+fi
 
 for binary in exercise-io exercise-io-release; do
   if [ -x "$WORK/$binary" ]; then
     io_syms="$(symbols "$WORK/$binary")"
     io_libs="$(libraries "$WORK/$binary")"
-    printf '  %s symbols   %s\n' "$binary" "$(echo $io_syms)"
+    if [ -n "$DUMPBIN" ]; then
+      printf '  %s symbols   %s names\n' "$binary" "$(printf '%s\n' "$io_syms" | grep -c .)"
+    else
+      printf '  %s symbols   %s\n' "$binary" "$(echo $io_syms)"
+    fi
     printf '  %s libraries %s\n' "$binary" "$(echo $io_libs)"
 
-    extra_syms="$(unexpected "$allowed_symbols" "$(echo $io_syms)")"
+    # Every PE imports kernel32 at the very least, so an empty list is an
+    # import table that was not read, not a floor of zero.
+    if [ -n "$DUMPBIN" ] && [ -z "$io_libs" ]; then
+      echo "  dumpbin read no imported DLL out of $binary, so its floor was not measured"
+      status=1
+      continue
+    fi
+
+    extra_syms=""
+    [ -z "$DUMPBIN" ] && extra_syms="$(unexpected "$allowed_symbols" "$(echo $io_syms)")"
     if [ -n "$extra_syms" ]; then
       echo "  std/io asks the machine for something new:"
       echo "$extra_syms" | sed 's/^/    /'

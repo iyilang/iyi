@@ -133,18 +133,39 @@ refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends i
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
   'HTTP.parse_response("HTTP/1.1 OK\r\n\r\n").status'
 
+# The first line a server printed, which is its port, once it has printed
+# it. The wait is for the process to start running: on Windows, Defender
+# checks an exe it has not seen before the exe's first launch runs, and its
+# cloud check holds a file 10 s by default and up to 60 s by policy.
+# Measured here, with four builds at a time, a program that only prints
+# took up to 9.8 s on its first launch and under 0.3 s on its second, and
+# this server printed its port 12.8 s after it was launched, after the
+# fifty rounds of `sleep 0.1` this step used to wait had run out; the gate
+# then said "the server printed no port" about a server that was fine. A
+# server that exits ends the wait at once, so one that dies still fails
+# without waiting out the minute.
+await_port() { # await_port <output file> <pid>
+  local out="$1" pid="$2" line="" start=$SECONDS
+  while [ $((SECONDS - start)) -lt 60 ]; do
+    line=$(head -1 "$out" 2>/dev/null)
+    [ -n "$line" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -n "$line" ] || line=$(head -1 "$out" 2>/dev/null)
+  printf '%s' "$line"
+}
+
 echo
 echo "== Python's http.client against the server"
 if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/server.build.log" 2>&1; then
   "$WORK/server" > "$WORK/server.out" 2>&1 &
   server_pid=$!
-  for _ in $(seq 1 50); do
-    port=$(head -1 "$WORK/server.out" 2>/dev/null)
-    [ -n "$port" ] && break
-    sleep 0.1
-  done
+  port=$(await_port "$WORK/server.out" "$server_pid")
   if [ -z "$port" ]; then
     echo "  the server printed no port"
+    sed -n '1,5p' "$WORK/server.out" | sed 's/^/    /'
+    kill "$server_pid" 2>/dev/null
     status=1
   elif [ -z "$PY" ]; then
     echo "  skipped: no working python3, so its http.client was not run against the server"
@@ -197,11 +218,7 @@ if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
   "$WORK/server-release" > "$WORK/load.out" 2>&1 &
   load_pid=$!
-  for _ in $(seq 1 50); do
-    lport=$(head -1 "$WORK/load.out" 2>/dev/null)
-    [ -n "$lport" ] && break
-    sleep 0.1
-  done
+  lport=$(await_port "$WORK/load.out" "$load_pid")
   wrk -t2 -c50 -d3s "http://127.0.0.1:$lport/echo" > "$WORK/wrk.out" 2>&1
   reqs=$(grep -o '^Requests/sec: *[0-9.]*' "$WORK/wrk.out" | grep -o '[0-9.]*$')
   # `wrk` counts a connection the stop closes under it as a read error;

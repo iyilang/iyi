@@ -351,7 +351,25 @@ fi
 
 # And the proof that this arm tests parking: a copy whose first receive is
 # a blocking `recvfrom` (no MSG_DONTWAIT) pins the one thread, the sender
-# never runs, and the program is killed at the bound.
+# never runs, and the program is killed at the bound. On Windows the flag
+# is not where blocking lives: Winsock has no MSG_DONTWAIT, the module's
+# win32 arm defines it as 0 and makes the socket itself non-blocking with
+# FIONBIO, so the flag edit left that copy exactly the program it copied -
+# measured: its sender ran and it exited inside the bound. There the copy
+# leaves the socket blocking instead, which is what makes its first
+# `recvfrom` block.
+#
+# The copy is killed on every run, and Git Bash loses a SIGTERM that lands
+# while it is still starting a native program: measured, a TERM sent 50 ms
+# into a fresh build's start left it pinned until something else ended
+# it, and one first start under load took nine seconds, so the gate hung
+# past its bound. A SIGKILL is not lost, and it takes the program with it,
+# so it follows the TERM; elsewhere the TERM ends the copy and the KILL
+# never goes.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) BLOCKING_SITE=win32 ;;
+  *) BLOCKING_SITE=posix ;;
+esac
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -359,10 +377,15 @@ else
   "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/udp.iyi").read_text()
-old = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))"
+if "$BLOCKING_SITE" == "win32":
+    old = "on = 1\n      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))"
+    new = "on = 0\n      LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))"
+else:
+    old = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))"
+    new = "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, 0, addr, pointerof(len))"
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/blocking/std/udp.iyi").write_text(src.replace(old, "count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, 0, addr, pointerof(len))", 1))
+Path("$WORK/blocking/std/udp.iyi").write_text(src.replace(old, new, 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the blocking patch did not apply"
@@ -371,7 +394,7 @@ PY
     echo "  the blocking copy did not build:"
     sed -n '1,8p' "$WORK/park_blocking.build"
     status=1
-  elif timeout 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
+  elif timeout -k 5 5 "$WORK/park_blocking" > "$WORK/park_blocking.out" 2>&1; then
     echo "  a blocking receive still let the sibling run, so this arm does not test parking"
     status=1
   else

@@ -208,16 +208,23 @@ fi
 echo
 echo "== proving a touch that ignores the time it is given is caught"
 # The branch the host compiles, because that is the only one this run can
-# reach: darwin writes a `timeval` pair through `utimes` and Linux a
-# `timespec` pair through `utimensat`. The darwin branch passed a null
-# `times`, which means "now", so `touch(path, 1)` set the clock's time
-# there and the epoch second on Linux — and nothing here said so, because
-# the Linux copy is what the proofs had always patched.
+# reach: darwin writes a `timeval` pair through `utimes`, Linux a
+# `timespec` pair through `utimensat`, and Windows a FILETIME tick count
+# through `SetFileTime`. The darwin branch passed a null `times`, which
+# means "now", so `touch(path, 1)` set the clock's time there and the epoch
+# second on Linux — and nothing here said so, because the Linux copy is what
+# the proofs had always patched. Windows fell to the darwin site in turn: the
+# patch applied to a branch that host never compiles, the touch it built was
+# whole, and the exercise passed.
 # The *mtime* slot, which is what `File.info#modification_time` reads: the
 # pair is atime then mtime, and a patch to the first one moves a field
-# nothing here asks about.
+# nothing here asks about. Windows hands one tick count to both slots, so
+# its patch is to that count, which zeroed is the epoch second the other
+# patches write.
 case "$(uname -s)" in
   Linux) touch_site='        ts[2] = sec' ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+         touch_site='        ticks = time * 10000000_i64 + 116444736000000000_i64' ;;
   *)     touch_site='        tv[2] = time' ;;
 esac
 mkdir -p "$WORK/patched_time/std"

@@ -81,9 +81,15 @@ build_and_run() {
 }
 
 # python3 draws the same 200 pairs with the same generator and prints the
-# same lines; the diff is the check.
+# same lines; the diff is the check. Python's text-mode stdout on windows
+# ends every line with "\r\n" while the iyi program writes "\n", so all 1,400
+# lines differed there with identical text; the oracle is told to write "\n"
+# like the program it is diffed against, which is what it already did on
+# linux and darwin.
 oracle() {
   "$PY" - <<'PY'
+import sys
+sys.stdout.reconfigure(newline="\n")
 seed = 42
 def draw(bound):
     global seed

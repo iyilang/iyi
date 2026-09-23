@@ -477,12 +477,15 @@ loads, and the same three libraries the tarball has, so there is nothing
 to configure and no `IYI_PATH` to set; what it does not carry is the
 daemon, because `iyi daemon`'s server loop is `poll(2)` and its worker is
 `fork` (`src/compiler/iyi/command/daemon.cr`), neither of which Windows
-has. `check`, `vet`, `build`, `test`, `mod context` and `mod diff` run
+has. `init`, `check`, `vet`, `build`, `test`, `mod context`, `mod diff`,
+`migrate`, a package through `iyi.mod` and `iyi.sum`, and `iyi lsp` —
+the whole scripted editor session, over source and over artifacts — run
 there in CI, along with every sample and every runtime exercise, and
 `install.ps1` is gated the way `install.sh` is: the run that built the
 zip installs it, runs the installed copy from a stranger's directory
-under both PowerShell hosts, and then refuses a sum with one hex digit
-wrong.
+under both PowerShell hosts, installs over that install and requires a
+file the release does not ship to be gone, and then refuses a sum with
+one hex digit wrong.
 
 You need the Visual C++ build tools — the MSVC toolset and the Windows
 SDK, e.g. Visual Studio Build Tools with "Desktop development with C++".

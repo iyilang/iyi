@@ -292,6 +292,54 @@ def main():
     step("and the honest unexported def is clean",
          run("check", "unexported.iyi", cwd=work).returncode == 0, "")
 
+    # And a type nobody exports, and a method an `impl` block gives it:
+    # both were caller-typed, so with nothing constructing the type a
+    # String returned as an Int32 and a call to a method that exists
+    # nowhere passed `check`. Each def is typed on its own, so both are
+    # named in one run rather than the first.
+    write("unbuilt.iyi", (
+        "module app4\n\n"
+        "trait B\n  abstract def name : String\nend\n\n"
+        "class X\n  def initialize\n  end\n\n"
+        "  def helper : Int32\n    \"nope\"\n  end\nend\n\n"
+        "impl B for X\n  def name : String\n    bogus_method_call(1)\n  end\nend\n"
+    ))
+    proc = run("check", "unbuilt.iyi", cwd=work)
+    said = proc.stdout + proc.stderr
+    step("an unexported type's and an impl's bodies are typed with nothing built",
+         proc.returncode == 1
+         and "X#helper must return Int32 but it is returning String" in said
+         and "undefined method 'bogus_method_call'" in said,
+         said.strip().splitlines()[-1] if said.strip() else "")
+    proc = run("check", "-f", "json", "unbuilt.iyi", cwd=work)
+    lines = sorted({frame["line"] for frame in json.loads(proc.stderr or proc.stdout)
+                    if "instantiating" not in frame["message"]})
+    step("and -f json carries both, each at its own line", lines == [11, 18], f"lines {lines}")
+    write("unbuilt.iyi", (
+        "module app4\n\n"
+        "trait B\n  abstract def name : String\nend\n\n"
+        "class X\n  def initialize\n  end\n\n"
+        "  def helper : Int32\n    1\n  end\nend\n\n"
+        "impl B for X\n  def name : String\n    \"x\"\n  end\nend\n"
+    ))
+    step("and the honest ones are clean",
+         run("check", "unbuilt.iyi", cwd=work).returncode == 0, "")
+
+    # A module-private type behind a generic argument is as private as it
+    # is bare: `def g : Array(P)` was refused with "does not export P" while
+    # `def f(p : P) : P` beside it was fine — the probe wrote the first and
+    # skipped the second, and neither said anything about the program.
+    write("private_generic.iyi", (
+        "module app5\n\n"
+        "struct P\n  def initialize\n  end\nend\n\n"
+        "def f(p : P) : P\n  p\nend\n\n"
+        "def g(n : Int32) : Array(P)\n  [] of P\nend\n"
+    ))
+    proc = run("check", "private_generic.iyi", cwd=work)
+    step("a private type is private the same way bare and as a type argument",
+         proc.returncode == 0,
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
     # 4b'. the generic half: a trait bound is written, and a bound is
     # enough — the body is typed against a synthesized witness, so a
     # generic def calling anything outside its bound dies at the

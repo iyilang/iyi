@@ -160,6 +160,10 @@ module Iyi::Lsp
         @seed.delete(path)
       end
       {result, [] of Diag}
+    rescue ex : CodeErrors
+      # Every def that does not type, one diagnostic apiece — the editor
+      # shows them all where `check` prints them all.
+      {nil, ex.errors.map { |error| to_diag(error, path) }}
     rescue ex : CodeError
       {nil, [to_diag(ex, path)]}
     rescue ex : Iyi::Error

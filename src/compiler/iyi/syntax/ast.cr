@@ -1070,6 +1070,12 @@ module Iyi
     # The location of the `else` keyword if present.
     property else_location : Location?
 
+    # iyi: the `if false` a definition-site probe is wrapped in
+    # (semantic/definition_typing.cr). The main visitor types each one on
+    # its own and keeps going past an error, so every def that does not
+    # type is reported rather than the first.
+    property? iyi_definition_probe = false
+
     def initialize(@cond, a_then = nil, a_else = nil, @ternary = false)
       @then = Expressions.from a_then
       @else = Expressions.from a_else
@@ -2084,6 +2090,13 @@ module Iyi
     # who did not already have it in their object code.
     property? iyi_from_artifact = false
 
+    # iyi: written by the definition-site typing probe (R-2c) rather than by
+    # an author. The probe is a def's own site asking about itself, so it
+    # names a type the def's module keeps to itself the way the module's
+    # own code can: `Call#check_visibility` lets its call through for the
+    # same reason.
+    property? iyi_synthetic = false
+
     def initialize(@names : Array, @global = false)
     end
 
@@ -2117,6 +2130,7 @@ module Iyi
     def clone_without_location
       ident = Path.new(@names.clone, @global)
       ident.iyi_from_artifact = @iyi_from_artifact
+      ident.iyi_synthetic = @iyi_synthetic
       ident
     end
 

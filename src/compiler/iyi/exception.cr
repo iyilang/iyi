@@ -75,6 +75,67 @@ module Iyi
     end
   end
 
+  # iyi: more than one error, each found on its own — the definition-site
+  # probes (semantic/definition_typing.cr) type one def apiece, and a def
+  # whose body is wrong says nothing about the next one's. `check` over a
+  # file with three broken defs answered with the first, and the loop was
+  # fix, re-run, fix, re-run; each is reported here, in the order the defs
+  # are written. Text prints them one after another; `-f json` is the same
+  # array of frames a single error writes, each error's frames in turn;
+  # the language server makes one diagnostic apiece.
+  class CodeErrors < CodeError
+    getter errors : Array(CodeError)
+
+    def initialize(@errors : Array(CodeError))
+      super(@errors.first.message)
+    end
+
+    def color=(@color : Bool)
+      @errors.each(&.color=(color))
+      color
+    end
+
+    def error_trace=(@error_trace : Bool)
+      @errors.each(&.error_trace=(error_trace))
+      error_trace
+    end
+
+    def warning=(@warning : Bool)
+      @errors.each(&.warning=(warning))
+      warning
+    end
+
+    def to_s_with_source(io : IO, source)
+      @errors.each_with_index do |error, index|
+        io << "\n\n" if index > 0
+        error.to_s_with_source(io, source)
+      end
+      io << "\n\n" << @errors.size << " errors, one per definition that does not type"
+    end
+
+    def has_location?
+      @errors.first.has_location?
+    end
+
+    def append_to_s(io : IO, source)
+      to_s_with_source(io, source)
+    end
+
+    def deepest_error_message
+      @errors.first.deepest_error_message
+    end
+
+    def to_json(json : JSON::Builder)
+      json.array do
+        @errors.each(&.to_json_single(json))
+      end
+    end
+
+    def to_json_single(json)
+      @errors.each(&.to_json_single(json))
+    end
+  end
+
   # iyi: text a build parsed under a filename that is not a file to read.
   #
   # The declarations from a `.iyimod` are parsed under the artifact's own path,

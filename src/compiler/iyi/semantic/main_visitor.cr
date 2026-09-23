@@ -697,7 +697,18 @@ module Iyi
 
     def visit(node : Expressions)
       exp_count = node.expressions.size
+      # The probes stand at the front of the program's own list, and only
+      # there is what they found raised: a probe's own body is an
+      # `Expressions` too, and raising there put the first probe's error
+      # in the second probe's place.
+      probed = false
       node.expressions.each_with_index do |exp, i|
+        if exp.is_a?(If) && exp.iyi_definition_probe?
+          visit_definition_probe(exp)
+          probed = true
+          next
+        end
+        raise_definition_errors if probed
         if i == exp_count - 1
           exp.accept self
           node.bind_to exp
@@ -705,12 +716,43 @@ module Iyi
           ignoring_type_filters { exp.accept self }
         end
       end
+      raise_definition_errors if probed
 
       if node.empty?
         node.set_type(@program.nil)
       end
 
       false
+    end
+
+    # iyi: one definition-site probe, typed on its own (R-2c). An error is
+    # kept and the next probe typed, so `check` names every def that does
+    # not type instead of the first; the probes stand before the program's
+    # own code, and what they found is raised before that code is looked
+    # at. Past a first error, anything but a code error stops the probing:
+    # a later probe can trip over a def an earlier one left half typed, and
+    # the error already found is the one worth reading.
+    @definition_errors : Array(CodeError)?
+    @definition_probes_stopped = false
+
+    private def visit_definition_probe(probe : If) : Nil
+      return if @definition_probes_stopped
+      begin
+        ignoring_type_filters { probe.accept self }
+      rescue ex : CodeError
+        (@definition_errors ||= [] of CodeError) << ex
+      rescue ex
+        raise ex unless @definition_errors
+        @definition_probes_stopped = true
+      end
+    end
+
+    private def raise_definition_errors : Nil
+      errors = @definition_errors
+      return unless errors
+      @definition_errors = nil
+      raise errors.first if errors.size == 1
+      raise CodeErrors.new(errors)
     end
 
     def visit(node : Assign)

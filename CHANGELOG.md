@@ -59,6 +59,25 @@
 
 ### Fixed
 
+- **`iyi check` passed a type's methods when nothing built the type.**
+  R-2c types a fully written def at its definition, caller or no caller,
+  and two kinds of def were still caller-typed: those of a type the module
+  never marked `pub`, whose name the probe could not write from outside,
+  and those an `impl` block gives a type. With nothing constructing `X`,
+  `def helper : Int32` returning `"nope"` and an `impl` method calling a
+  method that exists nowhere both checked clean — a 3,000-line port had to
+  grow a driver that called everything before `check` would read any of
+  it. The probe names such a type the way the module's own code does, and
+  an `impl`'s method is probed on the type like any other.
+
+- **`iyi check` named the first def that did not type, and stopped.** Each
+  definition-site probe is typed on its own now and every error is
+  reported, one per def, in the order written — in text, in `-f json`, and
+  as one editor diagnostic apiece. And an error at a probe's call pointed
+  at a line and column of the probe's own text inside the def's file
+  (`3:37`); it points at the def. `bench/agent_loop.py` checks both errors
+  of one file, and fails on the tree before.
+
 - **`record` dropped a block without a word.** `record Vec, x : Float64
   do def norm ... end end` compiled, and the methods were nowhere: the
   first call said `undefined method 'norm'`, at the call rather than at

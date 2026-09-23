@@ -37,17 +37,20 @@
 # always; here it costs one synthetic type per trait_type per compile.
 #
 # The probe is written at the top level and stamped with the def's own
-# location, and `Call#check_visibility` lets a synthetic call through R-2's
-# wall: it is the definition asking about itself, so a module's unmarked
-# function and a type's `private def` are typed like an exported one.
-# The fences that remain were each earned by a failure, kept on record:
-# a non-`pub` *type* is not nameable from the top level and stays
-# caller-typed (a spec's private `struct User`), impl-carried defs stay inside their
-# trait_type context (R-3, the collections sample's `<=>`), `Program` is its
-# own namespace so the nameable climb must stop there or hang, and
-# witnesses are only built for simple traits — supertraits, generic and
-# associated-type traits keep caller-typed bodies, stated rather than
-# guessed at.
+# location, and it is the definition asking about itself: `Call#check_visibility`
+# lets its call through R-2's wall, and its paths (`Path#iyi_synthetic`) name
+# a type the def's module keeps to itself the way the module's own code
+# can. So a module's unmarked function, a type's `private def`, a type the
+# module never marked `pub`, and a method an `impl` block gives a type are
+# all typed at their definition like an exported one. Before that,
+# `class X` without `pub`, or `impl B for X`, with nothing constructing an
+# `X`, passed `check` with `"nope"` returned as an `Int32` and a call to a
+# method nowhere in the program. The fences that remain were each earned by
+# a failure, kept on record: `Program` is its own namespace so the name
+# climb must stop there or hang, operator names are not called through a
+# probe (the collections sample's `<=>`), and witnesses are only built for
+# simple traits — supertraits, generic and associated-type traits keep
+# caller-typed bodies, stated rather than guessed at.
 require "../syntax/ast"
 
 module Iyi::DefinitionTyping
@@ -154,17 +157,12 @@ module Iyi::DefinitionTyping
       location = a_def.location
       return unless location
 
-      # R-3 keeps impl-carried defs inside their trait_type context. R-2's
-      # wall does not stop the probe: it is the def's own site asking, and
-      # `Call#check_visibility` lets a synthetic call through - so a module's
-      # unmarked function and a type's `private def` are typed at their
-      # definition like anything else. Before that, `def f : Int32` with a
-      # body answering `"s"` passed `check` and `build` whenever nothing
-      # called it, and `pub` was what decided whether the rule applied.
-      # The owner still has to be nameable from the top level: a spec's
-      # `private struct User` is not, and stays caller-typed.
-      return if a_def.iyi_from_impl?
-      return unless nameable?(owner)
+      # A def the probe calls is the def's own site asking. The owner's
+      # name, its parameters' and its return's resolve through the probe's
+      # synthetic paths, a type the module keeps to itself included.
+      # An `impl` block's method is the type's once the block lands, and
+      # is probed on the type like any other.
+      #
       # A plain `module` that is not a unit is a mixin: its instance defs
       # mean something on the type that includes it (`self` in
       # `Colorize::ObjectExtensions#colorize : Object(self)` is the includer),
@@ -223,6 +221,7 @@ module Iyi::DefinitionTyping
       parser.filename = location.filename
       parsed = parser.parse
       parsed.accept(Stamper.new(location))
+      parsed.iyi_definition_probe = true if parsed.is_a?(If)
       @probes << parsed
     rescue Iyi::CodeError
       # A type whose printed name does not re-parse (rare, and its own
@@ -343,9 +342,8 @@ module Iyi::DefinitionTyping
       true
     end
 
-    # Whether the type's printed name resolves from the program's top
-    # level. The climb mirrors the R-2 check itself: crossing into an iyi
-    # unit requires the unit to export the name.
+    # Whether the type has a printed name at all, which the probe's
+    # synthetic paths can resolve whatever the name's visibility.
     private def nameable?(type : Type) : Bool
       type = type.devirtualize
       if type.is_a?(UnionType)
@@ -357,27 +355,7 @@ module Iyi::DefinitionTyping
           !var.is_a?(Type) || nameable?(var)
         end
       end
-      current = type
-      while current.is_a?(NamedType)
-        # A `private class` is file-private in the other language, and a
-        # probe stands outside: it cannot write the name at all. R-2's
-        # wall below stops it at an unexported one for the same reason —
-        # and this one was missing, so a private class nested in an
-        # exported one had its own defs probed by a name nobody can use
-        # ("private constant referenced", pointing at the def).
-        return false if current.private?
-        namespace = current.namespace
-        # `Program` is its own namespace (constructed `super(self, self,
-        # "main")`); walking past it loops forever — call.cr's using walk
-        # carries the same warning.
-        break if namespace == current
-        if namespace.iyi_unit? && !namespace.exported_name?(current.name)
-          return false
-        end
-        break unless namespace.is_a?(NamedType)
-        current = namespace
-      end
-      true
+      type.is_a?(NamedType) || type.is_a?(Program)
     end
 
     # A def the probe can honestly call: every parameter carries a
@@ -402,15 +380,23 @@ module Iyi::DefinitionTyping
 
   # Sets every node's location to the def the probe belongs to, so the
   # error a probe finds points at the definition rather than at a
-  # synthetic line no file contains — and marks every call as the
-  # compiler's own, so reference answers never count it.
+  # synthetic line no file contains — and marks every call and path as the
+  # compiler's own, so reference answers never count one and R-2 lets it
+  # through. A call's name has a location of its own, and an error at a
+  # call reads it: unstamped, "instantiating 'X#helper()'" pointed at line
+  # 3, column 37 of the def's file — the probe's own text.
   private class Stamper < Visitor
     def initialize(@location : Location)
     end
 
     def visit(node : ASTNode) : Bool
       node.at(@location)
-      node.iyi_synthetic = true if node.is_a?(Call)
+      if node.is_a?(Call)
+        node.iyi_synthetic = true
+        node.name_location = @location
+      elsif node.is_a?(Path)
+        node.iyi_synthetic = true
+      end
       true
     end
   end

@@ -311,4 +311,13 @@ raise "utf8: ascii tr" unless "abc".tr("ab", "x") == "xxc"
 raise "utf8: ascii center" unless "hello".center(12, "-=") == "-=-hello-=-="
 puts "    the char family: strip, search, delete, squeeze, count, tr and center verified"
 
+raise "string: to_u64 max" unless "18446744073709551615".to_u64 == 18446744073709551615_u64
+raise "string: to_u64 past max" unless "18446744073709551616".to_u64?.nil?
+raise "string: to_u64 base 16" unless "ff".to_u64(16) == 255_u64
+raise "string: to_u64 refuses a sign" unless "-1".to_u64?.nil?
+raise "string: range" unless "hello"[1..3] == "ell" && "hello"[1...3] == "el"
+raise "string: range from the back" unless "hello"[-3..-1] == "llo" && "hello"[0..-2] == "hell"
+raise "string: backwards range is empty" unless "hello"[3..1] == ""
+puts "    to_u64 and a range of a string verified"
+
 puts "all std/text checks passed"

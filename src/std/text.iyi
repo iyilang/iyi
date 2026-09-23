@@ -825,6 +825,57 @@ class ::String
     0 - value
   end
 
+  # The unsigned 64-bit reading, for the checksums and hashes a port keeps
+  # in `UInt64`: digits in *base*, an optional `+`, and nil for a sign,
+  # anything that is not a digit, or a value past 18446744073709551615.
+  def to_u64 : UInt64
+    to_u64? || raise "not a number: #{inspect}"
+  end
+
+  def to_u64(base : Int32) : UInt64
+    to_u64?(base) || raise "not a number in base #{base}: #{inspect}"
+  end
+
+  def to_u64? : UInt64?
+    to_u64?(10)
+  end
+
+  def to_u64?(base : Int32) : UInt64?
+    raise "base #{base} out of range (2..36)" if base < 2 || base > 36
+    return nil if empty?
+    index = to_unsafe[0] == 43_u8 ? 1 : 0
+    return nil if index == bytesize
+    radix = base.to_u64
+    value = 0_u64
+    while index < bytesize
+      b = to_unsafe[index]
+      digit = if b >= 48_u8 && b <= 57_u8
+                (b - 48_u8).to_u64
+              elsif b >= 97_u8 && b <= 122_u8
+                (b - 97_u8).to_u64 + 10_u64
+              elsif b >= 65_u8 && b <= 90_u8
+                (b - 65_u8).to_u64 + 10_u64
+              else
+                return nil
+              end
+      return nil if digit >= radix
+      return nil if value > (18446744073709551615_u64 - digit).unsafe_div(radix)
+      value = value * radix + digit
+      index = index + 1
+    end
+    value
+  end
+
+  # `s[1..3]`, `s[-3..-1]`: the bytes a range names, its ends counted from
+  # the back when negative, as `[](start, count)` counts them.
+  def [](range : Range(Int32, Int32)) : String
+    first = range.begin < 0 ? bytesize + range.begin : range.begin
+    last = range.end < 0 ? bytesize + range.end : range.end
+    last = last - 1 if range.exclusive?
+    count = last - first + 1
+    self[range.begin, count < 0 ? 0 : count]
+  end
+
   def to_i64 : Int64
     to_i64? || raise "not a number: #{inspect}"
   end

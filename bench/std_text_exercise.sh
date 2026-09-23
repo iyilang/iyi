@@ -121,6 +121,12 @@ prove_fails() {
 }
 
 # 1. ASCII letter predicate broken
+prove_fails "to_u64 overflow unchecked" u64_wrap "arithmetic overflow" \
+  's/^      return nil if value > (18446744073709551615_u64 - digit).unsafe_div(radix)$/      value = value \&* 1_u64/'
+
+prove_fails "a range keeps its end" range_end "string: range" \
+  's/^    last = last - 1 if range.exclusive?$/    last = last + 0 if range.exclusive?/'
+
 prove_fails "ascii letter predicate broken" no_letter "char: ascii_letter lowercase" \
   's/def ascii_letter? : Bool/def ascii_letter? : Bool; return false/'
 

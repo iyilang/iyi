@@ -4,6 +4,13 @@
 
 ### Added
 
+- **`String#to_u64` (and `to_u64?`, with a base) and `String#[](range)`
+  (`import std/text`).** A checksum kept in `UInt64` read back from text,
+  nil past 18446744073709551615 or for a sign; and `s[1..3]`,
+  `s[-3..-1]`, `s[0...n]` — the bytes a range names, as `[](start,
+  count)` counts them. Both answer what Crystal 1.21 answers for the same
+  calls.
+
 - **`Int32#step`, `Int64#step` and `Float64#step` (`import
   std/steppable`).** `0.step(to: n, by: 60) { ... }` and
   `n.step(to: -n, by: -0.05) { ... }`: the trait and its iterator were

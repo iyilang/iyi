@@ -148,6 +148,8 @@ prove_fails "step arithmetic" mut1 "if gap == step_sign" "if gap != step_sign"
 prove_fails "exclusive boundary check" mut2 "elsif gap == 0 && !@exclusive" "elsif gap == 0"
 prove_fails "step direction validation" mut3 "if sign != step_sign" "if false"
 prove_fails "trait block iteration default" mut4 "yield item" "nil"
+prove_fails "doubles do not step" mut6 "impl Steppable for Float64
+end" ""
 prove_fails "overflow-safe gap compare" mut5 "gap = ((limit - @step) <=> @current)" "tmp = @current + @step
     gap = ((limit - @step) <=> @current)"
 

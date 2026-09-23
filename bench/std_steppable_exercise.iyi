@@ -215,4 +215,26 @@ sum_empty = StepInt.new(1).step(to: StepInt.new(5), by: StepInt.new(-1)).sum(Ste
 assert_int("sum of empty iterator", 99, sum_empty.val)
 puts "  draining inclusive step to Int32 MAX and MIN holds, empty sum holds"
 
+# The prelude's numbers, stepped as the other library steps them: each
+# count and last value below is what Crystal 1.21 answers for the same
+# loop, the double one reached by the same additions.
+ints = 0
+0.step(to: 100, by: 7) { |i| ints = ints + 1 }
+assert_int("Int32 steps to a limit", 15, ints)
+fives = 0
+0.step(to: 10, by: 3, exclusive: true) { |i| fives = fives + 1 }
+assert_int("Int32 steps short of an exclusive limit", 4, fives)
+longs = 0
+10_i64.step(to: 0_i64, by: -2_i64) { |i| longs = longs + 1 }
+assert_int("Int64 steps down", 6, longs)
+count = 0
+last = 0.0
+1.5.step(to: -1.5, by: -0.05) { |x| count = count + 1; last = x }
+assert_int("Float64 steps down by additions", 60, count)
+assert_equal("Float64's last step is the accumulated one", "-1.4500000000000015", last.to_s)
+tenths = 0
+0.1.step(to: 1.0, by: 0.1) { |x| tenths = tenths + 1 }
+assert_int("Float64 steps up to a limit", 10, tenths)
+puts "  Int32, Int64 and Float64 step, as the other library counts"
+
 puts "\nALL CHECKS PASSED"

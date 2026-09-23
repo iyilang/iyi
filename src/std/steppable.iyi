@@ -111,3 +111,18 @@ pub trait Steppable
     NumericStepIterator(self).new(self, limit, step_val, exclusive)
   end
 end
+
+# The prelude's numbers step, as in the other library:
+# `0.step(to: 100, by: 7) { |i| ... }` and
+# `1.0.step(to: -1.0, by: -0.05) { |x| ... }`. A double steps by adding,
+# and the same additions reach the same last value there and here, so a
+# ported loop runs the same number of times. The trait was here and
+# nothing implemented it, so every `step` was a missing method.
+impl Steppable for Int32
+end
+
+impl Steppable for Int64
+end
+
+impl Steppable for Float64
+end

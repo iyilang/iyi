@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`Int32#step`, `Int64#step` and `Float64#step` (`import
+  std/steppable`).** `0.step(to: n, by: 60) { ... }` and
+  `n.step(to: -n, by: -0.05) { ... }`: the trait and its iterator were
+  there and no number implemented it, so a port wrote Crystal's
+  accumulate-and-compare bounds by hand to keep the iteration counts. A
+  double steps by adding, and reaches the same count and the same last
+  value Crystal 1.21 does; `bench/std_steppable_exercise.iyi` checks both.
+
 - **`Array.new(size, value)`, `Array#+`, `Hash.new(default)`,
   `Hash.new { |table, key| ... }` and `Hash#to_a`.** The forms a Crystal
   port writes first: a filled row, two arrays joined, a counter that

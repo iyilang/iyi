@@ -1060,7 +1060,8 @@ class RxCompiler
 end
 
 # The other library's spellings on the text side: `seq.gsub(pattern,
-# "x")` and `seq.gsub(pattern) { |match| ... }` are `Regex#replace`, and
+# "x")`, `seq.gsub(pattern, table)` and `seq.gsub(pattern) { |match| ...
+# }` are `Regex#replace`, and
 # `text.matches?(pattern)` asks whether the pattern occurs anywhere, as the
 # other library's does - `Regex#match?` asks whether it spans the whole
 # text, and is a different question. There are no capture groups,
@@ -1074,6 +1075,12 @@ class ::String
 
   def gsub(pattern : Std::Regex::Regex, & : String -> String) : String
     pattern.replace(self) { |match| yield match }
+  end
+
+  # Each match replaced by its entry in *table*; a match the table has no
+  # entry for is dropped, as the other library drops it.
+  def gsub(pattern : Std::Regex::Regex, table : Hash(String, String)) : String
+    pattern.replace(self) { |match| table[match]? || "" }
   end
 
   def matches?(pattern : Std::Regex::Regex) : Bool

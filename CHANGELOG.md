@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`String#gsub(pattern, table)` (`import std/regex`).** Each match
+  replaced by its entry in a `Hash(String, String)` and dropped when the
+  table has none, as Crystal 1.21's `gsub(Regex, Hash)` answers:
+  `seq.gsub(Regex.compile("B|D"), {"B" => "(c|g|t)", "D" => "(a|g|t)"})`.
+
 - **`Array#zip(other) { |a, b| ... }` and `each_cartesian(other) { |a,
   b| ... }` (`import std/indexable`).** Pairs handed to a block without
   building the array of tuples first: `zip` stops at the shorter of the

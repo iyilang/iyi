@@ -958,7 +958,32 @@ def main():
          len(again) == len(items) and
          all(i["kind"] == "unchanged" and i["resultId"] for i in again) and
          elapsed < 0.5,
-         f"{len(again)} unchanged in {elapsed * 1000:.0f} ms")
+         f"{sum(i['kind'] == 'unchanged' for i in again)} of {len(again)} "
+         f"unchanged in {elapsed * 1000:.0f} ms")
+
+    # 31b'. and still so after the worker is replaced. The proxy retires
+    #       it when the wire is quiet for two seconds, and the ids the
+    #       client holds are handed to the successor: an id seeded by the
+    #       process that made it read as changed there, and the first
+    #       pull after every replacement compiled the whole workspace.
+    #       A retirement on the memory bound may have come first, and
+    #       then the first quiet warms that successor and the next one
+    #       replaces it, so the wait is for the pid to move, bounded.
+    before = children(c.proc.pid)
+    deadline = time.monotonic() + 10
+    while children(c.proc.pid) == before and time.monotonic() < deadline:
+        time.sleep(0.25)
+    time.sleep(0.5)
+    after = children(c.proc.pid)
+    started = time.monotonic()
+    reply = c.send("workspace/diagnostic", {"previousResultIds": previous})
+    elapsed = time.monotonic() - started
+    kinds = [i["kind"] for i in reply["result"]["items"]]
+    step("31b'", "a replaced worker reads the same ids as unchanged",
+         before != after and len(kinds) == len(items) and
+         all(k == "unchanged" for k in kinds) and elapsed < 0.5,
+         f"worker {before} -> {after}, {kinds.count('unchanged')} of "
+         f"{len(kinds)} unchanged in {elapsed * 1000:.0f} ms")
 
     # 31c. one file on disk moves, and the next pull is full for that
     #      file and unchanged for every other: `broken.iyi` imports

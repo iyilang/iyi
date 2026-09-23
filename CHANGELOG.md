@@ -241,6 +241,19 @@
 
 ### Fixed
 
+- **A workspace pull after the language server replaced its worker
+  compiled every file again.** The `resultId` of each file folded
+  `String#hash` and `Time#hash`, which are seeded per process, and the
+  proxy retires its worker mid-session (on its memory bound, or after
+  two quiet seconds) and hands the client's ids to the successor: none
+  matched, and the pull VS Code sends two seconds after any answer
+  recompiled the workspace - 0.9 s for six files where the same pull to
+  the same worker is a millisecond. The ids are an FNV-1a fold of the
+  paths and text and the files' sizes and modification times now, the
+  same in every process. `bench/lsp_session.py` step 31b' pulls with the
+  old ids after a replacement; CI's step 31b had been failing on the
+  replacement a larger prelude moved in front of it.
+
 - **On Windows a fiber switch lost the vector registers a call keeps.**
   The Windows x64 convention keeps xmm6-xmm15 across a call along with
   the eight integer registers, and a switch is a call — but the switch

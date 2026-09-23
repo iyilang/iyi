@@ -1039,13 +1039,20 @@ module Iyi::Lsp
     # stamps of every module its imports reach, plus one stamp shared
     # by all for what is outside the graph — `lib/`, `iyi.mod`,
     # `iyi.sum` — since a dependency's declarations are part of every
-    # verdict and the graph does not resolve into them. The hash is per
-    # process, which is exactly the life of a resultId.
+    # verdict and the graph does not resolve into them.
+    #
+    # The fold is over bytes and numbers, not `#hash`: that is seeded per
+    # process, and a resultId outlives its process - `Proxy` replaces the
+    # worker mid-session and the client hands the old ids to the new one.
+    # Seeded, every id changed at a replacement, and the next pull, which
+    # VS Code sends two seconds after any answer, compiled the whole
+    # workspace again: 0.9 s for six files, where the same pull to the
+    # same worker is a millisecond.
     private def result_ids : Hash(String, String)
       prime = 1099511628211_u64
       nodes = {} of String => Node
       @documents.each do |uri, text|
-        nodes[path_of(uri)] = Node.new(text.hash, Exports.header_of(text), imports_of(text))
+        nodes[path_of(uri)] = Node.new(stable(text), Exports.header_of(text), imports_of(text))
       end
 
       outside = 0_u64
@@ -1057,7 +1064,7 @@ module Iyi::Lsp
           info = File.info?(file)
           next unless info
           if posix.includes?("/lib/")
-            outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
+            outside = outside &* prime &+ stable(file) &+ stamp_of(info)
             next
           end
           # Keyed by the path the platform spells, which is what `path_of`
@@ -1066,12 +1073,12 @@ module Iyi::Lsp
           # every pull answered "unchanged" for a file that had changed.
           next if nodes.has_key?(file)
           header, imports = header_and_imports(file, info)
-          nodes[file] = Node.new(info.size.hash &* prime &+ info.modification_time.hash, header, imports)
+          nodes[file] = Node.new(stamp_of(info), header, imports)
         end
         Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
           info = File.info?(file)
           next unless info
-          outside = outside &* prime &+ file.hash &+ info.size.hash &+ info.modification_time.hash
+          outside = outside &* prime &+ stable(file) &+ stamp_of(info)
         end
       end
 
@@ -1093,7 +1100,7 @@ module Iyi::Lsp
         fold = outside
         while current = stack.pop?
           node = nodes[current]
-          fold = fold &* prime &+ current.hash &* prime &+ node.stamp
+          fold = fold &* prime &+ stable(current) &* prime &+ node.stamp
           node.imports.each do |imported|
             if (target = by_header[imported]?) && seen.add?(target)
               stack << target
@@ -1103,6 +1110,18 @@ module Iyi::Lsp
         ids[path] = fold.to_s(36)
       end
       ids
+    end
+
+    # FNV-1a over the text's bytes: the same in every process.
+    private def stable(text : String) : UInt64
+      fold = 14695981039346656037_u64
+      text.each_byte { |byte| fold = (fold ^ byte) &* 1099511628211_u64 }
+      fold
+    end
+
+    # A disk file as it stands: its size and its modification time.
+    private def stamp_of(info : File::Info) : UInt64
+      info.size.to_u64! &* 1099511628211_u64 &+ info.modification_time.to_unix_ns.to_u64!
     end
 
     private def header_and_imports(file : String, info : File::Info) : {String?, Array(String)}

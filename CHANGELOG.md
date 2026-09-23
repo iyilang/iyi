@@ -355,6 +355,11 @@
 
 ### Fixed
 
+- `bench/socket_exercise.sh` holds on Windows, where its first run found every
+  section passing and one proof unable to fail: a stale io deadline there
+  cancels an operation rather than waking a fiber, so the exercise cannot see
+  it. That proof is epoll's and kqueue's, and runs where they are.
+
 - `bench/debug_info.py` on Windows no longer asks gdb to read an MSVC-linked
   program: gdb reads DWARF, the program's debug information is CodeView in a
   PDB, and the mingw gdb on the runner's PATH found the program and read none

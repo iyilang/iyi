@@ -236,7 +236,14 @@ esac
 
 # 11. An io wait that ends before its deadline and stays in the sleep list:
 #     the deadline wakes the fiber a second time, after it has finished,
-#     which the runtime reports with a panic the program outlives.
+#     which the runtime reports with a panic the program outlives. On
+#     Windows an expired io deadline cancels the operation and lets its
+#     completion wake the fiber, so a stale one wakes nothing and the
+#     exercise cannot see it; the readiness pollers are where it shows.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  a deadline left behind: epoll's and kqueue's failure, proved there" ;;
+  *)
 mkdir -p "$WORK/stale/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/stale/iyi/"
 awk '{ sub(/return unless fiber\.io_timed$/, "return"); print }' \
@@ -257,7 +264,8 @@ else
   else
     echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "iyi: panic|timeout:" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
   fi
-fi
+fi ;;
+esac
 
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \

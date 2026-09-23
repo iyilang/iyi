@@ -79,6 +79,23 @@
 
 ### Changed
 
+- **`Float64#to_s` is Grisu3 and `String#to_f` is Eisel-Lemire, each
+  with the exact bignum behind it.** Printing multiplies the value and
+  its boundaries by a cached power of ten in 64-bit arithmetic and keeps
+  the digits only when their proof holds; about one double in 250 is
+  left to the bignum, which answered all of them before. Parsing reads
+  up to nineteen significant digits into a word and rounds that times a
+  128-bit power of five (fast_float's table); past nineteen, the word and
+  the word above it are both rounded, and only when they disagree does
+  the bignum read the text. Every one of 2,311,905 doubles prints the
+  bytes Crystal 1.21 prints, 367,920 hard decimal strings parse to
+  Crystal's bits, and the two directions ran 14.2 s and 9.0 s on them
+  and now run 1.2 s and 1.6 s. In the metric: JSON generation 3.8 s to
+  0.76 s, the three JSON parsers 2.3-3.1 s to 0.45-0.50 s (Crystal:
+  0.74 s, 0.30-0.40 s). The tables are strings of little-endian words,
+  because an array constant in the prelude is built before the heap it
+  lives in has started.
+
 - **`Base64.encode` and `Base64.decode` are twice as fast.** Encoding
   runs whole three-byte groups without asking how many bytes are left,
   and the last group alone takes the padding path. Decoding reads a
@@ -194,6 +211,14 @@
   unbuffered, so a gate that stops says where.
 
 ### Fixed
+
+- **`String#to_f` rounded a decimal with more than nineteen significant
+  digits as if the rest were zero.** `"6915724680296.729980553".to_f` was
+  one unit in the last place under the nearest double, and so were
+  85,234 of 367,920 long or halfway-straddling decimals measured against
+  Crystal's parser. Every digit up to 800 is read now, past that only
+  whether the rest is zero, which is all a double's rounding can depend
+  on.
 
 - **A method the integer tower has in `std/int` was reported as missing
   from the language.** `5_u32 + 1_u32`, `x << 3` on a `UInt64` and
@@ -9367,7 +9392,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 16,207-line library and nothing else. Every other
+  written against iyi's own 17,219-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

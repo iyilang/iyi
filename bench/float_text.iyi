@@ -59,11 +59,17 @@ check(huge - huge, "NaN")
 check(9007199254740992.0, "9.007199254740992e+15")
 check(0.5, "0.5")
 check(1024.0, "1024.0")
+# Doubles the fast printer cannot prove its digits for, which the bignum
+# answers: about one in two hundred and fifty.
+check(0.0 - 6016.951217939863, "-6016.951217939863")
+check(5.299064834871378e+16, "5.299064834871378e+16")
+check(3.1476980611636e-167, "3.1476980611636e-167")
 
 # `String#to_f` is the other direction, correctly rounded: the cases the
 # rounding is hardest on - the halves of the smallest subnormal, the top
 # of the format, a 30-digit integer, the literal that is not the double
-# it names - then every printed double read back to the same bits.
+# it names, digits past what one word holds - then every printed double
+# read back to the same bits.
 def check_parse(text : String, expected : String) : Nil
   actual = text.to_f.to_s
   if actual != expected
@@ -89,6 +95,13 @@ check_parse("5e-324", "5.0e-324")
 check_parse("2.5e-324", "5.0e-324")
 check_parse("2.4e-324", "0.0")
 check_parse("1e-400", "0.0")
+# Past nineteen digits, where the digits read so far and the next word up
+# round differently and the rest of the text decides: a hair over the
+# halfway point is up, the halfway point itself is to even.
+check_parse("9007199254740993.000000000000000000001", "9.007199254740994e+15")
+check_parse("1.000000000000000111022302462515654042363166809082031251", "1.0000000000000002")
+check_parse("1.000000000000000111022302462515654042363166809082031250", "1.0")
+check_parse("6915724680296.729980553", "6915724680296.73")
 check_parse("Infinity", "Infinity")
 check_parse("-Infinity", "-Infinity")
 check_parse("NaN", "NaN")

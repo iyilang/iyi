@@ -2,12 +2,15 @@
 # `Float64#to_s` and `String#to_f` (src/iyi/float.iyi): the shortest
 # decimal that reads back as the same double, in Crystal's notation, and
 # the correctly rounded double a decimal names. Runs bench/float_text.iyi
-# plain and optimised - forty printed cases, twenty parsed, twenty
+# plain and optimised - forty-odd printed cases, two dozen parsed, twenty
 # thousand doubles printed and read back to their bits - then proves the
-# check fails by name when the printer is broken: the digit loop's stop
-# condition removed (every value prints seventeen digits, no longer the
-# shortest), the notation's range widened (ten to the fifteenth prints in
-# fixed form), and the parser's rounding made truncation.
+# check fails by name when the printer is broken: the bignum digit loop's
+# stop condition removed (every value it prints has seventeen digits, no
+# longer the shortest), the notation's range widened (ten to the
+# fifteenth prints in fixed form), Grisu's proof skipped, the fast
+# parser's halfway case rounded up, a truncated word trusted without
+# checking the one above it, and the bignum parser's rounding made
+# truncation.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -82,6 +85,12 @@ prove_fails "digits never stop short" longform "float text:" \
   '{ if ($0 ~ /^      if !low && !high$/) { print "      if count < 17"; next } print }'
 prove_fails "notation range widened" widerange "float text: 1.234567890123456e+15" \
   '{ if ($0 ~ /^    if k > -4 && k <= 15$/) { print "    if k > -4 && k <= 16"; next } print }'
+prove_fails "the fast printer's proof skipped" unproven "float text:" \
+  '{ if ($0 ~ /^    \{digits, 2_u64 &\* unit <= rest && rest <= unsafe_interval &- 4_u64 &\* unit\}$/) { print "    {digits, true}"; next } print }'
+prove_fails "halfway rounded up, not to even" noeven "float text: 9007199254740993 read as" \
+  '{ if ($0 ~ /^    if low <= 1_u64 && q >= -4 && q <= 23 && mantissa & 3_u64 == 1_u64$/) { print "    if false"; next } print }'
+prove_fails "a truncated word trusted" trusted "float text: 9007199254740993.000000000000000000001" \
+  '{ if ($0 ~ /^    return parse_exact\(text\) if truncated && /) { next } print }'
 prove_fails "parser truncates" truncate "float text:" \
   '{ if ($0 ~ /^    if half != 0_u64 && \(remainder \|\| \(q & 1_u64\) != 0_u64\)$/) { print "    if false"; next } print }'
 

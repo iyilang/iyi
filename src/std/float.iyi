@@ -463,7 +463,8 @@ module Float32Text
       k = k - 1
     end
 
-    digits = Pointer(UInt8).malloc(20_u64)
+    # The digits as one integer, nine at most for a single.
+    digits = 0_u64
     count = 0
     while true
       r.mul_small(10_u64)
@@ -475,7 +476,7 @@ module Float32Text
       high_c = r.compare_sum(m_plus, s, scratch)
       high = high_c > 0 || (high_c == 0 && even)
       if !low && !high
-        digits[count] = digit.to_u8
+        digits = digits &* 10_u64 &+ digit.to_u64
         count = count + 1
         next
       end
@@ -487,7 +488,7 @@ module Float32Text
       elsif high
         digit = digit + 1
       end
-      digits[count] = digit.to_u8
+      digits = digits &* 10_u64 &+ digit.to_u64
       count = count + 1
       break
     end

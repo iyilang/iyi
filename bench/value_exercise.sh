@@ -181,6 +181,27 @@ prove_fails_range() { # prove_fails_range <label> <dir> <phrase> <sed script>
 }
 
 # 1. Equality by identity again, which is what `Object#==` gave it.
+# The once-guard a constant read before its line is initialised through,
+# taken out of the prelude: the program does not compile.
+mkdir -p "$WORK/no_once/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/no_once/iyi/"
+sed -e 's/^fun __iyi_once(flag : Bool\*, initializer : Void\*) : Nil$/fun __iyi_once_gone(flag : Bool*, initializer : Void*) : Nil/' \
+  "$REPO/src/iyi/prelude.iyi" > "$WORK/no_once/iyi/prelude.iyi"
+if cmp -s "$REPO/src/iyi/prelude.iyi" "$WORK/no_once/iyi/prelude.iyi"; then
+  echo "  the once-guard removed: the patch changed nothing, so this proves nothing"
+  status=1
+elif IYI_PATH="$WORK/no_once${PSEP}$REPO/src" "$IYI" build -o "$WORK/no_once/program" \
+     "$REPO/bench/value_exercise.iyi" > "$WORK/no_once/build" 2>&1; then
+  echo "  the once-guard removed: the exercise still built, so it does not test this"
+  status=1
+elif grep -q "__iyi_once is not defined" "$WORK/no_once/build"; then
+  echo "  the once-guard removed: refused at compile time"
+else
+  echo "  the once-guard removed: did not build, and not for this"
+  sed -n '1,5p' "$WORK/no_once/build"
+  status=1
+fi
+
 prove_fails "== by identity" no_eq "tuple: == same members" \
   's/^      return false unless self\[{{i}}\] == other\[{{i}}\]$/      return false/'
 

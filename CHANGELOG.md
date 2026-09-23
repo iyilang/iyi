@@ -256,6 +256,16 @@
 
 ### Fixed
 
+- **A block that names a constant written further down the file did not
+  compile: "BUG: __iyi_once is not defined".** A constant read before its
+  line is initialised by that first read, through a once-guard codegen
+  calls by name, and the prelude never defined one - any `extra_options`
+  block over an array declared below it (found in iyi-web). The prelude
+  has it now: the first read runs the initialiser and sets the flag, two
+  fibers reading the same constant first wait on one another rather than
+  build it twice, and an initialiser that reads another constant not yet
+  initialised re-enters.
+
 - **The collector's own exercises had never run on Windows, and the
   Windows loop counted them as passing.** `collect_trigger`,
   `sweep_exercise`, `mark_exercise` and `root_exercise` refused every
@@ -9567,7 +9577,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,297-line library and nothing else. Every other
+  written against iyi's own 17,340-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

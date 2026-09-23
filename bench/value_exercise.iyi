@@ -150,4 +150,18 @@ assert_int(Span.new(3, 8).record_width, 5, "record: a block's method is the stru
 assert_int(Span.new(3, 8).record_shifted(2).low, 5, "record: and returns the struct")
 assert_true(Span.new(1, 2).high == 2, "record: the fields still read")
 
+# A block that names a constant written further down the file: the first
+# read initialises it, once, through the prelude's `__iyi_once` - which
+# the prelude did not define, and the program did not compile.
+def yielded_twice(&) : Int32
+  first = yield
+  first + yield
+end
+
+assert_int(yielded_twice { LATER_WORDS.size }, 6, "constant: read in a block before its line")
+LATER_WORDS << "d"
+assert_int(LATER_WORDS.size, 4, "constant: initialised once, the same array at every read")
+
 puts "all value checks passed"
+
+LATER_WORDS = ["a", "b", "c"]

@@ -8077,6 +8077,49 @@ fun __iyi_raise(exception : Void*) : NoReturn
   __iyi_exit(1)
 end
 
+# A constant read before its declaration has run is initialised by that
+# first read, and codegen reaches for this by name to do it once
+# (`CodeGenVisitor#run_once`): a block whose body names a constant written
+# further down the file was a compile-time "BUG: __iyi_once is not
+# defined", because the prelude never defined it. The flag is the
+# constant's `i1`, read as the byte it is stored in. Two fibers reading
+# the same constant first wait on one another rather than initialise it
+# twice; the fiber holding the lock may re-enter, for an initialiser that
+# reads another constant not yet initialised.
+fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
+  byte = flag.as(Pointer(UInt8))
+  return if IyiAtomic.load(byte, :acquire, false) != 0_u8
+  IyiOnce.run(byte, initializer)
+end
+
+class IyiOnce
+  @@holder : UInt64 = 0_u64
+  @@depth : Int32 = 0
+
+  def self.run(flag : Pointer(UInt8), initializer : Void*) : Nil
+    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      me = IyiScheduler.current.as(Void*).address
+      if IyiAtomic.load(pointerof(@@holder), :acquire, false) != me
+        until IyiAtomic.cmpxchg(pointerof(@@holder), 0_u64, me, :acquire, :monotonic)[1]
+          IyiThread.spin_pause
+        end
+      end
+      @@depth = @@depth + 1
+    {% end %}
+    if IyiAtomic.load(flag, :acquire, false) == 0_u8
+      # A proc is its function and its closure; this one closes over
+      # nothing.
+      cell = {initializer.address, 0_u64}
+      pointerof(cell).as(Pointer(Proc(Nil))).value.call
+      IyiAtomic.store(flag, 1_u8, :release, false)
+    end
+    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      @@depth = @@depth - 1
+      IyiAtomic.store(pointerof(@@holder), 0_u64, :release, false) if @@depth == 0
+    {% end %}
+  end
+end
+
 # Every checked operation names this; the body is the ordinary panic, so an
 # overflow in a task dies at the task boundary like any other bug.
 fun __iyi_raise_overflow : NoReturn

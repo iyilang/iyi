@@ -189,24 +189,47 @@ pub struct Math
   private LN2_HI  =            0.6931471803691238
   private LN2_LO  =        1.9082149292705877e-10
 
+  # fdlibm's exp: x = k ln2 + r with |r| <= ln2/2, ln2 in two parts so the
+  # reduction is exact; exp(r) = 1 + 2r / (R(r^2) - r) with R the degree-5
+  # minimax polynomial, one division; then 2^k by the exponent field. Under
+  # one ulp, as the other library's libm is. It was a fourteen-term series
+  # with a division a term and `ldexp` through `frexp`: a neural network's
+  # training loop spent more than half its time here.
+  private EXP_P1 =  1.66666666666666019037e-01
+  private EXP_P2 = -2.77777777770155933842e-03
+  private EXP_P3 =  6.61375632143793436117e-05
+  private EXP_P4 = -1.65339022054652515390e-06
+  private EXP_P5 =  4.13813679705723846039e-08
+
   def self.exp(value : Float64) : Float64
     return 0.0 / 0.0 if value != value
     return 1.0 / 0.0 if value > 709.782712893384
     return 0.0 if value < -745.1332191019412
-    return 1.0 if value == 0.0
+    magnitude = value < 0.0 ? 0.0 - value : value
+    return 1.0 + value if magnitude < 3.725290298461914e-09
 
-    scaled = value * INV_LN2
-    k = (scaled + (scaled >= 0.0 ? 0.5 : -0.5)).to_i32
-    k_f = k.to_f64
-    r = (value - k_f * LN2_HI) - k_f * LN2_LO
-
-    poly = 1.0
-    i = 14
-    while i >= 1
-      poly = 1.0 + (r / i.to_f64) * poly
-      i = i - 1
+    k = 0
+    hi = value
+    lo = 0.0
+    if magnitude > 0.34657359027997264
+      scaled = value * INV_LN2
+      k = (scaled + (scaled >= 0.0 ? 0.5 : -0.5)).to_i32
+      k_f = k.to_f64
+      hi = value - k_f * LN2_HI
+      lo = k_f * LN2_LO
     end
-    ldexp(poly, k)
+    r = hi - lo
+    t = r * r
+    c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))
+    return 1.0 - ((r * c) / (c - 2.0) - r) if k == 0
+    y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
+    if k > 1023
+      y * 2.0 * IyiFloatText.from_bits((k + 1022).to_i64.to_u64.unsafe_shl(52_u64))
+    elsif k >= -1021
+      y * IyiFloatText.from_bits((k + 1023).to_i64.to_u64.unsafe_shl(52_u64))
+    else
+      ldexp(y, k)
+    end
   end
 
   def self.exp(value : Float32) : Float32

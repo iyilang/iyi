@@ -418,10 +418,12 @@ module IyiFloatText
     pointerof(holder).as(Pointer(UInt64)).value
   end
 
+  # The double whose bits these are, read through a local rather than a
+  # heap cell: `Math.exp` asked this once a call, and the allocation was a
+  # tenth of a neural network's training loop.
   def self.from_bits(bits : UInt64) : Float64
-    holder = Pointer(UInt64).malloc(1_u64)
-    holder.value = bits
-    Pointer(Float64).new(holder.address).value
+    holder = bits
+    pointerof(holder).as(Pointer(Float64)).value
   end
 
   def self.tail_is?(bytes : Pointer(UInt8), word : String) : Bool

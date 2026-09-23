@@ -68,6 +68,15 @@
 
 ### Changed
 
+- **`Math.exp` is the fdlibm routine, about three times faster.** The
+  argument is reduced by ln 2 split in two parts only past |x| > 0.35, a
+  fifth-degree polynomial carries the rest, and 2^k is written into the
+  exponent bits rather than multiplied out. Over 350,016 arguments it
+  stays within one unit in the last place of Crystal's answer (321,224
+  identical); a network that spends its time in a sigmoid ran 4.1 s and
+  now runs 1.34 s. `Float64` bits are read through a local pointer rather
+  than a heap cell, so printing a float allocates one object fewer.
+
 - **`iyi run` names the status of a death it cannot explain.** "Process
   terminated abnormally, the cause is unknown" left out the one fact
   there was: it now ends `(status 0xc0000409)`, so a stack cookie, a heap

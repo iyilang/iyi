@@ -125,6 +125,7 @@ mutate "no huge-arg guard in sin/cos" 'return {0.0, 1.0} if q_f.abs >= 922337203
 mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value * TWO_54)' 'bits = IyiFloatText.bits_of(value)'
 mutate "the third part of pi/2 as it was" 'P3 = 2.02226624879595063154e-21' 'P3 = 6.12323399573676588613e-17'
 mutate "log10 without its whole-number check" 'ten_to(n.to_i32) == value ? n : res' 'res'
+mutate "exp's polynomial a term short" '    c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))' '    c = r - t * (EXP_P1 + t * (EXP_P2 + t * EXP_P3))'
 mutate "exp cut off one argument early" 'return 1.0 / 0.0 if value > 709.782712893384' 'return 1.0 / 0.0 if value >= 709.782712893384'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
 mutate "erfc as 1 - erf everywhere" 'return 1.0 - erf(value) if value < 1.0' 'return 1.0 - erf(value)'

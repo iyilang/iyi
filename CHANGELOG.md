@@ -248,6 +248,14 @@
 
 ### Fixed
 
+- **`Params.parse` panicked on a malformed `%` in a query.** A query is
+  what a client sent, and `?q=100%` is what a browser sends for "100%";
+  a server reading it died. It reads the way the WHATWG URL standard
+  reads `application/x-www-form-urlencoded` now, as Crystal's does: `+`
+  is a space, `%XX` is the byte, and a `%` that does not start two hex
+  digits is itself. `URI.decode`, asked of text a program made, stays
+  strict (found in iyi-web).
+
 - **An unseeded `Random.new` did not compile in a program that imports
   `std/file`.** The entropy read opened `/dev/urandom` through `File`,
   and inside the library's namespace that name is `std/file`'s module

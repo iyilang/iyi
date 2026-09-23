@@ -14,7 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/uri
-using std/uri::{URI}
+using std/uri::{URI, Params}
 
 puts "== parse"
 u = URI.parse("https://ex.com/a")
@@ -26,5 +26,15 @@ puts "  https://ex.com/a"
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"
+
+puts "\n== form parameters"
+form = Params.parse("a=100%&b=%zz&c=%4&d=%41+b&%&e")
+assert_str "100%", form["a"], "a trailing % is itself"
+assert_str "%zz", form["b"], "a % without hex digits is itself"
+assert_str "%4", form["c"], "a % with one hex digit is itself"
+assert_str "A b", form["d"], "an escape and a plus are decoded"
+assert_str "", form["%"], "a lone % is a key"
+assert_str "", form["e"], "a key with no value"
+puts "  a malformed escape in a query is read, not refused"
 
 puts "\nALL CHECKS PASSED"

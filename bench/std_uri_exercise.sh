@@ -113,6 +113,31 @@ PY
   else
     echo "  a broken uri is caught"
   fi
+
+  # The form reading made strict again: the query panics at its first
+  # malformed escape.
+  mkdir -p "$WORK/strict/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uri.iyi").read_text()
+old = '              params.add(URI.decode_form_lenient(raw_k), URI.decode_form_lenient(raw_v))'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/strict/std/uri.iyi").write_text(src.replace(old, '              params.add(URI.decode_www_form(raw_k), URI.decode_www_form(raw_v))', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the strict-form patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/strict${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uri_exercise.iyi" >"$WORK/strict.out" 2>&1; then
+    echo "  the exercise PASSED with a form reading that panics"
+    status=1
+  elif grep -q "malformed percent escape" "$WORK/strict.out"; then
+    echo "  a form reading that panics is caught"
+  else
+    echo "  the strict form failed, but not at its escape"
+    tail -3 "$WORK/strict.out" | sed 's/^/    /'
+    status=1
+  fi
 fi
 
 echo

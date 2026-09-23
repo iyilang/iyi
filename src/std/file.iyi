@@ -52,6 +52,7 @@ using std/path::{Path}
     fun access(path : UInt8*, mode : Int32) : Int32
     fun utimes(path : UInt8*, times : Void*) : Int32
     fun arc4random_buf(buffer : Void*, count : UInt64) : Void
+    fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
   end
 {% elsif flag?(:win32) %}
   # The calls below name this `Std::File::LibKernel32` in full, the way the
@@ -284,6 +285,7 @@ using std/path::{Path}
       SYS_GETPID     =  39_i64
       SYS_UTIMENSAT  = 280_i64
       SYS_GETRANDOM  = 318_i64
+      SYS_LSEEK      =   8_i64
     {% else %}
       SYS_NEWFSTATAT =  79_i64
       SYS_FSTAT      =  80_i64
@@ -300,6 +302,7 @@ using std/path::{Path}
       SYS_GETPID     = 172_i64
       SYS_UTIMENSAT  =  88_i64
       SYS_GETRANDOM  = 278_i64
+      SYS_LSEEK      =  62_i64
     {% end %}
 
     def self.stat(path : UInt8*, buf : Stat*) : Int32
@@ -1480,6 +1483,71 @@ class ::File
     p = tempfile(prefix, suffix)
     defer File.delete(p)
     yield p
+  end
+end
+
+# Where in an open file the next read or write happens, and moving it:
+# Crystal's `IO#seek`, `#pos` and `#pos=`. A large file, or a range of
+# one, is sent from where it lies rather than read whole into memory
+# first. What is buffered goes first: the writes are flushed before the
+# move, and read-ahead the move skips is dropped, so the next read is
+# from the new place.
+class ::IyiIO
+  enum Seek
+    Set     = 0
+    Current = 1
+    End     = 2
+  end
+
+  # Moves to *offset* from the start, from here, or from the end, and
+  # answers the new position.
+  def seek(offset : Int64, whence : Seek = Seek::Set) : Int64
+    raise "cannot seek a closed IO" if closed?
+    # The kernel's position is past what was read ahead, so "from here"
+    # is from where the program has read to.
+    offset = offset - (@read_limit - @read_pos).to_i64 if whence == Seek::Current && @read_limit > @read_pos
+    flush
+    moved = IyiIO.lseek(handle, offset, whence.value.to_i32)
+    raise "cannot seek to #{offset} (#{whence}): error #{-moved}" if moved < 0_i64
+    @read_pos = 0
+    @read_limit = 0
+    @eof = false
+    moved
+  end
+
+  def seek(offset : Int32, whence : Seek = Seek::Set) : Int64
+    seek(offset.to_i64, whence)
+  end
+
+  # Bytes from the start to where the next read or write happens.
+  def pos : Int64
+    raise "cannot ask a closed IO its position" if closed?
+    here = IyiIO.lseek(handle, 0_i64, 1)
+    raise "cannot ask the position: error #{-here}" if here < 0_i64
+    unread = @read_limit > @read_pos ? (@read_limit - @read_pos).to_i64 : 0_i64
+    here - unread + @write_pos.to_i64
+  end
+
+  def pos=(position : Int64) : Int64
+    seek(position, Seek::Set)
+  end
+
+  # The kernel's move: the new offset, or a negative error.
+  protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
+    {% if flag?(:win32) %}
+      moved = 0_i64
+      if Std::File::LibKernel32.SetFilePointerEx(Pointer(Void).new(fd.to_u64), offset, pointerof(moved), whence) == 0
+        return -Std::File::LibKernel32.GetLastError.to_i64
+      end
+      moved
+    {% elsif flag?(:darwin) %}
+      moved = Std::File::LibC.lseek(fd.to_i32, offset, whence)
+      moved < 0_i64 ? -1_i64 : moved
+    {% elsif flag?(:wasm32) %}
+      raise "seek is not available on wasm32-wasi"
+    {% else %}
+      Std::File::LibC.sys(Std::File::LibC::SYS_LSEEK, fd, offset, whence.to_i64)
+    {% end %}
   end
 end
 

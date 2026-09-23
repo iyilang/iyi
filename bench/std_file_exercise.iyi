@@ -234,6 +234,25 @@ File.delete(tb)
 {% end %}
 puts "  links, rename, and path helpers verified"
 
+puts "\n== seek"
+fseek = sandbox + "/std_file_ex_seek.bin"
+File.write(fseek, String.build { |io| 1000.times { |i| io << (i % 10).to_s } })
+sio = File.open(fseek)
+assert_str "012", sio.read_bytes(3), "seek: a first read"
+assert_true sio.pos == 3_i64, "seek: pos counts what was read, not what was read ahead"
+sio.seek(500)
+assert_str "0123", sio.read_bytes(4), "seek: from the start, past the read-ahead"
+sio.seek(-2, IyiIO::Seek::Current)
+assert_str "234", sio.read_bytes(3), "seek: from here"
+sio.seek(-3, IyiIO::Seek::End)
+assert_str "789", sio.read_bytes(10), "seek: from the end, to the end"
+assert_true sio.pos == 1000_i64, "seek: pos at the end"
+sio.pos = 7
+assert_str "78", sio.read_bytes(2), "seek: pos="
+sio.close
+File.delete(fseek)
+puts "  seek and pos read a file from where they say"
+
 puts "\n== delete"
 File.delete(f1)
 assert_true !File.exists?(f1), "f1 deleted"

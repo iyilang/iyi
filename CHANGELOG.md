@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`IO#seek`, `#pos` and `#pos=` on a file (`import std/file`).**
+  `seek(offset, IyiIO::Seek::Set | Current | End)` moves where the next
+  read or write happens and answers the new position, as Crystal's does:
+  a large file, or a byte range of one, is sent from where it lies rather
+  than read whole into memory first (iyi-web's `send_file` wanted it).
+  Buffered writes are flushed before the move, the read-ahead it skips is
+  dropped, and `pos` counts what the program read, not what was read
+  ahead.
+
 - **`OptionParser#invalid_option` and `#missing_option`
   (`import std/option_parser`).** A mistyped flag, a value for a flag
   that takes none, and a flag whose value is missing panicked, which is

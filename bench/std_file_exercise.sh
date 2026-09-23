@@ -152,6 +152,38 @@ PY
     status=1
   fi
 }
+# The read-ahead kept across a seek: the next read answers the bytes after
+# the old place.
+seek_broken() {
+  if [ -z "$PY" ]; then
+    echo "  a seek that keeps the read-ahead: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/stale/std" "$WORK/stale-sandbox"
+  if ! "$PY" - "$REPO/src/std/file.iyi" "$WORK/stale/std/file.iyi" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+old = "    @read_pos = 0\n    @read_limit = 0\n    @eof = false\n    moved\n"
+assert src.count(old) == 1
+src = src.replace(old, "    moved\n", 1)
+open(sys.argv[2], "w").write(src)
+PY
+  then
+    echo "  a seek that keeps the read-ahead: the patch did not apply"
+    status=1
+  elif TMPDIR="$WORK/stale-sandbox" IYI_PATH="$WORK/stale${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/stale-sandbox" >"$WORK/stale.out" 2>&1; then
+    echo "  a seek that keeps the read-ahead: the exercise PASSED on a broken module"
+    status=1
+  elif grep -q "seek: from the start, past the read-ahead" "$WORK/stale.out"; then
+    echo "  a seek that keeps the read-ahead: caught"
+  else
+    echo "  a seek that keeps the read-ahead: failed, but not at the seek"
+    tail -3 "$WORK/stale.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+seek_broken
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     echo "  a planted symlink: not measured here, the exercise plants none on Windows" ;;

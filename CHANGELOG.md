@@ -41,6 +41,12 @@
   Both LSP gates now print each step as it finishes and, 180 seconds
   without one, name the step that never did, kill the servers, and exit 1.
 
+- **The Windows job sweeps cursor positions at stride 600.** At Linux's
+  200 `bench/lsp_positions.py` took 36 of the job's 90 minutes, which left
+  22 to spare; every module is still asked, over the Windows transport and
+  paths, which is what that job is there for. The step's output is
+  unbuffered, so a gate that stops says where.
+
 ### Fixed
 
 - **`iyi check --affected` names a missing file the way it was typed.**

@@ -1780,14 +1780,21 @@ jobs:
       # own `.iyi` files, and every semantic token's boundary — the four
       # surfaces whose answers are paths and positions, which is what the
       # last three Windows fixes to the language server were about.
+      #
+      # The sweep at stride 600, not Linux's 200: at 200 it took 36 of this
+      # job's 90 minutes, and what Windows adds to a cursor question is the
+      # transport and the path under it, which every module still gets
+      # asked about. Unbuffered, so a gate that stops says where it was.
       - name: The editor and agent surfaces, on Windows
         shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
           bash bench/samples_roundtrip.sh
           python bench/agent_loop.py
           python bench/lsp_token_boundaries.py
-          python bench/lsp_positions.py
+          python bench/lsp_positions.py 600
 
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its

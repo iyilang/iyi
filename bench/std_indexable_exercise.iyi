@@ -391,4 +391,12 @@ raise "hash: equal collections agree" unless [1, 2, 3].hash == [1, 2, 3].hash
 raise "hash: order counts" unless [1, 2, 3].hash != [3, 2, 1].hash
 puts "  hash: a long collection mixes without leaving the type"
 
+pairs = [] of String
+[1, 2].each_cartesian(["a", "b"]) { |n, s| pairs << "#{n}#{s}" }
+assert_equal "1a,1b,2a,2b", pairs.join(","), "each_cartesian: every pair, this array's order first"
+zipped = [] of String
+[1, 2, 3].zip(["x", "y"]) { |n, s| zipped << "#{n}#{s}" }
+assert_equal "1x,2y", zipped.join(","), "zip with a block: pairs as long as the shorter"
+puts "  each_cartesian and zip with a block hand pairs over without an array of them"
+
 puts "all indexable checks passed"

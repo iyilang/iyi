@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`Array#zip(other) { |a, b| ... }` and `each_cartesian(other) { |a,
+  b| ... }` (`import std/indexable`).** Pairs handed to a block without
+  building the array of tuples first: `zip` stops at the shorter of the
+  two, `each_cartesian` walks every pair, this collection's order
+  outermost — as Crystal 1.21 yields them.
+
 - **`String#gsub(pattern, replacement)`, `String#gsub(pattern) { ... }`
   and `String#matches?(pattern)` (`import std/regex`).** The other
   library's spellings on the text side, over `Regex#replace` and a search

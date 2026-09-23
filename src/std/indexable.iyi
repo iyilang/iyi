@@ -611,4 +611,12 @@ class ::Array(T)
     end
     result
   end
+
+  # The same pairs, handed to a block in the same order, with no array of
+  # them made - the other library's `each_cartesian`.
+  def each_cartesian(other : Array(U), & : T, U -> _) : Nil forall U
+    each do |a|
+      other.each { |b| yield a, b }
+    end
+  end
 end

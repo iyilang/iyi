@@ -170,6 +170,10 @@ prove_fails() {
   fi
 }
 
+# 0. The pairs of each_cartesian with the inner loop dropped.
+prove_fails "each_cartesian yields every pair" broken_cartesian "each_cartesian: every pair" \
+  's/^      other.each { |b| yield a, b }$/      yield a, other[0]/'
+
 # 1. Break negative index resolution: without wrap, a[-1] fails out of bounds
 prove_fails "negative index resolution" broken_neg "assertion failed: fetch negative in bounds" \
   's/index = size + index if index < 0/# negative wrap removed/'

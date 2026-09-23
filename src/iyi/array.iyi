@@ -475,6 +475,18 @@ class Array(T)
     result
   end
 
+  # The same pairs handed to a block, with no array of them made: the
+  # other library's `a.zip(b) { |x, y| ... }`, which a training loop calls
+  # a few million times.
+  def zip(other : Array(U), & : T, U -> _) : Nil forall U
+    count = @size < other.size ? @size : other.size
+    index = 0
+    while index < count
+      yield @buffer[index], other[index]
+      index = index + 1
+    end
+  end
+
   def reduce(initial : U, & : U, T -> U) : U forall U
     accumulator = initial
     each { |value| accumulator = yield accumulator, value }

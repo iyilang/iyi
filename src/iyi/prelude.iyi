@@ -1291,6 +1291,11 @@ require "./file"
         end
       end
 
+      # Open: advice, like Windows' `MEM_RESET` was (below), and the same
+      # defect - a released page keeps its bytes until the kernel wants the
+      # memory, and the carve hands a pointerful object out on it
+      # uncleared. `bench/reuse_integrity.sh` shows it on Windows and does
+      # not run the check here.
       fun __iyi_release_pages(address : UInt64, length : UInt64) : Nil
         LibC.madvise(Pointer(Void).new(address), length, 7_i32)
       end
@@ -1311,11 +1316,24 @@ require "./file"
         end
       end
 
+      # Pages back to the kernel, the mapping kept, reading zero when
+      # touched again - Linux's `MADV_DONTNEED`, which the carve leans on:
+      # a cold run taken up again is handed out uncleared, a pointerful
+      # object's fields included (`IyiHeap.carve`). `MEM_RESET` promised
+      # neither half. It only tells the kernel the bytes may be dropped,
+      # and until memory is short they are not: measured, a program with
+      # no `Pointer` in it built 24,000,000 objects on reopened cold runs
+      # and 14,474,737 read a nilable field their constructor never set as
+      # a stale word rather than nil. Decommitted, the pages go back at
+      # once; committed again at once, they are demand-zero and not
+      # resident until the carve touches them. Recommitting in the same
+      # call is what keeps every later touch legal - decommitted alone,
+      # the next carve into the run faulted with 0xC0000005 - and no touch
+      # lands between the two calls: a cold run is on no list, and the
+      # carve cannot find it until the sweep that released it counts it.
       fun __iyi_release_pages(address : UInt64, length : UInt64) : Nil
-        # On Windows, MEM_RESET (0x80000) advises the kernel that the pages can
-        # be discarded under memory pressure without decommitting the virtual address.
-        # Uncommitting with MEM_DECOMMIT causes 0xC0000005 on next access.
-        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x80000_i32, 4_i32)
+        LibC.VirtualFree(Pointer(Void).new(address), length, 0x4000_i32)
+        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x1000_i32, 4_i32)
       end
 
       fun __iyi_madvise(address : UInt64, length : UInt64, advice : Int64) : Nil

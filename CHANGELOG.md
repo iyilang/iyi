@@ -239,6 +239,24 @@
 
 ### Fixed
 
+- **On Windows a new object could start with an old object's bytes.**
+  The sweep hands a run of dead pages back to the kernel, and the carve
+  takes the run up again as fresh memory: an object with a pointer in it
+  is not cleared there, because a released page reads zero — Linux's
+  `MADV_DONTNEED` makes it so. Windows' release was `MEM_RESET`, which
+  only says the bytes may be dropped, and until memory is short they are
+  not. A program with no `Pointer` in it built 24,000,000 objects whose
+  nilable field the constructor never set, and 14,474,737 of them read it
+  as a stale word instead of nil; in a threaded program whose lists'
+  tails were such fields, five runs of five failed — a memory fault, a
+  list that looped into itself and never finished, a checksum off. The
+  release decommits and commits again now: the pages go back at once and
+  read zero, and the next touch is legal. `bench/reuse_integrity.sh`
+  builds the objects on released pages, plain and optimised, and fails
+  with the release made advice again (`MEM_RESET` on Windows,
+  `MADV_FREE` on Linux). darwin's `MADV_FREE_REUSABLE` is the same kind
+  of advice and the same defect, open: the check does not run there.
+
 - **`bench/doc_numbers.py` counted the compiler's `!` names on
   Windows.** The count README quotes leaves `src/compiler/` out, and it
   asked whether `"/compiler/"` was in the path's text — which on Windows
@@ -325,10 +343,10 @@
   `6.2e-310`, a free-list link, after a k-nucleotide run. That page now
   stays the list's and the cold run starts one page up.
   `bench/reuse_integrity.sh` checks both by content, default and
-  optimised, on Linux, darwin and Windows, and on Linux fails on its first
-  run with the release put back. darwin and Windows release a page lazily
-  (`MADV_FREE_REUSABLE`, `MEM_RESET`) and keep its bytes until the kernel
-  needs them, so there the same bug waited for memory pressure, and the
+  optimised, on Linux, darwin and Windows, and on Linux and Windows fails
+  on its first run with the release put back. darwin releases a page
+  lazily (`MADV_FREE_REUSABLE`) and keeps its bytes until the kernel
+  needs them, so there the same bug waits for memory pressure, and the
   put-back cannot be shown on demand.
 
 - **`iyi check --affected` names a missing file the way it was typed.**
@@ -9426,7 +9444,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,240-line library and nothing else. Every other
+  written against iyi's own 17,258-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

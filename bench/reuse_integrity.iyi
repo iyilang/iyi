@@ -5,17 +5,32 @@
 # bookkeeping can fake: every key still spells its value, and a constant
 # built before any of it still holds what it was built with.
 #
+# And what it hands out is new: a field the constructor never sets reads
+# nil, however many objects lived on the chunk's page before. Under the
+# arena a class instance with a pointer in it is not cleared by codegen —
+# the allocator's clearing entry is trusted to hand the chunk back zero —
+# and a chunk carved from a run the sweep released is zero only if the
+# release made it so.
+#
 #   ./bin/iyi run bench/reuse_integrity.iyi
 #   bash bench/reuse_integrity.sh        (default and --release)
 #
-# Both halves failed together, from one cause: a run of dead chunks whose
-# pages went back to the kernel kept its lowest chunk on the free list, and
-# when that chunk's head sat in the last sixteen bytes below the released
-# page, the release zeroed the slot word the list reads. The pop stamped
-# the arena's slot 0 as the new object — the arena's oldest, the
-# constant's buffer — and left the chunk free for the next sweep to list
-# again under its owner. Keys came back as other keys' bytes, and a ported
-# n-body read a planet's `x` as a free-list link (`close_run`).
+# Both halves of the first check failed together, from one cause: a run
+# of dead chunks whose pages went back to the kernel kept its lowest chunk
+# on the free list, and when that chunk's head sat in the last sixteen
+# bytes below the released page, the release zeroed the slot word the
+# list reads. The pop stamped the arena's slot 0 as the new object — the
+# arena's oldest, the constant's buffer — and left the chunk free for the
+# next sweep to list again under its owner. Keys came back as other keys'
+# bytes, and a ported n-body read a planet's `x` as a free-list link
+# (`close_run`).
+#
+# The second failed on Windows, where a release was `MEM_RESET`: advice
+# that the bytes may be dropped, which until memory is short they are
+# not. 14,474,737 of 24,000,000 fresh objects read their unset field as
+# a stale word, and a list whose tail was one looped back into itself.
+# darwin's release is `MADV_FREE_REUSABLE`, advice of the same kind, and
+# this check does not run there: that is an open defect, not a pass.
 
 module bench/reuse_integrity
 
@@ -67,3 +82,90 @@ if wrong != 0 || bodies_wrong != 0
   raise "reuse integrity: #{wrong} key(s) no longer spell their value and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"
 end
 puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup constant intact"
+
+# ── A fresh object on a released page ─────────────────────────────────
+#
+# Pairs of words filled with a pattern, held until all of them exist and
+# then dropped at once but for one in 4,096 — a death far past the
+# sweep's warm budget, spread so that no arena is wholly dead and goes
+# back as a mapping: what the sweep does with it is release runs of pages
+# cold. Then links of the same size, whose `next` nobody sets, held until
+# the carve has taken those runs up again. The fill runs in a task of its
+# own so that when it ends, no register or frame of the main thread still
+# names the dropped array.
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
+  class Pair
+    def initialize(@a : UInt64, @b : UInt64)
+    end
+  end
+
+  class Chain
+    getter value : UInt64
+    getter next : Chain?
+
+    def initialize(@value : UInt64)
+    end
+  end
+
+  class Pairs
+    @@all : Array(Pair)? = nil
+    @@kept : Array(Pair) = [] of Pair
+
+    def self.all=(value : Array(Pair)?) : Nil
+      @@all = value
+    end
+
+    def self.kept : Array(Pair)
+      @@kept
+    end
+  end
+
+  def fill(count : Int32) : Nil
+    all = [] of Pair
+    Pairs.all = all
+    word = 0x0000123456780000_u64
+    n = 0
+    while n < count
+      pair = Pair.new(word, word)
+      all << pair
+      Pairs.kept << pair if n % 4096 == 0
+      n = n + 1
+    end
+    Pairs.all = nil
+  end
+
+  def fresh(count : Int32) : Int32
+    held = [] of Chain
+    stale = 0
+    n = 0
+    while n < count
+      link = Chain.new(n.to_u64)
+      stale = stale + 1 unless link.next.nil?
+      held << link
+      n = n + 1
+    end
+    stale
+  end
+
+  group do |g|
+    g.spawn do
+      fill(4_000_000)
+      0
+    end
+  end
+  IyiMark.collect
+  IyiMark.collect
+  IyiMark.settle
+  reopened = IyiHeap.pages_reopened
+  rewarmed = IyiHeap.pages_rewarmed
+  born = 6_000_000
+  stale = fresh(born)
+  # Cold pages the carve took up, as against warm ones: a warm page was
+  # never released, and a check that met none proved nothing.
+  cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
+  raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again" if stale != 0
+  raise "reuse integrity: the carve took up no released page, so the fresh objects proved nothing" if cold == 0_u64
+  puts "reuse integrity: #{born} fresh objects on #{cold.to_i64} released pages taken up again, every unset field nil"
+{% else %}
+  puts "reuse integrity: the fresh-object check does not run on this target"
+{% end %}

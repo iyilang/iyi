@@ -393,26 +393,31 @@ t.join' ;;
     fail "stack overflow on the $where stack said:
 $out"
 done
-# The same overflow, twelve more times from one binary. On Windows the
+# The same overflow, eight more times from one binary. On Windows the
 # handler used to end with `ExitProcess`, which runs every DLL's detach
 # on the thread that faulted — the stack that had just run out — and a
 # second overflow past a guard page already consumed is an access
 # violation, which the same handler then named a memory fault under the
 # stack-overflow sentence. Whether the 16 KB guarantee covered the
 # detaches depended on where the first fault landed, so one run in three
-# showed it and two did not. A dozen runs make a flake a failure.
-set +e
-"$IYI" build -o "$work/deep_main_bin" "$work/deep_main.iyi" > /dev/null 2>&1
-set -e
-for again in 1 2 3 4 5 6 7 8 9 10 11 12; do
+# showed it and two did not. Repeated runs make a flake a failure.
+# And on the other two stacks the same way: a thread's guarantee is its
+# own, and was set on the main thread alone, so a thread's overflow said
+# "memory fault" on the runs where it landed near the bottom.
+for where in main fiber thread; do
   set +e
-  out=$("$work/deep_main_bin" 2>&1)
-  code=$?
+  "$IYI" build -o "$work/deep_${where}_bin" "$work/deep_$where.iyi" > /dev/null 2>&1
   set -e
-  [ "$code" = 1 ] || fail "stack overflow run $again exited $code, wanted 1"
-  [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
-    fail "stack overflow run $again said more than the sentence:
+  for again in 1 2 3 4 5 6 7 8; do
+    set +e
+    out=$("$work/deep_${where}_bin" 2>&1)
+    code=$?
+    set -e
+    [ "$code" = 1 ] || fail "stack overflow on the $where stack, run $again, exited $code, wanted 1"
+    [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+      fail "stack overflow on the $where stack, run $again, said more than the sentence:
 $out"
+  done
 done
 cat > "$work/wild.iyi" <<'EOF'
 module wild

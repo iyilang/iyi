@@ -627,6 +627,9 @@
       end
       raise "a thread started with no body" unless thread.is_a?(IyiThread)
       thread.proc.call
+      # The fibers go first, while the stack they name is still this
+      # thread's (`IyiScheduler.retire_thread`).
+      IyiScheduler.retire_thread
       # The cache goes before it is unmapped: a stop that read this line
       # after the retire would follow a pointer into a freed mapping.
       {% if flag?(:win32) %}

@@ -242,6 +242,18 @@
     end
   end
 
+  # The scheduler's registry of fibers, counted: what the collector bounds
+  # a stopped thread's stack by and scans parked stacks from.
+  def registered_fibers : Int32
+    registered = 0
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      registered = registered + 1
+      fiber = fiber.next_fiber
+    end
+    registered
+  end
+
   args = Program.args
   count = args.size > 0 ? args[0].to_i : 8
   fail("at least one thread") if count < 1
@@ -249,6 +261,7 @@
 
   # ── 1. Threads, collections, live lists ────────────────────────────────
   before = IyiMark.collections
+  fibers_before = registered_fibers
   threads = start_threads(count)
   # The main thread churns beside them and holds a list of its own.
   main_ledger = Ledger.new(1000)
@@ -268,6 +281,15 @@
     burst = burst + 1
   end
   join_all(threads)
+  # Every thread ran fibers of its own, so every thread had a main fiber
+  # on the registry, and a thread's stack goes when the thread does. A
+  # main fiber left behind names a stack top the system gives the next
+  # thread it makes, and the collector bounded that thread's stack by it:
+  # on a Windows runner it scanned a new thread's stack up from its first
+  # rsp, which is on the guard page, and the process died of the guard
+  # page with nothing printed (status 0x80000001).
+  fibers_after = registered_fibers
+  fail("registry: #{fibers_after - fibers_before} fibers of #{count} finished threads are still registered, naming stacks that are gone") if fibers_after != fibers_before
   IyiMark.settle
   collections = IyiMark.collections - before
   fail("no collection ran across #{count} threads' churn") if collections == 0_u64

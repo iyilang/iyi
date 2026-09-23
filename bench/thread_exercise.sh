@@ -93,6 +93,24 @@ if ! timeout 300 ./threads-release 8 > answers-release.txt 2>&1; then
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 
+# The plain build, ten more times. A death here is a failure whatever it
+# says: on a Windows runner the exercise died once in sixty of a guard-page
+# violation in the collector (status 0x80000001) after it had printed its
+# first line, so one run passing proved nothing. The registry check in
+# the exercise is the deterministic half of the same fix; this is the
+# half that turns the rare death into a red step.
+step "the plain build, ten more runs, and every one ends well"
+again=1
+while [ "$again" -le 10 ]; do
+  timeout 300 ./threads 8 > again.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
+    echo "run $again exited $code:"; tail -5 again.txt; exit 1
+  fi
+  again=$((again + 1))
+done
+echo "  ten of ten"
+
 # ── 2. The floor ──────────────────────────────────────────────────────────
 case "$(uname -s)" in
   Linux)
@@ -208,6 +226,25 @@ if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted.txt; then
   echo "the live-list check did not fire (exit $code):"; tail -5 unrooted.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'on a free list' unrooted.txt)"
+
+# ── 5b. Failure proof: a finished thread's fibers leave the registry ──────
+# The thread's retirement from the scheduler taken out of a copy of the
+# runtime: every thread that ran fibers leaves its main fiber on the list,
+# and the exercise's count names them.
+step "failure proof: a finished thread's main fiber left registered is named"
+mkdir -p stale/iyi
+cp "$REPO"/src/iyi/*.iyi stale/iyi/
+awk '/^      IyiScheduler.retire_thread$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/thread.iyi" > stale/iyi/thread.iyi || { echo "the retirement this proof removes is not in thread.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build "$REPO/bench/thread_exercise.iyi" -o stale-threads > build-stale.log 2>&1; then
+  cat build-stale.log; exit 1
+fi
+timeout 120 ./stale-threads 8 > stale.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "registry:" stale.txt; then
+  echo "the registry check did not fire (exit $code):"; tail -5 stale.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'registry:' stale.txt | sed 's/^FAIL: //')"
 
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has

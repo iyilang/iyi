@@ -970,6 +970,29 @@ class IyiScheduler
     @@all_head
   end
 
+  # A thread's last act with the scheduler: its main fiber leaves the
+  # registry, because its stack is about to. A spawned fiber leaves when
+  # it is reaped; the main fiber was made by the first `current` on the
+  # thread and was left on the list after the thread was gone, naming a
+  # stack top the system then gave to the next thread it made. On a
+  # Windows runner a collection bounded a new thread's stack by that
+  # stale top - the new thread stopped before its first instruction, its
+  # own line still with no top - and scanned up from its first rsp, whose
+  # page is the stack's guard page: STATUS_GUARD_PAGE_VIOLATION in the
+  # collector, which no handler of ours claims, and the process died of
+  # it with nothing printed (`thread_exercise`, once in sixty runs there).
+  # Only a fiber the registry holds is unlinked - `unregister` of one it
+  # does not would rewrite the head.
+  def self.retire_thread : Nil
+    state = @@state
+    return if state.is_a?(Nil)
+    main = state.current
+    return unless main.is_a?(IyiFiber)
+    head = @@all_head
+    linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
+    unregister(main) if linked
+  end
+
   # The top of the fiber stack holding `address`, 0 when no fiber's
   # does: how a stopped thread's stack is bounded when the stop landed
   # on one of its fibers.

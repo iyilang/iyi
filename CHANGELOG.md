@@ -358,6 +358,24 @@
   build it twice, and an initialiser that reads another constant not yet
   initialised re-enters.
 
+- **`thread_exercise` died now and then on Windows with nothing said.**
+  `iyi run` named the status once it could: `0x80000001`, a guard-page
+  violation, once in sixty runs on a Windows runner. A fault handler
+  that printed every thread's line and every registered fiber before it
+  decided showed where: the collector had stopped a thread that had not
+  run its first instruction, bounded its stack by the top of a *finished*
+  thread's main fiber - a thread's main fiber went on the registry the
+  first time it ran a fiber and never came off, and the system had given
+  its stack's addresses to the new thread - and scanned up from the new
+  thread's first rsp, which is on the stack's guard page. No handler
+  claims that page, so the process died of it. A thread takes its main
+  fiber off the registry as it finishes now. `thread_exercise` counts the
+  registry before its threads and after they are joined, and fails with
+  the retirement taken out ("8 fibers of 8 finished threads are still
+  registered"); its driver runs the plain build ten more times and turns
+  any death into a red step. The crash was not the per-thread stack
+  guarantee it had been blamed on: it happened with that taken out.
+
 - **The collector's own exercises had never run on Windows, and the
   Windows loop counted them as passing.** `collect_trigger`,
   `sweep_exercise`, `mark_exercise` and `root_exercise` refused every
@@ -9669,7 +9687,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,446-line library and nothing else. Every other
+  written against iyi's own 17,472-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

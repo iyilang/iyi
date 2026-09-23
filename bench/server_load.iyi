@@ -20,7 +20,7 @@
 module server_load
 
 import std/socket
-using std/socket::{IyiSocket}
+using std/socket::{IyiSocket, SocketError}
 
 ROUNDS      = 200
 STACK_BOUND =   8
@@ -31,7 +31,7 @@ STACK_BOUND =   8
 pub def serve(client : IyiSocket) : UInt64
   top = IyiScheduler.current.stack_top
   case request = client.read(256)
-  in Cancelled
+  in Cancelled, SocketError
     client.close
     0_u64
   in String
@@ -44,12 +44,12 @@ end
 # One connection, client side: the other half of the same park.
 pub def ask(port : Int32, id : Int32) : Int32
   case socket = IyiSocket.connect("127.0.0.1", port)
-  in Cancelled
+  in Cancelled, SocketError
     1
   in IyiSocket
     socket.write("ping-" + id.to_s)
     case reply = socket.read(256)
-    in Cancelled
+    in Cancelled, SocketError
       socket.close
       1
     in String
@@ -134,6 +134,8 @@ group do |outer|
       case client = listener.accept
       in Cancelled
         n = ROUNDS
+      in SocketError
+        raise client.message
       in IyiSocket
         accepted = client
         outer.spawn do

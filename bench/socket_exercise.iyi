@@ -11,15 +11,16 @@
 # 5. refused connection when target port has no listener
 
 import std/socket
-using std/socket::{IyiSocket}
+using std/socket::{IyiSocket, SocketError}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"
   probe_server = IyiSocket.listen(0)
   refused_port = probe_server.local_port
   probe_server.close
-  # Attempt connection to closed port; must raise "cannot connect"
-  IyiSocket.connect("127.0.0.1", refused_port)
+  # Attempt connection to closed port: a `SocketError`, which `or_panic`
+  # turns into the panic "cannot connect to ...: connection refused"
+  IyiSocket.connect("127.0.0.1", refused_port).or_panic
   __iyi_exit(0)
 end
 
@@ -75,6 +76,37 @@ raise "closed_peer: conn close failed" unless conn.closed?
 raise "closed_peer: server close failed" unless server.closed?
 puts "closed_peer: ok"
 
+# 5. A peer that went away is an answer: writing to it ends in a
+#    `SocketError` that says so - not a panic, and not SIGPIPE killing the
+#    process. The first writes land in the kernel's buffers; the peer's
+#    reset comes back on a later one.
+gone_server = IyiSocket.listen(0)
+gone_client = IyiSocket.connect("127.0.0.1", gone_server.local_port).or_panic
+gone_conn = gone_server.accept.or_panic
+gone_client.close
+chunk = "x" * 65536
+tries = 0
+wrote = gone_conn.write(chunk)
+while wrote.is_a?(Int32)
+  tries = tries + 1
+  raise "disconnect: #{tries} writes to a closed peer all went through" if tries > 2000
+  wrote = gone_conn.write(chunk)
+end
+raise "disconnect: expected a SocketError, got #{wrote.inspect}" unless wrote.is_a?(SocketError)
+raise "disconnect: #{wrote.message} is not a disconnect" unless wrote.disconnected?
+gone_conn.close
+gone_server.close
+puts "disconnect: ok (#{wrote.message})"
+
+# 6. A connect nobody answers is refused as a value.
+refusing = IyiSocket.listen(0)
+refused_port = refusing.local_port
+refusing.close
+refused = IyiSocket.connect("127.0.0.1", refused_port)
+raise "refused: expected a SocketError, got #{refused.inspect}" unless refused.is_a?(SocketError)
+raise "refused: #{refused.message}" unless refused.message.includes?("connection refused")
+puts "refused: ok (#{refused.message})"
+
 # 5. A read parks rather than blocks, and a cancelled task's read answers
 #    `Cancelled` (SPEC.md III.4.2). Three tasks on one thread: a reader
 #    parked on a connection nobody writes to, a sibling that answers an
@@ -99,10 +131,14 @@ group do |g|
     case peer = IyiSocket.connect("127.0.0.1", quiet_port)
     in Cancelled
       parked_answer = "connect cancelled"
+    in SocketError
+      parked_answer = peer.message
     in IyiSocket
-      case peer.read(16)
+      case answer = peer.read(16)
       in Cancelled
         parked_answer = "cancelled"
+      in SocketError
+        parked_answer = answer.message
       in String
         parked_answer = "read"
       end

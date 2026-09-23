@@ -156,6 +156,39 @@ prove_fails "short read size mismatch" badshort "short_read:" \
 prove_fails "closed peer EOF missed" badoff "closed_peer:" \
   '{ sub(/return "" if count == 0$/, "return \"eof_missed\" if count == 0"); print }'
 
+# 5. A write to a gone peer panicking, as it did
+prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \
+  '{ sub(/return SocketError.new\("write to socket", n < 0_i64 \? IyiSocket.__sys_code\(n\) : 0\) if n <= 0_i64/, "raise \"cannot write to socket\" if n <= 0_i64"); print }'
+
+# 6. The write without MSG_NOSIGNAL: on Linux the kernel's SIGPIPE ends the
+#    process at the first write to the gone peer, with nothing printed.
+case "$(uname -s)" in
+  Linux)
+    mkdir -p "$WORK/sigpipe/std"
+    cp -R "$REPO/src/std/." "$WORK/sigpipe/std/"
+    awk '{ sub(/len.to_i64, 0x4000_i64, 0_i64, 0_i64\)/, "len.to_i64, 0_i64, 0_i64, 0_i64)"); print }' \
+      "$REPO/src/std/socket.iyi" > "$WORK/sigpipe/std/socket.iyi"
+    if cmp -s "$REPO/src/std/socket.iyi" "$WORK/sigpipe/std/socket.iyi"; then
+      echo "  SIGPIPE on a gone peer: the patch changed nothing"
+      status=1
+    elif ! IYI_PATH="$WORK/sigpipe${PSEP}$REPO/src" "$IYI" build -o "$WORK/sigpipe/program" \
+         "$REPO/bench/socket_exercise.iyi" >"$WORK/sigpipe/build.log" 2>&1; then
+      echo "  SIGPIPE on a gone peer: the patched library did not build"
+      status=1
+    else
+      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      code=$?
+      if [ "$code" -eq 141 ] && ! grep -q "disconnect: ok" "$WORK/sigpipe/out"; then
+        echo "  SIGPIPE on a gone peer: killed by the signal at the disconnect (exit 141)"
+      else
+        echo "  SIGPIPE on a gone peer: exited $code, so the check does not see it"
+        status=1
+      fi
+    fi ;;
+  *)
+    echo "  SIGPIPE on a gone peer: Linux's MSG_NOSIGNAL, proved there" ;;
+esac
+
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
   '{ sub(/\(high << 8\) \| low/, "0"); print }'

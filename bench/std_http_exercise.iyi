@@ -16,11 +16,11 @@ end
 import std/http
 import std/socket
 using std/http::{HTTP, Response, Request, Server}
-using std/socket::{IyiSocket}
+using std/socket::{IyiSocket, SocketError}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.
-def read_request(conn : IyiSocket) : String | Cancelled
+def read_request(conn : IyiSocket) : String | Cancelled | SocketError
   buf = ""
   while true
     if split = HTTP.find_headers_end(buf)

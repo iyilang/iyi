@@ -26,7 +26,7 @@ module std/http
 
 import std/socket
 import std/uri
-using std/socket::{IyiSocket}
+using std/socket::{IyiSocket, SocketError}
 using std/uri::{URI}
 
 pub struct Response
@@ -100,11 +100,19 @@ pub struct Server
   # connection's fiber, once per request; what it answers is written back.
   def self.serve(listener : IyiSocket, &handler : Request -> Response) : Nil
     group do |g|
+      pause = 5
       while !listener.closed?
         case client = listener.accept
         in Cancelled
           break
+        in SocketError
+          # The listener's own trouble - descriptors run out, most often -
+          # is waited out rather than spun on: 5 ms doubling to a second,
+          # as Go's server does, and the next accept that works resets it.
+          sleep(pause)
+          pause = pause * 2 if pause < 1000
         in IyiSocket
+          pause = 5
           accepted = client
           g.spawn do
             handle(accepted, handler)
@@ -128,7 +136,9 @@ pub struct Server
         buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]
         response = handler.call(req)
         wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), parsed.close))
-        return if wrote.is_a?(Cancelled)
+        # A client that went away before its answer is gone; its
+        # connection ends here, and the server goes on.
+        return unless wrote.is_a?(Int32)
         return if parsed.close
         next
       end
@@ -139,7 +149,7 @@ pub struct Server
       # Not a whole request yet: read more, or stop at the client's close.
       return if buffer.bytesize > MAX_HEAD + MAX_BODY
       case chunk = client.read(65536)
-      in Cancelled
+      in Cancelled, SocketError
         return
       in String
         return if chunk.bytesize == 0
@@ -358,8 +368,9 @@ pub struct HTTP
   # One request, one answer, one connection: the answer is read to the
   # server's close, which `Connection: close` asks for. The socket parks
   # under the runtime, so a request from a task answers `Cancelled` when
-  # the task is; `!` passes it up, `.or_panic` refuses it.
-  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled
+  # the task is; a refused or reset connection answers `SocketError`; `!`
+  # passes either up, `.or_panic` refuses it.
+  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled | SocketError
     uri = URI.parse(url)
     scheme = uri.scheme
     raise "HTTP: TLS is not in 0.x; use http://" if scheme == "https"
@@ -387,23 +398,23 @@ pub struct HTTP
     parse_response(buf, same_name?(method, "HEAD"))
   end
 
-  def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled
+  def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
     request("GET", url, headers)
   end
 
-  def self.head(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled
+  def self.head(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
     request("HEAD", url, headers)
   end
 
-  def self.post(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled
+  def self.post(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
     request("POST", url, headers, body)
   end
 
-  def self.put(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled
+  def self.put(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
     request("PUT", url, headers, body)
   end
 
-  def self.delete(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled
+  def self.delete(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
     request("DELETE", url, headers)
   end
 

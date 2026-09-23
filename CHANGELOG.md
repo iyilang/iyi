@@ -96,6 +96,22 @@
 
 ### Changed
 
+- **What the other end of a socket does is a value, not a panic
+  (`SocketError`, `import std/socket`).** A client that disconnected
+  mid-response panicked the server with "cannot write to socket", or -
+  where the kernel raised SIGPIPE on the broken pipe - killed it without
+  a word. `read`, `write`, `recv`, `send`, `accept` and `connect` answer
+  `SocketError` beside `Cancelled` now: which operation, the platform's
+  error number, a reason (reset by the peer, the peer closed it, refused,
+  timed out, no route), and `disconnected?` for "the peer is gone". A
+  write never raises SIGPIPE (`MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on
+  darwin), an accept whose client left first takes the next one, and
+  `std/http`'s server ends that connection and serves on, waiting out a
+  listener's own errors from 5 ms doubling to a second; `HTTP.get` and
+  its siblings answer `SocketError` for a refused or reset connection.
+  What a program does wrong itself - a socket it closed, a negative
+  count - still panics (found in iyi-web).
+
 - **A language-server worker replaced on its memory bound is warmed at
   the next quiet, not at once.** Retiring a worker between two requests
   sent its successor the focused file's compile ahead of whatever the

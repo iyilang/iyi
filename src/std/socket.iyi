@@ -23,6 +23,17 @@
 # runtime to park in they block and never answer it, but the type is the
 # same, so a program reads the same everywhere. One fiber may wait on one fd.
 #
+# Errors:
+# What the other end or the network does is a value, not a panic: a
+# connection reset, a peer that has gone (a broken pipe), a refused or
+# timed-out connect, an accept whose client left first - `SocketError`,
+# beside `Cancelled` in the answer. A server whose client disconnected
+# mid-response panicked with "cannot write to socket"; it reads a
+# `SocketError` now, and `disconnected?` says the client is gone. What a
+# program does wrong itself - reading a socket it closed, a negative
+# count - still panics. Writing to a connection the peer closed does not
+# raise SIGPIPE: `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on darwin.
+#
 # Where it lives:
 # Outside the prelude, because a program that opens no socket should not
 # carry one. Nothing in `src/iyi/` uses this file - the prelude required it
@@ -44,6 +55,74 @@ pub struct IPv4Address
 
   def to_s : String
     "#{@b0}.#{@b1}.#{@b2}.#{@b3}"
+  end
+end
+
+# A connection's own failure: which operation, and the platform's error
+# number for why.
+pub struct SocketError
+  getter operation : String
+  getter code : Int32
+
+  def initialize(@operation : String, @code : Int32)
+  end
+
+  # The peer is gone: it reset the connection, or closed it and the write
+  # found the pipe broken, or the connection was aborted.
+  def disconnected? : Bool
+    {% if flag?(:win32) %}
+      @code == 10054 || @code == 10053 || @code == 10058
+    {% elsif flag?(:darwin) %}
+      @code == 54 || @code == 32 || @code == 53
+    {% else %}
+      @code == 104 || @code == 32 || @code == 103
+    {% end %}
+  end
+
+  def reason : String
+    return "the connection was reset by the peer" if reset?
+    return "the peer closed the connection" if broken_pipe?
+    return "the connection was aborted" if aborted?
+    return "connection refused" if refused?
+    return "timed out" if timed_out?
+    return "no route to the host" if unreachable?
+    "error #{@code}"
+  end
+
+  private def reset? : Bool
+    {% if flag?(:win32) %} @code == 10054 {% elsif flag?(:darwin) %} @code == 54 {% else %} @code == 104 {% end %}
+  end
+
+  private def broken_pipe? : Bool
+    {% if flag?(:win32) %} @code == 10058 {% else %} @code == 32 {% end %}
+  end
+
+  private def aborted? : Bool
+    {% if flag?(:win32) %} @code == 10053 {% elsif flag?(:darwin) %} @code == 53 {% else %} @code == 103 {% end %}
+  end
+
+  private def refused? : Bool
+    {% if flag?(:win32) %} @code == 10061 {% elsif flag?(:darwin) %} @code == 61 {% else %} @code == 111 {% end %}
+  end
+
+  private def timed_out? : Bool
+    {% if flag?(:win32) %} @code == 10060 {% elsif flag?(:darwin) %} @code == 60 {% else %} @code == 110 {% end %}
+  end
+
+  private def unreachable? : Bool
+    {% if flag?(:win32) %}
+      @code == 10065 || @code == 10051
+    {% elsif flag?(:darwin) %}
+      @code == 65 || @code == 51
+    {% else %}
+      @code == 113 || @code == 101
+    {% end %}
+  end
+end
+
+impl Error for SocketError
+  def message : String
+    "cannot #{operation}: #{reason}"
   end
 end
 
@@ -70,17 +149,18 @@ pub class IyiSocket
   # blocking `poll` on the descriptor and never do, but the type is the
   # same, so a program reads the same everywhere.
 
-  def self.connect(host : String, port : Int32) : IyiSocket | Cancelled
-    fd = __sys_socket
-    raise "cannot create socket" if fd < 0
-
+  def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
     ip = parse_ip(host)
     addr = make_sockaddr_in(ip, port)
+    fd = __sys_socket
+    return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
+    __sys_no_sigpipe(fd)
     __sys_set_nonblock(fd)
     res = __sys_connect(fd, addr)
     if res < 0 && !__sys_in_progress?(res)
+      code = __sys_code(res.to_i64)
       __sys_close(fd)
-      raise "cannot connect to #{host}:#{port}"
+      return SocketError.new("connect to #{host}:#{port}", code)
     end
     if res < 0
       # The handshake is under way; the socket turns writable when it is
@@ -90,25 +170,32 @@ pub class IyiSocket
         __sys_close(fd)
         return waited
       end
-      if __sys_sock_error(fd) != 0
+      if (code = __sys_sock_error(fd)) != 0
         __sys_close(fd)
-        raise "cannot connect to #{host}:#{port}"
+        return SocketError.new("connect to #{host}:#{port}", code)
       end
     end
     IyiSocket.new(fd)
   end
 
-  def accept : IyiSocket | Cancelled
+  def accept : IyiSocket | Cancelled | SocketError
     raise "socket is closed" if @fd < 0
     addr = Pointer(UInt8).malloc(16_u64)
     len = 16_u32
     while true
       client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
       if client_fd >= 0
+        IyiSocket.__sys_no_sigpipe(client_fd)
         IyiSocket.__sys_set_nonblock(client_fd)
         return IyiSocket.new(client_fd)
       end
-      raise "cannot accept socket" unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+      unless IyiSocket.__sys_would_block?(client_fd.to_i64)
+        error = SocketError.new("accept a connection", IyiSocket.__sys_code(client_fd.to_i64))
+        # A client that left between its handshake and this accept is no
+        # failure of the listener's: the next one is taken.
+        next if error.disconnected?
+        return error
+      end
       # Closed by another fiber, which is the same answer whether it
       # happened under the accept or under the wait: the wait is over and
       # nothing is coming, which is what `Cancelled` says. Asked before the
@@ -125,49 +212,49 @@ pub class IyiSocket
 
   # --- Reading and Writing ---
 
-  def read(max_bytes : Int32 = 4096) : String | Cancelled
+  def read(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     # `recv(-1)` died of "arithmetic overflow" on the `to_u64`, which names
     # neither the count nor the call; the enumerable's sentence for it.
     raise "negative count: #{max_bytes}" if max_bytes < 0
     raise "socket is closed" if @fd < 0
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     count = read(buffer, max_bytes)
-    return count if count.is_a?(Cancelled)
+    return count if count.is_a?(Cancelled) || count.is_a?(SocketError)
     return "" if count == 0
     String.new(count) do |target|
       target.copy_from(buffer, count)
     end
   end
 
-  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     raise "negative count: #{count}" if count < 0
     raise "socket is closed" if @fd < 0
     while true
       n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
       return n.to_i32 if n >= 0_i64
-      raise "cannot read from socket" unless IyiSocket.__sys_would_block?(n)
+      return SocketError.new("read from socket", IyiSocket.__sys_code(n)) unless IyiSocket.__sys_would_block?(n)
       waited = IyiSocket.await_readable(@fd)
       return waited if waited.is_a?(Cancelled)
       return Cancelled.new if @fd < 0
     end
   end
 
-  def recv(max_bytes : Int32 = 4096) : String | Cancelled
+  def recv(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     read(max_bytes)
   end
 
-  def recv(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def recv(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     read(buffer, count)
   end
 
-  def write(contents : String) : Int32 | Cancelled
+  def write(contents : String) : Int32 | Cancelled | SocketError
     # Checked before the loop: `write("")` on a closed socket has nothing
     # to send and answered 0 where `write("x")` refused.
     raise "socket is closed" if @fd < 0
     write(contents.to_unsafe, contents.bytesize)
   end
 
-  def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     raise "socket is closed" if @fd < 0
     written = 0
     while written < count
@@ -178,17 +265,17 @@ pub class IyiSocket
         return Cancelled.new if @fd < 0
         next
       end
-      raise "cannot write to socket" if n <= 0_i64
+      return SocketError.new("write to socket", n < 0_i64 ? IyiSocket.__sys_code(n) : 0) if n <= 0_i64
       written = written + n.to_i32
     end
     written
   end
 
-  def send(contents : String) : Int32 | Cancelled
+  def send(contents : String) : Int32 | Cancelled | SocketError
     write(contents)
   end
 
-  def send(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled
+  def send(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     write(buffer, count)
   end
 
@@ -429,6 +516,18 @@ pub class IyiSocket
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
+    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET: a write to a connection the peer
+    # closed answers EPIPE instead of killing the process.
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+      val = 1_i32
+      LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val).as(Void*), 4_u32)
+    end
+
+    # The failure a call answered -1 for, from errno.
+    def self.__sys_code(result : Int64) : Int32
+      LibC.error_location.value
+    end
+
     def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       LibC.recv(fd, buf.as(Void*), len, 0)
     end
@@ -580,8 +679,18 @@ pub class IyiSocket
       __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, SOCKADDR_IN_SIZE).to_i32
     end
 
+    # MSG_NOSIGNAL (0x4000): a write to a connection the peer closed answers
+    # EPIPE instead of killing the process with SIGPIPE.
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
-      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0_i64, 0_i64, 0_i64)
+      __sys6(SYS_SENDTO, fd.to_i64, buf.address.to_i64, len.to_i64, 0x4000_i64, 0_i64, 0_i64)
+    end
+
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    # A raw syscall's negative errno, as the number.
+    def self.__sys_code(result : Int64) : Int32
+      (0_i64 - result).to_i32
     end
 
     def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -1013,6 +1122,16 @@ pub class IyiSocket
       result == -WSAEWOULDBLOCK
     end
 
+    # Windows raises no SIGPIPE; a write to a closed connection answers
+    # WSAECONNRESET or WSAESHUTDOWN.
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    # The failures above arrive as the Winsock number negated.
+    def self.__sys_code(result : Int64) : Int32
+      (0_i64 - result).to_i32
+    end
+
     def self.__sys_in_progress?(result : Int32) : Bool
       result == -WSAEWOULDBLOCK
     end
@@ -1143,6 +1262,13 @@ pub class IyiSocket
     end
 
     def self.__sys_sock_error(fd : Int32) : Int32
+      0
+    end
+
+    def self.__sys_no_sigpipe(fd : Int32) : Nil
+    end
+
+    def self.__sys_code(result : Int64) : Int32
       0
     end
   {% end %}

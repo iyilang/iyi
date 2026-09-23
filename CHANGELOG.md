@@ -82,12 +82,12 @@
   on that stack, the exit code is the same 1 — and the gate runs the
   overflow a dozen times from one binary, which makes a flake a failure.
 
-  And a thread's stack the same way: `SetThreadStackGuarantee` is a
-  per-thread setting and was made on the main thread alone, so an
-  `IyiThread` that ran out of stack had no room for the handler and died
-  of "a memory fault" on the runs where the overflow landed near the
-  bottom. Every thread the runtime starts sets its own now, and the gate
-  repeats the overflow on the main, fiber and thread stacks.
+  The gate repeats the overflow on the main and fiber stacks. A thread's
+  can still, now and then, say "a memory fault" on Windows:
+  `SetThreadStackGuarantee` is per thread and made on the main thread
+  alone, and making it on every `IyiThread` broke `thread_exercise` at
+  exit — the runtime rewrites a thread's stack bounds as it switches
+  fibers — so that is open, and said here rather than hidden.
 
 - **The language server could not read a Windows file URI.** An editor
   sends `file:///c%3A/Users/x/a.iyi`, and the server chopped the scheme
@@ -9124,7 +9124,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,971-line library and nothing else. Every other
+  written against iyi's own 15,959-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

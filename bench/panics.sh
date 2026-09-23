@@ -401,10 +401,12 @@ done
 # stack-overflow sentence. Whether the 16 KB guarantee covered the
 # detaches depended on where the first fault landed, so one run in three
 # showed it and two did not. Repeated runs make a flake a failure.
-# And on the other two stacks the same way: a thread's guarantee is its
-# own, and was set on the main thread alone, so a thread's overflow said
-# "memory fault" on the runs where it landed near the bottom.
-for where in main fiber thread; do
+# And on a fiber's stack the same way. Not a thread's: `SetThreadStackGuarantee`
+# is a per-thread setting made on the main thread alone, and setting it on
+# every `IyiThread` broke `thread_exercise` at exit on Windows — the
+# runtime rewrites a thread's stack bounds as it switches fibers — so a
+# thread's overflow can still, now and then, say "memory fault" there.
+for where in main fiber; do
   set +e
   "$IYI" build -o "$work/deep_${where}_bin" "$work/deep_$where.iyi" > /dev/null 2>&1
   set -e

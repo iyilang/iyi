@@ -611,18 +611,6 @@
       {% unless flag?(:win32) %}
         IyiStackGuard.install
       {% end %}
-      # Windows' equivalent of the alternate stack, and just as much a
-      # thread's own: `SetThreadStackGuarantee` reserves room under the guard
-      # page for the handler to run in, and it was set on the main thread
-      # alone. A thread started here that ran out of stack had no room left
-      # to say so — the handler faulted past the page it was given, and the
-      # process died of "a memory fault" instead of the stack-overflow
-      # sentence, on the runs where the overflow landed close enough to the
-      # bottom (`bench/panics.sh`, once in a few Windows runs).
-      {% if flag?(:win32) %}
-        guarantee = 16384_i32
-        LibC.SetThreadStackGuarantee(pointerof(guarantee))
-      {% end %}
       {% if flag?(:darwin) %}
         here = uninitialized UInt64
         IyiHeap.write64(line + IYI_TL_TOP, pointerof(here).address)

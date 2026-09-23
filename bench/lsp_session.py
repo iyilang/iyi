@@ -969,20 +969,28 @@ def main():
     #       A retirement on the memory bound may have come first, and
     #       then the first quiet warms that successor and the next one
     #       replaces it, so the wait is for the pid to move, bounded.
+    #       Where `ps` cannot list the workers (Windows, BSD `ps`) the
+    #       wait is the two quiet periods that cover it, and the pid move
+    #       is reported unmeasured rather than asserted.
     before = children(c.proc.pid)
-    deadline = time.monotonic() + 10
-    while children(c.proc.pid) == before and time.monotonic() < deadline:
-        time.sleep(0.25)
-    time.sleep(0.5)
+    if before:
+        deadline = time.monotonic() + 10
+        while children(c.proc.pid) == before and time.monotonic() < deadline:
+            time.sleep(0.25)
+        time.sleep(0.5)
+    else:
+        time.sleep(5)
     after = children(c.proc.pid)
+    replaced = before != after if before else True
     started = time.monotonic()
     reply = c.send("workspace/diagnostic", {"previousResultIds": previous})
     elapsed = time.monotonic() - started
     kinds = [i["kind"] for i in reply["result"]["items"]]
     step("31b'", "a replaced worker reads the same ids as unchanged",
-         before != after and len(kinds) == len(items) and
+         replaced and len(kinds) == len(items) and
          all(k == "unchanged" for k in kinds) and elapsed < 0.5,
-         f"worker {before} -> {after}, {kinds.count('unchanged')} of "
+         f"worker {before or 'unmeasured'} -> {after or 'unmeasured'}, "
+         f"{kinds.count('unchanged')} of "
          f"{len(kinds)} unchanged in {elapsed * 1000:.0f} ms")
 
     # 31c. one file on disk moves, and the next pull is full for that

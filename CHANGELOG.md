@@ -209,8 +209,11 @@
   `6.2e-310`, a free-list link, after a k-nucleotide run. That page now
   stays the list's and the cold run starts one page up.
   `bench/reuse_integrity.sh` checks both by content, default and
-  optimised, on Linux, darwin and Windows, and fails on its first run with
-  the release put back.
+  optimised, on Linux, darwin and Windows, and on Linux fails on its first
+  run with the release put back. darwin and Windows release a page lazily
+  (`MADV_FREE_REUSABLE`, `MEM_RESET`) and keep its bytes until the kernel
+  needs them, so there the same bug waited for memory pressure, and the
+  put-back cannot be shown on demand.
 
 - **`iyi check --affected` names a missing file the way it was typed.**
   It expanded the path, then chopped the working directory back off, so on

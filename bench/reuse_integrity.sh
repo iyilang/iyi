@@ -59,6 +59,24 @@ run_case "release" optimised --release
 
 echo
 echo "== the check fails when a released page takes a listed chunk's words"
+# The break is a zeroed word, and only Linux zeroes a released page at once
+# (`MADV_DONTNEED`). darwin's `MADV_FREE_REUSABLE` and Windows' `MEM_RESET`
+# leave the bytes where they were until the kernel wants the memory, so
+# there the same bug waited for memory pressure and a run cannot be made to
+# show it. The checks above run everywhere; the proof runs where it can.
+case "$(uname -s)" in
+  Linux) ;;
+  *)
+    echo "  not here: $(uname -s) keeps a released page's bytes until it needs the memory, so the break cannot be shown on demand; Linux runs this proof"
+    echo
+    if [ "$status" -eq 0 ]; then
+      echo "reuse integrity gate: every step held"
+    else
+      echo "reuse integrity gate: FAILED"
+    fi
+    exit "$status"
+    ;;
+esac
 # The straddler's page released with the rest, as it was: the lowest chunk
 # of a cold run keeps its place on the list with its slot word zeroed.
 mkdir -p "$WORK/broken/iyi"

@@ -355,6 +355,12 @@
 
 ### Fixed
 
+- `bench/debug_info.py` on Windows no longer asks gdb to read an MSVC-linked
+  program: gdb reads DWARF, the program's debug information is CodeView in a
+  PDB, and the mingw gdb on the runner's PATH found the program and read none
+  of its variables. The step says it is unmeasured there, as it does where
+  there is no gdb.
+
 - On darwin, `File.write` to a file that already existed set its mode to
   0644: the prelude's open-for-write followed the `open` with a `chmod`, a
   workaround from when `open` was not bound as variadic and a created file's

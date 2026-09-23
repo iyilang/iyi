@@ -151,9 +151,16 @@ def main():
          f"{len(samples)} samples" if not broken
          else f"{len(broken)}: {', '.join(broken[:4])}")
 
-    # And where there is a debugger, what it reads.
+    # And where there is a debugger, what it reads. gdb reads DWARF, and a
+    # Windows binary's debug information is CodeView, in the PDB the MSVC
+    # linker writes beside it: the gdb a Windows PATH offers (mingw's) found
+    # the program and read none of its variables, which is a fact about gdb.
     debugger = shutil.which("gdb")
-    if not debugger or built.returncode != 0:
+    if sys.platform == "win32":
+        print("debug info ---- gdb reads DWARF and this binary carries "
+              "CodeView, so what a debugger reads goes unchecked here; the "
+              "offsets above are the claim")
+    elif not debugger or built.returncode != 0:
         print("debug info ---- no gdb here, so what a debugger reads goes "
               "unchecked; the offsets above are the claim")
     else:

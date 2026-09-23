@@ -248,6 +248,12 @@
 
 ### Fixed
 
+- **An unseeded `Random.new` did not compile in a program that imports
+  `std/file`.** The entropy read opened `/dev/urandom` through `File`,
+  and inside the library's namespace that name is `std/file`'s module
+  once the module is loaded: `undefined method 'open' for
+  Std::File:Module`. It names the class, `::File`, now.
+
 - **`File.tempfile` could be made to write through a planted symlink.**
   It named the file after the process id and a counter, asked whether
   the path existed, and wrote to it if not; a symlink placed at the next

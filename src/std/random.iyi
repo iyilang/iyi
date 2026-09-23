@@ -127,7 +127,7 @@ pub class Random
       end
       v
     {% else %}
-      io = File.open("/dev/urandom")
+      io = ::File.open("/dev/urandom")
       bytes = io.read_bytes(8)
       io.close
       raise "Random: /dev/urandom answered #{bytes.bytesize} bytes, not 8" if bytes.bytesize != 8

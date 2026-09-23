@@ -13,6 +13,10 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# A program that also works with files: `std/file` names a module `File`
+# in the library's namespace, and the unseeded generator's entropy read
+# used to find that module where it meant the class.
+import std/file
 import std/random
 using std/random::{Random}
 

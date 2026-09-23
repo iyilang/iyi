@@ -29,4 +29,23 @@ assert_str "x", rest[0], "operand"
 assert_true op.help.includes?("--name VALUE"), "help lists it"
 puts "  long, short, leftover"
 
+puts "\n== what the person typed wrong"
+handled = OptionParser.new
+seen = [] of String
+port = ""
+handled.on("--port PORT", "the port") { |v| port = v }
+handled.on("-q", "quiet") { |v| seen << "quiet" }
+handled.invalid_option { |flag| seen << "invalid " + flag }
+handled.missing_option { |flag| seen << "missing " + flag }
+left = handled.parse(["--nope", "-z", "-q=1", "--port=8080", "keep", "-q", "--port"])
+assert_str "8080", port, "a good flag after bad ones is still read"
+assert_str "invalid --nope,invalid -z,quiet,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
+assert_str "keep", left.join(","), "operands survive"
+bare = OptionParser.new
+bare.on("--flag", "a switch") { |v| }
+bare.invalid_option { |flag| seen << "no value for " + flag }
+bare.parse(["--flag=x"])
+assert_str "no value for --flag", seen.last, "a value for a switch is an invalid option"
+puts "  invalid_option and missing_option answer instead of a panic"
+
 puts "\nALL CHECKS PASSED"

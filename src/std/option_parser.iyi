@@ -2,9 +2,16 @@
 #
 # `on("--name VALUE", "help") { |v| ... }` and `on("-h", "help") { }`
 # register flags. `parse` walks `Program.args` (or the array given),
-# calls the blocks, and answers the leftover operands. An unknown
-# flag is `unknown flag: --x`. A flag that takes a value and is last
-# is `flag --name needs a value`.
+# calls the blocks, and answers the leftover operands.
+#
+# What the person typed wrong is the program's to answer, the way
+# Crystal's `OptionParser` has it: `invalid_option { |flag| ... }` is
+# handed an unknown flag and a value given to a flag that takes none,
+# `missing_option { |flag| ... }` a flag that takes a value and is last,
+# and parsing goes on after either. With no handler set they panic -
+# `unknown flag: --x`, `flag --x takes no value`, `flag --name needs a
+# value` - which is a bug report where a usage line was wanted, so a
+# program reading its own command line sets both.
 
 module std/option_parser
 
@@ -12,11 +19,35 @@ pub class OptionParser
   @long : Hash(String, {Bool, (String -> Nil)})
   @short : Hash(String, {Bool, (String -> Nil)})
   @help : Array(String)
+  @invalid : (String -> Nil)?
+  @missing : (String -> Nil)?
 
   def initialize
     @long = {} of String => {Bool, (String -> Nil)}
     @short = {} of String => {Bool, (String -> Nil)}
     @help = [] of String
+    @invalid = nil
+    @missing = nil
+  end
+
+  def invalid_option(&block : String -> Nil) : Nil
+    @invalid = block
+  end
+
+  def missing_option(&block : String -> Nil) : Nil
+    @missing = block
+  end
+
+  private def invalid(flag : String, sentence : String) : Nil
+    handler = @invalid
+    raise sentence unless handler
+    handler.call(flag)
+  end
+
+  private def missing(flag : String) : Nil
+    handler = @missing
+    raise "flag #{flag} needs a value" unless handler
+    handler.call(flag)
   end
 
   def on(flag : String, description : String, &block : String -> Nil) : Nil
@@ -55,16 +86,24 @@ pub class OptionParser
           name = a[0, eq]
           val = a[eq + 1, a.bytesize - eq - 1]
           spec = @long[name]?
-          raise "unknown flag: #{name}" unless spec
-          raise "flag #{name} takes no value" unless spec[0]
-          spec[1].call(val)
+          if !spec
+            invalid(name, "unknown flag: #{name}")
+          elsif !spec[0]
+            invalid(name, "flag #{name} takes no value")
+          else
+            spec[1].call(val)
+          end
         else
           spec = @long[a]?
-          raise "unknown flag: #{a}" unless spec
-          if spec[0]
+          if !spec
+            invalid(a, "unknown flag: #{a}")
+          elsif spec[0]
             i = i + 1
-            raise "flag #{a} needs a value" if i >= n
-            spec[1].call(args[i])
+            if i >= n
+              missing(a)
+            else
+              spec[1].call(args[i])
+            end
           else
             spec[1].call("")
           end
@@ -72,14 +111,18 @@ pub class OptionParser
       elsif a.starts_with?("-") && a.bytesize >= 2 && a != "-"
         name = a[0, 2]
         spec = @short[name]?
-        raise "unknown flag: #{name}" unless spec
-        if spec[0]
+        if !spec
+          invalid(name, "unknown flag: #{name}")
+        elsif spec[0]
           if a.bytesize > 2
             spec[1].call(a[2, a.bytesize - 2])
           else
             i = i + 1
-            raise "flag #{name} needs a value" if i >= n
-            spec[1].call(args[i])
+            if i >= n
+              missing(name)
+            else
+              spec[1].call(args[i])
+            end
           end
         else
           spec[1].call("")

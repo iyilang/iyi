@@ -113,6 +113,30 @@ PY
   else
     echo "  a broken option_parser is caught"
   fi
+
+  # The handler set and not called: the mistake panics anyway.
+  mkdir -p "$WORK/unheard/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/option_parser.iyi").read_text()
+old = '    raise sentence unless handler\n    handler.call(flag)'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/unheard/std/option_parser.iyi").write_text(src.replace(old, '    raise sentence', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the unheard-handler patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/unheard${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_option_parser_exercise.iyi" >"$WORK/unheard.out" 2>&1; then
+    echo "  the exercise PASSED with invalid_option never called"
+    status=1
+  elif grep -q "unknown flag: --nope" "$WORK/unheard.out"; then
+    echo "  a handler that is never called is caught"
+  else
+    echo "  the unheard handler failed, but not at the first mistake"
+    tail -3 "$WORK/unheard.out" | sed 's/^/    /'
+    status=1
+  fi
 fi
 
 echo

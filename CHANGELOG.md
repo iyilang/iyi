@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`OptionParser#invalid_option` and `#missing_option`
+  (`import std/option_parser`).** A mistyped flag, a value for a flag
+  that takes none, and a flag whose value is missing panicked, which is
+  a bug report where a usage line was wanted; a program reading its own
+  command line had to write its own parser (iyi-web did). The handlers
+  are Crystal's: each is handed the flag and parsing goes on after it.
+  With none set, the panics are the ones they were.
+
 - **`String#gsub(pattern, table)` (`import std/regex`).** Each match
   replaced by its entry in a `Hash(String, String)` and dropped when the
   table has none, as Crystal 1.21's `gsub(Regex, Hash)` answers:

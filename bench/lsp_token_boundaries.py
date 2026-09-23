@@ -21,7 +21,7 @@ import glob
 import os
 import sys
 
-from lsp_session import Client
+from lsp_session import Client, file_uri
 
 TYPES = ["keyword", "string", "number", "comment", "type", "function",
          "variable", "property", "operator", "regexp", "macro",
@@ -41,7 +41,7 @@ def main():
         sys.exit(f"no corpus under {root}")
 
     c = Client()
-    c.send("initialize", {"rootUri": "file://" + root, "capabilities": {}})
+    c.send("initialize", {"rootUri": file_uri(root), "capabilities": {}})
     c.send("initialized", {}, wait=False)
 
     total = 0
@@ -51,7 +51,7 @@ def main():
         with open(path) as f:
             text = f.read()
         lines = text.split("\n")
-        uri = "file://" + path
+        uri = file_uri(path)
         c.send("textDocument/didOpen",
                {"textDocument": {"uri": uri, "languageId": "iyi",
                                  "version": 1, "text": text}}, wait=False)

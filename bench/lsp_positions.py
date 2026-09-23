@@ -50,7 +50,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lsp_session import Client, tree_mb  # noqa: E402
+from lsp_session import Client, file_uri, tree_mb  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MODULES = sorted((REPO / "src/std").glob("*.iyi"))
@@ -133,7 +133,7 @@ def positions(lines: list[str], stride: int) -> list[tuple[int, int]]:
 def questions(path: Path, stride: int) -> list[tuple[str, dict, str]]:
     """Every request this module is asked, in order, as method and params."""
     lines = path.read_text().split("\n")
-    uri = "file://" + str(path)
+    uri = file_uri(str(path))
     asks: list[tuple[str, dict, str]] = []
     for method in WHOLE_FILE:
         asks.append((method, {"textDocument": {"uri": uri}}, path.name))
@@ -160,14 +160,14 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
     resident megabytes of the session — the proxy and whichever worker was
     compiling when it was read."""
     text = path.read_text()
-    uri = "file://" + str(path)
+    uri = file_uri(str(path))
     asks = questions(path, stride)
     asked = 0
     peak = 0
 
     client = Client()
     try:
-        client.send("initialize", {"rootUri": "file://" + str(REPO), "capabilities": {}})
+        client.send("initialize", {"rootUri": file_uri(str(REPO)), "capabilities": {}})
         client.send("initialized", {}, wait=False)
         client.send("textDocument/didOpen",
                     {"textDocument": {"uri": uri, "languageId": "iyi",

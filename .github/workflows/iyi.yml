@@ -1774,6 +1774,21 @@ jobs:
           bash bench/packages_resolve.sh
           bash bench/migrate_gate.sh
 
+      # And the rest of what an editor and an agent are handed. Every
+      # sample again from its modules' artifacts alone (R-1), the agent
+      # loop and its MCP server, every cursor position in the repository's
+      # own `.iyi` files, and every semantic token's boundary — the four
+      # surfaces whose answers are paths and positions, which is what the
+      # last three Windows fixes to the language server were about.
+      - name: The editor and agent surfaces, on Windows
+        shell: bash
+        run: |
+          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          bash bench/samples_roundtrip.sh
+          python bench/agent_loop.py
+          python bench/lsp_token_boundaries.py
+          python bench/lsp_positions.py
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build

@@ -140,6 +140,25 @@
 
 ### Changed
 
+- **Twenty-four more gates run on Windows, in a job of their own.** The
+  runtime's exercises (`format`, `io`, `number`, `value`, `enum`,
+  `float_text`, `collections`, `runtime`, `server_load`, `defer_cost`,
+  `windows_exercise`), the boundaries and floors (`bind_roundtrip`,
+  `bind_regex_identity`, `open_dispatch`, `yaml_reads`,
+  `std_dependency_floor`, `build_tool_floor`) and what the editor and
+  the numbers say (`debug_info`, `measured_numbers`, `lsp_latency`,
+  `lsp_soak`, `context_pack`, `generic_boundary`, `rebuild_speed`) ran on
+  Linux and darwin only. Each passed on a Windows machine first; two
+  could not start there: `context_pack.py` ran `bin/iyi`, a shell script,
+  and takes `IYI` now as the others do, and `generic_boundary.py` named a
+  module by its Windows path, `calc\lexer`, and looked for `calc/lexer`.
+  `windows-gates` builds and runs them beside the other two Windows jobs,
+  each of which is well into its ninety minutes. Still not on Windows:
+  the gates that install a shard (Shards needs symbolic links, which a
+  machine without Developer Mode refuses), the daemon's (`iyi-daemon.exe`
+  does not build there), `sandbox_story.sh` (wasi-sdk) and `gc_race.py`
+  (Go).
+
 - **One fiber may read a socket while another writes it.** The poller
   kept one waiter per descriptor and refused a second with "two fibers
   waiting on one fd", so a WebSocket - a fiber reading frames, another

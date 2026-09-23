@@ -2035,6 +2035,84 @@ jobs:
         shell: bash
         run: bash bench/socket_exercise.sh
 
+  # The gates the Linux job runs that no Windows job did: the runtime's
+  # own exercises, the boundaries bound from Crystal's library, the floors,
+  # and what the editor and the numbers say. A job of their own because
+  # the two above are each well into their ninety minutes. Each passed on
+  # a Windows machine before it came here; the two python gates that could
+  # not start there ran `bin/iyi`, a shell script, or named a module by
+  # its Windows path, and take the exe and a `/` now.
+  windows-gates:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "The language's gates, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The runtime's exercises, on Windows
+        shell: bash
+        run: |
+          bash bench/format_exercise.sh
+          bash bench/io_exercise.sh
+          bash bench/number_exercise.sh
+          bash bench/value_exercise.sh
+          bash bench/enum_exercise.sh
+          bash bench/float_text.sh
+          bash bench/collections_exercise.sh
+          bash bench/runtime_exercise.sh
+          bash bench/server_load.sh
+          bash bench/defer_cost.sh
+          bash bench/windows_exercise.sh
+
+      - name: Boundaries and floors, on Windows
+        shell: bash
+        run: |
+          bash bench/bind_roundtrip.sh
+          bash bench/bind_regex_identity.sh
+          bash bench/open_dispatch.sh
+          bash bench/yaml_reads.sh
+          bash bench/std_dependency_floor.sh
+          bash bench/build_tool_floor.sh
+
+      - name: What the editor and the numbers say, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          python bench/debug_info.py
+          python bench/measured_numbers.py
+          python bench/lsp_latency.py
+          python bench/lsp_soak.py
+          python bench/context_pack.py
+          python bench/generic_boundary.py
+          python bench/rebuild_speed.py
+
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
   # program a host can start is wasi-libc's entry stub — which calls
@@ -2440,6 +2518,7 @@ jobs:
     needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, std, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
+            windows-gates,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -102,7 +102,9 @@ def main():
                 if not name.endswith(".iyimod"):
                     continue
                 path = os.path.join(dirpath, name)
-                module = os.path.relpath(path, mods)[:-len(".iyimod")]
+                # A module's name is written with `/` on every platform;
+                # the path it came from is `calc\lexer.iyimod` on Windows.
+                module = os.path.relpath(path, mods)[:-len(".iyimod")].replace(os.sep, "/")
                 rows.append((module, os.path.getsize(path), sections_of(path)))
         rows.sort()
 

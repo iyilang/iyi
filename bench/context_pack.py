@@ -22,13 +22,14 @@ that is this script exiting 1.
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-IYI = REPO / "bin" / "iyi"
+IYI = pathlib.Path(os.environ.get("IYI", REPO / "bin" / "iyi"))
 
 # {entry file: its import closure's sources — what raw grounding costs}
 TARGETS = {

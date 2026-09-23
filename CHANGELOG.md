@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`String#gsub(pattern, replacement)`, `String#gsub(pattern) { ... }`
+  and `String#matches?(pattern)` (`import std/regex`).** The other
+  library's spellings on the text side, over `Regex#replace` and a search
+  — `matches?` asks whether the pattern occurs anywhere, which
+  `Regex#match?` (the whole text) does not. There are no capture groups
+  yet, so a replacement is taken as written; `scan` stays off `String`,
+  because Crystal's answers match data and one name meaning two things is
+  worse than a missing one.
+
 - **`strict_encode`, `strict_decode` and `decode_string` name what
   `std/base64` calls them.** `Base64.encode` already writes no line breaks
   and `decode` already answers a String; a port that reached for the other

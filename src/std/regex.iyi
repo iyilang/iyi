@@ -757,3 +757,25 @@ class RxCompiler
     end
   end
 end
+
+# The other library's spellings on the text side: `seq.gsub(pattern,
+# "x")` and `seq.gsub(pattern) { |match| ... }` are `Regex#replace`, and
+# `text.matches?(pattern)` asks whether the pattern occurs anywhere, as the
+# other library's does - `Regex#match?` asks whether it spans the whole
+# text, and is a different question. There are no capture groups,
+# so a replacement is taken as written - `\1` is two characters, not the
+# first group. `scan` is not here: the other library's answers match data,
+# and one name meaning two things is worse than a missing one.
+class ::String
+  def gsub(pattern : Std::Regex::Regex, replacement : String) : String
+    pattern.replace(self, replacement)
+  end
+
+  def gsub(pattern : Std::Regex::Regex, & : String -> String) : String
+    pattern.replace(self) { |match| yield match }
+  end
+
+  def matches?(pattern : Std::Regex::Regex) : Bool
+    !pattern.find(self).nil?
+  end
+end

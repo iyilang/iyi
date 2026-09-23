@@ -160,4 +160,14 @@ if args.size > 0
   puts "  #{cases} pattern/subject pairs: find, scan, split and replace agree"
 end
 
+puts "\n== the text side"
+bd = Regex.compile("B|D")
+assert_str("a(x)c(x)e", "aBcDe".gsub(bd, "(x)"), "String#gsub with a pattern")
+assert_str("abcde", "aBcDe".gsub(bd) { |m| m.downcase }, "String#gsub with a block")
+assert_str("x-yb-z", Regex.compile("a+").replace("xaaybaz", "-"), "replace")
+assert_str("x2yb1z", Regex.compile("a+").replace("xaaybaz") { |m| m.size.to_s }, "replace with a block")
+assert_true "aBc".matches?(bd), "matches? finds a pattern inside the text"
+assert_true !"abc".matches?(bd), "matches? without one"
+puts "  gsub, replace with a block and matches? hold"
+
 puts "\nALL CHECKS PASSED"

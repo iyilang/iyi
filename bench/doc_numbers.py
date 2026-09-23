@@ -44,7 +44,10 @@ def bang_names() -> int:
     """
     names: set[str] = set()
     for p in (REPO / "src").rglob("*.cr"):
-        if "/compiler/" in str(p):
+        # By the path's parts, not its text: on Windows `str(p)` is spelled
+        # with `\`, `"/compiler/"` matched nothing, and the compiler's own
+        # names were counted - 60 there against 50 on Linux.
+        if "compiler" in p.relative_to(REPO / "src").parts:
             continue
         try:
             text = p.read_text()

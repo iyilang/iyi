@@ -239,6 +239,13 @@
 
 ### Fixed
 
+- **`bench/doc_numbers.py` counted the compiler's `!` names on
+  Windows.** The count README quotes leaves `src/compiler/` out, and it
+  asked whether `"/compiler/"` was in the path's text — which on Windows
+  is spelled with `\`, so nothing was left out and the gate measured 60
+  where Linux measures 50, failing a tree whose sentence was right. It
+  asks the path's parts now.
+
 - **`String#to_f` rounded a decimal with more than nineteen significant
   digits as if the rest were zero.** `"6915724680296.729980553".to_f` was
   one unit in the last place under the nearest double, and so were

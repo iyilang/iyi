@@ -79,6 +79,13 @@
 
 ### Changed
 
+- **A language-server worker replaced on its memory bound is warmed at
+  the next quiet, not at once.** Retiring a worker between two requests
+  sent its successor the focused file's compile ahead of whatever the
+  client asked next, so that request waited for a compile it did not
+  need: an unchanged workspace pull took 160 ms behind it and takes
+  15 ms now. The idle retirement still warms in its own quiet.
+
 - **A `Hash` takes no storage until its first entry.** Every table made
   its keys, values and index at eight entries, sixteen slots cleared,
   whether or not anything was ever put in it - a trie's leaves, each

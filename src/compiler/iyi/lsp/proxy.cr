@@ -112,6 +112,9 @@ module Iyi::Lsp
     # The document the person is in, so a fresh worker is warmed on the
     # file the next question will be about.
     @focus : String?
+    # A successor made on the memory bound whose warm-up waits for the
+    # wire to go quiet (`retire`).
+    @warm_pending = false
 
     # The version of each buffer as this proxy has applied it, and the
     # text of the last version a worker called clean.
@@ -189,8 +192,17 @@ module Iyi::Lsp
         when timeout(RETIRE_IDLE)
           # Nothing on either side for two seconds: the person is
           # reading. Spend it on a fresh worker rather than on their
-          # next keystroke.
-          retire if (worker = @worker) && worker.idle? && worker.worked > 0
+          # next keystroke - or, when the last one was replaced on the
+          # memory bound mid-traffic, on the warm-up that retirement
+          # left for the quiet.
+          if (worker = @worker) && worker.idle?
+            if @warm_pending
+              @warm_pending = false
+              warm(worker)
+            elsif worker.worked > 0
+              retire
+            end
+          end
         end
       end
     ensure
@@ -387,7 +399,7 @@ module Iyi::Lsp
       # business: it is the retirement signal, and it stops here.
       if table && table["method"]?.try(&.as_s?) == "iyi/footprint"
         worker.footprint = table["params"]["megabytes"].as_i
-        retire if worker.idle? && worker.spent?
+        retire(warm_now: false) if worker.idle? && worker.spent?
         return
       end
 
@@ -435,7 +447,7 @@ module Iyi::Lsp
         worker.answered += 1
         @outbox.send body
       end
-      retire if worker.idle? && worker.spent?
+      retire(warm_now: false) if worker.idle? && worker.spent?
     end
 
     # A worker's stdout closed. Whoever was waiting is told by the code
@@ -467,12 +479,18 @@ module Iyi::Lsp
     # does on purpose, and a retirement a second later would otherwise
     # have taken the editor down with an exception where before there was
     # one warm process that needed nothing from the disk.
-    private def retire : Nil
+    #
+    # A retirement on the memory bound happens between two requests, with
+    # the next one likely already on the wire: its successor is handed the
+    # buffers now and warmed at the next quiet (`@warm_pending`), because
+    # a warm-up sent first is a compile the next request waits behind -
+    # 0.8 s for an unchanged workspace pull that compiles nothing.
+    private def retire(warm_now : Bool = true) : Nil
       return unless old = @worker
       return unless successor = spawn_worker
       @worker = successor
       stop(old)
-      hand_over(successor)
+      hand_over(successor, warm_now)
     end
 
     # A worker, or nil if this binary can no longer be started.
@@ -502,7 +520,7 @@ module Iyi::Lsp
     # The handshake, then the buffers, then the file the person is in.
     # The replayed frames are answered to nobody: their ids are not
     # outstanding, so `answer` drops them.
-    private def hand_over(worker : Worker) : Nil
+    private def hand_over(worker : Worker, warm_now : Bool = true) : Nil
       if frame = @initialize_frame
         write_frame(worker, frame)
       end
@@ -510,7 +528,11 @@ module Iyi::Lsp
         write_frame(worker, frame)
       end
       adopt(worker)
-      warm(worker)
+      if warm_now
+        warm(worker)
+      else
+        @warm_pending = true
+      end
     end
 
     # Hand over the open buffers without asking for a verdict. A replayed

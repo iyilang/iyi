@@ -348,13 +348,19 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # package resolves against that package's own checkout only — found or
   # refused, never passed along to the program's roots, because a
   # dependency reaching the consumer's modules by name collision is the
-  # accident isolation exists to prevent. Importing a package's bare
-  # prefix means its root module, the file named after the last segment.
+  # accident isolation exists to prevent. The one exception is iyi's own
+  # standard library, which is nobody's module: a package's `import
+  # std/file` answered "has no module 'std/file'", so a package could not
+  # use the library it was written against. Answered nil here, it
+  # resolves the way a program's does, on `IYI_PATH` alone
+  # (`resolve_import`). Importing a package's bare prefix means its root
+  # module, the file named after the last segment.
   private def resolve_package(path : String) : {String, String, String, String}?
     if (current = @iyi_package_stack.last?) && !path.includes?('.')
       prefix, checkout = current
       candidate = File.join(checkout, "#{path}.iyi")
       return {candidate, prefix, path, checkout} if File.file?(candidate)
+      return nil if iyi_std_module?(path)
       raise_at_import "package '#{prefix}' has no module '#{path}': " \
                       "`#{path}.iyi` is not in its checkout at #{checkout}"
     end
@@ -398,7 +404,12 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   private def resolve_import(path : String) : String?
     candidates = [] of String
 
-    if root = project_root
+    # Inside a package only `IYI_PATH` is asked: what reaches here from
+    # there is iyi's standard library (`resolve_package`), and a module of
+    # the same name in the consuming project is not it.
+    inside_package = !@iyi_package_stack.empty?
+
+    if !inside_package && (root = project_root)
       candidates << File.join(root, "#{path}.iyi")
       candidates << File.join(root, "#{path}.cr")
     end
@@ -408,7 +419,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # or a migrated module built on its own — resolves `import app/formal`
     # the way a build from the project root would. After the entry's
     # directory, never instead of it.
-    if header_root = @program.iyi_header_root
+    if !inside_package && (header_root = @program.iyi_header_root)
       candidates << File.join(header_root, "#{path}.iyi")
       candidates << File.join(header_root, "#{path}.cr")
     end
@@ -433,6 +444,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     posix = ::Path[filename].to_posix.to_s
     return false unless index = posix.rindex("/std/")
     File.file?(File.join(posix[0, index], "iyi", "prelude.iyi"))
+  end
+
+  # iyi: whether *path* names a module of iyi's own standard library on
+  # `IYI_PATH` - `iyi_std_source?` asked of where it would resolve.
+  private def iyi_std_module?(path : String) : Bool
+    @program.iyi_path.entries.any? do |entry|
+      candidate = File.join(entry, "#{path}.iyi")
+      File.file?(candidate) && iyi_std_source?(candidate)
+    end
   end
 
   # The module paths that exist in the directory a missing import named,

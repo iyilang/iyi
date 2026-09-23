@@ -47,7 +47,10 @@ mkrepo() { git init -q "$1" && git -C "$1" config user.email t@t && git -C "$1" 
 mkrepo work/liba
 printf 'module example.test/user/liba\n' > work/liba/iyi.mod
 printf 'module liba\n\npub def greeting : String\n  "hello from liba v1.0.0"\nend\n' > work/liba/liba.iyi
-printf 'module colors\n\npub def favourite : String\n  "green"\nend\n' > work/liba/colors.iyi
+# A package module that uses the standard library: `std/file` is iyi's,
+# found where every program finds it, and never the consuming project's
+# module of the same name (the app below has one that panics).
+printf 'module colors\n\nimport std/file\n\npub def favourite : String\n  File.basename("/paint/green.txt", ".txt")\nend\n' > work/liba/colors.iyi
 git -C work/liba add -A && git -C work/liba commit -qm one && git -C work/liba tag v1.0.0
 # `-i.bak` + rm: BSD sed demands the suffix GNU makes optional, and the bare
 # form silently mangled this edit on darwin — no tag, and the gate lied red.
@@ -63,7 +66,8 @@ mkdir -p mirror/example.test/user
 git clone -q --bare work/liba mirror/example.test/user/liba
 git clone -q --bare work/libb mirror/example.test/user/libb
 
-mkdir -p app
+mkdir -p app/std
+printf 'module std/file\n\nraise "the consuming project'"'"'s std/file was loaded for a package"\n' > app/std/file.iyi
 printf 'module example.test/user/app\nrequire example.test/user/liba v1.0.0\nrequire example.test/user/libb v1.0.0\n' > app/iyi.mod
 cat > app/main.iyi <<'IYI'
 import example.test/user/liba

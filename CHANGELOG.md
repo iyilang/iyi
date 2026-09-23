@@ -265,6 +265,18 @@
 
 ### Fixed
 
+- **A package could not import the standard library: "package '...'
+  has no module 'std/file'".** A short import written inside a package
+  resolves against the package's own checkout and nothing else, so it
+  cannot reach the consuming project's modules by a name they share; and
+  `std/file` is not in any package's checkout. iyi's standard library is
+  nobody's module: a package's `std/...` import that its checkout does
+  not have resolves on `IYI_PATH`, as a program's does, and never
+  against the consuming project, whose own `std/file.iyi` the package
+  still does not see (found in iyi-web, which was copied into `lib/`
+  instead of required). `bench/packages_resolve.sh`'s fixture package
+  imports `std/file` beside an app that has a `std/file` of its own.
+
 - **A block that names a constant written further down the file did not
   compile: "BUG: __iyi_once is not defined".** A constant read before its
   line is initialised by that first read, through a once-guard codegen

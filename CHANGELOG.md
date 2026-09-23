@@ -241,6 +241,19 @@
 
 ### Fixed
 
+- **On Windows a fiber switch lost the vector registers a call keeps.**
+  The Windows x64 convention keeps xmm6-xmm15 across a call along with
+  the eight integer registers, and a switch is a call — but the switch
+  saved and restored the integer ones only. Whatever the compiler kept
+  in those registers over a `send` or a `receive` came back as the other
+  fiber's: two fibers holding ten doubles each across a channel handoff,
+  in a `--release` build, read the other's in 4,000 checks of 4,000. The
+  switch carries all ten now, and a fresh fiber's first frame has room
+  for them. `bench/concurrency_exercise.iyi` holds the doubles across
+  2,000 switches, and `bench/concurrency_exercise.sh` fails on Windows
+  with the restores taken out of the switch; the Windows job runs it now,
+  with its import floor read off the table with `dumpbin`.
+
 - **On Windows a new object could start with an old object's bytes.**
   The sweep hands a run of dead pages back to the kernel, and the carve
   takes the run up again as fresh memory: an object with a pointer in it
@@ -9446,7 +9459,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,258-line library and nothing else. Every other
+  written against iyi's own 17,290-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

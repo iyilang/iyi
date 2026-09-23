@@ -478,4 +478,59 @@ while round < 3
 end
 puts "a dynamic group kept the general form"
 
+# ── 19. A switch keeps what the calling convention says a call keeps ─────
+#
+# A fiber switch is a call, so every register the platform's convention
+# says survives a call survives it: on Windows x64 that is xmm6-xmm15 as
+# well as the integer ones, and the switch carried the integer ones only.
+# Two fibers hold ten doubles each across every handoff, loaded from
+# memory so the optimiser cannot compute them again afterwards and has to
+# keep them somewhere; in a --release build it kept them in xmm6-xmm15,
+# and 2,000 of the 4,000 checks read the other fiber's.
+def hold_doubles(v : Array(Float64), out_ch : Channel(Int32), in_ch : Channel(Int32), rounds : Int32, first : Bool) : Int32
+  bad = 0
+  round = 0
+  while round < rounds
+    a = v[0]
+    b = v[1]
+    c = v[2]
+    d = v[3]
+    e = v[4]
+    f = v[5]
+    g = v[6]
+    h = v[7]
+    i = v[8]
+    j = v[9]
+    if first
+      out_ch.send(1)
+      in_ch.receive
+    else
+      in_ch.receive
+      out_ch.send(1)
+    end
+    bad = bad + 1 if a != v[0] || b != v[1] || c != v[2] || d != v[3] || e != v[4]
+    bad = bad + 1 if f != v[5] || g != v[6] || h != v[7] || i != v[8] || j != v[9]
+    round = round + 1
+  end
+  bad
+end
+
+mine = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5]
+theirs = [-1.25, -2.25, -3.25, -4.25, -5.25, -6.25, -7.25, -8.25, -9.25, -10.25]
+there = Channel(Int32).new
+back = Channel(Int32).new
+changed = 0
+group do |g|
+  g.spawn do
+    changed = changed + hold_doubles(mine, there, back, 1000, true)
+    0
+  end
+  g.spawn do
+    changed = changed + hold_doubles(theirs, back, there, 1000, false)
+    0
+  end
+end
+fail("switch: #{changed} checks found a double changed across a fiber switch") if changed != 0
+puts "ten doubles each, held by two fibers across 2,000 switches, unchanged"
+
 puts "concurrency exercise: every property held"

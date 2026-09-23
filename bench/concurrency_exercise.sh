@@ -13,7 +13,9 @@
 #      said not to.
 #   2. The binary keeps the dependency floor (III.9): on Linux the runtime
 #      is raw syscalls and must add zero undefined symbols; on darwin the
-#      floor is libSystem and nothing else, held as the exact symbol list.
+#      floor is libSystem and nothing else, held as the exact symbol list;
+#      on Windows it is kernel32 and the C runtime's DLLs, read off the
+#      import table with dumpbin.
 #   3. A deadlocked program — every fiber blocked, nothing to wake one —
 #      exits 1 with the deadlock named, rather than hanging.
 #   4. A group whose spelling would compile sequentially still interleaves:
@@ -21,6 +23,9 @@
 #      sequential imitation by name; this step proves the check *can* fail
 #      by asserting the exercise's own assert is reachable (a wrong
 #      expected order exits 1).
+#   5. On Windows, the switch's xmm6-xmm15 restore taken out of a copy of
+#      the runtime fails the exercise's doubles check by name, in the
+#      --release build that keeps doubles in those registers.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -87,9 +92,54 @@ step "dependency floor: the runtime stays on the platform's own doorway"
 NM=""
 command -v nm >/dev/null 2>&1 && NM=nm
 unmeasured=0
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A PE leaves nothing undefined: what the runtime asks of Windows is the
+    # DLLs the exercise imports, read with the toolchain's own `dumpbin`
+    # (located the way bench/dependency_floor.sh locates it). The runtime's
+    # doorway is kernel32 and the C runtime's DLLs; a socket or entropy
+    # DLL here would be a module the exercise does not import taking one on.
+    DUMPBIN=""
+    if command -v dumpbin >/dev/null 2>&1; then
+      DUMPBIN=dumpbin
+    else
+      vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+      root=""
+      [ -x "$vswhere" ] && root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
+      if [ -n "$root" ]; then
+        for candidate in "$(cygpath -u "$root")"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe; do
+          [ -x "$candidate" ] && DUMPBIN="$candidate" && break
+        done
+      fi
+    fi
+    if [ -z "$DUMPBIN" ]; then
+      echo "no dumpbin here, so the import floor is not measured"
+      unmeasured=$((unmeasured + 1))
+    else
+      dlls="$("$DUMPBIN" -nologo -dependents exercise.exe 2>/dev/null |
+        sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+      if [ -z "$dlls" ]; then
+        echo "dumpbin read no import table out of the exercise, so the floor was not measured"
+        exit 1
+      fi
+      extra="$(printf '%s\n' "$dlls" | grep -v -E '^(kernel32\.dll|vcruntime140\.dll|ucrtbase\.dll|api-ms-win-crt-.*\.dll)$' || true)"
+      if [ -n "$extra" ]; then
+        echo "the runtime moved the Windows floor: the exercise imports $(echo $extra)"
+        exit 1
+      fi
+      echo "  imports: $(echo $dlls)"
+    fi
+    NM=""
+    ;;
+esac
 if [ -z "$NM" ]; then
-  echo "no nm here, so the symbol floor is not measured"
-  unmeasured=$((unmeasured + 1))
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    *)
+      echo "no nm here, so the symbol floor is not measured"
+      unmeasured=$((unmeasured + 1))
+      ;;
+  esac
 else
   case "$(uname -s)" in
     Darwin)
@@ -154,6 +204,43 @@ if [ $? -ne 1 ] || ! grep -q 'FAIL: interleaving' misordered.txt; then
   cat misordered.txt
   exit 1
 fi
+
+# ── 5. Failure proof: the switch keeps xmm6-xmm15, on Windows ────────────
+# Only Windows x64 keeps vector registers across a call among the
+# platforms this runs on - the SysV convention keeps none, and aarch64's
+# d8-d15 are a different arm of the switch - so only there is there a
+# restore to take out. The frame keeps its size, so a fresh fiber still
+# starts; the registers simply come back as whatever the other fiber left.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a switch that drops xmm6-xmm15 is caught"
+    mkdir -p dropped/iyi
+    cp -R "$REPO/src/iyi/." dropped/iyi/
+    awk '/^         movups [0-9]+\(%rsp\), %xmm[0-9]+$/ { found = found + 1; next } { print }
+         END { if (found != 10) exit 3 }' \
+      "$REPO/src/iyi/concurrency.iyi" > dropped/iyi/concurrency.iyi
+    if [ $? -ne 0 ]; then
+      echo "the ten restores this proof removes are not in the switch any more; update the proof"
+      exit 1
+    fi
+    if ! IYI_PATH="$WORK/dropped;$REPO/src" "$IYI" build --release "$REPO/bench/concurrency_exercise.iyi" \
+         -o dropped-exercise > build-dropped.log 2>&1; then
+      echo "the patched runtime did not build:"
+      tail -5 build-dropped.log
+      exit 1
+    fi
+    timeout 60 ./dropped-exercise > dropped.txt 2>&1
+    if [ $? -ne 1 ] || ! grep -q 'FAIL: switch' dropped.txt; then
+      echo "a switch without its xmm restores passed the doubles check, so it checks nothing:"
+      tail -5 dropped.txt
+      exit 1
+    fi
+    echo "  caught: $(grep -m1 'FAIL: switch' dropped.txt)"
+    ;;
+  *)
+    step "failure proof: a switch that drops xmm6-xmm15 is caught: not here, because this platform's calling convention keeps no xmm register across a call"
+    ;;
+esac
 
 echo "workdir $WORK"
 # A summary may not claim more than was measured, so a step whose reader was

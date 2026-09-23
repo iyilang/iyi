@@ -1769,7 +1769,10 @@ jobs:
       # writes: each is path-shaped work, and this is the platform whose
       # paths are the reason to ask. And the collector's reuse check
       # optimised: the exercise loop above runs `iyi run`, and the double
-      # hand-out it catches showed in `--release` builds.
+      # hand-out it catches showed in `--release` builds. And the
+      # concurrency runtime's own gate, whose release arm is the one that
+      # keeps a double in xmm6-xmm15 across a fiber switch, and whose
+      # proof takes the switch's restore of them out.
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -1778,6 +1781,7 @@ jobs:
           bash bench/packages_resolve.sh
           bash bench/migrate_gate.sh
           bash bench/reuse_integrity.sh
+          bash bench/concurrency_exercise.sh
 
       # And the rest of what an editor and an agent are handed. Every
       # sample again from its modules' artifacts alone (R-1), the agent

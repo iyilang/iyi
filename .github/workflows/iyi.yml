@@ -2113,6 +2113,20 @@ jobs:
           python bench/generic_boundary.py
           python bench/rebuild_speed.py
 
+      # Four shards bound as boundaries, fetched with `shards install`,
+      # which needs symbolic links: a Windows machine without Developer
+      # Mode refuses them and a runner, an administrator, makes them. All
+      # four held on a runner (Kemal served, the JWT signed, the chain
+      # bound in order) before they came here. Not `sqlite3_queries.sh`:
+      # the image has no `sqlite3.lib` to link, which Linux installs.
+      - name: Shards bound as boundaries, on Windows
+        shell: bash
+        run: |
+          bash bench/jwt_signs.sh
+          bash bench/bind_chain.sh
+          bash bench/kemal_serves.sh
+          bash bench/shard_serves.sh
+
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
   # program a host can start is wasi-libc's entry stub — which calls

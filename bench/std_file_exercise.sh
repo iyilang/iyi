@@ -53,6 +53,9 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_FILE_SANDBOX="$WORK/sandbox"
+# `File.tempfile` reads TMPDIR first, so the symlink the exercise plants is
+# in the directory the temporary file is made in.
+export TMPDIR="$WORK/sandbox"
 mkdir -p "$WORK/sandbox"
 
 build_and_run() {
@@ -110,6 +113,54 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+# The temporary name made predictable for the exercise's `plant` prefix -
+# all zeros, the name it plants a symlink at - is refused by the exclusive create a hundred times
+# and fails by name; with the create made the old test-then-write as well,
+# the upload goes through the symlink.
+tempfile_broken() { # tempfile_broken <label> <dir> <phrase> <exclusive: yes|no>
+  local label="$1" dir="$2" phrase="$3" exclusive="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$dir/std"
+  if ! EXCLUSIVE="$exclusive" "$PY" - "$REPO/src/std/file.iyi" "$WORK/$dir/std/file.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+old = '      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + temp_token + suffix'
+assert src.count(old) == 1
+src = src.replace(old, old.replace("temp_token", '(prefix == "plant" ? "0000000000000000" : temp_token)'), 1)
+if os.environ["EXCLUSIVE"] == "no":
+    old = "      fd = __iyi_openat(sys_path(path), 1 | 64 | 128 | 0x80000, 384)"
+    assert src.count(old) == 1
+    src = src.replace(old, "      fd = __iyi_openat(sys_path(path), 1 | 64 | 0x80000, 384)", 1)
+open(sys.argv[2], "w").write(src)
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif mkdir -p "$WORK/$dir-sandbox" &&
+       TMPDIR="$WORK/$dir-sandbox" IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/$dir-sandbox" >"$WORK/$dir.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif grep -q "$phrase" "$WORK/$dir.out"; then
+    echo "  $label: caught at \"$phrase\""
+  else
+    echo "  $label: failed, but not at \"$phrase\""
+    tail -3 "$WORK/$dir.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  a planted symlink: not measured here, the exercise plants none on Windows" ;;
+  Linux)
+    tempfile_broken "a predictable temporary name" predictable "a hundred fresh names were all taken" yes
+    tempfile_broken "a predictable name, tested then written" follows "tempfile never answers a planted symlink" no ;;
+  *)
+    tempfile_broken "a predictable temporary name" predictable "a hundred fresh names were all taken" yes ;;
+esac
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"

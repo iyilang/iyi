@@ -248,6 +248,19 @@
 
 ### Fixed
 
+- **`File.tempfile` could be made to write through a planted symlink.**
+  It named the file after the process id and a counter, asked whether
+  the path existed, and wrote to it if not; a symlink placed at the next
+  name in a shared `/tmp` between the question and the write sent the
+  data wherever the link pointed - an upload server's uploads into a file
+  of the attacker's choosing (found in iyi-web, and reproduced). The file
+  is made with an exclusive create now - `O_CREAT | O_EXCL`, `CREATE_NEW`
+  on Windows - which refuses anything at the path, a symlink included,
+  with mode 0600; and its name is sixteen hex digits of the kernel's
+  randomness (`getrandom`, `arc4random_buf`), so it cannot be planted in
+  advance. Windows' `%TEMP%` belongs to its user, and there the create's
+  refusal is the guarantee.
+
 - **A bound library whose code read a file-private class variable did
   not link.** An artifact names the class variables its object code
   reads as `Owner::@@name`, and the consumer emits each global by

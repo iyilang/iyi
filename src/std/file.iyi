@@ -51,6 +51,7 @@ using std/path::{Path}
     fun ftruncate(fd : Int32, length : Int64) : Int32
     fun access(path : UInt8*, mode : Int32) : Int32
     fun utimes(path : UInt8*, times : Void*) : Int32
+    fun arc4random_buf(buffer : Void*, count : UInt64) : Void
   end
 {% elsif flag?(:win32) %}
   # The calls below name this `Std::File::LibKernel32` in full, the way the
@@ -282,6 +283,7 @@ using std/path::{Path}
       SYS_GETCWD     =  79_i64
       SYS_GETPID     =  39_i64
       SYS_UTIMENSAT  = 280_i64
+      SYS_GETRANDOM  = 318_i64
     {% else %}
       SYS_NEWFSTATAT =  79_i64
       SYS_FSTAT      =  80_i64
@@ -297,6 +299,7 @@ using std/path::{Path}
       SYS_GETCWD     =  17_i64
       SYS_GETPID     = 172_i64
       SYS_UTIMENSAT  =  88_i64
+      SYS_GETRANDOM  = 278_i64
     {% end %}
 
     def self.stat(path : UInt8*, buf : Stat*) : Int32
@@ -1353,8 +1356,21 @@ class ::File
     ni == nlen
   end
 
-  @@temp_counter = 1000_u64
+  @@temp_counter = 0_u64
 
+  # A new, empty file in the temporary directory, and its path.
+  #
+  # Made with an exclusive create - `O_CREAT | O_EXCL`, `CREATE_NEW` on
+  # Windows - which fails when anything is at the path, a symlink
+  # included, rather than asked whether something is there and written
+  # after. The name was the process id and a counter, and the file was
+  # written wherever the path led if nothing was there when asked: a
+  # symlink planted at the next name in a shared `/tmp` between the
+  # question and the write sent an upload wherever its owner pointed it.
+  # The name is sixteen hex digits of the system's randomness now, so it
+  # cannot be planted in advance either; Windows' `%TEMP%` belongs to the
+  # user, and there the create's refusal is the guarantee and the name
+  # needs only to be new. The file is the owner's alone, mode 0600.
   def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
     # Where the environment says, and the platform's own default only when
     # it says nothing — the same order `Dir.tempdir` reads, because the two
@@ -1383,21 +1399,81 @@ class ::File
         tmpdir = "/tmp"
       {% end %}
     end
-    pid = 0_i64
-    {% if flag?(:linux) %}
-      pid = Std::File::LibC.sys(Std::File::LibC::SYS_GETPID, 0_i64, 0_i64, 0_i64)
-    {% end %}
-    i = 0
-    while i < 1000
-      @@temp_counter = @@temp_counter + 1_u64
-      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + pid.to_s + "_" + @@temp_counter.to_s + suffix
-      unless File.exists?(path)
-        File.write(path, "")
-        return path
-      end
-      i = i + 1
+    attempt = 0
+    while attempt < 100
+      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + temp_token + suffix
+      return path if create_new(path)
+      attempt = attempt + 1
     end
-    raise "Cannot create tempfile"
+    raise "Cannot create tempfile in #{tmpdir}: a hundred fresh names were all taken"
+  end
+
+  # Sixteen hex digits nobody could have guessed: the kernel's randomness
+  # where a call reaches it without another library, the clock and a
+  # counter where the create alone is the guarantee.
+  private def self.temp_token : String
+    word = 0_u64
+    {% if flag?(:linux) %}
+      got = Std::File::LibC.sys(Std::File::LibC::SYS_GETRANDOM, pointerof(word).address.to_i64, 8_i64, 0_i64)
+      raise "Cannot create tempfile: getrandom failed (#{got})" if got != 8_i64
+    {% elsif flag?(:darwin) %}
+      Std::File::LibC.arc4random_buf(pointerof(word).as(Void*), 8_u64)
+    {% elsif flag?(:win32) %}
+      @@temp_counter = @@temp_counter &+ 1_u64
+      now = 0_i64
+      Std::File::LibKernel32.GetSystemTimeAsFileTime(pointerof(now))
+      word = (now.unsafe_to_u64 ^ @@temp_counter.unsafe_shl(40_u64)) &* 0x9E3779B97F4A7C15_u64
+    {% else %}
+      @@temp_counter = @@temp_counter &+ 1_u64
+      word = @@temp_counter &* 0x9E3779B97F4A7C15_u64
+    {% end %}
+    digits = "0123456789abcdef"
+    String.new(16) do |buffer|
+      index = 15
+      while index >= 0
+        buffer[index] = digits.to_unsafe[(word & 15_u64).to_i32]
+        word = word.unsafe_shr(4_u64)
+        index = index - 1
+      end
+    end
+  end
+
+  # True when the file was made here and now; false when something was
+  # already at the path, whatever it is; a panic for any other refusal.
+  private def self.create_new(path : String) : Bool
+    {% if flag?(:linux) %}
+      # O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode 0600. EEXIST is 17.
+      fd = __iyi_openat(sys_path(path), 1 | 64 | 128 | 0x80000, 384)
+      return false if fd == -17_i64
+      raise "Cannot create tempfile #{path}: error #{-fd}" if fd < 0
+      __iyi_close(fd)
+      true
+    {% elsif flag?(:darwin) %}
+      # O_WRONLY | O_CREAT | O_EXCL, mode 0600.
+      fd = ::LibC.open(sys_path(path), 1 | 0x200 | 0x800, 384)
+      if fd < 0
+        return false if symlink?(path) || exists?(path)
+        raise "Cannot create tempfile #{path}"
+      end
+      ::LibC.close(fd)
+      true
+    {% elsif flag?(:win32) %}
+      # GENERIC_WRITE, CREATE_NEW (1), FILE_ATTRIBUTE_NORMAL.
+      # ERROR_FILE_EXISTS is 80, ERROR_ALREADY_EXISTS 183.
+      handle = Std::File::LibKernel32.CreateFileW(__iyi_wide_path(sys_path(path)), 0x40000000, 0x7,
+        Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        code = Std::File::LibKernel32.GetLastError
+        return false if code == 80 || code == 183
+        raise "Cannot create tempfile #{path}: #{win_error}"
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      true
+    {% else %}
+      return false if exists?(path)
+      File.write(path, "")
+      true
+    {% end %}
   end
 
   def self.tempfile(prefix : String = "tmp", suffix : String = "", &block : String -> Nil) : Nil

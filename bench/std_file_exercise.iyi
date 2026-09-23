@@ -206,6 +206,25 @@ tb = File.tempfile("std_file_ex")
 assert_true ta != tb, "tempfile names differ"
 File.delete(ta)
 File.delete(tb)
+{% unless flag?(:win32) %}
+  # A symlink planted where the next temporary file would go, pointing at
+  # a file of someone else's: the temporary file is made somewhere else,
+  # alone, and the target is left as it was.
+  tmp = Program.env("TMPDIR") || "/tmp"
+  victim = sandbox + "/std_file_ex_victim.txt"
+  File.write(victim, "kept")
+  planted = tmp + "/plant_0000000000000000"
+  File.delete(planted) if File.symlink?(planted) || File.exists?(planted)
+  File.symlink(victim, planted)
+  made = File.tempfile("plant")
+  assert_true !File.symlink?(made), "tempfile never answers a planted symlink"
+  File.write(made, "upload")
+  assert_str "kept", File.read(victim), "a planted symlink's target is left alone"
+  assert_true (File.info(made).permissions.value & 0o777) == 0o600, "a temporary file is its owner's alone"
+  File.delete(made)
+  File.delete(planted)
+  File.delete(victim)
+{% end %}
 puts "  links, rename, and path helpers verified"
 
 puts "\n== delete"

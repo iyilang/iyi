@@ -459,13 +459,33 @@ module Iyi
         owner_name, separator, name = qualified.partition("::@@")
         next if separator.empty?
 
-        owner = iyi_lookup_class_var_owner(owner_name)
-        next unless owner.is_a?(ClassVarContainer)
+        # A type private to a file prints without its file, so the name that
+        # travelled is the plain one and the program's own namespace does not
+        # hold it: Crystal's Windows `ConsoleUtils` is private to
+        # `file_descriptor.cr`, and a bound `JSON` whose object code read
+        # `@@remaining_unit` left that global undefined on Windows alone,
+        # the one platform whose library has the module. Every file that
+        # holds a type of that name is asked; a global defined and not read
+        # costs its bytes and nothing else.
+        owners = [] of Type
+        if owner = iyi_lookup_class_var_owner(owner_name, @program)
+          owners << owner
+        else
+          @program.file_modules.each_value do |file_module|
+            if owner = iyi_lookup_class_var_owner(owner_name, file_module)
+              owners << owner
+            end
+          end
+        end
 
-        class_var = owner.class_vars?.try &.[]?("@@#{name}")
-        next unless class_var && class_var.type?
+        owners.each do |owner|
+          next unless owner.is_a?(ClassVarContainer)
 
-        iyi_define_class_var class_var, lazy
+          class_var = owner.class_vars?.try &.[]?("@@#{name}")
+          next unless class_var && class_var.type?
+
+          iyi_define_class_var class_var, lazy
+        end
       end
     end
 
@@ -529,8 +549,7 @@ module Iyi
     # Own rather than looked up: `lookup_class_var?` walks ancestors and copies
     # what it finds onto the asking type, which would answer for a name this
     # program does not actually own.
-    private def iyi_lookup_class_var_owner(qualified : String) : Type?
-      found : Type = @program
+    private def iyi_lookup_class_var_owner(qualified : String, found : Type) : Type?
       qualified.split("::").each do |part|
         next if part.empty?
         types = found.types?

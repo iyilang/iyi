@@ -248,6 +248,18 @@
 
 ### Fixed
 
+- **A bound library whose code read a file-private class variable did
+  not link.** An artifact names the class variables its object code
+  reads as `Owner::@@name`, and the consumer emits each global by
+  looking the owner up from the program's top; a type private to a file
+  prints without its file, so it was never found and its global never
+  emitted. On Windows `JSON`, `INI` and `XML` bound from Crystal's
+  library each read `ConsoleUtils::@@remaining_unit` — `ConsoleUtils` is
+  private to Windows' `file_descriptor.cr` — and every artifact arm of
+  `bench/library_boundaries.sh` failed on `LNK2019` there. The owner is
+  looked for in every file's private namespace when the program's own
+  has no such name; the gate runs in the Windows job now.
+
 - **A workspace pull after the language server replaced its worker
   compiled every file again.** The `resultId` of each file folded
   `String#hash` and `Time#hash`, which are seeded per process, and the

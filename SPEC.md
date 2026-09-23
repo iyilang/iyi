@@ -299,7 +299,7 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**3,494 lines** of the 17,446, measured by `bench/doc_numbers.py` as
+**3,509 lines** of the 17,446, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 1,508 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
@@ -441,7 +441,7 @@ Windows cannot be spelled without `kernel32`, a path without UTF-16, a
 128-bit divide without the four functions LLVM emits a call to. So the
 rule: the figure excludes the arms behind `flag?(:win32)`,
 `flag?(:linux)`, `flag?(:darwin)` and `flag?(:wasm32)`, symmetrically,
-and the library is **3,494** of 3,734 with 240 to spare.
+and the library is **3,509** of 3,734 with 225 to spare.
 
 What makes it the honest reading rather than the convenient one is what
 3,734 is measured against. Crystal 0.1.0's core did not carry its own

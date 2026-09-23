@@ -207,17 +207,17 @@ module Iyi
     # The spellings other languages give the methods this prelude has. The
     # sentence they drew was the library's size rule — true, and silent
     # about the name three characters away.
-    "length"   => "`size` is the spelling here: `xs.size`, `s.size`.",
-    "filter"   => "`select` is the spelling here: `xs.select { |x| x > 1 }`.",
-    "append"   => "`<<` appends here: `xs << 2`, and it answers the collection.",
-    "push"     => "`<<` appends here: `xs << 2`, and it answers the collection.",
+    "length" => "`size` is the spelling here: `xs.size`, `s.size`.",
+    "filter" => "`select` is the spelling here: `xs.select { |x| x > 1 }`.",
+    "append" => "`<<` appends here: `xs << 2`, and it answers the collection.",
+    "push"   => "`<<` appends here: `xs << 2`, and it answers the collection.",
     # Base64's names in the other library, for what this one calls plainly:
     # `encode` already writes no line breaks, and `decode` answers text.
     "strict_encode" => "`Base64.encode` writes no line breaks here - it is the other library's `strict_encode` (`import std/base64`).",
     "strict_decode" => "`Base64.decode` is the one decoder here, and it refuses what `strict_decode` refuses (`import std/base64`).",
     "decode_string" => "`Base64.decode` answers a String here - the other library's `decode_string` (`import std/base64`).",
-    "toString" => "`to_s` is the spelling here: `1.to_s`.",
-    "parseInt" => "`to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
+    "toString"      => "`to_s` is the spelling here: `1.to_s`.",
+    "parseInt"      => "`to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
     # `Array#sum` asks the element type for its zero, because an empty
     # array has no element to ask. A type that is not a number has none,
     # and the sentence a person is missing is what to use instead.

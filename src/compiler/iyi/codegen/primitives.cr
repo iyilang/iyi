@@ -1348,7 +1348,9 @@ class Iyi::CodeGenVisitor
   end
 
   def atomic_ordering_get_const(node, llvm_arg)
-    node.raise "atomic ordering must be a constant" unless llvm_arg.constant?
+    # iyi: a symbol is decided by its name, and in a unit its value is a load
+    # (`iyi_symbol_value`), which is no less constant for being one.
+    node.raise "atomic ordering must be a constant" unless llvm_arg.constant? || node.is_a?(SymbolLiteral)
 
     if node.type.implements?(@program.enum) && llvm_arg.type.kind.integer? && llvm_arg.type.int_width == 32
       # any `Int32` enum will do, it is up to `Atomic::Ops` to use appropriate
@@ -1367,7 +1369,7 @@ class Iyi::CodeGenVisitor
   end
 
   def atomicrwm_bin_op_get_const(node, llvm_arg)
-    node.raise "atomic rwm bin op must be a constant" unless llvm_arg.constant?
+    node.raise "atomic rwm bin op must be a constant" unless llvm_arg.constant? || node.is_a?(SymbolLiteral)
 
     if node.type.implements?(@program.enum) && llvm_arg.type.kind.integer? && llvm_arg.type.int_width == 32
       LLVM::AtomicRMWBinOp.new(llvm_arg.const_int_get_sext_value.to_i32!)

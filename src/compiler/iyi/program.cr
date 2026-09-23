@@ -541,6 +541,13 @@ module Iyi
     # Recorded only while writing artifacts.
     getter iyi_unit_match_types = {} of String => Set(Type)
 
+    # iyi: the symbols each object-code unit reads the value of, by unit name
+    # (SPEC.md IV.1g). `iyi_unit_type_ids`' question asked of a symbol: the
+    # numbering is the program's, so a unit reads the value from a global the
+    # consuming program defines, and the consumer has to know the name to
+    # give it a number. Filled only while writing artifacts.
+    getter iyi_unit_symbol_literals = {} of String => Set(String)
+
     # iyi: a def's body as it was written, by the location it was written at
     # (SPEC.md IV.1g).
     #

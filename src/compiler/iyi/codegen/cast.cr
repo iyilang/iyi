@@ -510,8 +510,7 @@ class Iyi::CodeGenVisitor
     # value has the value of the symbol inside the symbol table,
     # so we first get which symbol name that is, and then match
     # it to one of the enum members
-    index = value.const_int_get_sext_value
-    symbol = @symbols_by_index[index].underscore
+    symbol = iyi_symbol_name(value).underscore
 
     to_type.types.each do |name, value|
       if name.underscore == symbol

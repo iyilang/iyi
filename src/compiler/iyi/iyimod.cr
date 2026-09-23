@@ -56,7 +56,7 @@ module Iyi::IyiMod
   # v52: a signature carries the annotations written above it, because
   # `@[Primitive]` is a declaration a module makes and not one the compiler
   # made — see `Signature#annotations`.
-  FORMAT_VERSION = 53_u32
+  FORMAT_VERSION = 54_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -173,6 +173,12 @@ module Iyi::IyiMod
     # A file *added* to a shard that requires by glob moves no recorded
     # digest and is not seen. What is recorded is what was read.
     Inputs = 20
+
+    # iyi: the symbols this module's object code reads the value of, by name.
+    # `TypeIds` asked of a symbol: two programs number their symbols in the
+    # order each met them, so a unit reads the number from a global the
+    # consumer defines, and the consumer can number only a name it has.
+    SymbolLiterals = 21
 
     # iyi: the pointer maps of the types this module owns, one `TypeLayout`
     # per type, keyed in the file by the type's name. Same reason as
@@ -1090,6 +1096,10 @@ module Iyi::IyiMod
     # Settable alongside `object_code`, and for the same reason.
     property match_types : Array(String)
 
+    # The symbols this module's object code reads the value of, by name. See
+    # `Section::SymbolLiterals`. Settable alongside `object_code`.
+    property symbol_literals : Array(String)
+
     # The symbols this module's object code defines.
     #
     # A consumer compiles what an artifact does not define, and this is the
@@ -1264,7 +1274,7 @@ module Iyi::IyiMod
                    @top_level = [] of Signature, @top_level_funs = [] of String,
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
-                   @inputs = [] of String)
+                   @inputs = [] of String, @symbol_literals = [] of String)
     end
   end
 
@@ -1346,6 +1356,10 @@ module Iyi::IyiMod
 
     unless artifact.match_types.empty?
       sections << {Section::MatchTypes, encode_match_types(artifact)}
+    end
+
+    unless artifact.symbol_literals.empty?
+      sections << {Section::SymbolLiterals, encode_strings(artifact.symbol_literals)}
     end
 
     unless artifact.symbols.empty?
@@ -1536,6 +1550,7 @@ module Iyi::IyiMod
       regexes = [] of RegexConst
       class_vars = [] of ClassVarRef
       match_types = [] of String
+      symbol_literals = [] of String
       symbols = [] of String
       libs = [] of String
       top_level = [] of Signature
@@ -1561,27 +1576,28 @@ module Iyi::IyiMod
         file.read_fully?(payload) || raise Error.new("#{path} ends inside a section")
         verify(path, section, payload, sum)
         case section
-        when Section::Header       then header = decode_header(payload)
-        when Section::Imports      then imports = decode_imports(payload)
-        when Section::Exports      then exports = decode_exports(payload)
-        when Section::ObjectCode   then object_code = decode_object_code(payload)
-        when Section::MonoBodies   then mono_bodies = decode_mono_bodies(payload)
-        when Section::MacroBodies  then macro_bodies = decode_macro_bodies(payload)
-        when Section::Initialiser  then initialiser = String.new(payload)
-        when Section::TypeIds      then type_ids = decode_type_ids(payload)
-        when Section::Constants    then constants = decode_constants(payload)
-        when Section::Regexes      then regexes = decode_regexes(payload)
-        when Section::ClassVars    then class_vars = decode_class_vars(payload)
-        when Section::MatchTypes   then match_types = decode_match_types(payload)
-        when Section::Symbols      then symbols = decode_symbols(payload)
-        when Section::Libs         then libs = decode_libs(payload)
-        when Section::TopLevel     then top_level = decode_top_level(payload)
-        when Section::TopLevelFuns then top_level_funs = decode_strings(payload)
-        when Section::Reopened     then reopened = decode_reopened(payload)
-        when Section::Requires     then requires = decode_requires(payload)
-        when Section::Hashes       then hashes = decode_hashes(payload)
-        when Section::Layouts      then layouts = decode_layouts(payload)
-        when Section::Inputs       then inputs = decode_strings(payload)
+        when Section::Header         then header = decode_header(payload)
+        when Section::Imports        then imports = decode_imports(payload)
+        when Section::Exports        then exports = decode_exports(payload)
+        when Section::ObjectCode     then object_code = decode_object_code(payload)
+        when Section::MonoBodies     then mono_bodies = decode_mono_bodies(payload)
+        when Section::MacroBodies    then macro_bodies = decode_macro_bodies(payload)
+        when Section::Initialiser    then initialiser = String.new(payload)
+        when Section::TypeIds        then type_ids = decode_type_ids(payload)
+        when Section::Constants      then constants = decode_constants(payload)
+        when Section::Regexes        then regexes = decode_regexes(payload)
+        when Section::ClassVars      then class_vars = decode_class_vars(payload)
+        when Section::MatchTypes     then match_types = decode_match_types(payload)
+        when Section::Symbols        then symbols = decode_symbols(payload)
+        when Section::Libs           then libs = decode_libs(payload)
+        when Section::TopLevel       then top_level = decode_top_level(payload)
+        when Section::TopLevelFuns   then top_level_funs = decode_strings(payload)
+        when Section::Reopened       then reopened = decode_reopened(payload)
+        when Section::Requires       then requires = decode_requires(payload)
+        when Section::Hashes         then hashes = decode_hashes(payload)
+        when Section::Layouts        then layouts = decode_layouts(payload)
+        when Section::Inputs         then inputs = decode_strings(payload)
+        when Section::SymbolLiterals then symbol_literals = decode_strings(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1598,7 +1614,7 @@ module Iyi::IyiMod
         hashes, constants, macro_bodies, requires, header[:crystal_library],
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
-        top_level, top_level_funs, reopened, libs, layouts, inputs)
+        top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals)
     end
   rescue ex : Error
     raise ex
@@ -1780,6 +1796,12 @@ module Iyi::IyiMod
     unless match_types.empty?
       io.puts "match types"
       match_types.each { |name| io.puts "  #{name}" }
+    end
+
+    symbol_literals = artifact.symbol_literals
+    unless symbol_literals.empty?
+      io.puts "symbol literals"
+      symbol_literals.each { |name| io.puts "  :#{name}" }
     end
 
     class_vars = artifact.class_vars

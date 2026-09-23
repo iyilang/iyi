@@ -746,6 +746,7 @@ module Iyi
       artifact.regexes = collect_iyi_regexes(program, artifact.constants)
       artifact.class_vars = collect_iyi_unit_class_vars(program, names)
       artifact.match_types = collect_iyi_match_types(program, names)
+      artifact.symbol_literals = collect_iyi_symbol_literals(program, names)
       artifact.symbols = collect_iyi_symbols(program, names)
       artifact.libs = collect_iyi_libs(program, names)
       artifact.layouts = collect_iyi_layouts(program, type)
@@ -886,6 +887,7 @@ module Iyi
         artifact.regexes = collect_iyi_regexes(program, artifact.constants)
         artifact.class_vars = collect_iyi_unit_class_vars(program, unit_names)
         artifact.match_types = collect_iyi_match_types(program, unit_names)
+        artifact.symbol_literals = collect_iyi_symbol_literals(program, unit_names)
         artifact.symbols = collect_iyi_symbols(program, carried)
         artifact.libs = collect_iyi_libs(program, unit_names)
         # With the object code, because it is about the object code's types:
@@ -1352,6 +1354,18 @@ module Iyi
       names = Set(String).new
       unit_names.each do |unit_name|
         program.iyi_unit_symbols[unit_name]?.try &.each { |symbol| names << symbol }
+      end
+      names.to_a.sort!
+    end
+
+    # iyi: the symbols the module's object code reads the value of, by name,
+    # for `SymbolLiterals` (SPEC.md IV.1g). `collect_iyi_type_ids`' question
+    # asked of a symbol, and sorted for the same reason.
+    private def collect_iyi_symbol_literals(program : Program,
+                                            unit_names : Array(String)) : Array(String)
+      names = Set(String).new
+      unit_names.each do |unit_name|
+        program.iyi_unit_symbol_literals[unit_name]?.try &.each { |name| names << name }
       end
       names.to_a.sort!
     end

@@ -958,6 +958,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     number_iyi_artifact_types node, artifact
     resolve_iyi_artifact_match_types node, artifact
 
+    # The symbols its object code reads, which this program numbers and
+    # defines like its own (`iyi_define_all_symbol_values`): one the unit
+    # alone spells is one nothing else here would have met.
+    unless artifact.object_code.empty?
+      artifact.symbol_literals.each { |name| @program.symbols.add name }
+    end
+
     # The top-level text joins the tree as well, and a `fun` is why it has to.
     # A `def` is emitted when something calls it, so accepting it above was
     # enough; a `fun` is emitted where it is *written*, and a node the codegen

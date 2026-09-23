@@ -81,5 +81,95 @@ for sample in $SAMPLES; do
   fi
 done
 
+# Symbols, numbered by the program that links. A symbol is its index in the
+# program's table, and each build numbers its symbols in the order it meets
+# them: the producer below meets `:apple` and `:carrot` first, the consumer
+# meets four others before them. A unit that baked the producer's numbers in
+# compared the consumer's `:apple` against the producer's number for it, so
+# `webapp` above counted no before-filter once the prelude met one symbol
+# more. The module decides by `case`, autocasts a symbol to an enum member,
+# prints one, and answers `:carrot`, a symbol the consumer never writes - so
+# only the artifact can tell the consumer it exists.
+SYM="$WORK/symbols"
+mkdir -p "$SYM/tags"
+cat > "$SYM/tags/kind.iyi" <<'IYI'
+module tags/kind
+
+pub enum Colour
+  Red
+  Green
+end
+
+pub def kind_of(tag : Symbol) : String
+  case tag
+  when :apple  then "fruit"
+  when :carrot then "vegetable"
+  else              "unknown"
+  end
+end
+
+pub def favourite : Symbol
+  :carrot
+end
+
+pub def colour_name(colour : Colour) : String
+  colour == Colour::Green ? "green" : "red"
+end
+
+pub def green_by_symbol : String
+  colour_name(:green)
+end
+
+pub def tag_text(tag : Symbol) : String
+  tag.to_s
+end
+IYI
+cat > "$SYM/producer.iyi" <<'IYI'
+module producer
+
+import tags/kind
+using tags/kind
+
+puts kind_of(:apple)
+puts favourite
+puts tag_text(:apple)
+puts green_by_symbol
+IYI
+cat > "$SYM/consumer.iyi" <<'IYI'
+module consumer
+
+import tags/kind
+using tags/kind
+
+others = [:zebra, :yak, :walrus, :vole]
+puts others.size
+puts kind_of(:apple)
+puts kind_of(:zebra)
+puts kind_of(favourite)
+puts favourite.to_s
+puts favourite == favourite
+puts tag_text(:vole)
+puts green_by_symbol
+IYI
+printf '4\nfruit\nunknown\nvegetable\ncarrot\ntrue\nvole\ngreen\n' > "$SYM/expected.txt"
+if ! (cd "$SYM" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$SYM/emit.log" 2>&1; then
+  echo "symbols: writing artifacts failed"
+  tail -5 "$SYM/emit.log"
+  status=1
+else
+  rm -rf "$SYM/tags"
+  if ! (cd "$SYM" && "$IYI" build --use-iyimod mods -o consumer consumer.iyi) > "$SYM/use.log" 2>&1; then
+    echo "symbols: building the consumer from artifacts failed"
+    tail -12 "$SYM/use.log"
+    status=1
+  elif ! "$SYM/consumer" > "$SYM/consumer.txt" 2>&1 || ! cmp -s "$SYM/expected.txt" "$SYM/consumer.txt"; then
+    echo "symbols: the consumer, numbering its own, read the module's symbols wrong"
+    diff "$SYM/expected.txt" "$SYM/consumer.txt" | head -12
+    status=1
+  else
+    echo "symbols: numbered by the consumer, read right by the module's units"
+  fi
+fi
+
 echo "workdir $WORK"
 exit $status

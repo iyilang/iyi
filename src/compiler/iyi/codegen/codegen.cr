@@ -689,6 +689,7 @@ module Iyi
 
       unless @program.iyi_artifact_objects.empty?
         iyi_define_all_type_ids
+        iyi_define_all_symbol_values
         iyi_define_all_match_funs
         iyi_define_all_artifact_const_reads
       end
@@ -839,7 +840,7 @@ module Iyi
     end
 
     def visit(node : SymbolLiteral)
-      @last = int(@symbols[node.value])
+      @last = iyi_symbol_value(node.value)
       false
     end
 

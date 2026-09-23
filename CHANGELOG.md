@@ -345,6 +345,19 @@
   `compiler_spec`'s `-Dgc_none` examples and `bench/arena_exercise.sh`'s
   bump-pointer arm are what failed, on every platform.
 
+- A symbol read in a module's object code means what it means in the program
+  that links it. Symbols are numbered per build, in the order each build meets
+  them, and an artifact's units had the producer's numbers baked in: a consumer
+  whose numbering differed compared `:before` against another symbol's number,
+  so `samples/webapp.iyi` built from its artifacts counted no before-filter,
+  and a symbol the unit returned printed as another's name. A unit now reads a
+  symbol's value from a global the linking program defines, as it reads a type
+  id, and the artifact carries the names (`SymbolLiterals`, format v54) so the
+  consumer numbers even one only the unit spells. `bench/samples_roundtrip.sh`
+  now builds a consumer that meets its symbols in another order than the
+  producer, and checks `case`, an autocast to an enum, `to_s`, and a symbol
+  only the module writes.
+
 - **A package could not import the standard library: "package '...'
   has no module 'std/file'".** A short import written inside a package
   resolves against the package's own checkout and nothing else, so it

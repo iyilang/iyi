@@ -496,7 +496,12 @@
   POSIX `make` and began by deleting `.build/iyi`, says why it does not
   run on Windows: the compiler there is built without a collector by
   default. A second Windows job, `windows-std`, runs these drivers and
-  `bench/std_exercise.sh`.
+  `bench/std_exercise.sh`. The lazy sweep took one proof out of
+  Windows' reach: `reuse_integrity.sh`'s straddler proof, the line that
+  keeps a cold run's lowest chunk off the released page taken out,
+  failed 10 runs of 10 under the pause sweep and passed 20 of 20 under
+  the lazy one, which has no helper threads there. Linux, whose sweep
+  has them, still runs it; Windows says so and runs the other.
 
 - **Seven standard-library gates failed on Windows, and none for the
   library's sake.** `bench/std_exercise.sh` had never run there. The

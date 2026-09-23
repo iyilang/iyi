@@ -66,13 +66,13 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer; do
+for phrase in connect_accept message_exchange short_read closed_peer ipv6; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read and closed_peer all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer and ipv6 all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -190,7 +190,13 @@ case "$(uname -s)" in
 esac
 
 # 7. The poller keeping one waiter per fd, as it did: the reading fiber
-#    and the writing fiber cannot both wait on the socket.
+#    and the writing fiber cannot both wait on the socket. The registry is
+#    the readiness pollers'; Windows' completion port parks each posted
+#    operation on its own OVERLAPPED and has no such rule to break.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  one waiter per fd: epoll's and kqueue's rule, proved there" ;;
+  *)
 mkdir -p "$WORK/onewaiter/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/onewaiter/iyi/"
 awk '{ sub(/raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd" if others & direction != 0/, "raise \"two fibers waiting on one fd\" if others != 0"); print }' \
@@ -211,7 +217,14 @@ else
   echo "  one waiter per fd: failed, but not at the second waiter"
   tail -2 "$WORK/onewaiter/out" | sed 's/^/    /'
   status=1
-fi
+fi ;;
+esac
+
+# 8. An IPv6 address written without its `::`, or a family forgotten.
+prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
+  '{ sub(/best_size = 1$/, "best_size = 8"); print }'
+prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to ::1:0" \
+  '{ sub(/return \{make_sockaddr_in6\(parse_ipv6\(host\), port\), AF_INET6\}/, "return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET}"); print }'
 
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
@@ -270,8 +283,18 @@ refuses "a host with a leading space, shown inspected" addr_space "cannot resolv
   "IyiSocket.parse_ip(\" 1.2.3.4\").b0"
 refuses "a host with a trailing space, shown inspected" addr_tspace "cannot resolve address: \"1.2.3.4 \"" \
   "IyiSocket.parse_ip(\"1.2.3.4 \").b0"
-refuses "an IPv6 address, named as such" addr_v6 "cannot resolve address: \"::1\": IPv6 is not supported" \
+refuses "an IPv6 address given to the IPv4 parser, named as such" addr_v6 "cannot resolve address: \"::1\": an IPv6 address, which \`parse_ipv6\` reads" \
   "IyiSocket.parse_ip(\"::1\").b0"
+refuses "an IPv6 zone" addr_zone "cannot resolve address: \"fe80::1%eth0\": a zone" \
+  "IyiSocket.parse_ipv6(\"fe80::1%eth0\")"
+refuses "seven IPv6 groups and no gap" addr_seven "7 groups, not eight" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4:5:6:7\")"
+refuses "a gap with eight groups beside it" addr_nine "stands for nothing" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4::5:6:7:8\")"
+refuses "a trailing colon" addr_trailing "a trailing colon" \
+  "IyiSocket.parse_ipv6(\"1::2:\")"
+refuses "a dotted tail past six groups" addr_tail "a dotted tail after more than six groups" \
+  "IyiSocket.parse_ipv6(\"1:2:3:4:5:6:7:1.2.3.4\")"
 
 echo
 echo "== a closed socket says so"
@@ -312,8 +335,8 @@ refuses_after_close "accept after close" closed_accept 'puts l.accept.or_panic.c
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "Sockets: connect, accept, message exchange, short reads, closed peer, and"
-  echo "refused connections all verified, a port and an address are checked before"
+  echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
+  echo "refused connections and IPv6 all verified, a port and an address are checked before"
   echo "they are packed, a closed socket says so, and every check is proved to fail"
   echo "when broken."
 else

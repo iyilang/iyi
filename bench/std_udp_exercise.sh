@@ -155,18 +155,18 @@ refuses "an out-of-range octet" octet_range "cannot resolve address: \"999.1.1.1
   'IyiSocket.parse_ip("999.1.1.1")'
 refuses "an incomplete IPv4 address" incomplete_ip "cannot resolve address: \"1.2.3\"" \
   'IyiSocket.parse_ip("1.2.3")'
-refuses "an invalid hex character in IPv6" bad_hex "invalid hex character in IPv6 address: x" \
-  'UdpSocket.parse_ipv6("2001:xyz::1")'
+refuses "an invalid hex character in IPv6" bad_hex "cannot resolve address: \"2001:xyz::1\": 'x' is not a hex digit" \
+  'IyiSocket.parse_ipv6("2001:xyz::1")'
 refuses "a leading-zero octet" leading_zero "an octet with a leading zero is not decimal" \
   'IyiSocket.parse_ip("010.1.1.1")'
 refuses "an overflowing octet" overflow_octet "cannot resolve address: \"2147483648.1.1.1\"" \
   'IyiSocket.parse_ip("2147483648.1.1.1")'
-refuses "a second IPv6 compression" two_compressions "invalid IPv6 address: 1::2::3" \
-  'UdpSocket.parse_ipv6("1::2::3")'
-refuses "a five-digit IPv6 group" long_group "invalid IPv6 address group" \
-  'UdpSocket.parse_ipv6("00000::1")'
-refuses "a leading single colon" lead_colon "invalid IPv6 address group" \
-  'UdpSocket.parse_ipv6(":1:2:3:4:5:6:7")'
+refuses "a second IPv6 compression" two_compressions "cannot resolve address: \"1::2::3\": a second \`::\`" \
+  'IyiSocket.parse_ipv6("1::2::3")'
+refuses "a five-digit IPv6 group" long_group "a group of more than four hex digits" \
+  'IyiSocket.parse_ipv6("00000::1")'
+refuses "a leading single colon" lead_colon "a single leading colon" \
+  'IyiSocket.parse_ipv6(":1:2:3:4:5:6:7")'
 
 refuses_body() { # refuses_body <label> <name> <phrase>
   local label="$1" name="$2" phrase="$3"

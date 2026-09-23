@@ -11,7 +11,7 @@
 # 5. refused connection when target port has no listener
 
 import std/socket
-using std/socket::{IyiSocket, SocketError}
+using std/socket::{IyiSocket, SocketError, IPv6Address}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"
@@ -200,5 +200,38 @@ held.each { |h| h.close }
 listener.close
 raise "parked read: expected cancelled, got #{parked_answer.inspect}" unless parked_answer == "cancelled"
 puts "parked_read_cancelled: ok"
+
+# 8. IPv6: a listener on ::1, a connect through the literal a URL writes
+#    (`[::1]`), bytes each way, and both ends' addresses written back the
+#    RFC 5952 way. A listener on `::` takes IPv6 alone, on every platform.
+six = IyiSocket.listen("::1", 0)
+raise "ipv6: listening on #{six.local_address}" unless six.local_address == "::1"
+six_client = IyiSocket.connect("[::1]", six.local_port).or_panic
+six_conn = six.accept.or_panic
+six_client.write("over six")
+heard6 = six_conn.read(64).or_panic
+raise "ipv6: the server read #{heard6.inspect}" unless heard6 == "over six"
+six_conn.write("and back")
+back6 = six_client.read(64).or_panic
+raise "ipv6: the client read #{back6.inspect}" unless back6 == "and back"
+raise "ipv6: the accepted end is at #{six_conn.local_address}" unless six_conn.local_address == "::1"
+six_client.close
+six_conn.close
+six.close
+wide = IyiSocket.listen("::", 0)
+four = IyiSocket.connect("127.0.0.1", wide.local_port)
+raise "ipv6: an IPv4 connect reached a listener on ::" unless four.is_a?(SocketError)
+wide.close
+{"2001:DB8:0:0:1:0:0:1" => "2001:db8::1:0:0:1",
+ "2001:db8:0:1:1:1:1:1" => "2001:db8:0:1:1:1:1:1",
+ "0:0:1:0:0:0:1:0"      => "0:0:1::1:0",
+ "::ffff:192.0.2.1"     => "::ffff:192.0.2.1",
+ "64:ff9b::1.2.3.4"     => "64:ff9b::102:304",
+ "1::"                  => "1::",
+ "::"                   => "::"}.each do |text, written|
+  parsed = IyiSocket.parse_ipv6(text).to_s
+  raise "ipv6: #{text} was written #{parsed}" unless parsed == written
+end
+puts "ipv6: ok"
 
 puts "socket_exercise: all checks passed"

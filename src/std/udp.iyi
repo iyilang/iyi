@@ -26,12 +26,15 @@ module std/udp
 pub import std/slice
 using std/slice::{Bytes, Slice}
 import std/socket
-using std/socket::{IPv4Address, IyiSocket}
+using std/socket::{IPv4Address, IPv6Address, IyiSocket}
 
 pub alias Bytes = Std::Slice::Bytes
-# The address type, its parser and the `sockaddr_in` writer are `std/socket`'s;
-# this module had copies of all three, and the copies had drifted.
+# The address types, their parsers and the `sockaddr_in`/`sockaddr_in6`
+# writers are `std/socket`'s; this module had copies, and the copies had
+# drifted: its IPv6 parser read no dotted tail and its printer compressed
+# only `::` and `::1`.
 pub alias IPv4Address = Std::Socket::IPv4Address
+pub alias IPv6Address = Std::Socket::IPv6Address
 
 # An incoming datagram with payload bytes and remote peer origin.
 pub struct Datagram
@@ -407,183 +410,10 @@ pub class UdpSocket
 
   # --- Address Parsing and Formatting ---
 
-  private def self.parse_hex_group(str : String) : Int32
-    raise "invalid IPv6 address group" if str.bytesize == 0 || str.bytesize > 4
-    val = 0
-    i = 0
-    while i < str.bytesize
-      ch = str[i]
-      d = if ch >= '0' && ch <= '9'
-            ch.ord - 48
-          elsif ch >= 'a' && ch <= 'f'
-            ch.ord - 97 + 10
-          elsif ch >= 'A' && ch <= 'F'
-            ch.ord - 65 + 10
-          else
-            raise "invalid hex character in IPv6 address: #{ch}"
-          end
-      val = (val << 4) | d
-      i = i + 1
-    end
-    raise "hex group out of range in IPv6 address" if val > 65535
-    val
-  end
-
-  # Parses an IPv6 string into a 16-byte buffer in network byte order.
-  def self.parse_ipv6(host : String) : Pointer(UInt8)
-    bytes = Pointer(UInt8).malloc(16_u64)
-    i = 0
-    while i < 16
-      bytes[i] = 0_u8
-      i = i + 1
-    end
-
-    return bytes if host == "::"
-
-    # Find "::" if present; a second "::" is not an address.
-    double_colon = -1
-    idx = 0
-    while idx < host.bytesize - 1
-      if host[idx] == ':' && host[idx + 1] == ':'
-        if double_colon >= 0
-          raise "invalid IPv6 address: #{host}"
-        end
-        double_colon = idx
-        idx = idx + 1
-      end
-      idx = idx + 1
-    end
-
-    left_groups = [] of Int32
-    right_groups = [] of Int32
-
-    if double_colon >= 0
-      left_str = double_colon > 0 ? host[0, double_colon] : ""
-      right_start = double_colon + 2
-      right_len = host.bytesize - right_start
-      right_str = right_len > 0 ? host[right_start, right_len] : ""
-
-      if left_str.bytesize > 0
-        curr = ""
-        j = 0
-        while j < left_str.bytesize
-          if left_str[j] == ':'
-            left_groups << parse_hex_group(curr)
-            curr = ""
-          else
-            curr = curr + left_str[j].to_s
-          end
-          j = j + 1
-        end
-        left_groups << parse_hex_group(curr) if curr.bytesize > 0
-      end
-
-      if right_str.bytesize > 0
-        curr = ""
-        j = 0
-        while j < right_str.bytesize
-          if right_str[j] == ':'
-            right_groups << parse_hex_group(curr)
-            curr = ""
-          else
-            curr = curr + right_str[j].to_s
-          end
-          j = j + 1
-        end
-        right_groups << parse_hex_group(curr) if curr.bytesize > 0
-      end
-
-      zero_count = 8 - (left_groups.size + right_groups.size)
-      raise "invalid IPv6 address: #{host}" if zero_count < 0
-
-      out_idx = 0
-      j = 0
-      while j < left_groups.size
-        g = left_groups[j]
-        bytes[out_idx] = ((g >> 8) & 255).to_u8
-        bytes[out_idx + 1] = (g & 255).to_u8
-        out_idx = out_idx + 2
-        j = j + 1
-      end
-
-      out_idx = out_idx + (zero_count * 2)
-
-      j = 0
-      while j < right_groups.size
-        g = right_groups[j]
-        bytes[out_idx] = ((g >> 8) & 255).to_u8
-        bytes[out_idx + 1] = (g & 255).to_u8
-        out_idx = out_idx + 2
-        j = j + 1
-      end
-    else
-      curr = ""
-      j = 0
-      groups = [] of Int32
-      while j < host.bytesize
-        if host[j] == ':'
-          groups << parse_hex_group(curr)
-          curr = ""
-        else
-          curr = curr + host[j].to_s
-        end
-        j = j + 1
-      end
-      groups << parse_hex_group(curr) if curr.bytesize > 0
-      raise "invalid IPv6 address: #{host}" if groups.size != 8
-
-      out_idx = 0
-      j = 0
-      while j < 8
-        g = groups[j]
-        bytes[out_idx] = ((g >> 8) & 255).to_u8
-        bytes[out_idx + 1] = (g & 255).to_u8
-        out_idx = out_idx + 2
-        j = j + 1
-      end
-    end
-
-    bytes
-  end
-
-  def self.make_sockaddr_in6(v6_bytes : Pointer(UInt8), port : Int32) : Pointer(UInt8)
-    buffer = Pointer(UInt8).malloc(28_u64)
-    i = 0
-    while i < 28
-      buffer[i] = 0_u8
-      i = i + 1
-    end
-
-    {% if flag?(:darwin) %}
-      buffer[0] = 28_u8 # sin6_len = 28
-      buffer[1] = 30_u8 # sin6_family = AF_INET6 (30 on Darwin)
-    {% elsif flag?(:win32) %}
-      buffer[0] = 23_u8 # sin6_family = AF_INET6 (23 on Windows)
-      buffer[1] = 0_u8
-    {% else %}
-      buffer[0] = 10_u8 # sin6_family = AF_INET6 (10 on Linux)
-      buffer[1] = 0_u8
-    {% end %}
-
-    buffer[2] = ((port >> 8) & 255).to_u8
-    buffer[3] = (port & 255).to_u8
-
-    # bytes 4..7: flowinfo = 0
-    i = 0
-    while i < 16
-      buffer[8 + i] = v6_bytes[i]
-      i = i + 1
-    end
-    # bytes 24..27: scope_id = 0
-
-    buffer
-  end
-
   def self.make_sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), SockLen, Int32)
     raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
     if host.includes?(":")
-      v6_bytes = parse_ipv6(host)
-      {make_sockaddr_in6(v6_bytes, port), SOCKADDR_IN6_SIZE, AF_INET6}
+      {IyiSocket.make_sockaddr_in6(IyiSocket.parse_ipv6(host), port), SOCKADDR_IN6_SIZE, AF_INET6}
     else
       ip = IyiSocket.parse_ip(host)
       {IyiSocket.make_sockaddr_in(ip, port), SOCKADDR_IN_SIZE, 2}
@@ -596,46 +426,7 @@ pub class UdpSocket
     is_v6 = {% if flag?(:darwin) %} family == 30 {% elsif flag?(:win32) %} family == 23 {% else %} family == 10 {% end %}
 
     host = if is_v6
-             unspec = true
-             u = 0
-             while u < 16
-               if addr[8 + u] != 0_u8
-                 unspec = false
-                 break
-               end
-               u = u + 1
-             end
-             # Check for ::1 loopback
-             is_loopback = true
-             j = 0
-             while j < 15
-               if addr[8 + j] != 0_u8
-                 is_loopback = false
-                 break
-               end
-               j = j + 1
-             end
-             if unspec
-               "::"
-             elsif is_loopback && addr[23] == 1_u8
-               "::1"
-             else
-               parts = [] of String
-               k = 0
-               while k < 8
-                 offset = 8 + k * 2
-                 w = (addr[offset].to_i32 << 8) | addr[offset + 1].to_i32
-                 parts << w.to_s(16)
-                 k = k + 1
-               end
-               res = parts[0]
-               m = 1
-               while m < parts.size
-                 res = res + ":" + parts[m]
-                 m = m + 1
-               end
-               res
-             end
+             IPv6Address.new(addr + 8_u64).to_s
            else
              "#{addr[4]}.#{addr[5]}.#{addr[6]}.#{addr[7]}"
            end

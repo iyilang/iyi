@@ -4,6 +4,16 @@
 
 ### Added
 
+- `std/socket` speaks IPv6: `IyiSocket.listen("::1", port)`,
+  `IyiSocket.connect("[::1]", port)` (bare or bracketed, as a URL writes it),
+  `local_address` written the RFC 5952 way, and `IyiSocket.parse_ipv6` with
+  `IPv6Address` for the text forms, including a dotted IPv4 tail. A listener
+  on `::` takes IPv6 alone on every platform (`IPV6_V6ONLY`), where Linux's
+  default was both families and Windows' IPv6 alone. `std/udp` uses the same
+  parser and printer; its own read no dotted tail and printed every address
+  but `::` and `::1` uncompressed. The socket gate now runs on darwin and
+  Windows as well.
+
 - `std/signal`: `Signal.wait(Signal::INT, Signal::TERM)` parks a fiber until
   one of the signals it names arrives and answers which, or `Cancelled`. From
   the first wait that names a signal, its default action is off and every

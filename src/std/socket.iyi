@@ -1,15 +1,20 @@
 # Sockets: TCP networking for iyi
 #
-# A blocking TCP socket with numeric IP resolution (IPv4 dotted-decimal and localhost).
+# A TCP socket over IPv4 or IPv6, with numeric address resolution: dotted
+# decimal, an IPv6 literal (`::1`, or `[::1]` as a URL writes it), and
+# `localhost`.
 #
 # Address resolution:
 # getaddrinfo is the standard route in libc, but on Linux it pulls in libc.so,
 # dynamic NSS modules (libnss_dns, libnss_files), and resolver state, which destroys
 # the zero-undefined-symbol dependency floor (SPEC.md III.9).
-# By parsing numeric IPv4 dotted-decimal strings (and mapping "localhost" to 127.0.0.1)
+# By parsing numeric addresses (and mapping "localhost" to 127.0.0.1)
 # in pure iyi arithmetic without libc, Linux programs retain raw syscall purity
 # (zero undefined symbols) and Darwin programs only link standard socket symbols
-# provided by libSystem.
+# provided by libSystem. A socket listening on `::` takes IPv6 alone on
+# every platform (IPV6_V6ONLY): Linux's default is both families and
+# Windows' is IPv6 alone, and a program should not change meaning with the
+# machine it runs on.
 #
 # Concurrency:
 # On the targets that have the runtime (SPEC.md III.4), every socket is
@@ -57,6 +62,77 @@ pub struct IPv4Address
 
   def to_s : String
     "#{@b0}.#{@b1}.#{@b2}.#{@b3}"
+  end
+end
+
+# Sixteen bytes in network order, held as two words: `high` is bytes 0 to
+# 7. Written the RFC 5952 way - lowercase, no leading zeros, the longest
+# run of two or more zero groups as `::`, the first of two equal runs -
+# and an IPv4-mapped address with its dotted tail, `::ffff:192.0.2.1`.
+pub struct IPv6Address
+  getter high : UInt64
+  getter low : UInt64
+
+  def initialize(@high : UInt64, @low : UInt64)
+  end
+
+  # The sixteen bytes at *bytes*, network order.
+  def self.new(bytes : Pointer(UInt8)) : IPv6Address
+    high = 0_u64
+    low = 0_u64
+    index = 0
+    while index < 8
+      high = high.unsafe_shl(8_u64) | bytes[index].to_u64
+      low = low.unsafe_shl(8_u64) | bytes[index + 8].to_u64
+      index = index + 1
+    end
+    IPv6Address.new(high, low)
+  end
+
+  # Byte *index*, 0 to 15.
+  def [](index : Int32) : UInt8
+    word = index < 8 ? @high : @low
+    word.unsafe_shr(((7 - (index & 7)) * 8).to_u64).unsafe_to_u8
+  end
+
+  # Group *index*, 0 to 7.
+  def group(index : Int32) : Int32
+    (self[index * 2].to_i32 << 8) | self[index * 2 + 1].to_i32
+  end
+
+  def to_s : String
+    if @high == 0_u64 && @low.unsafe_shr(32_u64) == 0xFFFF_u64
+      return "::ffff:#{self[12]}.#{self[13]}.#{self[14]}.#{self[15]}"
+    end
+    best = -1
+    best_size = 1
+    start = -1
+    index = 0
+    while index < 8
+      if group(index) == 0
+        start = index if start < 0
+        if index - start + 1 > best_size
+          best = start
+          best_size = index - start + 1
+        end
+      else
+        start = -1
+      end
+      index = index + 1
+    end
+    head = [] of String
+    tail = [] of String
+    index = 0
+    while index < 8
+      if best < 0 || index < best
+        head << group(index).to_s(16)
+      elsif index >= best + best_size
+        tail << group(index).to_s(16)
+      end
+      index = index + 1
+    end
+    return head.join(":") if best < 0
+    "#{head.join(":")}::#{tail.join(":")}"
   end
 end
 
@@ -131,7 +207,10 @@ end
 pub class IyiSocket
   getter fd : Int32
 
-  def initialize(@fd : Int32)
+  # The address family, the platform's number for it: an accepted
+  # connection is its listener's, and on Windows the socket `AcceptEx`
+  # fills in has to be made in it.
+  def initialize(@fd : Int32, @family : Int32 = AF_INET)
   end
 
   def to_unsafe : Int32
@@ -152,13 +231,12 @@ pub class IyiSocket
   # same, so a program reads the same everywhere.
 
   def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
-    ip = parse_ip(host)
-    addr = make_sockaddr_in(ip, port)
-    fd = __sys_socket
+    addr, family = sockaddr(host, port)
+    fd = __sys_socket(family)
     return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
     __sys_no_sigpipe(fd)
     __sys_set_nonblock(fd)
-    res = __sys_connect(fd, addr)
+    res = __sys_connect(fd, addr, family)
     if res < 0 && !__sys_in_progress?(res)
       code = __sys_code(res.to_i64)
       __sys_close(fd)
@@ -177,19 +255,20 @@ pub class IyiSocket
         return SocketError.new("connect to #{host}:#{port}", code)
       end
     end
-    IyiSocket.new(fd)
+    IyiSocket.new(fd, family)
   end
 
   def accept : IyiSocket | Cancelled | SocketError
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    # A `sockaddr_storage`'s room: the peer's address in whichever family.
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
     while true
-      client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len))
+      client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len), @family)
       if client_fd >= 0
         IyiSocket.__sys_no_sigpipe(client_fd)
         IyiSocket.__sys_set_nonblock(client_fd)
-        return IyiSocket.new(client_fd)
+        return IyiSocket.new(client_fd, @family)
       end
       unless IyiSocket.__sys_would_block?(client_fd.to_i64)
         error = SocketError.new("accept a connection", IyiSocket.__sys_code(client_fd.to_i64))
@@ -306,14 +385,14 @@ pub class IyiSocket
   {% end %}
 
   def self.listen(host : String, port : Int32, backlog : Int32 = 128) : IyiSocket
-    fd = __sys_socket
+    addr, family = sockaddr(host, port)
+    fd = __sys_socket(family)
     raise "cannot create socket" if fd < 0
 
     __sys_set_reuseaddr(fd)
+    __sys_set_v6only(fd) if family == AF_INET6
 
-    ip = parse_ip(host)
-    addr = make_sockaddr_in(ip, port)
-    if __sys_bind(fd, addr) < 0
+    if __sys_bind(fd, addr, family) < 0
       __sys_close(fd)
       raise "cannot bind socket to #{host}:#{port}"
     end
@@ -324,7 +403,7 @@ pub class IyiSocket
     end
 
     __sys_set_nonblock(fd)
-    IyiSocket.new(fd)
+    IyiSocket.new(fd, family)
   end
 
   def self.listen(port : Int32, backlog : Int32 = 128) : IyiSocket
@@ -350,10 +429,12 @@ pub class IyiSocket
     @fd < 0
   end
 
+  # The port sits at the same two bytes of a `sockaddr_in` and a
+  # `sockaddr_in6`.
   def local_port : Int32
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
     raise "cannot get local port" if res < 0
 
@@ -364,11 +445,12 @@ pub class IyiSocket
 
   def local_address : String
     raise "socket is closed" if @fd < 0
-    addr = Pointer(UInt8).malloc(16_u64)
-    len = 16_u32
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
     raise "cannot get local address" if res < 0
 
+    return IPv6Address.new(addr + 8_u64).to_s if @family == AF_INET6
     "#{addr[4]}.#{addr[5]}.#{addr[6]}.#{addr[7]}"
   end
 
@@ -407,7 +489,7 @@ pub class IyiSocket
         curr = curr * 10 + (ch.ord - 48)
         has_digit = true
       elsif ch == ':'
-        raise "cannot resolve address: #{host.inspect}: IPv6 is not supported, and a port is a separate argument"
+        raise "cannot resolve address: #{host.inspect}: an IPv6 address, which `parse_ipv6` reads, and a port is a separate argument"
       else
         raise "cannot resolve address: #{host.inspect}"
       end
@@ -420,6 +502,135 @@ pub class IyiSocket
     bytes[3] = curr.to_u8
 
     IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])
+  end
+
+  # Eight groups of up to four hex digits, `::` once for a run of zero
+  # groups, and a dotted IPv4 tail for the last two (`::ffff:1.2.3.4`). A
+  # zone (`fe80::1%eth0`) is refused by name: it names an interface, and
+  # this parser has no way to ask the platform which.
+  def self.parse_ipv6(host : String) : IPv6Address
+    groups = Pointer(Int32).malloc(8_u64)
+    count = 0
+    gap = -1
+    len = host.bytesize
+    index = 0
+    ipv6_refused(host, "empty") if len == 0
+    if host[0] == ':'
+      ipv6_refused(host, "a single leading colon") unless len > 1 && host[1] == ':'
+      gap = 0
+      index = 2
+    end
+    while index < len
+      ipv6_refused(host, "more than eight groups") if count == 8
+      start = index
+      value = 0
+      digits = 0
+      while index < len && hex_digit(host[index]) >= 0
+        ipv6_refused(host, "a group of more than four hex digits") if digits == 4
+        value = value * 16 + hex_digit(host[index])
+        digits = digits + 1
+        index = index + 1
+      end
+      if index < len && host[index] == '.'
+        ipv6_refused(host, "a dotted tail after more than six groups") if count > 6
+        v4 = parse_ip(host[start, len - start])
+        groups[count] = (v4.b0.to_i32 << 8) | v4.b1.to_i32
+        groups[count + 1] = (v4.b2.to_i32 << 8) | v4.b3.to_i32
+        count = count + 2
+        index = len
+        break
+      end
+      if digits == 0
+        ipv6_refused(host, "a zone (`%`) names an interface, which is not supported") if host[index] == '%'
+        ipv6_refused(host, "#{host[index].inspect} is not a hex digit") if host[index] != ':'
+        ipv6_refused(host, "an empty group")
+      end
+      groups[count] = value
+      count = count + 1
+      break if index == len
+      ipv6_refused(host, "a zone (`%`) names an interface, which is not supported") if host[index] == '%'
+      ipv6_refused(host, "#{host[index].inspect} is not a hex digit") if host[index] != ':'
+      index = index + 1
+      if index < len && host[index] == ':'
+        ipv6_refused(host, "a second `::`") if gap >= 0
+        gap = count
+        index = index + 1
+      elsif index == len
+        ipv6_refused(host, "a trailing colon")
+      end
+    end
+    if gap < 0
+      ipv6_refused(host, "#{count} groups, not eight") if count != 8
+    elsif count > 7
+      ipv6_refused(host, "`::` with eight groups beside it stands for nothing")
+    end
+    high = 0_u64
+    low = 0_u64
+    fill = gap < 0 ? 0 : 8 - count
+    slot = 0
+    while slot < 8
+      value = 0
+      if gap < 0 || slot < gap
+        value = groups[slot]
+      elsif slot >= gap + fill
+        value = groups[slot - fill]
+      end
+      if slot < 4
+        high = high.unsafe_shl(16_u64) | value.to_u64
+      else
+        low = low.unsafe_shl(16_u64) | value.to_u64
+      end
+      slot = slot + 1
+    end
+    IPv6Address.new(high, low)
+  end
+
+  private def self.ipv6_refused(host : String, why : String) : NoReturn
+    raise "cannot resolve address: #{host.inspect}: #{why}"
+  end
+
+  private def self.hex_digit(ch : Char) : Int32
+    return ch.ord - 48 if ch >= '0' && ch <= '9'
+    return ch.ord - 87 if ch >= 'a' && ch <= 'f'
+    return ch.ord - 55 if ch >= 'A' && ch <= 'F'
+    -1
+  end
+
+  # A host and port as the address a call takes, and its family: an IPv6
+  # literal bare or in brackets, anything else IPv4.
+  def self.sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), Int32)
+    size = host.bytesize
+    if size >= 2 && host[0] == '[' && host[size - 1] == ']'
+      return {make_sockaddr_in6(parse_ipv6(host[1, size - 2]), port), AF_INET6}
+    end
+    return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET6} if host.includes?(":")
+    {make_sockaddr_in(parse_ip(host), port), AF_INET}
+  end
+
+  # A `sockaddr_in6`: family, port, a zero flow label, the address, a zero
+  # scope. The family's number and where it sits are the platform's.
+  def self.make_sockaddr_in6(ip : IPv6Address, port : Int32) : Pointer(UInt8)
+    raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    buffer = Pointer(UInt8).malloc(28_u64)
+    index = 0
+    while index < 28
+      buffer[index] = 0_u8
+      index = index + 1
+    end
+    {% if flag?(:darwin) %}
+      buffer[0] = 28_u8 # sin6_len
+      buffer[1] = AF_INET6.to_u8
+    {% else %}
+      buffer[0] = AF_INET6.to_u8
+    {% end %}
+    buffer[2] = ((port >> 8) & 255).to_u8
+    buffer[3] = (port & 255).to_u8
+    index = 0
+    while index < 16
+      buffer[8 + index] = ip[index]
+      index = index + 1
+    end
+    buffer
   end
 
   def self.make_sockaddr_in(ip : IPv4Address, port : Int32) : Pointer(UInt8)
@@ -486,32 +697,41 @@ pub class IyiSocket
       fun error_location = __error : Int32*
     end
 
-    # The length of a `sockaddr_in`, in the type each branch's call wants. It
-    # is a property of the address family rather than of the caller, so the
-    # callers do not pass it: `UInt32` here for libSystem's `socklen_t`, and
-    # `Int64` on the syscall branch, because the prelude has no conversion
-    # between the two. `UInt32` has neither `to_i64` nor `to_u64`, and `Int32`
-    # has no `to_u32`, which is what made a shared parameter type impossible.
-    SOCKADDR_IN_SIZE = 16_u32
+    AF_INET  =  2
+    AF_INET6 = 30
 
-    def self.__sys_socket : Int32
-      LibC.socket(2, 1, 0)
+    # The length of an address, in the type each branch's call wants. It is
+    # a property of the address family rather than of the caller, so the
+    # callers pass the family: `UInt32` here for libSystem's `socklen_t`,
+    # and `Int64` on the syscall branch, because the prelude has no
+    # conversion between the two. `UInt32` has neither `to_i64` nor
+    # `to_u64`, and `Int32` has no `to_u32`, which is what made a shared
+    # parameter type impossible.
+    SOCKADDR_IN_SIZE  = 16_u32
+    SOCKADDR_IN6_SIZE = 28_u32
+
+    def self.__sys_addr_size(family : Int32) : UInt32
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      LibC.bind(fd, addr.as(Void*), SOCKADDR_IN_SIZE)
+    def self.__sys_socket(family : Int32) : Int32
+      LibC.socket(family, 1, 0)
+    end
+
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      LibC.bind(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       LibC.listen(fd, backlog)
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       LibC.accept(fd, addr.as(Void*), addrlen)
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
-      LibC.connect(fd, addr.as(Void*), SOCKADDR_IN_SIZE)
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -541,6 +761,12 @@ pub class IyiSocket
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x0004, pointerof(val).as(Void*), 4_u32)
+    end
+
+    # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41).
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
     end
 
     # One `pollfd` (fd, events, revents), no timeout: the blocking wait a
@@ -608,10 +834,18 @@ pub class IyiSocket
       SYS_PPOLL       =  73_i64
     {% end %}
 
+    AF_INET  =  2
+    AF_INET6 = 10
+
     # Sized as the syscall takes it, a full register. See the darwin branch's
-    # note: this is a separate constant rather than a converted one because
+    # note: these are separate constants rather than converted ones because
     # the prelude has no conversion between `UInt32` and the 64-bit types.
-    SOCKADDR_IN_SIZE = 16_i64
+    SOCKADDR_IN_SIZE  = 16_i64
+    SOCKADDR_IN6_SIZE = 28_i64
+
+    def self.__sys_addr_size(family : Int32) : Int64
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
+    end
 
     def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
@@ -661,24 +895,24 @@ pub class IyiSocket
       result
     end
 
-    def self.__sys_socket : Int32
-      __sys3(SYS_SOCKET, 2_i64, 1_i64, 0_i64).to_i32
+    def self.__sys_socket(family : Int32) : Int32
+      __sys3(SYS_SOCKET, family.to_i64, 1_i64, 0_i64).to_i32
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      __sys3(SYS_BIND, fd.to_i64, addr.address.to_i64, SOCKADDR_IN_SIZE).to_i32
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      __sys3(SYS_BIND, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       __sys3(SYS_LISTEN, fd.to_i64, backlog.to_i64, 0_i64).to_i32
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       __sys3(SYS_ACCEPT, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
-      __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, SOCKADDR_IN_SIZE).to_i32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
     # MSG_NOSIGNAL (0x4000): a write to a connection the peer closed answers
@@ -706,6 +940,12 @@ pub class IyiSocket
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 1_i64, 2_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    # IPV6_V6ONLY (26) at IPPROTO_IPV6 (41).
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, 41_i64, 26_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
 
     # `ppoll` on one descriptor with no timeout and no signal mask.
@@ -802,27 +1042,27 @@ pub class IyiSocket
         buf : UInt8*
       end
 
-      struct AddressSlot
-        address_low : UInt64
-        address_high : UInt64
-        slack_low : UInt64
-        slack_high : UInt64
-      end
-
+      # Two slots of an address and the sixteen bytes after it, room for
+      # the widest family this file makes.
       struct AcceptAddresses
-        local : AddressSlot
-        remote : AddressSlot
+        words : UInt64[32]
       end
     end
 
-    # The length of a `sockaddr_in` in the type Winsock's calls want, which
-    # is a plain `int`. See the darwin branch's note for why each branch
-    # spells its own rather than converting one.
-    SOCKADDR_IN_SIZE = 16
+    # The length of an address in the type Winsock's calls want, which is a
+    # plain `int`. See the darwin branch's note for why each branch spells
+    # its own rather than converting one.
+    SOCKADDR_IN_SIZE  = 16
+    SOCKADDR_IN6_SIZE = 28
 
-    AF_INET     = 2
-    SOCK_STREAM = 1
-    IPPROTO_TCP = 6
+    AF_INET     =  2
+    AF_INET6    = 23
+    SOCK_STREAM =  1
+    IPPROTO_TCP =  6
+
+    def self.__sys_addr_size(family : Int32) : Int32
+      family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
+    end
 
     SOL_SOCKET = 0xffff
     SO_ERROR   = 0x1007
@@ -896,15 +1136,15 @@ pub class IyiSocket
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
-    def self.__sys_socket : Int32
+    def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
-      s = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      s = LibWs2_32.socket(family, SOCK_STREAM, IPPROTO_TCP)
       return -1 if s == INVALID_SOCKET
       s.unsafe_to_i32
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
-      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), SOCKADDR_IN_SIZE) != 0
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+      return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), __sys_addr_size(family)) != 0
       0
     end
 
@@ -916,7 +1156,7 @@ pub class IyiSocket
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
     # the same width and the same bytes, so the callers above keep one
     # signature.
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
       return client.unsafe_to_i32 if client != INVALID_SOCKET
@@ -926,10 +1166,10 @@ pub class IyiSocket
       # completion port can answer. `AcceptEx` is the accept it does answer,
       # and it takes the socket it will fill in, so here the wait and the
       # accept are one call.
-      __sys_accept_posted(s, addr, addrlen)
+      __sys_accept_posted(s, addr, addrlen, family)
     end
 
-    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       # A cancelled task must not post: nothing would wake it but the
       # completion, and a listener nobody connects to never produces one.
       # Answering "would block" sends the caller into the wait it already
@@ -939,13 +1179,14 @@ pub class IyiSocket
       # cannot answer it, and a `client` created first is a socket nobody is
       # left to close. Nothing between the two depends on the order.
       post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
-      client = LibWs2_32.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+      client = LibWs2_32.socket(family, SOCK_STREAM, IPPROTO_TCP)
       return __sys_error.to_i32 if client == INVALID_SOCKET
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
+      size = __sys_addr_size(family)
       ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
       answered = post.call(s, client, pointerof(addresses).as(Void*), 0,
-        SOCKADDR_IN_SIZE + 16, SOCKADDR_IN_SIZE + 16, pointerof(received), ov.as(Void*))
+        size + 16, size + 16, pointerof(received), ov.as(Void*))
       if answered == 0
         err = LibWs2_32.WSAGetLastError
         if err != ERROR_IO_PENDING
@@ -986,31 +1227,32 @@ pub class IyiSocket
       # The peer, where the POSIX `accept` leaves it: AcceptEx answers it in
       # its second slot instead, so the two arms agree on what the caller's
       # buffer holds when this returns.
-      peer = pointerof(addresses).as(Pointer(UInt8)) + (SOCKADDR_IN_SIZE + 16)
+      peer = pointerof(addresses).as(Pointer(UInt8)) + (size + 16)
       index = 0
-      while index < SOCKADDR_IN_SIZE
+      while index < size
         addr[index] = peer[index]
         index = index + 1
       end
-      addrlen.value = 16_u32
+      addrlen.value = size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
       client.unsafe_to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
       # `ConnectEx` is the connect a completion port can answer, and it
       # insists on a socket that is already bound; the POSIX `connect` binds
       # implicitly, so that is done here, to the wildcard address and the
       # ephemeral port the implicit bind would have picked anyway.
-      any = make_sockaddr_in(IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8), 0)
-      return __sys_error.to_i32 if LibWs2_32.bind(s, any.as(Void*), SOCKADDR_IN_SIZE) != 0
+      size = __sys_addr_size(family)
+      any = family == AF_INET6 ? make_sockaddr_in6(IPv6Address.new(0_u64, 0_u64), 0) : make_sockaddr_in(IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8), 0)
+      return __sys_error.to_i32 if LibWs2_32.bind(s, any.as(Void*), size) != 0
       post = __sys_extension(s, WSAID_CONNECTEX_LOW, WSAID_CONNECTEX_HIGH).as(Pointer(ConnectExFn)).value
       sent = 0_i32
       ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
-      answered = post.call(s, addr.as(Void*), SOCKADDR_IN_SIZE, Pointer(Void).new(0_u64), 0,
+      answered = post.call(s, addr.as(Void*), size, Pointer(Void).new(0_u64), 0,
         pointerof(sent), ov.as(Void*))
       if answered == 0
         err = LibWs2_32.WSAGetLastError
@@ -1112,6 +1354,13 @@ pub class IyiSocket
       0
     end
 
+    # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41). Windows' default already, and
+    # said anyway: the default is a registry's, and this is the program's.
+    def self.__sys_set_v6only(fd : Int32) : Int32
+      val = 1_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), 41, 27, pointerof(val).as(Void*), 4)
+    end
+
     def self.__sys_set_nonblock(fd : Int32) : Int32
       on = 1
       LibWs2_32.ioctlsocket(__sys_handle(fd), FIONBIO, pointerof(on))
@@ -1211,11 +1460,14 @@ pub class IyiSocket
       __sys_overlapped_result(s, ov)
     end
   {% else %}
-    def self.__sys_socket : Int32
+    AF_INET  =  2
+    AF_INET6 = 10
+
+    def self.__sys_socket(family : Int32) : Int32
       raise "IyiSocket is not supported on this platform"
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8)) : Int32
+    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       -1
     end
 
@@ -1223,11 +1475,11 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       -1
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8)) : Int32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       -1
     end
 
@@ -1244,6 +1496,10 @@ pub class IyiSocket
     end
 
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
+      -1
+    end
+
+    def self.__sys_set_v6only(fd : Int32) : Int32
       -1
     end
 

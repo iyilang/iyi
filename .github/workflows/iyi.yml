@@ -1252,6 +1252,13 @@ jobs:
       - name: The native standard library and its module exercises
         run: bash bench/std_exercise.sh
 
+      # `std/socket`'s gate is named from before the `std_` prefix, so the
+      # sweep above never ran it, and its darwin arm - libSystem's calls,
+      # kqueue's two filters, a `sockaddr` with a length byte - was
+      # measured by nothing but the programs that happened to use it.
+      - name: Sockets, on darwin
+        run: bash bench/socket_exercise.sh
+
       # Budgeted, unlike the pauses above: the budget is generous by design
       # and a defer that blew it on a shared runner would be a finding.
       - name: A defer costs nanoseconds, and stays priced
@@ -2015,6 +2022,13 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: bash bench/std_exercise.sh
+
+      # The socket gate, which the sweep above does not reach (its name is
+      # older than the `std_` prefix): Winsock's arm - AcceptEx, ConnectEx,
+      # a posted send - for both address families.
+      - name: Sockets, on Windows
+        shell: bash
+        run: bash bench/socket_exercise.sh
 
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a

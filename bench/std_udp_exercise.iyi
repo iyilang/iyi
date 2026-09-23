@@ -33,7 +33,7 @@ assert_str "127.0.0.1", ip_local.to_s, "localhost resolves to 127.0.0.1"
 ip_zero = IyiSocket.parse_ip("0.0.0.0")
 assert_str "0.0.0.0", ip_zero.to_s, "0.0.0.0 resolves to 0.0.0.0"
 
-v6 = UdpSocket.parse_ipv6("::1")
+v6 = IyiSocket.parse_ipv6("::1")
 assert_true v6[15] == 1_u8 && v6[0] == 0_u8, "ipv6 loopback parsed"
 puts "  numeric IPv4 and IPv6 parsing without libc"
 

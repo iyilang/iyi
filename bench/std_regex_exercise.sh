@@ -231,6 +231,8 @@ mutate "an empty match that eats a byte" '        pos = a
 mutate "a word boundary that is never one" 'before != after' 'false'
 mutate "matches? that spans the whole text" '!pattern.find(self).nil?' 'pattern.match?(self)'
 mutate "a block replacement that is ignored" 'io << yield text[a, b - a]' 'io << text[a, b - a]'
+mutate "a run of classes that matches on its first byte alone" '      return false if table[src[i + j].to_i32] == 0_u8' '      return false if table[src[i].to_i32] == 0_u8'
+mutate "an automaton that keeps every bit" '      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]' '      state = state.unsafe_shl(1_u64) | heads'
 mutate "a literal compared from its second byte on" '        j = 1
         while j < m && source[i + j] == wanted[j]' '        j = 2
         while j < m && source[i + j] == wanted[j]'

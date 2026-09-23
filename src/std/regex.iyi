@@ -21,6 +21,223 @@
 
 module std/regex
 
+# A pattern that is alternatives of fixed-length runs of byte classes, and
+# nothing else: no quantifier, group, anchor or `\\` class escape. Each run
+# is a list of 256-byte tables, one per byte it matches, so a byte is tested
+# with one load; a position is tried only when its byte can start some run,
+# and the runs are tried in the order written, so the first that matches
+# wins - leftmost-first, as the machine answers. Every run matches at least
+# one byte, so no match is empty.
+#
+# When the runs are all one length and hold 64 bytes between them, they are
+# run as one Shift-And automaton instead: bit k of a word is "atom k matched
+# the byte before", each byte shifts the word, sets every run's first bit,
+# and keeps the bits whose atom takes the byte - one load, a shift and two
+# masks a byte for all the runs at once. The first run to end marks the
+# leftmost start, and since every run is as long, the span is the same
+# whichever of them it was.
+class RxRuns
+  @tables : Pointer(UInt8)
+  @starts : Array(Int32)
+  @lengths : Array(Int32)
+  @first : Pointer(UInt8)
+  # The automaton, when the shape allows it: a mask of atoms per byte, the
+  # runs' first atoms, their last atoms, and the common length; zero length
+  # when it does not.
+  @masks : Pointer(UInt64)
+  @heads : UInt64
+  @tails : UInt64
+  @width : Int32
+
+  def initialize(@tables : Pointer(UInt8), @starts : Array(Int32), @lengths : Array(Int32), @first : Pointer(UInt8))
+    @masks = Pointer(UInt64).new(0_u64)
+    @heads = 0_u64
+    @tails = 0_u64
+    @width = 0
+    width = @lengths[0]
+    return if @lengths.any? { |length| length != width }
+    atoms = width * @lengths.size
+    return if atoms > 64
+    masks = Pointer(UInt64).malloc(256_u64)
+    atom = 0
+    while atom < atoms
+      table = @tables + (atom * 256).to_i64
+      bit = 1_u64.unsafe_shl(atom.to_u64)
+      byte = 0
+      while byte < 256
+        masks[byte] = masks[byte] | bit if table[byte] != 0_u8
+        byte = byte + 1
+      end
+      atom = atom + 1
+    end
+    a = 0
+    while a < @lengths.size
+      @heads = @heads | 1_u64.unsafe_shl((a * width).to_u64)
+      @tails = @tails | 1_u64.unsafe_shl((a * width + width - 1).to_u64)
+      a = a + 1
+    end
+    @masks = masks
+    @width = width
+  end
+
+  # Nil for anything past the shape above; the machine takes those.
+  def self.parse(pattern : String) : RxRuns?
+    n = pattern.bytesize
+    return nil if n == 0
+    p = pattern.to_unsafe
+    atoms_bound = n
+    tables = Pointer(UInt8).malloc((atoms_bound * 256).to_u64)
+    first = Pointer(UInt8).malloc(256_u64)
+    starts = [] of Int32
+    lengths = [] of Int32
+    i = 0
+    atoms = 0
+    while true
+      start = atoms
+      while i < n && p[i] != 124_u8
+        b = p[i]
+        at = tables + (atoms * 256).to_i64
+        clear(at)
+        if b == 91_u8
+          i = i + 1
+          negate = i < n && p[i] == 94_u8
+          i = i + 1 if negate
+          return nil if i >= n || p[i] == 93_u8
+          while i < n && p[i] != 93_u8
+            c = p[i]
+            return nil if c == 92_u8 || c == 91_u8
+            if i + 2 < n && p[i + 1] == 45_u8 && p[i + 2] != 93_u8
+              high = p[i + 2]
+              return nil if high < c
+              x = c.to_i32
+              while x <= high.to_i32
+                at[x] = 1_u8
+                x = x + 1
+              end
+              i = i + 3
+            else
+              at[c.to_i32] = 1_u8
+              i = i + 1
+            end
+          end
+          return nil if i >= n
+          i = i + 1
+          if negate
+            k = 0
+            while k < 256
+              at[k] = at[k] == 0_u8 ? 1_u8 : 0_u8
+              k = k + 1
+            end
+          end
+        elsif b == 46_u8
+          k = 0
+          while k < 256
+            at[k] = 1_u8
+            k = k + 1
+          end
+          at[10] = 0_u8
+          i = i + 1
+        elsif b == 92_u8
+          return nil if i + 1 >= n
+          c = p[i + 1]
+          return nil if (c >= 48_u8 && c <= 57_u8) || (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+          at[c.to_i32] = 1_u8
+          i = i + 2
+        elsif b == 94_u8 || b == 36_u8 || b == 63_u8 || b == 42_u8 || b == 43_u8 ||
+              b == 40_u8 || b == 41_u8 || b == 123_u8 || b == 125_u8 || b == 93_u8
+          return nil
+        else
+          at[b.to_i32] = 1_u8
+          i = i + 1
+        end
+        atoms = atoms + 1
+      end
+      return nil if atoms == start
+      starts << start * 256
+      lengths << atoms - start
+      head = tables + (start * 256).to_i64
+      k = 0
+      while k < 256
+        first[k] = 1_u8 if head[k] != 0_u8
+        k = k + 1
+      end
+      break if i >= n
+      i = i + 1
+      return nil if i >= n
+    end
+    new(tables, starts, lengths, first)
+  end
+
+  private def self.clear(table : Pointer(UInt8)) : Nil
+    k = 0
+    while k < 256
+      table[k] = 0_u8
+      k = k + 1
+    end
+  end
+
+  # Whether run *a* matches *src* at *i*, the text being *n* bytes.
+  private def run_at?(src : Pointer(UInt8), n : Int32, i : Int32, a : Int32) : Bool
+    length = @lengths.to_unsafe[a]
+    return false if i + length > n
+    table = @tables + @starts.to_unsafe[a].to_i64
+    j = 0
+    while j < length
+      return false if table[src[i + j].to_i32] == 0_u8
+      table = table + 256_i64
+      j = j + 1
+    end
+    true
+  end
+
+  # The first match at or after *from*, as byte offsets.
+  def search(text : String, from : Int32) : {Int32, Int32}?
+    return shift_and(text, from) if @width > 0
+    n = text.bytesize
+    src = text.to_unsafe
+    first = @first
+    alts = @starts.size
+    i = from
+    while i < n
+      if first[src[i].to_i32] != 0_u8
+        a = 0
+        while a < alts
+          return {i, i + @lengths.to_unsafe[a]} if run_at?(src, n, i, a)
+          a = a + 1
+        end
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  private def shift_and(text : String, from : Int32) : {Int32, Int32}?
+    n = text.bytesize
+    src = text.to_unsafe
+    masks = @masks
+    heads = @heads
+    tails = @tails
+    state = 0_u64
+    i = from
+    while i < n
+      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]
+      return {i - @width + 1, i + 1} if state & tails != 0_u64
+      i = i + 1
+    end
+    nil
+  end
+
+  # Whether some run spans the whole of *text*, as `match?` asks.
+  def whole?(text : String) : Bool
+    a = 0
+    while a < @starts.size
+      return true if @lengths[a] == text.bytesize && run_at?(text.to_unsafe, text.bytesize, 0, a)
+      a = a + 1
+    end
+    false
+  end
+end
+
 pub struct Regex
   @nfa : RxNfa
   # The pattern's own text when it holds no operator at all - `B`, `ggt`,
@@ -28,12 +245,21 @@ pub struct Regex
   # than by stepping the machine a byte at a time. Eleven one-letter
   # replacements over 60 MB took 8.5 s through the machine.
   @literal : String?
+  # Alternatives of fixed-length runs of byte classes - `agggtaaa|tttaccct`,
+  # `[cgt]gggtaaa|tttaccc[acg]`, `a.c` - tried at each position in order
+  # behind a filter on the first byte, instead of stepping the machine. The
+  # nine patterns regexdna counts over 60 MB took 6 s through the machine.
+  @runs : RxRuns?
 
-  def initialize(@nfa : RxNfa, @literal : String? = nil)
+  def initialize(@nfa : RxNfa, @literal : String? = nil, @runs : RxRuns? = nil)
   end
 
+  # The machine is compiled first either way: it is what refuses a pattern
+  # this engine does not take, and the fast paths only ever see one it did.
   def self.compile(pattern : String) : Regex
-    new(RxCompiler.new(pattern).compile, literal_of(pattern))
+    nfa = RxCompiler.new(pattern).compile
+    literal = literal_of(pattern)
+    new(nfa, literal, literal ? nil : RxRuns.parse(pattern))
   end
 
   # Nil for an empty pattern, which matches between every two bytes, and
@@ -58,12 +284,19 @@ pub struct Regex
     if literal = @literal
       return text == literal
     end
+    if runs = @runs
+      return runs.whole?(text)
+    end
     !@nfa.full(text).nil?
   end
 
   def find(text : String) : String?
     if literal = @literal
       return literal_at(text, literal, 0) ? literal : nil
+    end
+    if runs = @runs
+      span = runs.search(text, 0)
+      return span ? text[span[0], span[1] - span[0]] : nil
     end
     span = @nfa.search_from(text, 0)
     return nil unless span
@@ -142,6 +375,14 @@ pub struct Regex
       while (found = literal_at(text, literal, at))
         yield found, found + literal.bytesize
         at = found + literal.bytesize
+      end
+      return
+    end
+    if runs = @runs
+      at = 0
+      while (span = runs.search(text, at))
+        yield span[0], span[1]
+        at = span[1]
       end
       return
     end

@@ -74,6 +74,16 @@
 
 ### Changed
 
+- **A pattern of byte classes and alternatives is searched without the
+  machine.** `agggtaaa|tttaccct`, `[cgt]gggtaaa|tttaccc[acg]`, `a.c`,
+  `[^x]y` — runs of fixed length, no quantifier, group or anchor — are
+  kept as a table per byte; when the runs are the same length and fit in
+  64 bytes together, they run as one Shift-And word, a load, a shift and
+  two masks per byte for all the alternatives at once. The nine variant
+  patterns of the regex-dna benchmark over 50 MB went from 3.4 s to
+  0.54 s (Crystal's PCRE2: 2.0 s). Matches, their order and leftmost-first
+  choice are the machine's; everything else still goes to it.
+
 - **`Math.exp` is the fdlibm routine, about three times faster.** The
   argument is reduced by ln 2 split in two parts only past |x| > 0.35, a
   fifth-degree polynomial carries the rest, and 2^k is written into the

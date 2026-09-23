@@ -68,6 +68,13 @@
 
 ### Changed
 
+- **`iyi run` names the status of a death it cannot explain.** "Process
+  terminated abnormally, the cause is unknown" left out the one fact
+  there was: it now ends `(status 0xc0000409)`, so a stack cookie, a heap
+  corruption and a fast-fail read differently. It was written for an
+  intermittent Windows crash at `bench/thread_exercise.iyi`'s exit, which
+  said only that.
+
 - **A regex with no operator in it is searched as text.** `B`, `ggt`,
   `tHa`: the pattern is its own bytes, found the way a string is searched
   rather than by stepping the matching machine a byte at a time. Eleven

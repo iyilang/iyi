@@ -488,6 +488,11 @@ class Iyi::Command
       "it does not own: if the program uses `Pointer`, that is the place to look, and on a target " \
       "without iyi's runtime it can also be the stack running out. If neither, it is a bug in " \
       "#{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
+    when .unknown?
+      # The code is the one fact left, and without it an intermittent
+      # Windows exit crash could not be told from another: a stack cookie
+      # (0xc0000409), a heap corruption (0xc0000374), a fast-fail.
+      "#{status.description} (status 0x#{status.system_exit_status.to_s(16)})"
     else
       if signal = status.exit_signal?
         "the program was killed by signal #{signal} (#{status.description.lchop("Process ")})"

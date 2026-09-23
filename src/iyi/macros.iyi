@@ -24,8 +24,11 @@ class Object
 
   # `record Point, x : Int32, y : Int32` — a struct whose fields are its
   # constructor. Crystal's version also generates `copy_with` and `clone` and
-  # takes default values; this one takes what the Kemal port writes, which is
-  # a name and a list of typed fields.
+  # takes default values; this one takes a name, a list of typed fields, and
+  # — as Crystal's does — a block whose body is the struct's own:
+  # `record Vec, x : Float64 do def norm ... end end`. Without the `yield`
+  # the block compiled and its methods were nowhere, and the error landed
+  # at the first call instead of at the `record`.
   macro record(name, *fields)
     struct {{ name.id }}
       {% for field in fields %}
@@ -34,6 +37,8 @@ class Object
 
       def initialize({{ fields.map { |field| "@#{field}".id }.splat }})
       end
+
+      {{ yield }}
     end
   end
 

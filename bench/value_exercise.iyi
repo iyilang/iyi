@@ -133,4 +133,21 @@ counted = 0
 assert_int(counted, 4, "range: each still counts")
 assert_int((1...4).size, 3, "range: exclusive size")
 
+# A `record` is a value too, and a block given to it is the struct's own
+# body, as in Crystal: the methods are there. The block used to be dropped
+# without a word, and the first call said the method did not exist.
+record Span, low : Int32, high : Int32 do
+  def record_width : Int32
+    high - low
+  end
+
+  def record_shifted(by : Int32) : Span
+    Span.new(low + by, high + by)
+  end
+end
+
+assert_int(Span.new(3, 8).record_width, 5, "record: a block's method is the struct's")
+assert_int(Span.new(3, 8).record_shifted(2).low, 5, "record: and returns the struct")
+assert_true(Span.new(1, 2).high == 2, "record: the fields still read")
+
 puts "all value checks passed"

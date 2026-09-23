@@ -212,6 +212,37 @@ prove_fails "to_s without members" bad_to_s "tuple: to_s" \
   's/^      result = result + self\[{{i}}\].inspect$/      result = result + "?"/'
 
 # 8. And the range's own pair, in the file it lives in.
+# The macro file, for `record`: a block it drops is a method the program
+# names and the compiler cannot find, so this one is refused at compile time.
+prove_fails_macro() { # prove_fails_macro <label> <dir> <phrase> <sed script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  sed -e "$script" "$REPO/src/iyi/macros.iyi" > "$WORK/$dir/iyi/macros.iyi"
+  if cmp -s "$REPO/src/iyi/macros.iyi" "$WORK/$dir/iyi/macros.iyi"; then
+    echo "  $label: the patch changed nothing, so this proves nothing"
+    status=1
+    return
+  fi
+  if IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+       -o "$WORK/$dir/program" "$REPO/bench/value_exercise.iyi" \
+       > "$WORK/$dir/build" 2>&1; then
+    echo "  $label: the patched prelude still built, so this proves nothing"
+    status=1
+    return
+  fi
+  if grep -q "$phrase" "$WORK/$dir/build"; then
+    printf '  %s: refused at compile time, at %s\n' "$label" "$phrase"
+  else
+    echo "  $label: the patched prelude did not build, and not for this check"
+    sed -n '1,10p' "$WORK/$dir/build"
+    status=1
+  fi
+}
+
+prove_fails_macro "record drops its block" record_block "undefined method 'record_width'" \
+  's/^      {{ yield }}$//'
+
 prove_fails_range "range == ignores its bounds" range_eq "range: == different end" \
   's/^    @begin == other.begin \&\& @end == other.end \&\& @exclusive == other.exclusive?$/    true/'
 

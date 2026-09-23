@@ -59,6 +59,14 @@
 
 ### Fixed
 
+- **`record` dropped a block without a word.** `record Vec, x : Float64
+  do def norm ... end end` compiled, and the methods were nowhere: the
+  first call said `undefined method 'norm'`, at the call rather than at
+  the `record`. The block is the struct's own body now, as in Crystal —
+  a port that copies `record ... do ... end` keeps its methods.
+  `bench/value_exercise.sh` calls one and is refused at compile time with
+  the body dropped again.
+
 - **`Float64#round` moved the double just under a half, and
   `round(digits)` ignored a place count under one.**
   `0.49999999999999994.round` was 1.0 — `(x + 0.5).floor` rounds the sum
@@ -9180,7 +9188,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,994-line library and nothing else. Every other
+  written against iyi's own 15,999-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -374,7 +374,7 @@ def main():
     report = json.loads(proc.stdout)
     files = sorted(t["file"] for t in report["tests"])
     step("an edit to add runs only add's test",
-         files == ["./add_test.iyi"] and report["skipped"] == 1,
+         files == [os.path.join(".", "add_test.iyi")] and report["skipped"] == 1,
          f"ran {files}, skipped {report['skipped']}")
     step("and the test passed by its assert", report["passed"] == 1, "")
     # The other direction: a test that asserts something false fails, by
@@ -491,7 +491,7 @@ def main():
                                "arguments": {"affected": ["calc/mul.iyi"]}}, 4)
     report = json.loads(reply["result"]["content"][0]["text"])
     step("mcp test honours affected",
-         [t["file"] for t in report["tests"]] == ["./mul_test.iyi"], "")
+         [t["file"] for t in report["tests"]] == [os.path.join(".", "mul_test.iyi")], "")
     reply = rpc("tools/call", {"name": "doc", "arguments": {"target": "String"}}, 5)
     text = reply["result"]["content"][0]["text"]
     step("mcp doc answers a prelude type's surface",

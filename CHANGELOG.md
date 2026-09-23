@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`strict_encode`, `strict_decode` and `decode_string` name what
+  `std/base64` calls them.** `Base64.encode` already writes no line breaks
+  and `decode` already answers a String; a port that reached for the other
+  library's names was told the prelude is small by rule. The error says
+  which method it is now.
+
 - **`String#to_u64` (and `to_u64?`, with a base) and `String#[](range)`
   (`import std/text`).** A checksum kept in `UInt64` read back from text,
   nil past 18446744073709551615 or for a sign; and `s[1..3]`,

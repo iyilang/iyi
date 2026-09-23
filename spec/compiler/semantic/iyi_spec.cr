@@ -269,6 +269,11 @@ describe "Semantic: iyi" do
       assert_error "x = Nosuch.new", "undefined constant Nosuch"
     end
 
+    it "names Base64's plain spellings for the other library's" do
+      assert_error "struct B64\n  def self.encode(s : String) : String\n    s\n  end\nend\nB64.strict_encode(\"x\")", "it is the other library's `strict_encode`"
+      assert_error "struct B64\n  def self.decode(s : String) : String\n    s\n  end\nend\nB64.decode_string(\"x\")", "the other library's `decode_string`"
+    end
+
     it "names std/int for a method the integer tower has there" do
       assert_error "x = 5_u32\nx + 1_u32", "`+` on UInt32 is in `std/int`"
       assert_error "x = 5_u64\nx << 3", "`<<` on UInt64 is in `std/int`"

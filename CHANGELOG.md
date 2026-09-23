@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`Array.new(size, value)`, `Array#+`, `Hash.new(default)`,
+  `Hash.new { |table, key| ... }` and `Hash#to_a`.** The forms a Crystal
+  port writes first: a filled row, two arrays joined, a counter that
+  starts at zero (`counts[k] = counts[k] + 1` on a missing key), a memo
+  table whose block stores what it answers, and a table's pairs as an
+  array to sort by value. `bench/collections_exercise.sh` checks each and
+  fails with the default or the fill taken out.
+
 - **`String.build { |io| ... }` and `String::Builder`.** Text a piece at a
   time — `io << "a" << 1 << 'é'`, `io.write_byte` — into one buffer that
   doubles and is copied once, the other library's spelling. And
@@ -9262,7 +9270,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 16,149-line library and nothing else. Every other
+  written against iyi's own 16,192-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

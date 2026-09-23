@@ -23,6 +23,11 @@ class Hash(K, V)
   # Entries the dense arrays can hold; the index holds twice as many slots,
   # so it is never more than half full and a probe always stops.
   @capacity : Int32
+  # What `[]` answers for a key that is not there, when the table was made
+  # with one: `Hash(String, Int32).new(0)`, or a block that is handed the
+  # table and the key and may store what it answers - the counter a
+  # k-nucleotide count keeps, written the other library's way.
+  @default : Proc(Hash(K, V), K, V)?
 
   def initialize
     @size = 0
@@ -30,7 +35,17 @@ class Hash(K, V)
     @keys = Pointer(K).malloc(8_u64)
     @values = Pointer(V).malloc(8_u64)
     @index = Pointer(Int32).malloc(16_u64)
+    @default = nil
     clear_index
+  end
+
+  def initialize(&block : Hash(K, V), K -> V)
+    initialize
+    @default = block
+  end
+
+  def self.new(default : V) : Hash(K, V)
+    new { |table, key| default }
   end
 
   def size : Int32
@@ -66,7 +81,12 @@ class Hash(K, V)
 
   def [](key : K) : V
     entry = @index[slot_for(key)]
-    raise "no such key #{key.inspect}" if entry < 0
+    if entry < 0
+      if default = @default
+        return default.call(self, key)
+      end
+      raise "no such key #{key.inspect}"
+    end
     @values[entry]
   end
 
@@ -100,6 +120,14 @@ class Hash(K, V)
       yield @keys[entry], @values[entry]
       entry = entry + 1
     end
+  end
+
+  # Every pair as a tuple, in the order it went in - what a sort by value
+  # starts from.
+  def to_a : Array(Tuple(K, V))
+    pairs = Array(Tuple(K, V)).new(@size)
+    each { |key, value| pairs << {key, value} }
+    pairs
   end
 
   # The keys, and the values, each in the order they went in.

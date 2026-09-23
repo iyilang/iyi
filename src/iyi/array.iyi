@@ -40,6 +40,21 @@ class Array(T)
     array
   end
 
+  # `Array.new(729, 0)`: *size* copies of *value*, the other library's fill
+  # form. A second argument used to be an arity error beside a one-argument
+  # form that means capacity, which a port reads as the fill it was.
+  def self.new(size : Int32, value : T) : Array(T)
+    new(size) { |index| value }
+  end
+
+  # The two in order, as a new array; neither operand changes.
+  def +(other : Array(T)) : Array(T)
+    joined = Array(T).new(@size + other.size)
+    each { |value| joined << value }
+    other.each { |value| joined << value }
+    joined
+  end
+
   # An array of *capacity* elements that are not written yet. The literal
   # expander fills them through `to_unsafe` immediately afterwards, which is
   # why this is allowed to hand out a size it has not stored anything at.

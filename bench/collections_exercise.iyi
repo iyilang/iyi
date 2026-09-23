@@ -212,4 +212,26 @@ assert_int((5..5).to_a.size, 1, "range: one value")
 assert_int((5...5).to_a.size, 0, "range: no values")
 assert_int((1..4).sum, 10, "range: sum")
 
+# The forms a port writes first: a filled array, two joined, a table
+# with a default - a value, or a block that may store what it answers -
+# and a table's pairs as an array to sort.
+filled = Array.new(4, 7)
+assert_int(filled.size, 4, "array: filled has the size asked")
+assert_int(filled[3], 7, "array: filled with the value")
+joined = [1, 2] + [3]
+assert_int(joined.size, 3, "array: + joins")
+assert_int(joined[2], 3, "array: + keeps the order")
+counts = Hash(String, Int32).new(0)
+assert_int(counts["z"], 0, "hash: a default answers a missing key")
+counts["a"] = counts["a"] + 1
+counts["a"] = counts["a"] + 1
+assert_int(counts["a"], 2, "hash: a default counts")
+assert_int(counts.size, 1, "hash: a default is not stored")
+squares = Hash(Int32, Int32).new { |table, n| table[n] = n * n }
+assert_int(squares[6], 36, "hash: a default block answers")
+assert_int(squares.size, 1, "hash: and may store")
+pairs = counts.to_a
+assert_int(pairs.size, 1, "hash: to_a has a pair per entry")
+assert_str(pairs[0][0], "a", "hash: to_a keeps the key")
+
 puts "all collection checks passed"

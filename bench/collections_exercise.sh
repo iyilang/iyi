@@ -174,6 +174,14 @@ prove_fails() { # prove_fails <label> <dir> <file> <phrase> <sed script>
 }
 
 # 1. `concat` reading the other array's size as it grows, which is the defect.
+prove_fails "a default is ignored" no_default hash.iyi \
+  'no such key "z"' \
+  's/^      if default = @default$/      if default = nil/'
+
+prove_fails "the fill form fills nothing" no_fill array.iyi \
+  "array: filled has the size asked" \
+  's/^    new(size) { |index| value }$/    Array(T).new(0)/'
+
 prove_fails "concat reads a growing size" grow_concat array.iyi \
   "array: concat with itself doubles" \
   's/^    taking = other.size$/    taking = 1/'

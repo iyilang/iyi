@@ -355,6 +355,13 @@
 
 ### Fixed
 
+- `bench/std_regex_exercise.sh` holds on Windows: its probe for a class past
+  ASCII was written with Python's default encoding, which there is the ANSI
+  code page, so `[é]` became the byte 0xE9 and the compiler refused the file
+  as malformed UTF-8 before the regex could refuse the class. The probe, and
+  `bench/std_signal_exercise.sh`'s patched copy, are read and written as
+  UTF-8 by name.
+
 - On Windows, `IyiSocket.connect_unix` to a path whose listener had closed
   answered a socket rather than a `SocketError`. The unix socket's `connect`
   answers "would block" on a non-blocking socket, and the shared `connect`

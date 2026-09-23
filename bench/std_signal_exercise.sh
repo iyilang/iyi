@@ -163,11 +163,11 @@ patched() { # patched <name> <old> <new>: a copy of std with one line changed
   mkdir -p "$WORK/$name-std/std"
   OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/signal.iyi" "$WORK/$name-std/std/signal.iyi" <<'PY'
 import os, sys
-src = open(sys.argv[1]).read()
+src = open(sys.argv[1], encoding="utf-8").read()
 old, new = os.environ["OLD"], os.environ["NEW"]
 if src.count(old) != 1:
     raise SystemExit("patch site missing: " + old)
-open(sys.argv[2], "w").write(src.replace(old, new, 1))
+open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, new, 1))
 PY
 }
 if [ -z "$PY" ]; then

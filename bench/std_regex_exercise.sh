@@ -148,7 +148,9 @@ refuses() { # refuses <label> <name> <phrase> <pattern>
   PATTERN="$pattern" "$PY" - "$WORK/$name.iyi" <<'PY'
 import os, sys
 pat = os.environ["PATTERN"].replace("\\", "\\\\").replace('"', '\\"')
-open(sys.argv[1], "w").write('module main\n\nimport std/regex\nusing std/regex::{Regex}\n\nputs Regex.compile("%s").find("a").inspect\n' % pat)
+# UTF-8 by name: Windows' default is the ANSI code page, which wrote `[é]`
+# as the single byte 0xE9 and made a source file the compiler refuses.
+open(sys.argv[1], "w", encoding="utf-8").write('module main\n\nimport std/regex\nusing std/regex::{Regex}\n\nputs Regex.compile("%s").find("a").inspect\n' % pat)
 PY
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

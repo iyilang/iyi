@@ -355,6 +355,15 @@
 
 ### Fixed
 
+- On Windows, `IyiSocket.connect_unix` to a path whose listener had closed
+  answered a socket rather than a `SocketError`. The unix socket's `connect`
+  answers "would block" on a non-blocking socket, and the shared `connect`
+  cannot wait for that on Windows, which has no readiness to park on: it read
+  SO_ERROR before the outcome existed. The outcome is now waited for with
+  `select`, which reports a failed connect where `WSAPoll` does not. The socket
+  exercise also parks a unix accept before anybody connects, which is
+  `AcceptEx` on a unix socket there.
+
 - **The language server died on Windows when the binary it runs was
   moved away: "Stack overflow".** With `iyi.exe` renamed under a live
   session, the proxy's next worker could not be started, and the

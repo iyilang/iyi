@@ -260,6 +260,26 @@ back_unix = unix_client.read(64).or_panic
 raise "unix: the client read #{back_unix.inspect}" unless back_unix == "and back"
 unix_client.close
 unix_conn.close
+# And an accept that parks before anybody connects - on Windows that is
+# `AcceptEx` on a unix socket, where the one above found its connection
+# already queued.
+parked_heard = ""
+group do |g|
+  g.spawn do
+    waiting = unix.accept.or_panic
+    parked_heard = waiting.read(64).or_panic
+    waiting.close
+    0
+  end
+  g.spawn do
+    sleep(20)
+    late = IyiSocket.connect_unix(unix_path).or_panic
+    late.write("after the park")
+    late.close
+    0
+  end
+end
+raise "unix: the parked accept read #{parked_heard.inspect}" unless parked_heard == "after the park"
 unix.close
 gone = IyiSocket.connect_unix(unix_path)
 raise "unix: a connect after the listener closed answered #{gone.inspect}" unless gone.is_a?(SocketError)

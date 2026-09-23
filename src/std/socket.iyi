@@ -1193,6 +1193,9 @@ pub class IyiSocket
       fun socket(af : Int32, type : Int32, protocol : Int32) : UInt64
       fun bind(s : UInt64, addr : Void*, namelen : Int32) : Int32
       fun connect(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      # `select`, by another name here: iyi has a `select` of its own.
+      fun wsa_select = select(nfds : Int32, readfds : Void*, writefds : Void*, exceptfds : Void*,
+                              timeout : Void*) : Int32
       fun listen(s : UInt64, backlog : Int32) : Int32
       fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
       fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
@@ -1270,6 +1273,7 @@ pub class IyiSocket
     # operation that is not over yet says when it is asked how it went.
     WSAEWOULDBLOCK    = 10035
     WSAETIMEDOUT      = 10060
+    WSAECONNREFUSED   = 10061
     ERROR_IO_PENDING  =   997
     WSA_IO_INCOMPLETE =   996
 
@@ -1433,16 +1437,17 @@ pub class IyiSocket
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
       # `ConnectEx` is TCP's alone, and a unix socket's peer is a listener
       # on this machine, whose kernel queues the connection or refuses it
-      # on the spot: the plain `connect`, blocking for the moment it takes,
-      # which is Go's answer on this platform too.
+      # at once: the plain `connect`, and its outcome waited for in place,
+      # which is Go's answer on this platform too. On the non-blocking
+      # socket it answers WSAEWOULDBLOCK, and the shared `connect` cannot
+      # wait for that here - Windows has no readiness to park on, so it
+      # read SO_ERROR before the answer existed, and a connect to a path
+      # whose listener had gone came back connected.
       if family == AF_UNIX
-        off = 0
-        LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(off))
-        answered = LibWs2_32.connect(s, addr.as(Void*), SOCKADDR_UN_SIZE)
-        on = 1
-        LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
-        return __sys_error.to_i32 if answered != 0
-        return 0
+        return 0 if LibWs2_32.connect(s, addr.as(Void*), SOCKADDR_UN_SIZE) == 0
+        err = LibWs2_32.WSAGetLastError
+        return -err if err != WSAEWOULDBLOCK
+        return __sys_unix_connect_outcome(s)
       end
       # `ConnectEx` is the connect a completion port can answer, and it
       # insists on a socket that is already bound; the POSIX `connect` binds
@@ -1606,6 +1611,26 @@ pub class IyiSocket
       len = 4
       LibWs2_32.getsockopt(__sys_handle(fd), SOL_SOCKET, SO_ERROR, pointerof(err).as(Void*), pointerof(len))
       err
+    end
+
+    # How a unix socket's connect ended, asked of `select`: writable is
+    # connected, an exception is refused, and SO_ERROR says why. Not
+    # `WSAPoll`, which on the Windows versions still in service does not
+    # report a connect that failed. An `fd_set` is a count and an array of
+    # SOCKETs, padded to eight bytes; one socket each.
+    def self.__sys_unix_connect_outcome(s : UInt64) : Int32
+      writable = Pointer(UInt64).malloc(2_u64)
+      writable[0] = 1_u64
+      writable[1] = s
+      failed = Pointer(UInt64).malloc(2_u64)
+      failed[0] = 1_u64
+      failed[1] = s
+      ready = LibWs2_32.wsa_select(0, Pointer(Void).new(0_u64), writable.as(Void*), failed.as(Void*),
+        Pointer(Void).new(0_u64))
+      return __sys_error.to_i32 if ready < 0
+      return 0 if failed.as(Pointer(UInt32)).value == 0_u32
+      code = __sys_sock_error(s.unsafe_to_i32)
+      -(code == 0 ? WSAECONNREFUSED : code)
     end
 
     # The pointer to one of mswsock's extension functions, asked of the

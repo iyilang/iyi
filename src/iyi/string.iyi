@@ -18,9 +18,10 @@ class String
   HEADER_SIZE = 8
 
   # Allocates *bytesize* bytes, hands the buffer to the block to fill, and
-  # returns the string that results. The character count is scanned rather
-  # than asked for: a caller that knew it would have to be trusted, and every
-  # caller here is copying bytes it did not decode.
+  # returns the string that results. The character count is left at zero,
+  # "not counted yet", for `size` to scan the first time it is asked: most
+  # strings built here - an encoding, a join, a line - are never asked, and
+  # counting them all was a second pass over every byte built.
   def self.new(bytesize : Int32, & : Pointer(UInt8) -> Nil) : String
     memory = String.memory(bytesize + HEADER_SIZE + 1)
     buffer = memory + HEADER_SIZE
@@ -28,7 +29,7 @@ class String
 
     header = memory.as(Pointer(Int32))
     header[0] = bytesize
-    header[1] = character_count(buffer, bytesize)
+    header[1] = 0
     memory.as(String)
   end
 

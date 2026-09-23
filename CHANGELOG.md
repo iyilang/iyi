@@ -79,6 +79,14 @@
 
 ### Changed
 
+- **A string the prelude builds is counted when `size` asks, not when it
+  is made.** `String.new(bytesize) { ... }` scanned every byte it had
+  just been handed to store the character count, and almost none of those
+  strings - an encoding, a join, a line read - is ever asked for it. The
+  count is left at zero, the "not counted yet" `size` already honoured
+  for strings from the other library, and scanned once on the first
+  `size`. `Base64.encode` of 300 KB, 8,192 times: 2.0 s to 1.4 s.
+
 - **A pattern of byte classes and alternatives is searched without the
   machine.** `agggtaaa|tttaccct`, `[cgt]gggtaaa|tttaccc[acg]`, `a.c`,
   `[^x]y` — runs of fixed length, no quantifier, group or anchor — are
@@ -9348,7 +9356,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 16,192-line library and nothing else. Every other
+  written against iyi's own 16,207-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

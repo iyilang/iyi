@@ -320,4 +320,9 @@ raise "string: range from the back" unless "hello"[-3..-1] == "llo" && "hello"[0
 raise "string: backwards range is empty" unless "hello"[3..1] == ""
 puts "    to_u64 and a range of a string verified"
 
+built = String.build { |io| io << "aé€" << '🎉' }
+raise "utf8: a built string counts its code points when asked" unless built.size == 4
+raise "utf8: a built string's count stays what it was" unless built.size == 4 && built.bytesize == 10
+puts "    a built string counts its characters when asked, once"
+
 puts "all std/text checks passed"

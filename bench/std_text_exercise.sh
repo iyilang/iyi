@@ -209,6 +209,11 @@ prove_fails_prelude() {
 }
 
 # 8. Multi-byte char to_s encoding broken, in the prelude
+# A string built without its count is counted by `size`; answering the
+# stored zero instead is wrong for every string the prelude builds.
+prove_fails_prelude "an uncounted string answered as it is" no_count "utf8: char to_s size" \
+  's/^    return @length if @length > 0 || @bytesize == 0$/    return @length/'
+
 prove_fails_prelude "char utf8 encoding broken" no_encode "utf8: char to_s" \
   's/buffer\[1\] = (0x80 | (point \& 0x3F)).to_u8/buffer[1] = 0_u8/'
 

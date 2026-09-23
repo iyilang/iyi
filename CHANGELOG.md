@@ -379,13 +379,14 @@
   UTF-8 by name.
 
 - On Windows, `IyiSocket.connect_unix` to a path whose listener had closed
-  answered a socket rather than a `SocketError`. The unix socket's `connect`
-  answers "would block" on a non-blocking socket, and the shared `connect`
-  cannot wait for that on Windows, which has no readiness to park on: it read
-  SO_ERROR before the outcome existed. The outcome is now waited for with
-  `select`, which reports a failed connect where `WSAPoll` does not. The socket
-  exercise also parks a unix accept before anybody connects, which is
-  `AcceptEx` on a unix socket there.
+  answered a socket rather than a `SocketError`: the `connect` ran on a socket
+  already non-blocking, and the shared `connect` read SO_ERROR before any
+  outcome existed. Waiting for it with `select` was tried next and refused a
+  listener that was there. A unix socket now connects while still blocking and
+  is made non-blocking after, which is Go's `connect` on that platform; the
+  listener is on the same machine, and its kernel queues the connection or
+  refuses it at once. The socket exercise also parks a unix accept before
+  anybody connects, which is `AcceptEx` on a unix socket there.
 
 - **The language server died on Windows when the binary it runs was
   moved away: "Stack overflow".** With `iyi.exe` renamed under a live

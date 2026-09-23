@@ -144,7 +144,8 @@
   `x.to_u32` answered that the prelude is small by rule — or "did you mean
   `to_i32`?" — and a port concluded `UInt32` had no methods at all. It has
   every operator, shift, conversion and `<=>`, one import away; the error
-  says so now: "`+` on UInt32 is in `std/int` ... `import std/int`".
+  says so now: "`+` on UInt32 is in `std/int` ... `import std/int`" — and
+  `iyi doc UInt32`, an empty struct before, ends by naming the same import.
 
 - **`Array#join`, `String#tr`, `gsub` with a block, `delete`, `squeeze`
   and `Regex#replace` were quadratic.** Each built its answer with

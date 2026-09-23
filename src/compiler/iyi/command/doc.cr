@@ -220,6 +220,14 @@ class Iyi::Command
       io << "  " << IyiMod.render_signature(signature) << '\n'
     end
     io << "end\n"
+    # The rest of an integer is one import away, and the prelude's own
+    # listing cannot show it: `UInt32` printed as an empty struct, and a
+    # reader concluded it had no arithmetic at all.
+    if type.is_a?(IntegerType)
+      io << "\n# `import std/int` gives #{type} the rest of the integer tower's surface:\n" \
+            "# arithmetic and comparison with every integer type, `//`, `%`, `<<`, `>>`,\n" \
+            "# `<=>`, the bit counts and every `to_*` conversion (`iyi doc std/int`).\n"
+    end
   end
 
   # The module compiled alone — R-1's promise worn as a verb, the same way

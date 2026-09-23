@@ -429,6 +429,10 @@ grep -q '  def +(other : Int32) : self' int-doc.txt || { echo "Int32's + is miss
 grep -q '  def <(other : Int32) : Bool' int-doc.txt || { echo "Int32's < is missing"; exit 1; }
 grep -q '  def to_i64 : Int64' int-doc.txt || { echo "Int32's to_i64 is missing"; exit 1; }
 grep -q '^  def \(allocate\|crystal_type_id\|crystal_instance_type_id\)' int-doc.txt && { echo "the compiler's own method leaked into Int32's doc"; exit 1; }
+# An integer the prelude lists little of names the module that gives it the
+# rest: `iyi doc UInt32` was an empty struct, read as "no arithmetic".
+"$IYI" doc UInt32 > u32-doc.txt 2>&1 || { cat u32-doc.txt; exit 1; }
+grep -q 'import std/int. gives UInt32' u32-doc.txt || { echo "UInt32's doc does not name std/int:"; cat u32-doc.txt; exit 1; }
 "$IYI" doc Proc > proc-doc.txt 2>&1 || { cat proc-doc.txt; exit 1; }
 grep -q '  def call(\*args : \*T) : R' proc-doc.txt || { echo "Proc's call is missing:"; cat proc-doc.txt; exit 1; }
 "$IYI" doc Nope > nope.txt 2>&1 && { echo "an unknown type was documented"; exit 1; }

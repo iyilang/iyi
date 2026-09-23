@@ -34,6 +34,13 @@
   breaks, installs over it, and requires the stale file gone and the
   prelude whole.
 
+- **The language-server gates stop, and say where, when the server does
+  not answer.** A Windows run sat in `bench/lsp_session.py` for most of an
+  hour — it takes 37 seconds there — and printed nothing, because the
+  client blocks on a read and the output was still in a pipe's buffer.
+  Both LSP gates now print each step as it finishes and, 180 seconds
+  without one, name the step that never did, kill the servers, and exit 1.
+
 ### Fixed
 
 - **An artifact did not name the `lib` its own object code calls.**

@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bench"))
@@ -98,7 +99,10 @@ status = 0
 
 def say(label, ok, detail=""):
     global status
-    print(f"  {'ok  ' if ok else 'FAIL'} {label}" + (f" — {detail}" if detail else ""))
+    print(f"  {'ok  ' if ok else 'FAIL'} {label}" + (f" — {detail}" if detail else ""), flush=True)
+    session = sys.modules.get("lsp_session")
+    if session:
+        session.LAST["at"] = time.monotonic()
     if not ok:
         status = 1
 
@@ -138,6 +142,7 @@ def ask(where, env, label):
 
     main = os.path.join(where, "main.iyi")
     uri = session.file_uri(main)
+    session.watchdog(180)
     client = session.Client()
     client.send("initialize", {"rootUri": session.file_uri(where), "capabilities": {}})
     client.send("initialized", {}, wait=False)

@@ -27,9 +27,38 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 IYI = os.environ.get("IYI", "./bin/iyi")
+
+# Every server this gate started, and the last step that finished: what the
+# watchdog kills and names when a session stops answering.
+LIVE = []
+LAST = {"step": 0, "at": time.monotonic()}
+
+
+def watchdog(seconds):
+    """A server that stops answering hangs `read_message` forever, and the
+    runner only kills the job at its own limit, with what the gate printed
+    still in a pipe's buffer — a Windows run sat at "the language server
+    holds its session" for most of an hour and said nothing. Past *seconds*
+    with no step finished, this names the last one that did, kills every
+    server, and exits 1. The whole session is under a minute everywhere."""
+    if LAST.get("watching"):
+        return
+    LAST["watching"], LAST["at"] = True, time.monotonic()
+
+    def watch():
+        while True:
+            time.sleep(5)
+            if time.monotonic() - LAST["at"] > seconds:
+                print(f"step {LAST['step'] + 1} never finished: no answer in "
+                      f"{seconds} s after step {LAST['step']}", flush=True)
+                for proc in LIVE:
+                    proc.kill()
+                os._exit(1)
+    threading.Thread(target=watch, daemon=True).start()
 
 
 def uri_path(uri):
@@ -89,6 +118,7 @@ class Client:
         show what the split is worth."""
         self.proc = subprocess.Popen(
             [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        LIVE.append(self.proc)
         self.next_id = 0
 
     def send(self, method, params, wait=True):
@@ -192,7 +222,9 @@ class Client:
 
 def step(n, name, ok, detail=""):
     mark = "ok" if ok else "FAIL"
-    print(f"step {n:2} {name}: {mark}  {detail}")
+    print(f"step {n:2} {name}: {mark}  {detail}", flush=True)
+    if isinstance(n, int):
+        LAST["step"], LAST["at"] = n, time.monotonic()
     if not ok:
         sys.exit(1)
 
@@ -258,6 +290,7 @@ def package_fixture(home):
 
 
 def main():
+    watchdog(180)
     # Set before the server starts, because a child inherits the environment
     # it was spawned with: the package step below needs the server to find a
     # checkout in this cache rather than fetch one.

@@ -131,7 +131,10 @@ end
 # limbs for most - and a number that outgrows its estimate doubles
 # (`room`) rather than writing past it.
 class IyiBig
-  LIMBS =             80
+  LIMBS = 80
+  # What a number starts with when nobody said: enough for most of what the
+  # parser and the other printers meet, and `room` doubles it past that.
+  START =              8
   BASE  = 4294967296_u64
   MASK  = 4294967295_u64
 
@@ -139,7 +142,7 @@ class IyiBig
   @size : Int32
   @capacity : Int32
 
-  def initialize(value : UInt64, capacity : Int32 = LIMBS)
+  def initialize(value : UInt64, capacity : Int32 = START)
     @capacity = capacity
     @limbs = Pointer(UInt64).malloc(capacity.to_u64)
     @size = 0

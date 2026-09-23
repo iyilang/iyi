@@ -42,6 +42,11 @@
   number exercise pins the range's ends and the powers of two whose nearer
   neighbour is below, and fails with the power-of-two rule taken out.
 
+  `String#to_f` and the other two printers (`Float32`, `sprintf`'s `%g`)
+  start their bignums at eight limbs rather than eighty and grow on
+  demand, so parsing a million doubles takes 0.38 s instead of 0.68 s; the
+  2.3 million texts above read back to the bits they were printed from.
+
 - **`Float64#round` sends a tie to the even integer, as Crystal's does.**
   `2.5.round` is 2.0 and `3.5.round` is 4.0; `round(digits)` the same at
   its place. It went away from zero, so the same name compiled under both
@@ -9238,7 +9243,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 16,146-line library and nothing else. Every other
+  written against iyi's own 16,149-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

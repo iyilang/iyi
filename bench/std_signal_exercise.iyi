@@ -1,0 +1,228 @@
+# Exercises `std/signal`.
+#
+#     ./bin/iyi run bench/std_signal_exercise.iyi
+#     ./bin/iyi run bench/std_signal_exercise.iyi external   # waits for TERM
+#
+# The program sends itself the signals it waits for: `kill` on Linux,
+# `pthread_kill` on darwin, and on Windows a Ctrl-Break into a console of its own, so the
+# event reaches this process and not the shell that started it. Every wait
+# has a watchdog beside it, so a signal that never arrives is a failure
+# and not a hang.
+
+module bench/std_signal_exercise
+
+import std/signal
+using std/signal::{Signal}
+import std/socket
+using std/socket::{IyiSocket}
+
+{% if flag?(:win32) %}
+  lib LibKernel32
+    fun FreeConsole : Int32
+    fun AllocConsole : Int32
+    fun SetStdHandle(which : Int32, handle : Void*) : Int32
+    fun GenerateConsoleCtrlEvent(event : Int32, group : Int32) : Int32
+  end
+{% elsif flag?(:darwin) %}
+  # The thread layer's own two, so the exercise adds nothing to the
+  # program's floor (bench/floor_base.sh).
+  lib LibC
+    fun pthread_self : Void*
+    fun pthread_kill(thread : Void*, signal : Int32) : Int32
+  end
+{% end %}
+
+pub struct TimedOut
+  def initialize
+  end
+end
+
+impl Error for TimedOut
+  def message : String
+    "a signal did not arrive within five seconds"
+  end
+end
+
+def fail(message : String) : NoReturn
+  puts "FAIL: #{message}"
+  __iyi_exit(1)
+end
+
+# A console of this process's own, keeping the output where it was.
+def own_console : Nil
+  {% if flag?(:win32) %}
+    output = ::LibC.GetStdHandle(-11)
+    error = ::LibC.GetStdHandle(-12)
+    LibKernel32.FreeConsole
+    fail("AllocConsole refused") if LibKernel32.AllocConsole == 0
+    LibKernel32.SetStdHandle(-11, output)
+    LibKernel32.SetStdHandle(-12, error)
+  {% end %}
+end
+
+# INT, the one signal every platform can send itself: Windows' Ctrl-Break.
+def interrupt_self : Nil
+  {% if flag?(:win32) %}
+    fail("GenerateConsoleCtrlEvent refused") if LibKernel32.GenerateConsoleCtrlEvent(1, 0) == 0
+  {% elsif flag?(:darwin) %}
+    LibC.pthread_kill(LibC.pthread_self, 2)
+  {% elsif flag?(:x86_64) %}
+    __iyi_conc_syscall3(62_i64, __iyi_conc_syscall3(39_i64, 0_i64, 0_i64, 0_i64), 2_i64, 0_i64)
+  {% else %}
+    __iyi_conc_syscall3(129_i64, __iyi_conc_syscall3(172_i64, 0_i64, 0_i64, 0_i64), 2_i64, 0_i64)
+  {% end %}
+end
+
+# Fails the group unless *done* turns true within five seconds; returns as
+# soon as it does.
+def watchdog(done : -> Bool) : Nil | Cancelled | TimedOut
+  500.times do
+    return nil if done.call
+    slept = sleep(10)
+    return slept if slept.is_a?(Cancelled)
+  end
+  # Said here: the group's failure cancels the waiter, and the waiter's
+  # own report would only say it was cancelled.
+  puts "FAIL: #{TimedOut.new.message}"
+  TimedOut.new
+end
+
+own_console
+
+if Program.args.size > 0 && Program.args[0] == "external"
+  # The shell's side: the waiter is parked, which installs the handler,
+  # before "ready" is printed; the shell sends TERM and reads the rest.
+  got = ""
+  group do |g|
+    g.spawn do
+      signal = Signal.wait(Signal::TERM)
+      got = signal.to_s
+      signal.is_a?(Cancelled) ? signal : 0
+    end
+    g.spawn do
+      sleep(50)
+      puts "ready"
+      0
+    end
+  end
+  puts "stopped on #{got}"
+  __iyi_exit(0)
+end
+
+puts "== a signal the program sends itself wakes the waiting fiber"
+got = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(Signal::INT, Signal::TERM)
+    got = signal.to_s
+    signal.is_a?(Cancelled) ? signal : 0
+  end
+  g.spawn do
+    sleep(20)
+    interrupt_self
+    0
+  end
+  g.spawn { watchdog(-> { got != "" }) }
+end
+fail("woke with #{got}") unless got == "INT"
+puts "  Signal.wait answered INT, and the process lived"
+
+puts "== one that arrives with nobody waiting is kept"
+interrupt_self
+sleep(50)
+started = __iyi_monotonic_ns
+kept = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(Signal::INT)
+    kept = signal.to_s
+    signal.is_a?(Cancelled) ? signal : 0
+  end
+  g.spawn { watchdog(-> { kept != "" }) }
+end
+fail("the kept signal was #{kept}") unless kept == "INT"
+waited_ms = (__iyi_monotonic_ns - started) // 1000000_i64
+fail("the kept signal took #{waited_ms} ms to be taken") if waited_ms > 1000
+puts "  the next wait answered at once"
+{% unless flag?(:win32) %}
+  # Twice in a row and taken once: a pending signal is a bit, not a count.
+  interrupt_self
+  interrupt_self
+  sleep(50)
+  once = Signal.wait(Signal::INT)
+  fail("the first of two answered #{once}") unless once == Signal::INT
+  second = ""
+  group do |g|
+    g.spawn do
+      signal = Signal.wait(Signal::INT)
+      second = "taken before the third was sent" if second == ""
+      signal.is_a?(Cancelled) ? signal : 0
+    end
+    g.spawn do
+      sleep(100)
+      second = "waited for the third" if second == ""
+      interrupt_self
+      0
+    end
+  end
+  fail("two arrivals were #{second}") unless second == "waited for the third"
+  puts "  two arrivals nobody waited for are one"
+{% end %}
+
+puts "== a graceful stop: the signal closes the listener and the group joins"
+server = IyiSocket.listen("127.0.0.1", 0)
+port = server.local_port
+served = 0
+answered = ""
+stopped = false
+group do |g|
+  g.spawn do
+    while true
+      client = server.accept
+      break unless client.is_a?(IyiSocket)
+      request = client.read
+      client.write("served #{request}") if request.is_a?(String)
+      client.close
+      served = served + 1
+    end
+    0
+  end
+  g.spawn do
+    signal = Signal.wait(Signal::INT, Signal::TERM)
+    next signal if signal.is_a?(Cancelled)
+    server.close
+    stopped = true
+    0
+  end
+  g.spawn do
+    client = IyiSocket.connect("127.0.0.1", port).or_panic
+    client.write("one")
+    reply = client.read
+    answered = reply if reply.is_a?(String)
+    client.close
+    interrupt_self
+    0
+  end
+  g.spawn { watchdog(-> { stopped }) }
+end
+fail("the request in flight was answered #{answered.inspect}") unless answered == "served one"
+fail("served #{served}") unless served == 1
+puts "  one request served, the listener closed, the group joined"
+
+puts "== a cancelled task's wait answers Cancelled"
+outcome = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(Signal::TERM)
+    outcome = signal.is_a?(Cancelled) ? "cancelled" : signal.to_s
+    signal.is_a?(Cancelled) ? signal : 0
+  end
+  g.spawn do
+    sleep(20)
+    TimedOut.new
+  end
+end
+fail("the wait answered #{outcome}") unless outcome == "cancelled"
+puts "  the waiter left with Cancelled"
+
+puts "ALL CHECKS PASSED"

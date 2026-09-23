@@ -4,6 +4,18 @@
 
 ### Added
 
+- `std/signal`: `Signal.wait(Signal::INT, Signal::TERM)` parks a fiber until
+  one of the signals it names arrives and answers which, or `Cancelled`. From
+  the first wait that names a signal, its default action is off and every
+  arrival is kept until a wait takes it, so a server stops gracefully with
+  ordinary structured concurrency: a sibling waits, closes the listener, and
+  the group joins the requests in flight. On Linux and darwin the handler
+  writes to a pipe the poller watches; on Windows the console control handler
+  posts to the parked fiber's completion port, Ctrl-C and Ctrl-Break being
+  `INT` and closing the console, logging off and shutting down `TERM`. Gate:
+  `bench/std_signal_exercise.sh`, which sends TERM from outside and proves a
+  wait that takes nothing and a handler never installed are both caught.
+
 - **`IO#seek`, `#pos` and `#pos=` on a file (`import std/file`).**
   `seek(offset, IyiIO::Seek::Set | Current | End)` moves where the next
   read or write happens and answers the new position, as Crystal's does:

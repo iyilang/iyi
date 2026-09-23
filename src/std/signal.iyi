@@ -1,0 +1,289 @@
+# Signals: a program told to stop, as a value it waits for.
+#
+#     group do |g|
+#       g.spawn { Server.serve(listener) { |request| answer(request) }; 0 }
+#       g.spawn do
+#         Signal.wait(Signal::INT, Signal::TERM)
+#         listener.close   # the server stops taking connections
+#         0
+#       end
+#     end
+#     puts "bye"           # the group's end waited for the requests in flight
+#
+# `wait` parks the fiber until one of the signals it names arrives and
+# answers which, or `Cancelled` if its task is. From the first `wait` that
+# names a signal, that signal no longer has its default action - SIGINT
+# and SIGTERM no longer end the process - and every arrival is kept until
+# a `wait` takes it, so one that comes before the `wait` is not lost; a
+# signal nobody has named keeps its default. A graceful stop is then
+# ordinary structured concurrency: close what takes new work, let the
+# group join what is in flight.
+#
+# Underneath, on Linux and darwin, the handler does the one thing a signal
+# handler may: it writes the signal's number to a pipe. The waiting fiber
+# parks on the pipe's read end like any socket read, so the program's own
+# code never runs inside a handler. On Windows the console's control
+# handler runs on a thread of its own and posts a completion to the
+# waiting fiber's overlapped slot: Ctrl-C and Ctrl-Break are `INT`, closing
+# the console, logging off and shutting down are `TERM`; `HUP` and `QUIT`
+# have no Windows event.
+#
+# One fiber waits at a time - two at once are refused by the poller's own
+# rule, one reader per descriptor.
+
+module std/signal
+
+{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+  {% raise "std/signal parks a fiber until a signal arrives, and this target has no runtime to park it in " \
+           "(SPEC.md III.4): Linux and darwin arm64 and Windows x86_64 have one." %}
+{% end %}
+
+{% if flag?(:darwin) %}
+  lib LibC
+    fun pipe(fds : Int32*) : Int32
+    fun fcntl(fd : Int32, command : Int32, ...) : Int32
+    fun sigaction(signal : Int32, action : Void*, previous : Void*) : Int32
+  end
+{% elsif flag?(:win32) %}
+  lib LibKernel32
+    fun SetConsoleCtrlHandler(handler : Void*, add : Int32) : Int32
+    fun Sleep(milliseconds : UInt32) : Nil
+  end
+{% end %}
+
+pub enum Signal
+  HUP  =  1
+  INT  =  2
+  QUIT =  3
+  TERM = 15
+
+  # Parks until one of *signals* arrives; answers it.
+  def self.wait(*signals : Signal) : Signal | Cancelled
+    list = [] of Signal
+    index = 0
+    while index < signals.size
+      list << signals[index]
+      index = index + 1
+    end
+    SignalWaiter.wait(list)
+  end
+end
+
+class SignalWaiter
+  # Arrived and not yet taken, one bit per signal number.
+  @@pending = 0_u64
+  # The signals whose handler is installed, one bit each.
+  @@installed = 0_u64
+
+  {% if flag?(:win32) %}
+    # The handler's thread and the waiting fiber share these three words:
+    # arrivals as bits, and where to post the wakeup - the port of the
+    # scheduler the fiber parked on and its overlapped slot, zero when
+    # nobody is parked.
+    @@arrived = Atomic(UInt64).new(0_u64)
+    @@port = Atomic(UInt64).new(0_u64)
+    @@slot = Atomic(UInt64).new(0_u64)
+  {% else %}
+    @@read_fd = -1
+    @@write_fd = -1
+  {% end %}
+
+  def self.wait(signals : Array(Signal)) : Signal | Cancelled
+    raise "Signal.wait: name at least one signal" if signals.empty?
+    wanted = 0_u64
+    signals.each do |signal|
+      {% if flag?(:win32) %}
+        raise "Signal.wait: #{signal} has no Windows console event" if signal == Signal::HUP || signal == Signal::QUIT
+      {% end %}
+      wanted = wanted | 1_u64.unsafe_shl(signal.value.to_u64)
+    end
+    install(wanted)
+    while true
+      {% if flag?(:win32) %}
+        @@pending = @@pending | @@arrived.swap(0_u64)
+      {% end %}
+      taken = take(signals)
+      return taken if taken
+      waited = park
+      return waited if waited.is_a?(Cancelled)
+    end
+  end
+
+  # The first of *signals* that has arrived, taken off the pending bits.
+  private def self.take(signals : Array(Signal)) : Signal?
+    signals.each do |signal|
+      bit = 1_u64.unsafe_shl(signal.value.to_u64)
+      if @@pending & bit != 0_u64
+        @@pending = @@pending & (0xFFFFFFFFFFFFFFFF_u64 ^ bit)
+        return signal
+      end
+    end
+    nil
+  end
+
+  {% if flag?(:win32) %}
+    private def self.install(wanted : UInt64) : Nil
+      return if @@installed != 0_u64
+      @@installed = 1_u64
+      # Touched here, on the program's own thread, so the handler's thread
+      # finds them already made.
+      @@arrived.set(0_u64)
+      @@port.set(0_u64)
+      @@slot.set(0_u64)
+      proc = ->(event : Int32) { SignalWaiter.console_event(event) }
+      address = Pointer(Void).new(Pointer(UInt64).new(pointerof(proc).address).value)
+      raise "Signal.wait: SetConsoleCtrlHandler refused" if LibKernel32.SetConsoleCtrlHandler(address, 1) == 0
+    end
+
+    # On the console's own thread: no allocation, no lock, no fiber. The
+    # arrival is recorded and, when a fiber is parked, its slot completed
+    # with one byte, which is how the fiber tells this wakeup from its
+    # cancellation's. Answering 1 is "handled", so Ctrl-C's default -
+    # ending the process - is not taken.
+    #
+    # Closing the console, logging off and shutting down end the process
+    # when the handler returns, whatever it answers: Windows gives the
+    # handler a few seconds and no more. So for those the handler does not
+    # return. The program's own `exit` ends this thread with the rest, and
+    # the program has until Windows' deadline to reach it - Go's answer to
+    # the same rule.
+    def self.console_event(event : Int32) : Int32
+      signal = event <= 1 ? 2 : 15
+      @@arrived.add(1_u64.unsafe_shl(signal.to_u64))
+      slot = @@slot.swap(0_u64)
+      if slot != 0_u64
+        ::LibC.PostQueuedCompletionStatus(Pointer(Void).new(@@port.get), 1, 0_u64, Pointer(Void).new(slot))
+      end
+      while event >= 2
+        LibKernel32.Sleep(0xFFFFFFFF_u32)
+      end
+      1
+    end
+
+    private def self.park : Nil | Cancelled
+      fiber = IyiScheduler.current
+      return Cancelled.new if fiber.cancelled
+      ov = fiber.wait_overlapped
+      Pointer(UInt64).new(ov.address).value = 0_u64
+      Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
+      Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
+      Pointer(UInt64).new(ov.address + 24_u64).value = 0_u64
+      # No handle: a cancellation's `CancelIoEx` has no operation to stop.
+      fiber.wait_handle = Pointer(Void).new(0_u64)
+      fiber.io_bytes_read = 0_i64
+      @@port.set(IyiScheduler.pollfd.to_u64)
+      @@slot.set(ov.address)
+      # An arrival between the check above and the slot being set posted
+      # to nobody; it is in the bits, and the park is skipped.
+      if @@arrived.get != 0_u64
+        return nil if @@slot.swap(0_u64) != 0_u64
+        # The handler took the slot as well: its packet is on its way.
+      end
+      result = IyiScheduler.park_overlapped_current
+      return nil unless result.is_a?(Cancelled)
+      # Cancelled, and the handler's packet not taken: either the slot is
+      # still set and nothing will be posted, or the handler took it and
+      # the packet is on the port, where it would wake this fiber's next
+      # overlapped read with a byte that read never had. That packet is
+      # waited out first.
+      if fiber.io_bytes_read == 0_i64 && @@slot.swap(0_u64) == 0_u64
+        IyiScheduler.park_overlapped_current
+      end
+      result
+    end
+  {% else %}
+    private def self.install(wanted : UInt64) : Nil
+      open_pipe if @@read_fd < 0
+      signal = 1
+      while signal < 32
+        bit = 1_u64.unsafe_shl(signal.to_u64)
+        if wanted & bit != 0_u64 && @@installed & bit == 0_u64
+          handle(signal)
+          @@installed = @@installed | bit
+        end
+        signal = signal + 1
+      end
+    end
+
+    # The pipe, both ends non-blocking and closed on exec: the handler's
+    # write must never block, and the read end is waited on through the
+    # poller.
+    private def self.open_pipe : Nil
+      fds = Pointer(Int32).malloc(2_u64)
+      {% if flag?(:darwin) %}
+        raise "Signal.wait: pipe failed" if LibC.pipe(fds) != 0
+        2.times do |end_|
+          # F_SETFL O_NONBLOCK (4), F_SETFD FD_CLOEXEC (2 then 1).
+          LibC.fcntl(fds[end_], 4, LibC.fcntl(fds[end_], 3) | 4)
+          LibC.fcntl(fds[end_], 2, 1)
+        end
+      {% else %}
+        # pipe2(O_NONBLOCK | O_CLOEXEC): 293 on x86_64, 59 on aarch64.
+        {% if flag?(:x86_64) %}
+          made = __iyi_conc_syscall3(293_i64, fds.address.to_i64, 0x80800_i64, 0_i64)
+        {% else %}
+          made = __iyi_conc_syscall3(59_i64, fds.address.to_i64, 0x80800_i64, 0_i64)
+        {% end %}
+        raise "Signal.wait: pipe2 failed (#{made})" if made < 0
+      {% end %}
+      @@read_fd = fds[0]
+      @@write_fd = fds[1]
+    end
+
+    # SA_SIGINFO so the handler has the three-argument shape the stack
+    # guard's does, SA_RESTART so a call the signal interrupts is resumed
+    # rather than failed, and on x86_64 Linux the restorer the kernel
+    # needs to return.
+    private def self.handle(signal : Int32) : Nil
+      entry = IyiStackGuard.address_of_handler(->(number : Int32, info : Void*, context : Void*) { SignalWaiter.arrived(number) })
+      {% if flag?(:darwin) %}
+        action = Pointer(UInt64).malloc(2_u64)
+        action[0] = entry
+        # sa_mask 0, sa_flags SA_SIGINFO (0x40) | SA_RESTART (0x02), in the
+        # high half.
+        action[1] = 0x0000004200000000_u64
+        raise "Signal.wait: sigaction failed for #{signal}" if LibC.sigaction(signal, action.as(Void*), Pointer(Void).new(0_u64)) != 0
+      {% else %}
+        action = Pointer(UInt64).malloc(4_u64)
+        action[0] = entry
+        {% if flag?(:x86_64) %}
+          # SA_SIGINFO | SA_RESTORER | SA_RESTART.
+          action[1] = 0x14000004_u64
+          action[2] = __iyi_sg_sigreturn_address
+        {% else %}
+          action[1] = 0x10000004_u64
+          action[2] = 0_u64
+        {% end %}
+        action[3] = 0_u64
+        done = __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, signal.to_i64, action.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+        raise "Signal.wait: rt_sigaction failed for #{signal} (#{done})" if done < 0
+      {% end %}
+    end
+
+    # The handler: one write of one byte, which is all a signal handler may
+    # safely do. A full pipe drops the byte - a thousand signals nobody
+    # waited for are one pending bit anyway.
+    def self.arrived(number : Int32) : Nil
+      byte = number.to_u8
+      __iyi_write(@@write_fd, pointerof(byte).as(Void*), 1_u64)
+    end
+
+    # Waits for the pipe, then reads every byte it holds into the pending
+    # bits.
+    private def self.park : Nil | Cancelled
+      waited = IyiScheduler.wait_readable_current(@@read_fd)
+      return waited if waited.is_a?(Cancelled)
+      buffer = Pointer(UInt8).malloc(64_u64)
+      while true
+        got = __iyi_read(@@read_fd, buffer.as(Void*), 64_u64)
+        break if got <= 0_i64
+        index = 0
+        while index < got
+          @@pending = @@pending | 1_u64.unsafe_shl(buffer[index].to_u64)
+          index = index + 1
+        end
+      end
+      nil
+    end
+  {% end %}
+end

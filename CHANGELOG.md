@@ -49,6 +49,23 @@
 
 ### Fixed
 
+- **The collector handed a live object's chunk to a second object.** A
+  run of dead chunks whose pages go back to the kernel keeps its lowest
+  chunk on the free list, and when that chunk's head sat in the last
+  sixteen bytes below the released page, the release zeroed the slot word
+  the list reads when it hands the chunk out. The pop then stamped the
+  arena's slot 0 as the new object and left the chunk free, and the next
+  sweep listed it again under its owner. A table of fresh strings built
+  and dropped sixty times came back with keys spelling other keys, in every
+  `--release` build and at random; slot 0 is an arena's oldest chunk, so
+  the other face of it was a constant built at startup losing its
+  elements: a ported n-body's `BODIES` read a planet's `x` as
+  `6.2e-310`, a free-list link, after a k-nucleotide run. That page now
+  stays the list's and the cold run starts one page up.
+  `bench/reuse_integrity.sh` checks both by content, default and
+  optimised, on Linux, darwin and Windows, and fails on its first run with
+  the release put back.
+
 - **`iyi check --affected` names a missing file the way it was typed.**
   It expanded the path, then chopped the working directory back off, so on
   Windows a caller who wrote `calc/add.iyi` read `calc\add.iyi is not
@@ -9144,7 +9161,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 15,959-line library and nothing else. Every other
+  written against iyi's own 15,974-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

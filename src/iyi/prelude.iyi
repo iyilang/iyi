@@ -5706,8 +5706,23 @@ require "./file"
           IyiHeap.list_pages(arena, page_low, page_low + warm * IyiHeap::PAGE)
           IyiHeap.pages_retained_add(warm)
         end
-        if warm < pages
-          cold_low = page_low + warm * IyiHeap::PAGE
+        cold_low = page_low + warm * IyiHeap::PAGE
+        # The chunk that straddles into the first cold page is the run's
+        # and stays on the batch, and a list reads a chunk's first two
+        # words - its link and its slot - when it hands the chunk out.
+        # Its tail may go with the page; those two words may not. With its
+        # head in the last sixteen bytes below `cold_low`, the release
+        # zeroed the slot, the pop stamped the arena's slot 0 as the new
+        # object, and the chunk kept last epoch's free byte: the next
+        # sweep listed it again under its owner, and slot 0 - the arena's
+        # oldest object, a constant built at startup - wore another
+        # object's bits (an `Array` buffer marked atomic lost its
+        # elements). Such a page stays the batch's, neither listed nor
+        # idle, and the cold run begins one page up.
+        straddler = first + (cold_low - first + chunk - 1_u64).unsafe_div(chunk) * chunk - chunk
+        cold_low = cold_low + IyiHeap::PAGE if straddler >= low && straddler + IyiHeap::OFF_INDEX + 8_u64 > cold_low
+        if cold_low < page_high
+          cold = (page_high - cold_low).unsafe_shr(IyiHeap::PAGE_SHIFT)
           # The run's chunks are linked in address order, the newest the
           # highest: the batch cut back to the chunk below the cold pages
           # keeps the low edge and the warm pages, and the high edge is
@@ -5728,10 +5743,10 @@ require "./file"
           # After the links: a released page written to would be resident
           # again, and none is written to above.
           __iyi_release_pages(cold_low, page_high - cold_low)
-          IyiHeap.pages_released_add(pages - warm)
+          IyiHeap.pages_released_add(cold)
           # The counts last: a carve that reads an idle count takes the
           # lock and looks for the run, and finds it whole.
-          IyiHeap.idle_add(arena, pages - warm, false)
+          IyiHeap.idle_add(arena, cold, false)
         end
         batch_head
       end

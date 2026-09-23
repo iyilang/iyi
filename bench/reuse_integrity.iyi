@@ -1,0 +1,69 @@
+# What the collector hands out is nobody's: a chunk given to one object is
+# not given to a second while the first is alive. Exercised the way a
+# program meets it, with the trigger on — a table of fresh strings built
+# and dropped round after round — and checked by content, which no
+# bookkeeping can fake: every key still spells its value, and a constant
+# built before any of it still holds what it was built with.
+#
+#   ./bin/iyi run bench/reuse_integrity.iyi
+#   bash bench/reuse_integrity.sh        (default and --release)
+#
+# Both halves failed together, from one cause: a run of dead chunks whose
+# pages went back to the kernel kept its lowest chunk on the free list, and
+# when that chunk's head sat in the last sixteen bytes below the released
+# page, the release zeroed the slot word the list reads. The pop stamped
+# the arena's slot 0 as the new object — the arena's oldest, the
+# constant's buffer — and left the chunk free for the next sweep to list
+# again under its owner. Keys came back as other keys' bytes, and a ported
+# n-body read a planet's `x` as a free-list link (`close_run`).
+
+module bench/reuse_integrity
+
+class Body
+  getter x : Float64
+  getter y : Float64
+  getter mass : Float64
+
+  def initialize(@x : Float64, @y : Float64, @mass : Float64)
+  end
+end
+
+# Built at startup, before the first collection, and read at the end: the
+# oldest objects in their arenas.
+BODIES = [
+  Body.new(0.5, 1.5, 2.5),
+  Body.new(4.841431442464721, -1.1603200440274284, 0.0009547919384243266),
+  Body.new(8.34336671824458, 4.124798564124305, 0.0002858859806661308),
+  Body.new(12.894369562139131, -15.111151401698631, 0.00004366244043351563),
+  Body.new(15.379697114850917, -25.919314609987964, 0.00005151389020466115),
+]
+
+WANT = [0.5, 4.841431442464721, 8.34336671824458, 12.894369562139131, 15.379697114850917]
+
+def round_of(size : Int32) : Int32
+  table = {} of String => Int32
+  i = 0
+  while i < size
+    table[i.to_s] = i
+    i = i + 1
+  end
+  wrong = 0
+  table.each { |key, value| wrong = wrong + 1 if key != value.to_s }
+  wrong
+end
+
+wrong = 0
+rounds = 60
+round = 0
+while round < rounds
+  wrong = wrong + round_of(20000 + round * 1000)
+  round = round + 1
+end
+
+bodies_wrong = 0
+BODIES.each_with_index { |body, index| bodies_wrong = bodies_wrong + 1 if body.x != WANT[index] }
+
+if wrong != 0 || bodies_wrong != 0
+  raise "reuse integrity: #{wrong} key(s) no longer spell their value and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"
+end
+puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup constant intact"

@@ -442,12 +442,13 @@ jobs:
       # Windows — a host run, a cross-compile to `x86_64-windows-msvc` that
       # stops at the object, and three patched-prelude proofs — so it runs
       # here, in under two seconds.
-      - name: The collector holds, all six gates
+      - name: The collector holds, all seven gates
         run: |
           bash bench/arena_exercise.sh
           bash bench/root_exercise.sh
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
+          bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
           bash bench/windows_exercise.sh
 
@@ -1228,12 +1229,13 @@ jobs:
       # because its global was written and never read, so the scavenge
       # measured nothing and no machine had noticed. The same defect the
       # samples job's comment records, on the other platform.
-      - name: The collector holds, all five gates
+      - name: The collector holds, all six gates
         run: |
           bash bench/arena_exercise.sh
           bash bench/root_exercise.sh
           bash bench/mark_exercise.sh
           bash bench/sweep_exercise.sh
+          bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
 
       # The standard library's own gates, on the platform the darwin tarball
@@ -1765,7 +1767,9 @@ jobs:
       # What the verbs refuse, what the test verb answers, what a package
       # resolves to through `iyi.mod` and `iyi.sum`, and what `migrate`
       # writes: each is path-shaped work, and this is the platform whose
-      # paths are the reason to ask.
+      # paths are the reason to ask. And the collector's reuse check
+      # optimised: the exercise loop above runs `iyi run`, and the double
+      # hand-out it catches showed in `--release` builds.
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -1773,6 +1777,7 @@ jobs:
           bash bench/test_verb.sh
           bash bench/packages_resolve.sh
           bash bench/migrate_gate.sh
+          bash bench/reuse_integrity.sh
 
       # And the rest of what an editor and an agent are handed. Every
       # sample again from its modules' artifacts alone (R-1), the agent

@@ -128,7 +128,8 @@ broken "a last group's first character" 'dst[o] = table[(triple >> 18) & 63]' 'd
 broken "a whole group's last character" '        dst[o + 3] = table[triple & 63]
 ' '        dst[o + 3] = 65_u8
 '
-broken "four characters decoded out of order" 'buf[o + 1] = ((group >> 8) & 255).to_u8' 'buf[o + 1] = (group & 255).to_u8'
+broken "four characters decoded out of order" 'buf[o &+ 1] = group.unsafe_shr(8).unsafe_to_u8' 'buf[o &+ 1] = group.unsafe_to_u8'
+broken "a group after a line break out of order" 'buf[o + 1] = ((group >> 8) & 255).to_u8' 'buf[o + 1] = (group & 255).to_u8'
 broken "whitespace taken at the size it was guessed" 'return answer if written == size' 'return answer'
 
 echo

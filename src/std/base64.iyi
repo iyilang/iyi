@@ -56,6 +56,23 @@ pub struct Base64
     pads = 0
     pads_needed = 0
     i = 0
+    # Whole groups of four data characters from the start, three bytes
+    # each, until the first byte that is not one; the loop after takes it
+    # from there.
+    while i &+ 4 <= n
+      v0 = values[src[i].to_i32]
+      v1 = values[src[i &+ 1].to_i32]
+      v2 = values[src[i &+ 2].to_i32]
+      v3 = values[src[i &+ 3].to_i32]
+      break if (v0 | v1 | v2 | v3) < 0
+      group = v0.unsafe_shl(18) | v1.unsafe_shl(12) | v2.unsafe_shl(6) | v3
+      buf[o] = group.unsafe_shr(16).unsafe_to_u8
+      buf[o &+ 1] = group.unsafe_shr(8).unsafe_to_u8
+      buf[o &+ 2] = group.unsafe_to_u8
+      o = o &+ 3
+      i = i &+ 4
+    end
+    chars = i
     while i < n
       # Between groups with no padding seen, four data characters are three
       # bytes, which is what the path below makes of them one at a time.

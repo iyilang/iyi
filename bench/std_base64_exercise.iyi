@@ -33,6 +33,7 @@ assert_str "hello world", Base64.decode(Base64.encode("hello world")), "round tr
 assert_str "A", Base64.decode("QQ"), "missing padding"
 assert_str "A", Base64.decode("QQ="), "partial padding"
 assert_str "ABCA", Base64.decode("QUJD\nQQ=\n=\n"), "whitespace between groups and padding"
+assert_str "ABCEFG", Base64.decode("QUJD\nRUZH"), "whole groups either side of a line break"
 assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
 puts "  decode and round trip"
 

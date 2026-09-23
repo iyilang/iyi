@@ -1958,6 +1958,64 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The standard library's gates and the collector's, on Windows, in a job
+  # of their own: `bench/std_exercise.sh` runs every module's exercise from
+  # source and from its artifacts, each with its oracle and its failure
+  # proofs, and took 34 minutes on a Windows machine - more than the job
+  # above has left. The same build, then the gates. They ran on Linux and
+  # darwin only, and on Windows seven of them failed: python oracles that
+  # wrote CRLF, proofs that edited another platform's arm, a floor read
+  # with tools this platform does not have, and the collector's own
+  # exercises refusing a platform whose collector they had never been
+  # asked about.
+  windows-std:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "The standard library and the collector, gated on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The collector's gates, on Windows
+        shell: bash
+        run: |
+          bash bench/arena_exercise.sh
+          bash bench/root_exercise.sh
+          bash bench/mark_exercise.sh
+          bash bench/sweep_exercise.sh
+          bash bench/collect_trigger.sh
+          bash bench/thread_exercise.sh
+
+      - name: The standard library's gates, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: bash bench/std_exercise.sh
+
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
   # program a host can start is wasi-libc's entry stub — which calls
@@ -2362,7 +2420,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, std, targets, cross-objects, cross-run, wasi-run,
-            windows-probe, windows-collector, windows-runtime, windows-native,
+            windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

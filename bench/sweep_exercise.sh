@@ -105,9 +105,16 @@ prove_fails() {
   # check can report. That is the break being caught, not missed, so it counts
   # only under conditions that cannot be satisfied by a working collector: the
   # process died on a signal, and it never reached the line that says it passed.
+  # Windows delivers no signal: the runtime's vectored handler names the
+  # access violation and exits 1, which is the same death in its own words.
   if [ "$exit_code" -ge 128 ] && ! grep -q "all sweep checks passed" "$WORK/$dir/out"; then
     printf '  %s: dies on signal %s before it can report, and never passes\n' \
       "$label" "$(( exit_code - 128 ))"
+    return
+  fi
+  if [ "$exit_code" -eq 1 ] && grep -q "died of a memory fault" "$WORK/$dir/out" &&
+     ! grep -q "all sweep checks passed" "$WORK/$dir/out"; then
+    printf '  %s: dies of a memory fault before it can report, and never passes\n' "$label"
     return
   fi
   echo "  $label: failed, but not at the expected check"

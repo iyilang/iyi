@@ -6167,7 +6167,14 @@ require "./file"
         scavenge
         begin_sweep
         sweep_large
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        # Lazy on Windows too. Windows swept the whole heap inside every
+        # pause since a 50,000-string loop failed there with the lazy
+        # sweep; the loop (`bench/windows_exercise.iyi`) passes lazily now,
+        # and so do the trigger, sweep, mark, root and thread exercises
+        # that had never been asked about Windows at all -
+        # `bench/collect_trigger.sh` names a pause that sweeps, and failed
+        # on this line: 25 collections, 0 arenas swept by the allocator.
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           while eager && sweep_one_held
           end
         {% else %}

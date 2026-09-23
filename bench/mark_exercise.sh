@@ -42,11 +42,11 @@ case "$(uname -s)" in
 esac
 
 # Marking needs the collector's allocator, which is the default on
-# linux-x86_64, linux-aarch64 and darwin; where a build deselects it the
-# exercise itself refuses every section, and a gate that then reports those
-# sections as MISSING claims more than it measured.
+# linux-x86_64, linux-aarch64, darwin and windows-x86_64; where a build
+# deselects it the exercise itself refuses every section, and a gate that
+# then reports those sections as MISSING claims more than it measured.
 case "$(uname -s)" in
-  Linux | Darwin) ;;
+  Linux | Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *) echo "mark exercise: marking needs the collector's allocator, which this platform's build deselects; nothing to measure here"; exit 0 ;;
 esac
 

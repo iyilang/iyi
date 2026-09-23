@@ -67,9 +67,9 @@ cd "$WORK" || exit 1
 step() { echo "== $1"; }
 
 case "$(uname -s)" in
-  Linux | Darwin) ;;
+  Linux | Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *)
-    echo "thread exercise: measured on Linux and darwin; nothing to measure here"
+    echo "thread exercise: measured on Linux, darwin and Windows; nothing to measure here"
     exit 0
     ;;
 esac
@@ -135,10 +135,41 @@ case "$(uname -s)" in
     done
     echo "  the runtime's names and the thread floor's, and nothing else"
     ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A PE leaves nothing undefined, so the floor is the DLLs a thread
+    # program imports, read with the toolchain's own `dumpbin`: threads
+    # and their stop are kernel32's (`CreateThread`, `SuspendThread`,
+    # `GetThreadContext`), and nothing else may join the C runtime.
+    step "dependency floor: threads and their stop add no DLL"
+    DUMPBIN=""
+    if command -v dumpbin >/dev/null 2>&1; then
+      DUMPBIN=dumpbin
+    else
+      vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+      root=""
+      [ -x "$vswhere" ] && root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
+      if [ -n "$root" ]; then
+        for candidate in "$(cygpath -u "$root")"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe; do
+          [ -x "$candidate" ] && DUMPBIN="$candidate" && break
+        done
+      fi
+    fi
+    [ -n "$DUMPBIN" ] || { echo "no dumpbin here, and a machine that built these binaries has the toolchain that carries it"; exit 1; }
+    for bin in threads threads-release; do
+      dlls="$("$DUMPBIN" -nologo -dependents "$bin.exe" 2>/dev/null |
+        sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+      [ -n "$dlls" ] || { echo "dumpbin read no import table out of $bin"; exit 1; }
+      extra="$(printf '%s\n' "$dlls" | grep -v -E '^(kernel32\.dll|vcruntime140\.dll|ucrtbase\.dll|api-ms-win-crt-.*\.dll)$' || true)"
+      if [ -n "$extra" ]; then
+        echo "$bin imports $(echo $extra) beyond kernel32 and the C runtime"; exit 1
+      fi
+    done
+    echo "  kernel32 and the C runtime's DLLs, plain and release"
+    ;;
 esac
 
 # ── 3. The numbers ────────────────────────────────────────────────────────
-cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
+cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")"
 step "the numbers, release build ($cores cores here)"
 grep -E '^(threads|speed):' answers-release.txt | sed 's/^/  /'
 

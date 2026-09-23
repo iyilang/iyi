@@ -166,9 +166,15 @@ else
   probe_exit=$?
   # 128 + SIGSEGV(11), or 128 + SIGBUS(10) where a platform reports an
   # unmapped read that way. Either is the read faulting, which is the claim.
+  # Windows has no signal to die of: the runtime's vectored handler names
+  # the access violation itself and exits 1, and that sentence is the same
+  # claim in the runtime's words.
+  if [ "$probe_exit" = 1 ] && grep -q "died of a memory fault" "$WORK/large-probe.out"; then
+    probe_exit=fault
+  fi
   case "$probe_exit" in
-    139 | 138)
-      echo "  the read faulted (exit $probe_exit): munmap released the mapping"
+    139 | 138 | fault)
+      echo "  the read faulted (exit $probe_exit): the mapping was released"
       ;;
     0)
       echo "  the probe READ the freed mapping and lived, so nothing was released:"

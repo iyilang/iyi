@@ -16,7 +16,7 @@
 # Not under `samples/`: the sample count is a gated number and samples are
 # explanations, not torture tests.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   # The allocation-pressure trigger is off for this exercise: it
   # choreographs colours and free lists across explicit collections,
   # and a string interpolation running a collection mid-check would be
@@ -441,7 +441,7 @@
   # what pins the timeline: `ready.receive` parks main so the fiber runs
   # as far as its own `ready.send`, after which its saved stack holds
   # `keep` and the walk can ask about it.
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     Tally.forget_wanted
     Tally.reset
     ready = Channel(Int32).new

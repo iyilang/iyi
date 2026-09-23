@@ -19,7 +19,7 @@
 # Not under `samples/`: the sample count is a gated number, and samples are
 # explanations rather than torture tests.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   def count(value : UInt64) : String
     value.to_i64.to_s
   end
@@ -82,6 +82,25 @@
       built = built + 1_u64
     end
     Held.keep = head
+  end
+
+  # Builds the spike, collects with it rooted, reads the root back and the
+  # arena count, and drops the root: `[peak, arenas_released before]`.
+  # Read the root back, for the reason the sweep exercise gives: a global
+  # written and never read is a store the back end may legally drop, and
+  # it did - the release build on darwin collected the whole chain here, so
+  # the spike's arenas were gone before `peak` was read and the scavenge
+  # measured nothing.
+  @[NoInline]
+  def spike_peak : Tuple(UInt64, UInt64)
+    build_spike(4096_u64)
+    IyiMark.collect
+    raise "scavenge: the spike's root was lost" if Held.keep == 0_u64
+    peak = arena_count
+    raise "scavenge: 64 MiB live built only #{count(peak)} arenas" if peak < 4_u64
+    released_before = IyiMark.arenas_released
+    Held.keep = 0_u64
+    {peak, released_before}
   end
 
   puts "== the trigger, the default allocator"
@@ -159,7 +178,7 @@
   # own, so nothing on this stack roots the object and the check measures
   # the list: a state the sweep reclaimed carries the free flag, and the
   # driver's proof unlinks the list and reads exactly that.
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     marks = scheduler_marks(0x5A5A5A5A5A5A5A5A_u64)
     # One collection, then the sweep's own word before anything allocates:
     # a chunk it reclaimed carries FREE_FLAG until the allocator hands it
@@ -210,7 +229,7 @@
   # triggers collections; the object has to live through them, which is the
   # fiber-stack root walk carrying its weight under the trigger rather than
   # under the root exercise's hand-run walk.
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     ready = Channel(Int32).new
     release = Channel(Int32).new
     verdict = Channel(Int32).new
@@ -260,18 +279,17 @@
   # the defect this step exists to refuse. The pause line is reported
   # rather than asserted: a budget would be a number this file made up,
   # and the honest claim today is that the numbers exist and are measured.
-  build_spike(4096_u64)
-  IyiMark.collect
-  # Read the root back, for the reason the sweep exercise gives: a global
-  # written and never read is a store the back end may legally drop, and
-  # it did — the release build on darwin collected the whole chain here,
-  # so the spike's arenas were gone before `peak` was read and the
-  # scavenge measured nothing.
-  raise "scavenge: the spike's root was lost" if Held.keep == 0_u64
-  peak = arena_count
-  raise "scavenge: 64 MiB live built only #{count(peak)} arenas" if peak < 4_u64
-  released_before = IyiMark.arenas_released
-  Held.keep = 0_u64
+  #
+  # The peak is read and the root dropped inside a frame of its own, for
+  # the reason `build_spike` is one: reading the root back loads the head
+  # into a register, and the scan is conservative. Read here, in this
+  # frame, a --release build on Windows - whose convention has the callee
+  # keep more registers than SysV's, rsi and rdi among them - found none
+  # of the spike's arenas dead, five runs of five; read in a frame that
+  # returns, it releases them every time.
+  peak_and_before = spike_peak
+  peak = peak_and_before[0]
+  released_before = peak_and_before[1]
   # A small churn between the drop and the collections scrubs whatever
   # register or stack slot still names a spike node, the same laundering
   # the mark exercise's garbage step relies on.

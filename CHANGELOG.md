@@ -256,6 +256,27 @@
 
 ### Fixed
 
+- **The collector's own exercises had never run on Windows, and the
+  Windows loop counted them as passing.** `collect_trigger`,
+  `sweep_exercise`, `mark_exercise` and `root_exercise` refused every
+  platform but Linux and darwin and printed "nothing to exercise here",
+  which exits 0; their drivers, and `thread_exercise.sh`'s, did the
+  same. Asked on Windows, sweep, mark and root held as they stood, and
+  the trigger did not: every pause swept the whole heap, because
+  Windows had kept an eager sweep since a string loop failed under the
+  lazy one. The loop and all four exercises pass lazily now, and
+  Windows sweeps the way Linux and darwin do. Three drivers read a
+  death by signal as the break they prove, and Windows dies of an
+  access violation its handler names and exits 1 on; they read that too.
+  `collect_trigger`'s scavenge check read the spike's root back in the
+  frame that then collected, and on Windows the head stayed in a
+  register the scan is conservative about; it is read in a frame that
+  returns. `collector_free_floor.sh`, which rebuilds the compiler with
+  POSIX `make` and began by deleting `.build/iyi`, says why it does not
+  run on Windows: the compiler there is built without a collector by
+  default. A second Windows job, `windows-std`, runs these drivers and
+  `bench/std_exercise.sh`.
+
 - **Seven standard-library gates failed on Windows, and none for the
   library's sake.** `bench/std_exercise.sh` had never run there. The
   python oracles of `std_deque`, `std_set` and `std_io` wrote CRLF, so
@@ -9546,7 +9567,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,290-line library and nothing else. Every other
+  written against iyi's own 17,297-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

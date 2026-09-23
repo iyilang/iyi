@@ -21,6 +21,11 @@
 # that way in one night's work.
 *.sh text eol=lf
 
+# iyi: the design documents are read by line - `bench/doc_numbers.py` quotes
+# them by line number, and a diff of one is a review. A Windows save gave
+# GC_DESIGN.md CRLF, and a one-line change came in as 1,929.
+*.md text eol=lf
+
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.
 *.iyimod binary

@@ -79,6 +79,17 @@
 
 ### Changed
 
+- **`BigInt` adds, subtracts, multiplies, shifts and divides through the
+  limbs' pointers, and multiplies by a machine integer in one pass.**
+  Every limb went through a bounds-checked `Array#[]` and a growth-checked
+  `<<`, `x * 10` made a `BigInt` of the ten and ran the general product,
+  and `a - b` copied `b` to negate it. The arrays are now built at their
+  size and written in place, `* Int32` and `* Int64` under 2^32 are one
+  pass, and subtraction compares magnitudes directly. The metric's
+  pidigits went from 2.0 s to 0.97 s (Crystal 1.21 with GMP: 1.06 s);
+  27,000 random sums, differences, products, quotients, remainders and
+  shifts of up to 300 digits print what Crystal's `BigInt` prints.
+
 - **`Float64#to_s` is Grisu3 and `String#to_f` is Eisel-Lemire, each
   with the exact bignum behind it.** Printing multiplies the value and
   its boundaries by a cached power of ten in 64-bit arithmetic and keeps

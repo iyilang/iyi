@@ -319,15 +319,15 @@ prove_fails() {
 }
 
 # 1. Addition carry broken (dropped carry addition)
-prove_fails "addition carry dropped" no_add_carry "overflow: i64 pos nil" \
-  's/sum = va + vb + carry/sum = va + vb/'
+prove_fails "addition carry dropped" no_add_carry "known: fib(100)" \
+  's/sum = x\[i\] \&+ y\[i\] \&+ carry/sum = x[i] \&+ y[i]/'
 
 # 2. Multiplication broken (returns zero for limbs)
-prove_fails "multiplication broken" no_mul "string: underscores" \
-  's/res\[i + j\] = prod & 0xFFFFFFFF_u64/res[i + j] = 0_u64/'
+prove_fails "multiplication broken" no_mul "string: octal prefix" \
+  's/r\[i + j\] = prod \& 0xFFFFFFFF_u64/r[i + j] = 0_u64/'
 
 # 3. Negation broken (identity instead of negate)
-prove_fails "negate broken" no_negate "overflow: i64 neg nil" \
+prove_fails "negate broken" no_negate "negate: positive" \
   's/BigInt\.new(-@sign, @limbs\.dup)/self/'
 
 # 4. Divisor larger than dividend sign rule broken

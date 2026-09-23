@@ -293,11 +293,11 @@ pub struct BigInt
     if @limbs.size != other.limbs.size
       return @limbs.size < other.limbs.size ? -1 : 1
     end
+    a = @limbs.to_unsafe
+    b = other.limbs.to_unsafe
     i = @limbs.size - 1
     while i >= 0
-      if @limbs[i] != other.limbs[i]
-        return @limbs[i] < other.limbs[i] ? -1 : 1
-      end
+      return a[i] < b[i] ? -1 : 1 if a[i] != b[i]
       i = i - 1
     end
     0
@@ -394,9 +394,22 @@ pub struct BigInt
     self + BigInt.new(other.to_i64)
   end
 
-  # Subtraction
+  # Subtraction: the sum with the other's sign turned, without copying it.
   def -(other : BigInt) : BigInt
-    self + other.negate
+    return self if other.zero?
+    return other.negate if zero?
+    if @sign != other.sign
+      BigInt.new(@sign, add_abs_limbs(@limbs, other.limbs))
+    else
+      c = cmp_abs(other)
+      if c == 0
+        BigInt.zero
+      elsif c > 0
+        BigInt.new(@sign, sub_abs_limbs(@limbs, other.limbs))
+      else
+        BigInt.new(-@sign, sub_abs_limbs(other.limbs, @limbs))
+      end
+    end
   end
 
   def -(other : Int64) : BigInt
@@ -407,36 +420,55 @@ pub struct BigInt
     self - BigInt.new(other.to_i64)
   end
 
+  # The limb loops below go through the arrays' pointers: every index is
+  # inside the sizes they are given, and a bounds check and a growth check
+  # per limb were most of what adding, multiplying and dividing cost.
   private def add_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
-    n = a.size > b.size ? a.size : b.size
-    res = Array(UInt64).new(n + 1)
+    long = a.size >= b.size ? a : b
+    short = a.size >= b.size ? b : a
+    n = long.size
+    m = short.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = long.to_unsafe
+    y = short.to_unsafe
     carry = 0_u64
     i = 0
-    while i < n
-      va = i < a.size ? a[i] : 0_u64
-      vb = i < b.size ? b[i] : 0_u64
-      sum = va + vb + carry
-      res << (sum & 0xFFFFFFFF_u64)
+    while i < m
+      sum = x[i] &+ y[i] &+ carry
+      r[i] = sum & 0xFFFFFFFF_u64
       carry = sum.unsafe_shr(32_u64)
       i = i + 1
     end
-    res << carry if carry > 0_u64
+    while i < n
+      sum = x[i] &+ carry
+      r[i] = sum & 0xFFFFFFFF_u64
+      carry = sum.unsafe_shr(32_u64)
+      i = i + 1
+    end
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
     res
   end
 
+  # |a| - |b|, |a| at least |b|.
   private def sub_abs_limbs(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
-    res = Array(UInt64).new(a.size)
+    n = a.size
+    m = b.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    y = b.to_unsafe
     borrow = 0_u64
     i = 0
-    while i < a.size
-      va = a[i]
-      vb = i < b.size ? b[i] : 0_u64
-      sub = vb + borrow
+    while i < n
+      sub = (i < m ? y[i] : 0_u64) &+ borrow
+      va = x[i]
       if va >= sub
-        res << (va - sub)
+        r[i] = va &- sub
         borrow = 0_u64
       else
-        res << (va + 0x100000000_u64 - sub)
+        r[i] = va &+ 0x100000000_u64 &- sub
         borrow = 1_u64
       end
       i = i + 1
@@ -458,43 +490,65 @@ pub struct BigInt
   end
 
   def *(other : Int64) : BigInt
-    self * BigInt.new(other)
+    return BigInt.zero if zero? || other == 0_i64
+    magnitude = other == -9223372036854775808_i64 ? 0x8000000000000000_u64 : (other < 0_i64 ? -other : other).to_u64
+    return self * BigInt.new(other) if magnitude > 0xFFFFFFFF_u64
+    BigInt.new(other < 0_i64 ? -@sign : @sign, mul_limb(@limbs, magnitude))
   end
 
   def *(other : Int32) : BigInt
-    self * BigInt.new(other.to_i64)
+    self * other.to_i64
   end
 
+  # |a| times one limb, in one pass.
+  private def mul_limb(a : Array(UInt64), limb : UInt64) : Array(UInt64)
+    n = a.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    carry = 0_u64
+    i = 0
+    while i < n
+      product = x[i] &* limb &+ carry
+      r[i] = product & 0xFFFFFFFF_u64
+      carry = product.unsafe_shr(32_u64)
+      i = i + 1
+    end
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
+    res
+  end
+
+  # The result starts at zero: `Pointer.malloc` clears what it hands out.
   private def mul_schoolbook(a : Array(UInt64), b : Array(UInt64)) : Array(UInt64)
     n = a.size
     m = b.size
-    res_size = n + m
-    res = Array(UInt64).new(res_size) { 0_u64 }
+    res = Array(UInt64).unsafe_build(n + m)
+    r = res.to_unsafe
+    x = a.to_unsafe
+    y = b.to_unsafe
     i = 0
     while i < n
-      a_limb = a[i]
+      a_limb = x[i]
       if a_limb != 0_u64
         carry = 0_u64
         j = 0
         while j < m
-          prod = a_limb * b[j] + res[i + j] + carry
-          res[i + j] = prod & 0xFFFFFFFF_u64
+          # At most (2^32 - 1)^2 + 2 * (2^32 - 1), which is 2^64 - 1.
+          prod = a_limb &* y[j] &+ r[i + j] &+ carry
+          r[i + j] = prod & 0xFFFFFFFF_u64
           carry = prod.unsafe_shr(32_u64)
           j = j + 1
         end
-        k = i + m
-        while carry > 0_u64
-          sum = res[k] + carry
-          res[k] = sum & 0xFFFFFFFF_u64
-          carry = sum.unsafe_shr(32_u64)
-          k = k + 1
-        end
+        r[i + m] = carry
       end
       i = i + 1
     end
-    while res.size > 0 && res.last == 0_u64
-      res.pop
+    size = n + m
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
     end
+    res.unsafe_set_size(size)
     res
   end
 
@@ -571,23 +625,16 @@ pub struct BigInt
     # Single-limb divisor optimization: O(m) division
     if other.limbs.size == 1
       v0 = other.limbs[0]
-      q_limbs = Array(UInt64).new(@limbs.size)
+      q_limbs = Array(UInt64).unsafe_build(@limbs.size)
+      q = q_limbs.to_unsafe
+      u = @limbs.to_unsafe
       rem = 0_u64
       i = @limbs.size - 1
       while i >= 0
-        cur = rem.unsafe_shl(32_u64) | @limbs[i]
-        q_limbs << cur.unsafe_div(v0)
+        cur = rem.unsafe_shl(32_u64) | u[i]
+        q[i] = cur.unsafe_div(v0)
         rem = cur.unsafe_mod(v0)
         i = i - 1
-      end
-      left = 0
-      right = q_limbs.size - 1
-      while left < right
-        tmp_swap = q_limbs[left]
-        q_limbs[left] = q_limbs[right]
-        q_limbs[right] = tmp_swap
-        left = left + 1
-        right = right - 1
       end
       r_limbs = Array(UInt64).new(1)
       r_limbs << rem if rem > 0_u64
@@ -616,16 +663,19 @@ pub struct BigInt
       u_prime << 0_u64
     end
 
-    q_limbs = Array(UInt64).new(m + 1) { 0_u64 }
-    vn1 = v_prime[n - 1]
-    vn2 = v_prime[n - 2]
+    q_limbs = Array(UInt64).unsafe_build(m + 1)
+    qp = q_limbs.to_unsafe
+    up = u_prime.to_unsafe
+    vp = v_prime.to_unsafe
+    vn1 = vp[n - 1]
+    vn2 = vp[n - 2]
 
     # Steps D2 through D7: Loop on j from m down to 0
     j = m
     while j >= 0
-      ujn = u_prime[j + n]
-      ujn1 = u_prime[j + n - 1]
-      ujn2 = u_prime[j + n - 2]
+      ujn = up[j + n]
+      ujn1 = up[j + n - 1]
+      ujn2 = up[j + n - 2]
 
       # Step D3: Calculate quotient estimate q_hat
       numerator = ujn.unsafe_shl(32_u64) | ujn1
@@ -648,26 +698,26 @@ pub struct BigInt
       borrow = 0_u64
       k = 0
       while k < n
-        p = q_hat * v_prime[k] + borrow
+        p = q_hat &* vp[k] &+ borrow
         p_low = p & 0xFFFFFFFF_u64
         borrow = p.unsafe_shr(32_u64)
 
-        u_val = u_prime[j + k]
+        u_val = up[j + k]
         if u_val >= p_low
-          u_prime[j + k] = u_val - p_low
+          up[j + k] = u_val &- p_low
         else
-          u_prime[j + k] = u_val + 0x100000000_u64 - p_low
-          borrow = borrow + 1_u64
+          up[j + k] = u_val &+ 0x100000000_u64 &- p_low
+          borrow = borrow &+ 1_u64
         end
         k = k + 1
       end
 
-      u_val = u_prime[j + n]
+      u_val = up[j + n]
       if u_val >= borrow
-        u_prime[j + n] = u_val - borrow
+        up[j + n] = u_val &- borrow
         negative = false
       else
-        u_prime[j + n] = u_val + 0x100000000_u64 - borrow
+        up[j + n] = u_val &+ 0x100000000_u64 &- borrow
         negative = true
       end
 
@@ -677,15 +727,15 @@ pub struct BigInt
         carry = 0_u64
         k = 0
         while k < n
-          sum = u_prime[j + k] + v_prime[k] + carry
-          u_prime[j + k] = sum & 0xFFFFFFFF_u64
+          sum = up[j + k] &+ vp[k] &+ carry
+          up[j + k] = sum & 0xFFFFFFFF_u64
           carry = sum.unsafe_shr(32_u64)
           k = k + 1
         end
-        u_prime[j + n] = (u_prime[j + n] + carry) & 0xFFFFFFFF_u64
+        up[j + n] = (up[j + n] &+ carry) & 0xFFFFFFFF_u64
       end
 
-      q_limbs[j] = q_hat
+      qp[j] = q_hat
       j = j - 1
     end
 
@@ -730,37 +780,44 @@ pub struct BigInt
 
   private def shift_left_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
     return limbs.dup if bits == 0_u64
-    res = Array(UInt64).new(limbs.size + 1)
+    n = limbs.size
+    res = Array(UInt64).unsafe_build(n + 1)
+    r = res.to_unsafe
+    x = limbs.to_unsafe
     carry = 0_u64
     rshift = 32_u64 - bits
     i = 0
-    while i < limbs.size
-      val = limbs[i]
-      new_val = ((val.unsafe_shl(bits)) | carry) & 0xFFFFFFFF_u64
+    while i < n
+      val = x[i]
+      r[i] = (val.unsafe_shl(bits) | carry) & 0xFFFFFFFF_u64
       carry = val.unsafe_shr(rshift)
-      res << new_val
       i = i + 1
     end
-    res << carry if carry > 0_u64
+    r[n] = carry
+    res.unsafe_set_size(carry > 0_u64 ? n + 1 : n)
     res
   end
 
   private def shift_right_limbs(limbs : Array(UInt64), bits : UInt64) : Array(UInt64)
     return limbs.dup if bits == 0_u64
-    res = Array(UInt64).new(limbs.size) { 0_u64 }
+    n = limbs.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    x = limbs.to_unsafe
     carry = 0_u64
     lshift = 32_u64 - bits
-    i = limbs.size - 1
+    i = n - 1
     while i >= 0
-      val = limbs[i]
-      new_val = (val.unsafe_shr(bits)) | carry
-      carry = (val.unsafe_shl(lshift)) & 0xFFFFFFFF_u64
-      res[i] = new_val
+      val = x[i]
+      r[i] = val.unsafe_shr(bits) | carry
+      carry = val.unsafe_shl(lshift) & 0xFFFFFFFF_u64
       i = i - 1
     end
-    while res.size > 0 && res.last == 0_u64
-      res.pop
+    size = n
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
     end
+    res.unsafe_set_size(size)
     res
   end
 
@@ -888,34 +945,22 @@ pub struct BigInt
     limb_shift = count // 32
     bit_shift = (count % 32).to_u64
 
-    res_limbs = Array(UInt64).new(@limbs.size + limb_shift + 1)
-    # Prepend zero limbs
+    # Zero limbs below, from `Pointer.malloc`, and the shifted ones above.
+    n = @limbs.size
+    res_limbs = Array(UInt64).unsafe_build(n + limb_shift + 1)
+    r = res_limbs.to_unsafe + limb_shift.to_i64
+    x = @limbs.to_unsafe
+    carry = 0_u64
+    rshift = 32_u64 - bit_shift
     i = 0
-    while i < limb_shift
-      res_limbs << 0_u64
+    while i < n
+      val = x[i]
+      r[i] = (val.unsafe_shl(bit_shift) | carry) & 0xFFFFFFFF_u64
+      carry = val.unsafe_shr(rshift)
       i = i + 1
     end
-
-    if bit_shift == 0_u64
-      i = 0
-      while i < @limbs.size
-        res_limbs << @limbs[i]
-        i = i + 1
-      end
-    else
-      carry = 0_u64
-      rshift = 32_u64 - bit_shift
-      i = 0
-      while i < @limbs.size
-        val = @limbs[i]
-        new_val = ((val.unsafe_shl(bit_shift)) | carry) & 0xFFFFFFFF_u64
-        carry = val.unsafe_shr(rshift)
-        res_limbs << new_val
-        i = i + 1
-      end
-      res_limbs << carry if carry > 0_u64
-    end
-
+    r[n] = carry
+    res_limbs.unsafe_set_size(carry > 0_u64 ? n + limb_shift + 1 : n + limb_shift)
     BigInt.new(@sign, res_limbs)
   end
 

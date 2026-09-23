@@ -164,7 +164,12 @@ COMPILER="$REPO/.build/iyi"
 # Windows answers with `GetConsoleMode`, Linux by making the terminal-only
 # `ioctl` itself, and darwin with libSystem's own `isatty` — the same
 # library every other symbol on this line comes from.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt"
+# `lseek` joined with `IO#seek`, `#pos` and `#pos=` in `std/file`: moving a
+# file's offset is that call and nothing else. `arc4random_buf` joined with
+# `File.tempfile`'s random name, which has to be unpredictable or the
+# exclusive create is a race another user can win: libSystem's own entropy
+# call, where Linux asks `getrandom` by syscall. Both are libSystem's.
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

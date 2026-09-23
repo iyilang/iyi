@@ -345,6 +345,11 @@
   `compiler_spec`'s `-Dgc_none` examples and `bench/arena_exercise.sh`'s
   bump-pointer arm are what failed, on every platform.
 
+- `bench/dependency_floor.sh` on darwin names `lseek` and `arc4random_buf`,
+  with their reasons: `IO#seek` and `File.tempfile`'s random name brought them,
+  both libSystem's, and the floor stopped the darwin job on "THE FLOOR MOVED"
+  until it said so.
+
 - A symbol read in a module's object code means what it means in the program
   that links it. Symbols are numbered per build, in the order each build meets
   them, and an artifact's units had the producer's numbers baked in: a consumer

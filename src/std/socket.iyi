@@ -2,7 +2,9 @@
 #
 # A TCP socket over IPv4 or IPv6, with numeric address resolution: dotted
 # decimal, an IPv6 literal (`::1`, or `[::1]` as a URL writes it), and
-# `localhost`.
+# `localhost`; or a stream socket at a path on this machine
+# (`listen_unix`, `connect_unix`), which is what a reverse proxy in front
+# of a server usually talks to.
 #
 # Address resolution:
 # getaddrinfo is the standard route in libc, but on Linux it pulls in libc.so,
@@ -162,6 +164,8 @@ pub struct SocketError
     return "the peer closed the connection" if broken_pipe?
     return "the connection was aborted" if aborted?
     return "connection refused" if refused?
+    return "the address is in use" if in_use?
+    return "nothing is at that path" if missing?
     return "timed out" if timed_out?
     return "no route to the host" if unreachable?
     "error #{@code}"
@@ -181,6 +185,16 @@ pub struct SocketError
 
   private def refused? : Bool
     {% if flag?(:win32) %} @code == 10061 {% elsif flag?(:darwin) %} @code == 61 {% else %} @code == 111 {% end %}
+  end
+
+  # ENOENT: a unix socket's path that is not there. Winsock answers a
+  # missing path with a refusal, which says the same.
+  private def missing? : Bool
+    {% if flag?(:win32) %} false {% else %} @code == 2 {% end %}
+  end
+
+  private def in_use? : Bool
+    {% if flag?(:win32) %} @code == 10048 {% elsif flag?(:darwin) %} @code == 48 {% else %} @code == 98 {% end %}
   end
 
   private def timed_out? : Bool
@@ -213,6 +227,10 @@ pub class IyiSocket
   def initialize(@fd : Int32, @family : Int32 = AF_INET)
   end
 
+  # The path a unix listener bound, which its `close` removes: nobody else
+  # can bind it while the file is there, and the file outlives the socket.
+  @path : String? = nil
+
   def to_unsafe : Int32
     @fd
   end
@@ -232,6 +250,15 @@ pub class IyiSocket
 
   def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
     addr, family = sockaddr(host, port)
+    connect_to(addr, family, "#{host}:#{port}")
+  end
+
+  # The stream socket listening at *path*.
+  def self.connect_unix(path : String) : IyiSocket | Cancelled | SocketError
+    connect_to(make_sockaddr_un(path), AF_UNIX, path)
+  end
+
+  private def self.connect_to(addr : Pointer(UInt8), family : Int32, peer : String) : IyiSocket | Cancelled | SocketError
     fd = __sys_socket(family)
     return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
     __sys_no_sigpipe(fd)
@@ -240,7 +267,7 @@ pub class IyiSocket
     if res < 0 && !__sys_in_progress?(res)
       code = __sys_code(res.to_i64)
       __sys_close(fd)
-      return SocketError.new("connect to #{host}:#{port}", code)
+      return SocketError.new("connect to #{peer}", code)
     end
     if res < 0
       # The handshake is under way; the socket turns writable when it is
@@ -252,7 +279,7 @@ pub class IyiSocket
       end
       if (code = __sys_sock_error(fd)) != 0
         __sys_close(fd)
-        return SocketError.new("connect to #{host}:#{port}", code)
+        return SocketError.new("connect to #{peer}", code)
       end
     end
     IyiSocket.new(fd, family)
@@ -410,6 +437,32 @@ pub class IyiSocket
     listen("0.0.0.0", port, backlog)
   end
 
+  # A stream socket at *path*. The path must not exist: a socket file an
+  # earlier run left behind is refused rather than taken over, since
+  # which program owns it is not something a bind can know. `close`
+  # removes the file.
+  def self.listen_unix(path : String, backlog : Int32 = 128) : IyiSocket
+    addr = make_sockaddr_un(path)
+    fd = __sys_socket(AF_UNIX)
+    raise "cannot create socket" if fd < 0
+    if (bound = __sys_bind(fd, addr, AF_UNIX)) < 0
+      __sys_close(fd)
+      raise "cannot bind socket to #{path.inspect}: #{SocketError.new("bind", __sys_code(bound.to_i64)).reason}"
+    end
+    socket = IyiSocket.new(fd, AF_UNIX)
+    socket.bound_path(path)
+    if __sys_listen(fd, backlog) < 0
+      socket.close
+      raise "cannot listen on socket"
+    end
+    __sys_set_nonblock(fd)
+    socket
+  end
+
+  protected def bound_path(path : String) : Nil
+    @path = path
+  end
+
   # --- Lifecycle and Metadata ---
 
   def close : Nil
@@ -422,6 +475,11 @@ pub class IyiSocket
         wake_closed(fd)
       {% end %}
       IyiSocket.__sys_close(fd)
+      path = @path
+      if path.is_a?(String)
+        @path = nil
+        __iyi_unlink(IyiSocket.c_path(path))
+      end
     end
   end
 
@@ -433,6 +491,7 @@ pub class IyiSocket
   # `sockaddr_in6`.
   def local_port : Int32
     raise "socket is closed" if @fd < 0
+    raise "a unix socket has no port" if @family == AF_UNIX
     addr = Pointer(UInt8).malloc(128_u64)
     len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
@@ -446,11 +505,26 @@ pub class IyiSocket
   def local_address : String
     raise "socket is closed" if @fd < 0
     addr = Pointer(UInt8).malloc(128_u64)
+    index = 0
+    while index < 128
+      addr[index] = 0_u8
+      index = index + 1
+    end
     len = 128_u32
     res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
     raise "cannot get local address" if res < 0
 
     return IPv6Address.new(addr + 8_u64).to_s if @family == AF_INET6
+    if @family == AF_UNIX
+      # The path after the family, to its NUL: the listener's, and for an
+      # accepted end whatever the platform reports (Linux: the listener's
+      # path; an empty one answers "").
+      ends = 2
+      while ends < 128 && addr[ends] != 0_u8
+        ends = ends + 1
+      end
+      return String.new(ends - 2) { |target| target.copy_from(addr + 2_u64, ends - 2) }
+    end
     "#{addr[4]}.#{addr[5]}.#{addr[6]}.#{addr[7]}"
   end
 
@@ -633,6 +707,48 @@ pub class IyiSocket
     buffer
   end
 
+  # A `sockaddr_un`: the family, then the path and its NUL. The room for
+  # the path is the platform's - 104 bytes on darwin, 108 elsewhere - and a
+  # longer one is refused rather than cut, since a cut path is another
+  # path.
+  def self.make_sockaddr_un(path : String) : Pointer(UInt8)
+    size = path.bytesize
+    raise "a unix socket path is empty" if size == 0
+    room = 108
+    {% if flag?(:darwin) %}
+      room = 104
+    {% end %}
+    raise "unix socket path #{path.inspect} is #{size} bytes, and the platform's limit is #{room - 1}" if size >= room
+    buffer = Pointer(UInt8).malloc(112_u64)
+    index = 0
+    while index < 112
+      buffer[index] = 0_u8
+      index = index + 1
+    end
+    {% if flag?(:darwin) %}
+      buffer[0] = 106_u8 # sun_len
+      buffer[1] = AF_UNIX.to_u8
+    {% else %}
+      buffer[0] = AF_UNIX.to_u8
+    {% end %}
+    source = path.to_unsafe
+    index = 0
+    while index < size
+      raise "unix socket path #{path.inspect} has a NUL byte" if source[index] == 0_u8
+      buffer[2 + index] = source[index]
+      index = index + 1
+    end
+    buffer
+  end
+
+  # *path* with the NUL a system call reads to.
+  def self.c_path(path : String) : Pointer(UInt8)
+    buffer = Pointer(UInt8).malloc((path.bytesize + 1).to_u64)
+    buffer.copy_from(path.to_unsafe, path.bytesize)
+    buffer[path.bytesize] = 0_u8
+    buffer
+  end
+
   def self.make_sockaddr_in(ip : IPv4Address, port : Int32) : Pointer(UInt8)
     # A port is sixteen bits, and this packed it without asking: `listen`
     # with 70000 bound 4464 (70000 - 65536) and `-1` bound 65535, so a
@@ -697,6 +813,7 @@ pub class IyiSocket
       fun error_location = __error : Int32*
     end
 
+    AF_UNIX  =  1
     AF_INET  =  2
     AF_INET6 = 30
 
@@ -707,10 +824,12 @@ pub class IyiSocket
     # conversion between the two. `UInt32` has neither `to_i64` nor
     # `to_u64`, and `Int32` has no `to_u32`, which is what made a shared
     # parameter type impossible.
-    SOCKADDR_IN_SIZE  = 16_u32
-    SOCKADDR_IN6_SIZE = 28_u32
+    SOCKADDR_IN_SIZE  =  16_u32
+    SOCKADDR_IN6_SIZE =  28_u32
+    SOCKADDR_UN_SIZE  = 106_u32
 
     def self.__sys_addr_size(family : Int32) : UInt32
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
       family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
     end
 
@@ -834,16 +953,19 @@ pub class IyiSocket
       SYS_PPOLL       =  73_i64
     {% end %}
 
+    AF_UNIX  =  1
     AF_INET  =  2
     AF_INET6 = 10
 
     # Sized as the syscall takes it, a full register. See the darwin branch's
     # note: these are separate constants rather than converted ones because
     # the prelude has no conversion between `UInt32` and the 64-bit types.
-    SOCKADDR_IN_SIZE  = 16_i64
-    SOCKADDR_IN6_SIZE = 28_i64
+    SOCKADDR_IN_SIZE  =  16_i64
+    SOCKADDR_IN6_SIZE =  28_i64
+    SOCKADDR_UN_SIZE  = 110_i64
 
     def self.__sys_addr_size(family : Int32) : Int64
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
       family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
     end
 
@@ -1013,6 +1135,7 @@ pub class IyiSocket
       fun WSAGetLastError : Int32
       fun socket(af : Int32, type : Int32, protocol : Int32) : UInt64
       fun bind(s : UInt64, addr : Void*, namelen : Int32) : Int32
+      fun connect(s : UInt64, addr : Void*, namelen : Int32) : Int32
       fun listen(s : UInt64, backlog : Int32) : Int32
       fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
       fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
@@ -1052,16 +1175,24 @@ pub class IyiSocket
     # The length of an address in the type Winsock's calls want, which is a
     # plain `int`. See the darwin branch's note for why each branch spells
     # its own rather than converting one.
-    SOCKADDR_IN_SIZE  = 16
-    SOCKADDR_IN6_SIZE = 28
+    SOCKADDR_IN_SIZE  =  16
+    SOCKADDR_IN6_SIZE =  28
+    SOCKADDR_UN_SIZE  = 110
 
+    AF_UNIX     =  1
     AF_INET     =  2
     AF_INET6    = 23
     SOCK_STREAM =  1
     IPPROTO_TCP =  6
 
     def self.__sys_addr_size(family : Int32) : Int32
+      return SOCKADDR_UN_SIZE if family == AF_UNIX
       family == AF_INET6 ? SOCKADDR_IN6_SIZE : SOCKADDR_IN_SIZE
+    end
+
+    # TCP names its protocol; a unix socket has only the one, and says 0.
+    def self.__sys_protocol(family : Int32) : Int32
+      family == AF_UNIX ? 0 : IPPROTO_TCP
     end
 
     SOL_SOCKET = 0xffff
@@ -1138,7 +1269,7 @@ pub class IyiSocket
 
     def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
-      s = LibWs2_32.socket(family, SOCK_STREAM, IPPROTO_TCP)
+      s = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return -1 if s == INVALID_SOCKET
       s.unsafe_to_i32
     end
@@ -1179,7 +1310,7 @@ pub class IyiSocket
       # cannot answer it, and a `client` created first is a socket nobody is
       # left to close. Nothing between the two depends on the order.
       post = __sys_extension(s, WSAID_ACCEPTEX_LOW, WSAID_ACCEPTEX_HIGH).as(Pointer(AcceptExFn)).value
-      client = LibWs2_32.socket(family, SOCK_STREAM, IPPROTO_TCP)
+      client = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return __sys_error.to_i32 if client == INVALID_SOCKET
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
@@ -1233,7 +1364,7 @@ pub class IyiSocket
         addr[index] = peer[index]
         index = index + 1
       end
-      addrlen.value = size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
+      addrlen.value = size == SOCKADDR_UN_SIZE ? 110_u32 : size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
       client.unsafe_to_i32
@@ -1242,6 +1373,19 @@ pub class IyiSocket
     def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
+      # `ConnectEx` is TCP's alone, and a unix socket's peer is a listener
+      # on this machine, whose kernel queues the connection or refuses it
+      # on the spot: the plain `connect`, blocking for the moment it takes,
+      # which is Go's answer on this platform too.
+      if family == AF_UNIX
+        off = 0
+        LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(off))
+        answered = LibWs2_32.connect(s, addr.as(Void*), SOCKADDR_UN_SIZE)
+        on = 1
+        LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
+        return __sys_error.to_i32 if answered != 0
+        return 0
+      end
       # `ConnectEx` is the connect a completion port can answer, and it
       # insists on a socket that is already bound; the POSIX `connect` binds
       # implicitly, so that is done here, to the wildcard address and the
@@ -1460,6 +1604,7 @@ pub class IyiSocket
       __sys_overlapped_result(s, ov)
     end
   {% else %}
+    AF_UNIX  =  1
     AF_INET  =  2
     AF_INET6 = 10
 

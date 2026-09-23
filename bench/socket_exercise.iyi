@@ -12,6 +12,8 @@
 
 import std/socket
 using std/socket::{IyiSocket, SocketError, IPv6Address}
+import std/env
+using std/env::{ENV}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"
@@ -233,5 +235,36 @@ wide.close
   raise "ipv6: #{text} was written #{parsed}" unless parsed == written
 end
 puts "ipv6: ok"
+
+# 9. A unix socket: a listener at a path, a connection to it, bytes each
+#    way, the path as the listener's address and no port. Closing the
+#    listener takes the path away - a connect to it is then a value, and
+#    the path can be listened on again.
+unix_dir = ENV.fetch("TMPDIR", "/tmp")
+unix_separator = "/"
+{% if flag?(:win32) %}
+  unix_dir = ENV.fetch("TEMP", ".")
+  unix_separator = "\\"
+{% end %}
+unix_dir = unix_dir[0, unix_dir.bytesize - 1] if unix_dir.ends_with?(unix_separator)
+unix_path = "#{unix_dir}#{unix_separator}iyi-socket-#{__iyi_monotonic_ns}.sock"
+unix = IyiSocket.listen_unix(unix_path)
+raise "unix: the listener is at #{unix.local_address.inspect}" unless unix.local_address == unix_path
+unix_client = IyiSocket.connect_unix(unix_path).or_panic
+unix_conn = unix.accept.or_panic
+unix_client.write("over a path")
+heard_unix = unix_conn.read(64).or_panic
+raise "unix: the server read #{heard_unix.inspect}" unless heard_unix == "over a path"
+unix_conn.write("and back")
+back_unix = unix_client.read(64).or_panic
+raise "unix: the client read #{back_unix.inspect}" unless back_unix == "and back"
+unix_client.close
+unix_conn.close
+unix.close
+gone = IyiSocket.connect_unix(unix_path)
+raise "unix: a connect after the listener closed answered #{gone.inspect}" unless gone.is_a?(SocketError)
+again = IyiSocket.listen_unix(unix_path)
+again.close
+puts "unix: ok"
 
 puts "socket_exercise: all checks passed"

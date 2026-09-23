@@ -4,6 +4,15 @@
 
 ### Added
 
+- `std/socket` unix sockets: `IyiSocket.listen_unix(path)` and
+  `IyiSocket.connect_unix(path)`, parking like TCP's. The listener's
+  `local_address` is its path, `local_port` refuses by name, and `close`
+  removes the socket file; a path that is already taken is refused with
+  "the address is in use" rather than taken over, and a path past the
+  platform's room (103 bytes on darwin, 107 elsewhere) is refused rather than
+  cut. On Windows the accept is `AcceptEx` as for TCP, and the connect a plain
+  `connect`, `ConnectEx` being TCP's alone.
+
 - `std/socket` speaks IPv6: `IyiSocket.listen("::1", port)`,
   `IyiSocket.connect("[::1]", port)` (bare or bracketed, as a URL writes it),
   `local_address` written the RFC 5952 way, and `IyiSocket.parse_ipv6` with

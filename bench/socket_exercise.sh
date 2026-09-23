@@ -34,6 +34,13 @@ esac
 
 trap 'rm -rf "$WORK"' EXIT
 
+# The unix sockets the exercise makes live in the sandbox, so a proof whose
+# broken close leaves its file leaves it where the trap above removes it.
+export TMPDIR="$WORK"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) export TEMP="$(cygpath -w "$WORK")" ;;
+esac
+
 status=0
 
 run_case() {
@@ -66,13 +73,13 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer ipv6; do
+for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer and ipv6 all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6 and unix all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -226,6 +233,11 @@ prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
 prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to ::1:0" \
   '{ sub(/return \{make_sockaddr_in6\(parse_ipv6\(host\), port\), AF_INET6\}/, "return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET}"); print }'
 
+# 9. A unix listener whose close leaves its file: the path cannot be bound
+#    again.
+prove_fails "a unix listener's file left behind" unixleft "cannot bind socket to .*the address is in use" \
+  '{ sub(/__iyi_unlink\(IyiSocket.c_path\(path\)\)/, "IyiSocket.c_path(path)"); print }'
+
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
   '{ sub(/\(high << 8\) \| low/, "0"); print }'
@@ -293,6 +305,12 @@ refuses "a gap with eight groups beside it" addr_nine "stands for nothing" \
   "IyiSocket.parse_ipv6(\"1:2:3:4::5:6:7:8\")"
 refuses "a trailing colon" addr_trailing "a trailing colon" \
   "IyiSocket.parse_ipv6(\"1::2:\")"
+refuses "a unix socket path past the platform's room" unix_long "is 300 bytes, and the platform's limit is" \
+  "IyiSocket.listen_unix(\"/\" * 300).local_address"
+refuses "an empty unix socket path" unix_empty "a unix socket path is empty" \
+  "IyiSocket.connect_unix(\"\").or_panic.to_unsafe"
+refuses "a port asked of a unix socket" unix_port "a unix socket has no port" \
+  "IyiSocket.new(0, 1).local_port"
 refuses "a dotted tail past six groups" addr_tail "a dotted tail after more than six groups" \
   "IyiSocket.parse_ipv6(\"1:2:3:4:5:6:7:1.2.3.4\")"
 
@@ -336,7 +354,7 @@ refuses_after_close "accept after close" closed_accept 'puts l.accept.or_panic.c
 echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
-  echo "refused connections and IPv6 all verified, a port and an address are checked before"
+  echo "refused connections, IPv6 and unix sockets all verified, a port and an address are checked before"
   echo "they are packed, a closed socket says so, and every check is proved to fail"
   echo "when broken."
 else

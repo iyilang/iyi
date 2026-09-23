@@ -192,11 +192,11 @@ prove_fails "a rewritten key appends" double_write hash.iyi \
   "hash: a key written twice is one entry" \
   's/^    slot = slot_for(key)$/    slot = slot_for(key); @index[slot] = -1/'
 
-# 3. The index left stale after a delete, so a key that probed past the
-#    deleted one is no longer found.
+# 3. The index left stale after a delete, so the entries it points at are
+#    not the ones that moved down, and later deletes miss.
 prove_fails "delete leaves the index stale" stale_index hash.iyi \
-  "hash: the rest are findable" \
-  's/^    rebuild_index$/    # left stale/'
+  "hash: deletes leave half" \
+  '/^  def delete/,/^  end/s/^    rebuild_index$/    # left stale/'
 
 # 4. `each` walking the table rather than the entries, so it counts slots.
 prove_fails "each skips one" each_skips hash.iyi \

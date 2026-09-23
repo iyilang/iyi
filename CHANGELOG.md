@@ -79,6 +79,12 @@
 
 ### Changed
 
+- **A `Hash` takes no storage until its first entry.** Every table made
+  its keys, values and index at eight entries, sixteen slots cleared,
+  whether or not anything was ever put in it - a trie's leaves, each
+  with a children table it never fills, paid for all of it. The metric's
+  primes trie went from 1.04 s to 0.88 s (Crystal 1.21: 0.75 s).
+
 - **A parked channel send is one allocation, and finding the running
   fiber is one load.** The sender's value sat in a one-element array, so
   every send that waited for its receiver made a node, an array and the
@@ -9413,7 +9419,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,232-line library and nothing else. Every other
+  written against iyi's own 17,240-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

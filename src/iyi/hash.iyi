@@ -21,7 +21,9 @@ class Hash(K, V)
   @index : Pointer(Int32)
   @size : Int32
   # Entries the dense arrays can hold; the index holds twice as many slots,
-  # so it is never more than half full and a probe always stops.
+  # so it is never more than half full and a probe always stops. Zero
+  # until the first entry: a table made and never written - a trie's
+  # leaves, each with children it will not have - costs no storage.
   @capacity : Int32
   # What `[]` answers for a key that is not there, when the table was made
   # with one: `Hash(String, Int32).new(0)`, or a block that is handed the
@@ -31,12 +33,11 @@ class Hash(K, V)
 
   def initialize
     @size = 0
-    @capacity = 8
-    @keys = Pointer(K).malloc(8_u64)
-    @values = Pointer(V).malloc(8_u64)
-    @index = Pointer(Int32).malloc(16_u64)
+    @capacity = 0
+    @keys = Pointer(K).new(0_u64)
+    @values = Pointer(V).new(0_u64)
+    @index = Pointer(Int32).new(0_u64)
     @default = nil
-    clear_index
   end
 
   def initialize(&block : Hash(K, V), K -> V)
@@ -57,6 +58,7 @@ class Hash(K, V)
   end
 
   def []=(key : K, value : V) : V
+    grow if @capacity == 0
     slot = slot_for(key)
     entry = @index[slot]
     if entry < 0
@@ -75,12 +77,12 @@ class Hash(K, V)
   end
 
   def []?(key : K) : V?
-    entry = @index[slot_for(key)]
+    entry = entry_of(key)
     entry < 0 ? nil : @values[entry]
   end
 
   def [](key : K) : V
-    entry = @index[slot_for(key)]
+    entry = entry_of(key)
     if entry < 0
       if default = @default
         return default.call(self, key)
@@ -91,7 +93,7 @@ class Hash(K, V)
   end
 
   def has_key?(key : K) : Bool
-    @index[slot_for(key)] >= 0
+    entry_of(key) >= 0
   end
 
   # The value the key had, or nil. The entries after it move down one, so
@@ -100,7 +102,7 @@ class Hash(K, V)
   # rather than tombstones in the index that every probe would have to
   # step over from then on.
   def delete(key : K) : V?
-    entry = @index[slot_for(key)]
+    entry = entry_of(key)
     return nil if entry < 0
     value = @values[entry]
     while entry + 1 < @size
@@ -154,6 +156,12 @@ class Hash(K, V)
     to_s
   end
 
+  # The key's entry in the dense arrays, -1 when it has none.
+  private def entry_of(key : K) : Int32
+    return -1 if @capacity == 0
+    @index[slot_for(key)]
+  end
+
   # The index slot this key belongs in: the one pointing at its entry, or
   # the first free one after where it hashes to.
   private def slot_for(key : K) : Int32
@@ -178,7 +186,7 @@ class Hash(K, V)
   private def grow : Nil
     old_keys = @keys
     old_values = @values
-    @capacity = @capacity * 2
+    @capacity = @capacity == 0 ? 8 : @capacity * 2
     @keys = Pointer(K).malloc(@capacity.to_u64)
     @values = Pointer(V).malloc(@capacity.to_u64)
     @index = Pointer(Int32).malloc((@capacity * 2).to_u64)

@@ -104,13 +104,23 @@
   puts "phase: one mark of the wide object with helpers"
   IyiMark.collect
   fail("the wide object lost a node under the shared mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
+  # Recycling is asked of the pool directly: a batch handed out again
+  # off the free list. The helped tree marks took and freed batches -
+  # the helpers blackened nodes, above - and the wide mark published
+  # thousands after them, so a pool that recycles has reused some, and
+  # one that never frees a batch has reused none, on any machine. The
+  # bytes mapped used to be the proof: the copy that never recycled
+  # mapped eleven pieces and more everywhere measured, until a loaded
+  # three-core darwin runner mapped 3.4 MB of it under the 4 MB bound
+  # and the proof did not fire.
+  pool = IyiMark.pool_bytes
+  reused = IyiMark.pool_reused
+  fail("pool: no batch was handed out twice in eleven marks, so taken batches are not being recycled") if reused == 0_u64
   # Four megabytes: the wide mark's spills outrun fifteen helpers for a
   # moment and the pool's high-water mark is a handful of pieces - 1.5 MB
-  # on a three-core darwin runner - where the copy that never recycles
-  # is eleven and more on every machine measured.
-  pool = IyiMark.pool_bytes
-  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 4194304_u64
-  puts "pool: #{pool.to_i64} bytes mapped for the marks' batches"
+  # on a three-core darwin runner. What the pool holds, bounded.
+  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, past the bound a recycling pool keeps") if pool > 4194304_u64
+  puts "pool: #{pool.to_i64} bytes mapped for the marks' batches, #{reused.to_i64} batches reused"
 
   # A worker's stack starts small and grows: a mark alone of one object
   # holding 300,000 pointers pushes them all, and the stack of 8,192

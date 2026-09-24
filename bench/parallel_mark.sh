@@ -12,8 +12,8 @@
 #   3. Failure proof: the marker's donation of its stack's bottom removed
 #      from a copy of the prelude; the helpers wake and find nothing, and
 #      the program exits 1 saying so.
-#   4. Failure proof: a batch taken is never freed; the pool's pieces pile
-#      up past the bound, and the pool check says so.
+#   4. Failure proof: a batch taken is never freed; no batch is ever
+#      handed out twice, and the pool check says so on any machine.
 #   5. Failure proof: a stack that will not grow dies where it used to,
 #      by name, on the wide object.
 set -u
@@ -86,7 +86,7 @@ prove_fails "a marker that never shares its stack is refused" \
   '{ sub(/since >= DONATE_EVERY/, "false \\&\\& since >= DONATE_EVERY"); print }' "blackened nothing" 1
 
 # A taken batch's words never go back: every batch published is a fresh
-# one, and eleven marks of a million nodes pile up pieces past the bound.
+# one, and the pool has reused none.
 prove_fails "a pool that never recycles a batch is refused" \
   '{ if ($0 ~ /^        free_batch\(batch\)$/) { print "        # removed"; next } print }' "pool:" 1
 

@@ -82,6 +82,17 @@
 - `iyi get -u` never moves a requirement down: one past the latest release -
   a pseudo-version, or a pre-release of the next - stays where it is.
 
+### Fixed
+
+- **The parallel marker's recycling proof fires on every machine.** It
+  bounded the bytes the batch pool mapped, and a loaded three-core darwin
+  runner kept the copy that never frees a batch at 3.4 MB, under the 4 MB
+  bound, so the proof did not fire and CI went red at random. The pool now
+  counts the batches it hands out again off its free list, and
+  `bench/parallel_mark.iyi` asks that count first: none reused is a pool
+  that never recycles, whatever the cores. The bound stays, for what a
+  recycling pool holds.
+
 ## 0.14.1 — 2026-09-24
 
 **A server can stop, and be reached more ways.** `std/signal` parks a
@@ -9946,7 +9957,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,503-line library and nothing else. Every other
+  written against iyi's own 17,514-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

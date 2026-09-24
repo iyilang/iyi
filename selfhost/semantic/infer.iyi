@@ -1,0 +1,228 @@
+module main
+
+# The inference slice, written in iyi: return types of internal methods a
+# call actually reaches.
+#
+# This is deliberately smaller than "the semantic pass". It carries what a
+# method body is made of: literal types, typed arguments, local assignment
+# and lookup, the value of an expression list, the union of two branches,
+# the type of a call to another method in the file, every way out of a
+# body rather than only the last one, and a loop, which is not a value.
+#
+# The oracle asks the current compiler the same question after `semantic`,
+# and the fixtures include an uncalled method so that collecting
+# declarations cannot pass for call-driven inference.
+#
+# What it does not carry is a call to a method on a value: the pass runs on
+# one file with no prelude, so `1 + 1` has no `+` to reach, and neither
+# fixture writes one.
+
+import std/file
+import parser/parser
+using std/file::{File}
+using parser/parser::{Parser, Node, NumNode, StrNode, BoolNode, NilNode, NopNode, CharNode, VarNode, AssignNode, ExprsNode, IfNode, UnlessNode, WhileNode, ReturnNode, DefNode, ArgNode, PathNode, CallNode}
+
+pub class TypeEnv
+  @names : Array(String)
+  @types : Array(String)
+  # Every `return` the body reaches. A method answers what its last
+  # expression is worth *and* what it returned on the way out.
+  @returns : Array(String)
+
+  def initialize
+    @names = [] of String
+    @types = [] of String
+    @returns = [] of String
+  end
+
+  def set(name : String, type : String) : Nil
+    index = @names.index(name)
+    if index.nil?
+      @names << name
+      @types << type
+    else
+      @types[index] = type
+    end
+  end
+
+  def get(name : String) : String
+    index = @names.index(name)
+    return "Unknown" if index.nil?
+    @types[index]
+  end
+
+  def add_return(type : String) : Nil
+    @returns << type
+  end
+
+  def returns : Array(String)
+    @returns
+  end
+end
+
+# The methods this file declares, and what each one answers.
+#
+# A method is typed by what its body reaches, and a body can reach another
+# method in the same file. A method that reaches itself is typed by the way
+# out that does not: the recursive call contributes nothing, which is what
+# `NoReturn` is for and what the empty answer stands in for here.
+pub class Defs
+  @names : Array(String)
+  @nodes : Array(DefNode)
+  @active : Array(String)
+
+  def initialize
+    @names = [] of String
+    @nodes = [] of DefNode
+    @active = [] of String
+  end
+
+  def add(node : DefNode) : Nil
+    @names << node.name
+    @nodes << node
+  end
+
+  def names : Array(String)
+    @names
+  end
+
+  def knows?(name : String) : Bool
+    !@names.index(name).nil?
+  end
+
+  def type_of(name : String) : String
+    index = @names.index(name)
+    return "Unknown" if index.nil?
+    return "" if @active.includes?(name)
+    @active << name
+    answer = infer_def(@nodes[index], self)
+    @active.delete(name)
+    answer
+  end
+end
+
+pub def one(nodes : Array(Node), env : TypeEnv, defs : Defs) : String
+  return "Nil" if nodes.size == 0
+  infer(nodes[0], env, defs)
+end
+
+# An empty side is a way out that answers nothing: `return` leaves the
+# method rather than producing a value, and a union with it is the other
+# side alone.
+pub def union(left : String, right : String) : String
+  return right if left == ""
+  return left if right == ""
+  return left if left == right
+  "(#{left} | #{right})"
+end
+
+# `1` is an `Int32` and `1.5` is a `Float64`. The lexer drops a literal's
+# suffix, so `1_i64` arrives here as `1` and neither fixture writes one.
+pub def number_type(text : String) : String
+  text.index('.').nil? ? "Int32" : "Float64"
+end
+
+pub def infer(node : Node, env : TypeEnv, defs : Defs) : String
+  case node
+  when NumNode
+    number_type(node.value)
+  when StrNode
+    "String"
+  when CharNode
+    "Char"
+  when BoolNode
+    "Bool"
+  when NilNode
+    "Nil"
+  when NopNode
+    "Nil"
+  when VarNode
+    env.get(node.name)
+  when AssignNode
+    type = one(node.value, env, defs)
+    if node.target.size > 0
+      target = node.target[0]
+      case target
+      when VarNode then env.set(target.name, type)
+      end
+    end
+    type
+  when ExprsNode
+    # The body is worth what its last expression is worth, and one that
+    # ends in a `return` is worth nothing: the way out is the answer.
+    type = "Nil"
+    node.items.each { |item| type = infer(item, env, defs) }
+    type
+  when IfNode
+    union(one(node.then_branch, env, defs), one(node.else_branch, env, defs))
+  when UnlessNode
+    union(one(node.then_branch, env, defs), one(node.else_branch, env, defs))
+  when WhileNode
+    # A loop is not a value. It runs until its condition is false and the
+    # method answers whatever follows it.
+    "Nil"
+  when ReturnNode
+    env.add_return(one(node.value, env, defs))
+    ""
+  when CallNode
+    # A call with no receiver to a method this file declares is typed by
+    # that method. Anything else is a method on a value, which this slice
+    # does not carry.
+    node.recv.size == 0 && defs.knows?(node.name) ? defs.type_of(node.name) : "Unknown"
+  else
+    "Unknown"
+  end
+end
+
+pub def restriction(arg : ArgNode) : String
+  return "Unknown" if arg.restriction.size == 0
+  node = arg.restriction[0]
+  case node
+  when PathNode then node.names
+  else               "Unknown"
+  end
+end
+
+pub def infer_def(node : DefNode, defs : Defs) : String
+  env = TypeEnv.new
+  node.args.each do |arg|
+    case arg
+    when ArgNode then env.set(arg.name, restriction(arg))
+    end
+  end
+  answer = one(node.body, env, defs)
+  env.returns.each { |type| answer = union(answer, type) }
+  answer
+end
+
+pub def top_items(tree : Node) : Array(Node)
+  case tree
+  when ExprsNode then tree.items
+  else                [tree] of Node
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: infer <file.iyi>"
+else
+  source = File.read(path)
+  tree = Parser.new(source).parse
+  defs = Defs.new
+  calls = [] of String
+
+  top_items(tree).each do |node|
+    case node
+    when DefNode
+      defs.add(node)
+    when CallNode
+      calls << node.name if node.recv.size == 0
+    end
+  end
+
+  rows = [] of String
+  calls.uniq.each do |called|
+    rows << "<Program>##{called}=#{defs.type_of(called)}" if defs.knows?(called)
+  end
+  puts rows.uniq.sorted.join(" ")
+end

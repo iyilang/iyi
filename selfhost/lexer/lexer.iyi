@@ -1,0 +1,318 @@
+module main
+
+import std/file
+import std/text
+using std/file::{File}
+
+# The first real slice of the self-hosted front end: a lexer written in iyi,
+# emitting the same `kind<TAB>line<TAB>column<TAB>value` stream the current
+# lexer does, so the two can be diffed token for token on a real corpus.
+#
+# Scope of this slice, chosen because it is what a module header and a def
+# are made of: identifiers, constants, integers, strings, char-class
+# operators, comments, spaces and newlines. Not yet: heredocs, string
+# interpolation, regex literals, macro state, symbols, floats with suffixes.
+# Those are where the other 2,400 lines of the current lexer live, and each
+# wants its own diffed slice rather than a guess.
+
+pub struct Token
+  getter kind : String
+  getter line : Int32
+  getter col : Int32
+  getter value : String
+
+  def initialize(@kind : String, @line : Int32, @col : Int32, @value : String)
+  end
+
+  def dump : String
+    "#{kind}\t#{line}\t#{col}\t#{value}"
+  end
+end
+
+pub class Lexer
+  @src : String
+  @pending : Array(Token)
+  @prev_kind : String
+  @pos : Int32
+  @line : Int32
+  @col : Int32
+
+  def initialize(@src : String)
+    @pending = [] of Token
+    @prev_kind = ""
+    @pos = 0
+    @line = 1
+    @col = 1
+  end
+
+  def at_end? : Bool
+    @pos >= @src.bytesize
+  end
+
+  def peek : Char
+    return '\0' if at_end?
+    @src[@pos]
+  end
+
+  def peek_at(offset : Int32) : Char
+    i = @pos + offset
+    return '\0' if i >= @src.bytesize
+    @src[i]
+  end
+
+  def advance : Char
+    c = peek
+    @pos = @pos + 1
+    if c == '\n'
+      @line = @line + 1
+      @col = 1
+    else
+      @col = @col + 1
+    end
+    c
+  end
+
+  def ident_start?(c : Char) : Bool
+    c.ascii_letter? || c == '_'
+  end
+
+  def ident_char?(c : Char) : Bool
+    c.ascii_alphanumeric? || c == '_'
+  end
+
+  # One token, or nil at end of input.
+  def next_token : Token?
+    # A string lexes as three tokens the way the current lexer does it:
+    # the opening delimiter, the body, the closing delimiter. Queued here
+    # rather than returned as an array, so the caller stays a simple loop.
+    unless @pending.empty?
+      return @pending.shift
+    end
+    return nil if at_end?
+    line = @line
+    col = @col
+    c = peek
+
+    if c == '\n'
+      advance
+      return Token.new("NEWLINE", line, col, "NEWLINE")
+    end
+
+    if c == ' ' || c == '\t'
+      while !at_end? && (peek == ' ' || peek == '\t')
+        advance
+      end
+      return Token.new("SPACE", line, col, "SPACE")
+    end
+
+    if c == '#'
+      text = ""
+      while !at_end? && peek != '\n'
+        text = text + advance.to_s
+      end
+      return Token.new("COMMENT", line, col, text)
+    end
+
+    if c == '@'
+      advance
+      kind = "INSTANCE_VAR"
+      if peek == '@'
+        advance
+        kind = "CLASS_VAR"
+      end
+      text = if kind == "CLASS_VAR"
+               "@@"
+             else
+               "@"
+             end
+      while !at_end? && ident_char?(peek)
+        text = text + advance.to_s
+      end
+      return Token.new(kind, line, col, text)
+    end
+
+    if ident_start?(c)
+      text = ""
+      while !at_end? && ident_char?(peek)
+        text = text + advance.to_s
+      end
+      # `foo?` and `bar!` are one identifier, which is a lexing rule and
+      # not a parsing one.
+      if !at_end? && (peek == '?' || peek == '!')
+        text = text + advance.to_s
+      end
+      if text == "_"
+        return Token.new("_", line, col, "_")
+      end
+      kind = if c.ascii_uppercase?
+               "CONST"
+             else
+               "IDENT"
+             end
+      return Token.new(kind, line, col, text)
+    end
+
+    # `-42` is one NUMBER, but `a - 42` is three tokens. What separates them
+    # is what came before: after a value, a minus is subtraction.
+    if c == '-' && peek_at(1).ascii_number? &&
+       @prev_kind != "IDENT" && @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
+       @prev_kind != ")" && @prev_kind != "]" && @prev_kind != "INSTANCE_VAR"
+      advance
+      text = "-"
+      while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+        text = text + advance.to_s
+      end
+      if peek == '.' && peek_at(1).ascii_number?
+        text = text + advance.to_s
+        while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+          text = text + advance.to_s
+        end
+      end
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, text)
+    end
+
+    if c.ascii_number?
+      text = ""
+      while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+        text = text + advance.to_s
+      end
+      # A suffix (`_i64`, `_u8`, `_f32`) is consumed and dropped: the current
+      # lexer records it as the number's kind rather than part of its text.
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+        return Token.new("NUMBER", line, col, text)
+      end
+
+      # A float is one token. The dot only belongs to the number when a
+      # digit follows it: `3.14` is a literal, `3.times` is a call.
+      if peek == '.' && peek_at(1).ascii_number?
+        text = text + advance.to_s
+        while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
+          text = text + advance.to_s
+        end
+      end
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, text)
+    end
+
+    if c == '\''
+      advance
+      text = ""
+      if peek == '\\'
+        advance
+        esc = advance
+        text = "\\" + esc.to_s
+      else
+        text = advance.to_s
+      end
+      advance unless at_end?
+      return Token.new("CHAR", line, col, text)
+    end
+
+    if c == '"'
+      advance
+      # An escape closes the piece it is in: the current lexer reports a
+      # string body as runs of literal text with each escape as its own
+      # token, and a port that merges them is a different token stream.
+      text = ""
+      pieces = [] of String
+      while !at_end? && peek != '"'
+        if peek == '#'
+          pieces << text unless text == ""
+          pieces << advance.to_s
+          text = ""
+        elsif peek == '\\'
+          pieces << text unless text == ""
+          advance
+          esc = advance
+          # Printed as the escape, not as the byte: a real newline inside a
+          # token value turns a line-oriented dump into a liar.
+          pieces << "\\" + esc.to_s
+          text = ""
+        else
+          text = text + advance.to_s
+        end
+      end
+      pieces << text unless text == ""
+
+      end_line = @line
+      end_col = @col
+      advance unless at_end?
+      pieces.each { |piece| @pending << Token.new("STRING", line, col + 1, piece) }
+      @pending << Token.new("DELIMITER_END", end_line, end_col, "DELIMITER_END")
+      return Token.new("DELIMITER_START", line, col, "DELIMITER_START")
+    end
+
+    # `[]`, `[]=` and `[]?` are one token: they are method names, and the
+    # lexer is where that is decided.
+    if c == '[' && peek_at(1) == ']'
+      advance
+      advance
+      if peek == '=' || peek == '?'
+        op = "[]#{advance}"
+        return Token.new(op, line, col, op)
+      end
+      return Token.new("[]", line, col, "[]")
+    end
+
+    # Three characters before two before one. `...` is not `..` and `.`,
+    # and `<=>` is not `<=` and `>`.
+    three = "#{c}#{peek_at(1)}#{peek_at(2)}"
+    if three == "..." || three == "<=>" || three == "===" || three == "**=" ||
+       three == "||=" || three == "&&=" || three == "<<=" || three == ">>="
+      advance
+      advance
+      advance
+      return Token.new(three, line, col, three)
+    end
+
+    # Two-character operators before one, or `==` lexes as two `=`.
+    two = "#{c}#{peek_at(1)}"
+    if two == "==" || two == "!=" || two == "<=" || two == ">=" ||
+       two == "&&" || two == "||" || two == "->" || two == "=>" ||
+       two == "::" || two == ".." || two == "+=" || two == "-=" ||
+       two == "*=" || two == "/=" || two == "%=" || two == "|=" ||
+       two == "&=" || two == "^=" || two == "<<" || two == ">>" ||
+       two == "=~" || two == "!~" || two == "&+" || two == "&-" ||
+       two == "&*"
+      advance
+      advance
+      return Token.new(two, line, col, two)
+    end
+
+    advance
+    Token.new(c.to_s, line, col, c.to_s)
+  end
+
+  def dump_all : Nil
+    while token = next_token
+      # SPACE and NEWLINE do not count as "what came before": `x = -1`
+      # has a space in it and the minus is still part of the literal.
+      unless token.kind == "SPACE" || token.kind == "NEWLINE" || token.kind == "COMMENT"
+        @prev_kind = token.kind
+      end
+      puts token.dump
+    end
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: lexer <file.iyi>"
+else
+  Lexer.new(File.read(path)).dump_all
+end

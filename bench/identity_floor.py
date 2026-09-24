@@ -129,6 +129,13 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"crystal-lang\.org", "upstream's site"),
     (r"github\.com/crystal-lang", "upstream's repository"),
     (r"[Cc]opyright.*Crystal", "copyright"),
+    # `selfhost/macro/expand.iyi` says what it is a port of: Crystal runs a
+    # macro by expanding it into source and parsing the result, and this
+    # pass does the same for the shapes the corpora write. The sentence is
+    # about the other compiler's behaviour, which is the whole reason the
+    # file explains itself that way. Found by this gate the first run it
+    # ever reached, because the step above it used to fail first.
+    (r"Crystal expands a macro into source", "how the other compiler runs one"),
     # The compiler still declares these names itself, in
     # `src/compiler/iyi/macros.cr`: `__crystal_pseudo_sizeof`,
     # `__crystal_pseudo_is_a?` and their siblings, with
@@ -174,10 +181,15 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # definition: a Crystal project, a Crystal file kept as Crystal, the
     # tree's own output compared against what Crystal answered. Their
     # gates say "Crystal" because that is the input.
-    (r"(a|the|as|ordinary|becomes|is|in|not|One|A) Crystal", "a sentence about the other language"),
+    # Word-bounded on purpose. Without the `\b` the alternation matched
+    # inside other words, so `this Crystal` was allowed by the `is` branch
+    # and `thin Crystal` by `in`: any sentence at all could be exempted by
+    # the letters that happened to precede the name. Found by planting a
+    # leak to check this gate could see one, which it could not.
+    (r"\b(a|the|as|ordinary|becomes|is|in|not|One|A) Crystal", "a sentence about the other language"),
     (r"which is the lookup Crystal performs", "a sentence about the other language"),
     (r"every Crystal bang|Crystal ignores", "a sentence about the other language's rule"),
-    (r"(are|stay|stays|stayed|still) Crystal", "a sentence about files that keep being the other language"),
+    (r"\b(are|stay|stays|stayed|still) Crystal", "a sentence about files that keep being the other language"),
     (r"crystal_shards", "the module a migrated tree keeps its shard requires in"),
     (r"crystal_shop|crystal\.(out|err)|CRYSTAL=|\$CRYSTAL\b", "the gate's own Crystal arm"),
     (r"struct Int32", "the fixture's reopening of a library type"),

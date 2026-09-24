@@ -1,0 +1,7 @@
+module samples/deep/thing
+
+pub def id(n : Int32) : Int32
+  n
+end
+
+puts id(3)

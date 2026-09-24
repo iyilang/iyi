@@ -1,0 +1,42 @@
+# The first inference slice: return types of called internal methods.
+#
+# These methods are deliberately internal. R-2 requires an exported method to
+# carry its return type in its signature, so an exported unannotated method is
+# a declaration error rather than an inference example.
+
+def integer
+  value = 1
+  value
+end
+
+def text
+  "x"
+end
+
+def truth(flag : Bool)
+  if flag
+    true
+  else
+    false
+  end
+end
+
+def maybe(flag : Bool)
+  if flag
+    1
+  else
+    nil
+  end
+end
+
+# A definition is not typed merely because it is present. The current compiler
+# instantiates an internal method when a call reaches it, and the port has to
+# make the same distinction.
+def unused
+  "not called"
+end
+
+integer
+text
+truth(true)
+maybe(false)

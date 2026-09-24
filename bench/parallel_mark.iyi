@@ -104,12 +104,27 @@
   puts "phase: one mark of the wide object with helpers"
   IyiMark.collect
   fail("the wide object lost a node under the shared mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
-  # Four megabytes: the wide mark's spills outrun fifteen helpers for a
-  # moment and the pool's high-water mark is a handful of pieces - 1.5 MB
-  # on a three-core darwin runner - where the copy that never recycles
-  # is eleven and more on every machine measured.
+  # Two and a half megabytes, which is where the two populations
+  # separate rather than where a round number falls. The bound was four
+  # megabytes and it stopped firing: a three-core darwin runner mapped
+  # exactly 4,194,304 bytes with the recycling removed, and `>` against
+  # 4194304 is false at 4194304. It was sitting on the bottom edge of
+  # the thing it was meant to catch.
+  #
+  # Sampled across CI runs on both runners, healthy and with
+  # `free_batch` removed:
+  #
+  #   recycling     65,536   262,144   393,216   589,824   1,507,328
+  #   removed    4,194,304 4,521,984 4,587,520 4,653,056 5,111,808 …
+  #
+  # The gap is 1.5 MB to 4.19 MB, and 2.5 MB is its middle measured the
+  # way the numbers vary, which is multiplicatively: 1.74x above the
+  # largest healthy reading and 1.6x below the smallest broken one. The
+  # high-water depends on cores, because the wide mark's spills outrun
+  # the helpers for a moment and more helpers drain them sooner, so a
+  # bound with margin on both sides is what makes this travel.
   pool = IyiMark.pool_bytes
-  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 4194304_u64
+  fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 2621440_u64
   puts "pool: #{pool.to_i64} bytes mapped for the marks' batches"
 
   # A worker's stack starts small and grows: a mark alone of one object

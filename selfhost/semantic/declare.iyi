@@ -1,0 +1,479 @@
+module main
+
+# What a file declares, written in iyi.
+#
+# The parser answers what a file says. This answers what it brings into
+# being: for each type the file declares, its kind, its path, its type
+# parameters, and the methods on it. `selfhost/semantic/oracle.cr` asks
+# the current compiler the same question, and `diff.sh` compares them.
+#
+# Three rules here are the compiler's rather than the language's, and
+# each was read off the oracle rather than guessed:
+#
+#   * a trait that declares an associated type is a generic module, and
+#     prints as one, because that is how the compiler builds it;
+#   * a generic class prints its parameters twice, once in its name and
+#     once as its parameter list, and a generic module only once;
+#   * an `impl`'s methods belong to the type it is for, not to the trait
+#     and not to a type of its own.
+
+import std/file
+import macro/expand
+import parser/parser
+using std/file::{File}
+using macro/expand::{expand, host_flags}
+using parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode}
+
+# One declared type. `path` is what the compiler calls it, `vars` is the
+# parameter list it prints after that, and `defs` are the methods that
+# ended up on it from anywhere in the file.
+pub class Decl
+  getter kind : String
+  # `key` is the type's path and `shown` is what the compiler prints for
+  # it: a generic class prints its parameters in its name, and an `impl`
+  # for `Box(T)` has to find the entry for `Box` anyway.
+  getter key : String
+  getter shown : String
+  getter vars : String
+  getter defs : Array(String)
+  # A struct the file brings into being answers `new`, and the compiler
+  # writes the `initialize` that `new` calls when the struct declares
+  # none. A type the compiler already had keeps what it already had.
+  getter defaulted : Bool
+
+  def initialize(@kind : String, @key : String, @shown : String, @vars : String)
+    @defs = [] of String
+    @defaulted = false
+  end
+
+  def defaults_initialize : Nil
+    @defaulted = true
+  end
+
+  def add(name : String) : Nil
+    @defs << name
+  end
+
+  def line : String
+    names = @defs.dup
+    names << "initialize" if @defaulted && !names.includes?("initialize")
+    names = names.uniq.sorted
+    "(#{kind} #{shown}#{vars} (defs #{names.join(" ")}))"
+  end
+end
+
+pub class Declarations
+  getter found : Array(Decl)
+  # A macro brings methods into being on a type that is already there,
+  # and the type it writes itself is not reported: its home is the
+  # expansion rather than the file. The second pass runs in this mode, so
+  # `def add_{{suffix}}` lands on `Atomic` and `struct {{num.id}}` lands
+  # nowhere.
+  @methods_only : Bool
+
+  def initialize
+    @found = [] of Decl
+    @methods_only = false
+  end
+
+  def methods_only : Nil
+    @methods_only = true
+  end
+
+  # The entry for a path, or a new one. Two passes reach the same type:
+  # the declaration that names it and any `impl` written for it.
+  def at(kind : String, key : String, shown : String, vars : String) : Decl
+    @found.each do |decl|
+      return decl if decl.key == key
+    end
+    made = Decl.new(kind, key, shown, vars)
+    @found << made unless @methods_only
+    made
+  end
+
+  def existing(key : String) : Array(Decl)
+    hit = [] of Decl
+    @found.each do |decl|
+      hit << decl if decl.key == key
+    end
+    hit
+  end
+
+  def report : String
+    lines = [] of String
+    @found.each { |decl| lines << decl.line }
+    lines.sorted.join(" ")
+  end
+end
+
+# `Box(T)` from `(T)`, and `Pair(A, B)` from `(A B)`: the name a generic
+# class prints carries its parameters with commas, and the list after it
+# carries them with spaces.
+pub def name_with_vars(name : String, vars : String) : String
+  return name if vars == ""
+  inner = vars[1, vars.size - 2]
+  parts = inner.split(' ')
+  joined = ""
+  parts.each do |part|
+    joined = joined == "" ? part : joined + ", " + part
+  end
+  "#{name}(#{joined})"
+end
+
+# The prelude writes `struct Int32`, and the compiler does not build a
+# struct for it: these names are the compiler's own types and it reports
+# each one by its kind. The list is the compiler's rather than the
+# language's, and was read off the oracle.
+pub def compiler_kind(name : String) : String
+  return "booltype" if name == "Bool"
+  return "niltype" if name == "Nil"
+  return "chartype" if name == "Char"
+  return "symboltype" if name == "Symbol"
+  return "metaclasstype" if name == "Class"
+  return "floattype" if name == "Float32" || name == "Float64"
+  return "integertype" if name == "Int8" || name == "Int16" ||
+                          name == "Int32" || name == "Int64" ||
+                          name == "Int128" || name == "UInt8" ||
+                          name == "UInt16" || name == "UInt32" ||
+                          name == "UInt64" || name == "UInt128"
+  ""
+end
+
+# The structs the compiler already holds, which is why they are not given
+# an `initialize` the way a struct this file declares is.
+pub def compiler_struct?(name : String) : Bool
+  name == "Tuple" || name == "Proc" || name == "Enum" ||
+    name == "StaticArray" || name == "Int" || name == "Float" ||
+    name == "Number" || name == "Value" || name == "Struct"
+end
+
+# `struct Tuple` reopens a type the compiler built with parameters the
+# prelude does not write down, and the compiler reports its own name and
+# its own parameter list for it.
+pub def compiler_shown(name : String) : String
+  return "NamedTuple(T)" if name == "NamedTuple"
+  return "Tuple(*T)" if name == "Tuple"
+  return "Proc(*T, R)" if name == "Proc"
+  ""
+end
+
+pub def compiler_vars(name : String) : String
+  return "(T)" if name == "NamedTuple"
+  return "(T)" if name == "Tuple"
+  return "(T R)" if name == "Proc"
+  ""
+end
+
+pub def upper?(ch : Char) : Bool
+  ch.upcase == ch && ch.downcase != ch
+end
+
+pub def lower?(ch : Char) : Bool
+  ch.downcase == ch && ch.upcase != ch
+end
+
+# `BeginArray` is `begin_array` and `EOF` is `eof`: a run of capitals is
+# one word, and the break goes before the capital that starts the next
+# one. Breaking before every capital spelled `EOF` as `e_o_f`.
+pub def underscore(name : String) : String
+  built = ""
+  index = 0
+  size = name.size
+  while index < size
+    ch = name[index]
+    if upper?(ch) && index > 0
+      before = name[index - 1]
+      after_lower = index + 1 < size ? lower?(name[index + 1]) : false
+      digit = before >= '0' && before <= '9'
+      built = built + "_" if lower?(before) || digit || (upper?(before) && after_lower)
+    end
+    built = built + ch.downcase.to_s
+    index = index + 1
+  end
+  built
+end
+
+pub def path_text(nodes : Array(Node)) : String
+  return "" if nodes.size == 0
+  node = nodes[0]
+  case node
+  when PathNode then node.names
+    # `impl Show for Box(T)` names a generic type, and the type it is for
+    # is `Box`: the parameters are the ones `Box` was declared with.
+  when GenericNode then path_text(node.name)
+  else                  ""
+  end
+end
+
+# `Box(T)` as an impl target is the type `Box`; the parameters are the
+# ones it was declared with and are already on the entry.
+pub def bare(name : String) : String
+  cut = name.index('(')
+  return name if cut.nil?
+  name[0, cut]
+end
+
+pub class Walk
+  getter into : Declarations
+
+  def initialize(@into : Declarations)
+  end
+
+  # `scope` is the path everything declared here hangs off, and `holder`
+  # is the entry a bare `def` lands on.
+  def body(nodes : Array(Node), scope : String, holder : Decl?) : Nil
+    # `@[Flags]` is a statement of its own in front of the enum it is
+    # about, and the enum the compiler builds for it has members and
+    # methods this one does not.
+    flags = false
+    nodes.each do |node|
+      case node
+      when AnnotationNode
+        flags = true if path_text(node.name) == "Flags"
+        next
+      end
+      statement(node, scope, holder, flags)
+      flags = false
+    end
+  end
+
+  def statement(node : Node, scope : String, holder : Decl?) : Nil
+    statement(node, scope, holder, false)
+  end
+
+  # What a file declares when an import it names cannot be resolved: the
+  # module its header opens is never established, so nothing written
+  # inside it is declared. A declaration written against the root is, and
+  # `src/std/file.iyi` is both: `class ::File` survives and the
+  # `alias File` beside it does not.
+  def roots(nodes : Array(Node), scope : String) : Nil
+    nodes.each do |node|
+      case node
+      when ExprsNode     then roots(node.items, scope)
+      when ClassDefNode  then statement(node, scope, nil) if node.from_root
+      when ModuleDefNode then statement(node, scope, nil) if node.from_root
+      end
+    end
+  end
+
+  def statement(node : Node, scope : String, holder : Decl?, flags : Bool) : Nil
+    case node
+    # A body is one statement or a list of them, and the parser only
+    # wraps when there is more than one to hold.
+    when ExprsNode
+      body(node.items, scope, holder)
+    when DefNode
+      # `def self.x` is the type's method, not its instances'. The two
+      # print the same and land on different types.
+      holder.add(node.name) unless holder.nil? || node.receiver == "self"
+    when VisibilityModifierNode
+      # A private method is still a method the type has.
+      body(node.body, scope, holder)
+    when AliasNode
+      name = node.name
+      unless name == ""
+        full = join_scope(scope, name)
+        @into.at("aliastype", full, full, "")
+      end
+    when AssignNode
+      # `DEMO = 3` at the top of a module declares a constant, which the
+      # pass brings into being the way it does a type.
+      name = path_text(node.target)
+      @into.at("const", join_scope(scope, name), join_scope(scope, name), "") unless name == ""
+    when CallNode
+      # `derive described` runs a macro that declares a method of that
+      # name on the type it is written in — SPEC.md R-5.
+      if node.name == "derive" && node.recv.size == 0 && !holder.nil?
+        node.args.each do |arg|
+          derived = call_name(arg)
+          holder.add(derived) unless derived == ""
+        end
+      end
+    when ModuleDefNode
+      # `module ::Levenshtein` is the root's module wherever it is
+      # written, and nothing hangs off the module it was written in.
+      outer = node.from_root ? "" : scope
+      inner = join_scope(outer, path_text(node.name))
+      entry = @into.at("module", inner, inner, "")
+      body(node.body, inner, entry)
+    when ClassDefNode
+      declare(node.kind, path_text(node.name), node.vars, node.body,
+        node.from_root ? "" : scope, true)
+    when TraitDefNode
+      # A trait with an associated type is a generic module to the
+      # compiler, and prints its parameters once rather than twice.
+      vars = assoc_vars(node.body)
+      if vars == ""
+        declare("trait", path_text(node.name), "", node.body, scope, false)
+      else
+        declare("module", path_text(node.name), vars, node.body, scope, false)
+      end
+    when EnumDefNode
+      enum_type(node, scope, flags)
+    when ImplDefNode
+      target = join_scope(scope, bare(path_text(node.target)))
+      hit = @into.existing(target)
+      # An `impl` for a type this file did not declare puts its methods
+      # on a type whose home is elsewhere, and the oracle only reports
+      # what this file brought into being.
+      body(node.body, scope, hit.size == 0 ? nil : hit[0]) if hit.size > 0
+    end
+  end
+
+  def declare(kind : String, name : String, vars : String,
+              inner : Array(Node), scope : String, twice : Bool) : Nil
+    full = join_scope(scope, name)
+    shown = twice ? name_with_vars(full, vars) : full
+    own = compiler_kind(full)
+    held = compiler_shown(full)
+    unless held == ""
+      shown = held
+      vars = compiler_vars(full)
+    end
+    entry = @into.at(own == "" ? kind : own, full, shown, vars)
+    # Every struct answers `new`, and `Reference` is the root the compiler
+    # builds the same way: each is given the `initialize` that `new` calls
+    # when it declares none.
+    defaults = (kind == "struct" && own == "" && !compiler_struct?(full)) ||
+               full == "Reference"
+    entry.defaults_initialize if defaults
+    body(inner, full, entry)
+  end
+
+  # An enum's members are constants under it, and its methods are the
+  # ones the compiler writes: `value`, and a question per member. A
+  # `@[Flags]` enum also gets `None` and `All` members and a `none?`.
+  def enum_type(node : EnumDefNode, scope : String, flags : Bool) : Nil
+    full = join_scope(scope, path_text(node.name))
+    entry = @into.at("enum", full, full, "")
+    entry.add("value")
+    entry.add("none?") if flags
+    node.members.each do |member|
+      case member
+      # An enum body holds methods as well as members: `device?` written
+      # beside them is one of the enum's methods.
+      when DefNode then entry.add(member.name) unless member.receiver == "self"
+      when ArgNode
+        @into.at("const", "#{full}::#{member.name}", "#{full}::#{member.name}", "")
+        entry.add("#{underscore(member.name)}?")
+      end
+    end
+    if flags
+      @into.at("const", "#{full}::None", "#{full}::None", "")
+      @into.at("const", "#{full}::All", "#{full}::All", "")
+    end
+  end
+
+  def call_name(node : Node) : String
+    case node
+    when CallNode then node.name
+    when VarNode  then node.name
+    when PathNode then node.names
+    else               ""
+    end
+  end
+
+  def join_scope(scope : String, name : String) : String
+    return name if scope == ""
+    "#{scope}::#{name}"
+  end
+
+  def assoc_vars(nodes : Array(Node)) : String
+    names = [] of String
+    nodes.each do |node|
+      case node
+      when AssocTypeNode then names << node.name
+      when ExprsNode
+        node.items.each do |item|
+          case item
+          when AssocTypeNode then names << item.name
+          end
+        end
+      end
+    end
+    return "" if names.size == 0
+    "(#{names.join(" ")})"
+  end
+end
+
+pub def first_segment(path : String) : String
+  cut = path.index('/')
+  cut.nil? ? path : path[0, cut]
+end
+
+# Whether the module this file opens is the file's own to declare.
+#
+# `src/std/file.iyi` opens `Std::File` and imports `std/path`, which
+# opens `Std::Path`: the `Std` both hang off was brought into being by
+# the import, not by this file, and the pass reports only what this file
+# declared. Everything under a module the file did not bring into being
+# is invisible to it, which is why such a file reports its `class ::File`
+# and nothing else. A file that shares no root with what it imports -
+# `samples/hello` importing `app/greeter` - declares its own modules and
+# everything in them.
+pub def opens_own_module?(imports : Array(Node), header : String) : Bool
+  root = first_segment(header)
+  imports.each do |node|
+    case node
+    when ImportNode
+      return false if first_segment(node.path) == root
+    end
+  end
+  true
+end
+
+# The file as written and the file as expanded, walked in that order.
+# A macro body is not iyi until it has run, and what it writes belongs to
+# the types the file itself declared.
+pub def walk_file(source : String, into : Declarations) : Nil
+  parser = Parser.new(source)
+  tree = parser.parse
+  walk = Walk.new(into)
+  header = parser.header
+  if header == ""
+    walk.statement(tree, "", nil)
+  else
+    case tree
+    when ModuleDefNode
+      full = path_text(tree.name)
+      resolved = opens_own_module?(parser.imports, header)
+      if resolved
+        parts = full.split(':')
+        prefix = ""
+        parts.each do |part|
+          next if part == ""
+          prefix = prefix == "" ? part : prefix + "::" + part
+          into.at("module", prefix, prefix, "")
+        end
+        walk.body(tree.body, full, into.at("module", full, full, ""))
+      else
+        walk.roots(tree.body, full)
+      end
+    else
+      walk.statement(tree, "", nil)
+    end
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: declare <file.iyi>"
+else
+  into = Declarations.new
+  written = File.read(path)
+
+  # The file as written says what it declares.
+  walk_file(written, into)
+
+  # The file as expanded says what its macros wrote onto those
+  # declarations. A macro body is not iyi until it has run, and the type
+  # a macro writes is not the file's: its home is the expansion. So the
+  # second pass adds methods and brings nothing new into being.
+  expanded = expand(written, host_flags)
+  unless expanded == written
+    into.methods_only
+    walk_file(expanded, into)
+  end
+
+  puts into.report
+end

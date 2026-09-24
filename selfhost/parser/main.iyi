@@ -1,0 +1,27 @@
+module main
+
+import std/file
+import parser/parser
+using std/file::{File}
+using parser/parser::{Parser}
+
+# The parser is a library now, because the semantic pass reads the same
+# tree and cannot import a program. This file is the command that was at
+# the bottom of it.
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: parser <file.iyi>"
+else
+  source = File.read(path)
+  parser = Parser.new(source)
+  tree = parser.parse
+  imports = ""
+  parser.imports.each { |node| imports = imports + node.sexp + " " }
+  if parser.header == ""
+    # No header, no wrapper: the file's statements are the whole tree.
+    puts tree.sexp
+  else
+    puts "(exprs (module #{parser.header}) #{imports}#{tree.sexp})"
+  end
+end

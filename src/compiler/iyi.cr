@@ -38,7 +38,7 @@ module Iyi
         get                      add a requirement to iyi.mod, or move one; -u brings all up to date
         build                    build an executable
         run                      build and run a program (default)
-        mod                      inspect a .iyimod module artifact
+        mod                      inspect a .iyimod module artifact; `mod tidy` fixes iyi.mod
         doc                      print a module's exported surface, or a prelude type's
         test                     run every *_test.iyi: exit 0 passes, anything else fails
         vet                      report unreachable code; findings are the exit code

@@ -60,6 +60,34 @@ module Iyi::Mod
       end)
     end
 
+    # Drops every entry that is not one of *keep*, the selections a build
+    # of the manifest in *dir* now uses, and answers how many went: a sum
+    # line for a version nothing builds is a fact about another program.
+    def self.prune(dir : String, keep : Array(Selection)) : Int32
+      sum_path = File.join(dir, FILE)
+      return 0 unless File.file?(sum_path)
+      known = parse(File.read(sum_path), sum_path)
+      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      kept = known.select { |key, _| wanted.includes?(key) }
+      dropped = known.size - kept.size
+      return 0 if dropped == 0 || dir.starts_with?(Iyi::CacheDir.instance.join("mod"))
+      File.write(sum_path, String.build do |io|
+        kept.to_a.sort_by!(&.first).each do |(key, hash)|
+          io << key << ' ' << hash << '\n'
+        end
+      end)
+      dropped
+    end
+
+    # Which entries of the sum in *dir* are not one of *keep*, without
+    # writing anything.
+    def self.stale(dir : String, keep : Array(Selection)) : Array(String)
+      sum_path = File.join(dir, FILE)
+      return [] of String unless File.file?(sum_path)
+      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      parse(File.read(sum_path), sum_path).keys.reject { |key| wanted.includes?(key) }.sort!
+    end
+
     # The checkout's content, as one line-friendly token: files only,
     # sorted by relative path, each digested with its path so a rename is
     # a change.

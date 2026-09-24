@@ -20,6 +20,12 @@
 # records; one in a dependency's own manifest is ignored; and a target
 # that is not there, not the module, or not spelled as a directory is
 # refused by name.
+#
+# Then `iyi mod tidy`: a package imported without a `require` gets one -
+# at the version the graph already builds when it has it; a `require`
+# nothing imports is removed, unless it raises a version another module
+# pulls in; `iyi.sum` loses the versions nothing builds; `--check` writes
+# nothing and exits 1; and an import no repository provides is refused.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -203,6 +209,65 @@ bad_replace "a directory with no iyi.mod" ../nomod "has no iyi.mod"
 mkdir -p "$WORK/othermod" && printf 'module example.test/user/other\n' > "$WORK/othermod/iyi.mod"
 bad_replace "a directory holding another module" ../othermod "says it is 'example.test/user/other'"
 bad_replace "a target spelled like a module path" liba-local "is not a directory"
+
+step "mod tidy says what the source imports"
+mkdir -p "$WORK/tapp"
+cd "$WORK/tapp" || exit 1
+printf 'module example.test/user/tapp\n\nrequire example.test/user/liba v1.3.0\nrequire example.test/user/libb v1.0.0\n' > iyi.mod
+cp "$WORK/app/use.iyi" main.iyi
+# Another module beside it, with a manifest of its own, is not this one's
+# source: what it imports is not a requirement here.
+mkdir -p nested && printf 'module example.test/user/nested\n' > nested/iyi.mod
+printf 'import example.test/user/libc\nputs 1\n' > nested/main.iyi
+"$IYI" build main.iyi -o main > tidy-build.log 2>&1 || { fail "the tidy fixture did not build"; cat tidy-build.log; }
+printf 'example.test/user/liba v1.0.0 s1:0000000000000000000000000000000000000000\n' >> iyi.sum
+cp iyi.mod iyi.mod.before && cp iyi.sum iyi.sum.before
+"$IYI" mod tidy --check > tidy-check.log 2>&1
+check_status=$?
+[ "$check_status" -eq 1 ] || fail "--check answered $check_status with a change due"
+grep -q "would remove example.test/user/libb v1.0.0: nothing imports it" tidy-check.log || fail "--check did not name the unused line: $(cat tidy-check.log)"
+# Two: the version nothing builds, and libb's, which goes with its line.
+grep -q "would drop 2 iyi.sum entries" tidy-check.log || fail "--check did not name the stale sums: $(cat tidy-check.log)"
+cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "--check wrote something"
+"$IYI" mod tidy > tidy1.log 2>&1 || { fail "tidy failed"; cat tidy1.log; }
+[ -z "$(requires example.test/user/libb)" ] || fail "libb is still required"
+[ "$(requires example.test/user/liba)" = "v1.3.0" ] || fail "liba moved to '$(requires example.test/user/liba)'"
+[ -z "$(requires example.test/user/libc)" ] || fail "the nested module's import was taken for this one's"
+grep -q "v1.0.0" iyi.sum && fail "the stale sum entry is still there"
+grep -q "example.test/user/liba v1.3.0 s1:" iyi.sum || fail "the sum lost what builds"
+"$IYI" mod tidy --check > tidy-clean.log 2>&1 || fail "a tidy manifest was not clean: $(cat tidy-clean.log)"
+grep -q "say what the source imports" tidy-clean.log || fail "a clean tidy did not say so"
+[ "$status" -eq 0 ] && echo "  libb removed, liba kept, the stale sum dropped; --check wrote nothing, then found nothing"
+
+step "mod tidy adds an import's module at the version that builds, and keeps a raising line"
+printf 'import example.test/user/libb\nusing example.test/user/libb::{number}\nputs number\n' > b_test.iyi
+rm main.iyi
+"$IYI" mod tidy > tidy2.log 2>&1 || { fail "tidy failed"; cat tidy2.log; }
+[ "$(requires example.test/user/libb)" = "v1.0.0" ] || fail "the imported libb was not added: $(cat tidy2.log)"
+# liba is imported by nothing now, and libb asks for v1.1.0: the line
+# naming v1.3.0 is what builds v1.3.0, so it stays and is said.
+[ "$(requires example.test/user/liba)" = "v1.3.0" ] || fail "the raising line was removed"
+grep -q "kept example.test/user/liba v1.3.0: nothing imports it, but without the line another module's requirement would build v1.1.0" tidy2.log \
+  || fail "the kept line was not explained: $(cat tidy2.log)"
+mkdir -p "$WORK/t2" && cd "$WORK/t2" || exit 1
+printf 'module example.test/user/t2\nrequire example.test/user/libb v1.0.0\n' > iyi.mod
+printf 'import example.test/user/liba\nputs 1\n' > main.iyi
+"$IYI" mod tidy > tidy3.log 2>&1 || { fail "tidy failed"; cat tidy3.log; }
+[ "$(requires example.test/user/liba)" = "v1.1.0" ] || fail "liba was added at '$(requires example.test/user/liba)', not the v1.1.0 the graph builds"
+[ -z "$(requires example.test/user/libb)" ] || fail "libb stayed, imported by nothing"
+[ "$status" -eq 0 ] && echo "  libb added; liba's raising line kept; an indirect import required at v1.1.0, the version it builds at"
+
+step "mod tidy refuses an import no repository provides"
+printf 'import example.test/user/nosuch/thing\nputs 1\n' > missing.iyi
+cp iyi.mod iyi.mod.before
+"$IYI" mod tidy > tidy4.log 2>&1
+if [ $? -eq 0 ] || ! grep -q "no module provides example.test/user/nosuch/thing" tidy4.log; then
+  fail "the unprovided import was not refused: $(cat tidy4.log)"
+elif ! cmp -s iyi.mod iyi.mod.before; then
+  fail "the refusal changed iyi.mod"
+else
+  echo "  refused, naming every prefix tried, iyi.mod untouched"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -35,14 +35,7 @@ module Iyi::Mod
     # each of them.
     def self.resolve(dir : String, root : ModFile) : Array({Selection, String})
       replaced = replaced_directories(dir, root)
-      manifests = {} of String => ModFile
-      selections = Resolver.resolve(root) do |path, version|
-        if local = replaced[path]?
-          manifests[path] ||= local_manifest(path, local, root.replacements[path])
-        else
-          Fetcher.manifest(path, version)
-        end
-      end
+      selections = self.selections(dir, root)
 
       # Fact against policy, before anything is compiled: every selection's
       # checkout is hashed against `iyi.sum`, a mismatch is a refusal, and a
@@ -56,6 +49,21 @@ module Iyi::Mod
 
       selections.map do |selection|
         {selection, replaced[selection.path]? || Fetcher.checkout(selection.path, selection.version)}
+      end
+    end
+
+    # What *root*'s graph selects, and nothing else: no checkout beyond the
+    # manifests the walk reads, and `iyi.sum` neither checked nor written.
+    # The question `mod tidy` asks of manifests it has not written yet.
+    def self.selections(dir : String, root : ModFile) : Array(Selection)
+      replaced = replaced_directories(dir, root)
+      manifests = {} of String => ModFile
+      Resolver.resolve(root) do |path, version|
+        if local = replaced[path]?
+          manifests[path] ||= local_manifest(path, local, root.replacements[path])
+        else
+          Fetcher.manifest(path, version)
+        end
       end
     end
 

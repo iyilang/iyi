@@ -140,6 +140,17 @@ module Iyi::Mod
       lines.join(newline) + newline
     end
 
+    # *text* without *path*'s `require` line; every other line as it was.
+    def self.without_requirement(text : String, path : String) : String
+      newline = text.includes?("\r\n") ? "\r\n" : "\n"
+      lines = text.split(newline)
+      lines.reject! do |raw|
+        fields = raw.strip.split
+        fields.first? == "require" && fields[1]? == path
+      end
+      lines.join(newline)
+    end
+
     # A module path is a URL's path half (III.7): host-shaped segments may
     # carry `.` and `-`, every segment is lower-case, and nothing here maps
     # to a type name — the in-package path does that, under IV.6 #6's own

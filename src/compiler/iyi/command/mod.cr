@@ -17,6 +17,9 @@ class Iyi::Command
     when "context"
       options.shift
       mod_context
+    when "tidy"
+      options.shift
+      mod_tidy
     when nil, "--help", "-h"
       puts mod_usage
       exit
@@ -30,6 +33,9 @@ class Iyi::Command
     Usage: #{Command.program_name} mod [subcommand]
 
     Subcommand:
+        tidy [--check]           make iyi.mod and iyi.sum say what the source
+                                 imports: add what is missing, remove what
+                                 nothing uses, drop sums nothing builds
         context FILE.iyi         print what a change to this module is allowed
                                  to know: the exact exported surface of every
                                  module it imports, and nothing's body. This is

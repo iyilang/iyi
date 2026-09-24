@@ -25,6 +25,17 @@
   or absolute, and a `replace` in a dependency's manifest is ignored, so a
   library cannot redirect its consumers. iyi-web was copied into `lib/`
   for want of this.
+- **`iyi mod tidy`: the manifest says what the source imports.** A package
+  imported without a `require` gets one - at the version the graph already
+  builds when another requirement pulls it in, so tidying never moves what
+  builds, otherwise at the latest release of the import's longest prefix that
+  is a repository. A `require` nothing imports is removed, unless removing it
+  would lower a version another module pulls in: that line is kept and the
+  reason said, decided by the resolver rather than by a second kind of line.
+  `iyi.sum` keeps an entry per module that builds and drops the rest, and
+  `--check` writes nothing and exits 1 when a change is due. The source is
+  every `.iyi` file under the manifest, tests included; a directory with its
+  own `iyi.mod`, `lib/` and hidden directories are not.
 
 ## 0.14.1 — 2026-09-24
 

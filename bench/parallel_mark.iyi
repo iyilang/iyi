@@ -13,7 +13,7 @@
 # bench/parallel_mark.sh drives it and proves the sharing check fails when
 # the marker stops donating its stack's bottom.
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64))) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
@@ -101,13 +101,22 @@
   # gives a batch to the pool on every push after it, 300,000 pointers
   # are thousands of batches on any machine, and thousands of batches
   # never recycled are megabytes.
-  puts "phase: one mark of the wide object with helpers"
+  # Three marks of it: the spill of one is 300,000 words, about 2.4 MB
+  # of batches, and with the recycling removed that is what each mark
+  # adds. One was enough where the helpers spin and the tree's marks
+  # donate: eleven pieces and more on Linux and darwin. On Windows, whose
+  # helpers sleep between collections, the tree donated little, and one
+  # wide mark without recycling came to 3.1 MB - under the bound it had
+  # to cross - against 2.5 with it. Three cross it on any machine.
+  puts "phase: three marks of the wide object with helpers"
+  IyiMark.collect
+  IyiMark.collect
   IyiMark.collect
   fail("the wide object lost a node under the shared mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
-  # Four megabytes: the wide mark's spills outrun fifteen helpers for a
-  # moment and the pool's high-water mark is a handful of pieces - 1.5 MB
-  # on a three-core darwin runner - where the copy that never recycles
-  # is eleven and more on every machine measured.
+  # Four megabytes: a wide mark's spills can outrun the helpers for a
+  # moment, and the pool's high-water mark is at most one mark's spill -
+  # 1.5 MB on a three-core darwin runner, 2.5 on a Windows machine whose
+  # helpers sleep - where the copy that never recycles holds three.
   pool = IyiMark.pool_bytes
   fail("pool: #{pool.to_i64} bytes mapped for batches after the marks, so taken batches are not being recycled") if pool > 4194304_u64
   puts "pool: #{pool.to_i64} bytes mapped for the marks' batches"

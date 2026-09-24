@@ -2018,6 +2018,8 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
+      # And the parallel mark: Windows' mark has helper threads now, parked
+      # on a kernel32 semaphore between collections.
       - name: The collector's gates, on Windows
         shell: bash
         run: |
@@ -2027,6 +2029,7 @@ jobs:
           bash bench/sweep_exercise.sh
           bash bench/collect_trigger.sh
           bash bench/thread_exercise.sh
+          bash bench/parallel_mark.sh
 
       - name: The standard library's gates, on Windows
         shell: bash

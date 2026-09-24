@@ -492,6 +492,12 @@ end
     fun CancelWaitableTimer(h_timer : Void*) : Int32
     fun DuplicateHandle(h_source_process_handle : Void*, h_source_handle : Void*, h_target_process_handle : Void*, lp_target_handle : Void**, dw_desired_access : Int32, b_inherit_handle : Int32, dw_options : Int32) : Int32
     fun SwitchToThread : Int32
+    # The mark helpers' park (`IyiMark.wait_generation`): kernel32's own
+    # counting semaphore. `WaitOnAddress` would be the futex, and it is
+    # imported from a DLL beyond kernel32 that no program here links.
+    fun CreateSemaphoreW(lp_semaphore_attributes : Void*, l_initial_count : Int32,
+                         l_maximum_count : Int32, lp_name : UInt16*) : Void*
+    fun ReleaseSemaphore(h_semaphore : Void*, l_release_count : Int32, lp_previous_count : Int32*) : Int32
     fun GetActiveProcessorCount(group_number : UInt16) : Int32
     fun CreateNamedPipeA(lp_name : UInt8*, dw_open_mode : Int32, dw_pipe_mode : Int32, n_max_instances : Int32, n_out_buffer_size : Int32, n_in_buffer_size : Int32, n_default_time_out : Int32, lp_security_attributes : Void*) : Void*
     fun ConnectNamedPipe(h_named_pipe : Void*, lp_overlapped : Void*) : Int32
@@ -4094,6 +4100,9 @@ require "./file"
       POOL_FREE = 960_u64
       POOL_PIECE_END = 1024_u64
       POOL_PIECES = 1088_u64
+      # Windows' helpers asleep on the semaphore, counted so a wake
+      # releases one count per sleeper (`wake_helpers`).
+      POOL_SLEEPERS = 1152_u64
       NO_PERMIT = 0xFFFFFFFFFFFFFFFF_u64
 
       # A mark's permit, or NO_PERMIT: the slot is the order of taking,
@@ -4936,7 +4945,7 @@ require "./file"
       # a parked helper spins, fifteen of them on three cores held the
       # parallel mark's exercise past its five minutes.
       def self.workers=(count : UInt64) : Nil
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           cap = default_helpers
           count = cap if count > cap
         {% end %}
@@ -4957,7 +4966,10 @@ require "./file"
         {% end %}
       end
 
-      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+      # Windows has the helpers of a stopped mark and nothing more: the
+      # mark beside the program and the sweep round are Linux's and
+      # darwin's (their arms below say so), so a helper there only marks.
+      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       def self.default_helpers : UInt64
         cores = IyiThread.core_count
         cores = 16_u64 if cores > 16_u64
@@ -4970,6 +4982,9 @@ require "./file"
       # helper to answer a generation it turned.
       def self.start_helpers(count : UInt64) : Nil
         pool
+        {% if flag?(:win32) %}
+          doorbell
+        {% end %}
         while @@helpers < count
           IyiThread.start_helper(helper_entry, @@helpers)
           @@helpers = @@helpers + 1_u64
@@ -5001,28 +5016,32 @@ require "./file"
             IyiHeap.write64(w + W_BLACK, drain(w))
             fold_helper(w)
             pool_word(POOL_HELPERS_DONE).value.add(1_u64)
-            # Beside the program, the drain's end is not the mark's: the
-            # first taker waits for the rest - for the count taken, which
-            # rises if another helper is still arriving and is never a
-            # promise a missing helper has to keep - and takes the second
-            # stop.
-            if slot == 0_u64 && pool_word(POOL_FINISH).value.get != 0_u64
-              pool_word(POOL_FINISH).value.set(0_u64)
-              while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
-                spin_pause
+            {% unless flag?(:win32) %}
+              # Beside the program, the drain's end is not the mark's: the
+              # first taker waits for the rest - for the count taken, which
+              # rises if another helper is still arriving and is never a
+              # promise a missing helper has to keep - and takes the second
+              # stop.
+              if slot == 0_u64 && pool_word(POOL_FINISH).value.get != 0_u64
+                pool_word(POOL_FINISH).value.set(0_u64)
+                while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
+                  spin_pause
+                end
+                # The finish turns the generation once more, for the
+                # remainder, and again for the sweep round; that is the one
+                # this helper waits past next.
+                seen = finish_concurrent
               end
-              # The finish turns the generation once more, for the
-              # remainder, and again for the sweep round; that is the one
-              # this helper waits past next.
-              seen = finish_concurrent
-            end
+            {% end %}
           end
-          # The round, if one is open and a permit is left: arenas until
-          # none is left or a collection closes it.
-          if take_sweep_permit
-            while sweep_one_helper
+          {% unless flag?(:win32) %}
+            # The round, if one is open and a permit is left: arenas until
+            # none is left or a collection closes it.
+            if take_sweep_permit
+              while sweep_one_helper
+              end
             end
-          end
+          {% end %}
         end
       end
 
@@ -5099,6 +5118,50 @@ require "./file"
 
         def self.wake_helpers : Nil
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (pool + POOL_GENERATION).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
+        end
+
+        def self.wake_some_helpers(count : UInt64) : Nil
+          wake_helpers
+        end
+      {% elsif flag?(:win32) %}
+        # No futex here either, and not darwin's spin: a helper spins
+        # SPIN_BEFORE_PARK for the burst, then sleeps on a kernel32
+        # semaphore, so an idle program's helpers cost no core. The
+        # generation word is the truth and the semaphore only a doorbell:
+        # a helper counts itself a sleeper before it reads the word, and
+        # the collector turns the word before it reads the count, both
+        # locked read-modify-writes, so either the helper sees the new
+        # generation or the collector sees the sleeper and rings for it.
+        # A ring that finds its sleeper already awake is a spare count,
+        # and the next wait takes it, reads the word, and sleeps again.
+        @@doorbell : UInt64 = 0_u64
+
+        def self.doorbell : Void*
+          # Made by `start_helpers`, under the runtime lock, before any
+          # helper exists to wait on it.
+          if @@doorbell == 0_u64
+            @@doorbell = LibC.CreateSemaphoreW(nil, 0_i32, 0x7FFFFFFF_i32, nil).address
+            IyiRoots.fatal("iyi: the mark helpers' semaphore could not be made\n") if @@doorbell == 0_u64
+          end
+          Pointer(Void).new(@@doorbell)
+        end
+
+        def self.wait_generation(seen : UInt64) : UInt64
+          word = pool_word(POOL_GENERATION)
+          spun = spin_for_generation(word, seen)
+          return spun if spun != seen
+          sleepers = pool_word(POOL_SLEEPERS)
+          sleepers.value.add(1_u64)
+          while (now = word.value.get) == seen
+            LibC.WaitForSingleObject(doorbell, -1_i32)
+          end
+          sleepers.value.sub(1_u64)
+          now
+        end
+
+        def self.wake_helpers : Nil
+          asleep = pool_word(POOL_SLEEPERS).value.get
+          LibC.ReleaseSemaphore(doorbell, asleep.unsafe_to_i32, nil) if asleep > 0_u64
         end
 
         def self.wake_some_helpers(count : UInt64) : Nil
@@ -6164,6 +6227,14 @@ require "./file"
 
       def self.collect_locked(eager : Bool) : Nil
         decide_helpers
+        {% if flag?(:win32) && flag?(:x86_64) %}
+          # Every helper a mark may ask for, made before anything stops.
+          # `mark` makes the ones missing inside the stop, and a thread
+          # made there runs the C runtime's and every DLL's thread attach
+          # under the loader lock, which a thread suspended while holding
+          # it would never release.
+          start_helpers(@@helpers_wanted)
+        {% end %}
         # Debt left from the last epoch: an unswept arena wears the last
         # mark's colours, and a mark over them would call last cycle's
         # black this cycle's live — and, worse, never re-count it, so an

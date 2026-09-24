@@ -59,6 +59,24 @@
   every `.iyi` file under the manifest, tests included; a directory with its
   own `iyi.mod`, `lib/` and hidden directories are not.
 
+- **Windows marks with helper threads.** A collection there marked on
+  the collecting thread alone; Linux's and darwin's hand a large live set
+  to helpers. Windows has them now for the mark inside the pause: the
+  same helpers, as many as the cores less one, made before anything
+  stops (a thread made while others are suspended would run DLL attach
+  under a loader lock one of them may hold), and parked between
+  collections on a kernel32 semaphore after a short spin, so an idle
+  program's helpers take no core - darwin's spin, and `WaitOnAddress`,
+  which is imported from a DLL beyond kernel32, were the alternatives.
+  On a twelve-core Windows machine, the program running between
+  collections, a million-node tree's pause took 15.4 ms alone, 7.4 with
+  three helpers and 6.6 with five; with all eleven it was 16.4 in one
+  run and 23.9 in another, every core busy. `parallel_mark.sh`
+  runs on Windows and in its job; its recycling proof marks the wide
+  object three times now, because one mark without recycling came to
+  3.1 MB there, under the 4 MB bound it had to cross. The mark beside the
+  program and the sweep helpers remain Linux's and darwin's.
+
 ### Changed
 
 - **`root_exercise` measures on Windows what it only said it could not.**
@@ -80,8 +98,8 @@
   `LIB` and `PATH`. Run that way on a Windows machine, the two arms
   answered the same four rows. What Windows still does not run: the
   daemon's gates (`iyi-daemon.exe` does not build there),
-  `sandbox_story.sh` (wasi-sdk), `gc_race.py` (Go), and `parallel_mark`
-  and `concurrent_mark`, which have no mark helpers there to measure.
+  `sandbox_story.sh` (wasi-sdk), `gc_race.py` (Go), and
+  `concurrent_mark`, whose mark beside the program Windows does not have.
 
 ### Fixed
 
@@ -9962,7 +9980,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,511-line library and nothing else. Every other
+  written against iyi's own 17,582-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

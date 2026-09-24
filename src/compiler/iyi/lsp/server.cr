@@ -1450,7 +1450,6 @@ module Iyi::Lsp
       lines = text.lines
       header_index : Int32? = nil
       last_import : Int32? = nil
-      has_import = false
       selective : {Int32, Array(String)}? = nil
 
       lines.each_with_index do |line, index|
@@ -1458,7 +1457,6 @@ module Iyi::Lsp
         if header_index.nil? && stripped.starts_with?("module ")
           header_index = index
         elsif stripped == "import #{module_path}"
-          has_import = true
           last_import = index
         elsif stripped.starts_with?("import ") || stripped.starts_with?("using ")
           last_import = index
@@ -1480,8 +1478,8 @@ module Iyi::Lsp
       end
 
       anchor = (last_import || header_index || -1) + 1
+      # The `using` alone: it imports what it names.
       block = String.build do |io|
-        io << "import " << module_path << '\n' unless has_import
         io << "using " << module_path << "::{" << name << "}\n"
       end
       [{anchor, 0, 0, block}]
@@ -1687,8 +1685,10 @@ module Iyi::Lsp
       imports = [] of String
       text.each_line do |line|
         stripped = line.lstrip
-        next unless stripped.starts_with?("import ")
-        mod = stripped.lchop("import ").each_char
+        # A `using` imports what it names, so it is an edge too.
+        rest = stripped.lchop?("import ") || stripped.lchop?("using ")
+        next unless rest
+        mod = rest.each_char
           .take_while { |ch| ch.alphanumeric? || ch == '_' || ch == '/' }
           .join
         imports << mod unless mod.empty?

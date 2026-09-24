@@ -4,6 +4,13 @@
 
 ### Added
 
+- **A `using` imports what it names.** `import app/dep` followed by `using
+  app/dep` wrote one path twice; `using app/dep` is now the one line, and the
+  parser makes the import - after the file's own imports, so the edge is the
+  file's and the import wall holds: a qualified name the file wrote no line
+  for is still refused. Writing both still works and loads the module once.
+  The formatter and `to_s` print what the source says, and `mod context` and
+  the language server's auto-import write the one `using` line.
 - **`iyi get`: a requirement without writing the line by hand.** `iyi get
   example.com/someone/lib` requires the latest release - the highest `vX.Y.Z`
   tag, a pre-release only when there is no release - `PATH@v1.2.0` requires

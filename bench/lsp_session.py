@@ -1190,7 +1190,9 @@ def main():
     # 35. auto-import completion: a fresh buffer that has never
     #     compiled types `tok`; the workspace's exports answer anyway
     #     (R-2 made `pub` a parse-time fact), and the item carries the
-    #     `import`/`using` pair as additionalTextEdits.
+    #     `using` line as an additionalTextEdit - one line, since a `using`
+    #     imports what it names, and the buffer compiling clean after it is
+    #     the proof that the line is enough.
     scratch_path = os.path.join(work, "scratch.iyi")
     scratch_text = ("module scratch\n\ndef go : String\n  tok\nend\n\n"
                     "puts go\n")
@@ -1227,9 +1229,9 @@ def main():
     step(35, "completion auto-imports across the workspace",
          token_item is not None and
          token_item["labelDetails"]["description"] == "calc/lexer" and
-         "import calc/lexer" in edited and
+         "import calc/lexer" not in edited and
          "using calc/lexer::{token}" in edited and clean,
-         "never-compiled buffer, item wrote the import/using pair")
+         "never-compiled buffer, item wrote the one using line")
 
     # 36. the selective `using` grows instead of doubling: the buffer
     #     already selects {token}; completing glyph extends that line.

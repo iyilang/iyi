@@ -35,7 +35,7 @@ The compilation model, stated only as far as Part II needs it.
 |---|---|
 | R-1 | A module is the unit of compilation. `import` forms a DAG. Compiling a module reads only its dependencies' **export metadata**, never their bodies. |
 | R-2 | Everything a module exports (`pub`) carries full parameter and return types. Non-exported code infers. |
-| R-2b | `using` brings a module's exported names into unqualified scope, written by the consumer. |
+| R-2b | `using` brings a module's exported names into unqualified scope, written by the consumer. A `using` imports the module it names. |
 | R-2c | **Definition-site typing.** A def whose parameters and return are all written is typed at its definition, caller or no caller — R-2's declared types stand in for the missing call. A trait-restricted parameter is typed too: the bound is written, and a bound is enough — the compiler synthesizes one witness type per simple trait, implements its abstract requirements as stubs, and types the body against exactly the bound, so a generic body cannot quietly use what it did not declare (the half duck-typed generics never check and Rust checks always). `pub` is not the condition: a module's unmarked function, a type's `private def`, a type the module never marked `pub`, and a method an `impl` block gives a type are typed at their definition too, since the probe is the definition asking about itself and R-2's wall is for callers. Each def is typed on its own, so every one that does not type is reported, not the first. Out of reach and stated: supertrait/generic/associated-type traits, block-taking and unannotated defs, operator-named defs, defs of a mixin `module` (whose `self` is the includer's), `.cr` sources. *(Added with the agentic waves: a build, `check`, and the LSP may not disagree about what "clean" means. Mechanism: `semantic/definition_typing.cr`, probes from resolved signatures under `if false`, anchored at the def. First catch: this spec's own gate fixture — a signature edited to `Int64` over a body still returning `Int32`.)* |
 | R-3 | Open classes are gone. `impl Trait for Type` must live in the module defining the trait or the type. |
 | R-4 | Generic calls crossing a module boundary pass a dictionary keyed on GC shape. Within a module, monomorphisation. `@[Monomorphize]` forces specialisation across a boundary. |
@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,503 lines, of which 3,509 are the library held to the 3,734 ceiling (5,031 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 116,268 lines, none of it written in iyi |
+| compiler | 116,324 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,9 +1008,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 116,268 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 116,324 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,503-line own prelude + 40,690 in std |
-| Specs | 21,146 lines | 11,925 for iyi |
+| Specs | 21,146 lines | 11,946 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -1164,6 +1164,16 @@ get  "/x" do ... end     # ERROR: `get` is ambiguous (a::get, b::get): qualify i
 Resolvable from export metadata alone, so it costs nothing. And it means adding
 an export to a library only breaks consumers that actually call the colliding
 name.
+
+**A `using` imports what it names.** `import app/dep` followed by `using
+app/dep` wrote one path twice, and the first line told the compiler nothing
+the second did not: `using` reaches one module, and that module has to be
+in the program. The parser makes the import for a top-level `using` whose
+module the file does not import itself, after the file's own imports where
+every import stands, so the edge is the file's and the import wall is where
+it was - a qualified name the file never wrote a line for is still refused.
+Writing both is not an error; the module loads once. The formatter and
+`to_s` print what the source says, which is the `using`.
 
 **4. File-scoped, declared at the top. No block-scoped `using`.**
 

@@ -94,6 +94,11 @@ module Iyi
       @doc_enabled = wants_doc
     end
 
+    # iyi: the tree of what the source says and nothing it implies - the
+    # formatter's, which walks the tokens beside the nodes and has no token
+    # for an `import` a `using` implied.
+    property iyi_source_only = false
+
     def parse
       next_token_skip_statement_end
 
@@ -171,6 +176,12 @@ module Iyi
           location.try(&.line_number) || 1, location.try(&.column_number) || 1
       end
 
+      implied = iyi_import_what_using_names(expressions)
+      unless implied.same?(expressions)
+        expressions = implied
+        nodes = Expressions.from(expressions)
+      end
+
       header = expressions.first?
       return nodes unless header.is_a?(ModuleHeader)
 
@@ -223,6 +234,39 @@ module Iyi
       module_def.end_location = header.end_location
 
       Expressions.from([header] of ASTNode + directives + [module_def] of ASTNode)
+    end
+
+    # iyi: a `using` imports what it names. `using web/dsl` needed an
+    # `import web/dsl` line above it, the same path twice, and the pair was
+    # the only way to write it: `using` reaches exactly one module and that
+    # module has to be in the program. So the import is made here, one per
+    # module a top-level `using` names that no `import` in the file does,
+    # placed after the file's own imports where every import has to be -
+    # file level, ahead of the module body (`apply_module_header`). R-2b is
+    # unmoved: the names still enter scope only where the consumer writes
+    # `using`. An `import` written as well is not an error; the module is
+    # loaded once.
+    private def iyi_import_what_using_names(expressions : Array(ASTNode)) : Array(ASTNode)
+      return expressions if @iyi_source_only
+      imported = Set(Array(String)).new
+      expressions.each { |node| imported << node.path if node.is_a?(ImportDecl) }
+      implied = [] of ASTNode
+      expressions.each do |node|
+        next unless node.is_a?(UsingDecl)
+        next unless imported.add?(node.path)
+        decl = ImportDecl.new(node.path.dup)
+        decl.implicit = true
+        decl.at(node)
+        decl.end_location = node.end_location
+        implied << decl
+      end
+      return expressions if implied.empty?
+
+      at = 0
+      while (node = expressions[at]?) && (node.is_a?(ModuleHeader) || node.is_a?(ImportDecl) || node.is_a?(Require))
+        at += 1
+      end
+      expressions[0, at] + implied + expressions[at..]
     end
 
     def parse(mode : ParseMode)

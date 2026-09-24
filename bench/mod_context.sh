@@ -519,12 +519,14 @@ pub def facade_value : Int32
   1
 end
 EOF
+# deep/core is reached through the facade's `pub import` and nothing of
+# main's own: a `using deep/core` would import it here, and then it would be
+# main's dependency and no re-export at all.
 cat > main.iyi <<'EOF'
 import facade
-using deep/core::{core_value}
 using facade::{facade_value}
 
-puts core_value + facade_value
+puts Deep::Core.core_value + facade_value
 EOF
 export IYI_PATH="$REPO/src${PSEP}$WORK/facade"
 if ! "$IYI" run main.iyi > facade_run.txt 2>&1 || [ "$(tail -1 facade_run.txt)" != "8" ]; then

@@ -27,6 +27,12 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimport app/greeter\nusing app/greeter"
   assert_iyi_format "module m\n\nimport std/list\nusing std/list::{List}"
   assert_iyi_format "module m\n\nimport std/list\nusing std/list::{List, Cons}"
+  # A `using` alone imports what it names, and the parser makes that
+  # import itself; the formatter writes what the source says, so a file
+  # with only the `using` keeps only the `using`.
+  assert_iyi_format "module m\n\nusing app/greeter"
+  assert_iyi_format "module m\n\nusing web/dsl::{get, run}\n\nget \"/\" do |env|\n  \"hi\"\nend"
+  assert_iyi_format "using app/greeter\n\nputs 1"
 
   # A keyword-prefixed segment: `end` and `def` start these names, and the
   # slash after one is what the parser had to take out of the lexer's hands.

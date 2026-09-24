@@ -112,14 +112,29 @@ describe "Semantic: iyi import" do
   end
 
   describe "the message a rule gives the first time it is met" do
-    it "tells a file that `using` a module it has not imported to import it" do
+    # A `using` imports what it names: the pair `import app/dep` +
+    # `using app/dep` wrote the same path twice, and the first line said
+    # nothing the second did not. The edge is this file's, so the import
+    # wall still holds - what a file reaches is what it wrote.
+    it "imports the module a `using` names" do
       with_iyi_modules({
-        "main.iyi"    => "module app/main\n\nusing app/dep\n",
+        "main.iyi"    => "module app/main\n\nusing app/dep\n\nvalue\n",
         "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
       }) do
-        expect_raises(Iyi::TypeException, /needs `import app\/dep` above it/) do
-          semantic_iyi("main.iyi")
-        end
+        program = semantic_iyi("main.iyi")
+        program.iyi_module_paths.values.should eq ["app/dep"]
+        importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?("app/dep.iyi")) }
+        importers.keys.map { |file| File.basename(file) }.should eq ["main.iyi"]
+      end
+    end
+
+    it "loads a module once when a file both imports and `using`s it" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dep\nusing app/dep\n\nvalue\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
+      }) do
+        program = semantic_iyi("main.iyi")
+        program.iyi_module_paths.values.should eq ["app/dep"]
       end
     end
 

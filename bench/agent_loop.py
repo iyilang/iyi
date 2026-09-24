@@ -363,25 +363,20 @@ def main():
 
     # 4b''. the import wall is per-file, and `pub import` is the one
     # door through it: a module in the program because *somebody else*
-    # imported it is not reachable by `using` — the phantom-dependency
-    # disease R-1 exists to refuse
+    # imported it is not reachable unless this file says so - the
+    # phantom-dependency disease R-1 exists to refuse. A `using` says so:
+    # it imports what it names, so the dependency is written in the file
+    # that has it. A qualified name says nothing, and is refused.
     os.makedirs(os.path.join(work, "lib"), exist_ok=True)
     write("lib/inner.iyi", "module lib/inner\n\npub def shine() : Int32\n  7\nend\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
         "pub def front() : Int32\n  1\nend\n"
     ))
-    write("phantom.iyi", "import lib/facade\nusing lib/inner\n\nputs shine()\n")
-    proc = run("check", "phantom.iyi", cwd=work)
-    step("a phantom dependency is refused by name",
-         proc.returncode == 1 and "pub import" in (proc.stdout + proc.stderr),
-         "the error teaches both fixes")
-    write("lib/facade.iyi", (
-        "module lib/facade\npub import lib/inner\n\n"
-        "pub def front() : Int32\n  1\nend\n"
-    ))
-    step("pub import is the door",
-         run("check", "phantom.iyi", cwd=work).returncode == 0, "")
+    write("declared.iyi", "import lib/facade\nusing lib/inner\n\nputs shine()\n")
+    step("a using declares the dependency it reaches",
+         run("check", "declared.iyi", cwd=work).returncode == 0,
+         "using lib/inner is this file's own edge")
     write("qualified.iyi", "import lib/facade\n\nputs Lib::Inner.shine()\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
@@ -395,7 +390,7 @@ def main():
         "module lib/facade\npub import lib/inner\n\n"
         "pub def front() : Int32\n  1\nend\n"
     ))
-    step("and pub import opens both doors",
+    step("and pub import opens it",
          run("check", "qualified.iyi", cwd=work).returncode == 0, "")
     proc = run("fix", "--json", "uncalled.iyi", cwd=work)
     fixed = json.loads(proc.stdout)

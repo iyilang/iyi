@@ -2441,12 +2441,19 @@ module Iyi
     # include its dependencies, but only by saying so.
     property exported = false
 
+    # iyi: made by the parser for a `using` whose module the file does not
+    # import itself - `using web/dsl` alone is `import web/dsl` and the
+    # `using`. Not in the source, so nothing that writes source back (the
+    # formatter, `to_s`) writes it.
+    property? implicit = false
+
     def initialize(@path)
     end
 
     def clone_without_location
       decl = ImportDecl.new(@path.dup)
       decl.exported = @exported
+      decl.implicit = @implicit
       decl
     end
 

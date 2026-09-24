@@ -438,6 +438,8 @@ module Iyi
     end
 
     def visit(node : ImportDecl)
+      # A `using` wrote this one; the source it prints is the `using`.
+      return false if node.implicit?
       @str << "import " << node.path.join('/')
       false
     end

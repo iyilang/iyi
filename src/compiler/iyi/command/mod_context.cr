@@ -263,12 +263,13 @@ class Iyi::Command
     names.uniq!
     String.build do |io|
       io << "# A file that uses this writes, after its own `module` line:\n"
-      # A module handed on by a facade is reached by importing the facade:
-      # `pub import` is what makes the name reachable without an import of
-      # its own (R-2b), and telling the reader to import it directly would
-      # be telling them to add an edge the language does not need.
-      io << "#   import " << (via || written) << '\n'
-      unless names.empty?
+      if names.empty?
+        # Nothing to bring into scope, so the import alone. A module handed
+        # on by a facade is reached by importing the facade: `pub import`
+        # is what makes it reachable without an edge of its own (R-2b).
+        io << "#   import " << (via || written) << '\n'
+      else
+        # A `using` imports what it names, so it is the one line.
         io << "#   using " << written << "::{"
         names.join(io, ", ")
         io << "}   # or `using " << written << "` for every name\n"

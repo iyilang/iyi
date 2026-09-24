@@ -9,6 +9,7 @@ module Iyi
     def self.format(source, filename = nil, report_warnings : IO? = nil, flags : Array(String)? = nil)
       parser = Parser.new(source)
       parser.filename = filename
+      parser.iyi_source_only = true
       nodes = parser.parse
 
       # the formatter merely parses the same source again, it shouldn't
@@ -2275,6 +2276,7 @@ module Iyi
       end
 
       parser = Parser.new(source, var_scopes: @vars.clone)
+      parser.iyi_source_only = true
       # iyi: in the file's own language. A macro body is formatted by a
       # second formatter over its text, and the text was handed over with no
       # name — so `!` was read by the other language's rules, `v = risky()!`

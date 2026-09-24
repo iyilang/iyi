@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,503 lines, of which 3,509 are the library held to the 3,734 ceiling (5,031 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 116,466 lines, none of it written in iyi |
+| compiler | 116,812 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 116,466 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 116,812 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,503-line own prelude + 40,690 in std |
 | Specs | 21,146 lines | 11,946 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4399,6 +4399,25 @@ it, which Go spells `// indirect` and this decides by asking the resolver,
 so there is no second kind of line to keep in step. `iyi.sum` keeps one
 entry per module that builds. `--check` writes nothing and exits 1 when a
 change is due.
+
+**A package's reach is said when it arrives and when it moves.** Go's
+`go get` names the version and nothing about what came with it; an
+upgrade that starts opening sockets reads the same as one that fixed a
+typo. Here `get` ends with what the change reaches: every module new to
+the build with its reach, and every module that moved with what it reaches
+now that it did not, or no longer does - a moved module whose reach did
+not move says nothing, so the lines are read. `iyi mod reach` lists the
+whole build's. Reach is read from the source a consumer builds - tests
+not - and is three things: the std modules that call C that the package
+reaches, through std's own imports (`std/http` is `std/socket`; `std/json`
+calls nothing and is not listed), `File` from the prelude, and the C the
+package declares itself, `@[Link]` libraries and `lib` functions, a
+platform's `{% if %}` branch included. "Calls C" is read off std's source
+- a `lib` function, or a runtime `__iyi_` hook other than the allocator's -
+so it is a rule and not a list, and the module that gains one is counted
+the day it does. It is a report, not a sandbox: it says what the source
+can do, and a `lib` assembled by macro interpolation is not counted.
+`bench/packages_get.sh` holds it, a test's `std/file` included.
 
 What steps 1 and 2 do not do, said here: packages compile from
 source every build (their `.iyimod` story is step 5's, with signatures),

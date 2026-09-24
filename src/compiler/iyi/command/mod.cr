@@ -20,6 +20,9 @@ class Iyi::Command
     when "tidy"
       options.shift
       mod_tidy
+    when "reach"
+      options.shift
+      mod_reach
     when nil, "--help", "-h"
       puts mod_usage
       exit
@@ -36,6 +39,9 @@ class Iyi::Command
         tidy [--check]           make iyi.mod and iyi.sum say what the source
                                  imports: add what is missing, remove what
                                  nothing uses, drop sums nothing builds
+        reach                    say what every module the build selects
+                                 touches outside the language: std modules,
+                                 File, C libraries and functions
         context FILE.iyi         print what a change to this module is allowed
                                  to know: the exact exported surface of every
                                  module it imports, and nothing's body. This is

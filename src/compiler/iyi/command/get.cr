@@ -14,10 +14,13 @@
 # selection is checked out, and `iyi.sum` has agreed with every checkout it
 # already knew - a `get` that fails leaves `iyi.mod` as it found it.
 #
-# What it says is what changed: a requirement added or moved, and any
-# module whose selected version is not the one its `require` line names,
-# because another module asks for more.
+# What it says is what changed: a requirement added or moved, any module
+# whose selected version is not the one its `require` line names, because
+# another module asks for more, and what the change reaches: every module
+# new to the build with its reach, and every module that moved with what
+# it reaches now that it did not, or no longer does (`Mod::Reach`).
 require "../mod/installer"
+require "../mod/reach"
 
 class Iyi::Command
   private def get
@@ -121,6 +124,16 @@ class Iyi::Command
 
       resolved = Mod::Installer.resolve(dir, updated)
       selections = resolved.map(&.first)
+      # What built before, so the reach of what moved has something to be
+      # compared with. A manifest that no longer resolves has nothing to
+      # compare, and every module is new to it.
+      previous =
+        begin
+          Mod::Installer.selections(dir, root).to_h { |selection| {selection.path, selection.version} }
+        rescue Mod::ModError
+          {} of String => SemanticVersion
+        end
+      reach_lines = get_reach_lines(dir, root, previous, resolved)
     rescue ex : Mod::ModError
       abort! "get: #{ex.message}", :USAGE_ERROR
     end
@@ -157,6 +170,47 @@ class Iyi::Command
     puts "#{selections.size} module#{selections.size == 1 ? "" : "s"} selected " \
          "(#{indirect} through another module's requirements); " \
          "iyi.sum records the #{fetched} fetched from #{fetched == 1 ? "its tag" : "their tags"}"
+    unless reach_lines.empty?
+      puts "what the change reaches:"
+      reach_lines.each { |line| puts "  #{line}" }
+    end
+  end
+
+  # One line for each module new to the build, with its reach, and one
+  # for each that moved and reaches something it did not or no longer
+  # does. A module that moved without its reach moving says nothing: the
+  # lines are for reading, and a quiet upgrade is the common one.
+  private def get_reach_lines(dir : String, root : Mod::ModFile, previous : Hash(String, SemanticVersion), resolved : Array({Mod::Selection, String})) : Array(String)
+    lines = [] of String
+    replaced = Mod::Installer.replaced_directories(dir, root)
+    resolved.each do |(selection, checkout)|
+      was = previous[selection.path]?
+      if was.nil?
+        lines << "#{selection}, new: #{Mod::Reach.of(checkout)}"
+        next
+      end
+      next if was == selection.version
+      old_checkout =
+        begin
+          replaced[selection.path]? || Mod::Fetcher.checkout(selection.path, was)
+        rescue Mod::ModError
+          # The version it moved from cannot be fetched any more - a tag
+          # deleted - so there is nothing to compare, and it is said whole.
+          lines << "#{selection}, v#{was} no longer fetchable: #{Mod::Reach.of(checkout)}"
+          next
+        end
+      next if old_checkout == checkout
+      old_reach = Mod::Reach.of(old_checkout)
+      new_reach = Mod::Reach.of(checkout)
+      gained = new_reach - old_reach
+      lost = old_reach - new_reach
+      next if gained.empty? && lost.empty?
+      said = [] of String
+      said << "now reaches #{gained}" unless gained.empty?
+      said << "no longer reaches #{lost}" unless lost.empty?
+      lines << "#{selection.path} v#{was} -> v#{selection.version}: #{said.join("; ")}"
+    end
+    lines
   end
 
   # One `PATH[@VERSION]` argument: the version is `vX.Y.Z` or `latest`,

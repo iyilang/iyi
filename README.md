@@ -523,7 +523,10 @@ brings every requirement to its latest release (`--check` lists which
 are behind, writing nothing), `iyi get PATH --as web` gives it a short
 name so a file writes `using web/dsl` rather than the whole path - one
 line, since a `using` imports what it names - `iyi mod tidy` adds
-what the source imports and removes what it does not, and `replace
+what the source imports and removes what it does not, `get` says what a
+new or upgraded package reaches outside the language - the std modules
+that call C, `File`, the C it declares - and `iyi mod reach` lists the
+whole build's, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
 project while both are being written. `bench/init_project.sh` holds the claim that all four files are
 right the moment they land, on Linux and on Windows.

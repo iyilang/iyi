@@ -4832,7 +4832,14 @@ require "./file"
         pool_word(POOL_MARK_PERMITS).value.set(helpers)
         pool_word(POOL_FINISH).value.set(0_u64)
         @@helper_black = 0_u64
-        pool_word(POOL_ACTIVE).value.set(0_u64)
+        # This thread is counted in now, before a helper can see the
+        # generation: counted in by its own drain, a helper that woke in
+        # the instant between the turn and that count found no worker
+        # active and an empty pool, which is the mark's end, and left.
+        # Measured on Windows, where a woken helper is at the pool that
+        # soon: 11 helpers took permits and blackened nothing in 7 of 20 of the
+        # tree's marks, and the collector marked a million nodes alone.
+        pool_word(POOL_ACTIVE).value.set(1_u64)
         pool_word(POOL_HELPERS_DONE).value.set(0_u64)
         IyiRoots.each_root(->(base : UInt64) { shade(base) })
         # The helpers wake on the generation; from here every worker runs
@@ -4841,7 +4848,7 @@ require "./file"
           pool_word(POOL_GENERATION).value.add(1_u64)
           wake_helpers
         end
-        black = drain(w)
+        black = drain(w, true)
         # Every helper asked has answered - left the drain and folded its
         # accounts - before this thread reads them or turns the
         # generation again.
@@ -4868,10 +4875,11 @@ require "./file"
       # take one then spun forever waiting for a count that nobody would
       # ever pay - the collector's own gate on a two-core runner, and the
       # thread exercise on three.
-      def self.drain(w : UInt64) : UInt64
+      # `counted` is a caller that counted itself in already (`mark`).
+      def self.drain(w : UInt64, counted : Bool = false) : UInt64
         black = 0_u64
         active = pool_word(POOL_ACTIVE)
-        active.value.add(1_u64)
+        active.value.add(1_u64) unless counted
         while true
           while (len = IyiHeap.read64(w + W_LEN)) > 0_u64
             len = len - 1_u64

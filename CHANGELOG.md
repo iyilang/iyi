@@ -83,6 +83,21 @@
   `sandbox_story.sh` (wasi-sdk), `gc_race.py` (Go), and `parallel_mark`
   and `concurrent_mark`, which have no mark helpers there to measure.
 
+### Fixed
+
+- **A mark's helpers could find the mark over before it began.** The
+  collector turned the generation that wakes the helpers and only then,
+  in its own drain, counted itself as a worker with work. A helper that
+  reached the pool in between saw no worker active and an empty pool -
+  the drain's sign that the mark is done - and left with nothing, and the
+  collector marked alone while every helper had taken a permit. With
+  Windows' helpers (Added, above), eleven of them took permits and blackened
+  nothing in 7 of 20 of `parallel_mark`'s marks of a million-node tree,
+  and the exercise failed 6 runs in 10. The collector counts itself in
+  before it turns the generation now: in 20 marks printed one by one the
+  helpers blackened 82 to 94% of the nodes each time, and the exercise
+  held 10 runs of 10.
+
 ## 0.14.1 — 2026-09-24
 
 **A server can stop, and be reached more ways.** `std/signal` parks a
@@ -9947,7 +9962,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,503-line library and nothing else. Every other
+  written against iyi's own 17,511-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

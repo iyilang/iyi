@@ -15,6 +15,11 @@
   that is not a tag is refused beside the versions that are, and a module
   MVS builds at another version than its line names is named.
   `bench/packages_get.sh` drives it against a mirror.
+- **`iyi get --check`: which requirements are behind.** `iyi get -u --check`
+  lists every requirement behind its latest release, and the same flag on
+  any `get` says what it would change - from the repositories' tags alone,
+  nothing cloned and nothing written - exiting 1 when something would, so a
+  CI step can ask whether the manifest is current.
 - **`replace` in `iyi.mod`: a required module built from a directory.**
   `replace example.com/someone/lib => ../lib` makes every verb - a build,
   `get`, `check`, the language server - read the module from that directory

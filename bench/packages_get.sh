@@ -125,9 +125,19 @@ grep -q "example.test/user/liba builds at v1.1.0: iyi.mod names v1.0.0" get3.log
 grep -q "liba 1.1.0" run1.log || fail "the program ran liba '$(cat run1.log)', not what MVS selected"
 
 step "-u finds a tag published since, and the program builds against it"
+# First asked with --check: the new tag is found from the tags alone, said,
+# and nothing is written until the same `get` runs without it.
 sed -i.bak 's/1.2.0-rc.1/1.3.0/' "$WORK/work/liba/liba.iyi" && rm -f "$WORK/work/liba/liba.iyi.bak"
 git -C "$WORK/work/liba" commit -qam four && (cd "$WORK" && publish liba v1.3.0)
+cp iyi.mod iyi.mod.before
+"$IYI" get -u --check > check.log 2>&1
+check_code=$?
+[ "$check_code" -eq 1 ] || fail "get -u --check answered $check_code with liba behind"
+grep -q "would upgrade example.test/user/liba v1.0.0 -> v1.3.0" check.log || fail "--check did not list liba: $(cat check.log)"
+grep -q "example.test/user/libb is at v1.0.0, its latest" check.log || fail "--check did not say libb is current: $(cat check.log)"
+cmp -s iyi.mod iyi.mod.before || fail "get --check wrote iyi.mod"
 "$IYI" get -u > get4.log 2>&1 || { fail "get -u failed"; cat get4.log; }
+"$IYI" get -u --check > check2.log 2>&1 || fail "get -u --check found something behind after -u: $(cat check2.log)"
 [ "$(requires example.test/user/liba)" = "v1.3.0" ] || fail "-u left liba at '$(requires example.test/user/liba)'"
 grep -q "upgraded example.test/user/liba v1.0.0 -> v1.3.0" get4.log || fail "the upgrade was not said: $(cat get4.log)"
 grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's standing was not said: $(cat get4.log)"

@@ -5,6 +5,7 @@
 #     iyi get example.com/someone/lib          # the latest release
 #     iyi get example.com/someone/lib@v1.2.0   # that version, up or down
 #     iyi get -u                               # every requirement, latest
+#     iyi get -u --check                       # which are behind; exit 1 if any
 #
 # The manifest stays the person's: the one `require` line is rewritten in
 # place or appended, and nothing else in the file moves. Nothing is written
@@ -20,6 +21,7 @@ require "../mod/installer"
 class Iyi::Command
   private def get
     upgrade_all = false
+    check_only = false
     wanted = [] of String
     while option = options.shift?
       case option
@@ -28,6 +30,8 @@ class Iyi::Command
         exit
       when "-u"
         upgrade_all = true
+      when "--check"
+        check_only = true
       when .starts_with?('-')
         abort! "get: unknown flag #{option}", :USAGE_ERROR
       else
@@ -75,6 +79,26 @@ class Iyi::Command
           raise Mod::ModError.new("#{path} has no v#{version}; its versions are #{listed}")
         end
         {path, version}
+      end
+
+      # `--check` stops here: the answer is the tags against the lines,
+      # and nothing is cloned or written to reach it.
+      if check_only
+        behind = 0
+        chosen.each do |(path, version)|
+          was = before[path]?
+          if was.nil?
+            behind += 1
+            puts "would add #{path} v#{version}"
+          elsif was != version
+            behind += 1
+            puts "would #{version > was ? "upgrade" : "downgrade"} #{path} v#{was} -> v#{version}"
+          else
+            puts "#{path} is at v#{version}, its latest" if upgrade_all
+            puts "#{path} is already at v#{version}" unless upgrade_all
+          end
+        end
+        exit(behind > 0 ? 1 : 0)
       end
 
       chosen.each do |(path, version)|
@@ -139,8 +163,8 @@ class Iyi::Command
 
   private def get_usage
     <<-USAGE
-    Usage: #{Command.program_name} get PATH[@VERSION]...
-           #{Command.program_name} get -u
+    Usage: #{Command.program_name} get [--check] PATH[@VERSION]...
+           #{Command.program_name} get [--check] -u
 
     Add a requirement to iyi.mod, or move one: PATH at its latest release,
     or at VERSION (`v1.2.3`, up or down; `latest` is the default). `-u`
@@ -152,6 +176,10 @@ class Iyi::Command
     checkouts are fetched into the cache and recorded in iyi.sum, and only
     then is iyi.mod written - one line rewritten or added, nothing else
     touched. Run it where iyi.mod is.
+
+    `--check` says what the same `get` would change - `get -u --check`
+    lists every requirement behind its latest release - from the tags
+    alone, writes nothing, and exits 1 when anything would change.
     USAGE
   end
 end

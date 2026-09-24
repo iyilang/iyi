@@ -273,7 +273,7 @@ jobs:
           work="$(mktemp -d)"
           mkdir -p "$work/app"
           printf 'module app/pure\n\npub def hello : String\n  "hi"\nend\n' > "$work/app/pure.iyi"
-          printf 'module main\n\nimport app/pure\nusing app/pure\n\nputs hello\n' > "$work/main.iyi"
+          printf 'module main\n\nimport app/pure::*\n\nputs hello\n' > "$work/main.iyi"
           ./bin/iyi build --emit-iyimod "$work/mods" -o "$work/out" "$work/main.iyi"
           if ./bin/iyi build --crystal --use-iyimod "$work/mods" -o "$work/out" \
                "$work/main.iyi" 2>"$work/err"; then

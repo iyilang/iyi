@@ -80,7 +80,17 @@ class Iyi::Command
       # Every version is known before anything is fetched or written, so a
       # typo in the third path costs nothing the first two did.
       chosen = targets.map do |(path, version)|
-        next {path, Mod::Fetcher.latest(path)} unless version
+        unless version
+          latest = Mod::Fetcher.latest(path)
+          # `-u` never moves a line down: a requirement past the latest
+          # release - a commit after it, or a pre-release of the next one -
+          # is already as new as a release gets.
+          was = before[path]?
+          next {path, upgrade_all && was && was > latest ? was : latest}
+        end
+        # A pseudo-version is on no tag; its checkout is what proves the
+        # commit is there and spells it.
+        next {path, version} if Mod::Fetcher.pseudo_commit(version)
         # Asked of the tags before anything is cloned, so a version that is
         # not there is named beside the ones that are.
         known = Mod::Fetcher.versions(path)
@@ -169,7 +179,7 @@ class Iyi::Command
     fetched = selections.count { |selection| !updated.replacements.has_key?(selection.path) }
     puts "#{selections.size} module#{selections.size == 1 ? "" : "s"} selected " \
          "(#{indirect} through another module's requirements); " \
-         "iyi.sum records the #{fetched} fetched from #{fetched == 1 ? "its tag" : "their tags"}"
+         "iyi.sum records the #{fetched} fetched"
     unless reach_lines.empty?
       puts "what the change reaches:"
       reach_lines.each { |line| puts "  #{line}" }
@@ -214,7 +224,8 @@ class Iyi::Command
   end
 
   # One `PATH[@VERSION]` argument: the version is `vX.Y.Z` or `latest`,
-  # and left out it means `latest`.
+  # and left out it means `latest`. Anything else is a branch, a tag or a
+  # commit, and means the version that commit has.
   private def get_target(spec : String, root : Mod::ModFile) : {String, SemanticVersion?}
     path, at, version = spec.partition('@')
     Mod::ModFile.check_module_path(path)
@@ -224,6 +235,13 @@ class Iyi::Command
     return {path, nil} if at.empty? || version == "latest"
     if version.empty?
       raise Mod::ModError.new("'#{spec}' names no version after `@`; write `@v1.2.3` or `@latest`")
+    end
+    # `v1.2` and `1.2.3` are versions mistyped, and are told so; a word
+    # that is not spelled like a version is a ref.
+    unless version[0] == 'v' && version[1]?.try(&.ascii_number?) || SemanticVersion.parse?(version)
+      parsed = Mod::Fetcher.version_at(path, version)
+      Mod::ModFile.check_major(path, parsed)
+      return {path, parsed}
     end
     parsed = Mod::ModFile.check_module_version(version)
     Mod::ModFile.check_major(path, parsed)
@@ -237,7 +255,14 @@ class Iyi::Command
 
     Add a requirement to iyi.mod, or move one: PATH at its latest release,
     or at VERSION (`v1.2.3`, up or down; `latest` is the default). `-u`
-    brings every requirement already in iyi.mod to its latest release.
+    brings every requirement already in iyi.mod to its latest release, and
+    never moves one down.
+
+    VERSION may be a branch, a tag or a commit - `@main`, `@a1b2c3d` - and
+    means that commit's version: its tag, or for a commit no tag names its
+    pseudo-version, `v0.0.0-20260801120000-a1b2c3d4e5f6`, the commit's time
+    and hash after the version tag behind it. A repository with no version
+    tag has its default branch as its latest.
 
     A version is a git tag, `v1.2.3`, on the repository PATH names; the
     latest is the highest release, or the highest pre-release when there

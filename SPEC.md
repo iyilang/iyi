@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,582 lines, of which 3,509 are the library held to the 3,734 ceiling (5,037 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 116,831 lines, none of it written in iyi |
+| compiler | 116,974 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 116,831 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 116,974 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,582-line own prelude + 40,690 in std |
 | Specs | 21,146 lines | 11,946 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4345,6 +4345,23 @@ module that builds at another version than the one its line names.
 `--check` answers from the tags alone and writes nothing: `iyi get -u
 --check` lists every requirement behind its latest release and exits 1
 when one is. `bench/packages_get.sh` drives it against a mirror.
+
+**A commit no tag names has a pseudo-version.** `iyi get PATH@main`, or
+`@a1b2c3d`, or `get PATH` of a repository with no version tag at all,
+writes Go's spelling of the commit: `v0.0.0-20260801120000-a1b2c3d4e5f6`
+with no version tag behind it, `v1.2.4-0.20260801120000-a1b2c3d4e5f6` after
+v1.2.3 - the commit's time in UTC and the first twelve digits of its hash.
+It is an ordinary pre-release to everything after the fetcher: above the
+tag it follows and below the next release, so MVS orders it among the tags
+unchanged, and a `v1.2.4` that lands later outbids it. The fetcher clones
+the whole history for one - its commit is on no tag a shallow clone could
+ask for, and its spelling needs the tags behind it - and refuses a line
+whose time or base is not the commit's own, so the line is a name and not
+a claim. A ref whose commit carries a version tag is that tag. `-u` follows
+an untagged repository's default branch, and never moves a line down: a
+commit past the latest release is already newer than any release. The
+package that spent its life untagged - iyi-web, at the time of writing -
+is one `get` away rather than a copy.
 
 **A major version's suffix is read, not fetched.** `example.com/lib/v2` is
 major version 2 of the repository `example.com/lib`, fetched from there at

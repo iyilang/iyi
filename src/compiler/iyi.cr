@@ -35,6 +35,7 @@ module Iyi
 
     Command:
         init                     write a new project: iyi.mod, main.iyi, a module and a test
+        get                      add a requirement to iyi.mod, or move one; -u brings all up to date
         build                    build an executable
         run                      build and run a program (default)
         mod                      inspect a .iyimod module artifact
@@ -74,7 +75,7 @@ module Iyi
   # artifacts it writes and the file it arrived in cannot disagree.
   VERSION = Iyi::Config.iyi_version
 
-  DELEGATED = %w(init build run mod env clear_cache tool daemon test doc lsp vet check fix bind migrate mcp)
+  DELEGATED = %w(init get build run mod env clear_cache tool daemon test doc lsp vet check fix bind migrate mcp)
 
   # The ones that belong to Crystal and are still in the binary underneath.
   # Named rather than swallowed, because "unknown command" would be a lie.

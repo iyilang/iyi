@@ -43,6 +43,7 @@ class Iyi::Command
 
     Command:
         init                     generate a new project
+        get                      add a requirement to iyi.mod, or move one; -u brings all up to date
         doc                      print a module's exported surface, docs included
         build                    build an executable
         clear_cache              clear the compiler cache
@@ -113,6 +114,11 @@ class Iyi::Command
     when command == "init"
       options.shift
       init
+    when command == "get"
+      # Exact: it writes the manifest and fetches; not something to reach
+      # by prefix.
+      options.shift
+      get
     when "build".starts_with?(command)
       options.shift
       # A daemon named by the environment serves ordinary builds too, so the

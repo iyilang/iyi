@@ -125,8 +125,9 @@ cooperative scheduler, `group`/`spawn`,
 (x86_64, aarch64) and macOS arm64 only;
 `--crystal` supplies Crystal's standard library, IO, `require` and the
 ecosystem. Dependencies exist but are young: an `iyi.mod` beside the entry
-file names requirements, resolution is minimal version selection over git
-tags and `iyi.sum` pins what arrived (SPEC.md III.7), but there is no
+file names requirements, `iyi get` adds or moves one, resolution is
+minimal version selection over git tags and `iyi.sum` pins what arrived
+(SPEC.md III.7), but there is no
 registry and no artifact distribution yet; `--crystal` still leans on
 shards.
 
@@ -515,8 +516,10 @@ module `greet.iyi` the entry imports, and `main_test.iyi`. Between them
 they show `module`, `import`, `using`, `pub` and what a test is here: a
 program that passes by exiting 0, run by `iyi test` with every other
 `*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
-example.com/someone/lib v1.2.0`, and the first build fetches it and writes
-`iyi.sum`. `bench/init_project.sh` holds the claim that all four files are
+example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
+writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
+fetched and recorded in `iyi.sum` before the line is written. `iyi get -u`
+brings every requirement to its latest release. `bench/init_project.sh` holds the claim that all four files are
 right the moment they land, on Linux and on Windows.
 
 ### An editor, in one stanza

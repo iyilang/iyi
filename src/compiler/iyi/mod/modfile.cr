@@ -69,6 +69,54 @@ module Iyi::Mod
       new(module_path, requirements)
     end
 
+    # Checks *path* by the manifest's own grammar, for a path that arrives
+    # on a command line rather than in a file; the sentence is the one a
+    # hand-written `require` line would draw.
+    def self.check_module_path(path : String) : String
+      check_path(path, "", 0)
+    rescue ex : ModError
+      raise ModError.new(ex.message.to_s.lchop(":0: "))
+    end
+
+    # Checks a version as it is spelled on a command line, `v1.2.3`.
+    def self.check_module_version(spelling : String) : SemanticVersion
+      check_version(spelling, "", 0)
+    rescue ex : ModError
+      raise ModError.new(ex.message.to_s.lchop(":0: "))
+    end
+
+    # *text* with *path* required at *version*: its own `require` line
+    # rewritten in place when it has one, or a new line after the last
+    # `require` - after everything when there is none. Everything else the
+    # person wrote, comments and order and blank lines, stays as it was:
+    # the manifest is theirs, and a tool that rewrote it whole would turn
+    # every `get` into a diff of the file.
+    def self.with_requirement(text : String, path : String, version : SemanticVersion) : String
+      newline = text.includes?("\r\n") ? "\r\n" : "\n"
+      line = "require #{path} v#{version}"
+      lines = text.split(newline)
+      # A trailing newline leaves an empty last element; it is put back.
+      ended = !lines.empty? && lines.last.empty?
+      lines.pop if ended
+      last_require = nil
+      lines.each_with_index do |raw, index|
+        fields = raw.strip.split
+        next unless fields.first? == "require"
+        last_require = index
+        next unless fields[1]? == path
+        indent = raw[0, raw.size - raw.lstrip.size]
+        lines[index] = indent + line
+        return lines.join(newline) + (ended ? newline : "")
+      end
+      if at = last_require
+        lines.insert(at + 1, line)
+      else
+        lines << "" unless lines.empty? || lines.last.strip.empty?
+        lines << line
+      end
+      lines.join(newline) + newline
+    end
+
     # A module path is a URL's path half (III.7): host-shaped segments may
     # carry `.` and `-`, every segment is lower-case, and nothing here maps
     # to a type name — the in-package path does that, under IV.6 #6's own

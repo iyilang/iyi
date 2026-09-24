@@ -489,6 +489,9 @@ jobs:
       - name: Packages resolve by minimal version selection
         run: bash bench/packages_resolve.sh
 
+      - name: iyi get writes a requirement
+        run: bash bench/packages_get.sh
+
       # AI_FIRST.md §5's token arm: the context pack must be smaller than
       # the sources it replaces, and must carry no body. The rounds arm
       # needs a model and runs by hand: --agent 'claude -p'.
@@ -1275,7 +1278,9 @@ jobs:
       # `packages_resolve` is here by lesson: its BSD-sed breakage was
       # found by running it on a Mac, and only a Mac can keep it fixed.
       - name: The packages story (III.7)
-        run: bash bench/packages_resolve.sh
+        run: |
+          bash bench/packages_resolve.sh
+          bash bench/packages_get.sh
 
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
@@ -1794,6 +1799,7 @@ jobs:
           bash bench/verbs_exercise.sh
           bash bench/test_verb.sh
           bash bench/packages_resolve.sh
+          bash bench/packages_get.sh
           bash bench/migrate_gate.sh
           bash bench/reuse_integrity.sh
           bash bench/concurrency_exercise.sh

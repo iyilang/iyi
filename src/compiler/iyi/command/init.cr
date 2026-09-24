@@ -100,7 +100,8 @@ class Iyi::Command
     {
       "iyi.mod" => <<-MOD,
         # This project's manifest. The module line is the path other projects
-        # would import it by; a dependency is one line each:
+        # would import it by; a dependency is one line each, which
+        # `iyi get example.com/someone/lib` writes:
         #
         #     require example.com/someone/lib v1.2.0
         #

@@ -60,6 +60,45 @@ module Iyi::Mod
       ModFile.parse(File.read(file), file)
     end
 
+    # The versions *path* has, from its repository's tags: every `vX.Y.Z`
+    # (with or without a pre-release), highest last. A tag that is not a
+    # version is some other tag, and is not one to choose.
+    def self.versions(path : String) : Array(SemanticVersion)
+      remote = remote_for(path)
+      output = IO::Memory.new
+      errors = IO::Memory.new
+      status = Process.run("git", ["ls-remote", "--tags", "--refs", "--", remote], output: output, error: errors)
+      unless status.success?
+        raise ModError.new(
+          "cannot list the versions of #{path} at #{remote}:\n#{errors.to_s.strip}\n" \
+          "A module's path names its repository, and its versions are that repository's `v1.2.3` tags.")
+      end
+      found = [] of SemanticVersion
+      output.to_s.each_line do |line|
+        ref = line.split('\t')[1]?
+        next unless ref && ref.starts_with?("refs/tags/v")
+        begin
+          found << SemanticVersion.parse(ref.lchop("refs/tags/v"))
+        rescue ArgumentError
+        end
+      end
+      found.sort!
+    end
+
+    # The version `iyi get` means by "latest": the highest release, or the
+    # highest pre-release when there is no release at all. A pre-release is
+    # something its author has not called done, and nobody asked for one by
+    # asking for the latest.
+    def self.latest(path : String) : SemanticVersion
+      versions = self.versions(path)
+      if versions.empty?
+        raise ModError.new(
+          "#{path} has no version at #{remote_for(path)}: no tag spelled `v1.2.3`. " \
+          "A version is a git tag; its author tags one before anything can require it.")
+      end
+      versions.reverse.find { |version| version.prerelease.identifiers.empty? } || versions.last
+    end
+
     def self.remote_for(path : String) : String
       if mirror = ENV["IYI_MOD_MIRROR"]?
         File.join(mirror, path)

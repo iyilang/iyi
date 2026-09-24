@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- **`iyi get`: a requirement without writing the line by hand.** `iyi get
+  example.com/someone/lib` requires the latest release - the highest `vX.Y.Z`
+  tag, a pre-release only when there is no release - `PATH@v1.2.0` requires
+  that version, up or down, and `iyi get -u` brings every requirement to its
+  latest. The graph is resolved by minimal version selection, every selection
+  is fetched and checked against `iyi.sum`, and only then is `iyi.mod`
+  written: its one line rewritten in place or appended, comments and CRLF
+  kept, so a `get` that fails leaves the manifest byte for byte. A version
+  that is not a tag is refused beside the versions that are, and a module
+  MVS builds at another version than its line names is named.
+  `bench/packages_get.sh` drives it against a mirror.
+
 ## 0.14.1 — 2026-09-24
 
 **A server can stop, and be reached more ways.** `std/signal` parks a

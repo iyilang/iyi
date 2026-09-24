@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A module in a project's `lib/` was found only from the project's
+  directory: "can't find module 'iyi_web/dsl'".** `lib` is on the search
+  path as a relative entry, and it was read against the working
+  directory, so a library copied into `lib/` - iyi-web's instructions -
+  built from the project and nowhere else. The language server, whose
+  working directory is the editor's and not the project's, said it about
+  every such import, and so did `iyi run C:\app\app.iyi` started anywhere
+  else (both reproduced on Windows, with the error above).
+  A relative entry is also the project's now - under the entry's
+  directory and the root its header names, after the working directory's,
+  so a build that resolved before resolves the same - and `mod context`
+  reads imports that way too. Not inside a package, whose short imports
+  reach the standard library and never the consuming project.
+  `bench/packages_resolve.sh` runs such a program and asks `mod context`
+  about it from another directory, and `bench/lsp_session.py` step 10b
+  opens one in a server started elsewhere; with the change taken out
+  both fail with the sentence above.
+
 ## 0.14.1 — 2026-09-24
 
 **A server can stop, and be reached more ways.** `std/signal` parks a

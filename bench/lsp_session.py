@@ -528,6 +528,33 @@ def main():
     step(10, "nested module resolves from its header's root", diags == [],
          "calc/parser.iyi imports calc/lexer, opened alone, clean")
 
+    # 10b. a module from the project's `lib/`, which is where a library
+    #      copied into a project lives (iyi-web's instructions). `lib` is a
+    #      relative entry on the search path, and this server's working
+    #      directory is not the project's - an editor's never is - so the
+    #      import answered "can't find module 'iyi_web/dsl'" while `iyi run`
+    #      from the project built it. Closed afterwards: the workspace
+    #      steps below count this workspace's files.
+    vendored = tempfile.mkdtemp(prefix="iyi-lsp-lib")
+    os.makedirs(os.path.join(vendored, "lib", "webkit"))
+    with open(os.path.join(vendored, "lib", "webkit", "dsl.iyi"), "w") as f:
+        f.write('module webkit/dsl\n\npub def hello : String\n  "hi"\nend\n')
+    site_path = os.path.join(vendored, "site.iyi")
+    site_text = "module site\n\nimport webkit/dsl\n\nputs Webkit::Dsl.hello\n"
+    with open(site_path, "w") as f:
+        f.write(site_text)
+    site_uri = file_uri(site_path)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": site_uri, "languageId": "iyi",
+                             "version": 1, "text": site_text}}, wait=False)
+    diags = c.diagnostics(site_uri)["diagnostics"]
+    c.send("textDocument/didClose", {"textDocument": {"uri": site_uri}},
+           wait=False)
+    step("10b", "an import from the project's lib/ resolves, whatever the "
+         "server's working directory", diags == [],
+         "; ".join(d["message"].splitlines()[0] for d in diags)
+         or "site.iyi imports webkit/dsl from lib/, clean")
+
     # 11. completion after a dot: the buffer stops compiling the moment
     #     the dot lands, which is exactly when completion fires — so the
     #     answer comes from the last result that held together.

@@ -463,6 +463,22 @@ diff -u doc.txt modpath-doc.txt > modpath-diff.txt 2>&1 || {
 grep -q 'expected a module path' missing-mod.txt || {
   echo "the refusal does not name the module-path form:"; cat missing-mod.txt; exit 1; }
 
+# ── 11. A module in the project's lib/, wherever the build starts ──────────
+# `lib` is on the search path as a relative entry, and it was read as the
+# working directory's: a library copied into a project's `lib/` (iyi-web's
+# instructions) built only from the project, and `iyi run C:\app\app.iyi`
+# from anywhere else - an editor's task, a script - answered "can't find
+# module 'iyi_web/dsl'". It is also the project's `lib/` now, after the
+# working directory's. `mod context` reads imports the same way.
+step "a module in the project's lib/ resolves wherever the build starts"
+mkdir -p vendored/lib/webkit elsewhere
+printf 'module webkit/dsl\n\npub def hello : String\n  "hello from lib"\nend\n' > vendored/lib/webkit/dsl.iyi
+printf 'module site\n\nimport webkit/dsl\n\nputs Webkit::Dsl.hello\n' > vendored/site.iyi
+(cd elsewhere && "$IYI" run "$WORK/vendored/site.iyi") > vendored-run.txt 2>&1 || { cat vendored-run.txt; exit 1; }
+grep -qx 'hello from lib' vendored-run.txt || { echo "the program did not print its lib/ module's answer:"; cat vendored-run.txt; exit 1; }
+(cd elsewhere && "$IYI" mod context "$WORK/vendored/site.iyi") > vendored-context.txt 2>&1 || { cat vendored-context.txt; exit 1; }
+grep -q 'def hello' vendored-context.txt || { echo "mod context did not reach the lib/ module's surface:"; cat vendored-context.txt; exit 1; }
+
 echo "workdir $WORK"
 echo "packages gate: every step held"
 exit 0

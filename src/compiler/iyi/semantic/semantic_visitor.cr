@@ -424,7 +424,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       candidates << File.join(header_root, "#{path}.cr")
     end
 
-    @program.iyi_path.entries.each do |entry|
+    search_entries(inside_package).each do |entry|
       candidates << File.join(entry, "#{path}.iyi")
       candidates << File.join(entry, "#{path}.cr")
     end
@@ -467,7 +467,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     if header_root = @program.iyi_header_root
       roots << header_root
     end
-    roots.concat(@program.iyi_path.entries)
+    roots.concat(search_entries(!@iyi_package_stack.empty?))
 
     dir = File.dirname(path)
     prefix = dir == "." ? "" : "#{dir}/"
@@ -486,6 +486,23 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     end
     filename = @program.filename
     filename ? File.dirname(filename) : nil
+  end
+
+  # `IYI_PATH`'s entries, a relative one also under the project's roots
+  # (`IyiPath.rooted`): the default `lib` is the project's, wherever the
+  # build was started. Not inside a package, whose short imports reach
+  # iyi's standard library and never the consuming project's modules.
+  private def search_entries(inside_package : Bool) : Array(String)
+    entries = @program.iyi_path.entries
+    return entries if inside_package
+    roots = [] of String
+    if root = project_root
+      roots << root
+    end
+    if header_root = @program.iyi_header_root
+      roots << header_root
+    end
+    IyiPath.rooted(entries, roots)
   end
 
   # iyi: refuses an import cycle (R-1, SPEC.md III.5 rule 1).

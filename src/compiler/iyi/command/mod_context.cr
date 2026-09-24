@@ -436,7 +436,9 @@ class Iyi::Command
     # directory, because a file that is *missing* has to keep naming the
     # path it would have had: `check --affected app/lib.iyi` finds the
     # importers a deletion breaks by that name.
-    IyiPath.default_paths.each do |entry|
+    # A relative entry, the default `lib` above all, is also the entry's
+    # project's (`IyiPath.rooted`), as a build reads it.
+    IyiPath.rooted(IyiPath.default_paths, [entry_dir]).each do |entry|
       candidate = File.join(entry, "#{written}.iyi")
       return {candidate, written} if File.file?(candidate)
     end

@@ -39,6 +39,29 @@ module Iyi
       default_paths.join(Process::PATH_DELIMITER)
     end
 
+    # iyi: the entries a module is looked for under, for a program whose
+    # project is at *roots*: each entry as it is, and a relative one - the
+    # default `lib`, above all - also under each root. As it is, a relative
+    # entry is the working directory's, which is Crystal's reading, and it
+    # made `import iyi_web/dsl` from a project's `lib/` a build that worked
+    # only when started in the project: `iyi run C:\app\app.iyi` from
+    # anywhere else, and the language server, whose working directory is
+    # the editor's, answered "can't find module". The working directory's
+    # answer comes first, so a build that resolved before resolves the same.
+    def self.rooted(entries : Array(String), roots : Array(String)) : Array(String)
+      rooted = [] of String
+      entries.each do |entry|
+        rooted << entry
+        next if ::Path[entry].absolute?
+        roots.each do |root|
+          under = File.join(root, entry)
+          next if File.expand_path(under) == File.expand_path(entry)
+          rooted << under
+        end
+      end
+      rooted.uniq
+    end
+
     # Expand `$ORIGIN` in the paths to the directory where the compiler binary
     # is located (at runtime).
     # For install locations like

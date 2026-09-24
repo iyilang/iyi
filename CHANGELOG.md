@@ -357,6 +357,21 @@
 
 ### Fixed
 
+- **A Windows program whose threads failed while collections ran could
+  never end.** `__iyi_exit` was `ExitProcess`, which stops the other
+  threads and then runs every DLL's detach and the C runtime's
+  teardown, none of it iyi's. In 3 runs of 70 of `thread_exercise` with its
+  thread-root walk taken out, the process printed its failure and then
+  sat in `NtTerminateProcess` under `RtlExitUserProcess` for good; the
+  dumps show that one thread and nothing else, and neither `timeout -k`
+  nor `Stop-Process` could end it. On a runner the gate that runs that
+  program hung until `windows-std` was cancelled at 81 minutes. It is
+  `TerminateProcess` on itself now, the way Linux's is `exit_group`: 0
+  hangs in 1,150 runs. `bench/thread_exercise.sh` runs the program 200
+  more times on Windows and wants every run to end with exit 1, and each
+  of its deadlines is `timeout -k`, since Git Bash can lose the TERM to
+  a native program.
+
 - `bench/socket_exercise.sh` holds on Windows, where its first run found every
   section passing and one proof unable to fail: a stale io deadline there
   cancels an operation rather than waking a fiber, so the exercise cannot see
@@ -9808,7 +9823,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,491-line library and nothing else. Every other
+  written against iyi's own 17,503-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

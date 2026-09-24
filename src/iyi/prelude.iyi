@@ -436,7 +436,7 @@ end
     fun GetCurrentDirectoryW(buffer_count : Int32, buffer : UInt16*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun ExitProcess(exit_code : Int32) : NoReturn
-    fun TerminateProcess(process : Void*, exit_code : UInt32) : Int32
+    fun TerminateProcess(process : Void*, exit_code : Int32) : Int32
     fun GetCurrentProcess : Void*
   end
 
@@ -956,7 +956,19 @@ end
     (written - 1).to_i64
   end
 
+  # `TerminateProcess` on itself, the way Linux's arm is `exit_group`:
+  # every thread ends where it stands and nothing runs after. It was
+  # `ExitProcess`, which stops the other threads and then runs every
+  # DLL's detach and the C runtime's teardown on this one - none of it
+  # iyi's - and a `thread_exercise` whose threads fail while collections
+  # run did not always come back from it: 3 runs in 70 here never ended,
+  # their last thread in `NtTerminateProcess` under `RtlExitUserProcess`
+  # (two of them dumped), nothing outside could end them, and on a runner
+  # the gate that runs it hung until the job was cancelled at 81 minutes.
+  # With `TerminateProcess`, 0 in 1,150.
   def __iyi_exit(status : Int32) : NoReturn
+    LibC.TerminateProcess(LibC.GetCurrentProcess, status)
+    # Not reached; the `NoReturn` this def promises is `ExitProcess`'s.
     LibC.ExitProcess(status)
   end
 {% elsif flag?(:wasm32) %}
@@ -8738,7 +8750,7 @@ end
   # ends the process without unwinding anything on this stack, and the
   # exit code is the same 1.
   def __iyi_win_fault_exit : NoReturn
-    LibC.TerminateProcess(LibC.GetCurrentProcess, 1_u32)
+    LibC.TerminateProcess(LibC.GetCurrentProcess, 1_i32)
     # Unreachable: the process is gone. Spelled out because the type says
     # nothing returns from here and the binding above returns an Int32.
     LibC.ExitProcess(1)

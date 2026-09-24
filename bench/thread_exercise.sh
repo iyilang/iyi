@@ -79,7 +79,7 @@ step "threads under the collector, plain build"
 if ! "$IYI" build "$REPO/bench/thread_exercise.iyi" -o threads > build.log 2>&1; then
   cat build.log; exit 1
 fi
-if ! timeout 300 ./threads 8 > answers.txt 2>&1; then
+if ! timeout -k 5 300 ./threads 8 > answers.txt 2>&1; then
   cat answers.txt; exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
@@ -88,7 +88,7 @@ step "threads under the collector, release build"
 if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
   cat build-release.log; exit 1
 fi
-if ! timeout 300 ./threads-release 8 > answers-release.txt 2>&1; then
+if ! timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1; then
   cat answers-release.txt; exit 1
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
@@ -102,7 +102,7 @@ grep -q 'every property held' answers-release.txt || { cat answers-release.txt; 
 step "the plain build, ten more runs, and every one ends well"
 again=1
 while [ "$again" -le 10 ]; do
-  timeout 300 ./threads 8 > again.txt 2>&1
+  timeout -k 5 300 ./threads 8 > again.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
     echo "run $again exited $code:"; tail -5 again.txt; exit 1
@@ -200,7 +200,7 @@ over=$((cores * 2))
 [ "$over" -lt 9 ] && over=9
 [ "$over" -gt 32 ] && over=32
 step "the same, $over threads, release (past the $cores cores here)"
-if ! timeout 300 ./threads-release "$over" > answers-32.txt 2>&1; then
+if ! timeout -k 5 300 ./threads-release "$over" > answers-32.txt 2>&1; then
   cat answers-32.txt; exit 1
 fi
 grep -q 'every property held' answers-32.txt || { cat answers-32.txt; exit 1; }
@@ -220,12 +220,37 @@ cmp -s patched/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk fo
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unrooted > build-unrooted.log 2>&1; then
   cat build-unrooted.log; exit 1
 fi
-timeout 120 ./unrooted 8 > unrooted.txt 2>&1
+# `-k`: Git Bash's TERM can be lost on a native program, and a deadline
+# that does not end the run is a job that hangs to its own limit.
+timeout -k 5 120 ./unrooted 8 > unrooted.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted.txt; then
   echo "the live-list check did not fire (exit $code):"; tail -5 unrooted.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'on a free list' unrooted.txt)"
+
+# The same program, two hundred more times, on Windows. Its threads fail
+# while collections run, and each run has to end: leaving with
+# `ExitProcess`, 3 runs in 70 here never did - the last thread sat in
+# `NtTerminateProcess`, and neither `timeout` nor `Stop-Process` could end
+# it; on a runner this proof hung until the job was cancelled at 81
+# minutes - and with `TerminateProcess` 0 in 1,150 hung. A run is a
+# fraction of a second.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof, again: two hundred runs, and every one ends"
+    again=1
+    while [ "$again" -le 200 ]; do
+      timeout -k 5 30 ./unrooted 8 > unrooted-again.txt 2>&1
+      code=$?
+      if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted-again.txt; then
+        echo "run $again exited $code:"; tail -3 unrooted-again.txt; exit 1
+      fi
+      again=$((again + 1))
+    done
+    echo "  two hundred of two hundred exit 1"
+    ;;
+esac
 
 # ── 5b. Failure proof: a finished thread's fibers leave the registry ──────
 # The thread's retirement from the scheduler taken out of a copy of the
@@ -239,7 +264,7 @@ awk '/^      IyiScheduler.retire_thread$/ { found = 1; next } { print } END { if
 if ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build "$REPO/bench/thread_exercise.iyi" -o stale-threads > build-stale.log 2>&1; then
   cat build-stale.log; exit 1
 fi
-timeout 120 ./stale-threads 8 > stale.txt 2>&1
+timeout -k 5 120 ./stale-threads 8 > stale.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -q "registry:" stale.txt; then
   echo "the registry check did not fire (exit $code):"; tail -5 stale.txt; exit 1

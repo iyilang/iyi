@@ -42,6 +42,8 @@ case "$(uname -s)" in
     ;;
 esac
 
+. "$REPO/bench/floor_base.sh"
+
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
 case "$(uname -s)" in
@@ -255,11 +257,51 @@ case "$(uname -s)" in
       exit 2
     fi
     ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A PE leaves nothing undefined: the floor is the DLLs it imports
+    # (bench/floor_base.sh), and the arena allocator's mappings are
+    # kernel32's `VirtualAlloc` and `VirtualFree`, so it may add none.
+    allowed_symbols=""
+    ;;
   *) allowed_symbols="__error _tlv_bootstrap backtrace backtrace_symbols_fd madvise pipe pthread_create pthread_kill sigaction sigaltstack sysctlbyname read _dyld_get_image_header _dyld_get_image_vmaddr_slide clock_gettime clock_gettime_nsec_np exit kevent kqueue mmap munmap pthread_get_stackaddr_np pthread_self write" ;;
 esac
 allowed_libs="libSystem libc.so ld-linux libgcc_s"
 
-if [ -z "$NM" ] || [ -z "$LIBS_READER" ]; then
+if [ -z "$allowed_symbols" ]; then
+  DUMPBIN="$(find_dumpbin || true)"
+  if [ -z "$DUMPBIN" ]; then
+    # The toolchain that linked the binary carries it, so its absence is a
+    # broken machine, not a platform without the reader.
+    echo "  no dumpbin here, and a machine that built this binary has the toolchain that carries it"
+    status=1
+  else
+    floor_held=yes
+    for bin in exercise-gc exercise-gc-release; do
+      if [ ! -f "$WORK/$bin.exe" ]; then
+        echo "  no $bin to audit"
+        status=1
+        floor_held=no
+        continue
+      fi
+      dlls="$(pe_dlls "$WORK/$bin.exe")"
+      if [ -z "$dlls" ]; then
+        echo "  dumpbin read no import table out of $bin"
+        status=1
+        floor_held=no
+        continue
+      fi
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+      if [ -n "$extra" ]; then
+        echo "  the arena allocator links something new in $bin: $(echo $extra)"
+        status=1
+        floor_held=no
+      else
+        printf '  %-16s %s\n' "$bin" "$(echo $dlls)"
+      fi
+    done
+    [ "$floor_held" = yes ] && echo "  nothing new: kernel32 and the C runtime's DLLs"
+  fi
+elif [ -z "$NM" ] || [ -z "$LIBS_READER" ]; then
   echo "  no nm and no otool or readelf here, so the allocation floor is not measured"
   unmeasured=$((unmeasured + 1))
 elif [ -x "$WORK/exercise-gc" ]; then

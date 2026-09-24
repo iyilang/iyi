@@ -62,6 +62,8 @@ case "$(uname -s)" in
     ;;
 esac
 
+. "$REPO/bench/floor_base.sh"
+
 cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
@@ -159,25 +161,12 @@ case "$(uname -s)" in
     # and their stop are kernel32's (`CreateThread`, `SuspendThread`,
     # `GetThreadContext`), and nothing else may join the C runtime.
     step "dependency floor: threads and their stop add no DLL"
-    DUMPBIN=""
-    if command -v dumpbin >/dev/null 2>&1; then
-      DUMPBIN=dumpbin
-    else
-      vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-      root=""
-      [ -x "$vswhere" ] && root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
-      if [ -n "$root" ]; then
-        for candidate in "$(cygpath -u "$root")"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe; do
-          [ -x "$candidate" ] && DUMPBIN="$candidate" && break
-        done
-      fi
-    fi
+    DUMPBIN="$(find_dumpbin || true)"
     [ -n "$DUMPBIN" ] || { echo "no dumpbin here, and a machine that built these binaries has the toolchain that carries it"; exit 1; }
     for bin in threads threads-release; do
-      dlls="$("$DUMPBIN" -nologo -dependents "$bin.exe" 2>/dev/null |
-        sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+      dlls="$(pe_dlls "$bin.exe")"
       [ -n "$dlls" ] || { echo "dumpbin read no import table out of $bin"; exit 1; }
-      extra="$(printf '%s\n' "$dlls" | grep -v -E '^(kernel32\.dll|vcruntime140\.dll|ucrtbase\.dll|api-ms-win-crt-.*\.dll)$' || true)"
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
       if [ -n "$extra" ]; then
         echo "$bin imports $(echo $extra) beyond kernel32 and the C runtime"; exit 1
       fi

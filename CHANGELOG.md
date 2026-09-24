@@ -89,6 +89,18 @@
 
 ### Changed
 
+- **Two more gates measure their floor on Windows, and five read it one
+  way.** `arena_exercise` said its allocation floor was "not measured"
+  there and `std_dependency_floor` "with 1 arm unread": both read the
+  import table now with the toolchain's `dumpbin` - the arena allocator's
+  plain and release binaries import kernel32 and the C runtime's DLLs
+  and no other, and every standard-library module built alone does the
+  same. Each check fails with `vcruntime140.dll` taken off the list. The
+  reader and the Windows DLL lists had been copied into five gates; they
+  are `bench/floor_base.sh`'s now (`find_dumpbin`, `pe_dlls`,
+  `pe_imports`, `FLOOR_DLLS_RUNTIME` and `FLOOR_DLLS_PROGRAM`), the way
+  darwin's and Linux's lists already were.
+
 - **`root_exercise` measures on Windows what it only said it could not.**
   Two of its checks reported themselves unmeasured there. What root
   discovery asks the machine for had "no floor on record": it is read from

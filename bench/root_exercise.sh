@@ -256,19 +256,7 @@ esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"
 
 if [ "${windows_floor:-no}" = yes ]; then
-  DUMPBIN=""
-  if command -v dumpbin >/dev/null 2>&1; then
-    DUMPBIN=dumpbin
-  else
-    vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-    root=""
-    [ -x "$vswhere" ] && root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
-    if [ -n "$root" ]; then
-      for candidate in "$(cygpath -u "$root")"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe; do
-        [ -x "$candidate" ] && DUMPBIN="$candidate" && break
-      done
-    fi
-  fi
+  DUMPBIN="$(find_dumpbin || true)"
   if [ -z "$DUMPBIN" ]; then
     # The toolchain that linked these binaries carries it, so its absence
     # is a broken machine, not a platform without the reader.
@@ -276,21 +264,18 @@ if [ "${windows_floor:-no}" = yes ]; then
     status=1
   else
     for bin in roots-gc roots-release; do
-      dlls="$("$DUMPBIN" -nologo -dependents "$WORK/$bin.exe" 2>/dev/null |
-        sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+      dlls="$(pe_dlls "$WORK/$bin.exe")"
       if [ -z "$dlls" ]; then
         echo "  dumpbin read no import table out of $bin"
         status=1
         continue
       fi
-      extra="$(printf '%s\n' "$dlls" | grep -v -E '^(kernel32\.dll|vcruntime140\.dll|ucrtbase\.dll|api-ms-win-crt-.*\.dll)$' || true)"
-      names="$("$DUMPBIN" -nologo -imports "$WORK/$bin.exe" 2>/dev/null |
-        sed -n 's/^ *[0-9A-Fa-f]\{1,4\} \([A-Za-z_?@][A-Za-z0-9_?@$.]*\)$/\1/p' | sort -u)"
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
       if [ -n "$extra" ]; then
         echo "  $bin: root discovery links something new: $(echo $extra)"
         status=1
       else
-        printf '  %-14s %s names from %s\n' "$bin" "$(printf '%s\n' "$names" | grep -c .)" "$(echo $dlls)"
+        printf '  %-14s %s names from %s\n' "$bin" "$(pe_imports "$WORK/$bin.exe" | grep -c .)" "$(echo $dlls)"
       fi
     done
   fi

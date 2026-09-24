@@ -178,22 +178,9 @@ ALLOWED_LIBS_PROGRAM="$FLOOR_LIBS_PROGRAM"
 # What a program may import on Windows, which is the same claim read through
 # the loader's own list: a PE asks for DLLs rather than leaving libc symbols
 # undefined, so the floor there is written in DLLs and the imported names are
-# the detail under each one.
-#   kernel32.dll      the process interface, which is what libc is on the
-#                     other two (SPEC.md III.10's inventory)
-#   advapi32.dll      `RtlGenRandom`, the OS entropy `std/random` reads, and
-#                     `std/random` is its only caller (SPEC.md III.10)
-#   ws2_32.dll        Winsock, the platform's network interface, reached by
-#                     `std/socket` and `std/udp` and nothing else
-#                     (SPEC.md III.10)
-#   vcruntime140.dll  the MSVC runtime every binary the MSVC linker writes
-#                     carries, whatever it was written from
-#   ucrtbase.dll      the UCRT itself, for a link that names it directly
-#   api-ms-win-crt-   the UCRT's façade DLLs, which is how a default link
-#                     names it: runtime, math, stdio, locale, heap and
-#                     environment, all of them the C runtime and none of
-#                     them a library iyi took on
-ALLOWED_DLLS_PROGRAM="kernel32.dll advapi32.dll ws2_32.dll vcruntime140.dll ucrtbase.dll api-ms-win-crt-"
+# the detail under each one. Each DLL's reason is beside the list in
+# bench/floor_base.sh.
+ALLOWED_DLLS_PROGRAM="$FLOOR_DLLS_PROGRAM"
 
 # What the compiler may link, each with a reason recorded in SPEC.md.
 #   LLVM       the back end (B.2, Part V.9)
@@ -297,9 +284,7 @@ symbols() {
   # a Windows binary has instead is an import table, and the names in it are
   # the detail under the DLL list the floor is written in.
   if [ -n "$DUMPBIN" ]; then
-    "$DUMPBIN" -nologo -imports "$binary" 2>/dev/null |
-      sed -n 's/^ *[0-9A-Fa-f]\{1,4\} \([A-Za-z_?@][A-Za-z0-9_?@$.]*\)$/\1/p' |
-      sort -u
+    pe_imports "$binary"
     return 0
   fi
   nm -u "$binary" 2>/dev/null |
@@ -333,12 +318,8 @@ libraries() {
   # is not a decision any iyi commit made, and no iyi commit can unmake it.
   if [ -n "$DUMPBIN" ]; then
     # A PE's own import table, which is the list the loader will bind and so
-    # the same claim the other two make with LC_LOAD_DYLIB and NEEDED. The
-    # names are spelled however the linker felt (KERNEL32.dll), and a floor
-    # is not a question about capitalisation.
-    "$DUMPBIN" -nologo -dependents "$binary" 2>/dev/null |
-      sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' |
-      tr 'A-Z' 'a-z' | sort -u
+    # the same claim the other two make with LC_LOAD_DYLIB and NEEDED.
+    pe_dlls "$binary"
   elif command -v otool >/dev/null 2>&1; then
     otool -L "$binary" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
   else
@@ -372,30 +353,6 @@ unexpected() {
     [ "$keep" = no ] && printf '%s\n' "$item"
   done
   return 0
-}
-
-# Windows keeps the reader for its own binaries in the toolchain rather than
-# on a shell's PATH, so it is located the way src/compiler/iyi/codegen/link.cr
-# locates the linker: through the installer's own locator. The floor is read
-# with the toolchain that wrote the binary.
-find_dumpbin() {
-  local vswhere root candidate
-  if command -v dumpbin >/dev/null 2>&1; then
-    printf 'dumpbin\n'
-    return 0
-  fi
-  vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-  [ -x "$vswhere" ] || return 1
-  root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
-  [ -n "$root" ] || return 1
-  root="$(cygpath -u "$root" 2>/dev/null)" || return 1
-  for candidate in "$root"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe \
-                   "$root"/VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe; do
-    [ -x "$candidate" ] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
 }
 
 # Windows names its floor per program: the DLL list is the claim, so a DLL

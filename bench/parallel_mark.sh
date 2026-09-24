@@ -50,6 +50,11 @@ case "$(uname -s)" in
   *) echo "parallel mark: measured on Linux and darwin; nothing to measure here"; exit 0 ;;
 esac
 
+# The cores this process may run on - `nproc` reads the affinity mask, so
+# `taskset -c 0` is one core here - and not the machine's count.
+CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+export PARALLEL_MARK_CORES="$CORES"
+
 step "the parallel marker, release build"
 if ! "$IYI" build --release "$REPO/bench/parallel_mark.iyi" -o marks > build.log 2>&1; then
   cat build.log; exit 1
@@ -59,7 +64,7 @@ if ! timeout 300 ./marks > answers.txt 2>&1; then
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
-step "the mark, alone and with helpers ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu) cores here)"
+step "the mark, alone and with helpers ($CORES cores here)"
 grep -E '^(tree|mark|pool|stack):' answers.txt | sed 's/^/  /'
 
 # $1 label, $2 awk program over the prelude, $3 the phrase the failing check
@@ -82,13 +87,26 @@ prove_fails() {
   printf '  exits %s at "%s"\n' "$code" "$(grep -m1 "$phrase" "$dir/out.txt")"
 }
 
-prove_fails "a marker that never shares its stack is refused" \
-  '{ sub(/since >= DONATE_EVERY/, "false \\&\\& since >= DONATE_EVERY"); print }' "blackened nothing" 1
+# On one core the helpers are never scheduled while the marker works, so
+# the checks that need one - sharing, and recycling what was shared - are
+# off, and there is nothing for their proofs to show.
+if [ "$CORES" -gt 1 ]; then
+  prove_fails "a marker that never shares its stack is refused" \
+    '{ sub(/since >= DONATE_EVERY/, "false \\&\\& since >= DONATE_EVERY"); print }' "blackened nothing" 1
+else
+  step "failure proof: a marker that never shares its stack is refused"
+  echo "  one core here: the sharing check needs a second, so it and its proof are off"
+fi
 
 # A taken batch's words never go back: every batch published is a fresh
 # one, and the pool has reused none.
-prove_fails "a pool that never recycles a batch is refused" \
-  '{ if ($0 ~ /^        free_batch\(batch\)$/) { print "        # removed"; next } print }' "pool:" 1
+if [ "$CORES" -gt 1 ]; then
+  prove_fails "a pool that never recycles a batch is refused" \
+    '{ if ($0 ~ /^        free_batch\(batch\)$/) { print "        # removed"; next } print }' "pool:" 1
+else
+  step "failure proof: a pool that never recycles a batch is refused"
+  echo "  one core here: no helper takes a batch, so recycling is not asked and not proved"
+fi
 
 # The stack never grows: the fatal it used to be, on the wide object.
 prove_fails "a stack that will not grow dies by name" \

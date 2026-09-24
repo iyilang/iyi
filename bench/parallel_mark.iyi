@@ -80,7 +80,12 @@
   IyiMark.collect
   puts "phase: five marks with helpers"
   helped = collect_five(tree, expected)
-  fail("the helpers blackened nothing: the mark was one thread and the rest watched") if helped[1] == 0_i64
+  # One core runs one thread at a time, and the marker finishes its own
+  # stack before a helper is scheduled to ask for a share: nothing to
+  # blacken is the right answer there, not a marker that never shares.
+  # The script says how many cores it gave the program.
+  one_core = Program.env("PARALLEL_MARK_CORES") == "1"
+  fail("the helpers blackened nothing: the mark was one thread and the rest watched") if helped[1] == 0_i64 && !one_core
 
   puts "mark: #{alone[0] // 1000_i64} us alone, #{helped[0] // 1000_i64} us with helpers, which blackened #{helped[1]} of the last mark's nodes"
 
@@ -115,7 +120,9 @@
   # and the proof did not fire.
   pool = IyiMark.pool_bytes
   reused = IyiMark.pool_reused
-  fail("pool: no batch was handed out twice in eleven marks, so taken batches are not being recycled") if reused == 0_u64
+  # A batch is taken by a helper, and one core never schedules one while
+  # the marker works: nothing taken is nothing to hand out again.
+  fail("pool: no batch was handed out twice in eleven marks, so taken batches are not being recycled") if reused == 0_u64 && !one_core
   # Four megabytes: the wide mark's spills outrun fifteen helpers for a
   # moment and the pool's high-water mark is a handful of pieces - 1.5 MB
   # on a three-core darwin runner. What the pool holds, bounded.
@@ -128,9 +135,14 @@
   IyiMark.workers = 0_u64
   grown_before = IyiMark.stacks_grown
   IyiMark.collect
-  fail("stack: a 300,000-wide object was marked alone and the stack never grew past its #{IyiMark::STACK_START.to_i64} entries") if IyiMark.stacks_grown == grown_before
+  # On one core the wide object's mark with helpers was the marker's alone
+  # too - nobody took a spill - so its stack had already grown to hold it,
+  # and the growth to look for is the run's.
+  grew = one_core ? IyiMark.stacks_grown > 0_u64 : IyiMark.stacks_grown != grown_before
+  fail("stack: a 300,000-wide object was marked alone and the stack never grew past its #{IyiMark::STACK_START.to_i64} entries") unless grew
   fail("stack: the wide object lost a node under the mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
-  puts "stack: the mark of a 300,000-wide object grew a worker's stack #{(IyiMark.stacks_grown - grown_before).to_i64} times from #{IyiMark::STACK_START.to_i64} entries"
+  grown = one_core ? IyiMark.stacks_grown : IyiMark.stacks_grown - grown_before
+  puts "stack: the mark of a 300,000-wide object grew a worker's stack #{grown.to_i64} times from #{IyiMark::STACK_START.to_i64} entries"
   puts "parallel mark: every property held"
 {% else %}
   puts "parallel mark: needs the collector and a thread target; nothing to exercise here"

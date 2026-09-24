@@ -95,6 +95,15 @@
 
 ### Fixed
 
+- **The parallel marker's gate holds on one core.** `taskset -c 0 bash
+  bench/parallel_mark.sh` failed at "the helpers blackened nothing": one
+  core never schedules a helper while the marker works, so there is
+  nothing to share, nothing taken to recycle, and the wide object's stack
+  had grown before the mark that looked for it. The script now counts the
+  cores it may run on (`nproc`, the affinity mask) and hands the program
+  the count; on one core the sharing and recycling checks and their proofs
+  are off and say so, and the stack's growth is the run's.
+
 - **The parallel marker's recycling proof fires on every machine.** It
   bounded the bytes the batch pool mapped, and a loaded three-core darwin
   runner kept the copy that never frees a batch at 3.4 MB, under the 4 MB

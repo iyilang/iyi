@@ -2119,12 +2119,36 @@ jobs:
           python bench/generic_boundary.py
           python bench/rebuild_speed.py
 
-      # Four shards bound as boundaries, fetched with `shards install`,
+      # The image has no SQLite, and Linux installs libsqlite3-dev for the
+      # driver gate below: here it is sqlite.org's own x64 DLL, pinned by
+      # hash (the SHA3-256 sqlite.org publishes for it matched when the
+      # SHA-256 below was taken), and its import library made from the
+      # `.def` beside it with MSVC's `lib`. The library goes on `LIB`,
+      # which is where the compiler looks for a `.lib`, and the DLL on
+      # `PATH`, which is where the program looks for it.
+      - name: SQLite, for the driver the gates bind
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite-dll-win-x64-3530400.zip'
+          Invoke-WebRequest -Uri 'https://www.sqlite.org/2026/sqlite-dll-win-x64-3530400.zip' -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne '8b959b7eff4a81f6a62fc3468f9273e5cfe78d4a927e62215aed231b654fb104') {
+            throw "sqlite.org's zip is not the one pinned here: $hash"
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'sqlite'
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          lib /nologo /def:"$dir\sqlite3.def" /machine:x64 /out:"$dir\sqlite3.lib"
+          if ($LASTEXITCODE -ne 0) { throw "lib could not make sqlite3.lib from sqlite3.def" }
+          "LIB=$env:LIB;$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Five gates that bind shards as boundaries, fetched with `shards install`,
       # which needs symbolic links: a Windows machine without Developer
-      # Mode refuses them and a runner, an administrator, makes them. All
-      # four held on a runner (Kemal served, the JWT signed, the chain
-      # bound in order) before they came here. Not `sqlite3_queries.sh`:
-      # the image has no `sqlite3.lib` to link, which Linux installs.
+      # Mode refuses them and a runner, an administrator, makes them. The
+      # first four held on a runner (Kemal served, the JWT signed, the chain
+      # bound in order) before they came here, and the SQLite driver on a
+      # Windows machine with its shards fetched by hand and the library
+      # made as above: the same four rows from source and from artifacts.
       - name: Shards bound as boundaries, on Windows
         shell: bash
         run: |
@@ -2132,6 +2156,7 @@ jobs:
           bash bench/bind_chain.sh
           bash bench/kemal_serves.sh
           bash bench/shard_serves.sh
+          bash bench/sqlite3_queries.sh
 
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a

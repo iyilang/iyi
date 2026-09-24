@@ -70,7 +70,18 @@
   narrowed list flags `vcruntime140.dll`). And the Linux objects it
   cross-compiles had no `nm` to read them: LLVM's `llvm-nm` reads them
   where there is no `nm`, and they leave exactly `__data_start`,
-  `__ehdr_start` and `_end` undefined, as on the other two platforms.
+  `__ehdr_start` and `_end` undefined, as they do read on darwin.
+
+- **The SQLite driver gate runs on Windows.** `sqlite3_queries.sh` binds
+  `db` and `sqlite3` as boundaries and runs a query from source and from
+  artifacts, and the Windows image has no SQLite to link. The Windows
+  gates job makes one: sqlite.org's x64 DLL, pinned by hash, and its
+  import library made from the `.def` beside it with MSVC's `lib`, put on
+  `LIB` and `PATH`. Run that way on a Windows machine, the two arms
+  answered the same four rows. What Windows still does not run: the
+  daemon's gates (`iyi-daemon.exe` does not build there),
+  `sandbox_story.sh` (wasi-sdk), `gc_race.py` (Go), and `parallel_mark`
+  and `concurrent_mark`, which have no mark helpers there to measure.
 
 ## 0.14.1 — 2026-09-24
 

@@ -59,6 +59,19 @@
   every `.iyi` file under the manifest, tests included; a directory with its
   own `iyi.mod`, `lib/` and hidden directories are not.
 
+### Changed
+
+- **`root_exercise` measures on Windows what it only said it could not.**
+  Two of its checks reported themselves unmeasured there. What root
+  discovery asks the machine for had "no floor on record": it is read from
+  the import table now, with the toolchain's `dumpbin`, the way
+  `dependency_floor` and `thread_exercise` read theirs - kernel32 and the
+  C runtime's DLLs, plain and release, and a DLL beyond them fails it (a
+  narrowed list flags `vcruntime140.dll`). And the Linux objects it
+  cross-compiles had no `nm` to read them: LLVM's `llvm-nm` reads them
+  where there is no `nm`, and they leave exactly `__data_start`,
+  `__ehdr_start` and `_end` undefined, as on the other two platforms.
+
 ## 0.14.1 — 2026-09-24
 
 **A server can stop, and be reached more ways.** `std/signal` parks a

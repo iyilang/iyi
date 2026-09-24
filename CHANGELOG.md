@@ -612,6 +612,11 @@
   with the release made advice again (`MEM_RESET` on Windows,
   `MADV_FREE` on Linux). darwin's `MADV_FREE_REUSABLE` is the same kind
   of advice and the same defect, open: the check does not run there.
+  The objects that die to make the released pages were filled in a task
+  on the main thread, and on Linux 6 runs in 400 kept them through the
+  first collection and ended "the carve took up no released page"; they
+  are filled on a thread of its own, joined first, and 0 runs in 400
+  did.
 
 - **`bench/doc_numbers.py` counted the compiler's `!` names on
   Windows.** The count README quotes leaves `src/compiler/` out, and it

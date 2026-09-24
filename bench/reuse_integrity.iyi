@@ -90,9 +90,14 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
 # sweep's warm budget, spread so that no arena is wholly dead and goes
 # back as a mapping: what the sweep does with it is release runs of pages
 # cold. Then links of the same size, whose `next` nobody sets, held until
-# the carve has taken those runs up again. The fill runs in a task of its
-# own so that when it ends, no register or frame of the main thread still
-# names the dropped array.
+# the carve has taken those runs up again. The fill runs on a kernel
+# thread of its own, joined before the collections, so that no register
+# or frame of the main thread can name the dropped array. It ran in a
+# task on the main thread, and on Linux 6 runs in 400 ended "the carve
+# took up no released page": it took up warm pages only, and in each of
+# those runs the last collection before the check had freed 28 to 32 MiB:
+# the array's final buffer had outlived the first. On its own thread, 0
+# runs in 400.
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
   class Pair
     def initialize(@a : UInt64, @b : UInt64)
@@ -147,12 +152,11 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
     stale
   end
 
-  group do |g|
-    g.spawn do
-      fill(4_000_000)
-      0
-    end
+  filler = IyiThread.start do
+    fill(4_000_000)
+    nil
   end
+  filler.join
   IyiMark.collect
   IyiMark.collect
   IyiMark.settle

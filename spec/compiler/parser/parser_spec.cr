@@ -4188,8 +4188,10 @@ module Iyi
         nodes = parse("module app/greeter\nimport app/user\nusing app/other\ndef polite\nend").as(Expressions)
         nodes.expressions[0].should be_a(ModuleHeader)
         nodes.expressions[1].should be_a(ImportDecl)
+        # The import the `using` implies, after the file's own.
+        nodes.expressions[2].as(ImportDecl).implicit?.should be_true
 
-        mod = nodes.expressions[2].as(ModuleDef)
+        mod = nodes.expressions[3].as(ModuleDef)
         mod.name.should eq(Path.new(["App", "Greeter"]))
         mod.iyi_unit?.should be_true
 
@@ -4206,10 +4208,11 @@ module Iyi
       end
 
       it_parses "import app/user", ImportDecl.new(["app", "user"])
-      it_parses "using app/greeter", UsingDecl.new(["app", "greeter"], nil)
-      it_parses "using app/greeter::{polite}", UsingDecl.new(["app", "greeter"], ["polite"])
-      it_parses "using app/greeter::{polite, Greet}", UsingDecl.new(["app", "greeter"], ["polite", "Greet"])
-      it_parses "using a/b/c", UsingDecl.new(["a", "b", "c"], nil)
+      # A `using` imports what it names: the parser puts the import beside it.
+      it_parses "using app/greeter", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], nil)]
+      it_parses "using app/greeter::{polite}", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], ["polite"])]
+      it_parses "using app/greeter::{polite, Greet}", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], ["polite", "Greet"])]
+      it_parses "using a/b/c", [ImportDecl.new(["a", "b", "c"]), UsingDecl.new(["a", "b", "c"], nil)]
 
       assert_syntax_error "using app/greeter::polite", "expecting token '{'"
       assert_syntax_error "using app/greeter::{}", "expected a name to bring into scope"
@@ -4258,7 +4261,7 @@ module Iyi
 
         nodes = parse("module app/x\nimport libs/parser\nusing endpoint/handler\ndef f\nend").as(Expressions)
         nodes.expressions[1].as(ImportDecl).path.should eq(["libs", "parser"])
-        body = nodes.expressions[2].as(ModuleDef).body.as(Expressions).expressions
+        body = nodes.expressions[3].as(ModuleDef).body.as(Expressions).expressions
         body[1].as(UsingDecl).path.should eq(["endpoint", "handler"])
       end
 

@@ -131,8 +131,7 @@ EOF
 cat > main.iyi <<'EOF'
 module main
 
-import app/base
-using app/base::{value}
+import app/base::{value}
 
 def run : Int32
   n = value
@@ -221,8 +220,7 @@ EOF
 cat > app/mid.iyi <<'EOF'
 module app/mid
 
-import app/base
-using app/base::{value}
+import app/base::{value}
 
 pub def doubled : Int32
   value * 2
@@ -231,8 +229,7 @@ EOF
 cat > main.iyi <<'EOF'
 module main
 
-import app/mid
-using app/mid::{doubled}
+import app/mid::{doubled}
 
 puts doubled
 EOF
@@ -278,8 +275,7 @@ EOF
 cat > main.iyi <<'EOF'
 module main
 
-import app/base
-using app/base::{value}
+import app/base::{value}
 
 puts value
 EOF
@@ -410,7 +406,7 @@ cd "$WORK" || exit 1
 #
 # The line also read `impl Geo::Shape::Shape for Geo::Shape::Box`, which
 # is the other language's spelling of names this very answer tells the
-# reader to reach with `using geo/shape::{…}`.
+# reader to reach with `import geo/shape::{…}`.
 mkdir -p "$WORK/impls/geo"
 cd "$WORK/impls" || exit 1
 cat > geo/shape.iyi <<'EOF'
@@ -435,8 +431,7 @@ impl Shape for Box
 end
 EOF
 cat > main.iyi <<'EOF'
-import geo/shape
-using geo/shape::{Box}
+import geo/shape::{Box}
 
 b = Box.new(3)
 puts b.area
@@ -474,8 +469,7 @@ pub def make : Int32
 end
 EOF
 cat > main.iyi <<'EOF'
-import kit/all
-using kit/all::{make}
+import kit/all::{make}
 
 puts make
 EOF
@@ -495,7 +489,7 @@ fi
 cd "$WORK" || exit 1
 
 # And what a facade hands on. `pub import` is a promise to the consumer:
-# a file that imports the facade may `using` the module the facade
+# a file that imports the facade may name the module the facade
 # re-exported, with no import of its own (R-2b). The pack listed only the
 # file's own import lines, so the module a consumer is allowed to name
 # was missing from the one answer written to be named from — and the
@@ -520,11 +514,10 @@ pub def facade_value : Int32
 end
 EOF
 # deep/core is reached through the facade's `pub import` and nothing of
-# main's own: a `using deep/core` would import it here, and then it would be
+# main's own: an `import deep/core::*` would import it here, and then it would be
 # main's dependency and no re-export at all.
 cat > main.iyi <<'EOF'
-import facade
-using facade::{facade_value}
+import facade::{facade_value}
 
 puts Deep::Core.core_value + facade_value
 EOF
@@ -539,7 +532,7 @@ else
     echo "FAIL: the pack does not carry what the facade re-exports"
     grep '^── import' facade_pack.txt | sed 's/^/  /'
     status=1
-  elif ! grep -q '^#   using deep/core::{core_value}' facade_pack.txt ||
+  elif ! grep -q '^#   import deep/core::{core_value}' facade_pack.txt ||
        ! grep -q '^── import facade → deep/core (re-exported) ──' facade_pack.txt; then
     echo "FAIL: the pack does not say how the re-export is reached"
     grep -E '^── import|^#   ' facade_pack.txt | sed 's/^/  /' | head -6
@@ -574,7 +567,7 @@ pub class Box
   end
 end
 EOF
-printf 'import m/netty\nusing m/netty::{Box}\n\nputs Box.c(-3)\n' > main.iyi
+printf 'import m/netty::{Box}\n\nputs Box.c(-3)\n' > main.iyi
 export IYI_PATH="$REPO/src${PSEP}$WORK/libs"
 if ! "$IYI" build --emit-iyimod mods -o libs_main main.iyi > libs_build.txt 2>&1; then
   echo "FAIL: the lib fixture does not build"

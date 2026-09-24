@@ -26,19 +26,12 @@
   github.com/sdogruyol/iyi-web v0.1.0 as web` in `iyi.mod` - or `iyi get
   PATH --as web` - makes `web/dsl` mean `github.com/sdogruyol/iyi-web/dsl`
   in this project's files, so the path is written once, in the manifest,
-  and a file writes `using web/dsl`. The name is spelled out before anything
+  and a file writes `import web/dsl::{get}`. The name is spelled out before anything
   resolves, so a module is one module however it was reached; a package's
   own short names are its files', from its own manifest; `get -u` keeps a
   name and `tidy` counts what it imports. A short name that is also this
   project's directory, `std`, a name that is not one lower-case word and a
   name given twice are refused by name.
-- **A `using` imports what it names.** `import app/dep` followed by `using
-  app/dep` wrote one path twice; `using app/dep` is now the one line, and the
-  parser makes the import - after the file's own imports, so the edge is the
-  file's and the import wall holds: a qualified name the file wrote no line
-  for is still refused. Writing both still works and loads the module once.
-  The formatter and `to_s` print what the source says, and `mod context` and
-  the language server's auto-import write the one `using` line.
 - **`iyi get`: a requirement without writing the line by hand.** `iyi get
   example.com/someone/lib` requires the latest release - the highest `vX.Y.Z`
   tag, a pre-release only when there is no release - `PATH@v1.2.0` requires
@@ -79,6 +72,24 @@
 
 ### Changed
 
+- **One keyword for a module and its names: `using` is gone.** `import X`
+  loads a module and keeps its names qualified, as before; `import
+  X::{a, b}` loads it and brings those names into scope, and `import X::*`
+  every name it exports - what `import X` + `using X::{a, b}` and `using X`
+  were, one path written twice. `pub import X` hands a module on whole, and
+  `pub import X::{a}` is refused with why: names in scope are the module's
+  own. A `using` is now a syntax error that names the line replacing it,
+  and `iyi fix FILE` rewrites every one in a file - folding a bare `import`
+  of the same module into it, leaving a line with a comment where it is,
+  never folding into a `pub import` - and running it again changes nothing.
+  One module on two lines is loaded once and its names merge, where two
+  lists of one module made a name "ambiguous" between the module and
+  itself. An import in a type's body scopes its names to that type, and an
+  import of a module the file declares itself needs no file. Short names
+  work the same: `import web/dsl::{get}`. `iyi init`, `mod context`,
+  `iyi migrate`, the language server's auto-import and organize-imports,
+  artifacts' declarations and every file in the tree are written the new
+  way.
 - `iyi get -u` never moves a requirement down: one past the latest release -
   a pseudo-version, or a pre-release of the next - stays where it is.
 

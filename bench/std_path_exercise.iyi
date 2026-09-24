@@ -17,8 +17,7 @@
 
 module bench/std_path_exercise
 
-import std/path
-using std/path::{Path}
+import std/path::{Path}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

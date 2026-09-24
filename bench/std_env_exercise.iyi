@@ -5,8 +5,7 @@
 
 module bench/std_env_exercise
 
-import std/env
-using std/env::{ENV}
+import std/env::{ENV}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

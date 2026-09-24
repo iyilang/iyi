@@ -17,8 +17,7 @@ def assert_int(expected : Int64, actual : Int64, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
 end
 
-import std/annotations
-using std/annotations::{Deprecated, Flags, Link, Experimental, TargetFeature}
+import std/annotations::{Deprecated, Flags, Link, Experimental, TargetFeature}
 
 # 1. Flags on an enum
 @[Flags]
@@ -71,7 +70,8 @@ end
 
 puts "== identity"
 # A second `annotation` type in std/annotations would make these false:
-# `using` would attach the copy, and the compiler would ignore it.
+# `import std/annotations::{...}` would attach the copy, and the compiler
+# would ignore it.
 assert_true {{ Deprecated == ::Deprecated }}, "Deprecated is the compiler annotation"
 assert_true {{ Flags == ::Flags }}, "Flags is the compiler annotation"
 assert_true {{ Link == ::Link }}, "Link is the compiler annotation"

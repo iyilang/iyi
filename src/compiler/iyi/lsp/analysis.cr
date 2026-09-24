@@ -317,7 +317,7 @@ module Iyi::Lsp
         collect_defs_named(result.program, name, defs, include_private: true)
       end
 
-      # The scope's def tables miss what `using` brought into the
+      # The scope's def tables miss what an import's names brought into the
       # module; the typed graph does not. A call by this name that the
       # last good compile already bound knows its overloads exactly.
       if defs.empty?
@@ -719,7 +719,7 @@ module Iyi::Lsp
 
   # Every def a call named `name` in `file` resolved to, off one typed
   # result — the source signature help falls back to when the scope's
-  # tables cannot see a `using`-imported name.
+  # tables cannot see a name an import brought into scope.
   class CallsNamedVisitor < Visitor
     include TypedDefProcessor
 

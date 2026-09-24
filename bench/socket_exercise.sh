@@ -115,7 +115,7 @@ fi
 echo "== a negative count is refused by name"
 # `recv(-1)` died of "arithmetic overflow" on a `to_u64`, a sentence about
 # neither the count nor the call.
-printf 'module main\n\nimport std/socket\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nputs l.accept.or_panic.recv(-1).inspect\n' > "$WORK/negative.iyi"
+printf 'module main\n\nimport std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nputs l.accept.or_panic.recv(-1).inspect\n' > "$WORK/negative.iyi"
 if "$IYI" run "$WORK/negative.iyi" > "$WORK/negative.out" 2>&1; then
   echo "  a negative count was taken"; status=1
 elif ! grep -q "negative count: -1" "$WORK/negative.out"; then
@@ -298,7 +298,7 @@ echo "== what is not a port, and what is not an address"
 # sentence did not inspect the host, so `" 1.2.3.4"` looked valid.
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/socket::{IyiSocket}\n\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -368,7 +368,7 @@ echo "== a closed socket says so"
 # `write("")` had nothing to send and answered 0.
 refuses_after_close() { # refuses_after_close <label> <name> <statements on a closed connection c and listener l>
   local label="$1" name="$2" body="$3"
-  printf 'module main\n\nimport std/socket\n\nusing std/socket::{IyiSocket}\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nc.close\nl.close\n%s\n' \
+  printf 'module main\n\nimport std/socket::{IyiSocket}\n\n\nl = IyiSocket.listen(0)\nc = IyiSocket.connect("127.0.0.1", l.local_port).or_panic\nc.close\nl.close\n%s\n' \
     "$body" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

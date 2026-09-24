@@ -318,8 +318,8 @@ def package_fixture(home):
                 '  s + "!"\nend\n')
     text = ("import example.test/user/liba\n"
             "import helper\n"
-            "using example.test/user/liba::{greeting}\n"
-            "using helper::{shout}\n"
+            "import example.test/user/liba::{greeting}\n"
+            "import helper::{shout}\n"
             "\n"
             "puts shout(greeting)\n")
     path = os.path.join(app, "main.iyi")
@@ -388,7 +388,7 @@ def main():
 
     # 2. didOpen a file whose call mis-types the argument. The def is only
     #    typed when called, so the fixture calls it.
-    broken = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    broken = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
               "def run : String\n  shout(42)\nend\n\nputs run\n")
     c.send("textDocument/didOpen",
            {"textDocument": {"uri": app_uri, "languageId": "iyi",
@@ -401,7 +401,7 @@ def main():
 
     # 3. didChange to a SPEC-citing error (`!` on a union with no error
     #    member is refused and the message names its section), then fixed.
-    speccy = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    speccy = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
               "def run : String\n  shout(\"iyi\")!\nend\n\nputs run\n")
     c.send("textDocument/didChange",
            {"textDocument": {"uri": app_uri, "version": 2},
@@ -412,7 +412,7 @@ def main():
          f"code {diags[0].get('code')!r}, "
          f"link {'yes' if diags[0].get('codeDescription') else 'no'}")
 
-    fixed = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    fixed = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
              "def run : String\n  shout(\"iyi\")\nend\n\nputs run\n")
     started = time.monotonic()
     c.send("textDocument/didChange",
@@ -426,7 +426,7 @@ def main():
         step(4, "keystroke latency bound", False, f"{elapsed:.2f}s > 5s")
 
     # 5. hover on a local whose type came through the import.
-    hovered = ("module app\n\nimport greet\nusing greet::{shout}\n\n"
+    hovered = ("module app\n\nimport greet\nimport greet::{shout}\n\n"
                "def run : String\n  loud = shout(\"iyi\")\n"
                "  loud\nend\n\nputs run\n")
     c.send("textDocument/didChange",
@@ -516,7 +516,7 @@ def main():
                 '  "NUM"\nend\n\npub def glyph : String\n  "+"\nend\n')
     parser_path = os.path.join(calc, "parser.iyi")
     parser_text = ("module calc/parser\n\nimport calc/lexer\n"
-                   "using calc/lexer::{token}\n\n"
+                   "import calc/lexer::{token}\n\n"
                    "pub def first : String\n  token\nend\n\nputs first\n")
     with open(parser_path, "w") as f:
         f.write(parser_text)
@@ -603,7 +603,7 @@ def main():
 
     # 13. references, asked at the *def*: under R-1 the callers live in
     #     the consumers' compiles, so the session answers from every open
-    #     document — the call in app.iyi, the `using` selection that
+    #     document — the call in app.iyi, the import's `{...}` selection that
     #     brings the name in (the gate's own find: miss it and a rename
     #     leaves a program that does not compile), and the declaration.
     c.send("textDocument/didChange",
@@ -618,12 +618,12 @@ def main():
     names = sorted({l["uri"].rsplit("/", 1)[-1] for l in locs})
     app_lines = sorted(l["range"]["start"]["line"] for l in locs
                        if l["uri"].endswith("app.iyi"))
-    step(13, "references cross the module boundary, using line included",
+    step(13, "references cross the module boundary, import line included",
          names == ["app.iyi", "greet.iyi"] and len(locs) == 3 and
          app_lines == [3, 6],
          f"{len(locs)} site(s): "
          + ", ".join(f"{l['uri'].rsplit('/', 1)[-1]}:{l['range']['start']['line']}" for l in locs)
-         + " (wanted app.iyi:3 using, app.iyi:6 call, greet.iyi:2 declaration)")
+         + " (wanted app.iyi:3 import, app.iyi:6 call, greet.iyi:2 declaration)")
 
     # 14. rename off the typed graph: one request, two files edited —
     #     then both buffers change to the edit and the verdicts are clean.
@@ -648,9 +648,9 @@ def main():
                {"textDocument": {"uri": uri, "version": version},
                 "contentChanges": [{"text": texts[uri]}]}, wait=False)
         clean = clean and c.diagnostics(uri)["diagnostics"] == []
-    step(14, "rename edits both files, using line too, both stay clean",
+    step(14, "rename edits both files, import line too, both stay clean",
          len(changes) == 2 and edit_count == 3 and
-         "using greet::{yell}" in texts[app_uri] and
+         "import greet::{yell}" in texts[app_uri] and
          "def yell" in texts[greet_uri] and clean,
          f"{edit_count} edit(s) across {len(changes)} file(s)")
 
@@ -847,7 +847,7 @@ def main():
     outside = tempfile.mkdtemp(prefix="iyi-lsp-gate-outside")
     pkg_path = os.path.join(outside, "pkg.iyi")
     pkg_text = ("import example.test/user/lib\n"
-                "using example.test/user/lib::{value}\n\nx=value\n")
+                "import example.test/user/lib::{value}\n\nx=value\n")
     with open(pkg_path, "w") as f:
         f.write(pkg_text)
     pkg_uri = file_uri(pkg_path)
@@ -863,7 +863,7 @@ def main():
     step(25, "formatting a buffer that imports a package",
          "error" not in reply and len(edits) == 1 and
          "import example.test/user/lib\n" in formatted and
-         "using example.test/user/lib::{value}\n" in formatted and
+         "import example.test/user/lib::{value}\n" in formatted and
          "x = value" in formatted,
          reply.get("error", {}).get("message", "the path survived, x = value"))
     # Closed again, the way an editor closes a buffer: an open document is
@@ -1109,7 +1109,7 @@ def main():
     #     without one.
     printer_path = os.path.join(calc, "printer.iyi")
     printer_text = ("module calc/printer\n\nimport calc/lexer\n"
-                    "using calc/lexer::{token}\n\n"
+                    "import calc/lexer::{token}\n\n"
                     "pub def show : String\n  token\nend\n\nputs show\n")
     with open(printer_path, "w") as f:
         f.write(printer_text)
@@ -1168,10 +1168,10 @@ def main():
         f.write("module shape/base\n\npub struct Box\n  def initialize\n  end\n\n"
                 "  def area : Int32\n    4\n  end\nend\n")
     with open(os.path.join(shape, "make.iyi"), "w") as f:
-        f.write("module shape/make\n\nimport shape/base\nusing shape/base::{Box}\n\n"
+        f.write("module shape/make\n\nimport shape/base::{Box}\n\n\n"
                 "pub def make : Box\n  Box.new\nend\n")
     with open(os.path.join(work, "use.iyi"), "w") as f:
-        f.write("module use\n\nimport shape/make\nusing shape/make::{make}\n\n"
+        f.write("module use\n\nimport shape/make::{make}\n\n\n"
                 "puts make.area\n")
     with open(os.path.join(work, "lone.iyi"), "w") as f:
         f.write("module lone\n\nstruct Other\n  def area : Int32\n    1\n  end\nend\n\n"
@@ -1190,8 +1190,9 @@ def main():
     # 35. auto-import completion: a fresh buffer that has never
     #     compiled types `tok`; the workspace's exports answer anyway
     #     (R-2 made `pub` a parse-time fact), and the item carries the
-    #     `using` line as an additionalTextEdit - one line, since a `using`
-    #     imports what it names, and the buffer compiling clean after it is
+    #     import line as an additionalTextEdit - one line, since
+    #     `import calc/lexer::{token}` loads the module and brings the name
+    #     into scope, and the buffer compiling clean after it is
     #     the proof that the line is enough.
     scratch_path = os.path.join(work, "scratch.iyi")
     scratch_text = ("module scratch\n\ndef go : String\n  tok\nend\n\n"
@@ -1229,11 +1230,11 @@ def main():
     step(35, "completion auto-imports across the workspace",
          token_item is not None and
          token_item["labelDetails"]["description"] == "calc/lexer" and
-         "import calc/lexer" not in edited and
-         "using calc/lexer::{token}" in edited and clean,
-         "never-compiled buffer, item wrote the one using line")
+         "import calc/lexer" not in edited.split("\n") and
+         "import calc/lexer::{token}" in edited and clean,
+         "never-compiled buffer, item wrote the one import line")
 
-    # 36. the selective `using` grows instead of doubling: the buffer
+    # 36. the selective import grows instead of doubling: the buffer
     #     already selects {token}; completing glyph extends that line.
     broken2 = edited.replace("\nputs go\n", "\nputs go\nputs gly\n")
     c.send("textDocument/didChange",
@@ -1248,9 +1249,9 @@ def main():
     glyph_item = next((i for i in items if i["label"] == "glyph"), None)
     extends = (glyph_item or {}).get("additionalTextEdits", [])
     new_using = extends[0]["newText"] if extends else ""
-    step(36, "completion extends the selective using line",
+    step(36, "completion extends the selective import line",
          glyph_item is not None and len(extends) == 1 and
-         new_using == "using calc/lexer::{token, glyph}",
+         new_using == "import calc/lexer::{token, glyph}",
          f"edit: {new_using!r}")
 
     # 37. fuzzy ranks below prefix but still answers: `ucs` finds
@@ -1314,7 +1315,7 @@ def main():
          f"{published} publish(es) for 6 didChanges, final verdict clean")
 
     # 40. document links: the import block is clickable — `import
-    #     calc/lexer` and its `using` line both target lexer.iyi.
+    #     calc/lexer` and `import calc/lexer::{token}` both target lexer.iyi.
     reply = c.send("textDocument/documentLink",
                    {"textDocument": {"uri": parser_uri}})
     links = reply["result"] or []
@@ -1482,13 +1483,13 @@ def main():
              f"skipped: {binary} not present under this runner")
 
     # 47. organize imports: duplicates merge, selections of one module
-    #     unify sorted, imports before usings — and the organized
-    #     buffer still compiles.
+    #     unify sorted, the bare import folds into the selection — and the
+    #     organized buffer still compiles.
     messy_path = os.path.join(work, "tidy.iyi")
     messy = ("module tidy\n\n"
-             "using calc/lexer::{token}\n"
+             "import calc/lexer::{token}\n"
              "import calc/lexer\n"
-             "using calc/lexer::{glyph}\n"
+             "import calc/lexer::{glyph}\n"
              "import calc/lexer\n\n"
              "puts token\nputs glyph\n")
     messy_uri = file_uri(messy_path)
@@ -1518,13 +1519,13 @@ def main():
     clean = c.diagnostics(messy_uri)["diagnostics"] == []
     step(47, "organize imports canonicalises the header",
          len(organizers) == 1 and clean and
-         "import calc/lexer\n\nusing calc/lexer::{glyph, token}" in tidied
+         "import calc/lexer::{glyph, token}\n\n" in tidied
          and tidied.count("import calc/lexer") == 1,
-         "two imports, three usings -> one of each, sorted, still clean")
+         "four imports of one module -> one selective line, sorted, still clean")
 
     # 48. willRenameFiles: moving the file is renaming the module
     #     (IV.6), so one request rewrites the header and every
-    #     consumer's import/using — buffers and never-opened disk files
+    #     consumer's imports — buffers and never-opened disk files
     #     alike — and the moved module still compiles.
     lexer_path = os.path.join(calc, "lexer.iyi")
     scanner_path = os.path.join(calc, "scanner.iyi")

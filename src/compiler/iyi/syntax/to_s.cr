@@ -438,17 +438,19 @@ module Iyi
     end
 
     def visit(node : ImportDecl)
-      # A `using` wrote this one; the source it prints is the `using`.
-      return false if node.implicit?
+      @str << "pub " if node.exported
       @str << "import " << node.path.join('/')
+      if node.glob?
+        @str << "::*"
+      elsif names = node.names
+        @str << "::{" << names.join(", ") << '}'
+      end
       false
     end
 
+    # The scope an `import x::{a}` makes beside it: the import says it, and
+    # there is no source of its own to write.
     def visit(node : UsingDecl)
-      @str << "using " << node.path.join("::")
-      if names = node.names
-        @str << "::{" << names.join(", ") << '}'
-      end
       false
     end
 

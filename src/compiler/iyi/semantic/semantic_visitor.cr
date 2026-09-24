@@ -178,6 +178,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # That accident was observable. An `import` written below other top-level
   # code used to splice there, so the importing module ran part of its own
   # initialiser before the imported module ran any of its.
+  # Whether the program already has what *path* names, declared by its
+  # own source rather than loaded from a file. Any type: the scope beside
+  # the import says so when it is a struct or a trait and not a module.
+  private def iyi_declared_here?(path : String) : Bool
+    type = @program.lookup_type?(Path.new(path.split('/').map(&.camelcase), global: true), allow_typeof: false)
+    !type.nil? && !@program.iyi_module_paths.has_value?(path)
+  end
+
   def visit(node : ImportDecl)
     if expanded = node.expanded
       expanded.accept self
@@ -226,6 +234,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
 
     filename = artifact_path || package.try(&.first) || resolve_import(path)
+    # A module this very source declares - a single file that writes its
+    # modules out, a spec's inline fixture - is reached without a file of
+    # its own: a file reaches what it wrote (R-1), which is the rule the
+    # names half of an import always kept. Nothing to load; the scope
+    # beside the import does the rest.
+    if filename.nil? && package.nil? && iyi_declared_here?(path)
+      return false
+    end
     unless filename
       # iyi: say where it looked. A module's path *is* its file's path (IV.6),
       # and somebody meeting that rule for the first time is owed the mapping
@@ -389,7 +405,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   @iyi_package_stack = [] of {String, String}
   @iyi_package_short_names = {} of String => Array({String, String})
 
-  # iyi: a short name at the front of an import or a `using` (III.7):
+  # iyi: a short name at the front of an import's path (III.7):
   # `require github.com/sdogruyol/iyi-web v0.1.0 as web` makes `web/dsl`
   # the module `github.com/sdogruyol/iyi-web/dsl`. Rewritten before
   # anything resolves, so the module is one module under its path however
@@ -706,9 +722,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # had never compared them. Copy `m1/b.iyimod` onto `m1/a.iyimod` and the
     # import took it: `m1/b`'s declarations were spliced in under `m1/b`, and
     # `m1/a`, asked for and found and read and checksummed, stayed undefined.
-    # The first `using m1/a` then reported "can't find module 'm1/a'", which
-    # sends the reader off to write `m1/a.iyi`: the one action that cannot
-    # help, because the file was there and the compiler had already read it.
+    # The first `using m1/a` (the keyword `import X::{...}` replaced) then
+    # reported "can't find module 'm1/a'", which sends the reader off to
+    # write `m1/a.iyi`: the one action that cannot help, because the file
+    # was there and the compiler had already read it.
     #
     # Asked above the hashes, because identity does not need them. An artifact
     # from before the hashes cannot say whether it has gone stale, but it can
@@ -1688,7 +1705,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
   # iyi: already resolved into an `include` by the top-level visitor.
   def visit(node : UsingDecl)
-    check_outside_exp node, "use `using`"
+    check_outside_exp node, "import"
     node.set_type(@program.nil)
     false
   end

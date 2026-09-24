@@ -15,7 +15,7 @@
 #     require github.com/sdogruyol/iyi-web v0.1.0 as web
 #
 # `as web` gives a requirement a short name for this project's own files:
-# `import web/dsl` and `using web/dsl` mean the module at
+# `import web/dsl` and `import web/dsl::*` mean the module at
 # `github.com/sdogruyol/iyi-web/dsl`. The path is identity and stays here,
 # written once; the files write the name. A package's own short names
 # are its files', read from its own manifest, and never its consumer's.

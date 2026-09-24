@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/option_parser
-using std/option_parser::{OptionParser}
+import std/option_parser::{OptionParser}
 
 puts "== flags"
 op = OptionParser.new

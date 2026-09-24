@@ -183,7 +183,7 @@ echo
 echo "== what a stream refuses, by name"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/compress\n\nusing std/compress::{Deflate, Zlib, Gzip}\n\ndef bytes(values : Array(Int32)) : String\n  String.new(values.size) do |dst|\n    i = 0\n    while i < values.size\n      dst[i] = values[i].to_u8\n      i = i + 1\n    end\n  end\nend\n\nputs (%s).bytesize\n' \
+  printf 'module main\n\nimport std/compress::{Deflate, Zlib, Gzip}\n\n\ndef bytes(values : Array(Int32)) : String\n  String.new(values.size) do |dst|\n    i = 0\n    while i < values.size\n      dst[i] = values[i].to_u8\n      i = i + 1\n    end\n  end\nend\n\nputs (%s).bytesize\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

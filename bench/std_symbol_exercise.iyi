@@ -18,8 +18,7 @@ def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
 end
 
 import std/symbol
-import std/io
-using std/io::{Memory}
+import std/io::{Memory}
 
 puts "== identity and equality"
 s1 = :apple

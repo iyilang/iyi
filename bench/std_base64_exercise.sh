@@ -136,7 +136,7 @@ echo
 echo "== what decode refuses"
 refuses() { # refuses <label> <name> <phrase> <text>
   local label="$1" name="$2" phrase="$3" text="$4"
-  printf 'module main\n\nimport std/base64\nusing std/base64::{Base64}\n\nputs Base64.decode(%s).inspect\n' "$text" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/base64::{Base64}\n\nputs Base64.decode(%s).inspect\n' "$text" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

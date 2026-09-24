@@ -1139,18 +1139,18 @@ module Iyi
       "::#{name}"
     end
 
-    # iyi: the `using` directives written inside *type*'s own body, as the
+    # iyi: the imports' names written inside *type*'s own body, as the
     # file wrote them (SPEC.md R-2b).
     #
     # For a type reopened under a foreign name, which is the one place they
-    # have to travel: the unit's own `using` does not reach inside `class
+    # have to travel: the unit's own imports do not reach inside `class
     # ::File`, so `src/std/file.iyi` writes a second one there, and a
     # consumer reading the reopened section without it said `undefined
     # constant Path`.
     #
     # Only directives naming a module this file imports. A foreign type is
     # reopened by whoever likes — `::Object` by four std modules — and they
-    # all share one type, so its `using` list is every reopener's together.
+    # all share one type, so its list of imported names is every reopener's together.
     # Carrying another module's would write a directive for a module this
     # artifact never imported.
     private def iyi_type_usings(program : Program, type : Type,
@@ -1174,7 +1174,7 @@ module Iyi
     end
 
     # iyi: the module path a module type was declared under — `Std::Path` is
-    # `std/path`, which is how a `using` names it.
+    # `std/path`, which is how an import names it.
     private def iyi_module_path_of(type : Type) : String
       type.to_s.split("::").map(&.underscore).join('/')
     end
@@ -1854,7 +1854,7 @@ module Iyi
     # It used to travel as what the name *resolved to*, on the argument that a
     # name resolved where the module was read may not resolve where the
     # artifact is. That argument is the wrong way round: the declarations text
-    # replays the module's imports, its requires and its `using` directives,
+    # replays the module's imports, the names they bring in and its requires,
     # and declares its own nested types, so a name the module could write is a
     # name that text can write — and a resolved type is not always writable at
     # all. Two ways it was not:

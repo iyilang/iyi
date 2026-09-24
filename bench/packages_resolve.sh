@@ -59,7 +59,7 @@ git -C work/liba commit -qam two && git -C work/liba tag v1.1.0
 
 mkrepo work/libb
 printf 'module example.test/user/libb\nrequire example.test/user/liba v1.1.0\n' > work/libb/iyi.mod
-printf 'module libb\n\nimport example.test/user/liba\nusing example.test/user/liba::{greeting}\n\npub def doubled : String\n  greeting + " / " + greeting\nend\n' > work/libb/libb.iyi
+printf 'module libb\n\nimport example.test/user/liba::{greeting}\n\npub def doubled : String\n  greeting + " / " + greeting\nend\n' > work/libb/libb.iyi
 git -C work/libb add -A && git -C work/libb commit -qm one && git -C work/libb tag v1.0.0
 
 mkdir -p mirror/example.test/user
@@ -70,12 +70,9 @@ mkdir -p app/std
 printf 'module std/file\n\nraise "the consuming project'"'"'s std/file was loaded for a package"\n' > app/std/file.iyi
 printf 'module example.test/user/app\nrequire example.test/user/liba v1.0.0\nrequire example.test/user/libb v1.0.0\n' > app/iyi.mod
 cat > app/main.iyi <<'IYI'
-import example.test/user/liba
-import example.test/user/liba/colors
-import example.test/user/libb
-using example.test/user/liba::{greeting}
-using example.test/user/liba/colors::{favourite}
-using example.test/user/libb::{doubled}
+import example.test/user/liba::{greeting}
+import example.test/user/liba/colors::{favourite}
+import example.test/user/libb::{doubled}
 
 puts greeting
 puts favourite
@@ -239,8 +236,7 @@ printf 'module example.test/user/linked_app
 require example.test/user/linked v1.0.0
 ' > linked_app/iyi.mod
 cat > linked_app/main.iyi <<'IYI'
-import example.test/user/linked
-using example.test/user/linked::{linked_greeting}
+import example.test/user/linked::{linked_greeting}
 
 puts linked_greeting
 IYI
@@ -288,10 +284,8 @@ pub def shout(s : String) : String
 end
 ' > app/helper.iyi
 cat > app/emitted.iyi <<'IYI'
-import example.test/user/liba
-import helper
-using example.test/user/liba::{greeting}
-using helper::{shout}
+import example.test/user/liba::{greeting}
+import helper::{shout}
 
 puts shout(greeting)
 IYI
@@ -326,8 +320,7 @@ fi
 # there is nothing to run.
 step "a changed requirement reaches every test and every consumer"
 cat > app/pkg_test.iyi <<'IYI'
-import example.test/user/liba
-using example.test/user/liba::{greeting}
+import example.test/user/liba::{greeting}
 
 raise "greeting" unless greeting.starts_with?("hello from liba")
 puts "ok"
@@ -384,7 +377,7 @@ grep -q '"spec":\["III.1"\]' refs.log || { echo "no spec reference in the json e
 step "a doc comment reaches the context pack"
 mkdir -p docs
 printf 'module docd\n\n# Answers the one question.\npub def answer : Int32\n  42\nend\n' > docs/docd.iyi
-printf 'import docd\nusing docd::{answer}\nputs answer\n' > docs/main.iyi
+printf 'import docd::{answer}\nputs answer\n' > docs/main.iyi
 (cd docs && "$IYI" mod context --json main.iyi) > docs.json 2>&1 || { cat docs.json; exit 1; }
 grep -Eq '"doc": ?"Answers the one question."' docs.json || { echo "the doc did not travel:"; cat docs.json; exit 1; }
 

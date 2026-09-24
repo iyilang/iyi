@@ -5,8 +5,7 @@
 
 module bench/std_bit_array_exercise
 
-import std/bit_array
-using std/bit_array::{BitArray}
+import std/bit_array::{BitArray}
 
 def assert_true(label : String, condition : Bool) : Nil
   raise "assertion failed for #{label}: expected true, got false" unless condition

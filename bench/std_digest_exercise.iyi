@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/digest
-using std/digest::{MD5, SHA1, SHA256, CRC32, Adler32}
+import std/digest::{MD5, SHA1, SHA256, CRC32, Adler32}
 
 puts "== md5"
 assert_str "d41d8cd98f00b204e9800998ecf8427e", MD5.hexdigest(""), "empty"

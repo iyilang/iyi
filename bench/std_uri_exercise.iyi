@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/uri
-using std/uri::{URI, Params}
+import std/uri::{URI, Params}
 
 puts "== parse"
 u = URI.parse("https://ex.com/a")

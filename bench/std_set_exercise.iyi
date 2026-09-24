@@ -11,8 +11,7 @@
 module bench/std_set_exercise
 
 import std/set
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/enumerable::{Enumerable}
 
 def assert_true(label : String, condition : Bool) : Nil
   raise "assertion failed for #{label}: expected true, got false" unless condition

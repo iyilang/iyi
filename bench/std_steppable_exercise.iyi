@@ -5,11 +5,9 @@
 
 module bench/std_steppable_exercise
 
-import std/steppable
-using std/steppable::{Steppable, NumericStepIterator}
+import std/steppable::{Steppable, NumericStepIterator}
 
-import std/iterator
-using std/iterator::{Iterator}
+import std/iterator::{Iterator}
 
 # User-defined type implementing Steppable trait.
 # Requires +, -, <=>, >, < for NumericStepIterator's contract.

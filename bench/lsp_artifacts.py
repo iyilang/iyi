@@ -50,8 +50,7 @@ IYI = os.environ.get("IYI", os.path.join(ROOT, "bin", "iyi"))
 # `bench/lsp_session.py` established as the question an editor asks.
 MAIN = """module main
 
-import app/base
-using app/base::{value, tag}
+import app/base::{value, tag}
 
 def run : Int32
   n = value
@@ -154,13 +153,13 @@ def ask(where, env, label):
         json.dumps(diagnostics)[:160])
 
     hover = client.send("textDocument/hover", {"textDocument": {"uri": uri},
-                                               "position": {"line": 6, "character": 2}})
+                                               "position": {"line": 5, "character": 2}})
     shown = ((hover.get("result") or {}).get("contents") or {}).get("value", "")
     say(f"{label}: hover names the imported type", "n : Int32" in shown,
         shown.replace("\n", " "))
 
     jump = client.send("textDocument/definition", {"textDocument": {"uri": uri},
-                                                   "position": {"line": 6, "character": 6}})
+                                                   "position": {"line": 5, "character": 6}})
     locations = jump.get("result") or []
     target = session.uri_path(locations[0]["uri"]) if locations else ""
     say(f"{label}: definition lands in a file that is there",
@@ -171,7 +170,7 @@ def ask(where, env, label):
         "contentChanges": [{"text": DOTTED}]}, wait=False)
     client.diagnostics(uri)
     filled = client.send("textDocument/completion", {"textDocument": {"uri": uri},
-                                                     "position": {"line": 12, "character": 6}})
+                                                     "position": {"line": 11, "character": 6}})
     items = (filled.get("result") or {}).get("items") or []
     labels = [item["label"] for item in items]
     say(f"{label}: completion lists the artifact type's method",

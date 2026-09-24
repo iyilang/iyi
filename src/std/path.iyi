@@ -29,8 +29,7 @@
 
 module std/path
 
-import std/traits
-using std/traits::{Comparable}
+import std/traits::{Comparable}
 
 pub struct Path
   pub enum Kind : UInt8

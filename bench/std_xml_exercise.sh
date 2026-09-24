@@ -94,7 +94,7 @@ fi
 echo "== what a node refuses when it is made or its text set"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/xml\n\nusing std/xml::{Document, Node, NodeType}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/xml::{Document, Node, NodeType}\n\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

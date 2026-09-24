@@ -86,7 +86,7 @@ holds "the import cycle is one module, and named"      "R-1 cannot separate" "$W
 holds "the reopening of Int32 stays Crystal"           'struct Int32'        "$WORK/migrate.log"
 holds "not_nil! is rewritten and named"                'not_nil!'            "$WORK/migrate.log"
 holds "sort_by! is rewritten and named"                'sort_by!'            "$WORK/migrate.log"
-holds "include of a namespace becomes using"           'include Names'       "$WORK/migrate.log"
+holds "include of a namespace becomes an import's names" 'include Names'     "$WORK/migrate.log"
 holds "the embedded template travels"                  'report.html.ecr'     "$WORK/migrate.log"
 
 # The shape of the tree: the namespace is the path, the cycle is one file,
@@ -171,9 +171,9 @@ holds "the literal is in the module, not rewritten" "gsub(/[^a-z0-9]+/i" "$WORK/
 
 # A reopening of a type the tree does not own stays Crystal in a sidecar
 # beside its module (R-3), and it names the tree's own types too - which
-# moved. It has no `using` line to reach them through, so they are written
-# in full: Kemal's `context_crystal.cr` asked for a `Kemal::Route` that no
-# longer existed, which is `undefined constant` in a file nobody wrote.
+# moved. No import brings them into scope, so they are written in full:
+# Kemal's `context_crystal.cr` asked for a `Kemal::Route` that no longer
+# existed, which is `undefined constant` in a file nobody wrote.
 echo "== a sidecar's names follow the types that moved"
 holds "the tree's own type is named where it went" \
       "item : Shop::Models::CartItem::Item" "$WORK/out/shop/counter_crystal.cr"
@@ -469,8 +469,7 @@ module main
 
 require "./registry.cr"
 
-import store
-using store::{NAMES}
+import store::{NAMES}
 
 puts NAMES.join(", ")
 IYI

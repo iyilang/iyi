@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/string_pool
-using std/string_pool::{StringPool}
+import std/string_pool::{StringPool}
 
 puts "== intern"
 pool = StringPool.new

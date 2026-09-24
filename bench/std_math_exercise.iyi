@@ -33,8 +33,7 @@ def assert_close(expected : Float64, actual : Float64, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless ok
 end
 
-import std/math
-using std/math::{Math}
+import std/math::{Math}
 
 INF = 1.0 / 0.0
 NAN = 0.0 / 0.0

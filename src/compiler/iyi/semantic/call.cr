@@ -310,14 +310,14 @@ class Iyi::Call
     # scopes. This is the step Crystal has no equivalent of, and both halves
     # of it exist for the same reason: in iyi a module is a compilation unit,
     # so the functions in scope for a type are the ones its module declares
-    # and the ones its module brought in with `using` — not, as in Crystal,
+    # and the ones its module brought in by `import X::{...}` — not, as in Crystal,
     # only what the type inherits plus the top level.
     #
     # At each scope, in order:
     #
     #   1. the scope's own functions, so a type nested in a module can call
     #      the module's helpers unqualified;
-    #   2. the modules that scope brought in with `using` (SPEC.md II.3).
+    #   2. the modules whose names that scope imported (SPEC.md II.3).
     #
     # That order is II.3's rule that a local definition beats a used one, and
     # the outward walk is what makes a nearer scope win over a farther one.
@@ -336,17 +336,17 @@ class Iyi::Call
     # `DefInstanceContainer` cast in `#instantiate`.
     #
     # Costs nothing for code that is not iyi: `iyi_unit?` is false and the
-    # `using` list is lazily allocated, so each scope is two loads and the
+    # `using_modules` list is lazily allocated, so each scope is two loads and the
     # walk ends at `program`.
     #
     # NOTE: the walk must stop at `program`, which is its own namespace
     # (`Program` is constructed with `super(self, self, "main")`). Walking past
-    # it loops forever. Stopping there is also correct: a `using` at file top
+    # it loops forever. Stopping there is also correct: an import at file top
     # level lands on `program` itself, and the existing top-level fallback
     # below already covers that case.
     using_owner = nil
     if matches.empty? && !obj && search_in_toplevel
-      # The walk starts at the owner itself, because a `using` written in a
+      # The walk starts at the owner itself, because an import written in a
       # type's own body belongs to that type. `instance_type` turns
       # `Main.class` — the owner of code in a module body — back into `Main`,
       # which is where the directive was recorded.
@@ -420,8 +420,8 @@ class Iyi::Call
     end
 
     # If this call is an implicit call to self
-    # (a call resolved through `using` is not: its receiver is a module, and
-    # codegen passes no receiver for it at all)
+    # (a call resolved through an import's names is not: its receiver is a
+    # module, and codegen passes no receiver for it at all)
     if !obj && !program_matches && !using_owner && !owner.is_a?(Program)
       parent_visitor.check_self_closured
     end
@@ -489,9 +489,9 @@ class Iyi::Call
     matches
   end
 
-  # iyi: resolves *def_name* against the modules `using` brought into a scope,
-  # returning the matches together with the owner they must be instantiated
-  # under, or nil if none of them provides it.
+  # iyi: resolves *def_name* against the modules an import brought into a
+  # scope's names, returning the matches together with the owner they must be
+  # instantiated under, or nil if none of them provides it.
   #
   # Two used modules providing the same name is an error here, at the call,
   # and only for the name actually called — SPEC.md II.3. The mirror of
@@ -506,7 +506,7 @@ class Iyi::Call
       next unless used_matches
 
       if found
-        raise "'#{def_name}' is ambiguous here: it is exported by both #{found[1].instance_type} and #{using_module.type}. Qualify the call, or narrow one of the `using` directives."
+        raise "'#{def_name}' is ambiguous here: it is exported by both #{found[1].instance_type} and #{using_module.type}. Qualify the call, or narrow one of the imports' name lists."
       end
 
       found = {used_matches, using_module.type.metaclass}
@@ -1117,7 +1117,7 @@ class Iyi::Call
           next unless result.is_a?(Macro)
 
           if found && found_in != using_module.type
-            raise "'#{name}' is ambiguous here: it is exported as a macro by both #{found_in} and #{using_module.type}. Qualify the call, or narrow one of the `using` directives."
+            raise "'#{name}' is ambiguous here: it is exported as a macro by both #{found_in} and #{using_module.type}. Qualify the call, or narrow one of the imports' name lists."
           end
 
           found = result

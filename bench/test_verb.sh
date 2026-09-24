@@ -81,7 +81,7 @@ step "the discount says when it turns itself off"
 # that read as a selective one.
 mkdir -p calc
 printf 'module calc/add\n\npub def add(a : Int32, b : Int32) : Int32\n  a + b\nend\n' > calc/add.iyi
-printf 'module main\n\nimport calc/add\nusing calc/add::{add}\n\nraise "bad" if add(1, 2) != 3\n' > add_test.iyi
+printf 'module main\n\nimport calc/add::{add}\n\nraise "bad" if add(1, 2) != 3\n' > add_test.iyi
 printf 'module main\n\nputs "lonely"\n' > lonely_test.iyi
 "$IYI" test --affected calc/add.iyi . > sel.txt 2>&1
 grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel.txt ||

@@ -18,11 +18,9 @@
 
 module bench/std_time_exercise
 
-import std/format
-using std/format::{printf}
+import std/format::{printf}
 
-import std/time
-using std/time::{Time, Span, DayOfWeek}
+import std/time::{Time, Span, DayOfWeek}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond

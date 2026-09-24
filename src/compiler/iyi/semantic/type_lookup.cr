@@ -169,7 +169,7 @@ class Iyi::Type
       end
 
       # iyi: the import wall, on qualified names (SPEC.md R-1). The
-      # `using` half was enforced first and this is the other half: a
+      # scope half was enforced first and this is the other half: a
       # type that lives in an *imported unit* may only be named by a
       # file that imported that unit — directly, or through a chain of
       # `pub import`s. Only on authoritative lookups: a speculative one

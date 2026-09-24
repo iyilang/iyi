@@ -22,8 +22,7 @@
 
 module bench/std_json_exercise
 
-import std/json
-using std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
+import std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

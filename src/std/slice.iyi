@@ -10,12 +10,9 @@
 
 module std/slice
 
-import std/enumerable
-using std/enumerable::{Enumerable}
-import std/indexable
-using std/indexable::{Indexable}
-import std/iterator
-using std/iterator::{Iterator}
+import std/enumerable::{Enumerable}
+import std/indexable::{Indexable}
+import std/iterator::{Iterator}
 
 # `pub`, because an alias is part of a module's surface like anything else: an
 # unexported one is unreachable from a consumer, which R-2 now says out loud.

@@ -18,8 +18,7 @@
 
 module std/semantic_version
 
-import std/traits
-using std/traits::{Comparable}
+import std/traits::{Comparable}
 
 pub struct SemanticVersion
   getter major : Int32

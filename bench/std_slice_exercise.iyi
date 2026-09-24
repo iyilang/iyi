@@ -3,8 +3,7 @@
 
 module bench/std_slice_exercise
 
-import std/slice
-using std/slice::{Slice}
+import std/slice::{Slice}
 
 alias Bytes = Std::Slice::Bytes
 

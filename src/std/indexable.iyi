@@ -36,10 +36,8 @@
 
 module std/indexable
 
-import std/enumerable
-using std/enumerable::{Enumerable}
-import std/traits
-using std/traits::{Comparable, Hashable}
+import std/enumerable::{Enumerable}
+import std/traits::{Comparable, Hashable}
 
 pub trait Indexable
   type Elem

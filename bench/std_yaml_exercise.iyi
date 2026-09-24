@@ -5,8 +5,7 @@
 
 module bench/std_yaml_exercise
 
-import std/yaml
-using std/yaml::{YAML, Any, Parser}
+import std/yaml::{YAML, Any, Parser}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

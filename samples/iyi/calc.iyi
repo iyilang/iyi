@@ -16,13 +16,9 @@
 # item 3). Nothing else was missing.
 module samples/calc
 
-import calc/lexer
-import calc/parser
-import calc/ast
-
-using calc/lexer::{scan, BadCharacter}
-using calc/parser::{parse, Statement, SyntaxError}
-using calc/ast::{Number, Name, Binary, UnknownName, DividedByZero}
+import calc/lexer::{scan, BadCharacter}
+import calc/parser::{parse, Statement, SyntaxError}
+import calc/ast::{Number, Name, Binary, UnknownName, DividedByZero}
 
 # What runs when nothing is piped in, so that the sample is a program rather
 # than a prompt. CI runs it this way.

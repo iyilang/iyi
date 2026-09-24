@@ -11,10 +11,8 @@
 
 module bench/std_indexable_exercise
 
-import std/indexable
-using std/indexable::{Indexable, IndexableMutable}
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/indexable::{Indexable, IndexableMutable}
+import std/enumerable::{Enumerable}
 
 # Minimal custom sequence implementing ONLY the two requirements.
 # Does NOT implement `def each`. Indexable supplies `def each`, which then

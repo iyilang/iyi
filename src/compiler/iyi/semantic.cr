@@ -171,7 +171,7 @@ class Iyi::Program
 
     # The program's own code starts after the entry's *header block*: the
     # prelude require the compiler prepended, the `module` line, the
-    # `require`s and the `import`/`using` lines (II.3 rule 4 makes that
+    # `require`s and the `import` lines (II.3 rule 4 makes that
     # block line-shaped). It used to be "the first node that is not a
     # `Require`", which under an `.iyi` entry is the module header —
     # so an entry's own `require "pg"` was spliced *after* the imported

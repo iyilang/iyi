@@ -113,8 +113,7 @@ prove_panic() {
   cat <<EOF > "$probe_file"
 module bench/probe_${label}
 
-import std/slice
-using std/slice::{Slice}
+import std/slice::{Slice}
 
 alias Bytes = Std::Slice::Bytes
 

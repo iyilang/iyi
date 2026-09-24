@@ -36,7 +36,7 @@ class Iyi::Path
 
     # iyi: the name is usually not missing, it is out of reach - a type a
     # module this program loaded declares, and this file has not written
-    # `using` for (SPEC.md R-2b), or one its module never marked `pub`
+    # `import X::{...}` for (SPEC.md R-2b), or one its module never marked `pub`
     # (R-2). The same two answers `iyi_out_of_reach_hint` gives a call.
     if names.size == 1 && (hint = iyi_type_out_of_reach_hint(type.program, names.first))
       self.raise("undefined constant #{self}\n#{hint}")
@@ -79,8 +79,8 @@ class Iyi::Path
     unless exporting.empty?
       written = exporting.map { |mod| mod.to_s.split("::").map(&.underscore).join('/') }
       return "`#{name}` is exported by #{written.map { |path| "`#{path}`" }.join(" and ")}, " \
-             "and this file has not written `using`. Add `using #{written.first}::{#{name}}` " \
-             "to bring it in unqualified, or write it as `#{exporting.first}::#{name}` " \
+             "and this file has not brought it into scope. Import it by name, " \
+             "`import #{written.first}::{#{name}}`, or write it as `#{exporting.first}::#{name}` " \
              "(SPEC.md R-2b)"
     end
 
@@ -111,7 +111,7 @@ class Iyi::Path
         path = File.join(dir, file)
         next unless File.file?(path) && iyi_declares_at_top_level?(File.read(path), name)
         written = "std/#{file.rchop(".iyi")}"
-        return "`#{name}` comes with `import #{written}` and `using #{written}::{#{name}}`."
+        return "`#{name}` comes with `import #{written}::{#{name}}`."
       end
     end
     nil
@@ -146,8 +146,8 @@ module Iyi
   # first, not a list of everything the prelude lacks.
   IYI_ARRIVAL_CONSTANT_HINTS = {
     "ARGV"       => "The arguments are `Program.args`: an `Array(String)` of what followed the program's name.",
-    "ENV"        => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`. The whole map, `ENV[\"NAME\"]?` and `ENV.to_h`, comes with `import std/env` and `using std/env::{ENV}`.",
-    "Time"       => "`Time` lives in `std/time`: write `import std/time` and `using std/time::{Time}`. The clock is `Time.utc`; there is no `Time.now`.",
+    "ENV"        => "One variable at a time: `Program.env(\"NAME\")` answers a `String?`. The whole map, `ENV[\"NAME\"]?` and `ENV.to_h`, comes with `import std/env::{ENV}`.",
+    "Time"       => "`Time` lives in `std/time`: write `import std/time::{Time}`. The clock is `Time.utc`; there is no `Time.now`.",
     "Int32::MAX" => "There is no `Int32::MAX`: the edges are the literals, 2147483647 and -2147483648, and arithmetic past them panics rather than wrapping.",
     "Int32::MIN" => "There is no `Int32::MIN`: the edges are the literals, -2147483648 and 2147483647, and arithmetic past them panics rather than wrapping.",
     "Int64::MAX" => "There is no `Int64::MAX`: the edge is the literal, 9223372036854775807_i64, and arithmetic past it panics rather than wrapping.",
@@ -167,14 +167,14 @@ module Iyi
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
-    "p"       => "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel` and `using std/kernel::{p}`.",
-    "pp"      => "`puts value.inspect` is the spelling here; `pp` comes with `import std/kernel` and `using std/kernel::{pp}`.",
+    "p"       => "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel::{p}`.",
+    "pp"      => "`puts value.inspect` is the spelling here; `pp` comes with `import std/kernel::{pp}`.",
     "require" => "iyi has no `require`: a module is reached with `import`, and `--crystal` gives a program Crystal's library.",
     "exit"    => "There is no `exit`: a program ends when its last line runs, and a failure is a panic - `raise \"why\"`, or `assert` - which exits 1 with the sentence (SPEC.md III.1.4).",
     "gets"    => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no bare `gets`.",
-    "printf"  => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{printf}`.",
-    "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format` and `using std/format::{sprintf}`.",
-    "rand"    => "There is no `rand` in the prelude: `Random.new.rand(n)` comes with `import std/random` and `using std/random::{Random}`.",
+    "printf"  => "`printf`, `sprintf` and `String#%` come with `import std/format::{printf}`.",
+    "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format::{sprintf}`.",
+    "rand"    => "There is no `rand` in the prelude: `Random.new.rand(n)` comes with `import std/random::{Random}`.",
     "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
     "let"     => "There is no `let`: a variable is `x = 1`, and its type is the value's.",
     "var"     => "There is no `var`: a variable is `x = 1`, and its type is the value's.",
@@ -843,10 +843,11 @@ class Iyi::Call
   # iyi: what "undefined method" means most often in this language.
   #
   # R-2b keeps an imported module's names qualified until the file writes
-  # `using`, so the commonest way to reach this error is to import a module and
-  # call one of its functions the way every other language would. The compiler
-  # knows the name, knows which module has it and knows whether it is `pub`;
-  # "undefined local variable or method 'polite'" says none of the three.
+  # `import X::{...}`, so the commonest way to reach this error is to import
+  # a module and call one of its functions the way every other language
+  # would. The compiler knows the name, knows which module has it and knows
+  # whether it is `pub`; "undefined local variable or method 'polite'" says
+  # none of the three.
   #
   # Nothing here fires for a Crystal program: `iyi_unit?` is false for every
   # Crystal module, so the search finds nobody and the message is unchanged.
@@ -988,8 +989,8 @@ class Iyi::Call
       written = exporting.map { |mod| iyi_written_path(mod) }
       qualified = "#{exporting.first}.#{def_name}"
       return "`#{def_name}` is exported by #{written.map { |path| "`#{path}`" }.join(" and ")}, " \
-             "and this file has not written `using`. Add `using #{written.first}` " \
-             "to bring its names in unqualified, or call it as `#{qualified}` " \
+             "and this file has not brought it into scope. Import it by name, " \
+             "`import #{written.first}::{#{def_name}}`, or call it as `#{qualified}` " \
              "(SPEC.md R-2b)"
     end
 
@@ -1004,7 +1005,7 @@ class Iyi::Call
   end
 
   # The written form of a unit's path: `App::Greeter` is `app/greeter`, which
-  # is what a `using` is spelled with and what the file is called.
+  # is what an import is spelled with and what the file is called.
   private def iyi_written_path(type : Type) : String
     type.to_s.split("::").map(&.underscore).join('/')
   end
@@ -1039,11 +1040,11 @@ class Iyi::Call
     nil
   end
 
-  # Every name the scope's `using` lines brought into unqualified reach,
-  # Levenshtein'd. A selective `using m::{add}` contributes its selection;
-  # a bare `using m` contributes the module's exported names. The walk is
+  # Every name the scope's imports brought into unqualified reach,
+  # Levenshtein'd. `import m::{add}` contributes its selection;
+  # `import m::*` contributes the module's exported names. The walk is
   # the same namespace climb the call's own lookup performs (call.cr's
-  # using walk), seeded the same way: `owner.instance_type`, because the
+  # outward walk), seeded the same way: `owner.instance_type`, because the
   # owner of code in a module body is the metaclass and the directive was
   # recorded on the module itself.
   IYI_PSEUDO_METHODS = %w(is_a? nil? responds_to? as as? or_panic or)
@@ -1082,10 +1083,10 @@ class Iyi::Call
 
     owner_trace = obj.try &.find_owner_trace(owner.program, owner)
     similar_name = owner.lookup_similar_def_name(def_name, self.args.size, block)
-    # iyi: the name may have arrived through `using`, and those names live
-    # on the scope's using list rather than on the owner — the exact miss
+    # iyi: the name may have arrived through an import's names, and those names live
+    # on the scope's import list rather than on the owner — the exact miss
     # that made `addd` go unsuggested while `add` sat one edit away in
-    # the file's own `using` line. Receiverless calls only: a `using`
+    # the file's own import line. Receiverless calls only: an imported
     # name is by definition unqualified.
     similar_name ||= lookup_similar_using_name(owner, def_name) unless obj
     # iyi: the compiler's own pseudo-methods are on no type's def list, so

@@ -371,7 +371,7 @@ echo
 echo "== what the module refuses"
 io_panics_with() { # io_panics_with <label> <name> <phrase> <program body>
   local label="$1" name="$2" phrase="$3" body="$4"
-  printf 'module main\n\nimport std/io\nusing std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}\n\n%s\n' "$body" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}\n\n%s\n' "$body" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

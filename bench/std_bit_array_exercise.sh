@@ -173,8 +173,7 @@ refuses() {
   cat <<EOF > "$WORK/$name.iyi"
 module main
 
-import std/bit_array
-using std/bit_array::{BitArray}
+import std/bit_array::{BitArray}
 
 $body
 EOF

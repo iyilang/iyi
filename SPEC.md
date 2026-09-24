@@ -35,7 +35,7 @@ The compilation model, stated only as far as Part II needs it.
 |---|---|
 | R-1 | A module is the unit of compilation. `import` forms a DAG. Compiling a module reads only its dependencies' **export metadata**, never their bodies. |
 | R-2 | Everything a module exports (`pub`) carries full parameter and return types. Non-exported code infers. |
-| R-2b | `using` brings a module's exported names into unqualified scope, written by the consumer. A `using` imports the module it names. |
+| R-2b | One keyword loads a module and names what it brings into scope, written by the consumer. `import X` loads `X` and leaves its names qualified (`X::f`); `import X::{a, b}` also brings `a` and `b` into unqualified scope; `import X::*` brings every exported name. `pub import X` re-exports the module, never names. |
 | R-2c | **Definition-site typing.** A def whose parameters and return are all written is typed at its definition, caller or no caller — R-2's declared types stand in for the missing call. A trait-restricted parameter is typed too: the bound is written, and a bound is enough — the compiler synthesizes one witness type per simple trait, implements its abstract requirements as stubs, and types the body against exactly the bound, so a generic body cannot quietly use what it did not declare (the half duck-typed generics never check and Rust checks always). `pub` is not the condition: a module's unmarked function, a type's `private def`, a type the module never marked `pub`, and a method an `impl` block gives a type are typed at their definition too, since the probe is the definition asking about itself and R-2's wall is for callers. Each def is typed on its own, so every one that does not type is reported, not the first. Out of reach and stated: supertrait/generic/associated-type traits, block-taking and unannotated defs, operator-named defs, defs of a mixin `module` (whose `self` is the includer's), `.cr` sources. *(Added with the agentic waves: a build, `check`, and the LSP may not disagree about what "clean" means. Mechanism: `semantic/definition_typing.cr`, probes from resolved signatures under `if false`, anchored at the def. First catch: this spec's own gate fixture — a signature edited to `Int64` over a body still returning `Int32`.)* |
 | R-3 | Open classes are gone. `impl Trait for Type` must live in the module defining the trait or the type. |
 | R-4 | Generic calls crossing a module boundary pass a dictionary keyed on GC shape. Within a module, monomorphisation. `@[Monomorphize]` forces specialisation across a boundary. |
@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,514 lines, of which 3,509 are the library held to the 3,734 ceiling (5,031 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 116,955 lines, none of it written in iyi |
+| compiler | 117,247 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,9 +1008,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 116,955 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 17,514-line own prelude + 40,690 in std |
-| Specs | 21,146 lines | 11,946 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 117,247 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 17,514-line own prelude + 40,654 in std |
+| Specs | 21,146 lines | 11,990 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -1124,26 +1124,33 @@ This is worth stating explicitly because the intuition "unions are already
 dynamic, so they must be dictionaries" is wrong and would lead someone to build
 two parallel dispatch systems.
 
-### II.3 `using` × everything: **BUILT, one sub-question open**
+### II.3 `import` × everything: **BUILT**
 
-The Kemal port proved `using` is required: without it, Kemal's DSL is
-unwritable, because Crystal achieves it by injecting top-level methods into the
-importing program's global namespace. But the port did not say what `using`
-*is*. Proposed rules:
-
-**1. `using` affects unqualified calls only. It never affects method resolution
-on a receiver.**
+The Kemal port proved a consumer has to be able to name a library's exports
+unqualified: without it, Kemal's DSL is unwritable, because Crystal achieves it
+by injecting top-level methods into the importing program's global namespace.
+But the port did not say what bringing a name into scope *is*. One keyword
+does it, in three forms:
 
 ```
-using kemal::dsl
+import kemal/dsl                    # loads the module; its names stay qualified: Kemal::Dsl.get
+import kemal/dsl::{get, post}       # loads it, and brings these names into scope
+import kemal/dsl::*                 # loads it, and brings every exported name
+```
 
-get "/" do |env| ... end     # unqualified -> resolved via `using`
+**1. Names an import brings affect unqualified calls only. They never affect
+method resolution on a receiver.**
+
+```
+import kemal/dsl::{get}
+
+get "/" do |env| ... end     # unqualified -> resolved via the import's names
 user.greet                   # receiver call -> resolved via User's traits only
 ```
 
-This single rule dissolves the `using` × traits question entirely: they operate
-in disjoint namespaces and cannot interact. Trait method resolution is always
-and only a function of the receiver's type and its impls.
+This single rule dissolves the imported-names × traits question entirely: they
+operate in disjoint namespaces and cannot interact. Trait method resolution is
+always and only a function of the receiver's type and its impls.
 
 **2. Local definitions beat imported ones. Always.**
 
@@ -1154,8 +1161,8 @@ something you already had.
 **3. Ambiguity is an error at the point of *use*, not the point of import.**
 
 ```
-using a          # exports get, post
-using b          # exports get, delete
+import a::*          # exports get, post
+import b::*          # exports get, delete
 
 post "/x" do ... end     # fine
 get  "/x" do ... end     # ERROR: `get` is ambiguous (a::get, b::get): qualify it
@@ -1165,32 +1172,48 @@ Resolvable from export metadata alone, so it costs nothing. And it means adding
 an export to a library only breaks consumers that actually call the colliding
 name.
 
-**A `using` imports what it names.** `import app/dep` followed by `using
-app/dep` wrote one path twice, and the first line told the compiler nothing
-the second did not: `using` reaches one module, and that module has to be
-in the program. The parser makes the import for a top-level `using` whose
-module the file does not import itself, after the file's own imports where
-every import stands, so the edge is the file's and the import wall is where
-it was - a qualified name the file never wrote a line for is still refused.
-Writing both is not an error; the module loads once. The formatter and
-`to_s` print what the source says, which is the `using`.
+**One keyword for a module and its names.** Two keywords wrote one path
+twice: `import app/dep` loaded the module, and a second line named it again
+to bring its names in. That second line reached exactly one module, and the
+module had to be loaded anyway, so the first told the compiler nothing the
+second did not. One line now says both what the file depends on and what it
+names. The glob is written, `::*`, so "every name" is visible on the line
+where it happens. `import X` alone is Go's model, names qualified by the
+package; the list is Rust's `use a::{b}`, the closest model.
 
-**4. File-scoped, declared at the top. No block-scoped `using`.**
+- **The import wall is unchanged.** A qualified name from a module the file
+  never imported, directly or through a `pub import`, is still refused.
+- **One module on two lines merges.** `import app/dep` beside
+  `import app/dep::{a}`, or two lists of one module, is not an error: the
+  module loads once and the names from every line land in one scope. The
+  formatter does not merge the lines; it prints what the source says.
+- **`using` is refused.** The keyword `import X::{...}` and `import X::*`
+  replaced is a parse error, and the message names the line that replaces
+  it: `import app/greeter::{polite}` for a list of names,
+  `import app/greeter::*` for the bare form. `iyi fix FILE` rewrites every
+  one in a file and folds a bare `import` of the same module, in the same
+  scope, into the new line; a line with a trailing comment is rewritten in
+  place and keeps it. A `pub import` is never folded: it hands the module
+  on, and the names stay on a line of their own.
+
+**4. Declared at the top of a file or a type body. No block-scoped import.**
 
 Block-scoped imports are Ruby's `instance_eval` in a new hat: they make the
-meaning of a bare name depend on where you are in a file. Not worth it.
+meaning of a bare name depend on where you are in a file. Not worth it. An
+import written in a class body scopes its names to that type and the types
+nested in it, and stops at its edge.
 
-**5. Selective form available and encouraged:**
+**5. The list is encouraged; the glob is written:**
 
 ```
-using kemal::dsl                    # everything exported
-using kemal::dsl::{get, post}       # just these
+import kemal/dsl::{get, post}       # just these
+import kemal/dsl::*                 # everything exported
 ```
 
 **Enforced.** `pub` is what a module's surface is, and both halves are closed:
-`using` reaches only exported names. The selective form reports at the
-directive which of the names it asked for the module does not export, and a
-qualified `App::Greeter.helper` or `App::Greeter::Closed` is refused too.
+an import brings in only exported names. The list reports at the line which
+of the names it asked for the module does not export, and a qualified
+`App::Greeter.helper` or `App::Greeter::Closed` is refused too.
 
 The second half is not decoration. `.iyimod` carries a module's exports and
 nothing else (IV.2), so if another module could reach an unmarked name, that
@@ -1201,10 +1224,14 @@ body carries it: a `def` inside a `pub trait` or a `pub struct` belongs to the
 trait or the struct. `Enumerable#to_a` writes no `pub` and stays callable on
 every implementer. A Crystal module never wrote `pub` and is untouched.
 
-**OPEN:** whether `using` may be re-exported (`pub using`), so a facade module
-can pass a DSL through. Convenient for `import kemal` giving you the DSL without
-a second line, and a way to reintroduce exactly the implicitness R-3 removed.
-Recommend **no** for Draft 0.
+**`pub import` hands on the module, never names.** `pub import X` re-exports
+`X` whole, R-1's facade rule. `pub import X::{a}` and `pub import X::*` are
+refused: names brought into scope are the importing module's own and never
+pass to its importers. The error says to write `pub import X` to hand the
+module on and `import X::{a}` beside it for the names this module uses. A
+facade that passed a DSL's names through would make `import kemal` give you
+the DSL without a line naming it - convenient, and exactly the implicitness
+R-3 removed.
 
 ### II.4 Derive macros × separate compilation: **SETTLED and BUILT**
 
@@ -1695,7 +1722,7 @@ canonical case arrived last.
 
 Draft 0 said `impl Trait for Type` and left "trait" undefined. The first
 implementation desugared it to a module, which compiled but meant a trait and a
-module were the same thing: `include Greet` worked, `using Greet` worked, and
+module were the same thing: `include Greet` worked, importing `Greet`'s names worked, and
 `abstract def` was Crystal's abstract method rather than a requirement of
 anything. Writing the checks settled what the word means.
 
@@ -1715,12 +1742,12 @@ to refuse four things:
 | Written | Refused because |
 |---|---|
 | `include Greet` / `extend Greet` | A type acquires a trait by having an impl, whose location R-3 can check. `include` has no such rule. It is the open-class hole under a different name. |
-| `using Greet` | A trait exports no names to bring into scope. By II.3 rule 1 a trait method is resolved from the receiver, never from a `using`, so the two never meet. |
+| names imported from `Greet` (`::*` or `::{...}`) | A trait exports no names to bring into scope. By II.3 rule 1 a trait method is resolved from the receiver, never from an import's names, so the two never meet. |
 | `impl SomeModule for X` | A module has no requirements to satisfy and nothing for R-3 to check. Only a trait is implementable. |
 | `impl Greet for SomeTrait` | A blanket impl in disguise, refused for the reason II.7 gives. |
 
-The selective form of `using` may still *name* a trait,
-`using app/show::{Showable}` uses the module and selects a type from it, which
+An import's list may still *name* a trait:
+`import app/show::{Showable}` loads the module and selects a type from it, which
 is II.3 working as specified.
 
 **`abstract def` is a requirement, checked where the impl is written.**
@@ -1773,9 +1800,9 @@ Kemal cannot say this. It accepts the block and returns an empty body forever.
 And a user can now make their own type returnable by implementing the trait,
 which Kemal has no way to offer.
 
-**`using` did what II.3 said it would.** `dsl.cr` opens with "Kemal DSL is
+**The import's names did what II.3 said they would.** `dsl.cr` opens with "Kemal DSL is
 defined here and it's baked into global scope." The port exports the same names
-and the consumer writes `using kemal/dsl`; `before_all`, `get` and `mount` are
+and the consumer writes `import kemal/dsl::*`; `before_all`, `get` and `mount` are
 then unqualified in `webapp.iyi`. The Sinatra feel survives without the library
 reaching into the program's namespace.
 
@@ -3737,18 +3764,18 @@ what the counts miss. `models/tag.cr` became `acik_turkiye/d_b/tag.iyi`
 with five edits, none to a method body: the header, spelled the way
 `iyi_module_name` spells a namespace (`DB` is `d_b`); the `module
 AcikTurkiye::DB … end` wrapper removed, because the path is the namespace;
-`pub` on the struct; `require "pg"` kept and `import acik_turkiye/d_b` with
-`using …::{SQL}` for the constant another file declares; and the consumer
-writing `Tag` under `using acik_turkiye/d_b/tag::{Tag}` where it wrote
+`pub` on the struct; `require "pg"` kept and `import acik_turkiye/d_b::{SQL}`
+for the constant another file declares; and the consumer
+writing `Tag` under `import acik_turkiye/d_b/tag::{Tag}` where it wrote
 `AcikTurkiye::DB::Tag`. `iyi check --crystal` answers clean, `getter`,
 `include ::DB::Serializable`, `as: Tag` and an untyped `def update(name,
 description, sentiment)` untouched. The rule the exercise found, which no
 count would have: **a Crystal namespace is an iyi path, and a type's
 qualified name changes** — `A::B::C` in `c.cr` is module `a/b/c` exporting
-`C`, and every `A::B::C` a consumer writes becomes `C` under a `using`
-line. That rewrite is global and mechanical, and it is what a migrate verb
+`C`, and every `A::B::C` a consumer writes becomes `C` under an
+`import a/b/c::{C}` line. That rewrite is global and mechanical, and it is what a migrate verb
 is: header from path, wrapper off, `pub` on what other files reach,
-`import`/`using` from the references, signatures from the compiler where
+`import` lines and their names from the references, signatures from the compiler where
 the export lacks one. The residue a person writes is the reopened foreign
 type and whatever the counts call R-3, which on this application is one
 file.
@@ -3767,7 +3794,7 @@ designed:
 2. **A type's qualified name changes with it.** Every constant path the tree
    declares is resolved the way Crystal resolves one — innermost namespace
    outwards, through `include`, inside string interpolation as well as code —
-   and rewritten to the bare name its module exports, under a `using` line.
+   and rewritten to the bare name its module exports, named on an `import` line.
    `Shop::Names.title(x)` keeps its qualified spelling, because a module
    function called from inside a type's body does not resolve as a bare name
    (R-2b names both spellings). Two modules offering one name: the second
@@ -3903,7 +3930,7 @@ Two rules came out of pushing it that far. **`pub` is what another module
 names**: marking every top-level declaration made R-2 ask a signature of
 every one, including helpers nobody outside calls, so a def or constant no
 other module names stays the module's own — the rewrite knows exactly which
-names cross, having written every `using` line. A *type* keeps its `pub`
+names cross, having written every name on every `import` line. A *type* keeps its `pub`
 regardless, because a macro in a shard names the class that includes it
 (`Kemal::Handler`'s `only` expands `{{@type}}`) and that reference is
 qualified. And **a `private def` is not R-2's business**: its signature
@@ -3934,7 +3961,7 @@ found on an application; running them over the shards it depends on found
 three more, each a rule rather than a special case, and two bugs that were
 not migration's at all. A **sidecar** - the `.cr` file a reopening of
 somebody else's type stays in - names the tree's own types too, and has no
-`using` line to reach them through, so every such path is written in full
+`import` line to reach them through, so every such path is written in full
 and what it names counts as crossing: Kemal's `context_crystal.cr` asked
 for `Kemal::Route` after `Route` had moved, and its `HeadRequestHandler`
 lost the `pub` on a name only the sidecar beside it uses. And a def is
@@ -4273,7 +4300,7 @@ then artifacts are a local cache and the registry serves source.
   a cache and an index, and losing it loses discovery rather than the ability to
   build.
 - **No version solver.** See above; MVS or nothing.
-- **No transitive `using`.** R-2b says the consumer writes it. A dependency
+- **No transitive names.** R-2b says the consumer writes the line that names them. A dependency
   cannot bring names into scope, and a package manager is not a reason to
   reopen that.
 
@@ -4308,7 +4335,7 @@ The decisions:
    nothing — so the *import* grammar admits `.` and `-` inside a segment
    and the strict rule stands everywhere else. A requirement's prefix is
    identity for the resolver; the in-package path, under the old grammar,
-   is what maps to `Liba::…`, and `using example.com/user/liba/colors`
+   is what maps to `Liba::…`, and `import example.com/user/liba/colors::*`
    reaches `Colors` — the same name the package's own files use.
 2. **A package's short imports resolve in its own checkout, or fail.** Not
    passed along to the program's roots: a dependency reaching the
@@ -4376,7 +4403,7 @@ path's `latest` never crosses into the repository's v2 tags.
 github.com/sdogruyol/iyi-web v0.1.0 as web` makes `web/dsl` the module
 `github.com/sdogruyol/iyi-web/dsl` in this project's files: the path is
 identity and is written once, in the manifest, and the files write the
-name - `using web/dsl`, one line with the rule above. Go writes the full
+name - `import web/dsl::{get}`, one line for the module and its names. Go writes the full
 path in every file's import and qualifies with the package's own name;
 here the project chooses the name, so two packages' `json` are two names
 and the import-alias question has its answer where the requirement is. The
@@ -4439,8 +4466,8 @@ can do, and a `lib` assembled by macro interpolation is not counted.
 What steps 1 and 2 do not do, said here: packages compile from
 source every build (their `.iyimod` story is step 5's, with signatures),
 and two packages whose in-package modules share a name collide in the type
-namespace — the general import-alias question, which `using`'s selective
-form already softens and a later section has to settle.
+namespace — the general import-alias question, which an import's list of
+names already softens and a later section has to settle.
 
 ### III.8 Tooling: **BUILT — the formatter, the language server, `iyi doc`, `iyi vet`**
 
@@ -4594,11 +4621,11 @@ each taught something:
   the resolution stays out — the difference between a language server
   and a text search.
 - **Rename** is references written back, and its gate found the rule
-  worth recording: a `using` line that selects the renamed name is a
+  worth recording: an `import` line whose list names the renamed name is a
   reference too — miss it and the rename leaves a program that does not
-  compile. `UsingDecl` now carries per-name locations from the parser,
+  compile. `ImportDecl` carries per-name locations from the parser,
   and the gate's step is literal: one request, three edits across two
-  files (declaration, call, `using` selection), both buffers clean
+  files (declaration, call, the name on the `import` line), both buffers clean
   after.
 
 **The rest of gopls' table followed, and the pattern held: compile,
@@ -4608,7 +4635,7 @@ wire units, so a large buffer stops paying full-text tax per keystroke.
 Signature help fires while the call is half-typed — the callee is found
 by text, because there is no syntax yet, and its overloads come off the
 typed graph, falling back to every def a call by that name already
-resolved to, which is how a `using`-imported name answers. Hover grew
+resolved to, which is how a name an import brought answers. Hover grew
 the def's signature as written and the `#` doc comment above it. Type
 definition unwraps virtual, metaclass, generic-instance and union
 shells to the declaration sites. Document highlight is references
@@ -4672,9 +4699,10 @@ written at the declaration (R-2), so one parse of a module names its
 whole callable surface — no compile, no artifact, which is why the
 offer works in a buffer that has never compiled, the exact buffer a
 person mid-thought is holding. Choosing an item inserts the name and
-its `import`/`using` pair rides along as `additionalTextEdits`: a new
-selective `using` when the module is unimported, the existing line
-extended (`{token}` → `{token, glyph}`) when it is — the two lines a
+the `import` line that names it rides along as `additionalTextEdits`: a new
+`import X::{name}` when the module is unimported, the existing list
+extended (`{token}` → `{token, glyph}`) when it has one, a bare
+`import X` turned into `import X::{name}` when it does not — the line a
 person, and more often a model, forgets. The gate holds 38 steps.
 
 **The last structural complaint was the pipe itself, and the queue
@@ -4692,8 +4720,8 @@ and the verdict is the text the person actually sees. The gate holds
 40 steps, the burst and the overtaking cancel both literal.
 
 **Two conveniences rounded the table off.** Document links make the
-import block clickable — `import calc/lexer` and the `using` line
-under it both target the file, resolved against the root the header
+import block clickable — `import calc/lexer` and `import calc/lexer::{Token}`
+both target the file, resolved against the root the header
 names, by text, so a broken buffer still links. And type hierarchy
 walks both ways off the compiled type tree: supertypes are the named
 ancestors (an impl's trait included, because the impl became an
@@ -4737,8 +4765,8 @@ blank line with no header as EOF) and a non-JSON body killed the
 reader fiber and hung the pipe. The transport forgives both now, and
 only true EOF ends a session. Beside it, `source.organizeImports`
 joined the code actions: the header block canonicalised — imports
-sorted and deduped, one module's `using` selections merged and their
-names sorted, a full `using` absorbing them — and an organizer that
+sorted and deduped, one line per module, the names two lines of one module
+brought merged and sorted, a `::*` absorbing them — and an organizer that
 meets anything it does not understand, a comment between imports
 above all, offers nothing rather than eating it. The gate holds 48
 steps, the soak ten more beside it in CI.
@@ -4746,7 +4774,7 @@ steps, the soak ten more beside it in CI.
 **Moving a file is renaming a module, and the server now says so.**
 IV.6 read forward: a module's path is its file's path, so
 `workspace/willRenameFiles` answers a file move with one WorkspaceEdit
-— the header line in the moved file, and the exact `import`/`using`
+— the header line in the moved file, and the exact `import` path
 spans in every consumer, open buffers and never-opened disk files
 alike, applied by the client before the rename lands. A file whose
 header and path already disagree has no module identity to move and
@@ -5907,8 +5935,8 @@ behind it.
 ```
 imports
   std/enumerable
-usings
-  std/enumerable::{Enumerable}
+names imported
+  import std/enumerable::{Enumerable}
 exports
   struct List(T)
     def appended(item : T) : List(T)
@@ -5970,7 +5998,7 @@ that answers it.
 
 **The artifact is rendered back to declarations and those are parsed.**
 `crystal mod dump --declarations` prints exactly the text the compiler reads,
-which for `std/list` is its `module`, its `import`, its `using`, `pub struct
+which for `std/list` is its `module`, its `import` lines and the names they bring, `pub struct
 List(T)` with six headers and no bodies, and the impl with its `type Elem = T`.
 Text rather than a serialised AST because the signatures already are text: the
 parser that read the module is the one that should read its declarations back,
@@ -6001,9 +6029,9 @@ real module rather than by reading:
    `impl Comparable for Int32` puts `<=>` on a prelude type this module does not
    export, so recording it against the target loses it. This is also why
    `each` appears under the impl in the dump above and not under `List`.
-3. **The module's `using` directives.** A signature is stored as the annotation
+3. **The names the module's imports bring into scope.** A signature is stored as the annotation
    the author wrote, and an annotation is written in a context: `pub def
-   handle(ctx : Context)` resolves `Context` through a `using` further up the
+   handle(ctx : Context)` resolves `Context` through an `import …::{Context}` further up the
    file. `std/list` never noticed, because its signatures name only its own
    types; the Kemal port's first exported signature does not. Carrying the
    annotation without what resolves it was carrying half of it.
@@ -7330,10 +7358,10 @@ is the linker.
   associated types, and the methods it defines. This is what lets a consumer
   answer "does `Customer` implement `ToJSON`?" without reading `Customer`,
   which II.4 depends on.
-- **The module's `using` directives.** Not part of its surface: nothing here is
+- **The names the module's imports bring into scope.** Not part of its surface: nothing here is
   reachable through them. Part of what its surface *means*. A signature is
   stored as the annotation the author wrote (IV.1), and `pub def handle(ctx :
-  Context)` resolves `Context` through a `using` further up the file. The
+  Context)` resolves `Context` through an `import …::{Context}` further up the file. The
   annotation travels, so what resolves it has to travel with it.
 - **Exported constants.** **Built.** `pub LIMIT = 42` is reachable through the
   module's name and an unmarked constant is not, which is the same sentence an
@@ -7445,7 +7473,7 @@ IV.1g that no amount of reasoning about blocks would have produced.
 
    **`pub macro` is the way to say which of them another module may run, and
    it is built.** A marked macro is reachable exactly as a `pub def` is:
-   unqualified after `using`, or through the module's name. An unmarked one is
+   unqualified after an import that names it, or through the module's name. An unmarked one is
    the module's own and is refused by the same sentence an unmarked `def` gets.
    What it exports is a name and an arity rather than types, because a macro
    takes syntax and returns syntax and there is no type to write down — the one
@@ -7761,13 +7789,13 @@ files can disagree about what `app/greeter` refers to, which defeats the
 purpose of having module identity at all. Go takes the same position. Until iyi
 has a manifest, the project root is the directory of the entry file.
 
-**4. Namespacing makes `using` mandatory, not a convenience.** II.3 presented
-`using` as the thing that keeps DSL-shaped libraries writable. Implementing
+**4. Namespacing makes names in scope mandatory, not a convenience.** II.3
+presented `import X::{...}` as the thing that keeps DSL-shaped libraries writable. Implementing
 namespaces showed it is more basic than that: the moment `module app/greeter`
 actually scoped its contents, every cross-module reference broke, and the
 working test had to be rewritten to
 `impl App::Greeter::Greet for User` / `App::Greeter.polite(name)`. Without
-`using`, ordinary multi-module code is unbearable, not merely verbose.
+`import X::{...}`, ordinary multi-module code is unbearable, not merely verbose.
 
 **5. Module functions need `extend self`.** A `pub def` at module level is a
 function of the module, not an instance method of a mixin: iyi modules are
@@ -7785,8 +7813,8 @@ lowercase module names. The third is the better language and does not fit
 
 So the mismatch stays, and stops being a wart by being made **reversible**: a
 path segment is `[a-z][a-z0-9]*` with single `_` between groups, checked in
-`Parser#parse_module_path`, which is the one gate `module`, `import` and
-`using` all pass through. `camelcase` upper-cases the first character of each
+`Parser#parse_module_path`, which is the one gate a `module` header and an `import`
+path pass through. `camelcase` upper-cases the first character of each
 underscore-separated group and drops the underscores, so a name splits back
 into a path at every upper-case letter, and path and name determine each other.
 
@@ -7798,12 +7826,13 @@ trailing underscores collide the same way (`my__greeter` with `my_greeter`,
 `my_` with `my`). Requiring each group to begin with a letter removes all four
 cases at once.
 
-**7. New keywords are cheap, but not free.** `trait`, `impl`, `pub`, `import`
-and `using` were added to the lexer with no regressions: `trailing`,
-`implements`, `public`, `usingx` and `impl_` all still lex as identifiers. But
+**7. New keywords are cheap, but not free.** `trait`, `impl`, `pub` and `import`
+were added to the lexer with no regressions: `trailing`,
+`implements`, `public` and `impl_` all still lex as identifiers. But
 `impl` was in use as a local variable in two compiler tool files, which had to be
 renamed. Every keyword iyi adds is a name taken away from every program; the
-count should stay small.
+count should stay small. `using`, the keyword `import X::{...}` replaced, is
+still lexed, so the parser can refuse it with the line that replaces it.
 
 ### IV.5 Versioning
 
@@ -8022,7 +8051,7 @@ Named honestly, so nobody mistakes this draft for complete.
 
     That is the argument, and it is not about the 11k lines. **An interpreter is
     a second implementation of the language's semantics.** Traits with defaults,
-    `impl`, `using`, error unions, `defer`, and the module header all have to
+    `impl`, `import` with its names, error unions, `defer`, and the module header all have to
     exist twice or the second copy quietly means something else. The fork is not
     finished changing the language, so the price is not paid once.
 
@@ -9402,7 +9431,7 @@ Named honestly, so nobody mistakes this draft for complete.
     leaving it inside made json's `class String` mean `Site::String`.
 
     **The rules do not change with the library.** The module header, `pub`,
-    `import`, `using`, traits, `impl`, R-2 on exports: all of them, on a
+    `import` and the names it brings, traits, `impl`, R-2 on exports: all of them, on a
     program that requires Kemal. What changes is what a program *has*.
 
     **Swept across nine shards**, each built twice — as an iyi program and as a
@@ -10461,7 +10490,7 @@ For traceability, since several rules here rest on numbers rather than taste.
 | Half the top-level pass is the parser | 304 prelude files, 107,719 lines: 0.57 s parse, 0.54 s visit |
 | Open classes are the blocker | 77 of 484 types reopened across module boundaries; `String` by five modules |
 | Traits are a viable replacement | Kemal router ports at +4% code size, structure intact |
-| `using` is required, not optional | Kemal's DSL is unwritable without it |
+| Names in scope are required, not optional (`import X::{...}`) | Kemal's DSL is unwritable without them |
 | Dictionaries pay off at compile time | 46.6% of instantiations collapse (compiler), 47.7% (app-shaped code) |
 | Dictionaries cost ~3–4 cycles per call | 17.5× on a vectorisable loop, 1.21× where neither side vectorises, 1.00× with real work per element |
 | `macro_run` must go | +7.4 s per distinct script on a cold build, memoised per script but not amortised across scripts; two scripts cost twice (II.10) |
@@ -10499,7 +10528,7 @@ For traceability, since several rules here rest on numbers rather than taste.
 | 2 | ~~`!` in identifiers vs `!` as propagation (III.1.7)~~ | **Decided: A**: `!` dropped from identifiers, `sort`/`sorted` adopted, enforced by the compiler |
 | 3 | ~~Implicit error conversion (III.1.6)~~ | **Decided: no, and not on a schedule**: the signature is the error set; a conversion the reader cannot see takes that away |
 | 4 | ~~Nil-propagation operator (III.1.5)~~ | **Decided: no, and not on a schedule**: a second propagation channel ends by making `Nil` an error, which III.1.5 exists to prevent |
-| 5 | `pub using` re-export (II.3) | no, for Draft 0 |
+| 5 | ~~Re-exporting names (`pub import X::{a}`, II.3)~~ | **Decided: no**: `pub import X` hands the module on, and `pub import X::{a}` and `pub import X::*` are refused, because names in scope are the importing module's own |
 | 6 | `@[Monomorphize]` on stdlib trait defaults (II.6) | yes: mark `each`/`map`/`select`/`reduce`, stencil the rest. Accepts that the library author owns a per-method performance decision |
 | 7 | ~~`!` inside a `defer` (III.1.4, V.8)~~ | **Decided: no**: a `defer` runs while the function is already returning, so propagating from one needs error-during-error semantics |
 | 8 | Structured concurrency only, no bare spawn (III.4.1) | yes. It is `defer` applied to a task set, so it costs no new mechanism, and it makes Go's commonest bug unrepresentable. The price is that a task cannot outlive its scope, which is a taste call |

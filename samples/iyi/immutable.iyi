@@ -13,8 +13,7 @@
 
 module samples/immutable
 
-import std/list
-using std/list::{List}
+import std/list::{List}
 
 # Two ways of naming the same type, both across a module boundary. The second
 # lets the argument be inferred, and it is written that way on purpose: the

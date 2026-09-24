@@ -177,9 +177,9 @@ panics_with() { # panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
   {
     printf 'module main\n\n'
-    printf 'import std/list\nusing std/list::{List}\n'
-    printf 'import std/enumerable\nusing std/enumerable::{Enumerable}\n'
-    printf 'import std/iterator\nusing std/iterator::{Iterator, ArrayIterator}\n\n'
+    printf 'import std/list::{List}\n'
+    printf 'import std/enumerable::{Enumerable}\n'
+    printf 'import std/iterator::{Iterator, ArrayIterator}\n\n'
     printf 'puts (%s).to_s\n' "$expression"
   } > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
@@ -363,9 +363,10 @@ echo "== every std module exercise runs from artifacts as it runs from source"
 # of the sixty did that when it was first asked, and the thirty-nine that
 # did not each named a different thing a module never carried — a class
 # hierarchy's `<`, a `@[Primitive]`, an enum's members, a body whose symbol
-# the consumer keys differently, the `using` written inside a reopened
-# type. Every one of those is a defect a consumer meets and no gate here
-# could see, because every other gate compiles its module from source.
+# the consumer keys differently, the `using` (the keyword `import X::{...}`
+# replaced) written inside a reopened type. Every one of those is a defect
+# a consumer meets and no gate here could see, because every other gate
+# compiles its module from source.
 #
 # The output is compared and not merely the exit status: a program that
 # links against the wrong body runs fine and answers differently, which is

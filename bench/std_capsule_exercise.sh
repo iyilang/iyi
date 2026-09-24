@@ -126,10 +126,8 @@ refuses() { # refuses <label> <name> <phrase> <code>
   cat <<IYI > "$WORK/$name.iyi"
 module main
 
-import std/slice
-using std/slice::{Bytes}
-import std/capsule
-using std/capsule::{VarInt, HttpDatagram, Capsule, CapsuleType}
+import std/slice::{Bytes}
+import std/capsule::{VarInt, HttpDatagram, Capsule, CapsuleType}
 
 $code
 IYI

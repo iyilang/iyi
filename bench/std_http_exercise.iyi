@@ -13,10 +13,8 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/http
-import std/socket
-using std/http::{HTTP, Response, Request, Server}
-using std/socket::{IyiSocket, SocketError}
+import std/http::{HTTP, Response, Request, Server}
+import std/socket::{IyiSocket, SocketError}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.

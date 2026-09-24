@@ -10,10 +10,8 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
-import std/socket
-using std/socket::{IyiSocket, SocketError, IPv6Address}
-import std/env
-using std/env::{ENV}
+import std/socket::{IyiSocket, SocketError, IPv6Address}
+import std/env::{ENV}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"

@@ -28,10 +28,8 @@
 module std/hpack
 
 import std/traits
-import std/slice
+import std/slice::{Slice, Bytes}
 import std/text
-
-using std/slice::{Slice, Bytes}
 
 pub alias Bytes = Std::Slice::Bytes
 

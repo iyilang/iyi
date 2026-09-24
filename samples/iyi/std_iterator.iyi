@@ -8,11 +8,9 @@
 
 module samples/std_iterator
 
-import std/traits
-using std/traits::{Comparable, Num}
+import std/traits::{Comparable, Num}
 
-import std/iterator
-using std/iterator::{Iterator, ArrayIterator}
+import std/iterator::{Iterator, ArrayIterator}
 
 # An infinite sequence generator. Eagerly evaluating this would hang or OOM;
 # lazily evaluating it pulls only what the pipeline asks for.

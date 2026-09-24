@@ -2,10 +2,8 @@
 # its port, serves until `/stop`, echoes what it was sent.
 module bench/std_http_server
 
-import std/http
-import std/socket
-using std/http::{Server, Response}
-using std/socket::{IyiSocket}
+import std/http::{Server, Response}
+import std/socket::{IyiSocket}
 
 listener = IyiSocket.listen(0)
 puts listener.local_port

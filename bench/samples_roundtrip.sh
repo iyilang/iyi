@@ -127,8 +127,7 @@ IYI
 cat > "$SYM/producer.iyi" <<'IYI'
 module producer
 
-import tags/kind
-using tags/kind
+import tags/kind::*
 
 puts kind_of(:apple)
 puts favourite
@@ -138,8 +137,7 @@ IYI
 cat > "$SYM/consumer.iyi" <<'IYI'
 module consumer
 
-import tags/kind
-using tags/kind
+import tags/kind::*
 
 others = [:zebra, :yak, :walrus, :vole]
 puts others.size

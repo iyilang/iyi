@@ -93,8 +93,8 @@ describe "Semantic: iyi import" do
   # its top level twice — which III.5's ordering is written to prevent.
   it "loads a module once however many paths reach it" do
     with_iyi_modules({
-      "main.iyi"      => "module main\n\nimport app/left\nimport app/right\nusing app/left\n\npair\n",
-      "app/left.iyi"  => "module app/left\n\nimport app/base\nusing app/base\n\npub def pair : Int32\n  value\nend\n",
+      "main.iyi"      => "module main\n\nimport app/left::*\nimport app/right\n\npair\n",
+      "app/left.iyi"  => "module app/left\n\nimport app/base::*\n\npub def pair : Int32\n  value\nend\n",
       "app/right.iyi" => "module app/right\n\nimport app/base\n",
       "app/base.iyi"  => "module app/base\n\npub def value : Int32\n  41\nend\n",
     }) do
@@ -112,14 +112,13 @@ describe "Semantic: iyi import" do
   end
 
   describe "the message a rule gives the first time it is met" do
-    # A `using` imports what it names: the pair `import app/dep` +
-    # `using app/dep` wrote the same path twice, and the first line said
-    # nothing the second did not. The edge is this file's, so the import
-    # wall still holds - what a file reaches is what it wrote.
-    it "imports the module a `using` names" do
+    # One keyword for a module and its names: `import app/dep::{value}`
+    # loads the module and brings the name into scope, and the edge is
+    # this file's, so the import wall still holds.
+    it "loads a module and brings in the names its import lists" do
       with_iyi_modules({
-        "main.iyi"    => "module app/main\n\nusing app/dep\n\nvalue\n",
-        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
+        "main.iyi"    => "module app/main\n\nimport app/dep::{value}\n\nvalue\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n\npub def other : Int32\n  3\nend\n",
       }) do
         program = semantic_iyi("main.iyi")
         program.iyi_module_paths.values.should eq ["app/dep"]
@@ -128,13 +127,49 @@ describe "Semantic: iyi import" do
       end
     end
 
-    it "loads a module once when a file both imports and `using`s it" do
+    it "keeps a name the list left out qualified" do
       with_iyi_modules({
-        "main.iyi"    => "module app/main\n\nimport app/dep\nusing app/dep\n\nvalue\n",
-        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
+        "main.iyi"    => "module app/main\n\nimport app/dep::{value}\n\nother\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n\npub def other : Int32\n  3\nend\n",
+      }) do
+        expect_raises(Iyi::TypeException, /undefined local variable or method 'other'/) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+
+    it "brings in every exported name with `::*`" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nvalue\nother\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n\npub def other : Int32\n  3\nend\n",
+      }) do
+        semantic_iyi("main.iyi").iyi_module_paths.values.should eq ["app/dep"]
+      end
+    end
+
+    # Two lines of one module are one module and one scope: loaded once,
+    # the names of both reachable, and neither ambiguous with the other.
+    it "loads a module named on two lines once, with the names of both" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dep\nimport app/dep::{value}\nimport app/dep::{value, other}\n\nvalue\nother\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n\npub def other : Int32\n  3\nend\n",
       }) do
         program = semantic_iyi("main.iyi")
         program.iyi_module_paths.values.should eq ["app/dep"]
+      end
+    end
+
+    # The wall: a module in the program only because another file imported
+    # it is still not this file's to name.
+    it "refuses a qualified name the file wrote no import for" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/mid::{go}\n\ngo\nApp::Dep.value\n",
+        "app/mid.iyi" => "module app/mid\n\nimport app/dep\n\npub def go : Int32\n  App::Dep.value\nend\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value : Int32\n  2\nend\n",
+      }) do
+        expect_raises(Iyi::TypeException, /`App::Dep` is not imported here/) do
+          semantic_iyi("main.iyi")
+        end
       end
     end
 
@@ -167,7 +202,7 @@ describe "Semantic: iyi import" do
         "main.iyi"    => "module app/main\n\nimport app/dep\n\nBox.new\n",
         "app/dep.iyi" => "module app/dep\n\npub struct Box\nend\n",
       }) do
-        expect_raises(Iyi::TypeException, /`Box` is exported by `app\/dep`.*`using app\/dep::\{Box\}`.*`App::Dep::Box`/) do
+        expect_raises(Iyi::TypeException, /`Box` is exported by `app\/dep`.*`import app\/dep::\{Box\}`.*`App::Dep::Box`/) do
           semantic_iyi("main.iyi")
         end
       end
@@ -175,7 +210,7 @@ describe "Semantic: iyi import" do
 
     it "says when the type is there and was not marked `pub`" do
       with_iyi_modules({
-        "main.iyi"    => "module app/main\n\nimport app/dep\nusing app/dep\n\nBox.new\n",
+        "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nBox.new\n",
         "app/dep.iyi" => "module app/dep\n\nstruct Box\nend\n",
       }) do
         expect_raises(Iyi::TypeException, /declares `Box` and does not mark it `pub`/) do
@@ -186,7 +221,7 @@ describe "Semantic: iyi import" do
 
     it "says when the name is there and was not marked `pub`" do
       with_iyi_modules({
-        "main.iyi"    => "module app/main\n\nimport app/dep\nusing app/dep\n\nsecret\n",
+        "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nsecret\n",
         "app/dep.iyi" => "module app/dep\n\ndef secret : Int32\n  2\nend\n",
       }) do
         expect_raises(Iyi::TypeException, /does not mark it `pub`/) do
@@ -288,10 +323,8 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/main
 
-          import lib/holder
-          import lib/badge
-          using lib/holder::{Holder}
-          using lib/badge::{Badge}
+          import lib/holder::{Holder}
+          import lib/badge::{Badge}
 
           kept = ""
           Holder(Badge).new(Badge.new("kept")).each do |badge|
@@ -362,8 +395,7 @@ describe "Semantic: iyi import" do
           module app/main
 
           import lib/tuple
-          import lib/pair
-          using lib/pair::{pair}
+          import lib/pair::{pair}
 
           pair
           IYI
@@ -393,8 +425,7 @@ describe "Semantic: iyi import" do
           module app/main
 
           import lib/badge
-          import lib/peek
-          using lib/peek::{peek}
+          import lib/peek::{peek}
 
           peek
           IYI
@@ -591,8 +622,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/main
 
-          import app/dep
-          using app/dep
+          import app/dep::*
 
           declare(made)
           IYI
@@ -649,7 +679,7 @@ describe "Semantic: iyi import" do
       end
     end
 
-    it "leaves an unexported macro out of what `using` brings in" do
+    it "leaves an unexported macro out of what an import's names bring in" do
       with_iyi_modules({
         "app/dep.iyi" => <<-IYI,
           module app/dep
@@ -663,8 +693,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/main
 
-          import app/dep
-          using app/dep
+          import app/dep::*
 
           declare("made")
           IYI
@@ -964,7 +993,7 @@ describe "Semantic: iyi import" do
     # A module header makes a type, and inside it that name means the module.
     # Found by writing a command-line program called `tally` that imported a
     # `Tally`: what it said was that `Tally` was not `App::Count::Tally`, at
-    # the first line that used one, with nothing pointing at the `using`.
+    # the first line that used one, with nothing pointing at the import.
     # A module path is a file's path, so it cannot mean something different
     # depending on where it is written. Found by `samples/iyi/calc`: a module
     # called `samples/calc` importing `calc/lexer` resolved `Calc` to itself
@@ -982,8 +1011,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module samples/calc
 
-          import calc/lexer
-          using calc/lexer
+          import calc/lexer::*
 
           scan
           IYI
@@ -992,7 +1020,7 @@ describe "Semantic: iyi import" do
       end
     end
 
-    it "refuses a `using` of a name the module's own name already takes" do
+    it "refuses an import of a name the module's own name already takes" do
       with_iyi_modules({
         "app/dep.iyi" => <<-IYI,
           module app/dep
@@ -1003,8 +1031,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/thing
 
-          import app/dep
-          using app/dep::{Thing}
+          import app/dep::{Thing}
           IYI
       }) do
         expect_raises(Iyi::TypeException, /is this module's own name/) do
@@ -1016,8 +1043,8 @@ describe "Semantic: iyi import" do
     # II.3's conflict rule, with the used module in a file rather than faked as
     # a nested type. It used to be faked, and a lexical lookup found the fake;
     # a module path is a file's path, so the lookup is global now and a fake
-    # nested `App::Greeter` is not what `using app/greeter` means.
-    it "lets a local definition beat a name `using` brought in" do
+    # nested `App::Greeter` is not what `import app/greeter::*` means.
+    it "lets a local definition beat a name an import brought in" do
       with_iyi_modules({
         "app/greeter.iyi" => <<-IYI,
           module app/greeter
@@ -1029,8 +1056,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/consumer
 
-          import app/greeter
-          using app/greeter
+          import app/greeter::*
 
           def polite : Bool
             true
@@ -1061,8 +1087,7 @@ describe "Semantic: iyi import" do
         "main.iyi" => <<-IYI,
           module app/consumer
 
-          import app/greeter
-          using app/greeter
+          import app/greeter::*
 
           struct User
             def greet : Bool
@@ -1103,5 +1128,44 @@ describe "Semantic: iyi import" do
         semantic_iyi("main.iyi", iyi_module_dir: root)
       end
     end
+  end
+end
+
+# `iyi fix`'s rewrite of `using`, the keyword one `import` replaced.
+describe "Iyi::UsingRewrite" do
+  rewrite = ->(text : String) { Iyi::UsingRewrite.rewrite(text, "main.iyi").try(&.[0]) }
+
+  it "writes each `using` as the import that replaced it" do
+    rewrite.call("using app/a\nusing app/b::{x, Y}\n\nputs 1\n").should eq(
+      "import app/a::*\nimport app/b::{x, Y}\n\nputs 1\n")
+  end
+
+  it "folds a bare import of the module into the line, and the blank lines close up" do
+    rewrite.call("module app/m\n\nimport app/a\nimport std/time\n\nusing app/a::{x}\n\nputs x\n").should eq(
+      "module app/m\n\nimport app/a::{x}\nimport std/time\n\nputs x\n")
+  end
+
+  it "never folds into a `pub import`, which hands the module on whole" do
+    rewrite.call("module app/m\n\npub import app/a\nusing app/a\n").should eq(
+      "module app/m\n\npub import app/a\nimport app/a::*\n")
+  end
+
+  it "rewrites a `using` with a comment after it in place, comment kept" do
+    rewrite.call("import app/a\nusing app/a # the one\n").should eq(
+      "import app/a\nimport app/a::* # the one\n")
+  end
+
+  it "rewrites a `using` in a type's body where it stands, and folds only within one scope" do
+    rewrite.call("import app/a\n\nclass Box\n  using app/a::{x}\nend\n").should eq(
+      "import app/a\n\nclass Box\n  import app/a::{x}\nend\n")
+  end
+
+  it "leaves the word alone where the language does not read a `using`" do
+    rewrite.call(%(puts "using app/a"\n# using app/b\n)).should be_nil
+  end
+
+  it "changes nothing the second time" do
+    once = rewrite.call("import app/a\nusing app/a::{x}\nusing app/b\n").not_nil!
+    rewrite.call(once).should be_nil
   end
 end

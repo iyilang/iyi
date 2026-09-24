@@ -6,13 +6,12 @@
 # a distance as an open class, and also Kemal's entire identity. Making users
 # write `kemal.get "/" do ... end` would be safe and would kill the framework.
 #
-# `using` moves the decision to the consumer: the library exports names, and
-# the program says which ones it wants unqualified. See `webapp.iyi`.
+# `import X::{...}` moves the decision to the consumer: the library exports
+# names, and the program says which ones it wants unqualified. See
+# `webapp.iyi`.
 module kemal/dsl
 
-import kemal/router
-
-using kemal/router::{Router, Context, IntoBody}
+import kemal/router::{Router, Context, IntoBody}
 
 HTTP_METHODS = %w(get post put patch delete options head)
 

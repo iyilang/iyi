@@ -59,8 +59,7 @@ end
 
 MID = """module app/mid
 
-import app/base
-using app/base::{value}
+import app/base::{value}
 
 pub def doubled : Int32
   value * 2
@@ -94,11 +93,11 @@ def artifact_workspace(where, keep_mid_source, switches=()):
     if keep_mid_source:
         write(where, os.path.join("app", "mid.iyi"), MID)
         entry = write(where, "main.iyi",
-                      "module main\n\nimport app/mid\nusing app/mid::{doubled}\n\n"
+                      "module main\n\nimport app/mid::{doubled}\n\n"
                       "puts doubled\n")
     else:
         entry = write(where, "main.iyi",
-                      "module main\n\nimport app/base\nusing app/base::{value}\n\n"
+                      "module main\n\nimport app/base::{value}\n\n"
                       "puts value\n")
     env = dict(os.environ, IYI_PATH=os.path.join(ROOT, "src") + os.pathsep + where)
     emit = subprocess.run([IYI, "build"] + list(switches) +
@@ -190,7 +189,7 @@ def package_workspace(where):
     entry = os.path.join(app, "main.iyi")
     with open(entry, "w") as f:
         f.write("import example.test/user/liba\n"
-                "using example.test/user/liba::{greeting}\n\nputs greeting\n")
+                "import example.test/user/liba::{greeting}\n\nputs greeting\n")
     return entry, env
 
 

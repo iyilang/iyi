@@ -236,7 +236,7 @@ echo
 echo "== what std/big refuses"
 big_panics_with() { # big_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/big\nusing std/big::{BigInt, BigDecimal, BigRational}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/big::{BigInt, BigDecimal, BigRational}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

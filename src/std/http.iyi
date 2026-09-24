@@ -24,10 +24,8 @@
 
 module std/http
 
-import std/socket
-import std/uri
-using std/socket::{IyiSocket, SocketError}
-using std/uri::{URI}
+import std/socket::{IyiSocket, SocketError}
+import std/uri::{URI}
 
 pub struct Response
   getter status : Int32

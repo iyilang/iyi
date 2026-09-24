@@ -17,8 +17,7 @@ end
 # in the library's namespace, and the unseeded generator's entropy read
 # used to find that module where it meant the class.
 import std/file
-import std/random
-using std/random::{Random}
+import std/random::{Random}
 
 # Every expected value below is what Crystal 1.21's `Random.new(seed)`
 # answers for the same call: a seeded program ported from there prints

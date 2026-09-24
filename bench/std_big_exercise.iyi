@@ -21,8 +21,7 @@
 #
 # Every section prints a progress line and raises on mismatch.
 
-import std/big
-using std/big::{BigInt, BigDecimal, BigRational}
+import std/big::{BigInt, BigDecimal, BigRational}
 
 # 1. Construction and Integer Conversions
 raise "construct: zero" unless BigInt.zero.zero?

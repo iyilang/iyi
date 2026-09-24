@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.14.1 — 2026-09-24
+
+**A server can stop, and be reached more ways.** `std/signal` parks a
+fiber until INT or TERM arrives, so a graceful stop is a sibling that
+closes the listener and a group that joins what is in flight. `std/socket`
+listens and connects over IPv6 and at a unix socket's path, bounds a
+read's and a write's wait with `read_timeout_ms` and `write_timeout_ms`,
+answers what the peer does as a `SocketError` rather than a panic, and
+lets one fiber read a socket while another writes it. A file seeks, a
+package imports the standard library, and each of these ran on Linux,
+darwin and Windows before it was called done: the socket gate runs on
+all three now, and so do twenty-eight more of the language's gates.
+
+**The library is faster where a program ported from Crystal spends its
+time.** `Float64#to_s` is Grisu3 and `String#to_f` Eisel-Lemire, `Math.exp`
+is fdlibm's, `Base64` is twice as fast, a pattern of byte classes is
+searched without the machine and `gsub` takes a table, `BigInt` runs its
+limbs through pointers, and a `Hash` allocates nothing until its first
+entry. crystal-metric's suite, ported, ran in 24.87 s where Crystal 1.21
+took 26.11 s, on the machine the work was measured on.
+
+**Thirty-nine fixes, and one that changes what an artifact is.** A symbol
+in a module's object code carried the producing build's number for it, so
+a consumer that met its symbols in another order compared them wrong; a
+unit now reads the linking program's number, and **`.iyimod` is v54: an
+artifact written by 0.14.0 is refused, and `--emit-iyimod` rewrites it.**
+The rest include a temporary file that a planted symlink could redirect,
+a query whose malformed `%` panicked, a darwin write that made a 0600 file
+world-readable, a Windows fiber switch that lost the vector registers a
+call keeps, and a collector that handed a live object's chunk to a second
+one. `std` is 68 modules and 40,690 lines.
+
 ### Added
 
 - `std/socket` read and write timeouts: `read_timeout_ms` and

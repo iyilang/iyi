@@ -89,6 +89,15 @@
 
 ### Changed
 
+- **The collector race runs on Windows, for the record.** `gc_race.py`
+  builds the same three programs under iyi's collector, Boehm and Go and
+  refuses a row whose arms answer differently; it ran on Linux and darwin.
+  On Windows it took `bin/iyi`, a shell script, and read peak RSS with
+  `wait4`, which Windows has not: it takes `IYI` now, names its binaries
+  `.exe` there, and reads the peak working set off the process handle.
+  On a twelve-core Windows machine all three rows agreed; the Windows
+  gates job runs it with Go set up, asserting no number, as darwin's does.
+
 - **A TERM from outside is measured on Windows.** `std_signal`'s gate
   sent the exercise TERM from the shell on Linux and darwin and said
   "unmeasured on Windows", where TERM is the console being closed. It

@@ -2122,6 +2122,18 @@ jobs:
           python bench/generic_boundary.py
           python bench/rebuild_speed.py
 
+      # The race, for the record, as darwin's job runs it: the same three
+      # programs under iyi's collector, Boehm and Go on this runner. It
+      # asserts no number, and refuses a row whose three arms answer
+      # differently, which is a question Windows had never been asked.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: The race, for the record (bench/gc_race.py)
+        shell: bash
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/gc_race.py
+
       # The image has no SQLite, and Linux installs libsqlite3-dev for the
       # driver gate below: here it is sqlite.org's own x64 DLL, pinned by
       # hash (the SHA3-256 sqlite.org publishes for it matched when the

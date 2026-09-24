@@ -4,6 +4,16 @@
 
 ### Added
 
+- **A package's reach, said on `get`, and `iyi mod reach`.** `iyi get` ends
+  with what the change reaches outside the language: every module new to
+  the build with its reach, and every module that moved with what it
+  reaches now or no longer does - `libr v1.0.0 -> v1.1.0: now reaches
+  std/socket; links m; C LibM.cos`. `iyi mod reach` lists it for the whole
+  build. Reach is read from the source a consumer builds, tests excluded:
+  the std modules that call C which the package reaches through std's own
+  imports (`std/http` counts as `std/socket`, `std/json` not at all),
+  `File` from the prelude, and the `@[Link]` libraries and `lib` functions
+  it declares, inside a platform's `{% if %}` too.
 - **A short name for a requirement.** `require
   github.com/sdogruyol/iyi-web v0.1.0 as web` in `iyi.mod` - or `iyi get
   PATH --as web` - makes `web/dsl` mean `github.com/sdogruyol/iyi-web/dsl`

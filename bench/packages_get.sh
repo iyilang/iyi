@@ -33,6 +33,13 @@
 # A package's own short names are its files', whatever its consumer calls
 # the same word; a short name that is also the project's own directory,
 # or is not a word, or is `std`, is refused by name.
+#
+# Then reach: `get` names what a new module touches outside the language
+# and what a moved one reaches now or no longer does - a std module that
+# calls C through another std module it imports, C declared inside a
+# platform's `{% if %}`, a linked library - while a pure std import, and
+# what the package's tests import, are not reach; `mod reach` lists the
+# whole build's.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -357,6 +364,53 @@ rm -rf web web.iyi
 refused "an upper-case short name" "is not a short name" example.test/user/libb --as Web
 refused "std as a short name" "\`std\` is iyi's standard library" example.test/user/libb --as std
 refused "a short name already taken" "\`web\` already names example.test/user/liba" example.test/user/libb --as web
+
+step "get says what a package reaches, and what an upgrade adds to it"
+mkrepo "$WORK/work/libr"
+printf 'module example.test/user/libr\n' > "$WORK/work/libr/iyi.mod"
+printf 'module libr\n\nusing std/json\n\npub def version : String\n  "1.0.0"\nend\n' > "$WORK/work/libr/libr.iyi"
+# A test's imports are the package author's, not the consumer's.
+printf 'import std/file\n\nputs File.exists?("x")\n' > "$WORK/work/libr/libr_test.iyi"
+git -C "$WORK/work/libr" add -A && git -C "$WORK/work/libr" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libr"
+(cd "$WORK" && publish libr v1.0.0)
+# v1.1.0 reaches the network through std/http, and C behind a platform.
+cat > "$WORK/work/libr/libr.iyi" <<'EOF'
+module libr
+
+using std/json
+import std/http
+
+{% if flag?(:linux) || !flag?(:linux) %}
+  @[Link("m")]
+  lib LibM
+    fun cos(x : Float64) : Float64
+  end
+{% end %}
+
+pub def version : String
+  "1.1.0"
+end
+EOF
+git -C "$WORK/work/libr" commit -qam two && (cd "$WORK" && publish libr v1.1.0)
+printf 'module libr\n\nusing std/json\n\npub def version : String\n  "1.2.0"\nend\n' > "$WORK/work/libr/libr.iyi"
+git -C "$WORK/work/libr" commit -qam three && (cd "$WORK" && publish libr v1.2.0)
+mkdir -p "$WORK/rapp" && cd "$WORK/rapp" || exit 1
+printf 'module example.test/user/rapp\n' > iyi.mod
+"$IYI" get example.test/user/libr@v1.0.0 > reach1.log 2>&1 || { fail "get libr failed"; cat reach1.log; }
+grep -q "example.test/user/libr v1.0.0, new: nothing outside the language" reach1.log ||
+  fail "a pure package's reach was not said, or its test's std/file was counted: $(cat reach1.log)"
+"$IYI" get example.test/user/libr@v1.1.0 > reach2.log 2>&1 || { fail "get libr@v1.1.0 failed"; cat reach2.log; }
+grep -q "libr v1.0.0 -> v1.1.0: now reaches std/socket.*; links m; C LibM.cos" reach2.log ||
+  fail "the upgrade's new reach was not said: $(cat reach2.log)"
+grep -q "std/json" reach2.log && fail "a std module that calls nothing was counted as reach: $(cat reach2.log)"
+"$IYI" mod reach > reach3.log 2>&1 || { fail "mod reach failed"; cat reach3.log; }
+grep -q "^example.test/user/libr v1.1.0: std/socket.*; links m; C LibM.cos" reach3.log ||
+  fail "mod reach did not list the build's reach: $(cat reach3.log)"
+"$IYI" get example.test/user/libr@v1.2.0 > reach4.log 2>&1 || { fail "get libr@v1.2.0 failed"; cat reach4.log; }
+grep -q "libr v1.1.0 -> v1.2.0: no longer reaches std/socket.*; links m; C LibM.cos" reach4.log ||
+  fail "what the upgrade stopped reaching was not said: $(cat reach4.log)"
+[ "$status" -eq 0 ] && echo "  new: nothing; v1.1.0 adds std/socket (through std/http), libm, LibM.cos; v1.2.0 drops them"
 
 echo
 if [ "$status" -eq 0 ]; then

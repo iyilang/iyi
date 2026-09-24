@@ -410,10 +410,13 @@ class Iyi::Command
   # as it did before — which is what lets `check --affected app/lib.iyi`
   # find the importers a deletion breaks.
   private def mod_context_names(written : String, entry_dir : String, table : Array({String, String})) : {String, String}
+    # A short name the manifest gives is the path it names, as in a build.
+    written = Mod::Installer.expand(written, table)
     table.each do |(prefix, checkout)|
       inner =
         if written == prefix
-          prefix.rpartition('/')[2]
+          # A `/vN` suffix is a major version, not the package's name.
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
         elsif written.starts_with?("#{prefix}/")
           written[(prefix.size + 1)..]
         else

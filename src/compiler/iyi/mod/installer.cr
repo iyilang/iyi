@@ -25,7 +25,43 @@ module Iyi::Mod
       table = resolve(entry_dir, root).map { |(selection, dir)| {selection.path, dir} }
       # Longest prefix first, so the most specific module answers an import.
       table.sort_by! { |(prefix, _)| -prefix.size }
+      table.concat(short_name_rows(root))
       table
+    end
+
+    # The short names a manifest gives (`require <path> v1 as web`), as rows
+    # of the same table: `{"@web", "<path>"}`. They travel with the prefixes
+    # because every verb that compiles already carries the table - a build,
+    # `check`, `doc`, `test`, `mod context`, the language server - and no
+    # import can start with `@`, so every prefix match passes over them
+    # without being told. `expand` is the one reader.
+    SHORT_NAME = '@'
+
+    def self.short_name_rows(manifest : ModFile) : Array({String, String})
+      manifest.requirements.compact_map do |requirement|
+        name = requirement.short_name
+        {"#{SHORT_NAME}#{name}", requirement.path} if name
+      end
+    end
+
+    # *written* with a short name at its front replaced by the path it
+    # names in *table*: `web/dsl` is `github.com/sdogruyol/iyi-web/dsl`.
+    # Anything else comes back as written.
+    def self.expand(written : String, table : Array({String, String})) : String
+      first, slash, rest = written.partition('/')
+      key = "#{SHORT_NAME}#{first}"
+      row = table.find { |(prefix, _)| prefix == key }
+      return written unless row
+      slash.empty? ? row[1] : "#{row[1]}/#{rest}"
+    end
+
+    # A package's own short names, from the manifest at its checkout: its
+    # files wrote them, and they mean what its manifest says wherever the
+    # package is used. Empty for a directory with no manifest.
+    def self.short_names_in(dir : String) : Array({String, String})
+      file = File.join(dir, MANIFEST)
+      return [] of {String, String} unless File.file?(file)
+      short_name_rows(ModFile.parse(File.read(file), file))
     end
 
     # Every module *root*'s graph selects, with the directory it builds

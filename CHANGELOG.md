@@ -4,6 +4,16 @@
 
 ### Added
 
+- **A short name for a requirement.** `require
+  github.com/sdogruyol/iyi-web v0.1.0 as web` in `iyi.mod` - or `iyi get
+  PATH --as web` - makes `web/dsl` mean `github.com/sdogruyol/iyi-web/dsl`
+  in this project's files, so the path is written once, in the manifest,
+  and a file writes `using web/dsl`. The name is spelled out before anything
+  resolves, so a module is one module however it was reached; a package's
+  own short names are its files', from its own manifest; `get -u` keeps a
+  name and `tidy` counts what it imports. A short name that is also this
+  project's directory, `std`, a name that is not one lower-case word and a
+  name given twice are refused by name.
 - **A `using` imports what it names.** `import app/dep` followed by `using
   app/dep` wrote one path twice; `using app/dep` is now the one line, and the
   parser makes the import - after the file's own imports, so the edge is the

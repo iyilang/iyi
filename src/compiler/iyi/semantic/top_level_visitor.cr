@@ -289,6 +289,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   def visit(node : UsingDecl)
     check_outside_exp node, "use `using`"
 
+    # A short name is spelled out first, as the import beside it was.
+    written_short = node.path.join('/')
+    expanded = iyi_expand_short_name(node, written_short)
+    node.path = expanded.split('/') unless expanded == written_short
+
     # Global, because a module's path is its file's path (R-1) and a file path
     # does not mean something different depending on where it is written. A
     # lexical lookup made `using calc/lexer` inside a module called

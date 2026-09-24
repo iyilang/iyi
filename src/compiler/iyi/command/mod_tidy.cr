@@ -47,6 +47,15 @@ class Iyi::Command
              "`#{Command.program_name} init MODULE` writes one", :USAGE_ERROR
     end
 
+    # The manifest's short names, so `web/dsl` counts as the requirement
+    # it names.
+    short_names =
+      begin
+        Mod::Installer.short_name_rows(Mod::ModFile.parse(File.read(manifest_path), manifest_path))
+      rescue ex : Mod::ModError
+        abort! "mod tidy: #{ex.message}", :USAGE_ERROR
+      end
+
     # Every package the source imports, and the first file that does.
     importers = {} of String => String
     mod_tidy_sources(dir).each do |file|
@@ -55,7 +64,8 @@ class Iyi::Command
         abort! "mod tidy: #{Iyi.relative_filename(file)} does not parse, so what it imports is not known; " \
                "a tidy that guessed would remove a requirement it uses", :USAGE_ERROR
       end
-      imports.each do |path|
+      imports.each do |written|
+        path = Mod::Installer.expand(written, short_names)
         importers[path] ||= file if path.includes?('.')
       end
     end

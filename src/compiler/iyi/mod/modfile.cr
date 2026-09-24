@@ -12,6 +12,14 @@
 #
 #     replace github.com/user/lib => ../lib
 #
+#     require github.com/sdogruyol/iyi-web v0.1.0 as web
+#
+# `as web` gives a requirement a short name for this project's own files:
+# `import web/dsl` and `using web/dsl` mean the module at
+# `github.com/sdogruyol/iyi-web/dsl`. The path is identity and stays here,
+# written once; the files write the name. A package's own short names
+# are its files', read from its own manifest, and never its consumer's.
+#
 # `replace` builds a required module from a directory on this machine
 # instead of its tag: the module being written beside the one that uses
 # it, or a fork checked out to try. It is the program's own decision, so
@@ -28,9 +36,10 @@ require "semantic_version"
 module Iyi::Mod
   # One `require` line: the path that identifies a module and the minimum
   # version this manifest is known to work with.
-  record Requirement, path : String, version : SemanticVersion do
+  record Requirement, path : String, version : SemanticVersion, short_name : String? = nil do
     def to_s(io : IO) : Nil
       io << "require " << path << " v" << version
+      io << " as " << short_name if short_name
     end
   end
 
@@ -66,17 +75,24 @@ module Iyi::Mod
           end
           module_path = check_path(fields[1], source, line_number)
         when "require"
-          unless fields.size == 3
-            raise ModError.new("#{source}:#{line_number}: `require` takes a path and a version, as `require <path> v1.2.3`")
+          unless fields.size == 3 || (fields.size == 5 && fields[3] == "as")
+            raise ModError.new("#{source}:#{line_number}: `require` takes a path and a version, as `require <path> v1.2.3`, and a short name after `as` if it wants one")
           end
           path = check_path(fields[1], source, line_number)
           version = check_version(fields[2], source, line_number)
+          short_name = nil
+          if fields.size == 5
+            short_name = check_short_name(fields[4], source, line_number)
+            if taken = requirements.find { |other| other.short_name == short_name }
+              raise ModError.new("#{source}:#{line_number}: `#{short_name}` already names #{taken.path}; a short name is one module's")
+            end
+          end
           begin
             ModFile.check_major(path, version)
           rescue ex : ModError
             raise ModError.new("#{source}:#{line_number}: #{ex.message}")
           end
-          requirements << Requirement.new(path, version)
+          requirements << Requirement.new(path, version, short_name)
         when "replace"
           unless fields.size == 4 && fields[2] == "=>"
             raise ModError.new("#{source}:#{line_number}: `replace` takes a path and a directory, as `replace <path> => ../dir`")
@@ -103,6 +119,13 @@ module Iyi::Mod
     # hand-written `require` line would draw.
     def self.check_module_path(path : String) : String
       check_path(path, "", 0)
+    rescue ex : ModError
+      raise ModError.new(ex.message.to_s.lchop(":0: "))
+    end
+
+    # Checks a short name as it is given on a command line, `--as web`.
+    def self.check_module_short_name(name : String) : String
+      check_short_name(name, "", 0)
     rescue ex : ModError
       raise ModError.new(ex.message.to_s.lchop(":0: "))
     end
@@ -150,9 +173,10 @@ module Iyi::Mod
     # person wrote, comments and order and blank lines, stays as it was:
     # the manifest is theirs, and a tool that rewrote it whole would turn
     # every `get` into a diff of the file.
-    def self.with_requirement(text : String, path : String, version : SemanticVersion) : String
+    def self.with_requirement(text : String, path : String, version : SemanticVersion, short_name : String? = nil) : String
       newline = text.includes?("\r\n") ? "\r\n" : "\n"
       line = "require #{path} v#{version}"
+      line += " as #{short_name}" if short_name
       lines = text.split(newline)
       # A trailing newline leaves an empty last element; it is put back.
       ended = !lines.empty? && lines.last.empty?
@@ -164,7 +188,9 @@ module Iyi::Mod
         last_require = index
         next unless fields[1]? == path
         indent = raw[0, raw.size - raw.lstrip.size]
-        lines[index] = indent + line
+        # A short name already on the line stays, unless another was given.
+        kept = !short_name && fields[3]? == "as" && (name = fields[4]?) ? " as #{name}" : ""
+        lines[index] = indent + line + kept
         return lines.join(newline) + (ended ? newline : "")
       end
       if at = last_require
@@ -199,6 +225,20 @@ module Iyi::Mod
         raise ModError.new("#{source}:#{line_number}: '#{path}' is not a module path; a path is lower-case segments joined by `/`, with `.` and `-` allowed inside a segment")
       end
       path
+    end
+
+    # A short name: one lower-case segment, as a module path's first segment
+    # is spelled, and never `std`, which is iyi's own library in every file.
+    def self.check_short_name(name : String, source : String, line_number : Int32) : String
+      ok = !name.empty? && name[0].ascii_lowercase? &&
+           name.each_char.all? { |c| c.ascii_lowercase? || c.ascii_number? || c == '_' }
+      unless ok
+        raise ModError.new("#{source}:#{line_number}: '#{name}' is not a short name; one is a single lower-case word, as `web` or `json_x`")
+      end
+      if name == "std"
+        raise ModError.new("#{source}:#{line_number}: `std` is iyi's standard library in every file, and cannot name a requirement")
+      end
+      name
     end
 
     # A replacement's target: a directory, spelled so it cannot be read as

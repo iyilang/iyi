@@ -6,6 +6,7 @@
 #     iyi get example.com/someone/lib@v1.2.0   # that version, up or down
 #     iyi get -u                               # every requirement, latest
 #     iyi get -u --check                       # which are behind; exit 1 if any
+#     iyi get example.com/someone/lib --as lib # and a short name for it
 #
 # The manifest stays the person's: the one `require` line is rewritten in
 # place or appended, and nothing else in the file moves. Nothing is written
@@ -22,6 +23,7 @@ class Iyi::Command
   private def get
     upgrade_all = false
     check_only = false
+    short_name = nil
     wanted = [] of String
     while option = options.shift?
       case option
@@ -32,6 +34,8 @@ class Iyi::Command
         upgrade_all = true
       when "--check"
         check_only = true
+      when "--as"
+        short_name = options.shift? || abort!("get: `--as` takes a short name, as `--as web`", :USAGE_ERROR)
       when .starts_with?('-')
         abort! "get: unknown flag #{option}", :USAGE_ERROR
       else
@@ -42,6 +46,9 @@ class Iyi::Command
     if wanted.empty? && !upgrade_all
       abort! "get takes a module path, as `#{Command.program_name} get example.com/someone/lib`, " \
              "or `-u` for every requirement at its latest release", :USAGE_ERROR
+    end
+    if short_name && wanted.size != 1
+      abort! "get: `--as` names one requirement, and this get names #{wanted.size}", :USAGE_ERROR
     end
     if upgrade_all && !wanted.empty?
       abort! "get: `-u` brings every requirement up to date and takes no path; " \
@@ -101,8 +108,14 @@ class Iyi::Command
         exit(behind > 0 ? 1 : 0)
       end
 
+      if name = short_name
+        Mod::ModFile.check_module_short_name(name)
+        if (taken = root.requirements.find { |r| r.short_name == name }) && taken.path != chosen.first[0]
+          raise Mod::ModError.new("`#{name}` already names #{taken.path}")
+        end
+      end
       chosen.each do |(path, version)|
-        text = Mod::ModFile.with_requirement(text, path, version)
+        text = Mod::ModFile.with_requirement(text, path, version, short_name)
       end
       updated = Mod::ModFile.parse(text, manifest_path)
 
@@ -165,7 +178,7 @@ class Iyi::Command
 
   private def get_usage
     <<-USAGE
-    Usage: #{Command.program_name} get [--check] PATH[@VERSION]...
+    Usage: #{Command.program_name} get [--check] PATH[@VERSION]... [--as NAME]
            #{Command.program_name} get [--check] -u
 
     Add a requirement to iyi.mod, or move one: PATH at its latest release,
@@ -178,6 +191,10 @@ class Iyi::Command
     checkouts are fetched into the cache and recorded in iyi.sum, and only
     then is iyi.mod written - one line rewritten or added, nothing else
     touched. Run it where iyi.mod is.
+
+    `--as NAME` gives the one PATH a short name this project's files write
+    in its place: `iyi get github.com/someone/web --as web` makes
+    `using web/dsl` the module `github.com/someone/web/dsl`.
 
     `--check` says what the same `get` would change - `get -u --check`
     lists every requirement behind its latest release - from the tags

@@ -26,6 +26,13 @@
 # nothing imports is removed, unless it raises a version another module
 # pulls in; `iyi.sum` loses the versions nothing builds; `--check` writes
 # nothing and exits 1; and an import no repository provides is refused.
+#
+# Then short names: `require <path> <version> as <name>` - written by
+# `get --as`, kept by `get -u`, counted by `tidy` - lets a file write
+# `using web` for the package, and a `using` alone imports what it names.
+# A package's own short names are its files', whatever its consumer calls
+# the same word; a short name that is also the project's own directory,
+# or is not a word, or is `std`, is refused by name.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -303,6 +310,53 @@ elif ! cmp -s iyi.mod iyi.mod.before; then
 else
   echo "  refused, naming every prefix tried, iyi.mod untouched"
 fi
+
+step "a short name: iyi.mod writes the path once, files write the name"
+mkdir -p "$WORK/sapp" && cd "$WORK/sapp" || exit 1
+printf 'module example.test/user/sapp\n' > iyi.mod
+"$IYI" get example.test/user/liba@v1.1.0 --as web > short1.log 2>&1 || { fail "get --as failed"; cat short1.log; }
+grep -qx "require example.test/user/liba v1.1.0 as web" iyi.mod || fail "get --as wrote: $(grep require iyi.mod)"
+# One line: the `using` imports what it names, under its short name.
+printf 'using web\n\nputs greeting\n' > main.iyi
+"$IYI" run main.iyi > short2.log 2>&1 || { fail "the short name did not build"; cat short2.log; }
+grep -q "liba 1.1.0" short2.log || fail "the short-named program ran '$(cat short2.log)'"
+"$IYI" get -u > short3.log 2>&1 || { fail "get -u failed"; cat short3.log; }
+grep -qx "require example.test/user/liba v1.3.0 as web" iyi.mod || fail "get -u lost the short name: $(grep require iyi.mod)"
+# Whatever else tidy would do - -u left a sum entry behind - it must not
+# take the line a short name imports for unused.
+"$IYI" mod tidy --check > short4.log 2>&1
+grep -q "remove example.test/user/liba" short4.log && fail "tidy took the short-named line for unused: $(cat short4.log)"
+[ "$status" -eq 0 ] && echo "  get --as wrote it, using web built, -u kept it, tidy counted it"
+
+step "a package's short names are its own"
+mkrepo "$WORK/work/libs"
+# libs calls liba `a`; the app below calls libb `a`. Each file means its
+# own manifest's `a`.
+printf 'module example.test/user/libs\nrequire example.test/user/liba v1.1.0 as a\n' > "$WORK/work/libs/iyi.mod"
+printf 'module libs\n\nusing a\n\npub def relay : String\n  greeting\nend\n' > "$WORK/work/libs/libs.iyi"
+git -C "$WORK/work/libs" add -A && git -C "$WORK/work/libs" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libs"
+(cd "$WORK" && publish libs v1.0.0)
+mkdir -p "$WORK/papp" && cd "$WORK/papp" || exit 1
+printf 'module example.test/user/papp\nrequire example.test/user/libs v1.0.0\nrequire example.test/user/libb v1.0.0 as a\n' > iyi.mod
+printf 'using example.test/user/libs\nusing a\n\nputs relay\nputs number\n' > main.iyi
+"$IYI" run main.iyi > pkgshort.log 2>&1 || { fail "a package's own short name did not build"; cat pkgshort.log; }
+grep -q "liba 1.1.0" pkgshort.log && grep -q "^7$" pkgshort.log || fail "the two a's crossed: $(cat pkgshort.log)"
+[ "$status" -eq 0 ] && echo "  libs' a is liba, the app's a is libb, and both built"
+
+step "a short name that is not one is refused by name"
+cd "$WORK/sapp" || exit 1
+mkdir -p web && printf 'module web\n' > web.iyi
+"$IYI" run main.iyi > clash.log 2>&1
+if [ $? -eq 0 ] || ! grep -q "names two modules: \`web\` is iyi.mod's short name for example.test/user/liba" clash.log; then
+  fail "a short name that is also a local module was not refused: $(cat clash.log)"
+else
+  echo "  a short name that is also this project's module: refused"
+fi
+rm -rf web web.iyi
+refused "an upper-case short name" "is not a short name" example.test/user/libb --as Web
+refused "std as a short name" "\`std\` is iyi's standard library" example.test/user/libb --as std
+refused "a short name already taken" "\`web\` already names example.test/user/liba" example.test/user/libb --as web
 
 echo
 if [ "$status" -eq 0 ]; then

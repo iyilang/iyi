@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,503 lines, of which 3,509 are the library held to the 3,734 ceiling (5,031 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 116,324 lines, none of it written in iyi |
+| compiler | 116,466 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 116,324 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 116,466 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,503-line own prelude + 40,690 in std |
 | Specs | 21,146 lines | 11,946 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4354,6 +4354,24 @@ the whole path as the repository, so every `/v2` pointed at a
 nothing could reach. A `require` pairing a path with another major's
 version is refused naming the path that version belongs to, and a plain
 path's `latest` never crosses into the repository's v2 tags.
+
+**A short name for a requirement.** `require
+github.com/sdogruyol/iyi-web v0.1.0 as web` makes `web/dsl` the module
+`github.com/sdogruyol/iyi-web/dsl` in this project's files: the path is
+identity and is written once, in the manifest, and the files write the
+name - `using web/dsl`, one line with the rule above. Go writes the full
+path in every file's import and qualifies with the package's own name;
+here the project chooses the name, so two packages' `json` are two names
+and the import-alias question has its answer where the requirement is. The
+name is rewritten to the path before anything resolves, so a module is one
+module however a file spelled it. A package's own short names are its
+files', from its manifest, never its consumer's. A short name that is also
+the project's own directory is refused where it is written, since which of
+the two `web/routes` meant would be a rule nobody could see from the line;
+so are `std`, a name that is not one lower-case word, and a name given
+twice. `iyi get PATH --as web` writes one, `get -u` keeps it and `tidy`
+counts what it imports. It travels to every verb in the same prefix table,
+as a row `@web` no import can begin with.
 
 **`replace` builds a module from a directory.** `replace <path> =>
 ../dir` in the manifest beside the entry file makes every build - and

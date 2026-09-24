@@ -188,7 +188,9 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       node.raise "can't import dynamically"
     end
 
-    path = node.path.join('/')
+    written = node.path.join('/')
+    path = iyi_expand_short_name(node, written)
+    node.path = path.split('/') unless path == written
     location = node.location
     relative_to = location.try &.original_filename
 
@@ -385,6 +387,35 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   @iyi_package_stack = [] of {String, String}
+  @iyi_package_short_names = {} of String => Array({String, String})
+
+  # iyi: a short name at the front of an import or a `using` (III.7):
+  # `require github.com/sdogruyol/iyi-web v0.1.0 as web` makes `web/dsl`
+  # the module `github.com/sdogruyol/iyi-web/dsl`. Rewritten before
+  # anything resolves, so the module is one module under its path however
+  # a file spelled it. Inside a package the names are the package's own,
+  # from its manifest; everywhere else the program's.
+  #
+  # A short name that is also this project's own directory would make
+  # `web/routes` mean two files, and which one won would be a rule nobody
+  # could see from the line. It is refused where it is written.
+  private def iyi_expand_short_name(node : ASTNode, written : String) : String
+    table =
+      if current = @iyi_package_stack.last?
+        @iyi_package_short_names[current[1]] ||= Mod::Installer.short_names_in(current[1])
+      else
+        @program.iyi_mod_table
+      end
+    expanded = Mod::Installer.expand(written, table)
+    return written if expanded == written
+    if @iyi_package_stack.empty? && (local = resolve_import(written))
+      name = written.partition('/')[0]
+      node.raise "`#{written}` names two modules: `#{name}` is iyi.mod's short name for " \
+                 "#{expanded.rchop("/#{written.partition('/')[2]}")}, and #{Iyi.relative_filename(local)} " \
+                 "is this project's own. Rename the short name, or the directory"
+    end
+    expanded
+  end
 
   private def raise_at_import(message : String) : NoReturn
     raise Error.new(message)

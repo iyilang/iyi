@@ -520,7 +520,9 @@ example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
 writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
 fetched and recorded in `iyi.sum` before the line is written. `iyi get -u`
 brings every requirement to its latest release (`--check` lists which
-are behind, writing nothing), `iyi mod tidy` adds
+are behind, writing nothing), `iyi get PATH --as web` gives it a short
+name so a file writes `using web/dsl` rather than the whole path - one
+line, since a `using` imports what it names - `iyi mod tidy` adds
 what the source imports and removes what it does not, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
 project while both are being written. `bench/init_project.sh` holds the claim that all four files are

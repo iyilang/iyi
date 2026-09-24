@@ -131,10 +131,24 @@
   `LIB` and `PATH`. Run that way on a Windows machine, the two arms
   answered the same four rows. What Windows still does not run: the
   daemon's gates (`iyi-daemon.exe` does not build there),
-  `sandbox_story.sh` (wasi-sdk), `gc_race.py` (Go), and
-  `concurrent_mark`, whose mark beside the program Windows does not have.
+  `sandbox_story.sh` - the Windows compiler's LLVM has no WebAssembly
+  back end (Fixed, below) - and `concurrent_mark`, whose mark beside the
+  program Windows does not have.
 
 ### Fixed
+
+- **`--target wasm32-wasi` on Windows said the compiler had a bug.** The
+  compiler there links Crystal's own Windows LLVM package, whose back ends
+  are X86 and AArch64, and asking for WebAssembly raised a bare exception
+  from LLVM's set-up that the command reported as "you've found a bug in
+  the iyi compiler", stack trace and all. It is a property of the build:
+  a target whose back end is not in the linked LLVM is refused by name -
+  "wasm32-unknown-wasi needs LLVM's WebAssembly back end, and the LLVM
+  this compiler was built with has only x86, aarch64" - for every
+  architecture the compiler knows. `bench/verbs_exercise.sh` asks it on
+  Windows, where the compiler before this refused with the trace and the
+  case fails. It is also why `sandbox_story.sh`, which builds for
+  wasm32-wasi, cannot run from a Windows compiler.
 
 - **A mark's helpers could find the mark over before it began.** The
   collector turned the generation that wakes the helpers and only then,

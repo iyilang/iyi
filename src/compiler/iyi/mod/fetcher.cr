@@ -18,6 +18,7 @@ module Iyi::Mod
     def self.checkout(path : String, version : SemanticVersion) : String
       target = cache_target(path, version)
       return target if File.exists?(File.join(target, "iyi.mod"))
+      ModFile.check_major(path, version)
 
       remote = remote_for(path)
       tag = "v#{version}"
@@ -82,6 +83,11 @@ module Iyi::Mod
         rescue ArgumentError
         end
       end
+      # Only the versions this path can have: its suffix's major, or v0 and
+      # v1 for a path without one. The repository's v2 tags are
+      # `<path>/v2`'s, and a `get` of the plain path must not cross into them.
+      _, major = ModFile.split_major(path)
+      found.select! { |version| major ? version.major == major : version.major <= 1 }
       found.sort!
     end
 
@@ -93,17 +99,21 @@ module Iyi::Mod
       versions = self.versions(path)
       if versions.empty?
         raise ModError.new(
-          "#{path} has no version at #{remote_for(path)}: no tag spelled `v1.2.3`. " \
+          "#{path} has no version at #{remote_for(path)}: no tag spelled " \
+          "`#{(major = ModFile.split_major(path)[1]) ? "v#{major}.x.y" : "v1.2.3"}`. " \
           "A version is a git tag; its author tags one before anything can require it.")
       end
       versions.reverse.find { |version| version.prerelease.identifiers.empty? } || versions.last
     end
 
+    # The repository *path* is fetched from: a `/vN` suffix is a major
+    # version of the repository without it, not a repository of its own.
     def self.remote_for(path : String) : String
+      repository, _ = ModFile.split_major(path)
       if mirror = ENV["IYI_MOD_MIRROR"]?
-        File.join(mirror, path)
+        File.join(mirror, repository)
       else
-        "https://#{path}.git"
+        "https://#{repository}.git"
       end
     end
 

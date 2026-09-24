@@ -158,7 +158,9 @@ class Iyi::Command
     if version.empty?
       raise Mod::ModError.new("'#{spec}' names no version after `@`; write `@v1.2.3` or `@latest`")
     end
-    {path, Mod::ModFile.check_module_version(version)}
+    parsed = Mod::ModFile.check_module_version(version)
+    Mod::ModFile.check_major(path, parsed)
+    {path, parsed}
   end
 
   private def get_usage

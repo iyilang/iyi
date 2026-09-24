@@ -144,9 +144,34 @@ grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's s
 "$IYI" run use.iyi > run2.log 2>&1 || { fail "the program did not build after -u"; cat run2.log; }
 grep -q "liba 1.3.0" run2.log || fail "after -u the program ran '$(cat run2.log)'"
 
+step "a major version past 1 is the same repository under a /vN path"
+# liba's repository publishes v2.0.0, whose manifest names the module
+# `example.test/user/liba/v2`. The plain path must not cross into it, the
+# suffixed one is fetched from the same repository, and a line that pairs
+# a path with another major's version is refused naming the right path.
+printf 'module example.test/user/liba/v2\n' > "$WORK/work/liba/iyi.mod"
+sed -i.bak 's/1.3.0/2.0.0/' "$WORK/work/liba/liba.iyi" && rm -f "$WORK/work/liba/liba.iyi.bak"
+git -C "$WORK/work/liba" commit -qam five && (cd "$WORK" && publish liba v2.0.0)
+"$IYI" get -u --check > major-check.log 2>&1 || fail "the plain path saw v2.0.0 as its own: $(cat major-check.log)"
+mkdir -p "$WORK/vapp"
+printf 'module example.test/user/vapp\n' > "$WORK/vapp/iyi.mod"
+printf 'import example.test/user/liba/v2\nusing example.test/user/liba/v2::{greeting}\nputs greeting\n' > "$WORK/vapp/main.iyi"
+(cd "$WORK/vapp" && "$IYI" get example.test/user/liba/v2) > major.log 2>&1 || { fail "get of the /v2 path failed"; cat major.log; }
+grep -q "added example.test/user/liba/v2 v2.0.0" major.log || fail "the /v2 path got: $(cat major.log)"
+(cd "$WORK/vapp" && "$IYI" run main.iyi) > major-run.log 2>&1 || { fail "the /v2 program did not build"; cat major-run.log; }
+grep -q "liba 2.0.0" major-run.log || fail "the /v2 program ran '$(cat major-run.log)'"
+refused "a plain path at a v2 version" "is example.test/user/liba/v2: a major version past 1 is its own module path" \
+  example.test/user/liba@v2.0.0
+printf 'module example.test/user/wapp\nrequire example.test/user/liba/v2 v1.1.0\n' > "$WORK/vapp/iyi.mod"
+(cd "$WORK/vapp" && "$IYI" run main.iyi) > major-bad.log 2>&1
+if [ $? -eq 0 ] || ! grep -q "is major version 2, and v1.1.0 is not; v1.1.0 is example.test/user/liba's" major-bad.log; then
+  fail "a /v2 line at a v1 version was not refused by name: $(cat major-bad.log)"
+fi
+[ "$status" -eq 0 ] && echo "  the plain path stays on v1; /v2 fetched from liba's repository at v2.0.0; mismatched lines refused"
+
 step "what get refuses leaves iyi.mod as it was"
-refused "a version that is not a tag" "has no v9.9.9; its versions are v1.0.0, v1.1.0, v1.2.0-rc.1, v1.3.0" \
-  example.test/user/liba@v9.9.9
+refused "a version that is not a tag" "has no v1.9.9; its versions are v1.0.0, v1.1.0, v1.2.0-rc.1, v1.3.0" \
+  example.test/user/liba@v1.9.9
 refused "a path that is no repository" "cannot list the versions of example.test/user/nope" \
   example.test/user/nope
 refused "a version without its v" "does not start with \`v\`" example.test/user/liba@1.0.0

@@ -70,7 +70,13 @@ module Iyi::Mod
             raise ModError.new("#{source}:#{line_number}: `require` takes a path and a version, as `require <path> v1.2.3`")
           end
           path = check_path(fields[1], source, line_number)
-          requirements << Requirement.new(path, check_version(fields[2], source, line_number))
+          version = check_version(fields[2], source, line_number)
+          begin
+            ModFile.check_major(path, version)
+          rescue ex : ModError
+            raise ModError.new("#{source}:#{line_number}: #{ex.message}")
+          end
+          requirements << Requirement.new(path, version)
         when "replace"
           unless fields.size == 4 && fields[2] == "=>"
             raise ModError.new("#{source}:#{line_number}: `replace` takes a path and a directory, as `replace <path> => ../dir`")
@@ -106,6 +112,36 @@ module Iyi::Mod
       check_version(spelling, "", 0)
     rescue ex : ModError
       raise ModError.new(ex.message.to_s.lchop(":0: "))
+    end
+
+    # The repository a module path lives in, and the major version the
+    # path names: `example.com/lib/v2` is `{"example.com/lib", 2}`, and a
+    # path without a `vN` last segment names none. Go's rule, and SPEC.md
+    # III.7's: a major version past 1 is a different module, spelled by a
+    # suffix, in the same repository, so v1 and v2 can both be required.
+    def self.split_major(path : String) : {String, Int32?}
+      repository, slash, last = path.rpartition('/')
+      return {path, nil} if slash.empty? || last.size < 2 || last[0] != 'v'
+      digits = last[1..]
+      return {path, nil} unless digits.each_char.all?(&.ascii_number?) && digits[0] != '0'
+      major = digits.to_i?
+      return {path, nil} unless major && major >= 2
+      {repository, major}
+    end
+
+    # Whether *version* can be *path*'s: the major the suffix names, or 0
+    # and 1 for a path with no suffix. Refused with the path that version
+    # belongs to, which is the line the person meant to write.
+    def self.check_major(path : String, version : SemanticVersion) : Nil
+      repository, major = split_major(path)
+      if major
+        return if version.major == major
+        raise ModError.new("#{path} is major version #{major}, and v#{version} is not; " \
+                           "v#{version} is #{version.major <= 1 ? repository : "#{repository}/v#{version.major}"}'s")
+      end
+      return if version.major <= 1
+      raise ModError.new("v#{version} of #{path} is #{path}/v#{version.major}: " \
+                         "a major version past 1 is its own module path, and v0 and v1 are this one's")
     end
 
     # *text* with *path* required at *version*: its own `require` line

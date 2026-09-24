@@ -436,7 +436,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     @program.iyi_mod_table.each do |(prefix, _)|
       inner =
         if written == prefix
-          prefix.rpartition('/')[2]
+          # The package's own name, which a `/vN` suffix is not: the root
+          # module of `example.com/lib/v2` is `lib.iyi`, as Go names it.
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
         elsif written.starts_with?("#{prefix}/")
           written[(prefix.size + 1)..]
         else

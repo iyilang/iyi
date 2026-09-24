@@ -368,7 +368,9 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     @program.iyi_mod_table.each do |(prefix, checkout)|
       inner =
         if path == prefix
-          prefix.rpartition('/')[2]
+          # The package's own name, which a `/vN` suffix is not: the root
+          # module of `example.com/lib/v2` is `lib.iyi`, as Go names it.
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
         elsif path.starts_with?("#{prefix}/")
           path[(prefix.size + 1)..]
         else

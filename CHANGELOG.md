@@ -429,6 +429,17 @@ one. `std` is 68 modules and 40,690 lines.
 
 ### Fixed
 
+- **A module path's `/v2` named a repository nobody publishes.** SPEC.md III.7
+  says a major version past 1 is its own module under a path suffix, in the
+  same repository; the fetcher took `example.com/lib/v2` as the repository
+  `example.com/lib/v2.git`, and the import of its root module looked for
+  `v2.iyi`. The suffix is read now: the repository is `example.com/lib`, the
+  tag `v2.x.y`, the root module `lib.iyi`. A `require` pairing a path with
+  another major's version is refused naming the path it belongs to, and
+  `iyi get example.com/lib` never picks the repository's v2 tags.
+  `bench/packages_get.sh` publishes a v2 in the same repository and builds
+  against it.
+
 - **A Windows program whose threads failed while collections ran could
   never end.** `__iyi_exit` was `ExitProcess`, which stops the other
   threads and then runs every DLL's detach and the C runtime's

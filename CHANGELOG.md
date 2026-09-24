@@ -89,6 +89,17 @@
 
 ### Changed
 
+- **A TERM from outside is measured on Windows.** `std_signal`'s gate
+  sent the exercise TERM from the shell on Linux and darwin and said
+  "unmeasured on Windows", where TERM is the console being closed. It
+  closes one now the way a person does: the exercise runs in a hidden
+  console of its own, and once it is waiting the gate posts WM_CLOSE to
+  that console's window, which Windows delivers as CTRL_CLOSE_EVENT - the
+  waiting fiber takes TERM and the program ends on its last line, 10
+  runs of 10. With the close read as INT the waiter never wakes and
+  Windows ends the process at its deadline with STATUS_CONTROL_C_EXIT,
+  which the gate names.
+
 - **Two more gates measure their floor on Windows, and five read it one
   way.** `arena_exercise` said its allocation floor was "not measured"
   there and `std_dependency_floor` "with 1 arm unread": both read the

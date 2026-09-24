@@ -135,22 +135,71 @@ external() { # external <name>
   return "$code"
 }
 
+# Windows' TERM is its console being closed, and a person closes it: the
+# window's close button is WM_CLOSE to the console window, and Windows turns
+# that into CTRL_CLOSE_EVENT for every process attached to it. So the program
+# is started in a console of its own, hidden, and once it says it is waiting
+# this attaches to that console long enough to find its window and posts
+# the close. Prints the program's exit status as Windows spells it and
+# answers 0 when that was 0; a program still there ten seconds after the
+# close - Windows' own deadline for one is five - is killed and answers 124.
+console_close() { # console_close <name>
+  "$PY" - "$WORK/$1.exe" "$WORK/$1.out" <<'PY'
+import ctypes, subprocess, sys, time
+from ctypes import wintypes
+exe, out = sys.argv[1], sys.argv[2]
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+u32 = ctypes.WinDLL("user32", use_last_error=True)
+k32.GetConsoleWindow.restype = wintypes.HWND
+u32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+si = subprocess.STARTUPINFO()
+si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+si.wShowWindow = 0
+with open(out, "w") as f:
+    p = subprocess.Popen([exe, "external"], stdout=f, stderr=subprocess.STDOUT,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=si)
+deadline = time.time() + 10
+while time.time() < deadline and "ready" not in open(out).read():
+    time.sleep(0.1)
+if "ready" not in open(out).read():
+    p.kill(); print("  never said ready"); sys.exit(125)
+k32.FreeConsole()
+attached = k32.AttachConsole(p.pid)
+hwnd = k32.GetConsoleWindow() if attached else None
+k32.FreeConsole()
+if not hwnd:
+    p.kill(); print("  no window for the program's console (attach %s, error %d)" % (bool(attached), ctypes.get_last_error())); sys.exit(125)
+u32.PostMessageW(hwnd, 0x0010, 0, 0)
+try:
+    code = p.wait(timeout=10) & 0xFFFFFFFF
+except subprocess.TimeoutExpired:
+    p.kill(); print("  still running ten seconds after the close"); sys.exit(124)
+print("  exit status 0x%08x" % code)
+sys.exit(0 if code == 0 else 1)
+PY
+}
+
 echo
 echo "== a TERM from outside"
-if [ "$WINDOWS" -eq 1 ]; then
-  # A console control event is not something one process sends another
-  # from a shell; the exercise's own Ctrl-Break above is Windows' proof.
-  echo "  unmeasured on Windows: TERM is its console's close event"
+if [ "$WINDOWS" -eq 1 ] && [ -z "$PY" ]; then
+  echo "  no python on this machine to close the program's console, so TERM from outside is unmeasured"
 else
-  external signal-plain
+  if [ "$WINDOWS" -eq 1 ]; then
+    said="$(console_close signal-plain)"
+  else
+    external signal-plain
+  fi
   code=$?
   if [ "$code" -ne 0 ]; then
     echo "  exited $code"
+    [ "$WINDOWS" -eq 1 ] && echo "$said"
     status=1
   elif ! grep -q "stopped on TERM" "$WORK/signal-plain.out"; then
     echo "  exited 0 without saying why:"
     sed 's/^/    /' "$WORK/signal-plain.out"
     status=1
+  elif [ "$WINDOWS" -eq 1 ]; then
+    echo "  its console closed, the waiting fiber took TERM and the process ended on its last line"
   else
     echo "  the waiting fiber took TERM and the process ended on its last line"
   fi
@@ -204,6 +253,27 @@ else
         status=1
       else
         echo "  with no handler, TERM kills the process (exit $code)"
+      fi
+    fi
+  else
+    # A close read as INT: the waiter for TERM never wakes, the handler
+    # holds the close as it must, and Windows ends the process at its
+    # deadline with STATUS_CONTROL_C_EXIT rather than the program's 0.
+    if ! patched closeasint 'signal = event <= 1 ? 2 : 15' 'signal = 2'; then
+      echo "  the patch did not apply"
+      status=1
+    elif build closeasint "$WORK/closeasint-std${PSEP}$IYI_PATH"; then
+      said="$(console_close closeasint)"
+      code=$?
+      if [ "$code" -eq 0 ] || grep -q "stopped on TERM" "$WORK/closeasint.out"; then
+        echo "  the program took TERM from a close that it read as INT"
+        status=1
+      elif ! printf '%s\n' "$said" | grep -q "exit status 0xc000013a"; then
+        echo "  a close read as INT ended some other way than at Windows' deadline:"
+        echo "$said"
+        status=1
+      else
+        echo "  a close read as INT is never TERM: Windows ended the process at its deadline (STATUS_CONTROL_C_EXIT)"
       fi
     fi
   fi

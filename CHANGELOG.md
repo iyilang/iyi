@@ -14,6 +14,14 @@
   imports (`std/http` counts as `std/socket`, `std/json` not at all),
   `File` from the prelude, and the `@[Link]` libraries and `lib` functions
   it declares, inside a platform's `{% if %}` too.
+- **`iyi get PATH@main` and `@<commit>`: a commit no tag names.** It is
+  written as Go's pseudo-version, `v0.0.0-20260801120000-a1b2c3d4e5f6`
+  (`v1.2.4-0.<time>-<hash>` after v1.2.3): the commit's UTC time and hash
+  after the version tag behind it, so minimal version selection orders it
+  among the tags and a later release outbids it. A repository with no
+  version tag is got at its default branch, and `get -u` follows the
+  branch. The fetcher clones the history for one and refuses a line whose
+  time or base is not its commit's; a ref on a tagged commit is the tag.
 - **A short name for a requirement.** `require
   github.com/sdogruyol/iyi-web v0.1.0 as web` in `iyi.mod` - or `iyi get
   PATH --as web` - makes `web/dsl` mean `github.com/sdogruyol/iyi-web/dsl`
@@ -68,6 +76,11 @@
   `--check` writes nothing and exits 1 when a change is due. The source is
   every `.iyi` file under the manifest, tests included; a directory with its
   own `iyi.mod`, `lib/` and hidden directories are not.
+
+### Changed
+
+- `iyi get -u` never moves a requirement down: one past the latest release -
+  a pseudo-version, or a pre-release of the next - stays where it is.
 
 ## 0.14.1 — 2026-09-24
 

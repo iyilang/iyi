@@ -162,7 +162,7 @@ class Iyi::Command
       rescue Mod::ModError
       end
     end
-    raise Mod::ModError.new("no module provides #{imported}: none of #{tried.join(", ")} is a repository with a version tag")
+    raise Mod::ModError.new("no module provides #{imported}: none of #{tried.join(", ")} is a repository")
   end
 
   # The `.iyi` files that are this module's source.

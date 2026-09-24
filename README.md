@@ -518,7 +518,9 @@ program that passes by exiting 0, run by `iyi test` with every other
 `*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
 example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
 writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
-fetched and recorded in `iyi.sum` before the line is written. `iyi get -u`
+fetched and recorded in `iyi.sum` before the line is written; `@main` or
+`@a1b2c3d` - or a repository with no tag at all - is written as that
+commit's pseudo-version. `iyi get -u`
 brings every requirement to its latest release (`--check` lists which
 are behind, writing nothing), `iyi get PATH --as web` gives it a short
 name so a file writes `using web/dsl` rather than the whole path - one

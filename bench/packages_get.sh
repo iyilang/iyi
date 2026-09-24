@@ -40,6 +40,13 @@
 # platform's `{% if %}`, a linked library - while a pure std import, and
 # what the package's tests import, are not reach; `mod reach` lists the
 # whole build's.
+#
+# Then commits no tag names: a repository with no version tag is got at
+# its default branch as `v0.0.0-<time>-<hash>`, and `-u` follows the
+# branch; `@main` after a tag is the pseudo-version above it, which `-u`
+# does not take back down to the tag; `@<commit>` of a tagged commit is
+# the tag; and a pseudo-version whose time or hash is not its commit's, or
+# a ref that is not there, is refused.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -411,6 +418,66 @@ grep -q "^example.test/user/libr v1.1.0: std/socket.*; links m; C LibM.cos" reac
 grep -q "libr v1.1.0 -> v1.2.0: no longer reaches std/socket.*; links m; C LibM.cos" reach4.log ||
   fail "what the upgrade stopped reaching was not said: $(cat reach4.log)"
 [ "$status" -eq 0 ] && echo "  new: nothing; v1.1.0 adds std/socket (through std/http), libm, LibM.cos; v1.2.0 drops them"
+
+step "a commit no tag names is a pseudo-version"
+# The committer times are fixed, so the order of the pseudo-versions is
+# the order of the commits and not of the seconds the gate ran in.
+at() { GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" git -C "$WORK/work/libt" "${@:2}"; }
+pseudo() { # pseudo <base> <rev>: the version iyi should write for <rev>
+  local stamp hash
+  stamp="$(TZ=UTC0 git -C "$WORK/work/libt" show -s --date=format-local:%Y%m%d%H%M%S --format=%cd "$2")"
+  hash="$(git -C "$WORK/work/libt" rev-parse "$2" | cut -c1-12)"
+  echo "$1$stamp-$hash"
+}
+push_main() { git -C "$WORK/work/libt" push -q "$WORK/mirror/example.test/user/libt" HEAD:refs/heads/main; }
+mkrepo "$WORK/work/libt"
+printf 'module example.test/user/libt\n' > "$WORK/work/libt/iyi.mod"
+printf 'module libt\n\npub def word : String\n  "one"\nend\n' > "$WORK/work/libt/libt.iyi"
+git -C "$WORK/work/libt" add -A && at "2026-03-01 10:00:00 +0300" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libt"
+git -C "$WORK/mirror/example.test/user/libt" symbolic-ref HEAD refs/heads/main
+push_main
+mkdir -p "$WORK/tapp" && cd "$WORK/tapp" || exit 1
+printf 'module example.test/user/tapp\n' > iyi.mod
+printf 'using example.test/user/libt\n\nputs word\n' > main.iyi
+one="$(pseudo v0.0.0- HEAD)"
+"$IYI" get example.test/user/libt > pseudo1.log 2>&1 || { fail "get of an untagged repository failed"; cat pseudo1.log; }
+[ "$(requires example.test/user/libt)" = "$one" ] || fail "an untagged repository was written as '$(requires example.test/user/libt)', not $one"
+[ "$("$IYI" run main.iyi 2>&1)" = "one" ] || fail "the pseudo-version did not build its commit"
+grep -q "example.test/user/libt $one s1:" iyi.sum || fail "iyi.sum has no entry for $one"
+sed -i.bak 's/"one"/"two"/' "$WORK/work/libt/libt.iyi" && rm -f "$WORK/work/libt/libt.iyi.bak"
+at "2026-03-02 10:00:00 +0300" commit -qam two && push_main
+two="$(pseudo v0.0.0- HEAD)"
+"$IYI" get -u > pseudo2.log 2>&1 || { fail "get -u on a pseudo-version failed"; cat pseudo2.log; }
+[ "$(requires example.test/user/libt)" = "$two" ] || fail "-u left libt at '$(requires example.test/user/libt)', not the branch's $two"
+[ "$("$IYI" run main.iyi 2>&1)" = "two" ] || fail "-u's pseudo-version did not build the branch's commit"
+[ "$status" -eq 0 ] && echo "  untagged: $one, then -u to $two, each building its commit"
+
+git -C "$WORK/work/libt" tag v0.1.0 && git -C "$WORK/work/libt" push -q "$WORK/mirror/example.test/user/libt" v0.1.0
+sed -i.bak 's/"two"/"three"/' "$WORK/work/libt/libt.iyi" && rm -f "$WORK/work/libt/libt.iyi.bak"
+at "2026-03-03 10:00:00 +0300" commit -qam three && push_main
+three="$(pseudo v0.1.1-0. HEAD)"
+"$IYI" get example.test/user/libt@main > pseudo3.log 2>&1 || { fail "get @main failed"; cat pseudo3.log; }
+[ "$(requires example.test/user/libt)" = "$three" ] || fail "@main after v0.1.0 was written as '$(requires example.test/user/libt)', not $three"
+[ "$("$IYI" run main.iyi 2>&1)" = "three" ] || fail "@main did not build the branch's commit"
+"$IYI" get -u > pseudo4.log 2>&1 || { fail "get -u past the latest tag failed"; cat pseudo4.log; }
+[ "$(requires example.test/user/libt)" = "$three" ] || fail "-u took $three back down to '$(requires example.test/user/libt)'"
+"$IYI" get "example.test/user/libt@$(git -C "$WORK/work/libt" rev-parse --short HEAD~1)" > pseudo5.log 2>&1 || { fail "get @<commit> failed"; cat pseudo5.log; }
+[ "$(requires example.test/user/libt)" = "v0.1.0" ] || fail "the commit v0.1.0 tags was written as '$(requires example.test/user/libt)'"
+[ "$status" -eq 0 ] && echo "  @main after v0.1.0: $three, kept by -u; the tagged commit is v0.1.0"
+
+cp iyi.mod iyi.mod.good
+# The time one second off: the hash is the commit's, and the line still lies.
+forged="$(echo "$three" | sed -E 's/-0\.([0-9]{13})[0-9]-/-0.\10-/')"
+[ "$forged" != "$three" ] || forged="$(echo "$three" | sed -E 's/-0\.([0-9]{13})[0-9]-/-0.\11-/')"
+sed -i.bak "s/v0.1.0\$/$forged/" iyi.mod && rm -f iyi.mod.bak iyi.sum
+if "$IYI" run main.iyi > forged.log 2>&1 || ! grep -q "is not that commit's version" forged.log; then
+  fail "a pseudo-version with the wrong time was not refused: $(cat forged.log)"
+else
+  echo "  a pseudo-version whose time is not its commit's: refused"
+fi
+cp iyi.mod.good iyi.mod
+refused "a ref that is not there" "has no \`nosuchbranch\`" example.test/user/libt@nosuchbranch
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -519,7 +519,9 @@ program that passes by exiting 0, run by `iyi test` with every other
 example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
 writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
 fetched and recorded in `iyi.sum` before the line is written. `iyi get -u`
-brings every requirement to its latest release. `bench/init_project.sh` holds the claim that all four files are
+brings every requirement to its latest release, and `replace
+example.com/someone/lib => ../lib` builds one from a directory beside the
+project while both are being written. `bench/init_project.sh` holds the claim that all four files are
 right the moment they land, on Linux and on Windows.
 
 ### An editor, in one stanza

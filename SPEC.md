@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,503 lines, of which 3,509 are the library held to the 3,734 ceiling (5,031 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 115,840 lines, none of it written in iyi |
+| compiler | 115,946 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 115,840 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 115,946 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,503-line own prelude + 40,690 in std |
 | Specs | 21,146 lines | 11,925 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4333,6 +4333,19 @@ checked out and `iyi.sum` has agreed - a `get` that fails leaves `iyi.mod`
 byte for byte. MVS can outbid what the line says, and `get` names the
 module that builds at another version than the one its line names.
 `bench/packages_get.sh` drives it against a mirror.
+
+**`replace` builds a module from a directory.** `replace <path> =>
+../dir` in the manifest beside the entry file makes every build - and
+`get`, `check`, the language server, which all resolve through one
+function - read that module from the directory instead of its tag: the
+library written beside the app that uses it, or a fork checked out to
+try. The directory has to hold the module, its own `iyi.mod` naming the
+same path, and is spelled `./`, `../` or absolute so it is never read as
+a module path. It is the program's decision alone: a `replace` in a
+dependency's manifest is read and ignored, as Go does, or a library could
+redirect its consumers' builds. And it is not a fact `iyi.sum` records:
+a directory somebody is editing would be refused at the next keystroke.
+iyi-web went into `lib/` as a copy because this was missing.
 
 What steps 1 and 2 do not do, said here: packages compile from
 source every build (their `.iyimod` story is step 5's, with signatures),

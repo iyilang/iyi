@@ -15,6 +15,16 @@
   that is not a tag is refused beside the versions that are, and a module
   MVS builds at another version than its line names is named.
   `bench/packages_get.sh` drives it against a mirror.
+- **`replace` in `iyi.mod`: a required module built from a directory.**
+  `replace example.com/someone/lib => ../lib` makes every verb - a build,
+  `get`, `check`, the language server - read the module from that directory
+  instead of its tag, wherever the graph reaches it; its edits build without
+  `iyi.sum` refusing them, since the sum records only what was fetched, and
+  the language server's results move when a file there does. The directory
+  must hold the module under the same path, a target is spelled `./`, `../`
+  or absolute, and a `replace` in a dependency's manifest is ignored, so a
+  library cannot redirect its consumers. iyi-web was copied into `lib/`
+  for want of this.
 
 ## 0.14.1 — 2026-09-24
 

@@ -1079,6 +1079,27 @@ module Iyi::Lsp
           info = File.info?(file)
           next unless info
           outside = outside &* prime &+ stable(file) &+ stamp_of(info)
+          # A `replace` builds a module from a directory that may sit
+          # outside the workspace - the library being written beside the
+          # app - and its files are part of every verdict that imports it.
+          # Unstamped, an edit there left each file's result "unchanged".
+          next unless ::Path[file].basename == Mod::Installer::MANIFEST
+          replacements = begin
+            Mod::ModFile.parse(File.read(file), file).replacements
+          rescue Mod::ModError
+            next
+          end
+          replacements.each_value do |target|
+            local = File.expand_path(target, File.dirname(file))
+            next unless Dir.exists?(local)
+            Dir.glob(::Path[local].to_posix.join("**", "*.iyi"), ::Path[local].to_posix.join("iyi.mod")) do |replaced|
+              replaced = fs_path(replaced)
+              next if ::Path[replaced].to_posix.to_s.includes?("/.")
+              if replaced_info = File.info?(replaced)
+                outside = outside &* prime &+ stable(replaced) &+ stamp_of(replaced_info)
+              end
+            end
+          end
         end
       end
 

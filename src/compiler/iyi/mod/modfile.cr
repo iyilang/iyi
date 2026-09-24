@@ -10,6 +10,16 @@
 #     require github.com/user/lib v1.2.0
 #     require github.com/other/dep v0.3.1
 #
+#     replace github.com/user/lib => ../lib
+#
+# `replace` builds a required module from a directory on this machine
+# instead of its tag: the module being written beside the one that uses
+# it, or a fork checked out to try. It is the program's own decision, so
+# only the manifest beside the entry file is obeyed; one in a dependency's
+# manifest is read and ignored, as Go does, or a library could redirect
+# its consumers' builds. The target is spelled as a directory - `./`,
+# `../` or absolute - so it can never be mistaken for a module path.
+#
 # `#` comments a line out. Versions are `vMAJOR.MINOR.PATCH` — the `v` is
 # part of the spelling because it is part of the git tag the fetcher asks
 # for, and a spelling that round-trips beats one that is reassembled.
@@ -27,8 +37,11 @@ module Iyi::Mod
   class ModFile
     getter path : String
     getter requirements : Array(Requirement)
+    # Module path to the directory it builds from, as written.
+    getter replacements : Hash(String, String)
 
-    def initialize(@path : String, @requirements : Array(Requirement))
+    def initialize(@path : String, @requirements : Array(Requirement),
+                   @replacements = {} of String => String)
     end
 
     # Parses manifest text. *source* names the file in errors, because a
@@ -36,6 +49,7 @@ module Iyi::Mod
     def self.parse(text : String, source : String) : ModFile
       module_path = nil
       requirements = [] of Requirement
+      replacements = {} of String => String
 
       text.each_line.with_index(1) do |raw, line_number|
         line = raw.strip
@@ -57,8 +71,17 @@ module Iyi::Mod
           end
           path = check_path(fields[1], source, line_number)
           requirements << Requirement.new(path, check_version(fields[2], source, line_number))
+        when "replace"
+          unless fields.size == 4 && fields[2] == "=>"
+            raise ModError.new("#{source}:#{line_number}: `replace` takes a path and a directory, as `replace <path> => ../dir`")
+          end
+          path = check_path(fields[1], source, line_number)
+          if replacements.has_key?(path)
+            raise ModError.new("#{source}:#{line_number}: #{path} is already replaced; one directory builds it")
+          end
+          replacements[path] = check_directory(fields[3], source, line_number)
         else
-          raise ModError.new("#{source}:#{line_number}: `#{fields.first}` is not a directive; `module` and `require` are the two")
+          raise ModError.new("#{source}:#{line_number}: `#{fields.first}` is not a directive; `module`, `require` and `replace` are the three")
         end
       end
 
@@ -66,7 +89,7 @@ module Iyi::Mod
         raise ModError.new("#{source}: no `module` line; a manifest starts by saying whose it is")
       end
 
-      new(module_path, requirements)
+      new(module_path, requirements, replacements)
     end
 
     # Checks *path* by the manifest's own grammar, for a path that arrives
@@ -129,6 +152,17 @@ module Iyi::Mod
         raise ModError.new("#{source}:#{line_number}: '#{path}' is not a module path; a path is lower-case segments joined by `/`, with `.` and `-` allowed inside a segment")
       end
       path
+    end
+
+    # A replacement's target: a directory, spelled so it cannot be read as
+    # a module path - `./x`, `../x`, `/abs`, or on Windows `C:\x` and `C:/x`.
+    private def self.check_directory(target : String, source : String, line_number : Int32) : String
+      drive = target.size >= 3 && target[0].ascii_letter? && target[1] == ':' && target[2].in?('/', '\\')
+      unless target.starts_with?("./") || target.starts_with?("../") || target.starts_with?('/') ||
+             target == "." || target == ".." || drive
+        raise ModError.new("#{source}:#{line_number}: '#{target}' is not a directory; a replacement is spelled `./dir`, `../dir` or an absolute path, so it is never a module path")
+      end
+      target
     end
 
     private def self.check_version(spelling : String, source : String, line_number : Int32) : SemanticVersion

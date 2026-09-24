@@ -105,7 +105,9 @@ class Iyi::Command
         #
         #     require example.com/someone/lib v1.2.0
         #
-        # `iyi build` fetches what is required and writes iyi.sum beside this.
+        # and `replace example.com/someone/lib => ../lib` builds one from a
+        # directory instead of its tag. `iyi build` fetches what is required
+        # and writes iyi.sum beside this.
         module #{module_path}
         MOD
       "greet.iyi" => <<-IYI,

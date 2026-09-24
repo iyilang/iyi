@@ -22,23 +22,69 @@ module Iyi::Mod
       return [] of {String, String} unless File.file?(manifest_path)
 
       root = ModFile.parse(File.read(manifest_path), manifest_path)
+      table = resolve(entry_dir, root).map { |(selection, dir)| {selection.path, dir} }
+      # Longest prefix first, so the most specific module answers an import.
+      table.sort_by! { |(prefix, _)| -prefix.size }
+      table
+    end
+
+    # Every module *root*'s graph selects, with the directory it builds
+    # from: its checkout in the cache, or the directory the manifest in
+    # *dir* replaces it with. The one resolution every verb uses - a build,
+    # `get`, the language server - so a replacement means the same thing to
+    # each of them.
+    def self.resolve(dir : String, root : ModFile) : Array({Selection, String})
+      replaced = replaced_directories(dir, root)
+      manifests = {} of String => ModFile
       selections = Resolver.resolve(root) do |path, version|
-        Fetcher.manifest(path, version)
+        if local = replaced[path]?
+          manifests[path] ||= local_manifest(path, local, root.replacements[path])
+        else
+          Fetcher.manifest(path, version)
+        end
       end
 
       # Fact against policy, before anything is compiled: every selection's
       # checkout is hashed against `iyi.sum`, a mismatch is a refusal, and a
       # missing entry is recorded — the tool writes facts down (III.7 step 2).
-      Sum.check(entry_dir, selections) do |selection|
+      # A replaced module is none of that: it is a directory somebody is
+      # editing, and a hash of it would refuse the next keystroke.
+      fetched = selections.reject { |selection| replaced.has_key?(selection.path) }
+      Sum.check(dir, fetched) do |selection|
         Fetcher.checkout(selection.path, selection.version)
       end
 
-      table = selections.map do |selection|
-        {selection.path, Fetcher.checkout(selection.path, selection.version)}
+      selections.map do |selection|
+        {selection, replaced[selection.path]? || Fetcher.checkout(selection.path, selection.version)}
       end
-      # Longest prefix first, so the most specific module answers an import.
-      table.sort_by! { |(prefix, _)| -prefix.size }
-      table
+    end
+
+    # Each replacement's directory, made absolute against the manifest's
+    # own directory - `../lib` means beside the project, wherever the build
+    # was started from.
+    def self.replaced_directories(dir : String, root : ModFile) : Hash(String, String)
+      root.replacements.to_h do |path, target|
+        {path, File.expand_path(target, dir)}
+      end
+    end
+
+    # The manifest at a replacement's directory, which has to be the module
+    # it stands in for: a directory is not a module until its `iyi.mod`
+    # says whose it is, and a replacement pointed at the wrong checkout is
+    # the mistake this catches before any import resolves into it.
+    private def self.local_manifest(path : String, local : String, written : String) : ModFile
+      file = File.join(local, MANIFEST)
+      unless File.file?(file)
+        detail = Dir.exists?(local) ? "has no iyi.mod" : "does not exist"
+        raise ModError.new("replace #{path} => #{written}: #{local} #{detail}; " \
+                           "a replacement is a directory holding the module it replaces")
+      end
+      manifest = ModFile.parse(File.read(file), file)
+      unless manifest.path == path
+        raise ModError.new("replace #{path} => #{written}: #{file} says it is '#{manifest.path}'; " \
+                           "a replacement is the module it replaces, under the same path")
+      end
+      manifest
     end
   end
 end

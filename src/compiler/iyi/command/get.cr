@@ -82,12 +82,8 @@ class Iyi::Command
       end
       updated = Mod::ModFile.parse(text, manifest_path)
 
-      selections = Mod::Resolver.resolve(updated) do |path, version|
-        Mod::Fetcher.manifest(path, version)
-      end
-      Mod::Sum.check(dir, selections) do |selection|
-        Mod::Fetcher.checkout(selection.path, selection.version)
-      end
+      resolved = Mod::Installer.resolve(dir, updated)
+      selections = resolved.map(&.first)
     rescue ex : Mod::ModError
       abort! "get: #{ex.message}", :USAGE_ERROR
     end
@@ -114,9 +110,16 @@ class Iyi::Command
              "and another module asks for more"
       end
     end
+    # A replaced module builds from its directory whatever its line says,
+    # and a `get` that moved the line did not move what builds.
+    updated.replacements.each do |path, target|
+      puts "#{path} builds from #{target}, which replaces it" if required.has_key?(path)
+    end
     indirect = selections.count { |selection| !required.has_key?(selection.path) }
+    fetched = selections.count { |selection| !updated.replacements.has_key?(selection.path) }
     puts "#{selections.size} module#{selections.size == 1 ? "" : "s"} selected " \
-         "(#{indirect} through another module's requirements); iyi.sum records each"
+         "(#{indirect} through another module's requirements); " \
+         "iyi.sum records the #{fetched} fetched from #{fetched == 1 ? "its tag" : "their tags"}"
   end
 
   # One `PATH[@VERSION]` argument: the version is `vX.Y.Z` or `latest`,

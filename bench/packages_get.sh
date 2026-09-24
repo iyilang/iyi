@@ -13,6 +13,13 @@
 # manifest, a version that is not there, a path that is not a repository,
 # a version spelled without `v`, the module itself - leaves `iyi.mod` as it
 # was, byte for byte.
+#
+# Then `replace`: a required module built from a directory beside the
+# project - directly and through another module's requirement - whose
+# edits are built without `iyi.sum` refusing them, which the sum never
+# records; one in a dependency's own manifest is ignored; and a target
+# that is not there, not the module, or not spelled as a directory is
+# refused by name.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -146,6 +153,56 @@ if [ "$(grep -c $'\r$' "$WORK/crlf/iyi.mod")" != "$(wc -l < "$WORK/crlf/iyi.mod"
 else
   echo "  every line ends CRLF, the new one too"
 fi
+
+step "replace builds a required module from a directory"
+mkdir -p "$WORK/liba-local" "$WORK/rapp"
+printf 'module example.test/user/liba\n' > "$WORK/liba-local/iyi.mod"
+printf 'module liba\n\npub def greeting : String\n  "liba from beside the app"\nend\n' > "$WORK/liba-local/liba.iyi"
+# liba is required through libb as well as directly: the replacement is
+# the module, wherever the graph reaches it.
+printf 'module example.test/user/rapp\n\nrequire example.test/user/libb v1.0.0\nrequire example.test/user/liba v1.0.0\n\nreplace example.test/user/liba => ../liba-local\n' > "$WORK/rapp/iyi.mod"
+cp use.iyi "$WORK/rapp/use.iyi"
+(cd "$WORK/rapp" && "$IYI" run use.iyi) > replace1.log 2>&1 || { fail "the replaced build failed"; cat replace1.log; }
+grep -q "liba from beside the app" replace1.log || fail "the replacement did not build: $(cat replace1.log)"
+grep -q "example.test/user/liba" "$WORK/rapp/iyi.sum" 2>/dev/null && fail "iyi.sum recorded the replaced module"
+grep -q "example.test/user/libb v1.0.0 s1:" "$WORK/rapp/iyi.sum" 2>/dev/null || fail "iyi.sum lost the fetched module"
+sed -i.bak 's/beside the app/beside the app, edited/' "$WORK/liba-local/liba.iyi" && rm -f "$WORK/liba-local/liba.iyi.bak"
+(cd "$WORK/rapp" && "$IYI" run use.iyi) > replace2.log 2>&1 || { fail "an edit in the replacement was refused"; cat replace2.log; }
+grep -q "beside the app, edited" replace2.log || fail "the edit did not build: $(cat replace2.log)"
+(cd "$WORK/rapp" && "$IYI" get example.test/user/liba@v1.1.0) > replace3.log 2>&1 || { fail "get on a replaced module failed"; cat replace3.log; }
+grep -q "example.test/user/liba builds from ../liba-local, which replaces it" replace3.log || fail "get did not say the line moves nothing: $(cat replace3.log)"
+[ "$status" -eq 0 ] && echo "  built from ../liba-local, directly and through libb; edits build; iyi.sum never records it"
+
+step "a dependency's own replace is ignored"
+mkrepo "$WORK/work/libc"
+printf 'module example.test/user/libc\nrequire example.test/user/liba v1.1.0\nreplace example.test/user/liba => ../elsewhere\n' > "$WORK/work/libc/iyi.mod"
+printf 'module libc\n\npub def c : Int32\n  3\nend\n' > "$WORK/work/libc/libc.iyi"
+git -C "$WORK/work/libc" add -A && git -C "$WORK/work/libc" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libc"
+(cd "$WORK" && publish libc v1.0.0)
+mkdir -p "$WORK/capp"
+printf 'module example.test/user/capp\nrequire example.test/user/libc v1.0.0\n' > "$WORK/capp/iyi.mod"
+cp use.iyi "$WORK/capp/use.iyi"
+(cd "$WORK/capp" && "$IYI" run use.iyi) > replace4.log 2>&1 || { fail "a dependency's replace redirected the build"; cat replace4.log; }
+grep -q "liba 1.1.0" replace4.log || fail "the program ran '$(cat replace4.log)', not liba's tag"
+[ "$status" -eq 0 ] && echo "  libc's replace of liba is libc's business: the build fetched liba v1.1.0"
+
+step "a replacement that is not the module is refused by name"
+bad_replace() { # bad_replace <label> <target> <phrase>
+  printf 'module example.test/user/rapp\n\nrequire example.test/user/liba v1.0.0\n\nreplace example.test/user/liba => %s\n' "$2" > "$WORK/rapp/iyi.mod"
+  (cd "$WORK/rapp" && "$IYI" run use.iyi) > bad.log 2>&1
+  if [ $? -eq 0 ] || ! grep -qF -- "$3" bad.log; then
+    fail "$1: not refused with '$3':"; sed 's/^/    /' bad.log
+  else
+    echo "  $1: refused"
+  fi
+}
+bad_replace "a directory that is not there" ../nowhere "does not exist"
+mkdir -p "$WORK/nomod"
+bad_replace "a directory with no iyi.mod" ../nomod "has no iyi.mod"
+mkdir -p "$WORK/othermod" && printf 'module example.test/user/other\n' > "$WORK/othermod/iyi.mod"
+bad_replace "a directory holding another module" ../othermod "says it is 'example.test/user/other'"
+bad_replace "a target spelled like a module path" liba-local "is not a directory"
 
 echo
 if [ "$status" -eq 0 ]; then

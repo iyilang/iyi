@@ -68,6 +68,19 @@
   whole through PowerShell: without the guard the program ends with
   0xC0000095, and with it prints 0 and ends with 0.
 
+- **A Windows language server retires its worker on what the worker
+  costs.** The worker says its resident megabytes after each request and
+  the proxy replaces it at 512; on Windows it said 0, having no
+  `getrusage`, and the proxy counted 24 requests instead - more than a
+  collector-free front end can take in 512 MB. Windows answers the same
+  question with the peak working set (`K32GetProcessMemoryInfo`,
+  kernel32's own), and the worker says that now. The gates measure it
+  too, where `/proc` was all they read and Windows' steps said
+  "unmeasured": in `lsp_memory.py` a session typing without a pause
+  peaked at 1,023 MB against its 760 bound, and at 510 now; paused, it
+  rested at 298, 43, 44 and 46 MB, and at 39 to 43 now; and
+  `lsp_positions.py`'s largest of 68 sessions held 541 MB under its 1,024.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

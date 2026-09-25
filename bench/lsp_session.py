@@ -82,9 +82,11 @@ def file_uri(path):
 
 def rss_mb(pid):
     """Resident megabytes of one process, or 0 where the kernel does not
-    say. `/proc` is Linux's; on darwin and Windows this answers 0 and
-    whoever asked reports its bound unmeasured rather than
-    unasserted-and-claimed."""
+    say. `/proc` is Linux's, and Windows says it through the process's
+    working set; on darwin this answers 0 and whoever asked reports its
+    bound unmeasured rather than unasserted-and-claimed."""
+    if os.name == "nt":
+        return nt_working_set_mb(pid)
     try:
         with open(f"/proc/{pid}/status") as status:
             for line in status:
@@ -93,6 +95,43 @@ def rss_mb(pid):
     except OSError:
         return 0
     return 0
+
+
+def nt_working_set_mb(pid):
+    """The working set - the pages resident for the process, Windows'
+    VmRSS - through kernel32's `K32GetProcessMemoryInfo`. 0 for a process
+    that is gone or cannot be opened."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    # PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ
+    handle = kernel32.OpenProcess(0x1000 | 0x0010, False, pid)
+    if not handle:
+        return 0
+    try:
+        counters = Counters()
+        counters.cb = ctypes.sizeof(Counters)
+        if not kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return 0
+        return counters.WorkingSetSize // (1024 * 1024)
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def children(pid):

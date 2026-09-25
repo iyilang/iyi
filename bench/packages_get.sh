@@ -48,6 +48,13 @@
 # does not take back down to the tag; `@<commit>` of a tagged commit is
 # the tag; and a pseudo-version whose time or hash is not its commit's, or
 # a ref that is not there, is refused.
+#
+# Then `iyi mod release`: a package's surface at HEAD against its last
+# tag. A new def is a minor and a patch that says less is refused; a def
+# gone is a major, at the path `/v2`, and the manifest has to say it first;
+# before v1 a break is a minor. An example program beside the library is
+# nobody's surface, a release written with `using` is still read, and a
+# version already tagged is refused.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -480,6 +487,63 @@ else
 fi
 cp iyi.mod.good iyi.mod
 refused "a ref that is not there" "has no \`nosuchbranch\`" example.test/user/libt@nosuchbranch
+
+step "mod release: what the next tag has to be"
+REL="$WORK/rel"
+mkrepo "$REL"
+cd "$REL" || exit 1
+mkdir -p rel examples
+printf 'module example.test/user/rel\n' > iyi.mod
+printf 'module rel/util\n\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > rel/util.iyi
+# The release before is written the way 0.14 wrote a module's names.
+printf 'module rel\n\nimport rel/util\nusing rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n' > rel.iyi
+printf 'import rel::*\n\nassert a == 2\n' > rel_test.iyi
+git add -A && git commit -qm one && git tag v1.0.0
+# The same surface in the one-keyword spelling, and an example program
+# beside it that exports nothing: a patch.
+printf 'module rel\n\nimport rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n' > rel.iyi
+printf 'module examples/demo\n\nimport rel::*\n\nputs a\n' > examples/demo.iyi
+git add -A && git commit -qm spelling
+"$IYI" mod release > rel1.log 2>&1 || { fail "mod release failed on an unchanged surface"; cat rel1.log; }
+grep -q "the next release is v1.0.1: the surface is as it was" rel1.log ||
+  fail "a release written with using, respelled, was not the same surface: $(cat rel1.log)"
+# A def new: a minor, and a patch is refused by name.
+printf '\npub def b : Int32\n  3\nend\n' >> rel.iyi
+git commit -qam b
+if "$IYI" mod release v1.0.1 > rel2.log 2>&1 || ! grep -q "v1.0.1 is too small: something is new, so the next release is v1.1.0" rel2.log; then
+  fail "a patch that hides a new def was not refused: $(cat rel2.log)"
+fi
+grep -q "new   rel: def b : Int32" rel2.log || fail "the new def was not named: $(cat rel2.log)"
+"$IYI" mod release v1.1.0 > rel3.log 2>&1 || fail "v1.1.0 was refused for a new def: $(cat rel3.log)"
+# A def gone: a major, at a path of its own.
+sed -i.bak 's/pub def a : Int32/pub def a(n : Int32) : Int32/; s/  twice(1)/  twice(n)/' rel.iyi && rm -f rel.iyi.bak
+git commit -qam break
+if "$IYI" mod release v1.2.0 > rel4.log 2>&1 || ! grep -q "so the next release is v2.0.0, at the path example.test/user/rel/v2" rel4.log; then
+  fail "a minor that hides a gone def was not refused: $(cat rel4.log)"
+fi
+grep -q "gone  rel: def a : Int32" rel4.log || fail "the gone def was not named: $(cat rel4.log)"
+if "$IYI" mod release v2.0.0 > rel5.log 2>&1 || ! grep -q "is example.test/user/rel/v2: a major version past 1 is its own module path" rel5.log; then
+  fail "v2.0.0 was accepted on a path without /v2: $(cat rel5.log)"
+fi
+printf 'module example.test/user/rel/v2\n' > iyi.mod && git commit -qam v2
+"$IYI" mod release v2.0.0 > rel6.log 2>&1 || fail "v2.0.0 at the /v2 path was refused: $(cat rel6.log)"
+grep -q "examples/demo" rel6.log && fail "an example program was counted as surface: $(cat rel6.log)"
+if "$IYI" mod release v1.0.0 > rel7.log 2>&1; then fail "a version already tagged was accepted: $(cat rel7.log)"; fi
+[ "$status" -eq 0 ] && echo "  respelled: patch; new def: minor, patch refused; gone def: v2 at /v2, refused until iyi.mod says it"
+
+step "mod release before v1: a break is a minor"
+REL0="$WORK/rel0"
+mkrepo "$REL0"
+cd "$REL0" || exit 1
+printf 'module example.test/user/zero\n' > iyi.mod
+printf 'module zero\n\npub def a : Int32\n  1\nend\n' > zero.iyi
+git add -A && git commit -qm one && git tag v0.3.0
+printf 'module zero\n\npub def c : Int32\n  1\nend\n' > zero.iyi && git commit -qam break
+if "$IYI" mod release v0.3.1 > zero.log 2>&1 || ! grep -q "so the next release is v0.4.0" zero.log; then
+  fail "a v0 patch that hides a break was not refused: $(cat zero.log)"
+fi
+"$IYI" mod release v0.4.0 > zero2.log 2>&1 || fail "v0.4.0 was refused for a v0 break: $(cat zero2.log)"
+[ "$status" -eq 0 ] && echo "  v0.3.0 -> a def gone: v0.3.1 refused, v0.4.0 holds it"
 
 echo
 if [ "$status" -eq 0 ]; then

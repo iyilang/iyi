@@ -23,6 +23,9 @@ class Iyi::Command
     when "reach"
       options.shift
       mod_reach
+    when "release"
+      options.shift
+      mod_release
     when nil, "--help", "-h"
       puts mod_usage
       exit
@@ -42,6 +45,10 @@ class Iyi::Command
         reach                    say what every module the build selects
                                  touches outside the language: std modules,
                                  File, C libraries and functions
+        release [VERSION]        say what the next release of this package has
+                                 to be called, from what its exported surface
+                                 did since the last tag; exit 1 when VERSION
+                                 understates it
         context FILE.iyi         print what a change to this module is allowed
                                  to know: the exact exported surface of every
                                  module it imports, and nothing's body. This is
@@ -329,16 +336,34 @@ class Iyi::Command
   end
 
   # What a consumer can name, as text, so that two of them can be compared.
+  # A module's surface, one line per thing a consumer can name - what
+  # `mod diff` lists as gone and new, and what `mod release` weighs: functions, `pub`
+  # types with their parameters, their methods and the types inside them,
+  # impls and macros.
   private def iyi_export_lines(artifact : IyiMod::Artifact) : Array(String)
     lines = [] of String
-    artifact.exports.functions.each { |signature| lines << IyiMod.render_signature(signature) }
-    artifact.exports.types.each do |declaration|
-      lines << "#{declaration.kind} #{declaration.name}"
-      declaration.methods.each do |signature|
-        lines << "#{declaration.name}.#{IyiMod.render_signature(signature)}"
-      end
+    exports = artifact.exports
+    # A private def travels with the generic bodies that call it, and is
+    # nobody's to call: not surface.
+    exports.functions.each { |signature| lines << IyiMod.render_signature(signature) unless signature.visibility == "private" }
+    exports.types.each { |declaration| iyi_export_type_lines(declaration, "", lines) }
+    exports.impls.each do |entry|
+      named = entry.trait_arguments.empty? ? entry.trait_name : "#{entry.trait_name}(#{entry.trait_arguments.join(", ")})"
+      lines << "impl #{named} for #{entry.type_name}"
     end
-    lines.sort!
+    artifact.macro_bodies.each { |source| lines << source.lines.first.strip }
+    lines.uniq!.sort!
+  end
+
+  private def iyi_export_type_lines(declaration : IyiMod::TypeDecl, outer : String, lines : Array(String)) : Nil
+    return unless declaration.visibility == "pub"
+    name = "#{outer}#{declaration.name}"
+    parameters = declaration.type_parameters.empty? ? "" : "(#{declaration.type_parameters.join(", ")})"
+    lines << "#{declaration.kind} #{name}#{parameters}"
+    declaration.methods.each do |signature|
+      lines << "#{name}.#{IyiMod.render_signature(signature)}" unless signature.visibility == "private"
+    end
+    declaration.types.each { |inner| iyi_export_type_lines(inner, "#{name}::", lines) }
   end
 
   private def read_iyimod(path : String) : IyiMod::Artifact

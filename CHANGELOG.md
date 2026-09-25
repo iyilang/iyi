@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- **`iyi mod release [VERSION]`: the version has to say what changed.** It
+  compares the package's exported surface at HEAD with the highest release
+  tag HEAD contains - each checked out beside the tree and compiled once -
+  and names every line gone and new: a line gone is a new major, a line new
+  a new minor, nothing moved a patch, and before v1 a break moves the minor.
+  With VERSION it exits 1 when the version understates the change, or when a
+  new major past 1 is not yet iyi.mod's `/vN` path. A release written with
+  `using` is read the way `iyi fix` writes it. It tags nothing. `iyi mod
+  diff` shares its surface, and so no longer lists a `private` def that
+  travels with a generic's body, and now lists impls, macros and nested
+  types.
+
 ### Fixed
 
 - **A package's root module that imports its own submodule is reachable.**

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,593 lines, of which 3,509 are the library held to the 3,734 ceiling (5,037 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 117,275 lines, none of it written in iyi |
+| compiler | 117,571 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 117,275 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 117,571 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,593-line own prelude + 40,654 in std |
 | Specs | 21,146 lines | 12,017 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4462,6 +4462,26 @@ so it is a rule and not a list, and the module that gains one is counted
 the day it does. It is a report, not a sandbox: it says what the source
 can do, and a `lib` assembled by macro interpolation is not counted.
 `bench/packages_get.sh` holds it, a test's `std/file` included.
+
+**A release says what it changed, and the version has to agree.** Minimal
+version selection builds every consumer at the highest minimum anyone
+asked for, and that is only safe while a minor or patch release keeps what
+the one before it exported - which Go leaves to the author's memory.
+`iyi mod release [VERSION]` checks out HEAD and the highest `vX.Y.Z` tag
+it contains beside the tree, compiles every module of the package that
+writes `pub` once, and compares the two surfaces line by line: functions,
+`pub` types with their parameters and methods and the types inside them,
+impls and macros, a `private` def that travels with a generic's body not
+among them. A line gone is a new major, a line or a module new a new minor,
+nothing moved a patch; before v1 a break moves the minor and an addition
+the patch, as Cargo reads `0.x`. It names each line, says the next
+version, and with VERSION exits 1 when it understates the change - or
+when a new major past 1 is not yet the `/vN` path iyi.mod declares, which
+is where that major has to live. A release written with `using` is read
+the way `iyi fix` writes it, so the tag before the keyword changed still
+compares; HEAD is compiled as it is. It tags nothing: it is the check
+before `git tag`. `iyi mod diff` lists the same surface, one definition
+for both. `bench/packages_get.sh` holds it.
 
 What steps 1 and 2 do not do, said here: packages compile from
 source every build (their `.iyimod` story is step 5's, with signatures),

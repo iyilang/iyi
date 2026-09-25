@@ -70,30 +70,11 @@ status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 # A PE leaves nothing undefined and names its imports instead, so on Windows
-# both readers are the MSVC toolchain's `dumpbin`, found the way
-# bench/dependency_floor.sh finds it. `nm` and `readelf` are not on that
-# machine, and reading a Windows binary with them printed empty symbol and
-# library lines that passed every check as a floor of zero.
+# both readers are the MSVC toolchain's `dumpbin` (bench/floor_base.sh's
+# `find_dumpbin`, `pe_imports` and `pe_dlls`). `nm` and `readelf` are not on
+# that machine, and reading a Windows binary with them printed empty symbol
+# and library lines that passed every check as a floor of zero.
 DUMPBIN=""
-find_dumpbin() {
-  local vswhere root candidate
-  if command -v dumpbin >/dev/null 2>&1; then
-    printf 'dumpbin\n'
-    return 0
-  fi
-  vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-  [ -x "$vswhere" ] || return 1
-  root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
-  [ -n "$root" ] || return 1
-  root="$(cygpath -u "$root" 2>/dev/null)" || return 1
-  for candidate in "$root"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe \
-                   "$root"/VC/Tools/MSVC/*/bin/Host*/*/dumpbin.exe; do
-    [ -x "$candidate" ] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
 
 # The compiler writes `name.exe` beside the `-o` name on Windows, and
 # `dumpbin` reads an argument without a suffix as an object file and refuses
@@ -110,9 +91,7 @@ symbols() {
   local binary
   binary="$(readable "$1")"
   if [ -n "$DUMPBIN" ]; then
-    "$DUMPBIN" -nologo -imports "$binary" 2>/dev/null |
-      sed -n 's/^ *[0-9A-Fa-f]\{1,4\} \([A-Za-z_?@][A-Za-z0-9_?@$.]*\)$/\1/p' |
-      sort -u
+    pe_imports "$binary"
     return 0
   fi
   nm -u "$binary" 2>/dev/null |
@@ -128,11 +107,8 @@ libraries() {
   binary="$(readable "$1")"
   if [ -n "$DUMPBIN" ]; then
     # The PE's own import table, the list the loader binds: the same claim
-    # as LC_LOAD_DYLIB and NEEDED, spelled however the linker felt
-    # (KERNEL32.dll), so it is lowercased.
-    "$DUMPBIN" -nologo -dependents "$binary" 2>/dev/null |
-      sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' |
-      tr 'A-Z' 'a-z' | sort -u
+    # as LC_LOAD_DYLIB and NEEDED.
+    pe_dlls "$binary"
   elif command -v otool >/dev/null 2>&1; then
     otool -L "$binary" 2>/dev/null | sed -n '2,$p' | awk '{ print $1 }' | sed 's|.*/||' | sort -u
   else
@@ -528,7 +504,7 @@ case "$(uname -s)" in
     ;;
 esac
 if [ -n "$DUMPBIN" ]; then
-  allowed_libs="kernel32.dll vcruntime140.dll ucrtbase.dll api-ms-win-crt-"
+  allowed_libs="$FLOOR_DLLS_RUNTIME"
 else
   allowed_libs="$FLOOR_LIBS_PROGRAM"
 fi

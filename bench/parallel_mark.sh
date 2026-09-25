@@ -46,8 +46,8 @@ esac
 step() { echo "== $1"; }
 
 case "$(uname -s)" in
-  Linux | Darwin) ;;
-  *) echo "parallel mark: measured on Linux and darwin; nothing to measure here"; exit 0 ;;
+  Linux | Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *) echo "parallel mark: measured on Linux, darwin and Windows; nothing to measure here"; exit 0 ;;
 esac
 
 # The cores this process may run on - `nproc` reads the affinity mask, so
@@ -59,7 +59,7 @@ step "the parallel marker, release build"
 if ! "$IYI" build --release "$REPO/bench/parallel_mark.iyi" -o marks > build.log 2>&1; then
   cat build.log; exit 1
 fi
-if ! timeout 300 ./marks > answers.txt 2>&1; then
+if ! timeout -k 5 300 ./marks > answers.txt 2>&1; then
   cat answers.txt; exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
@@ -79,7 +79,7 @@ prove_fails() {
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_mark.iyi" -o "$dir/program" > "$dir/build.log" 2>&1; then
     cat "$dir/build.log"; exit 1
   fi
-  timeout 300 "./$dir/program" > "$dir/out.txt" 2>&1
+  timeout -k 5 300 "./$dir/program" > "$dir/out.txt" 2>&1
   local code=$?
   if [ "$code" -ne "$want" ] || ! grep -q "$phrase" "$dir/out.txt"; then
     echo "the check did not fire (exit $code, wanted $want at \"$phrase\"):"; tail -3 "$dir/out.txt"; exit 1

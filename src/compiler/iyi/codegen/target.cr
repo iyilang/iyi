@@ -229,10 +229,13 @@ class Iyi::Codegen::Target
                           code_model = LLVM::CodeModel::Default) : LLVM::TargetMachine
       case @architecture
       when "i386", "x86_64"
+        require_back_end "X86", {{ LibLLVM::BUILT_TARGETS.includes?(:x86) }}
         LLVM.init_x86
       when "aarch64"
+        require_back_end "AArch64", {{ LibLLVM::BUILT_TARGETS.includes?(:aarch64) }}
         LLVM.init_aarch64
       when "arm"
+        require_back_end "ARM", {{ LibLLVM::BUILT_TARGETS.includes?(:arm) }}
         LLVM.init_arm
 
         # Enable most conservative FPU for hard-float capable targets, unless a
@@ -242,6 +245,7 @@ class Iyi::Codegen::Target
           features += "+vfp2"
         end
       when "avr"
+        require_back_end "AVR", {{ LibLLVM::BUILT_TARGETS.includes?(:avr) }}
         LLVM.init_avr
 
         if cpu.blank?
@@ -249,6 +253,7 @@ class Iyi::Codegen::Target
           raise Target::Error.new("AVR targets must declare a CPU model, for example --mcpu=atmega328p")
         end
       when "wasm32"
+        require_back_end "WebAssembly", {{ LibLLVM::BUILT_TARGETS.includes?(:webassembly) }}
         LLVM.init_webassembly
       else
         raise Target::Error.new("Unsupported architecture for target triple: #{self}")
@@ -276,6 +281,20 @@ class Iyi::Codegen::Target
       # for background info
       machine.enable_global_isel = false
       machine
+    end
+
+    # iyi: a target whose back end is not in the LLVM this compiler links.
+    # `LLVM.init_*` raised a bare exception for one, which the command
+    # reports as a bug in the compiler: `--target wasm32-wasi` on Windows,
+    # whose LLVM (Crystal's own Windows package) carries X86 and AArch64
+    # only, answered "you've found a bug in the iyi compiler". It is a
+    # property of the build, and it is said as one.
+    private def require_back_end(name : String, built : Bool) : Nil
+      return if built
+      raise Target::Error.new(
+        "#{self} needs LLVM's #{name} back end, and the LLVM this compiler was built with " \
+        "has only #{ {{ LibLLVM::BUILT_TARGETS.map(&.id.stringify).join(", ") }} }. " \
+        "A compiler built against an LLVM that carries #{name} can build for it.")
     end
   {% end %}
 

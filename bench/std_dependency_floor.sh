@@ -35,7 +35,8 @@
 #      a different error than the one on record. A recorded reason that has
 #      gone stale is worse than no reason, because it reads as understood.
 #
-# Needs `make` for bin/iyi, plus `otool` on darwin or `readelf` on Linux.
+# Needs `make` for bin/iyi, plus `otool` on darwin, `readelf` on Linux or the
+# MSVC toolchain's `dumpbin` on Windows.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -107,18 +108,35 @@ known_pattern() {
 # A floor measured with a reader that is not installed is not measured at
 # all: `readelf -d` in a shell with no readelf prints nothing, and an empty
 # library list reads as a floor that held. The reader is resolved once here,
-# and the arm that needs it says what it could not measure instead.
+# and the arm that needs it says what it could not measure instead. Windows'
+# is the import table, read with the MSVC toolchain's `dumpbin`
+# (bench/floor_base.sh), against the DLLs a program may import there: a
+# module is a program's dependency on Windows too.
+. "$REPO/bench/floor_base.sh"
 LIBS_READER=""
-for candidate in otool readelf; do
-  if command -v "$candidate" >/dev/null 2>&1; then
-    LIBS_READER="$candidate"
-    break
-  fi
-done
+DUMPBIN=""
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    DUMPBIN="$(find_dumpbin || true)"
+    [ -n "$DUMPBIN" ] && LIBS_READER=dumpbin
+    ALLOWED_LIBS="$FLOOR_DLLS_PROGRAM"
+    ;;
+  *)
+    for candidate in otool readelf; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        LIBS_READER="$candidate"
+        break
+      fi
+    done
+    ;;
+esac
 unmeasured=0
 
 libs_of() {
-  if [ "$LIBS_READER" = otool ]; then
+  if [ "$LIBS_READER" = dumpbin ]; then
+    # The compiler writes `name.exe` beside the `-o` name.
+    pe_dlls "$1.exe"
+  elif [ "$LIBS_READER" = otool ]; then
     otool -L "$1" 2>/dev/null | sed 1d | awk '{print $1}'
   else
     readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'
@@ -201,7 +219,7 @@ echo "  modules found:        $module_count  (floor $FLOOR_MODULES)"
 echo "  built alone:          $built  (floor $FLOOR_BUILT)"
 echo "  known failures:       $(echo $KNOWN_FAIL_MODULES | wc -w | tr -d ' ')"
 if [ -z "$LIBS_READER" ]; then
-  echo "  libraries linked:     no otool or readelf here, so what the modules link went unmeasured"
+  echo "  libraries linked:     no otool, readelf or dumpbin here, so what the modules link went unmeasured"
   unmeasured=$((unmeasured + 1))
 else
   echo "  libraries linked:"

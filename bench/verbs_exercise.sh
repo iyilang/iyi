@@ -208,6 +208,18 @@ printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iy
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# A target whose back end the compiler's LLVM does not carry. Windows' is
+# Crystal's own Windows package, X86 and AArch64 only, and `--target
+# wasm32-wasi` there answered "you've found a bug in the iyi compiler"
+# over a bare exception from inside LLVM's set-up; it is a property of the
+# build, named as one. Linux's and darwin's LLVM carry WebAssembly, and the
+# wasi jobs build with it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a target this compiler's LLVM cannot build for" "needs LLVM's WebAssembly back end" -- \
+      "$IYI" build --cross-compile --target wasm32-wasi -o "$WORK/towasm" good.iyi
+    ;;
+esac
 
 echo
 echo "== what the verbs that were never here refuse"

@@ -37,8 +37,9 @@
 # check that cannot fail is not a check. The copy is why nothing in the tree is
 # touched to do it.
 #
-# Needs `make` for bin/iyi, plus `nm`, and `otool` on darwin or `readelf` on
-# Linux. Exits non-zero if any check fails.
+# Needs `make` for bin/iyi, plus `nm` (or LLVM's `llvm-nm`), and `otool` on
+# darwin, `readelf` on Linux or the MSVC toolchain's `dumpbin` on Windows.
+# Exits non-zero if any check fails.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -75,6 +76,16 @@ status=0
 # the arm that needs them says what it could not measure instead.
 NM=""
 command -v nm >/dev/null 2>&1 && NM=nm
+# Windows has no `nm`; LLVM's reads the ELF objects the cross-compile
+# arm below writes, and the runners carry it where LLVM installs itself.
+if [ -z "$NM" ]; then
+  for candidate in llvm-nm "/c/Program Files/LLVM/bin/llvm-nm.exe"; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      NM="$candidate"
+      break
+    fi
+  done
+fi
 LIBS_READER=""
 for candidate in otool readelf; do
   if command -v "$candidate" >/dev/null 2>&1; then
@@ -228,10 +239,15 @@ case "$(uname -s)" in
     fi
     ;;
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    # no floor has been measured on windows, and a list borrowed from another
-    # platform would name every import here as new, so this arm reports what
-    # it could not measure rather than a number it did not take.
+    # A PE leaves nothing undefined; what it asks of the machine is the
+    # DLLs it imports, read with the toolchain's own `dumpbin`, the floor
+    # `bench/dependency_floor.sh` and `thread_exercise.sh` hold there.
+    # Root discovery reads the stack bounds out of the TEB, the globals
+    # out of the image's own section table (`GetModuleHandleA`), and
+    # another thread's registers with `GetThreadContext`: kernel32's, all
+    # of them, and nothing may join the C runtime.
     allowed_symbols=""
+    windows_floor=yes
     ;;
   *)
     allowed_symbols="$FLOOR_BASE_DARWIN"
@@ -239,7 +255,31 @@ case "$(uname -s)" in
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"
 
-if [ -z "$allowed_symbols" ]; then
+if [ "${windows_floor:-no}" = yes ]; then
+  DUMPBIN="$(find_dumpbin || true)"
+  if [ -z "$DUMPBIN" ]; then
+    # The toolchain that linked these binaries carries it, so its absence
+    # is a broken machine, not a platform without the reader.
+    echo "  no dumpbin here, and a machine that built these binaries has the toolchain that carries it"
+    status=1
+  else
+    for bin in roots-gc roots-release; do
+      dlls="$(pe_dlls "$WORK/$bin.exe")"
+      if [ -z "$dlls" ]; then
+        echo "  dumpbin read no import table out of $bin"
+        status=1
+        continue
+      fi
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+      if [ -n "$extra" ]; then
+        echo "  $bin: root discovery links something new: $(echo $extra)"
+        status=1
+      else
+        printf '  %-14s %s names from %s\n' "$bin" "$(pe_imports "$WORK/$bin.exe" | grep -c .)" "$(echo $dlls)"
+      fi
+    done
+  fi
+elif [ -z "$allowed_symbols" ]; then
   echo "  no floor is on record for this platform, so what root discovery asks for is unmeasured"
   unmeasured=$((unmeasured + 1))
 elif [ -z "$NM" ] || [ -z "$LIBS_READER" ]; then

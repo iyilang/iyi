@@ -70,6 +70,22 @@
   every `.iyi` file under the manifest, tests included; a directory with its
   own `iyi.mod`, `lib/` and hidden directories are not.
 
+- **Windows marks with helper threads.** A collection there marked on
+  the collecting thread alone; Linux's and darwin's hand a large live set
+  to helpers. Windows has them now for the mark inside the pause: the
+  same helpers, as many as the cores less one, made before anything
+  stops (a thread made while others are suspended would run DLL attach
+  under a loader lock one of them may hold), and parked between
+  collections on a kernel32 semaphore after a short spin, so an idle
+  program's helpers take no core - darwin's spin, and `WaitOnAddress`,
+  which is imported from a DLL beyond kernel32, were the alternatives.
+  On a twelve-core Windows machine, the program running between
+  collections, a million-node tree's pause took 15.4 ms alone, 7.4 with
+  three helpers and 6.6 with five; with all eleven it was 16.4 in one
+  run and 23.9 in another, every core busy. `parallel_mark.sh` runs on
+  Windows and in its job. The mark beside the program and the sweep
+  helpers remain Linux's and darwin's.
+
 ### Changed
 
 - **One keyword for a module and its names: `using` is gone.** `import X`
@@ -93,7 +109,88 @@
 - `iyi get -u` never moves a requirement down: one past the latest release -
   a pseudo-version, or a pre-release of the next - stays where it is.
 
+- **The collector race runs on Windows, for the record.** `gc_race.py`
+  builds the same three programs under iyi's collector, Boehm and Go and
+  refuses a row whose arms answer differently; it ran on Linux and darwin.
+  On Windows it took `bin/iyi`, a shell script, and read peak RSS with
+  `wait4`, which Windows has not: it takes `IYI` now, names its binaries
+  `.exe` there, and reads the peak working set off the process handle.
+  On a twelve-core Windows machine all three rows agreed; the Windows
+  gates job runs it with Go set up, asserting no number, as darwin's does.
+
+- **A TERM from outside is measured on Windows.** `std_signal`'s gate
+  sent the exercise TERM from the shell on Linux and darwin and said
+  "unmeasured on Windows", where TERM is the console being closed. It
+  closes one now the way a person does: the exercise runs in a hidden
+  console of its own, and once it is waiting the gate posts WM_CLOSE to
+  that console's window, which Windows delivers as CTRL_CLOSE_EVENT - the
+  waiting fiber takes TERM and the program ends on its last line, 10
+  runs of 10. With the close read as INT the waiter never wakes and
+  Windows ends the process at its deadline with STATUS_CONTROL_C_EXIT,
+  which the gate names.
+
+- **Two more gates measure their floor on Windows, and five read it one
+  way.** `arena_exercise` said its allocation floor was "not measured"
+  there and `std_dependency_floor` "with 1 arm unread": both read the
+  import table now with the toolchain's `dumpbin` - the arena allocator's
+  plain and release binaries import kernel32 and the C runtime's DLLs
+  and no other, and every standard-library module built alone does the
+  same. Each check fails with `vcruntime140.dll` taken off the list. The
+  reader and the Windows DLL lists had been copied into five gates; they
+  are `bench/floor_base.sh`'s now (`find_dumpbin`, `pe_dlls`,
+  `pe_imports`, `FLOOR_DLLS_RUNTIME` and `FLOOR_DLLS_PROGRAM`), the way
+  darwin's and Linux's lists already were.
+
+- **`root_exercise` measures on Windows what it only said it could not.**
+  Two of its checks reported themselves unmeasured there. What root
+  discovery asks the machine for had "no floor on record": it is read from
+  the import table now, with the toolchain's `dumpbin`, the way
+  `dependency_floor` and `thread_exercise` read theirs - kernel32 and the
+  C runtime's DLLs, plain and release, and a DLL beyond them fails it (a
+  narrowed list flags `vcruntime140.dll`). And the Linux objects it
+  cross-compiles had no `nm` to read them: LLVM's `llvm-nm` reads them
+  where there is no `nm`, and they leave exactly `__data_start`,
+  `__ehdr_start` and `_end` undefined, as they do read on darwin.
+
+- **The SQLite driver gate runs on Windows.** `sqlite3_queries.sh` binds
+  `db` and `sqlite3` as boundaries and runs a query from source and from
+  artifacts, and the Windows image has no SQLite to link. The Windows
+  gates job makes one: sqlite.org's x64 DLL, pinned by hash, and its
+  import library made from the `.def` beside it with MSVC's `lib`, put on
+  `LIB` and `PATH`. Run that way on a Windows machine, the two arms
+  answered the same four rows. What Windows still does not run: the
+  daemon's gates (`iyi-daemon.exe` does not build there),
+  `sandbox_story.sh` - the Windows compiler's LLVM has no WebAssembly
+  back end (Fixed, below) - and `concurrent_mark`, whose mark beside the
+  program Windows does not have.
+
 ### Fixed
+
+- **`--target wasm32-wasi` on Windows said the compiler had a bug.** The
+  compiler there links Crystal's own Windows LLVM package, whose back ends
+  are X86 and AArch64, and asking for WebAssembly raised a bare exception
+  from LLVM's set-up that the command reported as "you've found a bug in
+  the iyi compiler", stack trace and all. It is a property of the build:
+  a target whose back end is not in the linked LLVM is refused by name -
+  "wasm32-unknown-wasi needs LLVM's WebAssembly back end, and the LLVM
+  this compiler was built with has only x86, aarch64" - for every
+  architecture the compiler knows. `bench/verbs_exercise.sh` asks it on
+  Windows, where the compiler before this refused with the trace and the
+  case fails. It is also why `sandbox_story.sh`, which builds for
+  wasm32-wasi, cannot run from a Windows compiler.
+
+- **A mark's helpers could find the mark over before it began.** The
+  collector turned the generation that wakes the helpers and only then,
+  in its own drain, counted itself as a worker with work. A helper that
+  reached the pool in between saw no worker active and an empty pool -
+  the drain's sign that the mark is done - and left with nothing, and the
+  collector marked alone while every helper had taken a permit. With
+  Windows' helpers (Added, above), eleven of them took permits and blackened
+  nothing in 7 of 20 of `parallel_mark`'s marks of a million-node tree,
+  and the exercise failed 6 runs in 10. The collector counts itself in
+  before it turns the generation now: in 20 marks printed one by one the
+  helpers blackened 82 to 94% of the nodes each time, and the exercise
+  held 10 runs of 10.
 
 - **The parallel marker's gate holds on one core.** `taskset -c 0 bash
   bench/parallel_mark.sh` failed at "the helpers blackened nothing": one
@@ -9977,7 +10074,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,514-line library and nothing else. Every other
+  written against iyi's own 17,593-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

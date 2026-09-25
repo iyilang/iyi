@@ -45,6 +45,8 @@ case "$(uname -s)" in
     ;;
 esac
 
+. "$REPO/bench/floor_base.sh"
+
 cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
@@ -96,33 +98,20 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # A PE leaves nothing undefined: what the runtime asks of Windows is the
     # DLLs the exercise imports, read with the toolchain's own `dumpbin`
-    # (located the way bench/dependency_floor.sh locates it). The runtime's
-    # doorway is kernel32 and the C runtime's DLLs; a socket or entropy
-    # DLL here would be a module the exercise does not import taking one on.
-    DUMPBIN=""
-    if command -v dumpbin >/dev/null 2>&1; then
-      DUMPBIN=dumpbin
-    else
-      vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-      root=""
-      [ -x "$vswhere" ] && root="$("$vswhere" -latest -products '*' -property installationPath 2>/dev/null | tr -d '\r')"
-      if [ -n "$root" ]; then
-        for candidate in "$(cygpath -u "$root")"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe; do
-          [ -x "$candidate" ] && DUMPBIN="$candidate" && break
-        done
-      fi
-    fi
+    # (bench/floor_base.sh). The runtime's doorway is kernel32 and the C
+    # runtime's DLLs; a socket or entropy DLL here would be a module the
+    # exercise does not import taking one on.
+    DUMPBIN="$(find_dumpbin || true)"
     if [ -z "$DUMPBIN" ]; then
       echo "no dumpbin here, so the import floor is not measured"
       unmeasured=$((unmeasured + 1))
     else
-      dlls="$("$DUMPBIN" -nologo -dependents exercise.exe 2>/dev/null |
-        sed -n 's/^    \([A-Za-z0-9_.+-]*\.[Dd][Ll][Ll]\)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+      dlls="$(pe_dlls exercise.exe)"
       if [ -z "$dlls" ]; then
         echo "dumpbin read no import table out of the exercise, so the floor was not measured"
         exit 1
       fi
-      extra="$(printf '%s\n' "$dlls" | grep -v -E '^(kernel32\.dll|vcruntime140\.dll|ucrtbase\.dll|api-ms-win-crt-.*\.dll)$' || true)"
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
       if [ -n "$extra" ]; then
         echo "the runtime moved the Windows floor: the exercise imports $(echo $extra)"
         exit 1

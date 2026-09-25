@@ -143,6 +143,29 @@
   fail("stack: the wide object lost a node under the mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
   grown = one_core ? IyiMark.stacks_grown : IyiMark.stacks_grown - grown_before
   puts "stack: the mark of a 300,000-wide object grew a worker's stack #{grown.to_i64} times from #{IyiMark::STACK_START.to_i64} entries"
+
+  # A helper with nothing to do spins for fifty microseconds by the clock
+  # and then parks, whatever a pause hint costs here: counted in hints, it
+  # was 400 us on a machine whose hint is 20 ns, and a program collecting
+  # every half millisecond had helpers that never parked. The shortest of
+  # ten spins on a word nobody turns, so a spin the scheduler interrupted
+  # does not count; a quarter millisecond is five times the bound.
+  {% if flag?(:linux) || flag?(:win32) %}
+    cell = Pointer(UInt64).malloc(1_u64)
+    word = Pointer(Atomic(UInt64)).new(cell.address)
+    shortest = 0_u64
+    attempt = 0
+    while attempt < 10
+      started = IyiMark.now_ns
+      IyiMark.spin_for_generation(word, 0_u64)
+      took = IyiMark.now_ns - started
+      shortest = took if attempt == 0 || took < shortest
+      attempt = attempt + 1
+    end
+    fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us before it parked, past five times the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest > 5_u64 * IyiMark::SPIN_BEFORE_PARK_NS
+    fail("park: a helper with no work spun #{(shortest // 1000_u64).to_i64} us, short of the #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} us it should") if shortest < IyiMark::SPIN_BEFORE_PARK_NS
+    puts "park: a helper with no work spins #{(shortest // 1000_u64).to_i64} us before it parks, for #{(IyiMark::SPIN_BEFORE_PARK_NS // 1000_u64).to_i64} asked"
+  {% end %}
   puts "parallel mark: every property held"
 {% else %}
   puts "parallel mark: needs the collector and a thread target; nothing to exercise here"

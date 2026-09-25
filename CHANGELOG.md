@@ -31,6 +31,21 @@
   59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
   against 0.059 - the helpers' spin before their park, fixed below.
 
+### Fixed
+
+- **A helper's spin before it parks is fifty microseconds by the clock.**
+  It was 20,000 pause hints, said to be fifty microseconds, which it is
+  where a hint costs 2.5 ns; on a twelve-core Windows machine a hint cost
+  20 ns and the spin 400 us, and churn, which collects every half
+  millisecond, had helpers without work that never parked - eleven of
+  them spinning beside three sweeping and the allocating thread. The
+  spin reads the clock every 1,024 hints now. Marking beside the program
+  with eleven helpers, churn's median went from 0.162 s to 0.071 (0.067
+  marked inside the pause), binary trees' from 0.267 s to 0.230 and its
+  total pause from 16.9 ms to 11.5, live churn's from 0.177 s to 0.156.
+  `parallel_mark.sh` times the spin on Linux and Windows - 50 us on that
+  machine - and a spin that ignores the clock fails it.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a
@@ -10133,7 +10148,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,584-line library and nothing else. Every other
+  written against iyi's own 17,592-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

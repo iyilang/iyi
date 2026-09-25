@@ -5056,19 +5056,27 @@ require "./file"
       # and its every-collection stop went from tens of microseconds to
       # milliseconds when the helpers stopped spinning. Collections come
       # in bursts, so a helper that spins for the length of one stays hot
-      # through the burst and sleeps between them; SPIN_BEFORE_PARK is
-      # about fifty microseconds of the pause hint.
-      SPIN_BEFORE_PARK = 20000_u64
+      # through the burst and sleeps between them. The spin is fifty
+      # microseconds by the clock: it was 20,000 pause hints, which is
+      # fifty microseconds where a hint is 2.5 ns, and a hint is not that
+      # everywhere - on a twelve-core Windows machine it was 20 ns, the
+      # spin 400 us, and churn's collections, one every half millisecond,
+      # never let a helper without work park: eleven helpers held eight
+      # cores spinning, and churn ran 0.162 s against 0.068 marked alone.
+      # The clock is read once every SPIN_CHECK hints.
+      SPIN_BEFORE_PARK_NS = 50000_u64
+      SPIN_CHECK = 1024_u64
 
       def self.spin_for_generation(word : Pointer(Atomic(UInt64)), seen : UInt64) : UInt64
+        deadline = now_ns + SPIN_BEFORE_PARK_NS
         spins = 0_u64
-        while spins < SPIN_BEFORE_PARK
+        while true
           now = word.value.get
           return now if now != seen
           spin_pause
           spins = spins + 1_u64
+          return seen if spins & (SPIN_CHECK - 1_u64) == 0_u64 && now_ns >= deadline
         end
-        seen
       end
 
       # A round's permits are SWEEP_HELPERS; on Linux that many helpers

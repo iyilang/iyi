@@ -3,11 +3,12 @@
 #
 #     bash bench/parallel_mark.sh
 #
-# Five steps, the last three failure proofs:
+# Six steps, the last four failure proofs:
 #   1. The program holds, release: a million-node tree survives five marks
 #      alone and five with helpers, and the helpers blackened nodes; the
 #      pool holds a handful of pieces after them; a worker's stack grew to
-#      hold a 300,000-wide object marked alone.
+#      hold a 300,000-wide object marked alone; and, on Linux and Windows,
+#      a helper with no work spins fifty microseconds before it parks.
 #   2. The two pause means, printed: alone against with helpers.
 #   3. Failure proof: the marker's donation of its stack's bottom removed
 #      from a copy of the prelude; the helpers wake and find nothing, and
@@ -16,6 +17,8 @@
 #      handed out twice, and the pool check says so on any machine.
 #   5. Failure proof: a stack that will not grow dies where it used to,
 #      by name, on the wide object.
+#   6. Failure proof: the spin before the park counted in pause hints, far
+#      past the bound on any machine; the park check names its length.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,7 +68,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the mark, alone and with helpers ($CORES cores here)"
-grep -E '^(tree|mark|pool|stack):' answers.txt | sed 's/^/  /'
+grep -E '^(tree|mark|pool|stack|park):' answers.txt | sed 's/^/  /'
 
 # $1 label, $2 awk program over the prelude, $3 the phrase the failing check
 # prints, $4 the exit code expected.
@@ -111,6 +114,19 @@ fi
 # The stack never grows: the fatal it used to be, on the wide object.
 prove_fails "a stack that will not grow dies by name" \
   '{ if ($0 ~ /^        return IyiHeap\.read64\(w \+ W_STACK\) if need <= cap$/) { print "        IyiRoots.fatal(\"iyi: a mark worker'"'"'s stack overflowed\\n\") if need > cap"; print; next } print }' "stack overflowed" 1
+
+# A spin counted in pause hints and not by the clock, long enough on any
+# machine: the check reads the spin's length and names it.
+case "$(uname -s)" in
+  Darwin)
+    step "failure proof: a spin before the park that ignores the clock is refused"
+    echo "  not here: darwin's helpers spin without parking, so the spin before a park is Linux's and Windows'"
+    ;;
+  *)
+    prove_fails "a spin before the park that ignores the clock is refused" \
+      '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 200000_u64"); print }' "park:" 1
+    ;;
+esac
 
 echo "workdir $WORK"
 echo "parallel mark: every step held"

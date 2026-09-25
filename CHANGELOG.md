@@ -81,6 +81,21 @@
   rested at 298, 43, 44 and 46 MB, and at 39 to 43 now; and
   `lsp_positions.py`'s largest of 68 sessions held 541 MB under its 1,024.
 
+- **`make -f Makefile.win iyi` with an editor open.** The build writes
+  `iyi-next.exe` and moves it onto `.build\iyi.exe` because Windows will
+  not overwrite a running program - but it will not move a file onto one
+  either, and `iyi lsp` runs whenever an editor is open: the move said
+  "Access is denied" and the build failed at its last line. A running
+  binary can be renamed, so the old one steps aside under a name of its
+  own and the new one takes the name; what stepped aside is deleted by the
+  next build once nothing runs it. `replace_running.sh` replaces a running
+  `iyi lsp`'s binary through Makefile.win's own macro, checks the new file
+  is at the name with the session still running and the old one gone at
+  the next build, and shows the plain move refused - 20 runs of 20 here.
+  `lsp_session.py`'s rebuild step, skipped on Windows for want of
+  `.build/iyi`, moves the running `.build/iyi.exe` aside the same way and
+  the session compiles on.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

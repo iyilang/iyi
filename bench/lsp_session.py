@@ -1495,11 +1495,16 @@ def main():
     #     session holds: `make iyi` unlinks the executable, which makes
     #     Process.executable_path nil on Linux — the first Cursor
     #     screenshot's "$ORIGIN" failure. The server pinned its origin
-    #     at startup, so a fresh compile still finds the library.
-    binary = os.environ.get("IYI_BINARY", ".build/iyi")
+    #     at startup, so a fresh compile still finds the library. On
+    #     Windows a running binary cannot be unlinked, and Makefile.win
+    #     renames it aside instead (`REPLACE`), so that is what is done
+    #     to it here.
+    binary = os.environ.get("IYI_BINARY",
+                            ".build/iyi.exe" if os.name == "nt" else ".build/iyi")
     if os.path.exists(binary):
         backup = binary + ".gate-backup"
-        shutil.copy2(binary, backup)
+        if os.name != "nt":
+            shutil.copy2(binary, backup)
         # A didChange to app invalidates every sibling's overrides, so
         # the next question about greet is a fresh compile, not a memo.
         c.send("textDocument/didChange",
@@ -1507,7 +1512,10 @@ def main():
                 "contentChanges": [{"text": app_text + "# gone\n"}]},
                wait=False)
         c.diagnostics(app_uri)
-        os.remove(binary)
+        if os.name == "nt":
+            os.rename(binary, backup)
+        else:
+            os.remove(binary)
         try:
             reply = c.send("textDocument/diagnostic",
                            {"textDocument": {"uri": greet_uri}})
@@ -1516,6 +1524,8 @@ def main():
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,
+             "compiled with the executable moved aside, as a rebuild does"
+             if os.name == "nt" else
              "compiled with the executable unlinked; $ORIGIN was pinned")
     else:
         step(46, "a rebuilt binary does not lobotomise the session", True,

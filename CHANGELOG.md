@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A package's root module that imports its own submodule is reachable.**
+  `rel.iyi` importing `rel/util` loads the submodule first, and `module
+  rel/util` makes `Rel` as its namespace; the import wall read the unit's
+  file off the type's first location, so every file that imported `rel`
+  was refused `Rel`'s names - `import rel::*` then `a` said "`Rel` is not
+  imported here". The unit is now the file whose `module` header made it,
+  and a file that imported only `rel/util` is still refused `Rel`.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

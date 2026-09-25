@@ -171,7 +171,7 @@ module Iyi
       end
       return unless unit.is_a?(NamedType)
 
-      unit_file = unit.locations.try(&.first?).try(&.filename).as?(String)
+      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.filename).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
       writer = location.try(&.filename).as?(String)

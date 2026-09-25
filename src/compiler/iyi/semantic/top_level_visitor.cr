@@ -1179,7 +1179,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end
 
     type.private = true if node.visibility.private?
-    type.iyi_unit = true if node.iyi_unit?
+    if node.iyi_unit?
+      type.iyi_unit = true
+      type.iyi_unit_file ||= node.location.try(&.original_filename)
+    end
 
     node.resolved_type = type
 

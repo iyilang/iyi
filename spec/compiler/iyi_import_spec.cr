@@ -159,6 +159,33 @@ describe "Semantic: iyi import" do
       end
     end
 
+    # A package's root module that imports its own submodule: `rel/util`
+    # loads first and makes `Rel` as its namespace, and the wall read the
+    # unit's file off that first location - so whoever imported `rel` was
+    # refused `Rel`'s names. The unit is the file whose header made it.
+    it "reaches a root module whose own submodule loaded first" do
+      with_iyi_modules({
+        "main.iyi"     => "import rel::*\n\na\nRel.a\n",
+        "rel.iyi"      => "module rel\n\nimport rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n",
+        "rel/util.iyi" => "module rel/util\n\npub def twice(n : Int32) : Int32\n  n\nend\n",
+      }) do
+        semantic_iyi("main.iyi").iyi_module_paths.values.sort.should eq ["rel", "rel/util"]
+      end
+    end
+
+    it "still walls the root module off from a file that imported only its submodule" do
+      with_iyi_modules({
+        "main.iyi"     => "import rel\nimport other\n",
+        "other.iyi"    => "module other\n\nimport rel/util\n\npub def go : Int32\n  Rel.a\nend\n",
+        "rel.iyi"      => "module rel\n\nimport rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n",
+        "rel/util.iyi" => "module rel/util\n\npub def twice(n : Int32) : Int32\n  n\nend\n",
+      }) do
+        expect_raises(Iyi::TypeException, /`Rel` is not imported here/) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+
     # The wall: a module in the program only because another file imported
     # it is still not this file's to name.
     it "refuses a qualified name the file wrote no import for" do

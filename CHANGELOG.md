@@ -143,7 +143,9 @@
   A console's read runs to its line and answers it. A 400,000-line pipe
   reads in the same time as before (306 to 321 ms against 308 to 317).
   `concurrency_exercise.sh` feeds `bench/stdin_park.iyi` a pipe on every
-  platform; with the read made the blocking call again it fails.
+  platform; with the read made the blocking call again it fails. The
+  Windows job's run of every bench program leaves it to that gate, as it
+  does the programs whose input their gates supply.
 
 ## 0.15.0 — 2026-09-25
 

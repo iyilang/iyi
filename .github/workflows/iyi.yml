@@ -1687,8 +1687,11 @@ jobs:
       - name: Every exercise the runtime can hold
         shell: pwsh
         run: |
+          # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
+          # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
-            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi"
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
+            "stdin_park.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"

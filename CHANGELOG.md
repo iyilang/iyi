@@ -96,6 +96,18 @@
   `.build/iyi`, moves the running `.build/iyi.exe` aside the same way and
   the session compiles on.
 
+- **A planted symlink is checked on Windows.** `std_file_exercise` plants
+  a symlink where the next temporary file would go and asks that
+  `File.tempfile` make its file elsewhere and leave the target alone; on
+  Windows it planted none and said "not measured here". It plants one now
+  wherever the account may make a symlink - the exercise already asks
+  Windows that for its own symlink checks, and an administrator, as on
+  the Windows runners, may - and the two proofs run there: a predictable
+  name refused a hundred times, and `CREATE_NEW` made `OPEN_ALWAYS`,
+  which follows the link. The mode check stays POSIX's; a Windows file's
+  reach is its ACL. An account that may not make a symlink is told so,
+  as this one is.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

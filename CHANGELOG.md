@@ -110,7 +110,9 @@
   name refused a hundred times, and `CREATE_NEW` made `OPEN_ALWAYS`,
   which follows the link. The mode check stays POSIX's; a Windows file's
   reach is its ACL. An account that may not make a symlink is told so,
-  as this one is.
+  as this one is. The symlink is planted where `File.tempfile` makes its
+  file, which `Dir.tempdir` answers: the exercise named `/tmp`, and run
+  without TMPDIR on the Windows runner it tried to plant it there.
 
 - **`server_load` proves Windows' poller memory is kept.** The gate hides
   what the kernel writes into from the collector and asks the run to

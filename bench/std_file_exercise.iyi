@@ -216,7 +216,10 @@ File.delete(tb)
 # and the target is left as it was - wherever a symlink can be made at all
 # (`symlinks_allowed`, above).
 if symlinks_allowed
-  tmp = Program.env("TMPDIR") || "/tmp"
+  # Where `File.tempfile` makes its file: TMPDIR, TEMP, TMP, in that
+  # order, as `Dir.tempdir` reads them. `/tmp` is not a directory on
+  # Windows, and a run without TMPDIR there planted nothing anywhere.
+  tmp = Dir.tempdir
   victim = sandbox + "/std_file_ex_victim.txt"
   File.write(victim, "kept")
   planted = tmp + "/plant_0000000000000000"

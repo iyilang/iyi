@@ -108,6 +108,18 @@
   reach is its ACL. An account that may not make a symlink is told so,
   as this one is.
 
+- **`server_load` proves Windows' poller memory is kept.** The gate hides
+  what the kernel writes into from the collector and asks the run to
+  fail; on Linux and darwin that is the epoll or kqueue event buffer, and
+  on Windows it said "not measured here". What the kernel writes into
+  there is the fiber's OVERLAPPED, one per fiber and reused for each of
+  its operations. Held as a number it still passed every run - the
+  canaries are larger than its 32 bytes, and a collection rarely lands
+  where only the fiber's field holds it. The exercise collects exactly
+  there now, between a connection's read and its write, and asks that
+  the OVERLAPPED come out live: held as a number it fails 8 runs of 8,
+  plain and release, and intact it holds through 210 collections.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

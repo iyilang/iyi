@@ -19,6 +19,8 @@
 #      writes epoll's answers into a chunk the allocator has handed to
 #      somebody else and the program dies. This is `wrk -c 100` against
 #      the sample web application, made small.
+#      On Windows, the fiber's OVERLAPPED held the same way, and the
+#      exercise's collection between a read and a write finds it freed.
 #   4. Failure proof: a finished fiber's stack not handed back, and the
 #      two hundred connections take two hundred mappings.
 set -u
@@ -82,18 +84,30 @@ grep -q 'every property held' answers-release.txt || { cat answers-release.txt; 
 mkdir -p patched/iyi
 cp "$REPO"/src/iyi/*.iyi patched/iyi/
 
-# This proof injects its defect into the event buffer `epoll_wait` and
-# `kevent` write into. Windows' poller is a completion port: it takes its
-# entries through `GetQueuedCompletionStatus` into a buffer this patch does
-# not touch, so the corruption cannot be injected here and a run that
-# survived it would say the opposite of the truth. Skipped by name, and
-# counted, rather than reported as held.
-unmeasured=0
+# This proof injects its defect into what the kernel writes into: the
+# event buffer `epoll_wait` and `kevent` fill, and on Windows, whose poller
+# is a completion port with no such buffer, the fiber's OVERLAPPED - held
+# as a number, the way the event buffer was. Storing it that way passed
+# every run until the exercise collected where only the field holds it,
+# between a connection's read and its write; it asks there now.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "failure proof: the poller's buffer as a number is a buffer nobody keeps"
-    echo "  not measured here: the buffer this corrupts is epoll's and kqueue's, and this platform's poller is a completion port"
-    unmeasured=$((unmeasured + 1))
+    step "failure proof: the fiber's OVERLAPPED as a number is an OVERLAPPED nobody keeps"
+    sed -e 's/^  property wait_overlapped : Pointer(UInt8)$/  property wait_overlapped_word : UInt64\n\n  def wait_overlapped : Pointer(UInt8)\n    Pointer(UInt8).new(@wait_overlapped_word)\n  end/' \
+        -e 's/^    @wait_overlapped = Pointer(UInt8)\.malloc(32_u64)$/    @wait_overlapped_word = Pointer(UInt8).malloc(32_u64).address/' \
+        "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
+    [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 6 ] || {
+      echo "the sed did not find both lines it changes"; exit 1; }
+    if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$REPO/bench/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
+      cat build-hidden.log; exit 1
+    fi
+    timeout -k 5 300 ./hidden > hidden.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q 'freed the OVERLAPPED' hidden.txt; then
+      echo "an OVERLAPPED the collector cannot see survived the run, so the run proves nothing (exit $code):"
+      tail -3 hidden.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$(grep -m1 'freed the OVERLAPPED' hidden.txt | sed 's/^iyi: panic: FAIL: //')"
     ;;
   *)
     step "failure proof: the poller's buffer as a number is a buffer nobody keeps"
@@ -153,9 +167,5 @@ if [ "$code" -ne 1 ] || ! grep -q 'the stacks were not reused' noreuse.txt; then
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the stacks were not reused' noreuse.txt | sed 's/^iyi: panic: FAIL: //')"
 echo "workdir $WORK"
-if [ "$unmeasured" -eq 0 ]; then
-  echo "server load: every step held"
-else
-  echo "server load: every step that ran held, with $unmeasured not measured here"
-fi
+echo "server load: every step held"
 exit 0

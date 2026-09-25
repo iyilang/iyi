@@ -39,6 +39,16 @@
   travels with a generic's body, and now lists impls, macros and nested
   types.
 
+### Changed
+
+- **`iyi init kemal` writes `iyi.mod` and `kemal.iyi`, and nothing else.**
+  The file is the project's root module - `module kemal`, what a
+  consumer's `import` of the package reads - named for the module path's
+  last segment (`github.com/me/iyi-web` is `iyi_web.iyi`, and a `/v2`
+  suffix is a version, not the name), and it runs as it lands. `init`
+  wrote four files before: an entry, a `greet.iyi` it imported and a test
+  of it, a tutorial every project began by deleting.
+
 ### Fixed
 
 - **A package's root module that imports its own submodule is reachable.**

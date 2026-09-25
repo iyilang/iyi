@@ -501,18 +501,17 @@ program that imports `std/text` out of the unpacked tree.
 ### A project, from nothing
 
 ```sh
-iyi init example.com/me/hello
-iyi run main.iyi    # hello, iyi
-iyi test            # 1 passed, 0 failed
+iyi init kemal
+iyi run kemal.iyi   # hello from kemal
 ```
 
-`iyi init MODULE [DIR]` writes four files and never over one that is
+`iyi init MODULE [DIR]` writes two files and never over one that is
 there: `iyi.mod` naming the module — the path other projects would import
-it by, or a bare `hello` for one nobody will — an entry `main.iyi`, a
-module `greet.iyi` the entry imports, and `main_test.iyi`. Between them
-they show `module`, `import` with the names it brings, `pub` and what a test is here: a
-program that passes by exiting 0, run by `iyi test` with every other
-`*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
+it by, `example.com/me/kemal`, or a bare `kemal` for one nobody will — and
+`kemal.iyi`, the root module the name's last segment promises, which is
+what another project's `import example.com/me/kemal` reads. A test is a
+`*_test.iyi` beside it, a program that passes by exiting 0, run by `iyi
+test`. A dependency is one line in `iyi.mod`, `require
 example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
 writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
 fetched and recorded in `iyi.sum` before the line is written; `@main` or
@@ -529,7 +528,7 @@ whole build's, an upgrade names every export it changed that the project
 writes and the lines that write it, `iyi mod release v1.3.0` refuses a version that says less
 than the package's exported surface changed since its last tag, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
-project while both are being written. `bench/init_project.sh` holds the claim that all four files are
+project while both are being written. `bench/init_project.sh` holds the claim that both files are
 right the moment they land, on Linux and on Windows.
 
 ### An editor, in one stanza

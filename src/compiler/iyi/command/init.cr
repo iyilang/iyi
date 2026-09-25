@@ -1,14 +1,15 @@
 # iyi: `iyi init MODULE [DIR]` — a project, from nothing.
 #
-# `go mod init example.com/me/hello` writes `go.mod` and stops; `cargo init`
-# writes a manifest and a `main.rs` that builds. This is between the two:
-# the manifest (`iyi.mod`), an entry file, one module the entry imports and
-# one test of it — the four files that show `module`, `import`,
-# `pub` and `iyi test` in a tree that runs the moment it is written.
+# `go mod init example.com/me/hello` writes `go.mod` and stops; this writes
+# the manifest and the one file the name promises, and stops there too:
 #
-#     iyi init example.com/me/hello
-#     iyi run main.iyi
-#     iyi test
+#     iyi init kemal          # iyi.mod (module kemal) and kemal.iyi
+#     iyi run kemal.iyi
+#
+# The file is the project's root module - `module kemal`, which is what a
+# consumer's `import kemal` of the package reads - and it runs as it lands.
+# It wrote four files before: an entry, a `greet.iyi` it imported and a
+# test of it, a tutorial every project began by deleting.
 #
 # It was refused before this: `init` sat in the list of verbs that belong to
 # Crystal, because Crystal's `init` writes a shard — `shard.yml`, `src/x.cr`,
@@ -73,7 +74,15 @@ class Iyi::Command
       abort! "#{directory} is a file, not a directory to write the project into", :USAGE_ERROR
     end
 
-    files = iyi_init_files(module_path)
+    # The root module's name is the path's last segment, as a package's is
+    # (`split_major`: `/v2` is a version, not a name). A repository name
+    # with `-` is a module name with `_`, the grammar allowing no dash.
+    name = Mod::ModFile.split_major(module_path)[0].rpartition('/')[2].gsub('-', '_')
+    unless name.size > 0 && name[0].ascii_lowercase? && name.each_char.all? { |c| c.ascii_lowercase? || c.ascii_number? || c == '_' } && !name.includes?("__") && !name.ends_with?('_')
+      abort! "init: '#{name}', the last segment of #{module_path}, cannot name a module: a module name is " \
+             "lower-case letters and digits with single `_` between them. Name the project so its last segment is one", :USAGE_ERROR
+    end
+    files = iyi_init_files(module_path, name)
     taken = files.keys.select { |name| File.exists?(File.join(directory, name)) }
     unless taken.empty?
       abort! "#{Iyi.relative_filename(directory)} already has #{taken.map { |name| "`#{name}`" }.join(", ")}; " \
@@ -82,58 +91,26 @@ class Iyi::Command
 
     Dir.mkdir_p(directory)
     files.each do |name, text|
-      File.write(File.join(directory, name), text)
+      File.write(File.join(directory, name), "#{text}\n")
       puts "wrote #{Iyi.relative_filename(File.join(directory, name))}"
     end
 
     where = directory == Dir.current ? "" : "cd #{Iyi.relative_filename(directory)} && "
     puts
-    puts "#{where}#{Command.program_name} run main.iyi    # builds and runs it"
-    puts "#{where}#{Command.program_name} test            # runs main_test.iyi"
+    puts "#{where}#{Command.program_name} run #{name}.iyi    # builds and runs it"
   end
 
-  # The four files, in the order they are written. The entry has no
-  # `module` header because an entry is a program, not a module anyone
-  # imports; the module's path is its file's path (R-1), so `greet.iyi` is
-  # `import greet` from the directory beside it.
-  private def iyi_init_files(module_path : String) : Hash(String, String)
+  # The two files, in the order they are written.
+  private def iyi_init_files(module_path : String, name : String) : Hash(String, String)
     {
       "iyi.mod" => <<-MOD,
-        # This project's manifest. The module line is the path other projects
-        # would import it by; a dependency is one line each, which
-        # `iyi get example.com/someone/lib` writes:
-        #
-        #     require example.com/someone/lib v1.2.0
-        #
-        # and `replace example.com/someone/lib => ../lib` builds one from a
-        # directory instead of its tag. `iyi build` fetches what is required
-        # and writes iyi.sum beside this.
+        # `iyi get example.com/someone/lib` adds a dependency here.
         module #{module_path}
         MOD
-      "greet.iyi" => <<-IYI,
-        # A module. Its path is its file's path: `import greet` reads greet.iyi
-        # from the directory of the file that imports it.
-        module greet
+      "#{name}.iyi" => <<-IYI,
+        module #{name}
 
-        # `pub` is what another file may reach; a def without it is this
-        # module's own.
-        pub def hello(name : String) : String
-          "hello, \#{name}"
-        end
-        IYI
-      "main.iyi" => <<-IYI,
-        # The program. `#{Command.program_name} run main.iyi` builds and runs it.
-        import greet::{hello}
-
-        puts hello("iyi")
-        IYI
-      "main_test.iyi" => <<-IYI,
-        # A test is a program that passes by exiting 0: `#{Command.program_name} test` runs
-        # every *_test.iyi in this directory, and `assert` panics — exit 1 —
-        # when what it is handed does not hold.
-        import greet::{hello}
-
-        assert hello("iyi") == "hello, iyi"
+        puts "hello from #{name}"
         IYI
     }
   end
@@ -142,10 +119,11 @@ class Iyi::Command
     <<-USAGE
     Usage: #{Command.program_name} init MODULE [DIR]
 
-    Write a new project: `iyi.mod` naming MODULE, an entry `main.iyi`, a
-    module `greet.iyi` it imports, and `main_test.iyi`. DIR is where, and
-    the current directory when it is left out. Nothing that is already
-    there is overwritten.
+    Write a new project: `iyi.mod` naming MODULE, and NAME.iyi, its root
+    module, where NAME is MODULE's last segment (`-` written `_`) - `iyi
+    init kemal` writes iyi.mod and kemal.iyi. DIR is where, and the current
+    directory when it is left out. Nothing that is already there is
+    overwritten.
 
     MODULE is the path other projects would import this one by — a URL's
     path half, `example.com/me/hello` — or a bare name like `hello` for a

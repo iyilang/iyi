@@ -56,6 +56,12 @@ module Iyi
     getter filename
     getter size : Int32?
 
+    # iyi: the text that replaces the `size` characters at the error, when
+    # the parser knows it - `using x` is `import x::*`. `check -f json`
+    # carries it as `suggested_edit` and the language server as a quick fix,
+    # as for a type error's did-you-mean.
+    property suggestion : String?
+
     def initialize(message, @line_number, @column_number, @filename, @size = nil)
       super(message)
     end
@@ -81,6 +87,17 @@ module Iyi
           json.field "spec" do
             json.array do
               refs.each { |ref| json.string ref }
+            end
+          end
+        end
+        if (replacement = @suggestion) && (size = @size) && size > 0
+          json.field "suggested_edit" do
+            json.object do
+              json.field "file", true_filename
+              json.field "line", @line_number
+              json.field "column", @column_number
+              json.field "size", size
+              json.field "replacement", replacement
             end
           end
         end

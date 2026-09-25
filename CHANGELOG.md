@@ -4,6 +4,12 @@
 
 ### Added
 
+- **A `using` refusal carries its fix.** The error names the replacing line
+  and now hands it over as data: `check -f json` carries a `suggested_edit`
+  over the directive's span, `import app/greeter::{polite}` for `using
+  app/greeter::{polite}`, and the language server offers it as a quick fix,
+  as for a type error's did-you-mean. A directive written over several
+  lines gets the sentence and no edit; `iyi fix .` rewrites those.
 - **`iyi fix .`: a project moved to one keyword in one run.** `iyi fix`
   takes several files, or a directory - every `.iyi` under it, hidden
   directories and `lib/` aside - and rewrites every `using` in all of them

@@ -2371,10 +2371,17 @@ module Iyi
       unless @iyi_reads_using
         written = path.join('/')
         now = names ? "import #{written}::{#{names.join(", ")}}" : "import #{written}::*"
-        raise "`using` is gone: one keyword loads a module and names what it brings into scope, " \
-              "so this line is `#{now}` (SPEC.md R-2b). `iyi fix .` rewrites every `using` in a project, " \
-              "folding an `import` of the same module into it",
-          location.line_number, location.column_number
+        message = "`using` is gone: one keyword loads a module and names what it brings into scope, " \
+                  "so this line is `#{now}` (SPEC.md R-2b). `iyi fix .` rewrites every `using` in a project, " \
+                  "folding an `import` of the same module into it"
+        # The edit, where the directive is one line: its span, replaced by the
+        # line that replaces it - what `check -f json` and a quick fix apply.
+        last = @iyi_import_end
+        one_line = last && last.line_number == location.line_number
+        size = one_line && last ? last.column_number - location.column_number + 1 : nil
+        refusal = SyntaxException.new(message, location.line_number, location.column_number, @filename, size)
+        refusal.suggestion = now if size
+        ::raise refusal
       end
 
       node = UsingDecl.new(path, names, name_locations)

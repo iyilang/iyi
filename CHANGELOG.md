@@ -124,6 +124,25 @@
   the OVERLAPPED come out live: held as a number it fails 8 runs of 8,
   plain and release, and intact it holds through 210 collections.
 
+- **A fiber reading stdin parks on Windows.** III.4.8 named the stdin read
+  as the call that had to stop being a blocking syscall, and on Linux and
+  darwin a fiber waiting for a line parks. On Windows the read was the
+  thread's: a sibling ticking every 100 ms beside `stdin.gets` on a pipe
+  that answered after two seconds ticked 0 times in them, and a console
+  was the same. A pipe or a console handed to a program cannot be read
+  through the completion port, so a thread of its own makes the blocking
+  read, as Go does for the same handles, and posts its end to the port;
+  the fiber parks meanwhile, and a disk file is read where it is asked,
+  as before. A cancellation or a deadline withdraws the read - ended with
+  `CancelSynchronousIo` on a pipe, in 200 ms in the gate, with the next
+  line read whole - but not a console's once it has begun: ended, the
+  console kept the request and handed it the next line typed, so a read
+  cancelled at 300 ms lost "first" and the next read answered "second".
+  A console's read runs to its line and answers it. A 400,000-line pipe
+  reads in the same time as before (306 to 321 ms against 308 to 317).
+  `concurrency_exercise.sh` feeds `bench/stdin_park.iyi` a pipe on every
+  platform; with the read made the blocking call again it fails.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a
@@ -10226,7 +10245,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,592-line library and nothing else. Every other
+  written against iyi's own 17,838-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -472,6 +472,11 @@ end
     fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
     fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
     fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
+    # Standard input's reader thread (`IyiStdinReader`): what the handle
+    # is - a disk file is read on the spot, a pipe or a console by the
+    # thread - and how a read that thread is blocked in is withdrawn.
+    fun GetFileType(h_file : Void*) : Int32
+    fun CancelSynchronousIo(h_thread : Void*) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,

@@ -2372,8 +2372,8 @@ module Iyi
         written = path.join('/')
         now = names ? "import #{written}::{#{names.join(", ")}}" : "import #{written}::*"
         raise "`using` is gone: one keyword loads a module and names what it brings into scope, " \
-              "so this line is `#{now}` (SPEC.md R-2b). `iyi fix FILE` rewrites every `using` in a file, " \
-              "and folds an `import` of the same module into it",
+              "so this line is `#{now}` (SPEC.md R-2b). `iyi fix .` rewrites every `using` in a project, " \
+              "folding an `import` of the same module into it",
           location.line_number, location.column_number
       end
 

@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`iyi fix .`: a project moved to one keyword in one run.** `iyi fix`
+  takes several files, or a directory - every `.iyi` under it, hidden
+  directories and `lib/` aside - and rewrites every `using` in all of them
+  before any compiles, since one file's compile reads the modules it
+  imports: `iyi fix a.iyi` stopped at the `using` in a module `a` imports,
+  and moving iyi-web took a loop over 54 files. Then each file's
+  did-you-mean loop runs, and a last line counts what was rewritten and
+  what still reports an error. iyi-web's tree went through `iyi fix .` in
+  one run and its 27 tests passed. The `using` refusal now names `iyi fix .`.
 - **`get` says what a move changed in what the project uses.** For each
   moved requirement the project's files import, both versions are compiled
   and every export of an imported module that changed or went is named -

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`std_signal`'s TERM step lost its output file at random.** A process
+  that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
+  it, and that subshell was itself killed a moment after it forked - before
+  bash had reset the traps it inherited - so it ran the gate's EXIT trap,
+  `rm -rf "$WORK"`, under the step still reading it: "exited 0 without
+  saying why", on CI and in 62 of 200 runs under load here. The watch is a
+  loop in the gate's own shell now; 200 of 200 held.
+
 ## 0.15.1 — 2026-09-25
 
 **Moving to one keyword is one command.** `iyi fix .` rewrites every

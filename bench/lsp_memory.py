@@ -348,6 +348,44 @@ def process_binary(pid):
         kernel32.CloseHandle(handle)
 
 
+def worker_binary(proxy):
+    """The binary the proxy's workers run, asked of whichever worker can
+    still answer: one being retired may have exited between the listing
+    and the question. None if no worker answers within ten seconds."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        for pid in children(proxy):
+            try:
+                return process_binary(pid)
+            except OSError:
+                continue
+        time.sleep(0.05)
+    return None
+
+
+def kill_every_worker(proxy):
+    """Kill the proxy's workers until it has none, twice seen. More than
+    one can be alive: a retirement starts the successor before it stops
+    the worker it replaces, right after the answer that made that one
+    spent - on Windows the 24th request, which on a slow machine was one
+    of `hovering_position`'s. The gate killed the first worker listed,
+    the one being replaced, and its successor answered the hover. With
+    the binary moved aside no worker can start after this."""
+    empty = 0
+    deadline = time.monotonic() + 10
+    while empty < 2 and time.monotonic() < deadline:
+        workers = children(proxy)
+        empty = 0 if workers else empty + 1
+        for pid in workers:
+            try:
+                os.kill(pid, 9)
+            except (ProcessLookupError, PermissionError):
+                # Gone already, or Windows' answer for a process that is
+                # already exiting: the retirement is stopping it.
+                pass
+        time.sleep(0.1)
+
+
 def binary_gone():
     """The compiler's binary, moved out from under a live session.
 
@@ -359,24 +397,22 @@ def binary_gone():
     client = Client(("lsp",))
     uri = open_module(client, MODULE, text)
     line, character, _ = hovering_position(client, uri, text)
-    workers = children(client.proc.pid)
-    if not workers:
-        step("a session outlives the binary it was started from", False,
-             "no worker process to look at")
-        return
-    try:
-        binary = process_binary(workers[0])
-    except OSError:
+    if os.name != "nt" and not os.path.isdir("/proc"):
         print("memory ---- no /proc/<pid>/exe here, so which binary the "
               "worker runs is not knowable; step skipped")
+        client.proc.kill()
+        return
+    binary = worker_binary(client.proc.pid)
+    if binary is None:
+        step("a session outlives the binary it was started from", False,
+             "no worker process to look at")
         client.proc.kill()
         return
 
     aside = binary + ".gate-aside"
     os.rename(binary, aside)
     try:
-        os.kill(workers[0], 9)
-        time.sleep(0.4)
+        kill_every_worker(client.proc.pid)
         reply = client.send("textDocument/hover",
                             {"textDocument": {"uri": uri},
                              "position": {"line": line,

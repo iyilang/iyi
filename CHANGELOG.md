@@ -46,6 +46,19 @@
   `parallel_mark.sh` times the spin on Linux and Windows - 50 us on that
   machine - and a spin that ignores the clock fails it.
 
+- **The language server's binary-gone step kills every worker it finds.**
+  `lsp_memory.py` moved the binary aside and killed the first worker the
+  proxy listed, and on Windows' runner it failed now and then with the
+  hover answered: a retirement starts the successor before it stops the
+  worker it replaces, right after the answer that made that one spent -
+  on Windows the 24th request, one of the hovers before the step on a
+  slow machine - and the gate killed the worker being replaced while its
+  successor answered. Forced onto that answer, the step failed 4 runs of
+  8 and passes 8 of 8 now: it kills the proxy's workers until it has
+  none, and asks the binary of whichever worker can still answer, where
+  a worker that had just exited made it skip the step as if there were
+  no `/proc`.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

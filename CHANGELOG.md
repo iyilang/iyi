@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.15.1 — 2026-09-25
+
+**Moving to one keyword is one command.** `iyi fix .` rewrites every
+`using` under a directory before any file compiles - one file's compile
+reads the modules it imports - then runs each file's did-you-mean loop and
+counts what it rewrote. iyi-web's 59 files went through it in one run and
+its 27 tests passed; iyi-web v0.1.1 is that tree, for 0.15.0 and later. A
+`using` the compiler meets now carries the line that replaces it as data:
+`check -f json` hands it over as a `suggested_edit`, and the language
+server offers it as a quick fix.
+
+**A package release says what it changed.** `iyi mod release [VERSION]`
+compiles the package at HEAD and at its last tag and names every exported
+line gone and new; a line gone is a new major, a line new a new minor, and
+with VERSION it exits 1 when the version says less than that. And `iyi get`
+now ends an upgrade with what it changed in the lines this project wrote:
+each export that changed or went, with the `file:line` that writes it.
+
+**`iyi init kemal` writes `iyi.mod` and `kemal.iyi`, and nothing else** -
+the project's root module, running as it lands, where it wrote an entry, a
+`greet.iyi` and a test every project began by deleting. And a package's
+root module that imports its own submodule is reachable again: the import
+wall refused every importer of `rel` the names of `Rel` when `rel/util`
+had loaded first.
+
 ### Added
 
 - **A `using` refusal carries its fix.** The error names the replacing line

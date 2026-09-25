@@ -55,6 +55,11 @@
 # before v1 a break is a minor. An example program beside the library is
 # nobody's surface, a release written with `using` is still read, and a
 # version already tagged is refused.
+#
+# Then what a move changes in what the project uses: an export whose
+# signature moved is "changed" with the lines that write it - a comment
+# that names it is not one - an export gone that nothing here writes says
+# so, and a requirement the project's files do not import says nothing.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -544,6 +549,37 @@ if "$IYI" mod release v0.3.1 > zero.log 2>&1 || ! grep -q "so the next release i
 fi
 "$IYI" mod release v0.4.0 > zero2.log 2>&1 || fail "v0.4.0 was refused for a v0 break: $(cat zero2.log)"
 [ "$status" -eq 0 ] && echo "  v0.3.0 -> a def gone: v0.3.1 refused, v0.4.0 holds it"
+
+step "get says what a move changes in what the project uses"
+mkrepo "$WORK/work/libi"
+printf 'module example.test/user/libi\n' > "$WORK/work/libi/iyi.mod"
+printf 'module libi\n\npub def greeting : String\n  "hi"\nend\n\npub def old : Int32\n  1\nend\n\npub def keep : Int32\n  2\nend\n' > "$WORK/work/libi/libi.iyi"
+git -C "$WORK/work/libi" add -A && git -C "$WORK/work/libi" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libi"
+(cd "$WORK" && publish libi v0.1.0)
+printf 'module libi\n\npub def greeting(name : String) : String\n  "hi #{name}"\nend\n\npub def keep : Int32\n  2\nend\n\npub def fresh : Int32\n  3\nend\n' > "$WORK/work/libi/libi.iyi"
+git -C "$WORK/work/libi" commit -qam two && (cd "$WORK" && publish libi v0.2.0)
+mkdir -p "$WORK/iapp" && cd "$WORK/iapp" || exit 1
+printf 'module example.test/user/iapp\n' > iyi.mod
+printf 'import example.test/user/libi::{greeting, keep}\n\nputs greeting\nputs keep\n# greeting, in a comment\n' > main.iyi
+"$IYI" get example.test/user/libi@v0.1.0 > imp0.log 2>&1 || { fail "get libi@v0.1.0 failed"; cat imp0.log; }
+"$IYI" get -u > imp1.log 2>&1 || { fail "get -u of libi failed"; cat imp1.log; }
+sed -n '/what the move changes/,$p' imp1.log > imp1.section
+if ! grep -q "changed  libi: def greeting : String" imp1.section ||
+   ! grep -q "now def greeting(name : String) : String" imp1.section ||
+   [ "$(grep -c 'main.iyi:' imp1.section | tr -d ' ')" != "2" ] ||
+   ! grep -q "main.iyi:1" imp1.section || ! grep -q "main.iyi:3" imp1.section; then
+  fail "the changed export and the two lines that write it were not said: $(cat imp1.log)"
+fi
+grep -q "gone     libi: def old : Int32 - used nowhere here" imp1.section || fail "the unused gone export was not said: $(cat imp1.log)"
+grep -q "and 1 new" imp1.section || fail "the new export was not counted: $(cat imp1.log)"
+# The same move for a project that requires libi and imports none of it.
+mkdir -p "$WORK/japp" && cd "$WORK/japp" || exit 1
+printf 'module example.test/user/japp\n' > iyi.mod
+printf 'puts 1\n' > main.iyi
+"$IYI" get example.test/user/libi@v0.1.0 > jmp0.log 2>&1 && "$IYI" get -u > jmp1.log 2>&1 || { fail "get in japp failed"; cat jmp0.log jmp1.log; }
+grep -q "what the move changes" jmp1.log && fail "a requirement nothing here imports was reported: $(cat jmp1.log)"
+[ "$status" -eq 0 ] && echo "  greeting changed at main.iyi:1 and :3, the comment not; old gone, used nowhere; 1 new; an unimported requirement: silent"
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,593 lines, of which 3,509 are the library held to the 3,734 ceiling (5,037 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 117,571 lines, none of it written in iyi |
+| compiler | 117,748 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 117,571 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 117,748 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,593-line own prelude + 40,654 in std |
 | Specs | 21,146 lines | 12,017 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4462,6 +4462,19 @@ so it is a rule and not a list, and the module that gains one is counted
 the day it does. It is a report, not a sandbox: it says what the source
 can do, and a `lib` assembled by macro interpolation is not counted.
 `bench/packages_get.sh` holds it, a test's `std/file` included.
+
+**A move says what it changed in the lines the project wrote.** Reach
+says what a new version can do; `get` also says what it did to the code
+that uses it. For each moved requirement this project's own files import,
+both versions' surfaces - the ones `iyi mod release` compares - are
+compiled from copies of their checkouts, and every export of an imported
+module whose line went is listed: "changed" when a line of the same name
+replaced it, with both, "gone" when none did, then the `file:line` of each
+line of an importing file that writes the name, comments aside, or "used
+nowhere here". New exports are counted. It is by name, not by type - a
+local of the same name is listed too - so a site is a place to look and
+not a proof of a break; a requirement only another package imports says
+nothing, that package being the one to answer for it.
 
 **A release says what it changed, and the version has to agree.** Minimal
 version selection builds every consumer at the highest minimum anyone

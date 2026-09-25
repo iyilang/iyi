@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`get` says what a move changed in what the project uses.** For each
+  moved requirement the project's files import, both versions are compiled
+  and every export of an imported module that changed or went is named -
+  `changed  libi: def greeting : String`, `now def greeting(name : String)
+  : String` - with the `file:line` of each line that writes it, comments
+  aside, or "used nowhere here"; new exports are counted. By name, not by
+  type: a site is a place to look. A requirement nothing here imports says
+  nothing.
 - **`iyi mod release [VERSION]`: the version has to say what changed.** It
   compares the package's exported surface at HEAD with the highest release
   tag HEAD contains - each checked out beside the tree and compiled once -

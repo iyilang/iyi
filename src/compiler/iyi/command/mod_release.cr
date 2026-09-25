@@ -180,11 +180,8 @@ class Iyi::Command
     true
   end
 
-  # Every module of the package at *rev* that exports something, by name,
-  # with its surface as sorted lines. The commit is checked out beside the
-  # tree - never into it - and one entry importing them all is compiled
-  # there, so the package's own requirements resolve as they would for a
-  # consumer.
+  # The surface of the package at *rev* (`package_surface`), from the
+  # commit checked out beside the tree - never into it.
   private def mod_release_surface(top : String, rev : String, inside : String, into : String) : Hash(String, Array(String))
     unless mod_release_git(top, "worktree", "add", "--detach", "--quiet", into, rev)
       raise Mod::ModError.new("cannot check out #{rev}")
@@ -194,46 +191,54 @@ class Iyi::Command
       unless File.file?(File.join(package, Mod::Installer::MANIFEST))
         raise Mod::ModError.new("#{rev} has no iyi.mod at #{inside.empty? ? "the repository's root" : inside}")
       end
-      # A release written before `import X::{...}` replaced `using` is read
-      # the way `iyi fix` would write it: the surface is the same, and a
-      # checkout nobody builds again is the one place the rewrite is free.
       # HEAD is compiled as it is - a `using` there is what a consumer meets.
-      if rev != "HEAD"
-        Mod::Reach.sources(package).each do |file|
-          if rewritten = UsingRewrite.rewrite(File.read(file), file)
-            File.write(file, rewritten[0])
-          end
-        end
-      end
-      modules = mod_release_modules(package)
-      return {} of String => Array(String) if modules.empty?
-
-      entry = File.join(package, "__iyi_release_entry.iyi")
-      File.write(entry, modules.map { |name| "import #{name}\n" }.join)
-      emit = File.join(into, "__iyi_release_mods")
-      compiler = Compiler.new
-      compiler.prelude = "iyi/prelude"
-      compiler.no_codegen = true
-      compiler.emit_iyimod = emit
-      compiler.stdout = IO::Memory.new
-      compiler.stderr = IO::Memory.new
-      begin
-        compiler.compile(Compiler::Source.new(entry, File.read(entry)), File.join(into, "unused"))
-      rescue ex : Iyi::Error | Iyi::CodeError | Mod::ModError
-        deepest = Iyi.deepest_error(ex)
-        raise Mod::ModError.new("#{rev} does not compile, so there is no surface to compare: #{deepest.message.to_s.lines.first?}")
-      end
-
-      surfaces = {} of String => Array(String)
-      Dir.glob(::Path[emit].to_posix.join("**", "*.iyimod")) do |candidate|
-        artifact = IyiMod.read(candidate) rescue next
-        next unless modules.includes?(artifact.module_name)
-        surfaces[artifact.module_name] = iyi_export_lines(artifact)
-      end
-      surfaces
+      package_surface(package, into, rev, respell: rev != "HEAD")
     ensure
       mod_release_git(top, "worktree", "remove", "--force", into)
     end
+  end
+
+  # Every module of the package at *package* that exports something, by
+  # name, with its surface as sorted lines: one entry importing them all is
+  # compiled there, so the package's own requirements resolve as they would
+  # for a consumer. *package* is a copy nobody builds again - the entry is
+  # written into it. With *respell*, a version written before `import
+  # X::{...}` replaced `using` is read the way `iyi fix` would write it: the
+  # surface is the same. *label* names the version in a refusal.
+  private def package_surface(package : String, scratch : String, label : String, respell : Bool) : Hash(String, Array(String))
+    if respell
+      Mod::Reach.sources(package).each do |file|
+        if rewritten = UsingRewrite.rewrite(File.read(file), file)
+          File.write(file, rewritten[0])
+        end
+      end
+    end
+    modules = mod_release_modules(package)
+    return {} of String => Array(String) if modules.empty?
+
+    entry = File.join(package, "__iyi_release_entry.iyi")
+    File.write(entry, modules.map { |name| "import #{name}\n" }.join)
+    emit = File.join(scratch, "__iyi_release_mods")
+    compiler = Compiler.new
+    compiler.prelude = "iyi/prelude"
+    compiler.no_codegen = true
+    compiler.emit_iyimod = emit
+    compiler.stdout = IO::Memory.new
+    compiler.stderr = IO::Memory.new
+    begin
+      compiler.compile(Compiler::Source.new(entry, File.read(entry)), File.join(scratch, "unused"))
+    rescue ex : Iyi::Error | Iyi::CodeError | Mod::ModError
+      deepest = Iyi.deepest_error(ex)
+      raise Mod::ModError.new("#{label} does not compile, so there is no surface to compare: #{deepest.message.to_s.lines.first?}")
+    end
+
+    surfaces = {} of String => Array(String)
+    Dir.glob(::Path[emit].to_posix.join("**", "*.iyimod")) do |candidate|
+      artifact = IyiMod.read(candidate) rescue next
+      next unless modules.includes?(artifact.module_name)
+      surfaces[artifact.module_name] = iyi_export_lines(artifact)
+    end
+    surfaces
   end
 
   # The package's modules that export something: a file whose header is its

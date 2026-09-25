@@ -525,7 +525,8 @@ line for the module and its names - `iyi mod tidy` adds
 what the source imports and removes what it does not, `get` says what a
 new or upgraded package reaches outside the language - the std modules
 that call C, `File`, the C it declares - and `iyi mod reach` lists the
-whole build's, `iyi mod release v1.3.0` refuses a version that says less
+whole build's, an upgrade names every export it changed that the project
+writes and the lines that write it, `iyi mod release v1.3.0` refuses a version that says less
 than the package's exported surface changed since its last tag, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
 project while both are being written. `bench/init_project.sh` holds the claim that all four files are

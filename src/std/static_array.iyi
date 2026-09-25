@@ -4,8 +4,7 @@
 
 module std/static_array
 
-import std/slice
-using std/slice::{Slice}
+import std/slice::{Slice}
 
 struct ::StaticArray(T, N)
   # Returns a pointer to this static array's data.

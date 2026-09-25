@@ -115,7 +115,7 @@ module Iyi
     getter iyi_module_imports = {} of String => Array(String)
 
     # iyi: the subset of the edges above that were written `pub import` —
-    # importing file => the files it re-exports. `using`'s reachability
+    # importing file => the files it re-exports. Imported names' reachability
     # walk follows ordinary edges one step and these edges any depth: a
     # facade may hand its dependencies on, a private import may not.
     getter iyi_exported_imports = {} of String => Set(String)
@@ -705,12 +705,12 @@ module Iyi
       "$Regex:#{::Crystal::Digest::MD5.hexdigest(key)}"
     end
 
-    # iyi: the `using` directives each file's module unit writes, by absolute
+    # iyi: the imports' names each file's module unit writes, by absolute
     # filename and as written (SPEC.md II.3).
     #
     # In the artifact because a signature is stored as the annotation the
     # author wrote, and an annotation is written in a context: `pub def
-    # handle(ctx : Context)` means what it means because of a `using` further
+    # handle(ctx : Context)` means what it means because of an import further
     # up the file. Carrying the annotation without the context that resolves it
     # was enough for `std/list`, whose signatures name only its own types, and
     # not for the Kemal port, whose first exported signature names an imported

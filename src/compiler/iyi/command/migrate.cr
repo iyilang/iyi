@@ -12,7 +12,7 @@
 #   2. **A type's qualified name changes with it.** Every constant path
 #      the tree declares is resolved the way Crystal resolves one —
 #      innermost namespace outwards, through `include` — and rewritten to
-#      the bare name the declaring module exports, under a `using` line.
+#      the bare name the declaring module exports, named on its `import` line.
 #      Two modules offering one name: the second stays qualified, and the
 #      note says which.
 #   3. **What other files reach is `pub`.** A Crystal file cannot say
@@ -72,7 +72,7 @@ class Iyi::Command
           Write every .cr under SRC as an iyi module under DIR: the
           namespace as the path, the wrapper off, `pub` on the top level,
           relative requires as imports, and every constant path this tree
-          declares as the bare name its module exports, under a `using`
+          declares as the bare name its module exports, named on its `import`
           line. Import cycles are written as one module; a reopening of a
           type the tree does not own is kept as Crystal in a `.cr` file
           beside its module.
@@ -473,7 +473,7 @@ class Iyi::Command
     # instantiates nowhere and a helper nobody outside calls, and the
     # types for those cannot be read off a program that never ran them.
     # What the rewrite already knows is exactly which names cross, since
-    # it wrote every `using` line and every qualified spelling.
+    # it wrote every import's names and every qualified spelling.
     needed = {} of String => Set(String)
     units.each do |unit|
       unit.usings.each do |target, names|
@@ -617,9 +617,17 @@ class Iyi::Command
         end
         sidecars.each { |member| io << "require \"./" << File.basename(member.path) << "_crystal.cr\"\n" }
         io << '\n' unless shard_requires.empty? && sidecars.empty?
-        imports.to_a.sort.each { |imported| io << "import " << imported << '\n' }
+        # One line per module: the names it brings, when it brings any.
+        imports.to_a.sort.each do |imported|
+          io << "import " << imported
+          if names = usings[imported]?
+            io << "::{" << names.to_a.sort.join(", ") << '}'
+          end
+          io << '\n'
+        end
         usings.to_a.sort_by(&.[0]).each do |(imported, names)|
-          io << "using " << imported << "::{" << names.to_a.sort.join(", ") << "}\n"
+          next if imports.includes?(imported)
+          io << "import " << imported << "::{" << names.to_a.sort.join(", ") << "}\n"
         end
         io << '\n' unless imports.empty?
         members.each do |member|
@@ -893,7 +901,7 @@ class Iyi::Command
       "reopen"     => "reopenings of types this tree does not own, kept as Crystal",
       "collide"    => "one name offered by two modules, the second left qualified",
       "bang"       => "`!` is III.1.7a's: rewritten, and worth reading",
-      "include"    => "`include` of a namespace, which is a `using` line here",
+      "include"    => "`include` of a namespace, which is an import's names here",
       "nested"     => "modules left nested, which nothing outside can reach",
       "mixin"      => "a module mixed into a type, which is a trait here and needs a person",
       "untyped"    => "exports whose types the compiler still has to be told",
@@ -1364,7 +1372,7 @@ class Iyi::Command
       # What follows the `end`. Nothing is the ordinary case; the `validator`
       # shard is the other one - `module Validator` with `alias Valid =
       # Validator` under it, where refusing to peel left the module nested
-      # and every consumer's `using validator::{Validator}` refused.
+      # and every consumer's `import validator::{Validator}` refused.
       #
       # Only a name for a type may trail it. Anything else is code that ran
       # *outside* the module and may name it: `halite/error.cr` closes
@@ -1678,10 +1686,10 @@ class Iyi::Command
 
         # Rule: `include Logging` at the namespace's own level is Crystal's
         # way of saying "and these names are mine too"; here the names come
-        # through `using`, which the rewrite below writes.
+        # through `import X::{...}`, which the rewrite below writes.
         if (match = INCLUDE.match(line)) && (match[1] || "").empty?
           if target = Command.resolve_namespace_for(match[3] || "", self, by_namespace)
-            notes.add "include", "#{path}: `include #{match[3]}` is #{target.path}'s names; they arrive by `using`"
+            notes.add "include", "#{path}: `include #{match[3]}` is #{target.path}'s names; they arrive by `import #{target.path}::{...}`"
             next
           end
         end
@@ -1787,7 +1795,7 @@ class Iyi::Command
       # A bare name resolves outwards, the way Crystal resolves one: this
       # file's namespace first, then the one above it, to the top. So
       # `ENVIRONMENT` inside `AcikTurkiye::Logging` is `AcikTurkiye`'s and
-      # arrives by `using` rather than by having been in scope.
+      # arrives by an import's names rather than by having been in scope.
       bare_lookup = {} of String => Export
       namespace.size.downto(0) do |depth|
         prefix = namespace[0, depth].join("::")
@@ -2169,7 +2177,7 @@ class Iyi::Command
     # its module exports. Resolved outwards from this file's namespace,
     # the way Crystal resolves a constant; string contents are skipped.
     # A sidecar is Crystal, not an iyi module: it reopens somebody else's
-    # type and is `require`d by the module beside it. It has no `using`
+    # type and is `require`d by the module beside it. It has no `import X::{...}`
     # line to reach a name through, so every path it names that the tree
     # declares is written in full - `Radix::Result(Kemal::Route)` becomes
     # `Radix::Result(CliAndOthers::Route)`, because that is where `Route`
@@ -2256,7 +2264,7 @@ class Iyi::Command
                              claimed : Hash(String, String), notes : Notes,
                              qualify : Bool = false) : String
       # `Shop::Names.title` is a namespace and a method: the method is one
-      # module's export, and naming it bare under a `using` is what R-2b
+      # module's export, and naming it bare under `import X::{...}` is what R-2b
       # says a consumer writes.
       if at = token.index('.')
         head = token[0, at]
@@ -2278,7 +2286,7 @@ class Iyi::Command
           return "#{MARK}#{path}#{MARK}#{MARK}.#{method}"
         end
         if unit = (qualify ? @by_namespace[head.lchop("::")]? : Command.resolve_namespace_for(head, self, @by_namespace))
-          # Qualified rather than bare under a `using`: a module function
+          # Qualified rather than bare under `import X::{...}`: a module function
           # called from inside a type's body does not resolve as a bare
           # name, and `Module::Path.method` is what R-2b names as the
           # other spelling. It reads the same as the Crystal it came from.

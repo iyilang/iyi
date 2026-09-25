@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/ini
-using std/ini::{INI}
+import std/ini::{INI}
 
 puts "== parse"
 doc = INI.parse("k=v\n[s]\na=b\n")

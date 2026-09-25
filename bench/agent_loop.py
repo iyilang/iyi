@@ -67,11 +67,11 @@ def main():
     # A test asserts by exiting non-zero, and `assert` is the one word the
     # prelude gives it: a false condition is a panic naming the site.
     write("add_test.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "assert add(2, 2) == 4, \"add broke\"\n"
     ))
     write("mul_test.iyi", (
-        "import calc/mul\nusing calc/mul::{mul}\n\n"
+        "import calc/mul::{mul}\n\n"
         "assert mul(2, 3) == 6, \"mul broke\"\n"
     ))
 
@@ -159,7 +159,7 @@ def main():
     ))
     write("bumps.iyi", (
         "module bumps\n\n"
-        "import calc/typo\nusing calc/typo::{bump}\n\n"
+        "import calc/typo::{bump}\n\n"
         "puts bump(1)\n"
     ))
     proc = run("fix", "--json", "bumps.iyi", cwd=work)
@@ -364,19 +364,19 @@ def main():
     # 4b''. the import wall is per-file, and `pub import` is the one
     # door through it: a module in the program because *somebody else*
     # imported it is not reachable unless this file says so - the
-    # phantom-dependency disease R-1 exists to refuse. A `using` says so:
-    # it imports what it names, so the dependency is written in the file
-    # that has it. A qualified name says nothing, and is refused.
+    # phantom-dependency disease R-1 exists to refuse. `import lib/inner::*`
+    # says so: the dependency is written in the file that has it. A
+    # qualified name says nothing, and is refused.
     os.makedirs(os.path.join(work, "lib"), exist_ok=True)
     write("lib/inner.iyi", "module lib/inner\n\npub def shine() : Int32\n  7\nend\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
         "pub def front() : Int32\n  1\nend\n"
     ))
-    write("declared.iyi", "import lib/facade\nusing lib/inner\n\nputs shine()\n")
-    step("a using declares the dependency it reaches",
+    write("declared.iyi", "import lib/facade\nimport lib/inner::*\n\nputs shine()\n")
+    step("an import declares the dependency it reaches",
          run("check", "declared.iyi", cwd=work).returncode == 0,
-         "using lib/inner is this file's own edge")
+         "import lib/inner::* is this file's own edge")
     write("qualified.iyi", "import lib/facade\n\nputs Lib::Inner.shine()\n")
     write("lib/facade.iyi", (
         "module lib/facade\nimport lib/inner\n\n"
@@ -399,16 +399,16 @@ def main():
          f"applied {fixed['applied']}")
     step("and check agrees", run("check", "uncalled.iyi", cwd=work).returncode == 0, "")
 
-    # 4c. the suggestion pool includes `using`-imported names — the miss
-    # that motivated it: `addd` went unsuggested while `add` sat one
-    # edit away in the file's own using line
+    # 4c. the suggestion pool includes names an import brought into scope —
+    # the miss that motivated it: `addd` went unsuggested while `add` sat
+    # one edit away in the file's own `import calc/add::{add}`
     write("uses.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "if addd(2, 2) != 4\n    puts \"broke\"\nend\n"
     ))
     proc = run("fix", "--json", "uses.iyi", cwd=work)
     fixed = json.loads(proc.stdout)
-    step("a using-imported name is suggested and fixed",
+    step("a name an import brought into scope is suggested and fixed",
          fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("addd", "add")],
          f"applied {fixed['applied']}")
 
@@ -423,7 +423,7 @@ def main():
     # The other direction: a test that asserts something false fails, by
     # exit code, with the site in what it printed.
     write("broken_test.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "assert add(2, 2) == 5, \"arithmetic\"\n"
     ))
     proc = run("test", "--json", "broken_test.iyi", cwd=work)
@@ -431,7 +431,7 @@ def main():
     step("a false assert fails its test and names the line",
          proc.returncode != 0 and report["failed"] == 1
          and "assertion failed: arithmetic" in report["tests"][0]["output"]
-         and "broken_test.iyi:4" in report["tests"][0]["output"],
+         and "broken_test.iyi:3" in report["tests"][0]["output"],
          report["tests"][0]["output"].strip())
     os.remove(os.path.join(work, "broken_test.iyi"))
     proc = run("test", "--json", "--affected", "app.iyi", cwd=work)
@@ -443,7 +443,7 @@ def main():
     # 5b. check --affected: the ripple — a surface break names exactly
     # the consumer it reaches, and a clean tree answers "all compile"
     write("consumer.iyi", (
-        "import calc/add\nusing calc/add::{add}\n\n"
+        "import calc/add::{add}\n\n"
         "puts add(1, 1)\n"
     ))
     proc = run("check", "--affected", "calc/add.iyi", cwd=work)

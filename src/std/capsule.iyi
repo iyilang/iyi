@@ -37,8 +37,7 @@
 
 module std/capsule
 
-import std/slice
-using std/slice::{Slice, Bytes}
+import std/slice::{Slice, Bytes}
 
 # =============================================================================
 # 1. QUIC Variable-Length Integer Encoding (RFC 9000 Section 16 & Appendix A)

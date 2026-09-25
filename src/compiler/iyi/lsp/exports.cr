@@ -3,13 +3,13 @@
 # `pub` is written at the declaration, so one parse of a module names
 # its whole callable surface, no compile and no artifact needed. The
 # walk covers module-level `pub def` only: those are the names a
-# `using` line can select and a bare call can reach.
+# `import X::{...}` line can select and a bare call can reach.
 require "../syntax/ast"
 require "../syntax/parser"
 
 module Iyi::Lsp
   module Exports
-    # One offerable export: the def's name, the module path a `using`
+    # One offerable export: the def's name, the module path an `import`
     # line selects it from, and the signature as written.
     record Item, name : String, module_path : String, detail : String
 

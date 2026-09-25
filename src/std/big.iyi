@@ -34,8 +34,7 @@
 
 module std/big
 
-import std/traits
-using std/traits::{Comparable, Num, Hashable}
+import std/traits::{Comparable, Num, Hashable}
 
 pub struct BigInt
   getter sign : Int32

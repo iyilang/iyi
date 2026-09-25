@@ -6,8 +6,7 @@
 
 module std/uuid
 
-import std/random
-using std/random::{Random}
+import std/random::{Random}
 
 pub struct UUID
   @bytes : Array(UInt8)

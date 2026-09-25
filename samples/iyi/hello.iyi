@@ -70,9 +70,10 @@ end
 #     include Greet     # a type acquires a trait by having an impl, whose
 #   end                 # location R-3 can check; `include` has no such rule
 #
-#   using samples/hello/greet   # a trait exports no names to bring into
-#                               # scope — a trait method is resolved from the
-#                               # receiver, never from a `using`
+#   import samples/hello/greet::*   # a trait exports no names to bring
+#                                   # into scope — a trait method is resolved
+#                                   # from the receiver, never from an
+#                                   # import's names
 #
 #   impl Greet for Loud         # a blanket impl in disguise
 #
@@ -142,6 +143,7 @@ puts announce(Robot.new(9))
 #   no formatting, and `raise` is a panic that prints and exits. What is in it
 #   is what a sample called for (SPEC.md, "0.1.0", item 3).
 #
-# See `modules.iyi` for `import` and `using` across files, `generics.iyi` for
-# implementing a trait for a generic type and for associated types, bounds and
-# requirements, and `collections.iyi` for `Enumerable` ported onto all of it.
+# See `modules.iyi` for `import` and its `::*` and `::{...}` forms across
+# files, `generics.iyi` for implementing a trait for a generic type and for
+# associated types, bounds and requirements, and `collections.iyi` for
+# `Enumerable` ported onto all of it.

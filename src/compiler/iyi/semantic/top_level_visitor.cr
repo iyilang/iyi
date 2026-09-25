@@ -274,20 +274,21 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     false
   end
 
-  # iyi: `using app/greeter`, `using app/greeter::{polite}` (SPEC.md II.3)
+  # iyi: the scope half of `import app/greeter::*` and
+  # `import app/greeter::{polite}` (SPEC.md II.3)
   #
   # Brings a module's exported names into unqualified scope — written by the
   # consumer, not performed by the library. This is only a record: the two
   # lookups that matter consult it directly, `Call#lookup_using_matches` for
   # methods and `Type#lookup_using_path_item` for type names. Nothing is added
-  # to the ancestor chain, which is what keeps `using` from re-exporting.
+  # to the ancestor chain, which is what keeps an import's names from re-exporting.
   #
   # The record lands on `current_type`, so the directive reaches exactly the
   # scope it was written in and no further: both lookups walk outward from
-  # where the name is used, so a `using` in a module covers the types nested
+  # where the name is used, so an import in a module covers the types nested
   # inside it, and stops at the module's edge.
   def visit(node : UsingDecl)
-    check_outside_exp node, "use `using`"
+    check_outside_exp node, "import"
 
     # A short name is spelled out first, as the import beside it was.
     written_short = node.path.join('/')
@@ -296,22 +297,21 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     # Global, because a module's path is its file's path (R-1) and a file path
     # does not mean something different depending on where it is written. A
-    # lexical lookup made `using calc/lexer` inside a module called
-    # `samples/calc` resolve `Calc` to the module doing the `using`, and then
+    # lexical lookup made `import calc/lexer::*` inside a module called
+    # `samples/calc` resolve `Calc` to the module doing the import, and then
     # say the module was not imported — a true-looking sentence about the wrong
     # thing. Found by `samples/iyi/calc`, which is called that.
     path = Path.new(iyi_using_segments(node.path), global: true).at(node)
 
-    # iyi: `using` reaches a module this file has imported, and the error for
+    # iyi: the scope half reaches a module this file has imported, and the error for
     # forgetting the import used to be "undefined constant App::Greeter" —
     # a name the author never wrote, about a rule they had not met. Two
     # different mistakes hide behind it, so they are told apart here.
     written = node.path.join('/')
     unless current_type.lookup_type?(path, allow_typeof: false)
       if resolve_import(written)
-        node.raise "`#{written}` is not imported here. `using` brings in the " \
-                   "names of a module this file has already imported, so this " \
-                   "needs `import #{written}` above it (SPEC.md R-1, R-2b)"
+        node.raise "`#{written}` is not imported here: its names come with the " \
+                   "import that loads it, `import #{written}::{name}` (SPEC.md R-1, R-2b)"
       else
         node.raise "can't find module '#{written}'. A module's path is its " \
                    "file's path, so this one is `#{written}.iyi`"
@@ -321,22 +321,22 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     used_type = lookup_type(path)
 
     # `is_a?(ModuleType)` would not do: classes and structs are `ModuleType`s
-    # too, and `using` a struct is meaningless. Nor would `module?` alone: a
-    # trait is a module type, but it exports no names to bring into scope —
-    # its methods are reached through the receiver's impl, which II.3 rule 1
-    # keeps entirely out of `using`'s namespace.
+    # too, and importing names from a struct is meaningless. Nor would
+    # `module?` alone: a trait is a module type, but it exports no names to
+    # bring into scope — its methods are reached through the receiver's impl,
+    # which II.3 rule 1 keeps entirely out of an import's names.
     if used_type.trait?
-      node.raise "can't `using` #{used_type}, it's a trait. Trait methods are resolved from the receiver's type, never from a `using` — see SPEC.md II.3"
+      node.raise "can't import names from #{used_type}, it's a trait. Trait methods are resolved from the receiver's type, never from an import's names — see SPEC.md II.3"
     end
 
     unless used_type.is_a?(ModuleType) && used_type.module?
-      node.raise "can't `using` #{used_type}, it's a #{used_type.type_desc}"
+      node.raise "can't import names from #{used_type}, it's a #{used_type.type_desc}"
     end
 
     # iyi: the wall, made per-file. Until here the check was
     # type-existence, and type-existence is program-wide — anyone's
     # import made a module everyone's, which is the phantom-dependency
-    # disease R-1 exists to refuse. A file reaches with `using` exactly
+    # disease R-1 exists to refuse. A file reaches with an import's names exactly
     # what it imported, plus what those imports re-export with
     # `pub import`, transitively: a facade may hand its dependencies
     # on, a private import may not.
@@ -349,38 +349,38 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
        (@program.iyi_module_paths.has_value?(written) || @program.iyi_artifact_modules.has_value?(written))
       from = @iyi_importing.last? || @program.filename.to_s
       unless iyi_using_reachable?(from, written)
-        node.raise "`using #{written}` reaches a module this file did not " \
-                   "import — it is in the program only because some other " \
-                   "file imported it. Add `import #{written}` here, or have " \
+        node.raise "`import #{written}` names a module this file does not " \
+                   "reach — it is in the program only because some other " \
+                   "file imported it. Import it from this file, or have " \
                    "a module this file imports re-export it with " \
                    "`pub import #{written}` (SPEC.md R-1, R-2b)"
       end
     end
 
-    # R-2b: `using` reaches a module's *exported* names. Reported here rather
+    # R-2b: an import reaches a module's *exported* names. Reported here rather
     # than left to fail at the point of use, because the selective form names
     # what it wants and the author can be told which of those they cannot have.
     # Two mistakes hide behind "does not export": a name the module has and
     # did not mark `pub`, and a name the module does not have at all - a typo,
-    # usually, and `using calc/add::{ad}` was told to add `pub` to a
+    # usually, and `import calc/add::{ad}` was told to add `pub` to a
     # declaration that does not exist. The typo gets the nearest exported name.
     if names = node.names
       unexported = names.reject { |name| used_type.exported_name?(name) }
       unless unexported.empty?
         declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
         if absent.empty?
-          node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. `using` reaches only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
+          node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. an import brings in only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
         else
           # iyi: the name the module declares at the *root*. `std/set` is
           # `module std/set` and `class ::Set(T)` inside it: the `::` puts
           # the class beside `Array` and `String` rather than in the
           # module, so `import std/set` alone is what brings it and a
-          # `using` naming it asks the module for something it does not
+          # selective import of it asks the module for something it does not
           # have. Twenty-five modules under `src/std` are written this way,
           # and the sentence they drew — "nothing by that name is declared
           # in `std/set`, `pub` or not" — is true of the module and wrong
           # about the program, where `Set` is right there. `mod context`
-          # already prints these as `class ::Set(T)` and offers no `using`
+          # already prints these as `class ::Set(T)` and offers no `::{...}`
           # line; this is the same fact, said where the mistake is made.
           rooted = absent.select { |name| iyi_root_declared_by?(name, used_type) }
           unless rooted.empty?
@@ -388,7 +388,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
                        "#{rooted.size == 1 ? "is" : "are"} declared at the root by " \
                        "`#{written}`, not as #{rooted.size == 1 ? "a name" : "names"} of it: " \
                        "`import #{written}` is enough to write #{rooted.map { |name| "`#{name}`" }.join(", ")}, " \
-                       "and `using #{written}::{#{rooted.join(", ")}}` asks the module for " \
+                       "and `import #{written}::{#{rooted.join(", ")}}` asks the module for " \
                        "#{rooted.size == 1 ? "a name it does not have" : "names it does not have"} (SPEC.md R-2b)"
           end
 
@@ -404,15 +404,15 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # iyi: a name the module's own name already takes.
     #
     # A module header makes a type — `module app/tally` is `App::Tally` — and
-    # inside it that name means the module, whatever a `using` brought. So
-    # `using x::{Tally}` in a module called `tally` asks for a name it cannot
+    # inside it that name means the module, whatever an import brought. So
+    # `import x::{Tally}` in a module called `tally` asks for a name it cannot
     # have, and what the author sees otherwise is a mismatch between `Tally`
     # and `App::Count::Tally` at the first line that uses it, with nothing
     # pointing back here. Only for the selective form: it named what it wanted.
     if (selected = node.names) && (unit = current_type.as?(NamedType))
       own = unit.name
       if selected.includes?(own)
-        node.raise "`#{own}` is this module's own name, so `using` cannot bring another one under it. Inside `#{unit}` the name `#{own}` means the module. Qualify the other one, or rename this module"
+        node.raise "`#{own}` is this module's own name, so an import cannot bring another one under it. Inside `#{unit}` the name `#{own}` means the module. Qualify the other one, or rename this module"
       end
     end
 
@@ -431,10 +431,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     false
   end
 
-  # iyi: the segments `using` turns into a type name. A package path names
+  # iyi: the segments a `UsingDecl` turns into a type name. A package path names
   # its module by the *in-package* half (III.7): the requirement's prefix is
   # identity for the resolver and never a type, so it is stripped before the
-  # camelcase mapping — `using example.com/user/liba/colors` reaches
+  # camelcase mapping — `import example.com/user/liba/colors::*` reaches
   # `Colors`, the same name the package's own files reach it by.
   private def iyi_using_segments(segments : Array(String)) : Array(String)
     written = segments.join('/')
@@ -487,7 +487,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # located in two files and the module that declared it is only one of
   # them. The advice is the same for a type this module reopens rather
   # than declares: the name is at the root, `import` is what brings what
-  # this module added to it, and a `using` naming it has nothing to bring.
+  # this module added to it, and an import naming it has nothing to bring.
   private def iyi_root_declared_by?(name : String, used_type : Type) : Bool
     return false unless type = @program.types[name]?
     return false unless locations = type.locations
@@ -1324,7 +1324,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     # iyi: `pub macro` — recorded on the module rather than on the metaclass the
     # macro itself lives on, because the export surface is the module's and
-    # `using` asks the module what it exports (R-2b).
+    # an import asks the module what it exports (R-2b).
     record_export current_type, node.name, node.exported?
 
     false
@@ -2228,7 +2228,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
       unless expanded
         argument.raise "`#{name}` is not an available derive macro. Define it as " \
-                       "`pub macro #{name}(declaration)` and import or `using` its module"
+                       "`pub macro #{name}(declaration)` and import it, `import MODULE::{#{name}}`"
       end
 
       if call_expanded = call.expanded

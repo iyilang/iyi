@@ -1,15 +1,13 @@
-# Timing a block: wall-clock ips and bm, using std/time.
+# Timing a block: wall-clock ips and bm, built on std/time.
 #
 module std/benchmark
 
 pub import std/time
-using std/time::{Time, Span}
+import std/time::{Time, Span}
 pub alias Time = Std::Time::Time
 pub alias Span = Std::Time::Span
-import std/math
-using std/math::{Math}
-import std/format
-using std/format::{sprintf, printf}
+import std/math::{Math}
+import std/format::{sprintf, printf}
 
 pub class Benchmark
   module BM

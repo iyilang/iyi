@@ -10,8 +10,7 @@
 
 module eiy_process
 
-import std/eiy
-using std/eiy::{Eiy}
+import std/eiy::{Eiy}
 
 args = Program.args
 raise "usage: eiy/process CALLER TEMPLATE IO_NAME, not #{args.size} arguments" unless args.size == 3

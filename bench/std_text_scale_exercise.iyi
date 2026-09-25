@@ -9,9 +9,8 @@
 #   bash bench/std_text_scale_exercise.sh
 module bench/std_text_scale_exercise
 
-import std/regex
+import std/regex::{Regex}
 import std/text
-using std/regex::{Regex}
 
 def check(ok : Bool, what : String) : Nil
   raise "text scale: #{what}" unless ok

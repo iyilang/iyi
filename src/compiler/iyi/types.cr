@@ -44,7 +44,7 @@ module Iyi
       nil
     end
 
-    # iyi: the `using` directives written in this type's body, or nil if there
+    # iyi: the imports' names written in this type's body, or nil if there
     # are none — which is every type in every program that does not use iyi.
     # Defined here, rather than only on `ModuleType`, so that name lookup can
     # ask any type without first checking what kind of type it is.
@@ -294,7 +294,7 @@ module Iyi
     # typed by it — so `module?` stays true and every restriction, dispatch
     # and codegen path keeps working unchanged. What this predicate adds is
     # the ability to refuse the things a trait is not: `include Greet`,
-    # `using Greet`, and `impl SomeModule for X`.
+    # importing names from it, and `impl SomeModule for X`.
     def trait?
       false
     end
@@ -1033,15 +1033,15 @@ module Iyi
     end
   end
 
-  # iyi: one `using` directive in effect somewhere (SPEC.md II.3) — the module
+  # iyi: one import's scope half in effect somewhere (SPEC.md II.3) — the module
   # it names, plus the names taken from it when the selective form
-  # (`using app/greeter::{polite}`) was written. A nil `names` is the whole
+  # (`import app/greeter::{polite}`) was written. A nil `names` is the whole
   # form: every name the module exports.
   record UsingModule, type : Type, names : Array(String)? do
     def exports?(name : String) : Bool
       # R-2b: a module's *exported* names. Checked before the selective list,
-      # because `using app/greeter::{internal}` naming something unexported is
-      # already an error at the directive — this is the lookup, and by the time
+      # because `import app/greeter::{internal}` naming something unexported is
+      # already an error at the import — this is the lookup, and by the time
       # it runs there is nothing left to find.
       return false unless type.exported_name?(name)
 
@@ -1057,7 +1057,7 @@ module Iyi
     getter hooks : Array(Hook)?
     getter(parents) { [] of Type }
 
-    # iyi: modules brought into unqualified scope here by `using` (SPEC.md II.3).
+    # iyi: modules brought into unqualified scope here by an import (SPEC.md II.3).
     #
     # Kept out of `parents` on purpose. `include` is the obvious shortcut and
     # is wrong in four ways at once: it does not reach types nested inside
@@ -1066,11 +1066,20 @@ module Iyi
     # settles a clash between two used modules silently by ancestor order
     # instead of reporting it at the point of use. A separate list searched
     # explicitly gets all four right, and leaves lookup untouched for any code
-    # that never writes `using`.
+    # that never imports names.
     getter(using_modules) { [] of UsingModule }
 
+    # One module named on two import lines is one scope: the names of
+    # both, or every name when either line took `::*`. Two entries made
+    # the same name "ambiguous" between a module and itself.
     def add_using_module(type : Type, names : Array(String)?)
-      using_modules << UsingModule.new(type, names)
+      if index = using_modules.index { |used| used.type == type }
+        before = using_modules[index].names
+        merged = before && names ? before | names : nil
+        using_modules[index] = UsingModule.new(type, merged)
+      else
+        using_modules << UsingModule.new(type, names)
+      end
     end
 
     def using_modules? : Array(UsingModule)?

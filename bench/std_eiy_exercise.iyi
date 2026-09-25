@@ -18,8 +18,7 @@
 
 module bench/std_eiy_exercise
 
-import std/eiy
-using std/eiy::{Eiy}
+import std/eiy::{Eiy}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond

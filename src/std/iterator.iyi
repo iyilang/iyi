@@ -67,8 +67,7 @@
 
 module std/iterator
 
-import std/traits
-using std/traits::{Comparable, Num}
+import std/traits::{Comparable, Num}
 
 pub trait Iterator
   type Elem

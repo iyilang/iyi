@@ -30,10 +30,8 @@ def slashed(path : String) : String
   end
 end
 
-import std/dir
-using std/dir::{Dir}
-import std/file
-using std/file::{File}
+import std/dir::{Dir}
+import std/file::{File}
 
 def clean_tree(dir_path : String) : Nil
   return unless Dir.exists?(dir_path)

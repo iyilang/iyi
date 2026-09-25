@@ -12,10 +12,8 @@
 
 module bench/std_deque_exercise
 
-import std/deque
-using std/deque::{Deque}
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/deque::{Deque}
+import std/enumerable::{Enumerable}
 
 def assert_true(label : String, condition : Bool) : Nil
   raise "assertion failed for #{label}: expected true, got false" unless condition

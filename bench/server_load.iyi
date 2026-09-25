@@ -19,8 +19,7 @@
 #      connections must run on the same few stacks.
 module server_load
 
-import std/socket
-using std/socket::{IyiSocket, SocketError}
+import std/socket::{IyiSocket, SocketError}
 
 ROUNDS      = 200
 STACK_BOUND =   8

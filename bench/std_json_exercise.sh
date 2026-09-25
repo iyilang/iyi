@@ -131,7 +131,7 @@ echo
 echo "== what the pull parser, the builder and from_json refuse, by name"
 refuses() { # refuses <label> <name> <phrase> <statements>
   local label="$1" name="$2" phrase="$3" statements="$4"
-  printf 'module main\n\nimport std/json\n\nusing std/json::{JSON, Any, PullParser, Builder}\n\n%s\n' \
+  printf 'module main\n\nimport std/json::{JSON, Any, PullParser, Builder}\n\n\n%s\n' \
     "$statements" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

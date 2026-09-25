@@ -22,8 +22,7 @@
 
 module bench/std_io_exercise
 
-import std/io
-using std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}
+import std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond

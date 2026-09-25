@@ -132,8 +132,7 @@ refuses() { # refuses <label> <name> <phrase> <snippet>
   local label="$1" name="$2" phrase="$3" snippet="$4"
   cat <<IYI >"$WORK/$name.iyi"
 module bench/refusal_$name
-import std/env
-using std/env::{ENV}
+import std/env::{ENV}
 
 $snippet
 IYI

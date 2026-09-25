@@ -4,8 +4,7 @@
 
 module std/bit_array
 
-import std/slice
-using std/slice::{Slice}
+import std/slice::{Slice}
 
 struct ::BitArray
   getter size : Int32

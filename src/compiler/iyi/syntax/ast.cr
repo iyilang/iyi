@@ -2431,7 +2431,12 @@ module Iyi
     def_equals_and_hash @path
   end
 
-  # iyi: `import std/json`
+  # iyi: `import std/json`, `import std/json::{parse, Any}`, `import
+  # std/json::*` (SPEC.md R-2b, II.3). The module is loaded by all three;
+  # the second brings the names it lists into unqualified scope and the
+  # third every name the module exports. The parser adds a `UsingDecl`
+  # beside an import that names anything, and that node is what scope is
+  # made of.
   class ImportDecl < ASTNode
     property path : Array(String)
 
@@ -2441,35 +2446,42 @@ module Iyi
     # include its dependencies, but only by saying so.
     property exported = false
 
-    # iyi: made by the parser for a `using` whose module the file does not
-    # import itself - `using web/dsl` alone is `import web/dsl` and the
-    # `using`. Not in the source, so nothing that writes source back (the
-    # formatter, `to_s`) writes it.
-    property? implicit = false
+    # The names `::{a, b}` brings into scope, or nil.
+    property names : Array(String)?
+    # Where each name sits, parallel to `names` - a rename reaches them.
+    property name_locations : Array(Location)?
+    # `::*`: every name the module exports.
+    property? glob = false
 
-    def initialize(@path)
+    def initialize(@path, @names = nil, @name_locations = nil, @glob = false)
+    end
+
+    # Whether this import brings names into scope as well as the module.
+    def scopes? : Bool
+      @glob || !@names.nil?
     end
 
     def clone_without_location
-      decl = ImportDecl.new(@path.dup)
+      decl = ImportDecl.new(@path.dup, @names.dup, @name_locations.dup, @glob)
       decl.exported = @exported
-      decl.implicit = @implicit
       decl
     end
 
-    def_equals_and_hash @path, @exported
+    def_equals_and_hash @path, @exported, @names, @glob
   end
 
-  # iyi: `using kemal::dsl` / `using kemal::dsl::{get, post}`
-  #
-  # Brings exported names into unqualified scope. Written by the consumer,
-  # never by the library; see SPEC.md II.3.
+  # iyi: the scope half of `import x::{a, b}` and `import x::*`, made by
+  # the parser beside the import (`Parser#iyi_scope_imported_names`) -
+  # there is no `using` keyword; it is the one name the source has no
+  # spelling for. Brings exported names into unqualified scope where it
+  # stands. Written by the consumer, never by the library; see SPEC.md
+  # II.3.
   class UsingDecl < ASTNode
     property path : Array(String)
     # nil means "everything exported"; otherwise the selected names.
     property names : Array(String)?
-    # Where each selected name sits, parallel to `names` — a `using` line
-    # is a reference to the defs it selects, and rename has to reach it.
+    # Where each selected name sits, parallel to `names` — an import's names
+    # are references to the defs they select, and rename has to reach them.
     property name_locations : Array(Location)?
 
     def initialize(@path, @names = nil, @name_locations = nil)

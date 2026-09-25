@@ -16,12 +16,9 @@ end
 
 import std/float
 import std/int
-import std/number
-import std/enumerable
-import std/list
-using std/number::{RoundingMode}
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/number::{RoundingMode}
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 puts "== arithmetic"
 assert_true 1.5_f32 + 1.5_f32 == 3.0_f32, "add"

@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/semantic_version
-using std/semantic_version::{SemanticVersion}
+import std/semantic_version::{SemanticVersion}
 
 puts "== parse"
 v = SemanticVersion.parse("1.2.3")

@@ -572,8 +572,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/levels
-        using app/levels::{Level, Mode, loudest}
+        import app/levels::{Level, Mode, loudest}
 
         puts "\#{loudest} \#{loudest == Level::Warn} \#{loudest.warn?} \#{Level.values.size} \#{(Mode::Read | Mode::Write)}"
         IYI
@@ -1705,9 +1704,8 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/countable
+        import std/countable::{Countable}
 
-        using std/countable::{Countable}
 
         pub struct Three
         end
@@ -2387,7 +2385,7 @@ describe Iyi::IyiMod do
   #   `std/bit_array` and `std/static_array` each do exactly this.
   #
   # The written form resolves on the far side because the declarations text
-  # replays the module's imports, requires and `using` directives and
+  # replays the module's imports with their names, its requires, and
   # declares its own nested types, which is the whole of what the module
   # itself could name.
   it "carries an alias as the module wrote it" do
@@ -3023,8 +3021,8 @@ describe Iyi::IyiMod do
   # `@@temp_counter` that `std/file` wrote, and then the methods are not
   # the whole of it. What the consumer cannot infer is the state — the
   # fields, the class variable, the members — and what it cannot resolve
-  # is a name the file brought in with a `using` written *inside* the
-  # type, which the unit's own `using` does not reach.
+  # is a name the file brought in with an import written *inside* the
+  # type, which the unit's own imports do not reach.
   #
   # One program, because that is how it was found: each fix uncovered the
   # next on the same module. `can't infer the type of instance variable
@@ -3051,13 +3049,12 @@ describe Iyi::IyiMod do
       File.write "boot/vault.iyi", <<-IYI
         module boot/vault
 
-        import boot/tag
-        using boot/tag::{Tag}
+        import boot/tag::{Tag}
 
         struct ::Vault
-          # The `using` above does not reach in here: a reopened name is not
+          # The import above does not reach in here: a reopened name is not
           # lexically inside the unit, so the file writes a second one.
-          using boot/tag::{Tag}
+          import boot/tag::{Tag}
 
           @label : String
           @count : Int32
@@ -3161,8 +3158,7 @@ describe Iyi::IyiMod do
       File.write "boot/pair.iyi", <<-IYI
         module boot/pair
 
-        import boot/shown
-        using boot/shown::{Show}
+        import boot/shown::{Show}
 
         pub struct Pair
           pub struct Half
@@ -3289,8 +3285,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/reference_storage
-        using std/reference_storage::{ReferenceStorage}
+        import std/reference_storage::{ReferenceStorage}
 
         class Point
           getter x : Int32
@@ -3658,8 +3653,7 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/text
-        using std/text::{mine}
+        import std/text::{mine}
 
         puts mine
         IYI
@@ -3690,8 +3684,9 @@ describe Iyi::IyiMod do
   # to the module being imported. A `.iyimod` copied onto another module's path
   # was adopted: its declarations were spliced in under its own name, and the
   # module actually asked for stayed undefined. The failure surfaced at the
-  # first `using` as "can't find module 'm1/a'", which sends the reader off to
-  # write `m1/a.iyi` when the file was there, valid, and already read.
+  # first `using` (the keyword `import X::{...}` replaced) as "can't find
+  # module 'm1/a'", which sends the reader off to write `m1/a.iyi` when the
+  # file was there, valid, and already read.
   it "refuses an artifact that declares a different module" do
     with_tempdir("iyimod_module_name") do
       Dir.mkdir_p "m1"
@@ -3712,16 +3707,14 @@ describe Iyi::IyiMod do
       File.write "usea.iyi", <<-IYI
         module usea
 
-        import m1/a
-        using m1/a
+        import m1/a::*
 
         puts v
         IYI
       File.write "useb.iyi", <<-IYI
         module useb
 
-        import m1/b
-        using m1/b
+        import m1/b::*
 
         puts v
         IYI
@@ -3762,8 +3755,8 @@ describe Iyi::IyiMod do
       # The file, so the reader knows which one to go and look at.
       ex.message.to_s.should contain File.join("mods", "m1", "a.iyimod")
 
-      # At the `import`, which is where the artifact is read, and not at the
-      # `using` on the next line where the old misdiagnosis landed.
+      # At the `import`, which is where the artifact is read, and not at its
+      # scope half, where the old misdiagnosis landed.
       ex.line_number.should eq 3
       ex.message.to_s.should_not match(/can't find module/)
 
@@ -4527,9 +4520,8 @@ describe Iyi::IyiMod do
       File.write "main.iyi", <<-IYI
         module main
 
-        import std/hold
+        import std/hold::{Hold}
 
-        using std/hold::{Hold}
 
         puts Std::Hold::Box.new(7).item
         IYI
@@ -4939,8 +4931,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts encode("iyi")
         puts slug("a b")
@@ -4990,8 +4981,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/ids
-        using app/ids
+        import app/ids::*
 
         puts stdout_id == STDOUT.object_id
         puts program_name_id == PROGRAM_NAME.object_id
@@ -5027,8 +5017,7 @@ describe "a module compiled against Crystal's library" do
       File.write "producer.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts encode("iyi")
         IYI
@@ -5042,8 +5031,7 @@ describe "a module compiled against Crystal's library" do
       File.write "consumer.iyi", <<-IYI
         module main
 
-        import app/store
-        using app/store
+        import app/store::*
 
         puts 1
         IYI
@@ -5073,8 +5061,7 @@ describe "a module compiled against Crystal's library" do
       File.write "main.iyi", <<-IYI
         module main
 
-        import app/greet
-        using app/greet
+        import app/greet::*
 
         puts hello("iyi")
         IYI

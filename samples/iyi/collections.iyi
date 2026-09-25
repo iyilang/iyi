@@ -13,8 +13,7 @@
 
 module samples/collections
 
-import std/enumerable
-using std/enumerable::{Enumerable}
+import std/enumerable::{Enumerable}
 
 pub struct Nums
   def initialize(@a : Array(Int32))

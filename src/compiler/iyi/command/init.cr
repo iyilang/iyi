@@ -3,7 +3,7 @@
 # `go mod init example.com/me/hello` writes `go.mod` and stops; `cargo init`
 # writes a manifest and a `main.rs` that builds. This is between the two:
 # the manifest (`iyi.mod`), an entry file, one module the entry imports and
-# one test of it — the four files that show `module`, `import`, `using`,
+# one test of it — the four files that show `module`, `import`,
 # `pub` and `iyi test` in a tree that runs the moment it is written.
 #
 #     iyi init example.com/me/hello
@@ -123,8 +123,7 @@ class Iyi::Command
         IYI
       "main.iyi" => <<-IYI,
         # The program. `#{Command.program_name} run main.iyi` builds and runs it.
-        import greet
-        using greet::{hello}
+        import greet::{hello}
 
         puts hello("iyi")
         IYI
@@ -132,8 +131,7 @@ class Iyi::Command
         # A test is a program that passes by exiting 0: `#{Command.program_name} test` runs
         # every *_test.iyi in this directory, and `assert` panics — exit 1 —
         # when what it is handed does not hold.
-        import greet
-        using greet::{hello}
+        import greet::{hello}
 
         assert hello("iyi") == "hello, iyi"
         IYI

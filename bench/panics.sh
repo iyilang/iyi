@@ -283,10 +283,8 @@ step "a panic with nowhere to print says so once, on the error stream"
 cat > "$work/site.iyi" <<'EOF'
 module site
 
-import std/enumerable
-import std/list
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 three = List(Int32).new([1, 2, 3])
 puts three.each_slice(0).size

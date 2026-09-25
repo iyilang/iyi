@@ -3473,8 +3473,8 @@ module Iyi
       @lexer.filename = filename
     end
 
-    # iyi: `app/greeter`, the path a module header, an `import` and a `using`
-    # all write.
+    # iyi: `app/greeter`, the path a module header and an `import` both
+    # write.
     #
     # The `/` has to be taken out of the lexer's hands the way the parser takes
     # it: after an identifier a slash starts a regex, and a module path is the
@@ -3513,22 +3513,19 @@ module Iyi
       false
     end
 
-    # iyi: `import app/greeter`, and `pub import app/greeter` — the facade
+    # iyi: `import app/greeter`, `import app/greeter::{polite, title}`,
+    # `import app/greeter::*`, and `pub import app/greeter` — the facade
     # form, which re-exports what it imports (R-2).
     def visit(node : ImportDecl)
       write_keyword :pub, " " if node.exported
       write_keyword :import, " "
       format_iyi_module_path node.path
 
-      false
-    end
-
-    # iyi: `using app/greeter` and `using app/greeter::{polite, title}`
-    def visit(node : UsingDecl)
-      write_keyword :using, " "
-      format_iyi_module_path node.path
-
-      if names = node.names
+      if node.glob?
+        write_token :OP_COLON_COLON
+        skip_space
+        write_token :OP_STAR
+      elsif names = node.names
         write_token :OP_COLON_COLON
         skip_space_or_newline
         write_token :OP_LCURLY

@@ -21,7 +21,7 @@
 #   textDocument/documentSymbol — the file's outline, from the parser
 #   textDocument/documentHighlight · foldingRange · workspace/symbol
 #   textDocument/completion     — the scope fuzzy-ranked, plus the
-#     workspace's exports, their `import`/`using` pair riding as edits
+#     workspace's exports, their `import X::{name}` line riding as edits
 #   textDocument/references · rename (with prepare) — workspace-wide
 #   textDocument/signatureHelp  — overloads while the call is half-typed
 #   textDocument/formatting     — the formatter, in process
@@ -1312,7 +1312,7 @@ module Iyi::Lsp
 
     # ── Completion ───────────────────────────────────────────────────────
 
-    KEYWORDS = %w(def end if elsif else unless while case when import using
+    KEYWORDS = %w(def end if elsif else unless while case when import
       pub module trait impl struct class enum return begin rescue ensure
       true false nil self group spawn defer select)
 
@@ -1368,7 +1368,7 @@ module Iyi::Lsp
         end
 
         # The workspace's exported defs, auto-import riding along: the
-        # item inserts the name, and the `import`/`using` pair a person
+        # item inserts the name, and the `import X::{name}` line a person
         # (or a model) forgets arrives as additionalTextEdits. Parse
         # only — R-2 wrote `pub` at the declaration, so the offer works
         # in a buffer that has never compiled.
@@ -1443,29 +1443,31 @@ module Iyi::Lsp
     end
 
     # The edits that make `name` from `module_path` bare-callable in
-    # this buffer: extend the module's selective `using`, or write the
-    # `import`/`using` pair after the last import (or the header). Nil
-    # when the name is already reachable — no edit is the right edit.
+    # this buffer: add it to the module's `import P::{...}`, or give a bare
+    # `import P` its first name, or write `import P::{name}` after the last
+    # import (or the header). Nil when the name is already reachable — no
+    # edit is the right edit.
     private def import_edits(text : String, module_path : String, name : String) : Array({Int32, Int32, Int32, String})?
       lines = text.lines
       header_index : Int32? = nil
       last_import : Int32? = nil
       selective : {Int32, Array(String)}? = nil
+      bare : Int32? = nil
 
       lines.each_with_index do |line, index|
         stripped = line.strip
         if header_index.nil? && stripped.starts_with?("module ")
           header_index = index
-        elsif stripped == "import #{module_path}"
+        elsif stripped.starts_with?("import ") || stripped.starts_with?("pub import ")
           last_import = index
-        elsif stripped.starts_with?("import ") || stripped.starts_with?("using ")
-          last_import = index
-          if stripped == "using #{module_path}"
+          if stripped == "import #{module_path}::*"
             return nil # everything exported is already in scope
-          elsif stripped.starts_with?("using #{module_path}::{") && stripped.ends_with?('}')
-            names = stripped.lchop("using #{module_path}::{").rchop.split(',').map(&.strip)
+          elsif stripped.starts_with?("import #{module_path}::{") && stripped.ends_with?('}')
+            names = stripped.lchop("import #{module_path}::{").rchop.split(',').map(&.strip)
             return nil if names.includes?(name)
             selective = {index, names}
+          elsif stripped == "import #{module_path}"
+            bare = index
           end
         end
       end
@@ -1474,15 +1476,18 @@ module Iyi::Lsp
         index, names = pick
         line = lines[index]
         end_ch = Lsp.character_of(line, line.chars.size + 1)
-        return [{index, 0, end_ch, "using #{module_path}::{#{names.join(", ")}, #{name}}"}]
+        indent = line[0, line.size - line.lstrip.size]
+        return [{index, 0, end_ch, "#{indent}import #{module_path}::{#{names.join(", ")}, #{name}}"}]
+      end
+      if index = bare
+        line = lines[index]
+        end_ch = Lsp.character_of(line, line.chars.size + 1)
+        indent = line[0, line.size - line.lstrip.size]
+        return [{index, 0, end_ch, "#{indent}import #{module_path}::{#{name}}"}]
       end
 
       anchor = (last_import || header_index || -1) + 1
-      # The `using` alone: it imports what it names.
-      block = String.build do |io|
-        io << "using " << module_path << "::{" << name << "}\n"
-      end
-      [{anchor, 0, 0, block}]
+      [{anchor, 0, 0, "import #{module_path}::{#{name}}\n"}]
     end
 
     private def name_char?(ch : Char?) : Bool
@@ -1685,8 +1690,7 @@ module Iyi::Lsp
       imports = [] of String
       text.each_line do |line|
         stripped = line.lstrip
-        # A `using` imports what it names, so it is an edge too.
-        rest = stripped.lchop?("import ") || stripped.lchop?("using ")
+        rest = stripped.lchop?("import ") || stripped.lchop?("pub import ")
         next unless rest
         mod = rest.each_char
           .take_while { |ch| ch.alphanumeric? || ch == '_' || ch == '/' }
@@ -2002,7 +2006,7 @@ module Iyi::Lsp
         kind =
           if stripped.starts_with?('#')
             "comment"
-          elsif stripped.starts_with?("import ") || stripped.starts_with?("using ")
+          elsif stripped.starts_with?("import ") || stripped.starts_with?("pub import ")
             "imports"
           end
         next if kind == run_kind
@@ -2353,41 +2357,41 @@ module Iyi::Lsp
       only.any? { |wanted| kind == wanted || kind.starts_with?("#{wanted}.") }
     end
 
-    # The header block, canonicalised: imports sorted and deduped, then
-    # a blank line, then `using` lines sorted — selective selections of
-    # one module merged and their names sorted, a full `using` absorbing
-    # them. Anything in the block this function does not understand — a
-    # comment between imports, a trailing remark — makes it offer
-    # nothing: an organizer that might eat a comment is not an organizer.
+    # The header block, canonicalised: one `import` line per module, sorted
+    # - the names two lines of one module brought merged and sorted, a
+    # `::*` absorbing them, a bare import of a module that names anything
+    # folded into the line that does. Anything in the block this function
+    # does not understand — a comment between imports, a trailing remark —
+    # makes it offer nothing: an organizer that might eat a comment is not
+    # an organizer.
     private def organize_imports(text : String) : {Int32, Int32, String}?
       lines = text.lines
       first : Int32? = nil
       last : Int32? = nil
 
-      imports = [] of String
-      full_usings = [] of String
+      modules = [] of String
+      globs = Set(String).new
       selective = {} of String => Array(String)
 
       lines.each_with_index do |line, index|
         stripped = line.strip
-        if stripped.starts_with?("import ") || stripped.starts_with?("using ")
+        if rest = stripped.lchop?("import ")
           first ||= index
           break if last && lines[(last + 1)...index].any? { |between| !between.strip.empty? }
           last = index
-          if mod = stripped.lchop?("import ")
+          if brace = rest.index("::{")
+            mod = rest[0, brace]
+            names = rest[(brace + 3)..]
+            return nil unless names.ends_with?('}') && clean_module?(mod)
+            (selective[mod] ||= [] of String).concat names.rchop.split(',').map(&.strip)
+          elsif mod = rest.rchop?("::*")
             return nil unless clean_module?(mod)
-            imports << mod
-          elsif rest = stripped.lchop?("using ")
-            if brace = rest.index("::{")
-              mod = rest[0, brace]
-              names = rest[(brace + 3)..]
-              return nil unless names.ends_with?('}') && clean_module?(mod)
-              (selective[mod] ||= [] of String).concat names.rchop.split(',').map(&.strip)
-            else
-              return nil unless clean_module?(rest)
-              full_usings << rest
-            end
+            globs << mod
+          else
+            mod = rest
+            return nil unless clean_module?(mod)
           end
+          modules << mod
         elsif first && !stripped.empty?
           break
         end
@@ -2395,20 +2399,13 @@ module Iyi::Lsp
       return nil unless first && last
 
       organized = String.build do |io|
-        imports.uniq!.sort!
-        imports.each_with_index do |mod, index|
+        modules.uniq!.sort!.each_with_index do |mod, index|
           io << '\n' unless index.zero?
           io << "import " << mod
-        end
-        modules = (full_usings + selective.keys).uniq!.sort!
-        io << '\n' << '\n' if !imports.empty? && !modules.empty?
-        modules.each_with_index do |mod, index|
-          io << '\n' unless index.zero?
-          if full_usings.includes?(mod)
-            io << "using " << mod
-          else
-            names = selective[mod].uniq!.sort!
-            io << "using " << mod << "::{" << names.join(", ") << '}'
+          if globs.includes?(mod)
+            io << "::*"
+          elsif names = selective[mod]?
+            io << "::{" << names.uniq!.sort!.join(", ") << '}'
           end
         end
       end
@@ -2428,7 +2425,7 @@ module Iyi::Lsp
 
     # IV.6 read forward: a module's path is its file's path, so moving
     # the file *is* renaming the module — the header line and every
-    # consumer's `import`/`using` move with it, in one WorkspaceEdit
+    # consumer's `import` move with it, in one WorkspaceEdit
     # the client applies before the rename lands on disk. A file whose
     # header and path disagree has no module identity to move, and is
     # left alone by name.
@@ -2497,7 +2494,7 @@ module Iyi::Lsp
     end
 
     # Every line that names `old_mod` as a module — the `module` header,
-    # an `import`, a `using` (selective or full) — with the exact span
+    # an `import`, with names or without — with the exact span
     # of the path, so the rename touches nothing else on the line.
     private def module_mention_edits(text : String, old_mod : String, new_mod : String) : Array({Int32, Int32, Int32, String})
       edits = [] of {Int32, Int32, Int32, String}
@@ -2506,10 +2503,10 @@ module Iyi::Lsp
         keyword =
           if stripped.starts_with?("module ")
             "module "
+          elsif stripped.starts_with?("pub import ")
+            "pub import "
           elsif stripped.starts_with?("import ")
             "import "
-          elsif stripped.starts_with?("using ")
-            "using "
           end
         next unless keyword
         rest = stripped.lchop(keyword)
@@ -2816,8 +2813,6 @@ module Iyi::Lsp
                 "pub import "
               elsif stripped.starts_with?("import ")
                 "import "
-              elsif stripped.starts_with?("using ")
-                "using "
               end
             next unless keyword
             # `.` and `-` belong to a path's host segment — `example.test`,

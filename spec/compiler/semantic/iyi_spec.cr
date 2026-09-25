@@ -1,13 +1,13 @@
 require "../../spec_helper"
 
-# Semantics of the iyi declarations: `module` headers, `using`, and `impl`.
+# Semantics of the iyi declarations: `module` headers, an import's names, and `impl`.
 #
 # `import` is not covered here — it resolves against files on disk, so it is
 # exercised by `samples/iyi/modules.iyi` rather than by this file. Everything
 # else needs only that the used module exist, so these specs declare it
 # directly instead of importing it.
 describe "Semantic: iyi" do
-  describe "using" do
+  describe "import names" do
     it "resolves a function of a used module from module top level" do
       assert_type(<<-CODE) { int32 }
         module App
@@ -21,7 +21,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
+          import app/greeter::*
 
           def self.go
             polite
@@ -47,7 +47,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
+          import app/greeter::*
 
           struct User
             def greet
@@ -70,7 +70,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
+          import app/greeter::*
 
           struct User
             include Greet
@@ -82,7 +82,7 @@ describe "Semantic: iyi" do
     end
 
     it "does not re-export what it brought in" do
-      # `using` is written by the consumer, so importing the consumer must not
+      # An import's names are the consumer's, so importing the consumer must not
       # be a way to reach what the consumer used.
       assert_error <<-CODE, "undefined method 'polite'"
         module App
@@ -96,7 +96,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
+          import app/greeter::*
         end
 
         Consumer.polite
@@ -120,7 +120,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{title}
+          import app/greeter::{title}
 
           polite
         end
@@ -144,7 +144,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{polite}
+          import app/greeter::{polite}
 
           def self.go
             polite
@@ -168,7 +168,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{Greet}
+          import app/greeter::{Greet}
 
           struct User
             include Greet
@@ -192,7 +192,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{Greet}
+          import app/greeter::{Greet}
 
           struct User
             include Loud
@@ -256,16 +256,16 @@ describe "Semantic: iyi" do
 
     it "names Program.env for ENV, and the module that has the map" do
       assert_error "ENV", "`Program.env(\"NAME\")`"
-      assert_error "ENV", "comes with `import std/env`"
+      assert_error "ENV", "comes with `import std/env::{ENV}`"
     end
 
     it "names the module that has rand" do
-      assert_error "rand(10)", "comes with `import std/random`"
+      assert_error "rand(10)", "comes with `import std/random::{Random}`"
     end
 
     it "names the std module that declares an unimported type" do
-      assert_error "x = Deque(Int32).new", "`Deque` comes with `import std/deque` and `using std/deque::{Deque}`"
-      assert_error "x = JSON.parse(\"1\")", "comes with `import std/json`"
+      assert_error "x = Deque(Int32).new", "`Deque` comes with `import std/deque::{Deque}`"
+      assert_error "x = JSON.parse(\"1\")", "comes with `import std/json::{JSON}`"
       assert_error "x = Nosuch.new", "undefined constant Nosuch"
     end
 
@@ -281,7 +281,7 @@ describe "Semantic: iyi" do
     end
 
     it "names puts value.inspect for p" do
-      assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel`"
+      assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel::{p}`"
     end
 
     it "names elsif for elif, and a plain assignment for let" do
@@ -373,7 +373,7 @@ describe "Semantic: iyi" do
     end
 
     it "names std/time for Time" do
-      assert_error "Time.now", "`Time` lives in `std/time`: write `import std/time`"
+      assert_error "Time.now", "`Time` lives in `std/time`: write `import std/time::{Time}`"
     end
 
     it "names the literal edges for Int32::MAX" do
@@ -389,7 +389,7 @@ describe "Semantic: iyi" do
     end
 
     it "names std/format for printf and for String#%" do
-      assert_error %(printf("%d", 1)), "come with `import std/format`"
+      assert_error %(printf("%d", 1)), "come with `import std/format::{printf}`"
       assert_error %("%d" % 1), "`%` on a String is a format string, and it comes with `import std/format`"
     end
 
@@ -440,7 +440,7 @@ describe "Semantic: iyi" do
     end
   end
 
-  describe "using conflicts (SPEC.md II.3)" do
+  describe "import name conflicts (SPEC.md II.3)" do
     it "reports an ambiguous function at the point of use" do
       assert_error <<-CODE, "'title' is ambiguous here"
         module App
@@ -462,8 +462,8 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
-          using app/formal
+          import app/greeter::*
+          import app/formal::*
 
           def self.go
             title
@@ -489,8 +489,8 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
-          using app/formal
+          import app/greeter::*
+          import app/formal::*
 
           struct User
             include Greet
@@ -526,8 +526,8 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
-          using app/formal
+          import app/greeter::*
+          import app/formal::*
 
           def self.go
             polite
@@ -563,8 +563,8 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter
-          using app/formal::{address}
+          import app/greeter::*
+          import app/formal::{address}
 
           def self.go
             title
@@ -586,15 +586,15 @@ describe "Semantic: iyi" do
     # The pair of specs is what pins it down — the second shows the used
     # function really is found when there is no local one to beat it.
 
-    it "raises on `using` of something that is not a module" do
-      assert_error <<-CODE, %(can't `using` App::Greeter, it's a struct)
+    it "raises on importing names from something that is not a module" do
+      assert_error <<-CODE, %(can't import names from App::Greeter, it's a struct)
         module App
           struct Greeter
           end
         end
 
         module Consumer
-          using app/greeter
+          import app/greeter::*
         end
         CODE
     end
@@ -733,8 +733,8 @@ describe "Semantic: iyi" do
         CODE
     end
 
-    it "refuses to `using` a trait" do
-      assert_error <<-CODE, "can't `using` App::Show::Showable, it's a trait"
+    it "refuses to import names from a trait" do
+      assert_error <<-CODE, "can't import names from App::Show::Showable, it's a trait"
         module App
           module Show
             trait Showable
@@ -744,13 +744,13 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/show/showable
+          import app/show/showable::*
         end
         CODE
     end
 
     it "still lets the selective form name a trait" do
-      # `using app/show::{Showable}` uses the *module* and selects a type name
+      # `import app/show::{Showable}` loads the *module* and selects a type name
       # from it, which is II.3 working as specified — only naming the trait as
       # the used module itself is refused.
       assert_type(<<-CODE) { types["App"].types["Show"].types["Foo"] }
@@ -772,7 +772,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/show::{Showable, Foo}
+          import app/show::{Showable, Foo}
 
           def self.build : Showable
             Foo.new
@@ -2751,9 +2751,9 @@ describe "Semantic: iyi" do
     end
   end
 
-  # iyi: `pub` — what a module exports (R-2), and what `using` may reach
+  # iyi: `pub` — what a module exports (R-2), and what an import's names may reach
   # (R-2b). Only a `module app/greeter` compilation unit has a surface; a
-  # Crystal module never wrote `pub`, so the `using` specs above are unaffected.
+  # Crystal module never wrote `pub`, so the import-name specs above are unaffected.
   describe "what a trait mismatch says" do
     # A trait is not a class, so "not Dog" is only half an answer: it says the
     # argument is wrong and not what would make it right. R-3 says exactly
@@ -2911,7 +2911,7 @@ describe "Semantic: iyi" do
         alias Money = Int32
 
         module Consumer
-          using app/thing::{Money}
+          import app/thing::{Money}
         end
         CODE
     end
@@ -2923,7 +2923,7 @@ describe "Semantic: iyi" do
         pub annotation Priced; end
 
         module Consumer
-          using app/thing::{Priced}
+          import app/thing::{Priced}
 
           @[Priced]
           class Item
@@ -2942,12 +2942,12 @@ describe "Semantic: iyi" do
         annotation Priced; end
 
         module Consumer
-          using app/thing::{Priced}
+          import app/thing::{Priced}
         end
         CODE
     end
 
-    it "refuses a selective `using` of a name the module does not export" do
+    it "refuses an import of a name the module does not export" do
       assert_error <<-CODE, "App::Greeter does not export `internal`"
         module app/greeter
 
@@ -2960,7 +2960,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{internal}
+          import app/greeter::{internal}
         end
         CODE
     end
@@ -2978,13 +2978,13 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{internal, Hidden}
+          import app/greeter::{internal, Hidden}
         end
         CODE
     end
 
     # The other mistake behind "does not export": a name the module does not
-    # have at all. `using calc/add::{ad}` was told to add `pub` to a
+    # have at all. `import calc/add::{ad}` was told to add `pub` to a
     # declaration that does not exist; the typo gets the nearest exported name.
     it "tells a name the module lacks from one it did not mark pub" do
       error = assert_error <<-CODE, "App::Greeter has no `polit`: nothing by that name is declared in `app/greeter`, `pub` or not."
@@ -2995,7 +2995,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{polit}
+          import app/greeter::{polit}
         end
         CODE
       error.message.should_not(be_nil).should contain "Did you mean `polite`?"
@@ -3018,13 +3018,13 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/bags::{Bag}
+          import app/bags::{Bag}
         end
         CODE
       error.message.should_not(be_nil).should contain "`import app/bags` is enough to write `Bag`"
     end
 
-    it "allows a selective `using` of exported names" do
+    it "allows an import naming exported names" do
       # `semantic` rather than `assert_type`: a `module app/greeter` header
       # scopes the whole rest of the source into the module, so the last
       # expression is inside it and the program's type is the module's, not the
@@ -3041,7 +3041,7 @@ describe "Semantic: iyi" do
         end
 
         module Consumer
-          using app/greeter::{polite, Greet}
+          import app/greeter::{polite, Greet}
 
           def self.go : Int32
             polite
@@ -3052,7 +3052,7 @@ describe "Semantic: iyi" do
         CODE
     end
 
-    # A bare `using app/greeter` reaching only the exported names cannot be
+    # An `import app/greeter::*` reaching only the exported names cannot be
     # written here for the same reason: the header scopes the rest of the
     # source into the module, so any consumer declared after it is *inside*
     # the module and sees its names lexically — which is right, R-2 is about
@@ -3136,7 +3136,7 @@ describe "Semantic: iyi" do
 
     it "leaves a Crystal module's names alone" do
       # A Crystal module has no `pub` and so no surface to enforce. Were the
-      # rule applied to it, every `using` of one would reach nothing.
+      # rule applied to it, every import of its names would reach nothing.
       assert_type(<<-CODE) { int32 }
         module App
           module Plain
@@ -3148,7 +3148,7 @@ describe "Semantic: iyi" do
           end
 
           module Consumer
-            using app/plain::{helper}
+            import app/plain::{helper}
 
             def self.go : Int32
               helper

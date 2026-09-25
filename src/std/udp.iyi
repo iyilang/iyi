@@ -24,9 +24,8 @@
 module std/udp
 
 pub import std/slice
-using std/slice::{Bytes, Slice}
-import std/socket
-using std/socket::{IPv4Address, IPv6Address, IyiSocket}
+import std/slice::{Bytes, Slice}
+import std/socket::{IPv4Address, IPv6Address, IyiSocket}
 
 pub alias Bytes = Std::Slice::Bytes
 # The address types, their parsers and the `sockaddr_in`/`sockaddr_in6`

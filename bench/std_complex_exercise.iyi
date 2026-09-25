@@ -13,8 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/complex
-using std/complex::{Complex}
+import std/complex::{Complex}
 
 puts "== abs"
 z = Complex.new(3.0, 4.0)

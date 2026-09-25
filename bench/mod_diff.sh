@@ -67,8 +67,7 @@ write_module() {
   cat > app/twice.iyi <<EOF
 module app/twice
 
-import app/base
-using app/base::{each_base}
+import app/base::{each_base}
 
 # $1
 pub def with_each(&block : Int32 -> Nil) : Nil

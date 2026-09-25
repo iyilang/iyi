@@ -29,11 +29,11 @@ If the binary lives somewhere the shell does not look, name it in
 ## What arrives over the protocol
 
 - **Diagnostics** on each keystroke, from a real compile — not a heuristic pass.
-- **Completion** that writes the `import`/`using` pair for you.
+- **Completion** that writes the `import X::{name}` line for you.
 - **Hover** with documentation, **signature help**, **inlay hints**.
 - **Go to definition**, type definition, implementation, references, document
   and workspace symbols, call and type hierarchy.
-- **Rename** that follows `using` lines, with prepare-rename.
+- **Rename** that follows the names on `import` lines, with prepare-rename.
 - **Code actions and quick fixes**, **code lenses**, **formatting**, folding
   ranges, document links, selection ranges.
 - **Semantic highlighting**. A deliberately minimal TextMate grammar paints the

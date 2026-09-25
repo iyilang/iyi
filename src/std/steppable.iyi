@@ -1,7 +1,6 @@
 module std/steppable
 
-import std/iterator
-using std/iterator::{Iterator}
+import std/iterator::{Iterator}
 
 # Implements a step method for iterating from a value.
 # T needs `+`, `-`, `<=>`, and comparison with the integer 0 (`>` / `<`).

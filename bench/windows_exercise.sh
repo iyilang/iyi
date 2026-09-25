@@ -164,8 +164,7 @@ EOF
     cat > "$WORK/late.iyi" <<'EOF'
 module late
 
-import std/socket
-using std/socket::{IyiSocket}
+import std/socket::{IyiSocket}
 
 server = IyiSocket.listen(0)
 port = server.local_port
@@ -223,12 +222,9 @@ EOF
     cat > "$WORK/bare.iyi" <<'EOF'
 module bare
 
-import std/dir
-import std/file
-import std/path
-using std/dir::{Dir}
-using std/file::{File}
-using std/path::{Path}
+import std/dir::{Dir}
+import std/file::{File}
+import std/path::{Path}
 
 puts "expanded " + Path["relative.txt"].expand.to_s
 scratch = Dir.tempdir + "\\iyi_windows_exercise_scratch"
@@ -271,8 +267,7 @@ EOF
     cat > "$WORK/holds.iyi" <<'EOF'
 module holds
 
-import std/socket
-using std/socket::{IyiSocket}
+import std/socket::{IyiSocket}
 
 server = IyiSocket.listen(0)
 puts "listening on " + server.local_port.to_s

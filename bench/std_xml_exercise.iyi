@@ -24,8 +24,7 @@
 
 module bench/std_xml_exercise
 
-import std/xml
-using std/xml::{Document, Node, NodeType, Parser, Attribute, Namespace}
+import std/xml::{Document, Node, NodeType, Parser, Attribute, Namespace}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

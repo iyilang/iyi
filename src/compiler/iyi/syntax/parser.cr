@@ -96,8 +96,16 @@ module Iyi
 
     # iyi: the tree of what the source says and nothing it implies - the
     # formatter's, which walks the tokens beside the nodes and has no token
-    # for an `import` a `using` implied.
+    # for the scope an `import x::{a}` makes beside it.
     property iyi_source_only = false
+
+    # iyi: read `using`, the keyword `import x::{a}` replaced, as the node
+    # it was, rather than refusing it: `iyi fix` rewrites a file written
+    # before the change (`Iyi::UsingRewrite`), and has to read it to.
+    property iyi_reads_using = false
+
+    # Where the import being read ends; see `parse_import_path_segment`.
+    @iyi_import_end : Location? = nil
 
     def parse
       next_token_skip_statement_end
@@ -176,9 +184,9 @@ module Iyi
           location.try(&.line_number) || 1, location.try(&.column_number) || 1
       end
 
-      implied = iyi_import_what_using_names(expressions)
-      unless implied.same?(expressions)
-        expressions = implied
+      scoped = iyi_scope_imported_names(expressions)
+      unless scoped.same?(expressions)
+        expressions = scoped
         nodes = Expressions.from(expressions)
       end
 
@@ -192,16 +200,20 @@ module Iyi
       # this module would nest the two — `app/main` importing `app/greeter`
       # would create `App::Main::App::Greeter`.
       #
-      # `using` deliberately stays INSIDE, because it affects name resolution
-      # within this module and should not leak to whoever imports it.
+      # The scope an `import x::{a}` makes deliberately stays INSIDE, because
+      # it affects name resolution within this module and should not leak to
+      # whoever imports it: the import goes out, its `UsingDecl` goes to the
+      # top of the module's body.
       # A `require` comes out with them, and for a plainer reason than
       # `import`'s: a require is file level in Crystal, and leaving it inside
       # the module this header desugars to loaded the required file *into* the
       # module. `require "json"` under `module web` made json's `class String`
       # mean `Web::String`, and the error was about a type nobody wrote.
       directives = [] of ASTNode
-      while (first = rest.first?) && (first.is_a?(ImportDecl) || first.is_a?(Require))
-        directives << rest.shift
+      scopes = [] of ASTNode
+      while (first = rest.first?) && (first.is_a?(ImportDecl) || first.is_a?(Require) || first.is_a?(UsingDecl))
+        node = rest.shift
+        node.is_a?(UsingDecl) ? scopes << node : directives << node
       end
 
       path = Path.new(header.path.map(&.camelcase))
@@ -223,9 +235,9 @@ module Iyi
       # the line; see `Artifact#module_extends_self`.
       body =
         if iyi_module_extends_written?
-          rest
+          scopes + rest
         else
-          [Extend.new(Self.new).at(header)] of ASTNode + rest
+          [Extend.new(Self.new).at(header)] of ASTNode + scopes + rest
         end
 
       module_def = ModuleDef.new(path, Expressions.from(body))
@@ -236,37 +248,34 @@ module Iyi
       Expressions.from([header] of ASTNode + directives + [module_def] of ASTNode)
     end
 
-    # iyi: a `using` imports what it names. `using web/dsl` needed an
-    # `import web/dsl` line above it, the same path twice, and the pair was
-    # the only way to write it: `using` reaches exactly one module and that
-    # module has to be in the program. So the import is made here, one per
-    # module a top-level `using` names that no `import` in the file does,
-    # placed after the file's own imports where every import has to be -
-    # file level, ahead of the module body (`apply_module_header`). R-2b is
-    # unmoved: the names still enter scope only where the consumer writes
-    # `using`. An `import` written as well is not an error; the module is
-    # loaded once.
-    private def iyi_import_what_using_names(expressions : Array(ASTNode)) : Array(ASTNode)
+    # iyi: `import x::{a, b}` and `import x::*` load the module and bring
+    # names into scope; the second half is a `UsingDecl`, made here and put
+    # beside the import, in the file's top level and in the bodies of the
+    # types it declares - wherever an import can stand. The import is what
+    # the source says; the scope is what it implies, so a tree for the
+    # source alone (`iyi_source_only`) has none.
+    private def iyi_scope_imported_names(expressions : Array(ASTNode)) : Array(ASTNode)
       return expressions if @iyi_source_only
-      imported = Set(Array(String)).new
-      expressions.each { |node| imported << node.path if node.is_a?(ImportDecl) }
-      implied = [] of ASTNode
       expressions.each do |node|
-        next unless node.is_a?(UsingDecl)
-        next unless imported.add?(node.path)
-        decl = ImportDecl.new(node.path.dup)
-        decl.implicit = true
-        decl.at(node)
-        decl.end_location = node.end_location
-        implied << decl
+        node = node.exp if node.is_a?(VisibilityModifier)
+        next unless node.is_a?(ClassDef) || node.is_a?(ModuleDef)
+        body = node.body
+        list = body.is_a?(Expressions) ? body.expressions : [body] of ASTNode
+        scoped = iyi_scope_imported_names(list)
+        node.body = Expressions.from(scoped) unless scoped.same?(list)
       end
-      return expressions if implied.empty?
+      return expressions unless expressions.any? { |node| node.is_a?(ImportDecl) && node.scopes? }
 
-      at = 0
-      while (node = expressions[at]?) && (node.is_a?(ModuleHeader) || node.is_a?(ImportDecl) || node.is_a?(Require))
-        at += 1
+      result = [] of ASTNode
+      expressions.each do |node|
+        result << node
+        next unless node.is_a?(ImportDecl) && node.scopes?
+        scope = UsingDecl.new(node.path.dup, node.glob? ? nil : node.names.dup, node.name_locations.dup)
+        scope.at(node)
+        scope.end_location = node.end_location
+        result << scope
       end
-      expressions[0, at] + implied + expressions[at..]
+      result
     end
 
     def parse(mode : ParseMode)
@@ -1489,7 +1498,7 @@ module Iyi
             end
           when .using?
             check_type_declaration do
-              check_not_inside_def("can't use `using`") { parse_using }
+              check_not_inside_def("can't import") { parse_using }
             end
           when .pub?
             check_type_declaration do
@@ -2269,13 +2278,35 @@ module Iyi
     # name — the in-package path does that, and it is checked where the
     # package's own files load. The relaxed spelling is import-only; a
     # module header stays under the strict grammar.
+    #
+    # `::{a, b}` after the path brings those names into scope as well, and
+    # `::*` every name the module exports: one keyword for a module and its
+    # names, where there were two (SPEC.md R-2b). The names are taken as
+    # written and matched as written, so the list may hold both method
+    # names and type names - to the consumer they are just names.
     def parse_import
       location = @token.location
       next_token_skip_space
       path = parse_import_path
-      node = ImportDecl.new(path)
+      names = nil
+      name_locations = nil
+      glob = false
+      if @token.type.op_colon_colon?
+        next_token
+        if @token.type.op_star?
+          glob = true
+          @iyi_import_end = token_end_location
+          next_token_skip_space
+        elsif @token.type.op_lcurly?
+          names, name_locations = parse_import_names
+        else
+          raise "after `::` an import lists the names it brings into scope, " \
+                "`import #{path.join('/')}::{name}`, or takes every one, `import #{path.join('/')}::*`", @token
+        end
+      end
+      node = ImportDecl.new(path, names, name_locations, glob)
       node.at(location)
-      node.end_location = token_end_location
+      node.end_location = @iyi_import_end
       node
     end
 
@@ -2315,35 +2346,45 @@ module Iyi
       end
       check_module_path_segment(segment) unless segment.includes?('.') || segment.includes?('-')
       suppress_regex
+      # Where an import's text ends, taken before the lexer moves past the
+      # line: `token_end_location` after it is the end of whatever comes
+      # next - the spaces, a comment - and `iyi fix` rewrites by this span.
+      @iyi_import_end = token_end_location
       next_token
       segment
     end
 
-    # iyi: `using app/greeter`, `using app/greeter::{polite, Greet}` (SPEC.md II.3)
-    #
-    # The module is written in the same path form as `import`. Both name a
-    # module, so they should look the same; the spec's original
-    # `using kemal::dsl` mixed two notations for one concept.
-    #
-    # `::{...}` then narrows what the directive brings in. The names are taken
-    # as written and matched as written, so the list may hold both method
-    # names and type names — to the consumer they are just names.
+    # iyi: `using app/greeter` and `using app/greeter::{polite}` are what
+    # `import app/greeter::*` and `import app/greeter::{polite}` were
+    # spelled before one keyword did both. Refused with the line that
+    # replaces it, read whole so the sentence can say it exactly - unless
+    # `iyi fix` is reading the file to rewrite it (`iyi_reads_using`).
     def parse_using
       location = @token.location
       next_token_skip_space
       path = parse_import_path
       if @token.type.op_colon_colon?
-        names, name_locations = parse_using_names
+        next_token
+        names, name_locations = parse_import_names
+      end
+
+      unless @iyi_reads_using
+        written = path.join('/')
+        now = names ? "import #{written}::{#{names.join(", ")}}" : "import #{written}::*"
+        raise "`using` is gone: one keyword loads a module and names what it brings into scope, " \
+              "so this line is `#{now}` (SPEC.md R-2b). `iyi fix FILE` rewrites every `using` in a file, " \
+              "and folds an `import` of the same module into it",
+          location.line_number, location.column_number
       end
 
       node = UsingDecl.new(path, names, name_locations)
       node.at(location)
-      node.end_location = token_end_location
+      node.end_location = @iyi_import_end
       node
     end
 
-    private def parse_using_names : {Array(String), Array(Location)}
-      next_token
+    # `{a, b}`, from the `{`.
+    private def parse_import_names : {Array(String), Array(Location)}
       check Token::Kind::OP_LCURLY
 
       names = [] of String
@@ -2360,6 +2401,7 @@ module Iyi
         next_token_skip_space_or_newline
       end
       check Token::Kind::OP_RCURLY
+      @iyi_import_end = token_end_location
 
       next_token_skip_space
       {names, name_locations}
@@ -2400,7 +2442,15 @@ module Iyi
           # iyi: `pub import x` — the facade form. The import is
           # re-exported: whoever imports this module reaches `x` too.
           decl = parse_import
-          decl.exported = true if decl.is_a?(ImportDecl)
+          if decl.scopes?
+            written = decl.path.join('/')
+            raise "`pub import` re-exports #{written} whole, and names brought into scope are this " \
+                  "module's own - they never pass to its importers (SPEC.md R-1, R-2b). Write " \
+                  "`pub import #{written}` to hand the module on, and `import #{written}::" \
+                  "#{decl.glob? ? "*" : "{#{decl.names.try(&.join(", "))}}"}` beside it for the names this module uses",
+              pub_location.line_number, pub_location.column_number
+          end
+          decl.exported = true
           decl
         when Keyword::DEF
           a_def = parse_def

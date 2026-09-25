@@ -4094,15 +4094,17 @@ require "./file"
       POOL_MARK_PERMITS = 832_u64
       POOL_FINISH = 896_u64
       # The free batches, pushed without the lock and popped under it
-      # (`free_batch`, `new_batch`); the end of the bump piece; and the
+      # (`free_batch`, `new_batch`); the end of the bump piece; the
       # pieces mapped, which is what the pool holds resident in units of
-      # POOL_PIECE - the exercises read it.
+      # POOL_PIECE; and the batches handed out again off the free list -
+      # the exercises read the last two.
       POOL_FREE = 960_u64
       POOL_PIECE_END = 1024_u64
       POOL_PIECES = 1088_u64
+      POOL_REUSED = 1152_u64
       # Windows' helpers asleep on the semaphore, counted so a wake
       # releases one count per sleeper (`wake_helpers`).
-      POOL_SLEEPERS = 1152_u64
+      POOL_SLEEPERS = 1216_u64
       NO_PERMIT = 0xFFFFFFFFFFFFFFFF_u64
 
       # A mark's permit, or NO_PERMIT: the slot is the order of taking,
@@ -4300,7 +4302,11 @@ require "./file"
         while true
           head = free.value.get
           break if head == 0
-          return head if free.value.compare_and_set(head, IyiHeap.read64(head))[1]
+          if free.value.compare_and_set(head, IyiHeap.read64(head))[1]
+            # Under the lock, so a plain count.
+            IyiHeap.write64(pool + POOL_REUSED, IyiHeap.read64(pool + POOL_REUSED) + 1_u64)
+            return head
+          end
         end
         cursor = IyiHeap.read64(pool + POOL_CURSOR)
         if cursor + BATCH_WORDS * 8_u64 > IyiHeap.read64(pool + POOL_PIECE_END)
@@ -4331,6 +4337,11 @@ require "./file"
       # Bytes the pool holds mapped for batches: the exercises read it.
       def self.pool_bytes : UInt64
         IyiHeap.read64(pool + POOL_PIECES) * POOL_PIECE
+      end
+
+      # Batches handed out again after being taken: the exercises read it.
+      def self.pool_reused : UInt64
+        IyiHeap.read64(pool + POOL_REUSED)
       end
 
       # This thread's worker page and stack, mapped on first use.

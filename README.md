@@ -140,11 +140,8 @@ anybody's namespace.
 ```crystal
 module samples/webapp
 
-import kemal/dsl
-import kemal/router
-
-using kemal/dsl                        # get, post, mount: because this file asked
-using kemal/router::{Router, Context}
+import kemal/dsl::*                    # get, post, mount: because this file asked
+import kemal/router::{Router, Context}
 
 get "/" do |env|
   "home"
@@ -252,7 +249,7 @@ anything.
 |---|---|
 | **R-1** | A module is the unit of compilation. `import` forms a DAG. Compiling a module reads its dependencies' **declarations**, never their bodies. |
 | **R-2** | Everything a module exports (`pub`) writes down full parameter and return types. Unexported code infers as usual. |
-| **R-2b** | `using` brings exported names into unqualified scope. The consumer writes it, not the library. |
+| **R-2b** | `import X::{a, b}` brings exported names into unqualified scope, `import X::*` every one; plain `import X` keeps them qualified. The consumer writes it, not the library. |
 | **R-2c** | A def whose parameters and return are all written is typed at its definition, caller or no caller. A build, `check` and the LSP cannot disagree about "clean". |
 | **R-3** | No open classes. `impl Trait for Type` lives in the module that declares the trait or the type. |
 
@@ -401,7 +398,7 @@ line so it cannot move unread.
 **Efficiency — built, and it is mostly subtraction.** `puts "hello"` is a 36 KB
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
-it uses, and iyi's own library is 17,582 lines rather than 8,161. The whole
+it uses, and iyi's own library is 17,593 lines rather than 8,161. The whole
 library is 725 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
@@ -435,7 +432,7 @@ tar -xzf iyi-0.14.1-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 725 KB prelude, the 1,339 KB of `src/std` that `import std/...`
+iyi's own 725 KB prelude, the 1,338 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -513,7 +510,7 @@ iyi test            # 1 passed, 0 failed
 there: `iyi.mod` naming the module — the path other projects would import
 it by, or a bare `hello` for one nobody will — an entry `main.iyi`, a
 module `greet.iyi` the entry imports, and `main_test.iyi`. Between them
-they show `module`, `import`, `using`, `pub` and what a test is here: a
+they show `module`, `import` with the names it brings, `pub` and what a test is here: a
 program that passes by exiting 0, run by `iyi test` with every other
 `*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
 example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
@@ -523,8 +520,8 @@ fetched and recorded in `iyi.sum` before the line is written; `@main` or
 commit's pseudo-version. `iyi get -u`
 brings every requirement to its latest release (`--check` lists which
 are behind, writing nothing), `iyi get PATH --as web` gives it a short
-name so a file writes `using web/dsl` rather than the whole path - one
-line, since a `using` imports what it names - `iyi mod tidy` adds
+name so a file writes `import web/dsl::{get}` rather than the whole path - one
+line for the module and its names - `iyi mod tidy` adds
 what the source imports and removes what it does not, `get` says what a
 new or upgraded package reaches outside the language - the std modules
 that call C, `File`, the C it declares - and `iyi mod reach` lists the
@@ -552,8 +549,8 @@ corpus, measured by `bench/lsp_latency.py` in CI — and an error that
 cites the spec carries the section as its diagnostic code.
 Completion lists a receiver's methods with their written signatures;
 references and rename ride the typed graph, so an overload that shares a
-name but not a resolution stays put, and a rename reaches the `using`
-line that selects the old name. Two requests go beyond the protocol for
+name but not a resolution stays put, and a rename reaches the name on the
+`import` line that brought it. Two requests go beyond the protocol for
 harnesses: `iyi/contextPack` returns the file's grounding pack and
 `iyi/surface` a module's rendered surface, unsaved buffers included
 (`bench/lsp_session.py` is the whole contract, runnable).
@@ -582,14 +579,13 @@ pub def polite(name : String) : String
 end
 ```
 
-`main.iyi` imports it, and then asks for its names by writing `using`. The
+`main.iyi` imports it, and names what it wants in scope on the same line. The
 library does not get to put them there:
 
 ```crystal
 module main
 
-import app/greeter
-using app/greeter
+import app/greeter::{polite}
 
 puts polite("world")
 ```
@@ -699,11 +695,11 @@ $ curl localhost:3000/json
 {"message":"iyi"}
 ```
 
-**Nothing about the language changes.** The module header, `import`, `using`,
+**Nothing about the language changes.** The module header, `import` and the names it brings,
 `pub`, traits with defaults, `impl … forall`, error unions and `!`, `.or`,
 `or_panic`, `defer` — all of them, on a program that requires a shard. R-2
 still refuses an export that does not write its types. What changes is what the
-program *has*: 8,161 lines of Crystal's standard library instead of 17,582
+program *has*: 8,161 lines of Crystal's standard library instead of 17,593
 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -917,17 +913,18 @@ module and call one of its functions the way every other language would:
 ```console
 Error: undefined method 'polite' for App::Main:Module
 
-`polite` is exported by `app/greeter`, and this file has not written `using`.
-Add `using app/greeter` to bring its names in unqualified, or call it as
+`polite` is exported by `app/greeter`, and this file has not brought it into
+scope. Import it by name, `import app/greeter::{polite}`, or call it as
 `App::Greeter.polite` (SPEC.md R-2b)
 ```
 
-Write the `using` and forget the `import`:
+Call `App::Greeter.polite` from a file that never imported `app/greeter`,
+because some other file did:
 
 ```console
-Error: `app/greeter` is not imported here. `using` brings in the names of a
-module this file has already imported, so this needs `import app/greeter`
-above it (SPEC.md R-1, R-2b)
+Error: `App::Greeter` is not imported here — it is in the program only because
+some other file imported it. Add an import in this file, or have a module this
+file imports re-export it with `pub import` (SPEC.md R-1)
 ```
 
 Write an `impl` in a module that owns neither the trait nor the type, which is
@@ -948,7 +945,7 @@ a new way to be stuck.
 
 Twenty programs in [`samples/iyi`](samples/iyi), each documenting a part
 of the design rather than showing off: `hello` (traits and `impl`), `modules`
-(`import` and `using` across files), `generics`, `errors`, `collections`,
+(`import` and the names it brings, across files), `generics`, `errors`, `collections`,
 `immutable` (a shareable collection and the copy that makes it safe),
 `init_order`, `webapp`, `workers` (a pool and a typed pair of tasks),
 `calc`, `derive`, `files` and `formatting`. And seven that document nothing:
@@ -999,13 +996,13 @@ move is one of the four rules:
 | Crystal | iyi | why |
 |---|---|---|
 | `require "foo"` pulls a file into the program | `import app/foo` names a module, and the module's path is its file's path | R-1: a module is a unit, so it has a name rather than a location in a concatenation |
-| a `require`d file's names are simply *there* | `using app/foo` brings them in, written by the consumer | R-2b: a library cannot take a name in your file |
+| a `require`d file's names are simply *there* | `import app/foo::{bar}` brings them in, written by the consumer | R-2b: a library cannot take a name in your file |
 | reopen any class, anywhere, including `String` | you may not reopen | R-3: what a type is, is settled where it is written |
 | `include`/`extend` a module into a class | `trait` and `impl Trait for Type`, in the trait's module or the type's | R-3's orphan rule, which is what makes coherence checkable without reading the program |
 | `abstract def` in a module | `abstract def` in a `trait`, and the trait is a type | II.6 |
 | everything is public unless `private` | everything is the module's own unless `pub`, and `pub` writes its types | R-2 |
 | shards, `shard.yml` | `--crystal` can `require` shards from `IYI_PATH`; `iyi bind` puts every shard under `lib/` behind a boundary, one `.iyimod` each, and a program `import`s it | no package manager; a required shard's source is compiled into the program, a bound one's object code is linked (SPEC.md III.6) |
-| a Crystal project you already have | `iyi migrate SRC --out DIR --annotate` writes it as iyi modules: the namespace becomes the path, qualified names become `using` lines, an import cycle becomes one module, a reopened foreign type stays Crystal beside its module, and the types R-2 wants are read off the program the compiler already typed | `--check` compiles every module written and names what is left; a 99-file application migrates to 91 modules that all compile, with 228 types written and 98 named as a person's to write; ten shards it depends on migrate too, five of them clean (SPEC.md III.6) |
+| a Crystal project you already have | `iyi migrate SRC --out DIR --annotate` writes it as iyi modules: the namespace becomes the path, qualified names become names on `import` lines, an import cycle becomes one module, a reopened foreign type stays Crystal beside its module, and the types R-2 wants are read off the program the compiler already typed | `--check` compiles every module written and names what is left; a 99-file application migrates to 91 modules that all compile, with 228 types written and 98 named as a person's to write; ten shards it depends on migrate too, five of them clean (SPEC.md III.6) |
 | macros | kept, and they travel in the artifact | |
 | `Nil`, union types, blocks, local inference | kept, unchanged | |
 
@@ -1085,7 +1082,7 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 17,582 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 17,593 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`**: integers, booleans, a string, one
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
@@ -1239,7 +1236,7 @@ marked PROPOSED are the parts that will move under you.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 17,582 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 17,593 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

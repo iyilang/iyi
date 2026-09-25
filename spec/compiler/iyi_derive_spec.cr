@@ -49,8 +49,7 @@ describe "Semantic: iyi derive" do
       File.write "app/point.iyi", <<-IYI
         module app/point
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Point
           @x : Int32
@@ -132,8 +131,7 @@ describe "Semantic: iyi derive" do
       File.write "app/order.iyi", <<-IYI
         module app/order
 
-        import app/kinds
-        using app/kinds
+        import app/kinds::*
 
         pub struct Order
           @customer : Customer
@@ -196,8 +194,7 @@ describe "Semantic: iyi derive" do
       File.write "app/boxed.iyi", <<-IYI
         module app/boxed
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           getter n : Int32
@@ -250,8 +247,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           derive shapes
@@ -286,8 +282,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           @n : Int32
@@ -348,8 +343,7 @@ describe "Semantic: iyi derive" do
       File.write "app/pair.iyi", <<-IYI
         module app/pair
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Pair
           @a : Int32
@@ -403,8 +397,7 @@ describe "Semantic: iyi derive" do
       "main.iyi" => <<-IYI,
         module app/main
 
-        import app/derives
-        using app/derives
+        import app/derives::*
 
         pub struct Boxed
           derive named, absent

@@ -4185,18 +4185,19 @@ module Iyi
         # parse time, so the whole semantic phase needs no changes. `import`
         # stays outside it: an imported file carries its own header, and
         # processing it while scoped inside this one would nest the two.
-        nodes = parse("module app/greeter\nimport app/user\nusing app/other\ndef polite\nend").as(Expressions)
+        nodes = parse("module app/greeter\nimport app/user\nimport app/other::*\ndef polite\nend").as(Expressions)
         nodes.expressions[0].should be_a(ModuleHeader)
         nodes.expressions[1].should be_a(ImportDecl)
-        # The import the `using` implies, after the file's own.
-        nodes.expressions[2].as(ImportDecl).implicit?.should be_true
+        nodes.expressions[2].as(ImportDecl).glob?.should be_true
 
         mod = nodes.expressions[3].as(ModuleDef)
         mod.name.should eq(Path.new(["App", "Greeter"]))
         mod.iyi_unit?.should be_true
 
         body = mod.body.as(Expressions).expressions
-        # `extend self`, so a module-level `def` is a function of the module.
+        # `extend self`, so a module-level `def` is a function of the module;
+        # then the scope the glob import makes, inside the module and so no
+        # further than it.
         body[0].should be_a(Extend)
         body[1].should be_a(UsingDecl)
         body[2].should be_a(Def)
@@ -4208,15 +4209,35 @@ module Iyi
       end
 
       it_parses "import app/user", ImportDecl.new(["app", "user"])
-      # A `using` imports what it names: the parser puts the import beside it.
-      it_parses "using app/greeter", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], nil)]
-      it_parses "using app/greeter::{polite}", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], ["polite"])]
-      it_parses "using app/greeter::{polite, Greet}", [ImportDecl.new(["app", "greeter"]), UsingDecl.new(["app", "greeter"], ["polite", "Greet"])]
-      it_parses "using a/b/c", [ImportDecl.new(["a", "b", "c"]), UsingDecl.new(["a", "b", "c"], nil)]
+      # One keyword: an import that names anything carries the scope it
+      # makes beside it.
+      it_parses "import app/greeter::*", [ImportDecl.new(["app", "greeter"], glob: true), UsingDecl.new(["app", "greeter"], nil)]
+      it_parses "import app/greeter::{polite}", [ImportDecl.new(["app", "greeter"], ["polite"]), UsingDecl.new(["app", "greeter"], ["polite"])]
+      it_parses "import app/greeter::{polite, Greet}", [ImportDecl.new(["app", "greeter"], ["polite", "Greet"]), UsingDecl.new(["app", "greeter"], ["polite", "Greet"])]
+      it_parses "import a/b/c::*", [ImportDecl.new(["a", "b", "c"], glob: true), UsingDecl.new(["a", "b", "c"], nil)]
+      it_parses "pub import app/greeter", ImportDecl.new(["app", "greeter"]).tap(&.exported=(true))
 
-      assert_syntax_error "using app/greeter::polite", "expecting token '{'"
-      assert_syntax_error "using app/greeter::{}", "expected a name to bring into scope"
-      assert_syntax_error "using app/greeter::{polite,}", "expected a name to bring into scope"
+      it "puts an import's scope inside the type whose body it is written in" do
+        nodes = parse("class Box
+  import std/path::{Path}
+end").as(ClassDef)
+        body = nodes.body.as(Expressions).expressions
+        body[0].as(ImportDecl).names.should eq(["Path"])
+        body[1].as(UsingDecl).names.should eq(["Path"])
+      end
+
+      assert_syntax_error "import app/greeter::polite", "after `::` an import lists the names it brings into scope"
+      assert_syntax_error "import app/greeter::{}", "expected a name to bring into scope"
+      assert_syntax_error "import app/greeter::{polite,}", "expected a name to bring into scope"
+
+      # `pub import` hands a module on whole; names in scope are the module's
+      # own and never pass to its importers.
+      assert_syntax_error "pub import app/greeter::{polite}", "`pub import` re-exports app/greeter whole"
+      assert_syntax_error "pub import app/greeter::*", "`import app/greeter::*` beside it"
+
+      # `using` is gone, and the refusal is the line that replaces it.
+      assert_syntax_error "using app/greeter", "`using` is gone: one keyword loads a module and names what it brings into scope, so this line is `import app/greeter::*`"
+      assert_syntax_error "using app/greeter::{polite, Greet}", "so this line is `import app/greeter::{polite, Greet}`"
 
       # iyi: a module path segment has to survive the round trip to the type
       # name it is reached by, `app/greeter` <-> `App::Greeter` (SPEC.md IV.6
@@ -4259,7 +4280,7 @@ module Iyi
           nodes.expressions[0].as(ModuleHeader).path.should eq(segments)
         end
 
-        nodes = parse("module app/x\nimport libs/parser\nusing endpoint/handler\ndef f\nend").as(Expressions)
+        nodes = parse("module app/x\nimport libs/parser\nimport endpoint/handler::*\ndef f\nend").as(Expressions)
         nodes.expressions[1].as(ImportDecl).path.should eq(["libs", "parser"])
         body = nodes.expressions[3].as(ModuleDef).body.as(Expressions).expressions
         body[1].as(UsingDecl).path.should eq(["endpoint", "handler"])
@@ -4274,7 +4295,7 @@ module Iyi
 
       # Checked at the one gate all three directives pass through.
       assert_syntax_error "import app/v_1", "not lower-case snake_case"
-      assert_syntax_error "using app/v_1", "not lower-case snake_case"
+      assert_syntax_error "import app/v_1::*", "not lower-case snake_case"
 
       it_parses "trait Greet\nend", TraitDef.new(Path.new(["Greet"]))
       it_parses "pub trait Greet\nend", TraitDef.new(Path.new(["Greet"]), exported: true)

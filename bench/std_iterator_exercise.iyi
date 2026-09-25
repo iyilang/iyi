@@ -16,11 +16,9 @@
 
 module bench/std_iterator_exercise
 
-import std/traits
-using std/traits::{Comparable, Num}
+import std/traits::{Comparable, Num}
 
-import std/iterator
-using std/iterator::{Iterator, ArrayIterator}
+import std/iterator::{Iterator, ArrayIterator}
 
 # ---- Tracking Iterators for Laziness Proofs ---------------------------------
 

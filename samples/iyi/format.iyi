@@ -9,8 +9,7 @@
 
 module samples/format
 
-import std/format
-using std/format::{sprintf, printf}
+import std/format::{sprintf, printf}
 
 # 1. Strings and characters
 puts sprintf("hello %s", "world")

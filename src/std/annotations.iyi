@@ -1,11 +1,11 @@
-# Compiler annotations, re-exported for `using std/annotations::{...}`.
+# Compiler annotations, re-exported for `import std/annotations::{...}`.
 #
 # `::Deprecated`, `::Flags`, `::Link`, `::Experimental` and `::TargetFeature`
 # are created by the compiler (`Program#initialize`) and are what compilation
 # actually honours: deprecation warnings, flags-enum numbering, linker flags,
 # experimental docs, and per-def CPU features. A second `annotation`
-# declaration in this module is a different type; `using` would attach that
-# copy and the compiler would ignore it.
+# declaration in this module is a different type; a selective import would
+# attach that copy and the compiler would ignore it.
 
 module std/annotations
 

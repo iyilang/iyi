@@ -14,9 +14,9 @@
 # Two passes over one typed result. The first finds what the cursor
 # names — a call adopts its `target_defs`, a def adopts itself. The
 # second collects every call that resolves into the adopted set, every
-# declaration that carries an adopted key, and every `using` selection
+# declaration that carries an adopted key, and every name an `import` selects
 # of an adopted name — the gate found that last one by renaming a def
-# and watching the `using` line it left behind refuse to compile.
+# and watching the `import` line it left behind refuse to compile.
 require "../syntax/ast"
 require "../compiler"
 require "../tools/typed_def_processor"
@@ -79,10 +79,10 @@ module Iyi::Lsp
       true
     end
 
-    # A `using` line that selects a target's name references it — and has
+    # An `import` line that selects a target's name references it — and has
     # to move with a rename, or the program the rename leaves behind does
     # not compile. Names are matched, then the path is checked against
-    # the files the targets live in: `using greet::{shout}` counts only
+    # the files the targets live in: `import greet::{shout}` counts only
     # if some target def's file is `<something>/greet.iyi`.
     def visit(node : UsingDecl)
       return true unless @collecting
@@ -93,7 +93,7 @@ module Iyi::Lsp
       # Asked of the posix reading, the way `Compiler.header_root_of` asks
       # the same question: a module path is posix by grammar (R-1) and a
       # target's file is spelled the platform's way, so on Windows no file
-      # ever ended with `/greet.iyi` and a rename left every `using` line
+      # ever ended with `/greet.iyi` and a rename left every `import` line
       # behind — step 13 of `bench/lsp_session.py`, the first time it ran
       # there.
       suffix = "/#{node.path.join('/')}.iyi"

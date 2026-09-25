@@ -14,8 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/unicode
-using std/unicode::{Unicode}
+import std/unicode::{Unicode}
 
 puts "== letter"
 assert_true Unicode.letter?('A'), "A"

@@ -34,11 +34,11 @@ class Iyi::Command
   end
 
   # iyi: the modules a facade hands on. `pub import` is a promise to the
-  # consumer — a file that imports the facade may `using` the module the
+  # consumer — a file that imports the facade may import names from the module the
   # facade re-exported, without an import of its own (R-2b) — and the pack
   # showed only what the file's own import lines named. So a consumer
   # reading its context saw a facade with two functions on it, wrote
-  # `using deep/core::{core_value}` anyway because the compiler accepts
+  # `import deep/core::{core_value}` anyway because the compiler accepts
   # it, and had no way to learn what `deep/core` offered. Every module the
   # consumer may name is in the pack now, marked with the facade that
   # hands it on, and the budget ladder cuts them like any other block.
@@ -249,12 +249,13 @@ class Iyi::Command
   # The two lines a consumer writes to reach what the block shows, spelled
   # out with every exported name in them. The surface says what a module
   # offers and nothing about how a file names it; the raw sources a pack
-  # replaces carry their *own* `import`/`using` lines and so show the
+  # replaces carry their *own* `import` lines and so show the
   # spelling by accident, and the rounds arm of `bench/context_pack.py`
   # lost a round to exactly that — a model that wrote `import kemal/dsl`,
   # called `before_all` bare, and was refused for the missing `using`
-  # (AI_FIRST.md §5, the third run). The language server's completion
-  # attaches the same pair to every export it offers.
+  # (the keyword `import X::{...}` replaced; AI_FIRST.md §5, the third
+  # run). The language server's completion attaches the same pair to
+  # every export it offers.
   private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact, via : String? = nil) : String
     names = artifact.exports.functions.map(&.name)
     artifact.exports.types.each do |declaration|
@@ -269,10 +270,10 @@ class Iyi::Command
         # is what makes it reachable without an edge of its own (R-2b).
         io << "#   import " << (via || written) << '\n'
       else
-        # A `using` imports what it names, so it is the one line.
-        io << "#   using " << written << "::{"
+        # One line loads the module and names what it brings into scope.
+        io << "#   import " << written << "::{"
         names.join(io, ", ")
-        io << "}   # or `using " << written << "` for every name\n"
+        io << "}   # or `import " << written << "::*` for every name\n"
       end
     end
   end

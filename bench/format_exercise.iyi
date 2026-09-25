@@ -15,8 +15,7 @@
 # exits non-zero with the failing section named.
 
 # 1. Field width: values narrower than width pad to the minimum width.
-import std/format
-using std/format::{sprintf, printf}
+import std/format::{sprintf, printf}
 
 w1 = sprintf("%10s", "hello")
 raise "format: width string failed" if w1 != "     hello"

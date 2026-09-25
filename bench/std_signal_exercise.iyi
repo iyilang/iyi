@@ -11,10 +11,8 @@
 
 module bench/std_signal_exercise
 
-import std/signal
-using std/signal::{Signal}
-import std/socket
-using std/socket::{IyiSocket}
+import std/signal::{Signal}
+import std/socket::{IyiSocket}
 
 {% if flag?(:win32) %}
   lib LibKernel32

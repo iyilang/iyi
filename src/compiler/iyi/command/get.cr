@@ -273,7 +273,7 @@ class Iyi::Command
 
     `--as NAME` gives the one PATH a short name this project's files write
     in its place: `iyi get github.com/someone/web --as web` makes
-    `using web/dsl` the module `github.com/someone/web/dsl`.
+    `import web/dsl::{get}` the module `github.com/someone/web/dsl`.
 
     `--check` says what the same `get` would change - `get -u --check`
     lists every requirement behind its latest release - from the tags

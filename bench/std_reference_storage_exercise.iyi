@@ -21,8 +21,7 @@ def assert_u64(expected : UInt64, actual : UInt64, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
 end
 
-import std/reference_storage
-using std/reference_storage::{ReferenceStorage}
+import std/reference_storage::{ReferenceStorage}
 
 class Empty
 end

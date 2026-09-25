@@ -134,8 +134,7 @@ IYI
 cat > "$WORK/boundary/main.iyi" <<'IYI'
 module main
 
-import level
-using level::{Level, Mode, loudest}
+import level::{Level, Mode, loudest}
 
 l = loudest
 puts "name: #{l}"

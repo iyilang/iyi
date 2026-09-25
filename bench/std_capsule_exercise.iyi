@@ -6,10 +6,8 @@
 
 module bench/std_capsule_exercise
 
-import std/slice
-using std/slice::{Bytes}
-import std/capsule
-using std/capsule::{VarInt, HttpDatagram, CapsuleType, Capsule, CapsuleReader, ExtendedConnect, CapsuleProtocol}
+import std/slice::{Bytes}
+import std/capsule::{VarInt, HttpDatagram, CapsuleType, Capsule, CapsuleReader, ExtendedConnect, CapsuleProtocol}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

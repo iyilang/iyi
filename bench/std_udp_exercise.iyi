@@ -17,10 +17,8 @@ def assert_int(expected : Int32, actual : Int32, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
 end
 
-import std/udp
-import std/socket
-using std/udp::{UdpSocket, Datagram, IPv4Address, Bytes}
-using std/socket::{IyiSocket}
+import std/udp::{UdpSocket, Datagram, IPv4Address, Bytes}
+import std/socket::{IyiSocket}
 
 puts "== address parsing"
 ip = IyiSocket.parse_ip("127.0.0.1")

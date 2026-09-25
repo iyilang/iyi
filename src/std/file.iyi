@@ -5,8 +5,7 @@
 
 module std/file
 
-import std/path
-using std/path::{Path}
+import std/path::{Path}
 
 {% if flag?(:darwin) %}
   lib LibC
@@ -457,7 +456,7 @@ class ::File
     SEPARATOR        = '/'
     SEPARATOR_STRING = "/"
   {% end %}
-  using std/path::{Path}
+  import std/path::{Path}
 
   private def self.sys_path(path : String) : UInt8*
     n = path.bytesize

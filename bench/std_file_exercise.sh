@@ -306,7 +306,7 @@ echo
 echo "== what file refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expr="$4"
-  printf 'module main\n\nimport std/file\nusing std/file::{File}\n\n%s\n' "$expr" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/file::{File}\n\n%s\n' "$expr" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

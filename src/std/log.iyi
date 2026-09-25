@@ -25,8 +25,7 @@
 
 module std/log
 
-import std/time
-using std/time::{Time}
+import std/time::{Time}
 
 pub enum Severity
   Trace  = 0

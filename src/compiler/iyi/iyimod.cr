@@ -260,7 +260,7 @@ module Iyi::IyiMod
     "pub #{source}"
   end
 
-  # `using` directives that resolve their annotations, and which modules this
+  # Imports' names that resolve their annotations, and which modules this
   # one imports. A body is not in it, so editing one leaves every dependent's
   # own artifact valid.
   #
@@ -660,17 +660,18 @@ module Iyi::IyiMod
     # `extend self` is what the shard wrote, one line says it, and the compiler
     # on the far side does with it what the compiler here did.
     extends_self : Bool = false,
-    # iyi: the `using` directives written inside this type's body, as
+    # iyi: the imports' names written inside this type's body, as
     # written (R-2b).
     #
     # `Artifact#usings` carries the module unit's own, and those are the
     # only ones that used to travel because they were the only ones thought
     # to reach a consumer. A type reopened under a foreign name is the
     # exception: `class ::File` is not lexically inside the unit, so the
-    # unit's `using` does not reach it and the file writes a second one
+    # unit's imports do not reach it and the file writes a second one
     # inside the class. Without it the consumer reads `def self.size(path :
     # String | Path)` and answers "undefined constant Path... this file has
-    # not written `using`", about a directive eleven lines above.
+    # not written `using`" (the keyword `import X::{...}` replaced), about
+    # a directive eleven lines above.
     usings : Array(String) = [] of String
 
   # How a body is found again on the far side.
@@ -921,12 +922,12 @@ module Iyi::IyiMod
     # With it, the build is refused and says so.
     getter has_initialiser : Bool
 
-    # The `using` directives the module writes, as written (II.3).
+    # The imports' names the module writes, as written (II.3).
     #
     # Not part of the module's surface — nothing here is reachable through it —
     # but part of what its surface *means*. A signature is stored as the
     # annotation the author wrote, and `pub def handle(ctx : Context)` resolves
-    # `Context` through a `using` further up the file. The annotation travels;
+    # `Context` through an import further up the file. The annotation travels;
     # so must what resolves it.
     getter usings : Array(String)
 
@@ -1686,8 +1687,8 @@ module Iyi::IyiMod
     end
 
     unless artifact.usings.empty?
-      io.puts "usings"
-      artifact.usings.each { |directive| io.puts "  #{directive}" }
+      io.puts "names imported"
+      artifact.usings.each { |directive| io.puts "  #{scoped_import(directive)}" }
     end
 
     exports = artifact.exports
@@ -1880,6 +1881,12 @@ module Iyi::IyiMod
     end
   end
 
+  # A recorded scope directive - `std/path::{Path}`, or `std/path` for
+  # every name - as the import line that makes it.
+  def self.scoped_import(directive : String) : String
+    directive.includes?("::") ? "import #{directive}" : "import #{directive}::*"
+  end
+
   def self.declarations(artifact : Artifact, io : IO) : Nil
     # A class root writes no header, and the class below is the namespace. With
     # one, iyi wraps the whole file in a module of the header's name — which
@@ -1912,11 +1919,13 @@ module Iyi::IyiMod
       artifact.requires.each { |name| io << "require " << name.inspect << '\n' }
     end
 
-    # Inside the module, where the parser keeps a `using` — it resolves names
-    # for this module's declarations and must not reach whoever reads them.
+    # The names the module brought into scope, as the import that brings
+    # them: the parser keeps that scope inside the module, where it resolves
+    # names for these declarations and does not reach whoever reads them.
+    # The module is loaded once, however many lines import it.
     unless artifact.usings.empty?
       io << '\n'
-      artifact.usings.each { |directive| io << "using " << directive << '\n' }
+      artifact.usings.each { |directive| io << scoped_import(directive) << '\n' }
     end
 
     # Where the module has it, and *after* the directives above: the parser
@@ -2434,7 +2443,7 @@ module Iyi::IyiMod
 
     # Before anything written in terms of the names they bring, which is
     # everything below. See `TypeDecl#usings`.
-    declaration.usings.each { |directive| io << inner << "using " << directive << '\n' }
+    declaration.usings.each { |directive| io << inner << scoped_import(directive) << '\n' }
 
     # First inside the module, because that is where the shard wrote it and
     # because everything below is reached through it: `extend self` is what
@@ -2556,7 +2565,7 @@ module Iyi::IyiMod
     # Names relative to this module's own root, which is how every
     # declaration above is already written: `Geo::Shape::Shape` for a trait
     # declared right there reads as another language's, in an answer whose
-    # header line is `module geo/shape` and whose `using` line the caller
+    # header line is `module geo/shape` and whose `import` line the caller
     # is told to write. Only this module's prefix, because that is the one
     # mapping that is certain — a camelcased segment does not invert.
     root =

@@ -147,14 +147,14 @@ else
   echo "  std/kernel declares no sleep"
 fi
 
-printf '%s\n' 'module kernel_sleep_using' 'import std/kernel' 'using std/kernel::{sleep}' 'puts "USING_OK"' > "$WORK/sleep_using.iyi"
+printf '%s\n' 'module kernel_sleep_using' 'import std/kernel' 'import std/kernel::{sleep}' 'puts "USING_OK"' > "$WORK/sleep_using.iyi"
 if "$IYI" build -o "$WORK/sleep_using" "$WORK/sleep_using.iyi" >"$WORK/sleep_using.build" 2>&1; then
-  echo "  \`using std/kernel::{sleep}\` still compiles, so the name is still there"
+  echo "  \`import std/kernel::{sleep}\` still compiles, so the name is still there"
   status=1
 elif grep -q "no \`sleep\`" "$WORK/sleep_using.build"; then
-  echo "  \`using std/kernel::{sleep}\` is refused by name"
+  echo "  \`import std/kernel::{sleep}\` is refused by name"
 else
-  echo "  \`using std/kernel::{sleep}\` failed for a different reason"
+  echo "  \`import std/kernel::{sleep}\` failed for a different reason"
   sed -n '1,12p' "$WORK/sleep_using.build"
   status=1
 fi
@@ -175,7 +175,7 @@ echo
 echo "== abort paths"
 check_abort() { # check_abort <label> <name> <expected_code> <expected_stderr> <code>
   local label="$1" name="$2" expected_code="$3" expected_stderr="$4" code="$5"
-  printf 'module main\n\nimport std/kernel\nusing std/kernel::{abort}\n\n%s\n' "$code" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/kernel::{abort}\n\n%s\n' "$code" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

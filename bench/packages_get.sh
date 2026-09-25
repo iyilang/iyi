@@ -29,7 +29,8 @@
 #
 # Then short names: `require <path> <version> as <name>` - written by
 # `get --as`, kept by `get -u`, counted by `tidy` - lets a file write
-# `using web` for the package, and a `using` alone imports what it names.
+# `import web::*` for the package, and that line alone loads it and brings
+# its names into scope.
 # A package's own short names are its files', whatever its consumer calls
 # the same word; a short name that is also the project's own directory,
 # or is not a word, or is `std`, is refused by name.
@@ -97,7 +98,7 @@ publish libb v1.0.0
 "$IYI" init example.test/user/app app > init.log 2>&1 || { echo "init failed:"; cat init.log; exit 1; }
 cd app || exit 1
 cp iyi.mod iyi.mod.init
-printf 'import example.test/user/liba\nusing example.test/user/liba::{greeting}\nputs greeting\n' > use.iyi
+printf 'import example.test/user/liba::{greeting}\nputs greeting\n' > use.iyi
 
 # requires <path>: the version iyi.mod requires it at, or nothing.
 requires() { awk -v p="$1" '$1 == "require" && $2 == p { print $3 }' iyi.mod; }
@@ -176,7 +177,7 @@ git -C "$WORK/work/liba" commit -qam five && (cd "$WORK" && publish liba v2.0.0)
 "$IYI" get -u --check > major-check.log 2>&1 || fail "the plain path saw v2.0.0 as its own: $(cat major-check.log)"
 mkdir -p "$WORK/vapp"
 printf 'module example.test/user/vapp\n' > "$WORK/vapp/iyi.mod"
-printf 'import example.test/user/liba/v2\nusing example.test/user/liba/v2::{greeting}\nputs greeting\n' > "$WORK/vapp/main.iyi"
+printf 'import example.test/user/liba/v2::{greeting}\nputs greeting\n' > "$WORK/vapp/main.iyi"
 (cd "$WORK/vapp" && "$IYI" get example.test/user/liba/v2) > major.log 2>&1 || { fail "get of the /v2 path failed"; cat major.log; }
 grep -q "added example.test/user/liba/v2 v2.0.0" major.log || fail "the /v2 path got: $(cat major.log)"
 (cd "$WORK/vapp" && "$IYI" run main.iyi) > major-run.log 2>&1 || { fail "the /v2 program did not build"; cat major-run.log; }
@@ -296,7 +297,7 @@ grep -q "say what the source imports" tidy-clean.log || fail "a clean tidy did n
 [ "$status" -eq 0 ] && echo "  libb removed, liba kept, the stale sum dropped; --check wrote nothing, then found nothing"
 
 step "mod tidy adds an import's module at the version that builds, and keeps a raising line"
-printf 'import example.test/user/libb\nusing example.test/user/libb::{number}\nputs number\n' > b_test.iyi
+printf 'import example.test/user/libb::{number}\nputs number\n' > b_test.iyi
 rm main.iyi
 "$IYI" mod tidy > tidy2.log 2>&1 || { fail "tidy failed"; cat tidy2.log; }
 [ "$(requires example.test/user/libb)" = "v1.0.0" ] || fail "the imported libb was not added: $(cat tidy2.log)"
@@ -330,8 +331,9 @@ mkdir -p "$WORK/sapp" && cd "$WORK/sapp" || exit 1
 printf 'module example.test/user/sapp\n' > iyi.mod
 "$IYI" get example.test/user/liba@v1.1.0 --as web > short1.log 2>&1 || { fail "get --as failed"; cat short1.log; }
 grep -qx "require example.test/user/liba v1.1.0 as web" iyi.mod || fail "get --as wrote: $(grep require iyi.mod)"
-# One line: the `using` imports what it names, under its short name.
-printf 'using web\n\nputs greeting\n' > main.iyi
+# One line: the import loads the package under its short name and brings
+# its names into scope.
+printf 'import web::*\n\nputs greeting\n' > main.iyi
 "$IYI" run main.iyi > short2.log 2>&1 || { fail "the short name did not build"; cat short2.log; }
 grep -q "liba 1.1.0" short2.log || fail "the short-named program ran '$(cat short2.log)'"
 "$IYI" get -u > short3.log 2>&1 || { fail "get -u failed"; cat short3.log; }
@@ -340,20 +342,20 @@ grep -qx "require example.test/user/liba v1.3.0 as web" iyi.mod || fail "get -u 
 # take the line a short name imports for unused.
 "$IYI" mod tidy --check > short4.log 2>&1
 grep -q "remove example.test/user/liba" short4.log && fail "tidy took the short-named line for unused: $(cat short4.log)"
-[ "$status" -eq 0 ] && echo "  get --as wrote it, using web built, -u kept it, tidy counted it"
+[ "$status" -eq 0 ] && echo "  get --as wrote it, import web::* built, -u kept it, tidy counted it"
 
 step "a package's short names are its own"
 mkrepo "$WORK/work/libs"
 # libs calls liba `a`; the app below calls libb `a`. Each file means its
 # own manifest's `a`.
 printf 'module example.test/user/libs\nrequire example.test/user/liba v1.1.0 as a\n' > "$WORK/work/libs/iyi.mod"
-printf 'module libs\n\nusing a\n\npub def relay : String\n  greeting\nend\n' > "$WORK/work/libs/libs.iyi"
+printf 'module libs\n\nimport a::*\n\npub def relay : String\n  greeting\nend\n' > "$WORK/work/libs/libs.iyi"
 git -C "$WORK/work/libs" add -A && git -C "$WORK/work/libs" commit -qm one
 git init -q --bare "$WORK/mirror/example.test/user/libs"
 (cd "$WORK" && publish libs v1.0.0)
 mkdir -p "$WORK/papp" && cd "$WORK/papp" || exit 1
 printf 'module example.test/user/papp\nrequire example.test/user/libs v1.0.0\nrequire example.test/user/libb v1.0.0 as a\n' > iyi.mod
-printf 'using example.test/user/libs\nusing a\n\nputs relay\nputs number\n' > main.iyi
+printf 'import example.test/user/libs::*\nimport a::*\n\nputs relay\nputs number\n' > main.iyi
 "$IYI" run main.iyi > pkgshort.log 2>&1 || { fail "a package's own short name did not build"; cat pkgshort.log; }
 grep -q "liba 1.1.0" pkgshort.log && grep -q "^7$" pkgshort.log || fail "the two a's crossed: $(cat pkgshort.log)"
 [ "$status" -eq 0 ] && echo "  libs' a is liba, the app's a is libb, and both built"
@@ -375,7 +377,7 @@ refused "a short name already taken" "\`web\` already names example.test/user/li
 step "get says what a package reaches, and what an upgrade adds to it"
 mkrepo "$WORK/work/libr"
 printf 'module example.test/user/libr\n' > "$WORK/work/libr/iyi.mod"
-printf 'module libr\n\nusing std/json\n\npub def version : String\n  "1.0.0"\nend\n' > "$WORK/work/libr/libr.iyi"
+printf 'module libr\n\nimport std/json::*\n\npub def version : String\n  "1.0.0"\nend\n' > "$WORK/work/libr/libr.iyi"
 # A test's imports are the package author's, not the consumer's.
 printf 'import std/file\n\nputs File.exists?("x")\n' > "$WORK/work/libr/libr_test.iyi"
 git -C "$WORK/work/libr" add -A && git -C "$WORK/work/libr" commit -qm one
@@ -385,7 +387,7 @@ git init -q --bare "$WORK/mirror/example.test/user/libr"
 cat > "$WORK/work/libr/libr.iyi" <<'EOF'
 module libr
 
-using std/json
+import std/json::*
 import std/http
 
 {% if flag?(:linux) || !flag?(:linux) %}
@@ -400,7 +402,7 @@ pub def version : String
 end
 EOF
 git -C "$WORK/work/libr" commit -qam two && (cd "$WORK" && publish libr v1.1.0)
-printf 'module libr\n\nusing std/json\n\npub def version : String\n  "1.2.0"\nend\n' > "$WORK/work/libr/libr.iyi"
+printf 'module libr\n\nimport std/json::*\n\npub def version : String\n  "1.2.0"\nend\n' > "$WORK/work/libr/libr.iyi"
 git -C "$WORK/work/libr" commit -qam three && (cd "$WORK" && publish libr v1.2.0)
 mkdir -p "$WORK/rapp" && cd "$WORK/rapp" || exit 1
 printf 'module example.test/user/rapp\n' > iyi.mod
@@ -439,7 +441,7 @@ git -C "$WORK/mirror/example.test/user/libt" symbolic-ref HEAD refs/heads/main
 push_main
 mkdir -p "$WORK/tapp" && cd "$WORK/tapp" || exit 1
 printf 'module example.test/user/tapp\n' > iyi.mod
-printf 'using example.test/user/libt\n\nputs word\n' > main.iyi
+printf 'import example.test/user/libt::*\n\nputs word\n' > main.iyi
 one="$(pseudo v0.0.0- HEAD)"
 "$IYI" get example.test/user/libt > pseudo1.log 2>&1 || { fail "get of an untagged repository failed"; cat pseudo1.log; }
 [ "$(requires example.test/user/libt)" = "$one" ] || fail "an untagged repository was written as '$(requires example.test/user/libt)', not $one"

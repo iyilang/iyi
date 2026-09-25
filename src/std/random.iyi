@@ -22,8 +22,7 @@
 module std/random
 
 import std/int
-import std/time
-using std/time::{Time}
+import std/time::{Time}
 
 {% if flag?(:win32) %}
   # The entropy source Windows offers a program that only wants bytes.

@@ -1,7 +1,6 @@
 module std/complex
 
-import std/math
-using std/math::{Math}
+import std/math::{Math}
 import std/float
 import std/int
 

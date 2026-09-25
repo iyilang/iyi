@@ -26,19 +26,12 @@
   github.com/sdogruyol/iyi-web v0.1.0 as web` in `iyi.mod` - or `iyi get
   PATH --as web` - makes `web/dsl` mean `github.com/sdogruyol/iyi-web/dsl`
   in this project's files, so the path is written once, in the manifest,
-  and a file writes `using web/dsl`. The name is spelled out before anything
+  and a file writes `import web/dsl::{get}`. The name is spelled out before anything
   resolves, so a module is one module however it was reached; a package's
   own short names are its files', from its own manifest; `get -u` keeps a
   name and `tidy` counts what it imports. A short name that is also this
   project's directory, `std`, a name that is not one lower-case word and a
   name given twice are refused by name.
-- **A `using` imports what it names.** `import app/dep` followed by `using
-  app/dep` wrote one path twice; `using app/dep` is now the one line, and the
-  parser makes the import - after the file's own imports, so the edge is the
-  file's and the import wall holds: a qualified name the file wrote no line
-  for is still refused. Writing both still works and loads the module once.
-  The formatter and `to_s` print what the source says, and `mod context` and
-  the language server's auto-import write the one `using` line.
 - **`iyi get`: a requirement without writing the line by hand.** `iyi get
   example.com/someone/lib` requires the latest release - the highest `vX.Y.Z`
   tag, a pre-release only when there is no release - `PATH@v1.2.0` requires
@@ -89,14 +82,30 @@
   On a twelve-core Windows machine, the program running between
   collections, a million-node tree's pause took 15.4 ms alone, 7.4 with
   three helpers and 6.6 with five; with all eleven it was 16.4 in one
-  run and 23.9 in another, every core busy. `parallel_mark.sh`
-  runs on Windows and in its job; its recycling proof marks the wide
-  object three times now, because one mark without recycling came to
-  3.1 MB there, under the 4 MB bound it had to cross. The mark beside the
-  program and the sweep helpers remain Linux's and darwin's.
+  run and 23.9 in another, every core busy. `parallel_mark.sh` runs on
+  Windows and in its job. The mark beside the program and the sweep
+  helpers remain Linux's and darwin's.
 
 ### Changed
 
+- **One keyword for a module and its names: `using` is gone.** `import X`
+  loads a module and keeps its names qualified, as before; `import
+  X::{a, b}` loads it and brings those names into scope, and `import X::*`
+  every name it exports - what `import X` + `using X::{a, b}` and `using X`
+  were, one path written twice. `pub import X` hands a module on whole, and
+  `pub import X::{a}` is refused with why: names in scope are the module's
+  own. A `using` is now a syntax error that names the line replacing it,
+  and `iyi fix FILE` rewrites every one in a file - folding a bare `import`
+  of the same module into it, leaving a line with a comment where it is,
+  never folding into a `pub import` - and running it again changes nothing.
+  One module on two lines is loaded once and its names merge, where two
+  lists of one module made a name "ambiguous" between the module and
+  itself. An import in a type's body scopes its names to that type, and an
+  import of a module the file declares itself needs no file. Short names
+  work the same: `import web/dsl::{get}`. `iyi init`, `mod context`,
+  `iyi migrate`, the language server's auto-import and organize-imports,
+  artifacts' declarations and every file in the tree are written the new
+  way.
 - `iyi get -u` never moves a requirement down: one past the latest release -
   a pseudo-version, or a pre-release of the next - stays where it is.
 
@@ -182,6 +191,24 @@
   before it turns the generation now: in 20 marks printed one by one the
   helpers blackened 82 to 94% of the nodes each time, and the exercise
   held 10 runs of 10.
+
+- **The parallel marker's gate holds on one core.** `taskset -c 0 bash
+  bench/parallel_mark.sh` failed at "the helpers blackened nothing": one
+  core never schedules a helper while the marker works, so there is
+  nothing to share, nothing taken to recycle, and the wide object's stack
+  had grown before the mark that looked for it. The script now counts the
+  cores it may run on (`nproc`, the affinity mask) and hands the program
+  the count; on one core the sharing and recycling checks and their proofs
+  are off and say so, and the stack's growth is the run's.
+
+- **The parallel marker's recycling proof fires on every machine.** It
+  bounded the bytes the batch pool mapped, and a loaded three-core darwin
+  runner kept the copy that never frees a batch at 3.4 MB, under the 4 MB
+  bound, so the proof did not fire and CI went red at random. The pool now
+  counts the batches it hands out again off its free list, and
+  `bench/parallel_mark.iyi` asks that count first: none reused is a pool
+  that never recycles, whatever the cores. The bound stays, for what a
+  recycling pool holds.
 
 ## 0.14.1 — 2026-09-24
 
@@ -10047,7 +10074,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,582-line library and nothing else. Every other
+  written against iyi's own 17,593-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

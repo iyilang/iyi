@@ -122,7 +122,7 @@ printf 'module main\n\nmodule second\n\nputs "two"\n' > twoheaders.iyi
 printf '\377\376\377\376' > binary.iyi
 mkdir -p app mods
 printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > app/lib.iyi
-printf 'module main\n\nimport app/lib\nusing app/lib::{value}\n\nputs value\n' > user.iyi
+printf 'module main\n\nimport app/lib::{value}\n\nputs value\n' > user.iyi
 printf '# A comment, and then nothing that declares a module.\nputs "hi"\n' > nomodule.iyi
 mkdir -p tree
 printf 'class Ok\nend\n' > tree/ok.cr
@@ -440,12 +440,12 @@ refuses "a format check on a path that is not there" "does not exist" -- \
 # report request about valid source. Every file importing a package was
 # unformattable. The tree-wide `--check` never saw it because this
 # repository's own `.iyi` files import local modules.
-printf 'import   example.test/user/lib\nusing example.test/user/lib::{value}\n\nx=value\n' > "$WORK/pkg.iyi"
+printf 'import   example.test/user/lib::{value}\n\nx=value\n' > "$WORK/pkg.iyi"
 if ! "$IYI" tool format "$WORK/pkg.iyi" > "$WORK/pkg.txt" 2>&1; then
   echo "  a package import: the formatter would not format it"
   sed -n '1,4p' "$WORK/pkg.txt"
   status=1
-elif [ "$(cat "$WORK/pkg.iyi")" != "$(printf 'import example.test/user/lib\nusing example.test/user/lib::{value}\n\nx = value')" ]; then
+elif [ "$(cat "$WORK/pkg.iyi")" != "$(printf 'import example.test/user/lib::{value}\n\nx = value')" ]; then
   echo "  a package import: the formatter rewrote the path"
   cat "$WORK/pkg.iyi"
   status=1
@@ -672,7 +672,7 @@ else
 fi
 mkdir -p mine
 printf 'module mine/util\n\npub def two : Int32\n  2\nend\n' > mine/util.iyi
-printf 'import mine/util\nusing mine/util::{two}\n\nputs two\n' > own_crystal.iyi
+printf 'import mine/util::{two}\n\nputs two\n' > own_crystal.iyi
 if "$IYI" check --crystal own_crystal.iyi > own_crystal.log 2>&1; then
   echo "  a module of the author's own is not std, and --crystal takes it"
 else

@@ -94,7 +94,7 @@ echo
 echo "== what a request refuses before it is written"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/http\n\nusing std/http::{HTTP}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/http::{HTTP}\n\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"

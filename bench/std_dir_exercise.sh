@@ -154,8 +154,7 @@ refuses() { # refuses <label> <name> <phrase> <code>
   local label="$1" name="$2" phrase="$3"
   shift 3
   cat > "$WORK/$name.iyi" <<EOF
-import std/dir
-using std/dir::{Dir}
+import std/dir::{Dir}
 $*
 EOF
   if IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$WORK/$name.iyi" >"$WORK/$name.out" 2>&1; then

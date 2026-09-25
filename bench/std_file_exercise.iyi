@@ -13,10 +13,8 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/file
-import std/dir
-using std/file::{File}
-using std/dir::{Dir}
+import std/file::{File}
+import std/dir::{Dir}
 
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. It was `/tmp` last, which is not a directory on

@@ -15,10 +15,8 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/int
-import std/enumerable
-import std/list
-using std/enumerable::{Enumerable}
-using std/list::{List}
+import std/enumerable::{Enumerable}
+import std/list::{List}
 
 puts "== add"
 assert_true 1_u16 + 2_u16 == 3_u16, "u16"

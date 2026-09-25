@@ -125,7 +125,7 @@ echo
 echo "== what address parsing refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/udp\nimport std/socket\nusing std/udp::{UdpSocket}\nusing std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
+  printf 'module main\n\nimport std/udp::{UdpSocket}\nimport std/socket::{IyiSocket}\n\nputs (%s).to_s\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -195,24 +195,21 @@ refuses_body() { # refuses_body <label> <name> <phrase>
 
 refuses_body "a negative port" neg_port "port -1 is not a port: 0 to 65535" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", -1)
 puts s.local_port
 IYI
 
 refuses_body "a port above 65535" high_port "port 70000 is not a port: 0 to 65535" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 70000)
 puts s.local_port
 IYI
 
 refuses_body "a Datagram index that is not 0, 1, or 2" dg_index "Datagram index -1 is not 0, 1, or 2" <<'IYI'
 module main
-import std/udp
-using std/udp::{Datagram, Bytes}
+import std/udp::{Datagram, Bytes}
 buf = Bytes.new(1)
 buf[0] = 120_u8
 dg = Datagram.new(buf, "h", 7)
@@ -221,16 +218,14 @@ IYI
 
 refuses_body "a negative receive count" neg_recv "negative count: -1" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 s.receive_from(-1)
 IYI
 
 refuses_body "local_port after close" closed_port "socket is closed" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 s.close
 puts s.local_port
@@ -238,8 +233,7 @@ IYI
 
 refuses_body "a negative poll timeout" neg_poll "negative timeout: -1" <<'IYI'
 module main
-import std/udp
-using std/udp::{UdpSocket}
+import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 puts s.poll_read(-1)
 IYI
@@ -254,8 +248,7 @@ echo "== a receive parks rather than blocking the thread (SPEC.md III.4.2)"
 cat > "$WORK/park.iyi" <<'IYI'
 module park
 
-import std/udp
-using std/udp::{UdpSocket, Datagram}
+import std/udp::{UdpSocket, Datagram}
 
 server = UdpSocket.bind("127.0.0.1", 0)
 port = server.local_port
@@ -427,8 +420,7 @@ PY
   else
     cat > "$WORK/dg_idx.iyi" <<'IYI'
 module main
-import std/udp
-using std/udp::{Datagram, Bytes}
+import std/udp::{Datagram, Bytes}
 buf = Bytes.new(1)
 buf[0] = 120_u8
 dg = Datagram.new(buf, "h", 7)

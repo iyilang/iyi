@@ -1,4 +1,4 @@
-# Modules across files: `import` and `using`.
+# Modules across files: `import`, and the names it brings into scope.
 #
 #   ./bin/crystal run samples/iyi/modules.iyi
 #
@@ -8,23 +8,22 @@
 module samples/modules
 
 # R-1: `import` names a module and loads it at most once, so the import graph
-# is a DAG rather than textual inclusion. It brings the module into scope
-# under its qualified name and nothing more — after this line, and with no
-# `using`, the module's names are reachable only as `App::Greeter::Greet` and
+# is a DAG rather than textual inclusion. Bare, it brings the module into
+# scope under its qualified name and nothing more: after `import app/greeter`
+# alone, the module's names are reachable only as `App::Greeter::Greet` and
 # `App::Greeter.polite`.
-import app/greeter
-import app/formal
+import app/greeter::*
+import app/formal::{address}
 
-# II.3: `using` is what makes those names available unqualified. It is written
-# by the consumer, not performed by the library: importing a module never
-# changes what the importer's unqualified names mean, so a library cannot
-# capture a name in your file by adding one to itself.
-using app/greeter
+# II.3: `::*` and `::{...}` are what make those names available unqualified.
+# They are written by the consumer, not performed by the library: a bare
+# import never changes what the importer's unqualified names mean, so a
+# library cannot capture a name in your file by adding one to itself.
 
-# The selective form narrows a `using` to the names listed. Here it is not
-# decoration — `app/greeter` and `app/formal` both export `title`, and taking
-# both whole would make every unqualified `title` in this module ambiguous.
-using app/formal::{address}
+# The selective form narrows an import's names to the ones listed. Here it
+# is not decoration — `app/greeter` and `app/formal` both export `title`, and
+# taking both whole would make every unqualified `title` in this module
+# ambiguous.
 
 pub struct User
   getter name : String
@@ -33,7 +32,8 @@ pub struct User
   end
 end
 
-# `Greet` resolves through the `using` above, so `impl` needs no qualification.
+# `Greet` resolves through `import app/greeter::*` above, so `impl` needs no
+# qualification.
 #
 # R-3's orphan rule allows this impl here because `User` is declared here:
 # this is the type's module. It would equally be allowed in `app/greeter`,
@@ -57,8 +57,8 @@ end
 
 puts User.new("iyi").greet
 
-# `title` was reachable unqualified from neither `using`: `app/greeter`'s was
-# left ambiguous by nothing (only one `using` was whole), and `app/formal`'s
+# `title` was reachable unqualified from neither import: `app/greeter`'s was
+# left ambiguous by nothing (only one import was whole), and `app/formal`'s
 # was excluded by the selective form. Qualification always works.
 puts App::Greeter.title
 puts App::Formal.title
@@ -67,30 +67,30 @@ puts App::Formal.title
 # What this sample would report as an error
 # ---------------------------------------------------------------------------
 #
-# * Widening the second directive to `using app/formal` and then writing an
+# * Widening the second import to `import app/formal::*` and then writing an
 #   unqualified `title` is an error, and it is reported at the `title`, not at
-#   the `using`. Widening it alone is not an error at all: two modules
+#   the import. Widening it alone is not an error at all: two modules
 #   exporting the same name is not by itself a mistake, so nothing is wrong
 #   until a name is written that could mean either (SPEC.md II.3).
 #
 # * Adding `def title` here makes even that legal again. A local definition
-#   beats a used one, silently, which is what keeps a library from breaking
-#   its consumers by adding an export.
+#   beats an imported one, silently, which is what keeps a library from
+#   breaking its consumers by adding an export.
 #
 # * Moving the `impl` above into a module that is neither `app/greeter` nor
 #   this one is refused by R-3, naming both modules where it would be allowed.
 #
-# * `using app/greeter::{greeting}` — `greeting` is declared there without
+# * `import app/greeter::{greeting}` — `greeting` is declared there without
 #   `pub`, so it is not part of the module's surface. The error names it at the
-#   `using`, where the author can see which of the names they asked for they
-#   cannot have. Widening to a bare `using app/greeter` does not reach it
+#   import, where the author can see which of the names they asked for they
+#   cannot have. Widening to `import app/greeter::*` does not reach it
 #   either; it simply is not there to be found (R-2b).
 #
 # * `App::Greeter.greeting` — qualifying it does not get around `pub` either.
-#   It has to be unreachable, not merely absent from `using`: `.iyimod` carries
-#   a module's exports and nothing else, so if another module could call an
-#   unmarked name, that metadata would not be enough to compile against
-#   (SPEC.md IV.2).
+#   It has to be unreachable, not merely absent from an import's names:
+#   `.iyimod` carries a module's exports and nothing else, so if another
+#   module could call an unmarked name, that metadata would not be enough to
+#   compile against (SPEC.md IV.2).
 #
 # * `import app/v_1`, or any path segment that is not `[a-z][a-z0-9]*` with
 #   single `_` between groups. A module declared `app/greeter` is reached as
@@ -115,8 +115,8 @@ puts App::Formal.title
 # The second command prints what the third one compiles against: `app/greeter`
 # with `pub def polite(name : String) : String`, `pub trait Greet` with its
 # requirement, and no bodies at all. `greeting` is not in it — it carries no
-# `pub`, and R-2b's "unreachable rather than absent from `using`" is the same
-# statement as "not in the artifact".
+# `pub`, and R-2b's "unreachable rather than absent from an import's names"
+# is the same statement as "not in the artifact".
 #
 # * Not yet: object code. `--use-iyimod` implies `--no-codegen`, because the
 #   artifact carries what another module may call and not how it is done, so

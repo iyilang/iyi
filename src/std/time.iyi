@@ -25,8 +25,7 @@
 
 module std/time
 
-import std/traits
-using std/traits::{Comparable}
+import std/traits::{Comparable}
 
 pub struct DayOfWeek
   getter value : Int32

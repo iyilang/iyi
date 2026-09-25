@@ -5,8 +5,7 @@
 
 module std/dir
 
-import std/path
-using std/path::{Path}
+import std/path::{Path}
 
 {% if flag?(:darwin) %}
   lib LibC

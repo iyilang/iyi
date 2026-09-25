@@ -204,7 +204,7 @@ echo
 echo "== what the macros refuse at build time"
 eiy_build_refuses() { # eiy_build_refuses <label> <name> <phrase>
   local label="$1" name="$2" phrase="$3"
-  printf 'module main\n\nimport std/eiy\nusing std/eiy::{Eiy}\n\nputs Eiy.render("%s.eiy")\n' "$name" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/eiy::{Eiy}\n\nputs Eiy.render("%s.eiy")\n' "$name" > "$WORK/$name.iyi"
   if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: it built instead of refusing"
     status=1
@@ -234,7 +234,7 @@ echo
 echo "== what the runtime API refuses"
 eiy_panics_with() { # eiy_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/eiy\nusing std/eiy::{Eiy}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/eiy::{Eiy}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"

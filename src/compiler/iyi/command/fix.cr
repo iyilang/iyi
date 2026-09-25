@@ -13,7 +13,16 @@
 # compromise; it is the only ordering that is always right. The round
 # cap exists so two suggestions that undo each other cannot ping-pong
 # forever.
+#
+# One rewrite runs ahead of that loop, and it is the language's own
+# rather than an error's: `using`, the keyword one `import` replaced, is
+# written as that `import` - folded into a bare `import` of the same
+# module when there is one (`Iyi::UsingRewrite`). A file written before
+# the change stops parsing at its first `using`, so no compile could hand
+# the edits over one at a time; the rewrite reads the file with the old
+# keyword admitted and makes every one at once.
 require "../lsp/analysis"
+require "../tools/using_rewrite"
 
 class Iyi::Command
   private def fix
@@ -35,7 +44,9 @@ class Iyi::Command
 
           Apply the compiler's did-you-mean edits to <file>, recompiling
           after each one, until the file is clean or carries an error the
-          compiler has no edit for. Exit 0 when the file ends clean. When
+          compiler has no edit for. Every `using` is first written as the
+          `import` that replaced it: `using X` is `import X::*`, `using
+          X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
           the remaining error lives in another file of the program, the
           verb names it (`cause` in `--json`): that is the file to fix next.
 
@@ -73,6 +84,12 @@ class Iyi::Command
     applied = [] of {Int32, Int32, String, String}
     remaining = nil
     capped = false
+
+    if (source = File.read(path)).valid_encoding? && (rewritten = UsingRewrite.rewrite(source, path))
+      text, edits = rewritten
+      File.write(path, text)
+      edits.each { |edit| applied << {edit.line, edit.column, edit.from, edit.to} }
+    end
 
     # Thirty-two is a cap on the *edits*, and the verdict is always the check
     # after the last one. A file that genuinely carries more consecutive

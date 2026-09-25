@@ -8,20 +8,14 @@
 
 module bench/std_exercise
 
-import std/traits
-import std/enumerable
-import std/list
-import std/derives
-import std/slice
-import std/iterator
+import std/traits::{Comparable, Num, Hashable}
+import std/enumerable::{Enumerable}
+import std/list::{List}
+import std/derives::{Show}
+import std/slice::{Slice, SliceIterator}
+import std/iterator::{Iterator}
 
-using std/traits::{Comparable, Num, Hashable}
-using std/enumerable::{Enumerable}
-using std/list::{List}
-using std/derives::{Show}
-using std/slice::{Slice, SliceIterator}
-using std/list::{ListIterator}
-using std/iterator::{Iterator}
+import std/list::{ListIterator}
 
 # ---- Test Types -------------------------------------------------------------
 

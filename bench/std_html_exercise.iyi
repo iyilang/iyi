@@ -5,8 +5,7 @@
 
 module bench/std_html_exercise
 
-import std/html
-using std/html::{HTML}
+import std/html::{HTML}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

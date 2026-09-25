@@ -34,11 +34,8 @@ def assert_bytes(expected : Array(UInt8), actual : Std::Slice::Bytes, msg : Stri
   end
 end
 
-import std/slice
-import std/hpack
-
-using std/slice::{Bytes}
-using std/hpack::{HeaderField, IndexingMode, StaticTable, DynamicTable, Table, Integer, Huffman, Encoder, Decoder, HpackError}
+import std/slice::{Bytes}
+import std/hpack::{HeaderField, IndexingMode, StaticTable, DynamicTable, Table, Integer, Huffman, Encoder, Decoder, HpackError}
 
 # ===========================================================================
 # 1. RFC 7541 Integer Codec

@@ -214,7 +214,7 @@ echo "== what the parser and the formatter refuse"
 # Sunday.
 time_panics_with() { # time_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/time\nusing std/time::{Time, Span, DayOfWeek}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/time::{Time, Span, DayOfWeek}\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -278,7 +278,7 @@ time_panics_with "a time plus a span past Int64" time_add "Span overflows" \
   'Time.utc(2024, 1, 1) + Span.seconds(9223372036854775807_i64)'
 # And the one RFC 3339 allows that the constructor does not: a leap second
 # is read as the second after 59, not refused.
-printf 'module main\n\nimport std/time\nusing std/time::{Time}\n\nputs Time.parse_rfc3339("2016-12-31T23:59:60Z").to_rfc3339\n' > "$WORK/leap.iyi"
+printf 'module main\n\nimport std/time::{Time}\n\nputs Time.parse_rfc3339("2016-12-31T23:59:60Z").to_rfc3339\n' > "$WORK/leap.iyi"
 if [ "$("$IYI" run "$WORK/leap.iyi" 2>&1)" = "2017-01-01T00:00:00Z" ]; then
   echo "  a leap second is read as the instant it names"
 else

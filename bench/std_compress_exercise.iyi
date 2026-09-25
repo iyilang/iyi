@@ -11,10 +11,8 @@
 
 module bench/std_compress_exercise
 
-import std/compress
-import std/random
-using std/compress::{Deflate, Zlib, Gzip}
-using std/random::{Random}
+import std/compress::{Deflate, Zlib, Gzip}
+import std/random::{Random}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond

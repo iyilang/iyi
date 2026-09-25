@@ -21,8 +21,7 @@
 
 module bench/std_gc_exercise
 
-import std/gc
-using std/gc::{GC}
+import std/gc::{GC}
 
 def check(cond : Bool, what : String) : Nil
   raise "ASSERTION FAILED: #{what}" unless cond

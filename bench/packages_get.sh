@@ -66,6 +66,12 @@
 # own `Util` is its own; a name both export is ambiguous only where a file
 # brings both into scope, and a package whose modules already begin with
 # its name (`iyi_web/dsl`) is where it was.
+#
+# Then `reaches` as a limit: `require ... reaches nothing` builds a pure
+# version, a `get` to one that opens a socket and declares C is refused
+# with what it reaches and iyi.mod and iyi.sum untouched, widening the line
+# lets it through and a later `get` keeps the clause, and a word that is not
+# something a package reaches is refused where it is written.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -610,6 +616,25 @@ printf 'import example.test/user/pa/util::{who}\nimport example.test/user/pb/uti
 grep -q "'who' is ambiguous here: it is exported by both Pa::Util and Pb::Util" amb.log ||
   fail "a name both util modules export was not called ambiguous by both names: $(cat amb.log)"
 [ "$status" -eq 0 ] && echo "  Pa::Util and Pb::Util both load, each package's Util is its own; who from both: ambiguous by name"
+
+step "reaches: what a package may touch, as a limit"
+mkdir -p "$WORK/lapp" && cd "$WORK/lapp" || exit 1
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches nothing\n' > iyi.mod
+printf 'import example.test/user/libr::{version}\n\nputs version\n' > main.iyi
+"$IYI" run main.iyi > lim1.log 2>&1 && grep -q "^1.0.0$" lim1.log || fail "a pure version under reaches nothing did not build: $(cat lim1.log)"
+cp iyi.mod iyi.mod.before; cp iyi.sum iyi.sum.before
+if "$IYI" get example.test/user/libr@v1.1.0 > lim2.log 2>&1 ||
+   ! grep -q "example.test/user/libr v1.1.0 reaches std/socket, C, which its line in iyi.mod does not allow" lim2.log; then
+  fail "a get past reaches nothing was not refused by what it reaches: $(cat lim2.log)"
+fi
+cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "a refused get changed iyi.mod or iyi.sum"
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches std/socket, C\n' > iyi.mod
+"$IYI" get example.test/user/libr@v1.1.0 > lim3.log 2>&1 || fail "a get inside the widened limit was refused: $(cat lim3.log)"
+grep -qx "require example.test/user/libr v1.1.0 reaches std/socket, C" iyi.mod || fail "get did not keep the reaches clause: $(grep require iyi.mod)"
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.1.0 reaches std/sockt, Files\n' > iyi.mod
+"$IYI" run main.iyi > lim4.log 2>&1
+grep -q "\`Files\` is not something a package reaches" lim4.log || fail "a word that is not a reach was not refused: $(cat lim4.log)"
+[ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/socket, C with nothing written; widened: allowed and kept"
 
 echo
 if [ "$status" -eq 0 ]; then

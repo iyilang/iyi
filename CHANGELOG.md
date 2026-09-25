@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **`require PATH vX reaches ...`: a package's reach as a limit.** `reaches
+  std/file, C`, or `reaches nothing`, in the words `iyi mod reach` prints:
+  std modules by path, `File`, and `C` for the C the package declares
+  itself. A selected version that reaches past its line is refused by
+  every verb that resolves, naming what it reaches, with iyi.sum and - in
+  a `get` - iyi.mod unwritten; `get` keeps the clause when it moves the
+  version. Only a line that writes one pays for reading the package's
+  source.
+
 ### Changed
 
 - **A package's modules live under its name, so two packages' `util`s are

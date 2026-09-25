@@ -59,6 +59,15 @@
   a worker that had just exited made it skip the step as if there were
   no `/proc`.
 
+- **The remainder's guard is proved on Windows too.** `number_exercise.sh`
+  takes the guard off `Int32::MIN % -1` and asks the program to die of
+  the processor's fault; on Windows it said "not measured here, because
+  Windows delivers no signal". Windows delivers the fault as the exit
+  code, STATUS_INTEGER_OVERFLOW (0xC0000095), which Git Bash reports as
+  127 - the code of a command it could not find - so the proof reads it
+  whole through PowerShell: without the guard the program ends with
+  0xC0000095, and with it prints 0 and ends with 0.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a

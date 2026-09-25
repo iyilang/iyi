@@ -15,6 +15,22 @@
   with the fix taken out the exercise failed 20 runs of 20, where without
   the helpers it passed 20 of 20 and the proof was skipped there.
 
+- **Windows marks beside the program.** A large live set on Windows was
+  marked inside the pause; Linux and darwin stop for the roots, mark
+  beside the program under the write barrier, and stop again to finish
+  (GC_DESIGN.md Stage 9). Windows does now: the main thread is
+  registered at the first collection so helper 0's second stop can
+  suspend it, and a thread inside the barrier is let run to its end and
+  parks there, as one inside the allocator already was.
+  `concurrent_mark.sh` runs on Windows and in the `windows-std` job: on a
+  twelve-core Windows machine every payload moved under a mark survived
+  in 8 runs of 8, and with the barrier's shade taken out the first was
+  freed. Against the same collector marking inside the pause,
+  `gc_race.py`'s binary trees' longest pause went from 4.78 ms to 1.21
+  and its total from 58.2 to 7.5, live churn's from 14.96 ms to 0.41 and
+  59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
+  against 0.059 - the helpers' spin before their park, fixed below.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a
@@ -10117,7 +10133,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,594-line library and nothing else. Every other
+  written against iyi's own 17,584-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

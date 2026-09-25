@@ -92,6 +92,10 @@
   `iyi lsp`'s binary through Makefile.win's own macro, checks the new file
   is at the name with the session still running and the old one gone at
   the next build, and shows the plain move refused - 20 runs of 20 here.
+  It waits for the old file to be unheld before that build: on the Windows
+  runner a handle stayed on the renamed file half a second after its
+  process ended, and the delete that follows a rename is refused while
+  one does.
   `lsp_session.py`'s rebuild step, skipped on Windows for want of
   `.build/iyi`, moves the running `.build/iyi.exe` aside the same way and
   the session compiles on.

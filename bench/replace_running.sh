@@ -60,13 +60,21 @@ stop_session() {
   wait "$session" 2>/dev/null
 }
 
-# Until no process runs the image: the session's worker (`iyi lsp
-# --worker`, started from the same file) is told to stop when the session
-# ends and exits on its own time. Ten seconds at most.
-wait_image_gone() {
-  local tries=0
+# Until nothing holds the file: no process runs the image - the session's
+# worker (`iyi lsp --worker`, started from the same file) exits on its own
+# time after the session - and no handle is open on it, which a Windows
+# runner's scanner keeps for a moment after a rename: the file opens with
+# no sharing at all. Ten seconds for each at most.
+wait_unheld() {
+  local path tries=0
+  path="$(cygpath -w "$1")"
   while tasklist //FI "IMAGENAME eq held.exe" //NH 2>/dev/null | grep -q 'held.exe' && [ "$tries" -lt 100 ]; do
     sleep 0.1
+    tries=$((tries + 1))
+  done
+  tries=0
+  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1 || [ "$tries" -ge 20 ]; do
+    sleep 0.5
     tries=$((tries + 1))
   done
 }
@@ -106,7 +114,7 @@ fi
 
 step "and goes at the next replacement, once nothing runs it"
 stop_session
-wait_image_gone
+[ -n "$aside" ] && wait_unheld "$WORK/$aside"
 cp "$IYI" "$WORK/next.exe"
 if replace "" "$next_w" && [ -n "$aside" ] && [ ! -e "$WORK/$aside" ]; then
   echo "  $aside deleted"

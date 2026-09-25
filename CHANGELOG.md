@@ -51,6 +51,14 @@
 
 ### Fixed
 
+- **`iyi mod release` compared the working tree with itself on darwin.**
+  It placed the package in its repository by the difference between the
+  working directory and git's top level, and on darwin those are `/var/...`
+  and `/private/var/...`: the difference climbed out of each checkout back
+  into the tree, both versions were the tree, and nothing had moved. The
+  place is now git's own (`--show-prefix`); the gate enters through a
+  symlink so Linux shows the same.
+
 - **A package's root module that imports its own submodule is reachable.**
   `rel.iyi` importing `rel/util` loads the submodule first, and `module
   rel/util` makes `Rel` as its namespace; the import wall read the unit's

@@ -65,9 +65,12 @@ class Iyi::Command
     unless top
       abort! "mod release: #{Iyi.relative_filename(dir)} is not in a git repository; a release is a tag on one", :USAGE_ERROR
     end
-    # Where the package sits in its repository, so both checkouts find it.
-    inside = ::Path[dir].relative_to(File.expand_path(top)).to_s
-    inside = "" if inside == "."
+    # Where the package sits in its repository, so both checkouts find it -
+    # asked of git, not worked out from the two paths: on darwin the working
+    # directory is `/var/...` and git's top level `/private/var/...`, and the
+    # difference climbed out of the checkout back into the working tree, so
+    # both "versions" compiled were the tree as it stood and nothing moved.
+    inside = (mod_release_git(dir, "rev-parse", "--show-prefix") || "").strip.rchop('/')
 
     _, major = Mod::ModFile.split_major(root.path)
     released = [] of SemanticVersion

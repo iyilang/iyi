@@ -496,7 +496,10 @@ refused "a ref that is not there" "has no \`nosuchbranch\`" example.test/user/li
 step "mod release: what the next tag has to be"
 REL="$WORK/rel"
 mkrepo "$REL"
-cd "$REL" || exit 1
+# Entered through a symlink, as darwin's `/var` is `/private/var`: the
+# working directory and git's top level are then two spellings of one place.
+ln -s "$REL" "$WORK/rel-link" 2>/dev/null
+cd "$WORK/rel-link" 2>/dev/null || cd "$REL" || exit 1
 mkdir -p rel examples
 printf 'module example.test/user/rel\n' > iyi.mod
 printf 'module rel/util\n\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > rel/util.iyi

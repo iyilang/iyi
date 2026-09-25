@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed
+
+- **A package's modules live under its name, so two packages' `util`s are
+  two modules.** Two packages that each had a `util.iyi` both defined the
+  type `Util`, and a program requiring both was refused - "`Util` is not
+  imported here", in the second package's own file. A package's module is
+  now under the package's name, its path's last segment (`-` as `_`, a
+  `/vN` left off): `Pa::Util` and `Pb::Util`, and a name both export is
+  ambiguous only where a file brings both into scope. A module whose path
+  begins with the name already - `iyi_web/dsl` in `iyi-web`, `liba` in
+  `liba` - is where it was; one that does not is reached by a qualified
+  name one segment longer: `Liba::Colors` for `import .../liba/colors`.
+  Inside the package nothing changes, and a std module a package imports
+  stays std's.
+
 ### Fixed
 
 - **`std_signal`'s TERM step lost its output file at random.** A process

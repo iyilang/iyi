@@ -403,6 +403,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   @iyi_package_stack = [] of {String, String}
+
+  private def iyi_inside_checkout?(filename : String, checkout : String) : Bool
+    ::Path[File.expand_path(filename)].to_posix.to_s.starts_with?(::Path[File.expand_path(checkout)].to_posix.to_s + "/")
+  end
+
   @iyi_package_short_names = {} of String => Array({String, String})
 
   # iyi: a short name at the front of an import's path (III.7):
@@ -1277,6 +1282,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
     parser.filename = filename
     parser.wants_doc = @program.wants_doc?
+    # Only the package's own files: a std module a package imports is
+    # loaded while the package is still on the stack, and is std's.
+    if (current = @iyi_package_stack.last?) && iyi_inside_checkout?(filename, current[1])
+      parser.iyi_package_name = Mod::ModFile.package_name(current[0])
+    end
     @iyi_importing << filename
     begin
       parsed_nodes = parser.parse

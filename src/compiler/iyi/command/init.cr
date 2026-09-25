@@ -77,9 +77,10 @@ class Iyi::Command
     # The root module's name is the path's last segment, as a package's is
     # (`split_major`: `/v2` is a version, not a name). A repository name
     # with `-` is a module name with `_`, the grammar allowing no dash.
-    name = Mod::ModFile.split_major(module_path)[0].rpartition('/')[2].gsub('-', '_')
-    unless name.size > 0 && name[0].ascii_lowercase? && name.each_char.all? { |c| c.ascii_lowercase? || c.ascii_number? || c == '_' } && !name.includes?("__") && !name.ends_with?('_')
-      abort! "init: '#{name}', the last segment of #{module_path}, cannot name a module: a module name is " \
+    name = Mod::ModFile.package_name(module_path)
+    unless name
+      last = Mod::ModFile.split_major(module_path)[0].rpartition('/')[2]
+      abort! "init: '#{last}', the last segment of #{module_path}, cannot name a module: a module name is " \
              "lower-case letters and digits with single `_` between them. Name the project so its last segment is one", :USAGE_ERROR
     end
     files = iyi_init_files(module_path, name)

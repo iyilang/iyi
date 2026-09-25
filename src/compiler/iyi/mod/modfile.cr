@@ -142,6 +142,18 @@ module Iyi::Mod
     # path without a `vN` last segment names none. Go's rule, and SPEC.md
     # III.7's: a major version past 1 is a different module, spelled by a
     # suffix, in the same repository, so v1 and v2 can both be required.
+    # The name a package's modules live under: its path's last segment, a
+    # `/vN` suffix left off and `-` written `_` - `github.com/sdogruyol/
+    # iyi-web` is `iyi_web`, `example.com/lib/v2` is `lib`. Nil when that
+    # is not a module name, which a segment like `lib.x` is not.
+    def self.package_name(path : String) : String?
+      name = split_major(path)[0].rpartition('/')[2].gsub('-', '_')
+      return nil unless name.size > 0 && name[0].ascii_lowercase?
+      return nil unless name.each_char.all? { |c| c.ascii_lowercase? || c.ascii_number? || c == '_' }
+      return nil if name.includes?("__") || name.ends_with?('_')
+      name
+    end
+
     def self.split_major(path : String) : {String, Int32?}
       repository, slash, last = path.rpartition('/')
       return {path, nil} if slash.empty? || last.size < 2 || last[0] != 'v'

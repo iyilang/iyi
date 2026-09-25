@@ -60,6 +60,12 @@
 # signature moved is "changed" with the lines that write it - a comment
 # that names it is not one - an export gone that nothing here writes says
 # so, and a requirement the project's files do not import says nothing.
+#
+# Then two packages that each have a `util`: each package's modules live
+# under its name - `Pa::Util`, `Pb::Util` - so both load and each package's
+# own `Util` is its own; a name both export is ambiguous only where a file
+# brings both into scope, and a package whose modules already begin with
+# its name (`iyi_web/dsl`) is where it was.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -583,6 +589,27 @@ printf 'puts 1\n' > main.iyi
 "$IYI" get example.test/user/libi@v0.1.0 > jmp0.log 2>&1 && "$IYI" get -u > jmp1.log 2>&1 || { fail "get in japp failed"; cat jmp0.log jmp1.log; }
 grep -q "what the move changes" jmp1.log && fail "a requirement nothing here imports was reported: $(cat jmp1.log)"
 [ "$status" -eq 0 ] && echo "  greeting changed at main.iyi:1 and :3, the comment not; old gone, used nowhere; 1 new; an unimported requirement: silent"
+
+step "two packages' util modules are two modules"
+for p in pa pb; do
+  mkrepo "$WORK/work/$p"
+  printf 'module example.test/user/%s\n' "$p" > "$WORK/work/$p/iyi.mod"
+  printf 'module util\n\npub def who : String\n  "%s"\nend\n' "$p" > "$WORK/work/$p/util.iyi"
+  printf 'module %s\n\nimport util\n\npub def name : String\n  Util.who\nend\n' "$p" > "$WORK/work/$p/$p.iyi"
+  git -C "$WORK/work/$p" add -A && git -C "$WORK/work/$p" commit -qm one
+  git init -q --bare "$WORK/mirror/example.test/user/$p"
+  (cd "$WORK" && publish "$p" v1.0.0)
+done
+mkdir -p "$WORK/capp2" && cd "$WORK/capp2" || exit 1
+printf 'module example.test/user/capp2\nrequire example.test/user/pa v1.0.0\nrequire example.test/user/pb v1.0.0\n' > iyi.mod
+printf 'import example.test/user/pa\nimport example.test/user/pb\nimport example.test/user/pa/util\nimport example.test/user/pb/util\n\nputs Pa.name\nputs Pb.name\nputs Pa::Util.who\nputs Pb::Util.who\n' > main.iyi
+"$IYI" run main.iyi > coll.log 2>&1
+[ "$(tr '\n' ' ' < coll.log)" = "pa pb pa pb " ] || fail "two packages' util modules did not stay two: $(cat coll.log)"
+printf 'import example.test/user/pa/util::{who}\nimport example.test/user/pb/util::{who}\n\nputs who\n' > amb.iyi
+"$IYI" run amb.iyi > amb.log 2>&1
+grep -q "'who' is ambiguous here: it is exported by both Pa::Util and Pb::Util" amb.log ||
+  fail "a name both util modules export was not called ambiguous by both names: $(cat amb.log)"
+[ "$status" -eq 0 ] && echo "  Pa::Util and Pb::Util both load, each package's Util is its own; who from both: ambiguous by name"
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,593 lines, of which 3,509 are the library held to the 3,734 ceiling (5,037 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 117,799 lines, none of it written in iyi |
+| compiler | 117,845 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,7 +1008,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 117,799 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 117,845 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,593-line own prelude + 40,654 in std |
 | Specs | 21,146 lines | 12,017 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -4336,8 +4336,13 @@ The decisions:
    nothing — so the *import* grammar admits `.` and `-` inside a segment
    and the strict rule stands everywhere else. A requirement's prefix is
    identity for the resolver; the in-package path, under the old grammar,
-   is what maps to `Liba::…`, and `import example.com/user/liba/colors::*`
-   reaches `Colors` — the same name the package's own files use.
+   is what maps to a type, under the package's name: a package's modules
+   live under its path's last segment (`-` as `_`, a `/vN` left off), so
+   `import example.com/user/liba/colors` reaches `Liba::Colors`, and two
+   packages that each have a `util` have `Pa::Util` and `Pb::Util` rather
+   than one type both define. A module whose path already begins with the
+   name - `iyi_web/dsl` in `iyi-web` - is where it was, and inside the
+   package `Colors` still means its own, by lexical lookup.
 2. **A package's short imports resolve in its own checkout, or fail.** Not
    passed along to the program's roots: a dependency reaching the
    consumer's modules through a name collision is the accident isolation
@@ -4498,10 +4503,10 @@ before `git tag`. `iyi mod diff` lists the same surface, one definition
 for both. `bench/packages_get.sh` holds it.
 
 What steps 1 and 2 do not do, said here: packages compile from
-source every build (their `.iyimod` story is step 5's, with signatures),
-and two packages whose in-package modules share a name collide in the type
-namespace — the general import-alias question, which an import's list of
-names already softens and a later section has to settle.
+source every build (their `.iyimod` story is step 5's, with signatures).
+Two packages' same-named modules no longer collide (rule 1); two names a
+file brings into scope from both are ambiguous where it does, and the file
+qualifies one - the import-alias question, answered by the namespace.
 
 ### III.8 Tooling: **BUILT — the formatter, the language server, `iyi doc`, `iyi vet`**
 

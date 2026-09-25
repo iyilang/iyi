@@ -104,6 +104,13 @@ module Iyi
     # before the change (`Iyi::UsingRewrite`), and has to read it to.
     property iyi_reads_using = false
 
+    # iyi: the package this file is a module of, when it is one: its modules
+    # live under the package's name (`Mod::ModFile.package_name`), so two
+    # packages' `util`s are `Pa::Util` and `Pb::Util` and not one type. A
+    # module whose path already begins with the name - `iyi_web/dsl` in
+    # `iyi-web` - is where it was.
+    property iyi_package_name : String? = nil
+
     # Where the import being read ends; see `parse_import_path_segment`.
     @iyi_import_end : Location? = nil
 
@@ -216,7 +223,11 @@ module Iyi
         node.is_a?(UsingDecl) ? scopes << node : directives << node
       end
 
-      path = Path.new(header.path.map(&.camelcase))
+      segments = header.path
+      if (package = @iyi_package_name) && segments.first? != package
+        segments = [package] + segments
+      end
+      path = Path.new(segments.map(&.camelcase))
       path.at(header)
 
       # `extend self` so a module-level `pub def` is callable on the module

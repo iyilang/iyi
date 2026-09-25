@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 0.15.0 — 2026-09-25
+
+**One keyword for a module and its names.** `import X::{a, b}` loads a
+module and brings those names into scope, `import X::*` every name it
+exports, and `import X` keeps them qualified - where `import X` followed by
+`using X` wrote one path twice. `using` is gone, and **this release breaks
+source that writes it**: the compiler refuses the line and names the one
+that replaces it, and `iyi fix FILE` rewrites a whole file, folding a bare
+`import` of the same module into it. iyi-web's 54 files went through it
+and its 27 tests passed.
+
+**Packages without writing the manifest by hand.** `iyi get PATH` requires
+a package's latest release, `@v1.2.0` a version and `@main` or `@<commit>`
+a commit no tag names, written as its pseudo-version; `-u` brings every
+requirement up and never moves one down, and `--check` says which are
+behind. `iyi mod tidy` makes `iyi.mod` and `iyi.sum` say what the source
+imports, `replace PATH => ../dir` builds a package from a directory, a
+`/v2` path is the repository's second major version, and `require PATH
+vX as web` lets a file write `import web/dsl::{get}`. And `get` says what
+a package reaches outside the language - the std modules that call C,
+`File`, the C it declares - and what an upgrade adds to that; `iyi mod
+reach` lists the build's.
+
+**Windows marks with helpers, and more gates measure there.** A collection
+on Windows marks on its helper threads now, as on Linux and darwin; the
+collector race, a TERM from outside and the SQLite driver run there, and
+more gates measure their floor there. The parallel marker's proofs fire on every machine
+and hold on one core. `.iyimod` is still v54, so 0.14.1's artifacts are
+rebuilt only because the compiler's version is in their identity.
+
 ### Added
 
 - **A package's reach, said on `get`, and `iyi mod reach`.** `iyi get` ends

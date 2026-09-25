@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- **Windows sweeps with helper threads.** A collection there left its
+  arenas to the allocating thread alone, where Linux's and darwin's open a
+  round the helpers sweep beside the program. Windows opens it too: the
+  round is closed before the next stop and its helpers woken after the
+  runtime lock is released, as there. In `collect_trigger.sh` on a
+  twelve-core Windows machine the helpers began 321 arenas and the
+  allocator 9 across 33 collections. `reuse_integrity.sh`'s proof that a
+  released page must not take a listed chunk's words runs on Windows now:
+  with the fix taken out the exercise failed 20 runs of 20, where without
+  the helpers it passed 20 of 20 and the proof was skipped there.
+
 ## 0.15.0 — 2026-09-25
 
 **One keyword for a module and its names.** `import X::{a, b}` loads a
@@ -10104,7 +10117,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,593-line library and nothing else. Every other
+  written against iyi's own 17,594-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

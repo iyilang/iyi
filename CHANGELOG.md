@@ -85,6 +85,20 @@
   `.exe` and its search path with `:`, and it names them as the build does
   now.
 
+- **Crystal's library specs run on Windows.** The compiler is built from
+  Crystal's library, and its specs ran on Linux alone. On Windows they did
+  not compile: the DWARF reader raises `Error` without loading the module
+  that defines it, and on Linux and darwin the call stack's reader loads
+  it first, while on Windows the name reached iyi's top-level `Error`, a
+  module. The reader requires it now. And a Windows checkout gave the
+  specs' data files CRLF - templates, INI files, text read back, a file
+  digested - which they compare byte for byte; they are pinned to LF in
+  `.gitattributes`. A spec that builds a program ran `bin/crystal`, a
+  shell script, and the Windows job names the built compiler instead.
+  With the three, 100 failing examples of 18,148 here became 31, every
+  one of them a spec that makes a symbolic link, which this account may
+  not and the runner's may. The Windows gates job runs them.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

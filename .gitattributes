@@ -59,3 +59,18 @@ spec/wasm32_std_spec.cr linguist-generated
 ## Syntax highlighting
 
 Makefile.win linguist-language=makefile
+
+# iyi: Crystal's library specs compare what these files hold byte for byte - a
+# template's output, a file read back, a digest - and a Windows checkout
+# wrote them with CRLF, so on Windows those specs compared against bytes
+# the file does not have in the repository. The binary files in the same
+# directory are left as they are.
+spec/std/data/**/*.txt text eol=lf
+spec/std/data/**/*.xml text eol=lf
+spec/std/data/**/*.ini text eol=lf
+spec/std/data/**/*.ecr text eol=lf
+spec/std/data/**/*.types text eol=lf
+spec/std/data/**/*.crt text eol=lf
+spec/std/data/**/*.key text eol=lf
+spec/std/data/*_sample text eol=lf
+spec/std/data/collect_within_ensure text eol=lf

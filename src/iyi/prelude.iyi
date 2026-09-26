@@ -438,6 +438,10 @@ end
     fun ExitProcess(exit_code : Int32) : NoReturn
     fun TerminateProcess(process : Void*, exit_code : Int32) : Int32
     fun GetCurrentProcess : Void*
+    # C's stdio buffers, every one: what the C runtime's `exit` flushes,
+    # which a program that ends in `main` (below) no longer passes through.
+    # iyi writes none of them; a bound C library can.
+    fun fflush(stream : Void*) : Int32
   end
 
   # The rest of the kernel32 surface this runtime names: virtual memory,
@@ -8966,6 +8970,18 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
+  {% if flag?(:win32) %}
+    # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
+    # reason `__iyi_exit` is not: a mark helper stopping this thread as it
+    # left was ended by `ExitProcess` with the thread still suspended, and
+    # the process never ended - its one thread in `NtTerminateProcess`,
+    # beyond `Stop-Process` or `timeout`. Measured with a thread running
+    # collections back to back while the program ended: 35 runs in 100 here
+    # never ended, 20 in 40 held to four cores, and 0 in 1,000 through
+    # `TerminateProcess`.
+    LibC.fflush(Pointer(Void).new(0_u64))
+    __iyi_exit(0)
+  {% end %}
   0
 end
 

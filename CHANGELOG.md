@@ -128,6 +128,21 @@
   keeps the boost is caught there - in 5 runs of 10 on twelve cores and
   10 of 10 held to four, so the proof gives it five runs.
 
+- **On Windows, a program that ends while a collection stops it ends.**
+  `main` returned into the C runtime, whose `exit` is `ExitProcess`: it
+  ended the thread that was stopping the main thread with the main thread
+  still suspended, and the process never ended - its one thread in
+  `NtTerminateProcess`, and neither `timeout` nor `Stop-Process` could end
+  it. It was found as a measuring program that hung once in about fifty
+  runs; with a thread running collections back to back while the program
+  ended, 35 runs in 100 never ended here, and 20 in 40 held to four cores.
+  `main` now ends through `TerminateProcess`, the way `__iyi_exit` already
+  did for the same reason, after flushing C's stdio buffers, the one thing
+  the C runtime's `exit` did that a bound C library can need: 0 in 1,000.
+  The thread exercise runs that program two hundred times on Windows, and
+  its proof puts the return back and has a run hang, released by resuming
+  its threads.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before
@@ -10456,7 +10471,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,863-line library and nothing else. Every other
+  written against iyi's own 17,879-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

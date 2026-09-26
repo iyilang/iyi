@@ -273,6 +273,17 @@
   types `ru` for a private `run` once inside a def and once at the top
   level; the old list did not offer it inside the def.
 
+- **A program deep in a directory tree builds.** The compiler's object
+  cache named its directory for the source's whole path, separators and
+  all, and never shortened it: on Windows a program at a 222-character
+  path - which Windows opens - put that directory at 262 characters, past
+  MAX_PATH, and the build said "The system cannot find the path
+  specified"; on any platform a path of 255 characters or more made a name
+  longer than a file system allows one to be. A name past 100 characters
+  now keeps its end - the file and the directories nearest it - behind a
+  digest of the whole path. A CLI spec builds and runs a program at a
+  240-character path on Windows and a 300-character one elsewhere.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

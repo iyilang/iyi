@@ -1,3 +1,5 @@
+require "crystal/digest/md5"
+
 module Iyi
   # Manages cache files in the ".iyi" directory.
   #
@@ -44,9 +46,28 @@ module Iyi
           io << part
         end
       end
-      output_dir = File.join(dir, name)
+      output_dir = File.join(dir, bounded_name(name))
       Dir.mkdir_p(output_dir)
       output_dir
+    end
+
+    # iyi: the name is the source's whole path, and a path is longer than a
+    # name may be. A file's path of 255 characters or more made a name no
+    # file system takes, on any platform; on Windows the cache directory's
+    # own path passes MAX_PATH far sooner - a program at a 222-character
+    # path, which Windows opens, did not build: "The system cannot find the
+    # path specified", for a cache directory 262 characters long. Past
+    # NAME_LIMIT the name keeps its end - the file and the directories
+    # nearest it, the part a person reads - behind a digest of the whole,
+    # which is what keeps two deep paths that end alike apart. The objects
+    # inside have names of their own of about sixty characters, and the
+    # cache root is the rest of what MAX_PATH has to hold.
+    NAME_LIMIT = 100
+
+    private def bounded_name(name : String) : String
+      return name if name.size <= NAME_LIMIT
+      digest = ::Crystal::Digest::MD5.hexdigest(name)
+      "#{digest}-#{name[(name.size - (NAME_LIMIT - digest.size - 1))..]}"
     end
 
     # Keeps the 10 most recently used directories in the cache,

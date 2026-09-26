@@ -35,6 +35,13 @@ BUDGETS = {
     "references": 3.0,
 }
 
+# A hover is answered from the verdict the keystroke before it already
+# compiled: no compile of its own, so its median is the transport's, and
+# is held to that. On Windows it was 47 to 52 ms - the frame waited for a
+# thread the reader was holding - where Linux answers in 1; a budget of
+# seconds could not see it.
+HOVER_P50 = 0.010
+
 
 def percentile(samples, p):
     ordered = sorted(samples)
@@ -51,10 +58,10 @@ def main():
         sys.exit(f"no corpus under {root}")
 
     c = Client()
-    started = time.monotonic()
+    started = time.perf_counter()
     c.send("initialize", {"rootUri": "file://" + root, "capabilities": {}})
     c.send("initialized", {}, wait=False)
-    startup = time.monotonic() - started
+    startup = time.perf_counter() - started
 
     texts = {}
     for path in files:
@@ -69,9 +76,9 @@ def main():
     timings = {verb: [] for verb in BUDGETS}
 
     def timed(verb, thunk):
-        t0 = time.monotonic()
+        t0 = time.perf_counter()
         thunk()
-        timings[verb].append(time.monotonic() - t0)
+        timings[verb].append(time.perf_counter() - t0)
 
     # A probe position per file: the first def's name.
     probes = {}
@@ -134,6 +141,11 @@ def main():
         if p95 > BUDGETS[verb]:
             over.append(f"{verb}: p95 {p95 * 1000:.0f}ms > "
                         f"{BUDGETS[verb] * 1000:.0f}ms")
+    hover_p50 = percentile(timings["hover"], 50)
+    if hover_p50 > HOVER_P50:
+        over.append(f"hover: p50 {hover_p50 * 1000:.1f}ms > "
+                    f"{HOVER_P50 * 1000:.0f}ms - a question that costs no "
+                    f"compile waited on the transport")
     if over:
         print("\nOVER BUDGET")
         for line in over:

@@ -214,6 +214,20 @@
   which also covers the source generators under `scripts/`, whose CRLF
   templates would have written CRLF into `.cr` files pinned LF.
 
+- **On Windows, the language server answers as fast as it does on Linux.**
+  A hover answered from the verdict already compiled took 47 to 52 ms
+  there against Linux's 1, and completion 63 to 78 against 19. The
+  editor's end of stdin is an anonymous pipe, which Windows cannot read
+  overlapped, so the reader's `ReadFile` held its thread until the next
+  bytes came - and the loop it had just woken through a channel was
+  queued on that same thread, run when the runtime's monitor sent another
+  thread to take it, every hundred milliseconds; single hovers came back
+  anywhere from 0 to 96 ms. The reader runs on a thread of its own now,
+  in the proxy and in the worker: hover 2 ms at the median, completion 17,
+  startup 250 ms to 40. `lsp_latency.py` holds a hover's median to 10 ms,
+  which the old reader fails at 51.7, and times with `perf_counter`: the
+  monotonic clock it used is 15.6 ms coarse on Windows.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

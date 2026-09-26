@@ -2115,11 +2115,13 @@ jobs:
       # Windows checkout gave their data files CRLF, which two dozen of
       # them compare byte for byte. A spec that builds a program runs the
       # compiler by the name below; `bin/crystal` is a shell script.
-      - name: Crystal's standard library specs, on Windows
+      - name: Crystal's primitives and standard library specs, on Windows
         shell: cmd
         env:
           CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
-        run: make -f Makefile.win std_spec
+        run: |
+          make -f Makefile.win primitives_spec || exit /b 1
+          make -f Makefile.win std_spec
 
       - name: The runtime's exercises, on Windows
         shell: bash

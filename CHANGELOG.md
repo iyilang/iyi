@@ -97,7 +97,9 @@
   shell script, and the Windows job names the built compiler instead.
   With the three, 100 failing examples of 18,148 here became 31, every
   one of them a spec that makes a symbolic link, which this account may
-  not and the runner's may. The Windows gates job runs them.
+  not and the runner's may. The Windows gates job runs them, and the
+  primitives specs, which passed there as they were: on the runner
+  18,148 and 716 examples, none failing.
 
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside

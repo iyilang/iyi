@@ -14,6 +14,14 @@
 # `bench/std_eiy_exercise.iyi` failed on Windows alone.
 *.eiy text eol=lf
 
+# iyi: and Crystal's templates for the same reason, one step removed: an
+# `.ecr` is compiled into the binary that renders it, so a Windows checkout's
+# CRLF became the bytes `init` writes into a person's new project - the
+# compiler specs' `init` example failed on Windows alone, the README it
+# rendered carrying "\r\n" on every template line - and the source
+# generators under `scripts/` would write CRLF into `.cr` files pinned LF.
+*.ecr text eol=lf
+
 # iyi: a gate is a shell script, and a shell script with CRLF is not a
 # program: Linux reads `#!/usr/bin/env bash\r` as an interpreter it cannot
 # find. A Windows clone gives CRLF to anything nothing pins, and an editor
@@ -68,7 +76,6 @@ Makefile.win linguist-language=makefile
 spec/std/data/**/*.txt text eol=lf
 spec/std/data/**/*.xml text eol=lf
 spec/std/data/**/*.ini text eol=lf
-spec/std/data/**/*.ecr text eol=lf
 spec/std/data/**/*.types text eol=lf
 spec/std/data/**/*.crt text eol=lf
 spec/std/data/**/*.key text eol=lf

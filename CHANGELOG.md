@@ -205,6 +205,15 @@
   module whole now, and a Windows job builds the fork's compiler and runs
   every compiler spec.
 
+- **A project `init` writes on Windows has the line endings it has
+  everywhere else.** Its templates are `.ecr` files compiled into the
+  binary, and a Windows checkout gave them CRLF - so a compiler built on
+  Windows wrote "\r\n" into every template line of a new project's README,
+  `.gitignore` and `shard.yml`, and the compiler specs' `init` example was
+  the one of 14,037 that failed on Windows. Every `.ecr` is pinned LF now,
+  which also covers the source generators under `scripts/`, whose CRLF
+  templates would have written CRLF into `.cr` files pinned LF.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

@@ -10,6 +10,7 @@
 require "./resolver"
 require "./sum"
 require "./fetcher"
+require "./reach"
 
 module Iyi::Mod
   module Installer
@@ -78,6 +79,22 @@ module Iyi::Mod
       # missing entry is recorded — the tool writes facts down (III.7 step 2).
       # A replaced module is none of that: it is a directory somebody is
       # editing, and a hash of it would refuse the next keystroke.
+      # A `reaches` limit, before anything is recorded: a version that
+      # reaches past what its line allows is refused by name, and neither
+      # iyi.sum nor - in a `get` - iyi.mod is written. Paid only by lines
+      # that write one.
+      root.requirements.each do |requirement|
+        next unless allowed = requirement.reaches
+        next unless selection = selections.find { |candidate| candidate.path == requirement.path }
+        checkout = replaced[selection.path]? || Fetcher.checkout(selection.path, selection.version)
+        over = Reach.of(checkout).beyond(allowed)
+        next if over.empty?
+        raise ModError.new(
+          "#{selection} reaches #{over.join(", ")}, which its line in iyi.mod does not allow " \
+          "(`reaches #{allowed.empty? ? "nothing" : allowed.join(", ")}`). Add what it now needs to the line if that " \
+          "is wanted, or stay on a version that reaches less; `#{Iyi::Command.program_name} mod reach` lists each module's")
+      end
+
       fetched = selections.reject { |selection| replaced.has_key?(selection.path) }
       Sum.check(dir, fetched) do |selection|
         Fetcher.checkout(selection.path, selection.version)

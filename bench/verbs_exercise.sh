@@ -235,15 +235,36 @@ echo "== what the verbs that were never here refuse"
 # caller had not configured.
 refuses "fix on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" fix binary.iyi
-refuses "fix on a directory" "is a directory" -- "$IYI" fix "$WORK"
+mkdir -p "$WORK/nofix"
+refuses "fix on a directory with no source" "with no .iyi file under it" -- "$IYI" fix "$WORK/nofix"
 refuses "an unknown flag to fix" "unknown flag" -- "$IYI" fix --nonesuch good.iyi
-refuses "a second file after fix's" "unexpected" -- "$IYI" fix good.iyi extra.iyi
+refuses "a second file that is not there" "no such file: extra.iyi" -- "$IYI" fix good.iyi extra.iyi
 # `.exe` off the end: the usage line names the command, and the command is
 # the compiler's name without the suffix Windows puts on the file.
 refuses "vet with no file" "Usage: $(basename "$IYI" .exe) vet" -- "$IYI" vet
 refuses "a variable env does not have" "no such variable" -- "$IYI" env NOPE
 refuses "an argument to clear_cache" "takes no arguments" -- "$IYI" clear_cache extra
 refuses "an argument to the mcp server" "takes no arguments" -- "$IYI" mcp --nonesuch
+# A directory is one run: every `using` in every file is rewritten before
+# any file compiles, because `a` compiles the module it imports - and the
+# second run changes nothing.
+mkdir -p "$WORK/mig/app"
+printf 'module app/dep\n\npub def value : Int32\n  2\nend\n' > "$WORK/mig/app/dep.iyi"
+printf 'module app/mid\n\nimport app/dep\nusing app/dep::{value}\n\npub def twice : Int32\n  value * 2\nend\n' > "$WORK/mig/app/mid.iyi"
+printf 'using app/mid\n\nputs twice\n' > "$WORK/mig/main.iyi"
+if ! (cd "$WORK/mig" && "$IYI" fix .) > "$WORK/mig.txt" 2>&1 ||
+   ! grep -q "3 files: 2 rewritten, every one clean" "$WORK/mig.txt" ||
+   grep -q "using" "$WORK/mig/main.iyi" "$WORK/mig/app/mid.iyi" ||
+   [ "$("$IYI" run "$WORK/mig/main.iyi" 2>&1)" != "4" ]; then
+  echo "  fix over a directory: did not rewrite the tree into a program that runs"
+  sed 's/^/    /' "$WORK/mig.txt"
+  status=1
+elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, every one clean"; then
+  echo "  fix over a directory: a second run changed something"
+  status=1
+else
+  echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
+fi
 # And the flag that was being dropped is read now, from either side.
 if "$IYI" fix good.iyi --json | head -1 | grep -q '^{'; then
   echo "  fix reads --json after the file, too"

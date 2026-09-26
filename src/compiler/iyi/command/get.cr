@@ -18,7 +18,9 @@
 # whose selected version is not the one its `require` line names, because
 # another module asks for more, and what the change reaches: every module
 # new to the build with its reach, and every module that moved with what
-# it reaches now that it did not, or no longer does (`Mod::Reach`).
+# it reaches now that it did not, or no longer does (`Mod::Reach`); and for
+# a requirement this project's files import, every export it moved that
+# they write, with the lines that write it (`get_impact_lines`).
 require "../mod/installer"
 require "../mod/reach"
 
@@ -144,6 +146,7 @@ class Iyi::Command
           {} of String => SemanticVersion
         end
       reach_lines = get_reach_lines(dir, root, previous, resolved)
+      impact_lines = get_impact_lines(dir, updated, previous, resolved)
     rescue ex : Mod::ModError
       abort! "get: #{ex.message}", :USAGE_ERROR
     end
@@ -183,6 +186,10 @@ class Iyi::Command
     unless reach_lines.empty?
       puts "what the change reaches:"
       reach_lines.each { |line| puts "  #{line}" }
+    end
+    unless impact_lines.empty?
+      puts "what the move changes in what this project uses:"
+      impact_lines.each { |line| puts "  #{line}" }
     end
   end
 

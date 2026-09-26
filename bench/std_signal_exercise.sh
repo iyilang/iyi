@@ -125,14 +125,20 @@ external() { # external <name>
     sleep 0.1
   done
   kill -TERM "$pid"
-  # A process that caught TERM and never finishes is a hang, not a pass.
-  ( sleep 10; kill -KILL "$pid" 2>/dev/null ) &
-  local killer=$!
+  # A process that caught TERM and never finishes is a hang, not a pass:
+  # given ten seconds, then killed. Watched from this shell and not from a
+  # `( sleep 10; kill ) &` beside it - that subshell was killed a moment
+  # after it forked, before bash had reset the traps it inherited, and ran
+  # this script's EXIT trap: `rm -rf "$WORK"` under the step still reading
+  # it. One run in four under load lost its output file that way.
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null
   wait "$pid"
-  local code=$?
-  kill "$killer" 2>/dev/null
-  wait "$killer" 2>/dev/null
-  return "$code"
+  return $?
 }
 
 # Windows' TERM is its console being closed, and a person closes it: the

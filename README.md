@@ -115,7 +115,7 @@ that prints each one is named beside it.
 
 **Where it loses**, said here rather than left to be found: a full build of a
 6,912-line program from scratch is 0.24 s against `go build`'s 0.09 s. The
-current compiler reports `0.15.0`. iyi's own prelude carries the small-tool
+current compiler reports `0.15.1`. iyi's own prelude carries the small-tool
 floor — `puts`, stdin, whole-file `File` read/write, `Program.args`/`.env` —
 and no more: no TLS, no serialisation, and no sockets or format strings -
 `import std/socket` and `import std/format` are where the last two live,
@@ -414,7 +414,7 @@ fails when one of those drifts from the tree.</sup>
 
 ## Getting it
 
-The released tarball is 0.15.0, and a build from current source reports the
+The released tarball is 0.15.1, and a build from current source reports the
 same. The one-liner at the top runs [`install.sh`](install.sh): POSIX sh
 over `curl` and `tar`, it picks the tarball for `uname` (linux-x86_64 or
 darwin-arm64), follows GitHub's `releases/latest` redirect rather than the
@@ -423,11 +423,11 @@ against the `SHA256SUMS` the release publishes beside it and refuses a
 mismatch with nothing unpacked; releases before 0.12.0 published no sums,
 and it says so rather than passing over it. CI runs the script against
 the tarball each build proves, then against a sum with one digit wrong.
-`IYI_PREFIX` moves the destination and `IYI_VERSION=0.15.0` pins a
+`IYI_PREFIX` moves the destination and `IYI_VERSION=0.15.1` pins a
 release. By hand it is the same two lines:
 
 ```sh
-tar -xzf iyi-0.15.0-linux-x86_64.tar.gz -C ~/.local
+tar -xzf iyi-0.15.1-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
@@ -450,7 +450,7 @@ outside the package but `/usr/lib` and `/System`.
 
 **On Windows the same release is a zip, and the one prerequisite is the
 build tools.** 0.14.0 was the first release to publish it, and
-`iyi-0.15.0-windows-x86_64.zip` sits beside the two tarballs,
+`iyi-0.15.1-windows-x86_64.zip` sits beside the two tarballs,
 written by `make -f Makefile.win iyi-zip` in the run that proved it, with
 its line in the same `SHA256SUMS`. The one-liner at the top runs
 [`install.ps1`](install.ps1), `install.sh`'s twin: Windows PowerShell 5.1
@@ -466,7 +466,7 @@ same two lines, because the zip is relocatable — `bin\` and `share\` at
 its top, exactly like the tarball:
 
 ```powershell
-Expand-Archive iyi-0.15.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
+Expand-Archive iyi-0.15.1-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
@@ -501,18 +501,17 @@ program that imports `std/text` out of the unpacked tree.
 ### A project, from nothing
 
 ```sh
-iyi init example.com/me/hello
-iyi run main.iyi    # hello, iyi
-iyi test            # 1 passed, 0 failed
+iyi init kemal
+iyi run kemal.iyi   # hello from kemal
 ```
 
-`iyi init MODULE [DIR]` writes four files and never over one that is
+`iyi init MODULE [DIR]` writes two files and never over one that is
 there: `iyi.mod` naming the module — the path other projects would import
-it by, or a bare `hello` for one nobody will — an entry `main.iyi`, a
-module `greet.iyi` the entry imports, and `main_test.iyi`. Between them
-they show `module`, `import` with the names it brings, `pub` and what a test is here: a
-program that passes by exiting 0, run by `iyi test` with every other
-`*_test.iyi` beside it. A dependency is one line in `iyi.mod`, `require
+it by, `example.com/me/kemal`, or a bare `kemal` for one nobody will — and
+`kemal.iyi`, the root module the name's last segment promises, which is
+what another project's `import example.com/me/kemal` reads. A test is a
+`*_test.iyi` beside it, a program that passes by exiting 0, run by `iyi
+test`. A dependency is one line in `iyi.mod`, `require
 example.com/someone/lib v1.2.0`, and `iyi get example.com/someone/lib`
 writes it: the latest release tag, or `@v1.2.0` for that one, resolved,
 fetched and recorded in `iyi.sum` before the line is written; `@main` or
@@ -525,9 +524,12 @@ line for the module and its names - `iyi mod tidy` adds
 what the source imports and removes what it does not, `get` says what a
 new or upgraded package reaches outside the language - the std modules
 that call C, `File`, the C it declares - and `iyi mod reach` lists the
-whole build's, and `replace
+whole build's, `require ... reaches std/file` makes that a limit a new
+version is refused past, an upgrade names every export it changed that the project
+writes and the lines that write it, `iyi mod release v1.3.0` refuses a version that says less
+than the package's exported surface changed since its last tag, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
-project while both are being written. `bench/init_project.sh` holds the claim that all four files are
+project while both are being written. `bench/init_project.sh` holds the claim that both files are
 right the moment they land, on Linux and on Windows.
 
 ### An editor, in one stanza
@@ -966,7 +968,7 @@ An artifact is readable:
 ```console
 $ iyi mod dump mods/kemal/router.iyimod | head -20
 module        kemal/router
-compiler      0.15.0
+compiler      0.15.1
 ...
 exports
   pub struct Context
@@ -1064,7 +1066,7 @@ swept through it, Kemal among them. There is still no package manager: point
 R-1 for the required shard, which is compiled from source rather than read as
 declarations.
 
-**Is the syntax stable?** No. 0.15.0 is a release of a language that is still
+**Is the syntax stable?** No. 0.15.1 is a release of a language that is still
 moving, and the parts of SPEC.md marked PROPOSED are exactly the parts that
 will move.
 
@@ -1077,7 +1079,7 @@ that the test suite runs on every target.
 **Who is this for right now?** Somebody who wants to check the claim, read the
 design, or argue with a number. `--crystal` moved the other line: a program
 that requires shards is buildable today, and what should keep you away is the
-language rather than the library — master is 0.15.0, and the parts of SPEC.md
+language rather than the library — master is 0.15.1, and the parts of SPEC.md
 marked PROPOSED are the parts that will move under you.
 
 ## What is not here
@@ -1208,8 +1210,8 @@ marked PROPOSED are the parts that will move under you.
   of the same released version read each other's `.iyimod` files only on the
   same target under the same flags; anything else is rejected and rebuilt,
   never migrated. A `-dev` build is not a released version: it keeps the build
-  commit in its identity and interoperates only with itself. 0.15.0 is
-  released, so its artifacts carry the version alone and any 0.15.0 build on
+  commit in its identity and interoperates only with itself. 0.15.1 is
+  released, so its artifacts carry the version alone and any 0.15.1 build on
   the same target and flags reads them.
 - **A derive reads upwards, and an artifact carries more than the rule says.**
   `derive <macro>` in a class or struct body runs once, in the module that
@@ -1250,7 +1252,7 @@ iyi's compiler is built on the Crystal compiler and carries Crystal's licence
 and copyright: Apache 2.0, Copyright 2012-2026 Manas Technology Solutions. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Everything here that is not
 Crystal's is a change to Crystal's source. `iyi --version` reports
-`iyi 0.15.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
+`iyi 0.15.1 (built on Crystal 1.22.0-dev)`: the language first, then what it
 is built on. The compatibility binary in the same checkout still reports itself
 as `Crystal 1.22.0-dev`, because that is what it is. This paragraph is a licence
 obligation and an accurate one; the language above it is iyi's own.

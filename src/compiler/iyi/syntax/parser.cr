@@ -104,6 +104,13 @@ module Iyi
     # before the change (`Iyi::UsingRewrite`), and has to read it to.
     property iyi_reads_using = false
 
+    # iyi: the package this file is a module of, when it is one: its modules
+    # live under the package's name (`Mod::ModFile.package_name`), so two
+    # packages' `util`s are `Pa::Util` and `Pb::Util` and not one type. A
+    # module whose path already begins with the name - `iyi_web/dsl` in
+    # `iyi-web` - is where it was.
+    property iyi_package_name : String? = nil
+
     # Where the import being read ends; see `parse_import_path_segment`.
     @iyi_import_end : Location? = nil
 
@@ -216,7 +223,11 @@ module Iyi
         node.is_a?(UsingDecl) ? scopes << node : directives << node
       end
 
-      path = Path.new(header.path.map(&.camelcase))
+      segments = header.path
+      if (package = @iyi_package_name) && segments.first? != package
+        segments = [package] + segments
+      end
+      path = Path.new(segments.map(&.camelcase))
       path.at(header)
 
       # `extend self` so a module-level `pub def` is callable on the module
@@ -2371,10 +2382,17 @@ module Iyi
       unless @iyi_reads_using
         written = path.join('/')
         now = names ? "import #{written}::{#{names.join(", ")}}" : "import #{written}::*"
-        raise "`using` is gone: one keyword loads a module and names what it brings into scope, " \
-              "so this line is `#{now}` (SPEC.md R-2b). `iyi fix FILE` rewrites every `using` in a file, " \
-              "and folds an `import` of the same module into it",
-          location.line_number, location.column_number
+        message = "`using` is gone: one keyword loads a module and names what it brings into scope, " \
+                  "so this line is `#{now}` (SPEC.md R-2b). `iyi fix .` rewrites every `using` in a project, " \
+                  "folding an `import` of the same module into it"
+        # The edit, where the directive is one line: its span, replaced by the
+        # line that replaces it - what `check -f json` and a quick fix apply.
+        last = @iyi_import_end
+        one_line = last && last.line_number == location.line_number
+        size = one_line && last ? last.column_number - location.column_number + 1 : nil
+        refusal = SyntaxException.new(message, location.line_number, location.column_number, @filename, size)
+        refusal.suggestion = now if size
+        ::raise refusal
       end
 
       node = UsingDecl.new(path, names, name_locations)

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 17,838 lines, of which 3,509 are the library held to the 3,734 ceiling (5,046 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 117,279 lines, none of it written in iyi |
+| compiler | 117,930 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,9 +1008,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 117,279 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 117,930 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 17,838-line own prelude + 40,654 in std |
-| Specs | 21,146 lines | 11,990 for iyi |
+| Specs | 21,146 lines | 12,017 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -1190,8 +1190,9 @@ package; the list is Rust's `use a::{b}`, the closest model.
 - **`using` is refused.** The keyword `import X::{...}` and `import X::*`
   replaced is a parse error, and the message names the line that replaces
   it: `import app/greeter::{polite}` for a list of names,
-  `import app/greeter::*` for the bare form. `iyi fix FILE` rewrites every
-  one in a file and folds a bare `import` of the same module, in the same
+  `import app/greeter::*` for the bare form. `iyi fix .` rewrites every
+  one in a project - every `.iyi` under the directory, all before any file
+  compiles, since a file compiles the modules it imports - and folds a bare `import` of the same module, in the same
   scope, into the new line; a line with a trailing comment is rewritten in
   place and keeps it. A `pub import` is never folded: it hands the module
   on, and the names stay on a line of their own.
@@ -4335,8 +4336,13 @@ The decisions:
    nothing — so the *import* grammar admits `.` and `-` inside a segment
    and the strict rule stands everywhere else. A requirement's prefix is
    identity for the resolver; the in-package path, under the old grammar,
-   is what maps to `Liba::…`, and `import example.com/user/liba/colors::*`
-   reaches `Colors` — the same name the package's own files use.
+   is what maps to a type, under the package's name: a package's modules
+   live under its path's last segment (`-` as `_`, a `/vN` left off), so
+   `import example.com/user/liba/colors` reaches `Liba::Colors`, and two
+   packages that each have a `util` have `Pa::Util` and `Pb::Util` rather
+   than one type both define. A module whose path already begins with the
+   name - `iyi_web/dsl` in `iyi-web` - is where it was, and inside the
+   package `Colors` still means its own, by lexical lookup.
 2. **A package's short imports resolve in its own checkout, or fail.** Not
    passed along to the program's roots: a dependency reaching the
    consumer's modules through a name collision is the accident isolation
@@ -4463,11 +4469,56 @@ the day it does. It is a report, not a sandbox: it says what the source
 can do, and a `lib` assembled by macro interpolation is not counted.
 `bench/packages_get.sh` holds it, a test's `std/file` included.
 
+**Reach can be a limit.** `require example.com/lib v1.2.0 reaches
+std/file, C` - or `reaches nothing` - says what that package may touch,
+in the words `mod reach` prints: std modules by path, `File`, and `C` for
+any C it declares itself. Every verb that resolves - build, get, check,
+the language server - refuses a selected version that reaches past its
+line, naming what it reaches, before iyi.sum or iyi.mod is written; `get`
+moves the version and keeps the clause. A limit is on that package's own
+reach: one of its dependencies is limited by a line of its own. The cost
+- reading the package's source for its reach - is paid only by a line
+that writes one. Go has nothing here; Deno's permissions are the nearest,
+and they are the program's, not the dependency's.
+
+**A move says what it changed in the lines the project wrote.** Reach
+says what a new version can do; `get` also says what it did to the code
+that uses it. For each moved requirement this project's own files import,
+both versions' surfaces - the ones `iyi mod release` compares - are
+compiled from copies of their checkouts, and every export of an imported
+module whose line went is listed: "changed" when a line of the same name
+replaced it, with both, "gone" when none did, then the `file:line` of each
+line of an importing file that writes the name, comments aside, or "used
+nowhere here". New exports are counted. It is by name, not by type - a
+local of the same name is listed too - so a site is a place to look and
+not a proof of a break; a requirement only another package imports says
+nothing, that package being the one to answer for it.
+
+**A release says what it changed, and the version has to agree.** Minimal
+version selection builds every consumer at the highest minimum anyone
+asked for, and that is only safe while a minor or patch release keeps what
+the one before it exported - which Go leaves to the author's memory.
+`iyi mod release [VERSION]` checks out HEAD and the highest `vX.Y.Z` tag
+it contains beside the tree, compiles every module of the package that
+writes `pub` once, and compares the two surfaces line by line: functions,
+`pub` types with their parameters and methods and the types inside them,
+impls and macros, a `private` def that travels with a generic's body not
+among them. A line gone is a new major, a line or a module new a new minor,
+nothing moved a patch; before v1 a break moves the minor and an addition
+the patch, as Cargo reads `0.x`. It names each line, says the next
+version, and with VERSION exits 1 when it understates the change - or
+when a new major past 1 is not yet the `/vN` path iyi.mod declares, which
+is where that major has to live. A release written with `using` is read
+the way `iyi fix` writes it, so the tag before the keyword changed still
+compares; HEAD is compiled as it is. It tags nothing: it is the check
+before `git tag`. `iyi mod diff` lists the same surface, one definition
+for both. `bench/packages_get.sh` holds it.
+
 What steps 1 and 2 do not do, said here: packages compile from
-source every build (their `.iyimod` story is step 5's, with signatures),
-and two packages whose in-package modules share a name collide in the type
-namespace — the general import-alias question, which an import's list of
-names already softens and a later section has to settle.
+source every build (their `.iyimod` story is step 5's, with signatures).
+Two packages' same-named modules no longer collide (rule 1); two names a
+file brings into scope from both are ambiguous where it does, and the file
+qualifies one - the import-alias question, answered by the namespace.
 
 ### III.8 Tooling: **BUILT — the formatter, the language server, `iyi doc`, `iyi vet`**
 

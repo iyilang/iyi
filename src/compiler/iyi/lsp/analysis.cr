@@ -671,6 +671,7 @@ module Iyi::Lsp
           line = cur.line_number
           col = cur.column_number
           size = cur.size || 0
+          suggestion = cur.suggestion
         when TypeException
           line = cur.line_number
           col = cur.column_number

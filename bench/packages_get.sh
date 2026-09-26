@@ -48,6 +48,30 @@
 # does not take back down to the tag; `@<commit>` of a tagged commit is
 # the tag; and a pseudo-version whose time or hash is not its commit's, or
 # a ref that is not there, is refused.
+#
+# Then `iyi mod release`: a package's surface at HEAD against its last
+# tag. A new def is a minor and a patch that says less is refused; a def
+# gone is a major, at the path `/v2`, and the manifest has to say it first;
+# before v1 a break is a minor. An example program beside the library is
+# nobody's surface, a release written with `using` is still read, and a
+# version already tagged is refused.
+#
+# Then what a move changes in what the project uses: an export whose
+# signature moved is "changed" with the lines that write it - a comment
+# that names it is not one - an export gone that nothing here writes says
+# so, and a requirement the project's files do not import says nothing.
+#
+# Then two packages that each have a `util`: each package's modules live
+# under its name - `Pa::Util`, `Pb::Util` - so both load and each package's
+# own `Util` is its own; a name both export is ambiguous only where a file
+# brings both into scope, and a package whose modules already begin with
+# its name (`iyi_web/dsl`) is where it was.
+#
+# Then `reaches` as a limit: `require ... reaches nothing` builds a pure
+# version, a `get` to one that opens a socket and declares C is refused
+# with what it reaches and iyi.mod and iyi.sum untouched, widening the line
+# lets it through and a later `get` keeps the clause, and a word that is not
+# something a package reaches is refused where it is written.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -480,6 +504,137 @@ else
 fi
 cp iyi.mod.good iyi.mod
 refused "a ref that is not there" "has no \`nosuchbranch\`" example.test/user/libt@nosuchbranch
+
+step "mod release: what the next tag has to be"
+REL="$WORK/rel"
+mkrepo "$REL"
+# Entered through a symlink, as darwin's `/var` is `/private/var`: the
+# working directory and git's top level are then two spellings of one place.
+ln -s "$REL" "$WORK/rel-link" 2>/dev/null
+cd "$WORK/rel-link" 2>/dev/null || cd "$REL" || exit 1
+mkdir -p rel examples
+printf 'module example.test/user/rel\n' > iyi.mod
+printf 'module rel/util\n\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > rel/util.iyi
+# The release before is written the way 0.14 wrote a module's names.
+printf 'module rel\n\nimport rel/util\nusing rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n' > rel.iyi
+printf 'import rel::*\n\nassert a == 2\n' > rel_test.iyi
+git add -A && git commit -qm one && git tag v1.0.0
+# The same surface in the one-keyword spelling, and an example program
+# beside it that exports nothing: a patch.
+printf 'module rel\n\nimport rel/util::{twice}\n\npub def a : Int32\n  twice(1)\nend\n' > rel.iyi
+printf 'module examples/demo\n\nimport rel::*\n\nputs a\n' > examples/demo.iyi
+git add -A && git commit -qm spelling
+"$IYI" mod release > rel1.log 2>&1 || { fail "mod release failed on an unchanged surface"; cat rel1.log; }
+grep -q "the next release is v1.0.1: the surface is as it was" rel1.log ||
+  fail "a release written with using, respelled, was not the same surface: $(cat rel1.log)"
+# A def new: a minor, and a patch is refused by name.
+printf '\npub def b : Int32\n  3\nend\n' >> rel.iyi
+git commit -qam b
+if "$IYI" mod release v1.0.1 > rel2.log 2>&1 || ! grep -q "v1.0.1 is too small: something is new, so the next release is v1.1.0" rel2.log; then
+  fail "a patch that hides a new def was not refused: $(cat rel2.log)"
+fi
+grep -q "new   rel: def b : Int32" rel2.log || fail "the new def was not named: $(cat rel2.log)"
+"$IYI" mod release v1.1.0 > rel3.log 2>&1 || fail "v1.1.0 was refused for a new def: $(cat rel3.log)"
+# A def gone: a major, at a path of its own.
+sed -i.bak 's/pub def a : Int32/pub def a(n : Int32) : Int32/; s/  twice(1)/  twice(n)/' rel.iyi && rm -f rel.iyi.bak
+git commit -qam break
+if "$IYI" mod release v1.2.0 > rel4.log 2>&1 || ! grep -q "so the next release is v2.0.0, at the path example.test/user/rel/v2" rel4.log; then
+  fail "a minor that hides a gone def was not refused: $(cat rel4.log)"
+fi
+grep -q "gone  rel: def a : Int32" rel4.log || fail "the gone def was not named: $(cat rel4.log)"
+if "$IYI" mod release v2.0.0 > rel5.log 2>&1 || ! grep -q "is example.test/user/rel/v2: a major version past 1 is its own module path" rel5.log; then
+  fail "v2.0.0 was accepted on a path without /v2: $(cat rel5.log)"
+fi
+printf 'module example.test/user/rel/v2\n' > iyi.mod && git commit -qam v2
+"$IYI" mod release v2.0.0 > rel6.log 2>&1 || fail "v2.0.0 at the /v2 path was refused: $(cat rel6.log)"
+grep -q "examples/demo" rel6.log && fail "an example program was counted as surface: $(cat rel6.log)"
+if "$IYI" mod release v1.0.0 > rel7.log 2>&1; then fail "a version already tagged was accepted: $(cat rel7.log)"; fi
+[ "$status" -eq 0 ] && echo "  respelled: patch; new def: minor, patch refused; gone def: v2 at /v2, refused until iyi.mod says it"
+
+step "mod release before v1: a break is a minor"
+REL0="$WORK/rel0"
+mkrepo "$REL0"
+cd "$REL0" || exit 1
+printf 'module example.test/user/zero\n' > iyi.mod
+printf 'module zero\n\npub def a : Int32\n  1\nend\n' > zero.iyi
+git add -A && git commit -qm one && git tag v0.3.0
+printf 'module zero\n\npub def c : Int32\n  1\nend\n' > zero.iyi && git commit -qam break
+if "$IYI" mod release v0.3.1 > zero.log 2>&1 || ! grep -q "so the next release is v0.4.0" zero.log; then
+  fail "a v0 patch that hides a break was not refused: $(cat zero.log)"
+fi
+"$IYI" mod release v0.4.0 > zero2.log 2>&1 || fail "v0.4.0 was refused for a v0 break: $(cat zero2.log)"
+[ "$status" -eq 0 ] && echo "  v0.3.0 -> a def gone: v0.3.1 refused, v0.4.0 holds it"
+
+step "get says what a move changes in what the project uses"
+mkrepo "$WORK/work/libi"
+printf 'module example.test/user/libi\n' > "$WORK/work/libi/iyi.mod"
+printf 'module libi\n\npub def greeting : String\n  "hi"\nend\n\npub def old : Int32\n  1\nend\n\npub def keep : Int32\n  2\nend\n' > "$WORK/work/libi/libi.iyi"
+git -C "$WORK/work/libi" add -A && git -C "$WORK/work/libi" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libi"
+(cd "$WORK" && publish libi v0.1.0)
+printf 'module libi\n\npub def greeting(name : String) : String\n  "hi #{name}"\nend\n\npub def keep : Int32\n  2\nend\n\npub def fresh : Int32\n  3\nend\n' > "$WORK/work/libi/libi.iyi"
+git -C "$WORK/work/libi" commit -qam two && (cd "$WORK" && publish libi v0.2.0)
+mkdir -p "$WORK/iapp" && cd "$WORK/iapp" || exit 1
+printf 'module example.test/user/iapp\n' > iyi.mod
+printf 'import example.test/user/libi::{greeting, keep}\n\nputs greeting\nputs keep\n# greeting, in a comment\n' > main.iyi
+"$IYI" get example.test/user/libi@v0.1.0 > imp0.log 2>&1 || { fail "get libi@v0.1.0 failed"; cat imp0.log; }
+"$IYI" get -u > imp1.log 2>&1 || { fail "get -u of libi failed"; cat imp1.log; }
+sed -n '/what the move changes/,$p' imp1.log > imp1.section
+if ! grep -q "changed  libi: def greeting : String" imp1.section ||
+   ! grep -q "now def greeting(name : String) : String" imp1.section ||
+   [ "$(grep -c 'main.iyi:' imp1.section | tr -d ' ')" != "2" ] ||
+   ! grep -q "main.iyi:1" imp1.section || ! grep -q "main.iyi:3" imp1.section; then
+  fail "the changed export and the two lines that write it were not said: $(cat imp1.log)"
+fi
+grep -q "gone     libi: def old : Int32 - used nowhere here" imp1.section || fail "the unused gone export was not said: $(cat imp1.log)"
+grep -q "and 1 new" imp1.section || fail "the new export was not counted: $(cat imp1.log)"
+# The same move for a project that requires libi and imports none of it.
+mkdir -p "$WORK/japp" && cd "$WORK/japp" || exit 1
+printf 'module example.test/user/japp\n' > iyi.mod
+printf 'puts 1\n' > main.iyi
+"$IYI" get example.test/user/libi@v0.1.0 > jmp0.log 2>&1 && "$IYI" get -u > jmp1.log 2>&1 || { fail "get in japp failed"; cat jmp0.log jmp1.log; }
+grep -q "what the move changes" jmp1.log && fail "a requirement nothing here imports was reported: $(cat jmp1.log)"
+[ "$status" -eq 0 ] && echo "  greeting changed at main.iyi:1 and :3, the comment not; old gone, used nowhere; 1 new; an unimported requirement: silent"
+
+step "two packages' util modules are two modules"
+for p in pa pb; do
+  mkrepo "$WORK/work/$p"
+  printf 'module example.test/user/%s\n' "$p" > "$WORK/work/$p/iyi.mod"
+  printf 'module util\n\npub def who : String\n  "%s"\nend\n' "$p" > "$WORK/work/$p/util.iyi"
+  printf 'module %s\n\nimport util\n\npub def name : String\n  Util.who\nend\n' "$p" > "$WORK/work/$p/$p.iyi"
+  git -C "$WORK/work/$p" add -A && git -C "$WORK/work/$p" commit -qm one
+  git init -q --bare "$WORK/mirror/example.test/user/$p"
+  (cd "$WORK" && publish "$p" v1.0.0)
+done
+mkdir -p "$WORK/capp2" && cd "$WORK/capp2" || exit 1
+printf 'module example.test/user/capp2\nrequire example.test/user/pa v1.0.0\nrequire example.test/user/pb v1.0.0\n' > iyi.mod
+printf 'import example.test/user/pa\nimport example.test/user/pb\nimport example.test/user/pa/util\nimport example.test/user/pb/util\n\nputs Pa.name\nputs Pb.name\nputs Pa::Util.who\nputs Pb::Util.who\n' > main.iyi
+"$IYI" run main.iyi > coll.log 2>&1
+[ "$(tr '\n' ' ' < coll.log)" = "pa pb pa pb " ] || fail "two packages' util modules did not stay two: $(cat coll.log)"
+printf 'import example.test/user/pa/util::{who}\nimport example.test/user/pb/util::{who}\n\nputs who\n' > amb.iyi
+"$IYI" run amb.iyi > amb.log 2>&1
+grep -q "'who' is ambiguous here: it is exported by both Pa::Util and Pb::Util" amb.log ||
+  fail "a name both util modules export was not called ambiguous by both names: $(cat amb.log)"
+[ "$status" -eq 0 ] && echo "  Pa::Util and Pb::Util both load, each package's Util is its own; who from both: ambiguous by name"
+
+step "reaches: what a package may touch, as a limit"
+mkdir -p "$WORK/lapp" && cd "$WORK/lapp" || exit 1
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches nothing\n' > iyi.mod
+printf 'import example.test/user/libr::{version}\n\nputs version\n' > main.iyi
+"$IYI" run main.iyi > lim1.log 2>&1 && grep -q "^1.0.0$" lim1.log || fail "a pure version under reaches nothing did not build: $(cat lim1.log)"
+cp iyi.mod iyi.mod.before; cp iyi.sum iyi.sum.before
+if "$IYI" get example.test/user/libr@v1.1.0 > lim2.log 2>&1 ||
+   ! grep -q "example.test/user/libr v1.1.0 reaches std/socket, C, which its line in iyi.mod does not allow" lim2.log; then
+  fail "a get past reaches nothing was not refused by what it reaches: $(cat lim2.log)"
+fi
+cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "a refused get changed iyi.mod or iyi.sum"
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches std/socket, C\n' > iyi.mod
+"$IYI" get example.test/user/libr@v1.1.0 > lim3.log 2>&1 || fail "a get inside the widened limit was refused: $(cat lim3.log)"
+grep -qx "require example.test/user/libr v1.1.0 reaches std/socket, C" iyi.mod || fail "get did not keep the reaches clause: $(grep require iyi.mod)"
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.1.0 reaches std/sockt, Files\n' > iyi.mod
+"$IYI" run main.iyi > lim4.log 2>&1
+grep -q "\`Files\` is not something a package reaches" lim4.log || fail "a word that is not a reach was not refused: $(cat lim4.log)"
+[ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/socket, C with nothing written; widened: allowed and kept"
 
 echo
 if [ "$status" -eq 0 ]; then

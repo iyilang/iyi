@@ -43,6 +43,16 @@ module Iyi::Mod
       Reach.new(std - other.std, prelude - other.prelude, links - other.links, c - other.c)
     end
 
+    # What *self* reaches that *allowed* - a `reaches` clause's items - does
+    # not let it: the std modules and `File` by name, and `C` for any C the
+    # package declares itself, links or functions.
+    def beyond(allowed : Array(String)) : Array(String)
+      over = std.reject { |name| allowed.includes?(name) }
+      over += prelude.reject { |name| allowed.includes?(name) }
+      over << "C" if !(links.empty? && c.empty?) && !allowed.includes?("C")
+      over
+    end
+
     # `std/file, std/socket; File; links z; C LibZ.zlibVersion`
     def to_s(io : IO) : Nil
       parts = [] of String

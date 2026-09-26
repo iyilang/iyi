@@ -449,9 +449,21 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         else
           next
         end
-      return inner.split('/').map(&.camelcase)
+      return iyi_package_segments(prefix, inner.split('/')).map(&.camelcase)
+    end
+    # A package's own file naming one of its modules by its in-package path
+    # - one its checkout has, which a std module is not.
+    if (current = @iyi_package_stack.last?) && File.file?(File.join(current[1], "#{written}.iyi"))
+      return iyi_package_segments(current[0], segments).map(&.camelcase)
     end
     segments.map(&.camelcase)
+  end
+
+  # A package module's namespace: under the package's name, unless its path
+  # begins with it already (`Parser#iyi_package_name`).
+  private def iyi_package_segments(prefix : String, inner : Array(String)) : Array(String)
+    package = Mod::ModFile.package_name(prefix)
+    package && inner.first? != package ? [package] + inner : inner
   end
 
   # Whether `written` is reachable from `from`'s own imports: every
@@ -1179,7 +1191,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end
 
     type.private = true if node.visibility.private?
-    type.iyi_unit = true if node.iyi_unit?
+    if node.iyi_unit?
+      type.iyi_unit = true
+      type.iyi_unit_file ||= node.location.try(&.original_filename)
+    end
 
     node.resolved_type = type
 

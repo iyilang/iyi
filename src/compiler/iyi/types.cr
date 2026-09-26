@@ -1089,6 +1089,12 @@ module Iyi
     # iyi: see `Type#iyi_unit?`.
     property? iyi_unit = false
 
+    # iyi: the file whose `module` header made this a unit. Not the type's
+    # first location: `module rel/util`, loaded first, makes `Rel` as its
+    # namespace, and the unit `rel` is `rel.iyi`'s - the wall asked of the
+    # first location refused everyone who imported `rel` a name of `Rel`.
+    property iyi_unit_file : String?
+
     # iyi: the names this module marked `pub` (R-2). Nil until something is
     # exported, which is every module in every program that does not use iyi.
     getter exported_names : Set(String)?

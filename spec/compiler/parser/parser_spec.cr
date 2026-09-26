@@ -4239,6 +4239,21 @@ end").as(ClassDef)
       assert_syntax_error "using app/greeter", "`using` is gone: one keyword loads a module and names what it brings into scope, so this line is `import app/greeter::*`"
       assert_syntax_error "using app/greeter::{polite, Greet}", "so this line is `import app/greeter::{polite, Greet}`"
 
+      # And the line as an edit: the directive's span and its replacement,
+      # which `check -f json` hands an agent and the editor a quick fix.
+      it "carries the replacing line as a suggested edit" do
+        ex = expect_raises(SyntaxException) { parse("puts 1\nusing app/greeter::{polite} # kept\n") }
+        ex.line_number.should eq(2)
+        ex.column_number.should eq(1)
+        ex.size.should eq("using app/greeter::{polite}".size)
+        ex.suggestion.should eq("import app/greeter::{polite}")
+      end
+
+      it "offers no edit for a directive written over several lines" do
+        ex = expect_raises(SyntaxException) { parse("using app/greeter::{\n  polite\n}\n") }
+        ex.suggestion.should be_nil
+      end
+
       # iyi: a module path segment has to survive the round trip to the type
       # name it is reached by, `app/greeter` <-> `App::Greeter` (SPEC.md IV.6
       # #6). `camelcase` makes an upper-case letter only where a group starts,

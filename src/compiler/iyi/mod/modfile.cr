@@ -36,10 +36,17 @@ require "semantic_version"
 module Iyi::Mod
   # One `require` line: the path that identifies a module and the minimum
   # version this manifest is known to work with.
-  record Requirement, path : String, version : SemanticVersion, short_name : String? = nil do
+  # `reaches`, when written, is what the package may touch outside the
+  # language (`Mod::Reach`): std modules by path, `File`, and `C` for C it
+  # declares itself; empty is `reaches nothing`. Nil is no limit.
+  record Requirement, path : String, version : SemanticVersion, short_name : String? = nil,
+    reaches : Array(String)? = nil do
     def to_s(io : IO) : Nil
       io << "require " << path << " v" << version
       io << " as " << short_name if short_name
+      if limit = reaches
+        io << " reaches " << (limit.empty? ? "nothing" : limit.join(", "))
+      end
     end
   end
 
@@ -75,14 +82,27 @@ module Iyi::Mod
           end
           module_path = check_path(fields[1], source, line_number)
         when "require"
-          unless fields.size == 3 || (fields.size == 5 && fields[3] == "as")
-            raise ModError.new("#{source}:#{line_number}: `require` takes a path and a version, as `require <path> v1.2.3`, and a short name after `as` if it wants one")
+          usage = "`require` takes a path and a version, as `require <path> v1.2.3`, a short name after `as` " \
+                  "if it wants one, and what the package may reach after `reaches` - `reaches std/file, C`"
+          raise ModError.new("#{source}:#{line_number}: #{usage}") if fields.size < 3
+          rest = fields[3..]
+          short_word = nil
+          if rest.first? == "as"
+            raise ModError.new("#{source}:#{line_number}: #{usage}") if rest.size < 2
+            short_word = rest[1]
+            rest = rest[2..]
           end
+          reaches = nil
+          if rest.first? == "reaches"
+            reaches = check_reaches(rest[1..], source, line_number)
+            rest = [] of String
+          end
+          raise ModError.new("#{source}:#{line_number}: #{usage}") unless rest.empty?
           path = check_path(fields[1], source, line_number)
           version = check_version(fields[2], source, line_number)
           short_name = nil
-          if fields.size == 5
-            short_name = check_short_name(fields[4], source, line_number)
+          if short_word
+            short_name = check_short_name(short_word, source, line_number)
             if taken = requirements.find { |other| other.short_name == short_name }
               raise ModError.new("#{source}:#{line_number}: `#{short_name}` already names #{taken.path}; a short name is one module's")
             end
@@ -92,7 +112,7 @@ module Iyi::Mod
           rescue ex : ModError
             raise ModError.new("#{source}:#{line_number}: #{ex.message}")
           end
-          requirements << Requirement.new(path, version, short_name)
+          requirements << Requirement.new(path, version, short_name, reaches)
         when "replace"
           unless fields.size == 4 && fields[2] == "=>"
             raise ModError.new("#{source}:#{line_number}: `replace` takes a path and a directory, as `replace <path> => ../dir`")
@@ -142,6 +162,18 @@ module Iyi::Mod
     # path without a `vN` last segment names none. Go's rule, and SPEC.md
     # III.7's: a major version past 1 is a different module, spelled by a
     # suffix, in the same repository, so v1 and v2 can both be required.
+    # The name a package's modules live under: its path's last segment, a
+    # `/vN` suffix left off and `-` written `_` - `github.com/sdogruyol/
+    # iyi-web` is `iyi_web`, `example.com/lib/v2` is `lib`. Nil when that
+    # is not a module name, which a segment like `lib.x` is not.
+    def self.package_name(path : String) : String?
+      name = split_major(path)[0].rpartition('/')[2].gsub('-', '_')
+      return nil unless name.size > 0 && name[0].ascii_lowercase?
+      return nil unless name.each_char.all? { |c| c.ascii_lowercase? || c.ascii_number? || c == '_' }
+      return nil if name.includes?("__") || name.ends_with?('_')
+      name
+    end
+
     def self.split_major(path : String) : {String, Int32?}
       repository, slash, last = path.rpartition('/')
       return {path, nil} if slash.empty? || last.size < 2 || last[0] != 'v'
@@ -188,8 +220,12 @@ module Iyi::Mod
         last_require = index
         next unless fields[1]? == path
         indent = raw[0, raw.size - raw.lstrip.size]
-        # A short name already on the line stays, unless another was given.
+        # A short name already on the line stays, unless another was given,
+        # and so does a `reaches` limit: a `get` moves the version only.
         kept = !short_name && fields[3]? == "as" && (name = fields[4]?) ? " as #{name}" : ""
+        if at = fields.index("reaches")
+          kept += " " + fields[at..].join(' ')
+        end
         lines[index] = indent + line + kept
         return lines.join(newline) + (ended ? newline : "")
       end
@@ -225,6 +261,27 @@ module Iyi::Mod
         raise ModError.new("#{source}:#{line_number}: '#{path}' is not a module path; a path is lower-case segments joined by `/`, with `.` and `-` allowed inside a segment")
       end
       path
+    end
+
+    # What a `reaches` clause names: `std/...` modules, `File` and `C`, split
+    # on commas and spaces alike, or `nothing` alone for a package that
+    # touches nothing outside the language.
+    def self.check_reaches(words : Array(String), source : String, line_number : Int32) : Array(String)
+      items = words.join(' ').split(',').flat_map(&.split).reject(&.empty?)
+      if items.empty?
+        raise ModError.new("#{source}:#{line_number}: `reaches` names what the package may touch - `std/socket`, `File`, `C` - or `nothing`")
+      end
+      return [] of String if items == ["nothing"]
+      items.each do |item|
+        next if item == "File" || item == "C"
+        if item.starts_with?("std/")
+          check_path(item, source, line_number)
+          next
+        end
+        raise ModError.new("#{source}:#{line_number}: `#{item}` is not something a package reaches; " \
+                           "`reaches` takes std modules (`std/socket`), `File`, `C`, or `nothing` alone")
+      end
+      items.uniq
     end
 
     # A short name: one lower-case segment, as a module path's first segment

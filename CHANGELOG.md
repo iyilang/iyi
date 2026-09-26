@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`require PATH vX reaches ...`: a package's reach as a limit.** `reaches
+  std/file, C`, or `reaches nothing`, in the words `iyi mod reach` prints:
+  std modules by path, `File`, and `C` for the C the package declares
+  itself. A selected version that reaches past its line is refused by
+  every verb that resolves, naming what it reaches, with iyi.sum and - in
+  a `get` - iyi.mod unwritten; `get` keeps the clause when it moves the
+  version. Only a line that writes one pays for reading the package's
+  source.
+
 - **Windows sweeps with helper threads.** A collection there left its
   arenas to the allocating thread alone, where Linux's and darwin's open a
   round the helpers sweep beside the program. Windows opens it too: the
@@ -31,7 +40,30 @@
   59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
   against 0.059 - the helpers' spin before their park, fixed below.
 
+### Changed
+
+- **A package's modules live under its name, so two packages' `util`s are
+  two modules.** Two packages that each had a `util.iyi` both defined the
+  type `Util`, and a program requiring both was refused - "`Util` is not
+  imported here", in the second package's own file. A package's module is
+  now under the package's name, its path's last segment (`-` as `_`, a
+  `/vN` left off): `Pa::Util` and `Pb::Util`, and a name both export is
+  ambiguous only where a file brings both into scope. A module whose path
+  begins with the name already - `iyi_web/dsl` in `iyi-web`, `liba` in
+  `liba` - is where it was; one that does not is reached by a qualified
+  name one segment longer: `Liba::Colors` for `import .../liba/colors`.
+  Inside the package nothing changes, and a std module a package imports
+  stays std's.
+
 ### Fixed
+
+- **`std_signal`'s TERM step lost its output file at random.** A process
+  that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
+  it, and that subshell was itself killed a moment after it forked - before
+  bash had reset the traps it inherited - so it ran the gate's EXIT trap,
+  `rm -rf "$WORK"`, under the step still reading it: "exited 0 without
+  saying why", on CI and in 62 of 200 runs under load here. The watch is a
+  loop in the gate's own shell now; 200 of 200 held.
 
 - **A helper's spin before it parks is fifty microseconds by the clock.**
   It was 20,000 pause hints, said to be fifty microseconds, which it is
@@ -146,6 +178,96 @@
   platform; with the read made the blocking call again it fails. The
   Windows job's run of every bench program leaves it to that gate, as it
   does the programs whose input their gates supply.
+
+## 0.15.1 — 2026-09-25
+
+**Moving to one keyword is one command.** `iyi fix .` rewrites every
+`using` under a directory before any file compiles - one file's compile
+reads the modules it imports - then runs each file's did-you-mean loop and
+counts what it rewrote. iyi-web's 59 files went through it in one run and
+its 27 tests passed; iyi-web v0.1.1 is that tree, for 0.15.0 and later. A
+`using` the compiler meets now carries the line that replaces it as data:
+`check -f json` hands it over as a `suggested_edit`, and the language
+server offers it as a quick fix.
+
+**A package release says what it changed.** `iyi mod release [VERSION]`
+compiles the package at HEAD and at its last tag and names every exported
+line gone and new; a line gone is a new major, a line new a new minor, and
+with VERSION it exits 1 when the version says less than that. And `iyi get`
+now ends an upgrade with what it changed in the lines this project wrote:
+each export that changed or went, with the `file:line` that writes it.
+
+**`iyi init kemal` writes `iyi.mod` and `kemal.iyi`, and nothing else** -
+the project's root module, running as it lands, where it wrote an entry, a
+`greet.iyi` and a test every project began by deleting. And a package's
+root module that imports its own submodule is reachable again: the import
+wall refused every importer of `rel` the names of `Rel` when `rel/util`
+had loaded first.
+
+### Added
+
+- **A `using` refusal carries its fix.** The error names the replacing line
+  and now hands it over as data: `check -f json` carries a `suggested_edit`
+  over the directive's span, `import app/greeter::{polite}` for `using
+  app/greeter::{polite}`, and the language server offers it as a quick fix,
+  as for a type error's did-you-mean. A directive written over several
+  lines gets the sentence and no edit; `iyi fix .` rewrites those.
+- **`iyi fix .`: a project moved to one keyword in one run.** `iyi fix`
+  takes several files, or a directory - every `.iyi` under it, hidden
+  directories and `lib/` aside - and rewrites every `using` in all of them
+  before any compiles, since one file's compile reads the modules it
+  imports: `iyi fix a.iyi` stopped at the `using` in a module `a` imports,
+  and moving iyi-web took a loop over 54 files. Then each file's
+  did-you-mean loop runs, and a last line counts what was rewritten and
+  what still reports an error. iyi-web's tree went through `iyi fix .` in
+  one run and its 27 tests passed. The `using` refusal now names `iyi fix .`.
+- **`get` says what a move changed in what the project uses.** For each
+  moved requirement the project's files import, both versions are compiled
+  and every export of an imported module that changed or went is named -
+  `changed  libi: def greeting : String`, `now def greeting(name : String)
+  : String` - with the `file:line` of each line that writes it, comments
+  aside, or "used nowhere here"; new exports are counted. By name, not by
+  type: a site is a place to look. A requirement nothing here imports says
+  nothing.
+- **`iyi mod release [VERSION]`: the version has to say what changed.** It
+  compares the package's exported surface at HEAD with the highest release
+  tag HEAD contains - each checked out beside the tree and compiled once -
+  and names every line gone and new: a line gone is a new major, a line new
+  a new minor, nothing moved a patch, and before v1 a break moves the minor.
+  With VERSION it exits 1 when the version understates the change, or when a
+  new major past 1 is not yet iyi.mod's `/vN` path. A release written with
+  `using` is read the way `iyi fix` writes it. It tags nothing. `iyi mod
+  diff` shares its surface, and so no longer lists a `private` def that
+  travels with a generic's body, and now lists impls, macros and nested
+  types.
+
+### Changed
+
+- **`iyi init kemal` writes `iyi.mod` and `kemal.iyi`, and nothing else.**
+  The file is the project's root module - `module kemal`, what a
+  consumer's `import` of the package reads - named for the module path's
+  last segment (`github.com/me/iyi-web` is `iyi_web.iyi`, and a `/v2`
+  suffix is a version, not the name), and it runs as it lands. `init`
+  wrote four files before: an entry, a `greet.iyi` it imported and a test
+  of it, a tutorial every project began by deleting.
+
+### Fixed
+
+- **`iyi mod release` compared the working tree with itself on darwin.**
+  It placed the package in its repository by the difference between the
+  working directory and git's top level, and on darwin those are `/var/...`
+  and `/private/var/...`: the difference climbed out of each checkout back
+  into the tree, both versions were the tree, and nothing had moved. The
+  place is now git's own (`--show-prefix`); the gate enters through a
+  symlink so Linux shows the same.
+
+- **A package's root module that imports its own submodule is reachable.**
+  `rel.iyi` importing `rel/util` loads the submodule first, and `module
+  rel/util` makes `Rel` as its namespace; the import wall read the unit's
+  file off the type's first location, so every file that imported `rel`
+  was refused `Rel`'s names - `import rel::*` then `a` said "`Rel` is not
+  imported here". The unit is now the file whose `module` header made it,
+  and a file that imported only `rel/util` is still refused `Rel`.
 
 ## 0.15.0 — 2026-09-25
 

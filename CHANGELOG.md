@@ -183,6 +183,17 @@
   `iyi-echo_env` and run it as `iyi echo_env foo bar`; before the fix
   that exited 1 with "unknown command or missing file: echo_env".
 
+- **The number exercise reads a trapping program's exit code from the
+  handle it started it with.** Its proof that the remainder guard matters
+  runs a program that dies of the processor's integer overflow at its
+  first division, and read the code through `Start-Process`; on a Windows
+  runner the cmdlet threw "the process has exited" and gave no code, and
+  the gate failed with nothing wrong in the language. The cmdlet takes
+  hold of the process after starting it - the likely account of a program
+  gone by then, not reproduced here in 300 runs - and
+  `[Diagnostics.Process]::Start` keeps the handle process creation gave
+  it. Both read 0xC0000095 in 300 runs of 300 here.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

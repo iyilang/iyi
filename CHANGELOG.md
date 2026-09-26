@@ -240,6 +240,16 @@
   failed on a runner with LNK1170 until the file held an argument to a
   line; `cl.exe` had read the one-line file and written its own.
 
+- **On Windows a build asks `vswhere` where Visual C++ is once, not every
+  time.** `vswhere` is a process of its own, 35 ms at the median, and
+  every `iyi build` started it before linking - what a Linux build once
+  paid in `PATH` searches for linkers nobody had installed. The answer is
+  kept beside the object cache, as the linker probe's is, and read back
+  while the directory it names is there, so an update that removes the
+  toolset asks again: a hello's build went from 521 ms at the median to
+  491. The compiler spec that holds the linker probe, pending on Windows
+  for having nothing to hold, holds this file there.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

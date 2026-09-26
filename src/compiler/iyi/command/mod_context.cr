@@ -128,7 +128,7 @@ class Iyi::Command
     imports = mod_context_imports(filename)
     table =
       begin
-        Mod::Installer.table_for(entry_dir)
+        @mod_context_table = Mod::Installer.table_for(entry_dir)
       rescue ex : Mod::ModError
         abort! ex.message.to_s, :USAGE_ERROR
       end
@@ -275,7 +275,36 @@ class Iyi::Command
         names.join(io, ", ")
         io << "}   # or `import " << written << "::*` for every name\n"
       end
+      # A package module's qualified name is under the package's name, and
+      # nothing in its own `module` line below says so.
+      if qualified = mod_context_package_type(written)
+        io << "# qualified, the module is " << qualified << ": " << qualified << ".name\n"
+      end
     end
+  end
+
+  @mod_context_table = [] of {String, String}
+
+  # `Liba::Colors` for `example.com/liba/colors`, when *written* is a
+  # package module the package's name is put in front of; nil otherwise.
+  private def mod_context_package_type(written : String) : String?
+    path = Mod::Installer.expand(written, @mod_context_table)
+    @mod_context_table.each do |(prefix, _)|
+      next if prefix.starts_with?('@')
+      inner =
+        if path == prefix
+          Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
+        elsif path.starts_with?("#{prefix}/")
+          path[(prefix.size + 1)..]
+        else
+          next
+        end
+      segments = inner.split('/')
+      package = Mod::ModFile.package_name(prefix)
+      return nil unless package && segments.first? != package
+      return ([package] + segments).map(&.camelcase).join("::")
+    end
+    nil
   end
 
   # The file's imports, in order, by parsing — never by compiling. A file

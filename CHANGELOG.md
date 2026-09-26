@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **A package module's old name is an edit away.** 0.15.2 put a package's
+  modules under its name, so `Colors` of `example.com/liba/colors` is
+  `Liba::Colors`; the old spelling was a bare "undefined constant". It now
+  says what the name is and carries it as a `suggested_edit`, so `iyi fix .`
+  moves a program across and the language server offers the quick fix.
+  `iyi mod context` prints a package module's qualified name - its own
+  `module` line does not say it - and `iyi doc` takes a package module's
+  path, a short name included: `iyi doc web/iyi_web/dsl`.
+
 ## 0.15.2 — 2026-09-26
 
 **Two packages can each have a `util`.** A package's modules now live under

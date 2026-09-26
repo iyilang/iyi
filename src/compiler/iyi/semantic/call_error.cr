@@ -34,6 +34,16 @@ class Iyi::Path
       self.raise("private constant #{private_const} referenced")
     end
 
+    # iyi: a package module reached by the name it had before 0.15.2, when
+    # a package's modules stopped sharing one namespace: `Colors` of
+    # `example.com/liba/colors` is `Liba::Colors` now. The first segment is
+    # the edit, so `iyi fix` moves a program across.
+    if !global? && (moved = iyi_package_module_name(type.program, names.first))
+      self.raise("undefined constant #{self}\n`#{names.first}` is `#{moved}`: a package's modules live under " \
+                 "the package's name, so two packages' modules of one name are two modules (SPEC.md III.7). " \
+                 "Did you mean '#{moved}'?", suggestion: moved, size: names.first.size)
+    end
+
     # iyi: the name is usually not missing, it is out of reach - a type a
     # module this program loaded declares, and this file has not written
     # `import X::{...}` for (SPEC.md R-2b), or one its module never marked `pub`
@@ -66,6 +76,22 @@ class Iyi::Path
     end
 
     self.raise("undefined constant #{self}")
+  end
+
+  # The qualified name of the one package module called *name*, when it
+  # lives under a package's name - `Liba::Colors` for `Colors` - or nil.
+  private def iyi_package_module_name(program, name : String) : String?
+    found = [] of String
+    program.types.each_value do |outer|
+      next unless outer.is_a?(ModuleType)
+      inner = outer.types?.try(&.[name]?)
+      next unless inner.is_a?(ModuleType) && inner.iyi_unit?
+      file = inner.iyi_unit_file
+      canonical = file && program.iyi_module_paths[file]?
+      next unless canonical && canonical.includes?('.')
+      found << "#{outer}::#{name}"
+    end
+    found.size == 1 ? found.first : nil
   end
 
   private def iyi_type_out_of_reach_hint(program, name : String) : String?

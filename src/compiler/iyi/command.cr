@@ -38,6 +38,13 @@ class Iyi::Command
   # says `crystal`.
   class_property program_name : String = "crystal"
 
+  # `git`-style: the executable on PATH that `<program> <name>` runs, if
+  # there is one. Both dispatches ask this - `iyi`'s own, which decides
+  # whether a word is a command at all, and this one's, which runs it.
+  def self.external_command(name : String) : String?
+    Process.find_executable("#{program_name}-#{name}")
+  end
+
   USAGE = <<-USAGE
     Usage: crystal [command] [switches] [program file] [--] [arguments]
 
@@ -234,7 +241,7 @@ class Iyi::Command
         # iyi: `git`-style subcommand extension, keyed on the name a person
         # typed. Hardcoded to `crystal-`, `iyi foo` could never find `iyi-foo`,
         # so the extension point existed for one of the two binaries only.
-      elsif external_command = Process.find_executable("#{Command.program_name}-#{command}")
+      elsif external_command = Command.external_command(command)
         options.shift
 
         iyi_exec_path = Iyi::Config.exec_path

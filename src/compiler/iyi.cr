@@ -158,6 +158,12 @@ module Iyi
       # it is the shortest thing to type and the shell already made it a path.
       if File.file?(command)
         Iyi::Command.run(options)
+      elsif Iyi::Command.external_command(command)
+        # `git`-style: `iyi foo` runs `iyi-foo` from PATH with the rest of
+        # the line. `Command` has the lookup and the exec; this dispatch
+        # answered "unknown command" before it could get there, so the
+        # extension point was never reached from `iyi`.
+        Iyi::Command.run(options)
       else
         STDERR.puts "iyi: unknown command or missing file: #{command}"
         STDERR.puts "Run `iyi help` for what there is."

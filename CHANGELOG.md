@@ -172,6 +172,17 @@
   Windows that it asked for one helper; with the cap removed it asked for
   eleven. Linux and darwin are unchanged, as they are unmeasured.
 
+- **`iyi foo` runs `iyi-foo` from PATH, on every platform.** The lookup
+  was there, in the command layer, keyed on the name the binary runs
+  under; `iyi`'s own dispatch answered "unknown command or missing file"
+  for any word that was not a verb or a file, so it was never reached and
+  the extension point worked for the fork's compiler only. A word that
+  names an `iyi-` executable on PATH now goes to it, with the rest of the
+  line and `IYI_EXEC_PATH` naming the directory `iyi` is in; a word that
+  names nothing is refused as before. The compiler's CLI specs build an
+  `iyi-echo_env` and run it as `iyi echo_env foo bar`; before the fix
+  that exited 1 with "unknown command or missing file: echo_env".
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

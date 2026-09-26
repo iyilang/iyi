@@ -88,17 +88,23 @@ fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 
 # ── 1b. A fiber reading stdin parks, and is cancelled there ───────────────
-# bench/stdin_park.iyi, fed by a pipe that answers after two seconds and
-# again after four. On Windows the read is a thread's of its own
-# (`IyiStdinReader`); here, it was the program's thread's, and the proof
-# below puts that back.
+# bench/stdin_park.iyi, fed by a pipe that answers a second after the
+# program has started and again two seconds later. On Windows the read is a
+# thread's of its own (`IyiStdinReader`); here, it was the program's
+# thread's, and the proof below puts that back.
 step "a fiber reading stdin parks, and is cancelled there"
 if ! "$IYI" build "$REPO/bench/stdin_park.iyi" -o stdin_park > build-stdin.log 2>&1; then
   echo "stdin exercise failed to build:"
   tail -5 build-stdin.log
   exit 1
 fi
-(sleep 2; echo first; sleep 2; echo second) | timeout -k 5 60 ./stdin_park > stdin.txt 2>&1
+feed() { # the lines, once the program has said it runs
+  local tries=0
+  while [ ! -e "$1" ] && [ "$tries" -lt 600 ]; do sleep 0.05; tries=$((tries + 1)); done
+  sleep 1; echo first; sleep 2; echo second
+}
+rm -f stdin.ready
+feed stdin.ready | STDIN_PARK_READY=stdin.ready timeout -k 5 60 ./stdin_park > stdin.txt 2>&1
 if ! grep -q 'every property held' stdin.txt; then
   echo "stdin exercise failed:"
   cat stdin.txt
@@ -120,7 +126,8 @@ if ! IYI_PATH="$WORK/blocking${PSEP}$REPO/src" "$IYI" build "$REPO/bench/stdin_p
   tail -5 build-blocking.log
   exit 1
 fi
-(sleep 2; echo first; sleep 2; echo second) | timeout -k 5 60 ./stdin_blocking > stdin-blocking.txt 2>&1
+rm -f blocking.ready
+feed blocking.ready | STDIN_PARK_READY=blocking.ready timeout -k 5 60 ./stdin_blocking > stdin-blocking.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -q 'held the thread' stdin-blocking.txt; then
   echo "a stdin read that holds the thread was not refused (exit $code):"

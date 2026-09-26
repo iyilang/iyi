@@ -101,6 +101,21 @@
   primitives specs, which passed there as they were: on the runner
   18,148 and 716 examples, none failing.
 
+- **Two concurrency checks ask what they mean, not how fast it went.**
+  The concurrency exercise held two 150 ms sleeps in a group to under
+  260 ms, as its sign that they overlapped; on a Windows runner the xmm
+  proof's run took 529 ms and failed there, before the check the proof is
+  about. Here the same build ran them in 150 ms 30 runs of 30, so what
+  stalled is not known; the check now asks that each sleep began before
+  the other woke, which a sequential runtime fails however fast it is -
+  with `sleep` made a spin on the clock it fails - and a stalled machine
+  passes however slow. And `stdin_park` failed here once with the sibling
+  at 0 ticks, then held 10 runs of 10: its feeder slept two seconds before
+  the first line, and a freshly built binary's first start here took 1.4
+  to 1.6 s, so a line already in the pipe when the read began - answered
+  at once - is the likely account. The program now says when it runs, and
+  the feeder writes a second after that; 3 gate runs of 3 held since.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

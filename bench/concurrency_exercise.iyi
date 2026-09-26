@@ -114,19 +114,34 @@ end
 fail("interleaving: expected bababa, got #{order}") unless order == "bababa"
 puts "interleaved: #{order}"
 
-# ── 2. Waits overlap: the anti-sequential clock ─────────────────────────
-started = __iyi_monotonic_ns
+# ── 2. Waits overlap ─────────────────────────────────────────────────────
+# Asked by order, not by a clock: each sleeper notes when it began and when
+# it woke, and the waits overlap when each began before the other woke. A
+# sequential runtime cannot pass that however fast it is, and a machine
+# that stalls cannot fail it however slow it is - the elapsed time this was
+# once held to, under 260 ms for two 150 ms sleeps, was 529 ms once on a
+# Windows runner, where a Windows machine ran the same build in 150. The
+# marks are written to the heap as they are taken, so none of them is a
+# register carried across a fiber switch.
+marks = [0_i64, 0_i64, 0_i64, 0_i64]
 group do |g|
   g.spawn do
+    marks[0] = __iyi_monotonic_ns
     sleep(150)
+    marks[1] = __iyi_monotonic_ns
   end
   g.spawn do
+    marks[2] = __iyi_monotonic_ns
     sleep(150)
+    marks[3] = __iyi_monotonic_ns
   end
 end
-overlap = elapsed_ms(started)
-fail("overlap: 2 x 150 ms took #{overlap} ms, which is sequential") if overlap >= 260
-puts "two 150 ms sleeps in #{overlap} ms"
+unless marks[0] < marks[3] && marks[2] < marks[1]
+  fail("overlap: two 150 ms sleeps ran one after the other, which is sequential")
+end
+first = marks[0] < marks[2] ? marks[0] : marks[2]
+last = marks[1] > marks[3] ? marks[1] : marks[3]
+puts "two 150 ms sleeps overlapped, in #{(last - first) // 1000000_i64} ms"
 
 # ── 3. The first failing task cancels a *blocked* sibling — III.4.2/3 ───
 started = __iyi_monotonic_ns

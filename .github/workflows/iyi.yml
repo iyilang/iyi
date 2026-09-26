@@ -694,7 +694,7 @@ jobs:
       - name: A YAML document, through a boundary built from the library
         run: bash bench/yaml_reads.sh
 
-      # And twelve of the library's own namespaces, because what a boundary
+      # And eleven of the library's own namespaces, because what a boundary
       # breaks on depends on what the namespace holds. `Log` is the one that
       # found the most: global state written by macros — a private constant, a
       # class variable with a live initialiser, and two `{% for %}` loops that
@@ -703,7 +703,10 @@ jobs:
       # carry both; `Random` found that a module is a mixin on the other side
       # of one. The other six found nothing, which is why they are here: a gate
       # that holds only what once broke says nothing about what never did.
-      - name: Twelve library namespaces, bound and consumed
+      # It was twelve until libxml2 left the tree: `XML` was the case that
+      # made a boundary carry a `@[Link]` flag the consumer never wrote, and
+      # the YAML step above asks that same question now.
+      - name: Eleven library namespaces, bound and consumed
         run: bash bench/library_boundaries.sh
 
       # A library arriving with a feature is a decision, and this is where it

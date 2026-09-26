@@ -183,6 +183,33 @@ def nt_children(pid):
     return found
 
 
+def process_binary(pid):
+    """The file *pid* was started from. Linux's `/proc/<pid>/exe`; on
+    Windows the image name the kernel keeps for the process, which is the
+    same path, and a running `.exe` may be renamed there, not deleted."""
+    if os.name != "nt":
+        return os.readlink(f"/proc/{pid}/exe")
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess")
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW")
+        return path.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def tree_mb(pid):
     """A session's whole cost: `iyi lsp` keeps the buffers and runs a
     child that compiles, so counting only the parent would make the

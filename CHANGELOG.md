@@ -57,6 +57,20 @@
 
 ### Fixed
 
+- **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
+  Windows renames the running binary aside (a running program cannot be
+  replaced there), and `Process.executable_path` answered the name the
+  image was loaded from - gone, so nil for the rest of the process. `iyi
+  mcp` runs itself for every tool call, and its next call after a rebuild
+  died of "Nil assertion failed", told as a bug in the compiler; every
+  exception in such a process also wrote "Unable to load debug
+  information" and a trace of `???`. Windows answers the image's name now
+  (`QueryFullProcessImageNameW`), as Linux's `/proc/self/exe` follows a
+  rename: the call is answered, and a renamed program's exception prints
+  its trace by name. `agent_loop.py` renames the running `iyi mcp`'s
+  binary and asks it a question, on Linux and Windows; the old binary
+  fails it.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

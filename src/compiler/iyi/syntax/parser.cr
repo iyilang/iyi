@@ -254,7 +254,14 @@ module Iyi
       module_def = ModuleDef.new(path, Expressions.from(body))
       module_def.iyi_unit = true
       module_def.at(header)
-      module_def.end_location = header.end_location
+      # The module is the rest of the file, and it ends where the file's last
+      # expression does. It ended at the header's own line, and a tool that
+      # asks whether the cursor is inside a node before looking into it -
+      # `definition` in an editor, `tool implementations` - never looked into
+      # the module: a call in a `module main` file's top-level code went
+      # nowhere, where the same call inside a `def`, or in a file with no
+      # header, found its target.
+      module_def.end_location = rest.reverse_each.compact_map(&.end_location).first? || header.end_location
 
       Expressions.from([header] of ASTNode + directives + [module_def] of ASTNode)
     end

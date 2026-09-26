@@ -250,6 +250,18 @@
   491. The compiler spec that holds the linker probe, pending on Windows
   for having nothing to hold, holds this file there.
 
+- **Go-to-definition works on a call in a module's top-level code.** A
+  `module main` header wraps the rest of the file in the module it names,
+  and that module was marked as ending on the header's own line. The
+  editor's `definition` - and `iyi tool implementations` - look into a node
+  only when the cursor is inside it, so they never looked into the module:
+  `puts selam(isim)` at the top of a `module main` file went nowhere, where
+  the same call inside a `def`, or in a file with no header, found `selam`.
+  The module ends where the file's last expression does now, and a hover
+  on that call names what it returns. On every platform; found on Windows,
+  checking the editor under a path with Turkish letters in it, which was
+  not the cause.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

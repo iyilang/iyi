@@ -516,6 +516,19 @@ def main():
              l["range"]["start"]["line"] == 2 for l in locs),
          f"{len(locs)} location(s), first {locs and locs[0]['uri']}")
 
+    # 6b. definition on a call in the module's top-level code: `puts run`,
+    #     line 10, jumps to `def run` in the same file. The module a header
+    #     opens was marked as ending on the header's line, and the lookup
+    #     never looked inside it - the same call in a `def` found its target.
+    reply = c.send("textDocument/definition",
+                   {"textDocument": {"uri": app_uri},
+                    "position": {"line": 10, "character": 6}})
+    locs = reply["result"] or []
+    step("6b", "definition from top-level code jumps to the def",
+         any(l["uri"] == app_uri and l["range"]["start"]["line"] == 5
+             for l in locs),
+         f"{len(locs)} location(s), first {locs and (locs[0]['uri'], locs[0]['range']['start']['line'])}")
+
     # 7. documentSymbol: the outline — the header's module at the root,
     #    the def nested inside it.
     reply = c.send("textDocument/documentSymbol",

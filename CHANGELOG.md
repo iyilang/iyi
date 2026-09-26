@@ -55,6 +55,14 @@
   waking after that finds no permit. Across 6,008 runs of live churn, 9
   faulted before and none after; `bench/parallel_mark.sh` checks that a
   closed round gives no permit, and proves the check fires.
+- **Windows: a thread stopped inside the allocator kept rsi and rdi out of
+  the roots.** A stop that lands in the allocator is paid at its exit, where
+  the thread spills its callee-saved registers for the mark; it spilled
+  System V's six, and Windows x64 preserves rsi and rdi as well, so a value
+  held only there across the stop was no root. The collector's own spill
+  already had the Windows set; the stopped thread's has it now.
+  `bench/windows_exercise.sh` reads the stores out of a cross-compiled
+  Windows object, and refuses a copy of the runtime that leaves rsi out.
 
 ## 0.15.2 — 2026-09-26
 
@@ -10462,7 +10470,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,852-line library and nothing else. Every other
+  written against iyi's own 17,868-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

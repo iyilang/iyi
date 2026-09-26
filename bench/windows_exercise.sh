@@ -3,8 +3,9 @@
 #
 #   bash bench/windows_exercise.sh
 #
-# Verifies clean cross-compilation for Windows x86_64, runs the exercise
-# on the host, and proves the exercise checks can fail when the collector is broken.
+# Verifies clean cross-compilation for Windows x86_64, reads the stopped
+# thread's register spill out of the object, runs the exercise on the host,
+# and proves the checks can fail when the collector is broken.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,6 +31,24 @@ case "$(uname -s)" in
     ;;
 esac
 trap 'rm -rf "$WORK"' EXIT
+
+# The disassembler for the cross-compiled object: GNU objdump reads COFF
+# x86-64 on a Linux host, llvm-objdump anywhere LLVM is.
+DISASM=""
+for tool in objdump llvm-objdump; do
+  if command -v "$tool" > /dev/null 2>&1; then DISASM="$tool"; break; fi
+done
+
+# Whether a Windows object's `IyiThread.stop_here` stores rdi and rsi into
+# the stopped thread's spill: Windows x64 preserves both across a call, so
+# a value held there across a stop deferred to the allocator's exit is a
+# root only if the spill has it. The destination is pinned to rcx, the
+# first slot after rbx and rbp.
+stop_here_spills() {
+  local body
+  body="$("$DISASM" -d "$1" | awk '/<[^>]*stop_here[^>]*>:$/{f=1; next} f && /^$/{exit} f' | tr -d ' \t')"
+  [ -n "$body" ] && grep -q '%rdi,0x10(%rcx)' <<< "$body" && grep -q '%rsi,0x18(%rcx)' <<< "$body"
+}
 
 status=0
 
@@ -64,6 +83,42 @@ if "$IYI" build --cross-compile --target x86_64-windows-msvc "$REPO/bench/window
 else
   echo "  cross-compilation to x86_64-windows-msvc failed"
   cat "$WORK/win_build.log"
+  status=1
+fi
+
+# 2, continued. A thread stopped where the allocator defers it spills Windows'
+# callee-saved set, rsi and rdi included, and a copy of the runtime whose
+# spill leaves rsi out is refused by the same check.
+echo
+echo "== A stopped thread spills Windows' callee-saved registers =="
+if [ -z "$DISASM" ]; then
+  echo "  no objdump or llvm-objdump here to read the object with"
+  status=1
+elif [ ! -f "$WORK/windows_exercise.obj" ]; then
+  echo "  no object to read: the cross-compilation above failed"
+  status=1
+elif stop_here_spills "$WORK/windows_exercise.obj"; then
+  echo "  stop_here stores rdi and rsi into the spill"
+  mkdir -p "$WORK/norsi/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/norsi/iyi/"
+  awk '{ if ($0 ~ /^ +movq %rsi, 24\(\$0\)$/ && !done) { done = 1; next } print }' \
+    "$REPO/src/iyi/thread.iyi" > "$WORK/norsi/iyi/thread.iyi"
+  if cmp -s "$WORK/norsi/iyi/thread.iyi" "$REPO/src/iyi/thread.iyi"; then
+    echo "  the proof's awk found no rsi store to remove"
+    status=1
+  elif ! IYI_PATH="$WORK/norsi${PSEP}$REPO/src" "$IYI" build --cross-compile --target x86_64-windows-msvc \
+       "$REPO/bench/windows_exercise.iyi" -o "$WORK/norsi/program.obj" > "$WORK/norsi/build.log" 2>&1; then
+    echo "  the copy without the rsi store did not build"
+    sed -n '1,12p' "$WORK/norsi/build.log"
+    status=1
+  elif stop_here_spills "$WORK/norsi/program.obj"; then
+    echo "  a stop_here without the rsi store still passed, so the check does not test it"
+    status=1
+  else
+    echo "  failure proof: a stop_here that leaves rsi out is refused"
+  fi
+else
+  echo "  stop_here does not store both rdi and rsi into the spill"
   status=1
 fi
 

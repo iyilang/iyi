@@ -28,6 +28,22 @@
   and the specs reach them. `library_boundaries` binds eleven namespaces,
   and the link-flag question XML asked is `yaml_reads`' now.
 
+### Fixed
+
+- **The identity gate could be talked past by the letters before a word.**
+  `bench/identity_floor.py` allows "Crystal" in sentences about the other
+  language, and its rules for those - `in Crystal`, `is Crystal`, `a
+  Crystal program` - had no word boundary, so "thin Crystal", "within
+  Crystal" or "this Crystal" anywhere in the tree passed as prose. Every
+  rule that opens with a word is bounded now; a leak planted each of those
+  three ways fails the gate, where the gate before let all three through.
+  Found in #104 by @jwaldrip, who bounded two of the rules; the other
+  eighteen had the same hole.
+- **The arena gate's huge-page bound sat on the thing it measured.** It
+  refused more than 2048 KB, exactly one huge page, so a single huge page
+  landed on `>` and did not fire. The bound is 1024 KB, between a healthy
+  run's 324 KB and one huge page (from #104, @jwaldrip).
+
 ## 0.15.2 — 2026-09-26
 
 **Two packages can each have a `util`.** A package's modules now live under

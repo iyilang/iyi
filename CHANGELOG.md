@@ -228,6 +228,14 @@
   which the old reader fails at 51.7, and times with `perf_counter`: the
   monotonic clock it used is 15.6 ms coarse on Windows.
 
+- **On Windows a program links through `link.exe` itself.** The compiler
+  found MSVC and ran `cl.exe` with the objects and `/link`, and the driver
+  compiled nothing: it started the linker, one more process per build.
+  The same objects and flags linked in 134 ms at the median through
+  `cl.exe` and in 91 without it, and the edit-and-rebuild loop of
+  `rebuild_speed.py` went from 829 ms to 742 from source, 781 to 742 from
+  artifacts. A driver named in `%CC%` is still spoken to as a driver.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

@@ -489,7 +489,7 @@ one hex digit wrong.
 
 You need the Visual C++ build tools — the MSVC toolset and the Windows
 SDK, e.g. Visual Studio Build Tools with "Desktop development with C++".
-iyi links a program with `cl.exe` and finds it, and the SDK's libraries,
+iyi links a program with `link.exe` and finds it, and the SDK's libraries,
 through the registry, so no developer prompt and nothing on `PATH` is
 needed. Everything else comes out of the zip, including the LLVM the
 compiler loads. `scripts/package-windows.ps1` is the gate for that

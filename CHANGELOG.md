@@ -63,6 +63,12 @@
   already had the Windows set; the stopped thread's has it now.
   `bench/windows_exercise.sh` reads the stores out of a cross-compiled
   Windows object, and refuses a copy of the runtime that leaves rsi out.
+- **The Windows replace gate gave up on a held file too soon.**
+  `bench/replace_running.sh` waits for the old binary to be free before it
+  asks the next replacement to delete it, and waited ten seconds for the
+  process and ten for the last handle; once in thirty-five runs that was
+  short and the file was still there. It waits thirty for each, and says
+  what still holds the file when it gives up.
 
 ## 0.15.2 — 2026-09-26
 

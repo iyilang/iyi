@@ -63,17 +63,28 @@ stop_session() {
 # Until nothing holds the file: no process runs the image - the session's
 # worker (`iyi lsp --worker`, started from the same file) exits on its own
 # time after the session - and no handle is open on it, which a Windows
-# runner's scanner keeps for a moment after a rename: the file opens with
-# no sharing at all. Ten seconds for each at most.
+# runner's scanner keeps for a while after a rename: the file opens with
+# no sharing at all. Thirty seconds for each at most: ten were short once
+# in thirty-five runs, and the file was still there. What still holds it
+# when the wait gives up is said, so a failure names its holder.
 wait_unheld() {
   local path tries=0
   path="$(cygpath -w "$1")"
-  while tasklist //FI "IMAGENAME eq held.exe" //NH 2>/dev/null | grep -q 'held.exe' && [ "$tries" -lt 100 ]; do
+  while tasklist //FI "IMAGENAME eq held.exe" //NH 2>/dev/null | grep -q 'held.exe'; do
+    if [ "$tries" -ge 300 ]; then
+      echo "  after 30 s a held.exe still runs:"
+      tasklist //FI "IMAGENAME eq held.exe" 2>&1 | sed 's/^/    /'
+      break
+    fi
     sleep 0.1
     tries=$((tries + 1))
   done
   tries=0
-  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1 || [ "$tries" -ge 20 ]; do
+  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1; do
+    if [ "$tries" -ge 60 ]; then
+      echo "  after 30 s the file still opens only shared: a handle is held on it"
+      break
+    fi
     sleep 0.5
     tries=$((tries + 1))
   done

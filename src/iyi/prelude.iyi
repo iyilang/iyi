@@ -477,6 +477,9 @@ end
     # thread - and how a read that thread is blocked in is withdrawn.
     fun GetFileType(h_file : Void*) : Int32
     fun CancelSynchronousIo(h_thread : Void*) : Int32
+    # The mark helpers' waking without the boost Windows gives a thread
+    # whose wait is satisfied (`IyiThread.start_helper` says why).
+    fun SetThreadPriorityBoost(h_thread : Void*, disable_priority_boost : Int32) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
@@ -6465,8 +6468,12 @@ require "./file"
           @@stw_first_ns = now_ns - started
           # The wake after the release: threads woken inside the stop were
           # the stop's largest part under load, and a helper's first
-          # microseconds are the futex's either way.
+          # microseconds are the futex's either way. It is the program's
+          # own thread that wakes them, so its length is the program's.
+          woke = now_ns
           wake_helpers
+          woke = now_ns - woke
+          @@wake_longest_ns = woke if woke > @@wake_longest_ns
           true
         end
 
@@ -6675,6 +6682,15 @@ require "./file"
 
         def self.stop_second_ns : UInt64
           @@stop_second_ns
+        end
+
+        # The longest the triggering thread - the program's own - spent
+        # waking the helpers for a mark beside it, across every collection,
+        # for the exercises.
+        @@wake_longest_ns : UInt64 = 0_u64
+
+        def self.wake_longest_ns : UInt64
+          @@wake_longest_ns
         end
 
         # Whether a mark is running beside the program right now: the byte

@@ -284,6 +284,16 @@
 
   puts "moves: #{under_mark} of #{rounds} rounds moved a payload into a black holder under a running mark, #{concurrent.to_i64} collections ran beside the program, every payload intact"
   puts "pause: #{stw_mean.unsafe_div(1000_u64).to_i64} us to mark the chain stopped; beside the program the longest first stop was #{Stops.first.unsafe_div(1000_u64).to_i64} us, the longest second #{Stops.second.unsafe_div(1000_u64).to_i64} us, and #{IyiMark.finish_retries.to_i64} second stops retreated to mark what they found"
+  # The helpers for each mark beside the program are woken by the
+  # program's own thread, and the wake is the program's time. On Linux it
+  # is one futex call; on Windows a woken helper ran above the thread that
+  # woke it and took its core, 3.7 to 40 ms at the longest. Asserted where
+  # it was measured; printed everywhere.
+  wake = IyiMark.wake_longest_ns
+  {% if flag?(:win32) %}
+    fail("wake: waking the helpers held the program's thread #{(wake // 1000_u64).to_i64} us") if wake > 1000000_u64
+  {% end %}
+  puts "wake: the program's thread spent at most #{(wake // 1000_u64).to_i64} us waking the helpers for a mark"
   puts "concurrent mark: every property held"
 {% else %}
   puts "concurrent mark: needs the collector and a thread target; nothing to exercise here"

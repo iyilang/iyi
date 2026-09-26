@@ -116,6 +116,18 @@
   at once - is the likely account. The program now says when it runs, and
   the feeder writes a second after that; 3 gate runs of 3 held since.
 
+- **On Windows, waking the mark helpers no longer holds the program.**
+  The program's own thread wakes the helpers when a mark starts beside
+  it, and Windows raises a thread whose wait is satisfied above the one
+  that satisfied it: each woken helper took the waker's core. With eleven
+  helpers on a twelve-core machine the wake held the program's thread 3.7
+  to 40 ms at its longest, doing nothing; the helpers now run without that
+  boost, and the wake takes 12 to 83 us. Binary trees' median went from
+  0.171 s to 0.148 and its total pause from 8.8 ms to 3.6. The concurrent
+  mark exercise asserts the wake under 1 ms on Windows, and the build that
+  keeps the boost is caught there - in 5 runs of 10 on twelve cores and
+  10 of 10 held to four, so the proof gives it five runs.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before
@@ -10444,7 +10456,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,838-line library and nothing else. Every other
+  written against iyi's own 17,863-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

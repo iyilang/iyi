@@ -54,7 +54,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(moves|pause):' answers.txt | sed 's/^/  /'
+grep -E '^(moves|pause|wake):' answers.txt | sed 's/^/  /'
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
@@ -70,6 +70,34 @@ if [ "$code" -ne 1 ] || ! grep -q "the barrier lost it" nobarrier.txt; then
   echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
+
+if [ "$PSEP" = ":" ]; then
+  echo "workdir $WORK"
+  echo "concurrent mark: every step held"
+  exit 0
+fi
+
+step "failure proof: helpers woken with Windows' wake boost hold the program's thread"
+mkdir -p boosted/iyi
+cp "$REPO"/src/iyi/*.iyi boosted/iyi/
+awk '{ if ($0 ~ /^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/) { print "        # the helpers keep the boost"; next } print }' "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi
+cmp -s boosted/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
+  cat build-boosted.log; exit 1
+fi
+# The wake is one scheduling race per collection: on twelve cores the
+# boosted build was caught in 5 runs of 10, on four in 10 of 10. Five
+# runs, and the first that is caught is the proof.
+caught=""
+for try in 1 2 3 4 5; do
+  timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
+  code=$?
+  if [ "$code" -eq 1 ] && grep -q "waking the helpers held the program's thread" boosted.txt; then
+    caught="$try"; break
+  fi
+done
+[ -n "$caught" ] || { echo "the wake check did not fire in 5 runs:"; tail -3 boosted.txt; exit 1; }
+printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

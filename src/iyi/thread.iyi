@@ -598,6 +598,15 @@
       {% elsif flag?(:win32) %}
         h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)
         raise "CreateThread failed" if h.address == 0_u64
+        # Without the boost Windows gives a thread whose wait is satisfied.
+        # The program's own thread wakes the helpers for a mark beside it
+        # (`IyiMark.wake_helpers`), and with the boost each woken helper
+        # ran above it and took its core: measured on a twelve-core
+        # machine with eleven helpers, the wake held the program's thread
+        # 3.7 to 40 ms, while the thread did no work in that time, where
+        # without it the wake takes 12 to 20 us. Binary trees' median went
+        # from 0.171 s to 0.147 and its total pause from 8.8 ms to 3.5.
+        LibC.SetThreadPriorityBoost(h, 1_i32)
       {% end %}
     end
 

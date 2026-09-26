@@ -235,6 +235,10 @@
   `cl.exe` and in 91 without it, and the edit-and-rebuild loop of
   `rebuild_speed.py` went from 829 ms to 742 from source, 781 to 742 from
   artifacts. A driver named in `%CC%` is still spoken to as a driver.
+  The linker reads a long command's response file itself now, and refuses
+  a line of 131,072 characters or more - linking Crystal's library specs
+  failed on a runner with LNK1170 until the file held an argument to a
+  line; `cl.exe` had read the one-line file and written its own.
 
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside

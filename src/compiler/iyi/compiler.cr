@@ -3201,6 +3201,19 @@ module Iyi
           # The command line would be too big, pass the args through a UTF-16-encoded file instead.
           # TODO: Use a proper way to write encoded text to a file when that's supported.
           # The first character is the BOM; it will be converted in the same endianness as the rest.
+          #
+          # iyi: one argument to a line when it is `link.exe` that reads it.
+          # The linker refuses a line of 131,072 characters or more - "LNK1170:
+          # line in command file contains 135135 or more characters", linking
+          # Crystal's library specs - where `cl.exe` read the same one-line
+          # file and wrote its own for the linker it started.
+          if direct
+            lines = ["/nologo"]
+            object_names.each { |name| lines << Process.quote_windows(name) }
+            lines << output_arg
+            link_args.each { |arg| lines << arg.gsub("\n", " ") }
+            args = lines.join("\r\n")
+          end
           args_16 = "\ufeff#{args}".to_utf16
           args_bytes = args_16.to_unsafe_bytes
 

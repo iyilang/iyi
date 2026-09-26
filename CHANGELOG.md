@@ -194,6 +194,17 @@
   `[Diagnostics.Process]::Start` keeps the handle process creation gave
   it. Both read 0xC0000095 in 300 runs of 300 here.
 
+- **Crystal's compiler specs run on Windows, and compile there.** Five
+  of iyi's own spec files ran on Windows; the rest did not compile. The
+  loader the interpreter's specs load named `System.to_wstr` and
+  `System::LibraryArchive`, which resolved to `Crystal::System` while it
+  was `Crystal::Loader` and to nothing once it was `Iyi::Loader` - "undefined
+  method 'to_wstr' for System:Module", then "undefined constant
+  System::LibraryArchive". The build never saw it: the loader is the
+  interpreter's, and only the specs compile it. Both loaders name the
+  module whole now, and a Windows job builds the fork's compiler and runs
+  every compiler spec.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

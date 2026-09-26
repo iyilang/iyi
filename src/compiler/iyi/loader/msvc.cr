@@ -143,7 +143,7 @@ class Iyi::Loader
     # On Windows, each `.lib` import library may reference any number of `.dll`
     # files, whose base names may not match the library's. Thus it is necessary
     # to extract this information from the library archive itself.
-    System::LibraryArchive.imported_dlls(path).all? do |dll|
+    Crystal::System::LibraryArchive.imported_dlls(path).all? do |dll|
       # API set names do not refer to physical filenames despite ending with
       # `.dll`, and therefore should not use a path search:
       # https://learn.microsoft.com/en-us/cpp/windows/universal-crt-deployment?view=msvc-170#local-deployment
@@ -182,7 +182,7 @@ class Iyi::Loader
   end
 
   private def open_library(path : String)
-    LibC.LoadLibraryExW(System.to_wstr(path), nil, 0)
+    LibC.LoadLibraryExW(Crystal::System.to_wstr(path), nil, 0)
   end
 
   def load_current_program_handle

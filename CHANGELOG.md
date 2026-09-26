@@ -262,6 +262,17 @@
   checking the editor under a path with Turkish letters in it, which was
   not the cause.
 
+- **Completion offers a module's own functions.** A bare name's completion
+  lists `self`'s methods, and it dropped every private one - and a def
+  without `pub` is the module's own, callable anywhere in it without a
+  receiver: typing `se` inside a def of a file that defines `selam` offered
+  `self` and `select` and not `selam`. Top-level code had no `self` in its
+  scope to ask at all. A bare name now offers private methods too, where
+  they can be called, and top-level code asks the module its file's header
+  opens; after a dot a private method is still not offered. `lsp_session.py`
+  types `ru` for a private `run` once inside a def and once at the top
+  level; the old list did not offer it inside the def.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

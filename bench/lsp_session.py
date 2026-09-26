@@ -643,6 +643,32 @@ def main():
          loud["detail"] == "String",
          f"loud : {loud and loud['detail']}")
 
+    # 12a. bare completion offers the module's own functions: `run` has no
+    #      `pub`, so it is the module's alone - callable anywhere in it
+    #      without a receiver, and left off the list because the list
+    #      dropped every private def; and top-level code had no `self` in
+    #      its scope to ask at all. Typed once inside a def, once at the top.
+    offered = []
+    for version, text, line, character in (
+            (70, holler_app.replace("\n  loud\n", "\n  ru\n"), 7, 4),
+            (71, holler_app.replace("\nputs run\n", "\nputs ru\n"), 10, 7)):
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": app_uri, "version": version},
+                "contentChanges": [{"text": text}]}, wait=False)
+        c.diagnostics(app_uri)
+        reply = c.send("textDocument/completion",
+                       {"textDocument": {"uri": app_uri},
+                        "position": {"line": line, "character": character}})
+        offered.append(any(i["label"] == "run" for i in reply["result"]["items"]))
+    step("12a", "bare completion offers the module's own functions",
+         offered == [True, True],
+         f"inside a def {offered[0]}, at the top level {offered[1]}")
+    # Back to the text step 12 left, for the steps that follow.
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": app_uri, "version": 72},
+            "contentChanges": [{"text": bare}]}, wait=False)
+    c.diagnostics(app_uri)
+
     # 12b. the same question with nothing typed yet — Ctrl+Space, which is
     #      how an editor asks for the whole scope rather than for what
     #      starts with two letters. The scope is the compiler's, and the

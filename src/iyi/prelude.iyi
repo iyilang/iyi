@@ -5125,6 +5125,15 @@ require "./file"
 
       @@helper_black : UInt64 = 0_u64
 
+      # The helpers the last mark beside the program asked for, for the
+      # exercises: on Windows no more than the cores the program's own
+      # threads leave (`start_concurrent` says why).
+      @@beside_helpers : UInt64 = 0_u64
+
+      def self.beside_helpers : UInt64
+        @@beside_helpers
+      end
+
       {% if flag?(:linux) %}
         # The generation is one word and every helper sleeps on it: a
         # futex wake of fifteen threads is microseconds, and a per-helper
@@ -6454,6 +6463,25 @@ require "./file"
           # mark's live bytes here, binary trees ran a tenth slower than
           # with all of them.
           helpers = @@helpers
+          {% if flag?(:win32) %}
+            # Every helper there is, while the cores are otherwise idle -
+            # and not past them: a program running threads of its own has
+            # them on those cores, and each helper beyond the cores it
+            # leaves took one from a thread of the program's. Measured on
+            # twelve cores with eleven helpers, four threads allocating
+            # beside the mark: their longest stall median 41 ms and the
+            # longest pause's 20.5, against 21.6 and 2.9 with the helpers
+            # held to the cores the threads leave (12 runs each); with one
+            # thread nothing is held back and nothing changed (9.4 ms,
+            # 8.7), and binary trees ran as it did.
+            # The floor is one helper, which takes the finish. Asserted
+            # where it was measured.
+            threads = IyiThread.program_threads
+            cores = IyiThread.core_count
+            free = cores > threads + 1_u64 ? cores - threads : 1_u64
+            helpers = free if helpers > free
+          {% end %}
+          @@beside_helpers = helpers
           @@workers = helpers + 1_u64
           pool_word(POOL_MARK_TAKEN).value.set(0_u64)
           pool_word(POOL_MARK_PERMITS).value.set(helpers)

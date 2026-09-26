@@ -156,6 +156,22 @@
   runtime's only where the machine gives its threads their cores, and the
   line is there so a pause is read against it.
 
+- **On Windows, a mark beside a busy program leaves the program its
+  cores.** A mark beside the program asked for every helper there was, on
+  the ground that the cores were otherwise idle; a program running threads
+  of its own had them on those cores, and eleven helpers on twelve took
+  them. With four threads allocating beside the mark, their longest stall
+  had a median of 41 ms and the longest pause 20.5 ms; with the helpers held to
+  the cores the program's threads leave, 21.6 and 2.9 (12 runs each, and
+  27.5 and 11.4 in a later 12 on a slower hour). A fixed default of seven
+  did as well there but gave up a single thread's pause (1.1 ms against
+  0.4), which the cap leaves alone: one thread gets every helper, as
+  before, and binary trees ran as it did. At eight threads the machine's
+  own gaps were larger than any difference. The concurrent mark exercise
+  runs a thread on every core but one beside a mark and asserts on
+  Windows that it asked for one helper; with the cap removed it asked for
+  eleven. Linux and darwin are unchanged, as they are unmeasured.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before
@@ -10484,7 +10500,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,879-line library and nothing else. Every other
+  written against iyi's own 17,914-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

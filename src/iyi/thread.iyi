@@ -457,6 +457,13 @@
       @@stop_ns
     end
 
+    # The program's own threads: every registered one, and the main
+    # thread before anything registered it. What the mark beside the
+    # program leaves the cores to on Windows.
+    def self.program_threads : UInt64
+      @@count > 1_i64 ? @@count.to_u64 : 1_u64
+    end
+
     def self.new_line : UInt64
       __iyi_mmap(IYI_THREAD_LINE).address
     end

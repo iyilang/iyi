@@ -4,14 +4,15 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Five steps, the last two failure proofs:
+# Six steps, the last three failure proofs:
 #   1. The program holds, release: twenty-four rounds each move a payload
 #      out of an unmarked chain into an already-marked holder under a
 #      running mark, and every payload is intact after the collection.
 #   2. The pauses, printed: the stop-the-world mark over the same chain
 #      against a concurrent collection's two stops, and the longest the
 #      program's thread spent waking the helpers, which on Windows is
-#      held under 1 ms.
+#      held under 1 ms; and how many helpers a mark beside a thread on
+#      every core but one asked for, which on Windows is held to one.
 #   3. The machine alone, printed: one thread per core reading the clock
 #      and nothing else, and the longest gap any of them saw. A pause is
 #      only the runtime's where the machine gives its threads their cores:
@@ -22,6 +23,8 @@
 #      program exits 1 saying so.
 #   5. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check exits 1.
+#   6. Failure proof, on Windows: the cap on the helpers beside a busy
+#      program removed, and the share check exits 1.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,7 +66,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(moves|pause|wake):' answers.txt | sed 's/^/  /'
+grep -E '^(moves|pause|wake|share):' answers.txt | sed 's/^/  /'
 
 # What the machine takes away on its own: a thread per core that reads the
 # clock and does nothing else - no allocation, so no collection - for a
@@ -167,6 +170,21 @@ for try in 1 2 3 4 5; do
 done
 [ -n "$caught" ] || { echo "the wake check did not fire in 5 runs:"; tail -3 boosted.txt; exit 1; }
 printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
+
+step "failure proof: a mark beside a busy program that asks for every helper is caught"
+mkdir -p greedy/iyi
+cp "$REPO"/src/iyi/*.iyi greedy/iyi/
+awk '/^ *helpers = free if helpers > free$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > greedy/iyi/prelude.iyi || { echo "the cap this proof removes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/greedy${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o greedy-run > build-greedy.log 2>&1; then
+  cat build-greedy.log; exit 1
+fi
+timeout -k 5 300 ./greedy-run > greedy.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
+  echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

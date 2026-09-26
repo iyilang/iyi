@@ -222,6 +222,27 @@
     Stops.note
   end
 
+  # Threads of the program's own, allocating until told to stop: the
+  # cores they hold are not the helpers' to take.
+  class Busy
+    @@page : UInt64 = 0_u64
+
+    def self.setup : Nil
+      @@page = __iyi_mmap(4096_u64).address
+    end
+
+    def self.stop : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page)
+    end
+  end
+
+  def busy_until_stopped : Nil
+    while Busy.stop.value.get == 0_u64
+      block = Pointer(UInt8).malloc(64_u64)
+      block.value = 1_u8
+    end
+  end
+
   index = 0
   while index < 64
     Roots.holders << Holder.new
@@ -294,6 +315,43 @@
     fail("wake: waking the helpers held the program's thread #{(wake // 1000_u64).to_i64} us") if wake > 1000000_u64
   {% end %}
   puts "wake: the program's thread spent at most #{(wake // 1000_u64).to_i64} us waking the helpers for a mark"
+
+  # ── The helpers' share beside a busy program ──────────────────────────
+  # The program runs a thread for every core but one, and a mark starts
+  # beside them: on Windows it asks for one helper, where it asked for
+  # every helper there was and the threads' stalls doubled (the prelude's
+  # `start_concurrent` has the numbers). Asserted where it was measured;
+  # printed everywhere.
+  cores = IyiThread.core_count
+  if cores >= 3_u64
+    Busy.setup
+    busy = [] of IyiThread
+    while busy.size.to_u64 < cores - 2_u64
+      busy << IyiThread.start { busy_until_stopped; nil }
+    end
+    threads = IyiThread.program_threads
+    IyiMark.auto = false
+    chain = build_chain(7_u64)
+    IyiMark.auto = true
+    asked = 0_u64
+    marked = false
+    attempt = 0
+    while !marked && attempt < 8
+      marked = allocate_until_marking
+      asked = IyiMark.beside_helpers if marked
+      IyiMark.settle
+      attempt = attempt + 1
+    end
+    Busy.stop.value.set(1_u64)
+    busy.each(&.join)
+    IyiMark.auto = false
+    fail("share: no mark ran beside the busy threads in 8 tries") unless marked
+    {% if flag?(:win32) %}
+      fail("share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers rather than 1") if asked != 1_u64
+    {% end %}
+    puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
+  end
   puts "concurrent mark: every property held"
 {% else %}
   puts "concurrent mark: needs the collector and a thread target; nothing to exercise here"

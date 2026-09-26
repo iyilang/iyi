@@ -122,7 +122,7 @@ case "$(uname -s)" in
   Darwin)
     echo
     echo "== the proofs"
-    echo "  not here: darwin keeps a released page's bytes until it needs the memory, so neither break can be shown on demand; Linux runs both and Windows the second"
+    echo "  not here: darwin keeps a released page's bytes until it needs the memory, so neither break can be shown on demand; Linux and Windows run both"
     echo
     if [ "$status" -eq 0 ]; then
       echo "reuse integrity gate: every step held"
@@ -137,22 +137,14 @@ echo
 echo "== the check fails when a released page takes a listed chunk's words"
 # The straddler's page released with the rest, as it was: the lowest chunk
 # of a cold run keeps its place on the list with its slot word zeroed.
-# Not on Windows. Linux, which sweeps with helper threads, shows the break
-# in the exercise; Windows has no sweep helpers, and with the line taken
-# out the exercise passed 20 runs of 20 under its lazy sweep, and failed
-# 10 of 10 with the sweep of the whole heap inside the pause it had until
-# it swept lazily too. A proof that cannot fail here is not one to run.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "  not here: with the line taken out the exercise passed 20 runs of 20 under Windows' lazy sweep, which has no helper threads; Linux runs this proof"
-    ;;
-  *)
-    prove_breaks straddler \
-      '{ if ($0 ~ /^        cold_low = cold_low \+ IyiHeap::PAGE if straddler >= low && /) { print "        # removed"; found = 1; next } print }
-       END { if (!found) exit 3 }' \
-      "$DONE"
-    ;;
-esac
+# Linux and Windows, which sweep with helper threads, show the break in
+# the exercise: on Windows the exercise failed 20 runs of 20 with the line
+# taken out once its helpers swept, and passed 20 of 20 while its lazy
+# sweep was the allocator's alone.
+prove_breaks straddler \
+  '{ if ($0 ~ /^        cold_low = cold_low \+ IyiHeap::PAGE if straddler >= low && /) { print "        # removed"; found = 1; next } print }
+   END { if (!found) exit 3 }' \
+  "$DONE"
 
 echo
 echo "== the check fails when a released page keeps its bytes"

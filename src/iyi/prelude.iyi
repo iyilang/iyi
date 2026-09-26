@@ -472,6 +472,11 @@ end
     fun GetQueuedCompletionStatus(completion_port : Void*, lp_number_of_bytes_transferred : Int32*, lp_completion_key : UInt64*, lp_overlapped : Void**, dw_milliseconds : Int32) : Int32
     fun PostQueuedCompletionStatus(completion_port : Void*, dw_number_of_bytes_transferred : Int32, dw_completion_key : UInt64, lp_overlapped : Void*) : Int32
     fun CancelIoEx(h_file : Void*, lp_overlapped : Void*) : Int32
+    # Standard input's reader thread (`IyiStdinReader`): what the handle
+    # is - a disk file is read on the spot, a pipe or a console by the
+    # thread - and how a read that thread is blocked in is withdrawn.
+    fun GetFileType(h_file : Void*) : Int32
+    fun CancelSynchronousIo(h_thread : Void*) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
@@ -4977,9 +4982,6 @@ require "./file"
         {% end %}
       end
 
-      # Windows has the helpers of a stopped mark and nothing more: the
-      # mark beside the program and the sweep round are Linux's and
-      # darwin's (their arms below say so), so a helper there only marks.
       {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       def self.default_helpers : UInt64
         cores = IyiThread.core_count
@@ -5027,32 +5029,28 @@ require "./file"
             IyiHeap.write64(w + W_BLACK, drain(w))
             fold_helper(w)
             pool_word(POOL_HELPERS_DONE).value.add(1_u64)
-            {% unless flag?(:win32) %}
-              # Beside the program, the drain's end is not the mark's: the
-              # first taker waits for the rest - for the count taken, which
-              # rises if another helper is still arriving and is never a
-              # promise a missing helper has to keep - and takes the second
-              # stop.
-              if slot == 0_u64 && pool_word(POOL_FINISH).value.get != 0_u64
-                pool_word(POOL_FINISH).value.set(0_u64)
-                while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
-                  spin_pause
-                end
-                # The finish turns the generation once more, for the
-                # remainder, and again for the sweep round; that is the one
-                # this helper waits past next.
-                seen = finish_concurrent
+            # Beside the program, the drain's end is not the mark's: the
+            # first taker waits for the rest - for the count taken, which
+            # rises if another helper is still arriving and is never a
+            # promise a missing helper has to keep - and takes the second
+            # stop.
+            if slot == 0_u64 && pool_word(POOL_FINISH).value.get != 0_u64
+              pool_word(POOL_FINISH).value.set(0_u64)
+              while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
+                spin_pause
               end
-            {% end %}
-          end
-          {% unless flag?(:win32) %}
-            # The round, if one is open and a permit is left: arenas until
-            # none is left or a collection closes it.
-            if take_sweep_permit
-              while sweep_one_helper
-              end
+              # The finish turns the generation once more, for the
+              # remainder, and again for the sweep round; that is the one
+              # this helper waits past next.
+              seen = finish_concurrent
             end
-          {% end %}
+          end
+          # The round, if one is open and a permit is left: arenas until
+          # none is left or a collection closes it.
+          if take_sweep_permit
+            while sweep_one_helper
+            end
+          end
         end
       end
 
@@ -5063,19 +5061,27 @@ require "./file"
       # and its every-collection stop went from tens of microseconds to
       # milliseconds when the helpers stopped spinning. Collections come
       # in bursts, so a helper that spins for the length of one stays hot
-      # through the burst and sleeps between them; SPIN_BEFORE_PARK is
-      # about fifty microseconds of the pause hint.
-      SPIN_BEFORE_PARK = 20000_u64
+      # through the burst and sleeps between them. The spin is fifty
+      # microseconds by the clock: it was 20,000 pause hints, which is
+      # fifty microseconds where a hint is 2.5 ns, and a hint is not that
+      # everywhere - on a twelve-core Windows machine it was 20 ns, the
+      # spin 400 us, and churn's collections, one every half millisecond,
+      # never let a helper without work park: eleven helpers held eight
+      # cores spinning, and churn ran 0.162 s against 0.068 marked alone.
+      # The clock is read once every SPIN_CHECK hints.
+      SPIN_BEFORE_PARK_NS = 50000_u64
+      SPIN_CHECK = 1024_u64
 
       def self.spin_for_generation(word : Pointer(Atomic(UInt64)), seen : UInt64) : UInt64
+        deadline = now_ns + SPIN_BEFORE_PARK_NS
         spins = 0_u64
-        while spins < SPIN_BEFORE_PARK
+        while true
           now = word.value.get
           return now if now != seen
           spin_pause
           spins = spins + 1_u64
+          return seen if spins & (SPIN_CHECK - 1_u64) == 0_u64 && now_ns >= deadline
         end
-        seen
       end
 
       # A round's permits are SWEEP_HELPERS; on Linux that many helpers
@@ -5509,14 +5515,14 @@ require "./file"
       # Whether helpers are at a round right now: the allocating thread
       # spins on a class's batch only while one is coming.
       def self.helpers_sweeping? : Bool
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           @@helpers > 0_u64 && @@sweep_left != 0_u64 && pool_word(POOL_SWEEP).value.get != 0_u64
         {% else %}
           false
         {% end %}
       end
 
-      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
         # A helper's turn of the round: one slice, the way an allocating
         # thread takes one - so three helpers are on one arena at once,
         # and the arena a program churns through is swept three times
@@ -5616,7 +5622,7 @@ require "./file"
       # An allocating thread about to wait on a class names it for the
       # helpers; the last to name one is the one they read.
       def self.sweep_wanted(index : Int32) : Nil
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           pool_word(POOL_SWEEP_WANTED).value.set(index.to_u64 + 1_u64)
         {% end %}
       end
@@ -6147,7 +6153,7 @@ require "./file"
       end
 
       def self.collect_if_due : Nil
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           # Helper 0 takes a concurrent mark's second stop, and a stop
           # names registered threads only: a program that never started a
           # thread has a main thread with no line until here, and the
@@ -6165,7 +6171,7 @@ require "./file"
           return
         end
         @@collecting = true
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           start_helpers(@@helpers_wanted)
           close_sweep_round
           if concurrent_possible?
@@ -6187,7 +6193,7 @@ require "./file"
         collect_locked(false)
         @@collecting = false
         IyiRuntimeLock.unlock
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           wake_sweep_round
         {% end %}
       end
@@ -6210,7 +6216,7 @@ require "./file"
           IyiRuntimeLock.lock
         end
         @@collecting = true
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           close_sweep_round
         {% end %}
         collect_locked(true)
@@ -6292,10 +6298,8 @@ require "./file"
         # blackened it — which is what lets the sweep be lazy: the budget
         # no longer waits on a sweep to count.
         @@budget = next_budget(@@bytes_marked)
-        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           open_sweep_round
-          IyiThread.resume_others(others)
-        {% elsif flag?(:win32) && flag?(:x86_64) %}
           IyiThread.resume_others(others)
         {% end %}
         pause = now_ns - started
@@ -6310,7 +6314,7 @@ require "./file"
         budget == 0 ? MIN_BUDGET : budget
       end
 
-      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
+      {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
         # ── The mark beside the program — GC_DESIGN.md Stage 9 ──────────────
         #
         # Two stops instead of one. The first is the roots: every thread

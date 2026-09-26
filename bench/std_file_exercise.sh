@@ -148,9 +148,14 @@ old = '      path = tmpdir + File::SEPARATOR_STRING + prefix + "_" + temp_token 
 assert src.count(old) == 1
 src = src.replace(old, old.replace("temp_token", '(prefix == "plant" ? "0000000000000000" : temp_token)'), 1)
 if os.environ["EXCLUSIVE"] == "no":
+    # Linux's O_EXCL dropped, and Windows' CREATE_NEW made OPEN_ALWAYS (4),
+    # which opens what is at the name - through a symlink - and answers it.
     old = "      fd = __iyi_openat(sys_path(path), 1 | 64 | 128 | 0x80000, 384)"
     assert src.count(old) == 1
     src = src.replace(old, "      fd = __iyi_openat(sys_path(path), 1 | 64 | 0x80000, 384)", 1)
+    old = "        Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))"
+    assert src.count(old) == 1
+    src = src.replace(old, "        Pointer(Void).new(0_u64), 4, 0x80, Pointer(Void).new(0_u64))", 1)
 open(sys.argv[2], "w").write(src)
 PY
   then
@@ -203,7 +208,14 @@ PY
 seek_broken
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "  a planted symlink: not measured here, the exercise plants none on Windows" ;;
+    # The exercise asks Windows whether this account may make a symlink
+    # (an administrator or Developer Mode), and says so when it may not.
+    if grep -q "symlink checks skipped" "$WORK/file-plain.out"; then
+      echo "  a planted symlink: not measured here, this account may not make a symlink (not an administrator, no Developer Mode)"
+    else
+      tempfile_broken "a predictable temporary name" predictable "a hundred fresh names were all taken" yes
+      tempfile_broken "a predictable name, tested then written" follows "tempfile never answers a planted symlink" no
+    fi ;;
   Linux)
     tempfile_broken "a predictable temporary name" predictable "a hundred fresh names were all taken" yes
     tempfile_broken "a predictable name, tested then written" follows "tempfile never answers a planted symlink" no ;;

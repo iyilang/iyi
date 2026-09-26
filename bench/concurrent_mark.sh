@@ -44,21 +44,16 @@ cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
 
-case "$(uname -s)" in
-  Linux | Darwin) ;;
-  *) echo "concurrent mark: measured on Linux and darwin; nothing to measure here"; exit 0 ;;
-esac
-
 step "the mark beside the program, release build"
 if ! "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o marks > build.log 2>&1; then
   cat build.log; exit 1
 fi
-if ! timeout 300 ./marks > answers.txt 2>&1; then
+if ! timeout -k 5 300 ./marks > answers.txt 2>&1; then
   cat answers.txt; exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
-step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu) cores here)"
+step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
 grep -E '^(moves|pause):' answers.txt | sed 's/^/  /'
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
@@ -69,7 +64,7 @@ cmp -s patched/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk fo
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o nobarrier > build-nobarrier.log 2>&1; then
   cat build-nobarrier.log; exit 1
 fi
-timeout 300 ./nobarrier > nobarrier.txt 2>&1
+timeout -k 5 300 ./nobarrier > nobarrier.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -q "the barrier lost it" nobarrier.txt; then
   echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1

@@ -351,7 +351,11 @@ class IyiIO
       end
     {% elsif flag?(:win32) %}
       if target_fd == 0_i64
-        __iyi_read(0, buffer, count)
+        # Parked, as on Linux: a pipe or a console is read by a thread of
+        # its own (`IyiStdinReader`), a disk file where it is asked.
+        outcome = iyi_read(0, buffer, count)
+        return 0_i64 if outcome.is_a?(Cancelled)
+        outcome
       else
         __iyi_file_read(target_fd, buffer, count)
       end

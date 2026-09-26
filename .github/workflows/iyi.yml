@@ -1603,6 +1603,13 @@ jobs:
         shell: cmd
         run: make -f Makefile.win iyi
 
+      # A rebuild with an editor open: `iyi lsp` holds `.build\iyi.exe`, and
+      # Windows will not move a file onto a running program, so Makefile.win
+      # renames the running one aside first.
+      - name: A running iyi is replaced, not refused
+        shell: bash
+        run: bash bench/replace_running.sh
+
       - name: Every rule this fork adds, on Windows
         shell: cmd
         run: |
@@ -1680,8 +1687,11 @@ jobs:
       - name: Every exercise the runtime can hold
         shell: pwsh
         run: |
+          # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
+          # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
-            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi"
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
+            "stdin_park.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -2018,8 +2028,9 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
-      # And the parallel mark: Windows' mark has helper threads now, parked
-      # on a kernel32 semaphore between collections.
+      # And the parallel mark and the mark beside the program: Windows'
+      # helpers park on a kernel32 semaphore between collections, and the
+      # second stop is a helper's, suspending every registered thread.
       - name: The collector's gates, on Windows
         shell: bash
         run: |
@@ -2030,6 +2041,7 @@ jobs:
           bash bench/collect_trigger.sh
           bash bench/thread_exercise.sh
           bash bench/parallel_mark.sh
+          bash bench/concurrent_mark.sh
 
       - name: The standard library's gates, on Windows
         shell: bash

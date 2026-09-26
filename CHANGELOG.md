@@ -13,6 +13,33 @@
   version. Only a line that writes one pays for reading the package's
   source.
 
+- **Windows sweeps with helper threads.** A collection there left its
+  arenas to the allocating thread alone, where Linux's and darwin's open a
+  round the helpers sweep beside the program. Windows opens it too: the
+  round is closed before the next stop and its helpers woken after the
+  runtime lock is released, as there. In `collect_trigger.sh` on a
+  twelve-core Windows machine the helpers began 321 arenas and the
+  allocator 9 across 33 collections. `reuse_integrity.sh`'s proof that a
+  released page must not take a listed chunk's words runs on Windows now:
+  with the fix taken out the exercise failed 20 runs of 20, where without
+  the helpers it passed 20 of 20 and the proof was skipped there.
+
+- **Windows marks beside the program.** A large live set on Windows was
+  marked inside the pause; Linux and darwin stop for the roots, mark
+  beside the program under the write barrier, and stop again to finish
+  (GC_DESIGN.md Stage 9). Windows does now: the main thread is
+  registered at the first collection so helper 0's second stop can
+  suspend it, and a thread inside the barrier is let run to its end and
+  parks there, as one inside the allocator already was.
+  `concurrent_mark.sh` runs on Windows and in the `windows-std` job: on a
+  twelve-core Windows machine every payload moved under a mark survived
+  in 8 runs of 8, and with the barrier's shade taken out the first was
+  freed. Against the same collector marking inside the pause,
+  `gc_race.py`'s binary trees' longest pause went from 4.78 ms to 1.21
+  and its total from 58.2 to 7.5, live churn's from 14.96 ms to 0.41 and
+  59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
+  against 0.059 - the helpers' spin before their park, fixed below.
+
 ### Changed
 
 - **A package's modules live under its name, so two packages' `util`s are
@@ -37,6 +64,134 @@
   `rm -rf "$WORK"`, under the step still reading it: "exited 0 without
   saying why", on CI and in 62 of 200 runs under load here. The watch is a
   loop in the gate's own shell now; 200 of 200 held.
+
+- **A helper's spin before it parks is fifty microseconds by the clock.**
+  It was 20,000 pause hints, said to be fifty microseconds, which it is
+  where a hint costs 2.5 ns; on a twelve-core Windows machine a hint cost
+  20 ns and the spin 400 us, and churn, which collects every half
+  millisecond, had helpers without work that never parked - eleven of
+  them spinning beside three sweeping and the allocating thread. The
+  spin reads the clock every 1,024 hints now. Marking beside the program
+  with eleven helpers, churn's median went from 0.162 s to 0.071 (0.067
+  marked inside the pause), binary trees' from 0.267 s to 0.230 and its
+  total pause from 16.9 ms to 11.5, live churn's from 0.177 s to 0.156.
+  `parallel_mark.sh` times the spin on Linux and Windows - 50 us on that
+  machine - and a spin that ignores the clock fails it.
+
+- **The language server's binary-gone step kills every worker it finds.**
+  `lsp_memory.py` moved the binary aside and killed the first worker the
+  proxy listed, and on Windows' runner it failed now and then with the
+  hover answered: a retirement starts the successor before it stops the
+  worker it replaces, right after the answer that made that one spent -
+  on Windows the 24th request, one of the hovers before the step on a
+  slow machine - and the gate killed the worker being replaced while its
+  successor answered. Forced onto that answer, the step failed 4 runs of
+  8 and passes 8 of 8 now: it kills the proxy's workers until it has
+  none, and asks the binary of whichever worker can still answer, where
+  a worker that had just exited made it skip the step as if there were
+  no `/proc`.
+
+  And it counts only the workers. A proxy with no console of its own, as
+  a CI step starts it, has `conhost.exe` among its children: run that way
+  here, the step took Windows' console host for the worker and died
+  renaming it, 10 runs of 10, and in the other order killed it and took
+  the proxy's console with it - the proxy then died of a stack overflow.
+  It reads the binary off the proxy itself, which starts its workers from
+  its own, and kills only children that run it: 8 of 8 run that way, and
+  the whole gate holds. The runner's own failure on this branch - the
+  hover answered, one worker listed - was not reproduced here, a worker
+  start slowed to the length of a virus scan included; the step now also
+  waits until nothing holds the moved binary, which a `CreateProcess`
+  still loading it does before the process list shows it, and a run that
+  fails says which worker answered, from which file.
+
+- **The remainder's guard is proved on Windows too.** `number_exercise.sh`
+  takes the guard off `Int32::MIN % -1` and asks the program to die of
+  the processor's fault; on Windows it said "not measured here, because
+  Windows delivers no signal". Windows delivers the fault as the exit
+  code, STATUS_INTEGER_OVERFLOW (0xC0000095), which Git Bash reports as
+  127 - the code of a command it could not find - so the proof reads it
+  whole through PowerShell: without the guard the program ends with
+  0xC0000095, and with it prints 0 and ends with 0.
+
+- **A Windows language server retires its worker on what the worker
+  costs.** The worker says its resident megabytes after each request and
+  the proxy replaces it at 512; on Windows it said 0, having no
+  `getrusage`, and the proxy counted 24 requests instead - more than a
+  collector-free front end can take in 512 MB. Windows answers the same
+  question with the peak working set (`K32GetProcessMemoryInfo`,
+  kernel32's own), and the worker says that now. The gates measure it
+  too, where `/proc` was all they read and Windows' steps said
+  "unmeasured": in `lsp_memory.py` a session typing without a pause
+  peaked at 1,023 MB against its 760 bound, and at 510 now; paused, it
+  rested at 298, 43, 44 and 46 MB, and at 39 to 43 now; and
+  `lsp_positions.py`'s largest of 68 sessions held 541 MB under its 1,024.
+
+- **`make -f Makefile.win iyi` with an editor open.** The build writes
+  `iyi-next.exe` and moves it onto `.build\iyi.exe` because Windows will
+  not overwrite a running program - but it will not move a file onto one
+  either, and `iyi lsp` runs whenever an editor is open: the move said
+  "Access is denied" and the build failed at its last line. A running
+  binary can be renamed, so the old one steps aside under a name of its
+  own and the new one takes the name; what stepped aside is deleted by the
+  next build once nothing runs it. `replace_running.sh` replaces a running
+  `iyi lsp`'s binary through Makefile.win's own macro, checks the new file
+  is at the name with the session still running and the old one gone at
+  the next build, and shows the plain move refused - 20 runs of 20 here.
+  It waits for the old file to be unheld before that build: on the Windows
+  runner a handle stayed on the renamed file half a second after its
+  process ended, and the delete that follows a rename is refused while
+  one does.
+  `lsp_session.py`'s rebuild step, skipped on Windows for want of
+  `.build/iyi`, moves the running `.build/iyi.exe` aside the same way and
+  the session compiles on.
+
+- **A planted symlink is checked on Windows.** `std_file_exercise` plants
+  a symlink where the next temporary file would go and asks that
+  `File.tempfile` make its file elsewhere and leave the target alone; on
+  Windows it planted none and said "not measured here". It plants one now
+  wherever the account may make a symlink - the exercise already asks
+  Windows that for its own symlink checks, and an administrator, as on
+  the Windows runners, may - and the two proofs run there: a predictable
+  name refused a hundred times, and `CREATE_NEW` made `OPEN_ALWAYS`,
+  which follows the link. The mode check stays POSIX's; a Windows file's
+  reach is its ACL. An account that may not make a symlink is told so,
+  as this one is. The symlink is planted where `File.tempfile` makes its
+  file, which `Dir.tempdir` answers: the exercise named `/tmp`, and run
+  without TMPDIR on the Windows runner it tried to plant it there.
+
+- **`server_load` proves Windows' poller memory is kept.** The gate hides
+  what the kernel writes into from the collector and asks the run to
+  fail; on Linux and darwin that is the epoll or kqueue event buffer, and
+  on Windows it said "not measured here". What the kernel writes into
+  there is the fiber's OVERLAPPED, one per fiber and reused for each of
+  its operations. Held as a number it still passed every run - the
+  canaries are larger than its 32 bytes, and a collection rarely lands
+  where only the fiber's field holds it. The exercise collects exactly
+  there now, between a connection's read and its write, and asks that
+  the OVERLAPPED come out live: held as a number it fails 8 runs of 8,
+  plain and release, and intact it holds through 210 collections.
+
+- **A fiber reading stdin parks on Windows.** III.4.8 named the stdin read
+  as the call that had to stop being a blocking syscall, and on Linux and
+  darwin a fiber waiting for a line parks. On Windows the read was the
+  thread's: a sibling ticking every 100 ms beside `stdin.gets` on a pipe
+  that answered after two seconds ticked 0 times in them, and a console
+  was the same. A pipe or a console handed to a program cannot be read
+  through the completion port, so a thread of its own makes the blocking
+  read, as Go does for the same handles, and posts its end to the port;
+  the fiber parks meanwhile, and a disk file is read where it is asked,
+  as before. A cancellation or a deadline withdraws the read - ended with
+  `CancelSynchronousIo` on a pipe, in 200 ms in the gate, with the next
+  line read whole - but not a console's once it has begun: ended, the
+  console kept the request and handed it the next line typed, so a read
+  cancelled at 300 ms lost "first" and the next read answered "second".
+  A console's read runs to its line and answers it. A 400,000-line pipe
+  reads in the same time as before (306 to 321 ms against 308 to 317).
+  `concurrency_exercise.sh` feeds `bench/stdin_park.iyi` a pipe on every
+  platform; with the read made the blocking call again it fails. The
+  Windows job's run of every bench program leaves it to that gate, as it
+  does the programs whose input their gates supply.
 
 ## 0.15.1 — 2026-09-25
 
@@ -10230,7 +10385,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,593-line library and nothing else. Every other
+  written against iyi's own 17,838-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

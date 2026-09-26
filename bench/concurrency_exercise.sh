@@ -4,13 +4,15 @@
 #
 #     bash bench/concurrency_exercise.sh
 #
-# Four steps, and the last two are failure proofs, because a gate that
+# Five steps, and the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
 #   1. The exercise holds every asserted property, plain and --release —
 #      the release arm is not decoration: the context switch is naked asm,
 #      and the optimiser is the thing that corrupted it until @[NoInline]
-#      said not to.
+#      said not to. And a fiber reading stdin parks, and is cancelled
+#      there (bench/stdin_park.iyi, fed by a pipe), which a read made the
+#      blocking call it was is refused for.
 #   2. The binary keeps the dependency floor (III.9): on Linux the runtime
 #      is raw syscalls and must add zero undefined symbols; on darwin the
 #      floor is libSystem and nothing else, held as the exact symbol list;
@@ -45,6 +47,13 @@ case "$(uname -s)" in
     ;;
 esac
 
+# The search path is a list, and the byte between its entries is the
+# platform's: `;` where a drive letter already owns the colon.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
+  *) PSEP=':' ;;
+esac
+
 . "$REPO/bench/floor_base.sh"
 
 cd "$WORK" || exit 1
@@ -77,6 +86,48 @@ if ! timeout 60 ./exercise-release > answers-release.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
+
+# ── 1b. A fiber reading stdin parks, and is cancelled there ───────────────
+# bench/stdin_park.iyi, fed by a pipe that answers after two seconds and
+# again after four. On Windows the read is a thread's of its own
+# (`IyiStdinReader`); here, it was the program's thread's, and the proof
+# below puts that back.
+step "a fiber reading stdin parks, and is cancelled there"
+if ! "$IYI" build "$REPO/bench/stdin_park.iyi" -o stdin_park > build-stdin.log 2>&1; then
+  echo "stdin exercise failed to build:"
+  tail -5 build-stdin.log
+  exit 1
+fi
+(sleep 2; echo first; sleep 2; echo second) | timeout -k 5 60 ./stdin_park > stdin.txt 2>&1
+if ! grep -q 'every property held' stdin.txt; then
+  echo "stdin exercise failed:"
+  cat stdin.txt
+  exit 1
+fi
+sed 's/^/  /' stdin.txt | grep -v 'every property held'
+
+step "failure proof: a stdin read that holds the thread is refused"
+mkdir -p blocking/iyi
+cp "$REPO"/src/iyi/*.iyi blocking/iyi/
+sed 's/^        outcome = iyi_read(0, buffer, count)$/        outcome = __iyi_read(0, buffer, count)/' \
+  "$REPO/src/iyi/io.iyi" > blocking/iyi/io.iyi
+if [ "$(diff "$REPO/src/iyi/io.iyi" blocking/iyi/io.iyi | grep -c '^>')" -lt 1 ]; then
+  echo "the sed found no stdin read to make blocking"
+  exit 1
+fi
+if ! IYI_PATH="$WORK/blocking${PSEP}$REPO/src" "$IYI" build "$REPO/bench/stdin_park.iyi" -o stdin_blocking > build-blocking.log 2>&1; then
+  echo "the blocking copy failed to build:"
+  tail -5 build-blocking.log
+  exit 1
+fi
+(sleep 2; echo first; sleep 2; echo second) | timeout -k 5 60 ./stdin_blocking > stdin-blocking.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'held the thread' stdin-blocking.txt; then
+  echo "a stdin read that holds the thread was not refused (exit $code):"
+  cat stdin-blocking.txt
+  exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'held the thread' stdin-blocking.txt | sed 's/^FAIL: //')"
 
 # ── 2. The dependency floor ───────────────────────────────────────────────
 # On Linux the five allowed names are the C runtime template's, not the

@@ -1176,6 +1176,18 @@ class IyiScheduler
     ov
   end
 
+  {% if flag?(:win32) %}
+    # A park for standard input's reader thread: off the io list, which is
+    # the port's operations, and woken by `IyiStdinReader.delivered`.
+    def self.park_stdin_current(ms : Int32) : Nil
+      fiber = current
+      fiber.state = IyiFiberState::WaitingIo
+      fiber.wait_handle = Pointer(Void).new(0_u64)
+      arm_deadline(fiber, ms)
+      reschedule
+    end
+  {% end %}
+
   def self.park_overlapped_current(ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     fiber.state = IyiFiberState::WaitingIo
@@ -1195,6 +1207,15 @@ class IyiScheduler
     handle = Pointer(Void).new(0_u64)
     if fd == 0_i32 || fd == 0_i64
       handle = LibC.GetStdHandle(-10)
+      # A pipe or a console waits, and is read by a thread of its own; a
+      # zero-byte read is a question about readiness, which a console
+      # would answer by taking a character, so it is answered here. A disk
+      # file answers at once and is read where it is asked, without an
+      # OVERLAPPED: on a handle not opened for one, its offset is where the
+      # read starts, and every read would start at 0.
+      return __iyi_read(0_i64, buffer, count) unless IyiStdinReader.waits?(handle)
+      return 0_i64 if count == 0_u64
+      return IyiStdinReader.read(handle, IyiConsole.console?(0_i64, handle), buffer, count, ms)
     elsif fd == 1_i32 || fd == 1_i64
       handle = LibC.GetStdHandle(-11)
     elsif fd == 2_i32 || fd == 2_i64
@@ -1435,9 +1456,11 @@ class IyiScheduler
 
   def self.wait_for_events : Nil
     sleep_head = state.sleep_head
-    if state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
-      raise "deadlock: every fiber is blocked and nothing can wake one"
-    end
+    quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
+    {% if flag?(:win32) %}
+      quiet = quiet && !IyiStdinReader.waiting?
+    {% end %}
+    raise "deadlock: every fiber is blocked and nothing can wake one" if quiet
 
     timeout = -1_i64
     {% if flag?(:win32) %}
@@ -1466,7 +1489,9 @@ class IyiScheduler
       timer = gap_ns < 0 ? -1_i64 : deadline_timer
       if timer <= 0
         LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
-        if overlapped_ptr.address != 0_u64
+        if overlapped_ptr.address != 0_u64 && overlapped_ptr.address == IyiStdinReader.overlapped_address
+          IyiStdinReader.delivered
+        elsif overlapped_ptr.address != 0_u64
           fiber = io_take_overlapped(overlapped_ptr.address)
           if fiber.is_a?(IyiFiber)
             fiber.io_bytes_read = bytes_transferred.to_i64
@@ -1490,6 +1515,10 @@ class IyiScheduler
         overlapped_ptr = Pointer(Void).new(0_u64)
         more = LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), 0_i32)
         break if overlapped_ptr.address == 0_u64
+        if overlapped_ptr.address == IyiStdinReader.overlapped_address
+          IyiStdinReader.delivered
+          next
+        end
         fiber = io_take_overlapped(overlapped_ptr.address)
         if fiber.is_a?(IyiFiber)
           fiber.io_bytes_read = bytes_transferred.to_i64
@@ -1586,7 +1615,12 @@ class IyiScheduler
           # the port, and the OVERLAPPED is the fiber's next operation's
           # too: it is cancelled here, and the cancellation's completion is
           # what wakes the fiber, so nothing of it is left to arrive later.
-          LibC.CancelIoEx(head.wait_handle, head.wait_overlapped.as(Void*))
+          # Standard input's read is its thread's, and withdrawn there.
+          if IyiStdinReader.waiter?(head)
+            IyiStdinReader.withdraw
+          else
+            LibC.CancelIoEx(head.wait_handle, head.wait_overlapped.as(Void*))
+          end
           next
         {% else %}
           io_remove(head)
@@ -1852,6 +1886,209 @@ class IyiScheduler
     __iyi_exit(1)
   end
 end
+
+{% if flag?(:win32) %}
+  # Standard input, read by a thread of its own. A fiber reading stdin
+  # parks on Linux and darwin (III.4.8 named the call); on Windows the
+  # read was the thread's, and a fiber waiting for a line stalled every
+  # sibling: a ticker beside `stdin.gets` on a pipe that answered after
+  # two seconds ticked 0 times in them. A pipe or a console handed to a
+  # program is not opened for overlapped reads, so the completion port
+  # cannot be asked; the way Go answers the same handles is a thread that
+  # makes the blocking read and posts its end. This is that thread.
+  #
+  # One read at a time, as one reader per fd is the rule elsewhere. The
+  # fiber asks (ASKED) and rings; the thread claims the read (READING),
+  # makes it into the fiber's buffer - a console wide, through its own
+  # page, since it has no heap to allocate from - and posts to the port
+  # with an OVERLAPPED of its own, never the fiber's, so a post arriving
+  # late is never taken for the fiber's next operation. The poller hands
+  # the answer over (`delivered`) and the state is IDLE again.
+  #
+  # A cancellation or a deadline withdraws the read: before the thread
+  # claims it, the claim fails and the thread posts nothing read; after,
+  # `CancelSynchronousIo` ends a pipe's blocked read (a console's runs to
+  # its line, `withdraw` says why). Either way the fiber
+  # waits for the post before it returns, because its buffer is the
+  # thread's until then, and a read that did complete is answered with
+  # its bytes rather than lost.
+  class IyiStdinReader
+    IDLE      = 0_u64
+    ASKED     = 1_u64
+    READING   = 2_u64
+    WITHDRAWN = 3_u64
+    ANSWERED  = 4_u64
+
+    W_STATE    =     0_u64
+    W_BUFFER   =     8_u64
+    W_COUNT    =    16_u64
+    W_BYTES    =    24_u64
+    W_HANDLE   =    32_u64
+    W_CONSOLE  =    40_u64
+    W_PORT     =    48_u64
+    W_DOORBELL =    56_u64
+    W_THREAD   =    64_u64
+    OVERLAPPED =   128_u64
+    WIDE       =  4096_u64
+    PAGE       = 65536_u64
+
+    @@page : UInt64 = 0_u64
+    @@waiter : IyiFiber? = nil
+    @@answer : Int64 = 0_i64
+
+    def self.word(offset : UInt64) : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page + offset)
+    end
+
+    # The OVERLAPPED the thread posts, which the poller recognises; 0
+    # before the thread exists, which no post carries.
+    def self.overlapped_address : UInt64
+      @@page == 0_u64 ? 0_u64 : @@page + OVERLAPPED
+    end
+
+    def self.waiting? : Bool
+      @@waiter.is_a?(IyiFiber)
+    end
+
+    def self.waiter?(fiber : IyiFiber) : Bool
+      waiter = @@waiter
+      waiter.is_a?(IyiFiber) && waiter.sp_slot.address == fiber.sp_slot.address
+    end
+
+    # Whether stdin's handle is one a read of could wait: a pipe (3) or a
+    # character device (2), the console among them. A disk file (1)
+    # answers at once, and is read where it is asked.
+    def self.waits?(handle : Void*) : Bool
+      kind = LibC.GetFileType(handle)
+      kind == 2 || kind == 3
+    end
+
+    def self.start(handle : Void*) : Nil
+      @@page = __iyi_mmap(PAGE).address
+      word(W_HANDLE).value.set(handle.address)
+      word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
+      word(W_DOORBELL).value.set(LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address)
+      entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
+      thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
+        Pointer(Void).new(0_u64), 0_i32, nil)
+      raise "CreateThread failed for standard input's reader" if thread.address == 0_u64
+      word(W_THREAD).value.set(thread.address)
+    end
+
+    def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
+      fiber = IyiScheduler.current
+      return Cancelled.new if fiber.cancelled
+      raise "two fibers reading standard input" if waiting?
+      start(handle) if @@page == 0_u64
+      @@waiter = fiber
+      word(W_BUFFER).value.set(buffer.address)
+      word(W_COUNT).value.set(count)
+      word(W_CONSOLE).value.set(console ? 1_u64 : 0_u64)
+      word(W_STATE).value.set(ASKED)
+      LibC.ReleaseSemaphore(Pointer(Void).new(word(W_DOORBELL).value.get), 1_i32, nil)
+      deadline = ms
+      withdrawn = false
+      while word(W_STATE).value.get != IDLE
+        IyiScheduler.park_stdin_current(deadline)
+        next if word(W_STATE).value.get == IDLE
+        # Woken with the read still the thread's: a cancellation. A
+        # deadline withdraws the read from the poller and wakes nobody
+        # until the post (`IyiScheduler.wake_expired_sleepers`).
+        withdraw unless withdrawn
+        withdrawn = true
+        deadline = -1
+      end
+      @@waiter = nil
+      answer = @@answer
+      return answer if answer > 0_i64
+      return Cancelled.new if fiber.cancelled
+      answer
+    end
+
+    # The read taken back, on the scheduler's thread. Before the claim
+    # the claim fails; inside the read the read is ended; between the
+    # claim and the call there is nothing to end yet, so it is asked
+    # again after a yield - for 50 ms at most, and past that the fiber
+    # waits for the read to finish on its own.
+    #
+    # Not a console's read once it has begun. Ended there, the read
+    # returns, but the console keeps the request and the next line typed
+    # goes to it and is gone: measured, a read cancelled at 300 ms, then
+    # "first" typed and "second" a second later, and the next read
+    # answered "second". So a console's read runs to its line, which the
+    # fiber answers - a sibling's failure waits for Enter, and loses
+    # nothing.
+    def self.withdraw : Nil
+      return if word(W_STATE).value.compare_and_set(ASKED, WITHDRAWN)[1]
+      return if word(W_CONSOLE).value.get != 0_u64
+      thread = Pointer(Void).new(word(W_THREAD).value.get)
+      give_up = __iyi_monotonic_ns + 50_000_000_i64
+      while word(W_STATE).value.get == READING && __iyi_monotonic_ns < give_up
+        break if LibC.CancelSynchronousIo(thread) != 0
+        LibC.SwitchToThread
+      end
+    end
+
+    # The post taken off the port: the answer to the fiber, and the next
+    # read free to be asked.
+    def self.delivered : Nil
+      @@answer = word(W_BYTES).value.get.to_i64
+      word(W_STATE).value.set(IDLE)
+      waiter = @@waiter
+      return unless waiter.is_a?(IyiFiber)
+      IyiScheduler.untime(waiter)
+      IyiScheduler.enqueue(waiter) if waiter.state == IyiFiberState::WaitingIo
+    end
+
+    # The thread's whole life. It touches no heap: its words and its wide
+    # buffer are this page, and what it writes into is the buffer the
+    # fiber asked with.
+    def self.run(argument : UInt64) : Nil
+      doorbell = Pointer(Void).new(word(W_DOORBELL).value.get)
+      while true
+        LibC.WaitForSingleObject(doorbell, -1_i32)
+        bytes = 0_i64
+        if word(W_STATE).value.compare_and_set(ASKED, READING)[1]
+          handle = Pointer(Void).new(word(W_HANDLE).value.get)
+          buffer = Pointer(Void).new(word(W_BUFFER).value.get)
+          count = word(W_COUNT).value.get
+          bytes = word(W_CONSOLE).value.get != 0_u64 ? read_console(handle, buffer, count) : read_file(handle, buffer, count)
+        end
+        word(W_BYTES).value.set(bytes.to_u64)
+        word(W_STATE).value.set(ANSWERED)
+        LibC.PostQueuedCompletionStatus(Pointer(Void).new(word(W_PORT).value.get), 0_i32, 0_u64,
+          Pointer(Void).new(@@page + OVERLAPPED))
+      end
+    end
+
+    # 0 for the end of the input, a broken pipe, and a withdrawn read.
+    def self.read_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
+      read = 0_i32
+      return 0_i64 if LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read), nil) == 0
+      read.to_i64
+    end
+
+    # `IyiConsole.read`'s read, with the wide buffer this page's rather
+    # than the heap's.
+    def self.read_console(handle : Void*, buffer : Void*, count : UInt64) : Int64
+      room = count // 3_u64
+      room = 1_u64 if room == 0_u64
+      capacity = (PAGE - WIDE) // 2_u64 - 1_u64
+      room = capacity if room > capacity
+      wide = Pointer(UInt16).new(@@page + WIDE)
+      read = 0_i32
+      return 0_i64 if LibC.ReadConsoleW(handle, wide.as(Void*), room.to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+      return 0_i64 if read <= 0
+      wide[read] = 0_u16
+      size = __iyi_utf8_size_from_wide(wide)
+      return 0_i64 if size <= 1
+      bytes = size - 1
+      return 0_i64 if bytes.to_u64 > count
+      __iyi_utf8_bytes_from_wide(wide, buffer.as(UInt8*), size)
+      bytes.to_i64
+    end
+  end
+{% end %}
 
 # `defer`'s runtime half on the concurrency targets: the registry is
 # the current fiber's, so interleaved tasks never share cleanups. The

@@ -1,0 +1,79 @@
+# A fiber reading standard input parks: SPEC.md III.4.8 named that call as
+# the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
+# feeds this a pipe - a line after two seconds, and another after four - and
+# asks two things of it:
+#
+#   1. The reader parks. A sibling ticking every 100 ms ticks while the
+#      first line is on its way; a read that held the thread let it tick
+#      none.
+#   2. Cancellation reaches it (III.4.2). A sibling's failure ends the group
+#      at once, and the line sent after is read whole by the next read.
+module stdin_park
+
+pub struct TaskFailed
+  def initialize
+  end
+end
+
+impl Error for TaskFailed
+  def message : String
+    "the failing task's error"
+  end
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+def elapsed_ms(started : Int64) : Int64
+  (__iyi_monotonic_ns - started) // 1000000_i64
+end
+
+# ── 1. The reader parks ──────────────────────────────────────────────────
+ticks = 0
+ticks_at_read = -1
+first = ""
+group do |g|
+  g.spawn do
+    line = stdin.gets
+    ticks_at_read = ticks
+    first = line || ""
+    0
+  end
+  g.spawn do
+    n = 0
+    while n < 5
+      sleep(100)
+      ticks = ticks + 1
+      n = n + 1
+    end
+    0
+  end
+end
+fail("a fiber reading standard input held the thread: its sibling ticked #{ticks_at_read} times while it waited") if ticks_at_read <= 0
+fail("the first line read #{first.inspect}, not the line sent") unless first == "first\n"
+puts "a fiber reading stdin parked: its sibling ticked #{ticks_at_read} times before the line came"
+
+# ── 2. Cancellation reaches it ───────────────────────────────────────────
+started = __iyi_monotonic_ns
+saw = ""
+group do |g|
+  g.spawn do
+    buffer = Pointer(UInt8).malloc(64_u64)
+    got = iyi_read(0, buffer.as(Void*), 64_u64)
+    saw = got.is_a?(Cancelled) ? "cancelled" : "read #{got}"
+    got
+  end
+  g.spawn do
+    sleep(200)
+    TaskFailed.new
+  end
+end
+ended = elapsed_ms(started)
+fail("cancellation never reached the fiber reading stdin: it #{saw}") unless saw == "cancelled"
+fail("cancelling the fiber reading stdin took #{ended} ms, against a line two seconds away") if ended >= 1000
+second = stdin.gets
+fail("after the cancelled read the next line read #{second.inspect}, not the line sent") unless second == "second\n"
+puts "a fiber reading stdin was cancelled in #{ended} ms, and the next line came whole"
+puts "every property held"

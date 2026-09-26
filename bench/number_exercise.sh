@@ -49,9 +49,6 @@ case "$(uname -s)" in
 esac
 
 status=0
-# The arm that asks for a signal cannot ask for one everywhere, and a run
-# that skipped it must not read as a run that made the measurement.
-guard_unmeasured=0
 
 run_case() { # run_case <label> <name> [build flags...]
   local label="$1" name="$2"
@@ -296,8 +293,12 @@ echo
 echo "== and the check that keeps the processor out of it"
 
 # The overflowing division with its guard removed does not fail a check - it
-# dies of SIGFPE, which is the whole reason the guard is there. So this one
-# asks for the signal rather than for a phrase.
+# dies of the processor's fault, which is the whole reason the guard is
+# there. So this one asks for the fault rather than for a phrase: SIGFPE
+# where there are signals, and on Windows STATUS_INTEGER_OVERFLOW
+# (0xC0000095) as the process's exit code. Git Bash reports that exit as
+# 127, the same as a command it could not find, so the code is read whole
+# through PowerShell.
 prove_traps() { # prove_traps <label> <dir> <sed script>
   local label="$1" dir="$2" script="$3"
   mkdir -p "$WORK/$dir/iyi"
@@ -316,29 +317,34 @@ prove_traps() { # prove_traps <label> <dir> <sed script>
     status=1
     return
   fi
-  "$WORK/$dir/program" > "$WORK/$dir/out" 2>&1
-  local code=$?
-  if [ "$code" -lt 128 ]; then
-    echo "  $label: exited $code rather than dying of a signal, so the guard proves nothing"
-    status=1
-    return
-  fi
-  printf '  %s: dies of signal %s without the guard\n' "$label" "$((code - 128))"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      local exe
+      exe="$(cygpath -w "$WORK/$dir/program.exe")"
+      local nt
+      nt="$(powershell -NoProfile -Command "\$p = Start-Process -FilePath '$exe' -NoNewWindow -Wait -PassThru -RedirectStandardOutput '$exe.out'; '{0:X8}' -f \$p.ExitCode" | tr -d '\r')"
+      if [ "$nt" != "C0000095" ]; then
+        echo "  $label: exited 0x$nt rather than of the processor's integer overflow (0xC0000095), so the guard proves nothing"
+        status=1
+        return
+      fi
+      printf '  %s: dies of STATUS_INTEGER_OVERFLOW (0x%s) without the guard\n' "$label" "$nt"
+      ;;
+    *)
+      "$WORK/$dir/program" > "$WORK/$dir/out" 2>&1
+      local code=$?
+      if [ "$code" -lt 128 ]; then
+        echo "  $label: exited $code rather than dying of a signal, so the guard proves nothing"
+        status=1
+        return
+      fi
+      printf '  %s: dies of signal %s without the guard\n' "$label" "$((code - 128))"
+      ;;
+  esac
 }
 
-# Windows delivers no signal: without the guard the program still dies, but
-# it dies with an exit code and nothing names a processor fault, so this arm
-# is not measured here rather than weakened into accepting one.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "  remainder without its guard: not measured here, because Windows delivers no signal for a processor fault"
-    guard_unmeasured=1
-    ;;
-  *)
-    prove_traps "remainder without its guard" no_mod_guard \
-      's/^    return 0 if self == -2147483648 \&\& other == -1$/    # unchecked/'
-    ;;
-esac
+prove_traps "remainder without its guard" no_mod_guard \
+  's/^    return 0 if self == -2147483648 \&\& other == -1$/    # unchecked/'
 
 echo
 if [ "$status" -eq 0 ]; then
@@ -347,10 +353,6 @@ if [ "$status" -eq 0 ]; then
   echo "than a fault from the processor, and the floats keep the three answers"
   echo "a program reads without thinking - NaN is not itself, -0.0 is zero, and"
   echo "everything rounds toward the same side it always did."
-  if [ "$guard_unmeasured" -eq 1 ]; then
-    echo "What this run did not measure is what the remainder's guard prevents:"
-    echo "that needs a signal, and this platform delivers none."
-  fi
 else
   echo "the number surface does not hold"
 fi

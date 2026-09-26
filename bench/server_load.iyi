@@ -12,6 +12,10 @@
 #      `wrk -c 100` over a sample web application died at request ~400,
 #      inside `String#+`, on a free list the poller had scribbled over.
 #
+#      On Windows the kernel writes into each fiber's OVERLAPPED instead,
+#      and a connection's is collected between its read and its write
+#      and must come out of it live.
+#
 #   2. **A finished fiber's stack comes back.** 256 KiB a fiber, mapped
 #      and never returned, is a leak with a connection counter on it:
 #      the mappings alone killed the program - `/proc/self/maps` outgrew
@@ -34,6 +38,18 @@ pub def serve(client : IyiSocket) : UInt64
     client.close
     0_u64
   in String
+    # Windows' poller keeps no event buffer; what the kernel writes into
+    # is the fiber's OVERLAPPED, one per fiber and reused for each of its
+    # operations. Between two of them - the read answered, the write not
+    # yet armed - the fiber's field is all that holds it, so a collection
+    # is made exactly there and the OVERLAPPED asked about.
+    {% if flag?(:win32) %}
+      IyiMark.collect
+      overlapped = IyiScheduler.current.wait_overlapped.address
+      if IyiMark.flags(overlapped) & IyiHeap::FREE_FLAG != 0
+        raise "FAIL: a collection between a connection's read and its write freed the OVERLAPPED the write hands the kernel"
+      end
+    {% end %}
     client.write("reply-" + request.size.to_s)
     client.close
     top

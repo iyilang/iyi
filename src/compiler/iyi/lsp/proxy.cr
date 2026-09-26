@@ -57,9 +57,10 @@ module Iyi::Lsp
     # process was measured doing.
     RETIRE_FOOTPRINT = 512
 
-    # The bound where there is no `getrusage` to read (Windows): a count
-    # of requests, assuming the worst of each. Cruder on purpose — a
-    # bound that is always there beats a measure that sometimes is.
+    # The bound where the worker cannot say what it costs (`Lsp.footprint`
+    # answers 0): a count of requests, assuming the worst of each. Cruder
+    # on purpose — a bound that is always there beats a measure that
+    # sometimes is.
     RETIRE_AFTER = 24
 
     # Quiet on the wire before the successor is warmed. Long enough that

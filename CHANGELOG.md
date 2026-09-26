@@ -91,6 +91,20 @@
   a worker that had just exited made it skip the step as if there were
   no `/proc`.
 
+  And it counts only the workers. A proxy with no console of its own, as
+  a CI step starts it, has `conhost.exe` among its children: run that way
+  here, the step took Windows' console host for the worker and died
+  renaming it, 10 runs of 10, and in the other order killed it and took
+  the proxy's console with it - the proxy then died of a stack overflow.
+  It reads the binary off the proxy itself, which starts its workers from
+  its own, and kills only children that run it: 8 of 8 run that way, and
+  the whole gate holds. The runner's own failure on this branch - the
+  hover answered, one worker listed - was not reproduced here, a worker
+  start slowed to the length of a virus scan included; the step now also
+  waits until nothing holds the moved binary, which a `CreateProcess`
+  still loading it does before the process list shows it, and a run that
+  fails says which worker answered, from which file.
+
 - **The remainder's guard is proved on Windows too.** `number_exercise.sh`
   takes the guard off `Int32::MIN % -1` and asks the program to die of
   the processor's fault; on Windows it said "not measured here, because

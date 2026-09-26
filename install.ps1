@@ -16,7 +16,7 @@
 
       IYI_PREFIX       where to unpack, default %LOCALAPPDATA%\Programs\iyi;
                        the zip is relocatable, so any writable directory works
-      IYI_VERSION      a release to pin, e.g. 0.15.1; default is the latest
+      IYI_VERSION      a release to pin, e.g. 0.15.2; default is the latest
       IYI_RELEASE_URL  where the release's files are, default the GitHub
                        release. A local directory or a file:// URL also works,
                        which is how CI gates this script against a zip the run

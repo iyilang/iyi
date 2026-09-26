@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.15.2 — 2026-09-26
+
+**Two packages can each have a `util`.** A package's modules now live under
+its name - its path's last segment, `-` as `_`, a `/vN` left off - so two
+packages that each have `util.iyi` are `Pa::Util` and `Pb::Util` rather
+than one type both define, which refused any program that required both.
+A module whose path already begins with the name, as iyi-web's `iyi_web/dsl`
+does, is where it was; one that does not is reached by a qualified name one
+segment longer, `Liba::Colors` for `import .../liba/colors`, and code that
+spelled it `Colors` from outside the package writes the longer name now.
+
+**A package's reach can be a limit.** `require PATH vX reaches std/file, C`,
+or `reaches nothing`, says what that package may touch outside the language,
+in `iyi mod reach`'s words; a version past it is refused by name before
+iyi.sum or iyi.mod is written, and `get` keeps the clause.
+
+**Windows collects beside the program, and gates stop flaking.** A
+collection on Windows marks and sweeps with its helper threads beside the
+running program, as on Linux and darwin, and a fiber reading stdin parks
+there. `std_signal`'s TERM step, which lost its output file in one run in
+three under load, holds - a killer subshell ran the gate's own cleanup -
+and so do the language server's and the collector's Windows gates.
+
 ### Added
 
 - **`require PATH vX reaches ...`: a package's reach as a limit.** `reaches

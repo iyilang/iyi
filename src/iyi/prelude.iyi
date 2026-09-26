@@ -461,6 +461,7 @@ end
     fun VirtualProtect(lpAddress : Void*, dwSize : UInt64, flNewProtect : Int32, lpflOldProtect : Int32*) : Int32
     fun GetModuleHandleA(lpModuleName : UInt8*) : Void*
     fun GetCurrentThread : Void*
+    fun GetCurrentThreadId : UInt64
     fun SuspendThread(hThread : Void*) : Int32
     fun ResumeThread(hThread : Void*) : Int32
     fun GetThreadContext(hThread : Void*, lpContext : Void*) : Int32
@@ -8905,6 +8906,7 @@ end
           __iyi_win_fault_exit
         end
       {% end %}
+      __iyi_win_fault_report(info, handle)
       message = "iyi: the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory it does not own: if the program uses `Pointer`, that is the place to look. If it does not, it is a bug in iyi's own runtime, and ours to fix: https://github.com/iyilang/iyi/issues\n"
       LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
       __iyi_win_fault_exit
@@ -8912,6 +8914,77 @@ end
     # EXCEPTION_CONTINUE_SEARCH: not one of ours, so whatever Windows would
     # have done with it, it still does.
     0
+  end
+
+  # STRESS BRANCH ONLY: where the fault was, written without allocating -
+  # the heap may be what broke. Offsets are from the image base, which is
+  # what `llvm-symbolizer --relative-address` reads against the PDB.
+  def __iyi_win_hex(buf : UInt8*, at : Int32, value : UInt64) : Int32
+    digits = "0123456789abcdef".to_unsafe
+    tmp = uninitialized UInt8[16]
+    t = pointerof(tmp).as(UInt8*)
+    n = 0
+    v = value
+    while n == 0 || v != 0_u64
+      t[n] = digits[v.unsafe_mod(16_u64).to_i32]
+      v = v.unsafe_div(16_u64)
+      n = n + 1
+    end
+    while n > 0
+      n = n - 1
+      buf[at] = t[n]
+      at = at + 1
+    end
+    at
+  end
+
+  def __iyi_win_text(buf : UInt8*, at : Int32, text : String) : Int32
+    src = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      buf[at + i] = src[i]
+      i = i + 1
+    end
+    at + text.bytesize
+  end
+
+  def __iyi_win_fault_report(info : Void*, handle : Void*) : Nil
+    record = Pointer(UInt64).new(info.address).value
+    context = Pointer(UInt64).new(info.address + 8_u64).value
+    base = LibC.GetModuleHandleA(nil).address
+    ip = Pointer(UInt64).new(record + 16_u64).value
+    kind = Pointer(UInt64).new(record + 32_u64).value
+    target = Pointer(UInt64).new(record + 40_u64).value
+    rsp = Pointer(UInt64).new(context + 0x98_u64).value
+    buf = uninitialized UInt8[4096]
+    p = pointerof(buf).as(UInt8*)
+    at = __iyi_win_text(p, 0, "STRESS fault ip=+0x")
+    at = __iyi_win_hex(p, at, ip &- base)
+    at = __iyi_win_text(p, at, " addr=0x")
+    at = __iyi_win_hex(p, at, target)
+    at = __iyi_win_text(p, at, " kind=")
+    at = __iyi_win_hex(p, at, kind)
+    at = __iyi_win_text(p, at, " tid=")
+    at = __iyi_win_hex(p, at, LibC.GetCurrentThreadId & 0xffffffff_u64)
+    at = __iyi_win_text(p, at, "\n")
+    written = uninitialized Int32
+    LibC.WriteFile(handle, p.as(Void*), at, pointerof(written), nil)
+    # Return addresses on the stack that fall in the image: a backtrace
+    # with false positives, enough to name the frames.
+    at = __iyi_win_text(p, 0, "STRESS stack")
+    i = 0
+    found = 0
+    while i < 400 && found < 40 && at < 4000
+      v = Pointer(UInt64).new(rsp + (i * 8).to_u64).value
+      if v > base && v < base + 0x4000000_u64
+        at = __iyi_win_text(p, at, " +0x")
+        at = __iyi_win_hex(p, at, v &- base)
+        found = found + 1
+      end
+      i = i + 1
+    end
+    at = __iyi_win_text(p, at, "\n")
+    LibC.WriteFile(handle, p.as(Void*), at, pointerof(written), nil)
   end
 
   def __iyi_win_install_fault_handler : Nil

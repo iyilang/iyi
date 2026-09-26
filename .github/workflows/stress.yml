@@ -1,0 +1,43 @@
+# STRESS BRANCH ONLY: gc_race's programs, run on Windows until one faults.
+name: stress
+
+on:
+  push:
+    branches: [stress/gc-race-windows]
+
+permissions: {}
+
+jobs:
+  race:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Get-Command llvm-symbolizer -ErrorAction SilentlyContinue | Format-List Source
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+      - name: Stress
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          STRESS_MINUTES: "70"
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/gc_race_stress.py

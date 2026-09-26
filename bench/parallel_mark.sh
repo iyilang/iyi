@@ -3,9 +3,10 @@
 #
 #     bash bench/parallel_mark.sh
 #
-# Six steps, the last four failure proofs:
+# Seven steps, the last five failure proofs:
 #   1. The program holds, release: a million-node tree survives five marks
-#      alone and five with helpers, and the helpers blackened nodes; the
+#      alone and five with helpers, and the helpers blackened nodes; a
+#      mark's round of permits, closed, gives none to a late helper; the
 #      pool holds a handful of pieces after them; a worker's stack grew to
 #      hold a 300,000-wide object marked alone; and, on Linux and Windows,
 #      a helper with no work spins fifty microseconds before it parks.
@@ -19,6 +20,8 @@
 #      by name, on the wide object.
 #   6. Failure proof: the spin before the park counted in pause hints, far
 #      past the bound on any machine; the park check names its length.
+#   7. Failure proof: a close that leaves the round's permits open; the
+#      late take succeeds, and the permits check says so.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,7 +71,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the mark, alone and with helpers ($CORES cores here)"
-grep -E '^(tree|mark|pool|stack|park):' answers.txt | sed 's/^/  /'
+grep -E '^(tree|permits|mark|pool|stack|park):' answers.txt | sed 's/^/  /'
 
 # $1 label, $2 awk program over the prelude, $3 the phrase the failing check
 # prints, $4 the exit code expected.
@@ -127,6 +130,11 @@ case "$(uname -s)" in
       '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 200000_u64"); print }' "park:" 1
     ;;
 esac
+
+# The round's close leaves its permits where they were: a helper waking
+# after the wait takes one, on any machine and any core count.
+prove_fails "a round whose close leaves its permits open is refused" \
+  '{ sub(/value - \(value & MARK_PERMITS_LEFT\)\)\[1\]/, "value)[1]"); print }' "permits:" 1
 
 echo "workdir $WORK"
 echo "parallel mark: every step held"

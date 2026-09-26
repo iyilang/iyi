@@ -43,6 +43,18 @@
   refused more than 2048 KB, exactly one huge page, so a single huge page
   landed on `>` and did not fire. The bound is 1024 KB, between a healthy
   run's 324 KB and one huge page (from #104, @jwaldrip).
+- **A mark beside the program could sweep live objects.** A helper that
+  woke late took a mark permit after the helper finishing the mark had
+  already counted the takers and moved on. Its drain then ran through the
+  mark's final stop and took the batch that stop had flushed from the
+  program's threads; the stop found the pool empty, ended the mark, and
+  swept what that batch reached. `gc_race`'s live churn walked a freed list
+  node once in a few hundred runs with helpers, on Linux and Windows alike,
+  and 0.15.2 ships it. The permits and their takers are one word now, and the
+  thread that waits for the takers closes the round first, so a helper
+  waking after that finds no permit. Across 6,008 runs of live churn, 9
+  faulted before and none after; `bench/parallel_mark.sh` checks that a
+  closed round gives no permit, and proves the check fires.
 
 ## 0.15.2 — 2026-09-26
 
@@ -10450,7 +10462,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,838-line library and nothing else. Every other
+  written against iyi's own 17,852-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

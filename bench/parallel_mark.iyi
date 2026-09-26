@@ -75,6 +75,23 @@
   alone = collect_five(tree, expected)
   fail("helpers blackened #{alone[1]} objects with none asked") if alone[1] != 0_i64
 
+  # A mark's round of permits is closed by the thread that waits for its
+  # takers, and a helper that wakes after that finds none: one that took
+  # a permit after the wait had passed drained through the second stop
+  # of a mark beside the program, took the batch the stop had flushed
+  # from the mutators, and what that batch reached was swept live. Asked
+  # here before any helper exists, so no helper takes a permit meant for
+  # this check.
+  IyiMark.open_mark_permits(3_u64)
+  first = IyiMark.take_mark_permit
+  takers = IyiMark.close_mark_permits
+  late = IyiMark.take_mark_permit
+  IyiMark.open_mark_permits(0_u64)
+  fail("permits: the first of three permits was not slot 0 (#{first.to_i64})") if first != 0_u64
+  fail("permits: a closed round counted #{takers.to_i64} takers for the one permit taken") if takers != 1_u64
+  fail("permits: a helper waking after the round closed took permit #{late.to_i64}") if late != IyiMark::NO_PERMIT
+  puts "permits: a round of three, one taken, closed at one taker, and no permit after the close"
+
   IyiMark.workers = 15_u64
   puts "phase: one mark with helpers"
   IyiMark.collect

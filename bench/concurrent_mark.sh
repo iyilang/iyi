@@ -5,9 +5,10 @@
 #     bash bench/concurrent_mark.sh
 #
 # Three steps, the last a failure proof:
-#   1. The program holds, release: twenty-four rounds each move a payload
-#      out of an unmarked chain into an already-marked holder under a
-#      running mark, and every payload is intact after the collection.
+#   1. The program holds, release: twenty-four rounds or more each move a
+#      payload out of an unmarked chain into an already-marked holder, at
+#      least one of them under a running mark, and every payload is intact
+#      after the collection.
 #   2. The pauses, printed: the stop-the-world mark over the same chain
 #      against a concurrent collection's two stops.
 #   3. Failure proof: the barrier's shade removed from a copy of the

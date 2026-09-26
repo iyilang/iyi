@@ -63,6 +63,13 @@
   already had the Windows set; the stopped thread's has it now.
   `bench/windows_exercise.sh` reads the stores out of a cross-compiled
   Windows object, and refuses a copy of the runtime that leaves rsi out.
+- **The concurrent mark gate could lose its race on a loaded machine.**
+  `bench/concurrent_mark.iyi` needs one of its rounds to move a payload
+  while the mark has not reached it yet, and ran twenty-four. With the
+  permit round closed, marks reach the chain's tail sooner, and under
+  eight copies at once the gate failed 2.3% of runs for want of such a
+  round, against 0.5% before. It runs on past twenty-four until one round
+  has, up to ninety-six, and failed none of 240 runs under the same load.
 - **The Windows replace gate looked for a deleted file too soon.**
   `bench/replace_running.sh` checks that the next replacement deletes the
   binary that stepped aside, and looked the instant it returned. A file

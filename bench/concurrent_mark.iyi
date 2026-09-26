@@ -23,7 +23,10 @@
 #     must be the pattern written into them.
 #
 # Every round that made its move under a mark counts; the program asks for
-# at least one, and reports how many. The pauses are printed beside the
+# at least one, and reports how many. Twenty-four rounds, and on past them
+# until one has, up to ninety-six: whether the program reaches the tail
+# before the marker does is a race it wins most rounds and, on a loaded
+# machine, can lose twenty-four times running. The pauses are printed beside the
 # stop-the-world mark's over the same chain: a concurrent collection's two
 # stops, the longest of each, against the one stop that marked it all —
 # and how many second stops found a white root or a full pool and retreated
@@ -248,10 +251,9 @@
   # ── The moves, under marks beside the program ─────────────────────────
   IyiMark.workers = 15_u64
   under_mark = 0
-  rounds = 24
   round = 0
   concurrent_before = IyiMark.concurrent_collections
-  while round < rounds
+  while round < 24 || (under_mark == 0 && round < 96)
     IyiMark.auto = false
     seed = 1000_u64 + round.to_u64
     chain = build_chain(seed)
@@ -278,6 +280,7 @@
     round = round + 1
   end
   IyiMark.auto = false
+  rounds = round
   concurrent = IyiMark.concurrent_collections - concurrent_before
   fail("no round made its move under a mark: nothing here was concurrent") if under_mark == 0
   fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64

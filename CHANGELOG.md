@@ -143,6 +143,19 @@
   its proof puts the return back and has a run hang, released by resuming
   its threads.
 
+- **The concurrent mark exercise prints what the machine takes away on
+  its own.** A thread per core reads the clock for a second with no
+  allocation and no collector, and the longest gap any of them saw is
+  printed beside the pauses. Windows' longest second stop read 3,128 us on
+  a runner against Linux's 45; on a twelve-core Windows VM here the second
+  stops' outliers of 13 to 45 ms fell in a different place each time - the
+  stop, a single `ResumeThread`, the program's own sweep - and threads that
+  only read the clock saw 23 to 64 ms at twelve, 32 to 43 at eleven. Raising
+  the stopping thread to the highest priority for the stop did not shorten
+  them (the tenth-worst of 30 runs 32 ms against 23). A pause is the
+  runtime's only where the machine gives its threads their cores, and the
+  line is there so a pause is read against it.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

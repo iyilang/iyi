@@ -4,15 +4,24 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Three steps, the last a failure proof:
+# Five steps, the last two failure proofs:
 #   1. The program holds, release: twenty-four rounds each move a payload
 #      out of an unmarked chain into an already-marked holder under a
 #      running mark, and every payload is intact after the collection.
 #   2. The pauses, printed: the stop-the-world mark over the same chain
-#      against a concurrent collection's two stops.
-#   3. Failure proof: the barrier's shade removed from a copy of the
+#      against a concurrent collection's two stops, and the longest the
+#      program's thread spent waking the helpers, which on Windows is
+#      held under 1 ms.
+#   3. The machine alone, printed: one thread per core reading the clock
+#      and nothing else, and the longest gap any of them saw. A pause is
+#      only the runtime's where the machine gives its threads their cores:
+#      on a twelve-core Windows VM this read 23 to 64 ms, the length of
+#      the longest second stops measured there.
+#   4. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
+#   5. Failure proof, on Windows: the helpers given back the boost a
+#      satisfied wait brings, and the wake check exits 1.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,6 +64,66 @@ grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
 grep -E '^(moves|pause|wake):' answers.txt | sed 's/^/  /'
+
+# What the machine takes away on its own: a thread per core that reads the
+# clock and does nothing else - no allocation, so no collection - for a
+# second, and the longest gap any of them saw between two reads. A stop
+# that meets such a gap lasts it, and nothing in the runtime shortens it:
+# on a twelve-core Windows VM this read 23 to 64 ms, where the longest
+# second stops measured 13 to 45.
+step "the machine alone: a thread per core reading the clock, no collector"
+cat > machine.iyi <<'IYI'
+class Gaps
+  @@page : UInt64 = 0_u64
+
+  def self.setup : Nil
+    @@page = __iyi_mmap(4096_u64).address
+  end
+
+  def self.slot(i : Int32) : Pointer(UInt64)
+    Pointer(UInt64).new(@@page + i.to_u64 * 64_u64)
+  end
+end
+
+def watch(index : Int32, deadline : UInt64) : Nil
+  longest = 0_u64
+  last = IyiMark.now_ns
+  while last < deadline
+    now = IyiMark.now_ns
+    longest = now - last if now - last > longest
+    last = now
+  end
+  Gaps.slot(index).value = longest
+end
+
+Gaps.setup
+count = IyiThread.core_count.to_i32
+deadline = IyiMark.now_ns + 1000000000_u64
+threads = [] of IyiThread
+i = 1
+while i < count
+  k = i
+  threads << IyiThread.start do
+    watch(k, deadline)
+    nil
+  end
+  i = i + 1
+end
+watch(0, deadline)
+threads.each { |t| t.join }
+worst = 0_u64
+i = 0
+while i < count
+  worst = Gaps.slot(i).value if Gaps.slot(i).value > worst
+  i = i + 1
+end
+puts "machine: #{count} threads reading the clock for a second, the longest gap any saw #{(worst // 1000_u64).to_i64} us"
+IYI
+if ! "$IYI" build --release machine.iyi -o machine > build-machine.log 2>&1; then
+  cat build-machine.log; exit 1
+fi
+timeout -k 5 60 ./machine > machine.txt 2>&1 || { cat machine.txt; exit 1; }
+grep '^machine:' machine.txt | sed 's/^/  /'
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi

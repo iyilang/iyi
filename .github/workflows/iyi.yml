@@ -2095,6 +2095,20 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
+      # The command surface, which the Linux job's `cli_spec` holds and no
+      # Windows job ran. The daemon's examples are pending here (its server
+      # is `fork`). The bind pipeline is the one example that needs
+      # the fork's compiler and `iyi.exe` from one commit, and it said pending on
+      # Windows for want of one; asked again by name, a pending answer is a
+      # failure.
+      - name: The commands, on Windows
+        shell: cmd
+        run: |
+          make -f Makefile.win cli_spec || exit /b 1
+          .build\cli_spec.exe -e "bound shard" > bind.txt
+          type bind.txt
+          findstr /C:" 0 failures, 0 errors, 0 pending" bind.txt
+
       - name: The runtime's exercises, on Windows
         shell: bash
         run: |

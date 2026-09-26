@@ -71,6 +71,20 @@
   binary and asks it a question, on Linux and Windows; the old binary
   fails it.
 
+- **The fork's compiler built on Windows carries its commit and library.**
+  `make -f Makefile.win crystal` handed the compiler `CRYSTAL_CONFIG_*`,
+  which it stopped reading when those became `IYI_CONFIG_*`: the binary had
+  no commit, no library path and no search path, and run from anywhere but
+  through its wrapper script it could not find its prelude. It is given what
+  `iyi.exe` is, as the Linux Makefile does. The command specs (`cli_spec`)
+  run on Windows now, in the Windows gates job: 48 examples, 14 pending -
+  the daemon's, whose server is `fork`. With the old variables 6 of them
+  failed on "can't find file 'prelude'". The bind pipeline, which needs both
+  binaries from one commit, had said pending on Windows; it runs there now,
+  and a pending answer fails the step. The spec named the binaries without
+  `.exe` and its search path with `:`, and it names them as the build does
+  now.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

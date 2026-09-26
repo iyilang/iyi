@@ -13,6 +13,21 @@
   `module` line does not say it - and `iyi doc` takes a package module's
   path, a short name included: `iyi doc web/iyi_web/dsl`.
 
+### Removed
+
+- **libxml2, `oauth`/`oauth2` and the libevent event loop are gone from the
+  inherited tree** (#101, @jwaldrip). 7,288 lines of the other language's
+  library that no binary reached - `dependency_floor` already proved iyi
+  links none of them - leave the source too: `src/xml` and its libxml2
+  binding, `src/oauth`, `src/oauth2`, and `Crystal::EventLoop::LibEvent`
+  with their specs. Under `--crystal`, `require "xml"`, `"oauth"` and
+  `"oauth2"` no longer resolve; iyi's own `std/xml` is untouched. A unix
+  target with none of epoll, kqueue or io_uring is refused at compile time,
+  naming the loops iyi carries, rather than falling back to libevent.
+  `http`, `openssl`, `big`, `yaml`, `digest` and pcre stay: shard binding
+  and the specs reach them. `library_boundaries` binds eleven namespaces,
+  and the link-flag question XML asked is `yaml_reads`' now.
+
 ## 0.15.2 — 2026-09-26
 
 **Two packages can each have a `util`.** A package's modules now live under

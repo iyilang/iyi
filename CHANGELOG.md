@@ -136,6 +136,13 @@
   One cheap request goes first now, so the time is the pull's own - 4 ms
   here.
 
+- **The reuse gate's fresh-object check could prove nothing under load.**
+  It needs the carve to take released pages up, and under eight copies at
+  once on Linux 3 runs in 6,976 took up warm pages only and failed "the
+  carve took up no released page". The phase runs up to three times until
+  one attempt meets a released page, and every attempt's fresh objects are
+  checked.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the

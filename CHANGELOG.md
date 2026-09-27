@@ -55,6 +55,19 @@
   waking after that finds no permit. Across 6,008 runs of live churn, 9
   faulted before and none after; `bench/parallel_mark.sh` checks that a
   closed round gives no permit, and proves the check fires.
+- **A write barrier that ran after its mark had ended could lose a
+  structure.** A pointer store reads the marking flag and shades what it
+  stored after; a thread stopped between the two found the mark over when
+  it went on, and grayed the stored object anyway. If that object's arena
+  had been swept since, it stayed gray into the next mark, which never
+  queues a gray object, and what hung off it was swept while live. On
+  Windows `gc_race`'s live churn lost its list's tail this way in one run
+  in forty, and every faulting run had started a mark with a chunk gray.
+  The barrier reads the flag again inside its bracket, where no stop can
+  land, and shades nothing once the mark is over; `realloc`'s barrier runs
+  in the same bracket. `bench/concurrent_mark.sh` runs a barrier after a
+  mark and checks the next mark keeps what the holder held, and proves the
+  check fires without the second read.
 - **Windows: a thread stopped inside the allocator kept rsi and rdi out of
   the roots.** A stop that lands in the allocator is paid at its exit, where
   the thread spills its callee-saved registers for the mark; it spilled
@@ -10485,7 +10498,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,868-line library and nothing else. Every other
+  written against iyi's own 17,886-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -3076,8 +3076,14 @@ require "./file"
         end
         # The copy was bytes, invisible to the barrier the compiler puts on
         # pointer stores; what the new block now holds is shaded here, so a
-        # buffer of references grown under a running mark keeps them.
-        IyiMark.barrier(new_pointer.address, limit.unsafe_div(8_u64)) if LibIyiGCTable.__iyi_marking != 0_u8
+        # buffer of references grown under a running mark keeps them. In
+        # the barrier's bracket, as the compiler's is, so the barrier's
+        # own look at the flag cannot go stale before it shades.
+        if LibIyiGCTable.__iyi_marking != 0_u8
+          IyiHeap.enter_barrier
+          IyiMark.barrier(new_pointer.address, limit.unsafe_div(8_u64))
+          IyiHeap.leave_barrier
+        end
         free(pointer)
         new_pointer
       end
@@ -4438,7 +4444,19 @@ require "./file"
       # it. An object born during the mark comes the same way.
       MUTATOR_BATCH = 64_u64
 
+      # The flag once more, inside the bracket (`IyiHeap.enter_barrier`):
+      # the store's own read of it came before the bracket, and a thread
+      # stopped between the two found the mark over when it went on. The
+      # value it stored was in its registers at that stop, a root the
+      # finish marked, so there is nothing left to shade - and a shade
+      # then was worse than nothing. The object went gray after its
+      # arena's sweep had turned it white, onto a stack the next mark
+      # starts by emptying, and that mark found it gray, never queued
+      # it, and swept what hung off it. gc_race's live churn lost its
+      # list's tail that way on Windows in one run in forty; every run
+      # that faulted had started a mark with a chunk gray.
       def self.barrier(address : UInt64, words : UInt64) : Nil
+        return if LibIyiGCTable.__iyi_marking == 0_u8
         w = worker
         index = 0_u64
         while index < words

@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Three steps, the last a failure proof:
+# Four steps, the last two failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -14,6 +14,9 @@
 #   3. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
+#   4. Failure proof: the barrier's own look at the marking flag removed;
+#      a barrier run after its mark ended grays a holder, the next mark
+#      sweeps the payload it held, and the program exits 1 saying so.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,7 +58,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(moves|pause):' answers.txt | sed 's/^/  /'
+grep -E '^(stray|moves|pause):' answers.txt | sed 's/^/  /'
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
@@ -71,6 +74,21 @@ if [ "$code" -ne 1 ] || ! grep -q "the barrier lost it" nobarrier.txt; then
   echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
+
+step "failure proof: a barrier that shades after its mark ended loses what the holder held"
+mkdir -p stray/iyi
+cp "$REPO"/src/iyi/*.iyi stray/iyi/
+awk '{ if ($0 ~ /^        return if LibIyiGCTable\.__iyi_marking == 0_u8$/ && prev ~ /def self\.barrier\(/) { prev = $0; next } prev = $0; print }' "$REPO/src/iyi/prelude.iyi" > stray/iyi/prelude.iyi
+cmp -s stray/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o straybarrier > build-stray.log 2>&1; then
+  cat build-stray.log; exit 1
+fi
+timeout -k 5 300 ./straybarrier > stray.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.txt; then
+  echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

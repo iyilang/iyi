@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.15.3 — 2026-09-27
+
+**The collector stops losing live objects under a mark beside the
+program.** 0.15.2 had two races that swept objects the program still held,
+and `gc_race`'s live churn - a million-item list beside 256 MB of garbage -
+walked into freed memory on both. A helper that woke late took a mark
+permit after its round was counted and drained through the final stop,
+once in a few hundred runs on Linux; a write barrier that ran after its
+mark had ended left an object gray into the next mark, which never scanned
+it, once in forty runs on Windows, where it also hung the program. Both are
+closed, each with a gate that fails without its fix, and a thread stopped
+inside the allocator on Windows now keeps rsi and rdi among its roots.
+
+**A package module's old name is an edit away.** Code written before
+0.15.2 moved package modules under their package's name is told the
+qualified name and can take it with `iyi fix`.
+
+**The inherited tree is 7,288 lines lighter**: libxml2, `oauth`/`oauth2`
+and the libevent loop are gone (#101, @jwaldrip).
+
 ### Added
 
 - **A package module's old name is an edit away.** 0.15.2 put a package's

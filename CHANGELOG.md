@@ -105,7 +105,7 @@
   again without clearing it, because a released page reads zero. darwin's
   release was `MADV_FREE_REUSABLE`: advice that the bytes may be dropped,
   which until memory is short they are not - the defect Windows' `MEM_RESET`
-  was in 0.15.0 - so an object built there read a field its constructor
+  was until 0.14.1 - so an object built there read a field its constructor
   never set as a stale word rather than nil. The release lays a fresh
   mapping over the run now (`mmap` with `MAP_FIXED`), which frees the old
   pages and reads zero at once, and darwin names no `madvise`.

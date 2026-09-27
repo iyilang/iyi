@@ -284,6 +284,16 @@
   digest of the whole path. A CLI spec builds and runs a program at a
   240-character path on Windows and a 300-character one elsewhere.
 
+- **CI's container jobs build with the commit's date and name.** In a
+  container the checkout belongs to another user, and git answered nothing
+  after the checkout step: the builds there named no commit, and dated
+  themselves by the Makefile's mtime, the moment of each job's own
+  checkout - 1790467191 in one job and 1790467280 in another, for one
+  commit. A run that crossed midnight UTC built a compiler dated
+  2026-09-26 and a daemon dated 2026-09-27, and the check that the two are
+  one build stopped the CLI specs. The workflow tells git the checkout is
+  safe in every step.
+
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
   it, and that subshell was itself killed a moment after it forked - before

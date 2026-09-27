@@ -38,6 +38,21 @@ name: iyi
 # guess at its average.
 on: [push, pull_request]
 
+# Git refuses a checkout that another user owns, and in a container job the
+# workspace is not the container user's: `actions/checkout` marks it safe in
+# a git config of its own, for the checkout step. After it the container
+# builds named no commit, and SOURCE_DATE_EPOCH was not the commit's time -
+# 1790467191 in one job and 1790467280 in another, for one commit, each
+# the moment of that job's checkout: the Makefile's mtime, its fallback
+# when git answers nothing. A run that crossed midnight UTC then built a
+# compiler that said 2026-09-26 and a daemon beside it that said
+# 2026-09-27, and `check_daemon_matches` stopped the CLI specs, the two
+# being one commit. Safe for every step here, so git answers in them.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: "*"
+
 permissions: {}
 
 concurrency:

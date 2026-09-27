@@ -2,6 +2,104 @@
 
 ## Unreleased
 
+### Added
+
+- **Crystal's library specs run on Windows.** The compiler is built from
+  Crystal's library, and its specs ran on Linux alone. On Windows they did
+  not compile: the DWARF reader raises `Error` without loading the module
+  that defines it, and on Linux and darwin the call stack's reader loads
+  it first, while on Windows the name reached iyi's top-level `Error`, a
+  module. The reader requires it now. And a Windows checkout gave the
+  specs' data files CRLF - templates, INI files, text read back, a file
+  digested - which they compare byte for byte; they are pinned to LF in
+  `.gitattributes`. A spec that builds a program ran `bin/crystal`, a
+  shell script, and the Windows job names the built compiler instead.
+  With the three, 100 failing examples of 18,148 here became 31, every
+  one of them a spec that makes a symbolic link, which this account may
+  not and the runner's may. The Windows gates job runs them, and the
+  primitives specs, which passed there as they were: on the runner
+  18,148 and 716 examples, none failing.
+
+- **The concurrent mark exercise prints what the machine takes away on
+  its own.** A thread per core reads the clock for a second with no
+  allocation and no collector, and the longest gap any of them saw is
+  printed beside the pauses. Windows' longest second stop read 3,128 us on
+  a runner against Linux's 45; on a twelve-core Windows VM here the second
+  stops' outliers of 13 to 45 ms fell in a different place each time - the
+  stop, a single `ResumeThread`, the program's own sweep - and threads that
+  only read the clock saw 23 to 64 ms at twelve, 32 to 43 at eleven. Raising
+  the stopping thread to the highest priority for the stop did not shorten
+  them (the tenth-worst of 30 runs 32 ms against 23). A pause is the
+  runtime's only where the machine gives its threads their cores, and the
+  line is there so a pause is read against it.
+
+- **Crystal's compiler specs run on Windows, and compile there.** Five
+  of iyi's own spec files ran on Windows; the rest did not compile. The
+  loader the interpreter's specs load named `System.to_wstr` and
+  `System::LibraryArchive`, which resolved to `Crystal::System` while it
+  was `Crystal::Loader` and to nothing once it was `Iyi::Loader` - "undefined
+  method 'to_wstr' for System:Module", then "undefined constant
+  System::LibraryArchive". The build never saw it: the loader is the
+  interpreter's, and only the specs compile it. Both loaders name the
+  module whole now, and a Windows job builds the fork's compiler and runs
+  every compiler spec.
+
+### Changed
+
+- **On Windows, a mark beside a busy program leaves the program its
+  cores.** A mark beside the program asked for every helper there was, on
+  the ground that the cores were otherwise idle; a program running threads
+  of its own had them on those cores, and eleven helpers on twelve took
+  them. With four threads allocating beside the mark, their longest stall
+  had a median of 41 ms and the longest pause 20.5 ms; with the helpers held to
+  the cores the program's threads leave, 21.6 and 2.9 (12 runs each, and
+  27.5 and 11.4 in a later 12 on a slower hour). A fixed default of seven
+  did as well there but gave up a single thread's pause (1.1 ms against
+  0.4), which the cap leaves alone: one thread gets every helper, as
+  before, and binary trees ran as it did. At eight threads the machine's
+  own gaps were larger than any difference. The concurrent mark exercise
+  runs a thread on every core but one beside a mark and asserts on
+  Windows that it asked for one helper; with the cap removed it asked for
+  eleven. Linux and darwin are unchanged, as they are unmeasured.
+
+- **On Windows, the language server answers as fast as it does on Linux.**
+  A hover answered from the verdict already compiled took 47 to 52 ms
+  there against Linux's 1, and completion 63 to 78 against 19. The
+  editor's end of stdin is an anonymous pipe, which Windows cannot read
+  overlapped, so the reader's `ReadFile` held its thread until the next
+  bytes came - and the loop it had just woken through a channel was
+  queued on that same thread, run when the runtime's monitor sent another
+  thread to take it, every hundred milliseconds; single hovers came back
+  anywhere from 0 to 96 ms. The reader runs on a thread of its own now,
+  in the proxy and in the worker: hover 2 ms at the median, completion 17,
+  startup 250 ms to 40. `lsp_latency.py` holds a hover's median to 10 ms,
+  which the old reader fails at 51.7, and times with `perf_counter`: the
+  monotonic clock it used is 15.6 ms coarse on Windows.
+
+- **On Windows a program links through `link.exe` itself.** The compiler
+  found MSVC and ran `cl.exe` with the objects and `/link`, and the driver
+  compiled nothing: it started the linker, one more process per build.
+  The same objects and flags linked in 134 ms at the median through
+  `cl.exe` and in 91 without it, and the edit-and-rebuild loop of
+  `rebuild_speed.py` went from 829 ms to 742 from source, 781 to 742 from
+  artifacts. A driver named in `%CC%` is still spoken to as a driver.
+  The linker reads a long command's response file itself now, and refuses
+  a line of 131,072 characters or more - linking Crystal's library specs
+  failed on a runner with LNK1170 until the file held an argument to a
+  line; `cl.exe` had read the one-line file and written its own.
+
+- **On Windows a build asks `vswhere` where Visual C++ is once, not every
+  time.** `vswhere` is a process of its own, 35 ms at the median, and
+  every `iyi build` started it before linking - what a Linux build once
+  paid in `PATH` searches for linkers nobody had installed. The answer is
+  kept beside the object cache, as the linker probe's is, and read back
+  while the directory it names is there, so an update that removes the
+  toolset asks again: a hello's build went from 521 ms at the median to
+  491. The compiler spec that holds the linker probe, pending on Windows
+  for having nothing to hold, holds this file there.
+
+### Fixed
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the
@@ -29,22 +127,6 @@
   and a pending answer fails the step. The spec named the binaries without
   `.exe` and its search path with `:`, and it names them as the build does
   now.
-
-- **Crystal's library specs run on Windows.** The compiler is built from
-  Crystal's library, and its specs ran on Linux alone. On Windows they did
-  not compile: the DWARF reader raises `Error` without loading the module
-  that defines it, and on Linux and darwin the call stack's reader loads
-  it first, while on Windows the name reached iyi's top-level `Error`, a
-  module. The reader requires it now. And a Windows checkout gave the
-  specs' data files CRLF - templates, INI files, text read back, a file
-  digested - which they compare byte for byte; they are pinned to LF in
-  `.gitattributes`. A spec that builds a program ran `bin/crystal`, a
-  shell script, and the Windows job names the built compiler instead.
-  With the three, 100 failing examples of 18,148 here became 31, every
-  one of them a spec that makes a symbolic link, which this account may
-  not and the runner's may. The Windows gates job runs them, and the
-  primitives specs, which passed there as they were: on the runner
-  18,148 and 716 examples, none failing.
 
 - **Two concurrency checks ask what they mean, not how fast it went.**
   The concurrency exercise held two 150 ms sleeps in a group to under
@@ -88,35 +170,6 @@
   its proof puts the return back and has a run hang, released by resuming
   its threads.
 
-- **The concurrent mark exercise prints what the machine takes away on
-  its own.** A thread per core reads the clock for a second with no
-  allocation and no collector, and the longest gap any of them saw is
-  printed beside the pauses. Windows' longest second stop read 3,128 us on
-  a runner against Linux's 45; on a twelve-core Windows VM here the second
-  stops' outliers of 13 to 45 ms fell in a different place each time - the
-  stop, a single `ResumeThread`, the program's own sweep - and threads that
-  only read the clock saw 23 to 64 ms at twelve, 32 to 43 at eleven. Raising
-  the stopping thread to the highest priority for the stop did not shorten
-  them (the tenth-worst of 30 runs 32 ms against 23). A pause is the
-  runtime's only where the machine gives its threads their cores, and the
-  line is there so a pause is read against it.
-
-- **On Windows, a mark beside a busy program leaves the program its
-  cores.** A mark beside the program asked for every helper there was, on
-  the ground that the cores were otherwise idle; a program running threads
-  of its own had them on those cores, and eleven helpers on twelve took
-  them. With four threads allocating beside the mark, their longest stall
-  had a median of 41 ms and the longest pause 20.5 ms; with the helpers held to
-  the cores the program's threads leave, 21.6 and 2.9 (12 runs each, and
-  27.5 and 11.4 in a later 12 on a slower hour). A fixed default of seven
-  did as well there but gave up a single thread's pause (1.1 ms against
-  0.4), which the cap leaves alone: one thread gets every helper, as
-  before, and binary trees ran as it did. At eight threads the machine's
-  own gaps were larger than any difference. The concurrent mark exercise
-  runs a thread on every core but one beside a mark and asserts on
-  Windows that it asked for one helper; with the cap removed it asked for
-  eleven. Linux and darwin are unchanged, as they are unmeasured.
-
 - **`iyi foo` runs `iyi-foo` from PATH, on every platform.** The lookup
   was there, in the command layer, keyed on the name the binary runs
   under; `iyi`'s own dispatch answered "unknown command or missing file"
@@ -139,17 +192,6 @@
   `[Diagnostics.Process]::Start` keeps the handle process creation gave
   it. Both read 0xC0000095 in 300 runs of 300 here.
 
-- **Crystal's compiler specs run on Windows, and compile there.** Five
-  of iyi's own spec files ran on Windows; the rest did not compile. The
-  loader the interpreter's specs load named `System.to_wstr` and
-  `System::LibraryArchive`, which resolved to `Crystal::System` while it
-  was `Crystal::Loader` and to nothing once it was `Iyi::Loader` - "undefined
-  method 'to_wstr' for System:Module", then "undefined constant
-  System::LibraryArchive". The build never saw it: the loader is the
-  interpreter's, and only the specs compile it. Both loaders name the
-  module whole now, and a Windows job builds the fork's compiler and runs
-  every compiler spec.
-
 - **A project `init` writes on Windows has the line endings it has
   everywhere else.** Its templates are `.ecr` files compiled into the
   binary, and a Windows checkout gave them CRLF - so a compiler built on
@@ -158,42 +200,6 @@
   the one of 14,037 that failed on Windows. Every `.ecr` is pinned LF now,
   which also covers the source generators under `scripts/`, whose CRLF
   templates would have written CRLF into `.cr` files pinned LF.
-
-- **On Windows, the language server answers as fast as it does on Linux.**
-  A hover answered from the verdict already compiled took 47 to 52 ms
-  there against Linux's 1, and completion 63 to 78 against 19. The
-  editor's end of stdin is an anonymous pipe, which Windows cannot read
-  overlapped, so the reader's `ReadFile` held its thread until the next
-  bytes came - and the loop it had just woken through a channel was
-  queued on that same thread, run when the runtime's monitor sent another
-  thread to take it, every hundred milliseconds; single hovers came back
-  anywhere from 0 to 96 ms. The reader runs on a thread of its own now,
-  in the proxy and in the worker: hover 2 ms at the median, completion 17,
-  startup 250 ms to 40. `lsp_latency.py` holds a hover's median to 10 ms,
-  which the old reader fails at 51.7, and times with `perf_counter`: the
-  monotonic clock it used is 15.6 ms coarse on Windows.
-
-- **On Windows a program links through `link.exe` itself.** The compiler
-  found MSVC and ran `cl.exe` with the objects and `/link`, and the driver
-  compiled nothing: it started the linker, one more process per build.
-  The same objects and flags linked in 134 ms at the median through
-  `cl.exe` and in 91 without it, and the edit-and-rebuild loop of
-  `rebuild_speed.py` went from 829 ms to 742 from source, 781 to 742 from
-  artifacts. A driver named in `%CC%` is still spoken to as a driver.
-  The linker reads a long command's response file itself now, and refuses
-  a line of 131,072 characters or more - linking Crystal's library specs
-  failed on a runner with LNK1170 until the file held an argument to a
-  line; `cl.exe` had read the one-line file and written its own.
-
-- **On Windows a build asks `vswhere` where Visual C++ is once, not every
-  time.** `vswhere` is a process of its own, 35 ms at the median, and
-  every `iyi build` started it before linking - what a Linux build once
-  paid in `PATH` searches for linkers nobody had installed. The answer is
-  kept beside the object cache, as the linker probe's is, and read back
-  while the directory it names is there, so an update that removes the
-  toolset asks again: a hello's build went from 521 ms at the median to
-  491. The compiler spec that holds the linker probe, pending on Windows
-  for having nothing to hold, holds this file there.
 
 - **Go-to-definition works on a call in a module's top-level code.** A
   `module main` header wraps the rest of the file in the module it names,

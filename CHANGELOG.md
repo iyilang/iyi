@@ -130,6 +130,15 @@
 
 ### Fixed
 
+- **A refused rename says it was refused, not that the server broke.** A
+  rename with nothing renameable under the cursor, or onto a name that is
+  not a name, answered -32603, the code that says the server itself is
+  broken, and so did `workspace/executeCommand` with a command the server
+  does not have. A rename it will not carry out is RequestFailed (-32803)
+  now, with the same sentence, and an unknown command is invalid params
+  (-32602). Steps 52g and 52h of `bench/lsp_session.py`; the old server
+  fails both.
+
 - **The language server finds, highlights and renames a local variable.**
   `documentHighlight`, `references` and `rename` answered for defs and
   calls, off the typed graph, and a variable is neither: on one, highlight

@@ -1852,6 +1852,23 @@ def main():
          "error" not in reply or reply["error"].get("code") not in (-32603,),
          json.dumps(reply)[:60])
 
+    # 52g. A request the server understood and will not carry out is
+    # RequestFailed with the reason: a rename with nothing renameable under
+    # the cursor left as -32603, the code for "this server is broken". And
+    # a command the server does not have is the client's mistake, -32602.
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0},
+        "newName": "renamed"})
+    step("52g", "a refused rename is request-failed, with its reason",
+         reply.get("error", {}).get("code") == -32803
+         and "nothing renameable" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+    reply = c.send("workspace/executeCommand", {"command": "iyi.nonesuch", "arguments": []})
+    step("52h", "an unknown command is invalid params",
+         reply.get("error", {}).get("code") == -32602
+         and "iyi.nonesuch" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

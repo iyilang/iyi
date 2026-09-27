@@ -581,6 +581,10 @@ module Iyi::Lsp
           # `params["textDocument"]` on a request that carried none. The
           # JSON library's wording is `Missing hash key: "textDocument"`.
           respond_error(id, -32602, "the request is missing #{ex.message.to_s.sub("Missing hash key: ", "")}")
+        when Refused
+          respond_error(id, -32803, ex.message.to_s)
+        when BadParams
+          respond_error(id, -32602, ex.message.to_s)
         when NilAssertionError
           # `params.not_nil!` on a request with no `params` at all: it was
           # answered -32603 "Nil assertion failed", the server's own words
@@ -597,6 +601,20 @@ module Iyi::Lsp
           end
         end
       end
+    end
+
+    # A request the server understood and will not carry out, with the
+    # reason: a rename onto a name in use, a cursor on nothing renameable.
+    # The protocol's RequestFailed (-32803), which a client shows as the
+    # sentence. Raised as a plain exception these left as -32603, which
+    # says the server is broken, about a request it answered correctly.
+    class Refused < Exception
+    end
+
+    # A request whose params name something this server does not take: a
+    # command it does not have, a command without the argument it needs.
+    # The client's mistake, -32602.
+    class BadParams < Exception
     end
 
     # One place the protocol's error shape is written, because there were
@@ -1536,20 +1554,20 @@ module Iyi::Lsp
       new_name = params["newName"].as_s
       if local = local_at(params)
         unless valid_local?(new_name)
-          raise "'#{new_name}' is not an iyi variable name"
+          raise Refused.new("'#{new_name}' is not an iyi variable name")
         end
         if local.taken?(new_name, text_of(params["textDocument"]["uri"].as_s).lines)
-          raise "'#{new_name}' is already a name where '#{local.name}' lives, and the rename would make the two one"
+          raise Refused.new("'#{new_name}' is already a name where '#{local.name}' lives, and the rename would make the two one")
         end
         references, declarations = local.split
       else
         unless valid_name?(new_name)
-          raise "'#{new_name}' is not an iyi method name"
+          raise Refused.new("'#{new_name}' is not an iyi method name")
         end
         references, declarations = reference_sites(params)
       end
       if references.empty? && declarations.empty?
-        raise "nothing renameable under the cursor: rename serves defs, their calls and local variables"
+        raise Refused.new("nothing renameable under the cursor: rename serves defs, their calls and local variables")
       end
 
       by_file = {} of String => Array({Int32, Int32, Int32})
@@ -3079,10 +3097,10 @@ module Iyi::Lsp
       case command
       when "iyi.run"
         uri = params["arguments"]?.try(&.[0]?).try(&.as_s?)
-        raise "iyi.run takes the document uri" unless uri
+        raise BadParams.new("iyi.run takes the document uri") unless uri
         run_verb(id, uri, "run")
       else
-        raise "unknown command '#{command}'"
+        raise BadParams.new("unknown command '#{command}'")
       end
     end
 

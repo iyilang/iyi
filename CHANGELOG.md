@@ -115,6 +115,18 @@
   5 and the new one passed 5 of 5, with live churn, churn and binary trees
   as fast as before and no larger.
 
+- **The Windows wake check caught the machine instead of the helpers.**
+  `bench/concurrent_mark.iyi` failed a mark whose longest helper wake held
+  the program's thread past a millisecond, and a runner took that thread
+  away for 3.7 ms in one wake of 49 on master, with nothing wrong. It now
+  counts the program's wakes over two hundred more collections beside a
+  kept chain, and fails when more than three were slow: on a four-core
+  Windows runner the shipped helpers made no slow wake in 10,000, and
+  helpers given back the priority boost made 5 to 88 in every run of 250;
+  the gate held 10 runs of 10 there, its proof catching the boost on the
+  first try each time. The collector counts its wakes and slow wakes (`IyiMark.wakes`,
+  `IyiMark.wakes_slow`) for it.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the
@@ -10786,7 +10798,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,966-line library and nothing else. Every other
+  written against iyi's own 17,983-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -6542,6 +6542,8 @@ require "./file"
           wake_helpers
           woke = now_ns - woke
           @@wake_longest_ns = woke if woke > @@wake_longest_ns
+          @@wakes = @@wakes + 1_u64
+          @@wakes_slow = @@wakes_slow + 1_u64 if woke > WAKE_SLOW_NS
           true
         end
 
@@ -6754,11 +6756,26 @@ require "./file"
 
         # The longest the triggering thread - the program's own - spent
         # waking the helpers for a mark beside it, across every collection,
-        # for the exercises.
+        # and how many wakes there were and how many took past
+        # WAKE_SLOW_NS, for the exercises: one slow wake is the machine
+        # taking the thread away, and it happens without the collector's
+        # help; a wake that lets the helpers take its core is slow again
+        # and again.
+        WAKE_SLOW_NS = 1000000_u64
         @@wake_longest_ns : UInt64 = 0_u64
+        @@wakes : UInt64 = 0_u64
+        @@wakes_slow : UInt64 = 0_u64
 
         def self.wake_longest_ns : UInt64
           @@wake_longest_ns
+        end
+
+        def self.wakes : UInt64
+          @@wakes
+        end
+
+        def self.wakes_slow : UInt64
+          @@wakes_slow
         end
 
         # Whether a mark is running beside the program right now: the byte

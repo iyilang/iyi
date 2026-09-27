@@ -100,6 +100,21 @@
 
 ### Fixed
 
+- **On darwin, a fresh object could read what its page's last owner left.**
+  The sweep hands runs of dead pages back, and the carve takes a run up
+  again without clearing it, because a released page reads zero. darwin's
+  release was `MADV_FREE_REUSABLE`: advice that the bytes may be dropped,
+  which until memory is short they are not - the defect Windows' `MEM_RESET`
+  was in 0.15.0 - so an object built there read a field its constructor
+  never set as a stale word rather than nil. The release lays a fresh
+  mapping over the run now (`mmap` with `MAP_FIXED`), which frees the old
+  pages and reads zero at once, and darwin names no `madvise`.
+  `bench/reuse_integrity.sh` runs its fresh-object check and both its
+  failure proofs on darwin too, where it had skipped them as an open
+  defect; on a darwin runner the old release failed the check in 5 runs of
+  5 and the new one passed 5 of 5, with live churn, churn and binary trees
+  as fast as before and no larger.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the
@@ -10771,7 +10786,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,962-line library and nothing else. Every other
+  written against iyi's own 17,966-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

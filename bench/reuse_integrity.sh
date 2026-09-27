@@ -31,13 +31,6 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 DONE="every key spells its value, the startup constant intact"
 FRESH="every unset field nil"
-# darwin's release is `MADV_FREE_REUSABLE`, which keeps a page's bytes
-# until the kernel wants the memory, exactly as Windows' `MEM_RESET` did:
-# the fresh-object check would fail there, and does not run. That is an
-# open defect (CHANGELOG, Unreleased), said here rather than passed.
-case "$(uname -s)" in
-  Darwin) FRESH="" ;;
-esac
 
 run_case() {
   local label="$1" name="$2"
@@ -54,7 +47,7 @@ run_case() {
     "$WORK/$name" >"$WORK/$name.out" 2>&1
     local exit_code=$?
     if [ "$exit_code" -ne 0 ] || ! grep -q "$DONE" "$WORK/$name.out" ||
-       { [ -n "$FRESH" ] && ! grep -q "$FRESH" "$WORK/$name.out"; }; then
+       ! grep -q "$FRESH" "$WORK/$name.out"; then
       echo "  FAIL: $label, run $again, exited $exit_code:"
       sed 's/^/    /' "$WORK/$name.out" | tail -3
       status=1
@@ -115,24 +108,8 @@ run_case "release" optimised --release
 
 # Both proofs need a release that zeroes a page at once, which is what
 # the first one's break is (a zeroed word) and what the second one takes
-# away. Linux's `MADV_DONTNEED` does, and Windows' decommit and commit
-# does; darwin's release does not (above), so neither proof can be shown
-# on demand there.
-case "$(uname -s)" in
-  Darwin)
-    echo
-    echo "== the proofs"
-    echo "  not here: darwin keeps a released page's bytes until it needs the memory, so neither break can be shown on demand; Linux and Windows run both"
-    echo
-    if [ "$status" -eq 0 ]; then
-      echo "reuse integrity gate: every step held"
-    else
-      echo "reuse integrity gate: FAILED"
-    fi
-    exit "$status"
-    ;;
-esac
-
+# away: Linux's `MADV_DONTNEED`, Windows' decommit and commit, and
+# darwin's fresh mapping laid over the run.
 echo
 echo "== the check fails when a released page takes a listed chunk's words"
 # The straddler's page released with the rest, as it was: the lowest chunk
@@ -151,16 +128,19 @@ echo "== the check fails when a released page keeps its bytes"
 # The release as advice again: `MADV_FREE` on Linux and `MEM_RESET` on
 # Windows, each of which leaves a page's bytes in place until the kernel
 # is short of memory - so a fresh object carved on the page reads what
-# lived there. Only the platform's own arm of `__iyi_release_pages` is
-# compiled, and the edit makes both; it has to find the one it knows.
+# lived there; on darwin, whose advice was the same defect, no release at
+# all, which keeps the bytes the same way. Only the platform's own arm of
+# `__iyi_release_pages` is compiled, and the edit makes all three; it has
+# to find each one it knows.
 prove_breaks advice \
   '/^      fun __iyi_release_pages\(address : UInt64, length : UInt64\) : Nil$/ { inside = 1 }
    inside && /^      end$/ { inside = 0 }
    inside && $0 == "        __iyi_madvise(address, length, 4_i64)" { print "        __iyi_madvise(address, length, 8_i64)"; found = found + 1; next }
    inside && $0 == "        LibC.VirtualFree(Pointer(Void).new(address), length, 0x4000_i32)" { print "        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x80000_i32, 4_i32)"; found = found + 1; next }
    inside && $0 == "        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x1000_i32, 4_i32)" { next }
+   inside && $0 == "        return if LibC.mmap(Pointer(Void).new(address), length, 3, 0x1012, -1, 0_i64).address == address" { print "        return"; found = found + 1; next }
    { print }
-   END { if (found != 2) exit 3 }' \
+   END { if (found != 3) exit 3 }' \
   "$FRESH"
 
 echo

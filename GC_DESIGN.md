@@ -515,8 +515,8 @@ and the waste is capped at eight bytes below 128 and a fifth above. A
 
 Then the pages. A collector that frees chunks but never pages has a
 resident size that is its high-water mark. The sweep hands runs of dead
-pages back to the kernel with `madvise(MADV_DONTNEED)` (darwin:
-`MADV_FREE_REUSABLE`), a bit per page in the arena's first page saying
+pages back to the kernel with `madvise(MADV_DONTNEED)` (darwin: a fresh
+`mmap(MAP_FIXED)` laid over the run; Windows: decommit and commit), a bit per page in the arena's first page saying
 so, and the carve takes a run up again as its bump region before it
 touches the frontier - which it now carves a slab at a time, 64 KB, so
 that the heap fills from its low addresses and the frontier stays cold.

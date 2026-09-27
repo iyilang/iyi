@@ -20,11 +20,11 @@
 #
 # darwin: libSystem is the platform's only stable interface, so the prelude
 # (write, read, exit, pipe), the poller (kqueue, kevent, its clock), the
-# collector (mmap, munmap, madvise, the stack base and dyld's image for root
+# collector (mmap, munmap, the stack base and dyld's image for root
 # discovery), the thread layer (pthread_*, sigaction, sigaltstack,
 # sysctlbyname, the one thread-local), errno's `__error` and the panic
 # path's backtrace are all its symbols.
-FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace backtrace_symbols_fd clock_gettime_nsec_np exit kevent kqueue madvise mmap mprotect munmap pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
+FLOOR_BASE_DARWIN="__error _tlv_bootstrap backtrace backtrace_symbols_fd clock_gettime_nsec_np exit kevent kqueue mmap mprotect munmap pipe pthread_create pthread_get_stackaddr_np pthread_kill pthread_self read sigaction sigaltstack sysctlbyname write _dyld_get_image_header _dyld_get_image_vmaddr_slide"
 
 # Linux: the prelude issues raw syscalls and adds no symbol of its own; what
 # a program carries is what the C runtime's start files leave undefined.

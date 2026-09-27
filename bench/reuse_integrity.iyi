@@ -29,8 +29,9 @@
 # that the bytes may be dropped, which until memory is short they are
 # not. 14,474,737 of 24,000,000 fresh objects read their unset field as
 # a stale word, and a list whose tail was one looped back into itself.
-# darwin's release is `MADV_FREE_REUSABLE`, advice of the same kind, and
-# this check does not run there: that is an open defect, not a pass.
+# darwin's release was `MADV_FREE_REUSABLE`, advice of the same kind, and
+# the check did not run there; the release lays a fresh mapping over the
+# run now, and it runs on all three.
 
 module bench/reuse_integrity
 
@@ -98,7 +99,7 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
 # those runs the last collection before the check had freed 28 to 32 MiB:
 # the array's final buffer had outlived the first. On its own thread, 0
 # runs in 400.
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   class Pair
     def initialize(@a : UInt64, @b : UInt64)
     end

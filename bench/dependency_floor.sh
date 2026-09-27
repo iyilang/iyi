@@ -115,13 +115,14 @@ COMPILER="$REPO/.build/iyi"
 # (Stage 9): helper 0 takes the mark's second stop, which stops the main
 # thread, so the main thread registers a line - and on darwin a line's park
 # is a pipe - the first time a mark runs beside it, and `sigaction`
-# joins with it, the stop's handler installed then. `madvise` is the
-# sweep handing a run of dead pages back (`MADV_FREE_REUSABLE`, the
-# advice darwin's accounting honours). `mprotect` joined with the first
+# joins with it, the stop's handler installed then. `madvise` left when
+# the sweep's release of dead pages became a fresh `mmap` over the run:
+# its advice, `MADV_FREE_REUSABLE`, kept the bytes, and a fresh object
+# carved there read them. `mprotect` joined with the first
 # sample that starts a task (`samples/iyi/workers.iyi`, III.4): a fiber's
 # stack has a guard page under it, and on darwin the guard is libSystem's
-# `mprotect`. Linux names none of the six: clone, sched_getaffinity,
-# futex, rt_sigaction, madvise and mprotect are syscalls. `accept`, `bind`,
+# `mprotect`. Linux names none of the five: clone, sched_getaffinity,
+# futex, rt_sigaction and mprotect are syscalls. `accept`, `bind`,
 # `connect`, `getsockname`, `listen`, `recv`, `send`, `setsockopt` and `socket`
 # joined with `IyiSocket` (samples/iyi/socket.iyi): on darwin libSystem is the
 # platform interface, while Linux issues raw socket syscalls and names none of them.

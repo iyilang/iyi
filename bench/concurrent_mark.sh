@@ -4,10 +4,11 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Six steps, the last three failure proofs:
-#   1. The program holds, release: twenty-four rounds each move a payload
-#      out of an unmarked chain into an already-marked holder under a
-#      running mark, and every payload is intact after the collection.
+# Seven steps, the last four failure proofs:
+#   1. The program holds, release: twenty-four rounds or more each move a
+#      payload out of an unmarked chain into an already-marked holder, at
+#      least one of them under a running mark, and every payload is intact
+#      after the collection.
 #   2. The pauses, printed: the stop-the-world mark over the same chain
 #      against a concurrent collection's two stops, and the longest the
 #      program's thread spent waking the helpers, which on Windows is
@@ -21,9 +22,12 @@
 #   4. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
-#   5. Failure proof, on Windows: the helpers given back the boost a
+#   5. Failure proof: the barrier's own look at the marking flag removed;
+#      a barrier run after its mark ended grays a holder, the next mark
+#      sweeps the payload it held, and the program exits 1 saying so.
+#   6. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check exits 1.
-#   6. Failure proof, on Windows: the cap on the helpers beside a busy
+#   7. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
 set -u
 
@@ -66,7 +70,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(moves|pause|wake|share):' answers.txt | sed 's/^/  /'
+grep -E '^(stray|moves|pause|wake|share):' answers.txt | sed 's/^/  /'
 
 # What the machine takes away on its own: a thread per core that reads the
 # clock and does nothing else - no allocation, so no collection - for a
@@ -142,6 +146,21 @@ if [ "$code" -ne 1 ] || ! grep -q "the barrier lost it" nobarrier.txt; then
   echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
+
+step "failure proof: a barrier that shades after its mark ended loses what the holder held"
+mkdir -p stray/iyi
+cp "$REPO"/src/iyi/*.iyi stray/iyi/
+awk '{ if ($0 ~ /^        return if LibIyiGCTable\.__iyi_marking == 0_u8$/ && prev ~ /def self\.barrier\(/) { prev = $0; next } prev = $0; print }' "$REPO/src/iyi/prelude.iyi" > stray/iyi/prelude.iyi
+cmp -s stray/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o straybarrier > build-stray.log 2>&1; then
+  cat build-stray.log; exit 1
+fi
+timeout -k 5 300 ./straybarrier > stray.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.txt; then
+  echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
 if [ "$PSEP" = ":" ]; then
   echo "workdir $WORK"

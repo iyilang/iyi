@@ -3083,8 +3083,14 @@ require "./file"
         end
         # The copy was bytes, invisible to the barrier the compiler puts on
         # pointer stores; what the new block now holds is shaded here, so a
-        # buffer of references grown under a running mark keeps them.
-        IyiMark.barrier(new_pointer.address, limit.unsafe_div(8_u64)) if LibIyiGCTable.__iyi_marking != 0_u8
+        # buffer of references grown under a running mark keeps them. In
+        # the barrier's bracket, as the compiler's is, so the barrier's
+        # own look at the flag cannot go stale before it shades.
+        if LibIyiGCTable.__iyi_marking != 0_u8
+          IyiHeap.enter_barrier
+          IyiMark.barrier(new_pointer.address, limit.unsafe_div(8_u64))
+          IyiHeap.leave_barrier
+        end
         free(pointer)
         new_pointer
       end
@@ -4067,11 +4073,6 @@ require "./file"
       POOL_ACTIVE = 256_u64
       POOL_GENERATION = 320_u64
       POOL_HELPERS_DONE = 384_u64
-      # Helpers that took a permit for the mark in flight: reset to zero
-      # wherever permits are set, counted up by each taker, and the
-      # taker's slot is the count it found. `take_mark_permit` says why
-      # it is a count and not a difference.
-      POOL_MARK_TAKEN = 448_u64
       POOL_READY = 512_u64
       # The sweep round (GC_DESIGN.md Stage 8): open after a collection
       # while helpers may claim arenas, closed by the next collection
@@ -4096,14 +4097,24 @@ require "./file"
       # a headcount that never arrives is a hang, which is what three
       # cores found one run in three.
       #
-      # Taken is a word of its own, POOL_MARK_TAKEN, counted up by each
-      # taker. It was a difference - the count asked less the permits
-      # left - and a difference of two words that are set one after the
-      # other is a race: a helper whose CAS on the permits landed just
-      # before a round reset both words read the new asked, 0, less its
-      # old permit and underflowed, and the thread exercise panicked on
-      # arithmetic overflow once in eighty runs on eight threads.
+      # One word holds both, the permits left in its low half and the
+      # takers in its high half, and a take moves one from the first to
+      # the second in one compare-and-set. The waiter closes the round
+      # before it waits (`close_mark_permits`): the permits go to zero and
+      # the takers it reads in the same operation are every taker there
+      # will be. Two words were two races. A difference of the count asked
+      # and the permits left underflowed when a round reset both between a
+      # helper's take and its read, and the thread exercise panicked on
+      # arithmetic overflow once in eighty runs on eight threads. A taker
+      # count of its own, waited for while permits were still open, let a
+      # helper woken late take one after the wait had passed: its drain
+      # then ran through the second stop, took the batch the stop had
+      # flushed from the mutators, and the stop found the pool empty and
+      # swept what that batch reached - gc_race's live churn walked a
+      # freed list node once in a few hundred runs.
       POOL_MARK_PERMITS = 832_u64
+      MARK_TAKER = 0x100000000_u64
+      MARK_PERMITS_LEFT = 0xFFFFFFFF_u64
       POOL_FINISH = 896_u64
       # The free batches, pushed without the lock and popped under it
       # (`free_batch`, `new_batch`); the end of the bump piece; the
@@ -4124,15 +4135,25 @@ require "./file"
       def self.take_mark_permit : UInt64
         word = pool_word(POOL_MARK_PERMITS)
         while true
-          left = word.value.get
-          return NO_PERMIT if left == 0_u64
-          return pool_word(POOL_MARK_TAKEN).value.add(1_u64) if word.value.compare_and_set(left, left - 1_u64)[1]
+          value = word.value.get
+          return NO_PERMIT if value & MARK_PERMITS_LEFT == 0_u64
+          return value.unsafe_shr(32_u64) if word.value.compare_and_set(value, value - 1_u64 + MARK_TAKER)[1]
         end
       end
 
-      # How many helpers took a permit for the mark in flight.
-      def self.mark_takers : UInt64
-        pool_word(POOL_MARK_TAKEN).value.get
+      # A round of `count` permits and no takers yet.
+      def self.open_mark_permits(count : UInt64) : Nil
+        pool_word(POOL_MARK_PERMITS).value.set(count)
+      end
+
+      # The round closed - no permit left for a helper still waking - and
+      # how many helpers took one, which no later take can change.
+      def self.close_mark_permits : UInt64
+        word = pool_word(POOL_MARK_PERMITS)
+        while true
+          value = word.value.get
+          return value.unsafe_shr(32_u64) if word.value.compare_and_set(value, value - (value & MARK_PERMITS_LEFT))[1]
+        end
       end
 
 
@@ -4430,7 +4451,19 @@ require "./file"
       # it. An object born during the mark comes the same way.
       MUTATOR_BATCH = 64_u64
 
+      # The flag once more, inside the bracket (`IyiHeap.enter_barrier`):
+      # the store's own read of it came before the bracket, and a thread
+      # stopped between the two found the mark over when it went on. The
+      # value it stored was in its registers at that stop, a root the
+      # finish marked, so there is nothing left to shade - and a shade
+      # then was worse than nothing. The object went gray after its
+      # arena's sweep had turned it white, onto a stack the next mark
+      # starts by emptying, and that mark found it gray, never queued
+      # it, and swept what hung off it. gc_race's live churn lost its
+      # list's tail that way on Windows in one run in forty; every run
+      # that faulted had started a mark with a chunk gray.
       def self.barrier(address : UInt64, words : UInt64) : Nil
+        return if LibIyiGCTable.__iyi_marking == 0_u8
         w = worker
         index = 0_u64
         while index < words
@@ -4860,8 +4893,7 @@ require "./file"
           helpers = @@helpers if @@helpers < helpers
         end
         @@workers = helpers + 1_u64
-        pool_word(POOL_MARK_TAKEN).value.set(0_u64)
-        pool_word(POOL_MARK_PERMITS).value.set(helpers)
+        open_mark_permits(helpers)
         pool_word(POOL_FINISH).value.set(0_u64)
         @@helper_black = 0_u64
         # This thread is counted in now, before a helper can see the
@@ -4884,7 +4916,8 @@ require "./file"
         # Every helper asked has answered - left the drain and folded its
         # accounts - before this thread reads them or turns the
         # generation again.
-        while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
+        takers = close_mark_permits
+        while pool_word(POOL_HELPERS_DONE).value.get < takers
           spin_pause
         end
         @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
@@ -5037,13 +5070,15 @@ require "./file"
             fold_helper(w)
             pool_word(POOL_HELPERS_DONE).value.add(1_u64)
             # Beside the program, the drain's end is not the mark's: the
-            # first taker waits for the rest - for the count taken, which
-            # rises if another helper is still arriving and is never a
-            # promise a missing helper has to keep - and takes the second
-            # stop.
+            # first taker closes the round, so that a helper still waking
+            # finds no permit rather than draining through the stop, waits
+            # for the helpers that took one - never for a count asked, a
+            # promise a missing helper would have to keep - and takes the
+            # second stop.
             if slot == 0_u64 && pool_word(POOL_FINISH).value.get != 0_u64
               pool_word(POOL_FINISH).value.set(0_u64)
-              while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
+              takers = close_mark_permits
+              while pool_word(POOL_HELPERS_DONE).value.get < takers
                 spin_pause
               end
               # The finish turns the generation once more, for the
@@ -5603,8 +5638,7 @@ require "./file"
         # helper spins awake and the first SWEEP_HELPERS take one.
         def self.open_sweep_round : Nil
           return if @@helpers == 0_u64 || @@sweep_left == 0_u64
-          pool_word(POOL_MARK_PERMITS).value.set(0_u64)
-          pool_word(POOL_MARK_TAKEN).value.set(0_u64)
+          open_mark_permits(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
           pool_word(POOL_SWEEP_PERMITS).value.set(@@helpers < SWEEP_HELPERS ? @@helpers : SWEEP_HELPERS)
           pool_word(POOL_SWEEP).value.set(1_u64)
@@ -6425,8 +6459,7 @@ require "./file"
           # with the world still stopped: no barrier is needed for it,
           # nothing is running.
           @@workers = 1_u64
-          pool_word(POOL_MARK_PERMITS).value.set(0_u64)
-          pool_word(POOL_MARK_TAKEN).value.set(0_u64)
+          open_mark_permits(0_u64)
           pool_word(POOL_FINISH).value.set(0_u64)
           pool_word(POOL_ACTIVE).value.set(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
@@ -6483,8 +6516,7 @@ require "./file"
           {% end %}
           @@beside_helpers = helpers
           @@workers = helpers + 1_u64
-          pool_word(POOL_MARK_TAKEN).value.set(0_u64)
-          pool_word(POOL_MARK_PERMITS).value.set(helpers)
+          open_mark_permits(helpers)
           pool_word(POOL_FINISH).value.set(1_u64)
           # Every helper counts itself in when it starts draining; the
           # triggering thread is not a worker after this.
@@ -6680,15 +6712,15 @@ require "./file"
           @@workers = helpers
           # This helper is inside the finish and drains below without a
           # permit; every other may take one.
-          pool_word(POOL_MARK_TAKEN).value.set(0_u64)
-          pool_word(POOL_MARK_PERMITS).value.set(helpers - 1_u64)
+          open_mark_permits(helpers - 1_u64)
           pool_word(POOL_FINISH).value.set(0_u64)
           pool_word(POOL_ACTIVE).value.set(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
           generation = pool_word(POOL_GENERATION).value.add(1_u64) + 1_u64
           wake_helpers
           drain(w)
-          while pool_word(POOL_HELPERS_DONE).value.get < mark_takers
+          takers = close_mark_permits
+          while pool_word(POOL_HELPERS_DONE).value.get < takers
             spin_pause
           end
           generation

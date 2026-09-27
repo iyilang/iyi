@@ -2,61 +2,6 @@
 
 ## Unreleased
 
-### Added
-
-- **`require PATH vX reaches ...`: a package's reach as a limit.** `reaches
-  std/file, C`, or `reaches nothing`, in the words `iyi mod reach` prints:
-  std modules by path, `File`, and `C` for the C the package declares
-  itself. A selected version that reaches past its line is refused by
-  every verb that resolves, naming what it reaches, with iyi.sum and - in
-  a `get` - iyi.mod unwritten; `get` keeps the clause when it moves the
-  version. Only a line that writes one pays for reading the package's
-  source.
-
-- **Windows sweeps with helper threads.** A collection there left its
-  arenas to the allocating thread alone, where Linux's and darwin's open a
-  round the helpers sweep beside the program. Windows opens it too: the
-  round is closed before the next stop and its helpers woken after the
-  runtime lock is released, as there. In `collect_trigger.sh` on a
-  twelve-core Windows machine the helpers began 321 arenas and the
-  allocator 9 across 33 collections. `reuse_integrity.sh`'s proof that a
-  released page must not take a listed chunk's words runs on Windows now:
-  with the fix taken out the exercise failed 20 runs of 20, where without
-  the helpers it passed 20 of 20 and the proof was skipped there.
-
-- **Windows marks beside the program.** A large live set on Windows was
-  marked inside the pause; Linux and darwin stop for the roots, mark
-  beside the program under the write barrier, and stop again to finish
-  (GC_DESIGN.md Stage 9). Windows does now: the main thread is
-  registered at the first collection so helper 0's second stop can
-  suspend it, and a thread inside the barrier is let run to its end and
-  parks there, as one inside the allocator already was.
-  `concurrent_mark.sh` runs on Windows and in the `windows-std` job: on a
-  twelve-core Windows machine every payload moved under a mark survived
-  in 8 runs of 8, and with the barrier's shade taken out the first was
-  freed. Against the same collector marking inside the pause,
-  `gc_race.py`'s binary trees' longest pause went from 4.78 ms to 1.21
-  and its total from 58.2 to 7.5, live churn's from 14.96 ms to 0.41 and
-  59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
-  against 0.059 - the helpers' spin before their park, fixed below.
-
-### Changed
-
-- **A package's modules live under its name, so two packages' `util`s are
-  two modules.** Two packages that each had a `util.iyi` both defined the
-  type `Util`, and a program requiring both was refused - "`Util` is not
-  imported here", in the second package's own file. A package's module is
-  now under the package's name, its path's last segment (`-` as `_`, a
-  `/vN` left off): `Pa::Util` and `Pb::Util`, and a name both export is
-  ambiguous only where a file brings both into scope. A module whose path
-  begins with the name already - `iyi_web/dsl` in `iyi-web`, `liba` in
-  `liba` - is where it was; one that does not is reached by a qualified
-  name one segment longer: `Liba::Colors` for `import .../liba/colors`.
-  Inside the package nothing changes, and a std module a package imports
-  stays std's.
-
-### Fixed
-
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the
@@ -293,6 +238,204 @@
   2026-09-26 and a daemon dated 2026-09-27, and the check that the two are
   one build stopped the CLI specs. The workflow tells git the checkout is
   safe in every step.
+
+## 0.15.3 — 2026-09-27
+
+**The collector stops losing live objects under a mark beside the
+program.** 0.15.2 had two races that swept objects the program still held,
+and `gc_race`'s live churn - a million-item list beside 256 MB of garbage -
+walked into freed memory on both. A helper that woke late took a mark
+permit after its round was counted and drained through the final stop,
+once in a few hundred runs on Linux; a write barrier that ran after its
+mark had ended left an object gray into the next mark, which never scanned
+it, once in forty runs on Windows, where it also hung the program. Both are
+closed, each with a gate that fails without its fix, and a thread stopped
+inside the allocator on Windows now keeps rsi and rdi among its roots.
+
+**A package module's old name is an edit away.** Code written before
+0.15.2 moved package modules under their package's name is told the
+qualified name and can take it with `iyi fix`.
+
+**The inherited tree is 7,288 lines lighter**: libxml2, `oauth`/`oauth2`
+and the libevent loop are gone (#101, @jwaldrip).
+
+### Added
+
+- **A package module's old name is an edit away.** 0.15.2 put a package's
+  modules under its name, so `Colors` of `example.com/liba/colors` is
+  `Liba::Colors`; the old spelling was a bare "undefined constant". It now
+  says what the name is and carries it as a `suggested_edit`, so `iyi fix .`
+  moves a program across and the language server offers the quick fix.
+  `iyi mod context` prints a package module's qualified name - its own
+  `module` line does not say it - and `iyi doc` takes a package module's
+  path, a short name included: `iyi doc web/iyi_web/dsl`.
+
+### Removed
+
+- **libxml2, `oauth`/`oauth2` and the libevent event loop are gone from the
+  inherited tree** (#101, @jwaldrip). 7,288 lines of the other language's
+  library that no binary reached - `dependency_floor` already proved iyi
+  links none of them - leave the source too: `src/xml` and its libxml2
+  binding, `src/oauth`, `src/oauth2`, and `Crystal::EventLoop::LibEvent`
+  with their specs. Under `--crystal`, `require "xml"`, `"oauth"` and
+  `"oauth2"` no longer resolve; iyi's own `std/xml` is untouched. A unix
+  target with none of epoll, kqueue or io_uring is refused at compile time,
+  naming the loops iyi carries, rather than falling back to libevent.
+  `http`, `openssl`, `big`, `yaml`, `digest` and pcre stay: shard binding
+  and the specs reach them. `library_boundaries` binds eleven namespaces,
+  and the link-flag question XML asked is `yaml_reads`' now.
+
+### Fixed
+
+- **The identity gate could be talked past by the letters before a word.**
+  `bench/identity_floor.py` allows "Crystal" in sentences about the other
+  language, and its rules for those - `in Crystal`, `is Crystal`, `a
+  Crystal program` - had no word boundary, so "thin Crystal", "within
+  Crystal" or "this Crystal" anywhere in the tree passed as prose. Every
+  rule that opens with a word is bounded now; a leak planted each of those
+  three ways fails the gate, where the gate before let all three through.
+  Found in #104 by @jwaldrip, who bounded two of the rules; the other
+  eighteen had the same hole.
+- **The arena gate's huge-page bound sat on the thing it measured.** It
+  refused more than 2048 KB, exactly one huge page, so a single huge page
+  landed on `>` and did not fire. The bound is 1024 KB, between a healthy
+  run's 324 KB and one huge page (from #104, @jwaldrip).
+- **A mark beside the program could sweep live objects.** A helper that
+  woke late took a mark permit after the helper finishing the mark had
+  already counted the takers and moved on. Its drain then ran through the
+  mark's final stop and took the batch that stop had flushed from the
+  program's threads; the stop found the pool empty, ended the mark, and
+  swept what that batch reached. `gc_race`'s live churn walked a freed list
+  node once in a few hundred runs with helpers, on Linux and Windows alike,
+  and 0.15.2 ships it. The permits and their takers are one word now, and the
+  thread that waits for the takers closes the round first, so a helper
+  waking after that finds no permit. Across 6,008 runs of live churn, 9
+  faulted before and none after; `bench/parallel_mark.sh` checks that a
+  closed round gives no permit, and proves the check fires.
+- **A write barrier that ran after its mark had ended could lose a
+  structure.** A pointer store reads the marking flag and shades what it
+  stored after; a thread stopped between the two found the mark over when
+  it went on, and grayed the stored object anyway. If that object's arena
+  had been swept since, it stayed gray into the next mark, which never
+  queues a gray object, and what hung off it was swept while live. On
+  Windows `gc_race`'s live churn lost its list's tail this way in one run
+  in forty, and every faulting run had started a mark with a chunk gray.
+  The barrier reads the flag again inside its bracket, where no stop can
+  land, and shades nothing once the mark is over; `realloc`'s barrier runs
+  in the same bracket. Across 3,100 runs of live churn on Windows, 43
+  faulted, 23 hung and 137 began a mark with a chunk gray before, and none
+  did after. `bench/concurrent_mark.sh` runs a barrier after a mark and
+  checks the next mark keeps what the holder held, and proves the check
+  fires without the second read.
+- **Windows: a thread stopped inside the allocator kept rsi and rdi out of
+  the roots.** A stop that lands in the allocator is paid at its exit, where
+  the thread spills its callee-saved registers for the mark; it spilled
+  System V's six, and Windows x64 preserves rsi and rdi as well, so a value
+  held only there across the stop was no root. The collector's own spill
+  already had the Windows set; the stopped thread's has it now.
+  `bench/windows_exercise.sh` reads the stores out of a cross-compiled
+  Windows object, and refuses a copy of the runtime that leaves rsi out.
+- **The concurrent mark gate could lose its race on a loaded machine.**
+  `bench/concurrent_mark.iyi` needs one of its rounds to move a payload
+  while the mark has not reached it yet, and ran twenty-four. With the
+  permit round closed, marks reach the chain's tail sooner, and under
+  eight copies at once the gate failed 2.3% of runs for want of such a
+  round, against 0.5% before. It runs on past twenty-four until one round
+  has, up to ninety-six, and failed none of 240 runs under the same load.
+- **The parallel marker's stack proof could prove nothing on darwin.** Its
+  copy of the runtime makes every stack growth fatal, so `stacks_grown`
+  never moves there, and the check read it before it read the wide
+  object: a compiler free to see that failed the growth check
+  unconditionally, dropped the wide object before the mark, and the mark
+  had nothing to grow for. darwin arm64's build did that in two runs of
+  five - the alone mark kept 4 objects and swept 183,961. The wide object
+  is read first now, so it is live across the mark in both builds.
+- **The Windows replace gate looked for a deleted file too soon.**
+  `bench/replace_running.sh` checks that the next replacement deletes the
+  binary that stepped aside, and looked the instant it returned. A file
+  deleted while a scanner has it open - and the gate's own probe, opening
+  it for writing, invites the scan - stays under its name until that handle
+  closes, so the gate failed with nothing wrong. It gives the deletion
+  thirty seconds to land, waits thirty rather than ten for the old process
+  and its handles, and says what still holds the file when it gives up.
+
+## 0.15.2 — 2026-09-26
+
+**Two packages can each have a `util`.** A package's modules now live under
+its name - its path's last segment, `-` as `_`, a `/vN` left off - so two
+packages that each have `util.iyi` are `Pa::Util` and `Pb::Util` rather
+than one type both define, which refused any program that required both.
+A module whose path already begins with the name, as iyi-web's `iyi_web/dsl`
+does, is where it was; one that does not is reached by a qualified name one
+segment longer, `Liba::Colors` for `import .../liba/colors`, and code that
+spelled it `Colors` from outside the package writes the longer name now.
+
+**A package's reach can be a limit.** `require PATH vX reaches std/file, C`,
+or `reaches nothing`, says what that package may touch outside the language,
+in `iyi mod reach`'s words; a version past it is refused by name before
+iyi.sum or iyi.mod is written, and `get` keeps the clause.
+
+**Windows collects beside the program, and gates stop flaking.** A
+collection on Windows marks and sweeps with its helper threads beside the
+running program, as on Linux and darwin, and a fiber reading stdin parks
+there. `std_signal`'s TERM step, which lost its output file in one run in
+three under load, holds - a killer subshell ran the gate's own cleanup -
+and so do the language server's and the collector's Windows gates.
+
+### Added
+
+- **`require PATH vX reaches ...`: a package's reach as a limit.** `reaches
+  std/file, C`, or `reaches nothing`, in the words `iyi mod reach` prints:
+  std modules by path, `File`, and `C` for the C the package declares
+  itself. A selected version that reaches past its line is refused by
+  every verb that resolves, naming what it reaches, with iyi.sum and - in
+  a `get` - iyi.mod unwritten; `get` keeps the clause when it moves the
+  version. Only a line that writes one pays for reading the package's
+  source.
+
+- **Windows sweeps with helper threads.** A collection there left its
+  arenas to the allocating thread alone, where Linux's and darwin's open a
+  round the helpers sweep beside the program. Windows opens it too: the
+  round is closed before the next stop and its helpers woken after the
+  runtime lock is released, as there. In `collect_trigger.sh` on a
+  twelve-core Windows machine the helpers began 321 arenas and the
+  allocator 9 across 33 collections. `reuse_integrity.sh`'s proof that a
+  released page must not take a listed chunk's words runs on Windows now:
+  with the fix taken out the exercise failed 20 runs of 20, where without
+  the helpers it passed 20 of 20 and the proof was skipped there.
+
+- **Windows marks beside the program.** A large live set on Windows was
+  marked inside the pause; Linux and darwin stop for the roots, mark
+  beside the program under the write barrier, and stop again to finish
+  (GC_DESIGN.md Stage 9). Windows does now: the main thread is
+  registered at the first collection so helper 0's second stop can
+  suspend it, and a thread inside the barrier is let run to its end and
+  parks there, as one inside the allocator already was.
+  `concurrent_mark.sh` runs on Windows and in the `windows-std` job: on a
+  twelve-core Windows machine every payload moved under a mark survived
+  in 8 runs of 8, and with the barrier's shade taken out the first was
+  freed. Against the same collector marking inside the pause,
+  `gc_race.py`'s binary trees' longest pause went from 4.78 ms to 1.21
+  and its total from 58.2 to 7.5, live churn's from 14.96 ms to 0.41 and
+  59.4 to 0.8; churn, which never marks beside the program, ran 0.114 s
+  against 0.059 - the helpers' spin before their park, fixed below.
+
+### Changed
+
+- **A package's modules live under its name, so two packages' `util`s are
+  two modules.** Two packages that each had a `util.iyi` both defined the
+  type `Util`, and a program requiring both was refused - "`Util` is not
+  imported here", in the second package's own file. A package's module is
+  now under the package's name, its path's last segment (`-` as `_`, a
+  `/vN` left off): `Pa::Util` and `Pb::Util`, and a name both export is
+  ambiguous only where a file brings both into scope. A module whose path
+  begins with the name already - `iyi_web/dsl` in `iyi-web`, `liba` in
+  `liba` - is where it was; one that does not is reached by a qualified
+  name one segment longer: `Liba::Colors` for `import .../liba/colors`.
+  Inside the package nothing changes, and a std module a package imports
+  stays std's.
+
+### Fixed
 
 - **`std_signal`'s TERM step lost its output file at random.** A process
   that caught TERM and hung was killed by a `( sleep 10; kill ) &` beside
@@ -10622,7 +10765,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,914-line library and nothing else. Every other
+  written against iyi's own 17,962-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

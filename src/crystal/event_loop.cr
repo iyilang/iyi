@@ -10,8 +10,6 @@ abstract class Crystal::EventLoop
         else
           System.panic "io_uring_setup", Errno::ENOSYS
         end
-      {% elsif flag?("evloop=libevent") %}
-        Crystal::EventLoop::LibEvent
       # The native async solution on Solaris (Illumos) are Event Ports, but both
       # `epoll` and `timerfd` are supported, and the epoll event loop works.
       {% elsif flag?("evloop=epoll") || flag?(:android) || flag?(:linux) || flag?(:solaris) %}
@@ -19,7 +17,7 @@ abstract class Crystal::EventLoop
       {% elsif flag?("evloop=kqueue") || flag?(:darwin) || flag?(:freebsd) || flag?(:openbsd) %}
         Crystal::EventLoop::Kqueue
       {% else %}
-        Crystal::EventLoop::LibEvent
+        {% raise "No event loop for this target: iyi carries epoll, kqueue and io_uring" %}
       {% end %}
     {% elsif flag?(:win32) %}
       Crystal::EventLoop::IOCP
@@ -164,14 +162,16 @@ end
 {% elsif flag?(:unix) %}
   {% if flag?("evloop=io_uring") %}
     require "./event_loop/io_uring"
-  {% elsif flag?("evloop=libevent") %}
-    require "./event_loop/libevent"
   {% elsif flag?("evloop=epoll") || flag?(:android) || flag?(:linux) || flag?(:solaris) %}
     require "./event_loop/epoll"
   {% elsif flag?("evloop=kqueue") || flag?(:darwin) || flag?(:freebsd) || flag?(:openbsd) %}
     require "./event_loop/kqueue"
   {% else %}
-    require "./event_loop/libevent"
+    # libevent is an ancestor dependency the floor forbids, and the loops
+    # above cover every platform this builds for. A unix that lands here
+    # needs one of them written for it, which is a better failure than a
+    # link against a library that may not be here.
+    {% raise "No event loop for this target: iyi carries epoll, kqueue and io_uring" %}
   {% end %}
 {% elsif flag?(:win32) %}
   require "./event_loop/iocp"

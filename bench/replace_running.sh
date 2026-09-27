@@ -63,17 +63,27 @@ stop_session() {
 # Until nothing holds the file: no process runs the image - the session's
 # worker (`iyi lsp --worker`, started from the same file) exits on its own
 # time after the session - and no handle is open on it, which a Windows
-# runner's scanner keeps for a moment after a rename: the file opens with
-# no sharing at all. Ten seconds for each at most.
+# runner's scanner keeps for a while after a rename: the file opens with
+# no sharing at all. Thirty seconds for each at most, and what still
+# holds the file when the wait gives up is said.
 wait_unheld() {
   local path tries=0
   path="$(cygpath -w "$1")"
-  while tasklist //FI "IMAGENAME eq held.exe" //NH 2>/dev/null | grep -q 'held.exe' && [ "$tries" -lt 100 ]; do
+  while tasklist //FI "IMAGENAME eq held.exe" //NH 2>/dev/null | grep -q 'held.exe'; do
+    if [ "$tries" -ge 300 ]; then
+      echo "  after 30 s a held.exe still runs:"
+      tasklist //FI "IMAGENAME eq held.exe" 2>&1 | sed 's/^/    /'
+      break
+    fi
     sleep 0.1
     tries=$((tries + 1))
   done
   tries=0
-  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1 || [ "$tries" -ge 20 ]; do
+  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1; do
+    if [ "$tries" -ge 60 ]; then
+      echo "  after 30 s the file still opens only shared: a handle is held on it"
+      break
+    fi
     sleep 0.5
     tries=$((tries + 1))
   done
@@ -116,7 +126,20 @@ step "and goes at the next replacement, once nothing runs it"
 stop_session
 [ -n "$aside" ] && wait_unheld "$WORK/$aside"
 cp "$IYI" "$WORK/next.exe"
-if replace "" "$next_w" && [ -n "$aside" ] && [ ! -e "$WORK/$aside" ]; then
+# Deleted is not gone at once: a file deleted while another handle has it
+# open - one opened to allow deletion, as a scanner's is, and the probe's
+# own open for writing is what asks the scanner in - stays under its name,
+# delete-pending, until that handle closes. Found in CI, twice in a row
+# with nothing holding the file when the wait above ended.
+gone_soon() {
+  local tries=0
+  while [ -e "$1" ]; do
+    [ "$tries" -ge 60 ] && return 1
+    sleep 0.5
+    tries=$((tries + 1))
+  done
+}
+if replace "" "$next_w" && [ -n "$aside" ] && gone_soon "$WORK/$aside"; then
   echo "  $aside deleted"
 else
   echo "  $aside is still there, or the replacement failed:"; sed 's/^/    /' "$WORK/make.out"

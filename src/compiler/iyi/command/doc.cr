@@ -71,6 +71,32 @@ class Iyi::Command
   private def doc_module_path(path : String) : String?
     return nil if path.empty? || path.starts_with?('-') || path.ends_with?(".cr")
 
+    # A package's module, through this project's iyi.mod - a short name
+    # included - the way a build resolves the import: `iyi doc
+    # github.com/sdogruyol/iyi-web/iyi_web/dsl`, or `iyi doc web/iyi_web/dsl`.
+    if File.file?(File.join(Dir.current, Mod::Installer::MANIFEST))
+      table =
+        begin
+          Mod::Installer.table_for(Dir.current)
+        rescue ex : Mod::ModError
+          abort! "doc: #{ex.message}", :USAGE_ERROR
+        end
+      expanded = Mod::Installer.expand(path, table)
+      table.each do |(prefix, checkout)|
+        next if prefix.starts_with?('@')
+        inner =
+          if expanded == prefix
+            Mod::ModFile.split_major(prefix)[0].rpartition('/')[2]
+          elsif expanded.starts_with?("#{prefix}/")
+            expanded[(prefix.size + 1)..]
+          else
+            next
+          end
+        file = File.join(checkout, "#{inner}.iyi")
+        return File.expand_path(file) if File.file?(file)
+      end
+    end
+
     candidates = [File.join(Dir.current, "#{path}.iyi"), File.join(Dir.current, "#{path}.cr")]
     IyiPath.new(iyi_path_entries).entries.each do |entry|
       candidates << File.join(entry, "#{path}.iyi")

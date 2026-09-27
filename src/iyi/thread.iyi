@@ -991,12 +991,28 @@
     # callee-saved registers are the ones that may hold a value across
     # this call, spilled onto the line the way `IyiRoots` spills the
     # collector's; the caller-saved ones are on the stack by convention.
+    #
+    # Which registers those are is the platform's ABI, and Windows x64
+    # adds rsi and rdi to System V's six. This spilled System V's set on
+    # Windows too, so a value held across the deferred stop in rsi or rdi
+    # - its only reference - was no root, and the mark could miss it.
+    # `IyiRoots.spill_registers` already had the Windows set; this has
+    # it now.
     @[NoInline]
     def self.stop_here : Nil
       line = @@line
       return if line == 0
       spill = line + IYI_TL_SPILL
-      {% if flag?(:x86_64) %}
+      {% if flag?(:win32) && flag?(:x86_64) %}
+        asm("movq %rbx, 0($0)
+             movq %rbp, 8($0)
+             movq %rdi, 16($0)
+             movq %rsi, 24($0)
+             movq %r12, 32($0)
+             movq %r13, 40($0)
+             movq %r14, 48($0)
+             movq %r15, 56($0)" :: "{rcx}"(spill) : "memory" : "volatile")
+      {% elsif flag?(:x86_64) %}
         asm("movq %rbx, 0($0)
              movq %rbp, 8($0)
              movq %r12, 16($0)

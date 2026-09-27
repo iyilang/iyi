@@ -65,7 +65,8 @@
 # under its name - `Pa::Util`, `Pb::Util` - so both load and each package's
 # own `Util` is its own; a name both export is ambiguous only where a file
 # brings both into scope, and a package whose modules already begin with
-# its name (`iyi_web/dsl`) is where it was.
+# its name (`iyi_web/dsl`) is where it was, and a name written before -
+# `Util` for `Pa::Util` - is an edit `iyi fix` applies.
 #
 # Then `reaches` as a limit: `require ... reaches nothing` builds a pure
 # version, a `get` to one that opens a socket and declares C is refused
@@ -616,6 +617,21 @@ printf 'import example.test/user/pa/util::{who}\nimport example.test/user/pb/uti
 grep -q "'who' is ambiguous here: it is exported by both Pa::Util and Pb::Util" amb.log ||
   fail "a name both util modules export was not called ambiguous by both names: $(cat amb.log)"
 [ "$status" -eq 0 ] && echo "  Pa::Util and Pb::Util both load, each package's Util is its own; who from both: ambiguous by name"
+# The name a program wrote before 0.15.2 is an edit away: `Util` of pa's
+# `util` is `Pa::Util`, the error says so as a suggested edit, and `iyi
+# fix` applies it.
+mkdir -p "$WORK/capp3" && cd "$WORK/capp3" || exit 1
+printf 'module example.test/user/capp3\nrequire example.test/user/pa v1.0.0\n' > iyi.mod
+printf 'import example.test/user/pa/util\n\nputs Util.who\n' > main.iyi
+"$IYI" check -f json main.iyi > old.json 2>&1
+grep -q '"replacement":"Pa::Util"' old.json || fail "the old name got no edit to its new one: $(cat old.json)"
+"$IYI" fix main.iyi > oldfix.log 2>&1 && grep -q "puts Pa::Util.who" main.iyi && [ "$("$IYI" run main.iyi 2>&1)" = "pa" ] ||
+  fail "iyi fix did not move the old name: $(cat oldfix.log main.iyi)"
+"$IYI" mod context main.iyi > ctx.log 2>&1
+grep -q "^# qualified, the module is Pa::Util" ctx.log || fail "mod context did not say the package module's qualified name: $(head -5 ctx.log)"
+"$IYI" doc example.test/user/pa/util > doc.log 2>&1 && grep -q "^pub def who : String" doc.log ||
+  fail "iyi doc did not take a package module path: $(cat doc.log)"
+[ "$status" -eq 0 ] && echo "  Util written before 0.15.2: the error carries Pa::Util and iyi fix applies it; mod context says Pa::Util, doc takes the package path"
 
 step "reaches: what a package may touch, as a limit"
 mkdir -p "$WORK/lapp" && cd "$WORK/lapp" || exit 1

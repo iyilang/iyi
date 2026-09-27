@@ -23,7 +23,10 @@
 #     must be the pattern written into them.
 #
 # Every round that made its move under a mark counts; the program asks for
-# at least one, and reports how many. The pauses are printed beside the
+# at least one, and reports how many. Twenty-four rounds, and on past them
+# until one has, up to ninety-six: whether the program reaches the tail
+# before the marker does is a race it wins most rounds and, on a loaded
+# machine, can lose twenty-four times running. The pauses are printed beside the
 # stop-the-world mark's over the same chain: a concurrent collection's two
 # stops, the longest of each, against the one stop that marked it all —
 # and how many second stops found a white root or a full pool and retreated
@@ -218,6 +221,15 @@
     end
   end
 
+  # A holder and the payload only it holds, made where no local of the
+  # caller's keeps the payload.
+  @[NoInline]
+  def stray_holder(seed : UInt64) : Holder
+    holder = Holder.new
+    holder.payload = Payload.new(seed)
+    holder
+  end
+
   def note_stops : Nil
     Stops.note
   end
@@ -266,13 +278,35 @@
   stw_mean = stw_pauses.unsafe_div(5_u64)
   fail("the chain's tail lost its payload under a stop-the-world mark") unless tail(chain).payload.is_a?(Payload)
 
+  # ── A barrier that runs after its mark has ended ──────────────────────
+  # A store reads the marking flag and its barrier runs after it, and a
+  # thread stopped between the two finds the mark over when it goes on.
+  # The barrier has nothing to shade then, and must shade nothing: a
+  # holder grayed after its arena's sweep went into the next mark gray,
+  # which that mark never queues, and the payload only it held was swept.
+  # Every arena is swept by the collection first, so nothing turns the
+  # holder white again before the next mark.
+  IyiMark.collect
+  stray = stray_holder(77_u64)
+  cell = Pointer(UInt64).malloc(1_u64)
+  cell.value = stray.object_id.to_u64
+  IyiHeap.enter_barrier
+  IyiMark.barrier(cell.address, 1_u64)
+  IyiHeap.leave_barrier
+  IyiMark.collect
+  strayed = stray.payload
+  fail("stray: the holder lost its payload") unless strayed.is_a?(Payload)
+  if IyiMark.flags(strayed.object_id.to_u64) & IyiHeap::FREE_FLAG != 0 || strayed.seed != 77_u64 || !strayed.intact?
+    fail("stray: a barrier run after its mark had ended left the holder gray, and the next mark swept the payload it held")
+  end
+  puts "stray: a barrier run after its mark had ended shaded nothing, and the next mark kept what the holder held"
+
   # ── The moves, under marks beside the program ─────────────────────────
   IyiMark.workers = 15_u64
   under_mark = 0
-  rounds = 24
   round = 0
   concurrent_before = IyiMark.concurrent_collections
-  while round < rounds
+  while round < 24 || (under_mark == 0 && round < 96)
     IyiMark.auto = false
     seed = 1000_u64 + round.to_u64
     chain = build_chain(seed)
@@ -299,6 +333,7 @@
     round = round + 1
   end
   IyiMark.auto = false
+  rounds = round
   concurrent = IyiMark.concurrent_collections - concurrent_before
   fail("no round made its move under a mark: nothing here was concurrent") if under_mark == 0
   fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64

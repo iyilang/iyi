@@ -156,7 +156,7 @@ PY
         echo "  the exercise PASSED with the table held nowhere"
         status=1
       else
-        echo "  a table held nowhere is caught (exit $code): $(grep -m1 -E 'ASSERTION FAILED|Segmentation|panic:' "$WORK/unheld.out" | cut -c1-100)"
+        echo "  a table held nowhere is caught (exit $code): $(grep -v '^\s*$' "$WORK/unheld.out" | tail -1 | cut -c1-120)"
       fi
     fi
     ;;

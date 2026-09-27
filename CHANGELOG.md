@@ -130,6 +130,12 @@
 
 ### Fixed
 
+- **`iyi help` says what `init` writes.** Its line still read "iyi.mod,
+  main.iyi, a module and a test" - the four files `init` wrote before it
+  was cut to the manifest and the root module. It names those two now, and
+  `bench/init_project.sh` holds the line to what `init kemal` wrote in the
+  same run; the old text fails it.
+
 - **A variable set with `ENV[]=` on Linux and darwin outlives the next
   collection.** The table `ENV[]=` builds is the collector's memory, and it
   goes into the C runtime's `environ`, in the C runtime's data, which the

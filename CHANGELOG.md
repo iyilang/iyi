@@ -31,8 +31,8 @@
   Windows, every argument the first on Linux and darwin; stderr read only
   after stdout, where the watchdog ends the run at 45 s; the end awaited by
   a blocking call, where the sibling ticks 0 times of 10; the kill on
-  cancel removed, where the run takes 20 s; and on Linux, SIGPIPE left
-  alone, which ends the program (141).
+  cancel removed, where the run takes 20 s; and on Linux and darwin,
+  SIGPIPE left alone, which ends the program (141).
 
 - **Crystal's library specs run on Windows.** The compiler is built from
   Crystal's library, and its specs ran on Linux alone. On Windows they did

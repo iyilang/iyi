@@ -2719,13 +2719,27 @@ module Iyi
     end
 
     # iyi: the arena's class-instance entry (`allocate_aggregate`).
+    #
+    # Declared here when an allocation reaches for it before the prelude's
+    # `fun __iyi_new` has been emitted; that definition then fills in the
+    # body (`codegen_fun_signature_external`). Nothing a program writes
+    # calls `__iyi_new`, so it is emitted where the top level reaches it,
+    # and the well-known functions (`codegen_well_known_functions`: the
+    # allocator's, the raise's, the barrier's) are emitted ahead of the top
+    # level with everything they call. `IyiIO.new` was emitted before it,
+    # and every class whose `new` was emitted that early took the path
+    # meant for another allocator: an untyped chunk from `__iyi_malloc64`,
+    # and the type id stored in the four bytes in front of it, which under
+    # the arena are the last four of the chunk before. Measured on Windows:
+    # STDERR's id, 23, landed in STDOUT's write position, and a program that
+    # named both streams wrote 23 NUL bytes ahead of its first output to a
+    # pipe. Linux's IR for the same program carries the same store.
     def iyi_new_fun
-      @iyi_new_fun ||= typed_fun?(@main_mod, IYI_NEW_NAME)
-      if new_fun = @iyi_new_fun
-        check_main_fun IYI_NEW_NAME, new_fun
-      else
-        nil
+      new_fun = @iyi_new_fun ||= fetch_typed_fun(@main_mod, IYI_NEW_NAME) do
+        int64 = @main_llvm_context.int64
+        LLVM::Type.function([int64, int64, int64], @main_llvm_context.void_pointer)
       end
+      check_main_fun IYI_NEW_NAME, new_fun
     end
 
     def crystal_realloc_fun

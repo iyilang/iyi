@@ -100,6 +100,22 @@
 
 ### Fixed
 
+- **A program that writes to stdout and stderr no longer writes NUL bytes
+  ahead of its output.** Codegen emits a callee the first time something
+  calls it, and `IyiIO.new` - the three standard streams, every `File`, a
+  socket's stream - was emitted inside the allocator's own callees, before
+  the prelude's `__iyi_new` existed. It took the path meant for another
+  allocator: an untyped chunk, and the type id stored in the four bytes in
+  front of it, which under the arena are the last four bytes of the chunk
+  before. STDERR's id landed in STDOUT's write position, and a program that
+  named both streams wrote 23 NUL bytes ahead of its first output into a
+  pipe, measured on Windows. Linux's IR carries the same store - one, in
+  `samples/iyi/hello.iyi` - and darwin's did not. `__iyi_new` is declared
+  now when the first allocation asks for it, and hello's IR has no such
+  store left. A compiler
+  spec runs a program that names both streams and reads its output back;
+  the old codegen fails it with the 23 NUL bytes.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the

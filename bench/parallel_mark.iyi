@@ -155,9 +155,15 @@
   # On one core the wide object's mark with helpers was the marker's alone
   # too - nobody took a spill - so its stack had already grown to hold it,
   # and the growth to look for is the run's.
+  # The wide object is read before the growth is: the other order let a
+  # compiler that saw `stacks_grown` never move - the failure proof's copy,
+  # whose every growth dies first - fail the check unconditionally and
+  # drop `wide` before the mark, which then had no wide object to push,
+  # grew nothing, and never reached the growth the proof is for. darwin's
+  # proof missed that way in two runs of five.
+  fail("stack: the wide object lost a node under the mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
   grew = one_core ? IyiMark.stacks_grown > 0_u64 : IyiMark.stacks_grown != grown_before
   fail("stack: a 300,000-wide object was marked alone and the stack never grew past its #{IyiMark::STACK_START.to_i64} entries") unless grew
-  fail("stack: the wide object lost a node under the mark") if wide.size != 300000 || wide[299999].as(Node).sum != 299999_i64
   grown = one_core ? IyiMark.stacks_grown : IyiMark.stacks_grown - grown_before
   puts "stack: the mark of a 300,000-wide object grew a worker's stack #{grown.to_i64} times from #{IyiMark::STACK_START.to_i64} entries"
 

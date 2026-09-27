@@ -85,6 +85,14 @@
   eight copies at once the gate failed 2.3% of runs for want of such a
   round, against 0.5% before. It runs on past twenty-four until one round
   has, up to ninety-six, and failed none of 240 runs under the same load.
+- **The parallel marker's stack proof could prove nothing on darwin.** Its
+  copy of the runtime makes every stack growth fatal, so `stacks_grown`
+  never moves there, and the check read it before it read the wide
+  object: a compiler free to see that failed the growth check
+  unconditionally, dropped the wide object before the mark, and the mark
+  had nothing to grow for. darwin arm64's build did that in two runs of
+  five - the alone mark kept 4 objects and swept 183,961. The wide object
+  is read first now, so it is live across the mark in both builds.
 - **The Windows replace gate looked for a deleted file too soon.**
   `bench/replace_running.sh` checks that the next replacement deletes the
   binary that stepped aside, and looked the instant it returned. A file

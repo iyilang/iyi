@@ -38,6 +38,21 @@ name: iyi
 # guess at its average.
 on: [push, pull_request]
 
+# Git refuses a checkout that another user owns, and in a container job the
+# workspace is not the container user's: `actions/checkout` marks it safe in
+# a git config of its own, for the checkout step. After it the container
+# builds named no commit, and SOURCE_DATE_EPOCH was not the commit's time -
+# 1790467191 in one job and 1790467280 in another, for one commit, each
+# the moment of that job's checkout: the Makefile's mtime, its fallback
+# when git answers nothing. A run that crossed midnight UTC then built a
+# compiler that said 2026-09-26 and a daemon beside it that said
+# 2026-09-27, and `check_daemon_matches` stopped the CLI specs, the two
+# being one commit. Safe for every step here, so git answers in them.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: "*"
+
 permissions: {}
 
 concurrency:
@@ -2098,6 +2113,34 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
+      # The command surface, which the Linux job's `cli_spec` holds and no
+      # Windows job ran. The daemon's examples are pending here (its server
+      # is `fork`). The bind pipeline is the one example that needs
+      # the fork's compiler and `iyi.exe` from one commit, and it said pending on
+      # Windows for want of one; asked again by name, a pending answer is a
+      # failure.
+      - name: The commands, on Windows
+        shell: cmd
+        run: |
+          make -f Makefile.win cli_spec || exit /b 1
+          .build\cli_spec.exe -e "bound shard" > bind.txt
+          type bind.txt
+          findstr /C:" 0 failures, 0 errors, 0 pending" bind.txt
+
+      # Crystal's library, under the compiler that is built from it: the
+      # Linux job runs these and no Windows job did. They did not compile
+      # here (the DWARF reader named an `Error` it had not loaded), and a
+      # Windows checkout gave their data files CRLF, which two dozen of
+      # them compare byte for byte. A spec that builds a program runs the
+      # compiler by the name below; `bin/crystal` is a shell script.
+      - name: Crystal's primitives and standard library specs, on Windows
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: |
+          make -f Makefile.win primitives_spec || exit /b 1
+          make -f Makefile.win std_spec
+
       - name: The runtime's exercises, on Windows
         shell: bash
         run: |
@@ -2199,6 +2242,51 @@ jobs:
   # Linked with the command `--cross-compile` prints, run as-is, with wasi-sdk's
   # clang as the `cc` it names — so the command a person is told to type is the
   # command that is tested.
+  # Crystal's compiler specs, which the Linux job runs and no Windows job
+  # did: five of iyi's own spec files ran here, and the rest never
+  # compiled - the loader the interpreter's specs load named
+  # `System.to_wstr` and `System::LibraryArchive`, which resolved to
+  # `Crystal::System` while it was `Crystal::Loader` and to nothing once
+  # it was `Iyi::Loader`. A job of its own because a codegen example is a
+  # program built and run, and there are fourteen thousand.
+  windows-compiler-specs:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    name: "Crystal's compiler specs, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler
+        shell: cmd
+        run: make -f Makefile.win crystal
+
+      # A spec that builds a program runs the compiler by the name below;
+      # `bin/crystal` is a shell script.
+      - name: Compiler specs, on Windows
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: make -f Makefile.win compiler_spec
+
   wasi-run:
     needs: [cross-objects, binary]
     runs-on: ubuntu-24.04
@@ -2593,7 +2681,7 @@ jobs:
     needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, std, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
-            windows-gates,
+            windows-gates, windows-compiler-specs,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

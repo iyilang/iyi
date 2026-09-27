@@ -14,6 +14,14 @@
 # `bench/std_eiy_exercise.iyi` failed on Windows alone.
 *.eiy text eol=lf
 
+# iyi: and Crystal's templates for the same reason, one step removed: an
+# `.ecr` is compiled into the binary that renders it, so a Windows checkout's
+# CRLF became the bytes `init` writes into a person's new project - the
+# compiler specs' `init` example failed on Windows alone, the README it
+# rendered carrying "\r\n" on every template line - and the source
+# generators under `scripts/` would write CRLF into `.cr` files pinned LF.
+*.ecr text eol=lf
+
 # iyi: a gate is a shell script, and a shell script with CRLF is not a
 # program: Linux reads `#!/usr/bin/env bash\r` as an interpreter it cannot
 # find. A Windows clone gives CRLF to anything nothing pins, and an editor
@@ -59,3 +67,17 @@ spec/wasm32_std_spec.cr linguist-generated
 ## Syntax highlighting
 
 Makefile.win linguist-language=makefile
+
+# iyi: Crystal's library specs compare what these files hold byte for byte - a
+# template's output, a file read back, a digest - and a Windows checkout
+# wrote them with CRLF, so on Windows those specs compared against bytes
+# the file does not have in the repository. The binary files in the same
+# directory are left as they are.
+spec/std/data/**/*.txt text eol=lf
+spec/std/data/**/*.xml text eol=lf
+spec/std/data/**/*.ini text eol=lf
+spec/std/data/**/*.types text eol=lf
+spec/std/data/**/*.crt text eol=lf
+spec/std/data/**/*.key text eol=lf
+spec/std/data/*_sample text eol=lf
+spec/std/data/collect_within_ensure text eol=lf

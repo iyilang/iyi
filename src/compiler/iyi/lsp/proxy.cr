@@ -43,6 +43,7 @@
 #     refusals still come from the one place that implements them.
 require "json"
 require "./text"
+require "./reader"
 
 module Iyi::Lsp
   class Proxy
@@ -162,7 +163,7 @@ module Iyi::Lsp
         end
       end
       frames = @frames
-      spawn do
+      Lsp.read_loop("lsp-stdin") do
         loop do
           body = read_frame(@input)
           frames.send body

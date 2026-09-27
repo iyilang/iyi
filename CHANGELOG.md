@@ -2,6 +2,243 @@
 
 ## Unreleased
 
+- **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
+  Windows renames the running binary aside (a running program cannot be
+  replaced there), and `Process.executable_path` answered the name the
+  image was loaded from - gone, so nil for the rest of the process. `iyi
+  mcp` runs itself for every tool call, and its next call after a rebuild
+  died of "Nil assertion failed", told as a bug in the compiler; every
+  exception in such a process also wrote "Unable to load debug
+  information" and a trace of `???`. Windows answers the image's name now
+  (`QueryFullProcessImageNameW`), as Linux's `/proc/self/exe` follows a
+  rename: the call is answered, and a renamed program's exception prints
+  its trace by name. `agent_loop.py` renames the running `iyi mcp`'s
+  binary and asks it a question, on Linux and Windows; the old binary
+  fails it.
+
+- **The fork's compiler built on Windows carries its commit and library.**
+  `make -f Makefile.win crystal` handed the compiler `CRYSTAL_CONFIG_*`,
+  which it stopped reading when those became `IYI_CONFIG_*`: the binary had
+  no commit, no library path and no search path, and run from anywhere but
+  through its wrapper script it could not find its prelude. It is given what
+  `iyi.exe` is, as the Linux Makefile does. The command specs (`cli_spec`)
+  run on Windows now, in the Windows gates job: 48 examples, 14 pending -
+  the daemon's, whose server is `fork`. With the old variables 6 of them
+  failed on "can't find file 'prelude'". The bind pipeline, which needs both
+  binaries from one commit, had said pending on Windows; it runs there now,
+  and a pending answer fails the step. The spec named the binaries without
+  `.exe` and its search path with `:`, and it names them as the build does
+  now.
+
+- **Crystal's library specs run on Windows.** The compiler is built from
+  Crystal's library, and its specs ran on Linux alone. On Windows they did
+  not compile: the DWARF reader raises `Error` without loading the module
+  that defines it, and on Linux and darwin the call stack's reader loads
+  it first, while on Windows the name reached iyi's top-level `Error`, a
+  module. The reader requires it now. And a Windows checkout gave the
+  specs' data files CRLF - templates, INI files, text read back, a file
+  digested - which they compare byte for byte; they are pinned to LF in
+  `.gitattributes`. A spec that builds a program ran `bin/crystal`, a
+  shell script, and the Windows job names the built compiler instead.
+  With the three, 100 failing examples of 18,148 here became 31, every
+  one of them a spec that makes a symbolic link, which this account may
+  not and the runner's may. The Windows gates job runs them, and the
+  primitives specs, which passed there as they were: on the runner
+  18,148 and 716 examples, none failing.
+
+- **Two concurrency checks ask what they mean, not how fast it went.**
+  The concurrency exercise held two 150 ms sleeps in a group to under
+  260 ms, as its sign that they overlapped; on a Windows runner the xmm
+  proof's run took 529 ms and failed there, before the check the proof is
+  about. Here the same build ran them in 150 ms 30 runs of 30, so what
+  stalled is not known; the check now asks that each sleep began before
+  the other woke, which a sequential runtime fails however fast it is -
+  with `sleep` made a spin on the clock it fails - and a stalled machine
+  passes however slow. And `stdin_park` failed here once with the sibling
+  at 0 ticks, then held 10 runs of 10: its feeder slept two seconds before
+  the first line, and a freshly built binary's first start here took 1.4
+  to 1.6 s, so a line already in the pipe when the read began - answered
+  at once - is the likely account. The program now says when it runs, and
+  the feeder writes a second after that; 3 gate runs of 3 held since.
+
+- **On Windows, waking the mark helpers no longer holds the program.**
+  The program's own thread wakes the helpers when a mark starts beside
+  it, and Windows raises a thread whose wait is satisfied above the one
+  that satisfied it: each woken helper took the waker's core. With eleven
+  helpers on a twelve-core machine the wake held the program's thread 3.7
+  to 40 ms at its longest, doing nothing; the helpers now run without that
+  boost, and the wake takes 12 to 83 us. Binary trees' median went from
+  0.171 s to 0.148 and its total pause from 8.8 ms to 3.6. The concurrent
+  mark exercise asserts the wake under 1 ms on Windows, and the build that
+  keeps the boost is caught there - in 5 runs of 10 on twelve cores and
+  10 of 10 held to four, so the proof gives it five runs.
+
+- **On Windows, a program that ends while a collection stops it ends.**
+  `main` returned into the C runtime, whose `exit` is `ExitProcess`: it
+  ended the thread that was stopping the main thread with the main thread
+  still suspended, and the process never ended - its one thread in
+  `NtTerminateProcess`, and neither `timeout` nor `Stop-Process` could end
+  it. It was found as a measuring program that hung once in about fifty
+  runs; with a thread running collections back to back while the program
+  ended, 35 runs in 100 never ended here, and 20 in 40 held to four cores.
+  `main` now ends through `TerminateProcess`, the way `__iyi_exit` already
+  did for the same reason, after flushing C's stdio buffers, the one thing
+  the C runtime's `exit` did that a bound C library can need: 0 in 1,000.
+  The thread exercise runs that program two hundred times on Windows, and
+  its proof puts the return back and has a run hang, released by resuming
+  its threads.
+
+- **The concurrent mark exercise prints what the machine takes away on
+  its own.** A thread per core reads the clock for a second with no
+  allocation and no collector, and the longest gap any of them saw is
+  printed beside the pauses. Windows' longest second stop read 3,128 us on
+  a runner against Linux's 45; on a twelve-core Windows VM here the second
+  stops' outliers of 13 to 45 ms fell in a different place each time - the
+  stop, a single `ResumeThread`, the program's own sweep - and threads that
+  only read the clock saw 23 to 64 ms at twelve, 32 to 43 at eleven. Raising
+  the stopping thread to the highest priority for the stop did not shorten
+  them (the tenth-worst of 30 runs 32 ms against 23). A pause is the
+  runtime's only where the machine gives its threads their cores, and the
+  line is there so a pause is read against it.
+
+- **On Windows, a mark beside a busy program leaves the program its
+  cores.** A mark beside the program asked for every helper there was, on
+  the ground that the cores were otherwise idle; a program running threads
+  of its own had them on those cores, and eleven helpers on twelve took
+  them. With four threads allocating beside the mark, their longest stall
+  had a median of 41 ms and the longest pause 20.5 ms; with the helpers held to
+  the cores the program's threads leave, 21.6 and 2.9 (12 runs each, and
+  27.5 and 11.4 in a later 12 on a slower hour). A fixed default of seven
+  did as well there but gave up a single thread's pause (1.1 ms against
+  0.4), which the cap leaves alone: one thread gets every helper, as
+  before, and binary trees ran as it did. At eight threads the machine's
+  own gaps were larger than any difference. The concurrent mark exercise
+  runs a thread on every core but one beside a mark and asserts on
+  Windows that it asked for one helper; with the cap removed it asked for
+  eleven. Linux and darwin are unchanged, as they are unmeasured.
+
+- **`iyi foo` runs `iyi-foo` from PATH, on every platform.** The lookup
+  was there, in the command layer, keyed on the name the binary runs
+  under; `iyi`'s own dispatch answered "unknown command or missing file"
+  for any word that was not a verb or a file, so it was never reached and
+  the extension point worked for the fork's compiler only. A word that
+  names an `iyi-` executable on PATH now goes to it, with the rest of the
+  line and `IYI_EXEC_PATH` naming the directory `iyi` is in; a word that
+  names nothing is refused as before. The compiler's CLI specs build an
+  `iyi-echo_env` and run it as `iyi echo_env foo bar`; before the fix
+  that exited 1 with "unknown command or missing file: echo_env".
+
+- **The number exercise reads a trapping program's exit code from the
+  handle it started it with.** Its proof that the remainder guard matters
+  runs a program that dies of the processor's integer overflow at its
+  first division, and read the code through `Start-Process`; on a Windows
+  runner the cmdlet threw "the process has exited" and gave no code, and
+  the gate failed with nothing wrong in the language. The cmdlet takes
+  hold of the process after starting it - the likely account of a program
+  gone by then, not reproduced here in 300 runs - and
+  `[Diagnostics.Process]::Start` keeps the handle process creation gave
+  it. Both read 0xC0000095 in 300 runs of 300 here.
+
+- **Crystal's compiler specs run on Windows, and compile there.** Five
+  of iyi's own spec files ran on Windows; the rest did not compile. The
+  loader the interpreter's specs load named `System.to_wstr` and
+  `System::LibraryArchive`, which resolved to `Crystal::System` while it
+  was `Crystal::Loader` and to nothing once it was `Iyi::Loader` - "undefined
+  method 'to_wstr' for System:Module", then "undefined constant
+  System::LibraryArchive". The build never saw it: the loader is the
+  interpreter's, and only the specs compile it. Both loaders name the
+  module whole now, and a Windows job builds the fork's compiler and runs
+  every compiler spec.
+
+- **A project `init` writes on Windows has the line endings it has
+  everywhere else.** Its templates are `.ecr` files compiled into the
+  binary, and a Windows checkout gave them CRLF - so a compiler built on
+  Windows wrote "\r\n" into every template line of a new project's README,
+  `.gitignore` and `shard.yml`, and the compiler specs' `init` example was
+  the one of 14,037 that failed on Windows. Every `.ecr` is pinned LF now,
+  which also covers the source generators under `scripts/`, whose CRLF
+  templates would have written CRLF into `.cr` files pinned LF.
+
+- **On Windows, the language server answers as fast as it does on Linux.**
+  A hover answered from the verdict already compiled took 47 to 52 ms
+  there against Linux's 1, and completion 63 to 78 against 19. The
+  editor's end of stdin is an anonymous pipe, which Windows cannot read
+  overlapped, so the reader's `ReadFile` held its thread until the next
+  bytes came - and the loop it had just woken through a channel was
+  queued on that same thread, run when the runtime's monitor sent another
+  thread to take it, every hundred milliseconds; single hovers came back
+  anywhere from 0 to 96 ms. The reader runs on a thread of its own now,
+  in the proxy and in the worker: hover 2 ms at the median, completion 17,
+  startup 250 ms to 40. `lsp_latency.py` holds a hover's median to 10 ms,
+  which the old reader fails at 51.7, and times with `perf_counter`: the
+  monotonic clock it used is 15.6 ms coarse on Windows.
+
+- **On Windows a program links through `link.exe` itself.** The compiler
+  found MSVC and ran `cl.exe` with the objects and `/link`, and the driver
+  compiled nothing: it started the linker, one more process per build.
+  The same objects and flags linked in 134 ms at the median through
+  `cl.exe` and in 91 without it, and the edit-and-rebuild loop of
+  `rebuild_speed.py` went from 829 ms to 742 from source, 781 to 742 from
+  artifacts. A driver named in `%CC%` is still spoken to as a driver.
+  The linker reads a long command's response file itself now, and refuses
+  a line of 131,072 characters or more - linking Crystal's library specs
+  failed on a runner with LNK1170 until the file held an argument to a
+  line; `cl.exe` had read the one-line file and written its own.
+
+- **On Windows a build asks `vswhere` where Visual C++ is once, not every
+  time.** `vswhere` is a process of its own, 35 ms at the median, and
+  every `iyi build` started it before linking - what a Linux build once
+  paid in `PATH` searches for linkers nobody had installed. The answer is
+  kept beside the object cache, as the linker probe's is, and read back
+  while the directory it names is there, so an update that removes the
+  toolset asks again: a hello's build went from 521 ms at the median to
+  491. The compiler spec that holds the linker probe, pending on Windows
+  for having nothing to hold, holds this file there.
+
+- **Go-to-definition works on a call in a module's top-level code.** A
+  `module main` header wraps the rest of the file in the module it names,
+  and that module was marked as ending on the header's own line. The
+  editor's `definition` - and `iyi tool implementations` - look into a node
+  only when the cursor is inside it, so they never looked into the module:
+  `puts selam(isim)` at the top of a `module main` file went nowhere, where
+  the same call inside a `def`, or in a file with no header, found `selam`.
+  The module ends where the file's last expression does now, and a hover
+  on that call names what it returns. On every platform; found on Windows,
+  checking the editor under a path with Turkish letters in it, which was
+  not the cause.
+
+- **Completion offers a module's own functions.** A bare name's completion
+  lists `self`'s methods, and it dropped every private one - and a def
+  without `pub` is the module's own, callable anywhere in it without a
+  receiver: typing `se` inside a def of a file that defines `selam` offered
+  `self` and `select` and not `selam`. Top-level code had no `self` in its
+  scope to ask at all. A bare name now offers private methods too, where
+  they can be called, and top-level code asks the module its file's header
+  opens; after a dot a private method is still not offered. `lsp_session.py`
+  types `ru` for a private `run` once inside a def and once at the top
+  level; the old list did not offer it inside the def.
+
+- **A program deep in a directory tree builds.** The compiler's object
+  cache named its directory for the source's whole path, separators and
+  all, and never shortened it: on Windows a program at a 222-character
+  path - which Windows opens - put that directory at 262 characters, past
+  MAX_PATH, and the build said "The system cannot find the path
+  specified"; on any platform a path of 255 characters or more made a name
+  longer than a file system allows one to be. A name past 100 characters
+  now keeps its end - the file and the directories nearest it - behind a
+  digest of the whole path. A CLI spec builds and runs a program at a
+  240-character path on Windows and a 300-character one elsewhere.
+
+- **CI's container jobs build with the commit's date and name.** In a
+  container the checkout belongs to another user, and git answered nothing
+  after the checkout step: the builds there named no commit, and dated
+  themselves by the Makefile's mtime, the moment of each job's own
+  checkout - 1790467191 in one job and 1790467280 in another, for one
+  commit. A run that crossed midnight UTC built a compiler dated
+  2026-09-26 and a daemon dated 2026-09-27, and the check that the two are
+  one build stopped the CLI specs. The workflow tells git the checkout is
+  safe in every step.
+
 ## 0.15.3 — 2026-09-27
 
 **The collector stops losing live objects under a mark beside the
@@ -10528,7 +10765,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,886-line library and nothing else. Every other
+  written against iyi's own 17,962-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

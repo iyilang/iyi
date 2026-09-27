@@ -273,8 +273,13 @@ module Iyi::Lsp
           next if name.includes?(' ') || name.includes?('(')            # call keys
           {name, PrettyTypeNameJsonConverter.pretty_type_name(type), 6} # Variable
         end
-        if self_type = scope["self"]?
-          items.concat methods_of(self_type, kind: 3) # Function
+        # What a bare name can call is `self`'s, private ones included -
+        # a def without `pub` is the module's own, callable anywhere in it
+        # without a receiver, and it was the one thing left off. Top-level
+        # code has no `self` in its scope; it runs in the module the file's
+        # header opens, so that module is asked the same question.
+        if self_type = scope["self"]? || unit_self_of(result, path)
+          items.concat methods_of(self_type, kind: 3, bare: true) # Function
         end
         items
       end
@@ -576,7 +581,20 @@ module Iyi::Lsp
     # One entry per name, nearest ancestor wins — the same order a call
     # resolves in. `initialize` is `new`'s business and compiler-internal
     # names are nobody's.
-    private def methods_of(type : Type, kind : Int32) : Array({String, String, Int32})
+    # The `self` of a module file's top-level code: the module its header
+    # opens, as its own functions see it (`extend self`, so its metaclass).
+    private def unit_self_of(result : Compiler::Result, path : String) : Type?
+      nodes = result.node.is_a?(Expressions) ? result.node.as(Expressions).expressions : [result.node]
+      nodes.each do |node|
+        next unless node.is_a?(ModuleDef) && node.iyi_unit?
+        filename = node.location.try(&.filename)
+        next unless filename.is_a?(String) && Location.same_file?(filename, path)
+        return node.resolved_type?.try(&.metaclass)
+      end
+      nil
+    end
+
+    private def methods_of(type : Type, kind : Int32, bare : Bool = false) : Array({String, String, Int32})
       members =
         if type.is_a?(UnionType)
           type.union_types
@@ -593,7 +611,7 @@ module Iyi::Lsp
             item = entries.first?
             next unless item
             a_def = item.def
-            next if a_def.visibility.private?
+            next if a_def.visibility.private? && !bare
             seen[name] = signature_of(a_def)
           end
         end

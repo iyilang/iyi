@@ -62,6 +62,7 @@ require "./exports"
 require "../tools/formatter"
 require "./text"
 require "./footprint"
+require "./reader"
 
 module Iyi::Lsp
   class Server
@@ -119,7 +120,7 @@ module Iyi::Lsp
     def run : Nil
       messages = Channel(JSON::Any?).new(64)
       @messages = messages
-      spawn do
+      Lsp.read_loop("lsp-stdin") do
         loop do
           message = read_message
           messages.send message

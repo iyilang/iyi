@@ -6,6 +6,10 @@ require "c/minwinbase"
 lib LibC
   alias HLOCAL = Void*
 
+  # The file a process runs, by its name now: a renamed image answers its
+  # new name, where `GetModuleFileNameW` keeps the one it was loaded from.
+  fun QueryFullProcessImageNameW(hProcess : HANDLE, dwFlags : DWORD, lpExeName : LPWSTR, lpdwSize : DWORD*) : BOOL
+
   fun LocalFree(hMem : HLOCAL)
 
   FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100_u32

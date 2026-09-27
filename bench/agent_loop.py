@@ -21,6 +21,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lsp_session import process_binary  # noqa: E402
+
 IYI = os.path.abspath(os.environ.get("IYI", "./bin/iyi"))
 
 passed = 0
@@ -518,7 +521,9 @@ def main():
         server.stdin.write(json.dumps(msg) + "\n")
         server.stdin.flush()
         if id is not None:
-            return json.loads(server.stdout.readline())
+            # Nothing at all is a server that died, which a step says.
+            line = server.stdout.readline()
+            return json.loads(line) if line else None
 
     reply = rpc("initialize", {"protocolVersion": "2025-06-18"}, 1)
     step("mcp initialize names the server",
@@ -603,7 +608,32 @@ def main():
     step("mcp tells a non-request from an unknown method",
          methodless.get("error", {}).get("code") == -32600,
          repr(methodless)[:90])
-    rpc("exit")
+
+    # The binary renamed under the running server, which is what rebuilding
+    # it does on Windows: a running program cannot be replaced there, so
+    # Makefile.win's REPLACE renames it aside. Every tool call runs the
+    # server's own binary again, found by `Process.executable_path`, and on
+    # Windows that answered the name it was loaded from; after the rename
+    # it was nil, and the next call died of "Nil assertion failed", told as
+    # a bug in the compiler. Linux's `/proc/self/exe` follows a rename, and
+    # Windows answers the image's name now too. darwin answers the path it
+    # was launched from (`_NSGetExecutablePath`), so it is not asked here.
+    if sys.platform == "darwin":
+        print("  ---- a renamed binary: darwin answers the path a program was launched from, not asked")
+    else:
+        binary = process_binary(server.pid)
+        aside = binary + ".gate-aside"
+        os.rename(binary, aside)
+        try:
+            reply = rpc("tools/call", {"name": "check", "arguments": {"file": "app.iyi"}}, 13)
+        finally:
+            os.rename(aside, binary)
+        answered = reply is not None and "result" in reply and reply["result"]["isError"] is False
+        step("mcp answers after its binary is renamed, as a rebuild on Windows does",
+             answered and json.loads(reply["result"]["content"][0]["text"]) == [],
+             repr(reply)[:90])
+    if server.poll() is None:
+        rpc("exit")
     server.wait(timeout=10)
     step("mcp exits on exit", server.returncode == 0, "")
 

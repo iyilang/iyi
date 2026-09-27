@@ -183,6 +183,33 @@ def nt_children(pid):
     return found
 
 
+def process_binary(pid):
+    """The file *pid* was started from. Linux's `/proc/<pid>/exe`; on
+    Windows the image name the kernel keeps for the process, which is the
+    same path, and a running `.exe` may be renamed there, not deleted."""
+    if os.name != "nt":
+        return os.readlink(f"/proc/{pid}/exe")
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess")
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW")
+        return path.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def tree_mb(pid):
     """A session's whole cost: `iyi lsp` keeps the buffers and runs a
     child that compiles, so counting only the parent would make the
@@ -489,6 +516,19 @@ def main():
              l["range"]["start"]["line"] == 2 for l in locs),
          f"{len(locs)} location(s), first {locs and locs[0]['uri']}")
 
+    # 6b. definition on a call in the module's top-level code: `puts run`,
+    #     line 10, jumps to `def run` in the same file. The module a header
+    #     opens was marked as ending on the header's line, and the lookup
+    #     never looked inside it - the same call in a `def` found its target.
+    reply = c.send("textDocument/definition",
+                   {"textDocument": {"uri": app_uri},
+                    "position": {"line": 10, "character": 6}})
+    locs = reply["result"] or []
+    step("6b", "definition from top-level code jumps to the def",
+         any(l["uri"] == app_uri and l["range"]["start"]["line"] == 5
+             for l in locs),
+         f"{len(locs)} location(s), first {locs and (locs[0]['uri'], locs[0]['range']['start']['line'])}")
+
     # 7. documentSymbol: the outline — the header's module at the root,
     #    the def nested inside it.
     reply = c.send("textDocument/documentSymbol",
@@ -602,6 +642,32 @@ def main():
          loud is not None and loud["kind"] == 6 and
          loud["detail"] == "String",
          f"loud : {loud and loud['detail']}")
+
+    # 12a. bare completion offers the module's own functions: `run` has no
+    #      `pub`, so it is the module's alone - callable anywhere in it
+    #      without a receiver, and left off the list because the list
+    #      dropped every private def; and top-level code had no `self` in
+    #      its scope to ask at all. Typed once inside a def, once at the top.
+    offered = []
+    for version, text, line, character in (
+            (70, holler_app.replace("\n  loud\n", "\n  ru\n"), 7, 4),
+            (71, holler_app.replace("\nputs run\n", "\nputs ru\n"), 10, 7)):
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": app_uri, "version": version},
+                "contentChanges": [{"text": text}]}, wait=False)
+        c.diagnostics(app_uri)
+        reply = c.send("textDocument/completion",
+                       {"textDocument": {"uri": app_uri},
+                        "position": {"line": line, "character": character}})
+        offered.append(any(i["label"] == "run" for i in reply["result"]["items"]))
+    step("12a", "bare completion offers the module's own functions",
+         offered == [True, True],
+         f"inside a def {offered[0]}, at the top level {offered[1]}")
+    # Back to the text step 12 left, for the steps that follow.
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": app_uri, "version": 72},
+            "contentChanges": [{"text": bare}]}, wait=False)
+    c.diagnostics(app_uri)
 
     # 12b. the same question with nothing typed yet — Ctrl+Space, which is
     #      how an editor asks for the whole scope rather than for what

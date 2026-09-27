@@ -322,7 +322,12 @@ prove_traps() { # prove_traps <label> <dir> <sed script>
       local exe
       exe="$(cygpath -w "$WORK/$dir/program.exe")"
       local nt
-      nt="$(powershell -NoProfile -Command "\$p = Start-Process -FilePath '$exe' -NoNewWindow -Wait -PassThru -RedirectStandardOutput '$exe.out'; '{0:X8}' -f \$p.ExitCode" | tr -d '\r')"
+      # `Process.Start`, not `Start-Process`: the cmdlet takes hold of the
+      # process after it has started it, and this one dies at its first
+      # division - on a runner it threw "the process has exited" and gave
+      # no code at all. `Process.Start` keeps the handle it was created
+      # with, and the exit code is read from that.
+      nt="$(powershell -NoProfile -Command "\$i = New-Object System.Diagnostics.ProcessStartInfo '$exe'; \$i.UseShellExecute = \$false; \$i.RedirectStandardOutput = \$true; \$p = [System.Diagnostics.Process]::Start(\$i); [void]\$p.StandardOutput.ReadToEnd(); \$p.WaitForExit(); '{0:X8}' -f \$p.ExitCode" | tr -d '\r')"
       if [ "$nt" != "C0000095" ]; then
         echo "  $label: exited 0x$nt rather than of the processor's integer overflow (0xC0000095), so the guard proves nothing"
         status=1

@@ -159,14 +159,25 @@ end
 {% elsif flag?(:win32) %}
   require "crystal/system/windows"
   require "c/libloaderapi"
+  require "c/winbase"
+  require "c/processthreadsapi"
 
   class Process
+    # iyi: the image's name now, which is what `/proc/self/exe` answers on
+    # Linux. `GetModuleFileNameW` answers the name the image was loaded
+    # from, and a running binary is renamed whenever it is rebuilt -
+    # Windows will not replace it any other way (Makefile.win's
+    # `REPLACE`) - so `realpath` found nothing there and this was nil for
+    # the rest of the process's life. Every exception then loaded debug
+    # information with no search path, which fails for a renamed image,
+    # and wrote "Unable to load debug information" to the error stream;
+    # the first was `realpath`'s own, from this very call.
     private def self.executable_path_impl
       Crystal::System.retry_wstr_buffer do |buffer, small_buf|
-        len = LibC.GetModuleFileNameW(nil, buffer, buffer.size)
-        if 0 < len < buffer.size
+        len = buffer.size.to_u32
+        if LibC.QueryFullProcessImageNameW(LibC.GetCurrentProcess, 0, buffer, pointerof(len)) != 0
           break String.from_utf16(buffer[0, len])
-        elsif small_buf && len == buffer.size
+        elsif small_buf
           next 32767 # big enough. 32767 is the maximum total path length of UNC path.
         else
           break nil

@@ -3165,10 +3165,15 @@ module Iyi
         lib_flags = program.lib_flags(@cross_compile)
         lib_flags = expand_lib_flags(lib_flags) if expand
 
-        object_arg = Process.quote_windows(object_names)
-        output_arg = Process.quote_windows("/Fe#{output_filename}")
-
         linker, link_args = program.msvc_compiler_and_flags
+        # `link.exe` is spoken to directly; anything else in `%CC%` is taken
+        # to be a driver in `cl.exe`'s shape, which passes what follows
+        # `/link` through to the linker it starts.
+        direct = File.basename(linker).compare("link.exe", case_insensitive: true) == 0
+
+        object_arg = Process.quote_windows(object_names)
+        output_arg = Process.quote_windows(direct ? "/OUT:#{output_filename}" : "/Fe#{output_filename}")
+
         linker = Process.quote_windows(linker)
         link_args.map! { |arg| Process.quote_windows(arg) }
 
@@ -3189,13 +3194,26 @@ module Iyi
           end
         {% end %}
 
-        args = %(/nologo #{object_arg} #{output_arg} /link #{link_args.join(' ')}).gsub("\n", " ")
+        args = %(/nologo #{object_arg} #{output_arg} #{direct ? "" : "/link "}#{link_args.join(' ')}).gsub("\n", " ")
         cmd = "#{linker} #{args}"
 
         if cmd.to_utf16.size > 32000
           # The command line would be too big, pass the args through a UTF-16-encoded file instead.
           # TODO: Use a proper way to write encoded text to a file when that's supported.
           # The first character is the BOM; it will be converted in the same endianness as the rest.
+          #
+          # iyi: one argument to a line when it is `link.exe` that reads it.
+          # The linker refuses a line of 131,072 characters or more - "LNK1170:
+          # line in command file contains 135135 or more characters", linking
+          # Crystal's library specs - where `cl.exe` read the same one-line
+          # file and wrote its own for the linker it started.
+          if direct
+            lines = ["/nologo"]
+            object_names.each { |name| lines << Process.quote_windows(name) }
+            lines << output_arg
+            link_args.each { |arg| lines << arg.gsub("\n", " ") }
+            args = lines.join("\r\n")
+          end
           args_16 = "\ufeff#{args}".to_utf16
           args_bytes = args_16.to_unsafe_bytes
 

@@ -438,6 +438,10 @@ end
     fun ExitProcess(exit_code : Int32) : NoReturn
     fun TerminateProcess(process : Void*, exit_code : Int32) : Int32
     fun GetCurrentProcess : Void*
+    # C's stdio buffers, every one: what the C runtime's `exit` flushes,
+    # which a program that ends in `main` (below) no longer passes through.
+    # iyi writes none of them; a bound C library can.
+    fun fflush(stream : Void*) : Int32
   end
 
   # The rest of the kernel32 surface this runtime names: virtual memory,
@@ -477,6 +481,9 @@ end
     # thread - and how a read that thread is blocked in is withdrawn.
     fun GetFileType(h_file : Void*) : Int32
     fun CancelSynchronousIo(h_thread : Void*) : Int32
+    # The mark helpers' waking without the boost Windows gives a thread
+    # whose wait is satisfied (`IyiThread.start_helper` says why).
+    fun SetThreadPriorityBoost(h_thread : Void*, disable_priority_boost : Int32) : Int32
     fun SetFileCompletionNotificationModes(file_handle : Void*, flags : UInt8) : Int32
     fun WaitForSingleObject(h_handle : Void*, dw_milliseconds : Int32) : Int32
     fun WaitForMultipleObjects(n_count : Int32, lp_handles : Void*, b_wait_all : Int32,
@@ -5153,6 +5160,15 @@ require "./file"
 
       @@helper_black : UInt64 = 0_u64
 
+      # The helpers the last mark beside the program asked for, for the
+      # exercises: on Windows no more than the cores the program's own
+      # threads leave (`start_concurrent` says why).
+      @@beside_helpers : UInt64 = 0_u64
+
+      def self.beside_helpers : UInt64
+        @@beside_helpers
+      end
+
       {% if flag?(:linux) %}
         # The generation is one word and every helper sleeps on it: a
         # futex wake of fifteen threads is microseconds, and a per-helper
@@ -6480,6 +6496,25 @@ require "./file"
           # mark's live bytes here, binary trees ran a tenth slower than
           # with all of them.
           helpers = @@helpers
+          {% if flag?(:win32) %}
+            # Every helper there is, while the cores are otherwise idle -
+            # and not past them: a program running threads of its own has
+            # them on those cores, and each helper beyond the cores it
+            # leaves took one from a thread of the program's. Measured on
+            # twelve cores with eleven helpers, four threads allocating
+            # beside the mark: their longest stall median 41 ms and the
+            # longest pause's 20.5, against 21.6 and 2.9 with the helpers
+            # held to the cores the threads leave (12 runs each); with one
+            # thread nothing is held back and nothing changed (9.4 ms,
+            # 8.7), and binary trees ran as it did.
+            # The floor is one helper, which takes the finish. Asserted
+            # where it was measured.
+            threads = IyiThread.program_threads
+            cores = IyiThread.core_count
+            free = cores > threads + 1_u64 ? cores - threads : 1_u64
+            helpers = free if helpers > free
+          {% end %}
+          @@beside_helpers = helpers
           @@workers = helpers + 1_u64
           open_mark_permits(helpers)
           pool_word(POOL_FINISH).value.set(1_u64)
@@ -6497,8 +6532,12 @@ require "./file"
           @@stw_first_ns = now_ns - started
           # The wake after the release: threads woken inside the stop were
           # the stop's largest part under load, and a helper's first
-          # microseconds are the futex's either way.
+          # microseconds are the futex's either way. It is the program's
+          # own thread that wakes them, so its length is the program's.
+          woke = now_ns
           wake_helpers
+          woke = now_ns - woke
+          @@wake_longest_ns = woke if woke > @@wake_longest_ns
           true
         end
 
@@ -6707,6 +6746,15 @@ require "./file"
 
         def self.stop_second_ns : UInt64
           @@stop_second_ns
+        end
+
+        # The longest the triggering thread - the program's own - spent
+        # waking the helpers for a mark beside it, across every collection,
+        # for the exercises.
+        @@wake_longest_ns : UInt64 = 0_u64
+
+        def self.wake_longest_ns : UInt64
+          @@wake_longest_ns
         end
 
         # Whether a mark is running beside the program right now: the byte
@@ -8982,6 +9030,18 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
+  {% if flag?(:win32) %}
+    # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
+    # reason `__iyi_exit` is not: a mark helper stopping this thread as it
+    # left was ended by `ExitProcess` with the thread still suspended, and
+    # the process never ended - its one thread in `NtTerminateProcess`,
+    # beyond `Stop-Process` or `timeout`. Measured with a thread running
+    # collections back to back while the program ended: 35 runs in 100 here
+    # never ended, 20 in 40 held to four cores, and 0 in 1,000 through
+    # `TerminateProcess`.
+    LibC.fflush(Pointer(Void).new(0_u64))
+    __iyi_exit(0)
+  {% end %}
   0
 end
 

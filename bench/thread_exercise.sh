@@ -4,8 +4,8 @@
 #
 #     bash bench/thread_exercise.sh
 #
-# Six steps, and the last two are failure proofs, because a gate that cannot
-# fail is not a gate:
+# Seven steps, and the fifth and sixth are failure proofs, because a gate
+# that cannot fail is not a gate; the seventh, Windows' own, carries its own:
 #
 #   1. The program holds every property, plain and --release, with eight
 #      threads: each allocates from its own cache while collections run
@@ -35,6 +35,10 @@
 #   6. Failure proof: a block that captures a value whose type is not
 #      `Share` (SPEC.md III.4.4) does not compile, and the error names the
 #      variable, its type and the field that made it mutable.
+#   7. On Windows, a program whose main thread ends while another thread's
+#      collections stop it ends, two hundred runs of two hundred; and with
+#      the end put back into the C runtime's `exit` a run never ends, and
+#      is released by resuming its threads.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -283,6 +287,93 @@ if ! grep -q "captures \`items : Array(Int32)\`, which is not Share" build-unsha
   echo "the refusal did not name the capture:"; cat build-unshared.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-unshared.log | sed 's/^Error: //')"
+
+# ── 7. Windows: a program ends while a collection stops it ────────────────
+# A thread runs collections back to back - each one stops the main thread -
+# while the main thread comes to the end of the program. Back into the C
+# runtime, that end was `ExitProcess`, which ended the collecting thread
+# with the main thread still suspended: the process never ended, its one
+# thread in `NtTerminateProcess` and beyond `timeout`; 35 runs in 100 here,
+# 20 in 40 held to four cores. `main` ends through `TerminateProcess` now:
+# 0 in 1,000. The proof puts the return back, and a run that hangs is
+# released by resuming its threads, which nothing else here can do.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "a program ends while another thread's collections stop it: two hundred runs, and every one ends"
+    cat > ends.iyi <<'IYI'
+head = [] of Int32
+n = 0
+while n < 2000
+  head << n
+  n = n + 1
+end
+t = IyiThread.start do
+  while true
+    IyiMark.collect
+  end
+  nil
+end
+until_ns = IyiMark.now_ns + 20000000_u64
+while IyiMark.now_ns < until_ns
+end
+print "ended with #{head.size}\n"
+IYI
+    cat > release.ps1 <<'PS1'
+param([string]$Name)
+Add-Type -Namespace IyiGate -Name Thread -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr OpenThread(int access, bool inherit, int id);
+[DllImport("kernel32.dll")] public static extern int ResumeThread(System.IntPtr thread);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr handle);
+'@
+Get-Process $Name -ErrorAction SilentlyContinue | ForEach-Object {
+  $process = $_
+  $process.Threads | ForEach-Object {
+    $thread = [IyiGate.Thread]::OpenThread(2, $false, $_.Id)
+    if ($thread -ne [System.IntPtr]::Zero) { [void][IyiGate.Thread]::ResumeThread($thread); [void][IyiGate.Thread]::CloseHandle($thread) }
+  }
+  [void]$process.WaitForExit(5000)
+}
+"left: $(@(Get-Process $Name -ErrorAction SilentlyContinue).Count)"
+PS1
+    release() { powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$WORK/release.ps1")" -Name "$1"; }
+    if ! "$IYI" build --release ends.iyi -o ends > build-ends.log 2>&1; then
+      cat build-ends.log; exit 1
+    fi
+    again=1
+    while [ "$again" -le 200 ]; do
+      timeout -k 1 30 ./ends > ends.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q "^ended with 2000$" ends.txt; then
+        echo "run $again exited $code:"; tail -3 ends.txt; release ends; exit 1
+      fi
+      again=$((again + 1))
+    done
+    echo "  two hundred of two hundred ended"
+
+    step "failure proof: a program that ends back in the C runtime hangs under a collection"
+    mkdir -p crt-end/iyi
+    cp "$REPO"/src/iyi/*.iyi crt-end/iyi/
+    awk '/^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ || /^    __iyi_exit\(0\)$/ { found++; next } { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "the end this proof removes is not in the prelude any more"; exit 1; }
+    if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
+      cat build-crt-end.log; exit 1
+    fi
+    # One run in two hung on four cores, so twenty runs; the first that
+    # does not end is the proof.
+    hung=""
+    try=1
+    while [ "$try" -le 20 ]; do
+      timeout -k 1 5 ./ends-in-crt > ends-in-crt.txt 2>&1
+      code=$?
+      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then hung="$try"; break; fi
+      try=$((try + 1))
+    done
+    left="$(release ends-in-crt | tr -d '\r')"
+    [ -n "$hung" ] || { echo "twenty runs that end in the C runtime all ended"; exit 1; }
+    [ "$left" = "left: 0" ] || { echo "a hung run could not be released ($left)"; exit 1; }
+    printf '  run %s never ended, and was released by resuming its threads\n' "$hung"
+    ;;
+esac
 
 echo "workdir $WORK"
 echo "thread exercise: every step held"

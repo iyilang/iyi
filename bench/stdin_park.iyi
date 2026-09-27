@@ -1,7 +1,7 @@
 # A fiber reading standard input parks: SPEC.md III.4.8 named that call as
 # the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
-# feeds this a pipe - a line after two seconds, and another after four - and
-# asks two things of it:
+# feeds this a pipe - a line a second after the program has started, and
+# another two seconds later - and asks two things of it:
 #
 #   1. The reader parks. A sibling ticking every 100 ms ticks while the
 #      first line is on its way; a read that held the thread let it tick
@@ -9,6 +9,8 @@
 #   2. Cancellation reaches it (III.4.2). A sibling's failure ends the group
 #      at once, and the line sent after is read whole by the next read.
 module stdin_park
+
+import std/file::{File}
 
 pub struct TaskFailed
   def initialize
@@ -28,6 +30,15 @@ end
 
 def elapsed_ms(started : Int64) : Int64
   (__iyi_monotonic_ns - started) // 1000000_i64
+end
+
+# The feeder writes only once this file exists: a line already in the pipe
+# when the read begins is answered at once, and says nothing about parking.
+# A freshly built binary's first start is its virus scan too - 1.4 to 1.6 s
+# measured on a Windows machine - so a feeder that only slept two seconds
+# first could have its line there before the reader asked.
+if ready = Program.env("STDIN_PARK_READY")
+  File.write(ready, "")
 end
 
 # ── 1. The reader parks ──────────────────────────────────────────────────

@@ -108,7 +108,8 @@
   was until 0.14.1 - so an object built there read a field its constructor
   never set as a stale word rather than nil. The release lays a fresh
   mapping over the run now (`mmap` with `MAP_FIXED`), which frees the old
-  pages and reads zero at once, and darwin names no `madvise`.
+  pages and reads zero at once, and darwin names no `madvise`: the
+  dependency and thread floors' darwin lists drop it.
   `bench/reuse_integrity.sh` runs its fresh-object check and both its
   failure proofs on darwin too, where it had skipped them as an open
   defect; on a darwin runner the old release failed the check in 5 runs of

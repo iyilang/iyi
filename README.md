@@ -343,8 +343,8 @@ programs under `bench/`, 84 run and pass unattended on a Windows 11
 machine. The three that do not are the three that cannot: one whose pass
 *is* a crash, one that waits for a client its gate supplies, and one that
 reads the two environment variables its gate pins. What is missing is named
-in the entry: no subprocess, no `Time::Location`, and a symbolic link needs
-a privilege Windows does not hand out.
+in the entry: no `Time::Location`, and a symbolic link needs a privilege
+Windows does not hand out.
 
 **Performance — Crystal's backend, and now one measurement of its own.**
 Native code through LLVM, the same GC. `python3 bench/runtime.py` runs the same
@@ -432,7 +432,7 @@ tar -xzf iyi-0.15.3-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 743 KB prelude, the 1,339 KB of `src/std` that `import std/...`
+iyi's own 743 KB prelude, the 1,389 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -1178,7 +1178,12 @@ marked PROPOSED are the parts that will move under you.
   Windows and not assumed. 114 program binaries import kernel32,
   `vcruntime140` and five UCRT façades, four of them `ws2_32` and two
   `advapi32`, and nothing else.
-  What is *not* here: there is no subprocess and no `Time::Location`; a
+  A child process is `std/process`'s `Process.run`, on every platform with
+  the runtime: `CreateProcessW` handed the child's three handles and no
+  others, its output read through overlapped named pipes on the completion
+  port and its end posted there by `RegisterWaitForSingleObject`, so a
+  program waiting for a child keeps serving its other tasks.
+  What is *not* here: there is no `Time::Location`; a
   symbolic link needs a privilege Windows grants to an administrator or
   to Developer Mode, so the file exercise asks first and says what it
   skipped; the daemon is POSIX-only (`poll(2)` and `fork`), so the

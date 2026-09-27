@@ -4,6 +4,36 @@
 
 ### Added
 
+- **`std/process`: a program runs another one.** `Process.run(command,
+  args, input:, chdir:, capture:)` starts a program, hands it `input` or
+  the null device, collects its stdout and stderr, and answers a
+  `ProcessResult` - the exit code, the signal that ended it, both texts -
+  or a `ProcessError` when it could not be started (no such program, not
+  allowed, no such directory), or `Cancelled`, after ending the child, when
+  its task is cancelled. `capture: false` gives the child this program's
+  own streams. An argument reaches the child's `argv` as it was given: no
+  shell reads it, and on Windows the command line is quoted for the
+  child's `CommandLineToArgvW`; a `.bat` or `.cmd` is refused rather than
+  run through `cmd.exe`, which reads its arguments again.
+  `Process.executable` is the program's own path. Nothing holds the thread:
+  Linux clones and execs by syscall and waits on a pidfd, darwin uses
+  `posix_spawn` and a kqueue watching the child's exit, and Windows
+  `CreateProcessW`, overlapped named pipes and `RegisterWaitForSingleObject`
+  on the completion port. Before this the library could not start a
+  program on any platform. `bench/std_process_exercise.sh` runs the
+  exercise's own binary as the child: 16 arguments with spaces, quotes and
+  backslashes, 468,890 bytes through the child and back, a megabyte on each
+  stream at once, exit codes and a panic, a missing program and directory,
+  `chdir`, a variable set here and read there, a child that reads none of
+  four megabytes, a sibling ticking while a child sleeps, and a cancelled
+  run. It holds on Linux, darwin and Windows, and fails with each promise
+  taken out of a copy of the module: a quote's backslash dropped on
+  Windows, every argument the first on Linux and darwin; stderr read only
+  after stdout, where the watchdog ends the run at 45 s; the end awaited by
+  a blocking call, where the sibling ticks 0 times of 10; the kill on
+  cancel removed, where the run takes 20 s; and on Linux, SIGPIPE left
+  alone, which ends the program (141).
+
 - **Crystal's library specs run on Windows.** The compiler is built from
   Crystal's library, and its specs ran on Linux alone. On Windows they did
   not compile: the DWARF reader raises `Error` without loading the module

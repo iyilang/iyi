@@ -19,6 +19,7 @@ require "../mod/installer"
 require "../tools/context"
 require "../tools/implementations"
 require "./references"
+require "./locals"
 require "./inlay"
 require "./hierarchy"
 

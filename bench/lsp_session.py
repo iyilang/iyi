@@ -843,6 +843,73 @@ def main():
          kinds == [2, 3] and hl_lines == [5, 10],
          f"{len(highlights)} range(s) at lines {hl_lines}")
 
+    # 18b. documentHighlight on a local variable, which is neither a def
+    #      nor a call: it answered null. Its scope is the def, a block's
+    #      own parameter is another variable, and a same-named local in
+    #      another def is not this one. A document of its own, open in
+    #      the editor and never saved, so no other step sees it.
+    scoped = ("module locals\n\n"
+              "def one(count : Int32) : Int32\n"
+              "  total = count\n"
+              "  [1, 2].each do |count|\n"
+              "    total = total + count\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "def two : Int32\n"
+              "  total = 5\n"
+              "  total\n"
+              "end\n\n"
+              "puts one(1) + two\n")
+    locals_uri = file_uri(os.path.join(work, "locals.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": locals_uri, "languageId": "iyi",
+                             "version": 1, "text": scoped}}, wait=False)
+    c.diagnostics(locals_uri)
+
+    def sites(line, character):
+        reply = c.send("textDocument/documentHighlight",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return sorted((h["range"]["start"]["line"],
+                       h["range"]["start"]["character"], h["kind"])
+                      for h in reply["result"] or [])
+
+    total = sites(7, 3)
+    param = sites(3, 10)
+    block = sites(5, 21)
+    step("18b", "documentHighlight marks a local in its own scope",
+         total == [(3, 2, 3), (5, 4, 3), (5, 12, 2), (7, 2, 2)] and
+         param == [(2, 8, 3), (3, 10, 2)] and
+         block == [(4, 18, 3), (5, 20, 2)],
+         f"total {total}, count {param}, the block's count {block}")
+
+    # 18c. The same sites answer references and rename, which refused a
+    #      local ("rename serves defs and their calls"): an editor could
+    #      not rename a variable at all. A new name already used in the
+    #      scope is refused, since the two would become one variable.
+    at_total = {"textDocument": {"uri": locals_uri},
+                "position": {"line": 7, "character": 3}}
+    refs = c.send("textDocument/references",
+                  dict(at_total, context={"includeDeclaration": False}))["result"] or []
+    ref_lines = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in refs)
+    prepared = c.send("textDocument/prepareRename", at_total)["result"] or {}
+    renamed = c.send("textDocument/rename", dict(at_total, newName="sum"))
+    edits = (renamed.get("result") or {}).get("changes", {})
+    edit_sites = sorted((e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+                        for e in edits.get(locals_uri, []))
+    clash = c.send("textDocument/rename", dict(at_total, newName="count"))
+    clash_error = (clash.get("error") or {}).get("message", "")
+    step("18c", "references and rename serve a local, and a clash is refused",
+         ref_lines == [(5, 4), (5, 12), (7, 2)] and
+         prepared.get("placeholder") == "total" and
+         list(edits) == [locals_uri] and
+         edit_sites == [(3, 2, "sum"), (5, 4, "sum"), (5, 12, "sum"), (7, 2, "sum")] and
+         "already a name" in clash_error,
+         f"references {ref_lines}, rename {edit_sites}, clash {clash_error[:60]!r}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": locals_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

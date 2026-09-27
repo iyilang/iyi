@@ -130,6 +130,21 @@
 
 ### Fixed
 
+- **The language server finds, highlights and renames a local variable.**
+  `documentHighlight`, `references` and `rename` answered for defs and
+  calls, off the typed graph, and a variable is neither: on one, highlight
+  and references answered null and rename refused ("rename serves defs and
+  their calls"), so an editor could not rename a variable at all. A local
+  is found in the buffer's parse now, so it answers while the buffer does
+  not compile, and within the scope that binds it - a def, a type body or
+  the file, with a block's own parameter a variable of its own. Its
+  binding and assignments are the writes, the first one the declaration.
+  A rename to a name already used in that scope, as a variable or a bare
+  call, is refused, since the two would become one. Steps 18b and 18c of
+  `bench/lsp_session.py` ask all four on a local, a parameter and a block
+  parameter of the same name, beside a same-named local in another def;
+  the old server answered each with nothing.
+
 - **`iyi help` says what `init` writes.** Its line still read "iyi.mod,
   main.iyi, a module and a test" - the four files `init` wrote before it
   was cut to the manifest and the root module. It names those two now, and

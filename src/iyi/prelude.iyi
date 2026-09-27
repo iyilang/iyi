@@ -6346,11 +6346,11 @@ require "./file"
           end
         {% end %}
         IyiHeap.allocated_word.value.set(0_u64)
-        # The next budget: twice what the mark found live (Go's GOGC=100),
-        # floored at MIN_BUDGET so a small program pays nothing. The mark
-        # knows the live bytes — it added each object's size as it
-        # blackened it — which is what lets the sweep be lazy: the budget
-        # no longer waits on a sweep to count.
+        # The next budget: what the mark found live times `@@growth` - twice
+        # it by default, Go's GOGC=200 - floored at MIN_BUDGET so a small
+        # program pays nothing. The mark knows the live bytes — it added
+        # each object's size as it blackened it — which is what lets the
+        # sweep be lazy: the budget no longer waits on a sweep to count.
         @@budget = next_budget(@@bytes_marked)
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           open_sweep_round

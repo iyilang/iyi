@@ -8684,12 +8684,30 @@ end
 # it: read the current one, and put a new one in its place. Windows is
 # absent from both because it has no table to edit — nothing there reads
 # `_environ` any more.
+#
+# A table `ENV[]=` builds is the collector's memory, and `environ` is the C
+# runtime's variable, in the C runtime's data, which the collector does not
+# scan. Held nowhere else, the table and every entry in it were garbage at
+# the next collection. Measured on Linux: a program that set a variable and
+# then allocated four megabytes ended in a segmentation fault, and a child
+# handed that table as its environment was refused by `execve` with EFAULT.
+# The table is kept in a class variable as well, which is a root; the
+# entries are reached through it.
 {% if !flag?(:wasm32) && !flag?(:win32) %}
+  class IyiEnvironTable
+    @@held = Pointer(UInt8*).new(0_u64)
+
+    def self.hold(entries : UInt8**) : Nil
+      @@held = entries
+    end
+  end
+
   def __iyi_environ : UInt8**
     LibIyiEnv.environ
   end
 
   def __iyi_set_environ(entries : UInt8**) : Nil
+    IyiEnvironTable.hold(entries)
     LibIyiEnv.environ = entries
     nil
   end

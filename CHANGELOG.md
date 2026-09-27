@@ -100,6 +100,21 @@
 
 ### Fixed
 
+- **A variable set with `ENV[]=` on Linux and darwin outlives the next
+  collection.** The table `ENV[]=` builds is the collector's memory, and it
+  goes into the C runtime's `environ`, in the C runtime's data, which the
+  collector does not scan; an overwritten variable went into the table the
+  C runtime started with. Nothing the collector reads held either, and the
+  next collection freed them. Measured on Linux: a program that set a
+  variable and then allocated four megabytes ended in a segmentation
+  fault, and a child started after that was refused by `execve` with
+  EFAULT - the `std/process` exercise is what found it. The prelude holds
+  the table in a class variable now, and an overwrite builds a new table
+  as a new variable does. `bench/std_env_exercise.sh` sets a variable and
+  overwrites `PATH`, collects twice with 20,000 strings between, and reads
+  both back; with the hold taken out the exercise fails on Linux and
+  darwin.
+
 - **A program that writes to stdout and stderr no longer writes NUL bytes
   ahead of its output.** Codegen emits a callee the first time something
   calls it, and `IyiIO.new` - the three standard streams, every `File`, a
@@ -10787,7 +10802,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,962-line library and nothing else. Every other
+  written against iyi's own 17,980-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

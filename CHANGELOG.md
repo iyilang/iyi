@@ -128,6 +128,14 @@
   first try each time. The collector counts its wakes and slow wakes (`IyiMark.wakes`,
   `IyiMark.wakes_slow`) for it.
 
+- **The language server gate timed a replaced worker's warm-up, not its
+  pull.** Step 31b' of `bench/lsp_session.py` holds the first pull after
+  the worker is replaced under 500 ms, and a successor starts by compiling
+  the focused buffer's diagnostics; a pull sent behind that waited for it,
+  and a Windows runner read 594 ms once against 15 to 47 every other run.
+  One cheap request goes first now, so the time is the pull's own - 4 ms
+  here.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the

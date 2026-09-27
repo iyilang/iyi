@@ -130,6 +130,13 @@
 
 ### Fixed
 
+- **Go-to-definition on a local variable goes where it is bound.** It
+  asked `tool implementations`, which answers for calls, and a variable
+  jumped nowhere. A local's definition is its first binding in its scope
+  now - an assignment, a parameter, a block's parameter - read off the
+  same parse that highlights it. Step 18d of `bench/lsp_session.py`; the
+  old server answers it with nothing.
+
 - **A refused rename says it was refused, not that the server broke.** A
   rename with nothing renameable under the cursor, or onto a name that is
   not a name, answered -32603, the code that says the server itself is

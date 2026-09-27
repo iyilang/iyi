@@ -1300,8 +1300,30 @@ module Iyi::Lsp
       text = text_of(uri)
       line0 = params["position"]["line"].as_i
       char = params["position"]["character"].as_i
-      line_text = text.lines[line0]? || ""
+      lines = text.lines
+      line_text = lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
+
+      # A local's definition is where it is first bound, found in the
+      # parse (`locals.cr`): `tool implementations` answers for calls, and
+      # a variable jumped nowhere.
+      if local = local_sites(text, path, Location.new(path, line0 + 1, column), lines)
+        _, declarations = local.split
+        if declared = declarations.first?
+          location = declared[0]
+          declared_line = lines[location.line_number - 1]? || ""
+          ch = Lsp.character_of(declared_line, location.column_number)
+          end_ch = Lsp.character_of(declared_line, location.column_number + local.name.size)
+          return respond(id) do |json|
+            json.array do
+              json.object do
+                json.field "uri", uri
+                json.field "range" { range(json, location.line_number - 1, ch, location.line_number - 1, end_ch) }
+              end
+            end
+          end
+        end
+      end
 
       result = @analysis.implementations_at(path, text, overrides_for(path), line0 + 1, column)
       traces = result.try(&.implementations)

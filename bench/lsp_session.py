@@ -907,6 +907,20 @@ def main():
          edit_sites == [(3, 2, "sum"), (5, 4, "sum"), (5, 12, "sum"), (7, 2, "sum")] and
          "already a name" in clash_error,
          f"references {ref_lines}, rename {edit_sites}, clash {clash_error[:60]!r}")
+
+    # 18d. Definition on a local is where it is first bound: a use of
+    #      `total` jumps to its first assignment, a use of the parameter
+    #      `count` to the parameter, a use of the block's `count` to the
+    #      block's. It answered null, `tool implementations` knowing calls.
+    def defined(line, character):
+        reply = c.send("textDocument/definition",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                for d in reply["result"] or []]
+    jumps = [defined(7, 3), defined(3, 10), defined(5, 21)]
+    step("18d", "definition on a local is where it is bound",
+         jumps == [[(3, 2)], [(2, 8)], [(4, 18)]], f"{jumps}")
     c.send("textDocument/didClose",
            {"textDocument": {"uri": locals_uri}}, wait=False)
 

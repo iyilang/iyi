@@ -293,13 +293,14 @@ esac
 step "failure proof: a stack mapped when a task is spawned is caught"
 mkdir -p eager/iyi
 cp -R "$REPO/src/iyi/." eager/iyi/
-awk '/^    fiber.prepare_stack if fiber.saved_sp == 0_u64$/ { found = found + 1; next }
-     /^    IyiScheduler.register\(fiber\)$/ { print "    fiber.prepare_stack"; found = found + 1 }
+# The stack made at spawn again: a fiber that has one is not given another
+# at its first switch, so this alone puts every spawn back on a mapping.
+awk '/^    IyiScheduler.register\(fiber\)$/ { print "    fiber.prepare_stack"; found = found + 1 }
      { print }
-     END { if (found != 2) exit 3 }' \
+     END { if (found != 1) exit 3 }' \
   "$REPO/src/iyi/concurrency.iyi" > eager/iyi/concurrency.iyi
 if [ $? -ne 0 ]; then
-  echo "the lines this proof moves are not where they were; update the proof"
+  echo "the line this proof adds to is not where it was; update the proof"
   exit 1
 fi
 if ! IYI_PATH="$WORK/eager${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \

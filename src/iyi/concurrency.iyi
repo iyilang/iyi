@@ -1117,6 +1117,22 @@ class IyiScheduler
     end
   end
 
+  # How a spawned fiber's stack is made, installed by the first spawn
+  # (`IyiGroup#spawn`) and called through rather than named here: a
+  # program that parks without spawning - a thread waiting on a lock -
+  # switches too, and naming `prepare_stack` in the switch put the stack
+  # mapping's `mprotect` into every such program, one more name on
+  # darwin's floor for a stack it never makes.
+  @@stack_maker : Proc(IyiFiber, Nil)?
+
+  def self.make_stacks_with(&maker : IyiFiber -> Nil) : Nil
+    @@stack_maker = maker
+  end
+
+  def self.makes_stacks? : Bool
+    !@@stack_maker.is_a?(Nil)
+  end
+
   # A fiber gets its stack here, the first time it is switched to, rather
   # than when it is spawned: a spawn that mapped one put a stack under
   # every task not yet run, so a loop spawning 100,000 short tasks made
@@ -1131,7 +1147,10 @@ class IyiScheduler
     previous = current
     fiber.state = IyiFiberState::Running
     return if fiber.sp_slot.address == previous.sp_slot.address
-    fiber.prepare_stack if fiber.saved_sp == 0_u64
+    if fiber.saved_sp == 0_u64
+      maker = @@stack_maker
+      maker.call(fiber) unless maker.is_a?(Nil)
+    end
     state.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
     # Back on this fiber's own stack, which is the first moment a stack
@@ -2348,6 +2367,7 @@ class IyiGroup
   # member is a failure the group acts on (III.4.3): first failure
   # cancels the siblings, `errgroup`'s policy with the library deleted.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
     task = IyiTask(T).new(fiber)
     runner = self

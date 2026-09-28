@@ -170,8 +170,16 @@ puts "32000 sleepers woke in deadline order in #{large_burst // 1000000} ms, 800
     took
   end
 
+  # The best of three each, so that a busy machine's one slow run is not
+  # read as a slow queue.
   alone = round_trips(0, 5000)
   crowded = round_trips(2000, 5000)
+  2.times do
+    again = round_trips(0, 5000)
+    alone = again if again < alone
+    again = round_trips(2000, 5000)
+    crowded = again if again < crowded
+  end
   fail("io: 5000 round trips took #{crowded * 10 // alone // 10}x as long with 2000 readers parked beside them") if crowded > alone * 3
   puts "5000 round trips took #{crowded // 1000000} ms with 2000 readers parked, #{alone // 1000000} ms alone"
 {% end %}

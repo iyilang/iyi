@@ -46,10 +46,14 @@
   1.7 GB, and on a kernel with the default 65,530 mappings a process a
   burst of about 33,000 was the end of the program. Taken at the first
   switch, the stack the last task finished on is the next one's: 100,000
-  spawns take 22-43 ms, and 400,000 take 111 ms and 144 MB.
+  spawns take 22-43 ms, and 400,000 take 111 ms and 144 MB. The switch
+  makes it through a maker the first spawn installs, so a program that
+  parks without spawning - a thread waiting on a lock - does not carry
+  the stack mapping, and darwin's thread floor keeps its names.
   `bench/concurrency_exercise.sh` spawns 2,000 tasks in one loop, requires
   them to run on at most eight stacks, and proves the check fails with
-  the stack mapped at spawn again.
+  the stack mapped at spawn again; `bench/thread_floor.sh` holds the
+  floor.
 
 - **`puts` does not end a line that has ended.** A string ending in a
   newline is written as it is, as Crystal's `puts` writes it: `puts
@@ -11234,7 +11238,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,323-line library and nothing else. Every other
+  written against iyi's own 18,343-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

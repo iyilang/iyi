@@ -120,9 +120,12 @@ module Iyi
         # iyi refuses. An imported name beats it. A script without a module
         # header wrote `import std/regex::{Regex}` and `Regex.compile(...)`
         # met "undefined method 'compile' for Regex.class", the empty shell
-        # answering where the import should have.
-        if type.is_a?(NamedType) && type.locations.nil? && (used = using_modules?)
-          if imported = lookup_using_path_item(used, name, location)
+        # answering where the import should have. Only where the import
+        # reaches: a headerless script's imports are the program's, and the
+        # prelude asking for `GC` must not get `std/gc`'s because a script
+        # imported it.
+        if location && type.is_a?(NamedType) && type.locations.nil? && (used = using_modules?)
+          if (imported = lookup_using_path_item(used, name, location)) && !program.iyi_walled_unit?(location, imported)
             return imported
           end
         end

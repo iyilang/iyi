@@ -37,9 +37,11 @@
   shell was found before the import, so `import std/regex::{Regex}` then
   `Regex.compile(...)` answered "undefined method 'compile' for
   Regex.class". A type the compiler declared and no source has written is
-  a name, not a definition, and an imported name beats it now. A file with
-  a module header was never affected. `bench/std_regex_exercise.sh` runs
-  such a script; 0.15.4's compiler fails it.
+  a name, not a definition, and an imported name beats it now, where the
+  import reaches: a script's imports are the program's, and the prelude
+  asking for `GC` still gets its own, not `std/gc`'s. A file with a module
+  header was never affected. `bench/std_regex_exercise.sh` runs both
+  scripts; 0.15.4's compiler fails the first.
 
 - **On Linux, a program with a thousand tasks alive at its first collection
   survives it.** The collector finds where the main thread's stack ends

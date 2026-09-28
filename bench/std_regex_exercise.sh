@@ -259,6 +259,23 @@ else
   sed 's/^/    /' "$WORK/script.out" | tail -3
   status=1
 fi
+# And only there. A headerless script's imports are the program's, and the
+# first cut of the rule above handed them to the prelude too: a script that
+# imported `std/gc::{GC}` and built a `List` was told `Std::Gc` "is not
+# imported here", at a line of std/list.
+cat > "$WORK/walled.iyi" <<'IYI'
+import std/gc::{GC}
+import std/list::{List}
+
+puts List(Int64).new([4_i64, 5_i64]).appended(6_i64).size + GC.stats.collections.to_i32 * 0
+IYI
+if "$IYI" run "$WORK/walled.iyi" > "$WORK/walled.out" 2>&1 && grep -qx "3" "$WORK/walled.out"; then
+  echo "  a script's import stays the script's: $(cat "$WORK/walled.out")"
+else
+  echo "  FAIL: a script's import reached the prelude:"
+  sed 's/^/    /' "$WORK/walled.out" | tail -3
+  status=1
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

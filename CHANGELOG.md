@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- **An integer prints in half the time.** `Int64#to_s` and `UInt64#to_s` -
+  and `Int32#to_s`, and every `#{n}`, through them - gathered their digits
+  in an `Array(Int32)` and then copied them into the string, an allocation
+  and its growth per number. They count the digits and write them straight
+  in now: two million integers print in 61 ms against 116 (Go's `Itoa`,
+  54), and `"#{k}-#{k}"` two million times in 128 ms against 298.
+  `bench/number_exercise.sh` holds the text, `Int64::MIN` and the bases
+  included.
+
+- **Typing a def at its definition costs that def, not every def before
+  it.** R-2c types each written def where it is written, through one
+  `if false` probe per def at the top of the program, and the variables a
+  probe assigned were merged into the program's after it like any
+  branch's: every probe copied and merged every variable the probes before
+  it had made, and `main` allocated a slot for each. The front end grew
+  with the square of the defs a program declares - 4,000 one-line methods
+  typed in 2.25 s against 0.10 for 500, with 0.15.4's release compiler. A
+  probe's variables are dropped when it is done now, and the same 4,000
+  type in 0.15 s. The generated pair `bench/build_speed.py` builds, 900
+  probed defs in 6,912 lines, went from 0.082 s of semantic analysis to
+  0.032, and a warm build of it from 0.31 s to 0.22.
+  `bench/definition_typing_scale.py` holds typing 4,000 defs under twelve
+  times the time of 500; linear typing measures 2.3, and 0.15.4's compiler
+  fails it at 22.9.
+
 ### Fixed
 
 - **A class instance equals itself, and a set of them finds it.** The
@@ -43,24 +70,6 @@
   counts its calls and fails past three million, and checks the order and
   its stability; an insertion sort fails the count, and a merge that takes
   the right run on a tie fails the order.
-
-### Changed
-
-- **Typing a def at its definition costs that def, not every def before
-  it.** R-2c types each written def where it is written, through one
-  `if false` probe per def at the top of the program, and the variables a
-  probe assigned were merged into the program's after it like any
-  branch's: every probe copied and merged every variable the probes before
-  it had made, and `main` allocated a slot for each. The front end grew
-  with the square of the defs a program declares - 4,000 one-line methods
-  typed in 2.25 s against 0.10 for 500, with 0.15.4's release compiler. A
-  probe's variables are dropped when it is done now, and the same 4,000
-  type in 0.15 s. The generated pair `bench/build_speed.py` builds, 900
-  probed defs in 6,912 lines, went from 0.082 s of semantic analysis to
-  0.032, and a warm build of it from 0.31 s to 0.22.
-  `bench/definition_typing_scale.py` holds typing 4,000 defs under twelve
-  times the time of 500; linear typing measures 2.3, and 0.15.4's compiler
-  fails it at 22.9.
 
 ## 0.15.4 — 2026-09-28
 
@@ -11032,7 +11041,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,105-line library and nothing else. Every other
+  written against iyi's own 18,104-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

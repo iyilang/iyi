@@ -236,7 +236,13 @@ prove_fails "a negative index does not wrap" no_wrap array.iyi \
 # 7. `uniq` keeping everything, which the collection checks read.
 prove_fails "uniq keeps everything" no_uniq array.iyi \
   "array: uniq" \
-  's/^    each { |value| result << value unless result.includes?(value) }$/    each { |value| result << value }/'
+  '/^  def uniq : Array(T)$/,/^  end$/{/^      next if seen.has_key?(value)$/d;}'
+
+# 7b. `shift` moving the rest down, as it did: draining a queue of 300,000
+#     is then quadratic, and the exercise stops answering.
+prove_fails "shift moves the rest down" moving_shift array.iyi \
+  "array: a queue of 300,000 drains" \
+  's/^    @buffer = @buffer + 1$/    index = 1; while index < @size; @buffer[index - 1] = @buffer[index]; index = index + 1; end/; /^    @capacity = @capacity - 1$/d'
 
 # 8. `pop` that does not shrink, so the size and the elements disagree.
 prove_fails "pop does not shrink" no_shrink array.iyi \

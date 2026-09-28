@@ -5,8 +5,8 @@
 # read (`LiteralExpander#expand`), so those two names are not ours to choose.
 #
 # A buffer, a size and a capacity. Growth doubles, which is the only policy
-# that keeps a run of `<<` linear, and there is no shrinking: nothing in the
-# samples removes elements.
+# that keeps a run of `<<` linear, and there is no shrinking; `shift` steps
+# the buffer forward, so the capacity is what is left past it.
 class Array(T)
   @size : Int32
   @capacity : Int32
@@ -274,19 +274,19 @@ class Array(T)
     @buffer[@size]
   end
 
-  # Removes and returns the first element, moving the rest down. Linear, which
-  # is what an array without a head offset costs; `each_cons` in the trait is
-  # the one caller and its window is `n` long.
+  # Removes and returns the first element. The buffer steps past it rather
+  # than the rest moving down: moving them made draining a queue quadratic,
+  # and `while item = queue.shift?` - how the prelude says a queue is
+  # drained - took 1.6 s over 100,000 items. The slot stepped past is still
+  # the buffer's chunk, which the collector keeps by the pointer into it,
+  # and the next growth copies only what is left.
   def shift : T
     raise "shift of an empty array" if empty?
 
     value = @buffer[0]
-    index = 1
-    while index < @size
-      @buffer[index - 1] = @buffer[index]
-      index = index + 1
-    end
+    @buffer = @buffer + 1
     @size = @size - 1
+    @capacity = @capacity - 1
     value
   end
 
@@ -486,11 +486,17 @@ class Array(T)
     result
   end
 
-  # Each value once, in the order first met: quadratic, on the arrays a
-  # first program has.
+  # Each value once, in the order first met, found through a table: a
+  # search of what was kept so far made it quadratic, 284 ms for 200,000
+  # elements with 10,000 distinct.
   def uniq : Array(T)
     result = Array(T).new(@size)
-    each { |value| result << value unless result.includes?(value) }
+    seen = {} of T => Bool
+    each do |value|
+      next if seen.has_key?(value)
+      seen[value] = true
+      result << value
+    end
     result
   end
 

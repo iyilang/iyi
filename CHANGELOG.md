@@ -31,6 +31,17 @@
 
 ### Fixed
 
+- **Draining a queue and `uniq` are linear.** `Array#shift` moved every
+  element after the first down one place, so `while item = queue.shift?` -
+  the prelude's own way to drain a queue, and `samples/iyi/visited.iyi`'s -
+  was quadratic: 100,000 items took 1.6 s. The buffer steps past the first
+  element now, and the same drain takes under a millisecond. `uniq`
+  searched what it had kept for every element; a table does that now, and
+  200,000 elements with 10,000 distinct went from 284 ms to 1.
+  `bench/collections_exercise.sh` drains 300,000 in order and checks a push
+  after a shift; a `shift` that moves the rest down stops the exercise
+  answering, and a `uniq` that keeps everything fails its count.
+
 - **A class instance equals itself, and a set of them finds it.** The
   prelude said an instance is "compared and hashed by identity unless the
   class says otherwise" and defined neither: `Object#==` answers false, so
@@ -11041,7 +11052,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,104-line library and nothing else. Every other
+  written against iyi's own 18,110-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

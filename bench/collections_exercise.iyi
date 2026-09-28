@@ -344,4 +344,27 @@ names = {} of Named => Int32
 names[Named.new("a")] = 1
 assert_int(names[Named.new("a")]? || 0, 1, "reference: a class's own == finds an equal key")
 
+# A queue drains from the front, and a drain is linear: `shift` moved every
+# element down, so 300,000 of them was 45 billion moves. Order holds across
+# a shift and a push after it.
+queue = [1, 2, 3, 4, 5]
+assert_int(queue.shift, 1, "array: shift answers the first")
+queue << 6
+assert_int(queue.size, 5, "array: a push after a shift keeps the rest")
+assert_int(queue[0], 2, "array: the second is first after a shift")
+assert_int(queue[4], 6, "array: and the push is last")
+drained = [] of Int32
+while item = queue.shift?
+  drained << item
+end
+assert_int(drained.size, 5, "array: shift? drains every element")
+assert_int(drained[4], 6, "array: in order")
+long_queue = [] of Int32
+300000.times { |i| long_queue << i }
+drained_sum = 0_i64
+while item = long_queue.shift?
+  drained_sum = drained_sum + item
+end
+assert_true(drained_sum == 44999850000_i64, "array: a queue of 300,000 drains, in order")
+
 puts "all collection checks passed"

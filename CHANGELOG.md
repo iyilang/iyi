@@ -54,8 +54,7 @@
   Waiters are found by descriptor now, and leave the list from where they
   are: 1.9 us with 16,000 parked. The table is made at a thread's first io
   wait, so a scheduler state that never waits on io holds nothing of the
-  heap's - which is what `bench/collect_trigger.sh`'s proof of an unrooted
-  state reads on Windows. `bench/concurrency_exercise.sh` times
+  heap's. `bench/concurrency_exercise.sh` times
   5,000 round trips alone and with 2,000 readers parked, fails past three
   times, and proves it fails with the walk put back (12x).
 

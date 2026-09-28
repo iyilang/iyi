@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A local is not renamed onto a name a block inside its scope binds.**
+  The rename's clash check looked at the scope's variables and bare calls
+  and skipped blocks that bind the new name - the same skip that keeps a
+  block's `|n|` a variable of its own. So `total` renamed to `n`, with
+  `[1, 2].each do |n| total = total + n end` inside the def, became
+  `n = n + n`: the block reassigned its own parameter and the def returned
+  100 where it had returned 103. Such a block is a clash now. Step 18g of
+  `bench/lsp_session.py`; the old server carries the rename out.
+
 - **A rename onto a name that is already there is refused.** The language
   server renamed a def onto any name, and one its type or the top level
   already had made two defs one: renaming `shout` to an existing `yell`

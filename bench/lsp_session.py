@@ -1009,6 +1009,35 @@ def main():
     c.send("textDocument/didClose",
            {"textDocument": {"uri": clash_uri}}, wait=False)
 
+    # 18g. A local renamed onto a name a block inside its scope binds: the
+    #      block's uses of the local would read the block's parameter. It
+    #      was carried out, and `total = total + n` became `n = n + n`,
+    #      so the def returned 100 where it had returned 103.
+    shadow = ("module shadow\n\n"
+              "def sum : Int32\n"
+              "  total = 100\n"
+              "  [1, 2].each do |n|\n"
+              "    total = total + n\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "puts sum\n")
+    shadow_uri = file_uri(os.path.join(work, "shadow.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": shadow_uri, "languageId": "iyi",
+                             "version": 1, "text": shadow}}, wait=False)
+    c.diagnostics(shadow_uri)
+    at_total = {"textDocument": {"uri": shadow_uri},
+                "position": {"line": 3, "character": 3}}
+    onto_n = c.send("textDocument/rename", dict(at_total, newName="n")).get("error") or {}
+    onto_acc = (c.send("textDocument/rename", dict(at_total, newName="acc")).get("result") or {}).get("changes", {})
+    step("18g", "a local is not renamed onto a block parameter's name",
+         onto_n.get("code") == -32803 and "already a name" in onto_n.get("message", "") and
+         len(onto_acc.get(shadow_uri, [])) == 4,
+         f"onto n {onto_n.get('code')}, onto acc {len(onto_acc.get(shadow_uri, []))} edit(s)")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": shadow_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

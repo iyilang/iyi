@@ -74,7 +74,9 @@ puts "  CRC-32 and Adler-32"
   end
   assert_true best_crc < best_sum * 6, "crc cost: #{best_crc * 10 // best_sum}/10 of a byte sum (#{seen})"
   assert_true best_adler < best_sum * 4, "adler cost: #{best_adler * 10 // best_sum}/10 of a byte sum"
-  puts "  CRC-32 at #{best_crc * 10 // best_sum}/10 and Adler-32 at #{best_adler * 10 // best_sum}/10 of a pass that adds the bytes up"
+  # Named without its measurements: `bench/std_exercise.sh` runs this from
+  # source and from artifacts and compares what it prints.
+  puts "  CRC-32 and Adler-32 within a few passes that add the bytes up"
 {% end %}
 
 puts "\nALL CHECKS PASSED"

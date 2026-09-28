@@ -141,12 +141,23 @@ struct UInt8
     to_i32.to_s
   end
 
+  def hash : Int32
+    to_i32
+  end
+
   def to_s(base : Int32) : String
     to_i32.to_s(base)
   end
 end
 
 struct UInt64
+  # The high half multiplied into the low: a key that fits 32 bits hashes
+  # to itself, as an `Int32` does, and a plain XOR of the halves would put
+  # `(n << 32) | n` at zero for every `n`.
+  def hash : Int32
+    (self ^ (unsafe_shr(32_u64) &* 2654435761_u64)).unsafe_to_i32
+  end
+
   def //(other : UInt64) : UInt64
     raise "division by zero" if other == 0_u64
     unsafe_div(other)
@@ -190,6 +201,17 @@ end
 
 # A 64-bit signed integer, the literal `1_i64`.
 struct Int64
+  # The halves mixed, as `UInt64`'s are. Without it an `Int64` hashed to
+  # its type, `Object#hash`'s default, so every key of a `Hash(Int64, V)`
+  # or `Set(Int64)` went to one slot and each insert walked all the keys
+  # before it: 80,000 inserts took 2.9 s and two million did not finish in
+  # two minutes. `UInt64`, `UInt8`, `Char` and `Float64` were the same,
+  # and `std/int`, which writes `hash` for the rest of the integer tower,
+  # leaves the prelude's types to the prelude.
+  def hash : Int32
+    unsafe_to_u64.hash
+  end
+
   def //(other : Int64) : Int64
     raise "division by zero" if other == 0
     # And the one division that overflows: the type's smallest value has no

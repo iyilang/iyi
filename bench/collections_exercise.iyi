@@ -289,4 +289,23 @@ by_key = keyed.sorted_by { |k| k.key }
 assert_int(by_key[0].seq, ordered[0].seq, "array: sorted_by keeps equal keys in order")
 assert_int(by_key[99999].seq, ordered[99999].seq, "array: sorted_by agrees with sorted")
 
+# Every key type the prelude has spreads its keys: a type without a `hash`
+# of its own hashes to its type id, so all its keys share one slot and a
+# table of them is a list searched from the front - two million `Int64`
+# inserts did not finish in two minutes that way. A thousand distinct keys
+# of each type have a thousand distinct hashes (the bytes and characters
+# as many as there are).
+def spread(hashes : Array(Int32)) : Int32
+  seen = {} of Int32 => Bool
+  hashes.each { |h| seen[h] = true }
+  seen.size
+end
+
+assert_int(spread((0...1000).map { |i| (i.to_i64 * 4294967296_i64 + i.to_i64).hash }), 1000, "hash: Int64 keys spread")
+assert_int(spread((0...1000).map { |i| (i.to_u64 * 4294967296_u64).hash }), 1000, "hash: UInt64 keys spread")
+assert_int(spread((0...256).map { |i| i.to_u8.hash }), 256, "hash: UInt8 keys spread")
+assert_int(spread((0...128).map { |i| i.chr.hash }), 128, "hash: Char keys spread")
+assert_int(spread((0...1000).map { |i| (i * 0.25).hash }), 1000, "hash: Float64 keys spread")
+assert_true(0.0.hash == (-0.0).hash, "hash: 0.0 and -0.0 are one key")
+
 puts "all collection checks passed"

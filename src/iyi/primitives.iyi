@@ -76,6 +76,10 @@ struct Char
   def ord : Int32
   end
 
+  def hash : Int32
+    ord
+  end
+
   {% for op in %w(== != < <= > >=) %}
     @[Primitive(:binary)]
     def {{ op.id }}(other : Char) : Bool

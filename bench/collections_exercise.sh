@@ -194,6 +194,10 @@ prove_fails "a merge that takes the right run on a tie" unstable_sort array.iyi 
   "array: a sort is ascending and keeps equal elements in order" \
   's/(yield from\[left\], from\[right\]) <= 0/(yield from[left], from[right]) < 0/'
 
+prove_fails "an Int64 hashed by its type" int64_type_hash number.iyi \
+  "hash: Int64 keys spread" \
+  '/^struct Int64$/,/^end$/{/^  def hash : Int32$/,/^  end$/d;}'
+
 # 2. A key written twice making two entries, which is what a `[]=` that does
 #    not look first would do.
 prove_fails "a rewritten key appends" double_write hash.iyi \

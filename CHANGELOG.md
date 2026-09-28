@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A table keyed by `Int64`, `UInt64`, `UInt8`, `Char` or `Float64` spreads
+  its keys.** The prelude gave `Int32` a `hash` and no other type it
+  declares, so every other key hashed to its type's id - `Object#hash` - and
+  a `Hash(Int64, V)` or `Set(Char)` was one slot searched from the front:
+  80,000 `Int64` inserts took 2.9 s, and two million had not finished after
+  two minutes. `std/traits` wrote the missing hashes and `std/float`
+  Float64's, so a program that imported either was fine and one that did not
+  was quadratic; `std/int` leaves the prelude's types to the prelude. The
+  five are the prelude's now - an integer's high half multiplied into its
+  low, so a key that fits 32 bits hashes to itself - and the two million
+  inserts take 0.04 s against Go's 0.24. `bench/collections_exercise.sh`
+  checks a thousand distinct keys of each type hash a thousand ways, and
+  fails with `Int64#hash` taken out.
+
 - **Sorting a large array finishes.** `Array#sorted`, `sort_in_place` and
   their `_by` forms were an insertion sort, written for the samples' five
   elements: a comparison for every pair, so a program that sorted three
@@ -11005,7 +11019,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,049-line library and nothing else. Every other
+  written against iyi's own 18,083-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -156,15 +156,17 @@ prove_fails "Hashable String hash_key is length" no_strhash "traits.iyi" "Hashab
 prove_fails "the tower's hash falls back to the type id" no_inthash "int.iyi" "hash: Int8 values differ" \
   's/def hash : Int32/def hash_elsewhere : Int32/'
 
-# 9. The same for both floats, whose `hash` lives in `std/float`.
-prove_fails "Float64 hash falls back to the type id" no_floathash "float.iyi" "hash: Float64 values differ" \
+# 9. The same for `Float32`, whose `hash` lives in `std/float`. `Float64`'s
+#    is the prelude's, as every prelude type's is, so a table of doubles
+#    spreads without an import.
+prove_fails "Float32 hash falls back to the type id" no_floathash "float.iyi" "hash: Float32 values differ" \
   's/def hash : Int32/def hash_elsewhere : Int32/'
 
 # 10. And the import itself is load-bearing, not decoration: `std/traits` is
 #     the only module this exercise imports for the scalars, so taking the
-#     `std/float` line out of it leaves both floats hashing to their type id
+#     `std/float` line out of it leaves `Float32` hashing to its type id
 #     however complete `std/float` is.
-prove_fails "traits without its std/float import" no_floatimport "traits.iyi" "hash: Float64 values differ" \
+prove_fails "traits without its std/float import" no_floatimport "traits.iyi" "hash: Float32 values differ" \
   's|^import std/float$||'
 
 echo

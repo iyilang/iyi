@@ -15,6 +15,7 @@ end
 
 import std/http::{HTTP, Response, Request, Server}
 import std/socket::{IyiSocket, SocketError}
+import std/gc::{GC}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.
@@ -272,6 +273,29 @@ group do |g|
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    # A small request on a kept-alive connection costs the server what it
+    # reads, not the size of the read it asks for: the socket's read took
+    # a heap buffer of the whole 64 KB per call, and the server a 64 KB
+    # builder per request, 130 KB of garbage per request and a collection
+    # every few dozen of them.
+    lean = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ask = "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n"
+    lean.write(ask).or_panic
+    answer_size = read_response(lean).bytesize
+    scratch = Pointer(UInt8).malloc(4096_u64)
+    GC.disable
+    lean_before = GC.stats.bytes_since_collection
+    200.times do
+      lean.write(ask).or_panic
+      got = 0
+      while got < answer_size
+        got = got + lean.read(scratch, 4096).or_panic.as(Int32)
+      end
+    end
+    lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 200_u64
+    GC.enable
+    lean.close
+    assert_true lean_bytes < 8192_u64, "a kept-alive request allocates #{lean_bytes} bytes, under 8 KB"
     # A client that asks to be told before it sends its body is told:
     # without the `100 Continue`, curl waits a second before every upload
     # past a megabyte.
@@ -291,16 +315,16 @@ group do |g|
     upload_started = __iyi_monotonic_ns
     r10 = HTTP.post("http://127.0.0.1:#{sport}/echo", upload).or_panic
     upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
-    assert_true r10.status == 200 && r10.body.bytesize == 24000000, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
+    assert_true r10.status == 200 && r10.body == upload, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
     assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 10, "the block ran ten times (the 400 never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 211, "the block ran 211 times (the 400 never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 100-continue, a 24 MB upload, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 201 lean requests, 100-continue, a 24 MB upload, and the client against it"
 
 puts "\nALL CHECKS PASSED"

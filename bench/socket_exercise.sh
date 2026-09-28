@@ -161,11 +161,11 @@ prove_fails() {
 
 # 1. Broken payload reception
 prove_fails "message payload mismatch" badpayload "message_exchange:" \
-  '{ sub(/target\.copy_from\(buffer, count\)/, "target[0] = 63_u8"); print }'
+  '{ sub(/target\.copy_from\(pointerof\(small\)\.as\(UInt8\*\), count\)/, "target[0] = 63_u8"); print }'
 
 # 2. Broken short read (clamping buffer size below 16 bytes alters chunk size)
 prove_fails "short read size mismatch" badshort "short_read:" \
-  '{ sub(/buffer = Pointer\(UInt8\)\.malloc\(max_bytes\.to_u64\)/, "if max_bytes < 16; max_bytes = 1; end; buffer = Pointer(UInt8).malloc(max_bytes.to_u64)"); print }'
+  '{ sub(/first = max_bytes < 4096 \? max_bytes : 4096/, "if max_bytes < 16; max_bytes = 1; end; first = max_bytes < 4096 ? max_bytes : 4096"); print }'
 # 3. Broken closed peer detection (does not answer empty string on EOF)
 prove_fails "closed peer EOF missed" badoff "closed_peer:" \
   '{ sub(/return "" if count == 0$/, "return \"eof_missed\" if count == 0"); print }'

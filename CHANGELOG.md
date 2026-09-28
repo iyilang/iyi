@@ -184,6 +184,20 @@
 
 ### Fixed
 
+- **A small request costs `Server.serve` what it reads.** `IyiSocket#read`
+  took a heap buffer of all it was allowed to read on every call, and the
+  server asked for 64 KB: 130 KB of garbage per 30-byte request, a
+  collection every few dozen requests, and eleven marking threads woken
+  for each. The read now lands on the stack first and takes the heap only
+  past 4 KB; the server keeps a kept-alive connection's next request as
+  the read it came in. A request costs 1.1 KB, and a hello-world server
+  under `wrk -c50` spends 7.5 us of CPU per request where it spent 31 (Go's
+  `net/http`: 17), serving 100k requests a second where it served 30k.
+  `bench/std_http_exercise.sh` counts the bytes 200 kept-alive requests
+  allocate, requires under 8 KB each, and proves the check fails with the
+  heap buffer put back (66 KB); `bench/socket_exercise.sh`'s payload and
+  short-read proofs follow the read to its new copy.
+
 - **`Server.serve` answers `Expect: 100-continue`.** A client that asks
   to be told before it sends its body was never told, and curl sends one
   on every upload past a megabyte and waits a second before giving up:

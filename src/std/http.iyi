@@ -165,21 +165,33 @@ pub struct Server
         continued = true
         return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
       end
-      wanted = parsed.wanted
-      pending = String::Builder.new(wanted > buffer.bytesize ? wanted : buffer.bytesize + 65536)
-      pending << buffer
-      while true
-        case chunk = client.read(65536)
-        in Cancelled, SocketError
-          return
-        in String
-          return if chunk.bytesize == 0
+      case chunk = client.read(65536)
+      in Cancelled, SocketError
+        return
+      in String
+        return if chunk.bytesize == 0
+        wanted = parsed.wanted
+        if buffer.bytesize + chunk.bytesize >= wanted
+          # A head still coming, or a request that is here now: the next
+          # request of a keep-alive connection arrives into an empty
+          # buffer, and is that read alone.
+          buffer = buffer.bytesize == 0 ? chunk : buffer + chunk
+        else
+          pending = String::Builder.new(wanted)
+          pending << buffer
           pending << chunk
+          while pending.bytesize < wanted
+            case more = client.read(65536)
+            in Cancelled, SocketError
+              return
+            in String
+              return if more.bytesize == 0
+              pending << more
+            end
+          end
+          buffer = pending.to_s
         end
-        break if pending.bytesize >= wanted
-        return if pending.bytesize > MAX_HEAD + MAX_BODY
       end
-      buffer = pending.to_s
     end
   end
 

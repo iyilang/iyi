@@ -241,8 +241,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mutate() { # mutate <label> <old> <new>
-  local label="$1" old="$2" new="$3"
+mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
+  local label="$1" old="$2" new="$3" module="${4:-http.iyi}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
@@ -252,11 +252,11 @@ mutate() { # mutate <label> <old> <new>
   OLD="$old" NEW="$new" "$PY" - <<PY
 import os
 from pathlib import Path
-src = Path("$REPO/src/std/http.iyi").read_text()
+src = Path("$REPO/src/std/$module").read_text()
 old = os.environ["OLD"]
 if old not in src:
     raise SystemExit("patch site missing: " + old)
-Path("$WORK/patched/std/http.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+Path("$WORK/patched/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
@@ -276,6 +276,7 @@ mutate "a server that answers every request 200" 'Response.new(400, reason' 'Res
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
+mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 
 echo
 if [ "$status" -eq 0 ]; then

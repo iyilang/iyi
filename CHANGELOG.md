@@ -55,12 +55,12 @@
   read. It is a pairing heap threaded through the fibers' own links now,
   with a fiber leaving from anywhere in it when its wait ends another way
   and equal deadlines leaving in the order they came: the 100,000 take
-  0.4 s. `bench/concurrency_exercise.sh` sleeps 8,000 and then 32,000
-  tasks, requires every task to wake in deadline order and, on Linux, the
-  second burst to take under eight times the first (the walked list
-  measures eleven; on darwin every sleeper's stack mapping costs more the
-  more there are, nine times with the heap), and proves both checks fail
-  with the walk or the order put back.
+  0.4 s. `bench/concurrency_exercise.sh` sleeps 32,000 tasks, requires
+  every task to wake in deadline order and the queue to cost at most 64
+  steps a sleeper - its melds, counted by `IyiScheduler.sleep_steps`
+  rather than timed, so neither a slow runner nor darwin's dearer
+  mappings move it; the heap takes 13 - and proves both checks fail with
+  the walk (16,009 steps each) or the order put back.
 
 - **A variable assigned many times types in memory near its length.**
   Every assignment binds the variable to one more value and merges all of
@@ -11284,7 +11284,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,364-line library and nothing else. Every other
+  written against iyi's own 18,373-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

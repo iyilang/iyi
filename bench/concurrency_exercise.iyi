@@ -83,43 +83,31 @@ end
 #
 # The sleep queue was a list kept sorted by walking it, so every sleep
 # walked past every sleeper before it: 100,000 tasks sleeping under 100 ms
-# took 11 s. Two bursts, one four times the other, all sleeping a
-# millisecond or a few: a linear queue takes about four times as long for
-# the second, the walked list thirteen. Each task notes the deadline its
-# sleep set, and they must wake in that order. First, so that a queue out
-# of order is named here rather than by whichever sleep below it breaks.
-def sleep_burst(n : Int32, woke : Array(Int64)) : Int64
-  started = __iyi_monotonic_ns
-  group do |g|
-    n.times do |k|
-      g.spawn do
-        sleep(k * 7919 % 7 + 1)
-        woke << IyiScheduler.current.deadline
-        0
-      end
+# took 11 s. 32,000 tasks sleeping a millisecond or a few may cost the
+# queue at most 64 steps each - a heap's melds, counted rather than timed,
+# so a slow machine and a platform whose mappings cost more cannot move it
+# - and must wake in the order of the deadlines their sleeps set. First,
+# so that a queue out of order is named here rather than by whichever
+# sleep below it breaks.
+woke = [] of Int64
+steps_before = IyiScheduler.sleep_steps
+group do |g|
+  32000.times do |k|
+    g.spawn do
+      sleep(k * 7919 % 7 + 1)
+      woke << IyiScheduler.current.deadline
+      0
     end
   end
-  __iyi_monotonic_ns - started
 end
-
-small_woke = [] of Int64
-large_woke = [] of Int64
-small_burst = sleep_burst(8000, small_woke)
-large_burst = sleep_burst(32000, large_woke)
-[small_woke, large_woke].each do |woke|
-  i = 1
-  while i < woke.size
-    fail("sleep: a sleeper woke before one whose deadline came first") if woke[i] < woke[i - 1]
-    i = i + 1
-  end
+steps = IyiScheduler.sleep_steps - steps_before
+i = 1
+while i < woke.size
+  fail("sleep: a sleeper woke before one whose deadline came first") if woke[i] < woke[i - 1]
+  i = i + 1
 end
-# The cost ratio on Linux only: every sleeper holds a stack, and darwin's
-# mappings cost more the more of them a process has, which is not the
-# queue's to answer for - measured there at nine times with the heap.
-{% if flag?(:linux) %}
-  fail("sleep: 32000 sleepers took #{large_burst * 10 // small_burst // 10}x what 8000 did") if large_burst > small_burst * 8
-{% end %}
-puts "32000 sleepers woke in deadline order in #{large_burst // 1000000} ms, 8000 in #{small_burst // 1000000} ms"
+fail("sleep: 32000 sleepers took #{steps // 32000} queue steps each") if steps > 32000_u64 * 64_u64
+puts "32000 sleepers woke in deadline order, #{steps // 32000} queue steps each"
 
 # ── 0b. A parked reader costs the others nothing ─────────────────────────
 #

@@ -1789,8 +1789,17 @@ class IyiScheduler
     a.deadline < b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)
   end
 
+  @@sleep_steps : UInt64 = 0_u64
+
+  # Melds the sleep heap has made, in all: what an insertion and a removal
+  # cost, counted, which the exercises read rather than a clock.
+  def self.sleep_steps : UInt64
+    @@sleep_steps
+  end
+
   # Two roots into one: the later becomes the earlier's first child.
   private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
+    @@sleep_steps = @@sleep_steps &+ 1_u64
     first = sleep_before?(b, a) ? b : a
     second = first.object_id == a.object_id ? b : a
     older = first.sleep_child

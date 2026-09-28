@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.15.4 — 2026-09-28
+
+**A program can run another one.** `std/process`'s `Process.run` starts a
+program with its arguments as given - no shell reads them - hands it input,
+collects both its streams and answers its exit code, on Linux, darwin and
+Windows, without holding the thread while the child runs; `env:` gives the
+child an environment of its own. Before this the library could not start a
+program on any platform.
+
+**Four ways a program read memory it did not own are closed.** On darwin a
+fresh object could read what its page's last owner left, because a released
+page kept its bytes; a variable set with `ENV[]=` on Linux and darwin was
+freed by the next collection; a string built at run time had no NUL after
+it, so code that handed it to the platform read on past its end; and a
+program that wrote to both stdout and stderr wrote NUL bytes ahead of its
+output. Each has a gate that fails without its fix.
+
+**Windows and the editor.** A program links through `link.exe` itself and
+asks `vswhere` once, the language server answers as fast as on Linux, a
+mark leaves a busy program its cores, and a program that ends while a
+collection stops it ends. The language server finds and highlights local
+and instance variables and renames a local one, and completion offers a
+module's own functions.
+
 ### Added
 
 - **`Process.run(env:)` gives a child its own environment.** The child's

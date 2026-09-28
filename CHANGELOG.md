@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **A parked reader costs the other connections nothing.** On Linux and
+  darwin every io event, every second waiter's check and every
+  cancellation walked the list of fibers parked on io, so each read on a
+  server paid for every connection parked beside it: a round trip over a
+  pipe took 41 us with 4,000 idle readers parked against 2 us with none.
+  Waiters are found by descriptor now, and leave the list from where they
+  are: 1.9 us with 16,000 parked. `bench/concurrency_exercise.sh` times
+  5,000 round trips alone and with 2,000 readers parked, fails past three
+  times, and proves it fails with the walk put back (12x).
+
 - **Sleeping tasks wait in a heap, not a list walked on every sleep.**
   The sleep queue - every `sleep`, and every io wait with a deadline - was
   a list kept sorted by walking it, so each sleep walked past every
@@ -11213,7 +11223,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,290-line library and nothing else. Every other
+  written against iyi's own 18,323-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

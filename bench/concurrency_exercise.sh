@@ -349,6 +349,19 @@ sleep_proof "a sleep queue that puts the latest first" latest \
    { print } END { if (!found) exit 3 }' \
   'FAIL: sleep: a sleeper woke before'
 
+# ── 8. Failure proof: an io list walked for every event ─────────────────
+case "$(uname -s)" in
+  Linux)
+    sleep_proof "an io waiter found by walking every waiter" walked_io \
+      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = state.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
+       { print } END { if (!found) exit 3 }' \
+      'FAIL: io: 5000 round trips'
+    ;;
+  *)
+    step "failure proof: an io waiter found by walking every waiter: not here, because the check runs on Linux's poller only"
+    ;;
+esac
+
 echo "workdir $WORK"
 # A summary may not claim more than was measured, so a step whose reader was
 # missing is named here rather than folded into the pass.

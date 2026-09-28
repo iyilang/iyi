@@ -1945,6 +1945,30 @@ def main():
          and "iyi.nonesuch" in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
 
+    # 52i. A hover inside `x.or(0)`: the `or` tests a variable of the
+    # compiler's own, and the cursor context looked it up among the names
+    # it had recorded, which leave those out - a KeyError the server
+    # answered as the client's, "the request is missing \"__temp_3\"".
+    orer = os.path.join(work, "orer.iyi")
+    orer_text = ("module orer\n\npub struct Bad\nend\n\nimpl Error for Bad\n"
+                 "  def message : String\n    \"bad\"\n  end\nend\n\n"
+                 "def load(path : String) : Int32 | Bad\n"
+                 "  path == \"x\" ? 1 : Bad.new\nend\n\n"
+                 "[\"a\", \"x\"].each do |path|\n"
+                 "  puts \"or: #{load(path).or(0)}\"\nend\n")
+    with open(orer, "w") as f:
+        f.write(orer_text)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": file_uri(orer), "languageId": "iyi",
+                             "version": 1, "text": orer_text}}, wait=False)
+    c.diagnostics(file_uri(orer))
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": file_uri(orer)},
+        "position": {"line": 16, "character": 17}})
+    step("52i", "a hover inside an `or` is answered, not refused",
+         "error" not in reply,
+         json.dumps(reply.get("error") or reply.get("result"))[:80])
+
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

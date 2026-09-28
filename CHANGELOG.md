@@ -56,6 +56,15 @@
 
 ### Fixed
 
+- **A hover inside `x.or(default)` is answered.** The `or` tests a variable
+  of the compiler's own, and the cursor context restricted it by looking
+  it up among the names it had recorded, which leave those out: a KeyError
+  the server answered as the client's mistake, "the request is missing
+  \"__temp_3\"", for hover, completion and go-to-type-definition anywhere
+  in `"#{load(path).or(0)}"` in `samples/iyi/errors.iyi`. A name the
+  context does not have is now left alone. `bench/lsp_session.py` step
+  52i hovers there.
+
 - **A `BigInt` product of one long and one much shorter value no longer
   panics.** Karatsuba took half the longer side's length off both sides,
   which is a negative count for a side shorter than that half: past 64

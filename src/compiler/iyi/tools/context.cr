@@ -246,9 +246,16 @@ module Iyi
         end
 
         # restrict the whole context
+        #
+        # iyi: only the names the context has. A condition can test one it
+        # never recorded - `x.or(0)` tests the compiler's own `__temp_3`,
+        # which `add_context` leaves out - and looking it up anyway raised
+        # a KeyError that the server answered as the client's mistake,
+        # "the request is missing \"__temp_3\"", for a hover inside
+        # `"#{load(path).or(0)}"`.
         filters.each do |name, filter|
-          filtered_var = current_context[name]
-          filtered_var.bind_to(current_context[name].filtered_by(filter))
+          next unless filtered_var = current_context[name]?
+          filtered_var.bind_to(filtered_var.filtered_by(filter))
           add_context name, filtered_var.type?
         end
       end

@@ -309,7 +309,9 @@ pub struct HTTP
   def self.decode_chunked(text : String) : String
     p = text.to_unsafe
     n = text.bytesize
-    out = ""
+    # One builder for the body: adding each chunk to the body so far copied
+    # it once per chunk.
+    out = String::Builder.new
     i = 0
     while true
       line_end = find_crlf(text, i)
@@ -323,12 +325,12 @@ pub struct HTTP
       i = line_end + 2
       break if size == 0
       raise "HTTP: chunked body ends inside a chunk" if i + size > n
-      out = out + text[i, size]
+      out.write(p + i, size)
       i = i + size
       raise "HTTP: a chunk is not followed by CRLF" unless i + 1 < n && p[i] == 13_u8 && p[i + 1] == 10_u8
       i = i + 2
     end
-    out
+    out.to_s
   end
 
   def self.find_headers_end(text : String) : Int32?

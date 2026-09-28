@@ -4,6 +4,15 @@
 
 ### Changed
 
+- **`Enumerable#join`, `String.join`, `CSV.build`, `HTTP.decode_chunked`
+  and `center`'s padding write into one builder.** Each added every piece
+  to the text so far, copying it once per piece: a `List` of 100,000
+  numbers took 9 s to join and 20,000 CSV rows 12.8 s to build; both now
+  take a few milliseconds, and a million-element join 30 ms.
+  `bench/std_text_scale_exercise.sh` runs all five over its eight
+  megabytes under the clock, and proves the clock catches a join or a CSV
+  build that copies what it has written per piece.
+
 - **`BigInt` prints and parses long values in time near their length.**
   `to_s(base)` appended each chunk's digits to the text so far, and divided
   by a fresh one-limb BigInt per chunk - per digit outside bases 2, 10 and

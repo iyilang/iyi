@@ -711,17 +711,17 @@ class ::String
   # Characters, so a multi-byte pad is one unit of width.
   private def cycled(pad : String, count : Int32) : String
     return "" if count <= 0
-    result = ""
-    taken = 0
-    while taken < count
-      pad.each_char do |c|
-        if taken < count
-          result = result + c.to_s
-          taken = taken + 1
+    String.build do |io|
+      taken = 0
+      while taken < count
+        pad.each_char do |c|
+          if taken < count
+            io << c
+            taken = taken + 1
+          end
         end
       end
     end
-    result
   end
 
   def chars : Array(Char)
@@ -1033,15 +1033,16 @@ class ::String
     items.join(separator)
   end
 
+  # Into one builder, as `Enumerable#join` is and for its reason.
   def self.join(items, separator : String = "") : String
-    result = ""
-    first = true
-    items.each do |item|
-      result = result + separator unless first
-      result = result + item.to_s
-      first = false
+    String.build do |io|
+      first = true
+      items.each do |item|
+        io << separator unless first
+        io << item.to_s
+        first = false
+      end
     end
-    result
   end
 
   # `byte_slice` and `Array#join` with no separator are the prelude's, and

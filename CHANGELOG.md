@@ -31,6 +31,26 @@
 
 ### Fixed
 
+- **A JIT engine is disposed.** `LLVM::JITCompiler#dispose` set its flag
+  and then called `finalize`, whose first line returned on that flag, so
+  no engine was ever disposed - not by `dispose` and not by the collector
+  - and every module a process JIT-compiled kept its memory. The compiler
+  specs JIT one module per example, about 14,000 a run, and one Windows CI
+  run of them died of "IMAGE_REL_AMD64_ADDR32NB relocation requires an
+  ordered section layout" (run 36441005703): LLVM cannot relocate a module
+  whose unwind table lands more than 4 GB from its code, and a process
+  that never frees takes each module's blocks from an ever more crowded
+  address space. The same commit passed in the run beside it, and the same
+  order (seed 68571) passed here, so the crash itself was not reproduced on
+  demand. An engine is disposed now. The value it answered holds it, since
+  a spec's `to_string` reads a string inside the module after the run, and
+  it holds its module, since disposing the engine disposes the module:
+  without that the collector could take the context first, and the
+  specs died of an access violation at their nineteenth example. With
+  both, the same order runs 14,038 examples, none failing. A library spec
+  disposes an engine and requires Windows to report its code's memory
+  free; the old `dispose` leaves it committed.
+
 - **On Linux, a program with a thousand tasks alive at its first collection
   survives it.** The collector finds where the main thread's stack ends
   by its `[stack]` line in `/proc/self/maps`, near the file's end, and read

@@ -361,22 +361,7 @@ class ::String
     return nil if offset < 0
     return offset if search.bytesize == 0 && offset <= bytesize
     return nil if offset + search.bytesize > bytesize
-
-    limit = bytesize - search.bytesize
-    i = offset
-    s_ptr = to_unsafe
-    t_ptr = search.to_unsafe
-    t_len = search.bytesize
-
-    while i <= limit
-      j = 0
-      while j < t_len && s_ptr[i + j] == t_ptr[j]
-        j = j + 1
-      end
-      return i if j == t_len
-      i = i + 1
-    end
-    nil
+    byte_index(search, offset)
   end
 
   def rindex(char : Char, offset : Int32) : Int32?

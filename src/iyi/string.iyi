@@ -456,23 +456,60 @@ class String
     end
   end
 
-  # Substring search, the naive way: the strings a sample holds are short
-  # enough that the loop is the answer and an index would be the question.
   def includes?(other : String) : Bool
     return true if other.bytesize == 0
     return false if other.bytesize > bytesize
+    !byte_index(other, 0).nil?
+  end
 
-    start = 0
-    limit = bytesize - other.bytesize
-    while start <= limit
-      index = 0
-      while index < other.bytesize && to_unsafe[start + index] == other.to_unsafe[index]
-        index = index + 1
+  # Where *search* first starts at or after *offset*, in bytes; the caller
+  # has checked that it fits. Naive while that is cheap, and Rabin-Karp -
+  # one rolling hash per position, bytes compared only where it matches -
+  # once more than four bytes a position have been compared: a needle that
+  # keeps almost matching, `"a" * 1000 + "b"` in a run of `a`, made the
+  # naive loop n * m, 222 ms for a megabyte.
+  protected def byte_index(search : String, offset : Int32) : Int32?
+    m = search.bytesize
+    limit = bytesize - m
+    s = to_unsafe
+    t = search.to_unsafe
+    i = offset
+    spent = 0
+    while i <= limit
+      j = 0
+      while j < m && s[i + j] == t[j]
+        j = j + 1
       end
-      return true if index == other.bytesize
-      start = start + 1
+      return i if j == m
+      spent = spent + j
+      break if spent > 4 * (i - offset) + 64
+      i = i + 1
     end
-    false
+    return nil if i > limit
+
+    prime = 16777619_u64
+    power = 1_u64
+    want = 0_u64
+    have = 0_u64
+    k = 0
+    while k < m
+      want = want &* prime &+ t[k].to_u64
+      have = have &* prime &+ s[i + k].to_u64
+      power = power &* prime
+      k = k + 1
+    end
+    while true
+      if have == want
+        j = 0
+        while j < m && s[i + j] == t[j]
+          j = j + 1
+        end
+        return i if j == m
+      end
+      return nil if i == limit
+      have = have &* prime &+ s[i + m].to_u64 &- power &* s[i].to_u64
+      i = i + 1
+    end
   end
 
   def ==(other : String) : Bool

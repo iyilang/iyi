@@ -4,6 +4,17 @@
 
 ### Changed
 
+- **A substring search that keeps almost matching stays linear.**
+  `String#includes?` and `String#index` - and `split` on a string, through
+  it - compared the needle from every position in turn, so a needle that
+  nearly matches everywhere made the search n * m: `"a" * 1000 + "b"` in a
+  megabyte of `a` took 222 ms, and sixteen thousand `a` and a `b` in eight
+  megabytes did not finish. Once more than four bytes a position have been
+  compared the search moves to a rolling hash and compares bytes only where
+  it matches; the megabyte takes 1 ms. `bench/std_text_scale_exercise.sh`
+  searches the eight megabytes and proves its clock catches a search that
+  stays naive.
+
 - **`Enumerable#join`, `String.join`, `CSV.build`, `HTTP.decode_chunked`
   and `center`'s padding write into one builder.** Each added every piece
   to the text so far, copying it once per piece: a `List` of 100,000
@@ -11145,7 +11156,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,164-line library and nothing else. Every other
+  written against iyi's own 18,201-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

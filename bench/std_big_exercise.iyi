@@ -318,6 +318,17 @@ k_prod = k_test_a * k_test_b
 raise "karatsuba: product non-zero" if k_prod.zero?
 raise "karatsuba: exact division" unless (k_prod // k_test_a) == k_test_b
 
+# Both past the crossover and one more than twice the other: the halves the
+# split takes off the shorter side had a negative length, and
+# `3 ** 10000` panicked "negative capacity" on its way there.
+[{70, 500}, {65, 1000}, {100, 2100}, {64, 129}].each do |sizes|
+  short_side = prng.random_big(sizes[0])
+  long_side = prng.random_big(sizes[1])
+  product = short_side * long_side
+  raise "karatsuba: unbalanced #{sizes}" unless product // short_side == long_side && (product % short_side).zero? && product == long_side * short_side
+end
+raise "karatsuba: unbalanced power" unless (BigInt.new(3_i64) ** 10000) // (BigInt.new(3_i64) ** 9999) == 3
+
 puts "    karatsuba: crossover threshold 64 limbs (2048 bits) verified"
 
 # 10. Hashing: any size hashes, and hash agrees with ==

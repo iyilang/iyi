@@ -14,8 +14,9 @@
 # A check that cannot fail is not a check. This script breaks addition,
 # multiplication, negation, the modulo sign rule, bitwise and, exponentiation,
 # abs, the constant one, BigInt hashing, BigDecimal hash normalisation,
-# division rounding, exact-division detection, zero printing and rational
-# reduction, and requires each break to be caught at a named check.
+# division rounding, exact-division detection, zero printing, rational
+# reduction and the unbalanced Karatsuba split, and requires each break to be
+# caught at a named check.
 #
 # Exits non-zero if any check fails.
 
@@ -381,6 +382,10 @@ prove_fails "rational not reduced" no_rat_reduce "hash: rational reduced" \
 # 16. Base conversion drops the sign
 prove_fails "base conversion drops sign" no_base_sign "rational: round trip" \
   's/prefix = @sign < 0 [?] "-" : ""/prefix = ""/'
+
+# 17. A Karatsuba split that takes k limbs off a side shorter than k
+prove_fails "karatsuba splits a short side" no_unbalanced "negative capacity" \
+  's/if a.size < k || b.size < k$/if false/'
 
 echo
 if [ "$status" -eq 0 ]; then

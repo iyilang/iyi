@@ -584,6 +584,15 @@ pub struct BigInt
     n = a.size > b.size ? a.size : b.size
     k = (n + 1) // 2
 
+    # The split below takes k limbs off each side for the low halves and
+    # the rest for the high ones, which is a negative count for a side
+    # shorter than k: `3 ** 10000` multiplies a squared base by a result
+    # a fraction of its size, and panicked "negative capacity". A side that
+    # short is multiplied against the other in pieces of its own size.
+    if a.size < k || b.size < k
+      return mul_unbalanced(a.size < b.size ? a : b, a.size < b.size ? b : a, threshold)
+    end
+
     x0 = slice_limbs(a, 0, k)
     x1 = slice_limbs(a, k, a.size - k)
     y0 = slice_limbs(b, 0, k)
@@ -600,6 +609,44 @@ pub struct BigInt
     z2_shifted = shift_limbs_left(z2, 2 * k)
     z1_shifted = shift_limbs_left(z1, k)
     add_abs_limbs(add_abs_limbs(z2_shifted, z1_shifted), z0)
+  end
+
+  # |short| times |long|, where `long` is more than twice as long: `long` in
+  # pieces of `short`'s size, each piece's product added in at its offset.
+  # The result starts at zero (`mul_schoolbook`), and a carry out of a
+  # piece's product stops before n + m, because the whole product fits.
+  private def mul_unbalanced(short : Array(UInt64), long : Array(UInt64), threshold : Int32) : Array(UInt64)
+    m = short.size
+    n = long.size
+    res = Array(UInt64).unsafe_build(n + m)
+    r = res.to_unsafe
+    offset = 0
+    while offset < n
+      count = n - offset < m ? n - offset : m
+      piece = mul_karatsuba(short, slice_limbs(long, offset, count), threshold)
+      p = piece.to_unsafe
+      carry = 0_u64
+      i = 0
+      while i < piece.size
+        sum = r[offset + i] &+ p[i] &+ carry
+        r[offset + i] = sum & 0xFFFFFFFF_u64
+        carry = sum.unsafe_shr(32_u64)
+        i = i + 1
+      end
+      while carry > 0_u64
+        sum = r[offset + i] &+ carry
+        r[offset + i] = sum & 0xFFFFFFFF_u64
+        carry = sum.unsafe_shr(32_u64)
+        i = i + 1
+      end
+      offset = offset + m
+    end
+    size = n + m
+    while size > 0 && r[size - 1] == 0_u64
+      size = size - 1
+    end
+    res.unsafe_set_size(size)
+    res
   end
 
   # Division and Modulo: Knuth Algorithm D

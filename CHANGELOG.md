@@ -41,6 +41,15 @@
 
 ### Fixed
 
+- **A `BigInt` product of one long and one much shorter value no longer
+  panics.** Karatsuba took half the longer side's length off both sides,
+  which is a negative count for a side shorter than that half: past 64
+  limbs each, a side more than twice the other's length panicked "negative
+  capacity", and `BigInt.new(3) ** 10000` did on its way there. The longer
+  side is now multiplied in pieces of the shorter one's size.
+  `bench/std_big_exercise.sh` multiplies four such pairs and proves the
+  check fails with the split put back.
+
 - **A script without a module header can import `Regex`.** The compiler
   declares an empty `Regex` before reading any source, for the other
   library's regex literals, which iyi refuses; at a script's top level that

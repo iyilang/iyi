@@ -1268,6 +1268,12 @@ def main():
         time.sleep(5)
     after = children(c.proc.pid)
     replaced = before != after if before else True
+    # The successor is warmed as it starts - the focused buffer's
+    # diagnostics, a compile - and a request behind that waits for it:
+    # on a Windows runner the pull once read 594 ms, the warm-up's tail,
+    # against 15 to 47 ms every other run. One cheap round trip first, so
+    # the time below is the pull's own.
+    c.send("textDocument/documentSymbol", {"textDocument": {"uri": app_uri}})
     started = time.monotonic()
     reply = c.send("workspace/diagnostic", {"previousResultIds": previous})
     elapsed = time.monotonic() - started

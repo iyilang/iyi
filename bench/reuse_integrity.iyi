@@ -29,8 +29,9 @@
 # that the bytes may be dropped, which until memory is short they are
 # not. 14,474,737 of 24,000,000 fresh objects read their unset field as
 # a stale word, and a list whose tail was one looped back into itself.
-# darwin's release is `MADV_FREE_REUSABLE`, advice of the same kind, and
-# this check does not run there: that is an open defect, not a pass.
+# darwin's release was `MADV_FREE_REUSABLE`, advice of the same kind, and
+# the check did not run there; the release lays a fresh mapping over the
+# run now, and it runs on all three.
 
 module bench/reuse_integrity
 
@@ -98,7 +99,7 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
 # those runs the last collection before the check had freed 28 to 32 MiB:
 # the array's final buffer had outlived the first. On its own thread, 0
 # runs in 400.
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   class Pair
     def initialize(@a : UInt64, @b : UInt64)
     end
@@ -152,23 +153,34 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
     stale
   end
 
-  filler = IyiThread.start do
-    fill(4_000_000)
-    nil
-  end
-  filler.join
-  IyiMark.collect
-  IyiMark.collect
-  IyiMark.settle
-  reopened = IyiHeap.pages_reopened
-  rewarmed = IyiHeap.pages_rewarmed
+  # Up to three attempts at a run that takes released pages up: under
+  # eight copies at once on Linux, 3 runs in 6,976 took up warm pages
+  # only and proved nothing, and a second attempt is the same check on a
+  # heap whose last round is now garbage too. Every attempt's fresh
+  # objects are checked; only the proof that one met a released page
+  # waits for a later attempt.
   born = 6_000_000
-  stale = fresh(born)
-  # Cold pages the carve took up, as against warm ones: a warm page was
-  # never released, and a check that met none proved nothing.
-  cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
-  raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again" if stale != 0
-  raise "reuse integrity: the carve took up no released page, so the fresh objects proved nothing" if cold == 0_u64
+  cold = 0_u64
+  attempts = 0
+  while cold == 0_u64 && attempts < 3
+    attempts = attempts + 1
+    filler = IyiThread.start do
+      fill(4_000_000)
+      nil
+    end
+    filler.join
+    IyiMark.collect
+    IyiMark.collect
+    IyiMark.settle
+    reopened = IyiHeap.pages_reopened
+    rewarmed = IyiHeap.pages_rewarmed
+    stale = fresh(born)
+    # Cold pages the carve took up, as against warm ones: a warm page was
+    # never released, and a check that met none proved nothing.
+    cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
+    raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again" if stale != 0
+  end
+  raise "reuse integrity: the carve took up no released page in #{attempts} attempts, so the fresh objects proved nothing" if cold == 0_u64
   puts "reuse integrity: #{born} fresh objects on #{cold.to_i64} released pages taken up again, every unset field nil"
 {% else %}
   puts "reuse integrity: the fresh-object check does not run on this target"

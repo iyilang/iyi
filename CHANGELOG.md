@@ -234,6 +234,49 @@
   spec runs a program that names both streams and reads its output back;
   the old codegen fails it with the 23 NUL bytes.
 
+- **On darwin, a fresh object could read what its page's last owner left.**
+  The sweep hands runs of dead pages back, and the carve takes a run up
+  again without clearing it, because a released page reads zero. darwin's
+  release was `MADV_FREE_REUSABLE`: advice that the bytes may be dropped,
+  which until memory is short they are not - the defect Windows' `MEM_RESET`
+  was until 0.14.1 - so an object built there read a field its constructor
+  never set as a stale word rather than nil. The release lays a fresh
+  mapping over the run now (`mmap` with `MAP_FIXED`), which frees the old
+  pages and reads zero at once, and darwin names no `madvise`: the
+  dependency and thread floors' darwin lists drop it.
+  `bench/reuse_integrity.sh` runs its fresh-object check and both its
+  failure proofs on darwin too, where it had skipped them as an open
+  defect; on a darwin runner the old release failed the check in 5 runs of
+  5 and the new one passed 5 of 5, with live churn, churn and binary trees
+  as fast as before and no larger.
+
+- **The Windows wake check caught the machine instead of the helpers.**
+  `bench/concurrent_mark.iyi` failed a mark whose longest helper wake held
+  the program's thread past a millisecond, and a runner took that thread
+  away for 3.7 ms in one wake of 49 on master, with nothing wrong. It now
+  counts the program's wakes over two hundred more collections beside a
+  kept chain, and fails when more than three were slow: on a four-core
+  Windows runner the shipped helpers made no slow wake in 10,000, and
+  helpers given back the priority boost made 5 to 88 in every run of 250;
+  the gate held 10 runs of 10 there, its proof catching the boost on the
+  first try each time. The collector counts its wakes and slow wakes (`IyiMark.wakes`,
+  `IyiMark.wakes_slow`) for it.
+
+- **The language server gate timed a replaced worker's warm-up, not its
+  pull.** Step 31b' of `bench/lsp_session.py` holds the first pull after
+  the worker is replaced under 500 ms, and a successor starts by compiling
+  the focused buffer's diagnostics; a pull sent behind that waited for it,
+  and a Windows runner read 594 ms once against 15 to 47 every other run.
+  One cheap request goes first now, so the time is the pull's own - 4 ms
+  here.
+
+- **The reuse gate's fresh-object check could prove nothing under load.**
+  It needs the carve to take released pages up, and under eight copies at
+  once on Linux 3 runs in 6,976 took up warm pages only and failed "the
+  carve took up no released page". The phase runs up to three times until
+  one attempt meets a released page, and every attempt's fresh objects are
+  checked.
+
 - **A renamed `iyi.exe` still knows where it is.** Rebuilding `iyi` on
   Windows renames the running binary aside (a running program cannot be
   replaced there), and `Process.executable_path` answered the name the
@@ -10905,7 +10948,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,990-line library and nothing else. Every other
+  written against iyi's own 18,011-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

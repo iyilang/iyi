@@ -26,7 +26,8 @@
 #      a barrier run after its mark ended grays a holder, the next mark
 #      sweeps the payload it held, and the program exits 1 saying so.
 #   6. Failure proof, on Windows: the helpers given back the boost a
-#      satisfied wait brings, and the wake check exits 1.
+#      satisfied wait brings, and the wake check - more than three of the
+#      program's wakes past a millisecond - exits 1.
 #   7. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
 set -u
@@ -176,9 +177,10 @@ cmp -s boosted/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "the awk foun
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
   cat build-boosted.log; exit 1
 fi
-# The wake is one scheduling race per collection: on twelve cores the
-# boosted build was caught in 5 runs of 10, on four in 10 of 10. Five
-# runs, and the first that is caught is the proof.
+# The wake is one scheduling race per collection, and the check counts
+# the races lost over two hundred and fifty: on a four-core runner the
+# boosted build lost 5 to 88 in each of 40 runs, where the check allows 3.
+# Five runs still, and the first that is caught is the proof.
 caught=""
 for try in 1 2 3 4 5; do
   timeout -k 5 300 ./boosted-run > boosted.txt 2>&1

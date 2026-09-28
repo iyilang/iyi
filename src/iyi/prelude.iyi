@@ -1297,10 +1297,6 @@ require "./file"
       lib LibC
         fun mmap(addr : Void*, len : UInt64, prot : Int32, flags : Int32, fd : Int32, offset : Int64) : Void*
         fun munmap(address : Void*, length : UInt64) : Int32
-        # The sweep hands a run of dead pages back with `MADV_FREE_REUSABLE`
-        # (7), the advice under which darwin's accounting stops counting
-        # them; `MADV_DONTNEED` there keeps the pages on the books.
-        fun madvise(address : Void*, length : UInt64, advice : Int32) : Int32
         # The pause clock (IyiMark), the same call the scheduler's clock
         # uses on the concurrency targets and the same declaration, so the
         # two `lib` reopenings agree the way `mmap`'s do.
@@ -1323,13 +1319,21 @@ require "./file"
         end
       end
 
-      # Open: advice, like Windows' `MEM_RESET` was (below), and the same
-      # defect - a released page keeps its bytes until the kernel wants the
-      # memory, and the carve hands a pointerful object out on it
-      # uncleared. `bench/reuse_integrity.sh` shows it on Windows and does
-      # not run the check here.
+      # Pages back to the kernel, the mapping kept, reading zero when
+      # touched again - Linux's `MADV_DONTNEED`, which the carve leans on:
+      # a cold run taken up again is handed out uncleared, a pointerful
+      # object's fields included (`IyiHeap.carve`). A fresh anonymous
+      # mapping laid over the run in place (MAP_FIXED, 0x10) is both
+      # halves at once: the old pages are freed, and the new ones are
+      # demand-zero and not resident until the carve touches them. This
+      # was `MADV_FREE_REUSABLE`, advice that the bytes may be dropped,
+      # which until memory is short they are not - the defect Windows'
+      # `MEM_RESET` was - and darwin handed out fresh objects whose unset
+      # fields read what the page's last owner left.
       fun __iyi_release_pages(address : UInt64, length : UInt64) : Nil
-        LibC.madvise(Pointer(Void).new(address), length, 7_i32)
+        return if LibC.mmap(Pointer(Void).new(address), length, 3, 0x1012, -1, 0_i64).address == address
+        __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+        __iyi_exit(1)
       end
     {% elsif flag?(:win32) %}
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
@@ -1467,8 +1471,8 @@ require "./file"
       # and a bit per page of the mapping saying whether the sweep handed
       # it back; the chunks' byte and layout tables follow it (`META`),
       # and the chunk grid begins on the page after them (`OFF_FIRST`).
-      # The page is the kernel's: darwin arm64's is 16 KB, and an
-      # `madvise` of a four-kilobyte run there is refused.
+      # The page is the kernel's: darwin arm64's is 16 KB, and a release
+      # of a four-kilobyte run there is refused.
       HEAD = 4096_u64
       {% if flag?(:darwin) %}
         PAGE = 16384_u64
@@ -6342,11 +6346,11 @@ require "./file"
           end
         {% end %}
         IyiHeap.allocated_word.value.set(0_u64)
-        # The next budget: twice what the mark found live (Go's GOGC=100),
-        # floored at MIN_BUDGET so a small program pays nothing. The mark
-        # knows the live bytes — it added each object's size as it
-        # blackened it — which is what lets the sweep be lazy: the budget
-        # no longer waits on a sweep to count.
+        # The next budget: what the mark found live times `@@growth` - twice
+        # it by default, Go's GOGC=200 - floored at MIN_BUDGET so a small
+        # program pays nothing. The mark knows the live bytes — it added
+        # each object's size as it blackened it — which is what lets the
+        # sweep be lazy: the budget no longer waits on a sweep to count.
         @@budget = next_budget(@@bytes_marked)
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           open_sweep_round
@@ -6538,6 +6542,8 @@ require "./file"
           wake_helpers
           woke = now_ns - woke
           @@wake_longest_ns = woke if woke > @@wake_longest_ns
+          @@wakes = @@wakes + 1_u64
+          @@wakes_slow = @@wakes_slow + 1_u64 if woke > WAKE_SLOW_NS
           true
         end
 
@@ -6750,11 +6756,26 @@ require "./file"
 
         # The longest the triggering thread - the program's own - spent
         # waking the helpers for a mark beside it, across every collection,
-        # for the exercises.
+        # and how many wakes there were and how many took past
+        # WAKE_SLOW_NS, for the exercises: one slow wake is the machine
+        # taking the thread away, and it happens without the collector's
+        # help; a wake that lets the helpers take its core is slow again
+        # and again.
+        WAKE_SLOW_NS = 1000000_u64
         @@wake_longest_ns : UInt64 = 0_u64
+        @@wakes : UInt64 = 0_u64
+        @@wakes_slow : UInt64 = 0_u64
 
         def self.wake_longest_ns : UInt64
           @@wake_longest_ns
+        end
+
+        def self.wakes : UInt64
+          @@wakes
+        end
+
+        def self.wakes_slow : UInt64
+          @@wakes_slow
         end
 
         # Whether a mark is running beside the program right now: the byte

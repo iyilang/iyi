@@ -343,13 +343,32 @@
   # The helpers for each mark beside the program are woken by the
   # program's own thread, and the wake is the program's time. On Linux it
   # is one futex call; on Windows a woken helper ran above the thread that
-  # woke it and took its core, 3.7 to 40 ms at the longest. Asserted where
-  # it was measured; printed everywhere.
+  # woke it and took its core, 3.7 to 40 ms at the longest. The longest
+  # wake was the check, and it caught the machine instead once: a runner
+  # took the thread away for 3.7 ms in one wake of 49, which it does
+  # without any help. So the wakes are counted, over two hundred more
+  # collections beside a kept chain, and the check is how many were slow.
+  # On a four-core Windows runner, 40 runs each: the shipped helpers made
+  # no wake past a millisecond in 10,000, and helpers with the boost made
+  # 5 to 88 in every run of 250. Asserted where it was measured; printed
+  # everywhere.
+  IyiMark.auto = true
+  kept = build_chain(1_u64)
+  wake_round = 0
+  while wake_round < 200
+    churn(IyiMark.budget)
+    IyiMark.settle
+    wake_round = wake_round + 1
+  end
+  IyiMark.auto = false
+  fail("the kept chain lost its payload under the wake rounds") unless tail(kept).payload.is_a?(Payload)
   wake = IyiMark.wake_longest_ns
+  wakes = IyiMark.wakes
+  slow = IyiMark.wakes_slow
   {% if flag?(:win32) %}
-    fail("wake: waking the helpers held the program's thread #{(wake // 1000_u64).to_i64} us") if wake > 1000000_u64
+    fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 3_u64
   {% end %}
-  puts "wake: the program's thread spent at most #{(wake // 1000_u64).to_i64} us waking the helpers for a mark"
+  puts "wake: the program's thread woke the helpers #{wakes.to_i64} times, #{slow.to_i64} of them past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us, the longest #{(wake // 1000_u64).to_i64} us"
 
   # ── The helpers' share beside a busy program ──────────────────────────
   # The program runs a thread for every core but one, and a mark starts

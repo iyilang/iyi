@@ -296,4 +296,27 @@ raise "round: an exact quarter is exact" unless sprintf("%.3f", 0.0625) == "0.06
 raise "round: nothing else moved" unless sprintf("%.4f", 3.14159) == "3.1416"
 puts "    rounding: half to even, and the value decides its own tie"
 
+# `%g`, the shorter notation, by C's rule: `%e` when the exponent is under
+# -4 or at least the precision, `%f` otherwise, trailing zeros trimmed
+# unless `#` keeps them. It was "unknown format specifier '%g'", a panic,
+# where C, Python, Go and the other language all answer. Checked against
+# the other language over 510 cases; C and Python agree with these.
+raise "general: default precision" unless sprintf("%g", 3.14159) == "3.14159"
+raise "general: trailing zeros trimmed" unless sprintf("%g", 100.0) == "100"
+raise "general: the point goes with them" unless sprintf("%g", 2.0) == "2"
+raise "general: large switches to exponent" unless sprintf("%g", 1e10) == "1e+10"
+raise "general: at the precision switches" unless sprintf("%g", 1234567.0) == "1.23457e+06"
+raise "general: under it stays fixed" unless sprintf("%g", 123456.0) == "123456"
+raise "general: small switches below 1e-4" unless sprintf("%g", 0.00001) == "1e-05"
+raise "general: 1e-4 stays fixed" unless sprintf("%g", 0.0001) == "0.0001"
+raise "general: rounding moves the exponent" unless sprintf("%g", 999999.5) == "1e+06"
+raise "general: precision is significant digits" unless sprintf("%.3g", 123456.789) == "1.23e+05"
+raise "general: precision 0 is 1" unless sprintf("%.0g", 2.5) == "2"
+raise "general: zero" unless sprintf("%g", 0.0) == "0" && sprintf("%g", -0.0) == "-0"
+raise "general: # keeps the zeros" unless sprintf("%#g", 1.5) == "1.50000" && sprintf("%#.3g", 1e10) == "1.00e+10"
+raise "general: uppercase" unless sprintf("%G", 1.23456789e-5) == "1.23457E-05"
+raise "general: width and flags" unless sprintf("%10g|", -2.25) == "     -2.25|" && sprintf("%-8g|", 0.5) == "0.5     |" && sprintf("%+g", 7) == "+7" && sprintf("%08g", 1.5) == "000001.5"
+raise "general: infinity" unless sprintf("%g", 1.0 / 0.0) == "Infinity"
+puts "    general: %g and %G choose the shorter notation and trim it"
+
 puts "    all format checks passed"

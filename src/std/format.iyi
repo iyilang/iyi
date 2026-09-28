@@ -18,6 +18,8 @@
 #   %f - floating point in fixed-point decimal notation
 #   %e - floating point in scientific notation (lowercase e)
 #   %E - floating point in scientific notation (uppercase E)
+#   %g - the shorter of %f and %e, trailing zeros trimmed (C's rule)
+#   %G - the same, with an uppercase E
 #   %% - literal percent sign
 #
 # Flags:
@@ -541,6 +543,62 @@ module ::IyiFormat
     end
   end
 
+  # `%g`: the shorter of the two notations, C's rule. With P the precision
+  # (6 when none is given, 1 when it is 0) and X the exponent `%e` would
+  # write at P - 1 places, it is `%e` at P - 1 places when X < -4 or X >= P
+  # and `%f` at P - 1 - X places otherwise; either way the trailing zeros
+  # of the fraction go, and its point with them, unless `#` keeps them.
+  # NaN and the infinities are written as `%e` writes them.
+  def self.format_float_general(val : Float64, uppercase : Bool, minus : Bool, plus : Bool, space : Bool, zero : Bool, hash : Bool, width : Int32, precision : Int32) : String
+    prec = precision < 0 ? 6 : (precision == 0 ? 1 : precision)
+    bits = IyiFloatText.bits_of(val)
+    if bits.unsafe_shr(52_u64) & 2047_u64 == 2047_u64
+      return format_float_exp(val, uppercase, minus, plus, space, zero, hash, width, precision)
+    end
+
+    scientific = IyiFloatText.format_exp(val.abs, uppercase, prec - 1, hash)
+    marker = scientific.index(uppercase ? 'E' : 'e') || scientific.bytesize
+    exp = scientific[marker + 1, scientific.bytesize - marker - 1].to_i
+    if exp < -4 || exp >= prec
+      mantissa = scientific[0, marker]
+      num_str = (hash ? mantissa : IyiFormat.trim_fraction(mantissa)) + scientific[marker, scientific.bytesize - marker]
+    else
+      fixed = IyiFloatText.format_fixed(val.abs, prec - 1 - exp)
+      num_str = hash ? (fixed.index('.') ? fixed : fixed + ".") : IyiFormat.trim_fraction(fixed)
+    end
+
+    sign = ""
+    if bits.unsafe_shr(63_u64) != 0_u64
+      sign = "-"
+    elsif plus
+      sign = "+"
+    elsif space
+      sign = " "
+    end
+    total_len = sign.bytesize + num_str.bytesize
+    return sign + num_str if total_len >= width
+    pad_count = width - total_len
+    if minus
+      sign + num_str + (" " * pad_count)
+    elsif zero
+      sign + ("0" * pad_count) + num_str
+    else
+      (" " * pad_count) + sign + num_str
+    end
+  end
+
+  # A decimal's fraction without its trailing zeros, and without its point
+  # when nothing is left after it: `%g`'s trim.
+  def self.trim_fraction(text : String) : String
+    return text unless text.index('.')
+    stop = text.bytesize
+    while stop > 0 && text.to_unsafe[stop - 1] == 48_u8
+      stop = stop - 1
+    end
+    stop = stop - 1 if stop > 0 && text.to_unsafe[stop - 1] == 46_u8
+    text[0, stop]
+  end
+
   # Width and precision in characters, because `size` is and because
   # `%-10s` is a column: counted in bytes, a multi-byte string came out
   # short by one space per extra byte, and a precision cut a character in
@@ -734,6 +792,19 @@ module ::IyiFormat
         format_float_exp(val.to_f64, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_float_exp(val.to_f64, true, minus, plus, space, zero, hash, width, precision)
+      else
+        not_a_number(val, verb)
+      end
+    when 'g', 'G'
+      case val
+      when Float64
+        format_float_general(val, verb == 'G', minus, plus, space, zero, hash, width, precision)
+      when Int32
+        format_float_general(val.to_f64, verb == 'G', minus, plus, space, zero, hash, width, precision)
+      when Int64
+        format_float_general(val.to_f64, verb == 'G', minus, plus, space, zero, hash, width, precision)
+      when UInt64
+        format_float_general(val.to_f64, verb == 'G', minus, plus, space, zero, hash, width, precision)
       else
         not_a_number(val, verb)
       end

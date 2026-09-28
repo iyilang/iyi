@@ -71,13 +71,13 @@ fi
 
 echo
 echo "== every format section reported"
-for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:"; do
+for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:"; do
   grep -q "$phrase" "$WORK/format-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, and boundary all reported"
+[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, boundary, and general all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -162,10 +162,16 @@ prove_fails "sign flag broken" no_neg "format: sign space positive" \
 prove_fails "boundary zero precision broken" no_bound "format: boundary" \
   's/digits = precision == 0 ? "" : "0"/digits = "0"/'
 
+# 8. %g that never trims, and %g that never switches to the exponent
+prove_fails "general notation keeps its zeros" no_trim "general: trailing zeros trimmed" \
+  's/^    return text unless text.index(.\..)$/    return text/'
+prove_fails "general notation never switches" no_switch "general: large switches to exponent" \
+  's/^    if exp < -4 || exp >= prec$/    if false/'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Format strings: width, alignment, zero pad, precision, bases, negatives,"
-  echo "and boundary cases all pass plain and optimised, and each check is"
+  echo "boundary cases and %g all pass plain and optimised, and each check is"
   echo "proven to fail when its mechanism is broken."
 else
   echo "Format strings: something above failed."

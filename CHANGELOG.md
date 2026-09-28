@@ -234,6 +234,16 @@ module's own functions.
 
 ### Added
 
+- **`%g` and `%G` in `sprintf`, `printf` and `String#%`.** The shorter
+  of `%f` and `%e` by C's rule - `%e` when the exponent is under -4 or at
+  least the precision, `%f` otherwise, trailing zeros trimmed unless `#`
+  keeps them. It was a panic, "unknown format specifier '%g'", where C,
+  Python, Go and Crystal all answer. Checked against Crystal over 510
+  cases, which it matches except `%#g` of zero, where C and Python write
+  `0.00000` and so does this. `bench/format_exercise.sh` checks the
+  switch points, the trim, `#`, flags and infinity, and proves the checks
+  fail with the trim or the switch taken out.
+
 - **`Process.run(env:)` gives a child its own environment.** The child's
   environment was this program's, and the only way to change it was
   `ENV[]=` - which changes it for this program too, under every other

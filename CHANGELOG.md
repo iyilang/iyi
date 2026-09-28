@@ -130,6 +130,20 @@
 
 ### Fixed
 
+- **A string built at run time ends in a NUL.** `String.new` allocated a
+  byte after the string for the terminator and never wrote it, and a
+  string's chunk is atomic, so the collector hands it back uncleared: a
+  chunk that had held a longer string kept that string's byte there. Code
+  that hands `to_unsafe` to the platform as a C string - `std/process`'s
+  program and directory lookups, `std/debug`'s PDB and DWARF paths - read
+  on past the end. Measured on Windows: after a collection that freed
+  longer strings, 961 of 1,000 strings built in their place had no
+  terminator, and `Process.run` of a batch file's path built that way
+  answered "no such program" instead of refusing the batch file. The
+  terminator is written now. `bench/std_gc_exercise.sh` builds 400
+  strings where longer ones were freed and checks each; without the
+  write, 363 of 400 fail it.
+
 - **Go-to-definition on a local variable goes where it is bound.** It
   asked `tool implementations`, which answers for calls, and a variable
   jumped nowhere. A local's definition is its first binding in its scope
@@ -10869,7 +10883,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,980-line library and nothing else. Every other
+  written against iyi's own 17,990-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -69,7 +69,7 @@ build_and_run "std_gc" exercise-gc "$REPO/bench/std_gc_exercise.iyi"
 
 echo
 echo "== every gc check reported"
-for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "ALL CHECKS PASSED"; do
+for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1

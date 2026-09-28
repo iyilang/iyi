@@ -22,6 +22,18 @@
 # Every section prints a progress line and raises on mismatch.
 
 import std/big::{BigInt, BigDecimal, BigRational}
+import std/gc::{GC}
+
+# The bytes one call allocates, with the collector held back so that the
+# word the trigger reads counts every one of them.
+def bytes_for(& : -> _) : UInt64
+  GC.disable
+  before = GC.stats.bytes_since_collection
+  yield
+  after = GC.stats.bytes_since_collection
+  GC.enable
+  after - before
+end
 
 # 1. Construction and Integer Conversions
 raise "construct: zero" unless BigInt.zero.zero?
@@ -476,6 +488,35 @@ raise "base: 36 digits" unless 35.to_big.to_s(36) == "z" && 36.to_big.to_s(36) =
 raise "base: 2 digits" unless 5.to_big.to_s(2) == "101" && (-5).to_big.to_s(2) == "-101"
 raise "base: 16 pads limbs" unless two64.to_s(16) == "ffffffffffffffff" && (two64 + 1).to_s(16) == "10000000000000000"
 raise "base: 10 pads chunks" unless BigInt.new("1000000000000000000").to_s == "1000000000000000000"
+
+# Values long enough that printing splits them at a power of the chunk and
+# parsing joins them the same way, in every base: the oracle recomputes
+# each from its digits, and the round trip has to give the value back.
+long = BigInt.new(3_i64) ** 9000
+long_values = [long, -(BigInt.new(7_i64) ** 3500 + BigInt.one), BigInt.new(10_i64) ** 2000]
+base = 2
+while base <= 36
+  long_values.each do |v|
+    raise "base: long round trip #{base}" unless BigInt.new(v.to_s(base), base) == v
+  end
+  base = base + 1
+end
+[2, 3, 7, 10, 16, 36].each do |b|
+  long_values.each { |v| puts "oracle base: #{b} #{v.to_s(b)} = #{v}" }
+end
+
+# And they cost what the digits do. Printing appended each chunk's digits
+# to everything printed so far, and parsing shifted or multiplied a whole
+# new BigInt per digit: 3 ** 9000 in base 7 allocated 22 MB to print and
+# 17 MB to parse, where its text is 5 KB. Sixty-four bytes per digit is
+# room for the halves a split makes, and a copy per chunk is not.
+[2, 7, 10, 16, 36].each do |b|
+  text = long.to_s(b)
+  printed = bytes_for { long.to_s(b) }
+  parsed = bytes_for { BigInt.new(text, b) }
+  raise "base: printing #{b} costs its digits (#{printed} bytes for #{text.bytesize})" unless printed < 64_u64 * text.bytesize.to_u64
+  raise "base: parsing #{b} costs its digits (#{parsed} bytes for #{text.bytesize})" unless parsed < 64_u64 * text.bytesize.to_u64
+end
 
 puts "    base round trips: every base 2..36 parses what it printed, digits oracle-checked"
 

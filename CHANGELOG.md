@@ -4,6 +4,21 @@
 
 ### Changed
 
+- **`BigInt` prints and parses long values in time near their length.**
+  `to_s(base)` appended each chunk's digits to the text so far, and divided
+  by a fresh one-limb BigInt per chunk - per digit outside bases 2, 10 and
+  16; parsing shifted or multiplied a whole new BigInt per digit, per nine
+  in decimal. A power-of-two base now reads the digits straight off the
+  limbs' bits both ways; any other splits the value at a power of the chunk
+  about half its size and meets the halves in one division or one
+  Karatsuba product, with only the short pieces at the bottom done a chunk
+  at a time in place. `3 ** 400000`: decimal 975 ms to 137 ms, binary
+  1,021 ms to under 1, base 7 9.5 s to 141 ms; parsing its 79,249 hex
+  digits back 1,238 ms to under 1. `bench/std_big_exercise.sh` round-trips
+  three values of thousands of digits through every base, checks them with
+  python3, bounds the bytes a print or a parse allocates to 64 per digit,
+  and proves each check fails when the split is broken.
+
 - **`List#appended` and `List#concatenated` copy the list once.** An
   append to a list of n elements `dup`ed it, grew the copy to twice its
   size with `<<`, then handed it to the constructor, which copied it again:

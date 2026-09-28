@@ -139,102 +139,126 @@ pub struct BigInt
 
     raise "invalid BigInt: empty digits after prefix" if start_idx > end_idx
 
-    # Parse digits
-    result = BigInt.zero
-    radix_big = BigInt.new(actual_base.to_i64)
-
-    # For base 10, parse in chunks of 9 digits to accelerate parsing
-    if actual_base == 10
-      chunk_val = 0_u64
-      chunk_len = 0
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8 # '_'
-          idx = idx + 1
-          next
-        end
-        raise "invalid BigInt digit: #{byte.unsafe_chr}" if byte < 48_u8 || byte > 57_u8
-        digit = (byte - 48_u8).to_u64
-        chunk_val = chunk_val * 10_u64 + digit
-        chunk_len = chunk_len + 1
-        if chunk_len == 9
-          result = result * 1000000000_i64 + chunk_val.to_i64
-          chunk_val = 0_u64
-          chunk_len = 0
-        end
-        idx = idx + 1
+    # The digits' values, most significant first. Each base keeps its own
+    # sentence for a byte that is not one of its digits.
+    digits = Array(UInt8).new(end_idx - start_idx + 1)
+    idx = start_idx
+    while idx <= end_idx
+      byte = bytes[idx]
+      idx = idx + 1
+      next if byte == 95_u8 # '_'
+      digit = BigInt.digit_value(byte)
+      if digit >= actual_base
+        char = byte.unsafe_chr
+        raise "invalid BigInt digit: #{char}" if actual_base == 10
+        raise "invalid BigInt hex digit: #{char}" if actual_base == 16
+        raise "invalid BigInt binary digit: #{char}" if actual_base == 2
+        raise "invalid BigInt digit: #{char} for base #{actual_base}"
       end
-      if chunk_len > 0
-        multiplier = 1_i64
-        c = 0
-        while c < chunk_len
-          multiplier = multiplier * 10_i64
-          c = c + 1
-        end
-        result = result * multiplier + chunk_val.to_i64
-      end
-    elsif actual_base == 16
-      # Parse hex in chunks of 8 characters (32 bits per limb)
-      chunk_val = 0_u64
-      chunk_len = 0
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
-        end
-        digit = -1
-        if byte >= 48_u8 && byte <= 57_u8
-          digit = (byte - 48_u8).to_i32
-        elsif byte >= 97_u8 && byte <= 102_u8
-          digit = (byte - 97_u8 + 10_u8).to_i32
-        elsif byte >= 65_u8 && byte <= 70_u8
-          digit = (byte - 65_u8 + 10_u8).to_i32
-        end
-        raise "invalid BigInt hex digit: #{byte.unsafe_chr}" if digit < 0
-        result = (result << 4) | BigInt.new(digit.to_i64)
-        idx = idx + 1
-      end
-    elsif actual_base == 2
-      # Parse binary in bits
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
-        end
-        raise "invalid BigInt binary digit: #{byte.unsafe_chr}" if byte != 48_u8 && byte != 49_u8
-        bit = (byte - 48_u8).to_i64
-        result = (result << 1) | BigInt.new(bit)
-        idx = idx + 1
-      end
-    else
-      # General base parsing
-      idx = start_idx
-      while idx <= end_idx
-        byte = bytes[idx]
-        if byte == 95_u8
-          idx = idx + 1
-          next
-        end
-        digit = -1
-        if byte >= 48_u8 && byte <= 57_u8
-          digit = (byte - 48_u8).to_i32
-        elsif byte >= 97_u8 && byte <= 122_u8
-          digit = (byte - 97_u8 + 10_u8).to_i32
-        elsif byte >= 65_u8 && byte <= 90_u8
-          digit = (byte - 65_u8 + 10_u8).to_i32
-        end
-        raise "invalid BigInt digit: #{byte.unsafe_chr} for base #{actual_base}" if digit < 0 || digit >= actual_base
-        result = result * radix_big + BigInt.new(digit.to_i64)
-        idx = idx + 1
-      end
+      digits << digit.to_u8
     end
 
+    result = BigInt.from_digits(digits, actual_base)
     sign < 0 ? result.negate : result
+  end
+
+  # A digit byte's value in any base up to 36, or 36 for a byte that is a
+  # digit in none.
+  protected def self.digit_value(byte : UInt8) : Int32
+    if byte >= 48_u8 && byte <= 57_u8
+      (byte - 48_u8).to_i32
+    elsif byte >= 97_u8 && byte <= 122_u8
+      (byte - 87_u8).to_i32
+    elsif byte >= 65_u8 && byte <= 90_u8
+      (byte - 55_u8).to_i32
+    else
+      36
+    end
+  end
+
+  # The value of `digits`, most significant first, in `base`: the inverse
+  # of `to_s(base)`, and built the same way. A power-of-two base packs the
+  # digits' bits into limbs directly. Any other splits the digits at a
+  # power of the chunk (`append_digits`), so that the halves meet in one
+  # Karatsuba product each, and runs the short pieces at the bottom through
+  # one multiply-add per chunk in place. This had shifted or multiplied a
+  # whole new BigInt per digit - per nine digits in decimal - and 80,000
+  # hex digits took more than a second.
+  protected def self.from_digits(digits : Array(UInt8), base : Int32) : BigInt
+    count = digits.size
+    return BigInt.zero if count == 0
+    if base & (base - 1) == 0
+      width = BigInt.bits_per_digit(base).to_u64
+      limbs = Array(UInt64).new(count * width.to_i32 // 32 + 1)
+      acc = 0_u64
+      held = 0_u64
+      i = count - 1
+      while i >= 0
+        acc = acc | digits[i].to_u64.unsafe_shl(held)
+        held = held + width
+        if held >= 32_u64
+          limbs << (acc & 0xFFFFFFFF_u64)
+          acc = acc.unsafe_shr(32_u64)
+          held = held - 32_u64
+        end
+        i = i - 1
+      end
+      limbs << acc if acc > 0_u64
+      return BigInt.new(1, limbs)
+    end
+
+    chunk = base.to_u64
+    per = 1
+    while chunk * base.to_u64 <= 0xFFFFFFFF_u64
+      chunk = chunk * base.to_u64
+      per = per + 1
+    end
+    powers = [BigInt.new(chunk.to_i64)]
+    while per.unsafe_shl(powers.size) < count
+      powers << powers.last * powers.last
+    end
+    value_of_digits(digits, 0, count, base.to_u64, per, powers)
+  end
+
+  # The value of `count` digits from `from`: the high part times the power
+  # of the chunk that the low part's digits stand for, plus the low part.
+  protected def self.value_of_digits(digits : Array(UInt8), from : Int32, count : Int32, base : UInt64, per : Int32, powers : Array(BigInt)) : BigInt
+    if count > per * DIGITS_SPLIT_LIMBS
+      level = powers.size - 1
+      while level > 0 && per.unsafe_shl(level) >= count
+        level = level - 1
+      end
+      low = per.unsafe_shl(level)
+      high = value_of_digits(digits, from, count - low, base, per, powers)
+      return high * powers[level] + value_of_digits(digits, from + count - low, low, base, per, powers)
+    end
+
+    limbs = Array(UInt64).new(count // per + 2)
+    i = from
+    stop = from + count
+    while i < stop
+      value = 0_u64
+      scale = 1_u64
+      taken = 0
+      while taken < per && i < stop
+        value = value * base + digits[i].to_u64
+        scale = scale * base
+        taken = taken + 1
+        i = i + 1
+      end
+      carry = value
+      w = limbs.to_unsafe
+      j = 0
+      size = limbs.size
+      while j < size
+        product = w[j] &* scale &+ carry
+        w[j] = product & 0xFFFFFFFF_u64
+        carry = product.unsafe_shr(32_u64)
+        j = j + 1
+      end
+      limbs << carry if carry > 0_u64
+    end
+    BigInt.new(1, limbs)
   end
 
   # Number of limbs currently allocated.
@@ -1219,113 +1243,136 @@ pub struct BigInt
 
   # Converts this BigInt to a string in the given base (default 10).
   # Bases 2..36 supported. Digits above 9 are lowercase 'a'..'z'.
+  #
+  # The digits are gathered least significant first and written into the
+  # string once. A base that is a power of two reads them straight off the
+  # limbs' bits; any other divides a copy of the limbs in place by the
+  # largest power of the base a limb holds - 10^9 for decimal - and takes
+  # that many digits from each remainder. This had built the text with
+  # `res = res + s`, a copy of everything so far per chunk, and divided by
+  # a fresh one-limb BigInt per chunk, or per digit outside bases 2, 10
+  # and 16: 3 ** 400000 took a second in decimal and in binary, and nine
+  # and a half in base 7.
   def to_s(base : Int32) : String
     raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36
     return "0" if zero?
 
-    prefix = @sign < 0 ? "-" : ""
-
-    if base == 16
-      # Hex conversion: 8 hex characters per 32-bit limb
-      res = prefix
-      i = @limbs.size - 1
-      first = true
-      while i >= 0
-        limb = @limbs[i]
-        s = limb.to_s(16)
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 8 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
+    digits = Array(UInt8).new(@limbs.size * 32 // BigInt.bits_per_digit(base) + 2)
+    if base & (base - 1) == 0
+      width = BigInt.bits_per_digit(base).to_u64
+      mask = (base - 1).to_u64
+      acc = 0_u64
+      held = 0_u64
+      @limbs.each do |limb|
+        acc = acc | limb.unsafe_shl(held)
+        held = held + 32_u64
+        while held >= width
+          digits << BigInt.digit_byte(acc & mask)
+          acc = acc.unsafe_shr(width)
+          held = held - width
         end
-        i = i - 1
       end
-      return res
-    elsif base == 2
-      # Binary conversion
-      res = prefix
-      i = @limbs.size - 1
-      first = true
-      while i >= 0
-        limb = @limbs[i]
-        s = limb.to_s(2)
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 32 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
-        end
-        i = i - 1
+      while acc > 0_u64
+        digits << BigInt.digit_byte(acc & mask)
+        acc = acc.unsafe_shr(width)
       end
-      return res
-    elsif base == 10
-      # Chunked division by 10^9 (9 decimal digits per chunk)
-      chunks = Array(UInt64).new
-      cur = abs
-      ten_to_nine = BigInt.new(1000000000_i64)
-
-      while !cur.zero?
-        qr = cur.divmod(ten_to_nine)
-        cur = qr[0]
-        rem_big = qr[1]
-        rem_val = rem_big.limbs.empty? ? 0_u64 : rem_big.limbs[0]
-        chunks << rem_val
-      end
-
-      res = prefix
-      i = chunks.size - 1
-      first = true
-      while i >= 0
-        chunk = chunks[i]
-        s = chunk.to_s
-        if first
-          res = res + s
-          first = false
-        else
-          pad = 9 - s.size
-          p = 0
-          while p < pad
-            res = res + "0"
-            p = p + 1
-          end
-          res = res + s
-        end
-        i = i - 1
-      end
-      return res
     else
-      # General base conversion: repeated single-limb division
-      radix_u64 = base.to_u64
-      digits = Array(Char).new
-      cur = abs
-      while !cur.zero?
-        qr = cur.divmod(BigInt.new(base.to_i64))
-        cur = qr[0]
-        rem_big = qr[1]
-        rem_val = rem_big.limbs.empty? ? 0 : rem_big.limbs[0].to_i32
-        char = rem_val < 10 ? (48 + rem_val).chr : (97 + (rem_val - 10)).chr
-        digits << char
+      chunk = base.to_u64
+      per = 1
+      while chunk * base.to_u64 <= 0xFFFFFFFF_u64
+        chunk = chunk * base.to_u64
+        per = per + 1
       end
-      res = prefix
-      i = digits.size - 1
+      # chunk, chunk ** 2, chunk ** 4, ... up to about half this value.
+      powers = [BigInt.new(chunk.to_i64)]
+      while powers.last.limbs.size * 2 <= @limbs.size
+        powers << powers.last * powers.last
+      end
+      abs.append_digits(base.to_u64, chunk, per, powers, powers.size - 1, 0, digits)
+    end
+    while digits.size > 1 && digits.last == 48_u8
+      digits.pop
+    end
+
+    negative = @sign < 0
+    lead = negative ? 1 : 0
+    count = digits.size
+    String.new(count + lead) do |bytes|
+      bytes[0] = 45_u8 if negative
+      i = 0
+      while i < count
+        bytes[lead + i] = digits[count - 1 - i]
+        i = i + 1
+      end
+    end
+  end
+
+  # The bits one digit of a power-of-two base takes; for any other base,
+  # the fewest bits a digit can carry, so that a limb's worth of bits
+  # bounds how many digits it makes.
+  protected def self.bits_per_digit(base : Int32) : Int32
+    bits = 1
+    while (1 << (bits + 1)) <= base
+      bits = bits + 1
+    end
+    bits
+  end
+
+  protected def self.digit_byte(value : UInt64) : UInt8
+    value < 10_u64 ? (48_u64 + value).to_u8 : (87_u64 + value).to_u8
+  end
+
+  # Below this many limbs a value's digits come one chunk at a time.
+  DIGITS_SPLIT_LIMBS = 48
+
+  # The digits of this value's magnitude, least significant first, onto
+  # `sink`: exactly `width` of them when `width` is positive, zeros above.
+  #
+  # A long value is split by `powers[level]`, a power of the chunk about
+  # half its size, and each half is written by the level below - the low
+  # half to exactly the digits that power stands for, so its leading zeros
+  # are kept. Dividing by one chunk at a time is a hardware division per
+  # limb per nine digits, n^2 / 9 of them; the split does that only for the
+  # short pieces at the bottom and multiplies its way through the rest.
+  protected def append_digits(radix : UInt64, chunk : UInt64, per : Int32, powers : Array(BigInt), level : Int32, width : Int32, sink : Array(UInt8)) : Nil
+    if level >= 0 && @limbs.size >= DIGITS_SPLIT_LIMBS
+      if cmp_abs(powers[level]) < 0
+        append_digits(radix, chunk, per, powers, level - 1, width, sink)
+      else
+        split = per.unsafe_shl(level)
+        halves = divmod(powers[level])
+        halves[1].append_digits(radix, chunk, per, powers, level - 1, split, sink)
+        halves[0].append_digits(radix, chunk, per, powers, level - 1, width > 0 ? width - split : 0, sink)
+      end
+      return
+    end
+
+    start = sink.size
+    work = Array(UInt64).new(@limbs.size)
+    work.concat(@limbs)
+    w = work.to_unsafe
+    size = work.size
+    while size > 0
+      rem = 0_u64
+      i = size - 1
       while i >= 0
-        res = res + digits[i].to_s
+        current = rem.unsafe_shl(32_u64) | w[i]
+        w[i] = current.unsafe_div(chunk)
+        rem = current.unsafe_mod(chunk)
         i = i - 1
       end
-      return res
+      while size > 0 && w[size - 1] == 0_u64
+        size = size - 1
+      end
+      taken = 0
+      while taken < per && (size > 0 || rem > 0_u64)
+        sink << BigInt.digit_byte(rem.unsafe_mod(radix))
+        rem = rem.unsafe_div(radix)
+        taken = taken + 1
+      end
+    end
+    while sink.size < start + width
+      sink << 48_u8
     end
   end
 

@@ -548,4 +548,26 @@ end
 fail("switch: #{changed} checks found a double changed across a fiber switch") if changed != 0
 puts "ten doubles each, held by two fibers across 2,000 switches, unchanged"
 
+# ── 20. A task gets its stack when it first runs ──────────────────────────
+#
+# Two thousand short tasks spawned in one loop, none of which runs until
+# the loop is done: a stack mapped at spawn gave each its own, and a burst
+# of 33,000 ran a default kernel out of mappings. Taken when a task first
+# runs, the stack the last one finished on is the next one's, and the
+# burst runs on a handful.
+burst_tops = [] of UInt64
+group do |g|
+  2000.times do
+    g.spawn do
+      burst_tops << IyiScheduler.current.stack_top
+      0
+    end
+  end
+end
+burst_distinct = [] of UInt64
+burst_tops.each { |top| burst_distinct << top unless burst_distinct.includes?(top) }
+fail("burst: #{burst_tops.size} of 2000 tasks ran") if burst_tops.size != 2000
+fail("burst: 2000 spawned tasks ran on #{burst_distinct.size} stacks") if burst_distinct.size > 8
+puts "2000 spawned tasks ran on #{burst_distinct.size} stacks"
+
 puts "concurrency exercise: every property held"

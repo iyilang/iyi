@@ -1097,10 +1097,21 @@ class IyiScheduler
     end
   end
 
+  # A fiber gets its stack here, the first time it is switched to, rather
+  # than when it is spawned: a spawn that mapped one put a stack under
+  # every task not yet run, so a loop spawning 100,000 short tasks made
+  # 100,000 mappings and a guard page each before the first of them ran
+  # (340 ms, and on a kernel with the default 65,530 mappings a process,
+  # a burst of 33,000 was the end of it). Taken at the first switch, the
+  # stack a finished task leaves in the pool is the next one's. Only a
+  # fiber that has never run has no saved stack pointer: the main fiber
+  # has one from the switch that left it, and a finished one is never
+  # switched to.
   def self.switch_to(fiber : IyiFiber) : Nil
     previous = current
     fiber.state = IyiFiberState::Running
     return if fiber.sp_slot.address == previous.sp_slot.address
+    fiber.prepare_stack if fiber.saved_sp == 0_u64
     state.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
     # Back on this fiber's own stack, which is the first moment a stack
@@ -2238,7 +2249,6 @@ class IyiGroup
       runner.child_finished(value.is_a?(::Error) && !fiber.cancelled)
       runner.drop_child(fiber)
     end
-    fiber.prepare_stack
     IyiScheduler.register(fiber)
     fiber.next_child = @first_child
     fiber.prev_child = nil

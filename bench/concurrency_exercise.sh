@@ -289,6 +289,33 @@ case "$(uname -s)" in
     ;;
 esac
 
+# ── 6. Failure proof: a stack mapped at spawn is caught ─────────────────
+step "failure proof: a stack mapped when a task is spawned is caught"
+mkdir -p eager/iyi
+cp -R "$REPO/src/iyi/." eager/iyi/
+awk '/^    fiber.prepare_stack if fiber.saved_sp == 0_u64$/ { found = found + 1; next }
+     /^    IyiScheduler.register\(fiber\)$/ { print "    fiber.prepare_stack"; found = found + 1 }
+     { print }
+     END { if (found != 2) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > eager/iyi/concurrency.iyi
+if [ $? -ne 0 ]; then
+  echo "the lines this proof moves are not where they were; update the proof"
+  exit 1
+fi
+if ! IYI_PATH="$WORK/eager${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \
+     -o eager-exercise > build-eager.log 2>&1; then
+  echo "the patched runtime did not build:"
+  tail -5 build-eager.log
+  exit 1
+fi
+timeout 120 ./eager-exercise > eager.txt 2>&1
+if [ $? -ne 1 ] || ! grep -q 'FAIL: burst' eager.txt; then
+  echo "stacks mapped at spawn passed the burst check, so it checks nothing:"
+  tail -5 eager.txt
+  exit 1
+fi
+echo "  caught: $(grep -m1 'FAIL: burst' eager.txt)"
+
 echo "workdir $WORK"
 # A summary may not claim more than was measured, so a step whose reader was
 # missing is named here rather than folded into the pass.

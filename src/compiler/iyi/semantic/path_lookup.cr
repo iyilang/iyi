@@ -114,6 +114,19 @@ module Iyi
           return nil
         end
 
+        # iyi: a type the compiler declares before any source is read, and
+        # that no source has written since, is a name and not a definition:
+        # `Regex` is one, kept for the other library's regex literals, which
+        # iyi refuses. An imported name beats it. A script without a module
+        # header wrote `import std/regex::{Regex}` and `Regex.compile(...)`
+        # met "undefined method 'compile' for Regex.class", the empty shell
+        # answering where the import should have.
+        if type.is_a?(NamedType) && type.locations.nil? && (used = using_modules?)
+          if imported = lookup_using_path_item(used, name, location)
+            return imported
+          end
+        end
+
         if lookup_in_namespace && program.iyi_walled_unit?(location, type)
           walled = type
         else

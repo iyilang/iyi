@@ -31,6 +31,16 @@
 
 ### Fixed
 
+- **A script without a module header can import `Regex`.** The compiler
+  declares an empty `Regex` before reading any source, for the other
+  library's regex literals, which iyi refuses; at a script's top level that
+  shell was found before the import, so `import std/regex::{Regex}` then
+  `Regex.compile(...)` answered "undefined method 'compile' for
+  Regex.class". A type the compiler declared and no source has written is
+  a name, not a definition, and an imported name beats it now. A file with
+  a module header was never affected. `bench/std_regex_exercise.sh` runs
+  such a script; 0.15.4's compiler fails it.
+
 - **On Linux, a program with a thousand tasks alive at its first collection
   survives it.** The collector finds where the main thread's stack ends
   by its `[stack]` line in `/proc/self/maps`, near the file's end, and read

@@ -240,6 +240,26 @@ mutate "a literal compared from its second byte on" '        j = 1
         while j < m && source[i + j] == wanted[j]' '        j = 2
         while j < m && source[i + j] == wanted[j]'
 
+# A script with no module header imports `Regex` the same way. The compiler
+# declares an empty `Regex` of its own before any source is read - the
+# other library's regex literals, which iyi refuses - and at a script's top
+# level it answered for the imported one: `Regex.compile` was "undefined
+# method 'compile' for Regex.class".
+echo
+echo "== a script without a module header imports Regex"
+cat > "$WORK/script.iyi" <<'IYI'
+import std/regex::{Regex}
+
+puts Regex.compile("a+").find("xaay") || "none"
+IYI
+if "$IYI" run "$WORK/script.iyi" > "$WORK/script.out" 2>&1 && grep -qx "aa" "$WORK/script.out"; then
+  echo "  the imported Regex answers: $(cat "$WORK/script.out")"
+else
+  echo "  FAIL: a headerless script's Regex is not the imported one:"
+  sed 's/^/    /' "$WORK/script.out" | tail -3
+  status=1
+fi
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/regex exercise holds"

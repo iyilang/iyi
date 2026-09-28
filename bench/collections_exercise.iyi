@@ -367,4 +367,18 @@ while item = long_queue.shift?
 end
 assert_true(drained_sum == 44999850000_i64, "array: a queue of 300,000 drains, in order")
 
+# A deletion costs one entry: it closed the gap and rebuilt the index, the
+# whole table per deletion, and emptying a set of 20,000 took 0.95 s. Half of
+# 50,000 are deleted, the rest are found, and the order holds.
+large = Set(Int32).new
+50000.times { |i| large.add(i) }
+50000.times { |i| large.delete(i) if i % 2 == 0 }
+assert_int(large.size, 25000, "set: twenty-five thousand deletes leave half")
+assert_true(large.includes?(49999) && !large.includes?(49998), "set: the right half")
+first_left = 0
+large.each { |v| first_left = v if first_left == 0 }
+assert_int(first_left, 1, "set: in the order they went in")
+50000.times { |i| large.add(i) if i % 2 == 0 }
+assert_int(large.size, 50000, "set: and a deleted key comes back")
+
 puts "all collection checks passed"

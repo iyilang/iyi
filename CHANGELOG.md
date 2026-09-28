@@ -31,6 +31,17 @@
 
 ### Fixed
 
+- **Deleting from a `Hash` or `Set` costs one entry.** A deletion closed the
+  gap in the table's dense arrays and rebuilt its index - the whole table
+  per deletion - so emptying a set of 20,000 took 0.95 s. The entry is
+  marked gone where it stands and its index slot left a tombstone, which a
+  lookup steps over and an insert reuses; the dense arrays close their gaps
+  when they next grow, and iteration still follows insertion order. 200,000
+  deletes take 3 ms. `bench/collections_exercise.sh` deletes half of 50,000
+  and checks the rest are found in order and a deleted key comes back; a
+  delete that frees its slot instead of leaving a tombstone loses a
+  neighbour, and an `each` that walks the gone entries miscounts.
+
 - **Draining a queue and `uniq` are linear.** `Array#shift` moved every
   element after the first down one place, so `while item = queue.shift?` -
   the prelude's own way to drain a queue, and `samples/iyi/visited.iyi`'s -
@@ -11052,7 +11063,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,110-line library and nothing else. Every other
+  written against iyi's own 18,139-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

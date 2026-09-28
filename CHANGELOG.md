@@ -184,6 +184,17 @@
 
 ### Fixed
 
+- **An array is a key that spreads.** `Array` writes `==`, so
+  `Reference#hash` answered its type's id and every array key shared one
+  slot: 40,000 `[x, y]` keys took 1.2 s to insert, and a million would not
+  have finished. `Array#hash` mixes its elements the way a tuple's are
+  mixed, and `std/indexable`'s default and `List#hash` are that same
+  function, where they had been `31 * h + e` with a grid's collisions: a
+  million array keys insert in 167 ms. `bench/collections_exercise.sh`
+  counts a 300 by 300 grid of arrays' distinct hashes and proves the count
+  fails with the type's id back; its crowded-slot deletion check keys on
+  a struct that hashes to a constant, which arrays had done by accident.
+
 - **A table keyed by tuples of small numbers fills.** `Tuple#hash` was `a
   * 31 + b`, which gives a grid of points few hashes - 9,569 for 90,000
   points of a 300 by 300 grid - and `Hash` probes a slot at a time, so
@@ -11307,7 +11318,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,382-line library and nothing else. Every other
+  written against iyi's own 18,394-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

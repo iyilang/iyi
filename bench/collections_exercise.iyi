@@ -97,26 +97,42 @@ assert_true(absent.delete("y") == nil, "hash: deleting a missing key is nil")
 assert_int(absent.size, 1, "hash: a missing delete removes nothing")
 assert_true(absent.has_key?("x"), "hash: the survivor is still there")
 
-# Keys that share one slot by construction: `Array` has an `==` of its own
-# and takes `Object`'s hash, so every array key lands in the same slot and
-# the comparison is what finds it.
-crowded = {} of Array(Int32) => Int32
+# Keys that share one slot by construction: equal by their number, hashed
+# to one constant, so every key lands in the same slot and the comparison
+# is what finds it. (Arrays did this by accident, hashing to their type's
+# id, until an array hashed its elements.)
+struct Crowded
+  getter n : Int32
+
+  def initialize(@n : Int32)
+  end
+
+  def ==(other : Crowded) : Bool
+    @n == other.n
+  end
+
+  def hash : Int32
+    7
+  end
+end
+
+crowded = {} of Crowded => Int32
 i = 0
 while i < 16
-  crowded[[i]] = i
+  crowded[Crowded.new(i)] = i
   i = i + 1
 end
 wrong = 0
 i = 0
 while i < 16
-  wrong = wrong + 1 if crowded[[i]]? != i
+  wrong = wrong + 1 if crowded[Crowded.new(i)]? != i
   i = i + 1
 end
 assert_int(wrong, 0, "hash: colliding keys are all findable")
-crowded.delete([8])
-assert_true(crowded[[8]]? == nil, "hash: one of the crowd deleted")
-assert_int(crowded[[9]]? || -1, 9, "hash: its neighbour survives")
-assert_int(crowded[[7]]? || -1, 7, "hash: and the one before it")
+crowded.delete(Crowded.new(8))
+assert_true(crowded[Crowded.new(8)]? == nil, "hash: one of the crowd deleted")
+assert_int(crowded[Crowded.new(9)]? || -1, 9, "hash: its neighbour survives")
+assert_int(crowded[Crowded.new(7)]? || -1, 7, "hash: and the one before it")
 
 # The order `each` promises, which is the order they went in
 order = {} of String => Int32
@@ -319,6 +335,13 @@ assert_int(spread(grid_hashes), 90000, "hash: a 300 by 300 grid of tuples spread
 grid = {} of {Int32, Int32} => Int32
 300.times { |x| 300.times { |y| grid[{x, y}] = x * y } }
 assert_true(grid[{299, 17}]? == 5083 && grid.size == 90000, "hash: a grid table fills and answers")
+
+# And an array: it writes `==`, so `Reference#hash` gave every array its
+# type's id and every array key one slot - 40,000 took 1.2 s to insert.
+pair_hashes = [] of Int32
+300.times { |x| 300.times { |y| pair_hashes << [x, y].hash } }
+assert_int(spread(pair_hashes), 90000, "hash: a 300 by 300 grid of arrays spreads")
+assert_true([1, 2].hash == [1, 2].hash && [1, 2] == [1, 2], "hash: equal arrays hash alike")
 
 # A class instance is itself, and a set of them finds each one: `Object#==`
 # answered false, so an instance did not equal itself and a `Set` never

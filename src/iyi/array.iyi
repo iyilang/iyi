@@ -571,6 +571,18 @@ class Array(T)
     true
   end
 
+  # Hashing follows `==`, mixed as a tuple's members are (object.iyi): an
+  # array writes `==`, so `Reference#hash` answered its type's id and every
+  # array key shared one slot - 40,000 of them took 1.2 s to insert.
+  def hash : Int32
+    value = 0x9E3779B97F4A7C15_u64 ^ @size.to_i64.unsafe_to_u64
+    each do |element|
+      value = (value ^ element.hash.to_i64.unsafe_to_u64) &* 0x100000001B3_u64
+      value = value ^ value.unsafe_shr(29_u64)
+    end
+    value.hash
+  end
+
   private def grow : Nil
     capacity = @capacity == 0 ? 4 : @capacity * 2
     buffer = Pointer(T).malloc(capacity.to_u64)

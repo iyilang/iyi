@@ -158,20 +158,11 @@ pub struct List(T)
   # the way object.iyi:20-23 says of a key type that never said how it
   # hashes.
   #
-  # Same seed and same mixing as `Indexable#hash` (std/indexable.iyi:384),
-  # wrapping `&*` and `&+` included: that comment records what the checked
-  # operators cost — "arithmetic overflow" as soon as a collection was long
-  # enough for `31 * h` to leave `Int32` — and a hash is a number modulo the
-  # word and nothing else. Sharing the mixing has a second effect worth
-  # having: a list and the array it was built from land in the same slot.
+  # The array's own hash, which is `Indexable#hash`'s mixing (the prelude's
+  # `Array#hash`): one function, so a list and the array it was built from
+  # land in the same slot.
   def hash : Int32
-    h = @items.size
-    i = 0
-    while i < @items.size
-      h = (31 &* h) &+ @items[i].hash
-      i = i + 1
-    end
-    h
+    @items.hash
   end
 
   # A list prints its elements, like both of its siblings: `Slice[10, 20, 30]`

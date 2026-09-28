@@ -260,6 +260,11 @@ prove_fails "a tuple hash that barely mixes" weak_tuple object.iyi \
   "hash: a 300 by 300 grid of tuples spreads" \
   's/^      value = (value ^ self\[{{i}}\].hash.to_i64.unsafe_to_u64) \&\* 0x100000001B3_u64$/      value = (value \&* 31_u64) \&+ self[{{i}}].hash.to_i64.unsafe_to_u64/; /^      value = value ^ value.unsafe_shr(29_u64)$/d'
 
+# 11. An array without a hash of its own, so `Reference#hash` answers.
+prove_fails "an array hashed by its type" type_hashed_array array.iyi \
+  "hash: a 300 by 300 grid of arrays spreads" \
+  's/^    value.hash$/    crystal_type_id/'
+
 echo
 echo "== and what an empty receiver says when it is asked for a size"
 panics_with "a negative capacity" neg_cap "negative capacity" "Array(Int32).new(-1).size"

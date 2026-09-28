@@ -184,6 +184,15 @@
 
 ### Fixed
 
+- **`::name` is always the top level's method.** Assigned, `::foo = 1`
+  was taken as the local `foo = 1` with the `::` dropped, and `iyi tool
+  format` died on the source ("expecting =, not `IDENT, foo`"), with a
+  newline or a comment after the `::` as well; before `+` or `-`, `foo = 1;
+  ::foo + 1` read the local rather than calling the method. Assigning
+  through `::` is now a syntax error that names the local's spelling, and
+  `::foo + 1` calls `foo`. `spec/compiler/parser/parser_spec.cr` holds the
+  four assignments and the sum.
+
 - **A small request costs `Server.serve` what it reads.** `IyiSocket#read`
   took a heap buffer of all it was allowed to read on every call, and the
   server asked for 64 KB: 130 KB of garbage per 30-byte request, a

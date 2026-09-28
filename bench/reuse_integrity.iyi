@@ -56,11 +56,23 @@ BODIES = [
 
 WANT = [0.5, 4.841431442464721, 8.34336671824458, 12.894369562139131, 15.379697114850917]
 
+# Each key comes with a small array of its digits, dropped at once: the
+# spread of size classes the round dies in is what makes released runs in
+# more than one class, and the straddler's defect shows only where such a
+# run meets a listed chunk. `Int32#to_s` built that array itself until it
+# wrote its digits straight into the string, and with it gone the proof
+# below caught its defect in 1 run of 20; with the array here, 16.
 def round_of(size : Int32) : Int32
   table = {} of String => Int32
   i = 0
   while i < size
-    table[i.to_s] = i
+    digits = [] of Int32
+    n = i
+    while n > 0 || digits.empty?
+      digits << n % 10
+      n = n // 10
+    end
+    table[i.to_s] = i + digits.size - digits.size
     i = i + 1
   end
   wrong = 0

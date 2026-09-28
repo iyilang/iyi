@@ -2,7 +2,114 @@
 
 ## Unreleased
 
+### Changed
+
+- **An integer prints in half the time.** `Int64#to_s` and `UInt64#to_s` -
+  and `Int32#to_s`, and every `#{n}`, through them - gathered their digits
+  in an `Array(Int32)` and then copied them into the string, an allocation
+  and its growth per number. They count the digits and write them straight
+  in now: two million integers print in 61 ms against 116 (Go's `Itoa`,
+  54), and `"#{k}-#{k}"` two million times in 128 ms against 298.
+  `bench/number_exercise.sh` holds the text, `Int64::MIN` and the bases
+  included.
+
+- **Typing a def at its definition costs that def, not every def before
+  it.** R-2c types each written def where it is written, through one
+  `if false` probe per def at the top of the program, and the variables a
+  probe assigned were merged into the program's after it like any
+  branch's: every probe copied and merged every variable the probes before
+  it had made, and `main` allocated a slot for each. The front end grew
+  with the square of the defs a program declares - 4,000 one-line methods
+  typed in 2.25 s against 0.10 for 500, with 0.15.4's release compiler. A
+  probe's variables are dropped when it is done now, and the same 4,000
+  type in 0.15 s. The generated pair `bench/build_speed.py` builds, 900
+  probed defs in 6,912 lines, went from 0.082 s of semantic analysis to
+  0.032, and a warm build of it from 0.31 s to 0.22.
+  `bench/definition_typing_scale.py` holds typing 4,000 defs under twelve
+  times the time of 500; linear typing measures 2.3, and 0.15.4's compiler
+  fails it at 22.9.
+
 ### Fixed
+
+- **On Linux, a program with a thousand tasks alive at its first collection
+  survives it.** The collector finds where the main thread's stack ends
+  by its `[stack]` line in `/proc/self/maps`, near the file's end, and read
+  only the first 64 KB of the file. Every task maps a stack and a guard
+  page, two lines, so a program with enough tasks alive at its first
+  collection died there with "no [stack] line in /proc/self/maps": 600
+  parked tasks survived 0.15.4 and 1,500 did not. The file is read
+  a buffer at a time now, the unfinished line carried to the next.
+  `bench/root_exercise.sh` parks 3,000 tasks, collects, and checks the
+  stack was found; a copy that stops after the first buffer dies there.
+
+- **The reuse gate's straddler proof lost its bite.** It needs the
+  exercise's rounds to die in several size classes, and `Int32#to_s`
+  stopped building an array of digits per number: with the fix taken out,
+  the exercise then failed 1 run in 20. Each key comes with its digits'
+  array again, in the exercise itself, and the proof catches the defect
+  in 16 of 20; it gets five runs rather than three.
+
+- **Deleting from a `Hash` or `Set` costs one entry.** A deletion closed the
+  gap in the table's dense arrays and rebuilt its index - the whole table
+  per deletion - so emptying a set of 20,000 took 0.95 s. The entry is
+  marked gone where it stands and its index slot left a tombstone, which a
+  lookup steps over and an insert reuses; the dense arrays close their gaps
+  when they next grow, and iteration still follows insertion order. 200,000
+  deletes take 3 ms. `bench/collections_exercise.sh` deletes half of 50,000
+  and checks the rest are found in order and a deleted key comes back; a
+  delete that frees its slot instead of leaving a tombstone loses a
+  neighbour, and an `each` that walks the gone entries miscounts.
+
+- **Draining a queue and `uniq` are linear.** `Array#shift` moved every
+  element after the first down one place, so `while item = queue.shift?` -
+  the prelude's own way to drain a queue, and `samples/iyi/visited.iyi`'s -
+  was quadratic: 100,000 items took 1.6 s. The buffer steps past the first
+  element now, and the same drain takes under a millisecond. `uniq`
+  searched what it had kept for every element; a table does that now, and
+  200,000 elements with 10,000 distinct went from 284 ms to 1.
+  `bench/collections_exercise.sh` drains 300,000 in order and checks a push
+  after a shift; a `shift` that moves the rest down stops the exercise
+  answering, and a `uniq` that keeps everything fails its count.
+
+- **A class instance equals itself, and a set of them finds it.** The
+  prelude said an instance is "compared and hashed by identity unless the
+  class says otherwise" and defined neither: `Object#==` answers false, so
+  `node == node` was false, a `Set(Node)` never found the node just added
+  to it, and a `Hash(Node, V)` never its key. `Reference#==` is identity
+  now and `Reference#hash` the address, so a visited-set of 200,000 nodes
+  answers in 0.02 s. A class that writes its own `==` and no `hash` keeps
+  the type's id as its hash - the address would part two instances its
+  `==` calls equal. `bench/collections_exercise.sh` checks an instance
+  equals itself, that 20,000 instances are found in a set and 1,000 hash
+  1,000 ways, and that a class's own `==` still finds an equal key; it
+  fails with the identity or the address taken out.
+
+- **A table keyed by `Int64`, `UInt64`, `UInt8`, `Char` or `Float64` spreads
+  its keys.** The prelude gave `Int32` a `hash` and no other type it
+  declares, so every other key hashed to its type's id - `Object#hash` - and
+  a `Hash(Int64, V)` or `Set(Char)` was one slot searched from the front:
+  80,000 `Int64` inserts took 2.9 s, and two million had not finished after
+  two minutes. `std/traits` wrote the missing hashes and `std/float`
+  Float64's, so a program that imported either was fine and one that did not
+  was quadratic; `std/int` leaves the prelude's types to the prelude. The
+  five are the prelude's now - an integer's high half multiplied into its
+  low, so a key that fits 32 bits hashes to itself - and the two million
+  inserts take 0.04 s against Go's 0.24. `bench/collections_exercise.sh`
+  checks a thousand distinct keys of each type hash a thousand ways, and
+  fails with `Int64#hash` taken out.
+
+- **Sorting a large array finishes.** `Array#sorted`, `sort_in_place` and
+  their `_by` forms were an insertion sort, written for the samples' five
+  elements: a comparison for every pair, so a program that sorted three
+  million integers had not finished after fifteen minutes. They are a
+  stable merge sort now, over runs an insertion sort orders first, and the
+  same three million sort in 0.30 s - Go's `sort.Slice` takes 0.55 here.
+  Equal elements keep their order as they did, and `sorted_by` computes each
+  element's key once rather than twice per comparison.
+  `bench/collections_exercise.sh` sorts 100,000 elements with a block that
+  counts its calls and fails past three million, and checks the order and
+  its stability; an insertion sort fails the count, and a merge that takes
+  the right run on a tie fails the order.
 
 - **A local is not renamed onto a name a block inside its scope binds.**
   The rename's clash check looked at the scope's variables and bare calls
@@ -43,6 +150,7 @@
   `pidfd_open` answering nothing and requires every check to hold, and
   proves the poll made a plain `wait4` again fails it: a sibling ticks 0
   times of 10 while the child sleeps.
+
 
 ## 0.15.4 — 2026-09-28
 
@@ -11014,7 +11122,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,011-line library and nothing else. Every other
+  written against iyi's own 18,164-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -3589,22 +3589,47 @@ require "./file"
         # buffer is a mapping of its own rather than a heap chunk, because
         # the heap is the thing being described and a scratch chunk in it
         # would be one more object every later scan has to reason about.
+        #
+        # The file is read a buffer at a time, the lines each read completes
+        # searched and the unfinished one carried to the front for the next.
+        # It was one read of the first 64 KB, and `[stack]` is near the end:
+        # a program whose first collection came after it had spawned
+        # thousands of tasks - two mappings each, a stack and its guard -
+        # died at that collection with "no [stack] line".
         def self.discover_stack_base : UInt64
           buffer = __iyi_mmap(MAPS).address
           handle = __iyi_open_read("/proc/self/maps".to_unsafe)
           fatal("iyi: /proc/self/maps unreadable\n") if handle < 0
-          filled = 0_u64
-          while filled < MAPS
-            count = __iyi_read(handle.to_i32, Pointer(Void).new(buffer + filled), MAPS - filled)
-            break if count <= 0
-            filled = filled + count.to_u64
+          kept = 0_u64
+          base = 0_u64
+          while base == 0_u64
+            count = __iyi_read(handle.to_i32, Pointer(Void).new(buffer + kept), MAPS - kept)
+            if count <= 0
+              base = stack_end_in_maps(buffer, kept) if kept > 0_u64
+              break
+            end
+            filled = kept + count.to_u64
+            last = filled
+            while last > 0_u64 && IyiHeap.read8(buffer + last - 1_u64) != 10_u64
+              last = last - 1_u64
+            end
+            if last == 0_u64
+              # No line ends in a full buffer: none is that long, so this is
+              # not a maps file worth reading further.
+              break if filled == MAPS
+              kept = filled
+              next
+            end
+            base = stack_end_in_maps(buffer, last - 1_u64)
+            kept = filled - last
+            index = 0_u64
+            while index < kept
+              IyiHeap.write8(buffer + index, IyiHeap.read8(buffer + last + index))
+              index = index + 1_u64
+            end
           end
           __iyi_close(handle)
-          base = stack_end_in_maps(buffer, filled)
           __iyi_munmap(buffer, MAPS)
-          # The `[stack]` line is near the end of the file, so a read that
-          # filled the buffer and stopped short reports no line rather than a
-          # wrong one, and this is where that becomes a diagnosis.
           fatal("iyi: no [stack] line in /proc/self/maps\n") if base == 0
           base
         end

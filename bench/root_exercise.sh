@@ -424,6 +424,68 @@ prove_fails "no fiber walk" nofiber "fiber root:" '
   { sub(/each_fiber_root\(visit\)/, "each_global_root(visit)"); print }
 '
 
+# The main stack's top, found after the program has spawned thousands of
+# tasks: two mappings each, a stack and its guard, before the first
+# collection asks where the main stack ends. Linux reads that out of
+# `/proc/self/maps`, whose `[stack]` line is near the end, and read only the
+# first 64 KB of it - so a program that spawned a few hundred tasks before
+# its first collection died there with "no [stack] line".
+echo
+echo "== the main stack is found past thousands of task stacks"
+cat > "$WORK/tasks.iyi" <<'IYI'
+IyiMark.auto = false
+parked = Channel(Int32).new
+seen = 0
+group do |g|
+  3000.times do
+    g.spawn do
+      case parked.receive
+      in Int32         then it
+      in ChannelClosed then 0
+      in Cancelled     then 0
+      end
+    end
+  end
+  g.spawn do
+    IyiMark.collect
+    seen = 1
+    parked.close
+    0
+  end
+end
+puts "tasks: 3000 parked, a collection after them, and it found the main stack (#{seen})"
+IYI
+many_tasks() { # many_tasks <label> [IYI_PATH]
+  if ! IYI_PATH="${2:-$REPO/src}" "$IYI" build -o "$WORK/tasks-$1" "$WORK/tasks.iyi" > "$WORK/tasks-$1.log" 2>&1; then
+    echo "  $1: build failed"; sed -n '1,12p' "$WORK/tasks-$1.log"; status=1; return 2
+  fi
+  "$WORK/tasks-$1" > "$WORK/tasks-$1.out" 2>&1
+}
+if many_tasks plain && grep -q "found the main stack (1)" "$WORK/tasks-plain.out"; then
+  printf '  %s\n' "$(cat "$WORK/tasks-plain.out")"
+else
+  echo "  FAIL:"; sed 's/^/    /' "$WORK/tasks-plain.out" | tail -3; status=1
+fi
+case "$(uname -s)" in
+  Linux)
+    # The read stopped after its first buffer, as it did.
+    mkdir -p "$WORK/onebuffer/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/onebuffer/iyi/"
+    awk '{ if ($0 ~ /^            kept = filled - last$/) { print; print "            break if base == 0_u64"; next } print }' \
+      "$REPO/src/iyi/prelude.iyi" > "$WORK/onebuffer/iyi/prelude.iyi"
+    if cmp -s "$WORK/onebuffer/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
+      echo "  the proof's awk found nothing to change"; status=1
+    else
+      many_tasks onebuffer "$WORK/onebuffer${PSEP}$REPO/src"
+      if grep -q "no \[stack\] line" "$WORK/tasks-onebuffer.out"; then
+        echo "  failure proof: a read of the first 64 KB alone dies at \"$(grep -m1 "no \[stack\]" "$WORK/tasks-onebuffer.out")\""
+      else
+        echo "  failure proof: the one-buffer read still found the stack, so this proves nothing"; status=1
+      fi
+    fi
+    ;;
+esac
+
 echo
 if [ "$status" -ne 0 ]; then
   echo "Roots: something above failed."

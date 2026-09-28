@@ -141,12 +141,23 @@ struct UInt8
     to_i32.to_s
   end
 
+  def hash : Int32
+    to_i32
+  end
+
   def to_s(base : Int32) : String
     to_i32.to_s(base)
   end
 end
 
 struct UInt64
+  # The high half multiplied into the low: a key that fits 32 bits hashes
+  # to itself, as an `Int32` does, and a plain XOR of the halves would put
+  # `(n << 32) | n` at zero for every `n`.
+  def hash : Int32
+    (self ^ (unsafe_shr(32_u64) &* 2654435761_u64)).unsafe_to_i32
+  end
+
   def //(other : UInt64) : UInt64
     raise "division by zero" if other == 0_u64
     unsafe_div(other)
@@ -165,24 +176,23 @@ struct UInt64
     raise "base out of range" if base < 2 || base > 36
     return "0" if self == 0_u64
 
+    # Counted, then written straight in, as `Int64#to_s` is.
     radix = base.to_u64
-    digits = [] of Int32
+    bytesize = 0
     temp = self
     while temp > 0_u64
-      rem = (temp % radix).to_i64.to_i32
-      digits << rem
-      temp = temp // radix
+      bytesize = bytesize + 1
+      temp = temp.unsafe_div(radix)
     end
 
-    bytesize = digits.size
     String.new(bytesize) do |buffer|
-      at = 0
-      rev = bytesize - 1
-      while rev >= 0
-        d = digits[rev]
+      at = bytesize - 1
+      temp = self
+      while temp > 0_u64
+        d = temp.unsafe_mod(radix).unsafe_to_i32
         buffer[at] = d < 10 ? (48 + d).to_u8 : (87 + d).to_u8
-        at = at + 1
-        rev = rev - 1
+        at = at - 1
+        temp = temp.unsafe_div(radix)
       end
     end
   end
@@ -190,6 +200,17 @@ end
 
 # A 64-bit signed integer, the literal `1_i64`.
 struct Int64
+  # The halves mixed, as `UInt64`'s are. Without it an `Int64` hashed to
+  # its type, `Object#hash`'s default, so every key of a `Hash(Int64, V)`
+  # or `Set(Int64)` went to one slot and each insert walked all the keys
+  # before it: 80,000 inserts took 2.9 s and two million did not finish in
+  # two minutes. `UInt64`, `UInt8`, `Char` and `Float64` were the same,
+  # and `std/int`, which writes `hash` for the rest of the integer tower,
+  # leaves the prelude's types to the prelude.
+  def hash : Int32
+    unsafe_to_u64.hash
+  end
+
   def //(other : Int64) : Int64
     raise "division by zero" if other == 0
     # And the one division that overflows: the type's smallest value has no
@@ -237,35 +258,35 @@ struct Int64
   end
 
   # Writes digits backward using division on negative numbers so that
-  # Int64::MIN (-9223372036854775808) does not overflow negation.
+  # Int64::MIN (-9223372036854775808) does not overflow negation. The
+  # digits are counted first and written straight into the string: they
+  # went through an `Array(Int32)` of their own, an allocation and a
+  # growth per number printed, and printing two million integers took
+  # twice Go's time.
   def to_s(base : Int32) : String
     raise "base out of range" if base < 2 || base > 36
     return "0" if self == 0_i64
 
     radix = base.to_i64
     negative = self < 0_i64
-    digits = [] of Int32
+    count = 0
     temp = self
     while temp != 0_i64
-      rem = temp % radix
-      d = rem < 0_i64 ? (0_i64 - rem).to_i32 : rem.to_i32
-      digits << d
-      temp = temp // radix
+      count = count + 1
+      temp = temp.unsafe_div(radix)
     end
 
-    bytesize = negative ? digits.size + 1 : digits.size
+    bytesize = negative ? count + 1 : count
     String.new(bytesize) do |buffer|
-      at = 0
-      if negative
-        buffer[0] = 45_u8
-        at = 1
-      end
-      rev = digits.size - 1
-      while rev >= 0
-        d = digits[rev]
+      buffer[0] = 45_u8 if negative
+      at = bytesize - 1
+      temp = self
+      while temp != 0_i64
+        rem = temp.unsafe_mod(radix)
+        d = rem < 0_i64 ? (0_i64 - rem).to_i32 : rem.to_i32
         buffer[at] = d < 10 ? (48 + d).to_u8 : (87 + d).to_u8
-        at = at + 1
-        rev = rev - 1
+        at = at - 1
+        temp = temp.unsafe_div(radix)
       end
     end
   end

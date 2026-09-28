@@ -23,6 +23,14 @@ struct Float64
     IyiFloatText.text(bits)
   end
 
+  # `-0.0 == 0.0`, so they hash alike. It was `std/float`'s, and a
+  # `Hash(Float64, V)` without that import put every key in one slot.
+  def hash : Int32
+    bits = IyiFloatText.bits_of(self == 0.0 ? 0.0 : self)
+    mix = bits ^ bits.unsafe_shr(32_u64)
+    (mix & 2147483647_u64).to_i32 ^ (mix.unsafe_shr(31_u64) & 1_u64).to_i32
+  end
+
   # A whole power, by squaring: `2.0 ** 10`. A negative exponent is one
   # over the positive one.
   def **(exponent : Int32) : Float64

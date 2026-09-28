@@ -186,22 +186,42 @@ prove_fails "concat reads a growing size" grow_concat array.iyi \
   "array: concat with itself doubles" \
   's/^    taking = other.size$/    taking = 1/'
 
+prove_fails "a sort that compares every pair" quadratic_sort array.iyi \
+  "array: a sort of 100,000 made" \
+  's/^  SORT_RUN = 16$/  SORT_RUN = 1073741824/'
+
+prove_fails "a merge that takes the right run on a tie" unstable_sort array.iyi \
+  "array: a sort is ascending and keeps equal elements in order" \
+  's/(yield from\[left\], from\[right\]) <= 0/(yield from[left], from[right]) < 0/'
+
+prove_fails "an Int64 hashed by its type" int64_type_hash number.iyi \
+  "hash: Int64 keys spread" \
+  '/^struct Int64$/,/^end$/{/^  def hash : Int32$/,/^  end$/d;}'
+
+prove_fails "an instance that is not itself" no_identity primitives.iyi \
+  "reference: an instance equals itself" \
+  '/^class Reference$/,/^end$/{/^  def ==(other : Reference) : Bool$/,/^  end$/d;}'
+
+prove_fails "instances hashed by their type" type_hash primitives.iyi \
+  "reference: instances hash apart" \
+  's/^      (object_id.unsafe_shr(4_u64) ^ object_id.unsafe_shr(36_u64)).unsafe_to_i32$/      crystal_type_id/'
+
 # 2. A key written twice making two entries, which is what a `[]=` that does
 #    not look first would do.
 prove_fails "a rewritten key appends" double_write hash.iyi \
   "hash: a key written twice is one entry" \
   's/^    slot = slot_for(key)$/    slot = slot_for(key); @index[slot] = -1/'
 
-# 3. The index left stale after a delete, so the entries it points at are
-#    not the ones that moved down, and later deletes miss.
-prove_fails "delete leaves the index stale" stale_index hash.iyi \
-  "hash: deletes leave half" \
-  '/^  def delete/,/^  end/s/^    rebuild_index$/    # left stale/'
+# 3. A delete that frees its index slot rather than leaving a tombstone: a
+#    key that probed past the deleted one is no longer found.
+prove_fails "a delete frees its slot" freed_slot hash.iyi \
+  "hash: its neighbour survives" \
+  's/^    @index\[slot\] = -2$/    @index[slot] = -1/'
 
-# 4. `each` walking the table rather than the entries, so it counts slots.
-prove_fails "each skips one" each_skips hash.iyi \
+# 4. `each` walking the gone entries as well as the live ones.
+prove_fails "each walks the gone entries" each_gone hash.iyi \
   "hash: each counts what size says" \
-  's/^      yield @keys\[entry\], @values\[entry\]$/      yield @keys[entry], @values[entry] if entry > 0/'
+  's/^      yield @keys\[entry\], @values\[entry\] unless @gone.address != 0_u64 \&\& @gone\[entry\]$/      yield @keys[entry], @values[entry]/'
 
 # 5. A set that keeps duplicates, which is the one thing a set is.
 prove_fails "a set forgets its members" dup_set set.iyi \
@@ -216,7 +236,13 @@ prove_fails "a negative index does not wrap" no_wrap array.iyi \
 # 7. `uniq` keeping everything, which the collection checks read.
 prove_fails "uniq keeps everything" no_uniq array.iyi \
   "array: uniq" \
-  's/^    each { |value| result << value unless result.includes?(value) }$/    each { |value| result << value }/'
+  '/^  def uniq : Array(T)$/,/^  end$/{/^      next if seen.has_key?(value)$/d;}'
+
+# 7b. `shift` moving the rest down, as it did: draining a queue of 300,000
+#     is then quadratic, and the exercise stops answering.
+prove_fails "shift moves the rest down" moving_shift array.iyi \
+  "array: a queue of 300,000 drains" \
+  's/^    @buffer = @buffer + 1$/    index = 1; while index < @size; @buffer[index - 1] = @buffer[index]; index = index + 1; end/; /^    @capacity = @capacity - 1$/d'
 
 # 8. `pop` that does not shrink, so the size and the elements disagree.
 prove_fails "pop does not shrink" no_shrink array.iyi \

@@ -708,7 +708,10 @@ module Iyi
           probed = true
           next
         end
-        raise_definition_errors if probed
+        if probed
+          forget_definition_probe_vars
+          raise_definition_errors
+        end
         if i == exp_count - 1
           exp.accept self
           node.bind_to exp
@@ -716,7 +719,10 @@ module Iyi
           ignoring_type_filters { exp.accept self }
         end
       end
-      raise_definition_errors if probed
+      if probed
+        forget_definition_probe_vars
+        raise_definition_errors
+      end
 
       if node.empty?
         node.set_type(@program.nil)
@@ -732,11 +738,24 @@ module Iyi
     # at. Past a first error, anything but a code error stops the probing:
     # a later probe can trip over a def an earlier one left half typed, and
     # the error already found is the one worth reading.
+    #
+    # A probe's variables are its own. It is an `if false` at the top
+    # level, and the variables it assigns were merged into the program's
+    # after it like any branch's, so every probe's `if` copied and merged
+    # every probe variable before it: 2,400 probed defs took 0.35 s of
+    # semantic analysis against 0.09 for 1,200, and the generated pair's
+    # 900 took half of its semantic pass. The program's variables are put
+    # back as they stood before the probe - nothing after it can name one
+    # of its variables - and, once the probes are done, their names leave
+    # the program's cumulative variables too: the probe's branch is never
+    # generated, and `main` allocated a slot for each of them.
     @definition_errors : Array(CodeError)?
     @definition_probes_stopped = false
+    @definition_probe_vars_forgotten = false
 
     private def visit_definition_probe(probe : If) : Nil
       return if @definition_probes_stopped
+      vars = @vars
       begin
         ignoring_type_filters { probe.accept self }
       rescue ex : CodeError
@@ -744,7 +763,15 @@ module Iyi
       rescue ex
         raise ex unless @definition_errors
         @definition_probes_stopped = true
+      ensure
+        @vars = vars
       end
+    end
+
+    private def forget_definition_probe_vars : Nil
+      return if @definition_probe_vars_forgotten
+      @definition_probe_vars_forgotten = true
+      @meta_vars.reject! { |name, _| name.starts_with?(DefinitionTyping::VAR_PREFIX) }
     end
 
     private def raise_definition_errors : Nil

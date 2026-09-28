@@ -359,15 +359,6 @@ struct ::Float32
   end
 end
 
-struct ::Float64
-  def hash : Int32
-    # `-0.0 == 0.0`, so they hash alike.
-    bits = IyiFloatText.bits_of(self == 0.0 ? 0.0 : self)
-    mix = bits ^ bits.unsafe_shr(32_u64)
-    (mix & 2147483647_u64).to_i32 ^ (mix.unsafe_shr(31_u64) & 1_u64).to_i32
-  end
-end
-
 # The single's shortest round-tripping decimal: the prelude's free-format
 # digit generation (Steele & White, Burger & Dybvig's scaling) on the
 # prelude's exact bignum, with the single's layout - a 24-bit significand,

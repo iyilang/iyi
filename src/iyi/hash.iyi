@@ -6,10 +6,11 @@
 # Python's dictionary and Crystal's `Hash` both settled on, because
 # iteration then follows the order things went in — the order a word count prints its words, and the
 # order a person expects — and because the index is one array of integers
-# rather than a copy of the keys. Deletion closes the gap in the dense
-# arrays and rebuilds the index, which is the boring answer and the right
-# one for a table that forgets an entry now and then; the sample that asked
-# for it (`samples/iyi/sessions.iyi`) signs people out one at a time.
+# rather than a copy of the keys. Deletion marks the entry gone and its
+# index slot a tombstone, `-2`, which a probe steps over and an insert may
+# take; the dense arrays close their gaps when they next grow. It closed
+# the gap at once and rebuilt the index, the whole table per deletion, and
+# emptying a set of 20,000 took 0.95 s.
 #
 # Hashing is `key.hash`, defined per type in this prelude. It is deliberately
 # not iyi's `Hashable` trait: that trait lives in `src/std`, which is the
@@ -19,7 +20,11 @@ class Hash(K, V)
   @keys : Pointer(K)
   @values : Pointer(V)
   @index : Pointer(Int32)
+  # Live entries; `@used` counts the dense slots written, gone ones too,
+  # and `@gone` marks which are gone - null until the first deletion.
   @size : Int32
+  @used : Int32
+  @gone : Pointer(Bool)
   # Entries the dense arrays can hold; the index holds twice as many slots,
   # so it is never more than half full and a probe always stops. Zero
   # until the first entry: a table made and never written - a trie's
@@ -33,6 +38,8 @@ class Hash(K, V)
 
   def initialize
     @size = 0
+    @used = 0
+    @gone = Pointer(Bool).new(0_u64)
     @capacity = 0
     @keys = Pointer(K).new(0_u64)
     @values = Pointer(V).new(0_u64)
@@ -62,14 +69,16 @@ class Hash(K, V)
     slot = slot_for(key)
     entry = @index[slot]
     if entry < 0
-      if @size == @capacity
+      if @used == @capacity
         # The index is rebuilt by the growth, so the key's slot is asked again.
         grow
         slot = slot_for(key)
       end
-      entry = @size
+      entry = @used
       @index[slot] = entry
       @keys[entry] = key
+      @gone[entry] = false if @gone.address != 0_u64
+      @used = @used + 1
       @size = @size + 1
     end
     @values[entry] = value
@@ -96,30 +105,34 @@ class Hash(K, V)
     entry_of(key) >= 0
   end
 
-  # The value the key had, or nil. The entries after it move down one, so
-  # the order of what remains is the order it went in, and the index is
-  # built again over what is left — the whole table, once per deletion,
-  # rather than tombstones in the index that every probe would have to
-  # step over from then on.
+  # The value the key had, or nil. The entry is marked gone where it
+  # stands, so the order of what remains is the order it went in, and its
+  # index slot becomes a tombstone.
   def delete(key : K) : V?
-    entry = entry_of(key)
+    return nil if @capacity == 0
+    slot = slot_for(key)
+    entry = @index[slot]
     return nil if entry < 0
     value = @values[entry]
-    while entry + 1 < @size
-      @keys[entry] = @keys[entry + 1]
-      @values[entry] = @values[entry + 1]
-      entry = entry + 1
+    if @gone.address == 0_u64
+      @gone = Pointer(Bool).malloc(@capacity.to_u64)
+      index = 0
+      while index < @capacity
+        @gone[index] = false
+        index = index + 1
+      end
     end
+    @gone[entry] = true
+    @index[slot] = -2
     @size = @size - 1
-    rebuild_index
     value
   end
 
   # Every pair, in the order it went in.
   def each(& : K, V -> Nil) : Nil
     entry = 0
-    while entry < @size
-      yield @keys[entry], @values[entry]
+    while entry < @used
+      yield @keys[entry], @values[entry] unless @gone.address != 0_u64 && @gone[entry]
       entry = entry + 1
     end
   end
@@ -162,15 +175,22 @@ class Hash(K, V)
     @index[slot_for(key)]
   end
 
-  # The index slot this key belongs in: the one pointing at its entry, or
-  # the first free one after where it hashes to.
+  # The index slot this key belongs in: the one pointing at its entry, or,
+  # when it has none, the first tombstone the probe passed or the free slot
+  # it stopped at.
   private def slot_for(key : K) : Int32
     mask = @capacity * 2 - 1
     slot = key.hash & mask
-    while (entry = @index[slot]) >= 0 && !(@keys[entry] == key)
+    tombstone = -1
+    while (entry = @index[slot]) != -1
+      if entry == -2
+        tombstone = slot if tombstone < 0
+      elsif @keys[entry] == key
+        return slot
+      end
       slot = (slot + 1) & mask
     end
-    slot
+    tombstone < 0 ? slot : tombstone
   end
 
   private def clear_index : Nil
@@ -181,21 +201,30 @@ class Hash(K, V)
     end
   end
 
-  # Twice the room, and the index rebuilt over the entries as they stand:
+  # Twice the room - or the same room, when half of what is written is gone
+  # - the gone entries left behind, and the index rebuilt over what is live:
   # the dense arrays keep their order, so nothing is re-inserted.
   private def grow : Nil
     old_keys = @keys
     old_values = @values
-    @capacity = @capacity == 0 ? 8 : @capacity * 2
+    old_gone = @gone
+    old_used = @used
+    @capacity = @capacity == 0 ? 8 : (@size * 2 <= @capacity ? @capacity : @capacity * 2)
     @keys = Pointer(K).malloc(@capacity.to_u64)
     @values = Pointer(V).malloc(@capacity.to_u64)
     @index = Pointer(Int32).malloc((@capacity * 2).to_u64)
+    @gone = Pointer(Bool).new(0_u64)
+    kept = 0
     entry = 0
-    while entry < @size
-      @keys[entry] = old_keys[entry]
-      @values[entry] = old_values[entry]
+    while entry < old_used
+      unless old_gone.address != 0_u64 && old_gone[entry]
+        @keys[kept] = old_keys[entry]
+        @values[kept] = old_values[entry]
+        kept = kept + 1
+      end
       entry = entry + 1
     end
+    @used = kept
     rebuild_index
   end
 
@@ -203,7 +232,7 @@ class Hash(K, V)
   private def rebuild_index : Nil
     clear_index
     entry = 0
-    while entry < @size
+    while entry < @used
       @index[slot_for(@keys[entry])] = entry
       entry = entry + 1
     end

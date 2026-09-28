@@ -234,4 +234,151 @@ pairs = counts.to_a
 assert_int(pairs.size, 1, "hash: to_a has a pair per entry")
 assert_str(pairs[0][0], "a", "hash: to_a keeps the key")
 
+# A sort is a merge sort, and a large array is where that shows: 100,000
+# elements with 50 distinct keys, sorted with a block that counts its calls.
+# An insertion sort - what the prelude had, written for five elements -
+# makes about n*n/4 comparisons here, 2.5 billion, and never answered for
+# three million; a merge sort about n*log2(n), 1.7 million. The order must
+# be ascending and, for equal keys, the order the elements came in.
+class Keyed
+  getter key : Int32
+  getter seq : Int32
+
+  def initialize(@key : Int32, @seq : Int32)
+  end
+end
+
+class Tally
+  @@calls = 0_i64
+
+  # Past the bound the sort is not a merge sort, and waiting out the rest
+  # of an insertion sort's billions is a minute; the check fails here.
+  def self.bump : Nil
+    @@calls = @@calls + 1
+    raise "assert failed: array: a sort of 100,000 made #{@@calls} comparisons, past n*log2(n)" if @@calls > 3000000_i64
+  end
+
+  def self.calls : Int64
+    @@calls
+  end
+end
+
+keyed = [] of Keyed
+seed = 7
+index = 0
+while index < 100000
+  seed = (seed * 1103 + 12345) % 1000003
+  keyed << Keyed.new(seed % 50, index)
+  index = index + 1
+end
+ordered = keyed.sorted do |a, b|
+  Tally.bump
+  a.key < b.key ? -1 : (a.key > b.key ? 1 : 0)
+end
+out_of_order = 0
+index = 1
+while index < ordered.size
+  before = ordered[index - 1]
+  after = ordered[index]
+  out_of_order = out_of_order + 1 if before.key > after.key || (before.key == after.key && before.seq > after.seq)
+  index = index + 1
+end
+assert_int(ordered.size, 100000, "array: a sort keeps every element")
+assert_int(out_of_order, 0, "array: a sort is ascending and keeps equal elements in order")
+by_key = keyed.sorted_by { |k| k.key }
+assert_int(by_key[0].seq, ordered[0].seq, "array: sorted_by keeps equal keys in order")
+assert_int(by_key[99999].seq, ordered[99999].seq, "array: sorted_by agrees with sorted")
+
+# Every key type the prelude has spreads its keys: a type without a `hash`
+# of its own hashes to its type id, so all its keys share one slot and a
+# table of them is a list searched from the front - two million `Int64`
+# inserts did not finish in two minutes that way. A thousand distinct keys
+# of each type have a thousand distinct hashes (the bytes and characters
+# as many as there are).
+def spread(hashes : Array(Int32)) : Int32
+  seen = {} of Int32 => Bool
+  hashes.each { |h| seen[h] = true }
+  seen.size
+end
+
+assert_int(spread((0...1000).map { |i| (i.to_i64 * 4294967296_i64 + i.to_i64).hash }), 1000, "hash: Int64 keys spread")
+assert_int(spread((0...1000).map { |i| (i.to_u64 * 4294967296_u64).hash }), 1000, "hash: UInt64 keys spread")
+assert_int(spread((0...256).map { |i| i.to_u8.hash }), 256, "hash: UInt8 keys spread")
+assert_int(spread((0...128).map { |i| i.chr.hash }), 128, "hash: Char keys spread")
+assert_int(spread((0...1000).map { |i| (i * 0.25).hash }), 1000, "hash: Float64 keys spread")
+assert_true(0.0.hash == (-0.0).hash, "hash: 0.0 and -0.0 are one key")
+
+# A class instance is itself, and a set of them finds each one: `Object#==`
+# answered false, so an instance did not equal itself and a `Set` never
+# found what was added to it. A class that says what equal means keeps
+# finding equal instances by it.
+class Visit
+  def initialize(@id : Int32)
+  end
+end
+
+class Named
+  getter name : String
+
+  def initialize(@name : String)
+  end
+
+  def ==(other : Named) : Bool
+    name == other.name
+  end
+end
+
+here = Visit.new(1)
+twin = Visit.new(1)
+assert_true(here == here, "reference: an instance equals itself")
+assert_true(here != twin, "reference: two instances are two")
+visits = Set(Visit).new
+all_visits = (0...20000).map { |i| Visit.new(i) }
+all_visits.each { |v| visits.add(v) }
+assert_int(visits.size, 20000, "reference: a set holds each instance once")
+assert_true(all_visits.all? { |v| visits.includes?(v) }, "reference: a set finds every instance added")
+assert_true(!visits.includes?(twin), "reference: and not one it was not given")
+spread_visits = spread(all_visits.first(1000).map { |v| v.hash })
+assert_true(spread_visits > 900, "reference: instances hash apart (#{spread_visits} of 1000)")
+names = {} of Named => Int32
+names[Named.new("a")] = 1
+assert_int(names[Named.new("a")]? || 0, 1, "reference: a class's own == finds an equal key")
+
+# A queue drains from the front, and a drain is linear: `shift` moved every
+# element down, so 300,000 of them was 45 billion moves. Order holds across
+# a shift and a push after it.
+queue = [1, 2, 3, 4, 5]
+assert_int(queue.shift, 1, "array: shift answers the first")
+queue << 6
+assert_int(queue.size, 5, "array: a push after a shift keeps the rest")
+assert_int(queue[0], 2, "array: the second is first after a shift")
+assert_int(queue[4], 6, "array: and the push is last")
+drained = [] of Int32
+while item = queue.shift?
+  drained << item
+end
+assert_int(drained.size, 5, "array: shift? drains every element")
+assert_int(drained[4], 6, "array: in order")
+long_queue = [] of Int32
+300000.times { |i| long_queue << i }
+drained_sum = 0_i64
+while item = long_queue.shift?
+  drained_sum = drained_sum + item
+end
+assert_true(drained_sum == 44999850000_i64, "array: a queue of 300,000 drains, in order")
+
+# A deletion costs one entry: it closed the gap and rebuilt the index, the
+# whole table per deletion, and emptying a set of 20,000 took 0.95 s. Half of
+# 50,000 are deleted, the rest are found, and the order holds.
+large = Set(Int32).new
+50000.times { |i| large.add(i) }
+50000.times { |i| large.delete(i) if i % 2 == 0 }
+assert_int(large.size, 25000, "set: twenty-five thousand deletes leave half")
+assert_true(large.includes?(49999) && !large.includes?(49998), "set: the right half")
+first_left = 0
+large.each { |v| first_left = v if first_left == 0 }
+assert_int(first_left, 1, "set: in the order they went in")
+50000.times { |i| large.add(i) if i % 2 == 0 }
+assert_int(large.size, 50000, "set: and a deleted key comes back")
+
 puts "all collection checks passed"

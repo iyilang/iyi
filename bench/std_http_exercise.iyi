@@ -272,6 +272,17 @@ group do |g|
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    # A client that asks to be told before it sends its body is told:
+    # without the `100 Continue`, curl waits a second before every upload
+    # past a megabyte.
+    ex = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ex.write("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n").or_panic
+    told = ex.read(64).or_panic
+    assert_str "HTTP/1.1 100 Continue\r\n\r\n", told, "Expect: 100-continue is answered before the body"
+    ex.write("body").or_panic
+    r11 = HTTP.parse_response(read_response(ex))
+    assert_true r11.status == 200 && r11.body == "body", "and the body sent after it arrives"
+    ex.close
     # A body of many reads. The server added each read to what came before
     # and parsed it all again - a copy of the body so far per read - and a
     # 20 MB upload took 1.9 s where Go's server takes 30 ms. It reads until
@@ -287,9 +298,9 @@ group do |g|
     0
   end
 end
-assert_true seen_paths.size == 9, "the block ran nine times (the 400 never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 10, "the block ran ten times (the 400 never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, a 24 MB upload, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 100-continue, a 24 MB upload, and the client against it"
 
 puts "\nALL CHECKS PASSED"

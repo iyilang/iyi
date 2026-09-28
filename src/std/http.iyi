@@ -87,8 +87,11 @@ struct ParsedRequest
   # For a request whose head is in and whose body is not: the bytes the
   # whole request takes, when its `Content-Length` says. 0 otherwise.
   getter wanted : Int32
+  # And whether that head asked `Expect: 100-continue`: the client waits
+  # to be told to send the body.
+  getter expects : Bool
 
-  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0)
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false)
   end
 end
 
@@ -131,9 +134,11 @@ pub struct Server
   def self.handle(client : IyiSocket, handler : Proc(Request, Response)) : Nil
     defer client.close
     buffer = ""
+    continued = false
     while true
       parsed = parse_request(buffer)
       if req = parsed.request
+        continued = false
         buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]
         response = handler.call(req)
         wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), parsed.close))
@@ -153,6 +158,13 @@ pub struct Server
       # parsing it all again was a copy of the body so far per read: a 5 MB
       # upload took 1.1 s, 20 MB 3 s, where Go's server takes 10 and 40 ms.
       return if buffer.bytesize > MAX_HEAD + MAX_BODY
+      # A client that sent `Expect: 100-continue` holds its body back until
+      # it is told to send it, and curl gives up waiting after a second:
+      # every upload past a megabyte took a second longer than it needed.
+      if parsed.expects && !continued
+        continued = true
+        return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
+      end
       wanted = parsed.wanted
       pending = String::Builder.new(wanted > buffer.bytesize ? wanted : buffer.bytesize + 65536)
       pending << buffer
@@ -218,10 +230,11 @@ pub struct Server
     end
     body_start = split_at + 4
     after = text[body_start, text.bytesize - body_start]
+    expects = version == "HTTP/1.1" && HTTP.same_name?(HTTP.trim(stub.header("Expect") || ""), "100-continue")
     if te = stub.header("Transfer-Encoding")
       return ParsedRequest.new(nil, "transfer encoding #{te.inspect} is not chunked", true, 0) unless HTTP.same_name?(HTTP.trim(te), "chunked")
       done = HTTP.chunked_end(after)
-      return ParsedRequest.new(nil, nil, false, 0) unless done
+      return ParsedRequest.new(nil, nil, false, 0, 0, expects) unless done
       return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done > MAX_BODY
       body = HTTP.decode_chunked(after[0, done])
       return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, body_start + done)
@@ -233,7 +246,7 @@ pub struct Server
       return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY
       length = n
     end
-    return ParsedRequest.new(nil, nil, false, 0, body_start + length) if after.bytesize < length
+    return ParsedRequest.new(nil, nil, false, 0, body_start + length, expects) if after.bytesize < length
     ParsedRequest.new(Request.new(method, path, query, headers, after[0, length]), nil, close, body_start + length)
   end
 

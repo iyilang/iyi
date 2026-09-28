@@ -184,6 +184,15 @@
 
 ### Fixed
 
+- **`Server.serve` answers `Expect: 100-continue`.** A client that asks
+  to be told before it sends its body was never told, and curl sends one
+  on every upload past a megabyte and waits a second before giving up:
+  every such upload took a second longer than it needed (curl's 5 MB
+  POST: 1.14 s, now 10 ms; Go's server: 10 ms). The server writes `100
+  Continue` once per request whose body is still to come.
+  `bench/std_http_exercise.sh` sends the head alone, requires the `100
+  Continue` before the body, and proves the check fails without it.
+
 - **A large body goes through `std/http` in time near its size, both
   ways.** The server added each read to the request so far and parsed it
   all again, and the client added each 4 KB read of the answer to the

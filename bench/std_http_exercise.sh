@@ -275,6 +275,7 @@ mutate "a server that forgets keep-alive" 'return if parsed.close' 'return if tr
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
+mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 
 echo
 if [ "$status" -eq 0 ]; then

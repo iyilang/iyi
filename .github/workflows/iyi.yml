@@ -472,6 +472,13 @@ jobs:
       - name: The edit-rebuild loop stays cheap
         run: python3 bench/rebuild_speed.py
 
+      # R-2c types every written def at its definition, and the probes that
+      # do it merged their variables into the program's, one probe after
+      # another: the front end grew with the square of the defs. Held as a
+      # ratio, 4,000 defs against 500, so the machine's speed is not in it.
+      - name: Typing a def at its definition costs that def
+        run: python3 bench/definition_typing_scale.py
+
       # `iyi migrate`: a Crystal project written out as iyi modules, on a
       # fixture that plants every case the rewrite has to answer — a
       # namespace over several files, an `include` of one, a two-file

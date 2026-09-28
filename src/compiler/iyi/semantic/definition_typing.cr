@@ -54,6 +54,10 @@
 require "../syntax/ast"
 
 module Iyi::DefinitionTyping
+  # Every variable a probe assigns begins with this; the main visitor
+  # drops them from the program's variables once the probes are typed.
+  VAR_PREFIX = "__iyi_dt_"
+
   def self.append_probes(program : Program, node : ASTNode) : Nil
     return unless node.is_a?(Expressions)
     runner = Runner.new(program)
@@ -190,7 +194,7 @@ module Iyi::DefinitionTyping
       serial = (@serial += 1)
       lines = [] of String
       names = argument_texts.map_with_index do |text, index|
-        name = "__iyi_dt_#{serial}_#{index}"
+        name = "#{VAR_PREFIX}#{serial}_#{index}"
         lines << "#{name} = uninitialized #{text}"
         name
       end
@@ -202,7 +206,7 @@ module Iyi::DefinitionTyping
         when NonGenericModuleType
           "#{owner}.#{a_def.name}(#{names.join(", ")})"
         else
-          receiver = "__iyi_dt_#{serial}_r"
+          receiver = "#{VAR_PREFIX}#{serial}_r"
           lines << "#{receiver} = uninitialized #{owner}"
           "#{receiver}.#{a_def.name}(#{names.join(", ")})"
         end
@@ -212,7 +216,7 @@ module Iyi::DefinitionTyping
       # typed, just not the assignment check.
       returned = a_def.return_type.try { |written| resolve(owner, written) }
       if returned && instantiable?(returned) && nameable?(returned) && !returned.nil_type?
-        lines << "__iyi_dt_#{serial}_v : #{returned} = #{call}"
+        lines << "#{VAR_PREFIX}#{serial}_v : #{returned} = #{call}"
       else
         lines << call
       end

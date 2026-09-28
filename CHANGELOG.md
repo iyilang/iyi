@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed
+
+- **Typing a def at its definition costs that def, not every def before
+  it.** R-2c types each written def where it is written, through one
+  `if false` probe per def at the top of the program, and the variables a
+  probe assigned were merged into the program's after it like any
+  branch's: every probe copied and merged every variable the probes before
+  it had made, and `main` allocated a slot for each. The front end grew
+  with the square of the defs a program declares - 4,000 one-line methods
+  typed in 2.25 s against 0.10 for 500, with 0.15.4's release compiler. A
+  probe's variables are dropped when it is done now, and the same 4,000
+  type in 0.15 s. The generated pair `bench/build_speed.py` builds, 900
+  probed defs in 6,912 lines, went from 0.082 s of semantic analysis to
+  0.032, and a warm build of it from 0.31 s to 0.22.
+  `bench/definition_typing_scale.py` holds typing 4,000 defs under twelve
+  times the time of 500; linear typing measures 2.3, and 0.15.4's compiler
+  fails it at 22.9.
+
 ## 0.15.4 — 2026-09-28
 
 **A program can run another one.** `std/process`'s `Process.run` starts a

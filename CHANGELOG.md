@@ -31,6 +31,24 @@
 
 ### Fixed
 
+- **On Linux, a program with a thousand tasks alive at its first collection
+  survives it.** The collector finds where the main thread's stack ends
+  by its `[stack]` line in `/proc/self/maps`, near the file's end, and read
+  only the first 64 KB of the file. Every task maps a stack and a guard
+  page, two lines, so a program with enough tasks alive at its first
+  collection died there with "no [stack] line in /proc/self/maps": 600
+  parked tasks survived 0.15.4 and 1,500 did not. The file is read
+  a buffer at a time now, the unfinished line carried to the next.
+  `bench/root_exercise.sh` parks 3,000 tasks, collects, and checks the
+  stack was found; a copy that stops after the first buffer dies there.
+
+- **The reuse gate's straddler proof lost its bite.** It needs the
+  exercise's rounds to die in several size classes, and `Int32#to_s`
+  stopped building an array of digits per number: with the fix taken out,
+  the exercise then failed 1 run in 20. Each key comes with its digits'
+  array again, in the exercise itself, and the proof catches the defect
+  in 16 of 20; it gets five runs rather than three.
+
 - **Deleting from a `Hash` or `Set` costs one entry.** A deletion closed the
   gap in the table's dense arrays and rebuilt its index - the whole table
   per deletion - so emptying a set of 20,000 took 0.95 s. The entry is
@@ -11063,7 +11081,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,139-line library and nothing else. Every other
+  written against iyi's own 18,164-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

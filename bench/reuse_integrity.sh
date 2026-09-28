@@ -58,7 +58,7 @@ run_case() {
   sed 's/^reuse integrity: /         /' "$WORK/$name.out"
 }
 
-# A copy of the library with one edit to the prelude, built and run three
+# A copy of the library with one edit to the prelude, built and run up to five
 # times; the proof holds when a run fails without the sentence the working
 # program prints. `$1` names the proof, `$2` is the awk that makes the
 # edit and exits 3 when the line it edits is not there, `$3` the sentence
@@ -82,7 +82,7 @@ prove_breaks() {
     return
   fi
   local caught=0 again exit_code=0
-  for again in 1 2 3; do
+  for again in 1 2 3 4 5; do
     ("$WORK/$name/program" >"$WORK/$name/out" 2>&1)
     exit_code=$?
     if [ "$exit_code" -ne 0 ] && ! grep -q "$sentence" "$WORK/$name/out"; then
@@ -97,7 +97,7 @@ prove_breaks() {
       echo "  caught on run $again: $(grep -m1 "panic: \|memory fault" "$WORK/$name/out" | sed 's/^iyi: panic: //' | cut -c1-150)"
     fi
   else
-    echo "  FAIL: three runs with the fix taken out and the exercise passed every time"
+    echo "  FAIL: five runs with the fix taken out and the exercise passed every time"
     status=1
   fi
 }

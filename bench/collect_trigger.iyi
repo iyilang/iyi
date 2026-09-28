@@ -187,9 +187,15 @@
     # from under its thread-local, on every platform's allocation pattern
     # alike (read after a churn, the chunk was somebody else's on darwin
     # and the read was a fault instead of a name).
+    #
+    # Asked through `IyiRoots.base_of`, which answers 0 for a chunk on a
+    # free list and for an address no arena holds any more, rather than by
+    # reading the chunk's flags: a sweep that emptied the state's arena
+    # can hand the arena back to the kernel, and the read was then a fault
+    # instead of a name - on Windows, once the state grew into a size
+    # class it had to itself.
     IyiMark.collect
-    state_word = IyiMark.flags(marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64)
-    if state_word & IyiHeap::FREE_FLAG != 0
+    if IyiRoots.base_of(marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64) == 0_u64
       # Named and left by the exit syscall, not raised: a panic's own path
       # reaches for the scheduler's state, which is the object just found
       # freed, and would fault before or after the name depending on the

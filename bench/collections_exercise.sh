@@ -198,6 +198,14 @@ prove_fails "an Int64 hashed by its type" int64_type_hash number.iyi \
   "hash: Int64 keys spread" \
   '/^struct Int64$/,/^end$/{/^  def hash : Int32$/,/^  end$/d;}'
 
+prove_fails "an instance that is not itself" no_identity primitives.iyi \
+  "reference: an instance equals itself" \
+  '/^class Reference$/,/^end$/{/^  def ==(other : Reference) : Bool$/,/^  end$/d;}'
+
+prove_fails "instances hashed by their type" type_hash primitives.iyi \
+  "reference: instances hash apart" \
+  's/^      (object_id.unsafe_shr(4_u64) ^ object_id.unsafe_shr(36_u64)).unsafe_to_i32$/      crystal_type_id/'
+
 # 2. A key written twice making two entries, which is what a `[]=` that does
 #    not look first would do.
 prove_fails "a rewritten key appends" double_write hash.iyi \

@@ -47,9 +47,31 @@ end
 
 # What every class instance is: a pointer to its fields, compared and
 # hashed by identity unless the class says otherwise.
+#
+# That was this comment's promise and nothing kept it: `Object#==` answers
+# false, so an instance was not even equal to itself, and a `Set(Node)`
+# never found the node just added to it nor a `Hash(Node, V)` its key.
+# Identity is `==` now, and the hash is the address. A class that writes
+# its own `==` says what equal means, and the address would part two
+# instances it calls equal - so one that writes `==` and no `hash` keeps
+# the type's id, correct for any `==` and one slot for every instance, the
+# default `Object#hash` explains.
 class Reference
   @[Primitive(:object_id)]
   def object_id : UInt64
+  end
+
+  def ==(other : Reference) : Bool
+    object_id == other.object_id
+  end
+
+  def hash : Int32
+    {% if ([@type] + @type.ancestors).any? { |t| t != Reference && t != Object && t.methods.any? { |m| m.name == "==" } } %}
+      crystal_type_id
+    {% else %}
+      # A chunk's address has its low bits in common with every other's.
+      (object_id.unsafe_shr(4_u64) ^ object_id.unsafe_shr(36_u64)).unsafe_to_i32
+    {% end %}
   end
 end
 

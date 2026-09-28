@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A class instance equals itself, and a set of them finds it.** The
+  prelude said an instance is "compared and hashed by identity unless the
+  class says otherwise" and defined neither: `Object#==` answers false, so
+  `node == node` was false, a `Set(Node)` never found the node just added
+  to it, and a `Hash(Node, V)` never its key. `Reference#==` is identity
+  now and `Reference#hash` the address, so a visited-set of 200,000 nodes
+  answers in 0.02 s. A class that writes its own `==` and no `hash` keeps
+  the type's id as its hash - the address would part two instances its
+  `==` calls equal. `bench/collections_exercise.sh` checks an instance
+  equals itself, that 20,000 instances are found in a set and 1,000 hash
+  1,000 ways, and that a class's own `==` still finds an equal key; it
+  fails with the identity or the address taken out.
+
 - **A table keyed by `Int64`, `UInt64`, `UInt8`, `Char` or `Float64` spreads
   its keys.** The prelude gave `Int32` a `hash` and no other type it
   declares, so every other key hashed to its type's id - `Object#hash` - and
@@ -11019,7 +11032,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,083-line library and nothing else. Every other
+  written against iyi's own 18,105-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

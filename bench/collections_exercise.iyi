@@ -308,4 +308,40 @@ assert_int(spread((0...128).map { |i| i.chr.hash }), 128, "hash: Char keys sprea
 assert_int(spread((0...1000).map { |i| (i * 0.25).hash }), 1000, "hash: Float64 keys spread")
 assert_true(0.0.hash == (-0.0).hash, "hash: 0.0 and -0.0 are one key")
 
+# A class instance is itself, and a set of them finds each one: `Object#==`
+# answered false, so an instance did not equal itself and a `Set` never
+# found what was added to it. A class that says what equal means keeps
+# finding equal instances by it.
+class Visit
+  def initialize(@id : Int32)
+  end
+end
+
+class Named
+  getter name : String
+
+  def initialize(@name : String)
+  end
+
+  def ==(other : Named) : Bool
+    name == other.name
+  end
+end
+
+here = Visit.new(1)
+twin = Visit.new(1)
+assert_true(here == here, "reference: an instance equals itself")
+assert_true(here != twin, "reference: two instances are two")
+visits = Set(Visit).new
+all_visits = (0...20000).map { |i| Visit.new(i) }
+all_visits.each { |v| visits.add(v) }
+assert_int(visits.size, 20000, "reference: a set holds each instance once")
+assert_true(all_visits.all? { |v| visits.includes?(v) }, "reference: a set finds every instance added")
+assert_true(!visits.includes?(twin), "reference: and not one it was not given")
+spread_visits = spread(all_visits.first(1000).map { |v| v.hash })
+assert_true(spread_visits > 900, "reference: instances hash apart (#{spread_visits} of 1000)")
+names = {} of Named => Int32
+names[Named.new("a")] = 1
+assert_int(names[Named.new("a")]? || 0, 1, "reference: a class's own == finds an equal key")
+
 puts "all collection checks passed"

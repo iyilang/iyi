@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A rename onto a name that is already there is refused.** The language
+  server renamed a def onto any name, and one its type or the top level
+  already had made two defs one: renaming `shout` to an existing `yell`
+  left two `def yell(name : String)`, the later replaced the earlier, and
+  `puts shout("a")`, now `puts yell("a")`, printed "a!" where it had
+  printed "A" - a behaviour change with no word. A rename onto a method
+  of the def's type, of what the type inherits, or of the top level is
+  refused now, with the reason. Step 18f of `bench/lsp_session.py`
+  renames onto a sibling def and onto `puts`, both refused, and onto a
+  free name, carried out; the old server carries out all three.
+
 - **On Windows, `Process.run(chdir:)` into a long directory says why it
   cannot.** Windows refuses a working directory past 254 characters while
   long paths are off - measured, 254 ran and 255 were refused - and

@@ -35,12 +35,17 @@ module Iyi::Lsp
     # that imports one of them, directly or through another, can refer to
     # them, which is how the server picks which entries to compile.
     getter target_files = Set(String).new
+    # The types the adopted defs belong to, for rename's question: is the
+    # new name one of theirs already.
+    @target_owners = [] of Type
+    @program : Program? = nil
     @collecting = false
 
     def initialize(@target_location : Location)
     end
 
     def process(result : Compiler::Result) : Bool
+      @program = result.program
       process_result result
       result.node.accept self
       return false if @target_keys.empty?
@@ -136,6 +141,22 @@ module Iyi::Lsp
       @target_keys << key_of(location)
       @target_names << node.name
       @target_files << location.filename.to_s
+      if owner = node.owner?
+        @target_owners << owner unless @target_owners.any?(&.same?(owner))
+      end
+    end
+
+    # Whether *name* is already a method where the adopted defs are: on
+    # their type, on what it inherits, or at the top level, where a bare
+    # call looks last. A rename onto it made two defs one name, and the
+    # later of two with one signature replaces the earlier: renaming
+    # `shout` to an existing `yell` turned `puts shout("a")`'s "A" into
+    # "a!", with nothing refused.
+    def taken?(name : String) : Bool
+      return false if @target_names.includes?(name)
+      return true if @target_owners.any? { |owner| !owner.lookup_defs(name).empty? }
+      program = @program
+      !!program && !program.lookup_defs(name).empty?
     end
 
     # The filename half of the key, in one spelling. An imported module's

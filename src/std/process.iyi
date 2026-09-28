@@ -184,8 +184,21 @@ impl Error for ProcessError
 end
 
 pub struct Process
-  # Runs *command* with *args* and answers once it has ended; see the top
-  # of this file for what each part means.
+  # Runs *command* with *args* and answers once it has ended.
+  #
+  # *command* is a path, or a name looked for on `PATH` (on Windows also as
+  # `NAME.exe` and `NAME.com`; a `.bat` or `.cmd` is refused). Each of
+  # *args* reaches the child as one argument, and no shell reads them.
+  # *input* is written to the child's standard input, and without it the
+  # child reads nothing. *chdir* is the directory it runs in. *env* changes
+  # the child's environment alone: a name given a value is set, a name
+  # given `nil` removed. With *capture* false the child writes to this
+  # program's own streams and the result's texts are empty.
+  #
+  # Answers a `ProcessResult` for a child that ran, whatever its exit code;
+  # a `ProcessError` when it could not be started; and `Cancelled`, after
+  # the child is ended, when the task running this is cancelled. Nothing
+  # blocks the thread: the other tasks run while the child does.
   def self.run(command : String, args : Array(String) = [] of String, input : String? = nil,
                chdir : String? = nil, capture : Bool = true,
                env : Hash(String, String) | Hash(String, String?) | Hash(String, Nil) | Nil = nil) : ProcessResult | ProcessError | Cancelled

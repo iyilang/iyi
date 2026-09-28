@@ -341,10 +341,17 @@ sleep_proof() { # sleep_proof <label> <dir> <awk program> <phrase>
   fi
   echo "  caught: $(grep -m1 "$4" "$2.txt")"
 }
+case "$(uname -s)" in
+  Linux) walked_proof=1 ;;
+  *) walked_proof=0
+     step "failure proof: a sleep queue walked on every insertion: not here, because the sleepers' cost ratio is checked on Linux only" ;;
+esac
+if [ "$walked_proof" -eq 1 ]; then
 sleep_proof "a sleep queue walked on every insertion" walked \
   '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
    { print } END { if (!found) exit 3 }' \
   'FAIL: sleep: 32000 sleepers took'
+fi
 sleep_proof "a sleep queue that puts the latest first" latest \
   '/^    a.deadline < b.deadline \|\| \(a.deadline == b.deadline && a.sleep_seq < b.sleep_seq\)$/ { print "    a.deadline > b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)"; found = 1; next }
    { print } END { if (!found) exit 3 }' \

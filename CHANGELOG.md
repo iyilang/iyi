@@ -56,9 +56,11 @@
   with a fiber leaving from anywhere in it when its wait ends another way
   and equal deadlines leaving in the order they came: the 100,000 take
   0.4 s. `bench/concurrency_exercise.sh` sleeps 8,000 and then 32,000
-  tasks, requires the second to take under eight times the first (the
-  walked list measures eleven) and every task to wake in deadline order,
-  and proves both checks fail with the walk or the order put back.
+  tasks, requires every task to wake in deadline order and, on Linux, the
+  second burst to take under eight times the first (the walked list
+  measures eleven; on darwin every sleeper's stack mapping costs more the
+  more there are, nine times with the heap), and proves both checks fail
+  with the walk or the order put back.
 
 - **A variable assigned many times types in memory near its length.**
   Every assignment binds the variable to one more value and merges all of

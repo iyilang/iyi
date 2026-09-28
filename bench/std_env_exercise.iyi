@@ -6,6 +6,7 @@
 module bench/std_env_exercise
 
 import std/env::{ENV}
+import std/gc::{GC}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -169,6 +170,31 @@ assert_str "c", ENV[K3], "last survives first delete"
 ENV.delete(K3)
 assert_nil ENV[K3]?, "last deleted"
 puts "  nil assignment, empty value, delete positions, and Program.env"
+
+puts "\n== what was set outlives a collection"
+# A new variable is a new table and an overwritten one a new entry, both
+# the collector's memory, installed into the C runtime's `environ`, which
+# the collector does not scan. The churn between the two collections reuses
+# whatever the first one freed, so a table nothing held reads back as
+# something else, or as a fault.
+kept = "kept-" + "k" * 40
+ENV[K2] = kept
+path_was = ENV["PATH"]?
+if path_was
+  ENV["PATH"] = path_was + PREFIX
+end
+GC.collect
+churn = [] of String
+20000.times { |i| churn << "c" * 48 + i.to_s }
+GC.collect
+assert_str kept, ENV[K2], "a variable set before two collections"
+assert_true ENV.keys.includes?(K2), "a variable set before two collections is enumerated"
+if path_was
+  assert_str path_was + PREFIX, ENV["PATH"], "an overwritten variable after two collections"
+  ENV["PATH"] = path_was
+end
+ENV.delete(K2)
+puts "  a variable set and one overwritten read back after two collections, #{churn.size} strings between"
 
 # Clean up all created variables
 ENV.delete(K1)

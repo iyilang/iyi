@@ -843,6 +843,143 @@ def main():
          kinds == [2, 3] and hl_lines == [5, 10],
          f"{len(highlights)} range(s) at lines {hl_lines}")
 
+    # 18b. documentHighlight on a local variable, which is neither a def
+    #      nor a call: it answered null. Its scope is the def, a block's
+    #      own parameter is another variable, and a same-named local in
+    #      another def is not this one. A document of its own, open in
+    #      the editor and never saved, so no other step sees it.
+    scoped = ("module locals\n\n"
+              "def one(count : Int32) : Int32\n"
+              "  total = count\n"
+              "  [1, 2].each do |count|\n"
+              "    total = total + count\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "def two : Int32\n"
+              "  total = 5\n"
+              "  total\n"
+              "end\n\n"
+              "puts one(1) + two\n")
+    locals_uri = file_uri(os.path.join(work, "locals.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": locals_uri, "languageId": "iyi",
+                             "version": 1, "text": scoped}}, wait=False)
+    c.diagnostics(locals_uri)
+
+    def sites(line, character):
+        reply = c.send("textDocument/documentHighlight",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return sorted((h["range"]["start"]["line"],
+                       h["range"]["start"]["character"], h["kind"])
+                      for h in reply["result"] or [])
+
+    total = sites(7, 3)
+    param = sites(3, 10)
+    block = sites(5, 21)
+    step("18b", "documentHighlight marks a local in its own scope",
+         total == [(3, 2, 3), (5, 4, 3), (5, 12, 2), (7, 2, 2)] and
+         param == [(2, 8, 3), (3, 10, 2)] and
+         block == [(4, 18, 3), (5, 20, 2)],
+         f"total {total}, count {param}, the block's count {block}")
+
+    # 18c. The same sites answer references and rename, which refused a
+    #      local ("rename serves defs and their calls"): an editor could
+    #      not rename a variable at all. A new name already used in the
+    #      scope is refused, since the two would become one variable.
+    at_total = {"textDocument": {"uri": locals_uri},
+                "position": {"line": 7, "character": 3}}
+    refs = c.send("textDocument/references",
+                  dict(at_total, context={"includeDeclaration": False}))["result"] or []
+    ref_lines = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in refs)
+    prepared = c.send("textDocument/prepareRename", at_total)["result"] or {}
+    renamed = c.send("textDocument/rename", dict(at_total, newName="sum"))
+    edits = (renamed.get("result") or {}).get("changes", {})
+    edit_sites = sorted((e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+                        for e in edits.get(locals_uri, []))
+    clash = c.send("textDocument/rename", dict(at_total, newName="count"))
+    clash_error = (clash.get("error") or {}).get("message", "")
+    step("18c", "references and rename serve a local, and a clash is refused",
+         ref_lines == [(5, 4), (5, 12), (7, 2)] and
+         prepared.get("placeholder") == "total" and
+         list(edits) == [locals_uri] and
+         edit_sites == [(3, 2, "sum"), (5, 4, "sum"), (5, 12, "sum"), (7, 2, "sum")] and
+         "already a name" in clash_error,
+         f"references {ref_lines}, rename {edit_sites}, clash {clash_error[:60]!r}")
+
+    # 18d. Definition on a local is where it is first bound: a use of
+    #      `total` jumps to its first assignment, a use of the parameter
+    #      `count` to the parameter, a use of the block's `count` to the
+    #      block's. It answered null, `tool implementations` knowing calls.
+    def defined(line, character):
+        reply = c.send("textDocument/definition",
+                       {"textDocument": {"uri": locals_uri},
+                        "position": {"line": line, "character": character}})
+        return [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                for d in reply["result"] or []]
+    jumps = [defined(7, 3), defined(3, 10), defined(5, 21)]
+    step("18d", "definition on a local is where it is bound",
+         jumps == [[(3, 2)], [(2, 8)], [(4, 18)]], f"{jumps}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": locals_uri}}, wait=False)
+
+    # 18e. An instance variable: every `@count` of its class, and the name
+    #      its accessor declares, which is the field's declaration. The
+    #      `@count` parameter is the field's too, not a local; a local
+    #      `count` beside it is its own variable; a nested class's
+    #      `@count` is another field. It answered null to all three
+    #      questions, and it is not renamed alone: its accessor carries the
+    #      name as a method.
+    fields = ("module fields\n\n"
+              "class Counter\n"
+              "  getter count : Int32\n"
+              "\n"
+              "  def initialize(@count : Int32)\n"
+              "  end\n"
+              "\n"
+              "  def bump : Nil\n"
+              "    count = 5\n"
+              "    @count = @count + count\n"
+              "  end\n"
+              "\n"
+              "  class Inner\n"
+              "    def initialize(@count : Int32)\n"
+              "    end\n"
+              "  end\n"
+              "end\n\n"
+              "puts Counter.new(1).count\n")
+    fields_uri = file_uri(os.path.join(work, "fields.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": fields_uri, "languageId": "iyi",
+                             "version": 1, "text": fields}}, wait=False)
+    c.diagnostics(fields_uri)
+    at_field = {"textDocument": {"uri": fields_uri},
+                "position": {"line": 10, "character": 14}}
+    lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"],
+                  h["range"]["end"]["character"], h["kind"])
+                 for h in c.send("textDocument/documentHighlight", at_field)["result"] or [])
+    local_lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"])
+                       for h in c.send("textDocument/documentHighlight",
+                                       {"textDocument": {"uri": fields_uri},
+                                        "position": {"line": 10, "character": 23}})["result"] or [])
+    field_refs = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"])
+                        for r in c.send("textDocument/references",
+                                        dict(at_field, context={"includeDeclaration": False}))["result"] or [])
+    field_def = [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                 for d in c.send("textDocument/definition", at_field)["result"] or []]
+    refused = c.send("textDocument/rename", dict(at_field, newName="total")).get("error") or {}
+    step("18e", "an instance variable is its class's: highlight, references, definition",
+         lit == [(3, 9, 14, 3), (5, 17, 23, 3), (10, 4, 10, 3), (10, 13, 19, 2)] and
+         local_lit == [(9, 4), (10, 22)] and
+         field_refs == [(5, 17), (10, 4), (10, 13)] and
+         field_def == [(3, 9)] and
+         refused.get("code") == -32803 and "accessors" in refused.get("message", ""),
+         f"field {lit}, local {local_lit}, references {field_refs}, "
+         f"definition {field_def}, rename {refused.get('code')}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": fields_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",
@@ -1790,6 +1927,23 @@ def main():
     step("52f", "and the session is still answering after all four",
          "error" not in reply or reply["error"].get("code") not in (-32603,),
          json.dumps(reply)[:60])
+
+    # 52g. A request the server understood and will not carry out is
+    # RequestFailed with the reason: a rename with nothing renameable under
+    # the cursor left as -32603, the code for "this server is broken". And
+    # a command the server does not have is the client's mistake, -32602.
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0},
+        "newName": "renamed"})
+    step("52g", "a refused rename is request-failed, with its reason",
+         reply.get("error", {}).get("code") == -32803
+         and "nothing renameable" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+    reply = c.send("workspace/executeCommand", {"command": "iyi.nonesuch", "arguments": []})
+    step("52h", "an unknown command is invalid params",
+         reply.get("error", {}).get("code") == -32602
+         and "iyi.nonesuch" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
 
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has

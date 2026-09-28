@@ -343,8 +343,8 @@ programs under `bench/`, 84 run and pass unattended on a Windows 11
 machine. The three that do not are the three that cannot: one whose pass
 *is* a crash, one that waits for a client its gate supplies, and one that
 reads the two environment variables its gate pins. What is missing is named
-in the entry: no subprocess, no `Time::Location`, and a symbolic link needs
-a privilege Windows does not hand out.
+in the entry: no `Time::Location`, and a symbolic link needs a privilege
+Windows does not hand out.
 
 **Performance — Crystal's backend, and now one measurement of its own.**
 Native code through LLVM, the same GC. `python3 bench/runtime.py` runs the same
@@ -398,8 +398,8 @@ line so it cannot move unread.
 **Efficiency — built, and it is mostly subtraction.** `puts "hello"` is a 36 KB
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
-it uses, and iyi's own library is 17,983 lines rather than 8,161. The whole
-library is 743 KB on disk beside the binary.
+it uses, and iyi's own library is 18,011 lines rather than 8,161. The whole
+library is 745 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
@@ -432,7 +432,7 @@ tar -xzf iyi-0.15.3-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 743 KB prelude, the 1,338 KB of `src/std` that `import std/...`
+iyi's own 745 KB prelude, the 1,395 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -701,7 +701,7 @@ $ curl localhost:3000/json
 `pub`, traits with defaults, `impl … forall`, error unions and `!`, `.or`,
 `or_panic`, `defer` — all of them, on a program that requires a shard. R-2
 still refuses an export that does not write its types. What changes is what the
-program *has*: 8,161 lines of Crystal's standard library instead of 17,983
+program *has*: 8,161 lines of Crystal's standard library instead of 18,011
 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -1084,7 +1084,7 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 17,983 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 18,011 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`**: integers, booleans, a string, one
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
@@ -1178,7 +1178,12 @@ marked PROPOSED are the parts that will move under you.
   Windows and not assumed. 114 program binaries import kernel32,
   `vcruntime140` and five UCRT façades, four of them `ws2_32` and two
   `advapi32`, and nothing else.
-  What is *not* here: there is no subprocess and no `Time::Location`; a
+  A child process is `std/process`'s `Process.run`, on every platform with
+  the runtime: `CreateProcessW` handed the child's three handles and no
+  others, its output read through overlapped named pipes on the completion
+  port and its end posted there by `RegisterWaitForSingleObject`, so a
+  program waiting for a child keeps serving its other tasks.
+  What is *not* here: there is no `Time::Location`; a
   symbolic link needs a privilege Windows grants to an administrator or
   to Developer Mode, so the file exercise asks first and says what it
   skipped; the daemon is POSIX-only (`poll(2)` and `fork`), so the
@@ -1238,7 +1243,7 @@ marked PROPOSED are the parts that will move under you.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 17,983 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 18,011 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

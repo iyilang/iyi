@@ -87,7 +87,7 @@ fi
 
 echo
 echo "== every env section reported"
-for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env"; do
+for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection"; do
   if ! grep -q "$phrase" "$WORK/env-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -125,6 +125,42 @@ elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run
 else
   echo "  a broken env is caught"
 fi
+
+# On Linux and darwin a table `ENV[]=` builds is installed into the C
+# runtime's `environ`, which the collector does not scan, so the prelude
+# holds it in a class variable too. Taken out, the table is garbage at the
+# next collection and the churn after it reuses its memory: measured on
+# Linux, the exercise ends in a segmentation fault. Windows keeps no table.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/unheld/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/unheld/iyi/"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the unheld-table proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/iyi/prelude.iyi").read_text()
+old = '    IyiEnvironTable.hold(entries)\n'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/unheld/iyi/prelude.iyi").write_text(src.replace(old, '', 1))
+PY
+    then
+      echo "  the unheld-table patch did not apply"
+      status=1
+    else
+      IYI_PATH="$WORK/unheld${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/unheld.out" 2>&1
+      code=$?
+      if grep -q "ALL CHECKS PASSED" "$WORK/unheld.out"; then
+        echo "  the exercise PASSED with the table held nowhere"
+        status=1
+      else
+        echo "  a table held nowhere is caught (exit $code): $(grep -v '^\s*$' "$WORK/unheld.out" | tail -1 | cut -c1-120)"
+      fi
+    fi
+    ;;
+esac
 
 echo
 echo "== what env refuses"

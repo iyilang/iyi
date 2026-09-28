@@ -126,4 +126,26 @@ churn(300_000)
 check(GC.stats.collections > c3, "the trigger runs again after enable (#{c3} -> #{GC.stats.collections})")
 puts "  disabled: 300k allocations, no collection; collect still runs; enabled: the trigger runs again"
 
+puts "== a string built in a reused chunk ends in a NUL"
+# A string's chunk is atomic, so the collector hands it back uncleared,
+# and the byte after its last is what makes `to_unsafe` a C string - the
+# form `std/process` and `std/debug` hand the platform a path in. Longer
+# strings fill the chunks first; after the collection that frees them,
+# every string built in their place has to end in a NUL of its own.
+unterminated = 0
+round = 0
+while round < 20
+  longer = [] of String
+  2000.times { |i| longer << "y" * 21 }
+  longer = [] of String
+  GC.collect
+  20.times do
+    built = String.build { |io| io << "a-path-" << "built.txt" }
+    unterminated = unterminated + 1 if built.to_unsafe[built.bytesize] != 0_u8
+  end
+  round = round + 1
+end
+check(unterminated == 0, "#{unterminated} of 400 strings built in reused chunks had no terminator")
+puts "  400 strings built where longer ones were freed, each a C string"
+
 puts "ALL CHECKS PASSED"

@@ -88,6 +88,13 @@ say "no module path is a usage error that shows the form" \
   "$([ $? -ne 0 ] && grep -q 'example.com/me/hello' none.txt; echo $?)"
 "$IYI" init --help > help.txt 2>&1
 say "--help is init's own usage" "$(head -1 help.txt | grep -q '^Usage: .* init MODULE'; echo $?)"
+# The top-level help describes the verb too, and it kept describing the
+# four files after `init` stopped writing them: "iyi.mod, main.iyi, a
+# module and a test". Held to what `init kemal` wrote above.
+"$IYI" help > top.txt 2>&1
+init_line="$(grep -m1 '^ *init ' top.txt)"
+say "iyi help's init line names what init writes, and nothing it does not" \
+  "$(echo "$init_line" | grep -q 'iyi.mod' && ! echo "$init_line" | grep -qE 'main\.iyi|test'; echo $?)"
 
 echo
 if [ "$status" -eq 0 ]; then

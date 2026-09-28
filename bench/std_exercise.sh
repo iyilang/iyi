@@ -251,6 +251,10 @@ echo "== the library is iyi all the way down"
 # else's: `rt_sigaction` on Linux, `sigaction` and `pipe` from libSystem on
 # darwin, `SetConsoleCtrlHandler` from kernel32 on Windows.
 #
+# `process` starts a program, which is the platform's act too: `clone` and
+# `execve` by syscall on Linux, `posix_spawn` from libSystem on darwin,
+# `CreateProcessW` from kernel32 on Windows.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
@@ -274,7 +278,7 @@ foreign=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
   case "$name" in
-    socket|time|debug|file|dir|udp|random|signal)
+    socket|time|debug|file|dir|udp|random|signal|process)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

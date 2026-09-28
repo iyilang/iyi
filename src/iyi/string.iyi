@@ -22,10 +22,20 @@ class String
   # "not counted yet", for `size` to scan the first time it is asked: most
   # strings built here - an encoding, a join, a line - are never asked, and
   # counting them all was a second pass over every byte built.
+  #
+  # The byte after the last is a NUL, as a literal's is, so `to_unsafe` is
+  # a C string: `std/process` and `std/debug` hand one to the platform as a
+  # path. The byte was allocated for that and never written, and a string's
+  # chunk is atomic - not cleared - so a chunk that had held a longer
+  # string kept that string's byte there. Measured on Windows after a
+  # collection that freed longer strings: 961 of 1,000 strings built after
+  # it had no terminator, and `Process.run` of a path built that way
+  # answered "no such program" for a file that was there.
   def self.new(bytesize : Int32, & : Pointer(UInt8) -> Nil) : String
     memory = String.memory(bytesize + HEADER_SIZE + 1)
     buffer = memory + HEADER_SIZE
     yield buffer
+    buffer[bytesize] = 0_u8
 
     header = memory.as(Pointer(Int32))
     header[0] = bytesize

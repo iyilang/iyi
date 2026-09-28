@@ -581,6 +581,10 @@ module Iyi::Lsp
           # `params["textDocument"]` on a request that carried none. The
           # JSON library's wording is `Missing hash key: "textDocument"`.
           respond_error(id, -32602, "the request is missing #{ex.message.to_s.sub("Missing hash key: ", "")}")
+        when Refused
+          respond_error(id, -32803, ex.message.to_s)
+        when BadParams
+          respond_error(id, -32602, ex.message.to_s)
         when NilAssertionError
           # `params.not_nil!` on a request with no `params` at all: it was
           # answered -32603 "Nil assertion failed", the server's own words
@@ -597,6 +601,20 @@ module Iyi::Lsp
           end
         end
       end
+    end
+
+    # A request the server understood and will not carry out, with the
+    # reason: a rename onto a name in use, a cursor on nothing renameable.
+    # The protocol's RequestFailed (-32803), which a client shows as the
+    # sentence. Raised as a plain exception these left as -32603, which
+    # says the server is broken, about a request it answered correctly.
+    class Refused < Exception
+    end
+
+    # A request whose params name something this server does not take: a
+    # command it does not have, a command without the argument it needs.
+    # The client's mistake, -32602.
+    class BadParams < Exception
     end
 
     # One place the protocol's error shape is written, because there were
@@ -1282,8 +1300,30 @@ module Iyi::Lsp
       text = text_of(uri)
       line0 = params["position"]["line"].as_i
       char = params["position"]["character"].as_i
-      line_text = text.lines[line0]? || ""
+      lines = text.lines
+      line_text = lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
+
+      # A local's definition is where it is first bound, found in the
+      # parse (`locals.cr`): `tool implementations` answers for calls, and
+      # a variable jumped nowhere.
+      if local = local_sites(text, path, Location.new(path, line0 + 1, column), lines)
+        _, declarations = local.split
+        if declared = declarations.first?
+          location, size = declared
+          declared_line = lines[location.line_number - 1]? || ""
+          ch = Lsp.character_of(declared_line, location.column_number)
+          end_ch = Lsp.character_of(declared_line, location.column_number + size)
+          return respond(id) do |json|
+            json.array do
+              json.object do
+                json.field "uri", uri
+                json.field "range" { range(json, location.line_number - 1, ch, location.line_number - 1, end_ch) }
+              end
+            end
+          end
+        end
+      end
 
       result = @analysis.implementations_at(path, text, overrides_for(path), line0 + 1, column)
       traces = result.try(&.implementations)
@@ -1529,15 +1569,30 @@ module Iyi::Lsp
     # front end bound move, so an overload that shares the name but not
     # the resolution keeps it. What the graph does not know it refuses to
     # touch — by name, not silently.
+    #
+    # A local variable is renamed off the parse instead (`locals.cr`), in
+    # its own scope, and refused when the new name is already one there.
     private def on_rename(id : JSON::Any, params : JSON::Any) : Nil
       new_name = params["newName"].as_s
-      unless valid_name?(new_name)
-        raise "'#{new_name}' is not an iyi method name"
+      if local = local_at(params)
+        if local.instance_var?
+          raise Refused.new("#{local.name} is not renamed on its own: its accessors carry the name as methods")
+        end
+        unless valid_local?(new_name)
+          raise Refused.new("'#{new_name}' is not an iyi variable name")
+        end
+        if local.taken?(new_name, text_of(params["textDocument"]["uri"].as_s).lines)
+          raise Refused.new("'#{new_name}' is already a name where '#{local.name}' lives, and the rename would make the two one")
+        end
+        references, declarations = local.split
+      else
+        unless valid_name?(new_name)
+          raise Refused.new("'#{new_name}' is not an iyi method name")
+        end
+        references, declarations = reference_sites(params)
       end
-
-      references, declarations = reference_sites(params)
       if references.empty? && declarations.empty?
-        raise "nothing renameable under the cursor: rename serves defs and their calls, off the typed graph"
+        raise Refused.new("nothing renameable under the cursor: rename serves defs, their calls and local variables")
       end
 
       by_file = {} of String => Array({Int32, Int32, Int32})
@@ -1594,6 +1649,9 @@ module Iyi::Lsp
     # reference, and are not asked. On a 32-module corpus that is the
     # difference between 1.7 s and the importers' share of it.
     private def reference_sites(params : JSON::Any) : {Array({Location, Int32}), Array({Location, Int32})}
+      if local = local_at(params)
+        return local.split
+      end
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
@@ -1764,9 +1822,13 @@ module Iyi::Lsp
       column = Lsp.column_of(line_text, char)
 
       target = Location.new(path, line0 + 1, column)
-      visitor = @analysis.references_at(path, text, overrides_for(path), target)
       span = word_range(line_text, column)
-      return respond_null(id) unless visitor && span
+      return respond_null(id) unless span
+      if local = local_sites(text, path, target, text.lines)
+        return respond_null(id) if local.instance_var?
+      else
+        return respond_null(id) unless @analysis.references_at(path, text, overrides_for(path), target)
+      end
 
       from, to = span
       start_ch = Lsp.character_of(line_text, from + 1)
@@ -1812,16 +1874,35 @@ module Iyi::Lsp
 
     # ── Document highlight ───────────────────────────────────────────────
 
-    # References, scoped to the buffer under the cursor: one compile,
-    # the sites in this file only, the declaration marked as the write.
+    # A local variable off the buffer's parse (`locals.cr`): its binding
+    # and assignments the writes, every other use a read. Anything else is
+    # references, scoped to the buffer under the cursor: one compile, the
+    # sites in this file only, the declaration marked as the write.
     private def on_document_highlight(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
       line0 = params["position"]["line"].as_i
       char = params["position"]["character"].as_i
-      line_text = text.lines[line0]? || ""
+      lines = text.lines
+      line_text = lines[line0]? || ""
       target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
+
+      if local = local_sites(text, path, target, lines)
+        return respond(id) do |json|
+          json.array do
+            local.sites.each do |(location, size, write)|
+              site_line = lines[location.line_number - 1]? || ""
+              start_ch = Lsp.character_of(site_line, location.column_number)
+              end_ch = Lsp.character_of(site_line, location.column_number + size)
+              json.object do
+                json.field "range" { range(json, location.line_number - 1, start_ch, location.line_number - 1, end_ch) }
+                json.field "kind", write ? 3 : 2
+              end
+            end
+          end
+        end
+      end
 
       visitor = @analysis.references_at(path, text, overrides_for(path), target)
       return respond_null(id) unless visitor
@@ -1842,6 +1923,33 @@ module Iyi::Lsp
           end
         end
       end
+    end
+
+    # The local under the request's cursor, or nil.
+    private def local_at(params : JSON::Any) : LocalSites?
+      uri = params["textDocument"]["uri"].as_s
+      text = text_of(uri)
+      lines = text.lines
+      line0 = params["position"]["line"].as_i
+      line_text = lines[line0]? || ""
+      target = Location.new(path_of(uri), line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      local_sites(text, path_of(uri), target, lines)
+    end
+
+    # A variable's name: a lower-case letter or `_` first, letters, digits
+    # and `_` after, no `?` or `!`, and not a keyword.
+    private def valid_local?(name : String) : Bool
+      return false if name.empty? || KEYWORDS.includes?(name)
+      return false unless name[0].ascii_lowercase? || name[0] == '_'
+      name.each_char.all? { |ch| ch.ascii_alphanumeric? || ch == '_' }
+    end
+
+    private def local_sites(text : String, path : String, target : Location, lines : Array(String)) : LocalSites?
+      parser = Parser.new(text)
+      parser.filename = path
+      LocalSites.at(parser.parse, target, lines)
+    rescue CodeError
+      nil
     end
 
     # ── Signature help ───────────────────────────────────────────────────
@@ -3016,10 +3124,10 @@ module Iyi::Lsp
       case command
       when "iyi.run"
         uri = params["arguments"]?.try(&.[0]?).try(&.as_s?)
-        raise "iyi.run takes the document uri" unless uri
+        raise BadParams.new("iyi.run takes the document uri") unless uri
         run_verb(id, uri, "run")
       else
-        raise "unknown command '#{command}'"
+        raise BadParams.new("unknown command '#{command}'")
       end
     end
 

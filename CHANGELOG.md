@@ -4,6 +4,47 @@
 
 ### Added
 
+- **`Process.run(env:)` gives a child its own environment.** The child's
+  environment was this program's, and the only way to change it was
+  `ENV[]=` - which changes it for this program too, under every other
+  task. `env:` takes a hash laid over the current environment for the
+  child alone: a name given a value is set, a name given `nil` removed; on
+  Windows a name matches without regard to case, as Windows matches one,
+  and the block is sorted as `CreateProcessW` documents. The
+  `std/process` exercise gives one variable and removes another, reads
+  both back from the child, and checks its own are unchanged; with `env:`
+  ignored the exercise fails.
+
+- **`std/process`: a program runs another one.** `Process.run(command,
+  args, input:, chdir:, capture:)` starts a program, hands it `input` or
+  the null device, collects its stdout and stderr, and answers a
+  `ProcessResult` - the exit code, the signal that ended it, both texts -
+  or a `ProcessError` when it could not be started (no such program, not
+  allowed, no such directory), or `Cancelled`, after ending the child, when
+  its task is cancelled. `capture: false` gives the child this program's
+  own streams. An argument reaches the child's `argv` as it was given: no
+  shell reads it, and on Windows the command line is quoted for the
+  child's `CommandLineToArgvW`; a `.bat` or `.cmd` is refused rather than
+  run through `cmd.exe`, which reads its arguments again.
+  `Process.executable` is the program's own path. Nothing holds the thread:
+  Linux clones and execs by syscall and waits on a pidfd, darwin uses
+  `posix_spawn` and a kqueue watching the child's exit, and Windows
+  `CreateProcessW`, overlapped named pipes and `RegisterWaitForSingleObject`
+  on the completion port. Before this the library could not start a
+  program on any platform. `bench/std_process_exercise.sh` runs the
+  exercise's own binary as the child: 16 arguments with spaces, quotes and
+  backslashes, 468,890 bytes through the child and back, a megabyte on each
+  stream at once, exit codes and a panic, a missing program and directory,
+  `chdir`, a variable set here and read there, a child that reads none of
+  four megabytes, a sibling ticking while a child sleeps, and a cancelled
+  run. It holds on Linux, darwin and Windows, and fails with each promise
+  taken out of a copy of the module: a quote's backslash dropped on
+  Windows, every argument the first on Linux and darwin; stderr read only
+  after stdout, where the watchdog ends the run at 45 s; the end awaited by
+  a blocking call, where the sibling ticks 0 times of 10; the kill on
+  cancel removed, where the run takes 20 s; and on Linux and darwin,
+  SIGPIPE left alone, which ends the program (141).
+
 - **Crystal's library specs run on Windows.** The compiler is built from
   Crystal's library, and its specs ran on Linux alone. On Windows they did
   not compile: the DWARF reader raises `Error` without loading the module
@@ -99,6 +140,99 @@
   for having nothing to hold, holds this file there.
 
 ### Fixed
+
+- **The language server finds an instance variable.** On `@count`,
+  `documentHighlight`, `references` and `definition` answered null. They
+  answer off the parse now, as for a local: the sites are every `@count`
+  in its class's body and defs, and the name its accessor declares -
+  `getter count : Int32` is the declaration, and where definition goes. A
+  `def initialize(@count : Int32)` parameter is the field's, a local
+  `count` beside it stays its own variable, and a nested class's `@count`
+  is another field. Rename refuses an instance variable by name, since
+  its accessors carry it as methods. Step 18e of `bench/lsp_session.py`;
+  the old server answers the field with nothing.
+
+- **A string built at run time ends in a NUL.** `String.new` allocated a
+  byte after the string for the terminator and never wrote it, and a
+  string's chunk is atomic, so the collector hands it back uncleared: a
+  chunk that had held a longer string kept that string's byte there. Code
+  that hands `to_unsafe` to the platform as a C string - `std/process`'s
+  program and directory lookups, `std/debug`'s PDB and DWARF paths - read
+  on past the end. Measured on Windows: after a collection that freed
+  longer strings, 961 of 1,000 strings built in their place had no
+  terminator, and `Process.run` of a batch file's path built that way
+  answered "no such program" instead of refusing the batch file. The
+  terminator is written now. `bench/std_gc_exercise.sh` builds 400
+  strings where longer ones were freed and checks each; without the
+  write, 363 of 400 fail it.
+
+- **Go-to-definition on a local variable goes where it is bound.** It
+  asked `tool implementations`, which answers for calls, and a variable
+  jumped nowhere. A local's definition is its first binding in its scope
+  now - an assignment, a parameter, a block's parameter - read off the
+  same parse that highlights it. Step 18d of `bench/lsp_session.py`; the
+  old server answers it with nothing.
+
+- **A refused rename says it was refused, not that the server broke.** A
+  rename with nothing renameable under the cursor, or onto a name that is
+  not a name, answered -32603, the code that says the server itself is
+  broken, and so did `workspace/executeCommand` with a command the server
+  does not have. A rename it will not carry out is RequestFailed (-32803)
+  now, with the same sentence, and an unknown command is invalid params
+  (-32602). Steps 52g and 52h of `bench/lsp_session.py`; the old server
+  fails both.
+
+- **The language server finds, highlights and renames a local variable.**
+  `documentHighlight`, `references` and `rename` answered for defs and
+  calls, off the typed graph, and a variable is neither: on one, highlight
+  and references answered null and rename refused ("rename serves defs and
+  their calls"), so an editor could not rename a variable at all. A local
+  is found in the buffer's parse now, so it answers while the buffer does
+  not compile, and within the scope that binds it - a def, a type body or
+  the file, with a block's own parameter a variable of its own. Its
+  binding and assignments are the writes, the first one the declaration.
+  A rename to a name already used in that scope, as a variable or a bare
+  call, is refused, since the two would become one. Steps 18b and 18c of
+  `bench/lsp_session.py` ask all four on a local, a parameter and a block
+  parameter of the same name, beside a same-named local in another def;
+  the old server answered each with nothing.
+
+- **`iyi help` says what `init` writes.** Its line still read "iyi.mod,
+  main.iyi, a module and a test" - the four files `init` wrote before it
+  was cut to the manifest and the root module. It names those two now, and
+  `bench/init_project.sh` holds the line to what `init kemal` wrote in the
+  same run; the old text fails it.
+
+- **A variable set with `ENV[]=` on Linux and darwin outlives the next
+  collection.** The table `ENV[]=` builds is the collector's memory, and it
+  goes into the C runtime's `environ`, in the C runtime's data, which the
+  collector does not scan; an overwritten variable went into the table the
+  C runtime started with. Nothing the collector reads held either, and the
+  next collection freed them. Measured on Linux: a program that set a
+  variable and then allocated four megabytes ended in a segmentation
+  fault, and a child started after that was refused by `execve` with
+  EFAULT - the `std/process` exercise is what found it. The prelude holds
+  the table in a class variable now, and an overwrite builds a new table
+  as a new variable does. `bench/std_env_exercise.sh` sets a variable and
+  overwrites `PATH`, collects twice with 20,000 strings between, and reads
+  both back; with the hold taken out the exercise fails on Linux and
+  darwin.
+
+- **A program that writes to stdout and stderr no longer writes NUL bytes
+  ahead of its output.** Codegen emits a callee the first time something
+  calls it, and `IyiIO.new` - the three standard streams, every `File`, a
+  socket's stream - was emitted inside the allocator's own callees, before
+  the prelude's `__iyi_new` existed. It took the path meant for another
+  allocator: an untyped chunk, and the type id stored in the four bytes in
+  front of it, which under the arena are the last four bytes of the chunk
+  before. STDERR's id landed in STDOUT's write position, and a program that
+  named both streams wrote 23 NUL bytes ahead of its first output into a
+  pipe, measured on Windows. Linux's IR carries the same store - one, in
+  `samples/iyi/hello.iyi` - and darwin's did not. `__iyi_new` is declared
+  now when the first allocation asks for it, and hello's IR has no such
+  store left. A compiler
+  spec runs a program that names both streams and reads its output back;
+  the old codegen fails it with the 23 NUL bytes.
 
 - **On darwin, a fresh object could read what its page's last owner left.**
   The sweep hands runs of dead pages back, and the carve takes a run up
@@ -10814,7 +10948,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 17,983-line library and nothing else. Every other
+  written against iyi's own 18,011-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -1,0 +1,291 @@
+# Exercises `std/process`.
+#
+#     ./bin/iyi run bench/std_process_exercise.iyi
+#
+# The children are this program itself, started again through
+# `Process.executable` with a word saying what to be: so every platform
+# runs the same child, and what it answers is known exactly. Everything
+# the parent checks is printed as a fact that is the same on every run,
+# and a watchdog beside the checks turns a hang - a pipe nobody drains, a
+# wait that never ends - into a failure with a sentence.
+
+module bench/std_process_exercise
+
+import std/process::{Process, ProcessResult, ProcessError}
+import std/env::{ENV}
+
+pub struct TaskFailed
+  def initialize
+  end
+end
+
+impl Error for TaskFailed
+  def message : String
+    "a sibling failed on purpose"
+  end
+end
+
+def fail(message : String) : NoReturn
+  puts "FAIL: #{message}"
+  stdout.flush
+  __iyi_exit(1)
+end
+
+def elapsed_ms(started : Int64) : Int64
+  (__iyi_monotonic_ns - started) // 1000000_i64
+end
+
+def base_name(path : String) : String
+  bytes = path.to_unsafe
+  index = path.bytesize - 1
+  while index >= 0
+    break if bytes[index] == 47_u8 || bytes[index] == 92_u8
+    index = index - 1
+  end
+  path[index + 1, path.bytesize - index - 1]
+end
+
+def directory_of(path : String) : String
+  name = base_name(path)
+  path[0, path.bytesize - name.bytesize - 1]
+end
+
+# ── The child ────────────────────────────────────────────────────────────
+args = Program.args
+if mode = args[0]?
+  case mode
+  when "argv"
+    index = 1
+    while index < args.size
+      stdout.write("[#{args[index]}]\n")
+      index = index + 1
+    end
+  when "cat"
+    data = stdin.read_all
+    stdout.write(data)
+    stderr.write("read #{data.bytesize} bytes\n")
+  when "stdin"
+    stdout.write("stdin had #{stdin.read_all.bytesize} bytes\n")
+  when "flood"
+    total = args[1].to_i
+    block = "x" * 4096
+    written = 0
+    while written < total
+      stdout.write(block)
+      stderr.write(block)
+      written = written + block.bytesize
+    end
+  when "exit"
+    stdout.write("exiting\n")
+    stdout.flush
+    __iyi_exit(args[1].to_i)
+  when "panic"
+    raise "the child panicked on purpose"
+  when "has"
+    stdout.write(File.exists?(args[1]) ? "found\n" : "missing\n")
+  when "env"
+    index = 1
+    while index < args.size
+      stdout.write("#{Program.env(args[index]) || "<unset>"}\n")
+      index = index + 1
+    end
+  when "sleep"
+    sleep(args[1].to_i)
+    stdout.write("woke\n")
+  when "deaf"
+    stdout.write("not reading\n")
+  else
+    fail("no child mode #{mode}")
+  end
+  stdout.flush
+  __iyi_exit(0)
+end
+
+# ── The parent ───────────────────────────────────────────────────────────
+me = Process.executable || fail("Process.executable answered nil")
+fail("Process.executable answered #{me}, which is not there") unless File.exists?(me)
+
+def ran(answer : ProcessResult | ProcessError | Cancelled, what : String) : ProcessResult
+  case answer
+  when ProcessResult
+    answer
+  when ProcessError
+    fail("#{what}: #{answer.message}")
+  else
+    fail("#{what}: answered Cancelled")
+  end
+end
+
+done = false
+group do |g|
+  g.spawn do
+    # Long enough for the proof whose child sleeps twenty seconds out.
+    slept = sleep(45000)
+    fail("a check did not finish within 45 seconds") unless slept.is_a?(Cancelled) || done
+    0
+  end
+
+  puts "== arguments reach the child as they left"
+  sent = ["plain", "two words", "", "quote\"inside", "back\\slash", "trail\\", "\\\\server\\share",
+          "tab\there", "ünïcode-çğış-日本", "$HOME ; echo no", "%PATH%", "a\"b\\\"c", "\\\"", "end\\\\",
+          "'single'", "*.iyi"]
+  argv = ["argv"] + sent
+  heard = ran(Process.run(me, argv), "argv")
+  expected = String.build { |text| sent.each { |arg| text << "[" << arg << "]\n" } }
+  unless heard.stdout == expected
+    fail("the child heard\n#{heard.stdout}instead of\n#{expected}")
+  end
+  puts "  #{sent.size} arguments came back as they went, spaces, quotes and backslashes included"
+
+  puts "== input in, output out, both at once"
+  input = String.build { |text| 20000.times { |line| text << "line " << line << " of the input\n" } }
+  echoed = ran(Process.run(me, ["cat"], input: input), "cat")
+  fail("cat answered #{echoed.stdout.bytesize} bytes of #{input.bytesize}") unless echoed.stdout == input
+  fail("cat's stderr was #{echoed.stderr.inspect}") unless echoed.stderr == "read #{input.bytesize} bytes\n"
+  puts "  #{input.bytesize} bytes through the child and back, and its stderr apart"
+
+  puts "== a child's input is empty unless it is given one"
+  empty = ran(Process.run(me, ["stdin"]), "stdin")
+  fail("the child's stdin: #{empty.stdout.inspect}") unless empty.stdout == "stdin had 0 bytes\n"
+  puts "  #{empty.stdout.chomp('\n')}"
+
+  puts "== a megabyte on each stream, drained together"
+  flood = ran(Process.run(me, ["flood", "1048576"]), "flood")
+  unless flood.stdout.bytesize == 1048576 && flood.stderr.bytesize == 1048576
+    fail("flood answered #{flood.stdout.bytesize} and #{flood.stderr.bytesize} bytes")
+  end
+  puts "  1048576 bytes of stdout and 1048576 of stderr"
+
+  puts "== an exit code, and a panic"
+  three = ran(Process.run(me, ["exit", "3"]), "exit 3")
+  fail("exit 3 answered #{three.exit_code}, success #{three.success?}") unless three.exit_code == 3 && !three.success?
+  fail("exit 3 said #{three.stdout.inspect}") unless three.stdout == "exiting\n"
+  panicked = ran(Process.run(me, ["panic"]), "panic")
+  fail("a panicking child answered #{panicked.exit_code}") unless panicked.exit_code == 1
+  fail("the panic's sentence: #{panicked.stderr.inspect}") unless panicked.stderr.includes?("the child panicked on purpose")
+  puts "  exit 3 is 3, and a panic is 1 with its sentence on stderr"
+
+  puts "== what cannot be started is an error"
+  missing = Process.run("no-such-program-iyi-process", ["x"])
+  case missing
+  when ProcessError
+    fail("not_found? is false for #{missing.code}") unless missing.not_found?
+    puts "  #{missing.message}"
+  else
+    fail("a missing program was not refused")
+  end
+  nowhere = Process.run(me, ["has", "x"], chdir: "no-such-directory-iyi-process")
+  case nowhere
+  when ProcessError
+    fail("the directory is not named: #{nowhere.message}") unless nowhere.directory == "no-such-directory-iyi-process"
+    fail("a missing directory's message: #{nowhere.message}") unless nowhere.message.ends_with?(" in no-such-directory-iyi-process: no such directory")
+    puts "  a missing directory: #{nowhere.reason}"
+  else
+    fail("a missing directory was not refused")
+  end
+
+  puts "== chdir is where the child runs"
+  here = ran(Process.run(me, ["has", base_name(me)], chdir: directory_of(me)), "has")
+  fail("in its own directory the child found #{here.stdout.inspect}") unless here.stdout == "found\n"
+  puts "  the child found its own file in the directory it was given"
+
+  puts "== the environment is this program's"
+  ENV["IYI_PROCESS_PROBE"] = "değer-日本"
+  told = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"]), "env")
+  fail("the child read #{told.stdout.inspect}") unless told.stdout == "değer-日本\n"
+  puts "  a variable set here arrives there: #{told.stdout.chomp('\n')}"
+
+  puts "== the child's environment can be given"
+  given = ran(Process.run(me, ["env", "IYI_PROCESS_GIVEN", "IYI_PROCESS_PROBE"],
+    env: {"IYI_PROCESS_GIVEN" => "given-değer", "IYI_PROCESS_PROBE" => nil}), "env:")
+  fail("with env: the child read #{given.stdout.inspect}") unless given.stdout == "given-değer\n<unset>\n"
+  fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
+  fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
+  puts "  one variable given and one removed, for the child alone"
+  {% if flag?(:win32) %}
+    # One variable, as Windows has it: a name given in another case
+    # replaces it rather than standing beside it.
+    cased = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"], env: {"iyi_process_probe" => "lower"}), "env: cased")
+    fail("a name in another case: the child read #{cased.stdout.inspect}") unless cased.stdout == "lower\n"
+    puts "  a name in another case is the same variable"
+  {% end %}
+
+  puts "== a child that stops reading"
+  deaf = ran(Process.run(me, ["deaf"], input: "x" * 4194304), "deaf")
+  fail("the deaf child said #{deaf.stdout.inspect}") unless deaf.stdout == "not reading\n" && deaf.success?
+  puts "  four megabytes offered, none read, and this program carries on"
+
+  puts "== the child's streams can be this program's own"
+  stdout.flush
+  shared = ran(Process.run(me, ["argv", "written straight to the terminal"], capture: false), "capture: false")
+  fail("capture: false still captured #{shared.stdout.inspect}") unless shared.stdout.empty? && shared.success?
+  puts "  and nothing captured"
+
+  puts "== the wait parks"
+  # The child's output is this program's own, so the only wait is for its
+  # end: a wait that held the thread would let the sibling tick none of
+  # its ticks before the child had ended.
+  ticks = 0
+  ticks_at_end = -1
+  group do |h|
+    h.spawn do
+      stdout.flush
+      slept = ran(Process.run(me, ["sleep", "800"], capture: false), "sleep")
+      ticks_at_end = ticks
+      fail("the sleeping child answered #{slept.exit_code}") unless slept.success?
+      0
+    end
+    h.spawn do
+      10.times do
+        sleep(50)
+        ticks = ticks + 1
+      end
+      0
+    end
+  end
+  fail("a sibling ticked #{ticks_at_end} times of 10 while the child ran") unless ticks_at_end >= 5
+  puts "  a sibling ticked all its ticks while the child slept"
+
+  puts "== a cancelled run ends its child"
+  outcome = ""
+  started = __iyi_monotonic_ns
+  group do |h|
+    h.spawn do
+      answer = Process.run(me, ["sleep", "20000"])
+      outcome = answer.is_a?(Cancelled) ? "cancelled" : "not cancelled"
+      answer.is_a?(Cancelled) ? answer : 0
+    end
+    h.spawn do
+      sleep(300)
+      TaskFailed.new
+    end
+  end
+  waited = elapsed_ms(started)
+  fail("the run answered #{outcome}") unless outcome == "cancelled"
+  fail("the cancelled run took #{waited} ms: its child was not ended") unless waited < 10000
+  puts "  answered Cancelled, with its child ended"
+
+  {% if flag?(:win32) %}
+    puts "== a batch file is refused"
+    batch = "#{directory_of(me)}\\iyi-process-probe.cmd"
+    File.write(batch, "@echo ran\r\n")
+    refused = Process.run(batch)
+    File.delete(batch)
+    case refused
+    when ProcessError
+      puts "  #{refused.reason}"
+    else
+      fail("a batch file was not refused")
+    end
+  {% else %}
+    puts "== a child ended by a signal"
+    killed = ran(Process.run("/bin/sh", ["-c", "kill -9 $$"]), "sh")
+    fail("signal #{killed.signal}, exit #{killed.exit_code}") unless killed.signal == 9 && killed.exit_code == 137 && !killed.success?
+    puts "  signal 9, exit code 137"
+  {% end %}
+
+  done = true
+  g.cancel_children
+end
+
+puts "ALL CHECKS PASSED"

@@ -34,7 +34,7 @@ module Iyi
     Usage: iyi [command] [switches] [program file] [--] [arguments]
 
     Command:
-        init                     write a new project: iyi.mod, main.iyi, a module and a test
+        init                     write a new project: iyi.mod and the root module it names
         get                      add a requirement to iyi.mod, or move one; -u brings all up to date
         build                    build an executable
         run                      build and run a program (default)

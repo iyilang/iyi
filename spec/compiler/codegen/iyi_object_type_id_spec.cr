@@ -76,4 +76,18 @@ describe "Codegen: iyi object type id" do
         IYI
     end
   end
+
+  # `IyiIO.new` is emitted inside the allocator's own callees, before the
+  # prelude's `fun __iyi_new`; it took the untyped path then, and stored
+  # STDERR's type id in the last four bytes of the chunk before it - STDOUT's
+  # write position - so the first write flushed that many NUL bytes ahead of
+  # itself.
+  it "writes nothing ahead of a program's output when it names both streams" do
+    with_tempdir("iyi-early-new") do
+      run_iyi("streams", <<-'IYI').should eq("out\n")
+        stderr.write("")
+        stdout.write("out\n")
+        IYI
+    end
+  end
 end

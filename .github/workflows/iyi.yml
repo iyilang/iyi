@@ -978,6 +978,14 @@ jobs:
           # arm64 kernel under emulation in cross-run.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/threads-aarch64 bench/thread_exercise.iyi
+          # std/process's Linux arm on the other instruction set and the
+          # other libc: `clone`, `execve`, `pipe2`, `pidfd_open` and `wait4`
+          # by syscall, with aarch64's numbers, which the native Linux job
+          # never reaches. The exercise runs itself as its children.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/process-aarch64 bench/std_process_exercise.iyi
+          ./bin/iyi build --cross-compile --target x86_64-linux-musl \
+            -o cross/process-musl bench/std_process_exercise.iyi
 
           # The Windows probe: the two shapes whose output has been seen wrong,
           # a case conversion and a number rendered into a string — then the
@@ -1052,10 +1060,15 @@ jobs:
             cc hello-musl.o -o hello-musl -lgc -lpthread &&
             ./hello-musl > got.txt &&
             cc conc-musl.o -o conc-musl &&
-            ./conc-musl > conc.txt
-          '
+            ./conc-musl > conc.txt &&
+            cc process-musl.o -o process-musl &&
+            timeout 300 ./process-musl > process.txt 2>&1
+          ' || status=$?
+          echo "== process.txt"; cat cross/process.txt 2>/dev/null || echo "(not written)"
+          [ "${status:-0}" -eq 0 ]
           diff cross/expected.txt cross/got.txt && echo "musl: same output"
           grep -q "every property held" cross/conc.txt && echo "musl: III.4 held"
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held"
 
       # Every program's output goes to a file and the chain stops at the
       # first failure, which is why a red run here used to say nothing but
@@ -1075,9 +1088,11 @@ jobs:
               gcc floor-aarch64.o -o floor-aarch64 &&
               timeout 120 ./floor-aarch64 2 20 > floor.txt 2>&1 &&
               gcc threads-aarch64.o -o threads-aarch64 &&
-              timeout 300 ./threads-aarch64 4 > threads.txt 2>&1
+              timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
+              gcc process-aarch64.o -o process-aarch64 &&
+              timeout 300 ./process-aarch64 > process.txt 2>&1
             ' || status=$?
-          for out in got conc floor threads; do
+          for out in got conc floor threads process; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1087,6 +1102,7 @@ jobs:
           # kernel's ABI and the asm, which is what this arm is for.
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held"
 
   # darwin arm64 is a run target now (SPEC.md III.4.8): the concurrency
   # runtime's kqueue arm, the panic registry and every sample run natively on

@@ -32,6 +32,49 @@ assert_str "00000000", CRC32.hexdigest(""), "crc empty"
 assert_str "cbf43926", CRC32.hexdigest("123456789"), "crc ITU"
 assert_str "00000001", Adler32.hexdigest(""), "adler empty"
 assert_str "091e01de", Adler32.hexdigest("123456789"), "adler ITU"
+# Past a table's eight bytes and Adler-32's 5,552 between reductions,
+# on bytes near their largest: python's zlib gives these.
+ones = "\u00ff" * 5552
+assert_str "fb3469c3", CRC32.hexdigest(ones), "crc of 11,104 bytes of 0xc3 0xbf"
+assert_str "73c4b541", Adler32.hexdigest(ones), "adler of 11,104 bytes of 0xc3 0xbf"
 puts "  CRC-32 and Adler-32"
+
+# What a checksum costs against a pass that only adds the bytes up: CRC-32
+# went a bit at a time and Adler-32 reduced twice a byte, 36 and 7 times
+# the pass in a plain build. A release build turns the pass into vector
+# code, so the ratio means nothing there and is not asked.
+{% unless flag?(:release) %}
+  def byte_sum(s : String) : UInt32
+    p = s.to_unsafe
+    sum = 0_u32
+    i = 0
+    while i < s.bytesize
+      sum = sum &+ p[i].to_u32
+      i = i + 1
+    end
+    sum
+  end
+
+  sample = "0123456789abcdefghijklmnopqrstuvwxyz!?" * 60000
+  best_sum = 0_i64
+  best_crc = 0_i64
+  best_adler = 0_i64
+  seen = 0_u32
+  3.times do |k|
+    t0 = IyiMark.now_ns
+    seen = seen ^ byte_sum(sample)
+    t1 = IyiMark.now_ns
+    seen = seen ^ CRC32.checksum(sample)
+    t2 = IyiMark.now_ns
+    seen = seen ^ Adler32.checksum(sample)
+    t3 = IyiMark.now_ns
+    best_sum = (t1 - t0).to_i64 if k == 0 || (t1 - t0).to_i64 < best_sum
+    best_crc = (t2 - t1).to_i64 if k == 0 || (t2 - t1).to_i64 < best_crc
+    best_adler = (t3 - t2).to_i64 if k == 0 || (t3 - t2).to_i64 < best_adler
+  end
+  assert_true best_crc < best_sum * 6, "crc cost: #{best_crc * 10 // best_sum}/10 of a byte sum (#{seen})"
+  assert_true best_adler < best_sum * 4, "adler cost: #{best_adler * 10 // best_sum}/10 of a byte sum"
+  puts "  CRC-32 at #{best_crc * 10 // best_sum}/10 and Adler-32 at #{best_adler * 10 // best_sum}/10 of a pass that adds the bytes up"
+{% end %}
 
 puts "\nALL CHECKS PASSED"

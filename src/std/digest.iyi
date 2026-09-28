@@ -288,25 +288,59 @@ pub struct SHA256
 end
 
 pub struct CRC32
+  # Eight bytes a step through eight tables (slicing-by-8), where it had
+  # been one bit a step: twenty megabytes took 105 ms, which was most of
+  # what `Gzip.decompress` spent, the inflating itself taking 30.
   def self.checksum(data : String) : UInt32
+    t = tables
     crc = 0xffffffff_u32
     p = data.to_unsafe
     n = data.bytesize
     i = 0
+    while i + 8 <= n
+      one = crc ^ (p[i].to_u32 | p[i + 1].to_u32.unsafe_shl(8) | p[i + 2].to_u32.unsafe_shl(16) | p[i + 3].to_u32.unsafe_shl(24))
+      crc = t[1792 + (one & 255_u32).to_i32] ^ t[1536 + (one.unsafe_shr(8) & 255_u32).to_i32] ^
+            t[1280 + (one.unsafe_shr(16) & 255_u32).to_i32] ^ t[1024 + one.unsafe_shr(24).to_i32] ^
+            t[768 + p[i + 4].to_i32] ^ t[512 + p[i + 5].to_i32] ^ t[256 + p[i + 6].to_i32] ^ t[p[i + 7].to_i32]
+      i = i + 8
+    end
     while i < n
-      crc = crc ^ p[i].to_u32
-      b = 0
-      while b < 8
-        if (crc & 1_u32) == 1_u32
-          crc = (crc >> 1) ^ 0xedb88320_u32
-        else
-          crc = crc >> 1
-        end
-        b = b + 1
-      end
+      crc = t[((crc ^ p[i].to_u32) & 255_u32).to_i32] ^ crc.unsafe_shr(8)
       i = i + 1
     end
     crc ^ 0xffffffff_u32
+  end
+
+  @@tables = Pointer(UInt32).new(0_u64)
+
+  # The eight tables, made once: the first is the byte-at-a-time table,
+  # and each after it is one more byte of zeros through the one before.
+  private def self.tables : Pointer(UInt32)
+    return @@tables if @@tables.address != 0_u64
+    t = Pointer(UInt32).malloc(2048_u64)
+    n = 0
+    while n < 256
+      c = n.to_u32
+      k = 0
+      while k < 8
+        c = (c & 1_u32) == 1_u32 ? c.unsafe_shr(1) ^ 0xedb88320_u32 : c.unsafe_shr(1)
+        k = k + 1
+      end
+      t[n] = c
+      n = n + 1
+    end
+    slice = 1
+    while slice < 8
+      n = 0
+      while n < 256
+        before = t[(slice - 1) * 256 + n]
+        t[slice * 256 + n] = before.unsafe_shr(8) ^ t[(before & 255_u32).to_i32]
+        n = n + 1
+      end
+      slice = slice + 1
+    end
+    @@tables = t
+    t
   end
 
   def self.hexdigest(data : String) : String
@@ -321,10 +355,17 @@ pub struct Adler32
     p = data.to_unsafe
     n = data.bytesize
     i = 0
+    # The modulo once per 5,552 bytes, the most that cannot carry `b` past
+    # 32 bits, rather than twice a byte.
     while i < n
-      a = (a + p[i].to_u32) % 65521_u32
-      b = (b + a) % 65521_u32
-      i = i + 1
+      stop = n - i > 5552 ? i + 5552 : n
+      while i < stop
+        a = a + p[i].to_u32
+        b = b + a
+        i = i + 1
+      end
+      a = a % 65521_u32
+      b = b % 65521_u32
     end
     (b << 16) | a
   end

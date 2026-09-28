@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **CRC-32 and Adler-32 cost what the bytes do.** CRC-32 went a bit at a
+  time and Adler-32 reduced its sums twice a byte: twenty megabytes took
+  105 ms to check, and `Gzip.decompress` spent most of its time there -
+  the inflating itself took 30. CRC-32 goes eight bytes a step through
+  eight tables and Adler-32 reduces once per 5,552 bytes: the twenty
+  megabytes take 8 ms, and `Gzip.decompress` of them 33 ms against Go's
+  67. `bench/std_digest_exercise.sh` checks both on 11,104 bytes against
+  python's zlib, times them against a pass that adds the bytes up in a
+  plain build, and proves both timings fail with the old loops back.
+
 - **`read_all`, and `File.read` through it, read the rest of a stream in
   large pieces.** It went through the stream's own buffer, a read and a
   copy per 4 KB: an 86 MB file took 150 ms and 21,000 reads. The rest

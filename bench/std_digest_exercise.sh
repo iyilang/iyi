@@ -112,6 +112,57 @@ else
   echo "  a broken digest is caught"
 fi
 
+# The checksums' costs, against the shapes they had: CRC-32 a bit at a
+# time, Adler-32 reduced every byte.
+cost_proof() { # cost_proof <label> <phrase> <old> <new>
+  rm -rf "$WORK/costly"
+  mkdir -p "$WORK/costly/std"
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/digest.iyi").read_text()
+if os.environ["OLD"] not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/costly/std/digest.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/costly${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_digest_exercise.iyi" >"$WORK/costly.out" 2>&1; then
+    echo "  the exercise PASSED on $1"
+    status=1
+  elif grep -q "$2" "$WORK/costly.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 failed, but not at the cost check:"
+    tail -2 "$WORK/costly.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+cost_proof "a CRC-32 a bit at a time" "crc cost" \
+  '    while i + 8 <= n
+      one' \
+  '    while i < n
+      crc = crc ^ p[i].to_u32
+      b = 0
+      while b < 8
+        crc = (crc & 1_u32) == 1_u32 ? crc.unsafe_shr(1) ^ 0xedb88320_u32 : crc.unsafe_shr(1)
+        b = b + 1
+      end
+      i = i + 1
+    end
+    while i + 8 <= n
+      one'
+cost_proof "an Adler-32 reduced every byte" "adler cost" \
+  '        a = a + p[i].to_u32
+        b = b + a' \
+  '        a = (a + p[i].to_u32) % 65521_u32
+        b = (b + a) % 65521_u32'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/digest exercise holds"

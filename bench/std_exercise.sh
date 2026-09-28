@@ -169,6 +169,16 @@ prove_fails "Float32 hash falls back to the type id" no_floathash "float.iyi" "h
 prove_fails "traits without its std/float import" no_floatimport "traits.iyi" "hash: Float32 values differ" \
   's|^import std/float$||'
 
+# 11. A list built by `appended` handed to the copying constructor, which is
+#     the second of the three copies an append used to make.
+prove_fails "an append that copies twice" no_owning "list.iyi" "list: an append copies the list once" \
+  's/List(T).owning(copy)/List(T).new(copy)/'
+
+# 12. And the constructor that stops copying: the caller's array becomes the
+#     list's, and the caller's next push lands in the list.
+prove_fails "a list that keeps the caller's array" no_copy "list.iyi" "list: the caller's array is not the list's" \
+  's/@items = items.dup/@items = items/'
+
 echo
 echo "== one mistake, one sentence, whichever tower answers"
 # `first` of an empty receiver, a negative count and a zero step used to be

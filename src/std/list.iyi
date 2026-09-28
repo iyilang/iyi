@@ -35,6 +35,19 @@ pub struct List(T)
     @items = items.dup
   end
 
+  # A list over an array nothing else holds: the one `appended` or
+  # `concatenated` has just built. The copy above is for a caller's array,
+  # which the caller still has; one made here has no other owner.
+  protected def self.owning(items : Array(T)) : List(T)
+    list = List(T).new([] of T)
+    list.adopt(items)
+    list
+  end
+
+  protected def adopt(items : Array(T)) : Nil
+    @items = items
+  end
+
   def size : Int32
     @items.size
   end
@@ -88,16 +101,23 @@ pub struct List(T)
   # `sort`, `reverse` — name the mutating form, and this type has none. That the
   # naming rule falls out rather than being applied is the point of having
   # settled it before any library code existed.
+  #
+  # Each builds its array at the size it ends with, once. `dup` then `<<`
+  # copied the list, grew the copy to twice its size and handed it to the
+  # constructor, which copied it a third time: an append to a list of n
+  # elements wrote 4n words where n + 1 is the whole of the work.
   def appended(item : T) : List(T)
-    copy = @items.dup
+    copy = Array(T).new(@items.size + 1)
+    copy.concat(@items)
     copy << item
-    List(T).new(copy)
+    List(T).owning(copy)
   end
 
   def concatenated(other : List(T)) : List(T)
-    copy = @items.dup
+    copy = Array(T).new(@items.size + other.size)
+    copy.concat(@items)
     other.each { |x| copy << x }
-    List(T).new(copy)
+    List(T).owning(copy)
   end
 
   # ---- value ---------------------------------------------------------------

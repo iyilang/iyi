@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **`List#appended` and `List#concatenated` copy the list once.** An
+  append to a list of n elements `dup`ed it, grew the copy to twice its
+  size with `<<`, then handed it to the constructor, which copied it again:
+  4n words where n + 1 is the work. Each now builds its array at the size
+  it ends with and keeps it. 100,000 Int64s: 3.2 MB per append down to
+  0.8 MB; 20,000 appends in a loop, 1.0 s down to 0.36 s.
+  `bench/std_exercise.sh` counts the bytes one append allocates with the
+  collector held back, and proves the check fails with the second copy put
+  back.
+
 - **An integer prints in half the time.** `Int64#to_s` and `UInt64#to_s` -
   and `Int32#to_s`, and every `#{n}`, through them - gathered their digits
   in an `Array(Int32)` and then copied them into the string, an allocation

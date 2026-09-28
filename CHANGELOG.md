@@ -145,6 +145,17 @@
 
 ### Fixed
 
+- **`File.each_line` reads a line at a time.** It read the whole file
+  into an array of its lines and then walked the array, so a log of any
+  size was the program's memory twice over before the first line was
+  seen: a 2 MB file allocated 8.7 MB. It reads off the file as it goes
+  now, the lines as `read_lines` gives them, and refuses a missing path
+  and a directory with `File.read`'s sentences; 2M lines take 90 ms, down
+  from 205. `bench/std_file_exercise.sh` counts the bytes a pass over
+  2 MB allocates with the collector held back, fails past one and a half
+  times the file, refuses both paths, and proves the check fails on an
+  `each_line` that reads the file whole first.
+
 - **A pause in typing hands the language server's memory back however the
   typing went before it.** The proxy replaces its worker when the wire
   goes quiet, and when a worker had instead been replaced on the memory

@@ -314,6 +314,34 @@ else
   status=1
 fi
 
+# each_line that reads the whole file into its lines first, as it did.
+mkdir -p "$WORK/patched_lines/std"
+cp -R "$REPO/src/std/." "$WORK/patched_lines/std/"
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the each_line proof is unmeasured"
+elif ! "$PY" - <<PY
+from pathlib import Path
+path = Path("$WORK/patched_lines/std/file.iyi")
+src = path.read_text()
+old = "    while line = io.read_line(chomp: true)\n      yield line\n    end\n"
+if old not in src:
+    raise SystemExit(f"each_line patch site missing: {old!r}")
+path.write_text(src.replace(old, "    io.close\n    read_lines(path).each { |line| yield line }\n", 1))
+PY
+then
+  echo "  the each_line patch did not apply"
+  status=1
+elif IYI_PATH="$WORK/patched_lines${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/sandbox" >"$WORK/mut_lines.out" 2>&1; then
+  echo "  the exercise PASSED on an each_line that reads the whole file first"
+  status=1
+elif grep -q "each_line streams" "$WORK/mut_lines.out"; then
+  echo "  an each_line that reads the whole file first is caught"
+else
+  echo "  it failed, but not at the streaming check:"
+  tail -3 "$WORK/mut_lines.out" | sed 's/^/    /'
+  status=1
+fi
+
 echo
 echo "== what file refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
@@ -345,6 +373,10 @@ refuses "read of a path that does not exist" read_nonexistent "cannot read " \
   'File.read("'"$WORK"'/does_not_exist.txt")'
 refuses "read of a directory passed where a file is expected" read_dir "it is a directory, or the read failed" \
   'File.read("'"$WORK"'")'
+refuses "each_line of a path that does not exist" each_line_nonexistent "cannot read " \
+  'File.each_line("'"$WORK"'/does_not_exist.txt") { |l| puts l }'
+refuses "each_line of a directory" each_line_dir "it is a directory, or the read failed" \
+  'File.each_line("'"$WORK"'") { |l| puts l }'
 refuses "unsupported append open mode" append_mode "unsupported mode: a" \
   'File.open("'"$WORK"'/foo.txt", "a")'
 refuses "info on a path that does not exist" info_nonexistent "File not found: " \

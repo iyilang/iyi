@@ -4,6 +4,14 @@
 
 ### Changed
 
+- **`read_all`, and `File.read` through it, read the rest of a stream in
+  large pieces.** It went through the stream's own buffer, a read and a
+  copy per 4 KB: an 86 MB file took 150 ms and 21,000 reads. The rest
+  goes straight into the growing result now, as much as it has room for
+  each time: 70 ms, and 4 MB is 10 reads. `bench/io_exercise.sh` counts a
+  4 MB `read_all`'s reads in `/proc/self/io` on Linux, fails past 200,
+  and proves it fails with the reads a buffer at a time again (1,027).
+
 - **A parked reader costs the other connections nothing.** On Linux and
   darwin every io event, every second waiter's check and every
   cancellation walked the list of fibers parked on io, so each read on a
@@ -11238,7 +11246,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,343-line library and nothing else. Every other
+  written against iyi's own 18,358-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

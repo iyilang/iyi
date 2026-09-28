@@ -124,6 +124,14 @@ prove_fails "read across buffer boundary fails" noboundary "buffer_boundary:" \
 prove_fails "eof check fails" noeof "eof:" \
   '{ sub(/def eof\? : Bool/, "def eof? : Bool\n    return false"); print }'
 
+# 4b. read_all through the stream's buffer again, a buffer at a time
+case "$(uname -s)" in
+  Linux)
+    prove_fails "read_all a buffer at a time fails" noread_all "read_all:" \
+      '{ if ($0 ~ /got = low_level_read\(@fd, \(buffer \+ filled\).as\(Void\*\), \(capacity - filled\).to_u64\)/) { print "      got = low_level_read(@fd, (buffer + filled).as(Void*), 4096_u64)"; next } print }'
+    ;;
+esac
+
 # 5. puts ends every line, ended or not
 prove_fails "puts ending an ended line fails" noends "puts:" \
   '{ if ($0 ~ /text.bytesize > 0 && text.to_unsafe\[text.bytesize - 1\] == 10_u8 \? write\(text\) : write_line\(text\)/) { print "    write_line(text)"; next } print }'

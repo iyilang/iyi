@@ -141,6 +141,17 @@
 
 ### Fixed
 
+- **The language server finds an instance variable.** On `@count`,
+  `documentHighlight`, `references` and `definition` answered null. They
+  answer off the parse now, as for a local: the sites are every `@count`
+  in its class's body and defs, and the name its accessor declares -
+  `getter count : Int32` is the declaration, and where definition goes. A
+  `def initialize(@count : Int32)` parameter is the field's, a local
+  `count` beside it stays its own variable, and a nested class's `@count`
+  is another field. Rename refuses an instance variable by name, since
+  its accessors carry it as methods. Step 18e of `bench/lsp_session.py`;
+  the old server answers the field with nothing.
+
 - **A string built at run time ends in a NUL.** `String.new` allocated a
   byte after the string for the terminator and never wrote it, and a
   string's chunk is atomic, so the collector hands it back uncleared: a

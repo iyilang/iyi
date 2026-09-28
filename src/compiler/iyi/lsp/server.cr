@@ -1310,10 +1310,10 @@ module Iyi::Lsp
       if local = local_sites(text, path, Location.new(path, line0 + 1, column), lines)
         _, declarations = local.split
         if declared = declarations.first?
-          location = declared[0]
+          location, size = declared
           declared_line = lines[location.line_number - 1]? || ""
           ch = Lsp.character_of(declared_line, location.column_number)
-          end_ch = Lsp.character_of(declared_line, location.column_number + local.name.size)
+          end_ch = Lsp.character_of(declared_line, location.column_number + size)
           return respond(id) do |json|
             json.array do
               json.object do
@@ -1575,6 +1575,9 @@ module Iyi::Lsp
     private def on_rename(id : JSON::Any, params : JSON::Any) : Nil
       new_name = params["newName"].as_s
       if local = local_at(params)
+        if local.instance_var?
+          raise Refused.new("#{local.name} is not renamed on its own: its accessors carry the name as methods")
+        end
         unless valid_local?(new_name)
           raise Refused.new("'#{new_name}' is not an iyi variable name")
         end
@@ -1821,7 +1824,9 @@ module Iyi::Lsp
       target = Location.new(path, line0 + 1, column)
       span = word_range(line_text, column)
       return respond_null(id) unless span
-      unless local_sites(text, path, target, text.lines)
+      if local = local_sites(text, path, target, text.lines)
+        return respond_null(id) if local.instance_var?
+      else
         return respond_null(id) unless @analysis.references_at(path, text, overrides_for(path), target)
       end
 
@@ -1886,10 +1891,10 @@ module Iyi::Lsp
       if local = local_sites(text, path, target, lines)
         return respond(id) do |json|
           json.array do
-            local.sites.each do |(location, write)|
+            local.sites.each do |(location, size, write)|
               site_line = lines[location.line_number - 1]? || ""
               start_ch = Lsp.character_of(site_line, location.column_number)
-              end_ch = Lsp.character_of(site_line, location.column_number + local.name.size)
+              end_ch = Lsp.character_of(site_line, location.column_number + size)
               json.object do
                 json.field "range" { range(json, location.line_number - 1, start_ch, location.line_number - 1, end_ch) }
                 json.field "kind", write ? 3 : 2

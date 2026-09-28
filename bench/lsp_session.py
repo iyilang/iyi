@@ -924,6 +924,62 @@ def main():
     c.send("textDocument/didClose",
            {"textDocument": {"uri": locals_uri}}, wait=False)
 
+    # 18e. An instance variable: every `@count` of its class, and the name
+    #      its accessor declares, which is the field's declaration. The
+    #      `@count` parameter is the field's too, not a local; a local
+    #      `count` beside it is its own variable; a nested class's
+    #      `@count` is another field. It answered null to all three
+    #      questions, and it is not renamed alone: its accessor carries the
+    #      name as a method.
+    fields = ("module fields\n\n"
+              "class Counter\n"
+              "  getter count : Int32\n"
+              "\n"
+              "  def initialize(@count : Int32)\n"
+              "  end\n"
+              "\n"
+              "  def bump : Nil\n"
+              "    count = 5\n"
+              "    @count = @count + count\n"
+              "  end\n"
+              "\n"
+              "  class Inner\n"
+              "    def initialize(@count : Int32)\n"
+              "    end\n"
+              "  end\n"
+              "end\n\n"
+              "puts Counter.new(1).count\n")
+    fields_uri = file_uri(os.path.join(work, "fields.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": fields_uri, "languageId": "iyi",
+                             "version": 1, "text": fields}}, wait=False)
+    c.diagnostics(fields_uri)
+    at_field = {"textDocument": {"uri": fields_uri},
+                "position": {"line": 10, "character": 14}}
+    lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"],
+                  h["range"]["end"]["character"], h["kind"])
+                 for h in c.send("textDocument/documentHighlight", at_field)["result"] or [])
+    local_lit = sorted((h["range"]["start"]["line"], h["range"]["start"]["character"])
+                       for h in c.send("textDocument/documentHighlight",
+                                       {"textDocument": {"uri": fields_uri},
+                                        "position": {"line": 10, "character": 23}})["result"] or [])
+    field_refs = sorted((r["range"]["start"]["line"], r["range"]["start"]["character"])
+                        for r in c.send("textDocument/references",
+                                        dict(at_field, context={"includeDeclaration": False}))["result"] or [])
+    field_def = [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                 for d in c.send("textDocument/definition", at_field)["result"] or []]
+    refused = c.send("textDocument/rename", dict(at_field, newName="total")).get("error") or {}
+    step("18e", "an instance variable is its class's: highlight, references, definition",
+         lit == [(3, 9, 14, 3), (5, 17, 23, 3), (10, 4, 10, 3), (10, 13, 19, 2)] and
+         local_lit == [(9, 4), (10, 22)] and
+         field_refs == [(5, 17), (10, 4), (10, 13)] and
+         field_def == [(3, 9)] and
+         refused.get("code") == -32803 and "accessors" in refused.get("message", ""),
+         f"field {lit}, local {local_lit}, references {field_refs}, "
+         f"definition {field_def}, rename {refused.get('code')}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": fields_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

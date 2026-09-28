@@ -113,6 +113,7 @@ for phrase in "arguments came back as they went" \
               "a missing directory: no such directory" \
               "the child found its own file" \
               "a variable set here arrives there: değer-日本" \
+              "one variable given and one removed, for the child alone" \
               "none read, and this program carries on" \
               "written straight to the terminal" \
               "a sibling ticked all its ticks while the child slept" \
@@ -213,6 +214,9 @@ else
         "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64"
       ;;
   esac
+
+  prove unenvironed "env: ignored" "with env: the child read" \
+    "    environment = ProcessChild.environment(env)" "    environment = nil.as(Array(String)?)"
 
   prove unkilled "the kill taken out" "the cancelled run took" \
     "        child.kill

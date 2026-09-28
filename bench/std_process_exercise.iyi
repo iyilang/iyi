@@ -84,7 +84,11 @@ if mode = args[0]?
   when "has"
     stdout.write(File.exists?(args[1]) ? "found\n" : "missing\n")
   when "env"
-    stdout.write("#{Program.env(args[1]) || "<unset>"}\n")
+    index = 1
+    while index < args.size
+      stdout.write("#{Program.env(args[index]) || "<unset>"}\n")
+      index = index + 1
+    end
   when "sleep"
     sleep(args[1].to_i)
     stdout.write("woke\n")
@@ -190,6 +194,21 @@ group do |g|
   told = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"]), "env")
   fail("the child read #{told.stdout.inspect}") unless told.stdout == "değer-日本\n"
   puts "  a variable set here arrives there: #{told.stdout.chomp('\n')}"
+
+  puts "== the child's environment can be given"
+  given = ran(Process.run(me, ["env", "IYI_PROCESS_GIVEN", "IYI_PROCESS_PROBE"],
+    env: {"IYI_PROCESS_GIVEN" => "given-değer", "IYI_PROCESS_PROBE" => nil}), "env:")
+  fail("with env: the child read #{given.stdout.inspect}") unless given.stdout == "given-değer\n<unset>\n"
+  fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
+  fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
+  puts "  one variable given and one removed, for the child alone"
+  {% if flag?(:win32) %}
+    # One variable, as Windows has it: a name given in another case
+    # replaces it rather than standing beside it.
+    cased = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"], env: {"iyi_process_probe" => "lower"}), "env: cased")
+    fail("a name in another case: the child read #{cased.stdout.inspect}") unless cased.stdout == "lower\n"
+    puts "  a name in another case is the same variable"
+  {% end %}
 
   puts "== a child that stops reading"
   deaf = ran(Process.run(me, ["deaf"], input: "x" * 4194304), "deaf")

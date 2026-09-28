@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`Process.run(env:)` gives a child its own environment.** The child's
+  environment was this program's, and the only way to change it was
+  `ENV[]=` - which changes it for this program too, under every other
+  task. `env:` takes a hash laid over the current environment for the
+  child alone: a name given a value is set, a name given `nil` removed; on
+  Windows a name matches without regard to case, as Windows matches one,
+  and the block is sorted as `CreateProcessW` documents. The
+  `std/process` exercise gives one variable and removes another, reads
+  both back from the child, and checks its own are unchanged; with `env:`
+  ignored the exercise fails.
+
 - **`std/process`: a program runs another one.** `Process.run(command,
   args, input:, chdir:, capture:)` starts a program, hands it `input` or
   the null device, collects its stdout and stderr, and answers a

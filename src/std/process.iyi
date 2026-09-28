@@ -19,6 +19,14 @@
 # instead, for a program whose output is for the person at the terminal;
 # its result carries the exit code and two empty texts.
 #
+# The child's environment is this program's, and `env:` changes it for
+# the child alone: each name given is set to its value, and a name given
+# `nil` is removed. This program's own environment is untouched, so a
+# task that runs a child with a variable changed does not change it under
+# the other tasks. On Windows a name is matched as Windows matches one,
+# without regard to case. The program itself is still looked for on this
+# program's own `PATH`.
+#
 # The arguments are the program's `argv`, one string each, and no shell
 # reads them: a space, a quote, a `$` or a `;` in one is that character in
 # the child's argument. The program is found the way a shell finds it -
@@ -175,10 +183,12 @@ pub struct Process
   # Runs *command* with *args* and answers once it has ended; see the top
   # of this file for what each part means.
   def self.run(command : String, args : Array(String) = [] of String, input : String? = nil,
-               chdir : String? = nil, capture : Bool = true) : ProcessResult | ProcessError | Cancelled
+               chdir : String? = nil, capture : Bool = true,
+               env : Hash(String, String) | Hash(String, String?) | Hash(String, Nil) | Nil = nil) : ProcessResult | ProcessError | Cancelled
     raise "Process.run: the command is empty" if command.empty?
     ProcessChild.check_text(command, "the command")
     args.each { |arg| ProcessChild.check_text(arg, "an argument") }
+    environment = ProcessChild.environment(env)
     if directory = chdir
       ProcessChild.check_text(directory, "the directory")
       unless ProcessChild.directory?(directory)
@@ -188,7 +198,7 @@ pub struct Process
     found = ProcessChild.find(command)
     return found if found.is_a?(ProcessError)
     child = ProcessChild.new
-    started = child.start(command, found, args, chdir, !input.nil?, capture)
+    started = child.start(command, found, args, chdir, !input.nil?, capture, environment)
     return started if started.is_a?(ProcessError)
     child.finish(input, capture)
   end
@@ -245,6 +255,108 @@ class ProcessChild
       raise "Process.run: #{what} contains a NUL byte" if bytes[index] == 0_u8
       index = index + 1
     end
+  end
+
+  # The child's environment as `NAME=VALUE` entries, or nil when it is
+  # this program's own: the current one with *changes* laid over it, a nil
+  # value removing the name. A name that is empty or holds `=`, or a NUL
+  # anywhere, is a program's mistake and a panic, as `ENV[]=` has it.
+  def self.environment(changes : Hash(String, String) | Hash(String, String?) | Hash(String, Nil) | Nil) : Array(String)?
+    return nil unless changes
+    names = [] of String
+    values = [] of String
+    removed = [] of Bool
+    each_variable do |name, value|
+      names << name
+      values << value
+      removed << false
+    end
+    changes.each do |name, value|
+      raise "Process.run: an environment name is empty" if name.empty?
+      raise "Process.run: the environment name #{name.inspect} contains '='" if name.includes?("=")
+      check_text(name, "an environment name")
+      if text = value
+        check_text(text, "an environment value")
+      end
+      index = -1
+      at = 0
+      while at < names.size
+        index = at if index == -1 && same_name?(names[at], name)
+        at = at + 1
+      end
+      if index >= 0
+        if text = value
+          values[index] = text
+          removed[index] = false
+        else
+          removed[index] = true
+        end
+      elsif text = value
+        names << name
+        values << text
+        removed << false
+      end
+    end
+    entries = [] of String
+    names.each_with_index { |name, index| entries << "#{name}=#{values[index]}" unless removed[index] }
+    {% if flag?(:win32) %}
+      # The block `CreateProcessW` takes is sorted by name, without regard
+      # to case, and a program reading it may rely on that.
+      entries.sorted_by { |entry| entry.upcase }
+    {% else %}
+      entries
+    {% end %}
+  end
+
+  def self.same_name?(one : String, other : String) : Bool
+    {% if flag?(:win32) %}
+      one.upcase == other.upcase
+    {% else %}
+      one == other
+    {% end %}
+  end
+
+  # This program's variables, as the platform holds them.
+  def self.each_variable(& : String, String -> Nil) : Nil
+    {% if flag?(:win32) %}
+      block = ::LibIyiEnv.GetEnvironmentStringsW
+      return if block.address == 0_u64
+      index = 0
+      while block[index] != 0_u16
+        length = 0
+        equals = -1
+        while block[index + length] != 0_u16
+          equals = length if equals == -1 && length > 0 && block[index + length] == 61_u16
+          length = length + 1
+        end
+        # A name that begins with `=` is cmd.exe's per-drive directory, not
+        # a variable, and it is not handed on.
+        if equals > 0 && block[index] != 61_u16
+          name = __iyi_win_env_text(block + index, equals)
+          value = __iyi_win_env_text(block + (index + equals + 1), length - equals - 1)
+          yield name, value if name && value
+        end
+        index = index + length + 1
+      end
+      ::LibIyiEnv.FreeEnvironmentStringsW(block)
+    {% else %}
+      table = __iyi_environ
+      return if table.address == 0_u64
+      index = 0
+      while (entry = table[index]).address != 0_u64
+        length = 0
+        equals = -1
+        while entry[length] != 0_u8
+          equals = length if equals == -1 && entry[length] == 61_u8
+          length = length + 1
+        end
+        if equals > 0
+          yield String.new(equals) { |target| target.copy_from(entry, equals) },
+            String.new(length - equals - 1) { |target| target.copy_from(entry + (equals + 1).to_i64, length - equals - 1) }
+        end
+        index = index + 1
+      end
+    {% end %}
   end
 
   # A NUL-terminated copy, for the platform's calls.
@@ -476,7 +588,7 @@ class ProcessChild
     end
 
     def start(command : String, path : String, args : Array(String), chdir : String?,
-              has_input : Bool, capture : Bool) : Nil | ProcessError
+              has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
       line = String::Builder.new(256)
       ProcessChild.quote(command, line)
       args.each do |arg|
@@ -565,10 +677,17 @@ class ProcessChild
       info[12] = theirs[2].address
       info[13] = attributes.address
       answer = Pointer(UInt64).malloc(3_u64)
-      # bInheritHandles, and EXTENDED_STARTUPINFO_PRESENT; the environment
-      # is this process's own block, which `ENV[]=` writes.
+      # bInheritHandles, and EXTENDED_STARTUPINFO_PRESENT. The environment
+      # is this process's own block, which `ENV[]=` writes, unless `env:`
+      # gave one, which is UTF-16 (CREATE_UNICODE_ENVIRONMENT).
+      block = Pointer(UInt16).new(0_u64)
+      flags = 0x00080000
+      if entries = environment
+        block = ProcessChild.environment_block(entries)
+        flags = flags | 0x400
+      end
       made_it = LibKernel32.CreateProcessW(wide_path, wide_line, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64),
-        count > 0 ? 1 : 0, 0x00080000, Pointer(Void).new(0_u64), wide_directory, info.as(Void*), answer.as(Void*))
+        count > 0 ? 1 : 0, flags, block.as(Void*), wide_directory, info.as(Void*), answer.as(Void*))
       failed = made_it == 0 ? ::LibC.GetLastError : 0
       LibKernel32.DeleteProcThreadAttributeList(attributes.as(Void*))
       close_theirs(theirs)
@@ -579,6 +698,33 @@ class ProcessChild
       @process = Pointer(Void).new(answer[0])
       ::LibC.CloseHandle(Pointer(Void).new(answer[1]))
       nil
+    end
+
+    # `NAME=VALUE`, NUL after each, and a NUL after the last: an empty
+    # environment is the two NULs alone.
+    def self.environment_block(entries : Array(String)) : Pointer(UInt16)
+      wides = entries.map { |entry| __iyi_win_env_wide(entry.to_unsafe, entry.bytesize) }
+      total = 1
+      lengths = wides.map do |wide|
+        length = 0
+        while wide[length] != 0_u16
+          length = length + 1
+        end
+        total = total + length + 1
+        length
+      end
+      total = total + 1 if entries.empty?
+      block = Pointer(UInt16).malloc(total.to_u64)
+      at = 0
+      wides.each_with_index do |wide, index|
+        length = lengths[index]
+        length.times { |offset| block[at + offset] = wide[offset] }
+        block[at + length] = 0_u16
+        at = at + length + 1
+      end
+      block[at] = 0_u16
+      block[at + 1] = 0_u16 if entries.empty?
+      block
     end
 
     private def close_theirs(theirs : Pointer(Pointer(Void))) : Nil
@@ -935,6 +1081,16 @@ class ProcessChild
       ProcessError.new(command, refused == 0 ? ENOENT : refused)
     end
 
+    # The child's `envp`: this program's own table, or the one `env:` made.
+    def self.envp(environment : Array(String)?) : Pointer(Pointer(UInt8))
+      entries = environment
+      return __iyi_environ unless entries
+      table = Pointer(Pointer(UInt8)).malloc((entries.size + 1).to_u64)
+      entries.each_with_index { |entry, index| table[index] = c_text(entry) }
+      table[entries.size] = Pointer(UInt8).new(0_u64)
+      table
+    end
+
     # The child's `argv`: the name it was asked for, then the arguments.
     def self.argv(command : String, args : Array(String)) : Pointer(Pointer(UInt8))
       list = Pointer(Pointer(UInt8)).malloc((args.size + 2).to_u64)
@@ -1022,7 +1178,7 @@ class ProcessChild
       end
 
       def start(command : String, path : String, args : Array(String), chdir : String?,
-                has_input : Bool, capture : Bool) : Nil | ProcessError
+                has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
         theirs = Pointer(Int32).malloc(3_u64)
         3.times { |index| theirs[index] = -1 }
         if has_input
@@ -1070,7 +1226,7 @@ class ProcessChild
         LibC.posix_spawnattr_setsigmask(attributes.as(Void*), mask.as(Void*))
         pid = 0
         failed = LibC.posix_spawn(pointerof(pid), ProcessChild.c_text(path), actions.as(Void*), attributes.as(Void*),
-          ProcessChild.argv(command, args), __iyi_environ)
+          ProcessChild.argv(command, args), ProcessChild.envp(environment))
         LibC.posix_spawn_file_actions_destroy(actions.as(Void*))
         LibC.posix_spawnattr_destroy(attributes.as(Void*))
         3.times { |index| ProcessChild.sys_close(theirs[index]) if theirs[index] >= 0 }
@@ -1144,7 +1300,7 @@ class ProcessChild
       end
 
       def start(command : String, path : String, args : Array(String), chdir : String?,
-                has_input : Bool, capture : Bool) : Nil | ProcessError
+                has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
         # Everything the child will touch is made here, before the clone:
         # between the clone and the `execve` the child is a copy of one
         # thread of this program, and it makes system calls and nothing
@@ -1194,7 +1350,7 @@ class ProcessChild
         end
         target = ProcessChild.c_text(path)
         argv = ProcessChild.argv(command, args)
-        envp = __iyi_environ
+        envp = ProcessChild.envp(environment)
         directory = Pointer(UInt8).new(0_u64)
         if where = chdir
           directory = ProcessChild.c_text(where)

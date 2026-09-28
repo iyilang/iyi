@@ -102,5 +102,6 @@ check(run.index(near).nil?, "index of a near miss")
 check(!run.includes?(near), "includes? of a near miss")
 check(run.split(near).size == 1, "split on a near miss")
 check((run + near).index(near) == run.bytesize, "index finds it at the end")
+check(Regex.compile(near).find(run).nil?, "a literal pattern's near miss")
 
-puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center and a near-miss search, each checked"
+puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center and a near-miss search and pattern, each checked"

@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **A regex whose pattern is a literal finds it in linear time, through a
+  public `String#byte_index`.** A literal pattern was looked for by
+  comparing from each position in turn, so a text that keeps almost
+  matching it was n * m: 1,000 `a` and a `b` against a megabyte of `a`
+  took 454 ms. It searches through `byte_index` now, the search
+  `includes?` and `index` use, which falls back to a rolling hash; 1 ms.
+  `byte_index(search, offset = 0)` is public, with Crystal's answers for
+  an empty search and a negative or past-the-end offset - checked against
+  Crystal's over 350 cases. `bench/std_text_scale_exercise.sh` looks for
+  a near-miss pattern in eight megabytes and proves its clock catches a
+  literal compared from each position.
+
 - **Inflating looks a code up by table, copies matches a word at a time,
   and sizes a gzip result from its trailer.** `Huffman#decode` walked
   every code a bit at a time; codes of nine bits or fewer are one lookup
@@ -11284,7 +11296,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,373-line library and nothing else. Every other
+  written against iyi's own 18,376-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

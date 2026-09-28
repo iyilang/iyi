@@ -457,18 +457,21 @@ class String
   end
 
   def includes?(other : String) : Bool
-    return true if other.bytesize == 0
-    return false if other.bytesize > bytesize
-    !byte_index(other, 0).nil?
+    !byte_index(other).nil?
   end
 
-  # Where *search* first starts at or after *offset*, in bytes; the caller
-  # has checked that it fits. Naive while that is cheap, and Rabin-Karp -
-  # one rolling hash per position, bytes compared only where it matches -
-  # once more than four bytes a position have been compared: a needle that
-  # keeps almost matching, `"a" * 1000 + "b"` in a run of `a`, made the
-  # naive loop n * m, 222 ms for a megabyte.
-  protected def byte_index(search : String, offset : Int32) : Int32?
+  # Where *search* first starts at or after byte *offset* - counted from
+  # the end when negative - in bytes, as Crystal's `byte_index` answers.
+  # Naive while that is cheap, and Rabin-Karp - one rolling hash per
+  # position, bytes compared only where it matches - once more than four
+  # bytes a position have been compared: a needle that keeps almost
+  # matching, `"a" * 1000 + "b"` in a run of `a`, made the naive loop
+  # n * m, 222 ms for a megabyte.
+  def byte_index(search : String, offset : Int32 = 0) : Int32?
+    offset = offset + bytesize if offset < 0
+    return nil if offset < 0 || offset > bytesize
+    return offset if search.bytesize == 0
+    return nil if search.bytesize > bytesize - offset
     m = search.bytesize
     limit = bytesize - m
     s = to_unsafe

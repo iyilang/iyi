@@ -40,7 +40,10 @@
   server paid for every connection parked beside it: a round trip over a
   pipe took 41 us with 4,000 idle readers parked against 2 us with none.
   Waiters are found by descriptor now, and leave the list from where they
-  are: 1.9 us with 16,000 parked. `bench/concurrency_exercise.sh` times
+  are: 1.9 us with 16,000 parked. The table is made at a thread's first io
+  wait, so a scheduler state that never waits on io holds nothing of the
+  heap's - which is what `bench/collect_trigger.sh`'s proof of an unrooted
+  state reads on Windows. `bench/concurrency_exercise.sh` times
   5,000 round trips alone and with 2,000 readers parked, fails past three
   times, and proves it fails with the walk put back (12x).
 
@@ -11279,7 +11282,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,358-line library and nothing else. Every other
+  written against iyi's own 18,364-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

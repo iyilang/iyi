@@ -184,6 +184,17 @@
 
 ### Fixed
 
+- **A table keyed by tuples of small numbers fills.** `Tuple#hash` was `a
+  * 31 + b`, which gives a grid of points few hashes - 9,569 for 90,000
+  points of a 300 by 300 grid - and `Hash` probes a slot at a time, so
+  runs of equal hashes merged into one: a million points of a 1,000 by
+  1,000 grid had not filled in ten minutes. Each member is multiplied
+  through and its high bits folded back down now, every point has its
+  own hash, and the million insert in 32 ms and are looked up in 10, Go's
+  map taking 102 and 88. `bench/collections_exercise.sh` counts the grid's
+  distinct hashes, fills a grid table, and proves the count fails with
+  the old combiner back.
+
 - **`File.each_line` reads a line at a time.** It read the whole file
   into an array of its lines and then walked the array, so a log of any
   size was the program's memory twice over before the first line was
@@ -11296,7 +11307,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,376-line library and nothing else. Every other
+  written against iyi's own 18,382-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

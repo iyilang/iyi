@@ -255,6 +255,11 @@ prove_fails "the range walk steps past its end" past_end range.iyi \
   "arithmetic overflow" \
   's/^    yield value if !@exclusive \&\& value == @end$/    yield value if !@exclusive \&\& value <= @end \&\& (value = value + 1) < 0/'
 
+# 10. A tuple hashed as `a * 31 + b` again, members barely mixed.
+prove_fails "a tuple hash that barely mixes" weak_tuple object.iyi \
+  "hash: a 300 by 300 grid of tuples spreads" \
+  's/^      value = (value ^ self\[{{i}}\].hash.to_i64.unsafe_to_u64) \&\* 0x100000001B3_u64$/      value = (value \&* 31_u64) \&+ self[{{i}}].hash.to_i64.unsafe_to_u64/; /^      value = value ^ value.unsafe_shr(29_u64)$/d'
+
 echo
 echo "== and what an empty receiver says when it is asked for a size"
 panics_with "a negative capacity" neg_cap "negative capacity" "Array(Int32).new(-1).size"

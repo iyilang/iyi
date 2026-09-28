@@ -128,12 +128,18 @@ struct Tuple
   # And hashing follows equality, or the agreement above buys nothing: a key
   # is found by its slot first and compared second. `Object#hash` put every
   # tuple in one slot, correct and useless in the way that comment says.
+  #
+  # Each member multiplied through and its high bits folded back down: `a *
+  # 31 + b` gave a 1,000 by 1,000 grid of points 32,000 hashes between a
+  # million keys, and a table probing a slot at a time turned those runs
+  # into one - it had not filled in ten minutes.
   def hash : Int32
-    value = 17
+    value = 0x9E3779B97F4A7C15_u64
     {% for i in 0...T.size %}
-      value = (value &* 31) &+ self[{{i}}].hash
+      value = (value ^ self[{{i}}].hash.to_i64.unsafe_to_u64) &* 0x100000001B3_u64
+      value = value ^ value.unsafe_shr(29_u64)
     {% end %}
-    value
+    value.hash
   end
 
   def to_s : String

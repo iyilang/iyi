@@ -308,6 +308,18 @@ assert_int(spread((0...128).map { |i| i.chr.hash }), 128, "hash: Char keys sprea
 assert_int(spread((0...1000).map { |i| (i * 0.25).hash }), 1000, "hash: Float64 keys spread")
 assert_true(0.0.hash == (-0.0).hash, "hash: 0.0 and -0.0 are one key")
 
+# A tuple of small numbers spreads too - the grid point, the commonest
+# tuple key there is. `a * 31 + b` gave a 300 by 300 grid 9,599 hashes
+# for 90,000 points, and a table probing a slot at a time turns runs of
+# equal hashes into one: a 1,000 by 1,000 grid had not filled in ten
+# minutes. Every point its own hash, and a grid table fills and answers.
+grid_hashes = [] of Int32
+300.times { |x| 300.times { |y| grid_hashes << {x, y}.hash } }
+assert_int(spread(grid_hashes), 90000, "hash: a 300 by 300 grid of tuples spreads")
+grid = {} of {Int32, Int32} => Int32
+300.times { |x| 300.times { |y| grid[{x, y}] = x * y } }
+assert_true(grid[{299, 17}]? == 5083 && grid.size == 90000, "hash: a grid table fills and answers")
+
 # A class instance is itself, and a set of them finds each one: `Object#==`
 # answered false, so an instance did not equal itself and a `Set` never
 # found what was added to it. A class that says what equal means keeps

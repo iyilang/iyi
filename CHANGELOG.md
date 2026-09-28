@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- **On a Linux kernel before 5.3, waiting for a child no longer holds the
+  thread.** `std/process` waits for a child's end through a pidfd, which
+  5.3 added; without one it called a blocking `wait4`, and every other
+  task on the thread stopped for as long as the child ran - RHEL 8's
+  kernel is 4.18. Without a pidfd the fiber now asks `wait4` with WNOHANG
+  and sleeps between asks, a millisecond at first and fifty at most.
+  `bench/std_process_exercise.sh` runs the whole exercise on Linux with
+  `pidfd_open` answering nothing and requires every check to hold, and
+  proves the poll made a plain `wait4` again fails it: a sibling ticks 0
+  times of 10 while the child sleeps.
+
 ## 0.15.4 — 2026-09-28
 
 **A program can run another one.** `std/process`'s `Process.run` starts a

@@ -45,10 +45,10 @@
 #
 #   * Linux: `clone` and `execve` by syscall, the child's end of each pipe
 #     put in place between the two, and the end awaited through a pidfd
-#     (`pidfd_open`, Linux 5.3); an older kernel's end is `wait4` once the
-#     output has closed. A write to a child that stopped reading answers
-#     EPIPE and not SIGPIPE: the signal is held on the writing thread for
-#     the write and taken off it after.
+#     (`pidfd_open`, Linux 5.3); on an older kernel the fiber asks
+#     `wait4` with WNOHANG and sleeps between asks. A write to a child that
+#     stopped reading answers EPIPE and not SIGPIPE: the signal is held on
+#     the writing thread for the write and taken off it after.
 #   * darwin: libSystem's `posix_spawn`, and the end awaited as a kqueue of
 #     its own, one whose single event is the child's NOTE_EXIT, which the
 #     poller waits on like any descriptor.
@@ -989,6 +989,7 @@ class ProcessChild
       {% end %}
       # One number on every architecture since 5.3.
       SYS_PIDFD_OPEN = 434_i64
+      WNOHANG        =   1_i64
       AT_FDCWD       = -100_i64
       EPIPE          = 32
 
@@ -1426,15 +1427,37 @@ class ProcessChild
       end
 
       # The end, through a pidfd the poller waits on; `wait4` once it is
-      # readable answers at once. A kernel before 5.3 has no pidfd, and
-      # there the end is awaited with `wait4` itself, after the output has
-      # closed, which is when most children end.
+      # readable answers at once. A kernel before 5.3 has no pidfd - RHEL 8
+      # runs 4.18 - and a blocking `wait4` there held the thread, and every
+      # other task on it, for as long as the child ran. So without one the
+      # end is asked for with WNOHANG and the fiber sleeps between asks,
+      # from a millisecond to fifty, which is the most a child's end waits
+      # to be noticed.
       def wait_end : Nil | Cancelled
         pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)
         if pidfd >= 0_i64
           waited = IyiScheduler.wait_readable_current(pidfd.to_i32)
           ProcessChild.sys_close(pidfd.to_i32)
           return waited if waited.is_a?(Cancelled)
+          reap
+          return nil
+        end
+        status = Pointer(Int32).malloc(1_u64)
+        pause = 1
+        while true
+          # WNOHANG: 0 while the child runs, its pid once it has ended.
+          answered = __iyi_conc_syscall6(SYS_WAIT4, @pid.to_i64, status.address.to_i64, WNOHANG, 0_i64, 0_i64, 0_i64)
+          if answered == @pid.to_i64
+            record_end(status[0])
+            return nil
+          end
+          # Anything but "still running" or an interruption has nothing
+          # more to wait for; the blocking reap says what it was.
+          break unless answered == 0_i64 || answered == -(EINTR.to_i64)
+          slept = sleep(pause)
+          return slept if slept.is_a?(Cancelled)
+          pause = pause * 2 if pause < 50
+          pause = 50 if pause > 50
         end
         reap
         nil

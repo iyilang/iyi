@@ -112,13 +112,14 @@
   output, and proves the check fails with every line ended again.
 
 - **A substring search that keeps almost matching stays linear.**
-  `String#includes?` and `String#index` - and `split` on a string, through
-  it - compared the needle from every position in turn, so a needle that
+  `String#includes?`, `String#index` and `String#rindex` - and `split` on
+  a string, through them - compared the needle from every position in turn, so a needle that
   nearly matches everywhere made the search n * m: `"a" * 1000 + "b"` in a
   megabyte of `a` took 222 ms, and sixteen thousand `a` and a `b` in eight
   megabytes did not finish. Once more than four bytes a position have been
   compared the search moves to a rolling hash and compares bytes only where
-  it matches; the megabyte takes 1 ms. `bench/std_text_scale_exercise.sh`
+  it matches, forwards or, for `rindex`, backwards; the megabyte takes 1 ms
+  either way, where `rindex` took 477. `bench/std_text_scale_exercise.sh`
   searches the eight megabytes and proves its clock catches a search that
   stays naive.
 

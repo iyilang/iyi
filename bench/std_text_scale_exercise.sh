@@ -118,6 +118,8 @@ proves_slow "CSV.build copying per field" copying_csv std "csv.iyi" \
 # And a search that never leaves the naive loop, however much it compares.
 proves_slow "a search that stays naive" naive_search iyi "string.iyi" \
   's/^      break if spent > 4 \* (i - offset) + 64$/      spent = 0/'
+proves_slow "an rindex that stays naive" naive_rindex std "text.iyi" \
+  's/^      break if spent > 4 \* (start - i) + 64$/      spent = 0/'
 proves_slow "a literal pattern compared from each position" naive_literal std "regex.iyi" \
   's/^    text.byte_index(literal, from)$/    i = from\n    while i + literal.bytesize <= text.bytesize\n      return i if text[i, literal.bytesize] == literal\n      i = i + 1\n    end\n    nil/'
 

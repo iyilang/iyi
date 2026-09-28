@@ -184,6 +184,18 @@
 
 ### Fixed
 
+- **A large body goes through `std/http` in time near its size, both
+  ways.** The server added each read to the request so far and parsed it
+  all again, and the client added each 4 KB read of the answer to the
+  answer so far: a 20 MB upload to `Server.serve` took 1.9 s (Go's server:
+  30 ms), and a 24 MB answer to `HTTP.post` did not arrive for minutes.
+  The server now reads until the request's `Content-Length` is in and
+  parses once, and the client reads 64 KB at a time into one builder: the
+  20 MB upload takes 60 ms. `bench/std_http_exercise.sh` echoes a 24 MB
+  body through both halves in one process, requires it back within 4 s,
+  and proves the check fails with either half's copying put back (31 s
+  for the server's).
+
 - **An array is a key that spreads.** `Array` writes `==`, so
   `Reference#hash` answered its type's id and every array key shared one
   slot: 40,000 `[x, y]` keys took 1.2 s to insert, and a million would not

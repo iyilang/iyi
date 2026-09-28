@@ -272,14 +272,24 @@ group do |g|
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    # A body of many reads. The server added each read to what came before
+    # and parsed it all again - a copy of the body so far per read - and a
+    # 20 MB upload took 1.9 s where Go's server takes 30 ms. It reads until
+    # the Content-Length is here and parses once.
+    upload = "u" * 24000000
+    upload_started = __iyi_monotonic_ns
+    r10 = HTTP.post("http://127.0.0.1:#{sport}/echo", upload).or_panic
+    upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
+    assert_true r10.status == 200 && r10.body.bytesize == 24000000, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
+    assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 8, "the block ran eight times (the 400 never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 9, "the block ran nine times (the 400 never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, a 24 MB upload, and the client against it"
 
 puts "\nALL CHECKS PASSED"

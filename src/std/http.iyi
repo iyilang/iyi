@@ -84,8 +84,11 @@ struct ParsedRequest
   getter error : String?
   getter close : Bool
   getter consumed : Int32
+  # For a request whose head is in and whose body is not: the bytes the
+  # whole request takes, when its `Content-Length` says. 0 otherwise.
+  getter wanted : Int32
 
-  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32)
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0)
   end
 end
 
@@ -145,14 +148,26 @@ pub struct Server
         return
       end
       # Not a whole request yet: read more, or stop at the client's close.
+      # When the head says how long the request is, read until it is all
+      # here and parse once. Adding each read to what came before and
+      # parsing it all again was a copy of the body so far per read: a 5 MB
+      # upload took 1.1 s, 20 MB 3 s, where Go's server takes 10 and 40 ms.
       return if buffer.bytesize > MAX_HEAD + MAX_BODY
-      case chunk = client.read(65536)
-      in Cancelled, SocketError
-        return
-      in String
-        return if chunk.bytesize == 0
-        buffer = buffer + chunk
+      wanted = parsed.wanted
+      pending = String::Builder.new(wanted > buffer.bytesize ? wanted : buffer.bytesize + 65536)
+      pending << buffer
+      while true
+        case chunk = client.read(65536)
+        in Cancelled, SocketError
+          return
+        in String
+          return if chunk.bytesize == 0
+          pending << chunk
+        end
+        break if pending.bytesize >= wanted
+        return if pending.bytesize > MAX_HEAD + MAX_BODY
       end
+      buffer = pending.to_s
     end
   end
 
@@ -218,7 +233,7 @@ pub struct Server
       return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY
       length = n
     end
-    return ParsedRequest.new(nil, nil, false, 0) if after.bytesize < length
+    return ParsedRequest.new(nil, nil, false, 0, body_start + length) if after.bytesize < length
     ParsedRequest.new(Request.new(method, path, query, headers, after[0, length]), nil, close, body_start + length)
   end
 
@@ -389,13 +404,15 @@ pub struct HTTP
     sock = IyiSocket.connect(host, port)!
     defer sock.close
     sock.write(text)!
-    buf = ""
+    # Into one builder, in large reads: adding each 4 KB read to the answer
+    # so far copied it once per read, and a 24 MB answer took minutes.
+    answer = String::Builder.new
     while true
-      chunk = sock.read(4096)!
+      chunk = sock.read(65536)!
       break if chunk.bytesize == 0
-      buf = buf + chunk
+      answer << chunk
     end
-    parse_response(buf, same_name?(method, "HEAD"))
+    parse_response(answer.to_s, same_name?(method, "HEAD"))
   end
 
   def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError

@@ -263,6 +263,8 @@ mutate "a back-reference copied from one byte off" '@data[@size + i] = @data[src
 mutate "a Huffman code written the wrong way round" 'put(rev, len)' 'put(code, len)'
 mutate "a match finder that never looks" 'chain < 64' 'chain < 0'
 mutate "a length table off by one" '@lbase = fill([3, 4, 5, 6' '@lbase = fill([3, 4, 5, 7'
+mutate "a back-reference copied a word from one byte off" '(@data + (src + i)).as(Pointer(UInt64))' '(@data + (src + i + 1)).as(Pointer(UInt64))'
+mutate "a code table indexed by the code's bits unreversed" '(((code >> bit) & 1) << (len - 1 - bit))' '(((code >> bit) & 1) << bit)'
 
 echo
 if [ "$status" -eq 0 ]; then

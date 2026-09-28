@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **Inflating looks a code up by table, copies matches a word at a time,
+  and sizes a gzip result from its trailer.** `Huffman#decode` walked
+  every code a bit at a time; codes of nine bits or fewer are one lookup
+  now, with the bit reader keeping whole bytes it loaded ahead for a
+  stored block to read. A match eight or more bytes back is copied eight
+  bytes a step, and `Gzip.decompress` allocates the length the trailer
+  names, held to what the stream could expand to. Twenty megabytes
+  inflate in 30 ms, down from 47. `bench/std_compress_exercise.sh` reads
+  thirteen streams whose code block is followed by stored ones, at every
+  bit the codes can end on, and proves the checks fail on a word copied
+  from one byte off and on a table indexed by the codes' bits unreversed.
+
 - **CRC-32 and Adler-32 cost what the bytes do.** CRC-32 went a bit at a
   time and Adler-32 reduced its sums twice a byte: twenty megabytes took
   105 ms to check, and `Gzip.decompress` spent most of its time there -

@@ -1,4 +1,4 @@
-# Exercise program for IyiIO: flush, short reads, buffer boundaries, and EOF.
+# Exercise program for IyiIO: flush, short reads, buffer boundaries, EOF and puts.
 #
 #   cd "$(mktemp -d)" && iyi run <repo>/bench/io_exercise.iyi
 #
@@ -88,8 +88,23 @@ raise "eof: expected eof? to remain true" unless io_eof.eof?
 io_eof.close
 puts "eof: ok"
 
+# 5. `puts` ends a line only when the text has not: a string that ends in
+# a newline is written as it is, as Crystal's `puts` writes it. Anything
+# else is its `to_s` and a newline.
+io_lines = File.open(path, "w", 64)
+io_lines.puts "ends\n"
+io_lines.puts "open"
+io_lines.puts ""
+io_lines.puts 5
+io_lines.close
+lines_written = File.read(path)
+raise "puts: a line that ends was ended again (#{lines_written.bytesize} bytes, not 13)" unless lines_written == "ends\nopen\n\n5\n"
+puts "puts: ok"
+
 # Cleanup
 File.delete(path) if File.exists?(path)
 File.delete(flush_path) if File.exists?(flush_path)
 
-puts "all io checks passed"
+# Ended already, so standard output gets it once: bench/io_exercise.sh
+# refuses an empty line anywhere in what this program prints.
+puts "all io checks passed\n"

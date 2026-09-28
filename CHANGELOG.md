@@ -4,6 +4,16 @@
 
 ### Changed
 
+- **`puts` does not end a line that has ended.** A string ending in a
+  newline is written as it is, as Crystal's `puts` writes it: `puts
+  File.read(path)` printed a blank line after the file, and the same
+  program under `--crystal` did not - a name shared with Crystal's library
+  meaning something else, silently (SPEC.md III.1.7a). Anything that is
+  not a string is still its `to_s` and a newline, as there. Top-level
+  `puts` and `IO#puts` both. `bench/io_exercise.sh` writes ended and open
+  lines through `IO#puts`, refuses an empty line in the program's own
+  output, and proves the check fails with every line ended again.
+
 - **A substring search that keeps almost matching stays linear.**
   `String#includes?` and `String#index` - and `split` on a string, through
   it - compared the needle from every position in turn, so a needle that
@@ -11156,7 +11166,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,201-line library and nothing else. Every other
+  written against iyi's own 18,205-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

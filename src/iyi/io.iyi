@@ -307,8 +307,12 @@ class IyiIO
     write(value.to_s)
   end
 
+  # A string that already ends its line is written as it is, as Crystal's
+  # `puts` writes it: `puts File.read(path)` printed a blank line after the
+  # file, and the same program under `--crystal` did not. Anything else is
+  # its `to_s` and a newline, whatever that ends with, as there.
   def puts(text : String) : Nil
-    write_line(text)
+    text.bytesize > 0 && text.to_unsafe[text.bytesize - 1] == 10_u8 ? write(text) : write_line(text)
   end
 
   def puts : Nil
@@ -408,7 +412,7 @@ def print(value) : Nil
 end
 
 def puts(text : String) : Nil
-  stdout.write_line(text)
+  stdout.puts(text)
 end
 
 def puts : Nil
@@ -424,7 +428,7 @@ def puts(first, second, *rest : *T) : Nil forall T
 end
 
 def puts(value) : Nil
-  puts value.to_s
+  stdout.puts(value)
 end
 
 def read_input : String

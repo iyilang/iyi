@@ -158,6 +158,10 @@ pub struct ProcessError
       return "the directory cannot be entered" if denied?
     end
     return "a batch file runs under cmd.exe, which reads its arguments again: run cmd.exe with /c and quote for it" if @code == ProcessChild::BATCH
+    if @code == ProcessChild::UNUSABLE_DIRECTORY
+      return "the directory is there, and Windows refused it as a working directory: " \
+             "past 254 characters it does unless long paths are enabled"
+    end
     return "no such program" if not_found?
     return "permission denied" if denied?
     {% if flag?(:win32) %}
@@ -214,6 +218,8 @@ class ProcessChild
   NOT_FOUND = 2
   # A `.bat` or `.cmd`, which is refused rather than run (see the top).
   BATCH = -1
+  # A directory that is there and that Windows will not run a program in.
+  UNUSABLE_DIRECTORY = -2
 
   # Typed where they are declared: an assignment written in a type body is
   # code an artifact does not carry (SPEC.md IV.1g), a declaration is not.
@@ -693,6 +699,14 @@ class ProcessChild
       close_theirs(theirs)
       if made_it == 0
         close_all
+        # ERROR_DIRECTORY is "the directory name is invalid", and for a
+        # directory that is there it was the working directory's length:
+        # measured with long paths off, 254 characters ran and 255 were
+        # refused, and "no such directory" named a directory that was
+        # there.
+        if failed == ERROR_DIRECTORY && (where = chdir) && ProcessChild.directory?(where)
+          return ProcessError.new(command, UNUSABLE_DIRECTORY, where)
+        end
         return ProcessError.new(command, failed, failed == ERROR_DIRECTORY ? chdir : nil)
       end
       @process = Pointer(Void).new(answer[0])

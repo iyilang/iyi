@@ -125,6 +125,7 @@ for phrase in "arguments came back as they went" \
 done
 if [ "$PLATFORM" = windows ]; then
   grep -q "a batch file runs under cmd.exe" "$WORK/process-plain.out" || { echo "  missing: the batch file's refusal"; status=1; }
+  grep -q "a working directory Windows will not take" "$WORK/process-plain.out" || { echo "  missing: the long working directory"; status=1; }
 else
   grep -q "signal 9, exit code 137" "$WORK/process-plain.out" || { echo "  missing: the signalled child"; status=1; }
 fi

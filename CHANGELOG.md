@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **On Windows, `Process.run(chdir:)` into a long directory says why it
+  cannot.** Windows refuses a working directory past 254 characters while
+  long paths are off - measured, 254 ran and 255 were refused - and
+  answers "the directory name is invalid", which `std/process` told as "no
+  such directory" about a directory that was there. A directory that is
+  there and refused that way is a refusal of its own now, whose sentence
+  says so. The exercise runs a child in a 270-character directory and
+  accepts either outcome but "no such directory"; the old module fails it.
+
 - **On a Linux kernel before 5.3, waiting for a child no longer holds the
   thread.** `std/process` waits for a child's end through a pidfd, which
   5.3 added; without one it called a blocking `wait4`, and every other

@@ -30,8 +30,30 @@ module Iyi
           return type_merge(first.type?, second.type?)
         end
       else
-        combined_union_of compact_types(nodes, &.type?)
+        single_type_of(nodes) || combined_union_of compact_types(nodes, &.type?)
       end
+    end
+
+    # iyi: the one type every typed node has, when they have one - which
+    # is what a variable assigned many times usually is, and every
+    # assignment merges all of the variable's values again. Answered by
+    # comparing, where the general path built an array as long as the
+    # node list each time: 16,000 lines of `x = x + 1` took 3 s and 1.1 GB
+    # to type. Only a type that `add_type` keeps as itself; a union, an
+    # alias or `Void` goes the general way.
+    private def single_type_of(nodes : Enumerable(ASTNode)) : Type?
+      found = nil
+      nodes.each do |node|
+        type = node.type?
+        next unless type
+        if found
+          return nil unless type.same?(found)
+        else
+          return nil if type.is_a?(UnionType) || type.is_a?(AliasType) || type.is_a?(VoidType)
+          found = type
+        end
+      end
+      found
     end
 
     def type_merge(first : Type?, second : Type?) : Type?
@@ -69,7 +91,9 @@ module Iyi
     end
 
     def compact_types(objects, &) : Array(Type)
-      all_types = Array(Type).new(objects.size)
+      # A few distinct types, however many objects: the capacity was the
+      # object count, an allocation per merge as long as the node list.
+      all_types = Array(Type).new(Math.min(objects.size, 8))
       objects.each { |obj| add_type all_types, yield(obj) }
       all_types.reject! &.no_return? if all_types.size > 1
       all_types

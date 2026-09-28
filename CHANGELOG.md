@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **A variable assigned many times types in memory near its length.**
+  Every assignment binds the variable to one more value and merges all of
+  them again, and the merge built an array as long as the value list to
+  do it: 16,000 lines of `x = x + 1` took 838 MB to type against 70 MB
+  for 2,000 with 0.15.4's release compiler, and a 40,000-statement
+  function 3.4 GB and 9.9 s. Values of one type are now answered by
+  comparison, and the array the general path builds starts at the few
+  types a merge has: 134 MB against 108, and the function 284 MB and
+  3.9 s. `bench/definition_typing_scale.py` types both sizes and fails
+  past three times the peak memory for eight times the lines; 0.15.4
+  measures 11.7.
+
 - **A task gets its stack when it first runs, not when it is spawned.**
   A spawn mapped a 256 KiB stack and a guard page for every task not yet
   run, so a loop spawning short tasks made a mapping each before the first

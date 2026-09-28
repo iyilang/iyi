@@ -417,7 +417,10 @@ step "iyi doc prints a prelude type's surface"
 grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:"; head -5 prelude-doc.txt; exit 1; }
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
-grep -q 'allocate' prelude-doc.txt && { echo "the compiler's own method leaked into the doc"; exit 1; }
+# A method, as the Int32 check below reads it: the doc carries the type's
+# comments too, and the word in `String.new`'s ("the byte was allocated
+# for that") failed the old `grep allocate` with no method in sight.
+grep -q '^  def \(allocate\|crystal_type_id\|crystal_instance_type_id\)' prelude-doc.txt && { echo "the compiler's own method leaked into the doc"; exit 1; }
 # The primitives the prelude declares are the type's own surface: `iyi doc
 # Int32` answered with `abs` and `times` and no `+`, no `<`, no `to_i64`,
 # because every primitive was filtered as if it were `allocate`.

@@ -79,6 +79,43 @@ impl Error for TaskFailed
   end
 end
 
+# ── 0. Sleepers wake in deadline order, each costing its own insertion ────
+#
+# The sleep queue was a list kept sorted by walking it, so every sleep
+# walked past every sleeper before it: 100,000 tasks sleeping under 100 ms
+# took 11 s. Two bursts, one four times the other, all sleeping a
+# millisecond or a few: a linear queue takes about four times as long for
+# the second, the walked list thirteen. Each task notes the deadline its
+# sleep set, and they must wake in that order. First, so that a queue out
+# of order is named here rather than by whichever sleep below it breaks.
+def sleep_burst(n : Int32, woke : Array(Int64)) : Int64
+  started = __iyi_monotonic_ns
+  group do |g|
+    n.times do |k|
+      g.spawn do
+        sleep(k * 7919 % 7 + 1)
+        woke << IyiScheduler.current.deadline
+        0
+      end
+    end
+  end
+  __iyi_monotonic_ns - started
+end
+
+small_woke = [] of Int64
+large_woke = [] of Int64
+small_burst = sleep_burst(8000, small_woke)
+large_burst = sleep_burst(32000, large_woke)
+[small_woke, large_woke].each do |woke|
+  i = 1
+  while i < woke.size
+    fail("sleep: a sleeper woke before one whose deadline came first") if woke[i] < woke[i - 1]
+    i = i + 1
+  end
+end
+fail("sleep: 32000 sleepers took #{large_burst * 10 // small_burst // 10}x what 8000 did") if large_burst > small_burst * 8
+puts "32000 sleepers woke in deadline order in #{large_burst // 1000000} ms, 8000 in #{small_burst // 1000000} ms"
+
 # ── 1. Interleaving is real, and deterministic ──────────────────────────
 #
 # Two tasks ping-pong through two channels. A `group` that ran its tasks

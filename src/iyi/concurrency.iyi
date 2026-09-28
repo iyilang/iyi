@@ -415,8 +415,15 @@ class IyiFiber
   # link per queue kind is enough, and none of them allocate on the wait
   # path except a channel's node.
   property next_run : IyiFiber?
-  property next_sleep : IyiFiber?
   property next_io : IyiFiber?
+  # The sleep heap's links (`IyiScheduler.sleep_insert`): the first
+  # child, the next sibling, and the node before this one - its parent
+  # when it is a first child, its previous sibling otherwise - with the
+  # order an insertion took, which breaks a tie between two deadlines.
+  property next_sleep : IyiFiber?
+  property sleep_child : IyiFiber?
+  property sleep_prev : IyiFiber?
+  property sleep_seq : UInt64
   property next_child : IyiFiber?
   property joiner : IyiFiber?
 
@@ -495,6 +502,9 @@ class IyiFiber
     @proc = nil
     @next_run = nil
     @next_sleep = nil
+    @sleep_child = nil
+    @sleep_prev = nil
+    @sleep_seq = 0_u64
     @next_io = nil
     @next_child = nil
     @joiner = nil
@@ -753,6 +763,7 @@ class IyiSchedulerState
   property run_head : IyiFiber?
   property run_tail : IyiFiber?
   property sleep_head : IyiFiber?
+  property sleep_seq : UInt64
   property io_head : IyiFiber?
   property pollfd : Int64
 
@@ -818,6 +829,7 @@ class IyiSchedulerState
     @pollfd = 0_i64
     @events = Pointer(UInt8).new(0_u64)
     @stack_pool = 0_u64
+    @sleep_seq = 0_u64
   end
 end
 
@@ -1615,8 +1627,7 @@ class IyiScheduler
       head = state.sleep_head
       return unless head.is_a?(IyiFiber)
       return if head.deadline > now
-      state.sleep_head = head.next_sleep
-      head.next_sleep = nil
+      sleep_remove(head)
       if head.io_timed
         # An io wait whose deadline came first.
         head.io_timed = false
@@ -1643,44 +1654,108 @@ class IyiScheduler
 
   # ── Lists ────────────────────────────────────────────────────────────
 
+  # The sleepers, earliest deadline first, as a pairing heap threaded
+  # through the fibers' own links: an insertion is one comparison, taking
+  # the earliest is a pass over its children, and a fiber leaves from
+  # anywhere in the heap when its wait ends some other way. It was a list
+  # kept sorted by walking it, so every sleep walked past the sleepers
+  # before it: 100,000 tasks each sleeping under 100 ms took 11 s, and a
+  # server whose reads carry a deadline paid the same on every read.
+  # Equal deadlines leave in the order they came, as the list kept them.
   def self.sleep_insert(fiber : IyiFiber) : Nil
-    head = state.sleep_head
-    if head.is_a?(Nil) || head.deadline > fiber.deadline
-      fiber.next_sleep = head
-      state.sleep_head = fiber
-      return
-    end
-    cursor = head
-    while true
-      after = cursor.next_sleep
-      if after.is_a?(Nil) || after.deadline > fiber.deadline
-        fiber.next_sleep = after
-        cursor.next_sleep = fiber
-        return
-      end
-      cursor = after
-    end
+    st = state
+    st.sleep_seq = st.sleep_seq &+ 1_u64
+    fiber.sleep_seq = st.sleep_seq
+    fiber.sleep_child = nil
+    fiber.next_sleep = nil
+    fiber.sleep_prev = nil
+    root = st.sleep_head
+    st.sleep_head = root.is_a?(IyiFiber) ? sleep_meld(root, fiber) : fiber
   end
 
+  # Out of the heap from wherever it is; nothing when it is not in it.
   def self.sleep_remove(fiber : IyiFiber) : Nil
-    head = state.sleep_head
-    return unless head.is_a?(IyiFiber)
-    if head.sp_slot.address == fiber.sp_slot.address
-      state.sleep_head = head.next_sleep
-      fiber.next_sleep = nil
+    st = state
+    root = st.sleep_head
+    return unless root.is_a?(IyiFiber)
+    children = fiber.sleep_child
+    fiber.sleep_child = nil
+    if root.object_id == fiber.object_id
+      rest = sleep_pairs(children)
+      rest.sleep_prev = nil if rest.is_a?(IyiFiber)
+      st.sleep_head = rest
       return
     end
-    cursor = head
-    while true
-      after = cursor.next_sleep
-      return unless after.is_a?(IyiFiber)
-      if after.sp_slot.address == fiber.sp_slot.address
-        cursor.next_sleep = after.next_sleep
-        fiber.next_sleep = nil
-        return
-      end
-      cursor = after
+    before = fiber.sleep_prev
+    unless before.is_a?(IyiFiber)
+      fiber.sleep_child = children
+      return
     end
+    after = fiber.next_sleep
+    first_child = before.sleep_child
+    if first_child.is_a?(IyiFiber) && first_child.object_id == fiber.object_id
+      before.sleep_child = after
+    else
+      before.next_sleep = after
+    end
+    after.sleep_prev = before if after.is_a?(IyiFiber)
+    fiber.next_sleep = nil
+    fiber.sleep_prev = nil
+    rest = sleep_pairs(children)
+    st.sleep_head = sleep_meld(root, rest) if rest.is_a?(IyiFiber)
+  end
+
+  private def self.sleep_before?(a : IyiFiber, b : IyiFiber) : Bool
+    a.deadline < b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)
+  end
+
+  # Two roots into one: the later becomes the earlier's first child.
+  private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
+    first = sleep_before?(b, a) ? b : a
+    second = first.object_id == a.object_id ? b : a
+    older = first.sleep_child
+    second.next_sleep = older
+    older.sleep_prev = second if older.is_a?(IyiFiber)
+    second.sleep_prev = first
+    first.sleep_child = second
+    first.next_sleep = nil
+    first.sleep_prev = nil
+    first
+  end
+
+  # A root's children into one root: melded in pairs left to right, then
+  # the pairs right to left, which is what keeps the heap shallow.
+  private def self.sleep_pairs(first : IyiFiber?) : IyiFiber?
+    pairs = nil
+    cursor = first
+    while cursor.is_a?(IyiFiber)
+      partner = cursor.next_sleep
+      cursor.next_sleep = nil
+      cursor.sleep_prev = nil
+      unless partner.is_a?(IyiFiber)
+        cursor.next_sleep = pairs
+        pairs = cursor
+        break
+      end
+      following = partner.next_sleep
+      partner.next_sleep = nil
+      partner.sleep_prev = nil
+      pair = sleep_meld(cursor, partner)
+      pair.next_sleep = pairs
+      pairs = pair
+      cursor = following
+    end
+    return nil unless pairs.is_a?(IyiFiber)
+    result = pairs
+    pairs = result.next_sleep
+    result.next_sleep = nil
+    while pairs.is_a?(IyiFiber)
+      following = pairs.next_sleep
+      pairs.next_sleep = nil
+      result = sleep_meld(pairs, result)
+      pairs = following
+    end
+    result
   end
 
   def self.io_take_overlapped(ptr : UInt64) : IyiFiber?

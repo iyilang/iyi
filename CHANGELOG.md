@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **Sleeping tasks wait in a heap, not a list walked on every sleep.**
+  The sleep queue - every `sleep`, and every io wait with a deadline - was
+  a list kept sorted by walking it, so each sleep walked past every
+  sleeper before it: 100,000 tasks each sleeping under 100 ms took 11 s,
+  and a server whose reads carry a deadline paid the same walk on every
+  read. It is a pairing heap threaded through the fibers' own links now,
+  with a fiber leaving from anywhere in it when its wait ends another way
+  and equal deadlines leaving in the order they came: the 100,000 take
+  0.4 s. `bench/concurrency_exercise.sh` sleeps 8,000 and then 32,000
+  tasks, requires the second to take under eight times the first (the
+  walked list measures eleven) and every task to wake in deadline order,
+  and proves both checks fail with the walk or the order put back.
+
 - **A variable assigned many times types in memory near its length.**
   Every assignment binds the variable to one more value and merges all of
   them again, and the merge built an array as long as the value list to
@@ -11200,7 +11213,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,215-line library and nothing else. Every other
+  written against iyi's own 18,290-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

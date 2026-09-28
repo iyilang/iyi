@@ -133,6 +133,17 @@
 
 ### Fixed
 
+- **A pause in typing hands the language server's memory back however the
+  typing went before it.** The proxy replaces its worker when the wire
+  goes quiet, and when a worker had instead been replaced on the memory
+  bound mid-typing, the quiet only warmed the successor - keeping every
+  edit it had taken since. How much a pause handed back depended on where
+  in the typing the bound had landed: a prelude a few hundred lines
+  longer moved it one edit earlier, and a paced session rested at 241 MB,
+  then 283, then 326, where it had rested at 198. A successor that has
+  worked is replaced at the quiet too, and the session rests at 172-185
+  MB. `bench/lsp_memory.py` is the gate that caught it, on CI.
+
 - **A hover inside `x.or(default)` is answered.** The `or` tests a variable
   of the compiler's own, and the cursor context restricted it by looking
   it up among the names it had recorded, which leave those out: a KeyError

@@ -212,13 +212,13 @@ prove_fails "== always true" all_eq "tuple: == different members" \
 # 3. One slot for every tuple, which is `Object#hash`. Equality still holds,
 #    so this is the check that a key is found rather than merely compared.
 prove_fails "hash collapsed" no_hash "tuple: order changes the hash" \
-  's/^      value = (value &\* 31) &+ self\[{{i}}\].hash$/      value = 17/'
+  's/^      value = (value ^ self\[{{i}}\]\.hash\.to_i64\.unsafe_to_u64) &\* 0x100000001B3_u64$/      value = 17_u64/'
 
 # 4. A hash that reads only the first member, so `{1, 2}` and `{1, 3}` share
 #    a slot. The table still answers - this is why the hash's own check is
 #    about which tuples differ rather than about lookups.
 prove_fails "hash ignores the tail" head_hash "tuple: a member changes the hash" \
-  's/^      value = (value &\* 31) &+ self\[{{i}}\].hash$/      value = value \&+ self[0].hash/'
+  's/^      value = (value ^ self\[{{i}}\]\.hash\.to_i64\.unsafe_to_u64) &\* 0x100000001B3_u64$/      value = (value ^ self[0].hash.to_i64.unsafe_to_u64) \&* 0x100000001B3_u64/'
 
 # 5. `size`, which the walk and every macro loop above read.
 prove_fails "size wrong" bad_size "tuple: size of a pair" \

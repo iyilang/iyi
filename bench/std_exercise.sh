@@ -428,7 +428,7 @@ if [ -n "$unconsumable" ]; then
   echo "  FAIL: cannot be consumed as artifacts:$unconsumable"
   status=1
 else
-  echo "  all sixty exercises answer the same from source and from artifacts"
+  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
 fi
 
 echo

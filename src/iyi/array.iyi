@@ -296,8 +296,6 @@ class Array(T)
     empty? ? nil : shift
   end
 
-  # Insertion sort: the samples sort five elements, and a merge sort would be
-  # three times the lines to be slower at that size.
   # Sorts this array, and `sorted` is the one that leaves it alone.
   #
   # The name is spelled out because of the library beside this one (SPEC.md
@@ -307,18 +305,63 @@ class Array(T)
   # the same pair `sort!` and `sort`, so a plain `sort` here would mean the
   # opposite of a plain `sort` under `--crystal` — the same call, two meanings,
   # no error. A longer name costs a few characters and cannot be misread.
+  #
+  # A merge sort, stable, over runs of SORT_RUN that an insertion sort puts
+  # in order first. It was an insertion sort alone, written for the samples'
+  # five elements, and a program that sorted three million integers did not
+  # finish in fifteen minutes; this sorts them in under a second. Equal
+  # elements keep their order, as they did.
+  SORT_RUN = 16
+
   def sort_in_place(& : T, T -> Int32) : self
-    index = 1
-    while index < @size
-      value = self[index]
-      slot = index - 1
-      while slot >= 0 && (yield self[slot], value) > 0
-        self[slot + 1] = self[slot]
-        slot = slot - 1
+    return self if @size < 2
+    start = 0
+    while start < @size
+      finish = start + SORT_RUN < @size ? start + SORT_RUN : @size
+      index = start + 1
+      while index < finish
+        value = @buffer[index]
+        slot = index - 1
+        while slot >= start && (yield @buffer[slot], value) > 0
+          @buffer[slot + 1] = @buffer[slot]
+          slot = slot - 1
+        end
+        @buffer[slot + 1] = value
+        index = index + 1
       end
-      self[slot + 1] = value
-      index = index + 1
+      start = finish
     end
+    return self if @size <= SORT_RUN
+    from = @buffer
+    into = Pointer(T).malloc(@size.to_u64)
+    width = SORT_RUN
+    while width < @size
+      low = 0
+      while low < @size
+        middle = low + width < @size ? low + width : @size
+        high = middle + width < @size ? middle + width : @size
+        left = low
+        right = middle
+        cursor = low
+        while cursor < high
+          # The left run's element on a tie: that is what keeps it stable.
+          if right >= high || (left < middle && (yield from[left], from[right]) <= 0)
+            into[cursor] = from[left]
+            left = left + 1
+          else
+            into[cursor] = from[right]
+            right = right + 1
+          end
+          cursor = cursor + 1
+        end
+        low = high
+      end
+      spare = from
+      from = into
+      into = spare
+      width = width * 2
+    end
+    @buffer.copy_from(from, @size) if from.address != @buffer.address
     self
   end
 
@@ -331,20 +374,15 @@ class Array(T)
   end
 
   # Sorted on a key each element answers, ascending by `<`: the same pair
-  # as above, one name longer. The key is computed once per comparison
-  # rather than once per element, which is the cost of an insertion sort
-  # with no scratch array; the arrays this prelude sorts are short.
+  # as above, one name longer. Each element's key is computed once, and the
+  # pairs of key and element are what the merge sort orders.
   def sort_in_place_by(& : T -> U) : self forall U
-    index = 1
+    keyed = Array(Tuple(U, T)).new(@size)
+    each { |value| keyed << {(yield value), value} }
+    keyed.sort_in_place { |a, b| a[0] < b[0] ? -1 : (b[0] < a[0] ? 1 : 0) }
+    index = 0
     while index < @size
-      value = self[index]
-      key = yield value
-      slot = index - 1
-      while slot >= 0 && key < (yield self[slot])
-        self[slot + 1] = self[slot]
-        slot = slot - 1
-      end
-      self[slot + 1] = value
+      @buffer[index] = keyed[index][1]
       index = index + 1
     end
     self

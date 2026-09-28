@@ -186,6 +186,14 @@ prove_fails "concat reads a growing size" grow_concat array.iyi \
   "array: concat with itself doubles" \
   's/^    taking = other.size$/    taking = 1/'
 
+prove_fails "a sort that compares every pair" quadratic_sort array.iyi \
+  "array: a sort of 100,000 made" \
+  's/^  SORT_RUN = 16$/  SORT_RUN = 1073741824/'
+
+prove_fails "a merge that takes the right run on a tie" unstable_sort array.iyi \
+  "array: a sort is ascending and keeps equal elements in order" \
+  's/(yield from\[left\], from\[right\]) <= 0/(yield from[left], from[right]) < 0/'
+
 # 2. A key written twice making two entries, which is what a `[]=` that does
 #    not look first would do.
 prove_fails "a rewritten key appends" double_write hash.iyi \

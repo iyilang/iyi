@@ -234,4 +234,59 @@ pairs = counts.to_a
 assert_int(pairs.size, 1, "hash: to_a has a pair per entry")
 assert_str(pairs[0][0], "a", "hash: to_a keeps the key")
 
+# A sort is a merge sort, and a large array is where that shows: 100,000
+# elements with 50 distinct keys, sorted with a block that counts its calls.
+# An insertion sort - what the prelude had, written for five elements -
+# makes about n*n/4 comparisons here, 2.5 billion, and never answered for
+# three million; a merge sort about n*log2(n), 1.7 million. The order must
+# be ascending and, for equal keys, the order the elements came in.
+class Keyed
+  getter key : Int32
+  getter seq : Int32
+
+  def initialize(@key : Int32, @seq : Int32)
+  end
+end
+
+class Tally
+  @@calls = 0_i64
+
+  # Past the bound the sort is not a merge sort, and waiting out the rest
+  # of an insertion sort's billions is a minute; the check fails here.
+  def self.bump : Nil
+    @@calls = @@calls + 1
+    raise "assert failed: array: a sort of 100,000 made #{@@calls} comparisons, past n*log2(n)" if @@calls > 3000000_i64
+  end
+
+  def self.calls : Int64
+    @@calls
+  end
+end
+
+keyed = [] of Keyed
+seed = 7
+index = 0
+while index < 100000
+  seed = (seed * 1103 + 12345) % 1000003
+  keyed << Keyed.new(seed % 50, index)
+  index = index + 1
+end
+ordered = keyed.sorted do |a, b|
+  Tally.bump
+  a.key < b.key ? -1 : (a.key > b.key ? 1 : 0)
+end
+out_of_order = 0
+index = 1
+while index < ordered.size
+  before = ordered[index - 1]
+  after = ordered[index]
+  out_of_order = out_of_order + 1 if before.key > after.key || (before.key == after.key && before.seq > after.seq)
+  index = index + 1
+end
+assert_int(ordered.size, 100000, "array: a sort keeps every element")
+assert_int(out_of_order, 0, "array: a sort is ascending and keeps equal elements in order")
+by_key = keyed.sorted_by { |k| k.key }
+assert_int(by_key[0].seq, ordered[0].seq, "array: sorted_by keeps equal keys in order")
+assert_int(by_key[99999].seq, ordered[99999].seq, "array: sorted_by agrees with sorted")
+
 puts "all collection checks passed"

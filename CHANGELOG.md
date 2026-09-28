@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Sorting a large array finishes.** `Array#sorted`, `sort_in_place` and
+  their `_by` forms were an insertion sort, written for the samples' five
+  elements: a comparison for every pair, so a program that sorted three
+  million integers had not finished after fifteen minutes. They are a
+  stable merge sort now, over runs an insertion sort orders first, and the
+  same three million sort in 0.30 s - Go's `sort.Slice` takes 0.55 here.
+  Equal elements keep their order as they did, and `sorted_by` computes each
+  element's key once rather than twice per comparison.
+  `bench/collections_exercise.sh` sorts 100,000 elements with a block that
+  counts its calls and fails past three million, and checks the order and
+  its stability; an insertion sort fails the count, and a merge that takes
+  the right run on a tie fails the order.
+
 ### Changed
 
 - **Typing a def at its definition costs that def, not every def before
@@ -10990,7 +11005,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,011-line library and nothing else. Every other
+  written against iyi's own 18,049-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

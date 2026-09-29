@@ -56,7 +56,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" $ORACLE >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -66,6 +66,38 @@ build_and_run() {
   fi
   return 0
 }
+
+# `Math.exp` is glibc's algorithm, so where Python's libm is glibc its
+# `math.exp` is an oracle to the last bit: pairs of doubles, argument and
+# answer, over the range, the tiny, the ends and the special cases. Apple's
+# libm and the Windows runtime's are other algorithms, and there the
+# comparison is not run - and says so.
+ORACLE=""
+if [ -n "$PY" ] && "$PY" -c 'import platform, sys; sys.exit(0 if platform.libc_ver()[0] == "glibc" else 1)' 2>/dev/null; then
+  "$PY" - "$WORK/exp.bin" <<'PY'
+import math, random, struct, sys
+random.seed(2718)
+xs = [random.uniform(-20, 20) for _ in range(100000)]
+xs += [random.uniform(-1, 1) for _ in range(60000)]
+xs += [random.uniform(-745.2, 709.8) for _ in range(60000)]
+xs += [random.uniform(-760, -500) for _ in range(40000)]
+xs += [random.uniform(500, 720) for _ in range(40000)]
+xs += [random.uniform(-1e-15, 1e-15) for _ in range(10000)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 709.782712893384, 709.7827128933841,
+       -745.1332191019412, -745.1332191019411, -708.3964185322641, 5e-324, -5e-324, 2.0 ** -54,
+       -(2.0 ** -54), 2.0 ** -55, 512.0, -512.0, 1024.0, -1024.0, 1e308, -1e308]
+def exp(x):
+    try:
+        return math.exp(x)
+    except OverflowError:
+        return float("inf")
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<dd", x, exp(x)))
+PY
+  [ $? -eq 0 ] && ORACLE="$WORK/exp.bin"
+fi
+[ -z "$ORACLE" ] && echo "exp against glibc: not compared here, because this machine's libm is not glibc (or there is no python3), and another algorithm answers differently in the last bit"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -82,6 +114,10 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
     status=1
   fi
 done
+if [ -n "$ORACLE" ] && ! grep -q "== exp against glibc, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
+  echo "  missing section: == exp against glibc, bit for bit"
+  status=1
+fi
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo
@@ -114,7 +150,7 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" $ORACLE >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else
@@ -125,8 +161,17 @@ mutate "no huge-arg guard in sin/cos" 'return {0.0, 1.0} if q_f.abs >= 922337203
 mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value * TWO_54)' 'bits = IyiFloatText.bits_of(value)'
 mutate "the third part of pi/2 as it was" 'P3 = 2.02226624879595063154e-21' 'P3 = 6.12323399573676588613e-17'
 mutate "log10 without its whole-number check" 'ten_to(n.to_i32) == value ? n : res' 'res'
-mutate "exp's polynomial a term short" '    c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))' '    c = r - t * (EXP_P1 + t * (EXP_P2 + t * EXP_P3))'
-mutate "exp cut off one argument early" 'return 1.0 / 0.0 if value > 709.782712893384' 'return 1.0 / 0.0 if value >= 709.782712893384'
+# The next three change `exp` by a unit or two in the last place, which the
+# relative checks above cannot see and the oracle can; without the oracle
+# they are not proven here.
+if [ -n "$ORACLE" ]; then
+  mutate "exp's polynomial a term short" 'r2 * r2 * (EXP_C4 + r * EXP_C5)' 'r2 * r2 * EXP_C4'
+  mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
+  mutate "exp's subnormal result rounded twice" '      y = (hi + lo) - 1.0' '      y = y'
+else
+  echo "  exp's last-bit proofs: not run, no glibc oracle here"
+fi
+mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
 mutate "erfc as 1 - erf everywhere" 'return 1.0 - erf(value) if value < 1.0' 'return 1.0 - erf(value)'
 mutate "gamma with a pole answered" 'return 0.0 / 0.0 if value <= 0.0 && value == value.floor' '# poles answered'

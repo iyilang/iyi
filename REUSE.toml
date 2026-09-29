@@ -14,3 +14,18 @@ SPDX-License-Identifier = "Apache-2.0 WITH Swift-exception"
 # carries its own licence.
 [[annotations]]
 path = ["lib/*/**"]
+
+# iyi: `Math.exp` is Arm's optimized-routines exp (glibc's since 2.28),
+# ported with its table; the notice is beside the code as well.
+[[annotations]]
+path = ["src/std/math.iyi"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2018-2025 Arm Limited"
+SPDX-License-Identifier = "MIT"
+
+# iyi: the port of kostya's crystal-metric that `bench/metric_port.sh` gates.
+[[annotations]]
+path = ["bench/metric/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2024 Konstantin Makarchev"
+SPDX-License-Identifier = "MIT"

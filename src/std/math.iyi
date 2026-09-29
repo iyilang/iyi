@@ -189,47 +189,165 @@ pub struct Math
   private LN2_HI  =            0.6931471803691238
   private LN2_LO  =        1.9082149292705877e-10
 
-  # fdlibm's exp: x = k ln2 + r with |r| <= ln2/2, ln2 in two parts so the
-  # reduction is exact; exp(r) = 1 + 2r / (R(r^2) - r) with R the degree-5
-  # minimax polynomial, one division; then 2^k by the exponent field. Under
-  # one ulp, as the other library's libm is. It was a fourteen-term series
-  # with a division a term and `ldexp` through `frexp`: a neural network's
-  # training loop spent more than half its time here.
-  private EXP_P1 =  1.66666666666666019037e-01
-  private EXP_P2 = -2.77777777770155933842e-03
-  private EXP_P3 =  6.61375632143793436117e-05
-  private EXP_P4 = -1.65339022054652515390e-06
-  private EXP_P5 =  4.13813679705723846039e-08
+  # exp as glibc computes it on Linux - Arm's optimized-routines exp, which
+  # glibc has carried since 2.28 - so a program's `Math.exp` is the other
+  # library's to the last bit: fdlibm's, which this was, differed from it
+  # for one argument in ten over a million drawn from +-700, and a result
+  # printed in full differed with it. x = k ln2/128 + r, |r| <= ln2/256,
+  # the reduction by adding 1.5 * 2^52 as glibc's x86_64 build does; then
+  # 2^(k/128) from a table of 128 pairs, as the scale's bits and a
+  # correction, and exp(r) - 1 by a degree-5 polynomial. No division, where
+  # fdlibm had one, and under 0.51 ulp. The table and the coefficients are
+  # `math/exp_data.c`'s for N = 128, order 5, taken from its text rather
+  # than retyped. Arm's code is MIT OR Apache-2.0 WITH LLVM-exception, used
+  # here under MIT:
+  #
+  #   Copyright (c) 2018-2025 Arm Limited
+  #
+  #   Permission is hereby granted, free of charge, to any person obtaining
+  #   a copy of this software and associated documentation files (the
+  #   "Software"), to deal in the Software without restriction, including
+  #   without limitation the rights to use, copy, modify, merge, publish,
+  #   distribute, sublicense, and/or sell copies of the Software, and to
+  #   permit persons to whom the Software is furnished to do so, subject to
+  #   the following conditions: The above copyright notice and this
+  #   permission notice shall be included in all copies or substantial
+  #   portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+  #   WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+  #   THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+  #   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+  #   LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+  #   OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+  #   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+  private EXP_INVLN2N  =       184.6649652337873
+  private EXP_NEGLN2HI =   -0.005415212348111709
+  private EXP_NEGLN2LO = -1.2864023111638346e-14
+  private EXP_SHIFT    =      6755399441055744.0
+  private EXP_C2       =     0.49999999999996786
+  private EXP_C3       =     0.16666666666665886
+  private EXP_C4       =      0.0416666808410674
+  private EXP_C5       =    0.008333335853059549
+
+  # tab[2k] is T[k]'s bits and tab[2k + 1] H[k]'s less (k << 52) / 128,
+  # where 2^(k/128) ~= H[k] * (1 + T[k]).
+  private EXP_TAB = [
+    0x0_u64, 0x3ff0000000000000_u64, 0x3c9b3b4f1a88bf6e_u64, 0x3feff63da9fb3335_u64,
+    0xbc7160139cd8dc5d_u64, 0x3fefec9a3e778061_u64, 0xbc905e7a108766d1_u64, 0x3fefe315e86e7f85_u64,
+    0x3c8cd2523567f613_u64, 0x3fefd9b0d3158574_u64, 0xbc8bce8023f98efa_u64, 0x3fefd06b29ddf6de_u64,
+    0x3c60f74e61e6c861_u64, 0x3fefc74518759bc8_u64, 0x3c90a3e45b33d399_u64, 0x3fefbe3ecac6f383_u64,
+    0x3c979aa65d837b6d_u64, 0x3fefb5586cf9890f_u64, 0x3c8eb51a92fdeffc_u64, 0x3fefac922b7247f7_u64,
+    0x3c3ebe3d702f9cd1_u64, 0x3fefa3ec32d3d1a2_u64, 0xbc6a033489906e0b_u64, 0x3fef9b66affed31b_u64,
+    0xbc9556522a2fbd0e_u64, 0x3fef9301d0125b51_u64, 0xbc5080ef8c4eea55_u64, 0x3fef8abdc06c31cc_u64,
+    0xbc91c923b9d5f416_u64, 0x3fef829aaea92de0_u64, 0x3c80d3e3e95c55af_u64, 0x3fef7a98c8a58e51_u64,
+    0xbc801b15eaa59348_u64, 0x3fef72b83c7d517b_u64, 0xbc8f1ff055de323d_u64, 0x3fef6af9388c8dea_u64,
+    0x3c8b898c3f1353bf_u64, 0x3fef635beb6fcb75_u64, 0xbc96d99c7611eb26_u64, 0x3fef5be084045cd4_u64,
+    0x3c9aecf73e3a2f60_u64, 0x3fef54873168b9aa_u64, 0xbc8fe782cb86389d_u64, 0x3fef4d5022fcd91d_u64,
+    0x3c8a6f4144a6c38d_u64, 0x3fef463b88628cd6_u64, 0x3c807a05b0e4047d_u64, 0x3fef3f49917ddc96_u64,
+    0x3c968efde3a8a894_u64, 0x3fef387a6e756238_u64, 0x3c875e18f274487d_u64, 0x3fef31ce4fb2a63f_u64,
+    0x3c80472b981fe7f2_u64, 0x3fef2b4565e27cdd_u64, 0xbc96b87b3f71085e_u64, 0x3fef24dfe1f56381_u64,
+    0x3c82f7e16d09ab31_u64, 0x3fef1e9df51fdee1_u64, 0xbc3d219b1a6fbffa_u64, 0x3fef187fd0dad990_u64,
+    0x3c8b3782720c0ab4_u64, 0x3fef1285a6e4030b_u64, 0x3c6e149289cecb8f_u64, 0x3fef0cafa93e2f56_u64,
+    0x3c834d754db0abb6_u64, 0x3fef06fe0a31b715_u64, 0x3c864201e2ac744c_u64, 0x3fef0170fc4cd831_u64,
+    0x3c8fdd395dd3f84a_u64, 0x3feefc08b26416ff_u64, 0xbc86a3803b8e5b04_u64, 0x3feef6c55f929ff1_u64,
+    0xbc924aedcc4b5068_u64, 0x3feef1a7373aa9cb_u64, 0xbc9907f81b512d8e_u64, 0x3feeecae6d05d866_u64,
+    0xbc71d1e83e9436d2_u64, 0x3feee7db34e59ff7_u64, 0xbc991919b3ce1b15_u64, 0x3feee32dc313a8e5_u64,
+    0x3c859f48a72a4c6d_u64, 0x3feedea64c123422_u64, 0xbc9312607a28698a_u64, 0x3feeda4504ac801c_u64,
+    0xbc58a78f4817895b_u64, 0x3feed60a21f72e2a_u64, 0xbc7c2c9b67499a1b_u64, 0x3feed1f5d950a897_u64,
+    0x3c4363ed60c2ac11_u64, 0x3feece086061892d_u64, 0x3c9666093b0664ef_u64, 0x3feeca41ed1d0057_u64,
+    0x3c6ecce1daa10379_u64, 0x3feec6a2b5c13cd0_u64, 0x3c93ff8e3f0f1230_u64, 0x3feec32af0d7d3de_u64,
+    0x3c7690cebb7aafb0_u64, 0x3feebfdad5362a27_u64, 0x3c931dbdeb54e077_u64, 0x3feebcb299fddd0d_u64,
+    0xbc8f94340071a38e_u64, 0x3feeb9b2769d2ca7_u64, 0xbc87deccdc93a349_u64, 0x3feeb6daa2cf6642_u64,
+    0xbc78dec6bd0f385f_u64, 0x3feeb42b569d4f82_u64, 0xbc861246ec7b5cf6_u64, 0x3feeb1a4ca5d920f_u64,
+    0x3c93350518fdd78e_u64, 0x3feeaf4736b527da_u64, 0x3c7b98b72f8a9b05_u64, 0x3feead12d497c7fd_u64,
+    0x3c9063e1e21c5409_u64, 0x3feeab07dd485429_u64, 0x3c34c7855019c6ea_u64, 0x3feea9268a5946b7_u64,
+    0x3c9432e62b64c035_u64, 0x3feea76f15ad2148_u64, 0xbc8ce44a6199769f_u64, 0x3feea5e1b976dc09_u64,
+    0xbc8c33c53bef4da8_u64, 0x3feea47eb03a5585_u64, 0xbc845378892be9ae_u64, 0x3feea34634ccc320_u64,
+    0xbc93cedd78565858_u64, 0x3feea23882552225_u64, 0x3c5710aa807e1964_u64, 0x3feea155d44ca973_u64,
+    0xbc93b3efbf5e2228_u64, 0x3feea09e667f3bcd_u64, 0xbc6a12ad8734b982_u64, 0x3feea012750bdabf_u64,
+    0xbc6367efb86da9ee_u64, 0x3fee9fb23c651a2f_u64, 0xbc80dc3d54e08851_u64, 0x3fee9f7df9519484_u64,
+    0xbc781f647e5a3ecf_u64, 0x3fee9f75e8ec5f74_u64, 0xbc86ee4ac08b7db0_u64, 0x3fee9f9a48a58174_u64,
+    0xbc8619321e55e68a_u64, 0x3fee9feb564267c9_u64, 0x3c909ccb5e09d4d3_u64, 0x3feea0694fde5d3f_u64,
+    0xbc7b32dcb94da51d_u64, 0x3feea11473eb0187_u64, 0x3c94ecfd5467c06b_u64, 0x3feea1ed0130c132_u64,
+    0x3c65ebe1abd66c55_u64, 0x3feea2f336cf4e62_u64, 0xbc88a1c52fb3cf42_u64, 0x3feea427543e1a12_u64,
+    0xbc9369b6f13b3734_u64, 0x3feea589994cce13_u64, 0xbc805e843a19ff1e_u64, 0x3feea71a4623c7ad_u64,
+    0xbc94d450d872576e_u64, 0x3feea8d99b4492ed_u64, 0x3c90ad675b0e8a00_u64, 0x3feeaac7d98a6699_u64,
+    0x3c8db72fc1f0eab4_u64, 0x3feeace5422aa0db_u64, 0xbc65b6609cc5e7ff_u64, 0x3feeaf3216b5448c_u64,
+    0x3c7bf68359f35f44_u64, 0x3feeb1ae99157736_u64, 0xbc93091fa71e3d83_u64, 0x3feeb45b0b91ffc6_u64,
+    0xbc5da9b88b6c1e29_u64, 0x3feeb737b0cdc5e5_u64, 0xbc6c23f97c90b959_u64, 0x3feeba44cbc8520f_u64,
+    0xbc92434322f4f9aa_u64, 0x3feebd829fde4e50_u64, 0xbc85ca6cd7668e4b_u64, 0x3feec0f170ca07ba_u64,
+    0x3c71affc2b91ce27_u64, 0x3feec49182a3f090_u64, 0x3c6dd235e10a73bb_u64, 0x3feec86319e32323_u64,
+    0xbc87c50422622263_u64, 0x3feecc667b5de565_u64, 0x3c8b1c86e3e231d5_u64, 0x3feed09bec4a2d33_u64,
+    0xbc91bbd1d3bcbb15_u64, 0x3feed503b23e255d_u64, 0x3c90cc319cee31d2_u64, 0x3feed99e1330b358_u64,
+    0x3c8469846e735ab3_u64, 0x3feede6b5579fdbf_u64, 0xbc82dfcd978e9db4_u64, 0x3feee36bbfd3f37a_u64,
+    0x3c8c1a7792cb3387_u64, 0x3feee89f995ad3ad_u64, 0xbc907b8f4ad1d9fa_u64, 0x3feeee07298db666_u64,
+    0xbc55c3d956dcaeba_u64, 0x3feef3a2b84f15fb_u64, 0xbc90a40e3da6f640_u64, 0x3feef9728de5593a_u64,
+    0xbc68d6f438ad9334_u64, 0x3feeff76f2fb5e47_u64, 0xbc91eee26b588a35_u64, 0x3fef05b030a1064a_u64,
+    0x3c74ffd70a5fddcd_u64, 0x3fef0c1e904bc1d2_u64, 0xbc91bdfbfa9298ac_u64, 0x3fef12c25bd71e09_u64,
+    0x3c736eae30af0cb3_u64, 0x3fef199bdd85529c_u64, 0x3c8ee3325c9ffd94_u64, 0x3fef20ab5fffd07a_u64,
+    0x3c84e08fd10959ac_u64, 0x3fef27f12e57d14b_u64, 0x3c63cdaf384e1a67_u64, 0x3fef2f6d9406e7b5_u64,
+    0x3c676b2c6c921968_u64, 0x3fef3720dcef9069_u64, 0xbc808a1883ccb5d2_u64, 0x3fef3f0b555dc3fa_u64,
+    0xbc8fad5d3ffffa6f_u64, 0x3fef472d4a07897c_u64, 0xbc900dae3875a949_u64, 0x3fef4f87080d89f2_u64,
+    0x3c74a385a63d07a7_u64, 0x3fef5818dcfba487_u64, 0xbc82919e2040220f_u64, 0x3fef60e316c98398_u64,
+    0x3c8e5a50d5c192ac_u64, 0x3fef69e603db3285_u64, 0x3c843a59ac016b4b_u64, 0x3fef7321f301b460_u64,
+    0xbc82d52107b43e1f_u64, 0x3fef7c97337b9b5f_u64, 0xbc892ab93b470dc9_u64, 0x3fef864614f5a129_u64,
+    0x3c74b604603a88d3_u64, 0x3fef902ee78b3ff6_u64, 0x3c83c5ec519d7271_u64, 0x3fef9a51fbc74c83_u64,
+    0xbc8ff7128fd391f0_u64, 0x3fefa4afa2a490da_u64, 0xbc8dae98e223747d_u64, 0x3fefaf482d8e67f1_u64,
+    0x3c8ec3bc41aa2008_u64, 0x3fefba1bee615a27_u64, 0x3c842b94c3a9eb32_u64, 0x3fefc52b376bba97_u64,
+    0x3c8a64a931d185ee_u64, 0x3fefd0765b6e4540_u64, 0xbc8e37bae43be3ed_u64, 0x3fefdbfdad9cbe14_u64,
+    0x3c77893b4d91cd9d_u64, 0x3fefe7c1819e90d8_u64, 0x3c5305c14160cc89_u64, 0x3feff3c22b8f71f1_u64,
+  ] of UInt64
 
   def self.exp(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value
-    return 1.0 / 0.0 if value > 709.782712893384
-    return 0.0 if value < -745.1332191019412
-    magnitude = value < 0.0 ? 0.0 - value : value
-    return 1.0 + value if magnitude < 3.725290298461914e-09
+    bits = IyiFloatText.bits_of(value)
+    abstop = (bits.unsafe_shr(52_u64) & 0x7ff_u64).to_i64
+    # Outside 2^-54 <= |x| < 512: tiny, the ends of the range, or large.
+    if abstop < 0x3c9_i64 || abstop >= 0x408_i64
+      return 1.0 + value if abstop < 0x3c9_i64
+      if abstop >= 0x409_i64
+        return 0.0 if bits == 0xfff0000000000000_u64
+        return 1.0 + value if abstop >= 0x7ff_i64
+        return bits.unsafe_shr(63_u64) != 0_u64 ? 0.0 : 1.0 / 0.0
+      end
+      # 512 <= |x| < 1024: the scale may leave the exponent's range.
+      abstop = 0_i64
+    end
+    z = EXP_INVLN2N * value
+    kd = z + EXP_SHIFT
+    ki = IyiFloatText.bits_of(kd)
+    kd = kd - EXP_SHIFT
+    r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO
+    table = EXP_TAB.to_unsafe
+    idx = ((ki & 127_u64) &* 2_u64).to_i32
+    top = ki.unsafe_shl(45_u64)
+    tail = IyiFloatText.from_bits(table[idx])
+    sbits = table[idx + 1] &+ top
+    r2 = r * r
+    tmp = tail + r + r2 * (EXP_C2 + r * EXP_C3) + r2 * r2 * (EXP_C4 + r * EXP_C5)
+    return exp_special(tmp, sbits, ki) if abstop == 0_i64
+    scale = IyiFloatText.from_bits(sbits)
+    scale + scale * tmp
+  end
 
-    k = 0
-    hi = value
-    lo = 0.0
-    if magnitude > 0.34657359027997264
-      scaled = value * INV_LN2
-      k = (scaled + (scaled >= 0.0 ? 0.5 : -0.5)).to_i32
-      k_f = k.to_f64
-      hi = value - k_f * LN2_HI
-      lo = k_f * LN2_LO
+  # The scale for 512 <= |x| < 1024, whose exponent may have overflowed by
+  # up to 460: taken back into range, the product made there, and scaled
+  # out again - by 2^1009 when k > 0, by 2^-1022 when k < 0, where a result
+  # in the subnormals is rounded once to its precision before the scaling
+  # rather than twice.
+  private def self.exp_special(tmp : Float64, sbits : UInt64, ki : UInt64) : Float64
+    if ki & 0x80000000_u64 == 0_u64
+      scale = IyiFloatText.from_bits(sbits &- 0x3f10000000000000_u64)
+      return 5.486124068793689e+303 * (scale + scale * tmp)
     end
-    r = hi - lo
-    t = r * r
-    c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))
-    return 1.0 - ((r * c) / (c - 2.0) - r) if k == 0
-    y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
-    if k > 1023
-      y * 2.0 * IyiFloatText.from_bits((k + 1022).to_i64.to_u64.unsafe_shl(52_u64))
-    elsif k >= -1021
-      y * IyiFloatText.from_bits((k + 1023).to_i64.to_u64.unsafe_shl(52_u64))
-    else
-      ldexp(y, k)
+    scale = IyiFloatText.from_bits(sbits &+ 0x3fe0000000000000_u64)
+    y = scale + scale * tmp
+    if y < 1.0
+      lo = scale - y + scale * tmp
+      hi = 1.0 + y
+      lo = 1.0 - hi + y + lo
+      y = (hi + lo) - 1.0
+      y = 0.0 if y == 0.0
     end
+    2.2250738585072014e-308 * y
   end
 
   def self.exp(value : Float32) : Float32

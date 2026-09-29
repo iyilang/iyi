@@ -271,4 +271,25 @@ assert_str "-Infinity", Math.sinh(-100.0_f32).to_s, "sinh(-100_f32)"
 assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
 puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
+# Pairs of doubles, an argument and glibc's answer for it, when the gate
+# has a glibc to ask (`bench/std_math_exercise.sh`).
+args = Program.args
+if args.size > 0
+  puts "\n== exp against glibc, bit for bit"
+  pairs = File.read(args[0])
+  words = pairs.to_unsafe.as(Pointer(UInt64))
+  cases = pairs.bytesize // 16
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 2])
+    want = words[index * 2 + 1]
+    got = IyiFloatText.bits_of(Math.exp(x))
+    same = got == want || (Math.exp(x) != Math.exp(x) && IyiFloatText.from_bits(want) != IyiFloatText.from_bits(want))
+    raise "ASSERTION FAILED: exp(#{x}) is #{Math.exp(x)}, glibc's is #{IyiFloatText.from_bits(want)}" unless same
+    index = index + 1
+  end
+  assert_true cases > 300000, "the oracle had #{cases} cases"
+  puts "  #{cases} arguments, every answer glibc's to the last bit"
+end
+
 puts "\nALL CHECKS PASSED"

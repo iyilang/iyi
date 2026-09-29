@@ -145,6 +145,41 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
 }
 
 # The same, for the file the other value type lives in.
+prove_fails_primitives() { # prove_fails_primitives <label> <dir> <phrase> <sed script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  sed -e "$script" "$REPO/src/iyi/primitives.iyi" > "$WORK/$dir/iyi/primitives.iyi"
+  if cmp -s "$REPO/src/iyi/primitives.iyi" "$WORK/$dir/iyi/primitives.iyi"; then
+    echo "  $label: the patch changed nothing, so this proves nothing"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+       -o "$WORK/$dir/program" "$REPO/bench/value_exercise.iyi" \
+       > "$WORK/$dir/build" 2>&1; then
+    echo "  $label: the patched prelude did not build"
+    sed -n '1,10p' "$WORK/$dir/build"
+    status=1
+    return
+  fi
+  "$WORK/$dir/program" > "$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: the exercise still passed, so it does not test this"
+    status=1
+    return
+  fi
+  if ! grep -q "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed, but not at the expected check (wanted '$phrase')"
+    tail -2 "$WORK/$dir/out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+    "$(grep -m1 -o "$phrase.*" "$WORK/$dir/out" | sed 's/^assert failed: //')"
+}
+
 prove_fails_range() { # prove_fails_range <label> <dir> <phrase> <sed script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/iyi"
@@ -274,6 +309,10 @@ prove_fails_range "range == ignores exclusive" range_flag "range: inclusive is n
 # 10. And its hash, which is what puts an equal range in the same slot.
 prove_fails_range "range hash collapsed" range_hash "range: the flag changes the hash" \
   's/^    @exclusive ? (value &\* 31) &+ 1 : value &\* 31$/    0/'
+
+# A character that steps by two: the walk skips every other letter.
+prove_fails_primitives "a character plus one is two on" char_step "range: characters walk by one" \
+  's/^    point = ord + other$/    point = ord + other * 2/'
 
 echo
 if [ "$status" -eq 0 ]; then

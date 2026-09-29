@@ -102,6 +102,13 @@ struct Char
     ord
   end
 
+  # The character *other* code points on: what `'a'..'z'` steps by.
+  def +(other : Int32) : Char
+    point = ord + other
+    raise "#{point} is out of char range" if point < 0 || point > 0x10FFFF
+    point.unsafe_chr
+  end
+
   {% for op in %w(== != < <= > >=) %}
     @[Primitive(:binary)]
     def {{ op.id }}(other : Char) : Bool

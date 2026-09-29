@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **`%g` and `%G` in `sprintf`, `printf` and `String#%`.** The shorter
+  of `%f` and `%e` by C's rule - `%e` when the exponent is under -4 or at
+  least the precision, `%f` otherwise, trailing zeros trimmed unless `#`
+  keeps them. It was a panic, "unknown format specifier '%g'", where C,
+  Python, Go and Crystal all answer. Checked against Crystal over 510
+  cases, which it matches except `%#g` of zero, where C and Python write
+  `0.00000` and so does this. `bench/format_exercise.sh` checks the
+  switch points, the trim, `#`, flags and infinity, and proves the checks
+  fail with the trim or the switch taken out.
+
+- **A range of characters.** `('a'..'z').each`, `.map`, `.to_a` and
+  `.size` walk code points, as they do in Crystal; the prelude's `Range`
+  steps by adding one, and nothing added to a `Char`, so the range did
+  not compile. `Char#+(Int32)` answers the character that many code points
+  on, and refuses a point outside `0..0x10FFFF`.
+  `bench/value_exercise.sh` walks ASCII and non-ASCII runs and proves the
+  check fails with a character that steps by two.
+
 ### Changed
 
 - **A union of many classes types in time near its width.** A variable
@@ -421,16 +441,6 @@ and instance variables and renames a local one, and completion offers a
 module's own functions.
 
 ### Added
-
-- **`%g` and `%G` in `sprintf`, `printf` and `String#%`.** The shorter
-  of `%f` and `%e` by C's rule - `%e` when the exponent is under -4 or at
-  least the precision, `%f` otherwise, trailing zeros trimmed unless `#`
-  keeps them. It was a panic, "unknown format specifier '%g'", where C,
-  Python, Go and Crystal all answer. Checked against Crystal over 510
-  cases, which it matches except `%#g` of zero, where C and Python write
-  `0.00000` and so does this. `bench/format_exercise.sh` checks the
-  switch points, the trim, `#`, flags and infinity, and proves the checks
-  fail with the trim or the switch taken out.
 
 - **`Process.run(env:)` gives a child its own environment.** The child's
   environment was this program's, and the only way to change it was
@@ -11376,7 +11386,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,394-line library and nothing else. Every other
+  written against iyi's own 18,401-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

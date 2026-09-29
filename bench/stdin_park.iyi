@@ -1,13 +1,15 @@
 # A fiber reading standard input parks: SPEC.md III.4.8 named that call as
 # the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
 # feeds this a pipe - a line a second after the program has started, and
-# another two seconds later - and asks two things of it:
+# one two seconds later, twice - and asks three things of it:
 #
 #   1. The reader parks. A sibling ticking every 100 ms ticks while the
 #      first line is on its way; a read that held the thread let it tick
 #      none.
 #   2. Cancellation reaches it (III.4.2). A sibling's failure ends the group
 #      at once, and the line sent after is read whole by the next read.
+#   3. The stream survives it: a line read withdrawn the same way leaves
+#      the next line to the next read.
 module stdin_park
 
 import std/file::{File}
@@ -87,4 +89,26 @@ fail("cancelling the fiber reading stdin took #{ended} ms, against a line two se
 second = stdin.gets
 fail("after the cancelled read the next line read #{second.inspect}, not the line sent") unless second == "second\n"
 puts "a fiber reading stdin was cancelled in #{ended} ms, and the next line came whole"
+
+# ── 3. A withdrawn line read leaves the stream open ─────────────────────
+# The same cancellation, through the stream rather than beneath it. The
+# stream took the withdrawn read for the end of its input and kept that
+# for good: every read after it answered nil, and the third line was
+# never read.
+withdrawn = "not asked"
+group do |g|
+  g.spawn do
+    line = stdin.gets
+    withdrawn = line.nil? ? "nil" : line
+    0
+  end
+  g.spawn do
+    sleep(200)
+    TaskFailed.new
+  end
+end
+fail("a line read cancelled before its line came answered #{withdrawn.inspect}") unless withdrawn == "nil"
+third = stdin.gets
+fail("after a withdrawn line read the next read #{third.inspect}, not the line sent") unless third == "third\n"
+puts "a withdrawn line read left the stream open, and the next line came whole"
 puts "every property held"

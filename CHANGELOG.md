@@ -374,6 +374,15 @@
 
 ### Fixed
 
+- **A withdrawn read leaves standard input open.** A task whose group
+  failed while it waited on `stdin.gets` answered nil, as it should, but
+  the stream took the withdrawn read for the end of its input and kept
+  that for good: every read after it answered nil, and lines sent later
+  were never read. A withdrawn read is not the end now. Part 3 of
+  `bench/stdin_park.iyi`, which `bench/concurrency_exercise.sh` feeds a
+  third line, withdraws a line read and reads the next line; the old
+  prelude read nil.
+
 - **On Windows, a panic the library raises names no library line.** The
   rule is that a panic in the program names its line and one the library
   raises names none, since the library's line is not where the bug is.
@@ -11910,7 +11919,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,618-line library and nothing else. Every other
+  written against iyi's own 18,620-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

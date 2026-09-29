@@ -101,7 +101,7 @@ fi
 feed() { # the lines, once the program has said it runs
   local tries=0
   while [ ! -e "$1" ] && [ "$tries" -lt 600 ]; do sleep 0.05; tries=$((tries + 1)); done
-  sleep 1; echo first; sleep 2; echo second
+  sleep 1; echo first; sleep 2; echo second; sleep 2; echo third
 }
 rm -f stdin.ready
 feed stdin.ready | STDIN_PARK_READY=stdin.ready timeout -k 5 60 ./stdin_park > stdin.txt 2>&1

@@ -374,6 +374,14 @@
 
 ### Fixed
 
+- **`File.same?` is false for two files nothing could identify.** On
+  Windows `File.info` answers a file it cannot open with its attributes
+  alone and an identity of 0, and `same?` read 0 and 0 as one file: two
+  files of different sizes and contents, both denied to this user, were
+  `same? true`. No identity is no answer of sameness now.
+  `bench/std_file_exercise.sh` denies two files and asks; the old module
+  answered true.
+
 - **On Windows, `File.match?` takes either separator for either.**
   It compared bytes, so `File.match?("a\\b.txt", "a/*.txt")` was false,
   and `Dir.glob`, which answers with `\` after a `/` pattern, returned

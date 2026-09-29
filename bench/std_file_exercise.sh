@@ -436,6 +436,26 @@ PY
         cat "$WORK/locked.out"
       fi
     fi
+    # Two files Windows will not open for their identity - here, a denied
+    # SYNCHRONIZE right - are two files still. `info` falls back to the
+    # attributes, whose identity is 0, and `same?` read 0 and 0 as one
+    # file: two sizes, two contents, `same? true`.
+    printf 'one' > "$WORK/deny_a.txt"
+    printf 'second' > "$WORK/deny_b.txt"
+    printf 'module main\n\nimport std/file::{File}\n\nputs File.same?(Program.args[0], Program.args[1])\n' > "$WORK/deny_same.iyi"
+    if ! "$IYI" build -o "$WORK/deny_same" "$WORK/deny_same.iyi" > "$WORK/deny_same.build" 2>&1; then
+      echo "  the unopenable-files program did not build"; sed -n '1,10p' "$WORK/deny_same.build"; status=1
+    else
+      for f in deny_a deny_b; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /deny "$USERNAME:(S)" > /dev/null; done
+      answer="$("$WORK/deny_same" "$WORK/deny_a.txt" "$WORK/deny_b.txt" 2>&1)"
+      for f in deny_a deny_b; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /remove:d "$USERNAME" > /dev/null; done
+      if [ "$answer" = "false" ]; then
+        echo "  two files Windows will not open are not one file"
+      else
+        echo "  two files Windows will not open answered same? $answer"
+        status=1
+      fi
+    fi
     ;;
 esac
 

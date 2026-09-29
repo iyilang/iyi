@@ -681,8 +681,11 @@ class ::File
       @permissions.owner_execute?
     end
 
+    # An identity of 0 is none: Windows answers a path it could not open
+    # with the attributes alone (`info?`), and two such files - different
+    # sizes, different contents - were the same file.
     def same_file?(other : Info) : Bool
-      @dev == other.dev && @ino == other.ino
+      @ino != 0_u64 && @dev == other.dev && @ino == other.ino
     end
   end
 
@@ -788,9 +791,8 @@ class ::File
       # FILE_FLAG_OPEN_REPARSE_POINT (0x200000) off resolves a symlink to its
       # target, which is the whole difference between `stat` and `lstat` here.
       # A path another process holds exclusively opens for neither, and then
-      # the attributes above are the whole answer and the identity stays 0 —
-      # `same_file?` reads two of those as the same file, which is as far as
-      # attribute data can go.
+      # the attributes above are the whole answer and the identity stays 0,
+      # which `same_file?` reads as no identity at all.
       dev = 0_i64
       ino = 0_u64
       open_flags = follow_symlinks ? 0x2000000 : 0x2200000

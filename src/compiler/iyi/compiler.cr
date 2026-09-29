@@ -295,7 +295,10 @@ module Iyi
       # a path is the platform's, so on Windows no entry ever ended with its own
       # header — every build fell back to the entry-dir rule and `import
       # shared/helper` from `pkg/eps_test.iyi` could not be found.
-      return nil unless ::Path[path].to_posix.to_s.ends_with?(suffix)
+      # And asked the way the file system compares: on Windows `APP\main.iyi`
+      # is `app/main.iyi`, and a path typed in another case found no root
+      # and then no module its header's imports named.
+      return nil unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end

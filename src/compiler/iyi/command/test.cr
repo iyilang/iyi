@@ -121,10 +121,10 @@ class Iyi::Command
       # the other reason to say which file it was.
       discount_off = affected.reject { |changed| File.file?(changed) }
       if discount_off.empty?
-        changed = affected.map { |changed| File.expand_path(changed) }
+        changed = affected.map { |changed| Iyi.path_key(File.expand_path(changed)) }
         selected = files.select do |file|
           closure = test_import_closure(file)
-          closure.nil? || changed.any? { |path| closure.includes?(path) }
+          closure.nil? || closure.any? { |path| changed.includes?(Iyi.path_key(path)) }
         end
         skipped = files.size - selected.size
         files = selected

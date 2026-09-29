@@ -231,6 +231,23 @@ fi
 touch twin_b.done
 wait "$twin_a"
 grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
+# A path in another case, where the file system says it is the same
+# file. The root a header names was found by comparing strings, so `iyi
+# run HDR/APP/MAIN.IYI` found none, and the import beside the header was
+# "can't find module"; and an entry spelled `.IYI` was built against
+# Crystal's library, told of a `--crystal` it was never given.
+mkdir -p hdr/app
+printf 'module app/util\n\npub def answer : Int32\n  42\nend\n' > hdr/app/util.iyi
+printf 'module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > hdr/app/main.iyi
+if [ HDR/APP/MAIN.IYI -ef hdr/app/main.iyi ]; then
+  if "$IYI" run HDR/APP/MAIN.IYI > hdr_case.out 2>&1 && grep -qx 42 hdr_case.out; then
+    echo "  a module run by its path in another case: resolves its imports"
+  else
+    echo "  a module run by its path in another case did not run:"
+    sed -n '1,3p' hdr_case.out
+    status=1
+  fi
+fi
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

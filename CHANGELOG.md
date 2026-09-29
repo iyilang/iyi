@@ -374,6 +374,20 @@
 
 ### Fixed
 
+- **On Windows, a path in another case is the same path to the CLI.**
+  Three places compared paths as strings where NTFS does not: `iyi test
+  --affected` and `iyi check --affected` given the changed file with a
+  lower-case drive letter - what editors pass - or in another case
+  selected nothing and reported "0 to run" and "0 consumer(s) checked, all
+  compile", clean verdicts about nothing; the root a module's header names
+  was not found for `iyi run APP\MAIN.iyi`, so its imports were "can't find
+  module"; and an entry spelled `.IYI` was built against Crystal's library
+  and told of a `--crystal` it was never given. The language server reads
+  a header's root through the compiler's one reading now, not a copy of
+  it. `bench/test_verb.sh` selects by the changed file in upper case and
+  with a lower-case drive, and `bench/verbs_exercise.sh` runs
+  `HDR/APP/MAIN.IYI`; the old compiler fails both.
+
 - **`Path#expand` answers an absolute path for Windows' rooted and
   drive-relative names.** An anchor that was not absolute went through
   as it was: `\a` expanded to `\a` and `C:a` to `C:a`, where the answer

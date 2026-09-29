@@ -86,6 +86,23 @@ printf 'module main\n\nputs "lonely"\n' > lonely_test.iyi
 "$IYI" test --affected calc/add.iyi . > sel.txt 2>&1
 grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel.txt ||
   { echo "the selection is not exact:"; cat sel.txt; exit 1; }
+# The same file under another spelling, where the file system says it is
+# one: in upper case, and on Windows with the drive letter an editor
+# writes lower case. The closure compared strings, and both selected
+# nothing - "0 to run, 1 skipped", a clean verdict about no tests.
+if [ CALC/ADD.IYI -ef calc/add.iyi ]; then
+  "$IYI" test --affected CALC/ADD.IYI . > sel_case.txt 2>&1
+  grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_case.txt ||
+    { echo "another case of the changed file selected otherwise:"; cat sel_case.txt; exit 1; }
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    lower="$(echo "$WORK" | cut -c1 | tr 'A-Z' 'a-z')$(echo "$WORK" | cut -c2-)/calc/add.iyi"
+    "$IYI" test --affected "$lower" . > sel_drive.txt 2>&1
+    grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_drive.txt ||
+      { echo "a lower-case drive letter selected otherwise:"; cat sel_drive.txt; exit 1; }
+    ;;
+esac
 "$IYI" test --affected nope.iyi . > off.txt 2>&1
 grep -q 'nope.iyi is not there, so every test ran' off.txt ||
   { echo "the discount turned off in silence:"; cat off.txt; exit 1; }

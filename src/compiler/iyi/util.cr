@@ -109,6 +109,20 @@ module Iyi
     relative.to_s
   end
 
+  # iyi: *path* spelled the way the platform's file system compares names:
+  # as it is on Linux, and on Windows with one separator and one case,
+  # because NTFS does not tell `C:\App\Util.iyi` from `c:/app/util.iyi`.
+  # For a path that may not exist yet, or a set of them, where
+  # `same_file?` cannot ask. Every comparison that did not do this
+  # answered differently for a drive letter an editor lowercased.
+  def self.path_key(path : String) : String
+    {% if flag?(:win32) %}
+      path.tr("/", "\\").downcase
+    {% else %}
+      path
+    {% end %}
+  end
+
   # iyi: whether *a* and *b* name one file - asked of the file system,
   # which is the only thing that knows. A string compare of the expanded
   # paths is the same answer on Linux and wrong on Windows, where NTFS

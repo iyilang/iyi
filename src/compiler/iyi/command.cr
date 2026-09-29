@@ -1014,7 +1014,10 @@ class Iyi::Command
     # compiler knows before it reads anything. `--prelude` still wins, and a
     # `.cr` file is untouched — the two languages share this compiler and do
     # not share a standard library.
-    if !specified_prelude && sources.first?.try(&.filename.ends_with?(".iyi"))
+    # In the file system's case: on Windows `hello.IYI` is `hello.iyi`, and
+    # it was built against Crystal's library and told of a `--crystal` it
+    # was never given.
+    if !specified_prelude && sources.first?.try { |source| Iyi.path_key(source.filename).ends_with?(".iyi") }
       compiler.prelude = "iyi/prelude"
     end
 

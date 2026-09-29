@@ -34,7 +34,7 @@ class Iyi::Command
           abort! ex.message.to_s, :USAGE_ERROR
         end
       IyiMod.surface artifact, STDOUT
-    when filename.ends_with?(".iyi")
+    when Iyi.path_key(filename).ends_with?(".iyi")
       doc_file! filename, ".iyi module"
       doc_from_source(File.expand_path(filename))
     when filename == "prelude"
@@ -284,7 +284,7 @@ class Iyi::Command
       abort! "#{filename} declares no module, and a module is what `doc` reads", :USAGE_ERROR
     end
     module_root = doc_module_root(filename, module_name)
-    unless File.expand_path(File.join(module_root, "#{module_name}.iyi")) == filename
+    unless Iyi.same_file?(File.join(module_root, "#{module_name}.iyi"), filename)
       abort! "#{filename} declares `module #{module_name}`, and a module's path " \
              "is its file's path (SPEC.md R-1, IV.6): a module by that name is " \
              "read from #{module_name}.iyi", :USAGE_ERROR

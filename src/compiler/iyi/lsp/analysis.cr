@@ -124,7 +124,9 @@ module Iyi::Lsp
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new
-      root = project_root_of(path, text)
+      # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
+      # resolves its `import calc/lexer` from `<root>`.
+      root = Compiler.header_root_of(path, text)
       compiler.iyi_project_root = root
       compiler.stderr = IO::Memory.new
 
@@ -638,36 +640,6 @@ module Iyi::Lsp
           return_type.to_s(io)
         end
       end
-    end
-
-    # IV.6 read backwards: a module's path is its file's path, so a file
-    # whose path ends with its own header's path names the project root
-    # above both — and opening `<root>/calc/parser.iyi` resolves its
-    # `import calc/lexer` the way a build from `<root>` would. A file
-    # whose header and path disagree, or that has no header, keeps the
-    # entry-dir rule.
-    private def project_root_of(path : String, text : String) : String?
-      header = nil
-      text.each_line do |line|
-        line = line.strip
-        next if line.empty? || line.starts_with?('#')
-        header = line
-        break
-      end
-      return nil unless header && header.starts_with?("module ")
-      module_path = header.lchop("module ").strip
-      return nil if module_path.empty? || module_path.includes?(' ')
-      suffix = "/#{module_path}.iyi"
-      # Asked of the posix reading, the way `Compiler.header_root_of` asks
-      # the same question of a build's entry: a module path is posix by
-      # grammar (R-1) and a path is the platform's, so on Windows no file
-      # ever ended with its own header and the server kept the entry-dir
-      # rule for every one of them. The root is sliced off the path itself,
-      # so what comes back is still the platform's spelling — `to_posix`
-      # swaps separator for separator and changes no length.
-      return nil unless ::Path[path].to_posix.to_s.ends_with?(suffix)
-      root = path[0, path.size - suffix.size]
-      root.empty? ? "/" : root
     end
 
     # ── CodeError → Diag ─────────────────────────────────────────────────

@@ -1360,7 +1360,15 @@ class ::File
         ni = ni + 1
         pi = pi + 1
       else
-        return false if ni >= nlen || nptr[ni] != pc
+        return false if ni >= nlen
+        # On Windows `/` and `\` are one separator, and `Dir.glob` answers
+        # with either: its own results did not match the pattern that
+        # found them.
+        {% if flag?(:win32) %}
+          return false if nptr[ni] != pc && !((pc == 47_u8 || pc == 92_u8) && (nptr[ni] == 47_u8 || nptr[ni] == 92_u8))
+        {% else %}
+          return false if nptr[ni] != pc
+        {% end %}
         ni = ni + 1
         pi = pi + 1
       end

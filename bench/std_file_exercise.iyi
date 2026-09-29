@@ -230,6 +230,12 @@ assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
+{% if flag?(:win32) %}
+  # Either separator matches either: `Dir.glob` answers in both, and its
+  # own results did not match the pattern that found them.
+  assert_true File.match?("a\\b.txt", "a/*.txt"), "a backslash in the name matches a slash in the pattern"
+  assert_true File.match?("a/b.txt", "a\\*.txt"), "a slash in the name matches a backslash in the pattern"
+{% end %}
 ta = File.tempfile("std_file_ex")
 tb = File.tempfile("std_file_ex")
 assert_true ta != tb, "tempfile names differ"

@@ -374,6 +374,13 @@
 
 ### Fixed
 
+- **On Windows, `File.match?` takes either separator for either.**
+  It compared bytes, so `File.match?("a\\b.txt", "a/*.txt")` was false,
+  and `Dir.glob`, which answers with `\` after a `/` pattern, returned
+  paths that did not match the pattern that found them.
+  `bench/std_file_exercise.iyi` matches each way on Windows; the old module
+  fails the first.
+
 - **On Windows, a path in another case is the same path to the CLI.**
   Three places compared paths as strings where NTFS does not: `iyi test
   --affected` and `iyi check --affected` given the changed file with a

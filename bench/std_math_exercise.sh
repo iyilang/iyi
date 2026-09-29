@@ -67,15 +67,21 @@ build_and_run() {
   return 0
 }
 
-# `Math.exp` is glibc's algorithm, so where Python's libm is glibc its
-# `math.exp` is an oracle to the last bit: pairs of doubles, argument and
-# answer, over the range, the tiny, the ends and the special cases. Apple's
-# libm and the Windows runtime's are other algorithms, and there the
-# comparison is not run - and says so.
+# `Math.exp` is Arm's optimized-routines exp - glibc's since 2.28 - and
+# `bench/arm_exp` holds Arm's two files as they are published, so the
+# oracle is that algorithm compiled here, with contraction off, rather than
+# this machine's libm: glibc's own build for a processor with FMA answers
+# differently in the last bit for about 7 arguments in 10,000, and Apple's
+# and Windows' libm are other algorithms. Python draws the arguments -
+# over the range, the tiny, the ends and the special cases - and the
+# compiled oracle writes each with its answer.
 ORACLE=""
-if [ -n "$PY" ] && "$PY" -c 'import platform, sys; sys.exit(0 if platform.libc_ver()[0] == "glibc" else 1)' 2>/dev/null; then
-  "$PY" - "$WORK/exp.bin" <<'PY'
-import math, random, struct, sys
+CC="${CC:-cc}"
+if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
+   "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/arm_exp" -o "$WORK/arm_exp" \
+     "$REPO/bench/arm_exp/oracle.c" "$REPO/bench/arm_exp/exp.c" "$REPO/bench/arm_exp/exp_data.c" > "$WORK/arm_exp.log" 2>&1; then
+  "$PY" - "$WORK/exp.in" <<'PY'
+import random, struct, sys
 random.seed(2718)
 xs = [random.uniform(-20, 20) for _ in range(100000)]
 xs += [random.uniform(-1, 1) for _ in range(60000)]
@@ -86,18 +92,13 @@ xs += [random.uniform(-1e-15, 1e-15) for _ in range(10000)]
 xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 709.782712893384, 709.7827128933841,
        -745.1332191019412, -745.1332191019411, -708.3964185322641, 5e-324, -5e-324, 2.0 ** -54,
        -(2.0 ** -54), 2.0 ** -55, 512.0, -512.0, 1024.0, -1024.0, 1e308, -1e308]
-def exp(x):
-    try:
-        return math.exp(x)
-    except OverflowError:
-        return float("inf")
 with open(sys.argv[1], "wb") as out:
     for x in xs:
-        out.write(struct.pack("<dd", x, exp(x)))
+        out.write(struct.pack("<d", x))
 PY
-  [ $? -eq 0 ] && ORACLE="$WORK/exp.bin"
+  "$WORK/arm_exp" < "$WORK/exp.in" > "$WORK/exp.bin" && ORACLE="$WORK/exp.bin"
 fi
-[ -z "$ORACLE" ] && echo "exp against glibc: not compared here, because this machine's libm is not glibc (or there is no python3), and another algorithm answers differently in the last bit"
+[ -z "$ORACLE" ] && echo "exp against Arm's exp: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -114,8 +115,8 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
     status=1
   fi
 done
-if [ -n "$ORACLE" ] && ! grep -q "== exp against glibc, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
-  echo "  missing section: == exp against glibc, bit for bit"
+if [ -n "$ORACLE" ] && ! grep -q "== exp against Arm's exp, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
+  echo "  missing section: == exp against Arm's exp, bit for bit"
   status=1
 fi
 [ "$status" -eq 0 ] && echo "  sections reported"
@@ -169,7 +170,7 @@ if [ -n "$ORACLE" ]; then
   mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
   mutate "exp's subnormal result rounded twice" '      y = (hi + lo) - 1.0' '      y = y'
 else
-  echo "  exp's last-bit proofs: not run, no glibc oracle here"
+  echo "  exp's last-bit proofs: not run, no oracle here"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'

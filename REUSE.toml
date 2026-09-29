@@ -16,9 +16,10 @@ SPDX-License-Identifier = "Apache-2.0 WITH Swift-exception"
 path = ["lib/*/**"]
 
 # iyi: `Math.exp` is Arm's optimized-routines exp (glibc's since 2.28),
-# ported with its table; the notice is beside the code as well.
+# ported with its table; the notice is beside the code as well. The math
+# gate's oracle is Arm's two files as published, with their own headers.
 [[annotations]]
-path = ["src/std/math.iyi"]
+path = ["src/std/math.iyi", "bench/arm_exp/exp.c", "bench/arm_exp/exp_data.c"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2018-2025 Arm Limited"
 SPDX-License-Identifier = "MIT"

@@ -193,7 +193,11 @@ pub struct Math
   # glibc has carried since 2.28 - so a program's `Math.exp` is the other
   # library's to the last bit: fdlibm's, which this was, differed from it
   # for one argument in ten over a million drawn from +-700, and a result
-  # printed in full differed with it. x = k ln2/128 + r, |r| <= ln2/256,
+  # printed in full differed with it. Exactly glibc's build without FMA;
+  # on a processor with FMA glibc picks a fused build of the same source,
+  # which answers differently in the last bit for about 7 arguments in
+  # 10,000 - glibc against itself - and this, unfused on every target,
+  # answers the same everywhere. x = k ln2/128 + r, |r| <= ln2/256,
   # the reduction by adding 1.5 * 2^52 as glibc's x86_64 build does; then
   # 2^(k/128) from a table of 128 pairs, as the scale's bits and a
   # correction, and exp(r) - 1 by a degree-5 polynomial. No division, where

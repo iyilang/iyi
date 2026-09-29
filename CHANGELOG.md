@@ -103,16 +103,20 @@
   Crystal on Linux one time in ten. It is now Arm's optimized-routines
   exp, which glibc has carried since 2.28: the same reduction, the same
   128-entry table taken from `exp_data.c`'s text, the same polynomial, no
-  division. 1,450,022 arguments compared, every answer glibc's. 20
-  million calls take 55 ms where they took 140 (Crystal's call into
-  glibc: 110), and crystal-metric's NeuralNet runs in 0.65 of Crystal's
-  time where it ran in 0.97 to 1.37. `bench/std_math_exercise.sh` asks
-  Python's `math.exp` for 310,021 answers wherever its libm is glibc and
-  requires each bit for bit, and proves a polynomial a term short, a
-  reduction without ln2's low part and a subnormal rounded twice each fail
-  it; elsewhere it says why it did not compare. The notice travels with
-  the code, in `REUSE.toml` and `NOTICE.md` - as crystal-metric's port's
-  now does too.
+  division. 1,450,022 arguments compared against glibc on a processor
+  without FMA, every answer the same; where glibc picks its fused build,
+  it answers differently for about 7 arguments in 10,000 - glibc against
+  itself - and iyi's, unfused on every target, answers the same
+  everywhere. 20 million calls take 55 ms where they took 140 (Crystal's
+  call into glibc: 110), and crystal-metric's NeuralNet runs in 0.65 of
+  Crystal's time where it ran in 0.97 to 1.37.
+  `bench/std_math_exercise.sh` compiles Arm's two files, kept as
+  published in `bench/arm_exp`, with contraction off, requires 310,021
+  answers bit for bit against them, and proves a polynomial a term short,
+  a reduction without ln2's low part and a subnormal rounded twice each
+  fail it; without a C compiler it says why it did not compare. The
+  notice travels with the code, in `REUSE.toml` and `NOTICE.md` - as
+  crystal-metric's port's now does too.
 
 - **An allocation carries less.** The thread's cache page was a call on
   every allocation, because its first-touch mapping sat inside it; the

@@ -374,6 +374,12 @@
 
 ### Fixed
 
+- **On Windows, `iyi daemon start` says there is no daemon there.** It
+  told a Windows user to `make iyi-daemon`, a target `Makefile.win` does
+  not have: the server forks a child per build and Windows has no fork.
+  It says so now; an `IYI_DAEMON` the user set is still run.
+  `bench/verbs_exercise.sh` requires the sentence on Windows.
+
 - **On Windows, `File.write` rewrites a hidden or system file.** A create
   that replaces refuses a file marked hidden or system unless it asks for
   the same attributes, so `File.write` panicked "cannot write" about a file

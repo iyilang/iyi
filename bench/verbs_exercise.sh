@@ -376,6 +376,14 @@ refuses "a socket path past the kernel's limit, with no server to exec" "the soc
 # takes, so the case above is an ordering rather than a blanket refusal.
 refuses "a server binary that is not there" "IYI_DAEMON points at" -- \
   env IYI_DAEMON="$WORK/absent-daemon" "$IYI" daemon start --socket "$WORK/short.sock"
+# Windows has no fork, so no daemon: it was told to `make iyi-daemon`, a
+# target Makefile.win does not have.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a daemon on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon start --socket "$WORK/short.sock"
+    ;;
+esac
 refuses "a socket path past the kernel's limit, building" "the socket path is" -- \
   "$IYI" daemon build --socket "$long" -o d1 good.iyi
 refuses "no daemon on a socket that is there to take" "no daemon listening on" -- \

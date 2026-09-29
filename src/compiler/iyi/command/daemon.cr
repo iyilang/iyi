@@ -127,6 +127,17 @@ class Iyi::Command
       Process.exec(server, ["daemon", "start"] + options)
     end
 
+    # iyi: the server forks a child per build and waits with `poll(2)`,
+    # neither of which Windows has, so there is no daemon binary to build
+    # there (`Makefile.win`). The sentence below told a Windows user to
+    # `make iyi-daemon`, a target that does not exist for them. An
+    # IYI_DAEMON the user set is still run above: they named it.
+    {% if flag?(:win32) %}
+      STDERR.puts "The build daemon forks a child per build, and Windows has no fork: " \
+                  "there is no daemon on Windows, and every build runs on its own"
+      exit 1
+    {% end %}
+
     STDERR.puts <<-MSG
       The build daemon needs a single-threaded compiler, and none was found.
 

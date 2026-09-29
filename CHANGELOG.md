@@ -319,6 +319,20 @@
 
 ### Fixed
 
+- **A derive can implement a trait for the type it is attached to.**
+  SPEC.md II.4's own example - `derive JSON` generating `impl ToJSON for
+  User` - could not be written: a macro body counted `impl` and `trait`
+  as nothing, so the body ended at the impl's `end` ("unexpected 'end':
+  nothing is open for it to close"); and in a script with no module
+  header, an impl inside a type's own body was held to be in no module
+  and refused by R-3. Both open a block in a `.iyi` macro body now - in a
+  `.cr` file they are names still - and an impl written in a type of a
+  headerless entry file is at home there, as one at its top level always
+  was; an impl in another module's type, reopened from a script, is
+  refused as before. `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/iyi_derive_spec.cr` hold all three; the first two failed
+  without the change.
+
 - **A JIT engine is disposed.** `LLVM::JITCompiler#dispose` set its flag
   and then called `finalize`, whose first line returned on that flag, so
   no engine was ever disposed - not by `dispose` and not by the collector

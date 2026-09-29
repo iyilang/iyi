@@ -410,6 +410,104 @@ describe "Semantic: iyi derive" do
     end
   end
 
+  # A derive that implements a trait writes the `impl` in the body of the
+  # type it is attached to. The macro body ended at that impl's `end`, and a
+  # headerless program's type was held to be in no module at all.
+  it "implements a trait for the type it is attached to" do
+    shared = {
+      "lib/shown.iyi" => <<-IYI,
+        module lib/shown
+
+        pub trait Shown
+          abstract def shown : String
+        end
+
+        pub macro showable(declaration)
+          impl ::Lib::Shown::Shown for {{declaration[:name].id}}
+            def shown : String
+              {{declaration[:name]}}
+            end
+          end
+
+          def after_the_impl : Int32
+            1
+          end
+        end
+        IYI
+    }
+    headed = shared.merge({"main.iyi" => <<-IYI})
+      module main
+
+      import lib/shown::{Shown, showable}
+
+      struct Point
+        derive showable
+      end
+
+      def show(s : Shown) : String
+        s.shown
+      end
+
+      show(Point.new)
+      Point.new.after_the_impl
+      IYI
+    with_iyi_modules(headed) do
+      semantic_iyi("main.iyi")
+    end
+
+    headerless = shared.merge({"main.iyi" => <<-IYI})
+      import lib/shown::{Shown, showable}
+
+      struct Point
+        derive showable
+      end
+
+      def show(s : Shown) : String
+        s.shown
+      end
+
+      show(Point.new)
+      IYI
+    with_iyi_modules(headerless) do
+      semantic_iyi("main.iyi")
+    end
+  end
+
+  it "still refuses an impl written in another module's type from a script" do
+    files = {
+      "lib/shown.iyi" => <<-IYI,
+        module lib/shown
+
+        pub trait Shown
+          abstract def shown : String
+        end
+        IYI
+      "lib/point.iyi" => <<-IYI,
+        module lib/point
+
+        pub struct Point
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        import lib/shown::{Shown}
+        import lib/point::{Point}
+
+        struct ::Lib::Point::Point
+          impl ::Lib::Shown::Shown for ::Lib::Point::Point
+            def shown : String
+              "p"
+            end
+          end
+        end
+        IYI
+    }
+    with_iyi_modules(files) do
+      expect_raises(Iyi::TypeException, "R-3") do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
   it "teaches that a derive names an exported macro" do
     with_iyi_modules({
       "main.iyi" => <<-IYI,

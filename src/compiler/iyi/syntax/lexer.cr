@@ -2142,7 +2142,17 @@ module Iyi
       when 'f'
         MacroKeywordState::Other if char_sequence?('u', 'n') && peek_not_ident_part_or_end_next_char
       when 'i'
-        MacroKeywordState::Other if beginning_of_line && next_char == 'f' && peek_not_ident_part_or_end_next_char
+        case next_char
+        when 'f'
+          MacroKeywordState::Other if beginning_of_line && peek_not_ident_part_or_end_next_char
+        when 'm'
+          # iyi: `impl` opens a block that its `end` closes, and a macro
+          # body that wrote one - a derive implementing a trait for the
+          # type it is attached to - ended at that `end` instead: "unexpected
+          # 'end': nothing is open for it to close". Only in a `.iyi` file,
+          # where it is a keyword; in a `.cr` file it is a name.
+          MacroKeywordState::Other if @iyi && char_sequence?('p', 'l') && peek_not_ident_part_or_end_next_char
+        end
       when 'l'
         MacroKeywordState::Other if char_sequence?('i', 'b') && peek_not_ident_part_or_end_next_char
       when 'm'
@@ -2159,6 +2169,9 @@ module Iyi
         when 't'
           MacroKeywordState::Other if char_sequence?('r', 'u', 'c', 't') && !ident_part_or_end?(peek_next_char) && next_char
         end
+      when 't'
+        # iyi: `trait`, for the same reason as `impl` above.
+        MacroKeywordState::Other if @iyi && char_sequence?('r', 'a', 'i', 't') && peek_not_ident_part_or_end_next_char
       when 'u'
         if next_char == 'n'
           case next_char

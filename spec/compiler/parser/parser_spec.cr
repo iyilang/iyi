@@ -4347,6 +4347,18 @@ end").as(ClassDef)
       assert_syntax_error "pub abstract module Sheet\nend",
         "`pub abstract` takes a class, a struct or a def"
 
+      it "keeps an impl or a trait written in a macro body inside the macro" do
+        node = parse("macro derived(declaration)\n  impl Greet for {{declaration[:name].id}}\n    def greet\n    end\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+        node = parse("macro traited\n  trait Greet\n    abstract def greet : String\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+      end
+
+      it "leaves impl a name in a Crystal file's macro body" do
+        node = parse("macro named\n  impl = 1\n  trait = 2\nend", filename: "x.cr").as(Macro)
+        node.body.to_s.should contain("trait = 2")
+      end
+
       it "parses an impl" do
         node = parse("impl Greet for User\ndef greet\nend\nend").as(ImplDef)
         node.trait.should eq(Path.new(["Greet"]))

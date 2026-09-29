@@ -1083,6 +1083,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   private def check_impl_coherence(node, trait_type, target_type)
     return if node.trait.iyi_from_artifact?
     return if current_type.is_a?(Program)
+    return if iyi_headerless_entry_type?(node)
 
     trait_module = trait_type.namespace
     target_module = target_type.namespace
@@ -1097,6 +1098,31 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end
 
     node.raise "can't implement #{trait_type} for #{target_type} in #{current_type}: an impl must live in #{places.join(" or ")}. This is R-3, the orphan rule, and it is what lets coherence be checked without a global pass — see SPEC.md IV.4"
+  end
+
+  # iyi: an impl inside a type of the program's own entry file when that
+  # file has no module header - the case above, one level in. A derive
+  # that implements a trait for the type it is attached to writes its
+  # `impl` in the type's body, and a headerless script's type is the
+  # single unit's as much as its top level is. Asked of the file the
+  # impl was written in, through any macro expansion, and of the type's
+  # chain having no module on it: a module that reopens a prelude type
+  # (`class ::String` in `std/text`) is inside no module either, and is
+  # not the entry.
+  private def iyi_headerless_entry_type?(node : ASTNode) : Bool
+    file = node.location.try(&.filename)
+    while file.is_a?(VirtualFile)
+      file = file.expanded_location.try(&.filename)
+    end
+    return false unless file.is_a?(String) && file == @program.filename
+    unit = current_type
+    while unit.is_a?(NamedType)
+      return false if unit.iyi_unit?
+      namespace = unit.namespace
+      break if namespace == unit
+      unit = namespace
+    end
+    unit.is_a?(Program)
   end
 
   # iyi: whether *mod* is a module the current type is inside of. The top level

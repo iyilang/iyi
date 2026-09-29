@@ -2,7 +2,224 @@
 
 ## Unreleased
 
+### Added
+
+- **`%g` and `%G` in `sprintf`, `printf` and `String#%`.** The shorter
+  of `%f` and `%e` by C's rule - `%e` when the exponent is under -4 or at
+  least the precision, `%f` otherwise, trailing zeros trimmed unless `#`
+  keeps them. It was a panic, "unknown format specifier '%g'", where C,
+  Python, Go and Crystal all answer. Checked against Crystal over 510
+  cases, which it matches except `%#g` of zero, where C and Python write
+  `0.00000` and so does this. `bench/format_exercise.sh` checks the
+  switch points, the trim, `#`, flags and infinity, and proves the checks
+  fail with the trim or the switch taken out.
+
+- **A range of characters.** `('a'..'z').each`, `.map`, `.to_a` and
+  `.size` walk code points, as they do in Crystal; the prelude's `Range`
+  steps by adding one, and nothing added to a `Char`, so the range did
+  not compile. `Char#+(Int32)` answers the character that many code points
+  on, and refuses a point outside `0..0x10FFFF`.
+  `bench/value_exercise.sh` walks ASCII and non-ASCII runs and proves the
+  check fails with a character that steps by two.
+
 ### Changed
+
+- **`iyi format` and `iyi fmt` name the formatter.** Both answered
+  "unknown command or missing file", which read as "there is no
+  formatter"; they now say it is `iyi tool format` and show the call with
+  the file given. `spec/compiler-cli/iyi-external-command_spec.cr` holds
+  both spellings.
+
+- **`sorted` and `sorted_by` ask one comparison a step.** The merge
+  only needs to know whether the right element is smaller, and `sorted`
+  asked `<` and then `==`, `sorted_by` `<` both ways: a string sort
+  compared most pairs twice. Both now ask `b < a` once - the same order
+  and the same stability for every total order; a NaN, which is in no
+  order, may land elsewhere. A million numeric strings sort in 295 ms
+  where they took 336, and `sorted_by` on a million integers in 85 ms
+  where it took 103. `bench/collections_exercise.sh` counts what an
+  element is asked - no `==`, and as many `<` for the key sort as for the
+  element sort - and proves both checks fail with the old questions.
+
+- **`%.2f` formats in two words.** Every fixed and scientific format
+  scaled the double through a bignum - three of them a call, 590 bytes -
+  and `sprintf("%.2f", x)` took 400 ns where Go's takes 129. When the
+  value and the places fit (up to nineteen places, magnitudes a word
+  holds), the product with the power of ten is two words and the division
+  by the binary exponent a shift, with the same half-to-even rule: 85 ns
+  and 65 bytes. The digits are the bignum's - 600,000 random `%f`, `%e`
+  and `%g` formats and the ties at every precision match it and Python.
+  `bench/format_exercise.sh` bounds the bytes, checks rounding and ties on
+  both paths, and proves each check fails with its path broken.
+
+- **A union of many classes types in time near its width.** A variable
+  given one of many unrelated classes grows its union a member per
+  assignment, and each growth asked every pair of members for their common
+  ancestor - a dispatched walk up both superclass chains - and scanned the
+  member list once per member it added. 1,200 classes took 7.9 s to type
+  with 0.15.4's release compiler, and 800 took 17.5 s with a plain build.
+  Two plain classes now combine exactly when they share their topmost
+  virtual root, found once per member and looked up in a hash, and a long
+  member list keeps a set: with the same plain build, 800 classes type in
+  0.83 s and 1,200 in 1.7 s, and 900 random unions over classes, modules, structs, generics, tuples
+  and metaclasses come out as they did. Instances of one generic class
+  (`Box(D0)` to `Box(D1199)`) combine the same way: 300 took 1.3 s, and
+  1,200 now take 1.8. `bench/definition_typing_scale.py` types unions of
+  300 and 1,200 of each kind and fails past twelve times the time for four
+  times the members: 5.3 now, 48 and 49 before.
+
+- **A regex whose pattern is a literal finds it in linear time, through a
+  public `String#byte_index`.** A literal pattern was looked for by
+  comparing from each position in turn, so a text that keeps almost
+  matching it was n * m: 1,000 `a` and a `b` against a megabyte of `a`
+  took 454 ms. It searches through `byte_index` now, the search
+  `includes?` and `index` use, which falls back to a rolling hash; 1 ms.
+  `byte_index(search, offset = 0)` is public, with Crystal's answers for
+  an empty search and a negative or past-the-end offset - checked against
+  Crystal's over 350 cases. `bench/std_text_scale_exercise.sh` looks for
+  a near-miss pattern in eight megabytes and proves its clock catches a
+  literal compared from each position.
+
+- **Inflating looks a code up by table, copies matches a word at a time,
+  and sizes a gzip result from its trailer.** `Huffman#decode` walked
+  every code a bit at a time; codes of nine bits or fewer are one lookup
+  now, with the bit reader keeping whole bytes it loaded ahead for a
+  stored block to read. A match eight or more bytes back is copied eight
+  bytes a step, and `Gzip.decompress` allocates the length the trailer
+  names, held to what the stream could expand to. Twenty megabytes
+  inflate in 30 ms, down from 47. `bench/std_compress_exercise.sh` reads
+  thirteen streams whose code block is followed by stored ones, at every
+  bit the codes can end on, and proves the checks fail on a word copied
+  from one byte off and on a table indexed by the codes' bits unreversed.
+
+- **CRC-32 and Adler-32 cost what the bytes do.** CRC-32 went a bit at a
+  time and Adler-32 reduced its sums twice a byte: twenty megabytes took
+  105 ms to check, and `Gzip.decompress` spent most of its time there -
+  the inflating itself took 30. CRC-32 goes eight bytes a step through
+  eight tables and Adler-32 reduces once per 5,552 bytes: the twenty
+  megabytes take 8 ms, and `Gzip.decompress` of them 33 ms against Go's
+  67. `bench/std_digest_exercise.sh` checks both on 11,104 bytes against
+  python's zlib, times them against a pass that adds the bytes up in a
+  plain build, and proves both timings fail with the old loops back.
+
+- **`read_all`, and `File.read` through it, read the rest of a stream in
+  large pieces.** It went through the stream's own buffer, a read and a
+  copy per 4 KB: an 86 MB file took 150 ms and 21,000 reads. The rest
+  goes straight into the growing result now, as much as it has room for
+  each time: 70 ms, and 4 MB is 10 reads. `bench/io_exercise.sh` counts a
+  4 MB `read_all`'s reads in `/proc/self/io` on Linux, fails past 200,
+  and proves it fails with the reads a buffer at a time again (1,027).
+
+- **A parked reader costs the other connections nothing.** On Linux and
+  darwin every io event, every second waiter's check and every
+  cancellation walked the list of fibers parked on io, so each read on a
+  server paid for every connection parked beside it: a round trip over a
+  pipe took 41 us with 4,000 idle readers parked against 2 us with none.
+  Waiters are found by descriptor now, and leave the list from where they
+  are: 1.9 us with 16,000 parked. The table is made at a thread's first io
+  wait, so a scheduler state that never waits on io holds nothing of the
+  heap's. `bench/concurrency_exercise.sh` times
+  5,000 round trips alone and with 2,000 readers parked, fails past three
+  times, and proves it fails with the walk put back (12x).
+
+- **Sleeping tasks wait in a heap, not a list walked on every sleep.**
+  The sleep queue - every `sleep`, and every io wait with a deadline - was
+  a list kept sorted by walking it, so each sleep walked past every
+  sleeper before it: 100,000 tasks each sleeping under 100 ms took 11 s,
+  and a server whose reads carry a deadline paid the same walk on every
+  read. It is a pairing heap threaded through the fibers' own links now,
+  with a fiber leaving from anywhere in it when its wait ends another way
+  and equal deadlines leaving in the order they came: the 100,000 take
+  0.4 s. `bench/concurrency_exercise.sh` sleeps 32,000 tasks, requires
+  every task to wake in deadline order and the queue to cost at most 64
+  steps a sleeper - its melds, counted by `IyiScheduler.sleep_steps`
+  rather than timed, so neither a slow runner nor darwin's dearer
+  mappings move it; the heap takes 13 - and proves both checks fail with
+  the walk (16,009 steps each) or the order put back.
+
+- **A variable assigned many times types in memory near its length.**
+  Every assignment binds the variable to one more value and merges all of
+  them again, and the merge built an array as long as the value list to
+  do it: 16,000 lines of `x = x + 1` took 838 MB to type against 70 MB
+  for 2,000 with 0.15.4's release compiler, and a 40,000-statement
+  function 3.4 GB and 9.9 s. Values of one type are now answered by
+  comparison, and the array the general path builds starts at the few
+  types a merge has: 134 MB against 108, and the function 284 MB and
+  3.9 s. `bench/definition_typing_scale.py` types both sizes and fails
+  past three times the peak memory for eight times the lines; 0.15.4
+  measures 11.7.
+
+- **A task gets its stack when it first runs, not when it is spawned.**
+  A spawn mapped a 256 KiB stack and a guard page for every task not yet
+  run, so a loop spawning short tasks made a mapping each before the first
+  of them ran: 100,000 took 340 ms (Go: 17-40 ms), 400,000 took 1.3 s and
+  1.7 GB, and on a kernel with the default 65,530 mappings a process a
+  burst of about 33,000 was the end of the program. Taken at the first
+  switch, the stack the last task finished on is the next one's: 100,000
+  spawns take 22-43 ms, and 400,000 take 111 ms and 144 MB. The switch
+  makes it through a maker the first spawn installs, so a program that
+  parks without spawning - a thread waiting on a lock - does not carry
+  the stack mapping, and darwin's thread floor keeps its names.
+  `bench/concurrency_exercise.sh` spawns 2,000 tasks in one loop, requires
+  them to run on at most eight stacks, and proves the check fails with
+  the stack mapped at spawn again; `bench/thread_floor.sh` holds the
+  floor.
+
+- **`puts` does not end a line that has ended.** A string ending in a
+  newline is written as it is, as Crystal's `puts` writes it: `puts
+  File.read(path)` printed a blank line after the file, and the same
+  program under `--crystal` did not - a name shared with Crystal's library
+  meaning something else, silently (SPEC.md III.1.7a). Anything that is
+  not a string is still its `to_s` and a newline, as there. Top-level
+  `puts` and `IO#puts` both. `bench/io_exercise.sh` writes ended and open
+  lines through `IO#puts`, refuses an empty line in the program's own
+  output, and proves the check fails with every line ended again.
+
+- **A substring search that keeps almost matching stays linear.**
+  `String#includes?`, `String#index` and `String#rindex` - and `split` on
+  a string, through them - compared the needle from every position in turn, so a needle that
+  nearly matches everywhere made the search n * m: `"a" * 1000 + "b"` in a
+  megabyte of `a` took 222 ms, and sixteen thousand `a` and a `b` in eight
+  megabytes did not finish. Once more than four bytes a position have been
+  compared the search moves to a rolling hash and compares bytes only where
+  it matches, forwards or, for `rindex`, backwards; the megabyte takes 1 ms
+  either way, where `rindex` took 477. `bench/std_text_scale_exercise.sh`
+  searches the eight megabytes and proves its clock catches a search that
+  stays naive.
+
+- **`Enumerable#join`, `String.join`, `CSV.build`, `HTTP.decode_chunked`
+  and `center`'s padding write into one builder.** Each added every piece
+  to the text so far, copying it once per piece: a `List` of 100,000
+  numbers took 9 s to join and 20,000 CSV rows 12.8 s to build; both now
+  take a few milliseconds, and a million-element join 30 ms.
+  `bench/std_text_scale_exercise.sh` runs all five over its eight
+  megabytes under the clock, and proves the clock catches a join or a CSV
+  build that copies what it has written per piece.
+
+- **`BigInt` prints and parses long values in time near their length.**
+  `to_s(base)` appended each chunk's digits to the text so far, and divided
+  by a fresh one-limb BigInt per chunk - per digit outside bases 2, 10 and
+  16; parsing shifted or multiplied a whole new BigInt per digit, per nine
+  in decimal. A power-of-two base now reads the digits straight off the
+  limbs' bits both ways; any other splits the value at a power of the chunk
+  about half its size and meets the halves in one division or one
+  Karatsuba product, with only the short pieces at the bottom done a chunk
+  at a time in place. `3 ** 400000`: decimal 975 ms to 137 ms, binary
+  1,021 ms to under 1, base 7 9.5 s to 141 ms; parsing its 79,249 hex
+  digits back 1,238 ms to under 1. `bench/std_big_exercise.sh` round-trips
+  three values of thousands of digits through every base, checks them with
+  python3, bounds the bytes a print or a parse allocates to 64 per digit,
+  and proves each check fails when the split is broken.
+
+- **`List#appended` and `List#concatenated` copy the list once.** An
+  append to a list of n elements `dup`ed it, grew the copy to twice its
+  size with `<<`, then handed it to the constructor, which copied it again:
+  4n words where n + 1 is the work. Each now builds its array at the size
+  it ends with and keeps it. 100,000 Int64s: 3.2 MB per append down to
+  0.8 MB; 20,000 appends in a loop, 1.0 s down to 0.36 s.
+  `bench/std_exercise.sh` counts the bytes one append allocates with the
+  collector held back, and proves the check fails with the second copy put
+  back.
 
 - **An integer prints in half the time.** `Int64#to_s` and `UInt64#to_s` -
   and `Int32#to_s`, and every `#{n}`, through them - gathered their digits
@@ -50,6 +267,145 @@
   both, the same order runs 14,038 examples, none failing. A library spec
   disposes an engine and requires Windows to report its code's memory
   free; the old `dispose` leaves it committed.
+
+- **`Server.serve` gives every connection a task of its own.** The accept
+  loop spawned each connection's task with a block that held the loop's
+  variable rather than its value, and the next accept overwrote it before
+  the task first ran. Connections that arrived together - a client opening
+  several at once, or a burst the server was slow to take - were read by
+  several tasks at once, which panicked "two fibers reading one fd", and
+  the rest by none: eight connections opened back to back left five
+  waiting forever, on 0.15.4 as well. The task is spawned from a method
+  now, so its block holds that call's connection; 5,000 parked keep-alive
+  connections are all answered, in 51 MB. `bench/std_http_exercise.sh`
+  queues twenty requests before the server starts, requires each answered
+  with its own, and proves the check fails with the loop's variable held.
+
+- **`::name` is always the top level's method.** Assigned, `::foo = 1`
+  was taken as the local `foo = 1` with the `::` dropped, and `iyi tool
+  format` died on the source ("expecting =, not `IDENT, foo`"), with a
+  newline or a comment after the `::` as well; before `+` or `-`, `foo = 1;
+  ::foo + 1` read the local rather than calling the method. Assigning
+  through `::` is now a syntax error that names the local's spelling, and
+  `::foo + 1` calls `foo`. `spec/compiler/parser/parser_spec.cr` holds the
+  four assignments and the sum.
+
+- **A small request costs `Server.serve` what it reads.** `IyiSocket#read`
+  took a heap buffer of all it was allowed to read on every call, and the
+  server asked for 64 KB: 130 KB of garbage per 30-byte request, a
+  collection every few dozen requests, and eleven marking threads woken
+  for each. The read now lands on the stack first and takes the heap only
+  past 4 KB; the server keeps a kept-alive connection's next request as
+  the read it came in. A request costs 1.1 KB, and a hello-world server
+  under `wrk -c50` spends 7.5 us of CPU per request where it spent 31 (Go's
+  `net/http`: 17), serving 100k requests a second where it served 30k.
+  `bench/std_http_exercise.sh` counts the bytes 200 kept-alive requests
+  allocate, requires under 8 KB each, and proves the check fails with the
+  heap buffer put back (66 KB); `bench/socket_exercise.sh`'s payload and
+  short-read proofs follow the read to its new copy. The stack buffer
+  lives in a frame of its own that never waits, so a fiber parked on its
+  next read keeps nothing of the last one where the collector scans:
+  `bench/socket_exercise.sh` sends eight bytes that spell an object's
+  address, requires the object collected while the reader waits, and
+  proves the check fails in an optimised build with the buffer inlined
+  into the waiting frame.
+
+- **`Server.serve` answers `Expect: 100-continue`.** A client that asks
+  to be told before it sends its body was never told, and curl sends one
+  on every upload past a megabyte and waits a second before giving up:
+  every such upload took a second longer than it needed (curl's 5 MB
+  POST: 1.14 s, now 10 ms; Go's server: 10 ms). The server writes `100
+  Continue` once per request whose body is still to come.
+  `bench/std_http_exercise.sh` sends the head alone, requires the `100
+  Continue` before the body, and proves the check fails without it.
+
+- **A large body goes through `std/http` in time near its size, both
+  ways.** The server added each read to the request so far and parsed it
+  all again, and the client added each 4 KB read of the answer to the
+  answer so far: a 20 MB upload to `Server.serve` took 1.9 s (Go's server:
+  30 ms), and a 24 MB answer to `HTTP.post` did not arrive for minutes.
+  The server now reads until the request's `Content-Length` is in and
+  parses once, and the client reads 64 KB at a time into one builder: the
+  20 MB upload takes 60 ms. `bench/std_http_exercise.sh` echoes a 24 MB
+  body through both halves in one process, requires it back within 4 s,
+  and proves the check fails with either half's copying put back (31 s
+  for the server's).
+
+- **An array is a key that spreads.** `Array` writes `==`, so
+  `Reference#hash` answered its type's id and every array key shared one
+  slot: 40,000 `[x, y]` keys took 1.2 s to insert, and a million would not
+  have finished. `Array#hash` mixes its elements the way a tuple's are
+  mixed, and `std/indexable`'s default and `List#hash` are that same
+  function, where they had been `31 * h + e` with a grid's collisions: a
+  million array keys insert in 167 ms. `bench/collections_exercise.sh`
+  counts a 300 by 300 grid of arrays' distinct hashes and proves the count
+  fails with the type's id back; its crowded-slot deletion check keys on
+  a struct that hashes to a constant, which arrays had done by accident.
+
+- **A table keyed by tuples of small numbers fills.** `Tuple#hash` was `a
+  * 31 + b`, which gives a grid of points few hashes - 9,569 for 90,000
+  points of a 300 by 300 grid - and `Hash` probes a slot at a time, so
+  runs of equal hashes merged into one: a million points of a 1,000 by
+  1,000 grid had not filled in ten minutes. Each member is multiplied
+  through and its high bits folded back down now, every point has its
+  own hash, and the million insert in 32 ms and are looked up in 10, Go's
+  map taking 102 and 88. `bench/collections_exercise.sh` counts the grid's
+  distinct hashes, fills a grid table, and proves the count fails with
+  the old combiner back.
+
+- **`File.each_line` reads a line at a time.** It read the whole file
+  into an array of its lines and then walked the array, so a log of any
+  size was the program's memory twice over before the first line was
+  seen: a 2 MB file allocated 8.7 MB. It reads off the file as it goes
+  now, the lines as `read_lines` gives them, and refuses a missing path
+  and a directory with `File.read`'s sentences - the directory asked
+  before the open, which on Windows refuses one with a sentence of its
+  own; 2M lines take 90 ms, down
+  from 205. `bench/std_file_exercise.sh` counts the bytes a pass over
+  2 MB allocates with the collector held back, fails past one and a half
+  times the file, refuses both paths, and proves the check fails on an
+  `each_line` that reads the file whole first.
+
+- **A pause in typing hands the language server's memory back however the
+  typing went before it.** The proxy replaces its worker when the wire
+  goes quiet, and when a worker had instead been replaced on the memory
+  bound mid-typing, the quiet only warmed the successor - keeping every
+  edit it had taken since. How much a pause handed back depended on where
+  in the typing the bound had landed: a prelude a few hundred lines
+  longer moved it one edit earlier, and a paced session rested at 241 MB,
+  then 283, then 326, where it had rested at 198. A successor that has
+  worked is replaced at the quiet too, and the session rests at 172-185
+  MB. `bench/lsp_memory.py` is the gate that caught it, on CI.
+
+- **A hover inside `x.or(default)` is answered.** The `or` tests a variable
+  of the compiler's own, and the cursor context restricted it by looking
+  it up among the names it had recorded, which leave those out: a KeyError
+  the server answered as the client's mistake, "the request is missing
+  \"__temp_3\"", for hover, completion and go-to-type-definition anywhere
+  in `"#{load(path).or(0)}"` in `samples/iyi/errors.iyi`. A name the
+  context does not have is now left alone. `bench/lsp_session.py` step
+  52i hovers there.
+
+- **A `BigInt` product of one long and one much shorter value no longer
+  panics.** Karatsuba took half the longer side's length off both sides,
+  which is a negative count for a side shorter than that half: past 64
+  limbs each, a side more than twice the other's length panicked "negative
+  capacity", and `BigInt.new(3) ** 10000` did on its way there. The longer
+  side is now multiplied in pieces of the shorter one's size.
+  `bench/std_big_exercise.sh` multiplies four such pairs and proves the
+  check fails with the split put back.
+
+- **A script without a module header can import `Regex`.** The compiler
+  declares an empty `Regex` before reading any source, for the other
+  library's regex literals, which iyi refuses; at a script's top level that
+  shell was found before the import, so `import std/regex::{Regex}` then
+  `Regex.compile(...)` answered "undefined method 'compile' for
+  Regex.class". A type the compiler declared and no source has written is
+  a name, not a definition, and an imported name beats it now, where the
+  import reaches: a script's imports are the program's, and the prelude
+  asking for `GC` still gets its own, not `std/gc`'s. A file with a module
+  header was never affected. `bench/std_regex_exercise.sh` runs both
+  scripts; 0.15.4's compiler fails the first.
 
 - **On Linux, a program with a thousand tasks alive at its first collection
   survives it.** The collector finds where the main thread's stack ends
@@ -11142,7 +11498,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,164-line library and nothing else. Every other
+  written against iyi's own 18,401-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

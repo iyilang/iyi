@@ -1,4 +1,4 @@
-# Exercise program for IyiIO: flush, short reads, buffer boundaries, and EOF.
+# Exercise program for IyiIO: flush, short reads, buffer boundaries, EOF and puts.
 #
 #   cd "$(mktemp -d)" && iyi run <repo>/bench/io_exercise.iyi
 #
@@ -88,8 +88,46 @@ raise "eof: expected eof? to remain true" unless io_eof.eof?
 io_eof.close
 puts "eof: ok"
 
+# 4b. `read_all` reads the rest of a file in large pieces, not through the
+# stream's own buffer a buffer at a time: 4 MB through a 4 KB buffer was
+# 1,024 reads and as many copies. Linux counts a process's reads in
+# /proc/self/io; the whole file may take at most 200 of them.
+{% if flag?(:linux) %}
+  def read_syscalls : Int32
+    File.read("/proc/self/io").split('\n').each do |line|
+      return line[7, line.bytesize - 7].to_i if line.starts_with?("syscr: ")
+    end
+    -1
+  end
+
+  File.write(path, "0123456789abcdef" * 262144)
+  whole = File.open(path, "r", 4096)
+  reads_before = read_syscalls
+  whole_text = whole.read_all
+  reads_after = read_syscalls
+  whole.close
+  raise "read_all: expected 4194304 bytes, got #{whole_text.bytesize}" unless whole_text.bytesize == 4194304
+  raise "read_all: 4 MB took #{reads_after - reads_before} reads through a 4 KB buffer" if reads_after - reads_before > 200
+  puts "read_all: 4 MB in #{reads_after - reads_before} reads"
+{% end %}
+
+# 5. `puts` ends a line only when the text has not: a string that ends in
+# a newline is written as it is, as Crystal's `puts` writes it. Anything
+# else is its `to_s` and a newline.
+io_lines = File.open(path, "w", 64)
+io_lines.puts "ends\n"
+io_lines.puts "open"
+io_lines.puts ""
+io_lines.puts 5
+io_lines.close
+lines_written = File.read(path)
+raise "puts: a line that ends was ended again (#{lines_written.bytesize} bytes, not 13)" unless lines_written == "ends\nopen\n\n5\n"
+puts "puts: ok"
+
 # Cleanup
 File.delete(path) if File.exists?(path)
 File.delete(flush_path) if File.exists?(flush_path)
 
-puts "all io checks passed"
+# Ended already, so standard output gets it once: bench/io_exercise.sh
+# refuses an empty line anywhere in what this program prints.
+puts "all io checks passed\n"

@@ -479,6 +479,7 @@ module Iyi
         case obj = exp.obj
         when Nil
           if exp.args.empty?
+            iyi_refuse_global_local(exp)
             exp = Var.new(exp.name).at(exp)
           end
         when Global
@@ -565,6 +566,15 @@ module Iyi
       (yield exp).at(location).at_end(exp)
     end
 
+    # iyi: `::name` looks a method up at the top level, and an assignment
+    # makes a local; `::name = 1` was parsed as `name = 1` with the `::`
+    # dropped, and the formatter, which reads the source it was written
+    # from, died on the `::` the tree no longer had.
+    private def iyi_refuse_global_local(atomic : ASTNode) : Nil
+      return unless atomic.is_a?(Call) && atomic.global? && atomic.obj.nil? && atomic.args.empty?
+      raise "`::#{atomic.name}` is not a variable: `::` looks a method up at the top level, and a local variable is assigned without it, `#{atomic.name} = ...`", atomic.location.not_nil!
+    end
+
     def parse_op_assign_no_control(allow_ops = true, allow_suffix = true)
       check_void_expression_keyword
       parse_op_assign(allow_ops, allow_suffix)
@@ -614,6 +624,7 @@ module Iyi
               unexpected_token token: start_token
             end
 
+            iyi_refuse_global_local(atomic)
             atomic = Var.new(atomic.name).at(atomic) if atomic.is_a?(Call)
 
             next_token_skip_space_or_newline
@@ -675,6 +686,7 @@ module Iyi
             raise "can't change the value of self", location
           end
 
+          iyi_refuse_global_local(atomic)
           if atomic.is_a?(Call) && atomic.name != "[]" && !var_in_scope?(atomic.name)
             raise "'#{@token.type}' before definition of '#{atomic.name}'"
           end
@@ -5617,7 +5629,9 @@ module Iyi
       is_var = var?(name)
 
       # If the name is a var and '+' or '-' follow, never treat the name as a call
-      if is_var && next_comes_plus_or_minus?
+      # iyi: unless `::` asked for the top level's method: `::foo + 1` read
+      # the local `foo`, and `::foo += 1` assigned it.
+      if is_var && !global && next_comes_plus_or_minus?
         var = Var.new(name)
         var.doc = doc
         var.location = name_location

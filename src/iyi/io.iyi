@@ -114,6 +114,12 @@ class IyiIO
     end
   end
 
+  # What is buffered, then the rest straight into the growing result, as
+  # much as it has room for each time: through the stream's own buffer
+  # it was a read and a copy per 4 KB, and an 86 MB file took 150 ms to
+  # read where one read per doubling of the result takes a fraction. A
+  # failed read leaves the limit at -1 as `fill_buffer` does, which is
+  # what `read_failed?` reports.
   def read_all : String
     raise "cannot read from closed IO" if @closed
 
@@ -121,22 +127,31 @@ class IyiIO
     buffer = Pointer(UInt8).malloc(capacity.to_u64)
     filled = 0
 
-    while true
-      avail = @read_limit - @read_pos
-      if avail > 0
-        if (filled + avail) > capacity
-          while (filled + avail) > capacity
-            capacity = capacity * 2
-          end
-          buffer = buffer.realloc(capacity.to_u64)
+    avail = @read_limit - @read_pos
+    if avail > 0
+      while avail > capacity
+        capacity = capacity * 2
+      end
+      buffer = buffer.realloc(capacity.to_u64) if capacity > 8192
+      buffer.copy_from(@read_buffer + @read_pos, avail)
+      filled = avail
+      @read_pos = @read_limit
+    end
+
+    until @eof
+      if capacity - filled < 65536
+        while capacity - filled < 65536
+          capacity = capacity * 2
         end
-        (buffer + filled).copy_from(@read_buffer + @read_pos, avail)
-        filled = filled + avail
-        @read_pos = @read_limit
+        buffer = buffer.realloc(capacity.to_u64)
+      end
+      got = low_level_read(@fd, (buffer + filled).as(Void*), (capacity - filled).to_u64)
+      if got <= 0_i64
+        @read_pos = 0
+        @read_limit = got < 0_i64 ? -1 : 0
+        @eof = true
       else
-        break if @eof
-        got = fill_buffer
-        break if got <= 0
+        filled = filled + got.to_i
       end
     end
 
@@ -307,8 +322,12 @@ class IyiIO
     write(value.to_s)
   end
 
+  # A string that already ends its line is written as it is, as Crystal's
+  # `puts` writes it: `puts File.read(path)` printed a blank line after the
+  # file, and the same program under `--crystal` did not. Anything else is
+  # its `to_s` and a newline, whatever that ends with, as there.
   def puts(text : String) : Nil
-    write_line(text)
+    text.bytesize > 0 && text.to_unsafe[text.bytesize - 1] == 10_u8 ? write(text) : write_line(text)
   end
 
   def puts : Nil
@@ -408,7 +427,7 @@ def print(value) : Nil
 end
 
 def puts(text : String) : Nil
-  stdout.write_line(text)
+  stdout.puts(text)
 end
 
 def puts : Nil
@@ -424,7 +443,7 @@ def puts(first, second, *rest : *T) : Nil forall T
 end
 
 def puts(value) : Nil
-  puts value.to_s
+  stdout.puts(value)
 end
 
 def read_input : String

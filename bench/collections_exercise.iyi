@@ -97,26 +97,42 @@ assert_true(absent.delete("y") == nil, "hash: deleting a missing key is nil")
 assert_int(absent.size, 1, "hash: a missing delete removes nothing")
 assert_true(absent.has_key?("x"), "hash: the survivor is still there")
 
-# Keys that share one slot by construction: `Array` has an `==` of its own
-# and takes `Object`'s hash, so every array key lands in the same slot and
-# the comparison is what finds it.
-crowded = {} of Array(Int32) => Int32
+# Keys that share one slot by construction: equal by their number, hashed
+# to one constant, so every key lands in the same slot and the comparison
+# is what finds it. (Arrays did this by accident, hashing to their type's
+# id, until an array hashed its elements.)
+struct Crowded
+  getter n : Int32
+
+  def initialize(@n : Int32)
+  end
+
+  def ==(other : Crowded) : Bool
+    @n == other.n
+  end
+
+  def hash : Int32
+    7
+  end
+end
+
+crowded = {} of Crowded => Int32
 i = 0
 while i < 16
-  crowded[[i]] = i
+  crowded[Crowded.new(i)] = i
   i = i + 1
 end
 wrong = 0
 i = 0
 while i < 16
-  wrong = wrong + 1 if crowded[[i]]? != i
+  wrong = wrong + 1 if crowded[Crowded.new(i)]? != i
   i = i + 1
 end
 assert_int(wrong, 0, "hash: colliding keys are all findable")
-crowded.delete([8])
-assert_true(crowded[[8]]? == nil, "hash: one of the crowd deleted")
-assert_int(crowded[[9]]? || -1, 9, "hash: its neighbour survives")
-assert_int(crowded[[7]]? || -1, 7, "hash: and the one before it")
+crowded.delete(Crowded.new(8))
+assert_true(crowded[Crowded.new(8)]? == nil, "hash: one of the crowd deleted")
+assert_int(crowded[Crowded.new(9)]? || -1, 9, "hash: its neighbour survives")
+assert_int(crowded[Crowded.new(7)]? || -1, 7, "hash: and the one before it")
 
 # The order `each` promises, which is the order they went in
 order = {} of String => Int32
@@ -289,6 +305,58 @@ by_key = keyed.sorted_by { |k| k.key }
 assert_int(by_key[0].seq, ordered[0].seq, "array: sorted_by keeps equal keys in order")
 assert_int(by_key[99999].seq, ordered[99999].seq, "array: sorted_by agrees with sorted")
 
+# `sorted` and `sorted_by` ask one question a step: is the right one
+# smaller. They asked `<` and then `==` - or `<` both ways - and a string
+# sort paid for two comparisons of every pair it did not find in order.
+# An element that counts what it is asked: no `==` at all, and the key
+# sort asks `<` exactly as often as the element sort, on the same order.
+struct Asked
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def <(other : Asked) : Bool
+    AskedCount.less = AskedCount.less + 1
+    @value < other.value
+  end
+
+  def ==(other : Asked) : Bool
+    AskedCount.equal = AskedCount.equal + 1
+    @value == other.value
+  end
+end
+
+class AskedCount
+  @@less = 0
+  @@equal = 0
+
+  def self.less : Int32
+    @@less
+  end
+
+  def self.less=(count : Int32) : Int32
+    @@less = count
+  end
+
+  def self.equal : Int32
+    @@equal
+  end
+
+  def self.equal=(count : Int32) : Int32
+    @@equal = count
+  end
+end
+
+asked = (0...5000).map { |i| Asked.new((i * 7919) % 5003) }
+asked_sorted = asked.sorted
+element_questions = AskedCount.less
+assert_int(AskedCount.equal, 0, "array: sorted asks one question a step, never ==")
+AskedCount.less = 0
+asked_by = asked.sorted_by { |x| x }
+assert_int(AskedCount.less, element_questions, "array: sorted_by asks < as often as sorted")
+assert_true(asked_sorted[0].value == 0 && asked_by[4999].value == asked_sorted[4999].value, "array: the one-question sorts agree")
+
 # Every key type the prelude has spreads its keys: a type without a `hash`
 # of its own hashes to its type id, so all its keys share one slot and a
 # table of them is a list searched from the front - two million `Int64`
@@ -307,6 +375,25 @@ assert_int(spread((0...256).map { |i| i.to_u8.hash }), 256, "hash: UInt8 keys sp
 assert_int(spread((0...128).map { |i| i.chr.hash }), 128, "hash: Char keys spread")
 assert_int(spread((0...1000).map { |i| (i * 0.25).hash }), 1000, "hash: Float64 keys spread")
 assert_true(0.0.hash == (-0.0).hash, "hash: 0.0 and -0.0 are one key")
+
+# A tuple of small numbers spreads too - the grid point, the commonest
+# tuple key there is. `a * 31 + b` gave a 300 by 300 grid 9,599 hashes
+# for 90,000 points, and a table probing a slot at a time turns runs of
+# equal hashes into one: a 1,000 by 1,000 grid had not filled in ten
+# minutes. Every point its own hash, and a grid table fills and answers.
+grid_hashes = [] of Int32
+300.times { |x| 300.times { |y| grid_hashes << {x, y}.hash } }
+assert_int(spread(grid_hashes), 90000, "hash: a 300 by 300 grid of tuples spreads")
+grid = {} of {Int32, Int32} => Int32
+300.times { |x| 300.times { |y| grid[{x, y}] = x * y } }
+assert_true(grid[{299, 17}]? == 5083 && grid.size == 90000, "hash: a grid table fills and answers")
+
+# And an array: it writes `==`, so `Reference#hash` gave every array its
+# type's id and every array key one slot - 40,000 took 1.2 s to insert.
+pair_hashes = [] of Int32
+300.times { |x| 300.times { |y| pair_hashes << [x, y].hash } }
+assert_int(spread(pair_hashes), 90000, "hash: a 300 by 300 grid of arrays spreads")
+assert_true([1, 2].hash == [1, 2].hash && [1, 2] == [1, 2], "hash: equal arrays hash alike")
 
 # A class instance is itself, and a set of them finds each one: `Object#==`
 # answered false, so an instance did not equal itself and a `Set` never

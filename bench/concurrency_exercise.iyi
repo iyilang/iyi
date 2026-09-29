@@ -79,6 +79,104 @@ impl Error for TaskFailed
   end
 end
 
+# ── 0. Sleepers wake in deadline order, each costing its own insertion ────
+#
+# The sleep queue was a list kept sorted by walking it, so every sleep
+# walked past every sleeper before it: 100,000 tasks sleeping under 100 ms
+# took 11 s. 32,000 tasks sleeping a millisecond or a few may cost the
+# queue at most 64 steps each - a heap's melds, counted rather than timed,
+# so a slow machine and a platform whose mappings cost more cannot move it
+# - and must wake in the order of the deadlines their sleeps set. First,
+# so that a queue out of order is named here rather than by whichever
+# sleep below it breaks.
+woke = [] of Int64
+steps_before = IyiScheduler.sleep_steps
+group do |g|
+  32000.times do |k|
+    g.spawn do
+      sleep(k * 7919 % 7 + 1)
+      woke << IyiScheduler.current.deadline
+      0
+    end
+  end
+end
+steps = IyiScheduler.sleep_steps - steps_before
+i = 1
+while i < woke.size
+  fail("sleep: a sleeper woke before one whose deadline came first") if woke[i] < woke[i - 1]
+  i = i + 1
+end
+fail("sleep: 32000 sleepers took #{steps // 32000} queue steps each") if steps > 32000_u64 * 64_u64
+puts "32000 sleepers woke in deadline order, #{steps // 32000} queue steps each"
+
+# ── 0b. A parked reader costs the others nothing ─────────────────────────
+#
+# Every io event, every second waiter's check and every cancellation
+# walked the list of fibers parked on io, so each read on a server paid
+# for every connection parked beside it: a round trip over a pipe took
+# 41 us with 4,000 idle readers parked and 2 us with none. The same round
+# trips with 2,000 idle readers parked may take at most three times what
+# they take alone. Linux's poller only: Windows finds a completion by its
+# OVERLAPPED, and darwin's default of 256 descriptors does not hold the
+# crowd.
+{% if flag?(:linux) %}
+  def round_trips(idle : Int32, rounds : Int32) : Int64
+    crowd = [] of Pointer(Int32)
+    idle.times { crowd << make_pipe }
+    ping = make_pipe
+    pong = make_pipe
+    took = 0_i64
+    group do |g|
+      crowd.each do |pipe|
+        fd = pipe[0]
+        g.spawn do
+          buffer = Pointer(UInt8).malloc(1_u64)
+          iyi_read(fd, buffer.as(Void*), 1_u64)
+          0
+        end
+      end
+      g.spawn do
+        buffer = Pointer(UInt8).malloc(1_u64)
+        rounds.times do
+          iyi_read(ping[0], buffer.as(Void*), 1_u64)
+          __iyi_write(pong[1], buffer.as(Void*), 1_u64)
+        end
+        0
+      end
+      g.spawn do
+        buffer = Pointer(UInt8).malloc(1_u64)
+        buffer.value = 1_u8
+        started = __iyi_monotonic_ns
+        rounds.times do
+          __iyi_write(ping[1], buffer.as(Void*), 1_u64)
+          iyi_read(pong[0], buffer.as(Void*), 1_u64)
+        end
+        took = __iyi_monotonic_ns - started
+        crowd.each { |pipe| __iyi_write(pipe[1], buffer.as(Void*), 1_u64) }
+        0
+      end
+    end
+    (crowd + [ping, pong]).each do |pipe|
+      __iyi_close(pipe[0].to_i64)
+      __iyi_close(pipe[1].to_i64)
+    end
+    took
+  end
+
+  # The best of three each, so that a busy machine's one slow run is not
+  # read as a slow queue.
+  alone = round_trips(0, 5000)
+  crowded = round_trips(2000, 5000)
+  2.times do
+    again = round_trips(0, 5000)
+    alone = again if again < alone
+    again = round_trips(2000, 5000)
+    crowded = again if again < crowded
+  end
+  fail("io: 5000 round trips took #{crowded * 10 // alone // 10}x as long with 2000 readers parked beside them") if crowded > alone * 3
+  puts "5000 round trips took #{crowded // 1000000} ms with 2000 readers parked, #{alone // 1000000} ms alone"
+{% end %}
+
 # ── 1. Interleaving is real, and deterministic ──────────────────────────
 #
 # Two tasks ping-pong through two channels. A `group` that ran its tasks
@@ -547,5 +645,27 @@ group do |g|
 end
 fail("switch: #{changed} checks found a double changed across a fiber switch") if changed != 0
 puts "ten doubles each, held by two fibers across 2,000 switches, unchanged"
+
+# ── 20. A task gets its stack when it first runs ──────────────────────────
+#
+# Two thousand short tasks spawned in one loop, none of which runs until
+# the loop is done: a stack mapped at spawn gave each its own, and a burst
+# of 33,000 ran a default kernel out of mappings. Taken when a task first
+# runs, the stack the last one finished on is the next one's, and the
+# burst runs on a handful.
+burst_tops = [] of UInt64
+group do |g|
+  2000.times do
+    g.spawn do
+      burst_tops << IyiScheduler.current.stack_top
+      0
+    end
+  end
+end
+burst_distinct = [] of UInt64
+burst_tops.each { |top| burst_distinct << top unless burst_distinct.includes?(top) }
+fail("burst: #{burst_tops.size} of 2000 tasks ran") if burst_tops.size != 2000
+fail("burst: 2000 spawned tasks ran on #{burst_distinct.size} stacks") if burst_distinct.size > 8
+puts "2000 spawned tasks ran on #{burst_distinct.size} stacks"
 
 puts "concurrency exercise: every property held"

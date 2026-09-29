@@ -114,6 +114,40 @@
   end
   puts "    quiet: a quarter MiB of churn ran no collection under the #{count(IyiMark.budget)}-byte budget"
 
+  # 1b. The scheduler's own state survives the program's first collection.
+  # The run queue, the lists and the poller sit on one object a
+  # `@[ThreadLocal]` names, and a TLS block is not in the image's data the
+  # root walk scans; what roots the object is the global list every state
+  # is linked on when it is made. Both addresses are kept XOR'd with a key,
+  # in a frame of their own, so nothing on this stack roots the object and
+  # the check measures the list.
+  #
+  # Asked of a mark, before anything is swept: the colour the mark from
+  # the roots gives the state says whether the next collection keeps it.
+  # A collection that freed it answered only as far as the program could
+  # still run afterwards - its stack walk asks the state for the running
+  # fiber - and the proof that unlinks the list faulted on Windows before
+  # it named anything, wherever the check stood. A mark frees nothing, and
+  # the colours go back to white after it.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    first_marks = scheduler_marks(0x5A5A5A5A5A5A5A5A_u64)
+    # Calls deep enough to write over what `scheduler_marks` left below
+    # this frame: the mark scans the stack word by word, and the state's
+    # address, dead in a slot nothing wrote since, roots it.
+    churn(65536_u64)
+    IyiMark.mark
+    state_colour = IyiMark.colour(first_marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64)
+    IyiMark.unmark
+    if state_colour != IyiMark::BLACK
+      unrooted = "iyi: panic: scheduler state: a mark from the roots leaves the object the thread-local names white, so the first collection frees it out from under it\n"
+      __iyi_write(1, unrooted.to_unsafe.as(Void*), unrooted.bytesize.to_u64)
+      __iyi_exit(1)
+    end
+    IyiMark.collect
+    raise "scheduler state: marked black, and still not a live chunk after the first collection" if IyiRoots.base_of(first_marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64) == 0_u64
+    puts "    scheduler's state: the object its thread-local names lived through the first collection"
+  {% end %}
+
   # 2. Churn, and nobody calls collect. A rooted object with a pattern in it,
   # then 64 MiB of garbage: the collections have to come from the trigger,
   # the heap has to stay bounded, and the survivor has to keep its bytes.
@@ -135,9 +169,11 @@
     (survivor + index.to_i64).value = 0x3C_u8
     index = index + 1_u64
   end
+  # Counted from here: 1b's collection is the caller's, not the trigger's.
+  collections_before = IyiMark.collections
   churn(67108864_u64)
   IyiMark.settle
-  first_wave = IyiMark.collections
+  first_wave = IyiMark.collections - collections_before
   raise "trigger: 64 MiB of churn ran no collection, so nothing triggers" if first_wave == 0
   arenas = arena_count
   if arenas > before_churn + 2_u64
@@ -170,33 +206,11 @@
   (ballast + 4194303_i64).value = 9_u8
   puts "    budget: the same churn ran #{count(second_wave)} collections with 4 MiB live where it ran #{count(first_wave)} with none, budget now #{count(IyiMark.budget)} bytes"
 
-  # 3b. The scheduler's own state lives through the churn. The run queue,
-  # the lists and the poller sit on one object a `@[ThreadLocal]` names,
-  # and a TLS block is not in the image's data the root walk scans; what
-  # roots the object is the global list every state is linked on when it
-  # is made. Both addresses are kept XOR'd with a key, in a frame of their
-  # own, so nothing on this stack roots the object and the check measures
-  # the list: a state the sweep reclaimed carries the free flag, and the
-  # driver's proof unlinks the list and reads exactly that.
+  # 3b. The scheduler's own state lives through the churn, rooted by the
+  # global list (1b); the thread-local names the same object after it, and
+  # that object still names the main fiber.
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     marks = scheduler_marks(0x5A5A5A5A5A5A5A5A_u64)
-    # One collection, then the sweep's own word before anything allocates:
-    # a chunk it reclaimed carries FREE_FLAG until the allocator hands it
-    # out again, and nothing between the sweep and this read can — so the
-    # flag, not the contents, says whether the state was collected out
-    # from under its thread-local, on every platform's allocation pattern
-    # alike (read after a churn, the chunk was somebody else's on darwin
-    # and the read was a fault instead of a name).
-    IyiMark.collect
-    state_word = IyiMark.flags(marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64)
-    if state_word & IyiHeap::FREE_FLAG != 0
-      # Named and left by the exit syscall, not raised: a panic's own path
-      # reaches for the scheduler's state, which is the object just found
-      # freed, and would fault before or after the name depending on the
-      # platform's allocation pattern.
-      puts "iyi: panic: scheduler state: after a collection the object the thread-local names is on a free list, collected out from under it"
-      __iyi_exit(1)
-    end
     before_state = IyiMark.collections
     churn(67108864_u64)
     IyiMark.settle
@@ -205,7 +219,7 @@
     raise "scheduler state: the churn beside it triggered nothing" if state_wave == 0
     raise "scheduler state: the thread-local names a different object after #{count(state_wave)} collections" if after[0] != marks[0]
     raise "scheduler state: the running fiber it names is not the main fiber it held before the churn" if after[1] != marks[1]
-    puts "    scheduler's state: the object its thread-local names lived through #{count(state_wave + 1_u64)} collections, rooted by the global list"
+    puts "    scheduler's state: the object its thread-local names lived through #{count(state_wave)} collections, rooted by the global list"
   {% end %}
 
   # 3c. The sweep is the allocator's and the helpers', not the pause's.

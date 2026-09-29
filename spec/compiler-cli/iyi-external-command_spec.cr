@@ -30,6 +30,14 @@ describe "`iyi-*` external commands" do
     File.same?(File.join(exec_dir, File.basename(IYI_BIN)), IYI_BIN).should be_true
   end
 
+  it "names the formatter's verb for format and fmt" do
+    %w(format fmt).each do |verb|
+      Process.capture_result(iyi, verb, "a.iyi")
+        .should(be_failure(1))
+        .error.should(contain("formatting is `iyi tool format`, as in `iyi tool format a.iyi`"))
+    end
+  end
+
   it "still refuses a name nothing on PATH answers to" do
     Process.capture_result(iyi, "echo_env_nonesuch")
       .should(be_failure(1))

@@ -9,6 +9,9 @@
 #   bash bench/std_text_scale_exercise.sh
 module bench/std_text_scale_exercise
 
+import std/csv::{CSV}
+import std/http::{HTTP}
+import std/list::{List}
 import std/regex::{Regex}
 import std/text
 
@@ -62,4 +65,45 @@ built = String.build do |io|
 end
 check(built.bytesize == count * (unit.bytesize + 2), "String.build")
 
-puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line and String.build, each checked"
+# The same text through the library's other builders, each of which added
+# every piece to the text so far: `Enumerable#join` (a `List` of the
+# pieces), `String.join` over what is not an `Array`, `CSV.build`,
+# `HTTP.decode_chunked` and `center`'s cycled padding.
+listed = List(String).new(pieces).join(",")
+check(listed.bytesize == count * (unit.bytesize + 1) - 1, "Enumerable#join")
+numbered = String.join(0...count, ",")
+check(numbered.starts_with?("0,1,2,") && numbered.ends_with?(",#{count - 1}"), "String.join over a range")
+rows = [] of Array(String)
+i = 0
+while i < count // 4
+  rows << [unit, "a,b", "c", "d"]
+  i = i + 1
+end
+table = CSV.build(rows)
+check(table.bytesize == (count // 4) * (unit.bytesize + 11) - 1, "CSV.build wrote #{table.bytesize} bytes")
+chunked = String.build do |io|
+  i = 0
+  while i < count
+    io << "9\r\n" << unit << "\r\n"
+    i = i + 1
+  end
+  io << "0\r\n\r\n"
+end
+check(HTTP.decode_chunked(chunked) == seq, "HTTP.decode_chunked")
+padded = "x".center(seq.bytesize, "-=")
+check(padded.bytesize == seq.bytesize && padded.starts_with?("-=-="), "center with a cycled pad")
+
+# A needle that almost matches everywhere: sixteen thousand `a` and a `b`,
+# looked for in eight megabytes of `a`. Compared from each position in
+# turn that is a hundred billion byte comparisons.
+run = "a" * seq.bytesize
+near = "a" * 16384 + "b"
+check(run.index(near).nil?, "index of a near miss")
+check(!run.includes?(near), "includes? of a near miss")
+check(run.split(near).size == 1, "split on a near miss")
+check((run + near).index(near) == run.bytesize, "index finds it at the end")
+check(Regex.compile(near).find(run).nil?, "a literal pattern's near miss")
+check(run.rindex(near).nil?, "rindex of a near miss")
+check((near + run).rindex(near) == 0, "rindex finds it at the start")
+
+puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center and a near-miss search and pattern, each checked"

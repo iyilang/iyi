@@ -16,6 +16,7 @@ import std/slice::{Slice, SliceIterator}
 import std/iterator::{Iterator}
 
 import std/list::{ListIterator}
+import std/gc::{GC}
 
 # ---- Test Types -------------------------------------------------------------
 
@@ -428,6 +429,26 @@ assert_str(List.new([10, 20]).to_s, "List[10, 20]", "list: prints its elements")
 assert_eq(list[0], 10, "list: [] indexes")
 assert_eq(list[-1], 40, "list: [] counts from the end")
 assert_true(list[9]?.nil?, "list: []? answers nil past the end")
+# A list copies the caller's array once, at the boundary, and an append
+# copies the list once. `appended` wrote 4n words for an n-element list:
+# `dup`, the copy grown to twice its size by `<<`, and the constructor's
+# copy of the result. Counted with the collector held back, so the word
+# the trigger reads is every byte the one call allocated.
+handed = [1, 2, 3]
+kept = List.new(handed)
+handed << 4
+assert_eq(kept.size, 3, "list: the caller's array is not the list's")
+joined = kept.concatenated(List.new([7, 8]))
+assert_eq(joined.size, 5, "list: concatenated size")
+assert_eq(joined[3], 7, "list: concatenated keeps order")
+wide = List(Int64).new(Array(Int64).new(100_000) { |i| i.to_i64 })
+GC.disable
+words_before = GC.stats.bytes_since_collection
+wider = wide.appended(7_i64)
+words_after = GC.stats.bytes_since_collection
+GC.enable
+assert_eq(wider[100_000].to_i32, 7, "list: appended lands last")
+assert_true(words_after - words_before < 1_200_000_u64, "list: an append copies the list once (#{words_after - words_before} bytes for 100000 Int64s)")
 # `Enumerable#join` made the separator mandatory where `Array#join` and
 # `Indexable#join` default it to nothing, so the same call was a compile
 # error on a Slice and a List.

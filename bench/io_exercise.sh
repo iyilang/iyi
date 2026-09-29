@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises IyiIO: flush, short reads, buffer boundaries, and EOF.
+# Exercises IyiIO: flush, short reads, buffer boundaries, EOF, and puts.
 #
 #     bash bench/io_exercise.sh
 #
@@ -61,6 +61,13 @@ run_case() {
     status=1
     return
   fi
+  # Every line the program prints is a check's, and its last one ends in
+  # a newline already: an empty line is `puts` ending it twice.
+  if grep -q '^$' "$WORK/$name.out"; then
+    echo "  $label: standard output has an empty line: puts ended a line that had ended"
+    status=1
+    return
+  fi
   echo "  $label: all io checks passed"
 }
 
@@ -116,6 +123,18 @@ prove_fails "read across buffer boundary fails" noboundary "buffer_boundary:" \
 # 4. EOF check broken: eof? always returns false
 prove_fails "eof check fails" noeof "eof:" \
   '{ sub(/def eof\? : Bool/, "def eof? : Bool\n    return false"); print }'
+
+# 4b. read_all through the stream's buffer again, a buffer at a time
+case "$(uname -s)" in
+  Linux)
+    prove_fails "read_all a buffer at a time fails" noread_all "read_all:" \
+      '{ if ($0 ~ /got = low_level_read\(@fd, \(buffer \+ filled\).as\(Void\*\), \(capacity - filled\).to_u64\)/) { print "      got = low_level_read(@fd, (buffer + filled).as(Void*), 4096_u64)"; next } print }'
+    ;;
+esac
+
+# 5. puts ends every line, ended or not
+prove_fails "puts ending an ended line fails" noends "puts:" \
+  '{ if ($0 ~ /text.bytesize > 0 && text.to_unsafe\[text.bytesize - 1\] == 10_u8 \? write\(text\) : write_line\(text\)/) { print "    write_line(text)"; next } print }'
 
 echo
 if [ "$status" -eq 0 ]; then

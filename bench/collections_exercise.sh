@@ -194,6 +194,14 @@ prove_fails "a merge that takes the right run on a tie" unstable_sort array.iyi 
   "array: a sort is ascending and keeps equal elements in order" \
   's/(yield from\[left\], from\[right\]) <= 0/(yield from[left], from[right]) < 0/'
 
+prove_fails "a sort that asks == after <" two_question_sort array.iyi \
+  "array: sorted asks one question a step" \
+  's/^    sorted { |a, b| b < a ? 1 : 0 }$/    sorted { |a, b| a < b ? -1 : (a == b ? 0 : 1) }/'
+
+prove_fails "a key sort that asks < both ways" two_way_key_sort array.iyi \
+  "array: sorted_by asks < as often as sorted" \
+  's/^    keyed.sort_in_place { |a, b| b\[0\] < a\[0\] ? 1 : 0 }$/    keyed.sort_in_place { |a, b| a[0] < b[0] ? -1 : (b[0] < a[0] ? 1 : 0) }/'
+
 prove_fails "an Int64 hashed by its type" int64_type_hash number.iyi \
   "hash: Int64 keys spread" \
   '/^struct Int64$/,/^end$/{/^  def hash : Int32$/,/^  end$/d;}'
@@ -254,6 +262,16 @@ prove_fails "pop does not shrink" no_shrink array.iyi \
 prove_fails "the range walk steps past its end" past_end range.iyi \
   "arithmetic overflow" \
   's/^    yield value if !@exclusive \&\& value == @end$/    yield value if !@exclusive \&\& value <= @end \&\& (value = value + 1) < 0/'
+
+# 10. A tuple hashed as `a * 31 + b` again, members barely mixed.
+prove_fails "a tuple hash that barely mixes" weak_tuple object.iyi \
+  "hash: a 300 by 300 grid of tuples spreads" \
+  's/^      value = (value ^ self\[{{i}}\].hash.to_i64.unsafe_to_u64) \&\* 0x100000001B3_u64$/      value = (value \&* 31_u64) \&+ self[{{i}}].hash.to_i64.unsafe_to_u64/; /^      value = value ^ value.unsafe_shr(29_u64)$/d'
+
+# 11. An array without a hash of its own, so `Reference#hash` answers.
+prove_fails "an array hashed by its type" type_hashed_array array.iyi \
+  "hash: a 300 by 300 grid of arrays spreads" \
+  's/^    value.hash$/    crystal_type_id/'
 
 echo
 echo "== and what an empty receiver says when it is asked for a size"

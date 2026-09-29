@@ -236,9 +236,44 @@ mutate "a block replacement that is ignored" 'io << yield text[a, b - a]' 'io <<
 mutate "a run of classes that matches on its first byte alone" '      return false if table[src[i + j].to_i32] == 0_u8' '      return false if table[src[i].to_i32] == 0_u8'
 mutate "a table's missing entry kept as the match" '    pattern.replace(self) { |match| table[match]? || "" }' '    pattern.replace(self) { |match| table[match]? || match }'
 mutate "an automaton that keeps every bit" '      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]' '      state = state.unsafe_shl(1_u64) | heads'
-mutate "a literal compared from its second byte on" '        j = 1
-        while j < m && source[i + j] == wanted[j]' '        j = 2
-        while j < m && source[i + j] == wanted[j]'
+mutate "a literal looked for from one byte past where it may start" '    text.byte_index(literal, from)' '    text.byte_index(literal, from + 1)'
+
+# A script with no module header imports `Regex` the same way. The compiler
+# declares an empty `Regex` of its own before any source is read - the
+# other library's regex literals, which iyi refuses - and at a script's top
+# level it answered for the imported one: `Regex.compile` was "undefined
+# method 'compile' for Regex.class".
+echo
+echo "== a script without a module header imports Regex"
+cat > "$WORK/script.iyi" <<'IYI'
+import std/regex::{Regex}
+
+puts Regex.compile("a+").find("xaay") || "none"
+IYI
+if "$IYI" run "$WORK/script.iyi" > "$WORK/script.out" 2>&1 && grep -qx "aa" "$WORK/script.out"; then
+  echo "  the imported Regex answers: $(cat "$WORK/script.out")"
+else
+  echo "  FAIL: a headerless script's Regex is not the imported one:"
+  sed 's/^/    /' "$WORK/script.out" | tail -3
+  status=1
+fi
+# And only there. A headerless script's imports are the program's, and the
+# first cut of the rule above handed them to the prelude too: a script that
+# imported `std/gc::{GC}` and built a `List` was told `Std::Gc` "is not
+# imported here", at a line of std/list.
+cat > "$WORK/walled.iyi" <<'IYI'
+import std/gc::{GC}
+import std/list::{List}
+
+puts List(Int64).new([4_i64, 5_i64]).appended(6_i64).size + GC.stats.collections.to_i32 * 0
+IYI
+if "$IYI" run "$WORK/walled.iyi" > "$WORK/walled.out" 2>&1 && grep -qx "3" "$WORK/walled.out"; then
+  echo "  a script's import stays the script's: $(cat "$WORK/walled.out")"
+else
+  echo "  FAIL: a script's import reached the prelude:"
+  sed 's/^/    /' "$WORK/walled.out" | tail -3
+  status=1
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -15,6 +15,7 @@ end
 
 import std/file::{File}
 import std/dir::{Dir}
+import std/gc::{GC}
 
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. It was `/tmp` last, which is not a directory on
@@ -68,6 +69,29 @@ File.each_line(f1) do |l|
   count = count + 1
 end
 assert_true count == 2, "each_line visited 2 lines"
+
+# A line at a time, off the file as it is read: `each_line` read the
+# whole file into an array of its lines first. Counted with the
+# collector held back, a pass over two megabytes may allocate the lines
+# and little else - under one and a half times the file - where reading
+# it whole first allocated the text, its doublings and the lines, past
+# three times.
+big_path = sandbox + "/std_file_each_line_big.txt"
+File.write(big_path, ("0123456789abcdefghijklmnopqrstuvwxyz" * 3 + "\r\n") * 18000)
+GC.disable
+walk_before = GC.stats.bytes_since_collection
+walked = 0
+walked_bytes = 0
+File.each_line(big_path) do |l|
+  walked = walked + 1
+  walked_bytes = walked_bytes + l.bytesize
+end
+walk_after = GC.stats.bytes_since_collection
+GC.enable
+assert_true walked == 18000 && walked_bytes == 18000 * 108, "each_line gave 18000 lines of 108 bytes, without their \\r\\n"
+file_bytes = File.size(big_path).to_u64
+assert_true walk_after - walk_before < file_bytes * 3_u64 // 2_u64, "each_line streams: #{walk_after - walk_before} bytes allocated for a #{file_bytes}-byte file"
+File.delete(big_path)
 puts "  read_lines and each_line verified"
 
 puts "\n== truncation and overwrite"

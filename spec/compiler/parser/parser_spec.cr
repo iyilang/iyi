@@ -2454,6 +2454,15 @@ module Iyi
       "can't change the value of self"
     assert_syntax_error "x, self = 1, 2",
       "can't change the value of self"
+    assert_syntax_error "::foo = 1",
+      "`::foo` is not a variable"
+    assert_syntax_error "foo = 1\n::\nfoo = 2",
+      "`::foo` is not a variable"
+    assert_syntax_error "foo = 1; ::foo += 1",
+      "`::foo` is not a variable"
+    assert_syntax_error "::foo, bar = 1, 2",
+      "`::foo` is not a variable"
+    it_parses "foo = 1; ::foo + 1", [Assign.new("foo".var, 1.int32), Call.new(Call.new("foo", global: true), "+", 1.int32)]
 
     assert_syntax_error "macro foo(x : Int32); end"
 

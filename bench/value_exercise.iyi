@@ -133,6 +133,16 @@ counted = 0
 assert_int(counted, 4, "range: each still counts")
 assert_int((1...4).size, 3, "range: exclusive size")
 
+# A range of characters walks their code points, as `'a'..'z'` is written
+# to: a character plus a count is the one that far on. It did not compile,
+# because nothing added to a `Char`.
+letters = ""
+('a'..'e').each { |c| letters = letters + c.to_s }
+assert_str(letters, "abcde", "range: characters walk by one")
+assert_int(('a'...'e').size, 4, "range: an exclusive run of characters")
+assert_str(('x'..'z').map { |c| c.to_s }.join, "xyz", "range: characters map")
+assert_str(('é'..'ê').to_a.map { |c| c.to_s }.join, "éê", "range: past ASCII")
+
 # A `record` is a value too, and a block given to it is the struct's own
 # body, as in Crystal: the methods are there. The block used to be dropped
 # without a word, and the first call said the method did not exist.

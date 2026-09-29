@@ -200,7 +200,14 @@ module Iyi::Lsp
           if (worker = @worker) && worker.idle?
             if @warm_pending
               @warm_pending = false
-              warm(worker)
+              # A successor that has worked since the memory bound made
+              # it is replaced here too, rather than only warmed: warming
+              # it kept every edit it had taken since, so how much a
+              # pause handed back depended on where in the typing the
+              # bound had landed - one edit earlier, from a slightly
+              # larger prelude, and the session rested at 241 MB, then
+              # 283, then 326, where it had rested at 198.
+              worker.worked > 0 ? retire : warm(worker)
             elsif worker.worked > 0
               retire
             end

@@ -60,10 +60,19 @@ class ByteBuffer
   # `length` bytes from `distance` back, byte by byte so a distance shorter
   # than the length repeats what it just wrote, which is the format's way
   # of spelling a run.
+  # A match: *length* bytes from *distance* back, which may overlap what
+  # it writes. Eight at a time where the source is eight or more behind,
+  # so no word reads what the same copy has not written yet.
   def copy_back(distance : Int32, length : Int32) : Nil
     reserve(length)
     src = @size - distance
     i = 0
+    if distance >= 8
+      while i + 8 <= length
+        (@data + (@size + i)).as(Pointer(UInt64)).value = (@data + (src + i)).as(Pointer(UInt64)).value
+        i = i + 8
+      end
+    end
     while i < length
       @data[@size + i] = @data[src + i]
       i = i + 1
@@ -116,27 +125,57 @@ class BitReader
     value
   end
 
-  # Drop to the next byte boundary. Fewer than eight bits are ever held
-  # after a read, so what is dropped is the tail of the byte just read.
-  def align : Nil
-    @buf = 0_u32
-    @cnt = 0
+  # The next `n` bits (up to 16) without taking them, as many as the
+  # stream still has: past its end the missing bits read as zero, and
+  # `held` says how many are real. A Huffman table looks a code up by
+  # them (`Huffman#decode`).
+  def peek(n : Int32) : Int32
+    while @cnt < n && @pos < @size
+      @buf = @buf | (@data[@pos].to_u32 << @cnt)
+      @pos = @pos + 1
+      @cnt = @cnt + 8
+    end
+    (@buf & ((1_u32 << n) - 1_u32)).to_i32
   end
 
-  # A whole byte, after `align`.
+  def held : Int32
+    @cnt
+  end
+
+  # Take `n` bits a `peek` has already loaded.
+  def drop(n : Int32) : Nil
+    @buf = @buf >> n
+    @cnt = @cnt - n
+  end
+
+  # Drop to the next byte boundary: the tail of the byte being read. A
+  # `peek` can have loaded whole bytes past it, and those stay, for
+  # `byte` to take first.
+  def align : Nil
+    drop(@cnt & 7)
+  end
+
+  # A whole byte, after `align`: one a `peek` loaded, or the stream's next.
   def byte : UInt8
+    if @cnt >= 8
+      b = (@buf & 255_u32).to_u8
+      drop(8)
+      return b
+    end
     raise "DEFLATE: the stream ends inside a block" if @pos >= @size
     b = @data[@pos]
     @pos = @pos + 1
     b
   end
 
+  # Where the reader is in the stream, the whole bytes loaded ahead and not
+  # yet read given back.
   def pos : Int32
-    @pos
+    @pos - @cnt // 8
   end
 
   def remaining : Int32
-    @size - @pos
+    @size - pos
   end
 end
 
@@ -186,6 +225,13 @@ end
 class Huffman
   @count : Pointer(Int32)
   @symbol : Pointer(Int32)
+  # Every code of `FAST` bits or fewer, by the next `FAST` bits of the
+  # stream in the order they arrive: the symbol shifted up by four over
+  # the code's length, or 0 where the code is longer. `decode` looked
+  # every code up a bit at a time, which was most of inflating.
+  @fast : Pointer(Int32)
+
+  FAST = 9
 
   def initialize(lengths : Pointer(Int32), n : Int32)
     @count = Pointer(Int32).malloc(16_u64)
@@ -226,9 +272,43 @@ class Huffman
       end
       i = i + 1
     end
+
+    # The canonical codes in order - by length, then by symbol - each
+    # stored at every index whose low bits are the code as it arrives,
+    # which is the code's bits reversed.
+    @fast = Pointer(Int32).malloc((1_u64 << FAST))
+    code = 0
+    index = 0
+    len = 1
+    while len <= FAST
+      k = 0
+      while k < @count[len]
+        reversed = 0
+        bit = 0
+        while bit < len
+          reversed = reversed | (((code >> bit) & 1) << (len - 1 - bit))
+          bit = bit + 1
+        end
+        slot = reversed
+        while slot < (1 << FAST)
+          @fast[slot] = (@symbol[index] << 4) | len
+          slot = slot + (1 << len)
+        end
+        code = code + 1
+        index = index + 1
+        k = k + 1
+      end
+      code = code << 1
+      len = len + 1
+    end
   end
 
   def decode(r : BitReader) : Int32
+    entry = @fast[r.peek(FAST)]
+    if entry != 0 && (entry & 15) <= r.held
+      r.drop(entry & 15)
+      return entry >> 4
+    end
     code = 0
     first = 0
     index = 0
@@ -366,10 +446,18 @@ pub struct Deflate
 
   # The bytes, and how many of the stream's bytes they took: an envelope
   # reads its trailer from there.
-  def self.inflate(data : String, start : Int32) : {String, Int32}
+  #
+  # *expected* is how long the caller thinks the result is - gzip's
+  # trailer says - so that the result is one allocation rather than a
+  # guess grown by doubling. Held to what the stream could expand to, so a
+  # trailer that lies is not an allocation it asked for.
+  def self.inflate(data : String, start : Int32, expected : Int64 = 0_i64) : {String, Int32}
     t = Tables.new
     r = BitReader.new(data, start)
-    sink = ByteBuffer.new((data.bytesize - start) * 3 + 64)
+    guess = (data.bytesize - start).to_i64 * 3_i64 + 64_i64
+    most = (data.bytesize - start).to_i64 * 1032_i64 + 64_i64
+    guess = expected + 64_i64 if expected > guess && expected <= most && expected < 1073741824_i64
+    sink = ByteBuffer.new(guess.to_i32)
     fixed_lit : Huffman? = nil
     fixed_dist : Huffman? = nil
     while true
@@ -603,7 +691,10 @@ pub struct Gzip
     end
     pos = pos + 2 if (flags & 2) != 0 # FHCRC
     raise "gzip: the stream ends inside its header" if data.bytesize < pos
-    sink, used = Deflate.inflate(data, pos)
+    # The last member's trailer names its length; for the one member this
+    # reads, that is the length the result will have.
+    expected = data.bytesize >= pos + 8 ? get_le(p + (data.bytesize - 4).to_i64).to_i64 : 0_i64
+    sink, used = Deflate.inflate(data, pos, expected)
     raise "gzip: the stream ends before its trailer" if data.bytesize - used < 8
     want_crc = get_le(p + used.to_i64)
     want_size = get_le(p + (used + 4).to_i64)

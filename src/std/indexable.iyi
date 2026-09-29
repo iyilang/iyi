@@ -380,15 +380,21 @@ pub trait Indexable
   # `+`, this panicked with "arithmetic overflow" the moment a collection was
   # long enough for `31 * h` to leave `Int32` - six elements of two digits
   # each was enough, while the five-element cases in the gates passed.
+  #
+  # Mixed as the prelude's `Array#hash` is, which is also what keeps an
+  # array's and another indexable's hashes one function: `31 * h + e` gave
+  # a grid of pairs a few hashes between many, and a table probing a slot
+  # at a time merged their runs.
   def hash : Int32
-    h = size
+    value = 0x9E3779B97F4A7C15_u64 ^ size.to_i64.unsafe_to_u64
     i = 0
     while i < size
       elem = unsafe_fetch(i)
-      h = (31 &* h) &+ (elem.responds_to?(:hash) ? elem.hash : 0)
+      value = (value ^ (elem.responds_to?(:hash) ? elem.hash : 0).to_i64.unsafe_to_u64) &* 0x100000001B3_u64
+      value = value ^ value.unsafe_shr(29_u64)
       i = i + 1
     end
-    h
+    value.hash
   end
 end
 

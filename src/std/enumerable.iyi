@@ -283,15 +283,18 @@ pub trait Enumerable
   # (SPEC.md III.1.7a), and `slice.join` has to compile
   # where `array.join` does. A mandatory separator made the arity of one name
   # depend on which tower the receiver came from.
+  #
+  # Into one builder: adding each element to the text so far copied that
+  # text once per element, and a `List` of 100,000 took nine seconds.
   def join(separator : String = "") : String
-    result = ""
-    first = true
-    each do |e|
-      result = result + separator unless first
-      result = result + e.to_s
-      first = false
+    String.build do |io|
+      first = true
+      each do |e|
+        io << separator unless first
+        io << e.to_s
+        first = false
+      end
     end
-    result
   end
 
   # ---- needing something of the element type -------------------------------

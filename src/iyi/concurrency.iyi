@@ -415,8 +415,18 @@ class IyiFiber
   # link per queue kind is enough, and none of them allocate on the wait
   # path except a channel's node.
   property next_run : IyiFiber?
-  property next_sleep : IyiFiber?
   property next_io : IyiFiber?
+  # The one before on the io list, where the list is the POSIX poller's
+  # and a waiter leaves it from wherever it is (`IyiScheduler.io_unlink`).
+  property prev_io : IyiFiber?
+  # The sleep heap's links (`IyiScheduler.sleep_insert`): the first
+  # child, the next sibling, and the node before this one - its parent
+  # when it is a first child, its previous sibling otherwise - with the
+  # order an insertion took, which breaks a tie between two deadlines.
+  property next_sleep : IyiFiber?
+  property sleep_child : IyiFiber?
+  property sleep_prev : IyiFiber?
+  property sleep_seq : UInt64
   property next_child : IyiFiber?
   property joiner : IyiFiber?
 
@@ -495,7 +505,11 @@ class IyiFiber
     @proc = nil
     @next_run = nil
     @next_sleep = nil
+    @sleep_child = nil
+    @sleep_prev = nil
+    @sleep_seq = 0_u64
     @next_io = nil
+    @prev_io = nil
     @next_child = nil
     @joiner = nil
     @deadline = 0_i64
@@ -753,7 +767,12 @@ class IyiSchedulerState
   property run_head : IyiFiber?
   property run_tail : IyiFiber?
   property sleep_head : IyiFiber?
+  property sleep_seq : UInt64
   property io_head : IyiFiber?
+  # The POSIX poller's waiters by descriptor: fd * 2 for the reader, fd *
+  # 2 + 1 for the writer (`IyiScheduler.io_slot`). Made at the first io
+  # wait, so a state that never waits on io holds nothing of the heap's.
+  property io_slots : Array(IyiFiber?)?
   property pollfd : Int64
 
   # The poller's event buffer, as a *pointer*.
@@ -818,6 +837,8 @@ class IyiSchedulerState
     @pollfd = 0_i64
     @events = Pointer(UInt8).new(0_u64)
     @stack_pool = 0_u64
+    @sleep_seq = 0_u64
+    @io_slots = nil
   end
 end
 
@@ -1097,10 +1118,40 @@ class IyiScheduler
     end
   end
 
+  # How a spawned fiber's stack is made, installed by the first spawn
+  # (`IyiGroup#spawn`) and called through rather than named here: a
+  # program that parks without spawning - a thread waiting on a lock -
+  # switches too, and naming `prepare_stack` in the switch put the stack
+  # mapping's `mprotect` into every such program, one more name on
+  # darwin's floor for a stack it never makes.
+  @@stack_maker : Proc(IyiFiber, Nil)?
+
+  def self.make_stacks_with(&maker : IyiFiber -> Nil) : Nil
+    @@stack_maker = maker
+  end
+
+  def self.makes_stacks? : Bool
+    !@@stack_maker.is_a?(Nil)
+  end
+
+  # A fiber gets its stack here, the first time it is switched to, rather
+  # than when it is spawned: a spawn that mapped one put a stack under
+  # every task not yet run, so a loop spawning 100,000 short tasks made
+  # 100,000 mappings and a guard page each before the first of them ran
+  # (340 ms, and on a kernel with the default 65,530 mappings a process,
+  # a burst of 33,000 was the end of it). Taken at the first switch, the
+  # stack a finished task leaves in the pool is the next one's. Only a
+  # fiber that has never run has no saved stack pointer: the main fiber
+  # has one from the switch that left it, and a finished one is never
+  # switched to.
   def self.switch_to(fiber : IyiFiber) : Nil
     previous = current
     fiber.state = IyiFiberState::Running
     return if fiber.sp_slot.address == previous.sp_slot.address
+    if fiber.saved_sp == 0_u64
+      maker = @@stack_maker
+      maker.call(fiber) unless maker.is_a?(Nil)
+    end
     state.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
     # Back on this fiber's own stack, which is the first moment a stack
@@ -1354,8 +1405,7 @@ class IyiScheduler
     fiber.wait_fd = fd
     fiber.wait_dir = direction
     fiber.state = IyiFiberState::WaitingIo
-    fiber.next_io = state.io_head
-    state.io_head = fiber
+    io_link(fiber)
     arm_deadline(fiber, ms)
     reschedule
     return Cancelled.new if fiber.cancelled
@@ -1381,15 +1431,68 @@ class IyiScheduler
     sleep_remove(fiber)
   end
 
-  # The directions fibers are waiting in on *fd*, as epoll bits.
+  # The directions fibers are waiting in on *fd*, as epoll bits: its two
+  # slots, where it had been a walk of every fiber waiting on any fd.
   def self.io_interest(fd : Int32) : Int32
-    mask = 0
-    scan = state.io_head
-    while scan.is_a?(IyiFiber)
-      mask = mask | scan.wait_dir if scan.wait_fd == fd
-      scan = scan.next_io
+    (io_slot(fd, 1).is_a?(IyiFiber) ? 1 : 0) | (io_slot(fd, 4).is_a?(IyiFiber) ? 4 : 0)
+  end
+
+  # The fiber waiting on *fd* in *direction* (1 to read, 4 to write).
+  def self.io_slot(fd : Int32, direction : Int32) : IyiFiber?
+    slots = state.io_slots
+    return nil if slots.is_a?(Nil)
+    index = fd * 2 + (direction == 1 ? 0 : 1)
+    index < slots.size ? slots[index] : nil
+  end
+
+  # Onto the io list and into its fd's slot. The list is what says that
+  # anything waits on io at all; the slots are how an event, a second
+  # waiter's check and a cancellation find a waiter. Each of those walked
+  # the list, so every read on a server paid for every connection parked
+  # beside it: a round trip over a pipe took 41 us with 4,000 idle
+  # readers parked, against 2 us with none.
+  def self.io_link(fiber : IyiFiber) : Nil
+    st = state
+    head = st.io_head
+    fiber.next_io = head
+    fiber.prev_io = nil
+    head.prev_io = fiber if head.is_a?(IyiFiber)
+    st.io_head = fiber
+    slots = st.io_slots
+    if slots.is_a?(Nil)
+      slots = [] of IyiFiber?
+      st.io_slots = slots
     end
-    mask
+    index = fiber.wait_fd * 2 + (fiber.wait_dir == 1 ? 0 : 1)
+    while slots.size <= index
+      slots << nil
+    end
+    slots[index] = fiber
+  end
+
+  # Off the io list and out of its slot; false when it was on neither.
+  def self.io_unlink(fiber : IyiFiber) : Bool
+    st = state
+    before = fiber.prev_io
+    after = fiber.next_io
+    head = st.io_head
+    if before.is_a?(IyiFiber)
+      before.next_io = after
+    elsif head.is_a?(IyiFiber) && head.object_id == fiber.object_id
+      st.io_head = after
+    else
+      return false
+    end
+    after.prev_io = before if after.is_a?(IyiFiber)
+    fiber.next_io = nil
+    fiber.prev_io = nil
+    slots = st.io_slots
+    index = fiber.wait_fd * 2 + (fiber.wait_dir == 1 ? 0 : 1)
+    if slots.is_a?(Array(IyiFiber?)) && index >= 0 && index < slots.size
+      held = slots[index]
+      slots[index] = nil if held.is_a?(IyiFiber) && held.object_id == fiber.object_id
+    end
+    true
   end
 
   def self.join(fiber : IyiFiber) : Nil
@@ -1604,8 +1707,7 @@ class IyiScheduler
       head = state.sleep_head
       return unless head.is_a?(IyiFiber)
       return if head.deadline > now
-      state.sleep_head = head.next_sleep
-      head.next_sleep = nil
+      sleep_remove(head)
       if head.io_timed
         # An io wait whose deadline came first.
         head.io_timed = false
@@ -1632,44 +1734,117 @@ class IyiScheduler
 
   # ── Lists ────────────────────────────────────────────────────────────
 
+  # The sleepers, earliest deadline first, as a pairing heap threaded
+  # through the fibers' own links: an insertion is one comparison, taking
+  # the earliest is a pass over its children, and a fiber leaves from
+  # anywhere in the heap when its wait ends some other way. It was a list
+  # kept sorted by walking it, so every sleep walked past the sleepers
+  # before it: 100,000 tasks each sleeping under 100 ms took 11 s, and a
+  # server whose reads carry a deadline paid the same on every read.
+  # Equal deadlines leave in the order they came, as the list kept them.
   def self.sleep_insert(fiber : IyiFiber) : Nil
-    head = state.sleep_head
-    if head.is_a?(Nil) || head.deadline > fiber.deadline
-      fiber.next_sleep = head
-      state.sleep_head = fiber
-      return
-    end
-    cursor = head
-    while true
-      after = cursor.next_sleep
-      if after.is_a?(Nil) || after.deadline > fiber.deadline
-        fiber.next_sleep = after
-        cursor.next_sleep = fiber
-        return
-      end
-      cursor = after
-    end
+    st = state
+    st.sleep_seq = st.sleep_seq &+ 1_u64
+    fiber.sleep_seq = st.sleep_seq
+    fiber.sleep_child = nil
+    fiber.next_sleep = nil
+    fiber.sleep_prev = nil
+    root = st.sleep_head
+    st.sleep_head = root.is_a?(IyiFiber) ? sleep_meld(root, fiber) : fiber
   end
 
+  # Out of the heap from wherever it is; nothing when it is not in it.
   def self.sleep_remove(fiber : IyiFiber) : Nil
-    head = state.sleep_head
-    return unless head.is_a?(IyiFiber)
-    if head.sp_slot.address == fiber.sp_slot.address
-      state.sleep_head = head.next_sleep
-      fiber.next_sleep = nil
+    st = state
+    root = st.sleep_head
+    return unless root.is_a?(IyiFiber)
+    children = fiber.sleep_child
+    fiber.sleep_child = nil
+    if root.object_id == fiber.object_id
+      rest = sleep_pairs(children)
+      rest.sleep_prev = nil if rest.is_a?(IyiFiber)
+      st.sleep_head = rest
       return
     end
-    cursor = head
-    while true
-      after = cursor.next_sleep
-      return unless after.is_a?(IyiFiber)
-      if after.sp_slot.address == fiber.sp_slot.address
-        cursor.next_sleep = after.next_sleep
-        fiber.next_sleep = nil
-        return
-      end
-      cursor = after
+    before = fiber.sleep_prev
+    unless before.is_a?(IyiFiber)
+      fiber.sleep_child = children
+      return
     end
+    after = fiber.next_sleep
+    first_child = before.sleep_child
+    if first_child.is_a?(IyiFiber) && first_child.object_id == fiber.object_id
+      before.sleep_child = after
+    else
+      before.next_sleep = after
+    end
+    after.sleep_prev = before if after.is_a?(IyiFiber)
+    fiber.next_sleep = nil
+    fiber.sleep_prev = nil
+    rest = sleep_pairs(children)
+    st.sleep_head = sleep_meld(root, rest) if rest.is_a?(IyiFiber)
+  end
+
+  private def self.sleep_before?(a : IyiFiber, b : IyiFiber) : Bool
+    a.deadline < b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)
+  end
+
+  @@sleep_steps : UInt64 = 0_u64
+
+  # Melds the sleep heap has made, in all: what an insertion and a removal
+  # cost, counted, which the exercises read rather than a clock.
+  def self.sleep_steps : UInt64
+    @@sleep_steps
+  end
+
+  # Two roots into one: the later becomes the earlier's first child.
+  private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
+    @@sleep_steps = @@sleep_steps &+ 1_u64
+    first = sleep_before?(b, a) ? b : a
+    second = first.object_id == a.object_id ? b : a
+    older = first.sleep_child
+    second.next_sleep = older
+    older.sleep_prev = second if older.is_a?(IyiFiber)
+    second.sleep_prev = first
+    first.sleep_child = second
+    first.next_sleep = nil
+    first.sleep_prev = nil
+    first
+  end
+
+  # A root's children into one root: melded in pairs left to right, then
+  # the pairs right to left, which is what keeps the heap shallow.
+  private def self.sleep_pairs(first : IyiFiber?) : IyiFiber?
+    pairs = nil
+    cursor = first
+    while cursor.is_a?(IyiFiber)
+      partner = cursor.next_sleep
+      cursor.next_sleep = nil
+      cursor.sleep_prev = nil
+      unless partner.is_a?(IyiFiber)
+        cursor.next_sleep = pairs
+        pairs = cursor
+        break
+      end
+      following = partner.next_sleep
+      partner.next_sleep = nil
+      partner.sleep_prev = nil
+      pair = sleep_meld(cursor, partner)
+      pair.next_sleep = pairs
+      pairs = pair
+      cursor = following
+    end
+    return nil unless pairs.is_a?(IyiFiber)
+    result = pairs
+    pairs = result.next_sleep
+    result.next_sleep = nil
+    while pairs.is_a?(IyiFiber)
+      following = pairs.next_sleep
+      pairs.next_sleep = nil
+      result = sleep_meld(pairs, result)
+      pairs = following
+    end
+    result
   end
 
   def self.io_take_overlapped(ptr : UInt64) : IyiFiber?
@@ -1702,15 +1877,10 @@ class IyiScheduler
 
   # The fiber waiting on *fd* in *direction*, off the list and the poller.
   def self.io_take(fd : Int32, direction : Int32) : IyiFiber?
-    cursor = state.io_head
-    while cursor.is_a?(IyiFiber)
-      if cursor.wait_fd == fd && cursor.wait_dir == direction
-        io_remove(cursor)
-        return cursor
-      end
-      cursor = cursor.next_io
-    end
-    nil
+    waiter = io_slot(fd, direction)
+    return nil unless waiter.is_a?(IyiFiber)
+    io_remove(waiter)
+    waiter
   end
 
   # *fiber* off the io list, whichever fd and direction it waits on: a
@@ -1719,24 +1889,7 @@ class IyiScheduler
     {% if flag?(:win32) %}
       io_take_overlapped(fiber.wait_overlapped.address)
     {% else %}
-      head = state.io_head
-      return unless head.is_a?(IyiFiber)
-      if head.sp_slot.address == fiber.sp_slot.address
-        state.io_head = head.next_io
-        io_forget(head)
-        return
-      end
-      cursor = head
-      while true
-        after = cursor.next_io
-        return unless after.is_a?(IyiFiber)
-        if after.sp_slot.address == fiber.sp_slot.address
-          cursor.next_io = after.next_io
-          io_forget(after)
-          return
-        end
-        cursor = after
-      end
+      io_forget(fiber) if io_unlink(fiber)
     {% end %}
   end
 
@@ -2229,6 +2382,7 @@ class IyiGroup
   # member is a failure the group acts on (III.4.3): first failure
   # cancels the siblings, `errgroup`'s policy with the library deleted.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
     task = IyiTask(T).new(fiber)
     runner = self
@@ -2238,7 +2392,6 @@ class IyiGroup
       runner.child_finished(value.is_a?(::Error) && !fiber.cancelled)
       runner.drop_child(fiber)
     end
-    fiber.prepare_stack
     IyiScheduler.register(fiber)
     fiber.next_child = @first_child
     fiber.prev_child = nil

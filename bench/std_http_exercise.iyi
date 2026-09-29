@@ -15,6 +15,7 @@ end
 
 import std/http::{HTTP, Response, Request, Server}
 import std/socket::{IyiSocket, SocketError}
+import std/gc::{GC}
 
 # The server side of one connection: the request text, headers and the
 # body `Content-Length` promises, read until both have arrived.
@@ -272,14 +273,92 @@ group do |g|
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
+    # A small request on a kept-alive connection costs the server what it
+    # reads, not the size of the read it asks for: the socket's read took
+    # a heap buffer of the whole 64 KB per call, and the server a 64 KB
+    # builder per request, 130 KB of garbage per request and a collection
+    # every few dozen of them.
+    lean = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ask = "GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n"
+    lean.write(ask).or_panic
+    answer_size = read_response(lean).bytesize
+    scratch = Pointer(UInt8).malloc(4096_u64)
+    GC.disable
+    lean_before = GC.stats.bytes_since_collection
+    200.times do
+      lean.write(ask).or_panic
+      got = 0
+      while got < answer_size
+        got = got + lean.read(scratch, 4096).or_panic.as(Int32)
+      end
+    end
+    lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 200_u64
+    GC.enable
+    lean.close
+    assert_true lean_bytes < 8192_u64, "a kept-alive request allocates #{lean_bytes} bytes, under 8 KB"
+    # A client that asks to be told before it sends its body is told:
+    # without the `100 Continue`, curl waits a second before every upload
+    # past a megabyte.
+    ex = IyiSocket.connect("127.0.0.1", sport).or_panic
+    ex.write("POST /echo HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n").or_panic
+    told = ex.read(64).or_panic
+    assert_str "HTTP/1.1 100 Continue\r\n\r\n", told, "Expect: 100-continue is answered before the body"
+    ex.write("body").or_panic
+    r11 = HTTP.parse_response(read_response(ex))
+    assert_true r11.status == 200 && r11.body == "body", "and the body sent after it arrives"
+    ex.close
+    # A body of many reads. The server added each read to what came before
+    # and parsed it all again - a copy of the body so far per read - and a
+    # 20 MB upload took 1.9 s where Go's server takes 30 ms. It reads until
+    # the Content-Length is here and parses once.
+    upload = "u" * 24000000
+    upload_started = __iyi_monotonic_ns
+    r10 = HTTP.post("http://127.0.0.1:#{sport}/echo", upload).or_panic
+    upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
+    assert_true r10.status == 200 && r10.body == upload, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
+    assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 8, "the block ran eight times (the 400 never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 211, "the block ran 211 times (the 400 never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 201 lean requests, 100-continue, a 24 MB upload, and the client against it"
+
+puts "\n== a burst of connections"
+# Twenty connections waiting, each with its request written, when the
+# server starts: its accept loop takes them one after another without
+# waiting, and each must get a task of its own. The tasks held the loop's
+# variable and not its value, which the next accept overwrote before they
+# ran: connections that came together were read by several tasks - "two
+# fibers reading one fd" - and the rest by none, their clients waiting for
+# an answer that never came.
+burst_listener = IyiSocket.listen(0)
+burst_port = burst_listener.local_port
+burst = [] of IyiSocket
+20.times do |i|
+  b = IyiSocket.connect("127.0.0.1", burst_port).or_panic
+  b.write("GET /burst?n=#{i} HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+  b.read_timeout_ms = 10000
+  burst << b
+end
+group do |g|
+  g.spawn do
+    Server.serve(burst_listener) { |req| Response.new(200, req.query || "-") }
+    0
+  end
+  g.spawn do
+    burst.each_with_index do |b, i|
+      rb = HTTP.parse_response(read_response(b))
+      assert_str "n=#{i}", rb.body, "connection #{i} of a burst answered its own request"
+      b.close
+    end
+    burst_listener.close
+    0
+  end
+end
+puts "  twenty connections that arrived together, each answered its own request"
 
 puts "\nALL CHECKS PASSED"

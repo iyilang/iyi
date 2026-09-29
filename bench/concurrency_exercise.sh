@@ -289,6 +289,80 @@ case "$(uname -s)" in
     ;;
 esac
 
+# ── 6. Failure proof: a stack mapped at spawn is caught ─────────────────
+step "failure proof: a stack mapped when a task is spawned is caught"
+mkdir -p eager/iyi
+cp -R "$REPO/src/iyi/." eager/iyi/
+# The stack made at spawn again: a fiber that has one is not given another
+# at its first switch, so this alone puts every spawn back on a mapping.
+awk '/^    IyiScheduler.register\(fiber\)$/ { print "    fiber.prepare_stack"; found = found + 1 }
+     { print }
+     END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > eager/iyi/concurrency.iyi
+if [ $? -ne 0 ]; then
+  echo "the line this proof adds to is not where it was; update the proof"
+  exit 1
+fi
+if ! IYI_PATH="$WORK/eager${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \
+     -o eager-exercise > build-eager.log 2>&1; then
+  echo "the patched runtime did not build:"
+  tail -5 build-eager.log
+  exit 1
+fi
+timeout 120 ./eager-exercise > eager.txt 2>&1
+if [ $? -ne 1 ] || ! grep -q 'FAIL: burst' eager.txt; then
+  echo "stacks mapped at spawn passed the burst check, so it checks nothing:"
+  tail -5 eager.txt
+  exit 1
+fi
+echo "  caught: $(grep -m1 'FAIL: burst' eager.txt)"
+
+# ── 7. Failure proofs: a walked sleep queue, and one out of order ────────
+sleep_proof() { # sleep_proof <label> <dir> <awk program> <phrase>
+  step "failure proof: $1 is caught"
+  mkdir -p "$2/iyi"
+  cp -R "$REPO/src/iyi/." "$2/iyi/"
+  awk "$3" "$REPO/src/iyi/concurrency.iyi" > "$2/iyi/concurrency.iyi"
+  if [ $? -ne 0 ]; then
+    echo "the line this proof changes is not where it was; update the proof"
+    exit 1
+  fi
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src" "$IYI" build "$REPO/bench/concurrency_exercise.iyi" \
+       -o "$2-exercise" > "build-$2.log" 2>&1; then
+    echo "the patched runtime did not build:"
+    tail -5 "build-$2.log"
+    exit 1
+  fi
+  timeout 300 "./$2-exercise" > "$2.txt" 2>&1
+  if [ $? -ne 1 ] || ! grep -q "$4" "$2.txt"; then
+    echo "$1 passed the sleep check, so it checks nothing:"
+    tail -5 "$2.txt"
+    exit 1
+  fi
+  echo "  caught: $(grep -m1 "$4" "$2.txt")"
+}
+sleep_proof "a sleep queue walked on every insertion" walked \
+  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      @@sleep_steps = @@sleep_steps &+ 1_u64"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: sleep: 32000 sleepers took'
+sleep_proof "a sleep queue that puts the latest first" latest \
+  '/^    a.deadline < b.deadline \|\| \(a.deadline == b.deadline && a.sleep_seq < b.sleep_seq\)$/ { print "    a.deadline > b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: sleep: a sleeper woke before'
+
+# ── 8. Failure proof: an io list walked for every event ─────────────────
+case "$(uname -s)" in
+  Linux)
+    sleep_proof "an io waiter found by walking every waiter" walked_io \
+      '/^    index < slots.size \? slots\[index\] : nil$/ { print "    found_waiter = nil"; print "    walk = state.io_head"; print "    while walk.is_a?(IyiFiber)"; print "      found_waiter = walk if walk.wait_fd == fd && walk.wait_dir == direction"; print "      walk = walk.next_io"; print "    end"; print "    found_waiter"; found = 1; next }
+       { print } END { if (!found) exit 3 }' \
+      'FAIL: io: 5000 round trips'
+    ;;
+  *)
+    step "failure proof: an io waiter found by walking every waiter: not here, because the check runs on Linux's poller only"
+    ;;
+esac
+
 echo "workdir $WORK"
 # A summary may not claim more than was measured, so a step whose reader was
 # missing is named here rather than folded into the pass.

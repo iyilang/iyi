@@ -361,22 +361,7 @@ class ::String
     return nil if offset < 0
     return offset if search.bytesize == 0 && offset <= bytesize
     return nil if offset + search.bytesize > bytesize
-
-    limit = bytesize - search.bytesize
-    i = offset
-    s_ptr = to_unsafe
-    t_ptr = search.to_unsafe
-    t_len = search.bytesize
-
-    while i <= limit
-      j = 0
-      while j < t_len && s_ptr[i + j] == t_ptr[j]
-        j = j + 1
-      end
-      return i if j == t_len
-      i = i + 1
-    end
-    nil
+    byte_index(search, offset)
   end
 
   def rindex(char : Char, offset : Int32) : Int32?
@@ -400,15 +385,51 @@ class ::String
     s_ptr = to_unsafe
     t_ptr = search.to_unsafe
 
+    # Backwards, the way `byte_index` goes forwards: naive while that is
+    # cheap, a rolling hash once more than four bytes a position have been
+    # compared, so a needle that keeps almost matching is not n * m - 477
+    # ms for 1,000 `a` and a `b` in a megabyte of `a`.
+    start = i
+    spent = 0
     while i >= 0
       j = 0
       while j < s_len && s_ptr[i + j] == t_ptr[j]
         j = j + 1
       end
       return i if j == s_len
+      spent = spent + j
+      break if spent > 4 * (start - i) + 64
       i = i - 1
     end
-    nil
+    return nil if i < 0
+
+    # The window's hash with its first byte as the lowest power, so that a
+    # step left drops the top byte and brings one in at the bottom.
+    prime = 16777619_u64
+    scale = 1_u64
+    top = 1_u64
+    want = 0_u64
+    have = 0_u64
+    k = 0
+    while k < s_len
+      want = want &+ t_ptr[k].to_u64 &* scale
+      have = have &+ s_ptr[i + k].to_u64 &* scale
+      top = scale
+      scale = scale &* prime
+      k = k + 1
+    end
+    while true
+      if have == want
+        j = 0
+        while j < s_len && s_ptr[i + j] == t_ptr[j]
+          j = j + 1
+        end
+        return i if j == s_len
+      end
+      return nil if i == 0
+      have = (have &- s_ptr[i + s_len - 1].to_u64 &* top) &* prime &+ s_ptr[i - 1].to_u64
+      i = i - 1
+    end
   end
 
   def rindex(search : String) : Int32?
@@ -711,17 +732,17 @@ class ::String
   # Characters, so a multi-byte pad is one unit of width.
   private def cycled(pad : String, count : Int32) : String
     return "" if count <= 0
-    result = ""
-    taken = 0
-    while taken < count
-      pad.each_char do |c|
-        if taken < count
-          result = result + c.to_s
-          taken = taken + 1
+    String.build do |io|
+      taken = 0
+      while taken < count
+        pad.each_char do |c|
+          if taken < count
+            io << c
+            taken = taken + 1
+          end
         end
       end
     end
-    result
   end
 
   def chars : Array(Char)
@@ -1033,15 +1054,16 @@ class ::String
     items.join(separator)
   end
 
+  # Into one builder, as `Enumerable#join` is and for its reason.
   def self.join(items, separator : String = "") : String
-    result = ""
-    first = true
-    items.each do |item|
-      result = result + separator unless first
-      result = result + item.to_s
-      first = false
+    String.build do |io|
+      first = true
+      items.each do |item|
+        io << separator unless first
+        io << item.to_s
+        first = false
+      end
     end
-    result
   end
 
   # `byte_slice` and `Array#join` with no separator are the prelude's, and

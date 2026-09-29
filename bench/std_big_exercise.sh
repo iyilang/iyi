@@ -14,8 +14,9 @@
 # A check that cannot fail is not a check. This script breaks addition,
 # multiplication, negation, the modulo sign rule, bitwise and, exponentiation,
 # abs, the constant one, BigInt hashing, BigDecimal hash normalisation,
-# division rounding, exact-division detection, zero printing and rational
-# reduction, and requires each break to be caught at a named check.
+# division rounding, exact-division detection, zero printing, rational
+# reduction, the unbalanced Karatsuba split and the split that prints and
+# parses long values, and requires each break to be caught at a named check.
 #
 # Exits non-zero if any check fails.
 
@@ -126,6 +127,11 @@ cat > "$WORK/oracle.py" << 'EOF'
 import sys
 from decimal import Decimal
 from fractions import Fraction
+
+# The base lines carry values of thousands of digits, past the 4,300 that
+# python 3.11 converts by default.
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)
 
 def fmt(n, scale):
     # std/big's BigDecimal#to_s: zero is "0"; a negative scale is multiplied out.
@@ -323,7 +329,7 @@ prove_fails "addition carry dropped" no_add_carry "known: fib(100)" \
   's/sum = x\[i\] \&+ y\[i\] \&+ carry/sum = x[i] \&+ y[i]/'
 
 # 2. Multiplication broken (returns zero for limbs)
-prove_fails "multiplication broken" no_mul "string: octal prefix" \
+prove_fails "multiplication broken" no_mul "arith: mul" \
   's/r\[i + j\] = prod \& 0xFFFFFFFF_u64/r[i + j] = 0_u64/'
 
 # 3. Negation broken (identity instead of negate)
@@ -380,7 +386,29 @@ prove_fails "rational not reduced" no_rat_reduce "hash: rational reduced" \
 
 # 16. Base conversion drops the sign
 prove_fails "base conversion drops sign" no_base_sign "rational: round trip" \
-  's/prefix = @sign < 0 [?] "-" : ""/prefix = ""/'
+  's/negative = @sign < 0$/negative = false/'
+
+# 17. A Karatsuba split that takes k limbs off a side shorter than k
+prove_fails "karatsuba splits a short side" no_unbalanced "negative capacity" \
+  's/if a.size < k || b.size < k$/if false/'
+
+# 18. A split print whose low half loses its leading zeros
+prove_fails "split print drops inner zeros" no_pad "base: long round trip" \
+  's/while sink.size < start + width$/while false/'
+
+# 19. A split parse that forgets what the low half's digits stand for
+prove_fails "split parse adds the halves" no_join "base: long round trip" \
+  's/return high \* powers\[level\] + /return high + /'
+
+# 20. Printing that copies the value per chunk of digits, as appending each
+#     chunk to the text so far did
+prove_fails "printing copies per chunk" no_print_split "base: printing 7 costs its digits" \
+  's/if level >= 0 \&\& @limbs.size >= DIGITS_SPLIT_LIMBS$/if false/;s/^      while size > 0 \&\& w\[size - 1\] == 0_u64$/      while size > 0 \&\& w[size - 1] == 0_u64 + @limbs.dup.size.to_u64 * 0_u64/'
+
+# 21. Parsing that copies the value per chunk of digits, as a new BigInt
+#     per digit did
+prove_fails "parsing copies per chunk" no_parse_split "base: parsing 7 costs its digits" \
+  's/if count > per \* DIGITS_SPLIT_LIMBS$/if false/;s/^      carry = value$/      carry = value + limbs.dup.size.to_u64 * 0_u64/'
 
 echo
 if [ "$status" -eq 0 ]; then

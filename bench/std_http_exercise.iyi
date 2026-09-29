@@ -327,4 +327,38 @@ assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
 puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 201 lean requests, 100-continue, a 24 MB upload, and the client against it"
 
+puts "\n== a burst of connections"
+# Twenty connections waiting, each with its request written, when the
+# server starts: its accept loop takes them one after another without
+# waiting, and each must get a task of its own. The tasks held the loop's
+# variable and not its value, which the next accept overwrote before they
+# ran: connections that came together were read by several tasks - "two
+# fibers reading one fd" - and the rest by none, their clients waiting for
+# an answer that never came.
+burst_listener = IyiSocket.listen(0)
+burst_port = burst_listener.local_port
+burst = [] of IyiSocket
+20.times do |i|
+  b = IyiSocket.connect("127.0.0.1", burst_port).or_panic
+  b.write("GET /burst?n=#{i} HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+  b.read_timeout_ms = 10000
+  burst << b
+end
+group do |g|
+  g.spawn do
+    Server.serve(burst_listener) { |req| Response.new(200, req.query || "-") }
+    0
+  end
+  g.spawn do
+    burst.each_with_index do |b, i|
+      rb = HTTP.parse_response(read_response(b))
+      assert_str "n=#{i}", rb.body, "connection #{i} of a burst answered its own request"
+      b.close
+    end
+    burst_listener.close
+    0
+  end
+end
+puts "  twenty connections that arrived together, each answered its own request"
+
 puts "\nALL CHECKS PASSED"

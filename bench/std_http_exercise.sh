@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== over a socket" "== the server, from a raw socket"; do
+for phrase in "== request" "== response" "== over a socket" "== the server, from a raw socket" "== a burst of connections"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -276,6 +276,11 @@ mutate "a server that answers every request 200" 'Response.new(400, reason' 'Res
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler)' '          accepted = client
+          g.spawn do
+            handle(accepted, handler)
+            0
+          end'
 mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 
 echo

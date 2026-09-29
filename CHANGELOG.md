@@ -248,6 +248,19 @@
 
 ### Fixed
 
+- **`Server.serve` gives every connection a task of its own.** The accept
+  loop spawned each connection's task with a block that held the loop's
+  variable rather than its value, and the next accept overwrote it before
+  the task first ran. Connections that arrived together - a client opening
+  several at once, or a burst the server was slow to take - were read by
+  several tasks at once, which panicked "two fibers reading one fd", and
+  the rest by none: eight connections opened back to back left five
+  waiting forever, on 0.15.4 as well. The task is spawned from a method
+  now, so its block holds that call's connection; 5,000 parked keep-alive
+  connections are all answered, in 51 MB. `bench/std_http_exercise.sh`
+  queues twenty requests before the server starts, requires each answered
+  with its own, and proves the check fails with the loop's variable held.
+
 - **`::name` is always the top level's method.** Assigned, `::foo = 1`
   was taken as the local `foo = 1` with the `::` dropped, and `iyi tool
   format` died on the source ("expecting =, not `IDENT, foo`"), with a

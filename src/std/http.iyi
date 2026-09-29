@@ -117,13 +117,22 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          accepted = client
-          g.spawn do
-            handle(accepted, handler)
-            0
-          end
+          spawn_handler(g, client, handler)
         end
       end
+      0
+    end
+  end
+
+  # The connection's task, spawned from a method so its block holds this
+  # call's `client`. Spawned from the accept loop, the block held the loop's
+  # own variable, which the next accept overwrote before the task first
+  # ran: connections that arrived together were served by several tasks at
+  # once - "two fibers reading one fd" - and the others by none, and their
+  # clients waited forever.
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response)) : Nil
+    g.spawn do
+      handle(client, handler)
       0
     end
   end

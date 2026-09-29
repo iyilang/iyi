@@ -374,6 +374,14 @@
 
 ### Fixed
 
+- **On Windows, `File.write` rewrites a hidden or system file.** A create
+  that replaces refuses a file marked hidden or system unless it asks for
+  the same attributes, so `File.write` panicked "cannot write" about a file
+  `File.read` had just read, where POSIX writes a dotfile like any other.
+  Such a file is opened as it is and emptied now, and keeps its mark.
+  `bench/std_file_exercise.sh` writes a `+h` and a `+s` file; the old
+  prelude panicked on both.
+
 - **A refused bind says why, and so do two refusals that were numbers.**
   `IyiSocket.listen` refused with "cannot bind socket to host:port" and
   nothing after it, so a port in use and one the system reserves - on
@@ -11871,7 +11879,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,590-line library and nothing else. Every other
+  written against iyi's own 18,603-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -938,11 +938,24 @@ end
     handle.address.to_i64
   end
 
+  # CREATE_ALWAYS refuses a file that is there with FILE_ATTRIBUTE_HIDDEN
+  # or _SYSTEM (0x2, 0x4) unless the create asks for the same attributes,
+  # so a file `attrib +h` had marked could be read and not rewritten -
+  # `File.write` panicked "cannot write" where POSIX writes a dotfile like
+  # any other. Such a file is opened as it is and emptied, which keeps
+  # its attributes.
   def __iyi_open_write(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
     handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
+    if handle.address &+ 1_u64 == 0_u64 && LibC.GetLastError == 5
+      attributes = LibC.GetFileAttributesW(wide)
+      if attributes != -1 && (attributes & 0x10) == 0 && (attributes & 0x6) != 0
+        # TRUNCATE_EXISTING (5)
+        handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 5, 128, Pointer(Void).new(0_u64))
+      end
+    end
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end

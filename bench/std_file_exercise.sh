@@ -477,6 +477,28 @@ PY
         status=1
       fi
     fi
+    # A hidden file, and a system one, is rewritten like any other: a
+    # create that replaces refuses them on Windows unless it asks for the
+    # same attributes, and `File.write` panicked "cannot write" about a
+    # file it could read. The attribute stays.
+    printf 'module main\n\nFile.write(Program.args[0], "rewritten")\nputs File.read(Program.args[0])\n' > "$WORK/hidden_write.iyi"
+    if ! "$IYI" build -o "$WORK/hidden_write" "$WORK/hidden_write.iyi" > "$WORK/hidden_write.build" 2>&1; then
+      echo "  the hidden-file program did not build"; sed -n '1,10p' "$WORK/hidden_write.build"; status=1
+    else
+      for mark in h s; do
+        printf 'before' > "$WORK/marked_$mark.txt"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +$mark "$(cygpath -w "$WORK/marked_$mark.txt")" > /dev/null
+        answer="$("$WORK/hidden_write" "$WORK/marked_$mark.txt" 2>&1)"
+        kept="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib "$(cygpath -w "$WORK/marked_$mark.txt")" | cut -c1-12 | tr -d ' ' | tr 'A-Z' 'a-z')"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -$mark "$(cygpath -w "$WORK/marked_$mark.txt")" > /dev/null
+        if [ "$answer" = "rewritten" ] && echo "$kept" | grep -q "$mark"; then
+          echo "  a file marked +$mark is rewritten and stays marked"
+        else
+          echo "  a file marked +$mark: wrote '$answer', attributes '$kept'"
+          status=1
+        fi
+      done
+    fi
     # A reparse point is a link only by its tag. Every one was `Symlink`,
     # so an app execution alias - what `WindowsApps` holds - and a cloud
     # placeholder answered `file? false`; and a junction whose directory is

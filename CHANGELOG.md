@@ -802,7 +802,9 @@
   name had no extension, `build -o` appended `.exe`, and the delete asked
   for the name without it, so every test left its program and its `.pdb`
   in %TEMP% - this machine's held 275 of them. The name carries the
-  extension now and the `.pdb` goes with it. `bench/test_verb.sh` runs a
+  extension now and the `.pdb` goes with it; on darwin the `.dwarf`
+  dsymutil writes beside the program, which the check below found in
+  its first run there, goes too. `bench/test_verb.sh` runs a
   test with the temporary directory pointed at an empty one and requires
   it empty after; the old verb left the two files.
 

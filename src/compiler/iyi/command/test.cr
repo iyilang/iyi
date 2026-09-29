@@ -298,8 +298,12 @@ class Iyi::Command
       end
     ensure
       File.delete?(binary)
+      # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
+      # `.dwarf` dsymutil makes, which the new check found there too.
       {% if flag?(:win32) %}
         File.delete?(binary.rchop(".exe") + ".pdb")
+      {% elsif flag?(:darwin) %}
+        File.delete?("#{binary}.dwarf")
       {% end %}
     end
   end

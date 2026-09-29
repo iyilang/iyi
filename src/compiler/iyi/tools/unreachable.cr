@@ -184,6 +184,14 @@ module Iyi
       true
     end
 
+    # A definition-site probe (R-2c) calls every def of a module so each is
+    # typed where it is written, inside an `if false` that is never
+    # generated. Counted, it was a caller for every def: `iyi vet` found
+    # nothing unused in a file with a module header.
+    def visit(node : If)
+      !node.iyi_definition_probe?
+    end
+
     def visit(node : ExpandableNode)
       return false unless @visited.add?(node)
 
@@ -251,8 +259,14 @@ module Iyi
       end
     end
 
+    # The def's filename normalised first: a library found through a search
+    # path spelled `$ORIGIN/../src` is read as `.build/../src/std/math.iyi`,
+    # and the excluded `src` is not one of that spelling's parents, so `iyi
+    # vet` on a program that imports std reported every unused std method
+    # beside the program's own.
     def match_path?(path)
-      paths = ::Path[path].parents << ::Path[path]
+      path = ::Path[path].normalize
+      paths = path.parents << path
 
       match_any_pattern?(includes, paths) || !match_any_pattern?(excludes, paths)
     end

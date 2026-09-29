@@ -280,8 +280,12 @@ module Iyi
       )
     end
 
+    # Normalised first, as `UnreachableVisitor#match_path?` is: a library
+    # read through `$ORIGIN/../src` has no excluded directory among its
+    # spelling's parents.
     private def match_path?(path)
-      paths = ::Path[path].parents << ::Path[path]
+      path = ::Path[path].normalize
+      paths = path.parents << path
 
       match_any_pattern?(includes, paths) || !match_any_pattern?(excludes, paths)
     end

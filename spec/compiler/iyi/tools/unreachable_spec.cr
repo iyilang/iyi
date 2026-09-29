@@ -442,6 +442,35 @@ describe "unreachable" do
       CODE
   end
 
+  # iyi: a module's defs are each typed where they are written, by a probe
+  # that calls them inside an `if false` (R-2c). Counted as callers, the
+  # probes made every def of a file with a module header reachable.
+  it "does not count a definition probe as a call" do
+    with_tempfile("unreachable-probe.iyi") do |path|
+      File.write path, "module probe\n\ndef used : Int32\n  1\nend\n\ndef unused : Int32\n  2\nend\n\nused\n"
+      compiler = Compiler.new
+      compiler.prelude = "iyi/prelude"
+      compiler.no_codegen = true
+      result = compiler.compile(Compiler::Source.new(path, File.read(path)), "fake-no-build")
+
+      visitor = UnreachableVisitor.new
+      visitor.includes << path
+      visitor.excludes << "/"
+      tallies = visitor.process(result).to_h { |a_def, count| {a_def.name, count} }
+      tallies.should eq({"used" => 1, "unused" => 0})
+    end
+  end
+
+  # iyi: the library is found through a search path spelled
+  # `$ORIGIN/../src`, and a def read from it keeps that spelling; the
+  # excluded `src` has to be found among its parents all the same.
+  it "excludes a def whose path is spelled through .." do
+    visitor = UnreachableVisitor.new
+    visitor.excludes << "/opt/iyi/src"
+    visitor.match_path?("/opt/iyi/.build/../src/std/math.iyi").should be_false
+    visitor.match_path?("/opt/iyi/.build/../app/main.iyi").should be_true
+  end
+
   it "tallies calls" do
     assert_unreachable <<-CODE
       ༓def foo

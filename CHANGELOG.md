@@ -348,6 +348,19 @@
 
 ### Fixed
 
+- **`iyi vet` reports the file it was given.** On a program that imports
+  std it listed every unused method of `std/traits`, `std/iterator` and
+  the rest - 713 lines for crystal-metric's port under 0.15.4, not one
+  of them the port's; now it is the port's 29 - because the library is
+  read through a search path spelled `$ORIGIN/../src`, and the excluded
+  `src` was not among
+  that spelling's parents; the path is normalised before it is matched,
+  in `tool unreachable` and `tool macro_code_coverage` alike. And in a
+  file with a module header it found nothing at all: the definition-site
+  probe that types every def (R-2c) was counted as a call to each. Both
+  are in `spec/compiler/iyi/tools/unreachable_spec.cr`, and both failed
+  without the change.
+
 - **A derive can implement a trait for the type it is attached to.**
   SPEC.md II.4's own example - `derive JSON` generating `impl ToJSON for
   User` - could not be written: a macro body counted `impl` and `trait`

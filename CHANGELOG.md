@@ -144,8 +144,9 @@
   125, allocation included. `bench/std_base64_exercise.sh` checks every
   byte value in both alphabets and every length to 40, bounds the cost at
   two and a half byte sums in a plain build, and proves each check fails
-  with the word read in the wrong order, a pair written backwards, or the
-  byte loop put back.
+  with the word read in the wrong order, a pair written backwards, or -
+  on Linux x86_64, since darwin arm64's byte loop stays inside the bound
+  too - the byte loop put back.
 
 - **`iyi fmt` and `iyi format` format.** Both answered "unknown command
   or missing file", which read as "there is no formatter"; they are

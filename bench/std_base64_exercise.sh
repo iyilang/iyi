@@ -135,7 +135,17 @@ broken "six bytes read in the wrong order" '(w.unsafe_shr(40) & 0xFF_u64)
 ' '(w.unsafe_shr(32) & 0xFF_u64)
 '
 broken "a character pair written backwards" 'chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8)' 'chars[k & 63].to_i32 | chars[k.unsafe_shr(6)].to_i32.unsafe_shl(8)'
-broken "a byte and a character at a time again" 'while i &+ 8 <= n' 'while false'
+# The byte loop is cheap enough on arm64 that it stays inside two and a half
+# byte sums there: darwin arm64 let it through. The check runs everywhere;
+# its proof on Linux x86_64, where the byte loop is twice the word loop.
+case "$(uname -s) $(uname -m)" in
+  "Linux x86_64")
+    broken "a byte and a character at a time again" 'while i &+ 8 <= n' 'while false'
+    ;;
+  *)
+    echo "  a byte and a character at a time again: not proven here, because this processor's byte loop is too cheap for its time to show"
+    ;;
+esac
 
 echo
 echo "== what decode refuses"

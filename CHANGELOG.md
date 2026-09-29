@@ -96,6 +96,18 @@
 
 ### Changed
 
+- **`Math.expm1` and `Math.log1p` are glibc's.** Each was a series near
+  zero and Kahan's formula past it, and each answered differently from
+  glibc's for about one argument in seven. They are now glibc's fdlibm
+  `s_expm1.c` and `s_log1p.c`, Sun's notice kept: a reduction by ln 2 with
+  a correction for its rounding and a rational function for `expm1`; 1 +
+  x as 2^k (1 + f) with a correction for its rounding and the series in f
+  / (2 + f) for `log1p`. 340,031 arguments compared, none different; the
+  hyperbolic functions built on them moved closer to glibc's with them
+  (`sinh` from 12% of arguments different to 1%). Both join
+  `bench/libm_oracle`, and `bench/std_math_exercise.sh` requires every
+  answer bit for bit and proves either correction left out fails it.
+
 - **`Math.log10` is glibc's.** `log(x) / ln 10` with a whole-number
   check answered differently from glibc's for more than half of 100,000
   arguments. It is now glibc's `e_log10.c` - fdlibm's, Sun's notice kept

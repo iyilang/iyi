@@ -272,10 +272,10 @@ assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
 puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
 # The oracles `bench/std_math_exercise.sh` writes from the code glibc
-# builds these from - Arm's, and fdlibm's for log10 - compiled from
-# `bench/libm_oracle`: pairs of doubles, an argument and its answer, for
-# exp, log, exp2, log2 and log10, and triples, a base, an exponent and the
-# power, for pow. Every answer is required to the last bit.
+# builds these from - Arm's, and fdlibm's for log10, expm1 and log1p -
+# compiled from `bench/libm_oracle`: pairs of doubles, an argument and its
+# answer, for the one-argument functions, and triples, a base, an exponent
+# and the power, for pow. Every answer is required to the last bit.
 def against(path : String, name : String, source : String, least : Int32, & : Float64 -> Float64) : Nil
   puts "\n== #{name} against #{source} #{name}, bit for bit"
   pairs = File.read(path)
@@ -318,5 +318,7 @@ against(args[2], "log", "Arm's", 200000) { |x| Math.log(x) } if args.size > 2
 against(args[3], "exp2", "Arm's", 150000) { |x| Math.exp2(x) } if args.size > 3
 against(args[4], "log2", "Arm's", 150000) { |x| Math.log2(x) } if args.size > 4
 against(args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if args.size > 5
+against(args[6], "expm1", "glibc's", 150000) { |x| Math.expm1(x) } if args.size > 6
+against(args[7], "log1p", "glibc's", 150000) { |x| Math.log1p(x) } if args.size > 7
 
 puts "\nALL CHECKS PASSED"

@@ -68,8 +68,9 @@ build_and_run() {
 }
 
 # `Math.exp`, `exp2`, `log`, `log2` and `pow` are Arm's optimized-routines
-# ones - glibc's since 2.28 - and `log10` glibc's fdlibm one on them, and
-# `bench/libm_oracle` holds those files as they are published, so the
+# ones - glibc's since 2.28 - and `log10`, `expm1` and `log1p` glibc's
+# fdlibm ones, and `bench/libm_oracle` holds those files as they are
+# published, so the
 # oracle is that algorithm compiled here, with contraction off, rather than
 # this machine's libm: glibc's own build for a processor with FMA answers
 # differently in the last bit for about 7 arguments in 10,000, and Apple's
@@ -84,7 +85,8 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
      "$REPO/bench/libm_oracle/pow.c" "$REPO/bench/libm_oracle/pow_log_data.c" \
      "$REPO/bench/libm_oracle/log.c" "$REPO/bench/libm_oracle/log_data.c" \
      "$REPO/bench/libm_oracle/exp2.c" "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
-     "$REPO/bench/libm_oracle/e_log10.c" > "$WORK/libm_oracle.log" 2>&1; then
+     "$REPO/bench/libm_oracle/e_log10.c" "$REPO/bench/libm_oracle/s_expm1.c" \
+     "$REPO/bench/libm_oracle/s_log1p.c" > "$WORK/libm_oracle.log" 2>&1; then
   "$PY" - "$WORK/exp.in" <<'PY'
 import random, struct, sys
 random.seed(2718)
@@ -146,7 +148,7 @@ PY
   # exp2's: the whole range and the band past each end its special case
   # takes, whole numbers, and the edges of overflow and underflow; log2's:
   # the range, the band around 1, the subnormals and every power of two.
-  "$PY" - "$WORK/exp2.in" "$WORK/log2.in" "$WORK/log10.in" <<'PY'
+  "$PY" - "$WORK/exp2.in" "$WORK/log2.in" "$WORK/log10.in" "$WORK/expm1.in" "$WORK/log1p.in" <<'PY'
 import random, struct, sys
 random.seed(1732)
 xs = [random.uniform(-1080, 1030) for _ in range(100000)]
@@ -165,7 +167,23 @@ zs += [random.uniform(0, 1e-307) for _ in range(20000)]
 zs += [10.0 ** k for k in range(-323, 309)]
 zs += [random.uniform(0.9, 1.1) for _ in range(30000)]
 zs += [0.0, -0.0, -1.0, float("inf"), float("-inf"), float("nan"), 1.0, 5e-324]
-for path, values in ((sys.argv[1], xs), (sys.argv[2], ys), (sys.argv[3], zs)):
+# expm1's: near zero, the range to overflow, the tiny, the saturation below
+# -56 ln2 and the edges of each reduction; log1p's: the range, near zero,
+# the band that is not reduced and its edges, -1 and below, the huge.
+es = [random.uniform(-5, 5) for _ in range(100000)]
+es += [random.uniform(-40, 710) for _ in range(50000)]
+es += [random.uniform(-1e-8, 1e-8) for _ in range(10000)]
+es += [random.uniform(-800, -30) for _ in range(5000)]
+es += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 709.782712893384, 709.7827128933841,
+       38.816242111356935, -38.816242111356935, 0.34657359027997264, -0.34657359027997264,
+       1.0397207708399179, 5e-324, 1e-17, 2.0 ** -54, -(2.0 ** -54)]
+ls = [random.uniform(-0.99999, 5) for _ in range(100000)]
+ls += [10 ** random.uniform(-20, 300) for _ in range(50000)]
+ls += [random.uniform(-0.3, 0.42) for _ in range(20000)]
+ls += [random.uniform(-1e-9, 1e-9) for _ in range(5000)]
+ls += [0.0, -0.0, -1.0, -1.0000000000000002, float("inf"), float("-inf"), float("nan"), 0.41421356,
+       -0.2928932, 2.0 ** -29, -(2.0 ** -29), 2.0 ** -54, 1e300, 4503599627370496.0, 9007199254740992.0]
+for path, values in ((sys.argv[1], xs), (sys.argv[2], ys), (sys.argv[3], zs), (sys.argv[4], es), (sys.argv[5], ls)):
     with open(path, "wb") as out:
         for v in values:
             out.write(struct.pack("<d", v))
@@ -176,9 +194,11 @@ PY
     "$WORK/libm_oracle" exp2 "$WORK/exp2.in" "$WORK/exp2.bin" &&
     "$WORK/libm_oracle" log2 "$WORK/log2.in" "$WORK/log2.bin" &&
     "$WORK/libm_oracle" log10 "$WORK/log10.in" "$WORK/log10.bin" &&
-    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin"
+    "$WORK/libm_oracle" expm1 "$WORK/expm1.in" "$WORK/expm1.bin" &&
+    "$WORK/libm_oracle" log1p "$WORK/log1p.in" "$WORK/log1p.bin" &&
+    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin"
 fi
-[ -z "$ORACLE" ] && echo "exp, exp2, log, log2, log10 and pow against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10 and pow against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -196,7 +216,7 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
   fi
 done
 if [ -n "$ORACLE" ]; then
-  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit"; do
+  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
@@ -262,6 +282,8 @@ if [ -n "$ORACLE" ]; then
   mutate "log's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc' ') * invc'
   mutate "log's polynomial a term short" 'r2 * (LOG_A3 + r * LOG_A4)' 'r2 * LOG_A3'
   mutate "log10 without log10(2)'s low part" '    z = y * LOG10_2LO + LOG10_IVLN10 * log(x)' '    z = LOG10_IVLN10 * log(x)'
+  mutate "expm1 without its reduction's correction" '    e = x * (e - c) - c' '    e = x * e'
+  mutate "log1p without the correction for 1 + x" '        c = c / u' '        c = 0.0'
   mutate "exp2's polynomial a term short" 'r2 * r2 * (EXP2_C4 + r * EXP2_C5)' 'r2 * r2 * EXP2_C4'
   mutate "log2 near one with r in one part" '      hi = rhi * LOG2_INVLN2HI
       lo = rlo * LOG2_INVLN2HI + r * LOG2_INVLN2LO' '      hi = r * LOG2_INVLN2HI
@@ -270,7 +292,7 @@ if [ -n "$ORACLE" ]; then
     rhi' ') * invc
     rhi'
 else
-  echo "  the last-bit proofs of exp, exp2, log, log2, log10 and pow: not run, no oracle here"
+  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10 and pow: not run, no oracle here"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
 mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'

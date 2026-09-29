@@ -1,9 +1,9 @@
 /*
- * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's log10 on them, as
- * `bench/std_math_exercise.sh` asks them. `oracle exp IN OUT` (or `exp2`,
- * `log`, `log2`, `log10`) reads doubles from IN and writes each with its
- * answer to OUT; `oracle pow IN OUT` reads pairs and writes each with its
- * power.
+ * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1
+ * and log1p, as `bench/std_math_exercise.sh` asks them. `oracle exp IN OUT`
+ * (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`) reads doubles from
+ * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
+ * pairs and writes each with its power.
  * The files are opened in binary, which a Windows C runtime's standard
  * streams are not. Built with contraction off: this is the algorithm as
  * written, not the fused build glibc picks on a processor with FMA, which
@@ -17,6 +17,8 @@ double log (double);
 double exp2 (double);
 double log2 (double);
 double __ieee754_log10 (double);
+double __expm1 (double);
+double __log1p (double);
 
 static double unary (const char *name, double x)
 {
@@ -28,6 +30,10 @@ static double unary (const char *name, double x)
     return log2 (x);
   if (strcmp (name, "log10") == 0)
     return __ieee754_log10 (x);
+  if (strcmp (name, "expm1") == 0)
+    return __expm1 (x);
+  if (strcmp (name, "log1p") == 0)
+    return __log1p (x);
   return exp (x);
 }
 int main (int argc, char **argv)

@@ -48,7 +48,8 @@ port of:
 
 - [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
   `bench/libm_oracle/`) - [MIT][]
-- fdlibm, as glibc carries it (`Math.log10`, and `bench/libm_oracle/e_log10.c`) -
+- fdlibm, as glibc carries it (`Math.log10`, `expm1` and `log1p`, and their
+  copies in `bench/libm_oracle/`) -
   Sun Microsystems' notice: "Permission to use, copy, modify, and
   distribute this software is freely granted, provided that this notice is
   preserved."

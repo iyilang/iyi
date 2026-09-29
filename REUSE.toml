@@ -32,10 +32,10 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2024 Konstantin Makarchev"
 SPDX-License-Identifier = "MIT"
 
-# iyi: `Math.log10` is glibc's `e_log10.c`, fdlibm's with Sun's notice,
-# which is kept beside the port and in the oracle's copy.
+# iyi: `Math.log10`, `expm1` and `log1p` are glibc's fdlibm files, with
+# Sun's notice, which is kept beside the port and in the oracle's copies.
 [[annotations]]
-path = ["bench/libm_oracle/e_log10.c"]
+path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (C) 1993 by Sun Microsystems, Inc."
 SPDX-License-Identifier = "LicenseRef-SunPro"

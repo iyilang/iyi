@@ -700,9 +700,29 @@ module Iyi
     # and the length is in it because a pattern may hold anything at all: two
     # different literals must not be able to spell the same key by moving the
     # separator.
+    # iyi: `std/regex`'s `Regex`, when the program loaded the module: what an
+    # iyi regex literal compiles to (`LiteralExpander#iyi_regex_literal`).
+    def self.iyi_std_regex_type(program : Program) : Type?
+      std = program.types["Std"]?
+      return unless std
+      regex_module = std.types?.try &.["Regex"]?
+      return unless regex_module
+      regex_module.types?.try &.["Regex"]?
+    end
+
     def self.regex_const_name(pattern : String, options : RegexOptions) : String
       key = "#{options.value}:#{pattern.bytesize}:#{pattern}"
       "$Regex:#{::Crystal::Digest::MD5.hexdigest(key)}"
+    end
+
+    # iyi: the constant an iyi program's regex literal becomes, which is a
+    # `std/regex` value and not the other library's: named apart, so the two
+    # never share a constant, and so a consumer rebuilding one from an
+    # artifact knows which library to build it with.
+    IYI_REGEX_CONST_PREFIX = "$Regex:iyi:"
+
+    def self.iyi_regex_const_name(pattern : String) : String
+      "#{IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest("#{pattern.bytesize}:#{pattern}")}"
     end
 
     # iyi: the imports' names each file's module unit writes, by absolute

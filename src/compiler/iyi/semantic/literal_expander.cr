@@ -336,7 +336,7 @@ module Iyi
       # without a driver (Crystal's own compiler specs do that) carries the
       # default prelude flag while compiling snippets that are not iyi's.
       if @program.iyi_prelude? && node.location.try(&.filename.to_s.ends_with?(".iyi"))
-        node.raise "regex literals are not available in iyi: this program has no runtime Regex, and the compiler's engine, Iyi::Rx, is RE2-shaped and serves macros only. Use the macro methods (match, scan, gsub, split) for compile-time matching, or compile against Crystal's library with --crystal"
+        return iyi_regex_literal(node)
       end
 
       node_value = node.value
@@ -378,6 +378,41 @@ module Iyi
       else
         regex_new_call(node, node_value)
       end
+    end
+
+    # iyi: a regex literal in an iyi program is `Regex.compile` from
+    # `std/regex`, iyi's own linear-time engine, cached the way the other
+    # library's literal is: one constant per pattern, named for its text
+    # (SPEC.md IV.1g), so a literal in a loop compiles once. It was refused
+    # while iyi's library had no runtime `Regex`, and after `std/regex`
+    # arrived a program still had to spell every pattern as a string for
+    # `Regex.compile`. The engine takes no flags, so a literal with one is
+    # refused at the literal rather than compiled without it.
+    private def iyi_regex_literal(node : RegexLiteral) : ASTNode
+      unless Program.iyi_std_regex_type(@program)
+        node.raise "a regex literal is `Regex.compile` from `std/regex`, iyi's own engine, and nothing in this program imports it: `import std/regex::{Regex}`"
+      end
+      unless node.options.value == 0
+        node.raise "`std/regex` takes no flags, so a regex literal cannot either: write the pattern for what the flag meant (`[Aa]` for a case, `(.|\\n)` for a line break)"
+      end
+
+      node_value = node.value
+      return iyi_regex_compile_call(node, node_value) unless node_value.is_a?(StringLiteral)
+
+      string = node_value.value
+      const_name = Program.iyi_regex_const_name(string)
+      if existing = @program.types[const_name]?
+        const = existing.as(Const)
+      else
+        const = Const.new(@program, @program, const_name, iyi_regex_compile_call(node, StringLiteral.new(string).at(node)))
+        @program.types[const_name] = const
+        @program.iyi_regex_constants[const_name] = {string, node.options}
+      end
+      Path.new(const_name).at(const.value)
+    end
+
+    private def iyi_regex_compile_call(node, value)
+      Call.new(Path.global(["Std", "Regex", "Regex"]).at(node), "compile", value).at(node)
     end
 
     private def regex_new_call(node, value)

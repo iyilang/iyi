@@ -1177,12 +1177,19 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       next if @program.types[regex.name]?
 
       options = RegexOptions.new(regex.options.to_i32)
-      value = Call.new(
-        Path.global("Regex").at(location), "new",
-        StringLiteral.new(regex.pattern).at(location),
-        Call.new(Path.global(["Regex", "Options"]).at(location), "new",
-          NumberLiteral.new(options.value.to_s).at(location)).at(location)
-      ).at(location)
+      value =
+        if regex.name.starts_with?(Program::IYI_REGEX_CONST_PREFIX)
+          # An iyi module's literal, rebuilt the way it was built.
+          Call.new(Path.global(["Std", "Regex", "Regex"]).at(location), "compile",
+            StringLiteral.new(regex.pattern).at(location)).at(location)
+        else
+          Call.new(
+            Path.global("Regex").at(location), "new",
+            StringLiteral.new(regex.pattern).at(location),
+            Call.new(Path.global(["Regex", "Options"]).at(location), "new",
+              NumberLiteral.new(options.value.to_s).at(location)).at(location)
+          ).at(location)
+        end
 
       @program.types[regex.name] = Const.new(@program, @program, regex.name, value)
       @program.iyi_regex_constants[regex.name] = {regex.pattern, options}

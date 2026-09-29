@@ -63,13 +63,14 @@ describe "Normalize: regex literal" do
     end
   end
 
-  # iyi: a `.iyi` program has no runtime Regex, so its prelude offers none to
-  # build one with, and the expander says so at the literal rather than
-  # emitting `::Regex.new` into a program whose Regex is the empty class the
-  # compiler pre-declares (SPEC.md III.10, Appendix B #17).
+  # iyi: a `.iyi` program's literal is `std/regex`'s `Regex.compile`, and
+  # iyi's prelude has no other runtime Regex: without the import the expander
+  # says so at the literal rather than emitting `::Regex.new` into a program
+  # whose Regex is the empty class the compiler pre-declares (SPEC.md III.10,
+  # Appendix B #17).
   describe "in an .iyi file" do
-    it "is refused with the engine's semantics" do
-      expect_raises(Iyi::TypeException, "regex literals are not available in iyi") do
+    it "names the import it is missing" do
+      expect_raises(Iyi::TypeException, "import std/regex::{Regex}") do
         LiteralExpander.new(Program.new).expand(parse(%q(/foo/), filename: "foo.iyi"))
       end
     end

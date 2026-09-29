@@ -170,4 +170,20 @@ assert_true "aBc".matches?(bd), "matches? finds a pattern inside the text"
 assert_true !"abc".matches?(bd), "matches? without one"
 puts "  gsub, replace with a block and matches? hold"
 
+# The literal is `Regex.compile` of its text, compiled once for the program:
+# `/x/` in a loop is one constant, not a compile per pass.
+puts "\n== a regex literal"
+assert_true /a+b/.match?("aab"), "a literal matches as Regex.compile does"
+assert_true !/a+b/.match?("aabc"), "and refuses as it does"
+assert_true /b[0-9]+/.scan("ab1 ab22 x") == ["b1", "b22"], "scan through a literal"
+assert_str "a/b", /a\/b/.find("xa/by") || "", "an escaped slash is the slash"
+assert_str "1.25", /\d+\.\d+/.find("v 1.25 x") || "", "an escape reaches the engine as written"
+assert_true /\n/.scan("a\nb\n").size == 2, "a line break"
+seen = 0
+3.times { seen = seen + /x/.scan("xx").size }
+assert_true seen == 6, "a literal in a loop"
+pat = "c+"
+assert_str "ccd", /#{pat}d/.find("xccd") || "", "an interpolated literal"
+puts "  match, scan, escapes, a loop and an interpolation"
+
 puts "\nALL CHECKS PASSED"

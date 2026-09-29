@@ -121,7 +121,7 @@ fi
 
 echo
 echo "== every regex section reported"
-for phrase in "== match" "== leftmost-first" "== an empty match costs no text" "== the syntax the header lists" "== linear time" "== against Python's re"; do
+for phrase in "== match" "== leftmost-first" "== an empty match costs no text" "== the syntax the header lists" "== linear time" "== against Python's re" "== a regex literal"; do
   if ! grep -q "$phrase" "$WORK/regex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -192,6 +192,67 @@ refuses "an unmatched )" close_paren "regex: unmatched ')'" ')'
 refuses "nothing to repeat" repeat_nothing "regex: nothing to repeat" '*a'
 refuses "an unterminated class" class_open "regex: unterminated class" '[a'
 refuses "\\x without its digits" hex_short "regex: \\x needs two hex digits" '\x4'
+
+echo
+echo "== what a regex literal refuses, at the literal"
+literal_refused() { # literal_refused <label> <name> <phrase> <source>
+  local label="$1" name="$2" phrase="$3"
+  printf '%s\n' "$4" > "$WORK/$name.iyi"
+  if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: it built"
+    status=1
+  elif ! grep -qF "$phrase" "$WORK/$name.build"; then
+    echo "  $label: refused, but not with '$phrase'"
+    grep -m1 "Error" "$WORK/$name.build"
+    status=1
+  else
+    echo "  $label: refused"
+  fi
+}
+literal_refused "a literal with no std/regex" literal_unimported "nothing in this program imports it" 'puts /a/.match?("a")'
+literal_refused "a literal with a flag" literal_flag "\`std/regex\` takes no flags" 'import std/regex::{Regex}
+puts /a/i.match?("A")'
+
+# A module's literal is a constant its artifact names and its consumer
+# builds; built with the other library's `Regex.new`, it did not compile.
+echo
+echo "== a module's regex literal, from its artifact"
+mkdir -p "$WORK/lit/app"
+cat > "$WORK/lit/app/words.iyi" <<'IYI'
+module app/words
+
+import std/regex::{Regex}
+
+pub def digits(text : String) : Array(String)
+  /[0-9]+/.scan(text)
+end
+
+pub def word(text : String) : String?
+  /w[a-z]*/.find(text)
+end
+IYI
+cat > "$WORK/lit/main.iyi" <<'IYI'
+module main
+
+import app/words
+import std/regex::{Regex}
+
+puts App::Words.digits("a1 b22").inspect
+puts App::Words.word("xx word") || "none"
+puts /[0-9]+/.find("q9") || "none"
+IYI
+if (cd "$WORK/lit" && "$IYI" build --emit-iyimod mods -o from-source main.iyi) > "$WORK/lit/emit.log" 2>&1 &&
+   (cd "$WORK/lit" && "$IYI" build --use-iyimod mods -o from-artifact main.iyi) > "$WORK/lit/use.log" 2>&1 &&
+   "$WORK/lit/from-source" > "$WORK/lit/source.out" 2>&1 &&
+   "$WORK/lit/from-artifact" > "$WORK/lit/artifact.out" 2>&1 &&
+   cmp -s "$WORK/lit/source.out" "$WORK/lit/artifact.out" &&
+   grep -qx "word" "$WORK/lit/artifact.out"; then
+  echo "  from source and from its artifact alike: $(tr '\n' ' ' < "$WORK/lit/artifact.out")"
+else
+  echo "  FAIL: a module's literal did not come through its artifact:"
+  cat "$WORK/lit/emit.log" "$WORK/lit/use.log" "$WORK/lit/artifact.out" 2>/dev/null | grep -m3 -E "Error|undefined|^" | sed 's/^/    /'
+  status=1
+fi
 
 echo
 echo "== proving the checks can fail when the module is broken"

@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Regex literals in iyi programs.** `/a+b/` in a `.iyi` file is
+  `std/regex`'s `Regex.compile("a+b")`, compiled once for the program as
+  the other library's literal is - `/x/` in a loop is one constant - and
+  interpolation (`/#{pat}d/`) compiles at the literal. It was refused
+  with "this program has no runtime Regex" long after `std/regex`
+  arrived, so crystal-metric's port spelled every pattern as a string.
+  Without `import std/regex` the literal is refused by that import's
+  name, and a flag (`/a/i`) is refused because the engine has none -
+  compiled without it, `/a/i` answered `false` for `"A"`. A module's
+  literal travels in its artifact under a name of its own
+  (`$Regex:iyi:<digest>`), and its consumer rebuilds it with the same
+  engine; with the other library's `Regex.new` it did not compile.
+  `bench/std_regex_exercise.sh` holds the literal, both refusals and the
+  artifact round trip, which failed without the rebuild.
+
 - **`derive serializable`: a type that reads and writes itself as JSON.**
   crystal-metric's port wrote its JSON reader and writer by hand, field by
   field, where Crystal writes `include JSON::Serializable`. With

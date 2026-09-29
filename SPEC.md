@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 18,540 lines, of which 3,732 are the library held to the 3,734 ceiling (5,304 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 118,975 lines, none of it written in iyi |
+| compiler | 119,041 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1008,8 +1008,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 118,975 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 18,540-line own prelude + 42,905 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 119,041 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 18,540-line own prelude + 42,907 in std |
 | Specs | 21,146 lines | 12,122 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4037,9 +4037,19 @@ refused snippets in Crystal's own compiler specs, which build a `Program`
 without a driver). `backtracer` went from 2 of 5 to 4 of 4. It admits no semantics that
 were not already reachable: the engine behind the literal is the one behind
 `Regex.new` in the library the program compiles against, so under
-`--crystal` it is that library's PCRE2 with that library's costs. iyi's own
-library still has no runtime `Regex`, and III.10's linear-time guarantee is
-about iyi's own engine — the sugar does not move either line. And `pub` did not admit an
+`--crystal` it is that library's PCRE2 with that library's costs. On iyi's
+own library the literal is `std/regex`'s `Regex.compile` of its text - the
+linear-time engine III.10 promises, so the sugar moves no line there
+either. It was refused while that library had no runtime `Regex`, and kept
+refused after `std/regex` arrived, so a port wrote every pattern as a
+string (crystal-metric's review asked for it back). The literal is cached
+as the other library's is, one constant per pattern, named apart from that
+library's (`$Regex:iyi:<digest>`) so an artifact's consumer rebuilds it
+with the engine it was built with. Without `import std/regex` it is refused
+by name, and so is a flag (`/a/i`), which that engine does not take -
+compiled without it, `/a/i` would have answered `false` for `"A"`.
+`bench/std_regex_exercise.sh` holds all of it, a module's literal through
+its artifact included. And `pub` did not admit an
 **alias** or an **annotation**, which are both surface: a name for a type
 is half of what `validator` exports, and an annotation is applied by a
 *consumer* - `annotation Checker` in a shard means a class in somebody

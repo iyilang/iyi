@@ -17,7 +17,9 @@
 # ASCII is refused, while a literal `é` outside one matches its own
 # bytes. `match?` is the whole string; `find` is the first match; `scan`
 # every non-overlapping one; `split` and `replace` read those, and an
-# empty match costs no text.
+# empty match costs no text. A literal, `/a+b/`, is `Regex.compile("a+b")`
+# compiled once for the program; it takes no flags, which this engine
+# does not have.
 
 module std/regex
 

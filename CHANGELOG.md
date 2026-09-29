@@ -685,7 +685,9 @@
   220 connects to a listener asked for 256 lost 20, each after the two
   seconds a refused connect takes there. A backlog past 200 is passed as
   the hint now. `bench/socket_exercise.iyi` makes the 220 connects without
-  accepting; the old module refused 20.
+  accepting, on Windows - darwin's kernel caps a backlog at 128 and leaves
+  the connects past it retrying, which hung the first CI run of it there;
+  the old module refused 20.
 
 - **On Windows, `File.rename` replaces a destination somebody has open.**
   `MoveFileExW` refuses a destination with any open handle - this

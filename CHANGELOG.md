@@ -96,6 +96,20 @@
 
 ### Changed
 
+- **A carve takes a page's worth of chunks.** An allocation the class's
+  list could not answer carved one chunk from fresh memory, so a program
+  whose heap only grows - a trie, a document being built - sent every
+  object through the slow path, the refill's checks and the cursor's
+  ordered store: six hundred instructions each, 15% of crystal-metric's
+  Primes. The carve now hands out the first chunk and threads the rest of
+  a page onto the cache's list, stamped free and this epoch's as `free`
+  stamps a chunk, entries written before the cursor moves past them; the
+  next allocations are pops. Primes 19.0 billion instructions to 17.0;
+  Primes, JsonGenerate and Knuckeotide 0.91 to 0.98 of their time. The
+  sweep exercise checks that the chunk after a carved one is listed free
+  and is the next allocation, and proves an unstamped and an unlisted
+  batch each fail it.
+
 - **`Math.expm1` and `Math.log1p` are glibc's.** Each was a series near
   zero and Kahan's formula past it, and each answered differently from
   glibc's for about one argument in seven. They are now glibc's fdlibm
@@ -11844,7 +11858,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,713-line library and nothing else. Every other
+  written against iyi's own 18,743-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

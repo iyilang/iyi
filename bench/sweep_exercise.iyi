@@ -304,6 +304,22 @@
   raise "rounding: #{count(released)} pages of #{count(request)}-byte requests handed back in eight steady epochs, each asking a budget's worth" if released != 0
   puts "    rounding: eight epochs of a budget's worth of #{count(request)}-byte requests, and no page of theirs went back cold"
 
+  # 7. A carve takes a page's worth of chunks: the first is the object,
+  # the rest go onto the cache's list stamped free and this epoch's, so
+  # the next allocations are pops rather than carves. A 120-byte class
+  # nothing above touched, so its first allocation carves.
+  carved = fresh(120_u64)
+  carve_arena = IyiHeap.arena_of(carved)
+  carve_chunk = IyiHeap.arena_chunk(carve_arena)
+  listed = carved + carve_chunk
+  entry = IyiHeap.read8(IyiHeap.meta(carve_arena, listed))
+  raise "batch: the chunk after a carved one is not listed free (entry #{count(entry)})" if entry & IyiHeap::FREE_FLAG == 0_u64 || entry & IyiHeap::CARVED_FLAG == 0_u64
+  raise "batch: the listed chunk is not this epoch's" if entry & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag
+  following = fresh(120_u64)
+  raise "batch: the next allocation came from #{hex(following)}, not the listed chunk at #{hex(listed)}" if following != listed
+  raise "batch: the listed chunk handed out still reads free" if IyiHeap.read8(IyiHeap.meta(carve_arena, following)) & IyiHeap::FREE_FLAG != 0_u64
+  puts "    batch: a carve lists the rest of its page, stamped free and this epoch's, and the next allocation pops it"
+
   puts "    all sweep checks passed"
 {% else %}
   puts "    sweeping needs the collector's allocator (the default on linux-x86_64, linux-aarch64 and darwin); this build deselected it, nothing to exercise here"

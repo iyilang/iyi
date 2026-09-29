@@ -2322,12 +2322,42 @@ require "./file"
         # refill's comment). The chunk's memory is the kernel's zero: a
         # region is a frontier slab or a cold run, warm runs being lists.
         byte = read64(arena + OFF_CURSOR_BYTE)
-        write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
-        write64(arena + OFF_CURSOR_BYTE, byte &+ META_ENTRY)
+        epoch = IyiMark.epoch_flag
+        write8(byte, bits | CARVED_FLAG | epoch)
         write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
-        following = cursor &+ read64(arena + OFF_CHUNK)
+        chunk = read64(arena + OFF_CHUNK)
+        # The rest of a page's worth, onto the cache's list, which is empty
+        # or the carve would not have been asked: stamped free and this
+        # epoch's, as `free` and a warm run's thread stamp theirs - a free
+        # chunk of the current parity is a list's, the sweep leaves it and
+        # the mark refuses it - and linked in address order. One chunk a
+        # carve sent every allocation from fresh memory through the slow
+        # path, the refill's checks and the cursor's ordered store: a
+        # program whose heap only grows - a trie, a document being built -
+        # paid six hundred instructions an object. The entries are written
+        # before the cursor moves past them, for the lazy sweeper's reason
+        # above.
+        count = chunk < PAGE ? PAGE.unsafe_div(chunk) : 1_u64
+        left = read64(arena + OFF_LEFT)
+        count = left if count > left
+        if count > 1_u64
+          first_slot = chunk_index(arena, cursor)
+          listed = cursor &+ chunk
+          table[index] = listed
+          taken = 1_u64
+          while taken < count
+            entry = byte &+ taken &* META_ENTRY
+            write8(entry, CARVED_FLAG | FREE_FLAG | epoch)
+            write64(listed + OFF_LINK, taken &+ 1_u64 < count ? listed &+ chunk : 0_u64)
+            write64(listed + OFF_INDEX, first_slot &+ taken)
+            listed = listed &+ chunk
+            taken = taken &+ 1_u64
+          end
+        end
+        write64(arena + OFF_CURSOR_BYTE, byte &+ count &* META_ENTRY)
+        following = cursor &+ count &* chunk
         Pointer(Atomic(UInt64)).new(arena + OFF_CURSOR).value.set(following)
-        write64(arena + OFF_LEFT, read64(arena + OFF_LEFT) &- 1_u64)
+        write64(arena + OFF_LEFT, left &- count)
         write64(arena + OFF_HIGH, following) if following > read64(arena + OFF_HIGH)
         cursor
       end

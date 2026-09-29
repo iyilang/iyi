@@ -927,6 +927,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     source = String.build { |io| IyiMod.declarations(artifact, io) }
     parser = @program.new_parser(source)
     parser.filename = artifact_path
+    # In the language of the module they came from, which the artifact's
+    # name does not say: `.iyimod` is no extension the lexer knows, so an
+    # iyi module's declarations were read by the other language's rules,
+    # and a `pub macro` whose body writes an `impl` - `std/json`'s
+    # `serializable` - ended at that impl's `end`.
+    iyi_declarations = Lexer.iyi_source?(artifact.source_path)
+    parser.iyi = true if iyi_declarations
     # Declarations say for themselves whether the module extends itself, so
     # the header must not decide it here — a `--crystal` boundary reopens a
     # module of the other language, where a module is a mixin. See the parser's
@@ -977,6 +984,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         top_path = "#{artifact_path} (top level)"
         top_parser = @program.new_parser(top_source)
         top_parser.filename = top_path
+        top_parser.iyi = true if iyi_declarations
         Iyi.register_iyi_declarations top_path, top_source
         top_nodes = nodes = @program.normalize(top_parser.parse, inside_exp: false)
         # The same mark the module's own declarations take, and for the same

@@ -471,6 +471,24 @@ describe "Semantic: iyi derive" do
     with_iyi_modules(headerless) do
       semantic_iyi("main.iyi")
     end
+
+    # And from the macro's artifact, whose declarations are iyi although
+    # `.iyimod` is no extension the lexer reads a language from.
+    with_iyi_modules(headed) do
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.no_codegen = true
+      producer.compile source, File.expand_path("unused")
+
+      File.delete "lib/shown.iyi"
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      consumer.compile source, File.expand_path("unused")
+    end
   end
 
   it "still refuses an impl written in another module's type from a script" do

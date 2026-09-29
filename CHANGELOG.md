@@ -350,6 +350,17 @@
 
 ### Fixed
 
+- **An iyi module's artifact is read as iyi.** Its declarations are
+  parsed under the artifact's own name, and `.iyimod` is no extension the
+  lexer reads a language from, so they were read by the other language's
+  rules: a `pub macro` whose body writes an `impl` - `std/json`'s
+  `serializable` - ended at that impl's `end`, and `std_json_exercise`
+  could not be built from artifacts ("unexpected 'end': nothing is open
+  for it to close"). The language now comes from the path the module was
+  written at; a bound Crystal shard's artifact is read as Crystal still.
+  `spec/compiler/iyi_derive_spec.cr` consumes such a macro from its
+  artifact, and failed without the change.
+
 - **`iyi vet` reports the file it was given.** On a program that imports
   std it listed every unused method of `std/traits`, `std/iterator` and
   the rest - 713 lines for crystal-metric's port under 0.15.4, not one

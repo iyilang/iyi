@@ -23,6 +23,7 @@
 module bench/std_json_exercise
 
 import std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
+import std/gc::{GC}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -175,6 +176,75 @@ assert_true(pull.kind.eof?, "skip over objects whose keys repeat only across obj
 assert_text("{\"x\":[1],\"y\":{\"x\":2}}", JSON.from_json("{\"x\": [1], \"y\": {\"x\": 2}}", Any).to_json, "read_any with a key repeated in a nested object")
 assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
 puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
+
+# An object with more keys than the pull parser scans (32) keeps its keys
+# in a hash from there, and a repeat past that point is still refused.
+wide_keys = String.build do |io|
+  io << "{"
+  40.times { |i| io << (i > 0 ? "," : "") << "\"k" << i << "\":" << i }
+  io << "}"
+end
+wide_total = 0_i64
+wide = PullParser.new(wide_keys)
+wide.read_object { |key| wide_total = wide_total + wide.read_int }
+assert_true wide_total == 780_i64, "forty keys read, their values summed: #{wide_total}"
+wide_repeat = wide_keys[0, wide_keys.bytesize - 1] + ",\"k3\":0}"
+wide_refusal = "accepted"
+group do |g|
+  reader = g.spawn do
+    rp = PullParser.new(wide_repeat)
+    rp.read_object { |key| rp.read_int }
+    0
+  end
+  answer = reader.value
+  wide_refusal = answer.message if answer.is_a?(Panicked)
+end
+assert_true wide_refusal.includes?("duplicate key 'k3'"), "a repeat past the scanned keys: #{wide_refusal}"
+
+# Numbers read without their text: the digits and the scale are the value
+# when a double holds both exactly, and the text is read otherwise - the
+# same double either way.
+spelled = "[0.1, -0.0, 1e22, 1e23, 5e-324, 0.30000000000000004, 123456789012345678, 1.7976931348623157e308, 2.2250738585072014e-308, 9007199254740993, 1E+2, 12.5e-1]"
+number_texts = [] of String
+numbers = PullParser.new(spelled)
+numbers.read_array do
+  if numbers.kind.int?
+    number_texts << numbers.read_int.to_s
+  else
+    number_texts << numbers.read_float.to_s
+  end
+end
+assert_text "0.1 -0.0 1.0e+22 1.0e+23 5.0e-324 0.30000000000000004 123456789012345678 1.7976931348623157e+308 2.2250738585072014e-308 9007199254740993 100.0 1.25", number_texts.join(" "), "numbers read without their text"
+
+# What reading costs: a document of ten thousand objects walked with the
+# pull parser allocates nothing for them. Each object took a hash to find
+# a repeated key in, each key and each number a substring of the input,
+# 288 bytes an object, and crystal-metric's JsonParsePull ran at one and a
+# half times Crystal's time.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  walked = String.build do |io|
+    io << "["
+    10000.times { |i| io << (i > 0 ? "," : "") << "{\"x\":" << i << ".25,\"y\":-" << i << ".5e-3,\"name\":\"n\",\"ok\":true}" }
+    io << "]"
+  end
+  GC.disable
+  walk_before = GC.stats.bytes_since_collection
+  walk_total = 0.0
+  walker = PullParser.new(walked)
+  walker.read_array do
+    walker.read_object do |key|
+      if key == "x" || key == "y"
+        walk_total = walk_total + walker.read_float
+      else
+        walker.skip
+      end
+    end
+  end
+  walk_bytes = (GC.stats.bytes_since_collection - walk_before) // 10000_u64
+  GC.enable
+  assert_true walk_bytes < 8_u64, "walking an object allocates #{walk_bytes} bytes, where it allocates nothing (#{walk_total})"
+  puts "  ten thousand objects walked without an allocation for them"
+{% end %}
 
 # ---------------------------------------------------------------------------
 # Builder

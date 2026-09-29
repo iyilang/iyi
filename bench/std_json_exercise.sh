@@ -167,6 +167,8 @@ refuses "an exponent into UInt64" u64_exp "expected int, got Float at line 1, co
   'puts JSON.from_json("1e3", UInt64)'
 refuses "a repeated key in read_object" pull_dup "duplicate key 'a' at line 1, column 8" \
   'p = PullParser.new("{\"a\":1,\"a\":2}"); p.read_object { |k| p.skip }; puts p.kind'
+refuses "a repeated key past the thirty-second" wide_dup "duplicate key 'k3' at line 1, column 342" \
+  'p = PullParser.new("{" + (0...40).map { |i| "\"k#{i}\":#{i}" }.join(",") + ",\"k3\":0}"); p.read_object { |k| p.read_int }'
 refuses "a repeated key in on_key" onkey_dup "duplicate key 'a' at line 1, column 8" \
   'p = PullParser.new("{\"a\":1,\"a\":2}"); p.on_key("b") { p.skip }; puts p.kind'
 refuses "a repeated key skipped over" skip_dup "duplicate key 'a' at line 1, column 10" \
@@ -221,11 +223,12 @@ else
   mkdir -p "$WORK/patched_pull/std"
   "$PY" - <<PY
 src = open("$REPO/src/std/json.iyi").read()
-old = "parse_error(\\"duplicate key '#{@string_value}'\\") if @kind == Kind::String && seen.has_key?(@string_value)"
-new = "parse_error(\\"duplicate key '#{@string_value}'\\") if false"
-if old not in src:
-    raise SystemExit("patch site missing")
-open("$WORK/patched_pull/std/json.iyi", "w").write(src.replace(old, new, 1))
+for old in ["parse_error(\\"duplicate key '#{candidate}'\\") if seen.has_key?(candidate)",
+            "parse_error(\\"duplicate key '#{candidate}'\\") if @keys[i] == candidate"]:
+    if src.count(old) != 1:
+        raise SystemExit("patch site missing: " + old)
+    src = src.replace(old, "nil", 1)
+open("$WORK/patched_pull/std/json.iyi", "w").write(src)
 PY
   if [ $? -ne 0 ]; then
     echo "  the patch did not apply"
@@ -238,6 +241,47 @@ PY
     echo "  with the check removed read_object yields the repeated key, so the check is what refuses it"
   fi
 fi
+
+echo
+echo "== proving the checks can fail when the reader's shape is broken"
+broken() { # broken <label> <phrase> <old> <new>
+  if [ -z "$PY" ]; then
+    echo "  $1: skipped, no working python3 to make the broken copy with"
+    return
+  fi
+  rm -rf "$WORK/broken"
+  mkdir -p "$WORK/broken/std"
+  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+import os
+src = open("$REPO/src/std/json.iyi").read()
+if src.count(os.environ["OLD"]) < 1:
+    raise SystemExit("patch site missing")
+open("$WORK/broken/std/json.iyi", "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $1: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/broken${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_json_exercise.iyi" >"$WORK/broken.out" 2>&1; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -aq "$2" "$WORK/broken.out"; then
+    echo "  $1: failed, but not at the check:"
+    grep -am1 panic "$WORK/broken.out" || sed -n '1,4p' "$WORK/broken.out"
+    status=1
+  else
+    echo "  $1: caught"
+  fi
+}
+broken "a hash for every object's keys" "walking an object allocates" \
+  'seen = nil.as(Hash(String, Bool)?)' 'seen = {} of String => Bool'
+broken "a substring for every key" "walking an object allocates" \
+  'return @input[start, size] if size > SHORT_MAX || size == 0' 'return @input[start, size]'
+broken "a substring for every number" "walking an object allocates" \
+  'if digits <= 15 && exponent_digits <= 3' 'if false'
+broken "a number scaled by the wrong power" "ASSERTION FAILED" \
+  'f = mantissa.to_f64 / POW10[0 - power]' 'f = mantissa.to_f64 / POW10[1 - power]'
+broken "a repeat past the scanned keys let through" "a repeat past the scanned keys" \
+  "parse_error(\"duplicate key '#{candidate}'\") if seen.has_key?(candidate)" 'nil'
 
 echo
 if [ "$status" -eq 0 ]; then

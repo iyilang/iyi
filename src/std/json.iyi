@@ -549,7 +549,12 @@ end
 
 class Token
   property kind : TokenKind
-  property raw_value : String
+  # A number's text, as the span of the input it was read from: made into
+  # a string only when asked, which a reader of the number's value never
+  # does - a substring a number was an allocation for every number read.
+  property raw_input : String
+  property raw_start : Int32
+  property raw_size : Int32
   property string_value : String
   property int_value : Int64
   property float_value : Float64
@@ -558,12 +563,18 @@ class Token
 
   def initialize
     @kind = TokenKind::EOF
-    @raw_value = ""
+    @raw_input = ""
+    @raw_start = 0
+    @raw_size = 0
     @string_value = ""
     @int_value = 0_i64
     @float_value = 0.0
     @line_number = 1
     @column_number = 1
+  end
+
+  def raw_value : String
+    @raw_input[@raw_start, @raw_size]
   end
 end
 
@@ -580,6 +591,11 @@ class Lexer
   @token : Token
   @string_buffer : StringBuffer
   @error : String?
+  # Short strings the lexer has already made, by a hash of their bytes: an
+  # object's keys are the same few strings in every object of an array,
+  # and each was a new substring. A slot holds the last string that hashed
+  # there, so a miss costs the substring it always did.
+  @short : Array(String)
 
   def initialize(@input : String)
     @bytes = @input.to_unsafe
@@ -590,6 +606,40 @@ class Lexer
     @token = Token.new
     @string_buffer = StringBuffer.new(64)
     @error = nil
+    @short = Array(String).new(SHORT_SLOTS) { "" }
+  end
+
+  SHORT_SLOTS = 256
+  SHORT_MAX   =  24
+
+  # The string the input spells from *start* for *size* bytes.
+  private def text_at(start : Int32, size : Int32) : String
+    return @input[start, size] if size > SHORT_MAX || size == 0
+    p = @bytes + start
+    h = 2166136261_u64
+    i = 0
+    while i < size
+      h = (h ^ p[i].to_u64) &* 16777619_u64
+      i = i + 1
+    end
+    slot = (h ^ h.unsafe_shr(8_u64)).unsafe_to_i32 & (SHORT_SLOTS - 1)
+    cached = @short[slot]
+    if cached.bytesize == size
+      q = cached.to_unsafe
+      same = true
+      i = 0
+      while i < size
+        if q[i] != p[i]
+          same = false
+          break
+        end
+        i = i + 1
+      end
+      return cached if same
+    end
+    made = @input[start, size]
+    @short[slot] = made
+    made
   end
 
   def token : Token
@@ -748,13 +798,13 @@ class Lexer
       elsif b >= 128_u8
         return unless take_utf8_sequence
       else
-        advance
+        step_ascii
       end
     end
 
     if !has_escape && @pos < @bytesize && current_byte == 34_u8
       # No escape: the text is a substring of the input.
-      str_val = @input[start_pos, @pos - start_pos]
+      str_val = text_at(start_pos, @pos - start_pos)
       advance
       set_token(TokenKind::String, line, col)
       @token.string_value = str_val
@@ -927,8 +977,16 @@ class Lexer
     start_pos = @pos
     has_fraction = false
     has_exponent = false
+    negative = false
+    # The significant digits as one integer while it fits nineteen of them,
+    # and the power of ten they are scaled by: what the fast conversion
+    # below reads instead of the number's text.
+    mantissa = 0_u64
+    digits = 0
+    scale = 0
 
     if current_byte == 45_u8 # '-'
+      negative = true
       advance
       if @pos >= @bytesize
         return fail("expected digit after minus sign in number", line, col)
@@ -939,20 +997,25 @@ class Lexer
     end
 
     if current_byte == 48_u8 # '0'
-      advance
+      step_ascii
       if @pos < @bytesize && digit?(current_byte)
         return fail("leading zero not allowed in number", @line_number, @column_number)
       end
     else
-      advance
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        if digits < 19
+          mantissa = mantissa &* 10_u64 &+ (current_byte &- 48_u8).to_u64
+          digits = digits + 1
+        else
+          scale = scale + 1
+        end
+        step_ascii
       end
     end
 
     if @pos < @bytesize && current_byte == 46_u8 # '.'
       has_fraction = true
-      advance
+      step_ascii
       if @pos >= @bytesize
         return fail("expected at least one digit after decimal point", line, col)
       end
@@ -960,15 +1023,26 @@ class Lexer
         return fail("expected at least one digit after decimal point", @line_number, @column_number)
       end
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        if digits < 19
+          if digits > 0 || current_byte != 48_u8
+            mantissa = mantissa &* 10_u64 &+ (current_byte &- 48_u8).to_u64
+            digits = digits + 1
+          end
+          scale = scale - 1
+        end
+        step_ascii
       end
     end
 
+    exponent = 0
+    exponent_digits = 0
     if @pos < @bytesize && (current_byte == 101_u8 || current_byte == 69_u8) # 'e' or 'E'
       has_exponent = true
-      advance
+      step_ascii
+      exponent_negative = false
       if @pos < @bytesize && (current_byte == 43_u8 || current_byte == 45_u8) # '+' or '-'
-        advance
+        exponent_negative = current_byte == 45_u8
+        step_ascii
       end
       if @pos >= @bytesize
         return fail("expected at least one digit in exponent", line, col)
@@ -977,8 +1051,11 @@ class Lexer
         return fail("expected at least one digit in exponent", @line_number, @column_number)
       end
       while @pos < @bytesize && digit?(current_byte)
-        advance
+        exponent = exponent * 10 + (current_byte - 48_u8).to_i32 if exponent < 100000
+        exponent_digits = exponent_digits + 1
+        step_ascii
       end
+      exponent = 0 - exponent if exponent_negative
     end
 
     # `0x12`, `1a`, `1.2.3`: a number does not run into letters or a second point.
@@ -989,31 +1066,59 @@ class Lexer
       end
     end
 
-    raw_num = @input[start_pos, @pos - start_pos]
     set_token(TokenKind::Int, line, col)
-    @token.raw_value = raw_num
+    @token.raw_input = @input
+    @token.raw_start = start_pos
+    @token.raw_size = @pos - start_pos
 
     unless has_fraction || has_exponent
-      val = parse_int64?(raw_num)
+      val = parse_int64?(@bytes + start_pos, @pos - start_pos)
       unless val.nil?
         @token.int_value = val
         return
       end
     end
 
-    f = raw_num.to_f
-    if f.abs > 1.7976931348623157e308
-      return fail("number #{raw_num} out of range", line, col)
+    # Clinger's fast path: an integer under 2^53 and a power of ten a
+    # double holds exactly are both exact, so their product or quotient is
+    # rounded once, which is the correctly rounded value `to_f` answers.
+    # Anything else - more digits, a larger exponent - is read from the
+    # text as before.
+    f = 0.0
+    fast = false
+    if digits <= 15 && exponent_digits <= 3
+      power = scale + exponent
+      if power >= 0 && power <= 22
+        f = mantissa.to_f64 * POW10[power]
+        fast = true
+      elsif power < 0 && power >= -22
+        f = mantissa.to_f64 / POW10[0 - power]
+        fast = true
+      end
+    end
+    if fast
+      # The sign flipped, not subtracted from zero: `0.0 - 0.0` is `0.0`,
+      # and `-0.0` is what the text says.
+      f = f * -1.0 if negative
+    else
+      f = @input[start_pos, @pos - start_pos].to_f
+      if f.abs > 1.7976931348623157e308
+        return fail("number #{@input[start_pos, @pos - start_pos]} out of range", line, col)
+      end
     end
     @token.kind = TokenKind::Float
     @token.float_value = f
   end
 
+  # A byte known to be ASCII and not a line break: one column on.
+  private def step_ascii : Nil
+    @pos = @pos + 1
+    @column_number = @column_number + 1
+  end
+
   # The Int64 these digits spell, or nil when they do not fit. The negative
   # magnitude is accumulated so the smallest Int64 needs no negation.
-  private def parse_int64?(text : String) : Int64?
-    bytes = text.to_unsafe
-    len = text.bytesize
+  private def parse_int64?(bytes : Pointer(UInt8), len : Int32) : Int64?
     i = 0
     negative = false
     if bytes[0] == 45_u8
@@ -1041,6 +1146,10 @@ class Lexer
 end
 
 MAX_NESTING = 512
+
+# The powers of ten a double holds exactly, for the lexer's fast path.
+POW10 = [1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+         1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
 
 # Reads a whole document into an `Any`. Like the lexer it records the first
 # failure instead of panicking; `JSON.parse` and `JSON.parse?` decide what to
@@ -1320,7 +1429,11 @@ pub class PullParser
   getter int_value : Int64
   getter float_value : Float64
   getter string_value : String
-  getter raw_value : String
+  @raw_input : String
+  @raw_start : Int32
+  @raw_size : Int32
+  # The keys of the objects open on the way down (`read_object_key`).
+  @keys : Array(String)
   property max_nesting : Int32
   @states : Array(Int32)
 
@@ -1331,10 +1444,24 @@ pub class PullParser
     @int_value = 0_i64
     @float_value = 0.0
     @string_value = ""
-    @raw_value = ""
+    @raw_input = ""
+    @raw_start = 0
+    @raw_size = 0
+    @keys = [] of String
     @max_nesting = MAX_NESTING
     @states = [ROOT]
     read_next
+  end
+
+  # The number the reader is on, as it was written.
+  def raw_value : String
+    @raw_input[@raw_start, @raw_size]
+  end
+
+  private def keep_raw(tok : Token) : Nil
+    @raw_input = tok.raw_input
+    @raw_start = tok.raw_start
+    @raw_size = tok.raw_size
   end
 
   def line_number : Int32
@@ -1421,14 +1548,14 @@ pub class PullParser
         after_value
         @kind = Kind::Int
         @int_value = tok.int_value
-        @raw_value = tok.raw_value
+        keep_raw(tok)
         return @kind
       when TokenKind::Float
         value_allowed
         after_value
         @kind = Kind::Float
         @float_value = tok.float_value
-        @raw_value = tok.raw_value
+        keep_raw(tok)
         return @kind
       when TokenKind::String
         st = state
@@ -1555,20 +1682,60 @@ pub class PullParser
   # value. A key named twice is refused, as `JSON.parse` refuses it.
   def read_object(& : String -> Nil) : Nil
     read_begin_object
-    seen = {} of String => Bool
+    mark = @keys.size
+    seen = nil.as(Hash(String, Bool)?)
     while @kind != Kind::EndObject
-      yield read_object_key(seen)
+      key, seen = read_object_key(mark, seen)
+      yield key
     end
+    drop_keys(mark)
     read_end_object
   end
 
-  # The key the reader is on, refused when `seen` already holds it, where
-  # the key is rather than where its value is.
-  private def read_object_key(seen : Hash(String, Bool)) : String
-    parse_error("duplicate key '#{@string_value}'") if @kind == Kind::String && seen.has_key?(@string_value)
+  # The key the reader is on, refused when this object already had it,
+  # where the key is rather than where its value is. The keys of every
+  # object open on the way down are one stack, each object's from its
+  # mark: a hash per object was an allocation for every object read, where
+  # an object has a few keys and a scan of them is cheaper than the hash.
+  #
+  # Past KEYS_SCANNED keys an object's are put in a hash, so an object
+  # with thousands of keys is not a scan of all of them per key.
+  KEYS_SCANNED = 32
+
+  private def read_object_key(mark : Int32, seen : Hash(String, Bool)?) : {String, Hash(String, Bool)?}
+    if @kind == Kind::String
+      candidate = @string_value
+      if seen
+        parse_error("duplicate key '#{candidate}'") if seen.has_key?(candidate)
+      else
+        i = mark
+        while i < @keys.size
+          parse_error("duplicate key '#{candidate}'") if @keys[i] == candidate
+          i = i + 1
+        end
+      end
+    end
     key = read_object_key
-    seen[key] = true
-    key
+    if seen
+      seen[key] = true
+    else
+      @keys << key
+      if @keys.size - mark > KEYS_SCANNED
+        seen = {} of String => Bool
+        i = mark
+        while i < @keys.size
+          seen[@keys[i]] = true
+          i = i + 1
+        end
+      end
+    end
+    {key, seen}
+  end
+
+  private def drop_keys(mark : Int32) : Nil
+    while @keys.size > mark
+      @keys.pop
+    end
   end
 
   # Passes over the value the reader is on, whole.
@@ -1601,9 +1768,10 @@ pub class PullParser
   def on_key(key : String, & : -> Nil) : Nil
     read_begin_object
     found = false
-    seen = {} of String => Bool
+    mark = @keys.size
+    seen = nil.as(Hash(String, Bool)?)
     while @kind != Kind::EndObject
-      current_key = read_object_key(seen)
+      current_key, seen = read_object_key(mark, seen)
       if current_key == key
         found = true
         yield
@@ -1611,6 +1779,7 @@ pub class PullParser
         skip
       end
     end
+    drop_keys(mark)
     read_end_object
     parse_error("missing key #{key.inspect}") unless found
   end

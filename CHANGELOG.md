@@ -35,6 +35,23 @@
 
 ### Changed
 
+- **Reading JSON allocates for values, not for keys and numbers.** The
+  pull parser took a hash for every object to find a repeated key in, and
+  the lexer a substring for every key and every number it read, the
+  number's text parsed again after: 288 bytes an object, and
+  crystal-metric's `JsonParsePull` and `JsonParseSerializable` ran at 1.5
+  times Crystal's time. The keys of the open objects are one stack,
+  scanned, and put in a hash past 32 keys; short strings the lexer has
+  made are reused by their bytes; and a number whose digits and power of
+  ten a double holds exactly is computed from them (Clinger's fast path,
+  correctly rounded), its text made only when asked. Pulling 200,000
+  objects takes 60 ms where it took 120, and `JSON.parse` 150 where it
+  took 190; 300,000 numbers of every shape read as the same doubles as
+  before. `bench/std_json_exercise.sh` requires ten thousand objects
+  walked without an allocation, reads the numbers the fast path must not
+  get wrong (`-0.0`, `1e23`, `5e-324`, 2^53 + 1), refuses a repeat past the
+  scanned keys, and proves each check fails with its piece taken out.
+
 - **A method std adds to a prelude type names its module, the integer
   tower's wrapping arithmetic included.** `x &* 33_u32` - a checksum's
   first line - was told the prelude is small by rule, and crystal-metric's

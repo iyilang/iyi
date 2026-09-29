@@ -52,6 +52,7 @@ import std/complex::{Complex}
 import std/gc::{GC}
 import std/io::{Memory}
 import std/random::{Random}
+import std/static_array
 import std/steppable
 import std/int
 
@@ -2081,13 +2082,16 @@ def noise_gradient(orig : Vec2, grad : Vec2, p : Vec2) : Float64
   grad.x * sp.x + grad.y * sp.y
 end
 
-class Noise2DContext
-  @rgradients : Array(Vec2)
-  @permutations : Array(Int32)
+# A struct holding its two tables inline, as Crystal's does: with `Array`s
+# every lookup read the array's size and buffer first, a sixth more
+# instructions than Crystal's for the whole benchmark.
+struct Noise2DContext
+  @rgradients : StaticArray(Vec2, 256)
+  @permutations : StaticArray(Int32, 256)
 
   def initialize
-    @rgradients = Array.new(256) { noise_random_gradient }
-    @permutations = Array.new(256) { |i| i }
+    @rgradients = StaticArray(Vec2, 256).new { |i| noise_random_gradient }
+    @permutations = StaticArray(Int32, 256).new { |i| i }
     @permutations.shuffle_in_place(NOISE_RANDOM)
   end
 

@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`StaticArray#shuffle_in_place`.** `std/random` shuffled an `Array` as
+  the other library does and a `StaticArray` not at all, so a program
+  holding a table inline - crystal-metric's Noise keeps its 256-entry
+  permutation in a struct, shuffled with `shuffle!` - built an `Array`
+  instead and read its size and buffer on every lookup. The same draws
+  in the same order as `Array#shuffle_in_place`, in a local or in a
+  field. `bench/std_random_exercise.sh` checks both against Crystal's
+  answers and proves the check fails with the last element left out.
+
 - **crystal-metric's port is a gate.** `bench/metric/metric.iyi` is the
   port of kostya's crystal-metric (MIT, notice kept) that the 0.15.4
   review measured: twenty-six benchmarks, each checking its answer

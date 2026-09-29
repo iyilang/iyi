@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every random section reported"
-for phrase in "== seed" "== array"; do
+for phrase in "== seed" "== array" "== static array"; do
   if ! grep -q "$phrase" "$WORK/random-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -98,7 +98,7 @@ else
   # A bounded draw that answers zero, and the stream taken from the seed
   # rather than from the sequence - which is what this module did, and
   # why a seeded program printed other numbers than the other library's.
-  for label in bounded stream; do
+  for label in bounded stream static; do
     rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
     PROOF="$label" "$PY" - <<PY
 import os
@@ -107,6 +107,7 @@ src = Path("$REPO/src/std/random.iyi").read_text()
 proofs = {
     "bounded": ("result.unsafe_mod(bound).to_i32", "0"),
     "stream": ("@inc = (sequence << 1) | 1_u64", "@inc = (seed << 1) | 1_u64"),
+    "static": ("    i = N - 1\n", "    i = N - 2\n"),
 }
 old, new = proofs[os.environ["PROOF"]]
 if old not in src:

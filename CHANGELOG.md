@@ -118,6 +118,16 @@
   1,050. The sweep exercise's proof that a sweep freeing the live is
   caught is anchored on the new line.
 
+- **The common allocation stays in its caller's frame.** A small class
+  whose list has a chunk, with no mark running, is popped, stamped and
+  cleared a word at a time in `take` itself; a mapping, a refill, a
+  carve and a birth under a mark are `take_slow`'s, out of line. Inlined,
+  those paths had given every allocation their frame and a general
+  clearing loop. Binary trees at depth 14 with the mark in the pause, so
+  that two runs compare: 887 million instructions to 797; at depth 18,
+  1,359 ms to 1,106 at best over the evening's three changes. The sweep
+  exercise proves a fast path that leaves a chunk dirty is caught.
+
 - **`Float64#floor` and `ceil` are one instruction.** On x86_64 the
   processor is asked once, by `cpuid`, whether it has SSE4.1's
   `roundsd`, as glibc's `floor` chooses its own version, and the
@@ -11735,7 +11745,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,671-line library and nothing else. Every other
+  written against iyi's own 18,710-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

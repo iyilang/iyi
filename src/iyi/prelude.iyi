@@ -2067,7 +2067,39 @@ require "./file"
         else
           write64(table.address &+ CACHE_SLICE, slice)
         end
-        base = take_inside(table, bits & HEADED_FLAG != 0 ? size &+ HEADER : size, clear, bits, type_id)
+        bytes = bits & HEADED_FLAG != 0 ? size &+ HEADER : size
+        # The common case, in the caller's frame: a small class whose list
+        # has a chunk, and no mark beside the program. The marking flag
+        # cannot turn while this thread is inside - a mark begins in a
+        # stop, and the stop waits for `leave`. The rest - a mapping, a
+        # refill, a carve, a birth under a mark - is `take_slow`'s, out of
+        # line: inlined here, those paths gave every allocation a frame of
+        # six saved registers and a general clearing loop.
+        if bytes <= 128_u64 && LibIyiGCTable.__iyi_marking == 0_u8
+          index = bytes <= 16_u64 ? 0 : ((bytes &+ 7_u64).unsafe_shr(3_u64).to_i64 &- 2_i64).to_i32
+          head = table[index]
+          if head != 0
+            stamp(table, index, head, bits, type_id)
+            if clear
+              # `chunk_of` for a class of eight-byte steps; the chunk is
+              # whole words, so a word at a time and no tail.
+              word = head
+              stop = head &+ (index.to_u64 &+ 2_u64) &* 8_u64
+              while word < stop
+                write64(word, 0_u64)
+                word = word &+ 8_u64
+              end
+            end
+            leave(table)
+            return bits & HEADED_FLAG != 0 ? head &+ HEADER : head
+          end
+        end
+        take_slow(table, size, bytes, clear, bits, type_id)
+      end
+
+      @[NoInline]
+      def self.take_slow(table : Pointer(UInt64), size : UInt64, bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+        base = take_inside(table, bytes, clear, bits, type_id)
         # Born while a mark runs beside the program: black, and counted
         # alive in its arena, by the bytes asked for - the chunk's waste
         # is a second lookup of the entry on every allocation under a
@@ -2134,29 +2166,36 @@ require "./file"
         head = table[index]
         head = refill(table, index) if head == 0
         if head != 0
-          table[index] = read64(head &+ OFF_LINK)
-          # The chunk's byte: this epoch's, white, atomic when the caller
-          # promised no pointers - `clear` is the atomic question worn the
-          # other way - and headed when it has a word. The epoch's parity
-          # is read here, after the refill: a refill takes the lock, and
-          # the lock's spin parks for a pause, whose sweep turns the
-          # epoch - a parity read before it stamped the chunk as the last
-          # epoch's, and the next sweep freed it under its owner. A list
-          # chunk is in an arena by construction, the mask names it. The
-          # clearing path clears the whole chunk, header word and all: a
-          # stale type id in the word is a layout the mark would trust;
-          # an atomic chunk is never opened, and its word is left until
-          # codegen stores.
-          arena = head & (0_u64 &- MAP)
-          slot = read64(head &+ OFF_INDEX)
-          byte = arena &+ META &+ slot &* META_ENTRY
-          write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
-          write16(byte &+ 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
+          stamp(table, index, head, bits, type_id)
           clear_block(head, chunk_of(index)) if clear
           return headed ? head &+ HEADER : head
         end
         head = carve(table, index, bits, type_id)
         headed ? head &+ HEADER : head
+      end
+
+      # The list's head popped and its chunk's entry stamped, for `take`'s
+      # fast path and `take_inside` alike.
+      @[AlwaysInline]
+      def self.stamp(table : Pointer(UInt64), index : Int32, head : UInt64, bits : UInt64, type_id : UInt64) : Nil
+        table[index] = read64(head &+ OFF_LINK)
+        # The chunk's byte: this epoch's, white, atomic when the caller
+        # promised no pointers - `clear` is the atomic question worn the
+        # other way - and headed when it has a word. The epoch's parity
+        # is read here, after the refill: a refill takes the lock, and
+        # the lock's spin parks for a pause, whose sweep turns the
+        # epoch - a parity read before it stamped the chunk as the last
+        # epoch's, and the next sweep freed it under its owner. A list
+        # chunk is in an arena by construction, the mask names it. The
+        # clearing path clears the whole chunk, header word and all: a
+        # stale type id in the word is a layout the mark would trust;
+        # an atomic chunk is never opened, and its word is left until
+        # codegen stores.
+        arena = head & (0_u64 &- MAP)
+        slot = read64(head &+ OFF_INDEX)
+        byte = arena &+ META &+ slot &* META_ENTRY
+        write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
+        write16(byte &+ 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
       end
 
       # The cache's list for this class is empty: take the centre's top

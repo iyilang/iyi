@@ -146,6 +146,11 @@ prove_fails "warm pages never taken up" nowarm "warm:" \
 prove_fails "warm chunks not cleared" dirtywarm "warm:" \
   '{ if ($0 ~ /^          clear_block\(head, chunk_of\(index\)\) if clear$/) { print "          # removed"; next } print }'
 
+# The allocation's fast path handing out a list chunk without clearing it:
+# every chunk after a refill's first comes that way.
+prove_fails "the fast path does not clear" dirtyfast "warm:" \
+  '{ if ($0 ~ /^                write64\(word, 0_u64\)$/) { print "                # removed"; next } print }'
+
 # A quarter-step class's warm pages counted at the full chunk again: a
 # fifth too few stay warm, and the steady churn hands pages back.
 prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \

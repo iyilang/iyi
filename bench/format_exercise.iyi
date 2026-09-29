@@ -16,6 +16,7 @@
 
 # 1. Field width: values narrower than width pad to the minimum width.
 import std/format::{sprintf, printf}
+import std/gc::{GC}
 
 w1 = sprintf("%10s", "hello")
 raise "format: width string failed" if w1 != "     hello"
@@ -74,6 +75,12 @@ raise "format: precision float round down failed" if p3 != "3.14"
 p4 = sprintf("%.4f", 3.14159)
 raise "format: precision float round up failed" if p4 != "3.1416"
 
+# Past nineteen places the digits come from the bignum rather than from two
+# words, and so do the rounding and the tie: 3 * 2^-22 rounds up at the
+# twentieth place, and 2^-21 ends in an exact half there.
+p4b = sprintf("%.20f", 7.152557373046875e-07)
+raise "format: precision float round up past nineteen places failed" if p4b != "0.00000071525573730469"
+
 p5 = sprintf("%.1f", 99.99)
 raise "format: precision float carry failed" if p5 != "100.0"
 
@@ -94,6 +101,21 @@ raise "format: precision float 0 round down failed" if p9 != "3"
 # even digit. The rounding block at the end of this file is the rest of it.
 p10 = sprintf("%.0f", 2.5)
 raise "format: precision float tie to even failed" if p10 != "2"
+p10b = sprintf("%.20f", 4.76837158203125e-07)
+raise "format: precision float tie to even past nineteen places failed" if p10b != "0.00000047683715820312"
+
+# A value and places that two words hold are formatted in them: through
+# the bignum, `%.2f` built three of them a call and took 400 ns, three
+# times Go's. The bytes, not the time, are the check: 590 a call then.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  GC.disable
+  quick_before = GC.stats.bytes_since_collection
+  quick_total = 0
+  1000.times { |i| quick_total = quick_total + sprintf("%.2f", i * 0.37).bytesize }
+  quick_bytes = (GC.stats.bytes_since_collection - quick_before) // 1000_u64
+  GC.enable
+  raise "format: a %.2f costs #{quick_bytes} bytes, past 200 (#{quick_total})" if quick_bytes > 200_u64
+{% end %}
 
 # The value's digits, every one of them. These printed the shortest
 # digits - the ones that round-trip - padded with zeros: `%.0f` of 1e23

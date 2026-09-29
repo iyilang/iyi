@@ -144,6 +144,17 @@ prove_fails "precision rounding broken" no_prec "format: precision float round u
 prove_fails "a tie rounds away from zero" no_even "format: precision float tie to even" \
   's/^    if c > 0 || (c == 0 \&\& quotient.low_bit == 1_u64)$/    if c >= 0/'
 
+# 4d. The same two, in the two-word path most formats take: rounding
+#     dropped, and a tie sent away from zero.
+prove_fails "two-word rounding broken" no_quick_prec "format: precision float round up" \
+  's/^    if above || (tie \&\& quotient \& 1_u64 == 1_u64)$/    if false/'
+prove_fails "a two-word tie rounds away from zero" no_quick_even "format: precision float tie to even" \
+  's/^    if above || (tie \&\& quotient \& 1_u64 == 1_u64)$/    if above || tie/'
+
+# 4e. Every value through the bignum again.
+prove_fails "the two-word path taken out" no_quick "format: a %.2f costs" \
+  's/^    if quick = scaled_quick(f, e, places)$/    if quick = nil/'
+
 # 4c. The digits past the shortest ones dropped: a bignum rendered without
 #     its zero-led chunks prints 1e22 as 10000.000, which is what a printer
 #     that pads the shortest digits with zeros was never able to see.

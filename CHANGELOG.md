@@ -24,6 +24,17 @@
 
 ### Changed
 
+- **`%.2f` formats in two words.** Every fixed and scientific format
+  scaled the double through a bignum - three of them a call, 590 bytes -
+  and `sprintf("%.2f", x)` took 400 ns where Go's takes 129. When the
+  value and the places fit (up to nineteen places, magnitudes a word
+  holds), the product with the power of ten is two words and the division
+  by the binary exponent a shift, with the same half-to-even rule: 85 ns
+  and 65 bytes. The digits are the bignum's - 600,000 random `%f`, `%e`
+  and `%g` formats and the ties at every precision match it and Python.
+  `bench/format_exercise.sh` bounds the bytes, checks rounding and ties on
+  both paths, and proves each check fails with its path broken.
+
 - **A union of many classes types in time near its width.** A variable
   given one of many unrelated classes grows its union a member per
   assignment, and each growth asked every pair of members for their common

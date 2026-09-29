@@ -161,6 +161,9 @@ module ::IyiFloatText
   # shortest digits, which round-trip, are not the value, and past them
   # there was nothing but zeros. `places` may be negative, a scale down.
   def self.scaled_digits(f : UInt64, e : Int32, places : Int32) : String
+    if quick = scaled_quick(f, e, places)
+      return quick.to_s
+    end
     num = IyiBig.new(f)
     den = IyiBig.new(1_u64)
     if places > 0
@@ -182,6 +185,65 @@ module ::IyiFloatText
       quotient.add_small(1_u64)
     end
     quotient.to_decimal
+  end
+
+  # `scaled_digits` in two words, when they hold it: f * 10^places is
+  # under 2^117 for the places a word of ten's powers reaches, and the
+  # quotient by 2^-e and its half-to-even rounding are shifts and one
+  # comparison of the remainder with the half. The same integer the
+  # bignum's division gives - it is the same arithmetic, exact - where
+  # that division made `%.2f` three times what Go's takes. nil when the
+  # value, the places or the answer do not fit.
+  def self.scaled_quick(f : UInt64, e : Int32, places : Int32) : UInt64?
+    return nil if places < 0 || places > 19
+    power = 1_u64
+    places.times { power = power &* 10_u64 }
+    if e >= 0
+      return nil if e > 10
+      hi, lo = mul_wide(f.unsafe_shl(e.to_u64), power)
+      return hi == 0_u64 ? lo : nil
+    end
+    hi, lo = mul_wide(f, power)
+    shift = (0 - e).to_u64
+    # Past 117 bits of shift the product is under half of the divisor.
+    return 0_u64 if shift > 117_u64
+    if shift < 64_u64
+      return nil if hi.unsafe_shr(shift) != 0_u64
+      quotient = lo.unsafe_shr(shift) | (shift == 0_u64 ? 0_u64 : hi.unsafe_shl(64_u64 - shift))
+      rest_hi = 0_u64
+      rest_lo = lo & (1_u64.unsafe_shl(shift) &- 1_u64)
+      half_hi = 0_u64
+      half_lo = 1_u64.unsafe_shl(shift - 1_u64)
+    else
+      quotient = hi.unsafe_shr(shift - 64_u64)
+      rest_hi = shift == 64_u64 ? 0_u64 : hi & (1_u64.unsafe_shl(shift - 64_u64) &- 1_u64)
+      rest_lo = lo
+      half_hi = shift == 64_u64 ? 0_u64 : 1_u64.unsafe_shl(shift - 65_u64)
+      half_lo = shift == 64_u64 ? 9223372036854775808_u64 : 0_u64
+    end
+    above = rest_hi > half_hi || (rest_hi == half_hi && rest_lo > half_lo)
+    tie = rest_hi == half_hi && rest_lo == half_lo
+    if above || (tie && quotient & 1_u64 == 1_u64)
+      return nil if quotient == 18446744073709551615_u64
+      quotient = quotient + 1_u64
+    end
+    quotient
+  end
+
+  # a * b as its high and low words, from 32-bit halves.
+  def self.mul_wide(a : UInt64, b : UInt64) : {UInt64, UInt64}
+    mask = 4294967295_u64
+    a_lo = a & mask
+    a_hi = a.unsafe_shr(32_u64)
+    b_lo = b & mask
+    b_hi = b.unsafe_shr(32_u64)
+    low = a_lo &* b_lo
+    cross1 = a_lo &* b_hi
+    cross2 = a_hi &* b_lo
+    high = a_hi &* b_hi
+    middle = low.unsafe_shr(32_u64) &+ (cross1 & mask) &+ (cross2 & mask)
+    {high &+ cross1.unsafe_shr(32_u64) &+ cross2.unsafe_shr(32_u64) &+ middle.unsafe_shr(32_u64),
+     middle.unsafe_shl(32_u64) | (low & mask)}
   end
 
   # The most digits a format may ask for: the bignum has a fixed capacity

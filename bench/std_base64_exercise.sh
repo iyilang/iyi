@@ -131,6 +131,11 @@ broken "a whole group's last character" '        dst[o + 3] = table[triple & 63]
 broken "four characters decoded out of order" 'buf[o &+ 1] = group.unsafe_shr(8).unsafe_to_u8' 'buf[o &+ 1] = group.unsafe_to_u8'
 broken "a group after a line break out of order" 'buf[o + 1] = ((group >> 8) & 255).to_u8' 'buf[o + 1] = (group & 255).to_u8'
 broken "whitespace taken at the size it was guessed" 'return answer if written == size' 'return answer'
+broken "six bytes read in the wrong order" '(w.unsafe_shr(40) & 0xFF_u64)
+' '(w.unsafe_shr(32) & 0xFF_u64)
+'
+broken "a character pair written backwards" 'chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8)' 'chars[k & 63].to_i32 | chars[k.unsafe_shr(6)].to_i32.unsafe_shl(8)'
+broken "a byte and a character at a time again" 'while i &+ 8 <= n' 'while false'
 
 echo
 echo "== what decode refuses"

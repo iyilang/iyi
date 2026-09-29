@@ -15,13 +15,18 @@ module std/base64
 # byte-at-a-time path sorts into whitespace, padding and refusals.
 DECODE_VALUES = Base64.decode_values
 
+# Two characters per twelve bits, the first in the low byte: the encoder
+# writes eight characters for every six bytes it reads, as one word.
+PAIRS_STD = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+PAIRS_URL = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+
 pub struct Base64
   def self.encode(data : String) : String
-    encode_with(data, plus_slash, true)
+    encode_with(data, plus_slash, PAIRS_STD, true)
   end
 
   def self.urlsafe_encode(data : String) : String
-    encode_with(data, minus_underscore, true)
+    encode_with(data, minus_underscore, PAIRS_URL, true)
   end
 
   def self.decode(text : String) : String
@@ -124,15 +129,36 @@ pub struct Base64
     o
   end
 
-  private def self.encode_with(data : String, alphabet : String, pad : Bool) : String
+  private def self.encode_with(data : String, alphabet : String, pairs : Array(Int32), pad : Bool) : String
     n = data.bytesize
     src = data.to_unsafe
     table = alphabet.to_unsafe
+    twelve = pairs.to_unsafe
     out_n = ((n + 2) // 3) * 4
     whole = n - n % 3
     String.new(out_n) do |dst|
       i = 0
       o = 0
+      # Six bytes read as one word and eight characters written as one,
+      # while eight bytes can be read: the rest of the answer is at least
+      # twelve characters then, so the word written fits. A byte and a
+      # character at a time was twice this loop's time, and `encode` a
+      # third slower than Crystal's, which reads a word as well. Words are
+      # little-endian on every target iyi builds for, which is what the
+      # byte order below and the pair table's order are written for.
+      while i &+ 8 <= n
+        w = (src + i).as(UInt64*).value
+        bits = (w & 0xFF_u64).unsafe_shl(40) | (w.unsafe_shr(8) & 0xFF_u64).unsafe_shl(32) |
+               (w.unsafe_shr(16) & 0xFF_u64).unsafe_shl(24) | (w.unsafe_shr(24) & 0xFF_u64).unsafe_shl(16) |
+               (w.unsafe_shr(32) & 0xFF_u64).unsafe_shl(8) | (w.unsafe_shr(40) & 0xFF_u64)
+        c01 = twelve[bits.unsafe_shr(36).unsafe_to_i32].unsafe_to_u64
+        c23 = twelve[(bits.unsafe_shr(24) & 0xFFF_u64).unsafe_to_i32].unsafe_to_u64
+        c45 = twelve[(bits.unsafe_shr(12) & 0xFFF_u64).unsafe_to_i32].unsafe_to_u64
+        c67 = twelve[(bits & 0xFFF_u64).unsafe_to_i32].unsafe_to_u64
+        (dst + o).as(UInt64*).value = c01 | c23.unsafe_shl(16) | c45.unsafe_shl(32) | c67.unsafe_shl(48)
+        o = o &+ 8
+        i = i &+ 6
+      end
       while i < whole
         triple = (src[i].to_i32 << 16) | (src[i + 1].to_i32 << 8) | src[i + 2].to_i32
         dst[o] = table[triple >> 18]
@@ -167,6 +193,11 @@ pub struct Base64
 
   private def self.minus_underscore : String
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+  end
+
+  protected def self.pairs_of(alphabet : String) : Array(Int32)
+    chars = alphabet.to_unsafe
+    Array.new(4096) { |k| chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8) }
   end
 
   protected def self.decode_values : Array(Int32)

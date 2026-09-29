@@ -24,6 +24,19 @@
 
 ### Changed
 
+- **`Base64.encode` reads six bytes and writes eight characters at a
+  time.** It went a byte and a character at a time, through a
+  64-character table: in a plain build five times a pass that only adds
+  the bytes up, and in crystal-metric's `Base64Encode` the benchmark iyi
+  was furthest behind Crystal on. The encoder reads a word, looks up two
+  characters per twelve bits, and writes eight characters as one word:
+  the loop takes half its time, and a 300 KB encode 93 us where it took
+  125, allocation included. `bench/std_base64_exercise.sh` checks every
+  byte value in both alphabets and every length to 40, bounds the cost at
+  two and a half byte sums in a plain build, and proves each check fails
+  with the word read in the wrong order, a pair written backwards, or the
+  byte loop put back.
+
 - **`iyi format` and `iyi fmt` name the formatter.** Both answered
   "unknown command or missing file", which read as "there is no
   formatter"; they now say it is `iyi tool format` and show the call with

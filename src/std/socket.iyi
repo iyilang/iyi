@@ -902,6 +902,14 @@ pub class IyiSocket
   # answer EOF rather than a reset is `closesocket`'s.
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
+      # The send side ends first (SD_SEND, 1): a FIN behind whatever was
+      # written. `closesocket` with a read still posted beneath a parked
+      # task - the kernel's until its completion is dequeued - reset the
+      # connection instead, and the peer lost what had been written before
+      # the close: "reset by the peer" where it should have read the answer
+      # and then the end. On a listener, or a socket never connected, the
+      # shutdown refuses and changes nothing.
+      LibWs2_32.shutdown(__sys_handle(fd), 1)
       LibWs2_32.closesocket(__sys_handle(fd))
     {% else %}
       __iyi_close(fd.to_i64)
@@ -1272,6 +1280,7 @@ pub class IyiSocket
       fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
       fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
       fun send(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun shutdown(s : UInt64, how : Int32) : Int32
       fun closesocket(s : UInt64) : Int32
       fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
       fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32) : Int32

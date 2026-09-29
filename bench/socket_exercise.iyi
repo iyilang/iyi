@@ -467,4 +467,37 @@ b_server.close
 raise "backlog: #{b_refused} of 220 connects to a backlog of 256 were refused" unless b_refused == 0
 puts "backlog: ok"
 
+# A connection closed by one task while another is parked reading it - a
+# server answering a request and closing while its next read waits. The
+# peer reads the answer, then the end. On Windows the close reset the
+# connection instead, the read posted beneath the parked one being still
+# the kernel's, and the peer's first read answered "reset by the peer":
+# the answer written before the close was lost.
+c_server = IyiSocket.listen("127.0.0.1", 0)
+c_client = IyiSocket.connect("127.0.0.1", c_server.local_port).or_panic
+c_conn = c_server.accept.or_panic
+c_parked = "not asked"
+group do |g|
+  g.spawn do
+    asked = c_conn.read(64).or_panic
+    c_conn.write("reply to #{asked}").or_panic
+    c_parked = c_conn.read(64).is_a?(Cancelled) ? "cancelled" : "answered"
+    0
+  end
+  g.spawn do
+    c_client.write("req").or_panic
+    sleep(50)
+    c_conn.close
+    0
+  end
+end
+c_heard = c_client.read(64)
+c_after = c_client.read(64)
+c_client.close
+c_server.close
+raise "closed_under_read: the peer read #{c_heard.inspect}, not the answer" unless c_heard == "reply to req"
+raise "closed_under_read: after the answer the peer read #{c_after.inspect}, not the end" unless c_after == ""
+raise "closed_under_read: the parked read #{c_parked}" unless c_parked == "cancelled"
+puts "closed_under_read: ok"
+
 puts "socket_exercise: all checks passed"

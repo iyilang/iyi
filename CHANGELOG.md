@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **On Windows, closing a socket another task is reading ends it
+  gracefully.** A server that answered a request and closed the
+  connection while its next read was parked reset the connection instead
+  of ending it: the read posted beneath the parked task was still the
+  kernel's when `closesocket` ran, and the peer's first read answered
+  "reset by the peer" - the answer written before the close was lost. The
+  send side is shut down first now, a FIN behind what was written.
+  `bench/socket_exercise.iyi` answers and closes under a parked read and
+  requires the peer to read the answer and then the end; the old module
+  handed it the reset.
+
 - **On Windows, a directory that will not take a file is refused
   before the work.** `-o`, `bind --mods` and `migrate --out` ask whether
   the directory can be written before they spend a compilation on it,

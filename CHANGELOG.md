@@ -124,11 +124,13 @@
   with the word read in the wrong order, a pair written backwards, or the
   byte loop put back.
 
-- **`iyi format` and `iyi fmt` name the formatter.** Both answered
-  "unknown command or missing file", which read as "there is no
-  formatter"; they now say it is `iyi tool format` and show the call with
-  the file given. `spec/compiler-cli/iyi-external-command_spec.cr` holds
-  both spellings.
+- **`iyi fmt` and `iyi format` format.** Both answered "unknown command
+  or missing file", which read as "there is no formatter"; they are
+  `iyi tool format` under the name other toolchains use now, switches
+  and all - `iyi fmt --check` makes a change the exit code - and `iyi
+  help fmt` prints the formatter's help. `iyi help` lists the verb.
+  `spec/compiler-cli/iyi-external-command_spec.cr` formats, checks and
+  re-checks a file through both spellings.
 
 - **`sorted` and `sorted_by` ask one comparison a step.** The merge
   only needs to know whether the right element is smaller, and `sorted`

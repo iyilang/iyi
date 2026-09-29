@@ -30,11 +30,15 @@ describe "`iyi-*` external commands" do
     File.same?(File.join(exec_dir, File.basename(IYI_BIN)), IYI_BIN).should be_true
   end
 
-  it "names the formatter's verb for format and fmt" do
+  it "formats with fmt and format, as tool format does" do
     %w(format fmt).each do |verb|
-      Process.capture_result(iyi, verb, "a.iyi")
-        .should(be_failure(1))
-        .error.should(contain("formatting is `iyi tool format`, as in `iyi tool format a.iyi`"))
+      with_tempfile("iyi-#{verb}.iyi") do |path|
+        File.write(path, "def f(a : Int32) : Int32\n        a\nend\n")
+        Process.capture_result(iyi, verb, "--check", path).should(be_failure(1))
+        Process.capture_result(iyi, verb, path).should(be_success)
+        File.read(path).should eq("def f(a : Int32) : Int32\n  a\nend\n")
+        Process.capture_result(iyi, verb, "--check", path).should(be_success)
+      end
     end
   end
 

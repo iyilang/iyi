@@ -43,6 +43,7 @@ module Iyi
         test                     run every *_test.iyi: exit 0 passes, anything else fails
         vet                      report unreachable code; findings are the exit code
         check                    type-check only; errors are the exit code, `-f json` makes them data
+        fmt                      format files in place (`tool format`); --check makes a change the exit code
         fix                      apply the compiler's did-you-mean edits until the file is clean
         bind                     put every shard under lib/ behind a boundary, as .iyimod files
         migrate                  write a Crystal tree as iyi modules, the namespace as the path
@@ -85,6 +86,16 @@ module Iyi
   # worked. A command that answers in another language is worse than one that
   # says where it went.
   CRYSTAL_ONLY = %w(spec eval)
+
+  # The verb other toolchains spell at the top level, `go fmt` and `zig fmt`
+  # and `crystal tool format`'s own users' `crystal format` habit: `tool
+  # format` under the name people type. It named `tool format` and exited 1,
+  # which answered a request to format with an instruction to retype it.
+  FORMAT_VERBS = %w(fmt format)
+
+  def self.format_options(options : Array(String)) : Array(String)
+    ["tool", "format"] + options[1..]
+  end
 
   # What this language has in place of a Crystal verb it does not carry.
   # The refusal used to end with "run it with the `crystal` binary in this
@@ -129,6 +140,8 @@ module Iyi
         case verb
         when .in?(DELEGATED)
           Iyi::Command.run([verb, "--help"])
+        when .in?(FORMAT_VERBS)
+          Iyi::Command.run(["tool", "format", "--help"])
         when .in?(CRYSTAL_ONLY)
           STDERR.puts other_language_verb_sentence(verb)
           exit 1
@@ -151,6 +164,8 @@ module Iyi
     when .in?(CRYSTAL_ONLY)
       STDERR.puts other_language_verb_sentence(command)
       exit 1
+    when .in?(FORMAT_VERBS)
+      Iyi::Command.run(format_options(options))
     when .in?(DELEGATED)
       Iyi::Command.run(options)
     else
@@ -164,11 +179,6 @@ module Iyi
         # answered "unknown command" before it could get there, so the
         # extension point was never reached from `iyi`.
         Iyi::Command.run(options)
-      elsif command.in?("format", "fmt")
-        # The verb other toolchains spell at the top level: named where it
-        # is, rather than "unknown", which read as "there is no formatter".
-        STDERR.puts "iyi: formatting is `iyi tool format`, as in `iyi tool format #{options[1]? || "file.iyi"}`."
-        exit 1
       else
         STDERR.puts "iyi: unknown command or missing file: #{command}"
         STDERR.puts "Run `iyi help` for what there is."

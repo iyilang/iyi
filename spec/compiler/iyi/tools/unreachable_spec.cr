@@ -453,10 +453,12 @@ describe "unreachable" do
       compiler.no_codegen = true
       result = compiler.compile(Compiler::Source.new(path, File.read(path)), "fake-no-build")
 
-      visitor = UnreachableVisitor.new
-      visitor.includes << path
-      visitor.excludes << "/"
-      tallies = visitor.process(result).to_h { |a_def, count| {a_def.name, count} }
+      # The file's own defs, read off the tallies rather than filtered by
+      # path: a root that excludes the prelude is a different spelling on
+      # every platform.
+      tallies = UnreachableVisitor.new.process(result)
+        .select { |a_def, _| a_def.location.try(&.filename) == path }
+        .to_h { |a_def, count| {a_def.name, count} }
       tallies.should eq({"used" => 1, "unused" => 0})
     end
   end

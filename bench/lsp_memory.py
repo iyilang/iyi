@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lsp_session import Client, children, process_binary, rss_mb, tree_mb  # noqa: E402
+from lsp_session import LAST, Client, children, process_binary, rss_mb, tree_mb, watchdog  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 # A module with imports and traits, so a compile is a real compile: this
@@ -75,7 +75,12 @@ FAILURES = []
 
 
 def step(name, ok, detail=""):
-    print(f"memory {'ok' if ok else 'FAIL'} {name}  {detail}")
+    # Flushed, and counted for the watchdog: on Windows the output is a
+    # pipe's buffer, and a session that stopped answering sat silent for
+    # seventy minutes until the runner cancelled the job, the steps that
+    # had passed still in the buffer.
+    print(f"memory {'ok' if ok else 'FAIL'} {name}  {detail}", flush=True)
+    LAST["step"], LAST["at"] = LAST["step"] + 1, time.monotonic()
     if not ok:
         FAILURES.append(name)
 
@@ -453,6 +458,9 @@ def binary_gone():
     client.proc.kill()
 
 def main():
+    # A step takes seconds; five minutes with none finished is a server
+    # that stopped answering, named and killed rather than waited on.
+    watchdog(300)
     direct = "--direct" in sys.argv
     argv = ("lsp", "--worker") if direct else ("lsp",)
     if direct:

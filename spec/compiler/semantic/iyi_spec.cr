@@ -278,6 +278,11 @@ describe "Semantic: iyi" do
       assert_error "x = 5_u32\nx + 1_u32", "`+` on UInt32 is in `std/int`"
       assert_error "x = 5_u64\nx << 3", "`<<` on UInt64 is in `std/int`"
       assert_error "x = 5_u64\nx.to_u32", "`to_u32` on UInt64 is in `std/int`"
+      # The wrapping and unchecked families are written from a template
+      # with a prefix, `def &{{ op.id }}` and `def unsafe_{{ ... }}`.
+      assert_error "x = 5_u32\nx &* 33_u32", "`&*` on UInt32 is in `std/int`"
+      assert_error "x = 5_u32\nx &+ 1_u32", "`&+` on UInt32 is in `std/int`"
+      assert_error "x = 5_u64\nx.unsafe_to_u32", "`unsafe_to_u32` on UInt64 is in `std/int`"
     end
 
     it "names puts value.inspect for p" do
@@ -310,9 +315,15 @@ describe "Semantic: iyi" do
       assert_error "throw \"bad\"", "`raise \"why\"` is the spelling here"
     end
 
-    it "says the prelude's size rule for a method a prelude type lacks" do
-      assert_error <<-CODE, "iyi's prelude has no `split` on String: it is small by rule"
+    it "names the std module that reopens the type with the method" do
+      # `std/text` reopens `String` rather than implementing a trait for
+      # it, so the trait walk did not see `gsub` or `split(String)`, and
+      # the reader was told the prelude is small by rule.
+      assert_error <<-CODE, "`std/text` adds `split` to String: `import std/text` puts it on this receiver."
         "a,b".split(",")
+        CODE
+      assert_error <<-CODE, "`std/regex` and `std/text` each add `gsub` to String, for different arguments"
+        "a,b".gsub("a", "b")
         CODE
     end
 

@@ -909,16 +909,36 @@ class Iyi::Call
       path = File.join(entry, "std", "int.iyi")
       next unless File.file?(path)
       text = File.read(path)
-      named = text.includes?("def #{name}(") || text.includes?("def #{name} ") ||
-              text.includes?("\"#{name}\"") ||
-              text.each_line.any? do |line|
-                line.includes?("%w(") && line.split("%w(", 2)[1].split(')', 2)[0].split(' ').includes?(name)
-              end
-      return nil unless named
+      return nil unless iyi_std_int_names?(text, name)
       return "`#{name}` on #{owner.instance_type} is in `std/int`, the module that makes " \
              "the whole integer tower usable: `import std/int`."
     end
     nil
+  end
+
+  # Whether std/int's *text* declares *name*: a `def`, an operator in a
+  # `%w(...)` list, or a quoted conversion name - and the two families
+  # written from those by a prefix in the template, `def &{{ op.id }}` for
+  # the wrapping `&+ &- &*` and `def unsafe_{{ conv[0].id }}` for the
+  # unchecked conversions. Without the prefixes, `x &* 33_u32` on a
+  # `UInt32` - a checksum's first line - was told the prelude is small by
+  # rule, and a port concluded `UInt32` had no methods at all.
+  private def iyi_std_int_names?(text : String, name : String) : Bool
+    return true if text.includes?("def #{name}(") || text.includes?("def #{name} ") || text.includes?("\"#{name}\"")
+    return true if iyi_std_int_listed?(text, name)
+    if name.size > 1 && name.starts_with?('&') && text.includes?("def &{{")
+      return true if iyi_std_int_listed?(text, name[1..])
+    end
+    if name.starts_with?("unsafe_") && text.includes?("def unsafe_{{")
+      return true if text.includes?("\"#{name.lchop("unsafe_")}\"")
+    end
+    false
+  end
+
+  private def iyi_std_int_listed?(text : String, name : String) : Bool
+    text.each_line.any? do |line|
+      line.includes?("%w(") && line.split("%w(", 2)[1].split(')', 2)[0].split(' ').includes?(name)
+    end
   end
 
   # The `std/<module>` that would put `name` on this receiver, and how.
@@ -938,22 +958,66 @@ class Iyi::Call
     bare = owner.instance_type.to_s.split('(').first
     return nil if bare.empty?
 
+    reopening = [] of String
     program.iyi_path.entries.each do |entry|
       dir = File.join(entry, "std")
       next unless Dir.exists?(dir)
-      Dir.each_child(dir) do |file|
-        next unless file.ends_with?(".iyi")
+      # Sorted, so the modules are named in the same order on every machine.
+      files = Dir.children(dir).select(&.ends_with?(".iyi")).sort!
+      files.each do |file|
         path = File.join(dir, file)
         next unless File.file?(path)
         text = File.read(path)
-        next unless implemented = iyi_std_trait_with_method(text, name, bare)
         written = "std/#{file.rchop(".iyi")}"
-        return "`#{written}` implements `#{implemented}` for #{bare} and that is where " \
-               "`#{name}` is: `import #{written}` puts it on this receiver " \
-               "(SPEC.md R-3)."
+        if implemented = iyi_std_trait_with_method(text, name, bare)
+          return "`#{written}` implements `#{implemented}` for #{bare} and that is where " \
+                 "`#{name}` is: `import #{written}` puts it on this receiver " \
+                 "(SPEC.md R-3)."
+        end
+        reopening << written if iyi_std_reopen_with_method?(text, name, bare) && !reopening.includes?(written)
       end
+      break unless reopening.empty?
     end
-    nil
+    case reopening.size
+    when 0
+      nil
+    when 1
+      "`#{reopening[0]}` adds `#{name}` to #{bare}: `import #{reopening[0]}` puts it on this receiver."
+    else
+      # `gsub` on String is `std/text`'s for a string or a character and
+      # `std/regex`'s for a pattern: both are named, since which one fits
+      # is the arguments' question.
+      named = reopening[0..-2].map { |m| "`#{m}`" }.join(", ") + " and `#{reopening[-1]}`"
+      "#{named} each add `#{name}` to #{bare}, for different arguments: `import` the one whose `#{name}` takes these."
+    end
+  end
+
+  # Whether *text* reopens *bare* at the top level - `class ::String`,
+  # `struct ::Char`, `class ::Array(T)` - with a `def name` in the
+  # reopening: how `std/text` gives `String` its `gsub`. The trait walk
+  # above cannot see it, and `"s".gsub(...)` without the import was told
+  # the prelude is small by rule.
+  private def iyi_std_reopen_with_method?(text : String, name : String, bare : String) : Bool
+    inside = false
+    text.each_line do |line|
+      if line.starts_with?("class ::") || line.starts_with?("struct ::")
+        reopened = line.split("::", 2)[1].split('(').first.split(' ').first.strip
+        inside = reopened == bare
+        next
+      end
+      if line.starts_with?("end")
+        inside = false
+        next
+      end
+      next unless inside
+      stripped = line.lstrip
+      next unless stripped.starts_with?("def ")
+      rest = stripped["def ".size..]
+      next unless rest.starts_with?(name)
+      after = rest[name.size]?
+      return true if after.nil? || !(after.alphanumeric? || after == '_' || after == '?' || after == '!' || after == '=')
+    end
+    false
   end
 
   # The trait in *text* that declares `def name` and is implemented for

@@ -35,6 +35,20 @@
 
 ### Changed
 
+- **A method std adds to a prelude type names its module, the integer
+  tower's wrapping arithmetic included.** `x &* 33_u32` - a checksum's
+  first line - was told the prelude is small by rule, and crystal-metric's
+  port concluded `UInt32` had no methods and rewrote its checksum in
+  `UInt64`: `std/int` writes `&+ &- &*` and `unsafe_to_*` from templates
+  (`def &{{ op.id }}`) the hint did not read. And `"a,b".gsub(...)` or
+  `.split(",")` got the same sentence, because `std/text` reopens `String`
+  rather than implementing a trait for it. The error now names `std/int`
+  for the wrapping and unchecked families, and the module that reopens the
+  type for a reopened method - every such module, when more than one adds
+  the name (`std/regex` and `std/text` both add `gsub`, for different
+  arguments). `spec/compiler/semantic/iyi_spec.cr` holds both; they failed
+  against the old hint.
+
 - **A message through a channel allocates nothing.** Every park took a
   node from the heap - a receiver's and, where the value's next owner had
   not parked yet, a sender's - and the channel's buffer, an array shifted

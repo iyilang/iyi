@@ -192,6 +192,7 @@ pub class UdpSocket
       # answered four bytes everywhere else, so a program whose peer sent
       # more than it asked for died on one platform only.
       return capacity if UdpSocket.__is_msgsize(count)
+      raise "cannot receive from UDP socket: it has no address yet - bind it, or send from it first" if UdpSocket.__is_unbound(count)
       raise "cannot receive from UDP socket" unless UdpSocket.__is_eagain(count)
       {% if flag?(:win32) %}
         # Windows' readable-wait is destructive on a datagram socket: the
@@ -219,7 +220,7 @@ pub class UdpSocket
       next if count < 0_i64 && UdpSocket.__is_eintr(count)
       return count.to_i32 if count >= 0_i64
       return capacity if UdpSocket.__is_msgsize(count)
-      return nil if UdpSocket.__is_eagain(count)
+      return nil if UdpSocket.__is_eagain(count) || UdpSocket.__is_unbound(count)
       raise "cannot receive from UDP socket"
     end
   end
@@ -331,6 +332,7 @@ pub class UdpSocket
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    return 0 if res < 0 && UdpSocket.__unbound_now?
     raise "cannot get local port" if res < 0
 
     (addr[2].to_i32 << 8) | addr[3].to_i32
@@ -553,6 +555,14 @@ pub class UdpSocket
       res < 0_i64 && LibC.__error.value == 4
     end
 
+    def self.__is_unbound(res : Int64) : Bool
+      false
+    end
+
+    def self.__unbound_now? : Bool
+      false
+    end
+
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
     def self.__is_msgsize(res : Int64) : Bool
@@ -719,6 +729,14 @@ pub class UdpSocket
 
     def self.__is_eintr(res : Int64) : Bool
       res == -4_i64 # -EINTR on Linux
+    end
+
+    def self.__is_unbound(res : Int64) : Bool
+      false
+    end
+
+    def self.__unbound_now? : Bool
+      false
     end
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
@@ -1005,6 +1023,17 @@ pub class UdpSocket
       false
     end
 
+    # WSAEINVAL (10022): Winsock's answer to a receive, or an address asked,
+    # on a socket that has none yet - one `client` made and nothing sent
+    # from. POSIX has nothing queued there and port 0; Windows panicked.
+    def self.__is_unbound(res : Int64) : Bool
+      res == -10022_i64
+    end
+
+    def self.__unbound_now? : Bool
+      LibWs2_32.WSAGetLastError == 10022
+    end
+
     # A datagram that did not fit is an error here where it is a silent
     # truncation everywhere else: WSAEMSGSIZE (10040), with the buffer
     # already filled, which is why the caller answers its capacity.
@@ -1071,6 +1100,14 @@ pub class UdpSocket
     end
 
     def self.__is_eintr(res : Int64) : Bool
+      false
+    end
+
+    def self.__is_unbound(res : Int64) : Bool
+      false
+    end
+
+    def self.__unbound_now? : Bool
       false
     end
 

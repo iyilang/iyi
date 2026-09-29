@@ -564,6 +564,14 @@
 
 ### Fixed
 
+- **On Windows, a UDP client that has sent nothing answers like one.**
+  Such a socket has no address yet, and Winsock refuses a receive and
+  `getsockname` on it with WSAEINVAL, where POSIX answers nothing queued
+  and port 0: `receive_from?` and `local_port` panicked on Windows alone.
+  They answer nil and 0 now, and a receive that would wait says the
+  socket has no address yet. `bench/std_udp_exercise.iyi` asks both of a
+  fresh client; the old module panicked at the first.
+
 - **On Windows, `File.readable?`, `writable?` and `executable?` answer
   what Windows would allow.** They read a mode made up from the
   attributes - 0o644 or 0o755 and the read-only bit - and an ACL is not

@@ -157,11 +157,21 @@ cost_proof "a CRC-32 a bit at a time" "crc cost" \
     end
     while i + 8 <= n
       one'
-cost_proof "an Adler-32 reduced every byte" "adler cost" \
-  '        a = a + p[i].to_u32
+# A divide is a few cycles on arm64: there Adler-32 reduced every byte stays
+# inside even two and a half byte sums, and the time cannot tell the two
+# shapes apart. The check runs everywhere; its proof where it can fail.
+case "$(uname -m)" in
+  arm64 | aarch64)
+    echo "  an Adler-32 reduced every byte: not proven here, because this processor's divide is too cheap for its time to show"
+    ;;
+  *)
+    cost_proof "an Adler-32 reduced every byte" "adler cost" \
+      '        a = a + p[i].to_u32
         b = b + a' \
-  '        a = (a + p[i].to_u32) % 65521_u32
+      '        a = (a + p[i].to_u32) % 65521_u32
         b = (b + a) % 65521_u32'
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -374,6 +374,19 @@
 
 ### Fixed
 
+- **On Windows, Ctrl+Z then Enter ends a console's input, and a long line
+  keeps its characters.** A program reading to the end of its input from
+  a console could be ended from the keyboard only by Ctrl+C: Ctrl+Z at the
+  start of a line, the end of input to the C runtime, Python, Go and
+  Rust, was read as a line holding 0x1A. And a line longer than one read
+  is read in pieces, each converted alone, so a character whose surrogate
+  pair a piece split - past the 1,364th of a line - came out as two
+  U+FFFD. The high half is carried to the next piece now. The two console
+  reads, the prelude's and the stdin reader thread's, are one.
+  `bench/io_exercise.sh` gives a program a console of its own from Python
+  and types into it; the old prelude read 1,370 bytes for 1,368 and never
+  saw the end.
+
 - **On Windows, a listener's backlog is the one it asked for.** Winsock
   caps a backlog at 200 unless it is asked as SOMAXCONN_HINT, and turns
   the next connect away as refused where Linux holds it until an accept:
@@ -11847,7 +11860,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,565-line library and nothing else. Every other
+  written against iyi's own 18,590-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

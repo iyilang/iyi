@@ -704,10 +704,49 @@ end
     def self.read(handle : Void*, buffer : Void*, count : UInt64) : Int64
       room = count // 3_u64
       room = 1_u64 if room == 0_u64
-      wide = Pointer(UInt16).malloc(room + 1_u64)
-      read = uninitialized Int32
-      return 0_i64 if LibC.ReadConsoleW(handle, wide.as(Void*), room.to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+      read_into(handle, buffer, count, Pointer(UInt16).malloc(room + 1_u64), room)
+    end
+
+    # A high surrogate a read ended on, and whether the next read starts a
+    # line: the console is one stream, read by whichever of `read` and
+    # the stdin reader's thread asks, never both at once.
+    @@carried : UInt16 = 0_u16
+    @@line_start = true
+
+    # The read itself, into *wide*, which has room for *capacity* units
+    # and the terminator. Two things a console says that bytes do not:
+    #
+    # Ctrl+Z at the start of a line, then Enter, is the end of the input -
+    # the convention the C runtime, Python, Go and Rust keep. It was read
+    # as a line holding byte 0x1A, and a program reading to the end of its
+    # input could be ended from the keyboard only by Ctrl+C.
+    #
+    # A line longer than a read is read in pieces, and a piece can end
+    # between the two halves of a surrogate pair. Each piece was converted
+    # alone, and the character past the 1,364th of a line came out as two
+    # U+FFFD. The high half is carried to the front of the next read.
+    def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
+      room = count // 3_u64
+      room = 1_u64 if room == 0_u64
+      room = capacity if room > capacity
+      start = 0
+      if @@carried != 0_u16 && room > 1_u64
+        wide[0] = @@carried
+        @@carried = 0_u16
+        start = 1
+      end
+      read = 0_i32
+      if LibC.ReadConsoleW(handle, (wide + start).as(Void*), (room - start.to_u64).to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+        return 0_i64
+      end
+      read = read + start
       return 0_i64 if read <= 0
+      return 0_i64 if @@line_start && wide[0] == 26_u16
+      if read > 1 && wide[read - 1] >= 0xD800_u16 && wide[read - 1] <= 0xDBFF_u16
+        read = read - 1
+        @@carried = wide[read]
+      end
+      @@line_start = wide[read - 1] == 10_u16
       wide[read] = 0_u16
       size = __iyi_utf8_size_from_wide(wide)
       return 0_i64 if size <= 1

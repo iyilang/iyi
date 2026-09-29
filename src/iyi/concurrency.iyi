@@ -2264,21 +2264,7 @@ end
     # `IyiConsole.read`'s read, with the wide buffer this page's rather
     # than the heap's.
     def self.read_console(handle : Void*, buffer : Void*, count : UInt64) : Int64
-      room = count // 3_u64
-      room = 1_u64 if room == 0_u64
-      capacity = (PAGE - WIDE) // 2_u64 - 1_u64
-      room = capacity if room > capacity
-      wide = Pointer(UInt16).new(@@page + WIDE)
-      read = 0_i32
-      return 0_i64 if LibC.ReadConsoleW(handle, wide.as(Void*), room.to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
-      return 0_i64 if read <= 0
-      wide[read] = 0_u16
-      size = __iyi_utf8_size_from_wide(wide)
-      return 0_i64 if size <= 1
-      bytes = size - 1
-      return 0_i64 if bytes.to_u64 > count
-      __iyi_utf8_bytes_from_wide(wide, buffer.as(UInt8*), size)
-      bytes.to_i64
+      IyiConsole.read_into(handle, buffer, count, Pointer(UInt16).new(@@page + WIDE), (PAGE - WIDE) // 2_u64 - 1_u64)
     end
   end
 {% end %}

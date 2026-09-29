@@ -71,6 +71,16 @@ say "a second init is refused by name" \
   "$([ $rc -ne 0 ] && grep -q 'already has `iyi.mod`' again.txt; echo $?)"
 say "and changes not one byte" "$([ "$before" = "$after" ]; echo $?)"
 
+# The next step, as lines any shell takes: a `cd` of its own, quoted
+# when the directory has a space, and none into the directory it is in.
+# It was one line joined with `&&`, which Windows PowerShell 5.1 refuses,
+# and the directory went unquoted.
+"$IYI" init example.com/me/spaced "my app" > spaced.txt 2>&1
+say "the next step is a cd of its own, quoted, and a run" \
+  "$(grep -qx 'cd "my app"' spaced.txt && grep -q '^iyi run spaced.iyi' spaced.txt && ! grep -q '&&' spaced.txt; echo $?)"
+mkdir -p inplace && (cd inplace && "$IYI" init example.com/me/inplace .) > inplace.txt 2>&1
+say "and no cd into the directory it is in" "$([ -f inplace/inplace.iyi ] && ! grep -q "^cd " inplace.txt; echo $?)"
+
 # ── the name, the current directory, and the refusals ────────────────────
 mkdir -p here && (cd here && "$IYI" init kemal) > here.txt 2>&1
 say "init kemal writes iyi.mod and kemal.iyi into the current directory" \

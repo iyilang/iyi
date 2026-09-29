@@ -564,6 +564,15 @@
 
 ### Fixed
 
+- **`iyi init`'s next step pastes into any shell.** It printed
+  `cd my app ğüş && iyi run hello.iyi`: one line joined with `&&`, which
+  Windows PowerShell 5.1 refuses as "not a valid statement separator", and
+  a directory with a space left unquoted, which no shell reads as one.
+  It is two lines now, the directory quoted when it has a space, and no
+  `cd` at all into the directory `init` was run in - `init x .` printed
+  `cd . &&`. `bench/init_project.sh` checks both; the old compiler fails
+  both.
+
 - **A `raise` inside `{% if %}` names its own line.** A macro written in
   place - a `{% if %}` or `{% for %}` in a file - is expanded where it
   stands, and `__LINE__` inside it, which is what `raise` reads, named the

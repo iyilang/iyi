@@ -199,7 +199,7 @@ refuses() { # refuses <label> <name> <phrase> <expression>
     return
   fi
   if ! grep -q "$phrase" "$WORK/$name.out"; then
-    echo "  $label: refused, but not with '$phrase'"
+    echo "  $label: refused, but not with '$phrase' (exit $code, $(wc -c < "$WORK/$name.out") bytes said)"
     tail -2 "$WORK/$name.out"
     status=1
     return

@@ -1038,6 +1038,42 @@ def main():
     c.send("textDocument/didClose",
            {"textDocument": {"uri": shadow_uri}}, wait=False)
 
+    # 18h. A rename onto a name a module that imports the def has of its
+    #      own is refused too. A module's own def beats an imported one
+    #      (II.3 rule 2), so `shout` renamed to `yell` in `loud/lib` moved
+    #      `import loud/lib::{shout}` to `{yell}` in `loud/app`, and app's
+    #      `puts shout("a")` became `puts yell("a")` - app's own `yell` -
+    #      printing "a!" where it had printed "A", with nothing refused.
+    #      The importer is a file nobody opened; a free name still renames
+    #      both files.
+    loud = os.path.join(work, "loud")
+    os.makedirs(loud)
+    loud_lib = os.path.join(loud, "lib.iyi")
+    loud_lib_text = "module loud/lib\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+    with open(loud_lib, "w", newline="") as f:
+        f.write(loud_lib_text)
+    with open(os.path.join(loud, "app.iyi"), "w", newline="") as f:
+        f.write("module loud/app\n\nimport loud/lib::{shout}\n\n"
+                "def yell(s : String) : String\n  s + \"!\"\nend\n\n"
+                "puts shout(\"a\")\nputs yell(\"b\")\n")
+    loud_uri = file_uri(loud_lib)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": loud_uri, "languageId": "iyi",
+                             "version": 1, "text": loud_lib_text}}, wait=False)
+    c.diagnostics(loud_uri)
+    at_loud = {"textDocument": {"uri": loud_uri},
+               "position": {"line": 2, "character": 9}}
+    onto_app = c.send("textDocument/rename", dict(at_loud, newName="yell")).get("error") or {}
+    free = (c.send("textDocument/rename", dict(at_loud, newName="holler")).get("result") or {}).get("changes", {})
+    free_files = sorted(u.rsplit("/", 1)[-1] for u in free)
+    step("18h", "a rename onto a name an importer has is refused",
+         onto_app.get("code") == -32803 and "loud/app" in onto_app.get("message", "") and
+         free_files == ["app.iyi", "lib.iyi"] and sum(len(e) for e in free.values()) == 3,
+         f"onto yell {onto_app.get('code')} {onto_app.get('message', '')[:80]!r}, "
+         f"onto holler {sum(len(e) for e in free.values())} edit(s) in {free_files}")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": loud_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

@@ -685,6 +685,19 @@
   renames onto a sibling def and onto `puts`, both refused, and onto a
   free name, carried out; the old server carries out all three.
 
+- **A rename onto a name a module importing the def has is refused too.**
+  The check above asked only the def's own module. A module's own def
+  beats an imported one (SPEC.md II.3 rule 2), so renaming `loud/lib`'s
+  `shout` to `yell` moved `loud/app`'s `import loud/lib::{shout}` to
+  `{yell}`, and app's `puts shout("a")`, now `puts yell("a")`, called
+  app's own `yell` and printed "a!" where it had printed "A". Every
+  importer the rename compiles is asked now whether it brings the def in
+  unqualified and already has the new name, of its own or from another
+  import, and the rename is refused naming that module. Step 18h of
+  `bench/lsp_session.py` renames onto an importer's name, refused, and
+  onto a free name, which edits both files; the old server carries out
+  both.
+
 - **On Windows, `Process.run(chdir:)` into a long directory says why it
   cannot.** Windows refuses a working directory past 254 characters while
   long paths are off - measured, 254 ran and 255 were refused - and

@@ -159,6 +159,32 @@ module Iyi::Lsp
       !!program && !program.lookup_defs(name).empty?
     end
 
+    # The file of a module in this compile that brings an adopted def in
+    # unqualified, by name or with `::*`, and already has *name* where the
+    # renamed import would land: a def of its own, or another import's.
+    # Its own beats the import (SPEC.md II.3 rule 2), so the rename would
+    # rebind that module's calls to its own def with nothing to say so -
+    # `puts shout("a")` printing "a!" where it printed "A" - and a second
+    # import of *name* makes every call ambiguous. Nil when no module here
+    # is taken; `taken?` answers for the defs' own scope.
+    def importer_taking(name : String) : String?
+      program = @program
+      return nil unless program
+      return nil if @target_names.includes?(name)
+      units = @target_owners.map(&.instance_type)
+      scopes = [program.as(Type)]
+      while scope = scopes.pop?
+        scope.types?.try &.each_value { |nested| scopes << nested }
+        used = scope.using_modules?
+        next unless used
+        next unless used.any? { |imported| units.any?(&.same?(imported.type)) && @target_names.any? { |old| imported.exports?(old) } }
+        if !scope.lookup_defs(name).empty? || used.any?(&.exports?(name))
+          return scope.as?(ModuleType).try(&.iyi_unit_file) || scope.to_s
+        end
+      end
+      nil
+    end
+
     # The filename half of the key, in one spelling. An imported module's
     # file is `File.join(root, "calc/lexer.iyi")`, and `File.join` spells
     # the joint the platform's way and leaves the module path's own `/`

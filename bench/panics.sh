@@ -346,7 +346,9 @@ EOF
 run "$work/site.iyi"
 [ "$code" = 1 ] || fail "std panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: slice size must be positive" || fail "std panic missing message: $out"
-echo "$out" | grep -q "at.*src/std" && fail "a std panic named a library line: $out"
+# Either separator: a Windows build names the file `...\src\std/x.iyi`,
+# and a pattern with `/` alone let a library line through there unseen.
+echo "$out" | grep -qE 'at.*src[/\\]std' && fail "a std panic named a library line: $out"
 cat > "$work/index.iyi" <<'EOF'
 module index
 
@@ -362,7 +364,7 @@ EOF
 run "$work/index.iyi"
 [ "$code" = 1 ] || fail "prelude panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
-echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
+echo "$out" | grep -qE 'at.*src[/\\]iyi' && fail "a prelude panic named a library line: $out"
 # On Darwin, the panic raises a backtrace through libSystem's backtrace and
 # points at the program rather than the library. Windows captures its
 # callers too (`RtlCaptureStackBackTrace`) but prints none without a

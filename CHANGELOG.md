@@ -374,6 +374,16 @@
 
 ### Fixed
 
+- **On Windows, a panic the library raises names no library line.** The
+  rule is that a panic in the program names its line and one the library
+  raises names none, since the library's line is not where the bug is.
+  `raise` recognised the library by `/src/std/` and `/src/iyi/`, and a
+  Windows build names those files `...\src\std/x.iyi`, so every such
+  panic there printed the library's line - often the line of a platform
+  arm rather than of the `raise`. And `bench/panics.sh`, which checks the
+  rule, looked for the same `/` and could not see it fail on Windows; it
+  takes either separator now, and fails the old prelude there.
+
 - **On Windows, the language server compiles an importer against a
   nested module's unsaved buffer.** The resolver spells a module below
   the root with the module path's own `/` inside a native root,
@@ -11900,7 +11910,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,603-line library and nothing else. Every other
+  written against iyi's own 18,618-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

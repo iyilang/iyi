@@ -421,20 +421,211 @@ pub struct Math
     2.0 * z * s
   end
 
-  def self.log(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value || value < 0.0
-    return 0.0 - (1.0 / 0.0) if value == 0.0
-    return 1.0 / 0.0 if value == 2.0 * value
-    return 0.0 if value == 1.0
+  # log as glibc computes it - Arm's optimized-routines log, glibc's since
+  # 2.28 - under 0.52 ulp: near 1 a degree-12 polynomial in x - 1 with the
+  # square taken in two parts; elsewhere x = 2^k z, z by a 128-entry table
+  # to within 1/256 of a point c whose log is known to 2^-97, and a
+  # degree-6 polynomial for the rest. The table's second pair is c split in
+  # two, so that z - c is exact without a fused multiply-add - glibc's
+  # build without FMA, unfused on every target, as `exp`'s. The series in
+  # (m - 1)/(m + 1) this replaces answered differently from glibc's for
+  # about one argument in a hundred. Arm's notice is at `exp`; the tables
+  # and coefficients are `math/log_data.c`'s for N = 128, orders 6 and 12.
+  private LOG_LN2HI =    0.69314718055989033
+  private LOG_LN2LO = 5.4979230187083712e-14
+  private LOG_A0    =   -0.50000000000000011
+  private LOG_A1    =    0.33333333331825593
+  private LOG_A2    =   -0.24999999996229549
+  private LOG_A3    =    0.20000304511814496
+  private LOG_A4    =   -0.16667054827627667
+  private LOG_B0    =                   -0.5
+  private LOG_B1    =     0.3333333333333352
+  private LOG_B2    =   -0.24999999999998432
+  private LOG_B3    =    0.19999999999320328
+  private LOG_B4    =   -0.16666666669929706
+  private LOG_B5    =    0.14285715076560868
+  private LOG_B6    =   -0.12499997863982555
+  private LOG_B7    =    0.11110712032936046
+  private LOG_B8    =   -0.10000486757818193
+  private LOG_B9    =   0.091819940061954666
+  private LOG_B10   =  -0.083283630622893415
 
-    m, k = frexp(value)
-    if m < SQRT2_INV
-      m = m * 2.0
-      k = k - 1
+  # For each of 128 subintervals of z: the bits of 1/c and of log(c), and
+  # of c as a high and a low part.
+  private LOG_TAB = [
+    0x3ff734f0c3e0de9f_u64, 0xbfd7cc7f79e69000_u64, 0x3fe61000014fb66b_u64, 0x3c7e026c91425b3c_u64,
+    0x3ff713786a2ce91f_u64, 0xbfd76feec20d0000_u64, 0x3fe63000034db495_u64, 0x3c8dbfea48005d41_u64,
+    0x3ff6f26008fab5a0_u64, 0xbfd713e31351e000_u64, 0x3fe650000d94d478_u64, 0x3c8e7fa786d6a5b7_u64,
+    0x3ff6d1a61f138c7d_u64, 0xbfd6b85b38287800_u64, 0x3fe67000074e6fad_u64, 0x3c61fcea6b54254c_u64,
+    0x3ff6b1490bc5b4d1_u64, 0xbfd65d5590807800_u64, 0x3fe68ffffedf0fae_u64, 0xbc7c7e274c590efd_u64,
+    0x3ff69147332f0cba_u64, 0xbfd602d076180000_u64, 0x3fe6b0000763c5bc_u64, 0xbc8ac16848dcda01_u64,
+    0x3ff6719f18224223_u64, 0xbfd5a8ca86909000_u64, 0x3fe6d0001e5cc1f6_u64, 0x3c833f1c9d499311_u64,
+    0x3ff6524f99a51ed9_u64, 0xbfd54f4356035000_u64, 0x3fe6efffeb05f63e_u64, 0xbc7e80041ae22d53_u64,
+    0x3ff63356aa8f24c4_u64, 0xbfd4f637c36b4000_u64, 0x3fe710000e869780_u64, 0x3c7bff6671097952_u64,
+    0x3ff614b36b9ddc14_u64, 0xbfd49da7fda85000_u64, 0x3fe72ffffc67e912_u64, 0x3c8c00e226bd8724_u64,
+    0x3ff5f66452c65c4c_u64, 0xbfd445923989a800_u64, 0x3fe74fffdf81116a_u64, 0xbc6e02916ef101d2_u64,
+    0x3ff5d867b5912c4f_u64, 0xbfd3edf439b0b800_u64, 0x3fe770000f679c90_u64, 0xbc67fc71cd549c74_u64,
+    0x3ff5babccb5b90de_u64, 0xbfd396ce448f7000_u64, 0x3fe78ffffa7ec835_u64, 0x3c81bec19ef50483_u64,
+    0x3ff59d61f2d91a78_u64, 0xbfd3401e17bda000_u64, 0x3fe7affffe20c2e6_u64, 0xbc707e1729cc6465_u64,
+    0x3ff5805612465687_u64, 0xbfd2e9e2ef468000_u64, 0x3fe7cfffed3fc900_u64, 0xbc808072087b8b1c_u64,
+    0x3ff56397cee76bd3_u64, 0xbfd2941b3830e000_u64, 0x3fe7efffe9261a76_u64, 0x3c8dc0286d9df9ae_u64,
+    0x3ff54725e2a77f93_u64, 0xbfd23ec58cda8800_u64, 0x3fe81000049ca3e8_u64, 0x3c897fd251e54c33_u64,
+    0x3ff52aff42064583_u64, 0xbfd1e9e129279000_u64, 0x3fe8300017932c8f_u64, 0xbc8afee9b630f381_u64,
+    0x3ff50f22dbb2bddf_u64, 0xbfd1956d2b48f800_u64, 0x3fe850000633739c_u64, 0x3c89bfbf6b6535bc_u64,
+    0x3ff4f38f4734ded7_u64, 0xbfd141679ab9f800_u64, 0x3fe87000204289c6_u64, 0xbc8bbf65f3117b75_u64,
+    0x3ff4d843cfde2840_u64, 0xbfd0edd094ef9800_u64, 0x3fe88fffebf57904_u64, 0xbc89006ea23dcb57_u64,
+    0x3ff4bd3ec078a3c8_u64, 0xbfd09aa518db1000_u64, 0x3fe8b00022bc04df_u64, 0xbc7d00df38e04b0a_u64,
+    0x3ff4a27fc3e0258a_u64, 0xbfd047e65263b800_u64, 0x3fe8cfffe50c1b8a_u64, 0xbc88007146ff9f05_u64,
+    0x3ff4880524d48434_u64, 0xbfcfeb224586f000_u64, 0x3fe8effffc918e43_u64, 0x3c83817bd07a7038_u64,
+    0x3ff46dce1b192d0b_u64, 0xbfcf474a7517b000_u64, 0x3fe910001efa5fc7_u64, 0x3c893e9176dfb403_u64,
+    0x3ff453d9d3391854_u64, 0xbfcea4443d103000_u64, 0x3fe9300013467bb9_u64, 0x3c7f804e4b980276_u64,
+    0x3ff43a2744b4845a_u64, 0xbfce020d44e9b000_u64, 0x3fe94fffe6ee076f_u64, 0xbc8f7ef0d9ff622e_u64,
+    0x3ff420b54115f8fb_u64, 0xbfcd60a22977f000_u64, 0x3fe96fffde3c12d1_u64, 0xbc7082aa962638ba_u64,
+    0x3ff40782da3ef4b1_u64, 0xbfccc00104959000_u64, 0x3fe98ffff4458a0d_u64, 0xbc87801b9164a8ef_u64,
+    0x3ff3ee8f5d57fe8f_u64, 0xbfcc202956891000_u64, 0x3fe9afffdd982e3e_u64, 0xbc8740e08a5a9337_u64,
+    0x3ff3d5d9a00b4ce9_u64, 0xbfcb81178d811000_u64, 0x3fe9cfffed49fb66_u64, 0x3c3fce08c19be000_u64,
+    0x3ff3bd60c010c12b_u64, 0xbfcae2c9ccd3d000_u64, 0x3fe9f00020f19c51_u64, 0xbc8a3faa27885b0a_u64,
+    0x3ff3a5242b75dab8_u64, 0xbfca45402e129000_u64, 0x3fea10001145b006_u64, 0x3c74ff489958da56_u64,
+    0x3ff38d22cd9fd002_u64, 0xbfc9a877681df000_u64, 0x3fea300007bbf6fa_u64, 0x3c8cbeab8a2b6d18_u64,
+    0x3ff3755bc5847a1c_u64, 0xbfc90c6d69483000_u64, 0x3fea500010971d79_u64, 0x3c88fecadd787930_u64,
+    0x3ff35dce49ad36e2_u64, 0xbfc87120a645c000_u64, 0x3fea70001df52e48_u64, 0xbc8f41763dd8abdb_u64,
+    0x3ff34679984dd440_u64, 0xbfc7d68fb4143000_u64, 0x3fea90001c593352_u64, 0xbc8ebf0284c27612_u64,
+    0x3ff32f5cceffcb24_u64, 0xbfc73cb83c627000_u64, 0x3feab0002a4f3e4b_u64, 0xbc69fd043cff3f5f_u64,
+    0x3ff3187775a10d49_u64, 0xbfc6a39a9b376000_u64, 0x3feacfffd7ae1ed1_u64, 0xbc823ee7129070b4_u64,
+    0x3ff301c8373e3990_u64, 0xbfc60b3154b7a000_u64, 0x3feaefffee510478_u64, 0x3c6a063ee00edea3_u64,
+    0x3ff2eb4ebb95f841_u64, 0xbfc5737d76243000_u64, 0x3feb0fffdb650d5b_u64, 0x3c5a06c8381f0ab9_u64,
+    0x3ff2d50a0219a9d1_u64, 0xbfc4dc7b8fc23000_u64, 0x3feb2ffffeaaca57_u64, 0xbc79011e74233c1d_u64,
+    0x3ff2bef9a8b7fd2a_u64, 0xbfc4462c51d20000_u64, 0x3feb4fffd995badc_u64, 0xbc79ff1068862a9f_u64,
+    0x3ff2a91c7a0c1bab_u64, 0xbfc3b08abc830000_u64, 0x3feb7000249e659c_u64, 0x3c8aff45d0864f3e_u64,
+    0x3ff293726014b530_u64, 0xbfc31b996b490000_u64, 0x3feb8ffff9871640_u64, 0x3c7cfe7796c2c3f9_u64,
+    0x3ff27dfa5757a1f5_u64, 0xbfc2875490a44000_u64, 0x3febafffd204cb4f_u64, 0xbc63ff27eef22bc4_u64,
+    0x3ff268b39b1d3bbf_u64, 0xbfc1f3b9f879a000_u64, 0x3febcfffd2415c45_u64, 0xbc6cffb7ee3bea21_u64,
+    0x3ff2539d838ff5bd_u64, 0xbfc160c8252ca000_u64, 0x3febeffff86309df_u64, 0xbc814103972e0b5c_u64,
+    0x3ff23eb7aac9083b_u64, 0xbfc0ce7f57f72000_u64, 0x3fec0fffe1b57653_u64, 0x3c8bc16494b76a19_u64,
+    0x3ff22a012ba940b6_u64, 0xbfc03cdc49fea000_u64, 0x3fec2ffff1fa57e3_u64, 0xbc64feef8d30c6ed_u64,
+    0x3ff2157996cc4132_u64, 0xbfbf57bdbc4b8000_u64, 0x3fec4fffdcbfe424_u64, 0xbc843f68bcec4775_u64,
+    0x3ff201201dd2fc9b_u64, 0xbfbe370896404000_u64, 0x3fec6fffed54b9f7_u64, 0x3c847ea3f053e0ec_u64,
+    0x3ff1ecf4494d480b_u64, 0xbfbd17983ef94000_u64, 0x3fec8fffeb998fd5_u64, 0x3c7383068df992f1_u64,
+    0x3ff1d8f5528f6569_u64, 0xbfbbf9674ed8a000_u64, 0x3fecb0002125219a_u64, 0xbc68fd8e64180e04_u64,
+    0x3ff1c52311577e7c_u64, 0xbfbadc79202f6000_u64, 0x3feccfffdd94469c_u64, 0x3c8e7ebe1cc7ea72_u64,
+    0x3ff1b17c74cb26e9_u64, 0xbfb9c0c3e7288000_u64, 0x3fecefffeafdc476_u64, 0x3c8ebe39ad9f88fe_u64,
+    0x3ff19e010c2c1ab6_u64, 0xbfb8a646b372c000_u64, 0x3fed1000169af82b_u64, 0x3c757d91a8b95a71_u64,
+    0x3ff18ab07bb670bd_u64, 0xbfb78d01b3ac0000_u64, 0x3fed30000d0ff71d_u64, 0x3c89c1906970c7da_u64,
+    0x3ff1778a25efbcb6_u64, 0xbfb674f145380000_u64, 0x3fed4fffea790fc4_u64, 0xbc580e37c558fe0c_u64,
+    0x3ff1648d354c31da_u64, 0xbfb55e0e6d878000_u64, 0x3fed70002edc87e5_u64, 0xbc7f80d64dc10f44_u64,
+    0x3ff151b990275fdd_u64, 0xbfb4485cdea1e000_u64, 0x3fed900021dc82aa_u64, 0xbc747c8f94fd5c5c_u64,
+    0x3ff13f0ea432d24c_u64, 0xbfb333d94d6aa000_u64, 0x3fedafffd86b0283_u64, 0x3c8c7f1dc521617e_u64,
+    0x3ff12c8b7210f9da_u64, 0xbfb22079f8c56000_u64, 0x3fedd000296c4739_u64, 0x3c88019eb2ffb153_u64,
+    0x3ff11a3028ecb531_u64, 0xbfb10e4698622000_u64, 0x3fedefffe54490f5_u64, 0x3c6e00d2c652cc89_u64,
+    0x3ff107fbda8434af_u64, 0xbfaffa6c6ad20000_u64, 0x3fee0fffcdabf694_u64, 0xbc7f8340202d69d2_u64,
+    0x3ff0f5ee0f4e6bb3_u64, 0xbfadda8d4a774000_u64, 0x3fee2fffdb52c8dd_u64, 0x3c7b00c1ca1b0864_u64,
+    0x3ff0e4065d2a9fce_u64, 0xbfabbcece4850000_u64, 0x3fee4ffff24216ef_u64, 0x3c72ffa8b094ab51_u64,
+    0x3ff0d244632ca521_u64, 0xbfa9a1894012c000_u64, 0x3fee6fffe88a5e11_u64, 0xbc57f673b1efbe59_u64,
+    0x3ff0c0a77ce2981a_u64, 0xbfa788583302c000_u64, 0x3fee9000119eff0d_u64, 0xbc84808d5e0bc801_u64,
+    0x3ff0af2f83c636d1_u64, 0xbfa5715e67d68000_u64, 0x3feeafffdfa51744_u64, 0x3c780006d54320b5_u64,
+    0x3ff09ddb98a01339_u64, 0xbfa35c8a49658000_u64, 0x3feed0001a127fa1_u64, 0xbc5002f860565c92_u64,
+    0x3ff08cabaf52e7df_u64, 0xbfa149e364154000_u64, 0x3feef00007babcc4_u64, 0xbc8540445d35e611_u64,
+    0x3ff07b9f2f4e28fb_u64, 0xbf9e72c082eb8000_u64, 0x3fef0ffff57a8d02_u64, 0xbc4ffb3139ef9105_u64,
+    0x3ff06ab58c358f19_u64, 0xbf9a55f152528000_u64, 0x3fef30001ee58ac7_u64, 0x3c8a81acf2731155_u64,
+    0x3ff059eea5ecf92c_u64, 0xbf963d62cf818000_u64, 0x3fef4ffff5823494_u64, 0x3c8a3f41d4d7c743_u64,
+    0x3ff04949cdd12c90_u64, 0xbf9228fb8caa0000_u64, 0x3fef6ffffca94c6b_u64, 0xbc6202f41c987875_u64,
+    0x3ff038c6c6f0ada9_u64, 0xbf8c317b20f90000_u64, 0x3fef8fffe1f9c441_u64, 0x3c777dd1f477e74b_u64,
+    0x3ff02865137932a9_u64, 0xbf8419355daa0000_u64, 0x3fefafffd2e0e37e_u64, 0xbc6f01199a7ca331_u64,
+    0x3ff0182427ea7348_u64, 0xbf781203c2ec0000_u64, 0x3fefd0001c77e49e_u64, 0x3c7181ee4bceacb1_u64,
+    0x3ff008040614b195_u64, 0xbf60040979240000_u64, 0x3fefeffff7e0c331_u64, 0xbc6e05370170875a_u64,
+    0x3fefe01ff726fa1a_u64, 0x3f6feff384900000_u64, 0x3ff00ffff465606e_u64, 0xbc8a7ead491c0ada_u64,
+    0x3fefa11cc261ea74_u64, 0x3f87dc41353d0000_u64, 0x3ff02ffff3867a58_u64, 0xbc977f69c3fcb2e0_u64,
+    0x3fef6310b081992e_u64, 0x3f93cea3c4c28000_u64, 0x3ff04ffffdfc0d17_u64, 0x3c97bffe34cb945b_u64,
+    0x3fef25f63ceeadcd_u64, 0x3f9b9fc114890000_u64, 0x3ff0700003cd4d82_u64, 0x3c820083c0e456cb_u64,
+    0x3feee9c8039113e7_u64, 0x3fa1b0d8ce110000_u64, 0x3ff08ffff9f2cbe8_u64, 0xbc6dffdfbe37751a_u64,
+    0x3feeae8078cbb1ab_u64, 0x3fa58a5bd001c000_u64, 0x3ff0b000010cda65_u64, 0xbc913f7faee626eb_u64,
+    0x3fee741aa29d0c9b_u64, 0x3fa95c8340d88000_u64, 0x3ff0d00001a4d338_u64, 0x3c807dfa79489ff7_u64,
+    0x3fee3a91830a99b5_u64, 0x3fad276aef578000_u64, 0x3ff0effffadafdfd_u64, 0xbc77040570d66bc0_u64,
+    0x3fee01e009609a56_u64, 0x3fb07598e598c000_u64, 0x3ff110000bbafd96_u64, 0x3c8e80d4846d0b62_u64,
+    0x3fedca01e577bb98_u64, 0x3fb253f5e30d2000_u64, 0x3ff12ffffae5f45d_u64, 0x3c9dbffa64fd36ef_u64,
+    0x3fed92f20b7c9103_u64, 0x3fb42edd8b380000_u64, 0x3ff150000dd59ad9_u64, 0x3c9a0077701250ae_u64,
+    0x3fed5cac66fb5cce_u64, 0x3fb606598757c000_u64, 0x3ff170000f21559a_u64, 0x3c8dfdf9e2e3deee_u64,
+    0x3fed272caa5ede9d_u64, 0x3fb7da76356a0000_u64, 0x3ff18ffffc275426_u64, 0x3c910030dc3b7273_u64,
+    0x3fecf26e3e6b2ccd_u64, 0x3fb9ab434e1c6000_u64, 0x3ff1b000123d3c59_u64, 0x3c997f7980030188_u64,
+    0x3fecbe6da2a77902_u64, 0x3fbb78c7bb0d6000_u64, 0x3ff1cffff8299eb7_u64, 0xbc65f932ab9f8c67_u64,
+    0x3fec8b266d37086d_u64, 0x3fbd431332e72000_u64, 0x3ff1effff48ad400_u64, 0x3c937fbf9da75beb_u64,
+    0x3fec5894bd5d5804_u64, 0x3fbf0a3171de6000_u64, 0x3ff210000c8b86a4_u64, 0x3c9f806b91fd5b22_u64,
+    0x3fec26b533bb9f8c_u64, 0x3fc067152b914000_u64, 0x3ff2300003854303_u64, 0x3c93ffc2eb9fbf33_u64,
+    0x3febf583eeece73f_u64, 0x3fc147858292b000_u64, 0x3ff24fffffbcf684_u64, 0x3c7601e77e2e2e72_u64,
+    0x3febc4fd75db96c1_u64, 0x3fc2266ecdca3000_u64, 0x3ff26ffff52921d9_u64, 0x3c7ffcbb767f0c61_u64,
+    0x3feb951e0c864a28_u64, 0x3fc303d7a6c55000_u64, 0x3ff2900014933a3c_u64, 0xbc7202ca3c02412b_u64,
+    0x3feb65e2c5ef3e2c_u64, 0x3fc3dfc33c331000_u64, 0x3ff2b00014556313_u64, 0xbc92808233f21f02_u64,
+    0x3feb374867c9888b_u64, 0x3fc4ba366b7a8000_u64, 0x3ff2cfffebfe523b_u64, 0xbc88ff7e384fdcf2_u64,
+    0x3feb094b211d304a_u64, 0x3fc5933928d1f000_u64, 0x3ff2f0000bb8ad96_u64, 0xbc85ff51503041c5_u64,
+    0x3feadbe885f2ef7e_u64, 0x3fc66acd2418f000_u64, 0x3ff30ffffb7ae2af_u64, 0xbc810071885e289d_u64,
+    0x3feaaf1d31603da2_u64, 0x3fc740f8ec669000_u64, 0x3ff32ffffeac5f7f_u64, 0xbc91ff5d3fb7b715_u64,
+    0x3fea82e63fd358a7_u64, 0x3fc815c0f51af000_u64, 0x3ff350000ca66756_u64, 0x3c957f82228b82bd_u64,
+    0x3fea5740ef09738b_u64, 0x3fc8e92954f68000_u64, 0x3ff3700011fbf721_u64, 0x3c8000bac40dd5cc_u64,
+    0x3fea2c2a90ab4b27_u64, 0x3fc9bb3602f84000_u64, 0x3ff38ffff9592fb9_u64, 0xbc943f9d2db2a751_u64,
+    0x3fea01a01393f2d1_u64, 0x3fca8bed1c2c0000_u64, 0x3ff3b00004ddd242_u64, 0x3c857f6b707638e1_u64,
+    0x3fe9d79f24db3c1b_u64, 0x3fcb5b515c01d000_u64, 0x3ff3cffff5b2c957_u64, 0x3c7a023a10bf1231_u64,
+    0x3fe9ae2505c7b190_u64, 0x3fcc2967ccbcc000_u64, 0x3ff3efffeab0b418_u64, 0x3c987f6d66b152b0_u64,
+    0x3fe9852ef297ce2f_u64, 0x3fccf635d5486000_u64, 0x3ff410001532aff4_u64, 0x3c67f8375f198524_u64,
+    0x3fe95cbaeea44b75_u64, 0x3fcdc1bd3446c000_u64, 0x3ff4300017478b29_u64, 0x3c8301e672dc5143_u64,
+    0x3fe934c69de74838_u64, 0x3fce8c01b8cfe000_u64, 0x3ff44fffe795b463_u64, 0x3c89ff69b8b2895a_u64,
+    0x3fe90d4f2f6752e6_u64, 0x3fcf5509c0179000_u64, 0x3ff46fffe80475e0_u64, 0xbc95c0b19bc2f254_u64,
+    0x3fe8e6528effd79d_u64, 0x3fd00e6c121fb800_u64, 0x3ff48fffef6fc1e7_u64, 0x3c9b4009f23a2a72_u64,
+    0x3fe8bfce9fcc007c_u64, 0x3fd071b80e93d000_u64, 0x3ff4afffe5bea704_u64, 0xbc94ffb7bf0d7d45_u64,
+    0x3fe899c0dabec30e_u64, 0x3fd0d46b9e867000_u64, 0x3ff4d000171027de_u64, 0xbc99c06471dc6a3d_u64,
+    0x3fe87427aa2317fb_u64, 0x3fd13687334bd000_u64, 0x3ff4f0000ff03ee2_u64, 0x3c977f890b85531c_u64,
+    0x3fe84f00acb39a08_u64, 0x3fd1980d67234800_u64, 0x3ff5100012dc4bd1_u64, 0x3c6004657166a436_u64,
+    0x3fe82a49e8653e55_u64, 0x3fd1f8ffe0cc8000_u64, 0x3ff530001605277a_u64, 0xbc96bfcece233209_u64,
+    0x3fe8060195f40260_u64, 0x3fd2595fd7636800_u64, 0x3ff54fffecdb704c_u64, 0xbc8902720505a1d7_u64,
+    0x3fe7e22563e0a329_u64, 0x3fd2b9300914a800_u64, 0x3ff56fffef5f54a9_u64, 0x3c9bbfe60ec96412_u64,
+    0x3fe7beb377dcb5ad_u64, 0x3fd3187210436000_u64, 0x3ff5900017e61012_u64, 0x3c887ec581afef90_u64,
+    0x3fe79baa679725c2_u64, 0x3fd377266dec1800_u64, 0x3ff5b00003c93e92_u64, 0xbc9f41080abf0cc0_u64,
+    0x3fe77907f2170657_u64, 0x3fd3d54ffbaf3000_u64, 0x3ff5d0001d4919bc_u64, 0xbc98812afb254729_u64,
+    0x3fe756cadbd6130c_u64, 0x3fd432eee32fe000_u64, 0x3ff5efffe7b87a89_u64, 0xbc947eb780ed6904_u64,
+
+  ] of UInt64
+
+  def self.log(value : Float64) : Float64
+    ix = IyiFloatText.bits_of(value)
+    # 1 - 2^-4 <= x < 1 + 0x1.09p-4: the polynomial in x - 1.
+    if ix &- 0x3fee000000000000_u64 < 0x3ff1090000000000_u64 &- 0x3fee000000000000_u64
+      return 0.0 if ix == 0x3ff0000000000000_u64
+      r = value - 1.0
+      r2 = r * r
+      r3 = r * r2
+      y = r3 * (LOG_B1 + r * LOG_B2 + r2 * LOG_B3 + r3 * (LOG_B4 + r * LOG_B5 + r2 * LOG_B6 + r3 * (LOG_B7 + r * LOG_B8 + r2 * LOG_B9 + r3 * LOG_B10)))
+      w = r * 134217728.0
+      rhi = r + w - w
+      rlo = r - rhi
+      w = rhi * rhi * LOG_B0
+      hi = r + w
+      lo = r - hi + w
+      lo = lo + LOG_B0 * rlo * (rhi + r)
+      y = y + lo
+      return y + hi
     end
-    ln_m = log_mantissa(m)
-    k_f = k.to_f64
-    k_f * LN2_HI + (k_f * LN2_LO + ln_m)
+    top = ix.unsafe_shr(48_u64).to_i64
+    if top < 0x10_i64 || top >= 0x7ff0_i64
+      # Subnormal, zero, negative, infinite or NaN.
+      return (1.0 / 0.0) * -1.0 if ix &* 2_u64 == 0_u64
+      return value if ix == 0x7ff0000000000000_u64
+      return (value - value) / (value - value) if top & 0x8000_i64 != 0_i64 || top & 0x7ff0_i64 == 0x7ff0_i64
+      ix = IyiFloatText.bits_of(value * 4503599627370496.0) &- 0x0340000000000000_u64
+    end
+    tmp = ix &- 0x3fe6000000000000_u64
+    i = (tmp.unsafe_shr(45_u64) & 127_u64).to_i32
+    k = tmp.unsafe_to_i64 >> 52
+    iz = ix &- (tmp & 0xfff0000000000000_u64)
+    table = LOG_TAB.to_unsafe
+    invc = IyiFloatText.from_bits(table[i * 4])
+    logc = IyiFloatText.from_bits(table[i * 4 + 1])
+    z = IyiFloatText.from_bits(iz)
+    r = (z - IyiFloatText.from_bits(table[i * 4 + 2]) - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
+    kd = k.to_f64
+    w = kd * LOG_LN2HI + logc
+    hi = w + r
+    lo = w - hi + r + kd * LOG_LN2LO
+    r2 = r * r
+    lo + r2 * LOG_A0 + r * r2 * (LOG_A1 + r * LOG_A2 + r2 * (LOG_A3 + r * LOG_A4)) + hi
   end
 
   def self.log(value : Float32) : Float32

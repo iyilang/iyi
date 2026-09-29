@@ -1,8 +1,9 @@
 /*
  * iyi: the part of optimized-routines' `math/math_config.h` that `exp.c`,
- * `pow.c` and their data read, for `bench/std_math_exercise.sh`'s oracle:
+ * `pow.c`, `log.c` and their data read, for `bench/std_math_exercise.sh`'s oracle:
  * the configuration glibc builds them with on x86_64 (128-entry tables, a
- * degree-5 exp polynomial and a degree-8 log one, the reduction by adding
+ * degree-5 exp polynomial, degree-6 and -12 log ones and a degree-8 one
+ * for pow's log, the reduction by adding
  * 1.5 * 2^52, no fused multiply-add), and no errno, which the oracle does
  * not read.
  */
@@ -20,6 +21,9 @@
 #define HAVE_FAST_FMA 0
 #define POW_LOG_TABLE_BITS 7
 #define POW_LOG_POLY_ORDER 8
+#define LOG_TABLE_BITS 7
+#define LOG_POLY_ORDER 6
+#define LOG_POLY1_ORDER 12
 #define WANT_ROUNDING 1
 #define WANT_ERRNO 0
 #define USE_GLIBC_ABI 0
@@ -62,4 +66,13 @@ extern const struct pow_log_data
   double poly[POW_LOG_POLY_ORDER - 1];
   struct { double invc, pad, logc, logctail; } tab[1 << POW_LOG_TABLE_BITS];
 } __pow_log_data;
+extern const struct log_data
+{
+  double ln2hi;
+  double ln2lo;
+  double poly[LOG_POLY_ORDER - 1];
+  double poly1[LOG_POLY1_ORDER - 1];
+  struct { double invc, logc; } tab[1 << LOG_TABLE_BITS];
+  struct { double chi, clo; } tab2[1 << LOG_TABLE_BITS];
+} __log_data;
 #endif

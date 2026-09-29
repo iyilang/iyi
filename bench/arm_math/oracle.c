@@ -1,7 +1,8 @@
 /*
- * iyi: Arm's exp and pow as `bench/std_math_exercise.sh` asks them.
- * `oracle exp IN OUT` reads doubles from IN and writes each with its exp
- * to OUT; `oracle pow IN OUT` reads pairs and writes each with its power.
+ * iyi: Arm's exp, log and pow as `bench/std_math_exercise.sh` asks them.
+ * `oracle exp IN OUT` (or `log`) reads doubles from IN and writes each
+ * with its answer to OUT; `oracle pow IN OUT` reads pairs and writes each
+ * with its power.
  * The files are opened in binary, which a Windows C runtime's standard
  * streams are not. Built with contraction off: this is the algorithm as
  * written, not the fused build glibc picks on a processor with FMA, which
@@ -11,6 +12,7 @@
 #include <string.h>
 double exp (double);
 double pow (double, double);
+double log (double);
 int main (int argc, char **argv)
 {
   double v[3];
@@ -30,7 +32,7 @@ int main (int argc, char **argv)
   else
     while (fread (v, sizeof v[0], 1, in) == 1)
       {
-        v[1] = exp (v[0]);
+        v[1] = strcmp (argv[1], "log") == 0 ? log (v[0]) : exp (v[0]);
         fwrite (v, sizeof v[0], 2, out);
       }
   return fclose (out) == 0 ? 0 : 1;

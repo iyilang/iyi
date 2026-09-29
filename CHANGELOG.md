@@ -96,6 +96,21 @@
 
 ### Changed
 
+- **`Math.log` is glibc's as well, and twice as fast.** A series in
+  (m - 1)/(m + 1) answered differently from glibc's for about one
+  argument in a hundred; it is now Arm's optimized-routines log, glibc's
+  since 2.28, under 0.52 ulp - a degree-12 polynomial near 1, elsewhere a
+  128-entry table and a degree-6 one - built as glibc builds it without
+  FMA, unfused on every target. 380,014 arguments compared, none
+  different; ten million logs take 30 to 55 ms where they took 75 to 95
+  (Crystal's: 55 to 90). Every function built on `log` - `log1p` past its
+  series, `log10`, the inverse hyperbolics, `lgamma` - reads it.
+  `bench/std_math_exercise.sh` compiles Arm's log with the rest of
+  `bench/arm_math`, requires 210,014 answers bit for bit - the range, the
+  band around 1 and its edges, the subnormals, the specials - and proves
+  a square near 1 taken in one part, a reduction without c's low part and
+  a polynomial a term short each fail it.
+
 - **`Math.pow` is glibc's too, and three times as fast.** It answered
   differently from glibc's for more than half of 300,000 arguments - a
   sum of ten million powers printed another last digit than Crystal's -

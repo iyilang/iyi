@@ -312,4 +312,23 @@ if args.size > 1
   puts "  #{cases} pairs, every power Arm's to the last bit"
 end
 
+# Pairs again: an argument and Arm's log of it.
+if args.size > 2
+  puts "\n== log against Arm's log, bit for bit"
+  pairs = File.read(args[2])
+  words = pairs.to_unsafe.as(Pointer(UInt64))
+  cases = pairs.bytesize // 16
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 2])
+    want = IyiFloatText.from_bits(words[index * 2 + 1])
+    got = Math.log(x)
+    same = IyiFloatText.bits_of(got) == words[index * 2 + 1] || (got != got && want != want)
+    raise "ASSERTION FAILED: log(#{x}) is #{got}, Arm's is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > 200000, "the oracle had #{cases} cases"
+  puts "  #{cases} arguments, every answer Arm's to the last bit"
+end
+
 puts "\nALL CHECKS PASSED"

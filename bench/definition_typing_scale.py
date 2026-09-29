@@ -38,7 +38,9 @@ member it added: 1,200 took 7.9 s against 0.18 for 300 with 0.15.4's
 release compiler, forty-four times the time for four times the classes.
 Plain classes now combine by their topmost virtual root, found once per
 member and looked up in a hash, and the list keeps a set once it is long.
-This types both and fails past twelve times the time: 5.5 now.
+This types both and fails past twelve times the time: 5.8 now. The same
+for a union of `Box(D0)` to `Box(D1199)`, instances of one generic class:
+1.3 s for 300 before, 5.3 times 300's time for 1,200 now.
 """
 import os
 import pathlib
@@ -81,10 +83,12 @@ def reassignments(count: int) -> str:
     return "x = 1\n" + "".join(f"x = x + {i % 7}\n" for i in range(count)) + "puts x\n"
 
 
-def wide_union(count: int) -> str:
-    return ("".join(f"class D{i}\nend\n" for i in range(count))
+def wide_union(count: int, generic: bool) -> str:
+    member = (lambda i: f"Box(D{i})") if generic else (lambda i: f"D{i}")
+    return (("class Box(T)\nend\n" if generic else "")
+            + "".join(f"class D{i}\nend\n" for i in range(count))
             + "r = Program.args.size\ny = nil\n"
-            + "".join(f"y = D{i}.new if r == {i}\n" for i in range(count))
+            + "".join(f"y = {member(i)}.new if r == {i}\n" for i in range(count))
             + "puts y.class\n")
 
 
@@ -135,20 +139,21 @@ def main() -> None:
         sys.exit(1)
     print("reassignment typing: each assignment costs its own merge")
 
-    unions = {}
-    for count in (CLASSES_SMALL, CLASSES_LARGE):
-        path = work / f"union_{count}.iyi"
-        path.write_text(wide_union(count))
-        unions[count] = best(path)
-    widened = unions[CLASSES_LARGE] / unions[CLASSES_SMALL]
-    print(f"a union of {CLASSES_SMALL} classes typed in "
-          f"{unions[CLASSES_SMALL]:.3f} s, of {CLASSES_LARGE} in "
-          f"{unions[CLASSES_LARGE]:.3f} s: {widened:.1f}x the time for "
-          f"{CLASSES_LARGE // CLASSES_SMALL}x the members")
-    if widened > LIMIT:
-        print(f"FAIL: past {LIMIT:.0f}x, so each member a union gains is "
-              "compared with every member it had")
-        sys.exit(1)
+    for generic, what in ((False, "classes"), (True, "instances of one generic")):
+        unions = {}
+        for count in (CLASSES_SMALL, CLASSES_LARGE):
+            path = work / f"union_{'generic_' if generic else ''}{count}.iyi"
+            path.write_text(wide_union(count, generic))
+            unions[count] = best(path)
+        widened = unions[CLASSES_LARGE] / unions[CLASSES_SMALL]
+        print(f"a union of {CLASSES_SMALL} {what} typed in "
+              f"{unions[CLASSES_SMALL]:.3f} s, of {CLASSES_LARGE} in "
+              f"{unions[CLASSES_LARGE]:.3f} s: {widened:.1f}x the time for "
+              f"{CLASSES_LARGE // CLASSES_SMALL}x the members")
+        if widened > LIMIT:
+            print(f"FAIL: past {LIMIT:.0f}x, so each member a union gains is "
+                  "compared with every member it had")
+            sys.exit(1)
     print("union typing: each member costs its own place")
 
 

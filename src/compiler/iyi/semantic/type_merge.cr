@@ -257,13 +257,14 @@ module Iyi
     end
 
     # What `type_combine` compares a member by: false for a type whose
-    # common ancestors are found by other rules - a metaclass, a generic,
-    # a module, a tuple - and for a plain class its topmost virtual root,
-    # or itself when it cannot be one (Reference, Int), which then matches
-    # no other class.
+    # common ancestors are found by other rules - a metaclass, a generic
+    # class itself, a module, a tuple, a pointer, a proc - and for a plain
+    # class or a plain generic instance (`Box(Int32)`), whose ancestors are
+    # its superclasses, its topmost virtual root, or itself when it cannot
+    # be one (Reference, Int), which then matches no other class.
     private def combine_root(type : Type) : Type | Bool
       type = type.devirtualize
-      return false unless type.is_a?(NonGenericClassType) || type.is_a?(PrimitiveType)
+      return false unless type.is_a?(NonGenericClassType) || type.is_a?(PrimitiveType) || type.class == GenericClassInstanceType
       return type unless virtual_root?(type)
       root = type
       while (parent = root.superclass) && virtual_root?(parent)

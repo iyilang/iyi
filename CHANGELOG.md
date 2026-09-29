@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **`Path#expand` answers an absolute path for Windows' rooted and
+  drive-relative names.** An anchor that was not absolute went through
+  as it was: `\a` expanded to `\a` and `C:a` to `C:a`, where the answer
+  promised is absolute. `\a` is rooted on the base's drive now, and `C:a`
+  is under the base when the base is on C: and under C:'s root when it is
+  not. And `Path.windows("C:").join("a")` is `C:a`, drive-relative as
+  `normalize` spells it, where it was `C:\a`, the drive's root - so the
+  sibling of `C:a` was `C:\b`. `bench/std_path_exercise.iyi` checks each
+  on every platform; the old module fails at the first expand and, with
+  expand fixed, at the join.
+
 - **On Windows, `iyi test` leaves nothing in the temporary directory.**
   Each test is built to a temporary name and deleted after it runs; the
   name had no extension, `build -o` appended `.exe`, and the delete asked

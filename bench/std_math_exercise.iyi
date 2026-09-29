@@ -271,12 +271,13 @@ assert_str "-Infinity", Math.sinh(-100.0_f32).to_s, "sinh(-100_f32)"
 assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
 puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
-# The oracles `bench/std_math_exercise.sh` writes from Arm's code, compiled
-# from `bench/arm_math`: pairs of doubles, an argument and its answer, for
-# exp, log, exp2 and log2, and triples, a base, an exponent and the power,
-# for pow. Every answer is required to the last bit.
-def against_arm(path : String, name : String, least : Int32, & : Float64 -> Float64) : Nil
-  puts "\n== #{name} against Arm's #{name}, bit for bit"
+# The oracles `bench/std_math_exercise.sh` writes from the code glibc
+# builds these from - Arm's, and fdlibm's for log10 - compiled from
+# `bench/libm_oracle`: pairs of doubles, an argument and its answer, for
+# exp, log, exp2, log2 and log10, and triples, a base, an exponent and the
+# power, for pow. Every answer is required to the last bit.
+def against(path : String, name : String, source : String, least : Int32, & : Float64 -> Float64) : Nil
+  puts "\n== #{name} against #{source} #{name}, bit for bit"
   pairs = File.read(path)
   words = pairs.to_unsafe.as(Pointer(UInt64))
   cases = pairs.bytesize // 16
@@ -290,11 +291,11 @@ def against_arm(path : String, name : String, least : Int32, & : Float64 -> Floa
     index = index + 1
   end
   assert_true cases > least, "the #{name} oracle had #{cases} cases"
-  puts "  #{cases} arguments, every answer Arm's to the last bit"
+  puts "  #{cases} arguments, every answer #{source} to the last bit"
 end
 
 args = Program.args
-against_arm(args[0], "exp", 300000) { |x| Math.exp(x) } if args.size > 0
+against(args[0], "exp", "Arm's", 300000) { |x| Math.exp(x) } if args.size > 0
 if args.size > 1
   puts "\n== pow against Arm's pow, bit for bit"
   triples = File.read(args[1])
@@ -313,8 +314,9 @@ if args.size > 1
   assert_true cases > 200000, "the pow oracle had #{cases} cases"
   puts "  #{cases} pairs, every power Arm's to the last bit"
 end
-against_arm(args[2], "log", 200000) { |x| Math.log(x) } if args.size > 2
-against_arm(args[3], "exp2", 150000) { |x| Math.exp2(x) } if args.size > 3
-against_arm(args[4], "log2", 150000) { |x| Math.log2(x) } if args.size > 4
+against(args[2], "log", "Arm's", 200000) { |x| Math.log(x) } if args.size > 2
+against(args[3], "exp2", "Arm's", 150000) { |x| Math.exp2(x) } if args.size > 3
+against(args[4], "log2", "Arm's", 150000) { |x| Math.log2(x) } if args.size > 4
+against(args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if args.size > 5
 
 puts "\nALL CHECKS PASSED"

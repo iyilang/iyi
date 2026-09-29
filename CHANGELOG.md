@@ -96,6 +96,18 @@
 
 ### Changed
 
+- **`Math.log10` is glibc's.** `log(x) / ln 10` with a whole-number
+  check answered differently from glibc's for more than half of 100,000
+  arguments. It is now glibc's `e_log10.c` - fdlibm's, Sun's notice kept
+  with it - on the Arm `log` above: x = 2^n m, n log10(2) in two parts,
+  plus log(m) / ln 10; a power of ten is its exponent exactly. 150,640
+  arguments compared, none different. The double-double powers the check
+  read, which nothing else read, are gone. The oracle's directory is
+  `bench/libm_oracle` now, holding glibc's `e_log10.c` beside Arm's files,
+  and `bench/std_math_exercise.sh` requires every `log10` answer bit for
+  bit and proves an exponent rounded the other way below one and a
+  log10(2) without its low part each fail it.
+
 - **`Math.exp2` and `Math.log2` are glibc's.** `exp2` was
   `exp(frac * log 2)` scaled by the whole part and answered differently
   from glibc's `exp2` for about one argument in eight; `log2` was the
@@ -104,7 +116,7 @@
   table and a 64-entry one of their own, built unfused as the rest: 0 of
   200,000 different from glibc, whole powers of two exact both ways.
   `bench/std_math_exercise.sh` compiles them with the rest of
-  `bench/arm_math`, requires 327,121 answers bit for bit - the whole
+  `bench/libm_oracle`, requires 327,121 answers bit for bit - the whole
   range, the bands their special cases take, every power of two - and
   proves a polynomial a term short, `log2` near 1 with r in one part, a
   reduction without c's low part and an overflow scale halved each fail
@@ -120,7 +132,7 @@
   (Crystal's: 55 to 90). Every function built on `log` - `log1p` past its
   series, `log10`, the inverse hyperbolics, `lgamma` - reads it.
   `bench/std_math_exercise.sh` compiles Arm's log with the rest of
-  `bench/arm_math`, requires 210,014 answers bit for bit - the range, the
+  `bench/libm_oracle`, requires 210,014 answers bit for bit - the range, the
   band around 1 and its edges, the subnormals, the specials - and proves
   a square near 1 taken in one part, a reduction without c's low part and
   a polynomial a term short each fail it.
@@ -136,7 +148,7 @@
   specials crossed with specials included, none different from glibc's
   unfused build; the ten million take 140 ms (Crystal's: 150 to 180) and
   print Crystal's sum. `bench/std_math_exercise.sh` compiles Arm's pow
-  beside its exp from `bench/arm_math`, requires 240,858 pairs bit for
+  beside its exp from `bench/libm_oracle`, requires 240,858 pairs bit for
   bit, and proves a logarithm a term short, an unsplit product, a table
   without its tail and a negative base's odd power made positive each
   fail it. The whole-exponent powers `log10` reads stay as they were.
@@ -156,7 +168,7 @@
   call into glibc: 110), and crystal-metric's NeuralNet runs in 0.65 of
   Crystal's time where it ran in 0.97 to 1.37.
   `bench/std_math_exercise.sh` compiles Arm's two files, kept as
-  published in `bench/arm_exp`, with contraction off, requires 310,021
+  published in `bench/libm_oracle`, with contraction off, requires 310,021
   answers bit for bit against them, and proves a polynomial a term short,
   a reduction without ln2's low part and a subnormal rounded twice each
   fail it; without a C compiler it says why it did not compare. The

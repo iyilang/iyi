@@ -812,14 +812,45 @@ pub struct Math
     log2(value.to_f64)
   end
 
-  # log(value) / log(10), and when the answer is within rounding of a whole
-  # number n whose 10^n is `value` itself, exactly n: log10(1000.0) is 3.0.
+  # log10 as glibc computes it - fdlibm's `e_log10.c`, which glibc still
+  # carries, on the `log` above: x = 2^n m with n rounded toward the one
+  # that keeps m's logarithm small, then n log10(2) in a 40-bit part and
+  # the rest, plus log(m) / ln 10. A power of ten is its exponent exactly.
+  # `log(x) / ln 10` with a whole-number check, which this replaces,
+  # answered differently from glibc's for more than half of 100,000
+  # arguments. Sun's notice, which the file carries and asks to be kept:
+  #
+  #   Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+  #
+  #   Developed at SunPro, a Sun Microsystems, Inc. business.
+  #   Permission to use, copy, modify, and distribute this
+  #   software is freely granted, provided that this notice
+  #   is preserved.
+  private LOG10_TWO54  = 1.80143985094819840000e+16
+  private LOG10_IVLN10 = 4.34294481903251816668e-01
+  private LOG10_2HI    = 3.01029995663611771306e-01
+  private LOG10_2LO    = 3.69423907715893078616e-13
+
   def self.log10(value : Float64) : Float64
-    res = log(value) / LOG10
-    return res if res != res || res == 2.0 * res
-    n = res.round
-    return res if n == res || (res - n).abs > 1.0e-9 || n < -323.0 || n > 308.0
-    ten_to(n.to_i32) == value ? n : res
+    x = value
+    hx = IyiFloatText.bits_of(x).unsafe_to_i64
+    k = 0_i64
+    if hx < 0x0010000000000000_i64
+      # Below 2^-1022: zero, negative or subnormal.
+      return LOG10_TWO54 * -1.0 / x.abs if hx & 0x7fffffffffffffff_i64 == 0_i64
+      return (x - x) / (x - x) if hx < 0_i64
+      k = k - 54_i64
+      x = x * LOG10_TWO54
+      hx = IyiFloatText.bits_of(x).unsafe_to_i64
+    end
+    return x + x if hx >= 0x7ff0000000000000_i64
+    k = k + (hx >> 52) - 1023_i64
+    i = k < 0_i64 ? 1_i64 : 0_i64
+    hx = (hx & 0x000fffffffffffff_i64) | ((0x3ff_i64 - i) << 52)
+    y = (k + i).to_f64
+    x = IyiFloatText.from_bits(hx.unsafe_to_u64)
+    z = y * LOG10_2LO + LOG10_IVLN10 * log(x)
+    z + y * LOG10_2HI
   end
 
   def self.log10(value : Float32) : Float32
@@ -852,76 +883,6 @@ pub struct Math
 
   def self.log1p(value : T) : Float64 forall T
     log1p(value.to_f64)
-  end
-
-  # The product of two double-doubles, rounded to a double-double. Once
-  # the high part has overflowed or underflowed it is answered as it is:
-  # the low part of an infinity or a zero means nothing.
-  private def self.dd_mul(ah : Float64, al : Float64, bh : Float64, bl : Float64) : {Float64, Float64}
-    p = ah * bh
-    return {p, 0.0} if p == 2.0 * p
-    pe = prod_err(ah, bh, p) + (ah * bl + al * bh)
-    s = p + pe
-    {s, pe - (s - p)}
-  end
-
-  private TWO_500     =  3.273390607896142e150
-  private TWO_NEG_500 = 3.054936363499605e-151
-
-  # A double-double kept within 2^-500..2^500 in magnitude, the power of
-  # two taken out of it added to `scale`: the product of two such never
-  # overflows or underflows.
-  private def self.rescale(h : Float64, l : Float64, scale : Int32) : {Float64, Float64, Int32}
-    a = h.abs
-    return {h, l, scale} if a == 0.0 || (a < TWO_500 && a > TWO_NEG_500)
-    m, k = frexp(h)
-    {m, ldexp(l, 0 - k), scale + k}
-  end
-
-  # base^e for e >= 1 by repeated squaring in double-double, answered as
-  # hi + lo times 2^scale, so that the answer is the correctly rounded
-  # power in all but the rarest ties: 2^1023 and 10^300 come out as the
-  # literals do, and 2^-1074 is reached from the same product. Past a
-  # scale of 4000 either way the answer is an infinity or a zero, and the
-  # remaining bits of e could only take it further.
-  private def self.pow_whole(base : Float64, e : Int64) : {Float64, Float64, Int32}
-    hi = 1.0
-    lo = 0.0
-    scale = 0
-    bh, bl, bscale = rescale(base, 0.0, 0)
-    while true
-      if (e & 1_i64) != 0_i64
-        hi, lo = dd_mul(hi, lo, bh, bl)
-        hi, lo, scale = rescale(hi, lo, scale + bscale)
-        return {hi, lo, scale} if scale > 4000 || scale < -4000
-      end
-      e = e >> 1
-      break if e == 0_i64
-      bh, bl = dd_mul(bh, bl, bh, bl)
-      bh, bl, bscale = rescale(bh, bl, bscale * 2)
-      return {hi, lo, scale + bscale} if bscale > 4000 || bscale < -4000
-    end
-    {hi, lo, scale}
-  end
-
-  # 1 / (hi + lo), refined once from the rounded 1 / hi.
-  private def self.dd_recip(hi : Float64, lo : Float64) : Float64
-    q = 1.0 / hi
-    return q if hi == 2.0 * hi || q == 2.0 * q
-    qh = q * hi
-    q + q * (((1.0 - qh) - prod_err(q, hi, qh)) - q * lo)
-  end
-
-  # base^e for a whole e of either sign, from `pow_whole`.
-  private def self.pow_signed(base : Float64, e : Int64) : Float64
-    hi, lo, scale = pow_whole(base, e < 0_i64 ? 0_i64 - e : e)
-    e > 0_i64 ? ldexp(hi, scale) : ldexp(dd_recip(hi, lo), 0 - scale)
-  end
-
-  # The double nearest 10^n.
-  private def self.ten_to(n : Int32) : Float64
-    return 1.0 if n == 0
-    pow_signed(10.0, n.to_i64)
   end
 
   # pow as glibc computes it - Arm's optimized-routines pow, which glibc

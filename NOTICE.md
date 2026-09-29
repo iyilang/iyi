@@ -47,7 +47,11 @@ iyi's own standard library includes code derived from, and its benches a
 port of:
 
 - [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
-  `bench/arm_math/`) - [MIT][]
+  `bench/libm_oracle/`) - [MIT][]
+- fdlibm, as glibc carries it (`Math.log10`, and `bench/libm_oracle/e_log10.c`) -
+  Sun Microsystems' notice: "Permission to use, copy, modify, and
+  distribute this software is freely granted, provided that this notice is
+  preserved."
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
 <!-- licenses -->

@@ -14,3 +14,28 @@ SPDX-License-Identifier = "Apache-2.0 WITH Swift-exception"
 # carries its own licence.
 [[annotations]]
 path = ["lib/*/**"]
+
+# iyi: `Math.exp`, `exp2`, `log`, `log2` and `pow` are Arm's optimized-routines ones
+# (glibc's since 2.28), ported with their tables; the notice is beside the
+# code as well. The math gate's oracle is Arm's files as published, with
+# their own headers.
+[[annotations]]
+path = ["src/std/math.iyi", "bench/libm_oracle/exp.c", "bench/libm_oracle/exp_data.c", "bench/libm_oracle/pow.c", "bench/libm_oracle/pow_log_data.c", "bench/libm_oracle/pow_common.h", "bench/libm_oracle/log.c", "bench/libm_oracle/log_data.c", "bench/libm_oracle/exp2.c", "bench/libm_oracle/log2.c", "bench/libm_oracle/log2_data.c"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2018-2025 Arm Limited"
+SPDX-License-Identifier = "MIT"
+
+# iyi: the port of kostya's crystal-metric that `bench/metric_port.sh` gates.
+[[annotations]]
+path = ["bench/metric/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2024 Konstantin Makarchev"
+SPDX-License-Identifier = "MIT"
+
+# iyi: `Math.log10`, `expm1` and `log1p` are glibc's fdlibm files, with
+# Sun's notice, which is kept beside the port and in the oracle's copies.
+[[annotations]]
+path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (C) 1993 by Sun Microsystems, Inc."
+SPDX-License-Identifier = "LicenseRef-SunPro"

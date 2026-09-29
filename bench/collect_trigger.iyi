@@ -56,6 +56,16 @@
     end
   end
 
+  # Garbage of the spike's class, a node at a time and nothing kept.
+  def churn_nodes(nodes : UInt64) : Nil
+    made = 0_u64
+    while made < nodes
+      node = Pointer(UInt64).malloc(2048_u64)
+      node.value = made
+      made = made + 1_u64
+    end
+  end
+
   def arena_count : UInt64
     arenas = 0_u64
     arena = IyiHeap.first_arena
@@ -320,6 +330,27 @@
   end
   puts "    scavenge: #{count(peak)} arenas at the peak, #{count(released)} released to the kernel, #{count(settled)} still mapped"
   puts "    pauses: last #{count(IyiMark.pause_last_ns)} ns, max #{count(IyiMark.pause_max_ns)} ns, #{count(IyiMark.pause_total_ns)} ns across #{count(IyiMark.collections)} collections"
+
+  # 6. A budget many arenas deep keeps the empty ones above four arenas'
+  # worth: the next epoch allocates that much again, and an arena handed
+  # back is one it maps and faults in afresh. 48 MiB live is a 96 MiB
+  # budget, two arenas above the floor; two epochs of 48 MiB of garbage
+  # in the spike's class, and the second maps at most one arena - the
+  # first's empty ones are there to take. Handed back instead, a program
+  # allocating 400 KB strings beside 133 MB it kept took 740,000 faults
+  # where it took 18,000 alone.
+  build_spike(3072_u64)
+  IyiMark.collect
+  raise "spare: the spike's root was lost" if Held.keep == 0_u64
+  raise "spare: 48 MiB live left a #{count(IyiMark.budget)}-byte budget, not two arenas above the floor" if IyiMark.budget < IyiMark::SPARE_BELOW + 2_u64 * IyiHeap::MAP
+  churn_nodes(3072_u64)
+  IyiMark.collect
+  spare_mapped = IyiHeap.arenas_mapped
+  churn_nodes(3072_u64)
+  spare_mapped = IyiHeap.arenas_mapped - spare_mapped
+  raise "spare: the second epoch's garbage mapped #{count(spare_mapped)} arenas afresh, so the first's empty ones went back to the kernel" if spare_mapped > 1_u64
+  Held.keep = 0_u64
+  puts "    spare: under a #{count(IyiMark.budget)}-byte budget the second epoch's 48 MiB of garbage mapped #{count(spare_mapped)} arenas afresh"
 
   puts "    all trigger checks passed"
 {% else %}

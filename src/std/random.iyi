@@ -193,3 +193,23 @@ class ::Array(T)
     picked.shuffle_in_place(rng)
   end
 end
+
+struct ::StaticArray(T, N)
+  # `Array#shuffle_in_place` for the array that holds its elements inline:
+  # the other library's `StaticArray#shuffle!`, the same draws in the same
+  # order, so a seeded generator puts the elements where it would. Its
+  # sample of noise does exactly this to a 256-entry permutation table.
+  def shuffle_in_place(random : Std::Random::Random? = nil) : self
+    rng = random || Std::Random::Random.new
+    elements = pointerof(@buffer)
+    i = N - 1
+    while i > 0
+      j = rng.rand(i + 1)
+      tmp = elements[i]
+      elements[i] = elements[j]
+      elements[j] = tmp
+      i = i - 1
+    end
+    self
+  end
+end

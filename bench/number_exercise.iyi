@@ -117,8 +117,26 @@ assert_int([1.0, nan, 0.5].sorted.size, 3, "number: sorting with nan keeps the c
 # Toward zero, the same direction `//` takes.
 assert_int(2.9.to_i, 2, "number: to_i truncates")
 assert_int((-2.9).to_i, -2, "number: to_i truncates toward zero")
+assert_true((-0.0).abs.to_s == "0.0" && (-2.5).abs == 2.5, "number: abs clears the sign of a zero too")
 assert_true((-1.5).floor == -2.0, "number: floor goes down")
 assert_true((-1.5).ceil == -1.0, "number: ceil goes up")
+# Both, over the values where a rounding goes wrong - the zeros and the
+# doubles either side of one, the last fractions below 2^52, what is past
+# it, the infinities and NaN - written as the other library writes its own
+# answers for them. The zeros' signs are in the text: `(-0.3).ceil` is
+# `-0.0` from the instruction, and the conversion has to agree.
+rounded = [] of String
+inf = 1.0 / 0.0
+[-0.0, 0.0, -0.3, 0.3, -1.5, 1.5, -2.0, 2.0, 4503599627370495.5, -4503599627370495.5,
+ 1e300, -1e300, 9007199254740993.0, inf, inf * -1.0, 0.9999999999999999, -0.9999999999999999,
+ 5e-324, -5e-324, inf - inf].each do |x|
+  rounded << "#{x.floor} #{x.ceil}"
+end
+assert_true(rounded.join(", ") == "-0.0 -0.0, 0.0 0.0, -1.0 -0.0, 0.0 1.0, -2.0 -1.0, 1.0 2.0, -2.0 -2.0, 2.0 2.0, " \
+                                  "4.503599627370495e+15 4.503599627370496e+15, -4.503599627370496e+15 -4.503599627370495e+15, " \
+                                  "1.0e+300 1.0e+300, -1.0e+300 -1.0e+300, 9.007199254740992e+15 9.007199254740992e+15, " \
+                                  "Infinity Infinity, -Infinity -Infinity, 0.0 1.0, -1.0 -0.0, 0.0 1.0, -1.0 -0.0, NaN NaN",
+  "number: floor and ceil as the other library answers them (#{rounded.join(", ")})")
 # A tie goes to the even integer, Crystal's `round` (SPEC.md III.1.7a); the
 # nearest is read off the fraction, so the double under a half is not moved
 # by a sum that rounds first; and a negative place count rounds to tens.

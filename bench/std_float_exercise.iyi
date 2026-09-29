@@ -24,6 +24,7 @@ puts "== arithmetic"
 assert_true 1.5_f32 + 1.5_f32 == 3.0_f32, "add"
 assert_true 4.0_f32 / 2.0_f32 == 2.0_f32, "div"
 assert_true (-1.5_f32).abs == 1.5_f32, "abs"
+assert_true (-0.0_f32).abs.to_f64.to_s == "0.0", "abs clears the sign of a zero"
 puts "  Float32 + / abs"
 
 puts "\n== constants"

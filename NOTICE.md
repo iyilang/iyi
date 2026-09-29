@@ -43,6 +43,18 @@ Crystal standard library uses the following libraries, which have their own lice
 - [readline][] - [GPLv3][]
 - [GMP][] - [LGPLv3][]
 
+iyi's own standard library includes code derived from, and its benches a
+port of:
+
+- [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
+  `bench/libm_oracle/`) - [MIT][]
+- fdlibm, as glibc carries it (`Math.log10`, `expm1` and `log1p`, and their
+  copies in `bench/libm_oracle/`) -
+  Sun Microsystems' notice: "Permission to use, copy, modify, and
+  distribute this software is freely granted, provided that this notice is
+  preserved."
+- [crystal-metric][] (`bench/metric/`) - [MIT][]
+
 <!-- licenses -->
 [Apache-2.0]: https://www.openssl.org/source/apache-license-2.0.txt
 [Apache-2.0 with LLVM exceptions]: https://raw.githubusercontent.com/llvm/llvm-project/main/llvm/LICENSE.TXT
@@ -52,6 +64,8 @@ Crystal standard library uses the following libraries, which have their own lice
 [MIT]: https://opensource.org/licenses/MIT
 [Zlib-license]: https://opensource.org/licenses/Zlib
 <!-- libraries -->
+[Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
+[crystal-metric]: https://github.com/kostya/crystal-metric
 [bdwgc]: http://www.hboehm.info/gc/
 [GMP]: https://gmplib.org/
 [libevent2]: http://libevent.org/

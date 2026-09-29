@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`StaticArray#shuffle_in_place`.** `std/random` shuffled an `Array` as
+  the other library does and a `StaticArray` not at all, so a program
+  holding a table inline - crystal-metric's Noise keeps its 256-entry
+  permutation in a struct, shuffled with `shuffle!` - built an `Array`
+  instead and read its size and buffer on every lookup. The same draws
+  in the same order as `Array#shuffle_in_place`, in a local or in a
+  field. `bench/std_random_exercise.sh` checks both against Crystal's
+  answers and proves the check fails with the last element left out.
+
 - **crystal-metric's port is a gate.** `bench/metric/metric.iyi` is the
   port of kostya's crystal-metric (MIT, notice kept) that the 0.15.4
   review measured: twenty-six benchmarks, each checking its answer
@@ -86,6 +95,187 @@
   check fails with a character that steps by two.
 
 ### Changed
+
+- **A deep budget keeps the empty arenas it will fill again.** The
+  scavenge handed every empty arena but a cache's fill arena back to the
+  kernel, and a program allocating a budget many arenas deep mapped them
+  again each epoch and faulted every page in. crystal-metric's
+  Base64Encode, run after Revcomp left 133 MB alive, took 740,000 faults
+  under its 266 MB budget where it took 18,000 alone: 1.25 s against
+  0.73. Empty arenas up to the part of the budget past 64 MB now stay
+  mapped, and their sweep keeps a budget's worth of pages warm as it
+  does in any arena: 0.9 s, the peak 56 MB higher on 842. A budget under
+  the floor spares nothing, so the resident-set probe (38 MB budget) is
+  unchanged. The trigger exercise holds 48 MB live and requires the
+  second of two epochs of garbage to map at most one arena afresh, and
+  proves handing every empty arena back fails it.
+
+- **A small live set is marked in the stop.** Every collection marked a
+  thousand objects stopped and went beside the program with the rest, so
+  a live set of a few thousand woke a helper at each collection. After
+  crystal-metric's Threadring a conservative slot held its ring - 5,043
+  objects, 278 KB - and Base64Encode, run next, took 1.8 to 4.2 s against
+  0.9 alone; it takes 0.8 after the ring now. A mark whose last one kept
+  fewer than 8,192 objects has that bound: an allocation loop after the
+  ring ran 587 ms to 212, its longest pause 8 ms to 0.4, and none of its
+  181 collections left the stop. A large live set keeps the thousand,
+  since it goes beside the program anyway. The concurrent mark exercise
+  holds 4,000 objects live through eight budgets and proves the
+  thousand-object bound for them fails.
+
+- **A carve takes a page's worth of chunks.** An allocation the class's
+  list could not answer carved one chunk from fresh memory, so a program
+  whose heap only grows - a trie, a document being built - sent every
+  object through the slow path, the refill's checks and the cursor's
+  ordered store: six hundred instructions each, 15% of crystal-metric's
+  Primes. The carve now hands out the first chunk and threads the rest of
+  a page onto the cache's list, stamped free and this epoch's as `free`
+  stamps a chunk, entries written before the cursor moves past them; the
+  next allocations are pops. Primes 19.0 billion instructions to 17.0;
+  Primes, JsonGenerate and Knuckeotide 0.91 to 0.98 of their time. The
+  sweep exercise checks that the chunk after a carved one is listed free
+  and is the next allocation, and proves an unstamped and an unlisted
+  batch each fail it.
+
+- **`Math.expm1` and `Math.log1p` are glibc's.** Each was a series near
+  zero and Kahan's formula past it, and each answered differently from
+  glibc's for about one argument in seven. They are now glibc's fdlibm
+  `s_expm1.c` and `s_log1p.c`, Sun's notice kept: a reduction by ln 2 with
+  a correction for its rounding and a rational function for `expm1`; 1 +
+  x as 2^k (1 + f) with a correction for its rounding and the series in f
+  / (2 + f) for `log1p`. 340,031 arguments compared, none different; the
+  hyperbolic functions built on them moved closer to glibc's with them
+  (`sinh` from 12% of arguments different to 1%). Both join
+  `bench/libm_oracle`, and `bench/std_math_exercise.sh` requires every
+  answer bit for bit and proves either correction left out fails it.
+
+- **`Math.log10` is glibc's.** `log(x) / ln 10` with a whole-number
+  check answered differently from glibc's for more than half of 100,000
+  arguments. It is now glibc's `e_log10.c` - fdlibm's, Sun's notice kept
+  with it - on the Arm `log` above: x = 2^n m, n log10(2) in two parts,
+  plus log(m) / ln 10; a power of ten is its exponent exactly. 150,640
+  arguments compared, none different. The double-double powers the check
+  read, which nothing else read, are gone. The oracle's directory is
+  `bench/libm_oracle` now, holding glibc's `e_log10.c` beside Arm's files,
+  and `bench/std_math_exercise.sh` requires every `log10` answer bit for
+  bit and proves an exponent rounded the other way below one and a
+  log10(2) without its low part each fail it.
+
+- **`Math.exp2` and `Math.log2` are glibc's.** `exp2` was
+  `exp(frac * log 2)` scaled by the whole part and answered differently
+  from glibc's `exp2` for about one argument in eight; `log2` was the
+  series `log` had and differed for one in six hundred. Both are now
+  Arm's optimized-routines functions, glibc's since 2.28, on `exp`'s
+  table and a 64-entry one of their own, built unfused as the rest: 0 of
+  200,000 different from glibc, whole powers of two exact both ways.
+  `bench/std_math_exercise.sh` compiles them with the rest of
+  `bench/libm_oracle`, requires 327,121 answers bit for bit - the whole
+  range, the bands their special cases take, every power of two - and
+  proves a polynomial a term short, `log2` near 1 with r in one part, a
+  reduction without c's low part and an overflow scale halved each fail
+  it. The series and `1 / ln 2` nothing reads any more are gone.
+
+- **`Math.log` is glibc's as well, and twice as fast.** A series in
+  (m - 1)/(m + 1) answered differently from glibc's for about one
+  argument in a hundred; it is now Arm's optimized-routines log, glibc's
+  since 2.28, under 0.52 ulp - a degree-12 polynomial near 1, elsewhere a
+  128-entry table and a degree-6 one - built as glibc builds it without
+  FMA, unfused on every target. 380,014 arguments compared, none
+  different; ten million logs take 30 to 55 ms where they took 75 to 95
+  (Crystal's: 55 to 90). Every function built on `log` - `log1p` past its
+  series, `log10`, the inverse hyperbolics, `lgamma` - reads it.
+  `bench/std_math_exercise.sh` compiles Arm's log with the rest of
+  `bench/libm_oracle`, requires 210,014 answers bit for bit - the range, the
+  band around 1 and its edges, the subnormals, the specials - and proves
+  a square near 1 taken in one part, a reduction without c's low part and
+  a polynomial a term short each fail it.
+
+- **`Math.pow` is glibc's too, and three times as fast.** It answered
+  differently from glibc's for more than half of 300,000 arguments - a
+  sum of ten million powers printed another last digit than Crystal's -
+  and took 400 ms for those ten million, a double-double by squaring for
+  the whole part and `exp(f log x)` for the fraction. It is now Arm's
+  optimized-routines pow, glibc's since 2.28: log(x) to about 68 bits
+  from a 128-entry table, the product with y split so it is exact, and
+  `exp`'s table for the rest, under 0.54 ulp. 800,858 pairs compared,
+  specials crossed with specials included, none different from glibc's
+  unfused build; the ten million take 140 ms (Crystal's: 150 to 180) and
+  print Crystal's sum. `bench/std_math_exercise.sh` compiles Arm's pow
+  beside its exp from `bench/libm_oracle`, requires 240,858 pairs bit for
+  bit, and proves a logarithm a term short, an unsplit product, a table
+  without its tail and a negative base's odd power made positive each
+  fail it. The whole-exponent powers `log10` reads stay as they were.
+
+- **`Math.exp` is glibc's, to the last bit, and twice as fast.** It was
+  fdlibm's, which differed from glibc's in the last place for one
+  argument in ten over a million drawn from +-700 - so a program printing
+  an exponential in full printed another number than the same program in
+  Crystal on Linux one time in ten. It is now Arm's optimized-routines
+  exp, which glibc has carried since 2.28: the same reduction, the same
+  128-entry table taken from `exp_data.c`'s text, the same polynomial, no
+  division. 1,450,022 arguments compared against glibc on a processor
+  without FMA, every answer the same; where glibc picks its fused build,
+  it answers differently for about 7 arguments in 10,000 - glibc against
+  itself - and iyi's, unfused on every target, answers the same
+  everywhere. 20 million calls take 55 ms where they took 140 (Crystal's
+  call into glibc: 110), and crystal-metric's NeuralNet runs in 0.65 of
+  Crystal's time where it ran in 0.97 to 1.37.
+  `bench/std_math_exercise.sh` compiles Arm's two files, kept as
+  published in `bench/libm_oracle`, with contraction off, requires 310,021
+  answers bit for bit against them, and proves a polynomial a term short,
+  a reduction without ln2's low part and a subnormal rounded twice each
+  fail it; without a C compiler it says why it did not compare. The
+  notice travels with the code, in `REUSE.toml` and `NOTICE.md` - as
+  crystal-metric's port's now does too.
+
+- **An allocation carries less.** The thread's cache page was a call on
+  every allocation, because its first-touch mapping sat inside it; the
+  assist's and the trigger's paths, which run once a 64 KB slice, were
+  inlined into every allocation's body with their syscalls; and the
+  fast path's address arithmetic was checked, a branch each and a
+  multiply with an overflow test for the chunk's table entry. The touch
+  and the slice's end are out of line and the addresses wrap. Measured
+  with callgrind (which the stack fix above made possible) on binary
+  trees at depth 14: 146 instructions an allocation in `take` to 132,
+  the cache call's 18 gone, 7% fewer in all.
+
+- **The sweep walks a chunk in two thirds of the instructions.** Its
+  four tallies were class variables and the epoch's parity was read
+  from one, each a load and a store per chunk - any write through a
+  heap address might have been to them - and its steps were checked.
+  The tallies are the slice's locals, added once at its end, the parity
+  is read once a slice (it turns only in a pause, with no slice in
+  flight), and the steps wrap. `sweep_slice` on binary trees at depth
+  14: 319 million instructions to 218; the program, 1,200 million to
+  1,050. The sweep exercise's proof that a sweep freeing the live is
+  caught is anchored on the new line.
+
+- **The common allocation stays in its caller's frame.** A small class
+  whose list has a chunk, with no mark running, is popped, stamped and
+  cleared a word at a time in `take` itself; a mapping, a refill, a
+  carve and a birth under a mark are `take_slow`'s, out of line. Inlined,
+  those paths had given every allocation their frame and a general
+  clearing loop. Binary trees at depth 14 with the mark in the pause, so
+  that two runs compare: 887 million instructions to 797; at depth 18,
+  1,359 ms to 1,106 at best over the evening's three changes. The sweep
+  exercise proves a fast path that leaves a chunk dirty is caught.
+
+- **`Float64#floor` and `ceil` are one instruction.** On x86_64 the
+  processor is asked once, by `cpuid`, whether it has SSE4.1's
+  `roundsd`, as glibc's `floor` chooses its own version, and the
+  instruction is used where it is - every x86_64 processor of the last
+  fifteen years; aarch64 always has `frintm` and `frintp`. The
+  conversion they replace sat on the chain every noise lookup waits
+  for: crystal-metric's Noise took 1.33 to 1.44 times Crystal's time
+  and takes 1.01 to 1.05 now. The conversion still runs where there is
+  no instruction, and its answers now carry the argument's sign, as the
+  instruction's and the other library's do: `(-0.3).ceil` and
+  `(-0.0).floor` are `-0.0`, where they were `0.0`.
+  `bench/number_exercise.sh` checks both over the zeros, the doubles
+  either side of them, 2^52, the infinities and NaN against Crystal's
+  answers, runs the whole exercise again on a prelude that never asks
+  the processor, and proves a floor that truncates, a zero without its
+  sign and `roundsd` in the wrong mode each fail.
 
 - **Reading JSON allocates for values, not for keys and numbers.** The
   pull parser took a hash for every object to find a repeated key in, and
@@ -639,6 +829,25 @@
   And `Dir.tempdir` turned a TMP of `C:\` into `C:`, the current directory.
   `bench/std_dir_exercise.iyi` checks each on Windows; putting any one of
   the four fixes back fails it.
+
+- **`(-0.0).abs` is `0.0`,** as it is in Crystal. `Float64#abs` and
+  `Float32#abs` were a comparison, and `-0.0 < 0.0` is false, so a
+  negative zero kept its sign - and `log10(-0.0)`, whose glibc answer is
+  `-Infinity`, came out `+Infinity` for it. The sign is cleared by `copysign`,
+  one instruction on every target, and a single goes through the double.
+  `bench/number_exercise.sh` checks it and proves the comparison fails it;
+  `bench/std_float_exercise.sh` checks the single.
+
+- **A program runs under valgrind.** On Linux the collector finds the
+  main thread's stack in `/proc/self/maps`, and took the line named
+  `[stack]`; under valgrind that is valgrind's own stack, the program's
+  is a mapping valgrind made, and the first collection scanned from the
+  program's stack pointer up to the wrong end - every program that
+  collected died there of "stack overflow", so neither memcheck nor
+  callgrind could look at one. The stack is now the mapping that holds
+  the program's arguments, which is `[stack]` itself on a plain run.
+  `bench/root_exercise.sh` parses a map where the two differ, and proves
+  a parser that takes the name fails it.
 
 - **Objects past 128 bytes keep their pages warm.** The sweep keeps a
   budget's worth of dead pages warm for the next epoch and hands the rest
@@ -11955,7 +12164,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,620-line library and nothing else. Every other
+  written against iyi's own 18,848-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

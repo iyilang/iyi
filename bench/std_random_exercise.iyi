@@ -18,6 +18,7 @@ end
 # used to find that module where it meant the class.
 import std/file
 import std/random::{Random}
+import std/static_array
 
 # Every expected value below is what Crystal 1.21's `Random.new(seed)`
 # answers for the same call: a seeded program ported from there prints
@@ -52,5 +53,31 @@ assert_true ten.shuffle(Random.new(5)) == [9, 4, 2, 1, 6, 7, 3, 10, 5, 8], "ten 
 assert_true ten.sample(3, Random.new(5)) == [7, 8, 4], "three sampled"
 assert_true [1, 2, 3].sample(1, Random.new(11)) == [3], "one sampled is a sample"
 puts "  shuffle and sample, seeded as the other library seeds them"
+
+# In place, inside a struct's field: the table a noise generator keeps.
+struct Table
+  @cells : StaticArray(Int32, 10)
+
+  def initialize
+    @cells = StaticArray(Int32, 10).new { |i| i + 1 }
+  end
+
+  def shuffle(seed : UInt64) : Nil
+    @cells.shuffle_in_place(Random.new(seed))
+  end
+
+  def cells : Array(Int32)
+    @cells.to_a
+  end
+end
+
+puts "\n== static array"
+table = Table.new
+table.shuffle(5_u64)
+assert_true table.cells == [9, 4, 2, 1, 6, 7, 3, 10, 5, 8], "a field shuffled in place, as the other library's shuffle! does"
+five = StaticArray(Int32, 5).new { |i| i + 1 }
+five.shuffle_in_place(Random.new(3))
+assert_true five.to_a == [2, 3, 4, 1, 5], "a local shuffled in place"
+puts "  shuffle_in_place, in a field and in a local, seeded as the other library seeds it"
 
 puts "\nALL CHECKS PASSED"

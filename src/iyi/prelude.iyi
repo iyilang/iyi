@@ -1812,7 +1812,7 @@ require "./file"
 
       def self.write16(address : UInt64, value : UInt64) : Nil
         write8(address, value & 0xFF_u64)
-        write8(address + 1_u64, value.unsafe_shr(8_u64) & 0xFF_u64)
+        write8(address &+ 1_u64, value.unsafe_shr(8_u64) & 0xFF_u64)
       end
 
       # ── Whose state is whose ──────────────────────────────────────────
@@ -1880,23 +1880,28 @@ require "./file"
       end
 
       # This thread's cache, mapped on first touch and linked for the
-      # scavenge before the thread-local names it.
+      # scavenge before the thread-local names it. The touch is out of
+      # line: inside, it held every allocation's `cache` to a call.
       def self.cache : Pointer(UInt64)
         page = @@cache
-        if page == 0
-          page = __iyi_mmap(DIR_LEN).address
-          lock
-          # The shared pages, made under the same lock the first time any
-          # thread reaches the heap: two threads' first allocations would
-          # otherwise each map a centre of their own.
-          @@central = __iyi_mmap(DIR_LEN).address if @@central == 0
-          arena_dir
-          write64(page + CACHE_NEXT, @@caches)
-          @@caches = page
-          unlock
-          @@cache = page
-        end
+        page = first_touch if page == 0
         Pointer(UInt64).new(page)
+      end
+
+      @[NoInline]
+      def self.first_touch : UInt64
+        page = __iyi_mmap(DIR_LEN).address
+        lock
+        # The shared pages, made under the same lock the first time any
+        # thread reaches the heap: two threads' first allocations would
+        # otherwise each map a centre of their own.
+        @@central = __iyi_mmap(DIR_LEN).address if @@central == 0
+        arena_dir
+        write64(page + CACHE_NEXT, @@caches)
+        @@caches = page
+        unlock
+        @@cache = page
+        page
       end
 
       def self.first_cache : UInt64
@@ -2121,27 +2126,51 @@ require "./file"
       # object, and is the caller's to store for a headed one.
       def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         table = cache
-        # The arithmetic on the way in and out is wrapping: a counter on
-        # a page cannot overflow, and a checked add is a branch each on
-        # the path every allocation takes.
-        write64(table.address + CACHE_INSIDE, read64(table.address + CACHE_INSIDE) &+ 1_u64)
-        slice = read64(table.address + CACHE_SLICE) &+ size
+        # The arithmetic on the way in and out is wrapping, addresses
+        # included: a counter on a page cannot overflow, nor can an offset
+        # into it, and a checked add is a branch each on the path every
+        # allocation takes.
+        write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
+        slice = read64(table.address &+ CACHE_SLICE) &+ size
         if slice >= SLICE
-          write64(table.address + CACHE_SLICE, 0_u64)
-          # Before the carve: a collection triggered here cannot sweep the
-          # object about to be born, because it does not exist yet, and
-          # everything already born is reachable or fair game. Under a
-          # mark, a slice's worth of allocation buys a slice's worth of
-          # marking on this thread first - the assist.
-          if LibIyiGCTable.__iyi_marking != 0_u8
-            IyiMark.assist
-          else
-            IyiMark.pressure(slice)
-          end
+          write64(table.address &+ CACHE_SLICE, 0_u64)
+          slice_full(slice)
         else
-          write64(table.address + CACHE_SLICE, slice)
+          write64(table.address &+ CACHE_SLICE, slice)
         end
-        base = take_inside(table, bits & HEADED_FLAG != 0 ? size &+ HEADER : size, clear, bits, type_id)
+        bytes = bits & HEADED_FLAG != 0 ? size &+ HEADER : size
+        # The common case, in the caller's frame: a small class whose list
+        # has a chunk, and no mark beside the program. The marking flag
+        # cannot turn while this thread is inside - a mark begins in a
+        # stop, and the stop waits for `leave`. The rest - a mapping, a
+        # refill, a carve, a birth under a mark - is `take_slow`'s, out of
+        # line: inlined here, those paths gave every allocation a frame of
+        # six saved registers and a general clearing loop.
+        if bytes <= 128_u64 && LibIyiGCTable.__iyi_marking == 0_u8
+          index = bytes <= 16_u64 ? 0 : ((bytes &+ 7_u64).unsafe_shr(3_u64).to_i64 &- 2_i64).to_i32
+          head = table[index]
+          if head != 0
+            stamp(table, index, head, bits, type_id)
+            if clear
+              # `chunk_of` for a class of eight-byte steps; the chunk is
+              # whole words, so a word at a time and no tail.
+              word = head
+              stop = head &+ (index.to_u64 &+ 2_u64) &* 8_u64
+              while word < stop
+                write64(word, 0_u64)
+                word = word &+ 8_u64
+              end
+            end
+            leave(table)
+            return bits & HEADED_FLAG != 0 ? head &+ HEADER : head
+          end
+        end
+        take_slow(table, size, bytes, clear, bits, type_id)
+      end
+
+      @[NoInline]
+      def self.take_slow(table : Pointer(UInt64), size : UInt64, bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+        base = take_inside(table, bytes, clear, bits, type_id)
         # Born while a mark runs beside the program: black, and counted
         # alive in its arena, by the bytes asked for - the chunk's waste
         # is a second lookup of the entry on every allocation under a
@@ -2151,12 +2180,29 @@ require "./file"
         base
       end
 
+      # A slice's worth allocated: before the carve, so a collection
+      # triggered here cannot sweep the object about to be born, because
+      # it does not exist yet, and everything already born is reachable
+      # or fair game. Under a mark, a slice's worth of allocation buys a
+      # slice's worth of marking on this thread first - the assist. Out
+      # of line, because it runs once a slice: inlined, the assist's and
+      # the trigger's paths - syscalls and all - were code every
+      # allocation carried in its body.
+      @[NoInline]
+      def self.slice_full(slice : UInt64) : Nil
+        if LibIyiGCTable.__iyi_marking != 0_u8
+          IyiMark.assist
+        else
+          IyiMark.pressure(slice)
+        end
+      end
+
       # Out of the allocator, or the barrier: the depth counter down, and
       # a stop that was deferred while it was up is paid now.
       def self.leave(table : Pointer(UInt64)) : Nil
-        write64(table.address + CACHE_INSIDE, read64(table.address + CACHE_INSIDE) &- 1_u64)
+        write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &- 1_u64)
         {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-          if read64(table.address + CACHE_INSIDE) == 0_u64 && read64(table.address + CACHE_REQUEST) != 0
+          if read64(table.address &+ CACHE_INSIDE) == 0_u64 && read64(table.address &+ CACHE_REQUEST) != 0
             IyiThread.park_if_requested
           end
         {% end %}
@@ -2191,29 +2237,36 @@ require "./file"
         head = table[index]
         head = refill(table, index) if head == 0
         if head != 0
-          table[index] = read64(head &+ OFF_LINK)
-          # The chunk's byte: this epoch's, white, atomic when the caller
-          # promised no pointers - `clear` is the atomic question worn the
-          # other way - and headed when it has a word. The epoch's parity
-          # is read here, after the refill: a refill takes the lock, and
-          # the lock's spin parks for a pause, whose sweep turns the
-          # epoch - a parity read before it stamped the chunk as the last
-          # epoch's, and the next sweep freed it under its owner. A list
-          # chunk is in an arena by construction, the mask names it. The
-          # clearing path clears the whole chunk, header word and all: a
-          # stale type id in the word is a layout the mark would trust;
-          # an atomic chunk is never opened, and its word is left until
-          # codegen stores.
-          arena = head & (0_u64 &- MAP)
-          slot = read64(head &+ OFF_INDEX)
-          byte = arena + META + slot * META_ENTRY
-          write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
-          write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
+          stamp(table, index, head, bits, type_id)
           clear_block(head, chunk_of(index)) if clear
           return headed ? head &+ HEADER : head
         end
         head = carve(table, index, bits, type_id)
         headed ? head &+ HEADER : head
+      end
+
+      # The list's head popped and its chunk's entry stamped, for `take`'s
+      # fast path and `take_inside` alike.
+      @[AlwaysInline]
+      def self.stamp(table : Pointer(UInt64), index : Int32, head : UInt64, bits : UInt64, type_id : UInt64) : Nil
+        table[index] = read64(head &+ OFF_LINK)
+        # The chunk's byte: this epoch's, white, atomic when the caller
+        # promised no pointers - `clear` is the atomic question worn the
+        # other way - and headed when it has a word. The epoch's parity
+        # is read here, after the refill: a refill takes the lock, and
+        # the lock's spin parks for a pause, whose sweep turns the
+        # epoch - a parity read before it stamped the chunk as the last
+        # epoch's, and the next sweep freed it under its owner. A list
+        # chunk is in an arena by construction, the mask names it. The
+        # clearing path clears the whole chunk, header word and all: a
+        # stale type id in the word is a layout the mark would trust;
+        # an atomic chunk is never opened, and its word is left until
+        # codegen stores.
+        arena = head & (0_u64 &- MAP)
+        slot = read64(head &+ OFF_INDEX)
+        byte = arena &+ META &+ slot &* META_ENTRY
+        write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
+        write16(byte &+ 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
       end
 
       # The cache's list for this class is empty: take the centre's top
@@ -2340,12 +2393,42 @@ require "./file"
         # refill's comment). The chunk's memory is the kernel's zero: a
         # region is a frontier slab or a cold run, warm runs being lists.
         byte = read64(arena + OFF_CURSOR_BYTE)
-        write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
-        write64(arena + OFF_CURSOR_BYTE, byte &+ META_ENTRY)
+        epoch = IyiMark.epoch_flag
+        write8(byte, bits | CARVED_FLAG | epoch)
         write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
-        following = cursor &+ read64(arena + OFF_CHUNK)
+        chunk = read64(arena + OFF_CHUNK)
+        # The rest of a page's worth, onto the cache's list, which is empty
+        # or the carve would not have been asked: stamped free and this
+        # epoch's, as `free` and a warm run's thread stamp theirs - a free
+        # chunk of the current parity is a list's, the sweep leaves it and
+        # the mark refuses it - and linked in address order. One chunk a
+        # carve sent every allocation from fresh memory through the slow
+        # path, the refill's checks and the cursor's ordered store: a
+        # program whose heap only grows - a trie, a document being built -
+        # paid six hundred instructions an object. The entries are written
+        # before the cursor moves past them, for the lazy sweeper's reason
+        # above.
+        count = chunk < PAGE ? PAGE.unsafe_div(chunk) : 1_u64
+        left = read64(arena + OFF_LEFT)
+        count = left if count > left
+        if count > 1_u64
+          first_slot = chunk_index(arena, cursor)
+          listed = cursor &+ chunk
+          table[index] = listed
+          taken = 1_u64
+          while taken < count
+            entry = byte &+ taken &* META_ENTRY
+            write8(entry, CARVED_FLAG | FREE_FLAG | epoch)
+            write64(listed + OFF_LINK, taken &+ 1_u64 < count ? listed &+ chunk : 0_u64)
+            write64(listed + OFF_INDEX, first_slot &+ taken)
+            listed = listed &+ chunk
+            taken = taken &+ 1_u64
+          end
+        end
+        write64(arena + OFF_CURSOR_BYTE, byte &+ count &* META_ENTRY)
+        following = cursor &+ count &* chunk
         Pointer(Atomic(UInt64)).new(arena + OFF_CURSOR).value.set(following)
-        write64(arena + OFF_LEFT, read64(arena + OFF_LEFT) &- 1_u64)
+        write64(arena + OFF_LEFT, left &- count)
         write64(arena + OFF_HIGH, following) if following > read64(arena + OFF_HIGH)
         cursor
       end
@@ -3648,13 +3731,21 @@ require "./file"
           IyiHeap.read64(ctx_addr + 152_u64) # Rsp
         end
       {% else %}
-        # What this number is: the end address of the kernel's `[stack]`
-        # mapping for this process, read out of `/proc/self/maps`, which is
-        # the true base and not an approximation. The address of a local in
-        # `main` was the alternative and it is not the same number: it sits
-        # below argv, envp and the auxiliary vector, which the kernel places
-        # at the top of that mapping, so a base taken there is too low and a
-        # base that is too low silently loses roots.
+        # What this number is: the end address of the main thread's stack
+        # mapping, read out of `/proc/self/maps`, which is the true base and
+        # not an approximation. The address of a local in `main` was the
+        # alternative and it is not the same number: it sits below argv,
+        # envp and the auxiliary vector, which the kernel places at the top
+        # of that mapping, so a base taken there is too low and a base that
+        # is too low silently loses roots.
+        #
+        # The mapping is the one holding argv, which is in it whoever set
+        # the process up, rather than the one the kernel names `[stack]`:
+        # under valgrind the program's stack is a mapping valgrind made,
+        # `[stack]` is valgrind's own, and a scan from the program's stack
+        # pointer up to that end crossed unmapped memory - every program
+        # that collected died there, of "stack overflow", so neither
+        # memcheck nor callgrind could look at one.
         #
         # Reading a file is three syscalls this file already issues. The
         # buffer is a mapping of its own rather than a heap chunk, because
@@ -3676,7 +3767,7 @@ require "./file"
           while base == 0_u64
             count = __iyi_read(handle.to_i32, Pointer(Void).new(buffer + kept), MAPS - kept)
             if count <= 0
-              base = stack_end_in_maps(buffer, kept) if kept > 0_u64
+              base = stack_end_in_maps(buffer, kept, ARGV_UNSAFE.address) if kept > 0_u64
               break
             end
             filled = kept + count.to_u64
@@ -3691,7 +3782,7 @@ require "./file"
               kept = filled
               next
             end
-            base = stack_end_in_maps(buffer, last - 1_u64)
+            base = stack_end_in_maps(buffer, last - 1_u64, ARGV_UNSAFE.address)
             kept = filled - last
             index = 0_u64
             while index < kept
@@ -3701,24 +3792,31 @@ require "./file"
           end
           __iyi_close(handle)
           __iyi_munmap(buffer, MAPS)
-          fatal("iyi: no [stack] line in /proc/self/maps\n") if base == 0
+          fatal("iyi: no mapping in /proc/self/maps holds the program's arguments\n") if base == 0
           base
         end
       {% end %}
 
       # `/proc/self/maps` is a line per mapping, "low-high perms ..." in hex,
-      # with the region's name last. The line whose name is `[stack]` is the
-      # main thread's, and the number after the dash is its end. Kept off the
-      # platform branch and reachable on both, because parsing text is the
-      # half of this that a test can exercise anywhere and the syscalls are
-      # the half that cannot leave Linux.
-      def self.stack_end_in_maps(buffer : UInt64, length : UInt64) : UInt64
+      # with the region's name last. The line whose range holds `probe` -
+      # the address of the program's arguments - is the main thread's
+      # stack, and the number after the dash is its end; with no probe,
+      # the line named `[stack]`. Kept off the platform branch and
+      # reachable on both, because parsing text is the half of this that a
+      # test can exercise anywhere and the syscalls are the half that
+      # cannot leave Linux.
+      def self.stack_end_in_maps(buffer : UInt64, length : UInt64, probe : UInt64 = 0_u64) : UInt64
         bytes = Pointer(UInt8).new(buffer)
         start = 0_u64
         index = 0_u64
         while index <= length
           if index == length || (bytes + index.to_i64).value == 10_u8
-            return line_stack_end(bytes, start, index) if line_names_stack?(bytes, start, index)
+            if probe != 0_u64
+              high = line_stack_end(bytes, start, index)
+              return high if high > probe && line_start(bytes, start, index) <= probe
+            elsif line_names_stack?(bytes, start, index)
+              return line_stack_end(bytes, start, index)
+            end
             start = index + 1
           end
           index = index + 1
@@ -3756,6 +3854,21 @@ require "./file"
           cursor = cursor + 1
         end
         return 0_u64 if digits == 0
+        value
+      end
+
+      # The number before the dash: where the line's mapping begins. A line
+      # that does not open with one reads as 0, which holds no probe once
+      # its end is 0 too.
+      def self.line_start(bytes : Pointer(UInt8), start : UInt64, stop : UInt64) : UInt64
+        cursor = start
+        value = 0_u64
+        while cursor < stop
+          digit = hex_digit((bytes + cursor.to_i64).value)
+          break if digit > 15
+          value = value * 16_u64 + digit
+          cursor = cursor + 1
+        end
         value
       end
 
@@ -5843,6 +5956,18 @@ require "./file"
         byte = 0_u64
         mark = 0_u64
         slot = 0_u64
+        # The slice's tallies, and the epoch's parity, in locals: added to
+        # the class's counters once at the end, and read once at the start
+        # - the epoch turns only in a pause, and no slice is in flight
+        # across one. As class variables they were a load and a store
+        # each per chunk, since any write through a heap address might have
+        # been to them, and the steps below wrap: an address in an arena
+        # cannot overflow. Together a third of the walk's instructions.
+        epoch = @@epoch_flag
+        swept = 0_u64
+        freed = 0_u64
+        kept = 0_u64
+        kept_bytes = 0_u64
         while cursor < stop
           if cursor >= region_low && cursor < region_high
             # Uncarved: past the region in one step, the run closed.
@@ -5880,44 +6005,48 @@ require "./file"
           end
           word = IyiHeap.read8(byte)
           colour = IyiHeap.read8(mark)
-          if word & IyiHeap::EPOCH_FLAG != @@epoch_flag && (colour == WHITE || word & IyiHeap::FREE_FLAG != 0)
+          if word & IyiHeap::EPOCH_FLAG != epoch && (colour == WHITE || word & IyiHeap::FREE_FLAG != 0)
             # Unmarked and allocated before the mark, or free already on
             # a list the pause dropped: dead, and the run's. A free chunk
             # of this epoch's parity is on a live list - a warm run the
             # refill threaded (`IyiHeap.thread_warm`), or a chunk the
             # program handed back this epoch - and is left where it is.
             if word & IyiHeap::FREE_FLAG == 0
-              @@bytes_freed = @@bytes_freed + (word & IyiHeap::HEADED_FLAG != 0 ? chunk - IyiHeap::HEADER : chunk)
-              @@swept = @@swept + 1_u64
+              freed = freed &+ (word & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk)
+              swept = swept &+ 1_u64
               IyiHeap.write8(byte, word | IyiHeap::FREE_FLAG)
             end
             if run_low == 0
               run_low = cursor
               run_batch = batch_head
             end
-            IyiHeap.write64(cursor + IyiHeap::OFF_LINK, batch_head)
-            IyiHeap.write64(cursor + IyiHeap::OFF_INDEX, slot)
+            IyiHeap.write64(cursor &+ IyiHeap::OFF_LINK, batch_head)
+            IyiHeap.write64(cursor &+ IyiHeap::OFF_INDEX, slot)
             batch_head = cursor
           else
             if colour != WHITE
               # Marked: survives, white again and this epoch's. A white
               # chunk of this epoch's parity was allocated after the mark,
               # alive by construction, and is left as it is.
-              @@bytes_kept = @@bytes_kept + (word & IyiHeap::HEADED_FLAG != 0 ? chunk - IyiHeap::HEADER : chunk)
-              IyiHeap.write8(byte, (word - (word & IyiHeap::EPOCH_FLAG)) | @@epoch_flag)
+              kept_bytes = kept_bytes &+ (word & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk)
+              IyiHeap.write8(byte, (word - (word & IyiHeap::EPOCH_FLAG)) | epoch)
               IyiHeap.write8(mark, WHITE)
-              @@kept = @@kept + 1_u64
+              kept = kept &+ 1_u64
             end
             if run_low != 0
               batch_head = close_run(arena, chunk, run_low, cursor, batch_head, run_batch)
               run_low = 0_u64
             end
           end
-          cursor = cursor + chunk
-          byte = byte + IyiHeap::META_ENTRY
-          mark = mark + 1_u64
-          slot = slot + 1_u64
+          cursor = cursor &+ chunk
+          byte = byte &+ IyiHeap::META_ENTRY
+          mark = mark &+ 1_u64
+          slot = slot &+ 1_u64
         end
+        @@swept = @@swept + swept
+        @@bytes_freed = @@bytes_freed + freed
+        @@kept = @@kept + kept
+        @@bytes_kept = @@bytes_kept + kept_bytes
         # The run in progress closes at the slice's end and the next slice
         # begins one of its own: a run cut back for a page release is the
         # batch's newest prefix, and a batch handed over is nobody's to
@@ -6093,16 +6222,25 @@ require "./file"
       # pause's and not the lazy sweeper's: a sweeper on one thread cannot
       # edit another running thread's cache. Some cache's warm fill arena
       # is exempt, the cushion that keeps spike-then-idle from paying an
-      # mmap on its next allocation. Nothing else is: sparing an all-dead
-      # arena the epoch had allocated from, or one holding pages the sweep
-      # kept warm, was built and measured in 0.11.0's first cycle and
-      # bought nothing the probe could see - the resident-set probe read
-      # 140 MB median against 129 without the first, on two cores, the
-      # race table the same either way - because a churning class's dead
-      # arena is what the kernel should have back, and the pages it faults
-      # in again are a budget's worth an epoch (GC_DESIGN.md, the
-      # footprint section). Runs after the mark and before the epoch
-      # turns, so a released arena is never debt.
+      # mmap on its next allocation. So are empty arenas up to the part of
+      # the budget past SPARE_BELOW: the next epoch allocates the budget
+      # again, and an arena handed back is one it maps and faults in
+      # afresh, a fault a page. crystal-metric's Base64Encode, run after
+      # Revcomp left 133 MB alive, allocated its 400 KB strings under a
+      # 266 MB budget and took 740,000 faults where it took 18,000 alone:
+      # 1.25 s against 0.73. With the arenas past the floor kept, 0.9,
+      # its peak 56 MB higher on 842. The floor is why a shallow budget
+      # spares nothing: sparing every empty arena a budget covers read on
+      # the resident-set probe, whose budget is 38 MB, as 148 MB median
+      # against 112 and no wall time bought - a spared arena stays
+      # resident until the lazy sweep reaches it, beside the pages that
+      # sweep keeps warm, and 0.11.0's first cycle had measured the same
+      # (140 against 129). A kept arena is debt like any other: its sweep
+      # keeps a budget's worth of its pages warm and hands the rest back
+      # cold (GC_DESIGN.md, the footprint section). Runs after the mark
+      # and before the epoch turns, so a released arena is never debt.
+      SPARE_BELOW = 67108864_u64
+
       def self.scavenge : Nil
         # Every free list dropped first - the centre's and each stopped
         # thread's cache's - which is what lets a mapping go back without
@@ -6110,13 +6248,18 @@ require "./file"
         # the sweep needs anyway.
         IyiHeap.drop_free_lists
         previous = 0_u64
+        spared = 0_u64
         arena = IyiHeap.first_arena
         while arena != 0
           following = IyiHeap.arena_next(arena)
           # What the sweep listed and no cache took: idle and warm from
           # here, the lists being gone.
           IyiHeap.idle_listed(arena)
-          if IyiHeap.arena_live(arena) == 0 && IyiHeap.release_arena(previous, arena)
+          empty = IyiHeap.arena_live(arena) == 0
+          if empty && spared + IyiHeap::MAP + SPARE_BELOW <= budget
+            spared = spared + IyiHeap::MAP
+            previous = arena
+          elsif empty && IyiHeap.release_arena(previous, arena)
             @@arenas_released = @@arenas_released + 1_u64
           else
             previous = arena
@@ -6524,6 +6667,22 @@ require "./file"
         # 2.1 ms, where every other stop in the run is under 230 µs.
         STW_MARK_BOUND = 1024_u64
 
+        # The bound for a mark whose last one kept fewer objects than it:
+        # a small live set is marked in the stop, whole. After a ring of
+        # 503 tasks a conservative slot held its channels, 5,043 objects
+        # and 278 KB, and every later collection overran a thousand and
+        # went beside the program: a helper woken each time, a third of
+        # the wakes past a millisecond on a loaded machine, and the
+        # second stop waiting on them - an allocation loop ran 587 ms
+        # against 194, its longest pause 8 ms against 0.1. Marked in the
+        # stop, the same 181 collections paused 110 µs each and 244 at the
+        # longest. Given to every mark, the larger bound is 7,000 objects
+        # of scanning a large live set pays in every first stop before it
+        # goes beside the program anyway: binary trees' pauses summed a
+        # third more. The last mark is a guess, and a wrong one costs this
+        # bound's scanning once - not the estimate's whole mark.
+        STW_MARK_SMALL = 8192_u64
+
         def self.concurrent_possible? : Bool
           @@helpers_wanted > 0_u64
         end
@@ -6574,7 +6733,8 @@ require "./file"
           # The mark, up to the bound, on both platforms: what it finds
           # inside the bound is the whole live set and this stop is the
           # collection.
-          bounded = drain_bounded(w, STW_MARK_BOUND)
+          # What the last mark kept, whole: the sweep debt was paid above.
+          bounded = drain_bounded(w, @@kept < STW_MARK_SMALL ? STW_MARK_SMALL : STW_MARK_BOUND)
           if bounded
             # The whole live set, inside the bound: this stop is the
             # collection. The tail is `collect_locked`'s, and the caller

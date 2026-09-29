@@ -83,6 +83,28 @@ echo "== and with optimisation on (--release)"
 run_case "release" release --release
 
 echo
+echo "== the rounding without the processor's instruction"
+# x86_64 rounds with `roundsd` where the processor has it, which every CI
+# machine does; the conversion that stands in for it elsewhere is run here
+# by a copy of the prelude that never asks. It has to pass every check.
+mkdir -p "$WORK/software/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/software/iyi/"
+sed -e 's/^      rounds == 1$/      false/' "$REPO/src/iyi/float.iyi" > "$WORK/software/iyi/float.iyi"
+if cmp -s "$REPO/src/iyi/float.iyi" "$WORK/software/iyi/float.iyi"; then
+  echo "  software: the copy still asks the processor, so this runs nothing new"
+  status=1
+elif IYI_PATH="$WORK/software${PSEP}$REPO/src" "$IYI" build -o "$WORK/software/program" \
+       "$REPO/bench/number_exercise.iyi" > "$WORK/software/build" 2>&1 &&
+     "$WORK/software/program" > "$WORK/software/out" 2>&1 &&
+     grep -q "all number checks passed" "$WORK/software/out"; then
+  echo "  software: every check held"
+else
+  echo "  software: the conversion's answers are not the instruction's"
+  tail -3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
+  status=1
+fi
+
+echo
 echo "== the divisions that leave the type, which are panics"
 
 panics_with() { # panics_with <label> <name> <phrase> <expression>
@@ -247,10 +269,28 @@ prove_fails "base printing broken" bad_base number.iyi \
   "number: hex" \
   's/^        buffer\[at\] = d < 10 ? (48 + d).to_u8 : (87 + d).to_u8$/        buffer[at] = d < 10 ? (48 + d).to_u8 : (55 + d).to_u8/'
 
-# 7. The rounding a column of numbers reads, in the file it lives in.
+# 7. The rounding a column of numbers reads, in the file it lives in: the
+#    conversion's floor truncating, with the instruction out of the way.
 prove_fails "floor rounds the wrong way" bad_floor float.iyi \
   "number: floor goes down" \
-  's/^    truncated > self ? truncated - 1.0 : truncated$/    truncated/'
+  's/^      rounds == 1$/      false/; s/^      LibIyiRounding.copysign(truncated > self ? truncated - 1.0 : truncated, self)$/      LibIyiRounding.copysign(truncated, self)/'
+
+# 7b. The conversion's answer without the argument's sign: `(-0.3).ceil`
+#     is `0.0` again, where the instruction answers `-0.0`.
+prove_fails "a zero without its sign" unsigned_zero float.iyi \
+  "number: floor and ceil as the other library answers them" \
+  's/^      rounds == 1$/      false/; s/^      LibIyiRounding.copysign(truncated < self ? truncated + 1.0 : truncated, self)$/      truncated < self ? truncated + 1.0 : truncated/'
+
+# 7d. abs by a comparison again, which leaves `-0.0` as it is.
+prove_fails "abs keeps a zero's sign" abs_sign float.iyi \
+  "number: abs clears the sign of a zero too" \
+  's/^    LibIyiRounding.copysign(self, 1.0)$/    self < 0.0 ? 0.0 - self : self/'
+
+# 7c. The instruction told to truncate: `roundsd`'s mode 11 rather than
+#     9, which is what floor asks. Read on a processor that has it.
+prove_fails "the instruction truncates" roundsd_mode float.iyi \
+  "number: floor goes down" \
+  's/roundsd \$\$9,/roundsd $$11,/'
 
 # 8. And the rounding that has to be symmetric about zero.
 prove_fails "round is not symmetric" bad_round float.iyi \

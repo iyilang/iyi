@@ -301,6 +301,31 @@
   end
   puts "stray: a barrier run after its mark had ended shaded nothing, and the next mark kept what the holder held"
 
+  # ── A small live set, marked in the stop ──────────────────────────────
+  # Four thousand live objects, over the thousand every first stop marks:
+  # a mark whose last one kept fewer than STW_MARK_SMALL is given that
+  # bound and finishes stopped, where waking a helper for each of these
+  # collections cost an allocation loop three times its time and 8 ms
+  # pauses. With helpers to wake, not one goes beside the program.
+  IyiMark.workers = 15_u64
+  IyiMark.auto = false
+  small = Array(Payload).new(2000) { |index| Payload.new(index.to_u64) }
+  IyiMark.collect
+  IyiMark.auto = true
+  small_collections = IyiMark.collections
+  small_beside = IyiMark.concurrent_collections
+  8.times do
+    churn(IyiMark.budget)
+    IyiMark.settle
+  end
+  IyiMark.auto = false
+  small_collections = IyiMark.collections - small_collections
+  small_beside = IyiMark.concurrent_collections - small_beside
+  fail("small: eight budgets of churn triggered no collection") if small_collections == 0_u64
+  fail("small: #{small_beside.to_i64} of #{small_collections.to_i64} collections over #{IyiMark.kept.to_i64} live objects ran beside the program") if small_beside != 0_u64
+  fail("small: a payload of the live set came back wrong") unless small[1999].seed == 1999_u64 && small[1999].intact?
+  puts "small: #{small_collections.to_i64} collections over #{IyiMark.kept.to_i64} live objects, every one finished in its stop"
+
   # ── The moves, under marks beside the program ─────────────────────────
   IyiMark.workers = 15_u64
   under_mark = 0

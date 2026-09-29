@@ -81,7 +81,7 @@ fi
 
 echo
 echo "== every json section reported"
-for phrase in "== parse corpus" "== to_json and to_pretty_json" "== pull parser walk" "== builder" "== equality and hash" "== to_json and from_json" "== what the reader refuses" "== differential corpus"; do
+for phrase in "== parse corpus" "== to_json and to_pretty_json" "== pull parser walk" "== builder" "== equality and hash" "== to_json and from_json" "== derive serializable" "== what the reader refuses" "== differential corpus"; do
   if ! grep -aq "$phrase" "$WORK/json-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -280,6 +280,18 @@ broken "a substring for every number" "walking an object allocates" \
   'if digits <= 15 && exponent_digits <= 3' 'if false'
 broken "a number scaled by the wrong power" "ASSERTION FAILED" \
   'f = mantissa.to_f64 / POW10[0 - power]' 'f = mantissa.to_f64 / POW10[1 - power]'
+broken "a derive that reads an unknown key's first token only" "ASSERTION FAILED\|expected\|unexpected" \
+  '        else
+          pull.skip
+        end
+      {% end %}' '        else
+          pull.read_next
+        end
+      {% end %}'
+broken "a derive that refuses a missing key without its name" "a missing field refused by name" \
+  'has no key #{ {{ field[:name][1..] }}.inspect }' 'is missing a key'
+broken "a derive that reads a null into the other type" "ASSERTION FAILED\|expected" \
+  'pull.read_null? ? nil : ::Std::Json::JSON.read_value' '::Std::Json::JSON.read_value'
 broken "a repeat past the scanned keys let through" "a repeat past the scanned keys" \
   "parse_error(\"duplicate key '#{candidate}'\") if seen.has_key?(candidate)" 'nil'
 

@@ -1009,7 +1009,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 118,975 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 18,540-line own prelude + 42,809 in std |
+| Library | 8,161 lines (3,551 of it core) | 18,540-line own prelude + 42,905 in std |
 | Specs | 21,146 lines | 12,122 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -1306,6 +1306,20 @@ purpose, carrying the declaration's name and, for each field written in its
 body, that field's name and the type it was written as. It is finite, it holds
 no reference back into the tree, and it is the same shape whether the module is
 being compiled or read.
+
+**`std/json` has one: `derive serializable`.** The spelling above is the
+section's shorthand; the macro is `serializable`, imported with
+`import std/json::{JSON, serializable}`. It writes `impl ToJSON for` the
+type - which is what the paragraph above promised and what a macro body
+could not hold until `impl` opened a block in one - a `to_json` and a
+`from_json`, and an `initialize(pull)` that reads a key per field, passes
+over keys it has no field for, holds `nil` for a missing key whose type
+admits it and refuses any other missing key by name. A field's type is
+asked of the field (`typeof`), not written out: a type rendered from the
+declaration arrives fully qualified, and a qualified name reaches a type
+the way another module would, which R-2 refuses for one that is not
+`pub`. crystal-metric's port wrote the reader and the writer by hand
+field by field for want of it; `bench/std_json_exercise.sh` holds it.
 
 **The `Order` case is built.** A field's type arrives as a type, not a name, so
 `field[:type] <= ToJSON` is the question above, asked and answered. The type,

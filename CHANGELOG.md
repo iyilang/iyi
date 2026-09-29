@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`derive serializable`: a type that reads and writes itself as JSON.**
+  crystal-metric's port wrote its JSON reader and writer by hand, field by
+  field, where Crystal writes `include JSON::Serializable`. With
+  `import std/json::{JSON, serializable}`, `derive serializable` in a
+  struct or class gives it `impl ToJSON`, `to_json`, `from_json` and an
+  `initialize(pull)`: a key per field, named as the field is; built-in
+  values, arrays, `Hash(String, V)`, `Any` and other serializable types;
+  `null` for a nil field and a missing key read as nil where the type
+  admits it; an unknown key passed over; any other missing key refused by
+  name. SPEC.md II.4 records it. `bench/std_json_exercise.sh` reads,
+  writes and round-trips nested, array, hash and nil fields, refuses a
+  missing key, and proves the checks fail with an unknown key half read, a
+  refusal without its name, or a `null` read as the other type.
+
 - **`exit(status = 0)`.** A program that has answered and says what it
   found in its status - `diff`'s 1, `grep`'s - had no way to: the error
   for `exit` said a failure is a panic, and a panic prints a line and a

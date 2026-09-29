@@ -22,7 +22,7 @@
 
 module bench/std_json_exercise
 
-import std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON}
+import std/json::{JSON, Any, Parser, PullParser, Builder, ToJSON, serializable}
 import std/gc::{GC}
 
 def assert_true(cond : Bool, msg : String) : Nil
@@ -415,6 +415,56 @@ assert_true(floats["a"] == 1.5 && floats["b"] == 2.0, "Hash(String, Float64)")
 strings = JSON.from_json("{\"k\": [\"v\", \"w\"]}", Hash(String, Array(String)))
 assert_true(strings["k"][1] == "w", "Hash(String, Array(String))")
 puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes and a ToJSON struct"
+
+puts "\n== derive serializable"
+
+# A type that reads and writes itself as an object, a key per field: the
+# derive writes `to_json`, `from_json` and `initialize(pull)`, and a field
+# of another such type, an array of them, a hash, a nil and a value the
+# type has no field for are each what the other library's
+# `JSON::Serializable` makes of them.
+struct Place
+  getter x : Float64
+  getter y : Float64
+  getter name : String
+  getter note : String?
+
+  def initialize(@x : Float64, @y : Float64, @name : String, @note : String?)
+  end
+
+  derive serializable
+end
+
+struct Places
+  getter places : Array(Place)
+  getter counts : Hash(String, Int32)
+  getter best : Place?
+
+  derive serializable
+end
+
+place = Place.from_json("{\"x\": 1.5, \"extra\": [1, {\"deep\": null}], \"name\": \"a\", \"y\": -2}")
+assert_true place.x == 1.5 && place.y == -2.0 && place.name == "a" && place.note.nil?, "a derived type read, an unknown key passed over"
+assert_text "{\"x\":1.5,\"y\":-2.0,\"name\":\"a\",\"note\":null}", place.to_json, "a derived type written, a nil field as null"
+assert_text place.to_json, Place.from_json(place.to_json).to_json, "a derived type round-trips"
+noted = Place.new(0.25, 3.0, "b", "seen")
+assert_text "{\"x\":0.25,\"y\":3.0,\"name\":\"b\",\"note\":\"seen\"}", JSON.to_json(noted), "JSON.to_json of a derived type"
+places = Places.from_json("{\"counts\": {\"a\": 1}, \"places\": [{\"x\": 1, \"y\": 2, \"name\": \"p\", \"note\": \"n\"}, {\"x\": 3, \"y\": 4, \"name\": \"q\", \"note\": null}], \"best\": null}")
+assert_true places.places.size == 2 && places.places[0].note == "n" && places.places[1].note.nil?, "an array of a derived type"
+assert_true places.counts["a"] == 1 && places.best.nil?, "a hash field and a nil derived field"
+assert_text "{\"places\":[{\"x\":1.0,\"y\":2.0,\"name\":\"p\",\"note\":\"n\"},{\"x\":3.0,\"y\":4.0,\"name\":\"q\",\"note\":null}],\"counts\":{\"a\":1},\"best\":null}", places.to_json, "a derived type of derived types written"
+assert_true JSON.from_json("[{\"x\": 0, \"y\": 0, \"name\": \"z\"}]", Array(Place))[0].name == "z", "JSON.from_json into an array of a derived type"
+refusal = "accepted"
+group do |g|
+  reader = g.spawn do
+    Place.from_json("{\"x\": 1, \"y\": 2}")
+    0
+  end
+  answer = reader.value
+  refusal = answer.message if answer.is_a?(Panicked)
+end
+assert_true refusal.includes?("JSON for Place has no key \"name\""), "a missing field refused by name: #{refusal}"
+puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, a missing key refused"
 
 # ---------------------------------------------------------------------------
 # Refusals

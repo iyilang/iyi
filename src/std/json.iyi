@@ -147,9 +147,98 @@ def utf8_sequence_at(bytes : Pointer(UInt8), size : Int32, at : Int32) : Int32
 end
 
 # A type that can write itself into a `Builder`. `JSON.to_json` accepts any
-# value whose type implements it.
+# value whose type implements it, as a `derive serializable` type does.
 pub trait ToJSON
   abstract def to_json(json : Builder) : Nil
+end
+
+# `derive serializable`, in a struct or class whose fields are written with
+# their types: the type reads and writes itself as a JSON object, a key per
+# field, named as the field is.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       getter name : String
+#       derive serializable
+#     end
+#
+#     Coord.from_json(%({"x": 1.5, "name": "a"})).x   # => 1.5
+#     coord.to_json                                   # => {"x":1.5,"name":"a"}
+#
+# A field's value is read and written as `JSON.read_value` and
+# `JSON.write_value` read and write its type: the built-in values, an
+# `Array` or `Hash(String, V)` of them, an `Any`, another serializable
+# type. A key the type has no field for is passed over; a field with no
+# key is refused by name unless its type admits `nil`, which it then
+# holds. It is what the other library's `include JSON::Serializable`
+# writes, and the derive runs once, in the type's own module (SPEC.md
+# II.4), so a consumer calls the methods without the macro.
+pub macro serializable(declaration)
+  impl ::Std::Json::ToJSON for {{ declaration[:name].id }}
+    def to_json(json : ::Std::Json::Builder) : Nil
+      json.object do
+        {% for field in declaration[:fields] %}
+          json.field({{ field[:name][1..] }})
+          {% if field[:type].nilable? %}
+            json_written = {{ field[:name].id }}
+            if json_written.nil?
+              json.null
+            else
+              ::Std::Json::JSON.write_value(json_written, json)
+            end
+          {% else %}
+            ::Std::Json::JSON.write_value({{ field[:name].id }}, json)
+          {% end %}
+        {% end %}
+      end
+    end
+  end
+
+  def to_json : String
+    ::Std::Json::JSON.build { |json| to_json(json) }
+  end
+
+  def self.from_json(text : String) : self
+    ::Std::Json::JSON.from_json(text, self)
+  end
+
+  def initialize(pull : ::Std::Json::PullParser)
+    # Each field's type is asked of the field itself (`typeof`): written
+    # out, a type from this module arrives fully qualified, and a qualified
+    # name reaches a type the way another module would. A field that may
+    # be nil reads `null` as the nil and anything else as the other type,
+    # which is the field's type with the nil taken out: `x || raise`.
+    {% for field in declaration[:fields] %}
+      json_value_{{ field[:name][1..].id }} = nil
+    {% end %}
+    pull.read_object do |json_key|
+      {% if declaration[:fields].empty? %}
+        pull.skip
+      {% else %}
+        case json_key
+        {% for field in declaration[:fields] %}
+        when {{ field[:name][1..] }}
+          {% if field[:type].nilable? %}
+            json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
+          {% else %}
+            json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+          {% end %}
+        {% end %}
+        else
+          pull.skip
+        end
+      {% end %}
+    end
+    {% for field in declaration[:fields] %}
+      {% if field[:type].nilable? %}
+        {{ field[:name].id }} = json_value_{{ field[:name][1..].id }}
+      {% else %}
+        json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
+        raise "JSON for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if json_field_{{ field[:name][1..].id }}.nil?
+        {{ field[:name].id }} = json_field_{{ field[:name][1..].id }}
+      {% end %}
+    {% end %}
+  end
 end
 
 # One JSON value of any kind, the result of `JSON.parse`. The `as_x` methods
@@ -2281,9 +2370,10 @@ pub struct JSON
   end
 
   # The document read into `type`: `Nil`, `Bool`, `Int32`, `Int64`, `UInt8`,
-  # `UInt64`, `Float64`, `String`, `Any`, or an `Array` or `Hash(String, V)`
-  # of those. An integer outside the type is refused, as is anything after
-  # the root value.
+  # `UInt64`, `Float64`, `String`, `Any`, a type with `derive serializable`,
+  # one of those or `nil`, or an `Array` or `Hash(String, V)` of those. An
+  # integer outside the type is refused, as is anything after the root
+  # value.
   def self.from_json(str : String, type : T.class) : T forall T
     pull = PullParser.new(str)
     value = read_value(pull, type)
@@ -2388,5 +2478,11 @@ pub struct JSON
       h[k] = read_value(pull, V)
     end
     h
+  end
+
+  # A type that reads itself: the `initialize(pull)` a `derive
+  # serializable` wrote.
+  def self.read_value(pull : PullParser, type : T.class) : T forall T
+    T.new(pull)
   end
 end

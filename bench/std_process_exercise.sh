@@ -125,6 +125,7 @@ for phrase in "arguments came back as they went" \
 done
 if [ "$PLATFORM" = windows ]; then
   grep -q "a batch file runs under cmd.exe" "$WORK/process-plain.out" || { echo "  missing: the batch file's refusal"; status=1; }
+  grep -q "a working directory Windows will not take" "$WORK/process-plain.out" || { echo "  missing: the long working directory"; status=1; }
 else
   grep -q "signal 9, exit code 137" "$WORK/process-plain.out" || { echo "  missing: the signalled child"; status=1; }
 fi
@@ -210,8 +211,25 @@ else
         "queue = ::LibC.kqueue" "queue = -1"
       ;;
     *)
-      prove blocking "the end awaited by wait4" "a sibling ticked" \
-        "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64"
+      # A kernel before 5.3 has no pidfd, and the end is polled: with
+      # pidfd_open answering nothing the exercise holds all the same. And
+      # the poll made a plain wait4 again blocks the thread.
+      if ! patched nopidfd \
+           "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64"; then
+        echo "  the patch for nopidfd did not apply"
+        status=1
+      elif build nopidfd "$WORK/nopidfd-std${PSEP}$IYI_PATH"; then
+        if "$WORK/nopidfd" >"$WORK/nopidfd.out" 2>&1 && grep -q "ALL CHECKS PASSED" "$WORK/nopidfd.out"; then
+          echo "  without a pidfd, as on a kernel before 5.3, every check holds: the end is polled"
+        else
+          echo "  without a pidfd the exercise failed:"
+          grep -m3 FAIL "$WORK/nopidfd.out" | sed 's/^/    /'
+          status=1
+        fi
+      fi
+      prove blocking "the end awaited by a blocking wait4, as on a kernel before 5.3" "a sibling ticked" \
+        "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64" \
+        "WNOHANG        =   1_i64" "WNOHANG        =   0_i64"
       ;;
   esac
 

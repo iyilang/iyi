@@ -980,6 +980,64 @@ def main():
     c.send("textDocument/didClose",
            {"textDocument": {"uri": fields_uri}}, wait=False)
 
+    # 18f. A rename onto a name its owner already has is refused. It was
+    #      carried out: `shout` renamed to an existing `yell` left two
+    #      `def yell(name : String)`, the later replaced the earlier, and
+    #      `puts shout("a")` printed "a!" where it had printed "A". The top
+    #      level counts too - a def renamed `puts` would take the prelude's
+    #      bare calls - and a free name still renames.
+    clash = ("module clash\n\n"
+             "def shout(name : String) : String\n  name.upcase\nend\n\n"
+             "def yell(name : String) : String\n  name + \"!\"\nend\n\n"
+             "puts shout(\"a\")\nputs yell(\"b\")\n")
+    clash_uri = file_uri(os.path.join(work, "clash.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": clash_uri, "languageId": "iyi",
+                             "version": 1, "text": clash}}, wait=False)
+    c.diagnostics(clash_uri)
+    at_shout = {"textDocument": {"uri": clash_uri},
+                "position": {"line": 2, "character": 5}}
+    onto_yell = c.send("textDocument/rename", dict(at_shout, newName="yell")).get("error") or {}
+    onto_puts = c.send("textDocument/rename", dict(at_shout, newName="puts")).get("error") or {}
+    free = (c.send("textDocument/rename", dict(at_shout, newName="holler")).get("result") or {}).get("changes", {})
+    step("18f", "a rename onto a name already there is refused",
+         onto_yell.get("code") == -32803 and "already a method" in onto_yell.get("message", "") and
+         onto_puts.get("code") == -32803 and
+         len(free.get(clash_uri, [])) == 2,
+         f"onto yell {onto_yell.get('code')}, onto puts {onto_puts.get('code')}, "
+         f"onto holler {len(free.get(clash_uri, []))} edit(s)")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": clash_uri}}, wait=False)
+
+    # 18g. A local renamed onto a name a block inside its scope binds: the
+    #      block's uses of the local would read the block's parameter. It
+    #      was carried out, and `total = total + n` became `n = n + n`,
+    #      so the def returned 100 where it had returned 103.
+    shadow = ("module shadow\n\n"
+              "def sum : Int32\n"
+              "  total = 100\n"
+              "  [1, 2].each do |n|\n"
+              "    total = total + n\n"
+              "  end\n"
+              "  total\n"
+              "end\n\n"
+              "puts sum\n")
+    shadow_uri = file_uri(os.path.join(work, "shadow.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": shadow_uri, "languageId": "iyi",
+                             "version": 1, "text": shadow}}, wait=False)
+    c.diagnostics(shadow_uri)
+    at_total = {"textDocument": {"uri": shadow_uri},
+                "position": {"line": 3, "character": 3}}
+    onto_n = c.send("textDocument/rename", dict(at_total, newName="n")).get("error") or {}
+    onto_acc = (c.send("textDocument/rename", dict(at_total, newName="acc")).get("result") or {}).get("changes", {})
+    step("18g", "a local is not renamed onto a block parameter's name",
+         onto_n.get("code") == -32803 and "already a name" in onto_n.get("message", "") and
+         len(onto_acc.get(shadow_uri, [])) == 4,
+         f"onto n {onto_n.get('code')}, onto acc {len(onto_acc.get(shadow_uri, []))} edit(s)")
+    c.send("textDocument/didClose",
+           {"textDocument": {"uri": shadow_uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

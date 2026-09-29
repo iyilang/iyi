@@ -48,6 +48,9 @@ module Iyi::Lsp
     # Whether the scope calls a method of this name with no receiver and
     # no arguments, which reads exactly like the variable.
     property? called = false
+    # Whether a block inside the scope binds this name as a parameter,
+    # which the variable's uses in that block would become.
+    property? bound_in_block = false
 
     def initialize(@name : String, @scope : ASTNode)
     end
@@ -72,7 +75,7 @@ module Iyi::Lsp
     # Whether *other* is already a name in this variable's scope.
     def taken?(other : String, lines : Array(String)) : Bool
       found = self.class.collect(other, @scope, lines)
-      !found.sites.empty? || found.called?
+      !found.sites.empty? || found.called? || found.bound_in_block?
     end
 
     def self.collect(name : String, scope : ASTNode, lines : Array(String)) : LocalSites
@@ -249,7 +252,9 @@ module Iyi::Lsp
 
       def visit(node : Block)
         return true if node.same?(@scope) || instance_var?
-        !LocalSites.binds?(node, @name)
+        return true unless LocalSites.binds?(node, @name)
+        @result.bound_in_block = true
+        false
       end
 
       def visit(node : Assign)

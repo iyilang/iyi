@@ -1,5 +1,10 @@
 class LLVM::GenericValue
-  def initialize(@unwrap : LibLLVM::GenericValueRef, @context : LLVM::Context)
+  # The engine that answered this value, when one did: a value can be a
+  # pointer into the module the engine loaded - `to_string` of a string
+  # the code returned - and that memory lives as long as the engine does.
+  @engine : LLVM::JITCompiler?
+
+  def initialize(@unwrap : LibLLVM::GenericValueRef, @context : LLVM::Context, @engine : LLVM::JITCompiler? = nil)
   end
 
   def to_i : Int32

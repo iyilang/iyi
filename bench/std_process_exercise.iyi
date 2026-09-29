@@ -13,6 +13,7 @@ module bench/std_process_exercise
 
 import std/process::{Process, ProcessResult, ProcessError}
 import std/env::{ENV}
+import std/dir::{Dir}
 
 pub struct TaskFailed
   def initialize
@@ -277,6 +278,28 @@ group do |g|
     else
       fail("a batch file was not refused")
     end
+
+    puts "== a working directory Windows will not take is named for what it is"
+    # 270 characters, past the 254 a working directory may have while long
+    # paths are off. Refused there as "the directory name is invalid", and
+    # that was told as "no such directory" about one that is there; where
+    # long paths are on, the child runs in it.
+    base = directory_of(me)
+    long = "#{base}\\#{"w" * (270 - base.bytesize - 1)}"
+    Dir.mkdir_p(long)
+    deep = Process.run(me, ["has", "x"], chdir: long)
+    case deep
+    when ProcessResult
+      fail("in a long working directory the child said #{deep.stdout.inspect}") unless deep.stdout == "missing\n"
+      puts "  this machine runs a program in a 270-character directory"
+    when ProcessError
+      fail("a long working directory was told as #{deep.reason.inspect}") if deep.not_found?
+      fail("a long working directory's refusal: #{deep.reason}") unless deep.reason.includes?("refused it as a working directory")
+      puts "  refused, and said so: #{deep.reason}"
+    else
+      fail("a long working directory answered Cancelled")
+    end
+    Dir.delete(long)
   {% else %}
     puts "== a child ended by a signal"
     killed = ran(Process.run("/bin/sh", ["-c", "kill -9 $$"]), "sh")

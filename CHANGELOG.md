@@ -248,6 +248,26 @@
 
 ### Fixed
 
+- **A JIT engine is disposed.** `LLVM::JITCompiler#dispose` set its flag
+  and then called `finalize`, whose first line returned on that flag, so
+  no engine was ever disposed - not by `dispose` and not by the collector
+  - and every module a process JIT-compiled kept its memory. The compiler
+  specs JIT one module per example, about 14,000 a run, and one Windows CI
+  run of them died of "IMAGE_REL_AMD64_ADDR32NB relocation requires an
+  ordered section layout" (run 36441005703): LLVM cannot relocate a module
+  whose unwind table lands more than 4 GB from its code, and a process
+  that never frees takes each module's blocks from an ever more crowded
+  address space. The same commit passed in the run beside it, and the same
+  order (seed 68571) passed here, so the crash itself was not reproduced on
+  demand. An engine is disposed now. The value it answered holds it, since
+  a spec's `to_string` reads a string inside the module after the run, and
+  it holds its module, since disposing the engine disposes the module:
+  without that the collector could take the context first, and the
+  specs died of an access violation at their nineteenth example. With
+  both, the same order runs 14,038 examples, none failing. A library spec
+  disposes an engine and requires Windows to report its code's memory
+  free; the old `dispose` leaves it committed.
+
 - **`Server.serve` gives every connection a task of its own.** The accept
   loop spawned each connection's task with a block that held the loop's
   variable rather than its value, and the next accept overwrote it before
@@ -466,6 +486,47 @@
   counts its calls and fails past three million, and checks the order and
   its stability; an insertion sort fails the count, and a merge that takes
   the right run on a tie fails the order.
+
+- **A local is not renamed onto a name a block inside its scope binds.**
+  The rename's clash check looked at the scope's variables and bare calls
+  and skipped blocks that bind the new name - the same skip that keeps a
+  block's `|n|` a variable of its own. So `total` renamed to `n`, with
+  `[1, 2].each do |n| total = total + n end` inside the def, became
+  `n = n + n`: the block reassigned its own parameter and the def returned
+  100 where it had returned 103. Such a block is a clash now. Step 18g of
+  `bench/lsp_session.py`; the old server carries the rename out.
+
+- **A rename onto a name that is already there is refused.** The language
+  server renamed a def onto any name, and one its type or the top level
+  already had made two defs one: renaming `shout` to an existing `yell`
+  left two `def yell(name : String)`, the later replaced the earlier, and
+  `puts shout("a")`, now `puts yell("a")`, printed "a!" where it had
+  printed "A" - a behaviour change with no word. A rename onto a method
+  of the def's type, of what the type inherits, or of the top level is
+  refused now, with the reason. Step 18f of `bench/lsp_session.py`
+  renames onto a sibling def and onto `puts`, both refused, and onto a
+  free name, carried out; the old server carries out all three.
+
+- **On Windows, `Process.run(chdir:)` into a long directory says why it
+  cannot.** Windows refuses a working directory past 254 characters while
+  long paths are off - measured, 254 ran and 255 were refused - and
+  answers "the directory name is invalid", which `std/process` told as "no
+  such directory" about a directory that was there. A directory that is
+  there and refused that way is a refusal of its own now, whose sentence
+  says so. The exercise runs a child in a 270-character directory and
+  accepts either outcome but "no such directory"; the old module fails it.
+
+- **On a Linux kernel before 5.3, waiting for a child no longer holds the
+  thread.** `std/process` waits for a child's end through a pidfd, which
+  5.3 added; without one it called a blocking `wait4`, and every other
+  task on the thread stopped for as long as the child ran - RHEL 8's
+  kernel is 4.18. Without a pidfd the fiber now asks `wait4` with WNOHANG
+  and sleeps between asks, a millisecond at first and fifty at most.
+  `bench/std_process_exercise.sh` runs the whole exercise on Linux with
+  `pidfd_open` answering nothing and requires every check to hold, and
+  proves the poll made a plain `wait4` again fails it: a sibling ticks 0
+  times of 10 while the child sleeps.
+
 
 ## 0.15.4 — 2026-09-28
 

@@ -1589,6 +1589,9 @@ module Iyi::Lsp
         unless valid_name?(new_name)
           raise Refused.new("'#{new_name}' is not an iyi method name")
         end
+        if def_name_taken?(params, new_name)
+          raise Refused.new("'#{new_name}' is already a method where this one is, and the rename would make the two one")
+        end
         references, declarations = reference_sites(params)
       end
       if references.empty? && declarations.empty?
@@ -1923,6 +1926,20 @@ module Iyi::Lsp
           end
         end
       end
+    end
+
+    # Whether the def under the request's cursor would collide with a
+    # method of *name* (`ReferencesVisitor#taken?`), asked of the cursor's
+    # own compile.
+    private def def_name_taken?(params : JSON::Any, name : String) : Bool
+      uri = params["textDocument"]["uri"].as_s
+      path = path_of(uri)
+      text = text_of(uri)
+      line0 = params["position"]["line"].as_i
+      line_text = text.lines[line0]? || ""
+      target = Location.new(path, line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      visitor = @analysis.references_at(path, text, overrides_for(path), target)
+      !!visitor && visitor.taken?(name)
     end
 
     # The local under the request's cursor, or nil.

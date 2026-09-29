@@ -1323,6 +1323,9 @@ class ::File
   # `read_lines` gives them, without their `\n` or a `\r` before it.
   def self.each_line(path : String | Path, &block : String -> Nil) : Nil
     raise "cannot read #{path}" unless File.exists?(path.to_s)
+    # Asked before the open: Windows refuses to open a directory at all,
+    # with the open's own sentence, where Linux opens it and fails the read.
+    raise "cannot read #{path}: it is a directory, or the read failed" if File.directory?(path.to_s)
     io = File.open(path.to_s, "r", 65536)
     defer io.close
     while line = io.read_line(chomp: true)

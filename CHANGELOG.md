@@ -319,7 +319,9 @@
   size was the program's memory twice over before the first line was
   seen: a 2 MB file allocated 8.7 MB. It reads off the file as it goes
   now, the lines as `read_lines` gives them, and refuses a missing path
-  and a directory with `File.read`'s sentences; 2M lines take 90 ms, down
+  and a directory with `File.read`'s sentences - the directory asked
+  before the open, which on Windows refuses one with a sentence of its
+  own; 2M lines take 90 ms, down
   from 205. `bench/std_file_exercise.sh` counts the bytes a pass over
   2 MB allocates with the collector held back, fails past one and a half
   times the file, refuses both paths, and proves the check fails on an

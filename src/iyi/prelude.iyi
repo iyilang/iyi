@@ -935,11 +935,18 @@ end
     -1_i64
   end
 
+  # 0 at the end, -1 on a failure. Every failed `ReadFile` answered 0,
+  # and a read Windows refused - a byte range another process has
+  # locked, ERROR_LOCK_VIOLATION - came back from `File.read` as "", an
+  # empty file with no word. A pipe whose writer has gone
+  # (ERROR_BROKEN_PIPE, 109) and ERROR_HANDLE_EOF (38) are the end.
   def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     read = uninitialized Int32
     if LibC.ReadFile(Pointer(Void).new(fd.to_u64), buffer,
          count.to_i32, pointerof(read), nil) == 0
-      return 0_i64
+      error = LibC.GetLastError
+      return 0_i64 if error == 109 || error == 38
+      return -1_i64
     end
     read.to_i64
   end

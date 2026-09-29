@@ -343,12 +343,12 @@ class IyiIO
     if @write_pos > 0
       written = 0_i64
       total = @write_pos.to_i64
+      @write_pos = 0 # before the write: a refused one flushed again from `close`, a second panic
       while written < total
         n = low_level_write(@fd, (@write_buffer + written).as(Void*), (total - written).to_u64)
         raise "write failed: the reader is gone, or the device refused it" if n <= 0_i64
         written = written + n
       end
-      @write_pos = 0
     end
   end
 

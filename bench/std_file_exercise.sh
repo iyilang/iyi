@@ -384,6 +384,61 @@ refuses "info on a path that does not exist" info_nonexistent "File not found: "
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
   'File.real_path("")'
 
+# A byte range another process has locked. Windows fails the read with
+# ERROR_LOCK_VIOLATION, and `File.read` answered "" with no word - the
+# failure spelled as an empty file. And a write that fails raised from
+# `flush` and again from the `close` its `defer` ran, which flushed the
+# same bytes again: two panics for one failure. POSIX has no mandatory
+# lock to hold a range with, so this is Windows' alone.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the locked-range reads are unmeasured"
+    else
+      locked="$WORK/locked.txt"
+      printf 'module main\n\nputs File.read(Program.args[0]).bytesize\n' > "$WORK/locked_read.iyi"
+      printf 'module main\n\nFile.write(Program.args[0], "replaced")\n' > "$WORK/locked_write.iyi"
+      if ! "$IYI" build -o "$WORK/locked_read" "$WORK/locked_read.iyi" > "$WORK/locked_read.build" 2>&1 ||
+         ! "$IYI" build -o "$WORK/locked_write" "$WORK/locked_write.iyi" > "$WORK/locked_write.build" 2>&1; then
+        echo "  the locked-range programs did not build"
+        sed -n '1,10p' "$WORK/locked_read.build" "$WORK/locked_write.build"
+        status=1
+      elif ! "$PY" - "$locked" "$WORK/locked_read.exe" "$WORK/locked_write.exe" > "$WORK/locked.out" 2>&1 <<'PY'
+import msvcrt, subprocess, sys
+path, reader, writer = sys.argv[1:4]
+with open(path, "wb") as f:
+    f.write(b"a locked range\n" * 3)
+held = open(path, "r+b")
+msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 10)
+bad = 0
+read = subprocess.run([reader, path], capture_output=True, text=True)
+if read.returncode == 0 or "the read failed" not in read.stderr + read.stdout:
+    print(f"  a read of a locked range answered {read.returncode}: {(read.stdout + read.stderr).strip()!r}")
+    bad += 1
+else:
+    print("  a read of a locked range refuses: the read failed")
+write = subprocess.run([writer, path], capture_output=True, text=True)
+panics = (write.stdout + write.stderr).count("iyi: panic:")
+if write.returncode == 0 or panics != 1:
+    print(f"  a write into a locked range exited {write.returncode} with {panics} panic(s)")
+    bad += 1
+else:
+    print("  a write into a locked range refuses once")
+held.seek(0)
+msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 10)
+held.close()
+sys.exit(1 if bad else 0)
+PY
+      then
+        cat "$WORK/locked.out"
+        status=1
+      else
+        cat "$WORK/locked.out"
+      fi
+    fi
+    ;;
+esac
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/file exercise holds"

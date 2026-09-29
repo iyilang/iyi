@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **On Windows, a read Windows refuses is a failure, not an empty file.**
+  Every failed `ReadFile` answered 0, the end of the file, so `File.read`
+  of a file whose byte range another process had locked answered "" with
+  no word. It refuses now with "it is a directory, or the read failed",
+  as a failed read does on the other platforms; a pipe whose writer has
+  gone is still the end. And a write that fails is refused once: its
+  bytes stayed buffered, and the `close` a `defer` ran flushed them again
+  and panicked a second time. `bench/std_file_exercise.sh` locks a range
+  from Python and reads and writes it; the old prelude answered 0 bytes
+  and panicked twice.
+
 - **`-o` refuses the source under any spelling of it.** The refusal of an
   output that is the build's own source, or a module it read, compared
   expanded paths as strings, and on Windows one file has many: `iyi build
@@ -11713,7 +11724,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,546-line library and nothing else. Every other
+  written against iyi's own 18,553-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

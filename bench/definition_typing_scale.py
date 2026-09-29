@@ -29,6 +29,16 @@ by comparison. This types both and fails when eight times the lines take
 more than three times the peak memory: 1.2 now, 12 before. Memory rather
 than time, because a release compiler made the square cheap in time and
 not in space.
+
+And a union of many unrelated classes costs each member once. A variable
+given one of 1,200 classes a branch at a time grows its union a member per
+assignment, and each growth asked every pair of members for their common
+ancestor, a walk up both superclass chains, then scanned the list for each
+member it added: 1,200 took 7.9 s against 0.18 for 300 with 0.15.4's
+release compiler, forty-four times the time for four times the classes.
+Plain classes now combine by their topmost virtual root, found once per
+member and looked up in a hash, and the list keeps a set once it is long.
+This types both and fails past twelve times the time: 5.5 now.
 """
 import os
 import pathlib
@@ -44,6 +54,7 @@ LIMIT = 12.0
 RUNS = 3
 LINES_SMALL, LINES_LARGE = 2000, 16000
 MEMORY_LIMIT = 3.0
+CLASSES_SMALL, CLASSES_LARGE = 300, 1200
 
 
 def program(count: int) -> str:
@@ -68,6 +79,13 @@ def best(path: pathlib.Path) -> float:
 
 def reassignments(count: int) -> str:
     return "x = 1\n" + "".join(f"x = x + {i % 7}\n" for i in range(count)) + "puts x\n"
+
+
+def wide_union(count: int) -> str:
+    return ("".join(f"class D{i}\nend\n" for i in range(count))
+            + "r = Program.args.size\ny = nil\n"
+            + "".join(f"y = D{i}.new if r == {i}\n" for i in range(count))
+            + "puts y.class\n")
 
 
 def peak_kb(path: pathlib.Path) -> int:
@@ -116,6 +134,22 @@ def main() -> None:
               "costs every value the variable had before it")
         sys.exit(1)
     print("reassignment typing: each assignment costs its own merge")
+
+    unions = {}
+    for count in (CLASSES_SMALL, CLASSES_LARGE):
+        path = work / f"union_{count}.iyi"
+        path.write_text(wide_union(count))
+        unions[count] = best(path)
+    widened = unions[CLASSES_LARGE] / unions[CLASSES_SMALL]
+    print(f"a union of {CLASSES_SMALL} classes typed in "
+          f"{unions[CLASSES_SMALL]:.3f} s, of {CLASSES_LARGE} in "
+          f"{unions[CLASSES_LARGE]:.3f} s: {widened:.1f}x the time for "
+          f"{CLASSES_LARGE // CLASSES_SMALL}x the members")
+    if widened > LIMIT:
+        print(f"FAIL: past {LIMIT:.0f}x, so each member a union gains is "
+              "compared with every member it had")
+        sys.exit(1)
+    print("union typing: each member costs its own place")
 
 
 if __name__ == "__main__":

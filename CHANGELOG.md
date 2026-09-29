@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **A union of many classes types in time near its width.** A variable
+  given one of many unrelated classes grows its union a member per
+  assignment, and each growth asked every pair of members for their common
+  ancestor - a dispatched walk up both superclass chains - and scanned the
+  member list once per member it added. 1,200 classes took 7.9 s to type
+  with 0.15.4's release compiler, and 800 took 17.5 s with a plain build.
+  Two plain classes now combine exactly when they share their topmost
+  virtual root, found once per member and looked up in a hash, and a long
+  member list keeps a set: with the same plain build, 800 classes type in
+  0.83 s and 1,200 in 1.7 s, and 900 random unions over classes, modules, structs, generics, tuples
+  and metaclasses come out as they did. `bench/definition_typing_scale.py`
+  types unions of 300 and 1,200 classes and fails past twelve times the
+  time for four times the members: 5.8 now, 49 before.
+
 - **A regex whose pattern is a literal finds it in linear time, through a
   public `String#byte_index`.** A literal pattern was looked for by
   comparing from each position in turn, so a text that keeps almost

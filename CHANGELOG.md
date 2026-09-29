@@ -589,8 +589,9 @@
   Windows leaves a port open to such binds unless the listener sets
   SO_EXCLUSIVEADDRUSE, which it does now; a port closed after a
   connection is still listened on again at once. `bench/socket_exercise.sh`
-  binds each way onto a held port and requires the refusal; the old
-  module bound both.
+  binds each way onto a held port and requires the refusal on Linux and
+  Windows - darwin lets the more specific bind through by BSD's design;
+  the old module bound both on Windows.
 
 - **On Windows, a read Windows refuses is a failure, not an empty file.**
   Every failed `ReadFile` answered 0, the end of the file, so `File.read`

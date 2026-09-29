@@ -96,6 +96,23 @@
 
 ### Changed
 
+- **`Float64#floor` and `ceil` are one instruction.** On x86_64 the
+  processor is asked once, by `cpuid`, whether it has SSE4.1's
+  `roundsd`, as glibc's `floor` chooses its own version, and the
+  instruction is used where it is - every x86_64 processor of the last
+  fifteen years; aarch64 always has `frintm` and `frintp`. The
+  conversion they replace sat on the chain every noise lookup waits
+  for: crystal-metric's Noise took 1.33 to 1.44 times Crystal's time
+  and takes 1.01 to 1.05 now. The conversion still runs where there is
+  no instruction, and its answers now carry the argument's sign, as the
+  instruction's and the other library's do: `(-0.3).ceil` and
+  `(-0.0).floor` are `-0.0`, where they were `0.0`.
+  `bench/number_exercise.sh` checks both over the zeros, the doubles
+  either side of them, 2^52, the infinities and NaN against Crystal's
+  answers, runs the whole exercise again on a prelude that never asks
+  the processor, and proves a floor that truncates, a zero without its
+  sign and `roundsd` in the wrong mode each fail.
+
 - **Reading JSON allocates for values, not for keys and numbers.** The
   pull parser took a hash for every object to find a repeated key in, and
   the lexer a substring for every key and every number it read, the
@@ -11685,7 +11702,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,546-line library and nothing else. Every other
+  written against iyi's own 18,611-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

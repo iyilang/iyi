@@ -17,6 +17,45 @@
 # `1.0e-5` below that and `1.0e+15` from ten to the fifteenth up (Crystal's
 # `Float::Printer`, point range -3 to 15), always a fractional part, `-0.0`,
 # `Infinity`, `-Infinity`, `NaN`.
+# `floor` and `ceil` are one instruction where the processor has one. On
+# aarch64 every processor does (`frintm`, `frintp`), and LLVM's intrinsic
+# is that instruction. On x86_64 it is SSE4.1's `roundsd`, which the
+# baseline this compiler targets does not promise, so the intrinsic there
+# is a call to libm's `floor` - a library this prelude does not link. The
+# processor is asked once, by `cpuid`, the way glibc's own `floor` picks
+# its version, and the instruction is written by hand. The conversion it
+# replaces sits on the chain every noise lookup waits for: crystal-metric's
+# Noise took 1.35 times Crystal's time with it and less than Crystal's
+# with `roundsd`.
+lib LibIyiRounding
+  fun copysign = "llvm.copysign.f64"(x : Float64, sign : Float64) : Float64
+  {% if flag?(:aarch64) %}
+    fun floor = "llvm.floor.f64"(x : Float64) : Float64
+    fun ceil = "llvm.ceil.f64"(x : Float64) : Float64
+  {% end %}
+end
+
+{% if flag?(:x86_64) %}
+  class IyiRounding
+    # 0 not asked yet, 1 the processor has `roundsd`, 2 it has not.
+    @@rounds : Int32 = 0
+
+    def self.hardware? : Bool
+      rounds = @@rounds
+      if rounds == 0
+        leaf = uninitialized UInt64
+        features = uninitialized UInt64
+        asm("cpuid" : "={rax}"(leaf), "={rcx}"(features)
+                    : "{rax}"(1_u64), "{rcx}"(0_u64)
+                    : "rbx", "rdx")
+        rounds = features & 0x80000_u64 != 0_u64 ? 1 : 2
+        @@rounds = rounds
+      end
+      rounds == 1
+    end
+  end
+{% end %}
+
 struct Float64
   def to_s : String
     bits = IyiFloatText.bits_of(self)
@@ -51,19 +90,45 @@ struct Float64
     self < 0.0 ? 0.0 - self : self
   end
 
-  # The integer below, above and nearest, as a `Float64`. Past 2^53 every
-  # double is an integer already and is answered as it is; the conversion
-  # below is exact under it.
+  # The integer below and above, as a `Float64`: one instruction where the
+  # processor has it (`IyiRounding`), the conversion below where it does
+  # not. Past 2^52 every double is an integer already and is answered as
+  # it is, as NaN and the infinities are; the conversion is exact under
+  # it. The answer carries the argument's sign, which is where a zero's
+  # comes from - `(-0.3).ceil` is `-0.0`, as the instruction and the other
+  # library answer.
   def floor : Float64
-    return self if self != self || abs >= 9007199254740992.0
-    truncated = to_i64.to_f64
-    truncated > self ? truncated - 1.0 : truncated
+    {% if flag?(:aarch64) %}
+      LibIyiRounding.floor(self)
+    {% else %}
+      {% if flag?(:x86_64) %}
+        if IyiRounding.hardware?
+          rounded = uninitialized Float64
+          asm("roundsd $$9, $1, $0" : "=x"(rounded) : "x"(self))
+          return rounded
+        end
+      {% end %}
+      return self unless abs < 4503599627370496.0
+      truncated = unsafe_to_i64.to_f64
+      LibIyiRounding.copysign(truncated > self ? truncated - 1.0 : truncated, self)
+    {% end %}
   end
 
   def ceil : Float64
-    return self if self != self || abs >= 9007199254740992.0
-    truncated = to_i64.to_f64
-    truncated < self ? truncated + 1.0 : truncated
+    {% if flag?(:aarch64) %}
+      LibIyiRounding.ceil(self)
+    {% else %}
+      {% if flag?(:x86_64) %}
+        if IyiRounding.hardware?
+          rounded = uninitialized Float64
+          asm("roundsd $$10, $1, $0" : "=x"(rounded) : "x"(self))
+          return rounded
+        end
+      {% end %}
+      return self unless abs < 4503599627370496.0
+      truncated = unsafe_to_i64.to_f64
+      LibIyiRounding.copysign(truncated < self ? truncated + 1.0 : truncated, self)
+    {% end %}
   end
 
   # The nearest integer, a tie to the even one — Crystal's `round`, so the

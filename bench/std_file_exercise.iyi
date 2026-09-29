@@ -160,6 +160,24 @@ File.chmod(onto_name, 0o644)
 File.delete(onto_name)
 puts "  a read-only destination is replaced by a rename"
 
+# And a destination somebody has open: the reader keeps the file it
+# opened, and the name is the new one. Windows refused `MoveFileExW` with
+# "Access is denied" while any handle was open - this program's own -
+# so writing a temporary file and renaming it over a file a reader held
+# panicked there alone.
+held_name = sandbox + "/rename_held.txt"
+fresh_name = sandbox + "/rename_fresh.txt"
+File.write(held_name, "old contents")
+File.write(fresh_name, "new contents")
+reader = File.open(held_name, "r")
+File.rename(fresh_name, held_name)
+assert_str "old contents", reader.read_all, "the open reader keeps the file it opened"
+reader.close
+assert_str "new contents", File.read(held_name), "the name is the renamed file's"
+assert_true !File.exists?(fresh_name), "the renamed file's old name is gone"
+File.delete(held_name)
+puts "  a destination somebody has open is replaced by a rename"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"

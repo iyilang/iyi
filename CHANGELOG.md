@@ -374,6 +374,18 @@
 
 ### Fixed
 
+- **On Windows, `File.rename` replaces a destination somebody has open.**
+  `MoveFileExW` refuses a destination with any open handle - this
+  program's own included - with "Access is denied", where POSIX `rename`
+  replaces the name and the reader keeps the file it opened. So writing a
+  temporary file and renaming it over one a reader held, the way a
+  program updates a file safely, panicked on Windows alone. Such a
+  refusal is retried as POSIX's rename, `FileRenameInfoEx` with its
+  replace and POSIX flags, which NTFS has had since Windows 10 1709; a
+  volume without it refuses as before. `bench/std_file_exercise.iyi`
+  renames over a file it holds open and reads both; the old module
+  panicked.
+
 - **On Windows, a reparse point is a link only when its tag says so.**
   `File.info` called every reparse point a symlink, so an app execution
   alias - what `%LOCALAPPDATA%\Microsoft\WindowsApps` holds - answered

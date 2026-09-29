@@ -424,12 +424,21 @@ prove_fails "no fiber walk" nofiber "fiber root:" '
   { sub(/each_fiber_root\(visit\)/, "each_global_root(visit)"); print }
 '
 
+# The probe ignored, so the parser takes the line named `[stack]` whatever
+# holds the arguments: the stack end valgrind's own stack gave, which a scan
+# from the program's stack pointer ran past into unmapped memory.
+prove_fails "the stack named, not held" named_stack "maps parser: the mapping holding" '
+  { sub(/if probe != 0_u64$/, "if false"); print }
+'
+
 # The main stack's top, found after the program has spawned thousands of
 # tasks: two mappings each, a stack and its guard, before the first
 # collection asks where the main stack ends. Linux reads that out of
 # `/proc/self/maps`, whose `[stack]` line is near the end, and read only the
 # first 64 KB of it - so a program that spawned a few hundred tasks before
-# its first collection died there with "no [stack] line".
+# its first collection died there with "no [stack] line" (now "no mapping
+# ... holds the program's arguments": the line is found by the argv it
+# holds).
 echo
 echo "== the main stack is found past thousands of task stacks"
 cat > "$WORK/tasks.iyi" <<'IYI'
@@ -477,8 +486,8 @@ case "$(uname -s)" in
       echo "  the proof's awk found nothing to change"; status=1
     else
       many_tasks onebuffer "$WORK/onebuffer${PSEP}$REPO/src"
-      if grep -q "no \[stack\] line" "$WORK/tasks-onebuffer.out"; then
-        echo "  failure proof: a read of the first 64 KB alone dies at \"$(grep -m1 "no \[stack\]" "$WORK/tasks-onebuffer.out")\""
+      if grep -q "no mapping in /proc/self/maps holds" "$WORK/tasks-onebuffer.out"; then
+        echo "  failure proof: a read of the first 64 KB alone dies at \"$(grep -m1 "no mapping in /proc/self/maps holds" "$WORK/tasks-onebuffer.out")\""
       else
         echo "  failure proof: the one-buffer read still found the stack, so this proves nothing"; status=1
       fi

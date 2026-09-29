@@ -3577,13 +3577,21 @@ require "./file"
           IyiHeap.read64(ctx_addr + 152_u64) # Rsp
         end
       {% else %}
-        # What this number is: the end address of the kernel's `[stack]`
-        # mapping for this process, read out of `/proc/self/maps`, which is
-        # the true base and not an approximation. The address of a local in
-        # `main` was the alternative and it is not the same number: it sits
-        # below argv, envp and the auxiliary vector, which the kernel places
-        # at the top of that mapping, so a base taken there is too low and a
-        # base that is too low silently loses roots.
+        # What this number is: the end address of the main thread's stack
+        # mapping, read out of `/proc/self/maps`, which is the true base and
+        # not an approximation. The address of a local in `main` was the
+        # alternative and it is not the same number: it sits below argv,
+        # envp and the auxiliary vector, which the kernel places at the top
+        # of that mapping, so a base taken there is too low and a base that
+        # is too low silently loses roots.
+        #
+        # The mapping is the one holding argv, which is in it whoever set
+        # the process up, rather than the one the kernel names `[stack]`:
+        # under valgrind the program's stack is a mapping valgrind made,
+        # `[stack]` is valgrind's own, and a scan from the program's stack
+        # pointer up to that end crossed unmapped memory - every program
+        # that collected died there, of "stack overflow", so neither
+        # memcheck nor callgrind could look at one.
         #
         # Reading a file is three syscalls this file already issues. The
         # buffer is a mapping of its own rather than a heap chunk, because
@@ -3605,7 +3613,7 @@ require "./file"
           while base == 0_u64
             count = __iyi_read(handle.to_i32, Pointer(Void).new(buffer + kept), MAPS - kept)
             if count <= 0
-              base = stack_end_in_maps(buffer, kept) if kept > 0_u64
+              base = stack_end_in_maps(buffer, kept, ARGV_UNSAFE.address) if kept > 0_u64
               break
             end
             filled = kept + count.to_u64
@@ -3620,7 +3628,7 @@ require "./file"
               kept = filled
               next
             end
-            base = stack_end_in_maps(buffer, last - 1_u64)
+            base = stack_end_in_maps(buffer, last - 1_u64, ARGV_UNSAFE.address)
             kept = filled - last
             index = 0_u64
             while index < kept
@@ -3630,24 +3638,31 @@ require "./file"
           end
           __iyi_close(handle)
           __iyi_munmap(buffer, MAPS)
-          fatal("iyi: no [stack] line in /proc/self/maps\n") if base == 0
+          fatal("iyi: no mapping in /proc/self/maps holds the program's arguments\n") if base == 0
           base
         end
       {% end %}
 
       # `/proc/self/maps` is a line per mapping, "low-high perms ..." in hex,
-      # with the region's name last. The line whose name is `[stack]` is the
-      # main thread's, and the number after the dash is its end. Kept off the
-      # platform branch and reachable on both, because parsing text is the
-      # half of this that a test can exercise anywhere and the syscalls are
-      # the half that cannot leave Linux.
-      def self.stack_end_in_maps(buffer : UInt64, length : UInt64) : UInt64
+      # with the region's name last. The line whose range holds `probe` -
+      # the address of the program's arguments - is the main thread's
+      # stack, and the number after the dash is its end; with no probe,
+      # the line named `[stack]`. Kept off the platform branch and
+      # reachable on both, because parsing text is the half of this that a
+      # test can exercise anywhere and the syscalls are the half that
+      # cannot leave Linux.
+      def self.stack_end_in_maps(buffer : UInt64, length : UInt64, probe : UInt64 = 0_u64) : UInt64
         bytes = Pointer(UInt8).new(buffer)
         start = 0_u64
         index = 0_u64
         while index <= length
           if index == length || (bytes + index.to_i64).value == 10_u8
-            return line_stack_end(bytes, start, index) if line_names_stack?(bytes, start, index)
+            if probe != 0_u64
+              high = line_stack_end(bytes, start, index)
+              return high if high > probe && line_start(bytes, start, index) <= probe
+            elsif line_names_stack?(bytes, start, index)
+              return line_stack_end(bytes, start, index)
+            end
             start = index + 1
           end
           index = index + 1
@@ -3685,6 +3700,21 @@ require "./file"
           cursor = cursor + 1
         end
         return 0_u64 if digits == 0
+        value
+      end
+
+      # The number before the dash: where the line's mapping begins. A line
+      # that does not open with one reads as 0, which holds no probe once
+      # its end is 0 too.
+      def self.line_start(bytes : Pointer(UInt8), start : UInt64, stop : UInt64) : UInt64
+        cursor = start
+        value = 0_u64
+        while cursor < stop
+          digit = hex_digit((bytes + cursor.to_i64).value)
+          break if digit > 15
+          value = value * 16_u64 + digit
+          cursor = cursor + 1
+        end
         value
       end
 

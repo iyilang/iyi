@@ -430,7 +430,14 @@
   UNTERMINATED = "55d0d4a00000-55d0d4a01000 r--p 00000000 08:01 1 /tmp/prog\n7ffd9b3f2000-7ffd9b413000 rw-p 00000000 00:00 0 [stack]"
   last = IyiRoots.stack_end_in_maps(UNTERMINATED.to_unsafe.address, UNTERMINATED.bytesize.to_u64)
   raise "maps parser: an unterminated last [stack] line read 0x#{hex(last)}, not 0x7ffd9b413000" if last != 0x7ffd9b413000_u64
-  print "  maps parser: the [stack] end is read, terminated or not, and a file without one and a truncated line both answer zero\n"
+  # The mapping that holds a probe address, named or not: under valgrind
+  # the program's stack is an unnamed mapping and `[stack]` is valgrind's.
+  VALGRIND = "55d0d4a00000-55d0d4a01000 r--p 00000000 08:01 1 /tmp/prog\n1ffefff000-1fff001000 rwxp 00000000 00:00 0\n7ffd9b3f2000-7ffd9b413000 rw-p 00000000 00:00 0 [stack]\n"
+  held = IyiRoots.stack_end_in_maps(VALGRIND.to_unsafe.address, VALGRIND.bytesize.to_u64, 0x1fff000800_u64)
+  raise "maps parser: the mapping holding the arguments ends at 0x1fff001000, not 0x#{hex(held)}" if held != 0x1fff001000_u64
+  raise "maps parser: a probe no mapping holds read 0x#{hex(IyiRoots.stack_end_in_maps(VALGRIND.to_unsafe.address, VALGRIND.bytesize.to_u64, 0x10_u64))}" if IyiRoots.stack_end_in_maps(VALGRIND.to_unsafe.address, VALGRIND.bytesize.to_u64, 0x10_u64) != 0
+  raise "maps parser: a probe one past a mapping's end read it as held" if IyiRoots.stack_end_in_maps(VALGRIND.to_unsafe.address, VALGRIND.bytesize.to_u64, 0x1fff001000_u64) != 0
+  print "  maps parser: the [stack] end is read, terminated or not, a file without one and a truncated line both answer zero, and the mapping holding the arguments is found named or not\n"
 
   # --- A suspended fiber's stack is a root range ---
   # The fiber allocates, records the address in the ledger (mmap, not a

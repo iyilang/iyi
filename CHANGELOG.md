@@ -400,6 +400,17 @@
 
 ### Fixed
 
+- **A program runs under valgrind.** On Linux the collector finds the
+  main thread's stack in `/proc/self/maps`, and took the line named
+  `[stack]`; under valgrind that is valgrind's own stack, the program's
+  is a mapping valgrind made, and the first collection scanned from the
+  program's stack pointer up to the wrong end - every program that
+  collected died there of "stack overflow", so neither memcheck nor
+  callgrind could look at one. The stack is now the mapping that holds
+  the program's arguments, which is `[stack]` itself on a plain run.
+  `bench/root_exercise.sh` parses a map where the two differ, and proves
+  a parser that takes the name fails it.
+
 - **Objects past 128 bytes keep their pages warm.** The sweep keeps a
   budget's worth of dead pages warm for the next epoch and hands the rest
   back to the kernel, and it counted a page's worth at the chunk. Past
@@ -11702,7 +11713,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,611-line library and nothing else. Every other
+  written against iyi's own 18,641-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

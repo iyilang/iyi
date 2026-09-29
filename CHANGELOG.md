@@ -374,6 +374,16 @@
 
 ### Fixed
 
+- **On Windows, two `iyi run`s of programs with one name run side by
+  side.** The runner linked into one executable per basename in the
+  cache, and Windows will not write over an executable that is running:
+  while one `iyi run main.iyi` ran, any other `main.iyi` - another
+  program in another directory, or the same one - failed with "LNK1104:
+  cannot open file ...\iyi-run-main.exe.tmp.exe". Each runner links its
+  own now, named by its process id. `bench/verbs_exercise.sh` runs a
+  second `main.iyi` while the first holds its executable; the old runner
+  failed it with LNK1104.
+
 - **On Windows, a listening port is the listener's.** A bind to
   127.0.0.1:P went through while `IyiSocket.listen` held 0.0.0.0:P, and
   the other way round, from this process or any other, and the more

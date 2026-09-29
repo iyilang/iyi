@@ -208,6 +208,29 @@ printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iy
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# Two `iyi run`s at once of programs with one basename. The runner linked
+# into one executable per basename, and Windows will not write over one
+# that is running: the second failed with `LNK1104: cannot open file
+# ...\iyi-run-main.exe.tmp.exe`. Each runner has its own now.
+mkdir -p twin_a twin_b
+# The first holds its executable open until the second has run: it says
+# it started, and waits (a minute at most) for the second to be done.
+printf 'module main\n\nFile.write("twin_a.started", "1")\ni = 0\nwhile i < 600 && !File.exists?("twin_b.done")\n  sleep(100)\n  i = i + 1\nend\nputs "a"\n' > twin_a/main.iyi
+printf 'module main\n\nputs "b"\n' > twin_b/main.iyi
+"$IYI" run twin_a/main.iyi > twin_a.out 2>&1 &
+twin_a=$!
+i=0
+while [ ! -f twin_a.started ] && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+if "$IYI" run twin_b/main.iyi > twin_b.out 2>&1 && grep -qx b twin_b.out; then
+  echo "  a run beside a running program of the same name: runs"
+else
+  echo "  a run beside a running program of the same name did not run:"
+  sed -n '1,3p' twin_b.out
+  status=1
+fi
+touch twin_b.done
+wait "$twin_a"
+grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

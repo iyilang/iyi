@@ -132,8 +132,13 @@ module Iyi
     CacheDir.instance.join("#{Iyi::Command.program_name}-run-#{basename}.tmp")
   end
 
+  # iyi: one per runner, by its process id. It was one per basename, and
+  # Windows will not write over an executable that is running: two `iyi
+  # run main.iyi` at once - two different programs in two directories,
+  # or one twice - and the second failed to link, `LNK1104: cannot open
+  # file ...\iyi-run-main.exe.tmp.exe`.
   def self.temp_executable(basename)
-    name = tempfile(basename)
+    name = tempfile("#{basename}-#{Process.pid}")
     {% if flag?(:win32) %}
       name += ".exe"
     {% end %}

@@ -445,4 +445,26 @@ k_server.close
 raise "retain: a reader parked on its next read kept alive the object its last read's bytes pointed at" if k_kept
 puts "retain: ok"
 
+# A backlog is the number of connections the kernel holds for a listener
+# nobody has accepted from yet. Windows capped every one at 200 unless it
+# is asked through SOMAXCONN_HINT, and turned the 201st connect away,
+# "connection refused", where Linux holds it: 220 connects to a backlog of
+# 256 lost 20.
+b_server = IyiSocket.listen("127.0.0.1", 0, 256)
+b_port = b_server.local_port
+b_held = [] of IyiSocket
+b_refused = 0
+220.times do
+  answer = IyiSocket.connect("127.0.0.1", b_port)
+  if answer.is_a?(IyiSocket)
+    b_held << answer
+  else
+    b_refused = b_refused + 1
+  end
+end
+b_held.each { |held| held.close }
+b_server.close
+raise "backlog: #{b_refused} of 220 connects to a backlog of 256 were refused" unless b_refused == 0
+puts "backlog: ok"
+
 puts "socket_exercise: all checks passed"

@@ -1385,8 +1385,13 @@ pub class IyiSocket
       0
     end
 
+    # Winsock caps a backlog at SOMAXCONN, 200, and turns the next connect
+    # away as refused - where Linux holds it - unless the backlog is asked
+    # as SOMAXCONN_HINT(n), which is -n: 220 connects to a listener asked
+    # for 256 lost 20.
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
-      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), backlog) != 0
+      hinted = backlog > 200 ? -backlog : backlog
+      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), hinted) != 0
       0
     end
 

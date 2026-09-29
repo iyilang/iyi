@@ -374,6 +374,14 @@
 
 ### Fixed
 
+- **On Windows, a listener's backlog is the one it asked for.** Winsock
+  caps a backlog at 200 unless it is asked as SOMAXCONN_HINT, and turns
+  the next connect away as refused where Linux holds it until an accept:
+  220 connects to a listener asked for 256 lost 20, each after the two
+  seconds a refused connect takes there. A backlog past 200 is passed as
+  the hint now. `bench/socket_exercise.iyi` makes the 220 connects without
+  accepting; the old module refused 20.
+
 - **On Windows, `File.rename` replaces a destination somebody has open.**
   `MoveFileExW` refuses a destination with any open handle - this
   program's own included - with "Access is denied", where POSIX `rename`

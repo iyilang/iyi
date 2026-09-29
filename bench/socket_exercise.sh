@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix timeout; do
+for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix timeout backlog; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1

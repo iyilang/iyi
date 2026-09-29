@@ -490,9 +490,13 @@
   module"; and an entry spelled `.IYI` was built against Crystal's library
   and told of a `--crystal` it was never given. The language server reads
   a header's root through the compiler's one reading now, not a copy of
-  it. `bench/test_verb.sh` selects by the changed file in upper case and
-  with a lower-case drive, and `bench/verbs_exercise.sh` runs
-  `HDR/APP/MAIN.IYI`; the old compiler fails both.
+  it. The `--affected` comparison also spells out 8.3 short names, which
+  a string cannot fold: a CI runner's temporary directory is
+  `C:\Users\RUNNER~1\...` to `mktemp` and the long name to the working
+  directory, and there even the lower-case drive selected nothing.
+  `bench/test_verb.sh` selects by the changed file in upper case, with a
+  lower-case drive and by its short name, and `bench/verbs_exercise.sh`
+  runs `HDR/APP/MAIN.IYI`; the old compiler fails both.
 
 - **`Path#expand` answers an absolute path for Windows' rooted and
   drive-relative names.** An anchor that was not absolute went through

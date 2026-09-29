@@ -123,6 +123,31 @@ module Iyi
     {% end %}
   end
 
+  # iyi: `path_key` of the file's real path, when there is a file: Windows
+  # has one more spelling a string cannot fold, the 8.3 short name - a CI
+  # runner's temporary directory is `C:\Users\RUNNER~1\...` to `mktemp`
+  # and `C:\Users\runneradmin\...` to `Dir.current` - and only the file
+  # system knows the two are one. A path that is not there keeps its own.
+  def self.file_key(path : String) : String
+    return path_key(path) unless File.exists?(path)
+    real = File.realpath(path)
+    {% if flag?(:win32) %}
+      # `realpath` there is `GetFullPathNameW`, which keeps a short name
+      # as it is; `GetLongPathNameW` spells every component out.
+      wide = Crystal::System.to_wstr(real)
+      buffer = Slice(UInt16).new(260)
+      length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      if length >= buffer.size
+        buffer = Slice(UInt16).new(length)
+        length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      end
+      real = String.from_utf16(buffer[0, length]) if 0 < length < buffer.size
+    {% end %}
+    path_key(real)
+  rescue File::Error
+    path_key(path)
+  end
+
   # iyi: whether *a* and *b* name one file - asked of the file system,
   # which is the only thing that knows. A string compare of the expanded
   # paths is the same answer on Linux and wrong on Windows, where NTFS

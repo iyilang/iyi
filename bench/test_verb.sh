@@ -101,6 +101,13 @@ case "$(uname -s)" in
     "$IYI" test --affected "$lower" . > sel_drive.txt 2>&1
     grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_drive.txt ||
       { echo "a lower-case drive letter selected otherwise:"; cat sel_drive.txt; exit 1; }
+    # And the 8.3 short name, which a CI runner's temporary directory is
+    # spelled in (`RUNNER~1`) while the working directory is the long one:
+    # the lower-case drive above selected nothing there for that reason.
+    short="$(cygpath -d "$WORK/calc/add.iyi")"
+    "$IYI" test --affected "$short" . > sel_short.txt 2>&1
+    grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_short.txt ||
+      { echo "the 8.3 short name selected otherwise ($short):"; cat sel_short.txt; exit 1; }
     ;;
 esac
 "$IYI" test --affected nope.iyi . > off.txt 2>&1

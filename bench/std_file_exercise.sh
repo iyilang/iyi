@@ -477,6 +477,44 @@ PY
         status=1
       fi
     fi
+    # A reparse point is a link only by its tag. Every one was `Symlink`,
+    # so an app execution alias - what `WindowsApps` holds - and a cloud
+    # placeholder answered `file? false`; and a junction whose directory is
+    # gone answered a followed `info?` with the link itself, where POSIX
+    # `stat` of a dangling link is an error.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])}"\n' > "$WORK/reparse_kind.iyi"
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?}"\n' > "$WORK/dangling.iyi"
+    if ! "$IYI" build -o "$WORK/reparse_kind" "$WORK/reparse_kind.iyi" > "$WORK/reparse_kind.build" 2>&1 ||
+       ! "$IYI" build -o "$WORK/dangling" "$WORK/dangling.iyi" > "$WORK/dangling.build" 2>&1; then
+      echo "  the reparse programs did not build"; sed -n '1,10p' "$WORK/reparse_kind.build" "$WORK/dangling.build"; status=1
+    else
+      alias_exe=""
+      apps="$(cygpath -u "$LOCALAPPDATA")/Microsoft/WindowsApps"
+      for candidate in "$apps"/*.exe; do
+        [ -e "$candidate" ] && { alias_exe="$(cygpath -m "$candidate")"; break; }
+      done
+      if [ -z "$alias_exe" ]; then
+        echo "  no app execution alias on this machine, so their kind is unmeasured"
+      else
+        answer="$("$WORK/reparse_kind" "$alias_exe" 2>&1)"
+        if [ "$answer" = "true false" ]; then
+          echo "  an app execution alias is a file, not a link"
+        else
+          echo "  an app execution alias ($alias_exe) answered file?/symlink? $answer"
+          status=1
+        fi
+      fi
+      mkdir -p "$WORK/gone_target"
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/dangling_junction")" "$(cygpath -w "$WORK/gone_target")" > /dev/null
+      rmdir "$WORK/gone_target"
+      answer="$("$WORK/dangling" "$WORK/dangling_junction" 2>&1)"
+      if [ "$answer" = "true true" ]; then
+        echo "  a junction to nothing is a link, and following it answers nothing"
+      else
+        echo "  a junction to nothing answered symlink?/info?.nil? $answer"
+        status=1
+      fi
+    fi
     ;;
 esac
 

@@ -374,6 +374,20 @@
 
 ### Fixed
 
+- **On Windows, a reparse point is a link only when its tag says so.**
+  `File.info` called every reparse point a symlink, so an app execution
+  alias - what `%LOCALAPPDATA%\Microsoft\WindowsApps` holds - answered
+  `file? false` and `symlink? true`, and then `readlink` refused it as not a
+  link; a cloud placeholder, which OneDrive makes of every file it has not
+  downloaded, carries the same bit [INFERENCE: not measured here, no
+  placeholder on this machine]. The kind is read from the tag now:
+  symlinks, junctions and WSL's links are links, and everything else is
+  the file or directory it is. And a followed `info?` of a link whose
+  target will not open - a junction whose directory is gone - is nil, as
+  POSIX `stat` of a dangling link is an error; it answered the link
+  itself. `bench/std_file_exercise.sh` asks an app alias and a dangling
+  junction; the old module fails both.
+
 - **On Windows, `File.delete` removes a link to a directory.** A junction
   - which any user may make - is a link `File.symlink?` answers true for,
   and POSIX `unlink` removes a link whatever it names; `File.delete` asked

@@ -122,6 +122,9 @@ import std/path::{Path}
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun GetFileInformationByHandle(handle : Void*, info : BY_HANDLE_FILE_INFORMATION*) : Int32
+    fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
+    fun FindFirstFileW(name : UInt16*, data : Void*) : Void*
+    fun FindClose(handle : Void*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun SetFileTime(handle : Void*, creation : Int64*, access : Int64*, write : Int64*) : Int32
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
@@ -795,23 +798,57 @@ class ::File
       # which `same_file?` reads as no identity at all.
       dev = 0_i64
       ino = 0_u64
+      opened = false
+      tag = 0_u32
       open_flags = follow_symlinks ? 0x2000000 : 0x2200000
       handle = Std::File::LibKernel32.CreateFileW(wpath, 0, 0x7, Pointer(Void).new(0_u64), 3, open_flags, Pointer(Void).new(0_u64))
       if handle.address != 0xFFFFFFFFFFFFFFFF_u64
         by_handle = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
         if Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(by_handle)) != 0
+          opened = true
           attrs = by_handle.dwFileAttributes
           size = ((by_handle.nFileSizeHigh.to_u64 << 32) | by_handle.nFileSizeLow.to_u64).to_i64
           write_ticks = ((by_handle.ftLastWriteTimeHigh.to_u64 << 32) | by_handle.ftLastWriteTimeLow.to_u64).to_i64
           dev = by_handle.dwVolumeSerialNumber.to_i64
           ino = (by_handle.nFileIndexHigh.to_u64 << 32) | by_handle.nFileIndexLow.to_u64
+          # FileAttributeTagInfo (9): the attributes, then the tag.
+          if !follow_symlinks && (attrs & 0x400_u32) != 0_u32
+            tag_info = Pointer(UInt32).malloc(2_u64)
+            if Std::File::LibKernel32.GetFileInformationByHandleEx(handle, 9, tag_info.as(Void*), 8_u32) != 0
+              tag = tag_info[1]
+            end
+          end
         end
         Std::File::LibKernel32.CloseHandle(handle)
       end
 
-      # A reparse point is read first: a directory symlink carries the
-      # directory attribute too.
-      file_type = if (attrs & 0x400_u32) != 0_u32
+      # A reparse point is a link only by its tag. Every one used to be
+      # `Symlink`: an app execution alias - `WindowsApps\*.exe` - and a
+      # cloud placeholder, which OneDrive makes of every file it has not
+      # downloaded, answered `file? false`, and `readlink` then refused
+      # them as "not a link". A followed open that succeeded has resolved
+      # every link, so a reparse bit left on its answer is not one; an
+      # unfollowed open, or none, asks the tag: IO_REPARSE_TAG_SYMLINK,
+      # _MOUNT_POINT (a junction) and _LX_SYMLINK (WSL's) are links.
+      link = false
+      if (attrs & 0x400_u32) != 0_u32 && !(follow_symlinks && opened)
+        if !opened
+          entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
+          found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
+          if found.address != 0xFFFFFFFFFFFFFFFF_u64
+            Std::File::LibKernel32.FindClose(found)
+            tag = (entry + 36).as(Pointer(UInt32)).value # dwReserved0
+          end
+        end
+        link = tag == 0xA000000C_u32 || tag == 0xA0000003_u32 || tag == 0xA000001D_u32
+      end
+      # A followed link whose target would not open is a link to nothing
+      # this process can stat, which POSIX `stat` answers with an error.
+      return nil if link && follow_symlinks
+
+      # The link is read first: a directory symlink carries the directory
+      # attribute too.
+      file_type = if link
                     Type::Symlink
                   elsif (attrs & 0x10_u32) != 0_u32
                     Type::Directory

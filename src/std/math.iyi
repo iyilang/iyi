@@ -185,9 +185,8 @@ pub struct Math
     cbrt(value.to_f64)
   end
 
-  private INV_LN2 = 1.442695040888963407359924681
-  private LN2_HI  =            0.6931471803691238
-  private LN2_LO  =        1.9082149292705877e-10
+  private LN2_HI =     0.6931471803691238
+  private LN2_LO = 1.9082149292705877e-10
 
   # exp as glibc computes it on Linux - Arm's optimized-routines exp, which
   # glibc has carried since 2.28 - so a program's `Math.exp` is the other
@@ -362,16 +361,52 @@ pub struct Math
     exp(value.to_f64)
   end
 
-  # 2^value: the whole part of `value` is an exact scaling, only the
-  # fraction goes through `exp`, so every integer power of two is exact and
-  # 2^1024 is the infinity it should be.
+  # 2^value as glibc computes it - Arm's optimized-routines exp2, glibc's
+  # since 2.28, on `exp`'s table: value = k/128 + r, 2^(k/128) from the
+  # table and 2^r by a degree-5 polynomial, under 0.52 ulp, and a whole
+  # value exact. The `exp(frac * log 2)` this replaces answered differently
+  # from glibc's for about one argument in eight. Unfused, as `exp`.
+  private EXP2_SHIFT =      52776558133248.0
+  private EXP2_C1    =   0.69314718055994529
+  private EXP2_C2    =   0.24022650695909065
+  private EXP2_C3    =    0.0555041086686087
+  private EXP2_C4    = 0.0096181319757210545
+  private EXP2_C5    = 0.0013332074570119598
+
   def self.exp2(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value
-    return 1.0 / 0.0 if value >= 1024.0
-    return 0.0 if value < -1075.0
-    whole = value.floor
-    frac = value - whole
-    ldexp(frac == 0.0 ? 1.0 : exp(frac * LOG2), whole.to_i32)
+    bits = IyiFloatText.bits_of(value)
+    abstop = (bits.unsafe_shr(52_u64) & 0x7ff_u64).to_i64
+    if abstop < 0x3c9_i64 || abstop >= 0x408_i64
+      return 1.0 + value if abstop < 0x3c9_i64
+      if abstop >= 0x409_i64
+        return 0.0 if bits == 0xfff0000000000000_u64
+        return 1.0 + value if abstop >= 0x7ff_i64
+        return 1.0 / 0.0 if bits.unsafe_shr(63_u64) == 0_u64
+        return 0.0 if bits >= 0xc090cc0000000000_u64
+      end
+      # |value| > 928: the scale may leave the exponent's range.
+      abstop = 0_i64 if bits &* 2_u64 > 0x811a000000000000_u64
+    end
+    kd = value + EXP2_SHIFT
+    ki = IyiFloatText.bits_of(kd)
+    kd = kd - EXP2_SHIFT
+    r = value - kd
+    table = EXP_TAB.to_unsafe
+    idx = ((ki & 127_u64) &* 2_u64).to_i32
+    top = ki.unsafe_shl(45_u64)
+    tail = IyiFloatText.from_bits(table[idx])
+    sbits = table[idx + 1] &+ top
+    r2 = r * r
+    tmp = tail + r * EXP2_C1 + r2 * (EXP2_C2 + r * EXP2_C3) + r2 * r2 * (EXP2_C4 + r * EXP2_C5)
+    if abstop == 0_i64
+      if ki & 0x80000000_u64 == 0_u64
+        scale = IyiFloatText.from_bits(sbits &- 0x0010000000000000_u64)
+        return 2.0 * (scale + scale * tmp)
+      end
+      return exp_special(tmp, sbits, ki)
+    end
+    scale = IyiFloatText.from_bits(sbits)
+    scale + scale * tmp
   end
 
   def self.exp2(value : Float32) : Float32
@@ -403,22 +438,6 @@ pub struct Math
 
   def self.expm1(value : T) : Float64 forall T
     expm1(value.to_f64)
-  end
-
-  private SQRT2_INV = 0.7071067811865475244
-
-  # log of a mantissa in [sqrt(1/2), sqrt(2)), by the series in
-  # (m - 1) / (m + 1).
-  private def self.log_mantissa(m : Float64) : Float64
-    z = (m - 1.0) / (m + 1.0)
-    z2 = z * z
-    s = 0.0
-    j = 9
-    while j >= 0
-      s = s * z2 + 1.0 / (2 * j + 1).to_f64
-      j = j - 1
-    end
-    2.0 * z * s
   end
 
   # log as glibc computes it - Arm's optimized-routines log, glibc's since
@@ -644,16 +663,145 @@ pub struct Math
     log(value.to_f64, base.to_f64)
   end
 
-  # The binary exponent is the answer's whole part outright, so a power of
-  # two answers its exponent exactly.
+  # log2 as glibc computes it - Arm's optimized-routines log2, glibc's
+  # since 2.28, under 0.55 ulp: near 1 a degree-11 polynomial, elsewhere a
+  # 64-entry table and a degree-7 one, r / ln 2 taken with r in two parts,
+  # a power of two exact. `log`'s shape, unfused as it is; the series it
+  # replaces answered differently for about one argument in six hundred.
+  # The tables are `math/log2_data.c`'s for N = 64.
+  private LOG2_INVLN2HI =     1.4426950407214463
+  private LOG2_INVLN2LO = 1.6751713164886512e-10
+  private LOG2_A0       =   -0.72134752044448824
+  private LOG2_A1       =    0.48089834696299849
+  private LOG2_A2       =   -0.36067375954075914
+  private LOG2_A3       =     0.2885390073180969
+  private LOG2_A4       =   -0.24046935556284221
+  private LOG2_A5       =    0.20612023821736031
+  private LOG2_B0       =   -0.72134752044448169
+  private LOG2_B1       =    0.48089834696298744
+  private LOG2_B2       =   -0.36067376022214498
+  private LOG2_B3       =     0.2885390081805197
+  private LOG2_B4       =   -0.24044917405728863
+  private LOG2_B5       =    0.20609928610229539
+  private LOG2_B6       =   -0.18033596705327856
+  private LOG2_B7       =     0.1603032746063156
+  private LOG2_B8       =   -0.14483316576701266
+  private LOG2_B9       =    0.13046826811283835
+
+  private LOG2_TAB = [
+    0x3ff724286bb1acf8_u64, 0xbfe1095feecdb000_u64, 0x3fe6200012b90a8e_u64, 0x3c8904ab0644b605_u64,
+    0x3ff6e1f766d2cca1_u64, 0xbfe08494bd76d000_u64, 0x3fe66000045734a6_u64, 0x3c61ff9bea62f7a9_u64,
+    0x3ff6a13d0e30d48a_u64, 0xbfe00143aee8f800_u64, 0x3fe69fffc325f2c5_u64, 0x3c827ecfcb3c90ba_u64,
+    0x3ff661ec32d06c85_u64, 0xbfdefec5360b4000_u64, 0x3fe6e00038b95a04_u64, 0x3c88ff8856739326_u64,
+    0x3ff623fa951198f8_u64, 0xbfddfdd91ab7e000_u64, 0x3fe71fffe09994e3_u64, 0x3c8afd40275f82b1_u64,
+    0x3ff5e75ba4cf026c_u64, 0xbfdcffae0cc79000_u64, 0x3fe7600015590e10_u64, 0xbc72fd75b4238341_u64,
+    0x3ff5ac055a214fb8_u64, 0xbfdc043811fda000_u64, 0x3fe7a00012655bd5_u64, 0x3c7808e67c242b76_u64,
+    0x3ff571ed0f166e1e_u64, 0xbfdb0b67323ae000_u64, 0x3fe7e0003259e9a6_u64, 0xbc6208e426f622b7_u64,
+    0x3ff53909590bf835_u64, 0xbfda152f5a2db000_u64, 0x3fe81fffedb4b2d2_u64, 0xbc8402461ea5c92f_u64,
+    0x3ff5014fed61addd_u64, 0xbfd9217f5af86000_u64, 0x3fe860002dfafcc3_u64, 0x3c6df7f4a2f29a1f_u64,
+    0x3ff4cab88e487bd0_u64, 0xbfd8304db0719000_u64, 0x3fe89ffff78c6b50_u64, 0xbc8e0453094995fd_u64,
+    0x3ff49539b4334fee_u64, 0xbfd74189f9a9e000_u64, 0x3fe8e00039671566_u64, 0xbc8a04f3bec77b45_u64,
+    0x3ff460cbdfafd569_u64, 0xbfd6552bb5199000_u64, 0x3fe91fffe2bf1745_u64, 0xbc77fa34400e203c_u64,
+    0x3ff42d664ee4b953_u64, 0xbfd56b23a29b1000_u64, 0x3fe95fffcc5c9fd1_u64, 0xbc76ff8005a0695d_u64,
+    0x3ff3fb01111dd8a6_u64, 0xbfd483650f5fa000_u64, 0x3fe9a0003bba4767_u64, 0x3c70f8c4c4ec7e03_u64,
+    0x3ff3c995b70c5836_u64, 0xbfd39de937f6a000_u64, 0x3fe9dfffe7b92da5_u64, 0x3c8e7fd9478c4602_u64,
+    0x3ff3991c4ab6fd4a_u64, 0xbfd2baa1538d6000_u64, 0x3fea1fffd72efdaf_u64, 0xbc6a0c554dcdae7e_u64,
+    0x3ff3698e0ce099b5_u64, 0xbfd1d98340ca4000_u64, 0x3fea5fffde04ff95_u64, 0x3c867da98ce9b26b_u64,
+    0x3ff33ae48213e7b2_u64, 0xbfd0fa853a40e000_u64, 0x3fea9fffca5e8d2b_u64, 0xbc8284c9b54c13de_u64,
+    0x3ff30d191985bdb1_u64, 0xbfd01d9c32e73000_u64, 0x3feadfffddad03ea_u64, 0x3c5812c8ea602e3c_u64,
+    0x3ff2e025cab271d7_u64, 0xbfce857da2fa6000_u64, 0x3feb1ffff10d3d4d_u64, 0xbc8efaddad27789c_u64,
+    0x3ff2b404cf13cd82_u64, 0xbfccd3c8633d8000_u64, 0x3feb5fffce21165a_u64, 0x3c53cb1719c61237_u64,
+    0x3ff288b02c7ccb50_u64, 0xbfcb26034c14a000_u64, 0x3feb9fffd950e674_u64, 0x3c73f7d94194ce00_u64,
+    0x3ff25e2263944de5_u64, 0xbfc97c1c2f4fe000_u64, 0x3febe000139ca8af_u64, 0x3c750ac4215d9bc0_u64,
+    0x3ff234563d8615b1_u64, 0xbfc7d6023f800000_u64, 0x3fec20005b46df99_u64, 0x3c6beea653e9c1c9_u64,
+    0x3ff20b46e33eaf38_u64, 0xbfc633a71a05e000_u64, 0x3fec600040b9f7ae_u64, 0xbc7c079f274a70d6_u64,
+    0x3ff1e2eefdcda3dd_u64, 0xbfc494f5e9570000_u64, 0x3feca0006255fd8a_u64, 0xbc7a0b4076e84c1f_u64,
+    0x3ff1bb4a580b3930_u64, 0xbfc2f9e424e0a000_u64, 0x3fecdfffd94c095d_u64, 0x3c88f933f99ab5d7_u64,
+    0x3ff19453847f2200_u64, 0xbfc162595afdc000_u64, 0x3fed1ffff975d6cf_u64, 0xbc582c08665fe1be_u64,
+    0x3ff16e06c0d5d73c_u64, 0xbfbf9c9a75bd8000_u64, 0x3fed5fffa2561c93_u64, 0xbc7b04289bd295f3_u64,
+    0x3ff1485f47b7e4c2_u64, 0xbfbc7b575bf9c000_u64, 0x3fed9fff9d228b0c_u64, 0x3c870251340fa236_u64,
+    0x3ff12358ad0085d1_u64, 0xbfb960c60ff48000_u64, 0x3fede00065bc7e16_u64, 0xbc75011e16a4d80c_u64,
+    0x3ff0fef00f532227_u64, 0xbfb64ce247b60000_u64, 0x3fee200002f64791_u64, 0x3c89802f09ef62e0_u64,
+    0x3ff0db2077d03a8f_u64, 0xbfb33f78b2014000_u64, 0x3fee600057d7a6d8_u64, 0xbc7e0b75580cf7fa_u64,
+    0x3ff0b7e6d65980d9_u64, 0xbfb0387d1a42c000_u64, 0x3feea00027edc00c_u64, 0xbc8c848309459811_u64,
+    0x3ff0953efe7b408d_u64, 0xbfaa6f9208b50000_u64, 0x3feee0006cf5cb7c_u64, 0xbc8f8027951576f4_u64,
+    0x3ff07325cac53b83_u64, 0xbfa47a954f770000_u64, 0x3fef2000782b7dcc_u64, 0xbc8f81d97274538f_u64,
+    0x3ff05197e40d1b5c_u64, 0xbf9d23a8c50c0000_u64, 0x3fef6000260c450a_u64, 0xbc4071002727ffdc_u64,
+    0x3ff03091c1208ea2_u64, 0xbf916a2629780000_u64, 0x3fef9fffe88cd533_u64, 0xbc581bdce1fda8b0_u64,
+    0x3ff0101025b37e21_u64, 0xbf7720f8d8e80000_u64, 0x3fefdfffd50f8689_u64, 0x3c87f91acb918e6e_u64,
+    0x3fefc07ef9caa76b_u64, 0x3f86fe53b1500000_u64, 0x3ff0200004292367_u64, 0x3c9b7ff365324681_u64,
+    0x3fef4465d3f6f184_u64, 0x3fa11ccce10f8000_u64, 0x3ff05fffe3e3d668_u64, 0x3c86fa08ddae957b_u64,
+    0x3feecc079f84107f_u64, 0x3fac4dfc8c8b8000_u64, 0x3ff0a0000a85a757_u64, 0xbc57e2de80d3fb91_u64,
+    0x3fee573a99975ae8_u64, 0x3fb3aa321e574000_u64, 0x3ff0e0001a5f3fcc_u64, 0xbc91823305c5f014_u64,
+    0x3fede5d6f0bd3de6_u64, 0x3fb918a0d08b8000_u64, 0x3ff11ffff8afbaf5_u64, 0xbc8bfabb6680bac2_u64,
+    0x3fed77b681ff38b3_u64, 0x3fbe72e9da044000_u64, 0x3ff15fffe54d91ad_u64, 0xbc9d7f121737e7ef_u64,
+    0x3fed0cb5724de943_u64, 0x3fc1dcd2507f6000_u64, 0x3ff1a00011ac36e1_u64, 0x3c9c000a0516f5ff_u64,
+    0x3feca4b2dc0e7563_u64, 0x3fc476ab03dea000_u64, 0x3ff1e00019c84248_u64, 0xbc9082fbe4da5da0_u64,
+    0x3fec3f8ee8d6cb51_u64, 0x3fc7074377e22000_u64, 0x3ff220000ffe5e6e_u64, 0xbc88fdd04c9cfb43_u64,
+    0x3febdd2b4f020c4c_u64, 0x3fc98ede8ba94000_u64, 0x3ff26000269fd891_u64, 0x3c8cfe2a7994d182_u64,
+    0x3feb7d6c006015ca_u64, 0x3fcc0db86ad2e000_u64, 0x3ff2a00029a6e6da_u64, 0xbc700273715e8bc5_u64,
+    0x3feb20366e2e338f_u64, 0x3fce840aafcee000_u64, 0x3ff2dfffe0293e39_u64, 0x3c9b7c39dab2a6f9_u64,
+    0x3feac57026295039_u64, 0x3fd0790ab4678000_u64, 0x3ff31ffff7dcf082_u64, 0x3c7df1336edc5254_u64,
+    0x3fea6d01bc2731dd_u64, 0x3fd1ac056801c000_u64, 0x3ff35ffff05a8b60_u64, 0xbc9e03564ccd31eb_u64,
+    0x3fea16d3bc3ff18b_u64, 0x3fd2db11d4fee000_u64, 0x3ff3a0002e0eaecc_u64, 0x3c75f0e74bd3a477_u64,
+    0x3fe9c2d14967fead_u64, 0x3fd406464ec58000_u64, 0x3ff3e000043bb236_u64, 0x3c9c7dcb149d8833_u64,
+    0x3fe970e4f47c9902_u64, 0x3fd52dbe093af000_u64, 0x3ff4200002d187ff_u64, 0x3c7e08afcf2d3d28_u64,
+    0x3fe920fb3982bcf2_u64, 0x3fd651902050d000_u64, 0x3ff460000d387cb1_u64, 0x3c820837856599a6_u64,
+    0x3fe8d30187f759f1_u64, 0x3fd771d2cdeaf000_u64, 0x3ff4a00004569f89_u64, 0xbc89fa5c904fbcd2_u64,
+    0x3fe886e5ebb9f66d_u64, 0x3fd88e9c857d9000_u64, 0x3ff4e000043543f3_u64, 0xbc781125ed175329_u64,
+    0x3fe83c97b658b994_u64, 0x3fd9a80155e16000_u64, 0x3ff51fffcc027f0f_u64, 0x3c9883d8847754dc_u64,
+    0x3fe7f405ffc61022_u64, 0x3fdabe186ed3d000_u64, 0x3ff55ffffd87b36f_u64, 0xbc8709e731d02807_u64,
+    0x3fe7ad22181415ca_u64, 0x3fdbd0f2aea0e000_u64, 0x3ff59ffff21df7ba_u64, 0x3c87f79f68727b02_u64,
+    0x3fe767dcf99eff8c_u64, 0x3fdce0a43dbf4000_u64, 0x3ff5dfffebfc3481_u64, 0xbc9180902e30e93e_u64,
+
+  ] of UInt64
+
   def self.log2(value : Float64) : Float64
-    return log(value) if value != value || value <= 0.0 || value == 2.0 * value
-    m, k = frexp(value)
-    if m < SQRT2_INV
-      m = m * 2.0
-      k = k - 1
+    ix = IyiFloatText.bits_of(value)
+    # 1 - 0x1.5b51p-5 <= x < 1 + 0x1.6ab2p-5: the polynomial in x - 1.
+    if ix &- 0x3feea4af00000000_u64 < 0x3ff0b55900000000_u64 &- 0x3feea4af00000000_u64
+      return 0.0 if ix == 0x3ff0000000000000_u64
+      r = value - 1.0
+      rhi = IyiFloatText.from_bits(IyiFloatText.bits_of(r) & 0xffffffff00000000_u64)
+      rlo = r - rhi
+      hi = rhi * LOG2_INVLN2HI
+      lo = rlo * LOG2_INVLN2HI + r * LOG2_INVLN2LO
+      r2 = r * r
+      r4 = r2 * r2
+      p = r2 * (LOG2_B0 + r * LOG2_B1)
+      y = hi + p
+      lo = lo + (hi - y + p)
+      lo = lo + r4 * (LOG2_B2 + r * LOG2_B3 + r2 * (LOG2_B4 + r * LOG2_B5) + r4 * (LOG2_B6 + r * LOG2_B7 + r2 * (LOG2_B8 + r * LOG2_B9)))
+      return y + lo
     end
-    k.to_f64 + log_mantissa(m) * INV_LN2
+    top = ix.unsafe_shr(48_u64).to_i64
+    if top < 0x10_i64 || top >= 0x7ff0_i64
+      return (1.0 / 0.0) * -1.0 if ix &* 2_u64 == 0_u64
+      return value if ix == 0x7ff0000000000000_u64
+      return (value - value) / (value - value) if top & 0x8000_i64 != 0_i64 || top & 0x7ff0_i64 == 0x7ff0_i64
+      ix = IyiFloatText.bits_of(value * 4503599627370496.0) &- 0x0340000000000000_u64
+    end
+    tmp = ix &- 0x3fe6000000000000_u64
+    i = (tmp.unsafe_shr(46_u64) & 63_u64).to_i32
+    k = tmp.unsafe_to_i64 >> 52
+    iz = ix &- (tmp & 0xfff0000000000000_u64)
+    table = LOG2_TAB.to_unsafe
+    invc = IyiFloatText.from_bits(table[i * 4])
+    logc = IyiFloatText.from_bits(table[i * 4 + 1])
+    z = IyiFloatText.from_bits(iz)
+    kd = k.to_f64
+    r = (z - IyiFloatText.from_bits(table[i * 4 + 2]) - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
+    rhi = IyiFloatText.from_bits(IyiFloatText.bits_of(r) & 0xffffffff00000000_u64)
+    rlo = r - rhi
+    t1 = rhi * LOG2_INVLN2HI
+    t2 = rlo * LOG2_INVLN2HI + r * LOG2_INVLN2LO
+    t3 = kd + logc
+    hi = t3 + t1
+    lo = t3 - hi + t1 + t2
+    r2 = r * r
+    r4 = r2 * r2
+    p = LOG2_A0 + r * LOG2_A1 + r2 * (LOG2_A2 + r * LOG2_A3) + r4 * (LOG2_A4 + r * LOG2_A5)
+    lo + r2 * p + hi
   end
 
   def self.log2(value : Float32) : Float32

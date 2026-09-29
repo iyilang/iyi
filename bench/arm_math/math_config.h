@@ -1,6 +1,6 @@
 /*
  * iyi: the part of optimized-routines' `math/math_config.h` that `exp.c`,
- * `pow.c`, `log.c` and their data read, for `bench/std_math_exercise.sh`'s oracle:
+ * `exp2.c`, `log.c`, `log2.c`, `pow.c` and their data read, for `bench/std_math_exercise.sh`'s oracle:
  * the configuration glibc builds them with on x86_64 (128-entry tables, a
  * degree-5 exp polynomial, degree-6 and -12 log ones and a degree-8 one
  * for pow's log, the reduction by adding
@@ -24,6 +24,9 @@
 #define LOG_TABLE_BITS 7
 #define LOG_POLY_ORDER 6
 #define LOG_POLY1_ORDER 12
+#define LOG2_TABLE_BITS 6
+#define LOG2_POLY_ORDER 7
+#define LOG2_POLY1_ORDER 11
 #define WANT_ROUNDING 1
 #define WANT_ERRNO 0
 #define USE_GLIBC_ABI 0
@@ -75,4 +78,13 @@ extern const struct log_data
   struct { double invc, logc; } tab[1 << LOG_TABLE_BITS];
   struct { double chi, clo; } tab2[1 << LOG_TABLE_BITS];
 } __log_data;
+extern const struct log2_data
+{
+  double invln2hi;
+  double invln2lo;
+  double poly[LOG2_POLY_ORDER - 1];
+  double poly1[LOG2_POLY1_ORDER - 1];
+  struct { double invc, logc; } tab[1 << LOG2_TABLE_BITS];
+  struct { double chi, clo; } tab2[1 << LOG2_TABLE_BITS];
+} __log2_data;
 #endif

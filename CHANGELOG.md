@@ -96,6 +96,20 @@
 
 ### Changed
 
+- **`Math.exp2` and `Math.log2` are glibc's.** `exp2` was
+  `exp(frac * log 2)` scaled by the whole part and answered differently
+  from glibc's `exp2` for about one argument in eight; `log2` was the
+  series `log` had and differed for one in six hundred. Both are now
+  Arm's optimized-routines functions, glibc's since 2.28, on `exp`'s
+  table and a 64-entry one of their own, built unfused as the rest: 0 of
+  200,000 different from glibc, whole powers of two exact both ways.
+  `bench/std_math_exercise.sh` compiles them with the rest of
+  `bench/arm_math`, requires 327,121 answers bit for bit - the whole
+  range, the bands their special cases take, every power of two - and
+  proves a polynomial a term short, `log2` near 1 with r in one part, a
+  reduction without c's low part and an overflow scale halved each fail
+  it. The series and `1 / ln 2` nothing reads any more are gone.
+
 - **`Math.log` is glibc's as well, and twice as fast.** A series in
   (m - 1)/(m + 1) answered differently from glibc's for about one
   argument in a hundred; it is now Arm's optimized-routines log, glibc's

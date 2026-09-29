@@ -46,7 +46,7 @@ Crystal standard library uses the following libraries, which have their own lice
 iyi's own standard library includes code derived from, and its benches a
 port of:
 
-- [Arm optimized-routines][] (`Math.exp`, `Math.log` and `Math.pow` in `src/std/math.iyi`, and
+- [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
   `bench/arm_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 

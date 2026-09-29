@@ -830,6 +830,11 @@ jobs:
         run: make -o .build/crystal iyi
       - name: The standard library foundation and discovered exercises
         run: bash bench/std_exercise.sh
+      # crystal-metric's port: twenty-six benchmarks that check their own
+      # answers against the Crystal program's, over one program that uses
+      # the library together; four broken modules prove it can fail.
+      - name: crystal-metric's port answers as Crystal does
+        run: bash bench/metric_port.sh
 
   targets:
     needs: build

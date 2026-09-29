@@ -1,0 +1,2944 @@
+module metric
+
+# Port of crystal-metric's metric.cr to iyi: twenty-six benchmarks, each of
+# which checks its own answer against the one the Crystal program prints.
+# `bench/metric_port.sh` builds it and requires every answer, which makes it
+# a whole-library correctness check - float printing, `Random`, BigInt,
+# regex, JSON, Complex, channels - as much as a benchmark.
+#
+#   iyi build --release -o metric metric.iyi && ./metric
+#   ./metric Brainfuck2
+#   ./metric Brainfuck,Brainfuck2
+#
+# What had to change against the Crystal original is written down beside the
+# code that changes.
+#
+# crystal-metric (https://github.com/kostya/crystal-metric) is under the MIT
+# License:
+#
+#   Copyright (c) 2024 Konstantin Makarchev <kostya27@gmail.com>
+#
+#   Permission is hereby granted, free of charge, to any person obtaining a
+#   copy of this software and associated documentation files (the
+#   "Software"), to deal in the Software without restriction, including
+#   without limitation the rights to use, copy, modify, merge, publish,
+#   distribute, sublicense, and/or sell copies of the Software, and to permit
+#   persons to whom the Software is furnished to do so, subject to the
+#   following conditions:
+#
+#   The above copyright notice and this permission notice shall be included
+#   in all copies or substantial portions of the Software.
+#
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+#   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+#   NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+#   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+#   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+#   USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import std/text
+import std/format::{sprintf}
+import std/math::{Math}
+import std/time::{Time}
+import std/enumerable
+import std/indexable
+import std/slice::{Slice}
+import std/base64::{Base64}
+import std/json::{JSON, PullParser, serializable}
+import std/big::{BigInt}
+import std/regex::{Regex}
+import std/complex::{Complex}
+import std/gc::{GC}
+import std/io::{Memory}
+import std/random::{Random}
+import std/steppable
+import std/int
+
+# djb2 over the bytes, in 32 bits as the Crystal file computes it.
+def checksum(v : String) : UInt32
+  hash = 5381_u32
+  i = 0
+  n = v.bytesize
+  p = v.to_unsafe
+  while i < n
+    hash = (hash &* 33_u32) &+ p[i].to_u32
+    i = i + 1
+  end
+  hash
+end
+
+trait Bench
+  abstract def name : String
+  abstract def run : Nil
+  abstract def result_text : String
+  abstract def expected_text : String
+end
+
+def ok?(b : Bench) : Bool
+  b.result_text == b.expected_text
+end
+
+# ---------------------------------------------------------------------------
+# Pidigits
+# ---------------------------------------------------------------------------
+class Pidigits
+  @nn : Int32
+  @buf : Memory
+
+  def initialize(nn : Int32)
+    @nn = nn
+    @buf = Memory.new(65536)
+  end
+end
+
+impl Bench for Pidigits
+  def name : String
+    "Pidigits"
+  end
+
+  def run : Nil
+    i = 0
+    k = 0
+    ns = BigInt.new(0)
+    a = BigInt.new(0)
+    t = BigInt.new(0)
+    u = BigInt.new(0)
+    k1 = 1
+    n = BigInt.new(1)
+    d = BigInt.new(1)
+
+    while true
+      k = k + 1
+      t = n << 1
+      n = n * k
+      k1 = k1 + 2
+      a = (a + t) * k1
+      d = d * k1
+      if a >= n
+        qr = (n * 3 + a).divmod(d)
+        t = qr[0]
+        u = qr[1]
+        u = u + n
+        if d > u
+          ns = ns * 10 + t
+          i = i + 1
+          if i % 10 == 0
+            # `ns.to_u64` in Crystal; ns is under 10^10, so `to_i64` is the
+            # same number.
+            @buf.write(sprintf("%010d\t:%d\n", ns.to_i64, i))
+            ns = BigInt.new(0)
+          end
+          break if i >= @nn
+
+          a = (a - (d * t)) * 10
+          n = n * 10
+        end
+      end
+    end
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "519471024"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Binarytrees
+# ---------------------------------------------------------------------------
+class TreeNode
+  @item : Int32
+  @left : TreeNode?
+  @right : TreeNode?
+
+  def initialize(item : Int32, depth : Int32)
+    @item = item
+    @left = nil
+    @right = nil
+    if depth > 0
+      @left = TreeNode.new(2 * item - 1, depth - 1)
+      @right = TreeNode.new(2 * item, depth - 1)
+    end
+  end
+
+  # Crystal's `TreeNode.create(item, depth)`, which is `new(item, depth - 1)`.
+  def self.create(item : Int32, depth : Int32) : TreeNode
+    TreeNode.new(item, depth - 1)
+  end
+
+  def check : Int32
+    lft = @left
+    return @item if lft.nil?
+    rgt = @right
+    return @item if rgt.nil?
+    lft.check - rgt.check + @item
+  end
+end
+
+class Binarytrees
+  @n : Int32
+  @res : Int32
+
+  def initialize(n : Int32)
+    @n = n
+    @res = 0
+  end
+end
+
+impl Bench for Binarytrees
+  def name : String
+    "Binarytrees"
+  end
+
+  def run : Nil
+    min_depth = 4
+    max_depth = min_depth + 2 > @n ? min_depth + 2 : @n
+    stretch_depth = max_depth + 1
+    @res = @res + TreeNode.create(0, stretch_depth).check
+
+    long_lived_tree = TreeNode.create(0, max_depth)
+
+    min_depth.step(to: max_depth, by: 2) do |depth|
+      iterations = 1 << (max_depth - depth + min_depth)
+      i = 1
+      while i <= iterations
+        @res = @res + TreeNode.create(i, depth).check
+        @res = @res + TreeNode.create(-i, depth).check
+        i = i + 1
+      end
+    end
+    # the long lived tree stays reachable to the end, as the benchmark asks
+    @res = @res + long_lived_tree.check - long_lived_tree.check
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "-699041"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Brainfuck
+# ---------------------------------------------------------------------------
+BF_TEXT = "Benchmark brainf*ck program
+>++[<+++++++++++++>-]<[[>+>+<<-]>[<+>-]++++++++
+[>++++++++<-]>.[-]<<>++++++++++[>++++++++++[>++
+++++++++[>++++++++++[>++++++++++[>++++++++++[>+
++++++++++[-]<-]<-]<-]<-]<-]<-]<-]++++++++++."
+
+class BfTape
+  @tape : Array(Int32)
+  @pos : Int32
+
+  def initialize
+    @tape = [0]
+    @pos = 0
+  end
+
+  def get : Int32
+    @tape[@pos]
+  end
+
+  def inc : Nil
+    @tape[@pos] = @tape[@pos] + 1
+  end
+
+  def dec : Nil
+    @tape[@pos] = @tape[@pos] - 1
+  end
+
+  def advance : Nil
+    @pos = @pos + 1
+    @tape << 0 if @tape.size <= @pos
+  end
+
+  def devance : Nil
+    @pos = @pos - 1 if @pos > 0
+  end
+end
+
+class BfProgram
+  @chars : Array(Char)
+  @bracket_map : Hash(Int32, Int32)
+
+  def initialize(text : String)
+    @chars = [] of Char
+    @bracket_map = {} of Int32 => Int32
+    leftstack = [] of Int32
+    pc = 0
+    text.each_char do |char|
+      # `"[]<>+-,.".includes?(char)` in Crystal; `String#includes?` takes a
+      # String here, and `index(Char)` is the question that takes a Char.
+      unless "[]<>+-,.".index(char).nil?
+        @chars << char
+        if char == '['
+          leftstack << pc
+        elsif char == ']' && !leftstack.empty?
+          left = leftstack.pop
+          right = pc
+          @bracket_map[left] = right
+          @bracket_map[right] = left
+        end
+        pc = pc + 1
+      end
+    end
+  end
+
+  def run : Int32
+    result = 0
+    tape = BfTape.new
+    pc = 0
+    while pc < @chars.size
+      c = @chars[pc]
+      if c == '+'
+        tape.inc
+      elsif c == '-'
+        tape.dec
+      elsif c == '>'
+        tape.advance
+      elsif c == '<'
+        tape.devance
+      elsif c == '['
+        pc = @bracket_map[pc] if tape.get == 0
+      elsif c == ']'
+        pc = @bracket_map[pc] if tape.get != 0
+      elsif c == '.'
+        result = result + tape.get.chr.ord
+      end
+      pc = pc + 1
+    end
+    result
+  end
+end
+
+class Brainfuck
+  @res : Int32
+
+  def initialize
+    @res = 0
+  end
+end
+
+impl Bench for Brainfuck
+  def name : String
+    "Brainfuck"
+  end
+
+  def run : Nil
+    @res = BfProgram.new(BF_TEXT).run
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "2025"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Brainfuck2
+# ---------------------------------------------------------------------------
+record OpInc, val : Int32
+record OpMove, val : Int32
+record OpPrint
+
+alias OpT = OpInc | OpMove | OpPrint | Array(OpT)
+
+class Bf2Tape
+  @tape : Array(UInt8)
+  @pos : Int32
+
+  def initialize
+    @tape = [0_u8]
+    @pos = 0
+  end
+
+  def get : UInt8
+    @tape[@pos]
+  end
+
+  def inc(x : Int32) : Nil
+    @tape[@pos] = (@tape[@pos].to_i32 &+ x).to_u8
+  end
+
+  def move(x : Int32) : Nil
+    @pos = @pos + x
+    while @pos >= @tape.size
+      @tape << 0_u8
+    end
+  end
+end
+
+class Bf2Program
+  @ops : Array(OpT)
+  @res : Int32
+
+  def initialize(code : String)
+    @res = 0
+    # Crystal parses from a `Char` iterator and recurses on it; `each_char`
+    # here only takes a block, so the position is carried explicitly.
+    parsed = parse(code, 0)
+    @ops = parsed[0]
+  end
+
+  def result : Int32
+    @res
+  end
+
+  def parse(code : String, from : Int32) : Tuple(Array(OpT), Int32)
+    res = [] of OpT
+    i = from
+    n = code.bytesize
+    while i < n
+      c = code[i]
+      i = i + 1
+      if c == '+'
+        res << OpInc.new(1)
+      elsif c == '-'
+        res << OpInc.new(-1)
+      elsif c == '>'
+        res << OpMove.new(1)
+      elsif c == '<'
+        res << OpMove.new(-1)
+      elsif c == '.'
+        res << OpPrint.new
+      elsif c == '['
+        inner = parse(code, i)
+        res << inner[0]
+        i = inner[1]
+      elsif c == ']'
+        break
+      end
+    end
+    {res, i}
+  end
+
+  def run : Nil
+    _run(@ops, Bf2Tape.new)
+  end
+
+  def _run(program : Array(OpT), tape : Bf2Tape) : Nil
+    program.each do |op|
+      if op.is_a?(OpInc)
+        tape.inc(op.val)
+      elsif op.is_a?(OpMove)
+        tape.move(op.val)
+      elsif op.is_a?(Array(OpT))
+        while tape.get != 0_u8
+          _run(op, tape)
+        end
+      elsif op.is_a?(OpPrint)
+        @res = @res + tape.get.to_i32.chr.ord
+      end
+    end
+  end
+end
+
+class Brainfuck2
+  @res : Int32
+
+  def initialize
+    @res = 0
+  end
+end
+
+impl Bench for Brainfuck2
+  def name : String
+    "Brainfuck2"
+  end
+
+  def run : Nil
+    program = Bf2Program.new(BF_TEXT)
+    program.run
+    @res = program.result
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "2025"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Fannkuchredux
+# ---------------------------------------------------------------------------
+class Fannkuchredux
+  @n : Int32
+  @res : Tuple(Int32, Int32)
+
+  def initialize(n : Int32)
+    @n = n
+    @res = {0, 0}
+  end
+
+  def result : Tuple(Int32, Int32)
+    @res
+  end
+
+  # `StaticArray(Int32, 32)` in Crystal; `Slice` is the fixed buffer with a
+  # fill constructor here.
+  def fannkuchredux(n : Int32) : Tuple(Int32, Int32)
+    perm1 = Slice(Int32).new(32) { |i| i }
+    perm = Slice(Int32).new(32, 0)
+    count = Slice(Int32).new(32, 0)
+    max_flips_count = 0
+    perm_count = 0
+    chk = 0
+    r = n
+
+    while true
+      while r > 1
+        count[r - 1] = r
+        r = r - 1
+      end
+
+      i = 0
+      while i < n
+        perm[i] = perm1[i]
+        i = i + 1
+      end
+      flips_count = 0
+
+      k = perm[0]
+      while k != 0
+        k2 = (k + 1) >> 1
+        i = 0
+        while i < k2
+          j = k - i
+          tmp = perm[i]
+          perm[i] = perm[j]
+          perm[j] = tmp
+          i = i + 1
+        end
+        flips_count = flips_count + 1
+        k = perm[0]
+      end
+
+      max_flips_count = flips_count if flips_count > max_flips_count
+      chk = chk + (perm_count % 2 == 0 ? flips_count : -flips_count)
+
+      while true
+        return {chk, max_flips_count} if r == n
+
+        perm0 = perm1[0]
+        i = 0
+        while i < r
+          j = i + 1
+          tmp = perm1[i]
+          perm1[i] = perm1[j]
+          perm1[j] = tmp
+          i = i + 1
+        end
+
+        perm1[r] = perm0
+        count[r] = count[r] - 1
+        cntr = count[r]
+        break if cntr > 0
+        r = r + 1
+      end
+      perm_count = perm_count + 1
+    end
+    {chk, max_flips_count}
+  end
+end
+
+impl Bench for Fannkuchredux
+  def name : String
+    "Fannkuchredux"
+  end
+
+  def run : Nil
+    @res = fannkuchredux(@n)
+  end
+
+  def result_text : String
+    "{#{@res[0]}, #{@res[1]}}"
+  end
+
+  def expected_text : String
+    "{556355, 51}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Fasta
+# ---------------------------------------------------------------------------
+FASTA_IM    = 139968
+FASTA_IA    =   3877
+FASTA_IC    =  29573
+LINE_LENGTH =     60
+
+# Crystal keeps this in a class variable so every `Fasta` shares one stream,
+# and the expected checksums of Fasta, Knuckeotide, RegexDna and Revcomp
+# depend on that sharing. Same here.
+class FastaLast
+  @@last : Int32 = 42
+
+  def self.gen_random(max : Int32) : Float64
+    @@last = (@@last * FASTA_IA + FASTA_IC) % FASTA_IM
+    max * @@last / FASTA_IM.to_f64
+  end
+end
+
+IUB = [
+  {'a', 0.27},
+  {'c', 0.12},
+  {'g', 0.12},
+  {'t', 0.27},
+
+  {'B', 0.02},
+  {'D', 0.02},
+  {'H', 0.02},
+  {'K', 0.02},
+  {'M', 0.02},
+  {'N', 0.02},
+  {'R', 0.02},
+  {'S', 0.02},
+  {'V', 0.02},
+  {'W', 0.02},
+  {'Y', 0.02},
+]
+
+HOMO = [{'a', 0.3029549426680}, {'c', 0.1979883004921}, {'g', 0.1975473066391}, {'t', 0.3015094502008}]
+ALU  = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+class Fasta
+  @n : Int32
+  @buf : Memory
+
+  def initialize(n : Int32)
+    @n = n
+    make_cumulative(IUB)
+    make_cumulative(HOMO)
+    @buf = Memory.new(1048576)
+  end
+
+  def text : String
+    @buf.to_s
+  end
+
+  def buf : Memory
+    @buf
+  end
+
+  def make_cumulative(genelist : Array(Tuple(Char, Float64))) : Nil
+    cp = 0.0
+    i = 0
+    while i < genelist.size
+      pair = genelist[i]
+      cp = cp + pair[1]
+      genelist[i] = {pair[0], cp}
+      i = i + 1
+    end
+  end
+
+  def select_random(genelist : Array(Tuple(Char, Float64))) : Char
+    r = FastaLast.gen_random(1)
+    return genelist[0][0] if r < genelist[0][1]
+
+    lo = 0
+    hi = genelist.size - 1
+
+    while hi > lo + 1
+      i = (hi + lo) // 2
+      if r < genelist[i][1]
+        hi = i
+      else
+        lo = i
+      end
+    end
+    genelist[hi][0]
+  end
+
+  def make_random_fasta(id : String, desc : String, genelist : Array(Tuple(Char, Float64)), n : Int32) : Nil
+    todo = n
+    @buf.write(">#{id} #{desc}")
+    @buf.write("\n")
+
+    while todo > 0
+      m = todo < LINE_LENGTH ? todo : LINE_LENGTH
+      pick = String.new(m) do |buffer|
+        i = 0
+        while i < m
+          buffer[i] = select_random(genelist).ord.to_u8
+          i = i + 1
+        end
+      end
+      @buf.write(pick)
+      @buf.write("\n")
+      todo = todo - LINE_LENGTH
+    end
+  end
+
+  def make_repeat_fasta(id : String, desc : String, s : String, n : Int32) : Nil
+    todo = n
+    k = 0
+    kn = s.bytesize
+
+    @buf.write(">#{id} #{desc}")
+    @buf.write("\n")
+    while todo > 0
+      m = todo < LINE_LENGTH ? todo : LINE_LENGTH
+
+      while m >= kn - k
+        @buf.write(s[k, kn - k])
+        m = m - (kn - k)
+        k = 0
+      end
+
+      @buf.write(s[k, m])
+      @buf.write("\n")
+      k = k + m
+
+      todo = todo - LINE_LENGTH
+    end
+  end
+
+  def generate : Nil
+    make_repeat_fasta("ONE", "Homo sapiens alu", ALU, @n * 2)
+    make_random_fasta("TWO", "IUB ambiguity codes", IUB, @n * 3)
+    make_random_fasta("THREE", "Homo sapiens frequency", HOMO, @n * 5)
+  end
+end
+
+impl Bench for Fasta
+  def name : String
+    "Fasta"
+  end
+
+  def run : Nil
+    generate
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "3574419414"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Knuckeotide
+# ---------------------------------------------------------------------------
+class Knuckeotide
+  @seq : String
+  @buf : Memory
+
+  def initialize
+    @buf = Memory.new(4096)
+
+    f = Fasta.new(600000)
+    f.generate
+    res = f.text
+
+    seq = Memory.new(1048576)
+    three = false
+
+    res.each_line do |line|
+      if line.starts_with?(">THREE")
+        three = true
+        next
+      end
+      seq.write(line.chomp) if three
+    end
+    @seq = seq.to_s
+  end
+
+  def frecuency(seq : String, length : Int32) : Tuple(Int32, Hash(String, Int32))
+    n = seq.bytesize - length + 1
+    table = Hash(String, Int32).new(0)
+    (0...n).each do |f|
+      table[seq[f, length]] += 1
+    end
+    {n, table}
+  end
+
+  def sort_by_freq(seq : String, length : Int32) : Nil
+    fr = frecuency(seq, length)
+    n = fr[0]
+    table = fr[1]
+    pairs = table.to_a
+    # `sort { |a, b| b[1] <=> a[1] }`; `<=>` on Int32 lives in `std/int`, and
+    # the comparator is spelled out rather than importing the whole matrix.
+    pairs.sort_in_place { |a, b| b[1] < a[1] ? -1 : (b[1] == a[1] ? 0 : 1) }
+    pairs.each do |v|
+      @buf.write(sprintf("%s %.3f\n", v[0].upcase, (v[1] * 100).to_f / n))
+    end
+    @buf.write("\n")
+  end
+
+  def find_seq(seq : String, s : String) : Nil
+    fr = frecuency(seq, s.bytesize)
+    table = fr[1]
+    @buf.write("#{table[s].to_s}\t#{s.upcase}\n")
+  end
+end
+
+impl Bench for Knuckeotide
+  def name : String
+    "Knuckeotide"
+  end
+
+  def run : Nil
+    (1..2).each { |i| sort_by_freq(@seq, i) }
+    ["ggt", "ggta", "ggtatt", "ggtattttaatt", "ggtattttaatttatagt"].each { |s| find_seq(@seq, s) }
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "1459386462"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Mandelbrot
+# ---------------------------------------------------------------------------
+MANDEL_ITER  =  50
+MANDEL_LIMIT = 2.0
+
+class Mandelbrot
+  @n : Int32
+  @buf : Memory
+
+  def initialize(n : Int32)
+    @n = n
+    @buf = Memory.new(1048576)
+  end
+end
+
+impl Bench for Mandelbrot
+  def name : String
+    "Mandelbrot"
+  end
+
+  def run : Nil
+    w = @n
+    h = @n
+    @buf.write("P4\n#{w} #{h}\n")
+
+    bit_num = 0
+    # `UInt8` has no `<<` in the prelude, so the accumulator is an `Int32`
+    # masked to eight bits, which is the same byte.
+    byte_acc = 0
+
+    y = 0
+    while y < h
+      x = 0
+      while x < w
+        zr = 0.0
+        zi = 0.0
+        tr = 0.0
+        ti = 0.0
+        cr = 2.0 * x / w - 1.5
+        ci = 2.0 * y / h - 1.0
+
+        i = 0
+        while i < MANDEL_ITER && tr + ti <= MANDEL_LIMIT * MANDEL_LIMIT
+          zi = 2.0 * zr * zi + ci
+          zr = tr - ti + cr
+          tr = zr * zr
+          ti = zi * zi
+          i = i + 1
+        end
+
+        byte_acc = (byte_acc << 1) & 255
+        byte_acc = byte_acc | 1 if tr + ti <= MANDEL_LIMIT * MANDEL_LIMIT
+        bit_num = bit_num + 1
+
+        if bit_num == 8
+          @buf.write_byte(byte_acc.to_u8)
+          byte_acc = 0
+          bit_num = 0
+        elsif x == w - 1
+          byte_acc = (byte_acc << (8 - w % 8)) & 255
+          @buf.write_byte(byte_acc.to_u8)
+          byte_acc = 0
+          bit_num = 0
+        end
+
+        x = x + 1
+      end
+      y = y + 1
+    end
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "58810785"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Matmul
+# ---------------------------------------------------------------------------
+class Matmul
+  @n : Int32
+  @res : Float64
+
+  def initialize(n : Int32)
+    @n = n
+    @res = 0.0
+  end
+
+  def matmul(a : Array(Array(Float64)), b : Array(Array(Float64))) : Array(Array(Float64))
+    m = a.size
+    n = a[0].size
+    p = b[0].size
+    # transpose
+    b2 = Array.new(n) { Array.new(p) { 0.0 } }
+    i = 0
+    while i < n
+      j = 0
+      while j < p
+        b2[j][i] = b[i][j]
+        j = j + 1
+      end
+      i = i + 1
+    end
+    # multiplication
+    c = Array.new(m) { Array.new(p) { 0.0 } }
+    c.each_with_index do |ci, ii|
+      ai = a[ii]
+      b2.each_with_index do |b2j, j|
+        s = 0.0
+        b2j.each_with_index do |b2jv, k|
+          s = s + ai[k] * b2jv
+        end
+        ci[j] = s
+      end
+    end
+    c
+  end
+
+  def matgen(n : Int32) : Array(Array(Float64))
+    tmp = 1.0 / n / n
+    a = Array.new(n) { Array.new(n) { 0.0 } }
+    i = 0
+    while i < n
+      j = 0
+      while j < n
+        a[i][j] = tmp * (i - j) * (i + j)
+        j = j + 1
+      end
+      i = i + 1
+    end
+    a
+  end
+end
+
+impl Bench for Matmul
+  def name : String
+    "Matmul"
+  end
+
+  def run : Nil
+    a = matgen(@n)
+    b = matgen(@n)
+    c = matmul(a, b)
+    @res = c[@n >> 1][@n >> 1]
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "-93.66692176867205"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Nbody
+# ---------------------------------------------------------------------------
+SOLAR_MASS    = 4.0 * Math::PI ** 2
+DAYS_PER_YEAR = 365.24
+
+class Planet
+  property x : Float64
+  property y : Float64
+  property z : Float64
+  property vx : Float64
+  property vy : Float64
+  property vz : Float64
+  property mass : Float64
+
+  def initialize(x : Float64, y : Float64, z : Float64, vx : Float64, vy : Float64, vz : Float64, mass : Float64)
+    @x = x
+    @y = y
+    @z = z
+    @vx = vx * DAYS_PER_YEAR
+    @vy = vy * DAYS_PER_YEAR
+    @vz = vz * DAYS_PER_YEAR
+    @mass = mass * SOLAR_MASS
+  end
+
+  def move_from_i(bodies : Array(Planet), nbodies : Int32, dt : Float64, i : Int32) : Nil
+    while i < nbodies
+      b2 = bodies[i]
+      dx = @x - b2.x
+      dy = @y - b2.y
+      dz = @z - b2.z
+
+      distance = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      mag = dt / (distance * distance * distance)
+      b_mass_mag = @mass * mag
+      b2_mass_mag = b2.mass * mag
+
+      @vx = @vx - dx * b2_mass_mag
+      @vy = @vy - dy * b2_mass_mag
+      @vz = @vz - dz * b2_mass_mag
+      b2.vx = b2.vx + dx * b_mass_mag
+      b2.vy = b2.vy + dy * b_mass_mag
+      b2.vz = b2.vz + dz * b_mass_mag
+      i = i + 1
+    end
+
+    @x = @x + dt * @vx
+    @y = @y + dt * @vy
+    @z = @z + dt * @vz
+  end
+end
+
+BODIES = [
+  # sun
+  Planet.new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+
+  # jupiter
+  Planet.new(
+    4.84143144246472090e+00,
+    -1.16032004402742839e+00,
+    -1.03622044471123109e-01,
+    1.66007664274403694e-03,
+    7.69901118419740425e-03,
+    -6.90460016972063023e-05,
+    9.54791938424326609e-04),
+
+  # saturn
+  Planet.new(
+    8.34336671824457987e+00,
+    4.12479856412430479e+00,
+    -4.03523417114321381e-01,
+    -2.76742510726862411e-03,
+    4.99852801234917238e-03,
+    2.30417297573763929e-05,
+    2.85885980666130812e-04),
+
+  # uranus
+  Planet.new(
+    1.28943695621391310e+01,
+    -1.51111514016986312e+01,
+    -2.23307578892655734e-01,
+    2.96460137564761618e-03,
+    2.37847173959480950e-03,
+    -2.96589568540237556e-05,
+    4.36624404335156298e-05),
+
+  # neptune
+  Planet.new(
+    1.53796971148509165e+01,
+    -2.59193146099879641e+01,
+    1.79258772950371181e-01,
+    2.68067772490389322e-03,
+    1.62824170038242295e-03,
+    -9.51592254519715870e-05,
+    5.15138902046611451e-05),
+]
+
+class Nbody
+  @n : Int32
+  @body : Array(Planet)
+  @res : Tuple(Float64, Float64)
+
+  def initialize(n : Int32)
+    @n = n
+    @body = BODIES
+    @res = {0.0, 0.0}
+  end
+
+  def energy(bodies : Array(Planet)) : Float64
+    e = 0.0
+    nbodies = bodies.size
+
+    i = 0
+    while i < nbodies
+      b = bodies[i]
+      e = e + 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz)
+      j = i + 1
+      while j < nbodies
+        b2 = bodies[j]
+        dx = b.x - b2.x
+        dy = b.y - b2.y
+        dz = b.z - b2.z
+        distance = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        e = e - (b.mass * b2.mass) / distance
+        j = j + 1
+      end
+      i = i + 1
+    end
+    e
+  end
+
+  def offset_momentum(bodies : Array(Planet)) : Nil
+    px = 0.0
+    py = 0.0
+    pz = 0.0
+
+    bodies.each do |b|
+      m = b.mass
+      px = px + b.vx * m
+      py = py + b.vy * m
+      pz = pz + b.vz * m
+    end
+
+    b = bodies[0]
+    b.vx = -px / SOLAR_MASS
+    b.vy = -py / SOLAR_MASS
+    b.vz = -pz / SOLAR_MASS
+  end
+end
+
+impl Bench for Nbody
+  def name : String
+    "Nbody"
+  end
+
+  def run : Nil
+    offset_momentum(@body)
+
+    v1 = energy(@body)
+
+    nbodies = @body.size
+    dt = 0.01
+
+    step = 0
+    while step < @n
+      i = 0
+      while i < nbodies
+        b = @body[i]
+        b.move_from_i(@body, nbodies, dt, i + 1)
+        i = i + 1
+      end
+      step = step + 1
+    end
+
+    v2 = energy(@body)
+    @res = {v1, v2}
+  end
+
+  def result_text : String
+    "{#{@res[0]}, #{@res[1]}}"
+  end
+
+  def expected_text : String
+    "{-0.16907516382852447, -0.16905678767532126}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# RegexDna
+#
+# `f.scan(@seq).size` is `Regex#scan`: `String#scan` would answer match
+# data in Crystal.
+# ---------------------------------------------------------------------------
+
+DNA_SUBS = {
+  "B" => "(c|g|t)",
+  "D" => "(a|g|t)",
+  "H" => "(a|c|t)",
+  "K" => "(g|t)",
+  "M" => "(a|c)",
+  "N" => "(a|c|g|t)",
+  "R" => "(a|g)",
+  "S" => "(c|t)",
+  "V" => "(a|c|g)",
+  "W" => "(a|t)",
+  "Y" => "(c|t)",
+}
+
+class RegexDna
+  @seq : String
+  @ilen : Int32
+  @clen : Int32
+  @buf : Memory
+
+  def initialize
+    @buf = Memory.new(4096)
+
+    f = Fasta.new(6000000)
+    f.generate
+    res = f.text
+
+    seq = Memory.new(1048576)
+    ilen = 0
+    res.each_line do |line|
+      ilen = ilen + line.bytesize + 1
+      seq.write(line.chomp) unless line.starts_with?('>')
+    end
+
+    @ilen = ilen
+    @clen = seq.size
+    @seq = seq.to_s
+  end
+end
+
+impl Bench for RegexDna
+  def name : String
+    "RegexDna"
+  end
+
+  def run : Nil
+    [
+      /agggtaaa|tttaccct/,
+      /[cgt]gggtaaa|tttaccc[acg]/,
+      /a[act]ggtaaa|tttacc[agt]t/,
+      /ag[act]gtaaa|tttac[agt]ct/,
+      /agg[act]taaa|ttta[agt]cct/,
+      /aggg[acg]aaa|ttt[cgt]ccct/,
+      /agggt[cgt]aa|tt[acg]accct/,
+      /agggta[cgt]a|t[acg]taccct/,
+      /agggtaa[cgt]|[acg]ttaccct/,
+    ].each { |f| @buf.write("#{f.source} #{f.scan(@seq).size}\n") }
+
+    @seq = @seq.gsub(/B|D|H|K|M|N|R|S|V|W|Y/, DNA_SUBS)
+
+    @buf.write("\n")
+    @buf.write("#{@ilen}\n")
+    @buf.write("#{@clen}\n")
+    @buf.write("#{@seq.bytesize}\n")
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "2813760484"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Revcomp
+# ---------------------------------------------------------------------------
+class Revcomp
+  @input : String
+  @buf : Memory
+
+  def initialize
+    @buf = Memory.new(1048576)
+
+    f = Fasta.new(13000000)
+    f.generate
+    @input = f.text
+  end
+
+  def revcomp(seq : String) : Nil
+    seq = seq.reverse.tr("wsatugcyrkmbdhvnATUGCYRKMBDHVN", "WSTAACGRYMKVHDBNTAACGRYMKVHDBN")
+    stringlen = seq.bytesize - 1
+    0.step(to: stringlen, by: 60) do |x|
+      @buf.write(seq[x...x + 60])
+      @buf.write("\n")
+    end
+  end
+end
+
+impl Bench for Revcomp
+  def name : String
+    "Revcomp"
+  end
+
+  def run : Nil
+    seq = Memory.new(1048576)
+
+    @input.each_line do |line|
+      if line.starts_with?('>')
+        if !seq.empty?
+          revcomp(seq.to_s)
+          seq.clear
+        end
+        @buf.write(line)
+        @buf.write("\n")
+      else
+        seq.write(line.chomp)
+      end
+    end
+    revcomp(seq.to_s)
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "2734405216"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Spectralnorm
+# ---------------------------------------------------------------------------
+class Spectralnorm
+  @n : Int32
+  @res : Float64
+
+  def initialize(n : Int32)
+    @n = n
+    @res = 0.0
+  end
+
+  def eval_a(i : Int32, j : Int32) : Float64
+    1.0 / ((i + j) * (i + j + 1.0) / 2.0 + i + 1.0)
+  end
+
+  def eval_a_times_u(u : Array(Float64)) : Array(Float64)
+    (0...u.size).map do |i|
+      v = 0.0
+      u.each_with_index do |uu, j|
+        v = v + eval_a(i, j) * uu
+      end
+      v
+    end
+  end
+
+  def eval_at_times_u(u : Array(Float64)) : Array(Float64)
+    (0...u.size).map do |i|
+      v = 0.0
+      u.each_with_index do |uu, j|
+        v = v + eval_a(j, i) * uu
+      end
+      v
+    end
+  end
+
+  def eval_ata_times_u(u : Array(Float64)) : Array(Float64)
+    eval_at_times_u(eval_a_times_u(u))
+  end
+end
+
+impl Bench for Spectralnorm
+  def name : String
+    "Spectralnorm"
+  end
+
+  def run : Nil
+    u = Array.new(@n) { 1.0 }
+    v = Array.new(@n) { 1.0 }
+    10.times do
+      v = eval_ata_times_u(u)
+      u = eval_ata_times_u(v)
+    end
+    vbv = 0.0
+    vv = 0.0
+    i = 0
+    while i < @n
+      vbv = vbv + u[i] * v[i]
+      vv = vv + v[i] * v[i]
+      i = i + 1
+    end
+    @res = Math.sqrt(vbv / vv)
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "1.2742241527688491"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Threadring
+#
+# Crystal spawns 503 fibers that never end and lets the program exit under
+# them. A task here belongs to a `group` and the group's `end` joins it, so
+# the ring's mailboxes are closed once the answer is in and every loop leaves
+# on `ChannelClosed`.
+# ---------------------------------------------------------------------------
+THREAD_COUNT = 503
+
+class Receiver
+  @name : Int32
+  @res : Channel(Int32)
+  @mailbox : Channel(Int32)
+  @next : Receiver?
+
+  def initialize(name : Int32, res : Channel(Int32))
+    @name = name
+    @res = res
+    @mailbox = Channel(Int32).new
+    @next = nil
+  end
+
+  def set_next(n : Receiver) : Nil
+    @next = n
+  end
+
+  def put(msg : Int32) : Nil
+    @mailbox.send(msg)
+    nil
+  end
+
+  def close_mailbox : Nil
+    @mailbox.close
+  end
+
+  def messageloop : Nil
+    while true
+      msg = @mailbox.receive
+      if msg.is_a?(Int32)
+        if msg == 0
+          @res.send(@name)
+        else
+          nxt = @next
+          nxt.put(msg - 1) unless nxt.nil?
+        end
+      else
+        break
+      end
+    end
+  end
+end
+
+class Threadring
+  @n : Int32
+  @res : Channel(Int32)
+  @receivers : Array(Receiver)
+  @result : Int32
+
+  def initialize(n : Int32)
+    @n = n
+    @res = Channel(Int32).new
+    rs = Channel(Int32).new
+    @res = rs
+    @receivers = Array.new(THREAD_COUNT) { |i| Receiver.new(i + 1, rs) }
+    i = 0
+    while i < THREAD_COUNT - 1
+      @receivers[i].set_next(@receivers[i + 1])
+      i = i + 1
+    end
+    @receivers[THREAD_COUNT - 1].set_next(@receivers[0])
+    @result = 0
+  end
+end
+
+impl Bench for Threadring
+  def name : String
+    "Threadring"
+  end
+
+  def run : Nil
+    receivers = @receivers
+    res = @res
+    n = @n
+    group do |g|
+      THREAD_COUNT.times do |i|
+        g.spawn do
+          receivers[i].messageloop
+          0
+        end
+      end
+      receivers[0].put(n)
+      answer = res.receive
+      @result = answer.is_a?(Int32) ? answer : -1
+      receivers.each { |r| r.close_mailbox }
+      0
+    end
+    nil
+  end
+
+  def result_text : String
+    @result.to_s
+  end
+
+  def expected_text : String
+    "38"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Base64Encode / Base64Decode
+#
+# `Base64.encode` here is Crystal's `strict_encode`: no line breaks. Crystal's
+# `decode_string` is `Base64.decode`.
+# ---------------------------------------------------------------------------
+B64_TRIES = 8192
+
+class Base64Encode
+  @n : Int32
+  @str : String
+  @str2 : String
+  @str3 : String
+  @res : String
+
+  def initialize(n : Int32)
+    @n = n
+    @str = "a" * n
+    @str2 = Base64.encode(@str)
+    @str3 = Base64.decode(@str2)
+    @res = ""
+  end
+end
+
+impl Bench for Base64Encode
+  def name : String
+    "Base64Encode"
+  end
+
+  def run : Nil
+    s_encoded = 0_i64
+
+    B64_TRIES.times do |i|
+      s_encoded = s_encoded + Base64.encode(@str).bytesize.to_i64
+    end
+
+    @res = @res + "encode #{@str[0, 4]}... to #{@str2[0, 4]}...: #{s_encoded}\n"
+  end
+
+  def result_text : String
+    @res
+  end
+
+  def expected_text : String
+    "encode aaaa... to YWFh...: 3276800000\n"
+  end
+end
+
+class Base64Decode
+  @n : Int32
+  @str : String
+  @str2 : String
+  @str3 : String
+  @res : String
+
+  def initialize(n : Int32)
+    @n = n
+    @str = "a" * n
+    @str2 = Base64.encode(@str)
+    @str3 = Base64.decode(@str2)
+    @res = ""
+  end
+end
+
+impl Bench for Base64Decode
+  def name : String
+    "Base64Decode"
+  end
+
+  def run : Nil
+    s_decoded = 0_i64
+
+    B64_TRIES.times do |i|
+      s_decoded = s_decoded + Base64.decode(@str2).bytesize.to_i64
+    end
+
+    @res = @res + "decode #{@str2[0, 4]}... to #{@str3[0, 4]}...: #{s_decoded}\n"
+  end
+
+  def result_text : String
+    @res
+  end
+
+  def expected_text : String
+    "decode YWFh... to aaaa...: 1884160000\n"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Primes
+# ---------------------------------------------------------------------------
+PRIMES_PREFIX = 32338
+
+class TrieNode
+  property children : Hash(Char, TrieNode)
+  property terminal : Bool
+
+  def initialize
+    @children = {} of Char => TrieNode
+    @terminal = false
+  end
+end
+
+class Sieve
+  @limit : Int32
+  @prime : Slice(Bool)
+
+  def initialize(limit : Int32)
+    @limit = limit
+    @prime = Slice(Bool).new(limit + 1, false)
+  end
+
+  def to_list : Array(Int32)
+    result = [2, 3]
+    p = 5
+    while p <= @limit
+      result << p if @prime[p]
+      p = p + 1
+    end
+    result
+  end
+
+  def omit_squares : Sieve
+    r = 5
+    while r * r < @limit
+      if @prime[r]
+        i = r * r
+        while i < @limit
+          @prime[i] = false
+          i = i + r * r
+        end
+      end
+      r = r + 1
+    end
+
+    self
+  end
+
+  def step1(x : Int32, y : Int32) : Nil
+    n = (4 * x * x) + (y * y)
+    @prime[n] = !@prime[n] if n <= @limit && (n % 12 == 1 || n % 12 == 5)
+  end
+
+  def step2(x : Int32, y : Int32) : Nil
+    n = (3 * x * x) + (y * y)
+    @prime[n] = !@prime[n] if n <= @limit && n % 12 == 7
+  end
+
+  def step3(x : Int32, y : Int32) : Nil
+    n = (3 * x * x) - (y * y)
+    @prime[n] = !@prime[n] if x > y && n <= @limit && n % 12 == 11
+  end
+
+  def loop_y(x : Int32) : Nil
+    y = 1
+    while y * y < @limit
+      step1(x, y)
+      step2(x, y)
+      step3(x, y)
+      y = y + 1
+    end
+  end
+
+  def loop_x : Nil
+    x = 1
+    while x * x < @limit
+      loop_y(x)
+      x = x + 1
+    end
+  end
+
+  def calc : Sieve
+    loop_x
+    omit_squares
+  end
+end
+
+class Primes
+  @n : Int32
+  @results : Array(Int32)
+
+  def initialize(n : Int32)
+    @n = n
+    @results = [] of Int32
+  end
+
+  def generate_trie(l : Array(Int32)) : TrieNode
+    root = TrieNode.new
+    l.each do |el|
+      head = root
+      el.to_s.each_char do |ch|
+        head.children[ch] = TrieNode.new if head.children[ch]?.nil?
+        nxt = head.children[ch]?
+        head = nxt unless nxt.nil?
+      end
+      head.terminal = true
+    end
+    root
+  end
+
+  def find(upper_bound : Int32, prefix : Int32) : Array(Int32)
+    primes = Sieve.new(upper_bound).calc
+    str_prefix = prefix.to_s
+    head = generate_trie(primes.to_list)
+    i = 0
+    while i < str_prefix.bytesize
+      nxt = head.children[str_prefix[i]]?
+      return [] of Int32 if nxt.nil?
+      head = nxt
+      i = i + 1
+    end
+
+    queue = [{head, str_prefix}]
+    result = [] of Int32
+    while !queue.empty?
+      top = queue.pop
+      node = top[0]
+      pref = top[1]
+      result << pref.to_i if node.terminal
+      node.children.each do |ch, v|
+        queue.insert(0, {v, pref + ch.to_s})
+      end
+    end
+    result
+  end
+end
+
+impl Bench for Primes
+  def name : String
+    "Primes"
+  end
+
+  def run : Nil
+    @results = find(@n, PRIMES_PREFIX)
+  end
+
+  def result_text : String
+    @results.join(",")
+  end
+
+  def expected_text : String
+    "323381,323383,3233803,3233809,3233851,3233863,3233873,3233887,3233897,32338123,32338129,32338147,32338169,32338351,32338367,32338387,32338039,32338099,32338013,32338027,32338043,32338049,32338067,32338517,32338507,32338541,32338577,32338633,32338637,32338609,32338619,32338643,32338661,32338687,32338697,32338699,32338739,32338751,32338763,32338871,32338819,32338829,32338837,32338843,32338849,32338853,32338861,32338907,32338909,32338937,32338949,32338993,32338997,32338223,32338231,32338249,32338291,32338433,32338499"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# JsonGenerate
+#
+# Crystal derives the writer with `include JSON::Serializable`. The `opts`
+# field is a hash of tuples, which `std/json`'s `derive serializable` does
+# not write, so the object is written through `JSON::Builder`, which is what
+# the derive would have emitted.
+# ---------------------------------------------------------------------------
+pub struct Coord
+  getter x : Float64
+  getter y : Float64
+  getter z : Float64
+  getter name : String
+
+  def initialize(@x : Float64, @y : Float64, @z : Float64, @name : String)
+  end
+end
+
+def coord_text(c : Coord) : String
+  "{#{c.x}, #{c.y}, #{c.z}}"
+end
+
+def letters_a_to_z : Array(Char)
+  Array.new(26) { |i| (97 + i).chr }
+end
+
+def generate_coordinates(n : Int32) : Array(Coord)
+  data = [] of Coord
+  r = Random.new(0, 0_u64)
+  letters = letters_a_to_z
+  n.times do
+    data << Coord.new(
+      r.next_float.round(10),
+      r.next_float.round(10),
+      r.next_float.round(10),
+      "#{letters.sample(6, r).join} #{r.rand(10000)}")
+  end
+  data
+end
+
+def coordinates_json(data : Array(Coord)) : String
+  JSON.build do |j|
+    j.object do
+      j.field("coordinates") do
+        j.array do
+          data.each do |c|
+            j.object do
+              j.field("x") { j.number(c.x) }
+              j.field("y") { j.number(c.y) }
+              j.field("z") { j.number(c.z) }
+              j.field("name", c.name)
+              j.field("opts") do
+                j.object do
+                  j.field("1") do
+                    j.array do
+                      j.number(1)
+                      j.bool(true)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      j.field("info", "some info")
+    end
+  end
+end
+
+class JsonGenerate
+  @n : Int32
+  @data : Array(Coord)
+  @text : String
+
+  def initialize(n : Int32)
+    @n = n
+    @text = ""
+    @data = generate_coordinates(n)
+  end
+
+  def text : String
+    @text
+  end
+end
+
+impl Bench for JsonGenerate
+  def name : String
+    "JsonGenerate"
+  end
+
+  def run : Nil
+    @text = coordinates_json(@data)
+  end
+
+  def result_text : String
+    checksum(@text).to_s
+  end
+
+  def expected_text : String
+    "3931493865"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# JsonParsePure
+# ---------------------------------------------------------------------------
+class JsonParsePure
+  @text : String
+  @res : Coord
+
+  def initialize
+    j = JsonGenerate.new(600000)
+    j.run
+    @text = j.text
+    @res = Coord.new(0.0, 0.0, 0.0, "")
+  end
+
+  def calc(text : String) : Coord
+    jobj = JSON.parse(text)
+    coordinates = jobj["coordinates"].as_a
+    len = coordinates.size.to_f
+    x = 0.0
+    y = 0.0
+    z = 0.0
+
+    coordinates.each do |coord|
+      x = x + coord["x"].as_f
+      y = y + coord["y"].as_f
+      z = z + coord["z"].as_f
+    end
+
+    Coord.new(x / len, y / len, z / len, "")
+  end
+end
+
+impl Bench for JsonParsePure
+  def name : String
+    "JsonParsePure"
+  end
+
+  def run : Nil
+    @res = calc(@text)
+  end
+
+  def result_text : String
+    coord_text(@res)
+  end
+
+  def expected_text : String
+    "{0.49995358947126856, 0.5000557786699196, 0.5007583687182323}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# JsonParseSerializable
+#
+# Crystal's `include JSON::Serializable` is `derive serializable`.
+# ---------------------------------------------------------------------------
+class JsonParseSerializable
+  struct Coordinate
+    getter x : Float64
+    getter y : Float64
+    getter z : Float64
+
+    def initialize(@x : Float64, @y : Float64, @z : Float64)
+    end
+
+    derive serializable
+  end
+
+  class Coordinates
+    getter coordinates : Array(Coordinate)
+
+    derive serializable
+  end
+
+  @text : String
+  @res : Coord
+
+  def initialize
+    j = JsonGenerate.new(800000)
+    j.run
+    @text = j.text
+    @res = Coord.new(0.0, 0.0, 0.0, "")
+  end
+
+  def calc(text : String) : Coord
+    coordinates = Coordinates.from_json(text).coordinates
+    len = coordinates.size.to_f
+    x = 0.0
+    y = 0.0
+    z = 0.0
+
+    coordinates.each do |e|
+      x = x + e.x
+      y = y + e.y
+      z = z + e.z
+    end
+
+    Coord.new(x / len, y / len, z / len, "")
+  end
+end
+
+impl Bench for JsonParseSerializable
+  def name : String
+    "JsonParseSerializable"
+  end
+
+  def run : Nil
+    @res = calc(@text)
+  end
+
+  def result_text : String
+    coord_text(@res)
+  end
+
+  def expected_text : String
+    "{0.49986260081787687, 0.500113702362733, 0.5006048890911176}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# JsonParsePull
+# ---------------------------------------------------------------------------
+class JsonParsePull
+  @text : String
+  @res : Coord
+
+  def initialize
+    j = JsonGenerate.new(800000)
+    j.run
+    @text = j.text
+    @res = Coord.new(0.0, 0.0, 0.0, "")
+  end
+
+  def calc(text : String) : Coord
+    len = 0
+    x = 0.0
+    y = 0.0
+    z = 0.0
+
+    pull = PullParser.new(text)
+    pull.on_key("coordinates") do
+      pull.read_array do
+        len = len + 1
+        pull.read_object do |key|
+          if key == "x"
+            x = x + pull.read_float
+          elsif key == "y"
+            y = y + pull.read_float
+          elsif key == "z"
+            z = z + pull.read_float
+          else
+            pull.skip
+          end
+        end
+      end
+    end
+
+    Coord.new(x / len, y / len, z / len, "")
+  end
+end
+
+impl Bench for JsonParsePull
+  def name : String
+    "JsonParsePull"
+  end
+
+  def run : Nil
+    @res = calc(@text)
+  end
+
+  def result_text : String
+    coord_text(@res)
+  end
+
+  def expected_text : String
+    "{0.49986260081787687, 0.500113702362733, 0.5006048890911176}"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Mandelbrot2
+#
+# `Iterator.of(a).first(100).reduce(a) { |z, c| z * z + c }` is a hundred
+# rounds of `z = z * z + a`; `Iterator.of` here takes a collection, not a
+# value, so the rounds are written out. `x + y.i` is `Complex.new(x, y)`.
+# ---------------------------------------------------------------------------
+class Mandelbrot2
+  @n : Int32
+  @res : UInt64
+
+  def initialize(n : Int32)
+    @n = n
+    @res = 0_u64
+  end
+
+  def mandelbrot(a : Complex) : Complex
+    z = a
+    i = 0
+    while i < 100
+      z = z * z + a
+      i = i + 1
+    end
+    z
+  end
+end
+
+impl Bench for Mandelbrot2
+  def name : String
+    "Mandelbrot2"
+  end
+
+  def run : Nil
+    res = 0_u64
+    n = @n.to_f
+    n.step(to: -n, by: -0.05) do |y|
+      (-n).step(to: n, by: 0.0315) do |x|
+        c = mandelbrot(Complex.new(x, y))
+        res = res &+ (c.abs < 2.0 ? 42_u64 : 32_u64)
+      end
+    end
+    @res = res
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "130139180"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Noise
+# ---------------------------------------------------------------------------
+NOISE_RANDOM = Random.new(0_u64, 0_u64)
+NOISE_SYM    = [' ', '░', '▒', '▓', '█', '█']
+
+record Vec2, x : Float64, y : Float64
+
+def noise_lerp(a : Float64, b : Float64, v : Float64) : Float64
+  a * (1.0 - v) + b * v
+end
+
+def noise_smooth(v : Float64) : Float64
+  v * v * (3.0 - 2.0 * v)
+end
+
+def noise_random_gradient : Vec2
+  v = NOISE_RANDOM.next_float * Math::PI * 2.0
+  Vec2.new(Math.cos(v), Math.sin(v))
+end
+
+def noise_gradient(orig : Vec2, grad : Vec2, p : Vec2) : Float64
+  sp = Vec2.new(p.x - orig.x, p.y - orig.y)
+  grad.x * sp.x + grad.y * sp.y
+end
+
+class Noise2DContext
+  @rgradients : Array(Vec2)
+  @permutations : Array(Int32)
+
+  def initialize
+    @rgradients = Array.new(256) { noise_random_gradient }
+    @permutations = Array.new(256) { |i| i }
+    @permutations.shuffle_in_place(NOISE_RANDOM)
+  end
+
+  def get_gradient(x : Int32, y : Int32) : Vec2
+    idx = @permutations[x & 255] + @permutations[y & 255]
+    @rgradients[idx & 255]
+  end
+
+  def get(x : Float64, y : Float64) : Float64
+    p = Vec2.new(x, y)
+    x0f = x.floor
+    y0f = y.floor
+    x0 = x0f.to_i
+    y0 = y0f.to_i
+    x1 = x0 + 1
+    y1 = y0 + 1
+
+    g0 = get_gradient(x0, y0)
+    g1 = get_gradient(x1, y0)
+    g2 = get_gradient(x0, y1)
+    g3 = get_gradient(x1, y1)
+
+    o0 = Vec2.new(x0f + 0.0, y0f + 0.0)
+    o1 = Vec2.new(x0f + 1.0, y0f + 0.0)
+    o2 = Vec2.new(x0f + 0.0, y0f + 1.0)
+    o3 = Vec2.new(x0f + 1.0, y0f + 1.0)
+
+    v0 = noise_gradient(o0, g0, p)
+    v1 = noise_gradient(o1, g1, p)
+    v2 = noise_gradient(o2, g2, p)
+    v3 = noise_gradient(o3, g3, p)
+    fx = noise_smooth(x - o0.x)
+    vx0 = noise_lerp(v0, v1, fx)
+    vx1 = noise_lerp(v2, v3, fx)
+    fy = noise_smooth(y - o0.y)
+    noise_lerp(vx0, vx1, fy)
+  end
+end
+
+class Noise
+  @n : Int32
+  @res : UInt64
+
+  def initialize(n : Int32)
+    @n = n
+    @res = 0_u64
+  end
+
+  def noise : UInt64
+    pixels = Array.new(256) { Array.new(256) { 0.0 } }
+
+    n2d = Noise2DContext.new
+
+    i = 0
+    while i < 100
+      y = 0
+      while y < 256
+        x = 0
+        while x < 256
+          v = n2d.get(x * 0.1, (y + (i * 128)) * 0.1) * 0.5 + 0.5
+          pixels[y][x] = v
+          x = x + 1
+        end
+        y = y + 1
+      end
+      i = i + 1
+    end
+
+    res = 0_u64
+
+    y = 0
+    while y < 256
+      x = 0
+      while x < 256
+        v = pixels[y][x]
+        res = res &+ NOISE_SYM[(v / 0.2).to_i].ord.to_u64
+        x = x + 1
+      end
+      y = y + 1
+    end
+    res
+  end
+end
+
+impl Bench for Noise
+  def name : String
+    "Noise"
+  end
+
+  def run : Nil
+    i = 0
+    while i < @n
+      @res = @res &+ noise
+      i = i + 1
+    end
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "22052067725"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Sudoku
+# ---------------------------------------------------------------------------
+SUDOKU = <<-SUDOKU
+..............3.85..1.2.......5.7.....4...1...9.......5......73..2.1........4...9 # near worst case for brute-force solver (wiki)
+.......12........3..23..4....18....5.6..7.8.......9.....85.....9...4.5..47...6... # gsf's sudoku q1 (Platinum Blonde)
+.2..5.7..4..1....68....3...2....8..3.4..2.5.....6...1...2.9.....9......57.4...9.. # (Cheese)
+........3..1..56...9..4..7......9.5.7.......8.5.4.2....8..2..9...35..1..6........ # (Fata Morgana)
+12.3....435....1....4........54..2..6...7.........8.9...31..5.......9.7.....6...8 # (Red Dwarf)
+1.......2.9.4...5...6...7...5.9.3.......7.......85..4.7.....6...3...9.8...2.....1 # (Easter Monster)
+.......39.....1..5..3.5.8....8.9...6.7...2...1..4.......9.8..5..2....6..4..7..... # Nicolas Juillerat's Sudoku explainer 1.2.1 (top 5)
+12.3.....4.....3....3.5......42..5......8...9.6...5.7...15..2......9..6......7..8
+..3..6.8....1..2......7...4..9..8.6..3..4...1.7.2.....3....5.....5...6..98.....5.
+1.......9..67...2..8....4......75.3...5..2....6.3......9....8..6...4...1..25...6.
+..9...4...7.3...2.8...6...71..8....6....1..7.....56...3....5..1.4.....9...2...7..
+....9..5..1.....3...23..7....45...7.8.....2.......64...9..1.....8..6......54....7 # dukuso's suexrat9 (top 1)
+7.8...3.....2.1...5.........4.....263...8.......1...9..9.6....4....7.5...........
+3.7.4...........918........4.....7.....16.......25..........38..9....5...2.6.....
+........8..3...4...9..2..6.....79.......612...6.5.2.7...8...5...1.....2.4.5.....3 # dukuso's suexratt (top 1)
+.......1.4.........2...........5.4.7..8...3....1.9....3..4..2...5.1........8.6... # first 2 from sudoku17
+.......12....35......6...7.7.....3.....4..8..1...........12.....8.....4..5....6..
+1.......2.9.4...5...6...7...5.3.4.......6........58.4...2...6...3...9.8.7.......1
+.....1.2.3...4.5.....6....7..2.....1.8..9..3.4.....8..5....2....9..3.4....67.....
+SUDOKU
+
+class Sudoku
+  @n : Int32
+  @buf : Memory
+
+  def initialize(n : Int32)
+    @n = n
+    @buf = Memory.new(1048576)
+  end
+
+  def sd_genmat : Tuple(Array(Array(Int32)), Array(Array(Int32)))
+    mr = Array.new(324) { [] of Int32 }
+    mc = Array.new(729) { [] of Int32 }
+    r = 0
+    i = 0
+    while i < 9
+      j = 0
+      while j < 9
+        k = 0
+        while k < 9
+          mc[r] = [9 * i + j, (i // 3 * 3 + j // 3) * 9 + k + 81, 9 * i + k + 162, 9 * j + k + 243]
+          r = r + 1
+          k = k + 1
+        end
+        j = j + 1
+      end
+      i = i + 1
+    end
+    r2 = 0
+    while r2 < 729
+      c2 = 0
+      while c2 < 4
+        mr[mc[r2][c2]] << r2
+        c2 = c2 + 1
+      end
+      r2 = r2 + 1
+    end
+    {mr, mc}
+  end
+
+  def sd_update(mr : Array(Array(Int32)), mc : Array(Array(Int32)), sr : Array(Int32), sc : Array(Int32), r : Int32, v : Int32) : Tuple(Int32, Int32)
+    min = 10
+    min_c = 0
+    c2 = 0
+    while c2 < 4
+      if v > 0
+        sc[mc[r][c2]] = sc[mc[r][c2]] + 128
+      else
+        sc[mc[r][c2]] = sc[mc[r][c2]] - 128
+      end
+      c2 = c2 + 1
+    end
+    c2 = 0
+    while c2 < 4
+      c = mc[r][c2]
+      if v > 0
+        r2 = 0
+        while r2 < 9
+          rr = mr[c][r2]
+          sr[rr] = sr[rr] + 1
+          if sr[rr] == 1
+            p = mc[rr]
+            sc[p[0]] = sc[p[0]] - 1
+            sc[p[1]] = sc[p[1]] - 1
+            sc[p[2]] = sc[p[2]] - 1
+            sc[p[3]] = sc[p[3]] - 1
+            if sc[p[0]] < min
+              min = sc[p[0]]
+              min_c = p[0]
+            end
+            if sc[p[1]] < min
+              min = sc[p[1]]
+              min_c = p[1]
+            end
+            if sc[p[2]] < min
+              min = sc[p[2]]
+              min_c = p[2]
+            end
+            if sc[p[3]] < min
+              min = sc[p[3]]
+              min_c = p[3]
+            end
+          end
+          r2 = r2 + 1
+        end
+      else
+        r2 = 0
+        while r2 < 9
+          rr = mr[c][r2]
+          sr[rr] = sr[rr] - 1
+          if sr[rr] == 0
+            p = mc[rr]
+            sc[p[0]] = sc[p[0]] + 1
+            sc[p[1]] = sc[p[1]] + 1
+            sc[p[2]] = sc[p[2]] + 1
+            sc[p[3]] = sc[p[3]] + 1
+          end
+          r2 = r2 + 1
+        end
+      end
+      c2 = c2 + 1
+    end
+    {min, min_c}
+  end
+
+  def sd_solve(mr : Array(Array(Int32)), mc : Array(Array(Int32)), s : String) : Array(Array(Int32))
+    ret = [] of Array(Int32)
+    sr = Array.new(729) { 0 }
+    sc = Array.new(324) { 9 }
+    hints = 0
+    i = 0
+    while i < 81
+      ch = s[i]
+      a = ch >= '1' && ch <= '9' ? ch.ord - 49 : -1
+      if a >= 0
+        sd_update(mr, mc, sr, sc, i * 9 + a, 1)
+        hints = hints + 1
+      end
+      i = i + 1
+    end
+    cr = Array.new(81) { -1 }
+    cc = Array.new(81) { 0 }
+    i = 0
+    min = 10
+    dir = 1
+    while true
+      while i >= 0 && i < 81 - hints
+        if dir == 1
+          if min > 1
+            c = 0
+            while c < 324
+              if sc[c] < min
+                min = sc[c]
+                cc[i] = c
+                break if min < 2
+              end
+              c = c + 1
+            end
+          end
+          if min == 0 || min == 10
+            cr[i] = -1
+            dir = -1
+            i = i - 1
+          end
+        end
+        c = cc[i]
+        if dir == -1 && cr[i] >= 0
+          sd_update(mr, mc, sr, sc, mr[c][cr[i]], -1)
+        end
+        r2_ = 9
+        r2 = cr[i] + 1
+        while r2 < 9
+          if sr[mr[c][r2]] == 0
+            r2_ = r2
+            break
+          end
+          r2 = r2 + 1
+        end
+        if r2_ < 9
+          pair = sd_update(mr, mc, sr, sc, mr[c][r2_], 1)
+          min = pair[0]
+          cc[i + 1] = pair[1]
+          cr[i] = r2_
+          dir = 1
+          i = i + 1
+        else
+          cr[i] = -1
+          dir = -1
+          i = i - 1
+        end
+      end
+      break if i < 0
+      o = [] of Int32
+      j = 0
+      while j < 81
+        o << (s[j].ord - 49)
+        j = j + 1
+      end
+      j = 0
+      while j < i
+        r = mr[cc[j]][cr[j]]
+        o[r // 9] = r % 9 + 1
+        j = j + 1
+      end
+      ret << o
+      i = i - 1
+      dir = -1
+    end
+    ret
+  end
+
+  def solve_all(sudoku : String) : Array(Array(String))
+    mats = sd_genmat
+    mr = mats[0]
+    mc = mats[1]
+    out = [] of Array(String)
+    sudoku.split('\n').each do |line|
+      if line.size >= 81
+        ret = sd_solve(mr, mc, line)
+        out << ret.map { |o| o.join }
+      end
+    end
+    out
+  end
+end
+
+impl Bench for Sudoku
+  def name : String
+    "Sudoku"
+  end
+
+  def run : Nil
+    i = 0
+    while i < @n
+      res = solve_all(SUDOKU)
+      res.each { |str| @buf.write(str.to_s) }
+      i = i + 1
+    end
+  end
+
+  def result_text : String
+    checksum(@buf.to_s).to_s
+  end
+
+  def expected_text : String
+    "3422637057"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# TextRaytracer
+# ---------------------------------------------------------------------------
+record Vector, x : Float64, y : Float64, z : Float64 do
+  def scale(s : Float64) : Vector
+    Vector.new(@x * s, @y * s, @z * s)
+  end
+
+  def +(other : Vector) : Vector
+    Vector.new(@x + other.x, @y + other.y, @z + other.z)
+  end
+
+  def -(other : Vector) : Vector
+    Vector.new(@x - other.x, @y - other.y, @z - other.z)
+  end
+
+  def dot(other : Vector) : Float64
+    @x * other.x + @y * other.y + @z * other.z
+  end
+
+  def magnitude : Float64
+    Math.sqrt(dot(self))
+  end
+
+  def normalize : Vector
+    scale(1.0 / magnitude)
+  end
+end
+
+record Ray, orig : Vector, dir : Vector
+
+record RColor, r : Float64, g : Float64, b : Float64 do
+  def scale(s : Float64) : RColor
+    RColor.new(@r * s, @g * s, @b * s)
+  end
+
+  def +(other : RColor) : RColor
+    RColor.new(@r + other.r, @g + other.g, @b + other.b)
+  end
+end
+
+record Sphere, center : Vector, radius : Float64, color : RColor do
+  def get_normal(pt : Vector) : Vector
+    (pt - @center).normalize
+  end
+end
+
+record LightSource, position : Vector, color : RColor
+
+record Hit, obj : Sphere, value : Float64
+
+WHITE = RColor.new(1.0, 1.0, 1.0)
+RED   = RColor.new(1.0, 0.0, 0.0)
+GREEN = RColor.new(0.0, 1.0, 0.0)
+BLUE  = RColor.new(0.0, 0.0, 1.0)
+
+LIGHT1 = LightSource.new(Vector.new(0.7, -1.0, 1.7), WHITE)
+
+LUT = ['.', '-', '+', '*', 'X', 'M']
+
+SCENE = [
+  Sphere.new(Vector.new(-1.0, 0.0, 3.0), 0.3, RED),
+  Sphere.new(Vector.new(0.0, 0.0, 3.0), 0.8, GREEN),
+  Sphere.new(Vector.new(1.0, 0.0, 3.0), 0.4, BLUE),
+]
+
+class TextRaytracer
+  @w : Int32
+  @h : Int32
+  @res : UInt64
+
+  def initialize(w : Int32, h : Int32)
+    @w = w
+    @h = h
+    @res = 0_u64
+  end
+
+  def shade_pixel(ray : Ray, obj : Sphere, tval : Float64) : Int32
+    pi = ray.orig + ray.dir.scale(tval)
+    color = diffuse_shading(pi, obj, LIGHT1)
+    col = (color.r + color.g + color.b) / 3.0
+    (col * 6.0).to_i
+  end
+
+  def intersect_sphere(ray : Ray, center : Vector, radius : Float64) : Float64?
+    l = center - ray.orig
+    tca = l.dot(ray.dir)
+    return nil if tca < 0.0
+
+    d2 = l.dot(l) - tca * tca
+    r2 = radius * radius
+    return nil if d2 > r2
+
+    thc = Math.sqrt(r2 - d2)
+    t0 = tca - thc
+    return nil if t0 > 10000.0
+
+    t0
+  end
+
+  def clamp(x : Float64, a : Float64, b : Float64) : Float64
+    return a if x < a
+    return b if x > b
+    x
+  end
+
+  def diffuse_shading(pi : Vector, obj : Sphere, light : LightSource) : RColor
+    n = obj.get_normal(pi)
+    lam1 = (light.position - pi).normalize.dot(n)
+    lam2 = clamp(lam1, 0.0, 1.0)
+    light.color.scale(lam2 * 0.5) + obj.color.scale(0.3)
+  end
+end
+
+impl Bench for TextRaytracer
+  def name : String
+    "TextRaytracer"
+  end
+
+  def run : Nil
+    res = 0_u64
+    j = 0
+    while j < @h
+      i = 0
+      while i < @w
+        fw = @w.to_f
+        fi = i.to_f
+        fj = j.to_f
+        fh = @h.to_f
+
+        ray = Ray.new(
+          Vector.new(0.0, 0.0, 0.0),
+          Vector.new((fi - fw / 2.0) / fw, (fj - fh / 2.0) / fh, 1.0).normalize
+        )
+
+        hit = nil
+        SCENE.each do |obj|
+          ret = intersect_sphere(ray, obj.center, obj.radius)
+          hit = Hit.new(obj, ret) unless ret.nil?
+        end
+
+        pixel = ' '
+        pixel = LUT[shade_pixel(ray, hit.obj, hit.value)] unless hit.nil?
+
+        res = res &+ pixel.ord.to_u64
+        i = i + 1
+      end
+      j = j + 1
+    end
+    @res = res
+  end
+
+  def result_text : String
+    @res.to_s
+  end
+
+  def expected_text : String
+    "3165789000"
+  end
+end
+
+# ---------------------------------------------------------------------------
+# NeuralNet
+# ---------------------------------------------------------------------------
+NN_RANDOM        = Random.new(0_u64, 0_u64)
+NN_LEARNING_RATE = 1.0
+NN_MOMENTUM      = 0.3
+
+class Neuron
+  property threshold : Float64
+  property prev_threshold : Float64
+  property error : Float64
+  property output : Float64
+  property synapses_in : Array(Synapse)
+  property synapses_out : Array(Synapse)
+
+  def initialize
+    t = NN_RANDOM.next_float * 2 - 1
+    @prev_threshold = t
+    @threshold = t
+    @synapses_in = [] of Synapse
+    @synapses_out = [] of Synapse
+    @output = 0.0
+    @error = 0.0
+  end
+
+  def calculate_output : Nil
+    activation = @synapses_in.reduce(0.0) do |sum, synapse|
+      sum + synapse.weight * synapse.source_neuron.output
+    end
+    activation = activation - @threshold
+
+    @output = 1.0 / (1.0 + Math.exp(-activation))
+  end
+
+  def derivative : Float64
+    @output * (1 - @output)
+  end
+
+  def output_train(rate : Float64, target : Float64) : Nil
+    @error = (target - @output) * derivative
+    update_weights(rate)
+  end
+
+  def hidden_train(rate : Float64) : Nil
+    @error = @synapses_out.reduce(0.0) do |sum, synapse|
+      sum + synapse.prev_weight * synapse.dest_neuron.error
+    end * derivative
+    update_weights(rate)
+  end
+
+  def update_weights(rate : Float64) : Nil
+    @synapses_in.each do |synapse|
+      temp_weight = synapse.weight
+      synapse.weight = synapse.weight + (rate * NN_LEARNING_RATE * @error * synapse.source_neuron.output) + (NN_MOMENTUM * (synapse.weight - synapse.prev_weight))
+      synapse.prev_weight = temp_weight
+    end
+    temp_threshold = @threshold
+    @threshold = @threshold + (rate * NN_LEARNING_RATE * @error * -1) + (NN_MOMENTUM * (@threshold - @prev_threshold))
+    @prev_threshold = temp_threshold
+  end
+end
+
+class Synapse
+  property weight : Float64
+  property prev_weight : Float64
+  property source_neuron : Neuron
+  property dest_neuron : Neuron
+
+  def initialize(source_neuron : Neuron, dest_neuron : Neuron)
+    @source_neuron = source_neuron
+    @dest_neuron = dest_neuron
+    w = NN_RANDOM.next_float * 2 - 1
+    @prev_weight = w
+    @weight = w
+  end
+end
+
+class NeuralNetwork
+  @input_layer : Array(Neuron)
+  @hidden_layer : Array(Neuron)
+  @output_layer : Array(Neuron)
+
+  def initialize(inputs : Int32, hidden : Int32, outputs : Int32)
+    @input_layer = (1..inputs).map { Neuron.new }
+    @hidden_layer = (1..hidden).map { Neuron.new }
+    @output_layer = (1..outputs).map { Neuron.new }
+
+    @input_layer.each_cartesian(@hidden_layer) do |source, dest|
+      synapse = Synapse.new(source, dest)
+      source.synapses_out << synapse
+      dest.synapses_in << synapse
+    end
+    @hidden_layer.each_cartesian(@output_layer) do |source, dest|
+      synapse = Synapse.new(source, dest)
+      source.synapses_out << synapse
+      dest.synapses_in << synapse
+    end
+  end
+
+  def train(inputs : Array(Int32), targets : Array(Int32)) : Nil
+    feed_forward(inputs)
+
+    @output_layer.zip(targets) do |neuron, target|
+      neuron.output_train(0.3, target.to_f64)
+    end
+    @hidden_layer.each do |neuron|
+      neuron.hidden_train(0.3)
+    end
+  end
+
+  def feed_forward(inputs : Array(Int32)) : Nil
+    @input_layer.zip(inputs) do |neuron, input|
+      neuron.output = input.to_f64
+    end
+    @hidden_layer.each do |neuron|
+      neuron.calculate_output
+    end
+    @output_layer.each do |neuron|
+      neuron.calculate_output
+    end
+  end
+
+  def current_outputs : Array(Float64)
+    @output_layer.map do |neuron|
+      neuron.output
+    end
+  end
+end
+
+class NeuralNet
+  @n : Int32
+  @res : Array(Float64)
+
+  def initialize(n : Int32)
+    @n = n
+    @res = [] of Float64
+  end
+end
+
+impl Bench for NeuralNet
+  def name : String
+    "NeuralNet"
+  end
+
+  def run : Nil
+    xor = NeuralNetwork.new(2, 10, 1)
+
+    i = 0
+    while i < @n
+      xor.train([0, 0], [0])
+      xor.train([1, 0], [1])
+      xor.train([0, 1], [1])
+      xor.train([1, 1], [0])
+      i = i + 1
+    end
+
+    xor.feed_forward([0, 0])
+    @res.concat(xor.current_outputs)
+    xor.feed_forward([0, 1])
+    @res.concat(xor.current_outputs)
+    xor.feed_forward([1, 0])
+    @res.concat(xor.current_outputs)
+    xor.feed_forward([1, 1])
+    @res.concat(xor.current_outputs)
+  end
+
+  def result_text : String
+    @res.map { |v| v.round(8) }.join(",")
+  end
+
+  def expected_text : String
+    [0.000845335077086041, 0.9990857490807116, 0.9991775011715351, 0.0008922162500023385].map { |v| v.round(8) }.join(",")
+  end
+end
+
+# ---------------------------------------------------------------------------
+# The driver
+#
+# Crystal walks `@type.subclasses` in a macro and names each class; there are
+# no subclasses here (R-3), so the list is written out, in the same order.
+# ---------------------------------------------------------------------------
+RESULTS_FILE = "#{__DIR__}/results.js"
+
+BENCH_NAMES = [
+  "Pidigits",
+  "Binarytrees",
+  "Brainfuck",
+  "Brainfuck2",
+  "Fannkuchredux",
+  "Fasta",
+  "Knuckeotide",
+  "Mandelbrot",
+  "Matmul",
+  "Nbody",
+  "RegexDna",
+  "Revcomp",
+  "Spectralnorm",
+  "Threadring",
+  "Base64Encode",
+  "Base64Decode",
+  "Primes",
+  "JsonGenerate",
+  "JsonParsePure",
+  "JsonParseSerializable",
+  "JsonParsePull",
+  "Mandelbrot2",
+  "Noise",
+  "Sudoku",
+  "TextRaytracer",
+  "NeuralNet",
+]
+
+def make(bench_name : String) : Bench
+  return Pidigits.new(4500) if bench_name == "Pidigits"
+  return Binarytrees.new(18) if bench_name == "Binarytrees"
+  return Brainfuck.new if bench_name == "Brainfuck"
+  return Brainfuck2.new if bench_name == "Brainfuck2"
+  return Fannkuchredux.new(11) if bench_name == "Fannkuchredux"
+  return Fasta.new(7000000) if bench_name == "Fasta"
+  return Knuckeotide.new if bench_name == "Knuckeotide"
+  return Mandelbrot.new(3800) if bench_name == "Mandelbrot"
+  return Matmul.new(980) if bench_name == "Matmul"
+  return Nbody.new(15000000) if bench_name == "Nbody"
+  return RegexDna.new if bench_name == "RegexDna"
+  return Revcomp.new if bench_name == "Revcomp"
+  return Spectralnorm.new(4500) if bench_name == "Spectralnorm"
+  return Threadring.new(15000000) if bench_name == "Threadring"
+  return Base64Encode.new(300000) if bench_name == "Base64Encode"
+  return Base64Decode.new(230000) if bench_name == "Base64Decode"
+  return Primes.new(40000000) if bench_name == "Primes"
+  return JsonGenerate.new(1800000) if bench_name == "JsonGenerate"
+  return JsonParsePure.new if bench_name == "JsonParsePure"
+  return JsonParseSerializable.new if bench_name == "JsonParseSerializable"
+  return JsonParsePull.new if bench_name == "JsonParsePull"
+  return Mandelbrot2.new(40) if bench_name == "Mandelbrot2"
+  return Noise.new(35) if bench_name == "Noise"
+  return Sudoku.new(50) if bench_name == "Sudoku"
+  return TextRaytracer.new(2500 * 4, 2200 * 4) if bench_name == "TextRaytracer"
+  return NeuralNet.new(1500000) if bench_name == "NeuralNet"
+  raise "unknown benchmark: #{bench_name}"
+end
+
+def release_results_error : Nil
+  puts "ERROR\nNot found release results!\nBefore run in any other mode, you should compile and run this metric in --release mode,\nbecause all other modes compare to release."
+  exit(1)
+end
+
+def load_release_results : Hash(String, Float64)
+  out = {} of String => Float64
+  {% unless flag?(:release) %}
+    if File.exists?(RESULTS_FILE)
+      any = JSON.parse(File.read(RESULTS_FILE))
+      BENCH_NAMES.each do |nm|
+        v = any[nm]?
+        if v.nil?
+          release_results_error
+        else
+          out[nm] = v.as_f
+        end
+      end
+    else
+      release_results_error
+    end
+  {% end %}
+  out
+end
+
+args = Program.args
+filter = [] of String
+filter = args[0].split(',').map { |s| s.strip } if args.size > 0
+
+silent = (Program.env("SILENT") || "") == "1"
+run_mark = (Program.env("RUN_MARK") || "") == "1"
+
+release_results = load_release_results
+results = {} of String => Float64
+
+summary_time = 0.0
+awards = 0.0
+oks = 0
+fails = 0
+
+BENCH_NAMES.each do |bench_name|
+  unless filter.size > 0 && !filter.includes?(bench_name)
+    print "#{bench_name}: " unless silent
+    puts "---RUN---" if run_mark
+
+    b = make(bench_name)
+
+    GC.collect
+    t0 = Time.monotonic
+    b.run
+    delta = (Time.monotonic - t0).total_seconds
+    GC.collect
+
+    results[bench_name] = delta
+
+    award = 1.0
+    {% unless flag?(:release) %}
+      rr = release_results[bench_name]?
+      award = rr / delta unless rr.nil?
+    {% end %}
+
+    if b.result_text == b.expected_text
+      print "ok " unless silent
+      oks = oks + 1
+    else
+      print "err result=#{b.result_text}, but expected=#{b.expected_text} " unless silent
+      fails = fails + 1
+    end
+
+    print sprintf("in %.3fs, award %.1f\n", delta, award) unless silent
+
+    summary_time = summary_time + delta
+    awards = awards + award
+  end
+end
+
+{% if flag?(:release) %}
+  if filter.size == 0
+    text = JSON.build do |j|
+      j.object do
+        results.each { |k, v| j.field(k) { j.number(v) } }
+      end
+    end
+    File.write(RESULTS_FILE, text)
+  end
+{% end %}
+
+if oks + fails > 0
+  puts sprintf("%.4fs, %.2f/%d, %.2f", summary_time, awards, oks + fails, awards / (oks + fails).to_f)
+end
+
+exit(1) if fails > 0

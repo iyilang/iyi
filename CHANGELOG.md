@@ -4,6 +4,21 @@
 
 ### Added
 
+- **crystal-metric's port is a gate.** `bench/metric/metric.iyi` is the
+  port of kostya's crystal-metric (MIT, notice kept) that the 0.15.4
+  review measured: twenty-six benchmarks, each checking its answer
+  against the Crystal program's - float text, `Random`, BigInt, regex,
+  JSON, `Complex`, channels, one program using the library together.
+  `bench/metric_port.sh` builds it with `--release` in CI's `std` job and
+  requires all twenty-six; timings are printed, not judged. The gate's
+  copy is written the way the language now allows: regex literals with
+  `source` for RegexDna, `derive serializable` for JsonParseSerializable
+  (as fast as the hand-written reader it replaces), `exit`, `UInt32`
+  arithmetic for the checksum, and the four JSON answers Crystal 1.21
+  prints rather than the stale ones both programs failed. Four broken
+  std modules - a BigInt carry, a base64 pair, a regex automaton, the
+  derive's keys - each fail their benchmark.
+
 - **`Regex#source`.** A pattern answers the text it was compiled from,
   the other library's name for it, so a program that prints its
   patterns - crystal-metric's RegexDna writes `"#{f.source} #{count}"`

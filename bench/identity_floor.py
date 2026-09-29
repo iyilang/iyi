@@ -58,6 +58,9 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # library: it is how a shard is bound for an iyi consumer to import. The
     # bench drives that binary and names it throughout.
     (r"^bench/bind_speed\.py$", "a bench that drives the compatibility binary"),
+    # crystal-metric's port: each note beside a changed line says what the
+    # Crystal original does there, which is the other language by name.
+    (r"^bench/metric/", "a port that compares itself with the Crystal program"),
     # Provenance, licence, copyright.
     (r"^README\.crystal\.md$", "upstream's README, kept"),
     (r"^LICENSE", "Crystal's licence"),

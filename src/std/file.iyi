@@ -913,9 +913,15 @@ class ::File
     private def self.win_opens?(path : String, access : Int32) : Bool?
       wide = __iyi_wide_path(sys_path(path))
       return false if wide.address == 0_u64
-      # Every share right, OPEN_EXISTING, BACKUP_SEMANTICS so a directory
-      # opens too.
-      handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+      # Every share right and OPEN_EXISTING, opened the way `File.read`
+      # and `File.write` open it: BACKUP_SEMANTICS only for a directory,
+      # which opens no other way. On a file it would let a process holding
+      # the backup and restore privileges - an elevated administrator's,
+      # a CI runner's - past the ACL, and answer yes about a file the
+      # program's own read is then refused.
+      attributes = Std::File::LibKernel32.GetFileAttributesW(wide)
+      flags = attributes != -1 && (attributes & 0x10) != 0 ? 0x2000000 : 0x80
+      handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         return nil if Std::File::LibKernel32.GetLastError == 32
         return false

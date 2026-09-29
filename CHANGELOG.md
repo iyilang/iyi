@@ -578,8 +578,12 @@
   in it: a file this user was denied reading was `readable? true` and the
   read then panicked, one denied writing was `writable? true`, and
   `cmd.exe` was `executable? false`. The first two open the path for that
-  access now, the way POSIX `access` asks; a file another process holds
-  without sharing is answered from its attributes as before. A file is
+  access now, the way POSIX `access` asks, and the way `File.read` and
+  `File.write` open it - a directory with backup semantics, a file
+  without, since on a file they let an elevated process past the ACL
+  and answered yes about a read that was then refused (the first CI run
+  of this, on a runner holding those privileges). A file another process
+  holds without sharing is answered from its attributes as before. A file is
   executable by one of PATHEXT's extensions, and a directory when it can
   be read. `bench/std_file_exercise.sh` denies a read and a write with
   `icacls` and asks `cmd.exe`; the old module answered true, true, false.

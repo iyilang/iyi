@@ -376,6 +376,30 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 step "a panic the library raises names no library line, prelude or std"
 
+# ── 9b. and the program's own line inside a macro written in place: a
+#      `{% if %}` is expanded where it stands, and a `raise` inside one
+#      named the `{% if` line - where the expansion was put, not where the
+#      `raise` is. `__LINE__` is what `raise` reads, and it reads the
+#      line the text was written on now. ───────────────────────────────
+cat > "$work/inplace.iyi" <<'EOF'
+module inplace
+
+def boom(x : Int32) : Nil
+  {% if 1 == 2 %}
+    puts "never"
+  {% else %}
+    y = x + 1
+    raise "boom #{y}"
+  {% end %}
+end
+
+boom(1)
+EOF
+run "$work/inplace.iyi"
+[ "$code" = 1 ] || fail "the in-place panic exit was $code, wanted 1"
+echo "$out" | grep -q "at .*inplace\.iyi:8$" || fail "a raise inside {% if %} did not name its own line, 8: $out"
+step "a raise inside a macro written in place names its own line"
+
 # ── 9a. a program that imports `std/debug` gets its callers named: the
 #      resolver reads the program's own debug information — DWARF beside a
 #      Mach-O, the CodeView PDB the linker wrote beside a PE — and a frame

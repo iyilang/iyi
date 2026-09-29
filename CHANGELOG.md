@@ -564,6 +564,16 @@
 
 ### Fixed
 
+- **A `raise` inside `{% if %}` names its own line.** A macro written in
+  place - a `{% if %}` or `{% for %}` in a file - is expanded where it
+  stands, and `__LINE__` inside it, which is what `raise` reads, named the
+  line the expansion was put at, the `{% if`: a panic in a platform arm
+  cited a line that was not the `raise`'s. The expansion now keeps the
+  line each stretch of its text was written on, and `__LINE__` reads it;
+  a macro's own body still names the call, as before. `bench/panics.sh`
+  raises inside an `{% else %}` and requires line 8; the old compiler said
+  4. The compiler specs hold, 14,048 examples.
+
 - **On Windows, a UDP client that has sent nothing answers like one.**
   Such a socket has no address yet, and Winsock refuses a receive and
   `getsockname` on it with WSAEINVAL, where POSIX answers nothing queued

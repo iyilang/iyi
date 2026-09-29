@@ -3741,6 +3741,10 @@ module Iyi
     end
 
     def self.expand_line(location)
+      # An inline macro's text knows its own line (`VirtualFile#line_origins`).
+      if location && (file = location.filename).is_a?(VirtualFile) && (line = file.line_origins.try &.[location.line_number]?)
+        return line
+      end
       (location.try(&.expanded_location) || location).try(&.line_number) || 0
     end
 

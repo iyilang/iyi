@@ -12,6 +12,14 @@ class Iyi::VirtualFile
   # The location where the macro was expanded (where the macro was invoked).
   getter expanded_location : Location?
 
+  # iyi: for an inline macro, the line of the file each line of the
+  # expansion was written on, where it was text rather than an expression's
+  # output. `__LINE__` - and `raise`'s default argument, which is one - read
+  # it: without it a panic inside `{% if flag?(:win32) %}` named the
+  # `{% if` line, which is where the expansion was put rather than where the
+  # `raise` is.
+  property line_origins : Hash(Int32, Int32)? = nil
+
   def initialize(@macro : Macro, @source : String, @expanded_location : Location?)
   end
 

@@ -37,7 +37,7 @@ module Iyi
 
     property macro_expansion_pragmas : Hash(Int32, Array(LocPragma))? = nil
 
-    alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma
+    alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma | LocOriginPragma
 
     record LocSetPragma,
       filename : String,
@@ -57,6 +57,14 @@ module Iyi
     record LocPopPragma do
       def run_pragma(lexer)
         lexer.pop_location
+      end
+    end
+
+    # iyi: the source line a stretch of an inline macro's output was written
+    # on. Nothing for the lexer to do: `Program#parse_macro_source` reads
+    # these into the `VirtualFile`'s line origins before the lexer runs.
+    record LocOriginPragma, line_number : Int32 do
+      def run_pragma(lexer)
       end
     end
 

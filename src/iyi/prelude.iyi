@@ -414,6 +414,7 @@ end
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileW(name : UInt16*) : Int32
+    fun RemoveDirectoryW(name : UInt16*) : Int32
     fun GetFileAttributesW(name : UInt16*) : Int32
     # Clearing FILE_ATTRIBUTE_READONLY, which is what stands between a
     # read-only file and `DeleteFileW`: POSIX asks the *directory* for
@@ -919,12 +920,23 @@ end
   # off and the delete tried again; if it still refuses, the attribute
   # goes back, because a file this could not remove is not a file this
   # may leave writable.
+  #
+  # A link to a directory - a junction, a directory symlink - is removed
+  # the way a directory is, which `DeleteFileW` refuses: `File.symlink?`
+  # said it was a link and `File.delete` could not remove it, where POSIX
+  # `unlink` removes a link whatever it points at. `RemoveDirectoryW` on
+  # the link takes the link and leaves the directory it named.
   def __iyi_unlink(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     return 0_i64 if LibC.DeleteFileW(wide) != 0
-    return -1_i64 if LibC.GetLastError != 5
+    error = LibC.GetLastError
     attributes = LibC.GetFileAttributesW(wide)
+    # FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
+    if attributes != -1 && (attributes & 0x410) == 0x410
+      return LibC.RemoveDirectoryW(wide) != 0 ? 0_i64 : -1_i64
+    end
+    return -1_i64 if error != 5
     return -1_i64 if attributes == -1 || (attributes & 1) == 0
     # `attributes - 1` clears bit 0, which the line above proved is set:
     # the prelude has no `~`, and a program that imports nothing but the

@@ -456,6 +456,27 @@ PY
         status=1
       fi
     fi
+    # A junction, which any user may make: a link to a directory. POSIX
+    # `unlink` removes a link whatever it names, and `File.symlink?` said
+    # this was one - but `File.delete` asked `DeleteFileW`, which refuses a
+    # directory, and panicked "cannot delete".
+    mkdir -p "$WORK/junction_target"
+    printf 'kept' > "$WORK/junction_target/inside.txt"
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/junction")" "$(cygpath -w "$WORK/junction_target")" > /dev/null
+    printf 'module main\n\nimport std/file::{File}\n\nputs File.symlink?(Program.args[0])\nFile.delete(Program.args[0])\nputs File.exists?(Program.args[0])\n' > "$WORK/junction_delete.iyi"
+    if [ ! -d "$WORK/junction" ]; then
+      echo "  mklink /J made no junction, so its delete is unmeasured"
+    elif ! "$IYI" build -o "$WORK/junction_delete" "$WORK/junction_delete.iyi" > "$WORK/junction_delete.build" 2>&1; then
+      echo "  the junction program did not build"; sed -n '1,10p' "$WORK/junction_delete.build"; status=1
+    else
+      answer="$("$WORK/junction_delete" "$WORK/junction" 2>&1 | tr '\n' ' ')"
+      if [ "$answer" = "true false " ] && [ -f "$WORK/junction_target/inside.txt" ]; then
+        echo "  File.delete of a junction removes the link and leaves the directory"
+      else
+        echo "  File.delete of a junction: $answer"
+        status=1
+      fi
+    fi
     ;;
 esac
 

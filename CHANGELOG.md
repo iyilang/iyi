@@ -374,6 +374,14 @@
 
 ### Fixed
 
+- **On Windows, `File.delete` removes a link to a directory.** A junction
+  - which any user may make - is a link `File.symlink?` answers true for,
+  and POSIX `unlink` removes a link whatever it names; `File.delete` asked
+  `DeleteFileW`, which refuses a directory, and panicked "cannot delete".
+  A directory link is removed the way a directory is now, and the
+  directory it named stays. `bench/std_file_exercise.sh` makes a junction
+  with `mklink /J` and deletes it; the old prelude panicked.
+
 - **A byte order mark does not hide a module's header.** The lexer skips
   the mark a Windows editor may put at the front of a file; the three
   readings of a header - a build's root, `iyi doc` and the language
@@ -11805,7 +11813,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,553-line library and nothing else. Every other
+  written against iyi's own 18,565-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

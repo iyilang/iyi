@@ -585,54 +585,322 @@ pub struct Math
     pow_signed(10.0, n.to_i64)
   end
 
+  # pow as glibc computes it - Arm's optimized-routines pow, which glibc
+  # has carried since 2.28, sharing `exp`'s table: log(x) to about 68 bits
+  # as a double and a tail, the product with y split so that it is exact,
+  # and exp of that with the tail folded in. Under 0.54 ulp. The pow this
+  # replaces answered differently from glibc's for more than half of
+  # 300,000 arguments; as with `exp`, this is glibc's build without FMA,
+  # unfused on every target. Arm's notice is at `exp`; the table and the
+  # coefficients are `math/pow_log_data.c`'s for N = 128, order 8.
+  private POW_LN2HI =    0.6931471805598903
+  private POW_LN2LO = 5.497923018708371e-14
+  private POW_A0    =                  -0.5
+  private POW_A1    =   -0.6666666666666679
+  private POW_A2    =    0.5000000000000007
+  private POW_A3    =    0.7999999995323976
+  private POW_A4    =   -0.6666666663487739
+  private POW_A5    =    -1.142909628459501
+  private POW_A6    =    1.0000415263675542
+
+  # For each of 128 subintervals of z in [0x1.69555p-1, 0x1.69555p0]: the
+  # bits of 1/c, of log(c) rounded to 2^-43, and of the rest of log(c).
+  private POW_LOG_TAB = [
+    0x3ff6a00000000000_u64, 0xbfd62c82f2b9c800_u64, 0x3cfab42428375680_u64,
+    0x3ff6800000000000_u64, 0xbfd5d1bdbf580800_u64, 0xbd1ca508d8e0f720_u64,
+    0x3ff6600000000000_u64, 0xbfd5767717455800_u64, 0xbd2362a4d5b6506d_u64,
+    0x3ff6400000000000_u64, 0xbfd51aad872df800_u64, 0xbce684e49eb067d5_u64,
+    0x3ff6200000000000_u64, 0xbfd4be5f95777800_u64, 0xbd041b6993293ee0_u64,
+    0x3ff6000000000000_u64, 0xbfd4618bc21c6000_u64, 0x3d13d82f484c84cc_u64,
+    0x3ff5e00000000000_u64, 0xbfd404308686a800_u64, 0x3cdc42f3ed820b3a_u64,
+    0x3ff5c00000000000_u64, 0xbfd3a64c55694800_u64, 0x3d20b1c686519460_u64,
+    0x3ff5a00000000000_u64, 0xbfd347dd9a988000_u64, 0x3d25594dd4c58092_u64,
+    0x3ff5800000000000_u64, 0xbfd2e8e2bae12000_u64, 0x3d267b1e99b72bd8_u64,
+    0x3ff5600000000000_u64, 0xbfd2895a13de8800_u64, 0x3d15ca14b6cfb03f_u64,
+    0x3ff5600000000000_u64, 0xbfd2895a13de8800_u64, 0x3d15ca14b6cfb03f_u64,
+    0x3ff5400000000000_u64, 0xbfd22941fbcf7800_u64, 0xbd165a242853da76_u64,
+    0x3ff5200000000000_u64, 0xbfd1c898c1699800_u64, 0xbd1fafbc68e75404_u64,
+    0x3ff5000000000000_u64, 0xbfd1675cababa800_u64, 0x3d1f1fc63382a8f0_u64,
+    0x3ff4e00000000000_u64, 0xbfd1058bf9ae4800_u64, 0xbd26a8c4fd055a66_u64,
+    0x3ff4c00000000000_u64, 0xbfd0a324e2739000_u64, 0xbd0c6bee7ef4030e_u64,
+    0x3ff4a00000000000_u64, 0xbfd0402594b4d000_u64, 0xbcf036b89ef42d7f_u64,
+    0x3ff4a00000000000_u64, 0xbfd0402594b4d000_u64, 0xbcf036b89ef42d7f_u64,
+    0x3ff4800000000000_u64, 0xbfcfb9186d5e4000_u64, 0x3d0d572aab993c87_u64,
+    0x3ff4600000000000_u64, 0xbfcef0adcbdc6000_u64, 0x3d2b26b79c86af24_u64,
+    0x3ff4400000000000_u64, 0xbfce27076e2af000_u64, 0xbd172f4f543fff10_u64,
+    0x3ff4200000000000_u64, 0xbfcd5c216b4fc000_u64, 0x3d21ba91bbca681b_u64,
+    0x3ff4000000000000_u64, 0xbfcc8ff7c79aa000_u64, 0x3d27794f689f8434_u64,
+    0x3ff4000000000000_u64, 0xbfcc8ff7c79aa000_u64, 0x3d27794f689f8434_u64,
+    0x3ff3e00000000000_u64, 0xbfcbc286742d9000_u64, 0x3d194eb0318bb78f_u64,
+    0x3ff3c00000000000_u64, 0xbfcaf3c94e80c000_u64, 0x3cba4e633fcd9066_u64,
+    0x3ff3a00000000000_u64, 0xbfca23bc1fe2b000_u64, 0xbd258c64dc46c1ea_u64,
+    0x3ff3a00000000000_u64, 0xbfca23bc1fe2b000_u64, 0xbd258c64dc46c1ea_u64,
+    0x3ff3800000000000_u64, 0xbfc9525a9cf45000_u64, 0xbd2ad1d904c1d4e3_u64,
+    0x3ff3600000000000_u64, 0xbfc87fa06520d000_u64, 0x3d2bbdbf7fdbfa09_u64,
+    0x3ff3400000000000_u64, 0xbfc7ab890210e000_u64, 0x3d2bdb9072534a58_u64,
+    0x3ff3400000000000_u64, 0xbfc7ab890210e000_u64, 0x3d2bdb9072534a58_u64,
+    0x3ff3200000000000_u64, 0xbfc6d60fe719d000_u64, 0xbd10e46aa3b2e266_u64,
+    0x3ff3000000000000_u64, 0xbfc5ff3070a79000_u64, 0xbd1e9e439f105039_u64,
+    0x3ff3000000000000_u64, 0xbfc5ff3070a79000_u64, 0xbd1e9e439f105039_u64,
+    0x3ff2e00000000000_u64, 0xbfc526e5e3a1b000_u64, 0xbd20de8b90075b8f_u64,
+    0x3ff2c00000000000_u64, 0xbfc44d2b6ccb8000_u64, 0x3d170cc16135783c_u64,
+    0x3ff2c00000000000_u64, 0xbfc44d2b6ccb8000_u64, 0x3d170cc16135783c_u64,
+    0x3ff2a00000000000_u64, 0xbfc371fc201e9000_u64, 0x3cf178864d27543a_u64,
+    0x3ff2800000000000_u64, 0xbfc29552f81ff000_u64, 0xbd248d301771c408_u64,
+    0x3ff2600000000000_u64, 0xbfc1b72ad52f6000_u64, 0xbd2e80a41811a396_u64,
+    0x3ff2600000000000_u64, 0xbfc1b72ad52f6000_u64, 0xbd2e80a41811a396_u64,
+    0x3ff2400000000000_u64, 0xbfc0d77e7cd09000_u64, 0x3d0a699688e85bf4_u64,
+    0x3ff2400000000000_u64, 0xbfc0d77e7cd09000_u64, 0x3d0a699688e85bf4_u64,
+    0x3ff2200000000000_u64, 0xbfbfec9131dbe000_u64, 0xbd2575545ca333f2_u64,
+    0x3ff2000000000000_u64, 0xbfbe27076e2b0000_u64, 0x3d2a342c2af0003c_u64,
+    0x3ff2000000000000_u64, 0xbfbe27076e2b0000_u64, 0x3d2a342c2af0003c_u64,
+    0x3ff1e00000000000_u64, 0xbfbc5e548f5bc000_u64, 0xbd1d0c57585fbe06_u64,
+    0x3ff1c00000000000_u64, 0xbfba926d3a4ae000_u64, 0x3d253935e85baac8_u64,
+    0x3ff1c00000000000_u64, 0xbfba926d3a4ae000_u64, 0x3d253935e85baac8_u64,
+    0x3ff1a00000000000_u64, 0xbfb8c345d631a000_u64, 0x3d137c294d2f5668_u64,
+    0x3ff1a00000000000_u64, 0xbfb8c345d631a000_u64, 0x3d137c294d2f5668_u64,
+    0x3ff1800000000000_u64, 0xbfb6f0d28ae56000_u64, 0xbd269737c93373da_u64,
+    0x3ff1600000000000_u64, 0xbfb51b073f062000_u64, 0x3d1f025b61c65e57_u64,
+    0x3ff1600000000000_u64, 0xbfb51b073f062000_u64, 0x3d1f025b61c65e57_u64,
+    0x3ff1400000000000_u64, 0xbfb341d7961be000_u64, 0x3d2c5edaccf913df_u64,
+    0x3ff1400000000000_u64, 0xbfb341d7961be000_u64, 0x3d2c5edaccf913df_u64,
+    0x3ff1200000000000_u64, 0xbfb16536eea38000_u64, 0x3d147c5e768fa309_u64,
+    0x3ff1000000000000_u64, 0xbfaf0a30c0118000_u64, 0x3d2d599e83368e91_u64,
+    0x3ff1000000000000_u64, 0xbfaf0a30c0118000_u64, 0x3d2d599e83368e91_u64,
+    0x3ff0e00000000000_u64, 0xbfab42dd71198000_u64, 0x3d1c827ae5d6704c_u64,
+    0x3ff0e00000000000_u64, 0xbfab42dd71198000_u64, 0x3d1c827ae5d6704c_u64,
+    0x3ff0c00000000000_u64, 0xbfa77458f632c000_u64, 0xbd2cfc4634f2a1ee_u64,
+    0x3ff0c00000000000_u64, 0xbfa77458f632c000_u64, 0xbd2cfc4634f2a1ee_u64,
+    0x3ff0a00000000000_u64, 0xbfa39e87b9fec000_u64, 0x3cf502b7f526feaa_u64,
+    0x3ff0a00000000000_u64, 0xbfa39e87b9fec000_u64, 0x3cf502b7f526feaa_u64,
+    0x3ff0800000000000_u64, 0xbf9f829b0e780000_u64, 0xbd2980267c7e09e4_u64,
+    0x3ff0800000000000_u64, 0xbf9f829b0e780000_u64, 0xbd2980267c7e09e4_u64,
+    0x3ff0600000000000_u64, 0xbf97b91b07d58000_u64, 0xbd288d5493faa639_u64,
+    0x3ff0400000000000_u64, 0xbf8fc0a8b0fc0000_u64, 0xbcdf1e7cf6d3a69c_u64,
+    0x3ff0400000000000_u64, 0xbf8fc0a8b0fc0000_u64, 0xbcdf1e7cf6d3a69c_u64,
+    0x3ff0200000000000_u64, 0xbf7fe02a6b100000_u64, 0xbd19e23f0dda40e4_u64,
+    0x3ff0200000000000_u64, 0xbf7fe02a6b100000_u64, 0xbd19e23f0dda40e4_u64,
+    0x3ff0000000000000_u64, 0x0_u64, 0x0_u64,
+    0x3ff0000000000000_u64, 0x0_u64, 0x0_u64,
+    0x3fefc00000000000_u64, 0x3f80101575890000_u64, 0xbd10c76b999d2be8_u64,
+    0x3fef800000000000_u64, 0x3f90205658938000_u64, 0xbd23dc5b06e2f7d2_u64,
+    0x3fef400000000000_u64, 0x3f98492528c90000_u64, 0xbd2aa0ba325a0c34_u64,
+    0x3fef000000000000_u64, 0x3fa0415d89e74000_u64, 0x3d0111c05cf1d753_u64,
+    0x3feec00000000000_u64, 0x3fa466aed42e0000_u64, 0xbd2c167375bdfd28_u64,
+    0x3fee800000000000_u64, 0x3fa894aa149fc000_u64, 0xbd197995d05a267d_u64,
+    0x3fee400000000000_u64, 0x3faccb73cdddc000_u64, 0xbd1a68f247d82807_u64,
+    0x3fee200000000000_u64, 0x3faeea31c006c000_u64, 0xbd0e113e4fc93b7b_u64,
+    0x3fede00000000000_u64, 0x3fb1973bd1466000_u64, 0xbd25325d560d9e9b_u64,
+    0x3feda00000000000_u64, 0x3fb3bdf5a7d1e000_u64, 0x3d2cc85ea5db4ed7_u64,
+    0x3fed600000000000_u64, 0x3fb5e95a4d97a000_u64, 0xbd2c69063c5d1d1e_u64,
+    0x3fed400000000000_u64, 0x3fb700d30aeac000_u64, 0x3cec1e8da99ded32_u64,
+    0x3fed000000000000_u64, 0x3fb9335e5d594000_u64, 0x3d23115c3abd47da_u64,
+    0x3fecc00000000000_u64, 0x3fbb6ac88dad6000_u64, 0xbd1390802bf768e5_u64,
+    0x3feca00000000000_u64, 0x3fbc885801bc4000_u64, 0x3d2646d1c65aacd3_u64,
+    0x3fec600000000000_u64, 0x3fbec739830a2000_u64, 0xbd2dc068afe645e0_u64,
+    0x3fec400000000000_u64, 0x3fbfe89139dbe000_u64, 0xbd2534d64fa10afd_u64,
+    0x3fec000000000000_u64, 0x3fc1178e8227e000_u64, 0x3d21ef78ce2d07f2_u64,
+    0x3febe00000000000_u64, 0x3fc1aa2b7e23f000_u64, 0x3d2ca78e44389934_u64,
+    0x3feba00000000000_u64, 0x3fc2d1610c868000_u64, 0x3d039d6ccb81b4a1_u64,
+    0x3feb800000000000_u64, 0x3fc365fcb0159000_u64, 0x3cc62fa8234b7289_u64,
+    0x3feb400000000000_u64, 0x3fc4913d8333b000_u64, 0x3d25837954fdb678_u64,
+    0x3feb200000000000_u64, 0x3fc527e5e4a1b000_u64, 0x3d2633e8e5697dc7_u64,
+    0x3feae00000000000_u64, 0x3fc6574ebe8c1000_u64, 0x3d19cf8b2c3c2e78_u64,
+    0x3feac00000000000_u64, 0x3fc6f0128b757000_u64, 0xbd25118de59c21e1_u64,
+    0x3feaa00000000000_u64, 0x3fc7898d85445000_u64, 0xbd1c661070914305_u64,
+    0x3fea600000000000_u64, 0x3fc8beafeb390000_u64, 0xbd073d54aae92cd1_u64,
+    0x3fea400000000000_u64, 0x3fc95a5adcf70000_u64, 0x3d07f22858a0ff6f_u64,
+    0x3fea000000000000_u64, 0x3fca93ed3c8ae000_u64, 0xbd28724350562169_u64,
+    0x3fe9e00000000000_u64, 0x3fcb31d8575bd000_u64, 0xbd0c358d4eace1aa_u64,
+    0x3fe9c00000000000_u64, 0x3fcbd087383be000_u64, 0xbd2d4bc4595412b6_u64,
+    0x3fe9a00000000000_u64, 0x3fcc6ffbc6f01000_u64, 0xbcf1ec72c5962bd2_u64,
+    0x3fe9600000000000_u64, 0x3fcdb13db0d49000_u64, 0xbd2aff2af715b035_u64,
+    0x3fe9400000000000_u64, 0x3fce530effe71000_u64, 0x3cc212276041f430_u64,
+    0x3fe9200000000000_u64, 0x3fcef5ade4dd0000_u64, 0xbcca211565bb8e11_u64,
+    0x3fe9000000000000_u64, 0x3fcf991c6cb3b000_u64, 0x3d1bcbecca0cdf30_u64,
+    0x3fe8c00000000000_u64, 0x3fd07138604d5800_u64, 0x3cf89cdb16ed4e91_u64,
+    0x3fe8a00000000000_u64, 0x3fd0c42d67616000_u64, 0x3d27188b163ceae9_u64,
+    0x3fe8800000000000_u64, 0x3fd1178e8227e800_u64, 0xbd2c210e63a5f01c_u64,
+    0x3fe8600000000000_u64, 0x3fd16b5ccbacf800_u64, 0x3d2b9acdf7a51681_u64,
+    0x3fe8400000000000_u64, 0x3fd1bf99635a6800_u64, 0x3d2ca6ed5147bdb7_u64,
+    0x3fe8200000000000_u64, 0x3fd214456d0eb800_u64, 0x3d0a87deba46baea_u64,
+    0x3fe7e00000000000_u64, 0x3fd2bef07cdc9000_u64, 0x3d2a9cfa4a5004f4_u64,
+    0x3fe7c00000000000_u64, 0x3fd314f1e1d36000_u64, 0xbd28e27ad3213cb8_u64,
+    0x3fe7a00000000000_u64, 0x3fd36b6776be1000_u64, 0x3d116ecdb0f177c8_u64,
+    0x3fe7800000000000_u64, 0x3fd3c25277333000_u64, 0x3d183b54b606bd5c_u64,
+    0x3fe7600000000000_u64, 0x3fd419b423d5e800_u64, 0x3d08e436ec90e09d_u64,
+    0x3fe7400000000000_u64, 0x3fd4718dc271c800_u64, 0xbd2f27ce0967d675_u64,
+    0x3fe7200000000000_u64, 0x3fd4c9e09e173000_u64, 0xbd2e20891b0ad8a4_u64,
+    0x3fe7000000000000_u64, 0x3fd522ae0738a000_u64, 0x3d2ebe708164c759_u64,
+    0x3fe6e00000000000_u64, 0x3fd57bf753c8d000_u64, 0x3d1fadedee5d40ef_u64,
+    0x3fe6c00000000000_u64, 0x3fd5d5bddf596000_u64, 0xbd0a0b2a08a465dc_u64,
+  ] of UInt64
+
   def self.pow(base : Float64, exp : Float64) : Float64
-    return 1.0 if exp == 0.0 || base == 1.0
-    return 0.0 / 0.0 if base != base || exp != exp
-
-    abs_base = base.abs
-    # An infinite exponent, or one so large that no base other than 1 keeps
-    # the answer finite and nonzero: past 2^63 the exponent is an even
-    # whole number, so the base's sign does not matter either.
-    if exp.abs >= 9223372036854775808.0
-      return 1.0 if abs_base == 1.0
-      grows = (abs_base > 1.0) == (exp > 0.0)
-      return grows ? 1.0 / 0.0 : 0.0
-    end
-
-    int_exp = exp.to_i64
-    is_int = int_exp.to_f64 == exp
-    odd = is_int && (int_exp & 1_i64) != 0_i64
-
-    if base == 0.0
-      if exp < 0.0
-        return odd ? copysign(1.0 / 0.0, base) : 1.0 / 0.0
+    ix = IyiFloatText.bits_of(base)
+    iy = IyiFloatText.bits_of(exp)
+    topx = ix.unsafe_shr(52_u64).to_i64
+    topy = iy.unsafe_shr(52_u64).to_i64
+    sign_bias = 0_u64
+    ytop = topy & 0x7ff_i64
+    if topx == 0_i64 || topx >= 0x7ff_i64 || ytop < 0x3be_i64 || ytop >= 0x43e_i64
+      # x subnormal, zero, infinite, NaN or negative; or |y| < 2^-65,
+      # |y| >= 2^63 or y NaN.
+      if pow_zero_inf_nan?(iy)
+        return 1.0 if iy &* 2_u64 == 0_u64
+        return 1.0 if ix == 0x3ff0000000000000_u64
+        return base + exp if ix &* 2_u64 > 0xffe0000000000000_u64 || iy &* 2_u64 > 0xffe0000000000000_u64
+        return 1.0 if ix &* 2_u64 == 0x7fe0000000000000_u64
+        return 0.0 if (ix &* 2_u64 < 0x7fe0000000000000_u64) == (iy.unsafe_shr(63_u64) == 0_u64)
+        return exp * exp
       end
-      return odd ? base : 0.0
-    end
-    if abs_base == 2.0 * abs_base
-      if exp < 0.0
-        return odd && base < 0.0 ? copysign(0.0, base) : 0.0
+      if pow_zero_inf_nan?(ix)
+        x2 = base * base
+        x2 = x2 * -1.0 if ix.unsafe_shr(63_u64) != 0_u64 && pow_check_int(iy) == 1
+        return iy.unsafe_shr(63_u64) != 0_u64 ? 1.0 / x2 : x2
       end
-      return odd && base < 0.0 ? base : 1.0 / 0.0
+      # Finite, nonzero x and y from here.
+      if ix.unsafe_shr(63_u64) != 0_u64
+        yint = pow_check_int(iy)
+        return (base - base) / (base - base) if yint == 0
+        sign_bias = 0x40000_u64 if yint == 1
+        ix = ix & 0x7fffffffffffffff_u64
+        topx = topx & 0x7ff_i64
+      end
+      if ytop < 0x3be_i64 || ytop >= 0x43e_i64
+        return 1.0 if ix == 0x3ff0000000000000_u64
+        if ytop < 0x3be_i64
+          # |y| < 2^-65: x^y ~= 1 + y log(x).
+          return ix > 0x3ff0000000000000_u64 ? 1.0 + exp : 1.0 - exp
+        end
+        return (ix > 0x3ff0000000000000_u64) == (topy < 0x800_i64) ? 1.0 / 0.0 : 0.0
+      end
+      if topx == 0_i64
+        # A subnormal x, normalised so that its exponent is negative.
+        ix = IyiFloatText.bits_of(base * 4503599627370496.0) & 0x7fffffffffffffff_u64
+        ix = ix &- 0x0340000000000000_u64
+      end
     end
-    if base < 0.0
-      return 0.0 / 0.0 unless is_int
-      pos_res = pow(abs_base, exp)
-      return odd ? 0.0 - pos_res : pos_res
+    hi, lo = pow_log(ix)
+    yhi = IyiFloatText.from_bits(iy & 0xfffffffff8000000_u64)
+    ylo = exp - yhi
+    lhi = IyiFloatText.from_bits(IyiFloatText.bits_of(hi) & 0xfffffffff8000000_u64)
+    llo = hi - lhi + lo
+    ehi = yhi * lhi
+    elo = ylo * lhi + exp * llo
+    pow_exp(ehi, elo, sign_bias)
+  end
+
+  # 0, an infinity or NaN, from the bits: 2i - 1 wraps for either zero.
+  private def self.pow_zero_inf_nan?(i : UInt64) : Bool
+    (i &* 2_u64) &- 1_u64 >= 0xffe0000000000000_u64 &- 1_u64
+  end
+
+  # 0 when the finite, nonzero y is not an integer, 1 when it is odd, 2
+  # when it is even.
+  private def self.pow_check_int(iy : UInt64) : Int32
+    e = (iy.unsafe_shr(52_u64) & 0x7ff_u64).to_i64
+    return 0 if e < 0x3ff_i64
+    return 2 if e > 0x3ff_i64 + 52_i64
+    bit = 1_u64.unsafe_shl((0x3ff_i64 + 52_i64 - e).to_u64)
+    return 0 if iy & (bit &- 1_u64) != 0_u64
+    return 1 if iy & bit != 0_u64
+    2
+  end
+
+  # log(x) for the bits `ix` of a positive normal x (or a subnormal one
+  # normalised with its exponent below zero), as a double and a tail with
+  # about 15 more bits.
+  private def self.pow_log(ix : UInt64) : {Float64, Float64}
+    tmp = ix &- 0x3fe6955500000000_u64
+    i = (tmp.unsafe_shr(45_u64) & 127_u64).to_i32
+    k = tmp.unsafe_to_i64 >> 52
+    iz = ix &- (tmp & 0xfff0000000000000_u64)
+    z = IyiFloatText.from_bits(iz)
+    kd = k.to_f64
+    table = POW_LOG_TAB.to_unsafe
+    invc = IyiFloatText.from_bits(table[i * 3])
+    logc = IyiFloatText.from_bits(table[i * 3 + 1])
+    logctail = IyiFloatText.from_bits(table[i * 3 + 2])
+    # z split so that rhi, rlo and rhi * rhi are exact.
+    zhi = IyiFloatText.from_bits((iz &+ 0x80000000_u64) & 0xffffffff00000000_u64)
+    zlo = z - zhi
+    rhi = zhi * invc - 1.0
+    rlo = zlo * invc
+    r = rhi + rlo
+    t1 = kd * POW_LN2HI + logc
+    t2 = t1 + r
+    lo1 = kd * POW_LN2LO + logctail
+    lo2 = t1 - t2 + r
+    ar = POW_A0 * r
+    ar2 = r * ar
+    ar3 = r * ar2
+    arhi = POW_A0 * rhi
+    arhi2 = rhi * arhi
+    hi = t2 + arhi2
+    lo3 = rlo * (ar + arhi)
+    lo4 = t2 - hi + arhi2
+    p = ar3 * (POW_A1 + r * POW_A2 + ar2 * (POW_A3 + r * POW_A4 + ar2 * (POW_A5 + r * POW_A6)))
+    lo = lo1 + lo2 + lo3 + lo4 + p
+    y = hi + lo
+    {y, hi - y + lo}
+  end
+
+  # sign * exp(x + tail), `exp` with the tail folded in and the sign
+  # carried in the scale's bits.
+  private def self.pow_exp(x : Float64, tail_in : Float64, sign_bias : UInt64) : Float64
+    abstop = (IyiFloatText.bits_of(x).unsafe_shr(52_u64) & 0x7ff_u64).to_i64
+    if abstop < 0x3c9_i64 || abstop >= 0x408_i64
+      if abstop < 0x3c9_i64
+        one = 1.0 + x
+        return sign_bias != 0_u64 ? one * -1.0 : one
+      end
+      if abstop >= 0x409_i64
+        negative = sign_bias != 0_u64
+        if IyiFloatText.bits_of(x).unsafe_shr(63_u64) != 0_u64
+          return negative ? -0.0 : 0.0
+        end
+        return negative ? (1.0 / 0.0) * -1.0 : 1.0 / 0.0
+      end
+      abstop = 0_i64
     end
+    z = EXP_INVLN2N * x
+    kd = z + EXP_SHIFT
+    ki = IyiFloatText.bits_of(kd)
+    kd = kd - EXP_SHIFT
+    r = x + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO
+    r = r + tail_in
+    table = EXP_TAB.to_unsafe
+    idx = ((ki & 127_u64) &* 2_u64).to_i32
+    top = (ki &+ sign_bias).unsafe_shl(45_u64)
+    tail = IyiFloatText.from_bits(table[idx])
+    sbits = table[idx + 1] &+ top
+    r2 = r * r
+    tmp = tail + r + r2 * (EXP_C2 + r * EXP_C3) + r2 * r2 * (EXP_C4 + r * EXP_C5)
+    return pow_special(tmp, sbits, ki) if abstop == 0_i64
+    scale = IyiFloatText.from_bits(sbits)
+    scale + scale * tmp
+  end
 
-    return base if exp == 1.0
-    return pow_signed(base, int_exp) if is_int
-
-    # A fractional exponent: the whole part by squaring, the fraction by
-    # exp(f * log(base)), where only the small f amplifies the error of the
-    # logarithm. A half is a square root.
-    frac = exp - int_exp.to_f64
-    part = frac.abs == 0.5 ? sqrt(base) : exp(frac.abs * log(base))
-    part = 1.0 / part if frac < 0.0
-    return part if int_exp == 0_i64
-    hi, lo, scale = pow_whole(base, int_exp < 0_i64 ? 0_i64 - int_exp : int_exp)
-    ldexp((int_exp > 0_i64 ? hi : dd_recip(hi, lo)) * part, int_exp > 0_i64 ? scale : 0 - scale)
+  # `exp_special` for pow: the scale may be negative, and a zero keeps its
+  # sign.
+  private def self.pow_special(tmp : Float64, sbits : UInt64, ki : UInt64) : Float64
+    if ki & 0x80000000_u64 == 0_u64
+      scale = IyiFloatText.from_bits(sbits &- 0x3f10000000000000_u64)
+      return (scale + scale * tmp) * 5.486124068793689e+303
+    end
+    sbits = sbits &+ 0x3fe0000000000000_u64
+    scale = IyiFloatText.from_bits(sbits)
+    y = scale + scale * tmp
+    if y.abs < 1.0
+      one = y < 0.0 ? -1.0 : 1.0
+      lo = scale - y + scale * tmp
+      hi = one + y
+      lo = one - hi + y + lo
+      y = (hi + lo) - one
+      y = IyiFloatText.from_bits(sbits & 0x8000000000000000_u64) if y == 0.0
+    end
+    2.2250738585072014e-308 * y
   end
 
   def self.pow(base : Float32, exp : Float32) : Float32

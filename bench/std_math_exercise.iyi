@@ -292,4 +292,24 @@ if args.size > 0
   puts "  #{cases} arguments, every answer Arm's to the last bit"
 end
 
+# Triples: a base, an exponent and Arm's pow of them.
+if args.size > 1
+  puts "\n== pow against Arm's pow, bit for bit"
+  triples = File.read(args[1])
+  words = triples.to_unsafe.as(Pointer(UInt64))
+  cases = triples.bytesize // 24
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 3])
+    y = IyiFloatText.from_bits(words[index * 3 + 1])
+    want = IyiFloatText.from_bits(words[index * 3 + 2])
+    got = Math.pow(x, y)
+    same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+    raise "ASSERTION FAILED: pow(#{x}, #{y}) is #{got}, Arm's is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > 200000, "the oracle had #{cases} cases"
+  puts "  #{cases} pairs, every power Arm's to the last bit"
+end
+
 puts "\nALL CHECKS PASSED"

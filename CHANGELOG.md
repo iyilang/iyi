@@ -96,6 +96,22 @@
 
 ### Changed
 
+- **`Math.pow` is glibc's too, and three times as fast.** It answered
+  differently from glibc's for more than half of 300,000 arguments - a
+  sum of ten million powers printed another last digit than Crystal's -
+  and took 400 ms for those ten million, a double-double by squaring for
+  the whole part and `exp(f log x)` for the fraction. It is now Arm's
+  optimized-routines pow, glibc's since 2.28: log(x) to about 68 bits
+  from a 128-entry table, the product with y split so it is exact, and
+  `exp`'s table for the rest, under 0.54 ulp. 800,858 pairs compared,
+  specials crossed with specials included, none different from glibc's
+  unfused build; the ten million take 140 ms (Crystal's: 150 to 180) and
+  print Crystal's sum. `bench/std_math_exercise.sh` compiles Arm's pow
+  beside its exp from `bench/arm_math`, requires 240,858 pairs bit for
+  bit, and proves a logarithm a term short, an unsplit product, a table
+  without its tail and a negative base's odd power made positive each
+  fail it. The whole-exponent powers `log10` reads stay as they were.
+
 - **`Math.exp` is glibc's, to the last bit, and twice as fast.** It was
   fdlibm's, which differed from glibc's in the last place for one
   argument in ten over a million drawn from +-700 - so a program printing

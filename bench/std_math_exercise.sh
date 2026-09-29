@@ -67,8 +67,9 @@ build_and_run() {
   return 0
 }
 
-# `Math.exp` is Arm's optimized-routines exp - glibc's since 2.28 - and
-# `bench/arm_exp` holds Arm's two files as they are published, so the
+# `Math.exp` and `Math.pow` are Arm's optimized-routines exp and pow -
+# glibc's since 2.28 - and `bench/arm_math` holds Arm's files as they are
+# published, so the
 # oracle is that algorithm compiled here, with contraction off, rather than
 # this machine's libm: glibc's own build for a processor with FMA answers
 # differently in the last bit for about 7 arguments in 10,000, and Apple's
@@ -78,8 +79,9 @@ build_and_run() {
 ORACLE=""
 CC="${CC:-cc}"
 if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
-   "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/arm_exp" -o "$WORK/arm_exp" \
-     "$REPO/bench/arm_exp/oracle.c" "$REPO/bench/arm_exp/exp.c" "$REPO/bench/arm_exp/exp_data.c" > "$WORK/arm_exp.log" 2>&1; then
+   "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/arm_math" -o "$WORK/arm_math" \
+     "$REPO/bench/arm_math/oracle.c" "$REPO/bench/arm_math/exp.c" "$REPO/bench/arm_math/exp_data.c" \
+     "$REPO/bench/arm_math/pow.c" "$REPO/bench/arm_math/pow_log_data.c" > "$WORK/arm_math.log" 2>&1; then
   "$PY" - "$WORK/exp.in" <<'PY'
 import random, struct, sys
 random.seed(2718)
@@ -96,9 +98,36 @@ with open(sys.argv[1], "wb") as out:
     for x in xs:
         out.write(struct.pack("<d", x))
 PY
-  "$WORK/arm_exp" < "$WORK/exp.in" > "$WORK/exp.bin" && ORACLE="$WORK/exp.bin"
+  # And pairs for pow: the specials crossed with each other - zeros,
+  # infinities, NaN, negative bases, subnormals, the ends of the range -
+  # then whole and fractional exponents, bases near one with large ones,
+  # subnormal bases, and results either side of overflow and underflow.
+  "$PY" - "$WORK/pow.in" <<'PY'
+import itertools, random, struct, sys
+random.seed(1618)
+xs = [0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 0.5, -0.5, 3.0, -3.0, float("inf"), float("-inf"), float("nan"),
+      5e-324, -5e-324, 2.2250738585072014e-308, 1e-310, -1e-310, 1.7976931348623157e308,
+      -1.7976931348623157e308, 0.9999999999999999, 1.0000000000000002, 10.0, -10.0, 1e300, 1e-300]
+ys = [0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 0.5, -0.5, 1.5, -1.5, float("inf"), float("-inf"),
+      float("nan"), 1e-20, -1e-20, 2.0 ** -66, -(2.0 ** -66), 2.0 ** 63, -(2.0 ** 63),
+      9007199254740993.0, 1e300, -1e300, 1023.0, 1024.0, -1074.0, -1075.0, 0.1, -0.1, 53.0, 52.0, 1e10]
+pairs = list(itertools.product(xs, ys))
+for _ in range(40000):
+    pairs.append((random.uniform(-10, 10), float(random.randint(-400, 400))))
+    pairs.append((random.uniform(0, 10), random.uniform(-10, 10)))
+    pairs.append((random.uniform(0.9, 1.1), random.uniform(-1e5, 1e5)))
+    pairs.append((random.uniform(1e-310, 1e-300), random.uniform(-2, 2)))
+    pairs.append((random.uniform(1, 2), random.uniform(1000, 1100)))
+    pairs.append((random.uniform(1, 2), random.uniform(-1100, -1000)))
+with open(sys.argv[1], "wb") as out:
+    for x, y in pairs:
+        out.write(struct.pack("<dd", x, y))
+PY
+  "$WORK/arm_math" exp "$WORK/exp.in" "$WORK/exp.bin" &&
+    "$WORK/arm_math" pow "$WORK/pow.in" "$WORK/pow.bin" &&
+    ORACLE="$WORK/exp.bin $WORK/pow.bin"
 fi
-[ -z "$ORACLE" ] && echo "exp against Arm's exp: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE" ] && echo "exp and pow against Arm's: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -115,9 +144,13 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
     status=1
   fi
 done
-if [ -n "$ORACLE" ] && ! grep -q "== exp against Arm's exp, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
-  echo "  missing section: == exp against Arm's exp, bit for bit"
-  status=1
+if [ -n "$ORACLE" ]; then
+  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit"; do
+    if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
+      echo "  missing section: $phrase"
+      status=1
+    fi
+  done
 fi
 [ "$status" -eq 0 ] && echo "  sections reported"
 
@@ -169,10 +202,16 @@ if [ -n "$ORACLE" ]; then
   mutate "exp's polynomial a term short" 'r2 * r2 * (EXP_C4 + r * EXP_C5)' 'r2 * r2 * EXP_C4'
   mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
   mutate "exp's subnormal result rounded twice" '      y = (hi + lo) - 1.0' '      y = y'
+  mutate "pow's logarithm a term short" 'ar2 * (POW_A5 + r * POW_A6)' 'ar2 * POW_A5'
+  mutate "pow's product with y not split" '    ehi = yhi * lhi
+    elo = ylo * lhi + exp * llo' '    ehi = exp * hi
+    elo = exp * lo'
+  mutate "pow's logarithm without its table's tail" '    lo1 = kd * POW_LN2LO + logctail' '    lo1 = kd * POW_LN2LO'
 else
-  echo "  exp's last-bit proofs: not run, no oracle here"
+  echo "  exp's and pow's last-bit proofs: not run, no oracle here"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
+mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
 mutate "erfc as 1 - erf everywhere" 'return 1.0 - erf(value) if value < 1.0' 'return 1.0 - erf(value)'
 mutate "gamma with a pole answered" 'return 0.0 / 0.0 if value <= 0.0 && value == value.floor' '# poles answered'

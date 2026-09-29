@@ -164,6 +164,11 @@ module Iyi
         # answered "unknown command" before it could get there, so the
         # extension point was never reached from `iyi`.
         Iyi::Command.run(options)
+      elsif command.in?("format", "fmt")
+        # The verb other toolchains spell at the top level: named where it
+        # is, rather than "unknown", which read as "there is no formatter".
+        STDERR.puts "iyi: formatting is `iyi tool format`, as in `iyi tool format #{options[1]? || "file.iyi"}`."
+        exit 1
       else
         STDERR.puts "iyi: unknown command or missing file: #{command}"
         STDERR.puts "Run `iyi help` for what there is."

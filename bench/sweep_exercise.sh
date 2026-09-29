@@ -133,7 +133,7 @@ prove_fails "sweep frees nothing" nofree "sweep:" \
 
 # The colour test stops mattering, so a live object goes on the free list.
 prove_fails "sweep frees the live" reckless "sweep:" \
-  '{ if ($0 ~ /^          if word & IyiHeap::EPOCH_FLAG != @@epoch_flag && \(colour == WHITE \|\| word & IyiHeap::FREE_FLAG != 0\)$/) { print "          if word & IyiHeap::EPOCH_FLAG != @@epoch_flag"; next } print }'
+  '{ if ($0 ~ /^          if word & IyiHeap::EPOCH_FLAG != epoch && \(colour == WHITE \|\| word & IyiHeap::FREE_FLAG != 0\)$/) { print "          if word & IyiHeap::EPOCH_FLAG != epoch"; next } print }'
 
 # The refill stops threading idle warm runs: the pages stay idle, the
 # class carves its frontier, and the warm check names how many were left.

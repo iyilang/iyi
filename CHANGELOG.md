@@ -107,6 +107,17 @@
   trees at depth 14: 146 instructions an allocation in `take` to 132,
   the cache call's 18 gone, 7% fewer in all.
 
+- **The sweep walks a chunk in two thirds of the instructions.** Its
+  four tallies were class variables and the epoch's parity was read
+  from one, each a load and a store per chunk - any write through a
+  heap address might have been to them - and its steps were checked.
+  The tallies are the slice's locals, added once at its end, the parity
+  is read once a slice (it turns only in a pause, with no slice in
+  flight), and the steps wrap. `sweep_slice` on binary trees at depth
+  14: 319 million instructions to 218; the program, 1,200 million to
+  1,050. The sweep exercise's proof that a sweep freeing the live is
+  caught is anchored on the new line.
+
 - **`Float64#floor` and `ceil` are one instruction.** On x86_64 the
   processor is asked once, by `cpuid`, whether it has SSE4.1's
   `roundsd`, as glibc's `floor` chooses its own version, and the
@@ -11724,7 +11735,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,655-line library and nothing else. Every other
+  written against iyi's own 18,671-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

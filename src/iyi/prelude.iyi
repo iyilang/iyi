@@ -5816,6 +5816,18 @@ require "./file"
         byte = 0_u64
         mark = 0_u64
         slot = 0_u64
+        # The slice's tallies, and the epoch's parity, in locals: added to
+        # the class's counters once at the end, and read once at the start
+        # - the epoch turns only in a pause, and no slice is in flight
+        # across one. As class variables they were a load and a store
+        # each per chunk, since any write through a heap address might have
+        # been to them, and the steps below wrap: an address in an arena
+        # cannot overflow. Together a third of the walk's instructions.
+        epoch = @@epoch_flag
+        swept = 0_u64
+        freed = 0_u64
+        kept = 0_u64
+        kept_bytes = 0_u64
         while cursor < stop
           if cursor >= region_low && cursor < region_high
             # Uncarved: past the region in one step, the run closed.
@@ -5853,44 +5865,48 @@ require "./file"
           end
           word = IyiHeap.read8(byte)
           colour = IyiHeap.read8(mark)
-          if word & IyiHeap::EPOCH_FLAG != @@epoch_flag && (colour == WHITE || word & IyiHeap::FREE_FLAG != 0)
+          if word & IyiHeap::EPOCH_FLAG != epoch && (colour == WHITE || word & IyiHeap::FREE_FLAG != 0)
             # Unmarked and allocated before the mark, or free already on
             # a list the pause dropped: dead, and the run's. A free chunk
             # of this epoch's parity is on a live list - a warm run the
             # refill threaded (`IyiHeap.thread_warm`), or a chunk the
             # program handed back this epoch - and is left where it is.
             if word & IyiHeap::FREE_FLAG == 0
-              @@bytes_freed = @@bytes_freed + (word & IyiHeap::HEADED_FLAG != 0 ? chunk - IyiHeap::HEADER : chunk)
-              @@swept = @@swept + 1_u64
+              freed = freed &+ (word & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk)
+              swept = swept &+ 1_u64
               IyiHeap.write8(byte, word | IyiHeap::FREE_FLAG)
             end
             if run_low == 0
               run_low = cursor
               run_batch = batch_head
             end
-            IyiHeap.write64(cursor + IyiHeap::OFF_LINK, batch_head)
-            IyiHeap.write64(cursor + IyiHeap::OFF_INDEX, slot)
+            IyiHeap.write64(cursor &+ IyiHeap::OFF_LINK, batch_head)
+            IyiHeap.write64(cursor &+ IyiHeap::OFF_INDEX, slot)
             batch_head = cursor
           else
             if colour != WHITE
               # Marked: survives, white again and this epoch's. A white
               # chunk of this epoch's parity was allocated after the mark,
               # alive by construction, and is left as it is.
-              @@bytes_kept = @@bytes_kept + (word & IyiHeap::HEADED_FLAG != 0 ? chunk - IyiHeap::HEADER : chunk)
-              IyiHeap.write8(byte, (word - (word & IyiHeap::EPOCH_FLAG)) | @@epoch_flag)
+              kept_bytes = kept_bytes &+ (word & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk)
+              IyiHeap.write8(byte, (word - (word & IyiHeap::EPOCH_FLAG)) | epoch)
               IyiHeap.write8(mark, WHITE)
-              @@kept = @@kept + 1_u64
+              kept = kept &+ 1_u64
             end
             if run_low != 0
               batch_head = close_run(arena, chunk, run_low, cursor, batch_head, run_batch)
               run_low = 0_u64
             end
           end
-          cursor = cursor + chunk
-          byte = byte + IyiHeap::META_ENTRY
-          mark = mark + 1_u64
-          slot = slot + 1_u64
+          cursor = cursor &+ chunk
+          byte = byte &+ IyiHeap::META_ENTRY
+          mark = mark &+ 1_u64
+          slot = slot &+ 1_u64
         end
+        @@swept = @@swept + swept
+        @@bytes_freed = @@bytes_freed + freed
+        @@kept = @@kept + kept
+        @@bytes_kept = @@bytes_kept + kept_bytes
         # The run in progress closes at the slice's end and the next slice
         # begins one of its own: a run cut back for a page release is the
         # batch's newest prefix, and a batch handed over is nobody's to

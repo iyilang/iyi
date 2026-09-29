@@ -96,6 +96,20 @@
 
 ### Changed
 
+- **A deep budget keeps the empty arenas it will fill again.** The
+  scavenge handed every empty arena but a cache's fill arena back to the
+  kernel, and a program allocating a budget many arenas deep mapped them
+  again each epoch and faulted every page in. crystal-metric's
+  Base64Encode, run after Revcomp left 133 MB alive, took 740,000 faults
+  under its 266 MB budget where it took 18,000 alone: 1.25 s against
+  0.73. Empty arenas up to the part of the budget past 64 MB now stay
+  mapped, and their sweep keeps a budget's worth of pages warm as it
+  does in any arena: 0.9 s, the peak 56 MB higher on 842. A budget under
+  the floor spares nothing, so the resident-set probe (38 MB budget) is
+  unchanged. The trigger exercise holds 48 MB live and requires the
+  second of two epochs of garbage to map at most one arena afresh, and
+  proves handing every empty arena back fails it.
+
 - **A small live set is marked in the stop.** Every collection marked a
   thousand objects stopped and went beside the program with the rest, so
   a live set of a few thousand woke a helper at each collection. After
@@ -11871,7 +11885,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,760-line library and nothing else. Every other
+  written against iyi's own 18,774-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

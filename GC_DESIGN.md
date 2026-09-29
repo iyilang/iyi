@@ -688,6 +688,22 @@ it back. Sparing only arenas holding warm pages spared nothing a churn
 leaves, since a churn consumes its kept pages. Both were built,
 measured and taken out.
 
+What those measured was a budget two arenas deep. A deep one pays the
+faults in proportion: crystal-metric's Base64Encode, run after Revcomp
+left 133 MB alive, allocated its 400 KB strings under a 266 MB budget,
+and every epoch's arenas were dead at the next mark, unmapped, mapped
+again and faulted in - 740,000 faults where it took 18,000 alone, 1.25 s
+against 0.73. So the scavenge keeps empty arenas up to the part of the
+budget past `SPARE_BELOW` = 64 MB, and hands back the rest. The floor
+is why the probe does not move: its budget is 38 MB and nothing is
+spared, where sparing every empty arena a budget covers read 148 MB
+median against 112 on it, the same verdict as before. Base64Encode after
+Revcomp takes 0.9 s, its peak 56 MB higher on 842. A kept arena is debt
+like any other, and its sweep keeps a budget's worth of pages warm and
+hands the rest back cold. The trigger exercise holds 48 MB live and
+requires the second of two epochs of garbage to map at most one arena
+afresh; handing every empty arena back maps two.
+
 Three more things were built on the way and measured out. Warm runs as
 bump regions the carve took up first, no fault and no slice: the carve
 became the allocator's main path, and the carve's ordered cursor store

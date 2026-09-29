@@ -153,7 +153,12 @@ prove_fails "budget never grows" nogrow "budget:" \
 # The scavenge disabled: sweeps keep reclaiming chunks, mappings never go
 # back, and the heap is high-water — the check names it.
 prove_fails "mappings never return" noscavenge "scavenge:" \
-  '{ sub(/IyiHeap\.arena_live\(arena\) == 0 && IyiHeap\.release_arena\(previous, arena\)/, "false"); print }'
+  '{ sub(/elsif empty && IyiHeap\.release_arena\(previous, arena\)/, "elsif false"); print }'
+
+# Every empty arena handed back whatever the budget: the next epoch maps
+# the ones it needs afresh, and the spare check counts them.
+prove_fails "empty arenas never spared" nospare "spare:" \
+  '{ sub(/if empty && spared \+ IyiHeap::MAP \+ SPARE_BELOW <= budget/, "if false"); print }'
 
 # The allocator's slices and the helpers' round removed: every arena is
 # debt until a pause pays it, which is the eager sweep back inside the
@@ -170,7 +175,8 @@ prove_fails "scheduler state unrooted" unrooted "scheduler state:" \
 echo
 if [ "$status" -eq 0 ]; then
   echo "Trigger: collections come from allocation pressure alone, the heap"
-  echo "stays bounded, empty arenas go back to the kernel, the pauses have"
+  echo "stays bounded, empty arenas go back to the kernel past what a deep"
+  echo "budget will fill again, the pauses have"
   echo "measured numbers, the budget grows with what survives, a parked"
   echo "fiber's reference lives through it, and the checks fail when any"
   echo "of it is broken."

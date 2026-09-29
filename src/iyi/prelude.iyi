@@ -6151,16 +6151,25 @@ require "./file"
       # pause's and not the lazy sweeper's: a sweeper on one thread cannot
       # edit another running thread's cache. Some cache's warm fill arena
       # is exempt, the cushion that keeps spike-then-idle from paying an
-      # mmap on its next allocation. Nothing else is: sparing an all-dead
-      # arena the epoch had allocated from, or one holding pages the sweep
-      # kept warm, was built and measured in 0.11.0's first cycle and
-      # bought nothing the probe could see - the resident-set probe read
-      # 140 MB median against 129 without the first, on two cores, the
-      # race table the same either way - because a churning class's dead
-      # arena is what the kernel should have back, and the pages it faults
-      # in again are a budget's worth an epoch (GC_DESIGN.md, the
-      # footprint section). Runs after the mark and before the epoch
-      # turns, so a released arena is never debt.
+      # mmap on its next allocation. So are empty arenas up to the part of
+      # the budget past SPARE_BELOW: the next epoch allocates the budget
+      # again, and an arena handed back is one it maps and faults in
+      # afresh, a fault a page. crystal-metric's Base64Encode, run after
+      # Revcomp left 133 MB alive, allocated its 400 KB strings under a
+      # 266 MB budget and took 740,000 faults where it took 18,000 alone:
+      # 1.25 s against 0.73. With the arenas past the floor kept, 0.9,
+      # its peak 56 MB higher on 842. The floor is why a shallow budget
+      # spares nothing: sparing every empty arena a budget covers read on
+      # the resident-set probe, whose budget is 38 MB, as 148 MB median
+      # against 112 and no wall time bought - a spared arena stays
+      # resident until the lazy sweep reaches it, beside the pages that
+      # sweep keeps warm, and 0.11.0's first cycle had measured the same
+      # (140 against 129). A kept arena is debt like any other: its sweep
+      # keeps a budget's worth of its pages warm and hands the rest back
+      # cold (GC_DESIGN.md, the footprint section). Runs after the mark
+      # and before the epoch turns, so a released arena is never debt.
+      SPARE_BELOW = 67108864_u64
+
       def self.scavenge : Nil
         # Every free list dropped first - the centre's and each stopped
         # thread's cache's - which is what lets a mapping go back without
@@ -6168,13 +6177,18 @@ require "./file"
         # the sweep needs anyway.
         IyiHeap.drop_free_lists
         previous = 0_u64
+        spared = 0_u64
         arena = IyiHeap.first_arena
         while arena != 0
           following = IyiHeap.arena_next(arena)
           # What the sweep listed and no cache took: idle and warm from
           # here, the lists being gone.
           IyiHeap.idle_listed(arena)
-          if IyiHeap.arena_live(arena) == 0 && IyiHeap.release_arena(previous, arena)
+          empty = IyiHeap.arena_live(arena) == 0
+          if empty && spared + IyiHeap::MAP + SPARE_BELOW <= budget
+            spared = spared + IyiHeap::MAP
+            previous = arena
+          elsif empty && IyiHeap.release_arena(previous, arena)
             @@arenas_released = @@arenas_released + 1_u64
           else
             previous = arena

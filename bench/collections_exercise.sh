@@ -194,6 +194,14 @@ prove_fails "a merge that takes the right run on a tie" unstable_sort array.iyi 
   "array: a sort is ascending and keeps equal elements in order" \
   's/(yield from\[left\], from\[right\]) <= 0/(yield from[left], from[right]) < 0/'
 
+prove_fails "a sort that asks == after <" two_question_sort array.iyi \
+  "array: sorted asks one question a step" \
+  's/^    sorted { |a, b| b < a ? 1 : 0 }$/    sorted { |a, b| a < b ? -1 : (a == b ? 0 : 1) }/'
+
+prove_fails "a key sort that asks < both ways" two_way_key_sort array.iyi \
+  "array: sorted_by asks < as often as sorted" \
+  's/^    keyed.sort_in_place { |a, b| b\[0\] < a\[0\] ? 1 : 0 }$/    keyed.sort_in_place { |a, b| a[0] < b[0] ? -1 : (b[0] < a[0] ? 1 : 0) }/'
+
 prove_fails "an Int64 hashed by its type" int64_type_hash number.iyi \
   "hash: Int64 keys spread" \
   '/^struct Int64$/,/^end$/{/^  def hash : Int32$/,/^  end$/d;}'

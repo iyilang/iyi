@@ -305,6 +305,58 @@ by_key = keyed.sorted_by { |k| k.key }
 assert_int(by_key[0].seq, ordered[0].seq, "array: sorted_by keeps equal keys in order")
 assert_int(by_key[99999].seq, ordered[99999].seq, "array: sorted_by agrees with sorted")
 
+# `sorted` and `sorted_by` ask one question a step: is the right one
+# smaller. They asked `<` and then `==` - or `<` both ways - and a string
+# sort paid for two comparisons of every pair it did not find in order.
+# An element that counts what it is asked: no `==` at all, and the key
+# sort asks `<` exactly as often as the element sort, on the same order.
+struct Asked
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def <(other : Asked) : Bool
+    AskedCount.less = AskedCount.less + 1
+    @value < other.value
+  end
+
+  def ==(other : Asked) : Bool
+    AskedCount.equal = AskedCount.equal + 1
+    @value == other.value
+  end
+end
+
+class AskedCount
+  @@less = 0
+  @@equal = 0
+
+  def self.less : Int32
+    @@less
+  end
+
+  def self.less=(count : Int32) : Int32
+    @@less = count
+  end
+
+  def self.equal : Int32
+    @@equal
+  end
+
+  def self.equal=(count : Int32) : Int32
+    @@equal = count
+  end
+end
+
+asked = (0...5000).map { |i| Asked.new((i * 7919) % 5003) }
+asked_sorted = asked.sorted
+element_questions = AskedCount.less
+assert_int(AskedCount.equal, 0, "array: sorted asks one question a step, never ==")
+AskedCount.less = 0
+asked_by = asked.sorted_by { |x| x }
+assert_int(AskedCount.less, element_questions, "array: sorted_by asks < as often as sorted")
+assert_true(asked_sorted[0].value == 0 && asked_by[4999].value == asked_sorted[4999].value, "array: the one-question sorts agree")
+
 # Every key type the prelude has spreads its keys: a type without a `hash`
 # of its own hashes to its type id, so all its keys share one slot and a
 # table of them is a list searched from the front - two million `Int64`

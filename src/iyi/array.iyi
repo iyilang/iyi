@@ -379,7 +379,7 @@ class Array(T)
   def sort_in_place_by(& : T -> U) : self forall U
     keyed = Array(Tuple(U, T)).new(@size)
     each { |value| keyed << {(yield value), value} }
-    keyed.sort_in_place { |a, b| a[0] < b[0] ? -1 : (b[0] < a[0] ? 1 : 0) }
+    keyed.sort_in_place { |a, b| b[0] < a[0] ? 1 : 0 }
     index = 0
     while index < @size
       @buffer[index] = keyed[index][1]
@@ -541,7 +541,7 @@ class Array(T)
   # compare — SPEC.md III.1.7(A)'s pair, with the name that says a copy comes
   # back.
   def sorted : Array(T)
-    sorted { |a, b| a < b ? -1 : (a == b ? 0 : 1) }
+    sorted { |a, b| b < a ? 1 : 0 }
   end
 
   # `[1, 2, 3]`, the way it is written: an array printed is its elements

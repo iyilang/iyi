@@ -24,6 +24,17 @@
 
 ### Changed
 
+- **`sorted` and `sorted_by` ask one comparison a step.** The merge
+  only needs to know whether the right element is smaller, and `sorted`
+  asked `<` and then `==`, `sorted_by` `<` both ways: a string sort
+  compared most pairs twice. Both now ask `b < a` once - the same order
+  and the same stability for every total order; a NaN, which is in no
+  order, may land elsewhere. A million numeric strings sort in 295 ms
+  where they took 336, and `sorted_by` on a million integers in 85 ms
+  where it took 103. `bench/collections_exercise.sh` counts what an
+  element is asked - no `==`, and as many `<` for the key sort as for the
+  element sort - and proves both checks fail with the old questions.
+
 - **`%.2f` formats in two words.** Every fixed and scientific format
   scaled the double through a bignum - three of them a call, 590 bytes -
   and `sprintf("%.2f", x)` took 400 ns where Go's takes 129. When the

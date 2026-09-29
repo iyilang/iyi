@@ -1105,6 +1105,21 @@ the threads and wakes the helpers, and helper 0 finishes with the
 second stop as before. The bound is a thousand objects because that is
 about ten microseconds of scanning, which is the price of finding out.
 
+A mark whose last one kept fewer than `STW_MARK_SMALL` = 8192 objects
+is given that bound instead. A small live set above a thousand went
+beside the program at every collection: after crystal-metric's ring of
+503 tasks a conservative slot held its channels, 5,043 objects and
+278 KB, and Base64Encode, which ran next, woke a helper at each of its
+collections. On a loaded machine a third of those wakes were past a
+millisecond and the second stop waited on them: an allocation loop ran
+587 ms against 194, its longest pause 8 ms against 0.1. Marked in the
+stop, its 181 collections paused 110 µs each and 244 at the longest.
+The larger bound for every mark was 7,000 objects of scanning that a
+large live set pays in each first stop before going beside the program
+anyway, and binary trees' pauses summed a third more. The last mark's
+count is a guess, like the estimate before it, but a wrong guess costs
+the bound's scanning once rather than a whole mark.
+
 Both platforms measure, and darwin came to it late. It kept the
 estimate for most of this cycle on a measurement of a rule without its
 drain: `concurrent_possible?` was opened to every collection while the

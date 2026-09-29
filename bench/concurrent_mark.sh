@@ -71,7 +71,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(stray|moves|pause|wake|share):' answers.txt | sed 's/^/  /'
+grep -E '^(stray|small|moves|pause|wake|share):' answers.txt | sed 's/^/  /'
 
 # What the machine takes away on its own: a thread per core that reads the
 # clock and does nothing else - no allocation, so no collection - for a
@@ -162,6 +162,21 @@ if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.tx
   echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
+
+step "failure proof: a small live set given the thousand-object bound goes beside the program"
+mkdir -p thousand/iyi
+cp "$REPO"/src/iyi/*.iyi thousand/iyi/
+awk '{ if (sub(/drain_bounded\(w, @@kept < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found = 1; print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/thousand${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o thousand-run > build-thousand.log 2>&1; then
+  cat build-thousand.log; exit 1
+fi
+timeout -k 5 300 ./thousand-run > thousand.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: small:" thousand.txt; then
+  echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
 
 if [ "$PSEP" = ":" ]; then
   echo "workdir $WORK"

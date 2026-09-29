@@ -6582,6 +6582,22 @@ require "./file"
         # 2.1 ms, where every other stop in the run is under 230 µs.
         STW_MARK_BOUND = 1024_u64
 
+        # The bound for a mark whose last one kept fewer objects than it:
+        # a small live set is marked in the stop, whole. After a ring of
+        # 503 tasks a conservative slot held its channels, 5,043 objects
+        # and 278 KB, and every later collection overran a thousand and
+        # went beside the program: a helper woken each time, a third of
+        # the wakes past a millisecond on a loaded machine, and the
+        # second stop waiting on them - an allocation loop ran 587 ms
+        # against 194, its longest pause 8 ms against 0.1. Marked in the
+        # stop, the same 181 collections paused 110 µs each and 244 at the
+        # longest. Given to every mark, the larger bound is 7,000 objects
+        # of scanning a large live set pays in every first stop before it
+        # goes beside the program anyway: binary trees' pauses summed a
+        # third more. The last mark is a guess, and a wrong one costs this
+        # bound's scanning once - not the estimate's whole mark.
+        STW_MARK_SMALL = 8192_u64
+
         def self.concurrent_possible? : Bool
           @@helpers_wanted > 0_u64
         end
@@ -6632,7 +6648,8 @@ require "./file"
           # The mark, up to the bound, on both platforms: what it finds
           # inside the bound is the whole live set and this stop is the
           # collection.
-          bounded = drain_bounded(w, STW_MARK_BOUND)
+          # What the last mark kept, whole: the sweep debt was paid above.
+          bounded = drain_bounded(w, @@kept < STW_MARK_SMALL ? STW_MARK_SMALL : STW_MARK_BOUND)
           if bounded
             # The whole live set, inside the bound: this stop is the
             # collection. The tail is `collect_locked`'s, and the caller

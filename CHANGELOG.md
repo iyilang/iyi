@@ -96,6 +96,19 @@
 
 ### Changed
 
+- **A small live set is marked in the stop.** Every collection marked a
+  thousand objects stopped and went beside the program with the rest, so
+  a live set of a few thousand woke a helper at each collection. After
+  crystal-metric's Threadring a conservative slot held its ring - 5,043
+  objects, 278 KB - and Base64Encode, run next, took 1.8 to 4.2 s against
+  0.9 alone; it takes 0.8 after the ring now. A mark whose last one kept
+  fewer than 8,192 objects has that bound: an allocation loop after the
+  ring ran 587 ms to 212, its longest pause 8 ms to 0.4, and none of its
+  181 collections left the stop. A large live set keeps the thousand,
+  since it goes beside the program anyway. The concurrent mark exercise
+  holds 4,000 objects live through eight budgets and proves the
+  thousand-object bound for them fails.
+
 - **A carve takes a page's worth of chunks.** An allocation the class's
   list could not answer carved one chunk from fresh memory, so a program
   whose heap only grows - a trie, a document being built - sent every
@@ -11858,7 +11871,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,743-line library and nothing else. Every other
+  written against iyi's own 18,760-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -127,14 +127,16 @@ fi
 echo
 echo "== the checks fail when the socket mechanism is broken"
 prove_fails() {
-  local label="$1" dir="$2" phrase="$3" script="$4"
+  # $5, when given, is a build flag: a proof about what an optimised build
+  # inlines has to be built with `--release`.
+  local label="$1" dir="$2" phrase="$3" script="$4" flag="${5:-}"
   # The library the program imports, not the prelude: `std/socket` is a
   # module now, so the patched copy is `std/` beside an untouched `iyi/`
   # and `IYI_PATH` finds this one first.
   mkdir -p "$WORK/$dir/std"
   cp -R "$REPO/src/std/." "$WORK/$dir/std/"
   awk "$script" "$REPO/src/std/socket.iyi" > "$WORK/$dir/std/socket.iyi"
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $flag \
        -o "$WORK/$dir/program" "$REPO/bench/socket_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched library did not build"
@@ -285,6 +287,11 @@ prove_fails "a read timeout not kept" untimed "timeout: the read answered" \
 # 4. Broken local port (answers 0 instead of assigned ephemeral port)
 prove_fails "local port returns 0" badport "local_port failed:" \
   '{ sub(/\(high << 8\) \| low/, "0"); print }'
+
+# The read's buffer inlined into the frame that waits: an optimised build
+# then parks every reader on its last 4 KB.
+prove_fails "a read whose buffer waits with it" inlined_read "retain: a reader parked" \
+  '{ sub(/^  @\[NoInline\]$/, "  @[AlwaysInline]"); print }' --release
 
 echo
 echo "== what is not a port, and what is not an address"

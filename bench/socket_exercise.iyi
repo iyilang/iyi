@@ -372,4 +372,77 @@ t_conn.close unless t_conn.closed?
 t_server.close
 puts "timeout: ok"
 
+# 11. A reader parked on a socket keeps nothing of what it last read. The
+# bytes land in a 4 KB buffer on the stack, and while that buffer's frame
+# was the one that waited, every parked connection held its last read
+# where the collector scans: a read of eight bytes that spelled an
+# object's address kept the object alive. The address is sent hidden
+# behind a key, and computed and checked in frames of their own, so only
+# the reader's stack could hold it bare.
+class Victim
+  @a = 0_i64
+  @b = 0_i64
+  @c = 0_i64
+  @d = 0_i64
+  @e = 0_i64
+end
+
+VICTIM_KEY = 0x5A5A5A5A5A5A5A5A_u64
+
+@[NoInline]
+def victim_address : UInt64
+  Victim.new.object_id ^ VICTIM_KEY
+end
+
+@[NoInline]
+def victim_bytes(word : UInt64) : String
+  String.new(8) do |buffer|
+    8.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * i).to_u64) & 0xFF_u64).to_u8 }
+  end
+end
+
+# The key the check unhides the address with is read from memory after the
+# collection, so an optimised build cannot have the bare address ready in
+# a register the collection spills and scans.
+class VictimKey
+  @@key = VICTIM_KEY
+
+  def self.key : UInt64
+    @@key
+  end
+end
+
+@[NoInline]
+def victim_collected?(word : UInt64) : Bool
+  IyiMark.collect
+  IyiRoots.base_of(word ^ VictimKey.key) == 0_u64
+end
+
+k_server = IyiSocket.listen(0)
+k_port = k_server.local_port
+k_kept = false
+group do |g|
+  g.spawn do
+    reader = k_server.accept.or_panic
+    got = reader.read(64).or_panic
+    raise "retain: the reader got #{got.bytesize} bytes, not the 8 sent" unless got.bytesize == 8
+    reader.read(64).or_panic
+    reader.close
+    0
+  end
+  g.spawn do
+    writer = IyiSocket.connect("127.0.0.1", k_port).or_panic
+    hidden = victim_address
+    writer.write(victim_bytes(hidden)).or_panic
+    sleep(50)
+    k_kept = !victim_collected?(hidden)
+    writer.write("x").or_panic
+    writer.close
+    0
+  end
+end
+k_server.close
+raise "retain: a reader parked on its next read kept alive the object its last read's bytes pointed at" if k_kept
+puts "retain: ok"
+
 puts "socket_exercise: all checks passed"

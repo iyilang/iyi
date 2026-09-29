@@ -263,7 +263,13 @@
   `bench/std_http_exercise.sh` counts the bytes 200 kept-alive requests
   allocate, requires under 8 KB each, and proves the check fails with the
   heap buffer put back (66 KB); `bench/socket_exercise.sh`'s payload and
-  short-read proofs follow the read to its new copy.
+  short-read proofs follow the read to its new copy. The stack buffer
+  lives in a frame of its own that never waits, so a fiber parked on its
+  next read keeps nothing of the last one where the collector scans:
+  `bench/socket_exercise.sh` sends eight bytes that spell an object's
+  address, requires the object collected while the reader waits, and
+  proves the check fails in an optimised build with the buffer inlined
+  into the waiting frame.
 
 - **`Server.serve` answers `Expect: 100-continue`.** A client that asks
   to be told before it sends its body was never told, and curl sends one

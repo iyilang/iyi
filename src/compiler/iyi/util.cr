@@ -109,6 +109,20 @@ module Iyi
     relative.to_s
   end
 
+  # iyi: whether *a* and *b* name one file - asked of the file system,
+  # which is the only thing that knows. A string compare of the expanded
+  # paths is the same answer on Linux and wrong on Windows, where NTFS
+  # ignores case and Win32 drops a trailing space or dot: `-o PROG.iyi
+  # prog.iyi`, `-o c:\...\main.iyi` and `-o "prog.iyi "` each linked the
+  # program over its only source, exit 0. Two paths that do not both
+  # exist are the same file only if they are the same string.
+  def self.same_file?(a : String, b : String) : Bool
+    return true if File.expand_path(a) == File.expand_path(b)
+    File.exists?(a) && File.exists?(b) && File.same?(a, b, follow_symlinks: true)
+  rescue File::Error
+    false
+  end
+
   def self.print_error(msg, color, stderr = STDERR, leading_error = true)
     stderr.print "Error: ".colorize.toggle(color).red.bold if leading_error
     stderr.puts msg.colorize.toggle(color).bright

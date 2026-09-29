@@ -1028,7 +1028,7 @@ class Iyi::Command
       output_filename = (output_path / "#{::Path[first_filename].stem}#{output_extension}").normalize.to_s
 
       # Check if we'll overwrite the main source file
-      if !compiler.no_codegen? && !run && first_filename == File.expand_path(output_filename)
+      if !compiler.no_codegen? && !run && Iyi.same_file?(first_filename, output_filename)
         abort! "compilation will overwrite source file '#{Iyi.relative_filename(first_filename)}', either change its extension to '.cr' or specify an output file with '-o'", :USAGE_ERROR
       end
     else
@@ -1045,8 +1045,7 @@ class Iyi::Command
       # same mistake one step removed, and is refused once it is known
       # (`Compiler#codegen`), before anything is written.
       if !compiler.no_codegen? && !run
-        expanded = File.expand_path(output_filename)
-        if source = sources.find { |candidate| candidate.filename == expanded }
+        if source = sources.find { |candidate| Iyi.same_file?(candidate.filename, output_filename) }
           abort! "-o #{output_filename} names #{Iyi.relative_filename(source.filename)}, the source it would build from, " \
                  "and linking there would replace it. Name the program something else", :USAGE_ERROR
         end

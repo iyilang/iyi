@@ -3053,8 +3053,7 @@ module Iyi
       # against, is only known now - and linking the program over either
       # would replace it in silence, which is what `-o good.iyi good.iyi`
       # did to its source. Before the first object is written.
-      wanted = File.expand_path(output_filename)
-      if read = program.requires.find { |filename| File.expand_path(filename) == wanted }
+      if File.exists?(output_filename) && (read = program.requires.find { |filename| Iyi.same_file?(filename, output_filename) })
         raise Iyi::Error.new("#{Iyi.relative_filename(read)} is a file this build read, and linking the program " \
                              "over it would replace it. Name the program something else")
       end

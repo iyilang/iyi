@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **`-o` refuses the source under any spelling of it.** The refusal of an
+  output that is the build's own source, or a module it read, compared
+  expanded paths as strings, and on Windows one file has many: `iyi build
+  -o PROG.iyi prog.iyi` linked the program over `prog.iyi`, exit 0, and so
+  did `-o "prog.iyi "`, `-o c:\...\prog.iyi` and `-o app/LIB.iyi` for an
+  imported `app/lib.iyi` - the source's only copy became an executable.
+  The file system is asked now whether the two are one file.
+  `bench/verbs_exercise.sh` builds onto the source in another case and,
+  on Windows, with a trailing space; the old compiler replaced the source
+  in all three.
+
 - **On Windows, `std/dir` answers for roots, bare drives and `\\?\`
   paths.** `Dir.children("/")` and `Dir.children("\\")` panicked with
   "Cannot open directory" on a directory `Dir.exists?` accepted: the

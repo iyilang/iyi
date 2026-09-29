@@ -395,6 +395,25 @@ cp app/lib.iyi lib.keep
 refuses "an output that is an imported module" "a file this build read" -- \
   "$IYI" build -o app/lib.iyi user.iyi
 cmp -s app/lib.iyi lib.keep || { echo "  the refusal came after the module was replaced"; status=1; }
+# The same file under another spelling. NTFS and APFS ignore case, and
+# Win32 drops a trailing space, and the refusal compared strings:
+# `-o GOOD.iyi good.iyi` on Windows linked the program over its source,
+# exit 0. Asked only where the file system says the two names are one.
+if [ GOOD.iyi -ef good.iyi ]; then
+  refuses "an output that is the source in another case" "the source it would build from" -- \
+    "$IYI" build -o GOOD.iyi good.iyi
+  cmp -s good.iyi good.keep || { echo "  GOOD.iyi replaced good.iyi"; cp good.keep good.iyi; status=1; }
+  refuses "an output that is an imported module in another case" "a file this build read" -- \
+    "$IYI" build -o app/LIB.iyi user.iyi
+  cmp -s app/lib.iyi lib.keep || { echo "  app/LIB.iyi replaced app/lib.iyi"; cp lib.keep app/lib.iyi; status=1; }
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "an output that is the source with a trailing space" "the source it would build from" -- \
+      "$IYI" build -o "good.iyi " good.iyi
+    cmp -s good.iyi good.keep || { echo "  \"good.iyi \" replaced good.iyi"; cp good.keep good.iyi; status=1; }
+    ;;
+esac
 mkdir -p "$WORK/readonly"
 chmod 500 "$WORK/readonly"
 # A directory this process cannot write into. `chmod 500` does not bite as

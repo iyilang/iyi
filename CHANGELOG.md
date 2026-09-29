@@ -374,6 +374,18 @@
 
 ### Fixed
 
+- **On Windows, a directory that will not take a file is refused
+  before the work.** `-o`, `bind --mods` and `migrate --out` ask whether
+  the directory can be written before they spend a compilation on it,
+  and asked `File.writable?`, which on Windows answers a directory from
+  its attributes: the permission is an ACL they do not carry, so a
+  directory that refused this user every new file answered yes, and `-o`
+  there came back as the linker's LNK1104 after the whole build. Windows
+  is asked by making a file there now. `bench/verbs_exercise.sh` denies
+  the directory new files with `icacls` - where the mode bits it used
+  bind nothing - and drives all three; the old compiler answered with
+  the linker and with the first write's failure.
+
 - **A withdrawn read leaves standard input open.** A task whose group
   failed while it waited on `stdin.gets` answered nil, as it should, but
   the stream took the withdrawn read for the end of its input and kept

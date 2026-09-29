@@ -145,7 +145,7 @@ class Iyi::Command
     if File.exists?(out_dir) && !Dir.exists?(out_dir)
       abort! "migrate: --out needs a directory for the modules, and #{out_written} is a file", :USAGE_ERROR
     end
-    if Dir.exists?(out_dir) && !File.writable?(out_dir)
+    if Dir.exists?(out_dir) && !Iyi.writable_directory?(out_dir)
       abort! "migrate: --out #{out_written} will not take the modules: no permission to write there", :USAGE_ERROR
     end
 

@@ -1081,7 +1081,7 @@ class Iyi::Command
       # the file. `-o ro/prog` under a mode-500 directory was three lines
       # of `ld.lld: error: cannot open output file`, once per link
       # attempt, for a permission bit.
-      unless File.writable?(directory)
+      unless Iyi.writable_directory?(directory)
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
     end

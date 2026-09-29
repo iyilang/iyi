@@ -123,6 +123,27 @@ module Iyi
     {% end %}
   end
 
+  # iyi: whether a file can be made in *directory*. `File.writable?` of a
+  # directory answers from its attributes, and on Windows the permission
+  # is an ACL they do not carry: a directory that refused this user every
+  # new file answered yes, and `-o` there came back as the linker's
+  # LNK1104 after a whole compilation. So Windows is asked by making a
+  # file, which is the question.
+  def self.writable_directory?(directory : String) : Bool
+    {% if flag?(:win32) %}
+      probe = File.join(directory, ".iyi-write-probe-#{Process.pid}")
+      begin
+        File.write(probe, "")
+      rescue File::Error
+        return false
+      end
+      File.delete?(probe)
+      true
+    {% else %}
+      File.writable?(directory)
+    {% end %}
+  end
+
   # iyi: `path_key` of the file's real path, when there is a file: Windows
   # has one more spelling a string cannot fold, the 8.3 short name - a CI
   # runner's temporary directory is `C:\Users\RUNNER~1\...` to `mktemp`

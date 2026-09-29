@@ -490,7 +490,10 @@ case "$(uname -s)" in
     ;;
 esac
 mkdir -p "$WORK/readonly"
-chmod 500 "$WORK/readonly"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *) chmod 500 "$WORK/readonly" ;;
+esac
 # A directory this process cannot write into. `chmod 500` does not bite as
 # root, which is what CI runs as (see the unreadable module further down,
 # which is `/proc/self/mem` for the same reason): the build really did
@@ -503,12 +506,20 @@ unwritable=""
 # compiler can be sent: handed `/proc/prog` it resolves the name against the
 # current drive and writes the program into `C:\proc`, so the case reported
 # that nothing was refused after the build had quietly succeeded.
+# On Windows the mode bits are not the permission, an ACL is: a deny of
+# write on the directory is what binds there, and the compiler's question -
+# `File.writable?` of a directory - answered yes to it, so the refusal came
+# as the linker's LNK1104 after a whole compilation.
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) candidates="$WORK/readonly" ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /deny "$USERNAME:(WD,AD)" > /dev/null
+    candidates="$WORK/readonly" ;;
   *) candidates="$WORK/readonly /sys /proc" ;;
 esac
+# Asked by writing, not by `test -w`: under Git's shell that reads the
+# mode bits and says yes to a directory an ACL denies.
 for candidate in $candidates; do
-  if [ -d "$candidate" ] && [ ! -w "$candidate" ]; then
+  if [ -d "$candidate" ] && ! (touch "$candidate/.iyi_probe" && rm -f "$candidate/.iyi_probe") 2>/dev/null; then
     unwritable="$candidate"
     break
   fi
@@ -520,7 +531,11 @@ else
   echo "  an output directory that will not take the file: nothing here refuses"
   echo "  this process, so this case had nothing to drive"
 fi
-chmod 700 "$WORK/readonly"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /remove:d "$USERNAME" > /dev/null ;;
+  *) chmod 700 "$WORK/readonly" ;;
+esac
 # And the library the program compiles against. With IYI_PATH pointed
 # somewhere empty, the prelude is not found - and the answer was Crystal's
 # advice about `shards install` and `shard.yml`, to an author whose
@@ -879,12 +894,20 @@ refuses "an empty shard name" "the shard name is empty" -- \
 # `--out` naming a file of mkdir's "File exists". `$unwritable` is the
 # directory found above, since a mode bit does not bind as root.
 if [ -n "$unwritable" ]; then
-  chmod 500 "$WORK/readonly"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /deny "$USERNAME:(WD,AD)" > /dev/null ;;
+    *) chmod 500 "$WORK/readonly" ;;
+  esac
   refuses "a --mods directory that will not take the files" "no permission to write there" -- \
     "$IYI" bind --lib bindhere/lib --mods "$unwritable"
   refuses "a --out directory that will not take the modules" "no permission to write there" -- \
     "$IYI" migrate tree --out "$unwritable"
-  chmod 700 "$WORK/readonly"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /remove:d "$USERNAME" > /dev/null ;;
+    *) chmod 700 "$WORK/readonly" ;;
+  esac
 fi
 # As the author typed it, like `--lib` and `--mods` above: the expanded
 # path was a different string on Windows — 8.3 names long, separators

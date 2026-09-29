@@ -30,6 +30,21 @@ def slashed(path : String) : String
   end
 end
 
+# The other way, for a `\\?\` path, where Windows reads `/` as a name's
+# byte.
+def backslashed(path : String) : String
+  n = path.bytesize
+  bytes = path.to_unsafe
+  String.new(n) do |target|
+    target.copy_from(bytes, n)
+    i = 0
+    while i < n
+      target[i] = 92_u8 if target[i] == 47_u8
+      i = i + 1
+    end
+  end
+end
+
 import std/dir::{Dir}
 import std/file::{File}
 
@@ -220,6 +235,46 @@ File.chmod(locked_dir, 0o444)
 Dir.delete(locked_dir)
 assert_true !Dir.exists?(locked_dir), "a read-only directory is still the parent's to remove"
 puts "  deletion outcomes for empty and non-empty paths"
+
+{% if flag?(:win32) %}
+  puts "\n== windows roots, drives and the \\\\?\\ form"
+  # The current drive's root, spelled three ways, is one listing - `\`
+  # and `/` alone panicked, the pattern built from them naming a network
+  # path.
+  drive = Dir.current[0, 2]
+  root_kids = Dir.children(drive + "\\")
+  assert_true !root_kids.empty?, "the drive's root lists"
+  assert_true Dir.children("\\").size == root_kids.size, "Dir.children(\"\\\\\") is the drive's root"
+  assert_true Dir.children("/").size == root_kids.size, "Dir.children(\"/\") is the drive's root"
+
+  # A bare drive is that drive's current directory, not its root.
+  Dir.cd(sandbox) do
+    here = Dir.current[0, 2]
+    assert_true Dir.children(here).includes?("regular_file.txt"), "Dir.children(\"C:\") lists the current directory on C:"
+
+    # And a drive-relative path is created there, not at the root.
+    root_stray = here + "\\iyi_dir_exercise_drive_rel"
+    Dir.mkdir_p(here + "iyi_dir_exercise_drive_rel\\inner")
+    stray = Dir.exists?(root_stray)
+    if stray
+      Dir.delete?(root_stray + "\\inner")
+      Dir.delete?(root_stray)
+    end
+    assert_true !stray, "mkdir_p(\"C:rel\\\\x\") made nothing at the drive's root"
+    assert_true Dir.exists?(sandbox + "/iyi_dir_exercise_drive_rel/inner"), "mkdir_p(\"C:rel\\\\x\") made rel\\x in the current directory"
+  end
+
+  # Under `\\?\` Windows does not parse the path again, and `/` there is
+  # a name's byte rather than a separator.
+  prefixed = "\\\\?\\" + backslashed(sandbox) + "\\prefixed\\two\\three"
+  Dir.mkdir_p(prefixed)
+  assert_true Dir.exists?(sandbox + "/prefixed/two/three"), "mkdir_p makes every segment of a \\\\?\\ path"
+
+  # A drive's root keeps the separator that makes it the root.
+  assert_str "C:\\", Dir.without_trailing_separator("C:\\"), "a drive's root keeps its separator"
+  assert_str "C:\\tmp", Dir.without_trailing_separator("C:\\tmp\\"), "any other directory drops it"
+  puts "  roots, bare drives, drive-relative and \\\\?\\ paths"
+{% end %}
 
 # Cleanup sandbox
 clean_tree(sandbox)

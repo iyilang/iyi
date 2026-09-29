@@ -374,6 +374,19 @@
 
 ### Fixed
 
+- **On Windows, `std/dir` answers for roots, bare drives and `\\?\`
+  paths.** `Dir.children("/")` and `Dir.children("\\")` panicked with
+  "Cannot open directory" on a directory `Dir.exists?` accepted: the
+  listing pattern put a second separator after the root, and `\\*` is the
+  start of a network path to Windows. `Dir.children("C:")` listed the
+  drive's root where `C:` is the current directory on C:.
+  `Dir.mkdir_p` joined every segment with `/`, so `C:rel\x` made `C:\rel`
+  at the drive's root and then panicked, and under a `\\?\` prefix, where
+  `/` is not a separator, it made the first segment and refused the rest.
+  And `Dir.tempdir` turned a TMP of `C:\` into `C:`, the current directory.
+  `bench/std_dir_exercise.iyi` checks each on Windows; putting any one of
+  the four fixes back fails it.
+
 - **Objects past 128 bytes keep their pages warm.** The sweep keeps a
   budget's worth of dead pages warm for the next epoch and hands the rest
   back to the kernel, and it counted a page's worth at the chunk. Past

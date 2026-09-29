@@ -1074,6 +1074,42 @@ def main():
     c.send("textDocument/didClose",
            {"textDocument": {"uri": loud_uri}}, wait=False)
 
+    # 18i. An importer compiles against an unsaved buffer of a module
+    #      below the root. The resolver spells that file with the module
+    #      path's own `/` inside a native root, the buffer is keyed by the
+    #      path its URI names, and on Windows the two never met: a def
+    #      renamed in `nest/lib`'s buffer left `nest/use`'s verdict clean,
+    #      compiled against the disk.
+    nest = os.path.join(work, "nest")
+    os.makedirs(nest)
+    nest_lib = os.path.join(nest, "lib.iyi")
+    nest_use = os.path.join(nest, "use.iyi")
+    nest_lib_text = "module nest/lib\n\npub def token : String\n  \"NUM\"\nend\n"
+    nest_use_text = "module nest/use\n\nimport nest/lib::{token}\n\nputs token\n"
+    with open(nest_lib, "w", newline="") as f:
+        f.write(nest_lib_text)
+    with open(nest_use, "w", newline="") as f:
+        f.write(nest_use_text)
+    nest_lib_uri, nest_use_uri = file_uri(nest_lib), file_uri(nest_use)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nest_use_uri, "languageId": "iyi",
+                             "version": 1, "text": nest_use_text}}, wait=False)
+    clean_first = c.diagnostics(nest_use_uri)["diagnostics"] == []
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nest_lib_uri, "languageId": "iyi", "version": 1,
+                             "text": nest_lib_text.replace("def token", "def tok")}}, wait=False)
+    c.diagnostics(nest_lib_uri)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": nest_use_uri, "version": 2},
+            "contentChanges": [{"text": nest_use_text + "\n"}]}, wait=False)
+    after = c.diagnostics(nest_use_uri)["diagnostics"]
+    step("18i", "an importer compiles against a nested module's unsaved buffer",
+         clean_first and any("token" in d["message"] for d in after),
+         f"clean first {clean_first}, after the buffer's rename: "
+         f"{[d['message'][:60] for d in after]}")
+    for uri in (nest_lib_uri, nest_use_uri):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

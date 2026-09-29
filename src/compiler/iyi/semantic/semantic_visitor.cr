@@ -484,7 +484,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     end
 
     candidates.find do |candidate|
-      @program.iyi_file_overrides.has_key?(candidate) || File.file?(candidate)
+      !@program.iyi_file_override(candidate).nil? || File.file?(candidate)
     end
   end
 
@@ -1285,7 +1285,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # answers it too, at the `import` line that asked for it.
     source =
       begin
-        @program.iyi_file_overrides[filename]? || File.read(filename)
+        @program.iyi_file_override(filename) || File.read(filename)
       rescue ex : File::Error
         node.raise "cannot read #{filename}: #{ex.os_error.try(&.message) || ex.message}"
       end

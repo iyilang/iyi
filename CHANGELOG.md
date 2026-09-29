@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **On Windows, the language server compiles an importer against a
+  nested module's unsaved buffer.** The resolver spells a module below
+  the root with the module path's own `/` inside a native root,
+  `C:\root\nest/lib.iyi`, and the server keys a buffer by the path its
+  URI names, `C:\root\nest\lib.iyi`; the two never met, so an importer
+  was compiled against the disk - a def renamed in `nest/lib`'s buffer
+  left `nest/use`'s verdict clean. A module at the root has no `/` in its
+  path, which is why step 9 never saw it. The lookup folds the spelling
+  now. Step 18i of `bench/lsp_session.py` renames in a nested module's
+  buffer and requires the importer's error; the old server reported none.
+
 - **On Windows, `iyi daemon start` says there is no daemon there.** It
   told a Windows user to `make iyi-daemon`, a target `Makefile.win` does
   not have: the server forks a child per build and Windows has no fork.

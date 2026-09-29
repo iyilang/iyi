@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **A byte order mark does not hide a module's header.** The lexer skips
+  the mark a Windows editor may put at the front of a file; the three
+  readings of a header - a build's root, `iyi doc` and the language
+  server, each its own copy - read it as part of the first line. So a
+  module saved with one ran as a script and its imports were "can't find
+  module", `iyi doc` said it "declares no module", and `iyi fmt` wrote it
+  back without the mark, which `--check` then called unformatted. There
+  is one reading now, `Compiler.module_header_of`, past the mark, and
+  `fmt` keeps a mark the file had. `bench/verbs_exercise.sh` runs, docs,
+  checks and formats a module with one; the old compiler fails all four.
+
 - **`File.same?` is false for two files nothing could identify.** On
   Windows `File.info` answers a file it cannot open with its attributes
   alone and an identity of 0, and `same?` read 0 and 0 as one file: two

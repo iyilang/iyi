@@ -248,6 +248,33 @@ if [ HDR/APP/MAIN.IYI -ef hdr/app/main.iyi ]; then
     status=1
   fi
 fi
+# A byte order mark, which a Windows editor may put at the front of a
+# file. The lexer skips it; the three readings of a header did not, so a
+# module saved with one ran as a script and its import beside the header
+# was "can't find module", `iyi doc` said it "declares no module", and
+# `fmt` wrote the file back without the mark and `--check` called a
+# formatted file unformatted.
+mkdir -p bom/app
+printf '\357\273\277module app/util\n\npub def answer : Int32\n  42\nend\n' > bom/app/util.iyi
+printf '\357\273\277module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > bom/app/main.iyi
+cp bom/app/util.iyi bom/util.keep
+if "$IYI" run bom/app/main.iyi > bom_run.out 2>&1 && grep -qx 42 bom_run.out; then
+  echo "  a module saved with a byte order mark: resolves its imports"
+else
+  echo "  a module saved with a byte order mark did not run:"; sed -n '1,3p' bom_run.out; status=1
+fi
+if "$IYI" doc bom/app/util.iyi > bom_doc.out 2>&1 && grep -q 'answer' bom_doc.out; then
+  echo "  iyi doc of a module saved with a byte order mark: its surface"
+else
+  echo "  iyi doc of a module saved with a byte order mark:"; sed -n '1,3p' bom_doc.out; status=1
+fi
+if "$IYI" fmt --check bom/app/util.iyi > bom_fmt.out 2>&1; then
+  echo "  fmt --check of a formatted file with a byte order mark: clean"
+else
+  echo "  fmt --check of a formatted file with a byte order mark:"; sed -n '1,3p' bom_fmt.out; status=1
+fi
+"$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
+cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

@@ -30,18 +30,9 @@ module Iyi::Lsp
       [] of Item
     end
 
-    # The compilation-unit header: the first `module x` line, the same
-    # reading `project_root_of` does.
+    # The compilation-unit header, read the way a build reads it.
     def self.header_of(text : String) : String?
-      text.each_line do |line|
-        line = line.strip
-        next if line.empty? || line.starts_with?('#')
-        return nil unless line.starts_with?("module ")
-        module_path = line.lchop("module ").strip
-        return nil if module_path.empty? || module_path.includes?(' ')
-        return module_path
-      end
-      nil
+      Compiler.module_header_of(text)
     end
 
     private def self.collect(node : ASTNode, module_path : String, into : Array(Item)) : Nil

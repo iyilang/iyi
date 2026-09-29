@@ -199,6 +199,10 @@ class Iyi::Command
       # `newline_style = Auto`. Normalised before it is applied so that a
       # raw CR already in the text cannot become `\r\r\n`.
       result = result.gsub("\r\n", "\n").gsub('\n', "\r\n") if iyi_crlf?(source)
+      # And the byte order mark it began with, which the lexer skips: a file
+      # saved with one came back without it, and `--check` failed a file
+      # whose code was already formatted.
+      result = "\uFEFF#{result}" if source.starts_with?('\uFEFF') && !result.starts_with?('\uFEFF')
 
       @stdout.print result if @format_stdin
       return if result == source

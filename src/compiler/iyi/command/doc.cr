@@ -358,13 +358,7 @@ class Iyi::Command
   # empty surface at exit 0 — a documented module reported as exporting
   # nothing, which is the worst of the three answers a verb can give.
   private def doc_module_header(source : String) : String?
-    source.each_line do |line|
-      text = line.strip
-      next if text.empty? || text.starts_with?('#')
-      return text.lchop("module").strip if text.starts_with?("module ")
-      break
-    end
-    nil
+    Compiler.module_header_of(source)
   end
 
   # And the directory that name is read from: `deep/inner/thing` is found

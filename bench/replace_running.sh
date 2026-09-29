@@ -143,6 +143,15 @@ if replace "" "$next_w" && [ -n "$aside" ] && gone_soon "$WORK/$aside"; then
   echo "  $aside deleted"
 else
   echo "  $aside is still there, or the replacement failed:"; sed 's/^/    /' "$WORK/make.out"
+  # What holds it, asked the three ways a Windows file is held: a process
+  # running an image from this directory, a handle that will not share, and
+  # the delete's own sentence, which `REPLACE` sends to NUL.
+  aside_w="$(cygpath -w "$WORK/$aside")"
+  echo "    processes running from $WORK:"
+  powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.ExecutablePath -like '$(cygpath -w "$WORK")\\*' } | ForEach-Object { '      ' + \$_.ProcessId + ' ' + \$_.ExecutablePath + ' ' + \$_.CommandLine }" 2>&1
+  powershell -NoProfile -Command "try { [IO.File]::Open('$aside_w', 'Open', 'Read', 'None').Close(); '    it opens unshared now' } catch { '    it does not open unshared: ' + \$_.Exception.Message }" 2>&1
+  echo "    the delete says: $(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c del /F /Q "$aside_w" 2>&1 | tr -d "\r")"
+  [ -e "$WORK/$aside" ] && echo "    and it is still there" || echo "    and now it is gone"
   status=1
 fi
 

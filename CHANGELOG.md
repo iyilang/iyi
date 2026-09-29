@@ -374,6 +374,15 @@
 
 ### Fixed
 
+- **On Windows, `iyi test` leaves nothing in the temporary directory.**
+  Each test is built to a temporary name and deleted after it runs; the
+  name had no extension, `build -o` appended `.exe`, and the delete asked
+  for the name without it, so every test left its program and its `.pdb`
+  in %TEMP% - this machine's held 275 of them. The name carries the
+  extension now and the `.pdb` goes with it. `bench/test_verb.sh` runs a
+  test with the temporary directory pointed at an empty one and requires
+  it empty after; the old verb left the two files.
+
 - **On Windows, two `iyi run`s of programs with one name run side by
   side.** The runner linked into one executable per basename in the
   cache, and Windows will not write over an executable that is running:

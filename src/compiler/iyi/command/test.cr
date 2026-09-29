@@ -261,7 +261,11 @@ class Iyi::Command
     started = Time.instant
     output = IO::Memory.new
 
-    binary = File.tempname("iyi-test", nil)
+    # With the executable's extension, which `build -o` appends to a name
+    # that has none: without it the delete below asked for a name nothing
+    # had, and on Windows every test left its program and its `.pdb` in
+    # %TEMP%.
+    binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
     begin
       build_status = Process.run(
         Process.executable_path.not_nil!,
@@ -294,6 +298,9 @@ class Iyi::Command
       end
     ensure
       File.delete?(binary)
+      {% if flag?(:win32) %}
+        File.delete?(binary.rchop(".exe") + ".pdb")
+      {% end %}
     end
   end
 

@@ -135,6 +135,18 @@ printf 'module wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wi
 grep -q 'memory fault' wild.txt || { echo "the kernel's kill is not the evidence:"; cat wild.txt; exit 1; }
 rm wild_test.iyi
 
+step "a test leaves nothing in the temporary directory"
+# Each test is built to a temporary name and deleted after it runs. On
+# Windows the name had no extension, the build appended `.exe`, and the
+# delete asked for the name without it: every test left its program and
+# its `.pdb` behind, and a developer's %TEMP% held hundreds of them.
+mkdir -p scratch_tmp
+scratch="$WORK/scratch_tmp"
+TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" "$IYI" test math_test.iyi > tmp.txt 2>&1 ||
+  { echo "the test did not pass:"; cat tmp.txt; exit 1; }
+left="$(ls -A "$scratch")"
+[ -z "$left" ] || { echo "a test left behind:"; echo "$left"; exit 1; }
+
 echo "workdir $WORK"
 echo "test verb gate: every step held"
 exit 0

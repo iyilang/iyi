@@ -374,6 +374,18 @@
 
 ### Fixed
 
+- **On Windows, `File.readable?`, `writable?` and `executable?` answer
+  what Windows would allow.** They read a mode made up from the
+  attributes - 0o644 or 0o755 and the read-only bit - and an ACL is not
+  in it: a file this user was denied reading was `readable? true` and the
+  read then panicked, one denied writing was `writable? true`, and
+  `cmd.exe` was `executable? false`. The first two open the path for that
+  access now, the way POSIX `access` asks; a file another process holds
+  without sharing is answered from its attributes as before. A file is
+  executable by one of PATHEXT's extensions, and a directory when it can
+  be read. `bench/std_file_exercise.sh` denies a read and a write with
+  `icacls` and asks `cmd.exe`; the old module answered true, true, false.
+
 - **On Windows, closing a socket another task is reading ends it
   gracefully.** A server that answered a request and closed the
   connection while its next read was parked reset the connection instead

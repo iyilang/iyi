@@ -902,9 +902,37 @@ class ::File
     inf ? inf.symlink? : false
   end
 
+  {% if flag?(:win32) %}
+    # Windows' answer to POSIX `access`: open the path for *access* and see.
+    # The mode `info` reports is made up from the attributes - 0o644 or
+    # 0o755 and the read-only bit - and an ACL is not in it, so a file
+    # this user was denied answered `readable? true` and the read then
+    # panicked. A path another process holds without sharing refuses every
+    # open (ERROR_SHARING_VIOLATION, 32), which says nothing about the
+    # permission, and is answered from the attributes as before.
+    private def self.win_opens?(path : String, access : Int32) : Bool?
+      wide = __iyi_wide_path(sys_path(path))
+      return false if wide.address == 0_u64
+      # Every share right, OPEN_EXISTING, BACKUP_SEMANTICS so a directory
+      # opens too.
+      handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        return nil if Std::File::LibKernel32.GetLastError == 32
+        return false
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      true
+    end
+  {% end %}
+
   def self.readable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 4) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, -2147483648) # GENERIC_READ
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.readable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.readable? : false
@@ -914,15 +942,32 @@ class ::File
   def self.writable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 2) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, 0x40000000) # GENERIC_WRITE
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.writable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.writable? : false
     {% end %}
   end
 
+  # On Windows a file runs by its extension, one of PATHEXT's - what cmd
+  # and `CreateProcess`'s search go by - and a directory is searchable
+  # when it can be read. `cmd.exe` answered false: the made-up mode gave
+  # the execute bit to directories alone.
   def self.executable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 1) == 0
+    {% elsif flag?(:win32) %}
+      inf = info?(path)
+      return false unless inf
+      return readable?(path) if inf.directory?
+      extension = extname(path).upcase
+      return false if extension.empty?
+      pathext = Program.env("PATHEXT") || ".COM;.EXE;.BAT;.CMD"
+      pathext.upcase.split(';').includes?(extension) && readable?(path)
     {% else %}
       inf = info?(path)
       inf ? inf.executable? : false

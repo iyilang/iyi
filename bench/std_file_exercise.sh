@@ -499,6 +499,30 @@ PY
         fi
       done
     fi
+    # What `access` answers on POSIX, asked of Windows: a file this user is
+    # denied reading is not readable, one denied writing is not writable,
+    # and `cmd.exe` is executable. The made-up mode answered true, true
+    # and false.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.readable?(Program.args[0])} #{File.writable?(Program.args[0])} #{File.executable?(Program.args[0])}"\n' > "$WORK/access.iyi"
+    if ! "$IYI" build -o "$WORK/access" "$WORK/access.iyi" > "$WORK/access.build" 2>&1; then
+      echo "  the access program did not build"; sed -n '1,10p' "$WORK/access.build"; status=1
+    else
+      printf 'x' > "$WORK/no_read.txt"; printf 'x' > "$WORK/no_write.txt"
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/no_read.txt")" /deny "$USERNAME:(RD)" > /dev/null
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/no_write.txt")" /deny "$USERNAME:(WD)" > /dev/null
+      no_read="$("$WORK/access" "$WORK/no_read.txt" 2>&1)"
+      no_write="$("$WORK/access" "$WORK/no_write.txt" 2>&1)"
+      shell="$("$WORK/access" "$(cygpath -m "$SYSTEMROOT")/System32/cmd.exe" 2>&1)"
+      for f in no_read no_write; do
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /remove:d "$USERNAME" > /dev/null
+      done
+      if [ "$no_read" = "false true false" ] && [ "$no_write" = "true false false" ] && [ "$shell" = "true false true" ]; then
+        echo "  readable?, writable? and executable? answer as Windows would let them"
+      else
+        echo "  readable?/writable?/executable?: denied read '$no_read', denied write '$no_write', cmd.exe '$shell'"
+        status=1
+      fi
+    fi
     # A reparse point is a link only by its tag. Every one was `Symlink`,
     # so an app execution alias - what `WindowsApps` holds - and a cloud
     # placeholder answered `file? false`; and a junction whose directory is

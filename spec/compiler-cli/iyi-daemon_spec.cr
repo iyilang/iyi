@@ -24,9 +24,16 @@ describe "`iyi daemon`" do
         env: {"CRYSTAL_DAEMON" => ""})
 
       result.should be_failure(1)
-      result.error.should contain("iyi-daemon")
-      result.error.should contain("make iyi-daemon")
-      result.error.should_not contain("crystal-daemon")
+      # Windows has no fork and so no server to look for: it says that,
+      # rather than naming a make target `Makefile.win` does not have.
+      {% if flag?(:win32) %}
+        result.error.should contain("there is no daemon on Windows")
+        result.error.should_not contain("make ")
+      {% else %}
+        result.error.should contain("iyi-daemon")
+        result.error.should contain("make iyi-daemon")
+        result.error.should_not contain("crystal-daemon")
+      {% end %}
     end
   end
 end

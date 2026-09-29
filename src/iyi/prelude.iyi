@@ -1741,7 +1741,7 @@ require "./file"
 
       def self.write16(address : UInt64, value : UInt64) : Nil
         write8(address, value & 0xFF_u64)
-        write8(address + 1_u64, value.unsafe_shr(8_u64) & 0xFF_u64)
+        write8(address &+ 1_u64, value.unsafe_shr(8_u64) & 0xFF_u64)
       end
 
       # ── Whose state is whose ──────────────────────────────────────────
@@ -1809,23 +1809,28 @@ require "./file"
       end
 
       # This thread's cache, mapped on first touch and linked for the
-      # scavenge before the thread-local names it.
+      # scavenge before the thread-local names it. The touch is out of
+      # line: inside, it held every allocation's `cache` to a call.
       def self.cache : Pointer(UInt64)
         page = @@cache
-        if page == 0
-          page = __iyi_mmap(DIR_LEN).address
-          lock
-          # The shared pages, made under the same lock the first time any
-          # thread reaches the heap: two threads' first allocations would
-          # otherwise each map a centre of their own.
-          @@central = __iyi_mmap(DIR_LEN).address if @@central == 0
-          arena_dir
-          write64(page + CACHE_NEXT, @@caches)
-          @@caches = page
-          unlock
-          @@cache = page
-        end
+        page = first_touch if page == 0
         Pointer(UInt64).new(page)
+      end
+
+      @[NoInline]
+      def self.first_touch : UInt64
+        page = __iyi_mmap(DIR_LEN).address
+        lock
+        # The shared pages, made under the same lock the first time any
+        # thread reaches the heap: two threads' first allocations would
+        # otherwise each map a centre of their own.
+        @@central = __iyi_mmap(DIR_LEN).address if @@central == 0
+        arena_dir
+        write64(page + CACHE_NEXT, @@caches)
+        @@caches = page
+        unlock
+        @@cache = page
+        page
       end
 
       def self.first_cache : UInt64
@@ -2050,25 +2055,17 @@ require "./file"
       # object, and is the caller's to store for a headed one.
       def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         table = cache
-        # The arithmetic on the way in and out is wrapping: a counter on
-        # a page cannot overflow, and a checked add is a branch each on
-        # the path every allocation takes.
-        write64(table.address + CACHE_INSIDE, read64(table.address + CACHE_INSIDE) &+ 1_u64)
-        slice = read64(table.address + CACHE_SLICE) &+ size
+        # The arithmetic on the way in and out is wrapping, addresses
+        # included: a counter on a page cannot overflow, nor can an offset
+        # into it, and a checked add is a branch each on the path every
+        # allocation takes.
+        write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
+        slice = read64(table.address &+ CACHE_SLICE) &+ size
         if slice >= SLICE
-          write64(table.address + CACHE_SLICE, 0_u64)
-          # Before the carve: a collection triggered here cannot sweep the
-          # object about to be born, because it does not exist yet, and
-          # everything already born is reachable or fair game. Under a
-          # mark, a slice's worth of allocation buys a slice's worth of
-          # marking on this thread first - the assist.
-          if LibIyiGCTable.__iyi_marking != 0_u8
-            IyiMark.assist
-          else
-            IyiMark.pressure(slice)
-          end
+          write64(table.address &+ CACHE_SLICE, 0_u64)
+          slice_full(slice)
         else
-          write64(table.address + CACHE_SLICE, slice)
+          write64(table.address &+ CACHE_SLICE, slice)
         end
         base = take_inside(table, bits & HEADED_FLAG != 0 ? size &+ HEADER : size, clear, bits, type_id)
         # Born while a mark runs beside the program: black, and counted
@@ -2080,12 +2077,29 @@ require "./file"
         base
       end
 
+      # A slice's worth allocated: before the carve, so a collection
+      # triggered here cannot sweep the object about to be born, because
+      # it does not exist yet, and everything already born is reachable
+      # or fair game. Under a mark, a slice's worth of allocation buys a
+      # slice's worth of marking on this thread first - the assist. Out
+      # of line, because it runs once a slice: inlined, the assist's and
+      # the trigger's paths - syscalls and all - were code every
+      # allocation carried in its body.
+      @[NoInline]
+      def self.slice_full(slice : UInt64) : Nil
+        if LibIyiGCTable.__iyi_marking != 0_u8
+          IyiMark.assist
+        else
+          IyiMark.pressure(slice)
+        end
+      end
+
       # Out of the allocator, or the barrier: the depth counter down, and
       # a stop that was deferred while it was up is paid now.
       def self.leave(table : Pointer(UInt64)) : Nil
-        write64(table.address + CACHE_INSIDE, read64(table.address + CACHE_INSIDE) &- 1_u64)
+        write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &- 1_u64)
         {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-          if read64(table.address + CACHE_INSIDE) == 0_u64 && read64(table.address + CACHE_REQUEST) != 0
+          if read64(table.address &+ CACHE_INSIDE) == 0_u64 && read64(table.address &+ CACHE_REQUEST) != 0
             IyiThread.park_if_requested
           end
         {% end %}
@@ -2135,9 +2149,9 @@ require "./file"
           # codegen stores.
           arena = head & (0_u64 &- MAP)
           slot = read64(head &+ OFF_INDEX)
-          byte = arena + META + slot * META_ENTRY
+          byte = arena &+ META &+ slot &* META_ENTRY
           write8(byte, bits | CARVED_FLAG | IyiMark.epoch_flag)
-          write16(byte + 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
+          write16(byte &+ 1_u64, type_id) if bits & (UNTYPED_FLAG | HEADED_FLAG) == 0
           clear_block(head, chunk_of(index)) if clear
           return headed ? head &+ HEADER : head
         end

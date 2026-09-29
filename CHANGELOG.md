@@ -96,6 +96,17 @@
 
 ### Changed
 
+- **An allocation carries less.** The thread's cache page was a call on
+  every allocation, because its first-touch mapping sat inside it; the
+  assist's and the trigger's paths, which run once a 64 KB slice, were
+  inlined into every allocation's body with their syscalls; and the
+  fast path's address arithmetic was checked, a branch each and a
+  multiply with an overflow test for the chunk's table entry. The touch
+  and the slice's end are out of line and the addresses wrap. Measured
+  with callgrind (which the stack fix above made possible) on binary
+  trees at depth 14: 146 instructions an allocation in `take` to 132,
+  the cache call's 18 gone, 7% fewer in all.
+
 - **`Float64#floor` and `ceil` are one instruction.** On x86_64 the
   processor is asked once, by `cpuid`, whether it has SSE4.1's
   `roundsd`, as glibc's `floor` chooses its own version, and the
@@ -11713,7 +11724,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,641-line library and nothing else. Every other
+  written against iyi's own 18,655-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -192,6 +192,27 @@ module Iyi
     CacheDir.instance.join("#{Iyi::Command.program_name}-run-#{basename}.tmp")
   end
 
+  # iyi: the temporary programs runners left behind: a runner removes its
+  # own when the program ends, and one ended from outside - `taskkill /F`,
+  # an editor's stop button, which is `TerminateProcess` and runs nothing -
+  # leaves its program and its `.pdb` in the cache. Named one per runner
+  # (below), they would pile up; so each run takes away what an hour-old
+  # runner left. An hour, because a younger file may be a program another
+  # runner has just linked and not yet started; on Windows a running one
+  # refuses the delete anyway.
+  def self.sweep_run_leftovers : Nil
+    dir = CacheDir.instance.dir
+    prefix = "#{Iyi::Command.program_name}-run-"
+    cutoff = Time.utc - 1.hour
+    Dir.each_child(dir) do |name|
+      next unless name.starts_with?(prefix) && name.includes?(".tmp")
+      path = File.join(dir, name)
+      next unless (info = File.info?(path)) && info.modification_time < cutoff
+      File.delete?(path) rescue nil
+    end
+  rescue File::Error
+  end
+
   # iyi: one per runner, by its process id. It was one per basename, and
   # Windows will not write over an executable that is running: two `iyi
   # run main.iyi` at once - two different programs in two directories,

@@ -793,9 +793,13 @@
   while one `iyi run main.iyi` ran, any other `main.iyi` - another
   program in another directory, or the same one - failed with "LNK1104:
   cannot open file ...\iyi-run-main.exe.tmp.exe". Each runner links its
-  own now, named by its process id. `bench/verbs_exercise.sh` runs a
-  second `main.iyi` while the first holds its executable; the old runner
-  failed it with LNK1104.
+  own now, named by its process id. A runner ended from outside -
+  `taskkill /F`, an editor's stop, which runs nothing in it - leaves its
+  program in the cache, and one per runner would pile up, so each run
+  takes away what a runner left over an hour ago. `bench/verbs_exercise.sh`
+  runs a second `main.iyi` while the first holds its executable, which the
+  old runner failed with LNK1104, and plants an old and a fresh leftover:
+  the old one goes, the fresh one stays.
 
 - **On Windows, a listening port is the listener's.** A bind to
   127.0.0.1:P went through while `IyiSocket.listen` held 0.0.0.0:P, and

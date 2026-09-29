@@ -231,6 +231,22 @@ fi
 touch twin_b.done
 wait "$twin_a"
 grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
+# What a runner ended from outside leaves - `taskkill /F` runs no code
+# in it, so its program stays in the cache under the runner's own name -
+# the next run takes away once it is an hour old, and not before: a
+# younger one may be another runner's, linked and about to start.
+mkdir -p "$WORK/runcache"
+: > "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+: > "$WORK/runcache/iyi-run-main-99998.tmp.exe"
+touch -d '2 hours ago' "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
+if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
+  echo "  a runner's leftover from two hours ago is still in the cache"; status=1
+elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
+  echo "  a runner's leftover from just now was taken"; status=1
+else
+  echo "  an old runner's leftover is taken, a fresh one kept"
+fi
 # A path in another case, where the file system says it is the same
 # file. The root a header names was found by comparing strings, so `iyi
 # run HDR/APP/MAIN.IYI` found none, and the import beside the header was

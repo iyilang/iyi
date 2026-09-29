@@ -455,6 +455,7 @@ class Iyi::Command
       return
     end
 
+    Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable(config.output_filename)
 
     config.compile output_filename

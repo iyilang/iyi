@@ -298,6 +298,7 @@ mutate "a run of classes that matches on its first byte alone" '      return fal
 mutate "a table's missing entry kept as the match" '    pattern.replace(self) { |match| table[match]? || "" }' '    pattern.replace(self) { |match| table[match]? || match }'
 mutate "an automaton that keeps every bit" '      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]' '      state = state.unsafe_shl(1_u64) | heads'
 mutate "a literal looked for from one byte past where it may start" '    text.byte_index(literal, from)' '    text.byte_index(literal, from + 1)'
+mutate "a pattern that forgets its source" 'RxRuns.parse(pattern), pattern)' 'RxRuns.parse(pattern), "")'
 
 # A script with no module header imports `Regex` the same way. The compiler
 # declares an empty `Regex` of its own before any source is read - the

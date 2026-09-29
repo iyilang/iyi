@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`Regex#source`.** A pattern answers the text it was compiled from,
+  the other library's name for it, so a program that prints its
+  patterns - crystal-metric's RegexDna writes `"#{f.source} #{count}"`
+  for each of nine literals - keeps the literal and not a second list of
+  strings beside it. `bench/std_regex_exercise.sh` reads it off a literal
+  and an interpolated one, and proves the check fails when the pattern
+  is dropped.
+
 - **Regex literals in iyi programs.** `/a+b/` in a `.iyi` file is
   `std/regex`'s `Regex.compile("a+b")`, compiled once for the program as
   the other library's literal is - `/x/` in a loop is one constant - and

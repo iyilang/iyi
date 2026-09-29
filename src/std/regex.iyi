@@ -252,8 +252,9 @@ pub struct Regex
   # behind a filter on the first byte, instead of stepping the machine. The
   # nine patterns regexdna counts over 60 MB took 6 s through the machine.
   @runs : RxRuns?
+  @source : String
 
-  def initialize(@nfa : RxNfa, @literal : String? = nil, @runs : RxRuns? = nil)
+  def initialize(@nfa : RxNfa, @literal : String? = nil, @runs : RxRuns? = nil, @source : String = "")
   end
 
   # The machine is compiled first either way: it is what refuses a pattern
@@ -261,7 +262,13 @@ pub struct Regex
   def self.compile(pattern : String) : Regex
     nfa = RxCompiler.new(pattern).compile
     literal = literal_of(pattern)
-    new(nfa, literal, literal ? nil : RxRuns.parse(pattern))
+    new(nfa, literal, literal ? nil : RxRuns.parse(pattern), pattern)
+  end
+
+  # The pattern as written, the other library's `Regex#source`: what a
+  # literal was compiled from, for a program that prints its patterns.
+  def source : String
+    @source
   end
 
   # Nil for an empty pattern, which matches between every two bytes, and

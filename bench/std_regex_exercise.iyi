@@ -184,6 +184,8 @@ seen = 0
 assert_true seen == 6, "a literal in a loop"
 pat = "c+"
 assert_str "ccd", /#{pat}d/.find("xccd") || "", "an interpolated literal"
-puts "  match, scan, escapes, a loop and an interpolation"
+assert_str "[cgt]gggtaaa|tttaccc[acg]", /[cgt]gggtaaa|tttaccc[acg]/.source, "a literal answers its source"
+assert_str "c+d", /#{pat}d/.source, "and an interpolated one the text it was compiled from"
+puts "  match, scan, escapes, a loop, an interpolation and the source"
 
 puts "\nALL CHECKS PASSED"

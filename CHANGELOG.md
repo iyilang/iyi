@@ -499,6 +499,14 @@
 
 ### Fixed
 
+- **`(-0.0).abs` is `0.0`,** as it is in Crystal. `Float64#abs` and
+  `Float32#abs` were a comparison, and `-0.0 < 0.0` is false, so a
+  negative zero kept its sign - and `log10(-0.0)`, whose glibc answer is
+  `-Infinity`, came out `+Infinity` for it. The sign is cleared by `copysign`,
+  one instruction on every target, and a single goes through the double.
+  `bench/number_exercise.sh` checks it and proves the comparison fails it;
+  `bench/std_float_exercise.sh` checks the single.
+
 - **A program runs under valgrind.** On Linux the collector finds the
   main thread's stack in `/proc/self/maps`, and took the line named
   `[stack]`; under valgrind that is valgrind's own stack, the program's
@@ -11812,7 +11820,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,710-line library and nothing else. Every other
+  written against iyi's own 18,713-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

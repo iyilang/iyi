@@ -281,6 +281,11 @@ prove_fails "a zero without its sign" unsigned_zero float.iyi \
   "number: floor and ceil as the other library answers them" \
   's/^      rounds == 1$/      false/; s/^      LibIyiRounding.copysign(truncated < self ? truncated + 1.0 : truncated, self)$/      truncated < self ? truncated + 1.0 : truncated/'
 
+# 7d. abs by a comparison again, which leaves `-0.0` as it is.
+prove_fails "abs keeps a zero's sign" abs_sign float.iyi \
+  "number: abs clears the sign of a zero too" \
+  's/^    LibIyiRounding.copysign(self, 1.0)$/    self < 0.0 ? 0.0 - self : self/'
+
 # 7c. The instruction told to truncate: `roundsd`'s mode 11 rather than
 #     9, which is what floor asks. Read on a processor that has it.
 prove_fails "the instruction truncates" roundsd_mode float.iyi \

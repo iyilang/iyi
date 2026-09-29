@@ -86,8 +86,11 @@ struct Float64
     result
   end
 
+  # The sign cleared, which a comparison cannot do: `-0.0 < 0.0` is false,
+  # and `(-0.0).abs` answered `-0.0` - `log10(-0.0)` came out `+Infinity`
+  # for it. `copysign` is an instruction on every target.
   def abs : Float64
-    self < 0.0 ? 0.0 - self : self
+    LibIyiRounding.copysign(self, 1.0)
   end
 
   # The integer below and above, as a `Float64`: one instruction where the

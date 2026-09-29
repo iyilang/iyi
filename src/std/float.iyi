@@ -325,8 +325,10 @@ import std/number
 struct ::Float32
   # Every single is a double, and the integer nearest a single is a
   # single: the prelude's `Float64` roundings are exact for it.
+  # The sign cleared, by `Float64#abs`: a single widens to a double and
+  # back exactly, and a comparison left `(-0.0_f32).abs` at `-0.0`.
   def abs : Float32
-    self < 0.0_f32 ? -1.0_f32 * self : self
+    to_f64.abs.to_f32
   end
 
   def floor : Float32

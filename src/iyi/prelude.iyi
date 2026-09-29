@@ -5952,18 +5952,24 @@ require "./file"
 
       # How many of a run of `pages` pages of `chunk`-byte chunks stay
       # warm: as many as the epoch's warm pages have room for under a
-      # budget's worth of payload. A page's share of the payload is
-      # `PAGE * (chunk - HEADER) / chunk` - a class larger than a page has
-      # less than one chunk to a page; the budget is what the program will
-      # ask for, and headers are not what it asks for - counted in pages
-      # against the budget's bytes, the warm pages of a 64-byte class held
-      # an eighth less than the epoch's demand and the carve took the
-      # difference from the frontier every epoch.
+      # budget's worth of payload. The budget is what the program will ask
+      # for, and a page's share of it is `PAGE * floor / chunk`, less the
+      # header, which is not what it asks for: counted at the full chunk,
+      # the warm pages of a 64-byte class held an eighth less than the
+      # epoch's demand. Past 128 bytes a class is a quarter step, and
+      # `floor` is the least a request in it asks - one byte past the
+      # class below - because a request rounds up by as much as a
+      # quarter there: BigInt's limb arrays, 40 KB asked of 48 KB
+      # chunks, needed a fifth more pages than the budget kept warm, and
+      # the rest came back each epoch by a fault a page - Pidigits' loop
+      # 680 ms, and 500 counted this way. The eight-byte steps below
+      # round by less than a header and keep the chunk.
       def self.warm_pages(chunk : UInt64, pages : UInt64) : UInt64
         kept = Pointer(Atomic(UInt64)).new(pointerof(@@kept_warm).address)
         seen = kept.value.get
         return 0_u64 if seen >= budget
-        per_page = (IyiHeap::PAGE * (chunk - IyiHeap::HEADER)).unsafe_div(chunk)
+        floor = chunk > 128_u64 ? IyiHeap.chunk_of(IyiHeap.class_index(chunk) - 1) + 1_u64 : chunk
+        per_page = (IyiHeap::PAGE * (floor - IyiHeap::HEADER)).unsafe_div(chunk)
         room = (budget - seen + per_page - 1_u64).unsafe_div(per_page)
         take = pages < room ? pages : room
         kept.value.add(take * per_page)

@@ -662,7 +662,17 @@ run is split at the budget now. And the budget was counted in pages
 against bytes the program asks for; a 64-byte class's page holds an
 eighth less payload than its bytes, so the warm pages held an eighth
 less than the epoch's demand and the carve took the difference from the
-frontier every epoch. The count is of payload.
+frontier every epoch. The count is of payload. And the payload was
+counted at the chunk, where past 128 bytes a request rounds up by as
+much as a quarter of it: crystal-metric's Pidigits asked 40 KB of
+48 KB chunks, a fifth of every epoch's pages went back to the kernel and
+came back by a fault a page, and the loop took 680 ms against 500. A
+quarter-step class's page is counted at the least a request in it asks,
+one byte past the class below; the sweep exercise's `rounding` check
+churns 32,769-byte requests a budget at a time and requires no page of
+theirs to go back cold, which the chunk count failed with 1,928. Peak
+resident set: the probe's the same (median 119 MB against 118), Pidigits'
+14.2 MB against 13.1.
 
 The scavenge unmapped a churning class's arenas every pause - every
 one of them is dead at every mark - and every epoch mapped fresh ones

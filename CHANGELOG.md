@@ -374,6 +374,20 @@
 
 ### Fixed
 
+- **Objects past 128 bytes keep their pages warm.** The sweep keeps a
+  budget's worth of dead pages warm for the next epoch and hands the rest
+  back to the kernel, and it counted a page's worth at the chunk. Past
+  128 bytes a class is a quarter step and a request rounds up by as much
+  as a quarter, so a program allocating 40 KB arrays - BigInt's limbs in
+  crystal-metric's Pidigits, 48 KB chunks - had a fifth of every epoch's
+  pages released and faulted back in: Pidigits ran 26% slower (A/B,
+  new/old 0.74), and a 48 KB allocation took 5 us. A page there is now
+  counted at the least a request in its class asks. Peak resident set
+  moves by a megabyte or less (the resident probe's median 119 MB
+  against 118; Pidigits 14.2 MB against 13.1). `bench/sweep_exercise.sh`
+  churns 32,769-byte requests a budget at a time and requires no page of
+  theirs to go back cold; counted at the chunk, 1,928 did.
+
 - **An iyi module's artifact is read as iyi.** Its declarations are
   parsed under the artifact's own name, and `.iyimod` is no extension the
   lexer reads a language from, so they were read by the other language's
@@ -11662,7 +11676,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,540-line library and nothing else. Every other
+  written against iyi's own 18,546-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

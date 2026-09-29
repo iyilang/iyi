@@ -146,6 +146,11 @@ prove_fails "warm pages never taken up" nowarm "warm:" \
 prove_fails "warm chunks not cleared" dirtywarm "warm:" \
   '{ if ($0 ~ /^          clear_block\(head, chunk_of\(index\)\) if clear$/) { print "          # removed"; next } print }'
 
+# A quarter-step class's warm pages counted at the full chunk again: a
+# fifth too few stay warm, and the steady churn hands pages back.
+prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
+  '{ if ($0 ~ /^        floor = chunk > 128_u64 \?/) { print "        floor = chunk"; next } print }'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Sweeping: unreachable chunks come back and are handed out again, a live"

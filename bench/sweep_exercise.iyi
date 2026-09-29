@@ -278,6 +278,32 @@
   end
   puts "    steady: 20 cycles of 200 allocations each left #{count(arenas)} arenas mapped and #{count(IyiMark.collections)} collections recorded"
 
+  # 6. A class past 128 bytes is a quarter step, and a request one byte
+  # past the class below rounds up by nearly that: 32,769 bytes asked of
+  # 40,960-byte chunks. A program asking a budget's worth of them every
+  # epoch has its dead pages kept warm - counted at the full chunk, the
+  # budget kept a fifth too few, and every epoch that fifth went back to
+  # the kernel and came back by a fault a page (BigInt's limb arrays,
+  # crystal-metric's Pidigits a third slower for it). Measured after eight
+  # epochs, when the class's pages have settled.
+  request = IyiHeap.chunk_of(IyiHeap.class_index(32768_u64)) + 1_u64
+  epoch = 0
+  released_before = 0_u64
+  while epoch < 16
+    released_before = IyiHeap.pages_released if epoch == 8
+    asked = IyiMark.budget.unsafe_div(request) - 1_u64
+    index = 0_u64
+    while index < asked
+      fresh(request)
+      index = index + 1_u64
+    end
+    IyiMark.collect
+    epoch = epoch + 1
+  end
+  released = IyiHeap.pages_released - released_before
+  raise "rounding: #{count(released)} pages of #{count(request)}-byte requests handed back in eight steady epochs, each asking a budget's worth" if released != 0
+  puts "    rounding: eight epochs of a budget's worth of #{count(request)}-byte requests, and no page of theirs went back cold"
+
   puts "    all sweep checks passed"
 {% else %}
   puts "    sweeping needs the collector's allocator (the default on linux-x86_64, linux-aarch64 and darwin); this build deselected it, nothing to exercise here"

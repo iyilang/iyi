@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **A refused bind says why, and so do two refusals that were numbers.**
+  `IyiSocket.listen` refused with "cannot bind socket to host:port" and
+  nothing after it, so a port in use and one the system reserves - on
+  Windows, a range Hyper-V or WSL keeps - read alike; the reason follows
+  now. And `SocketError#reason` names EACCES and EADDRNOTAVAIL, which were
+  "error 10013" and "error 10049" on Windows: the second is what a connect
+  to 0.0.0.0, the address a server prints, answers there.
+  `bench/socket_exercise.sh` requires a reason after each held-port
+  refusal and, on Windows, the sentence for a wildcard connect; the old
+  module gave none and "error 10049".
+
 - **On Windows, Ctrl+Z then Enter ends a console's input, and a long line
   keeps its characters.** A program reading to the end of its input from
   a console could be ended from the keyboard only by Ctrl+C: Ctrl+Z at the

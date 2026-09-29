@@ -189,7 +189,29 @@ pub struct SocketError
     return "nothing is at that path" if missing?
     return "timed out" if timed_out?
     return "no route to the host" if unreachable?
+    if denied?
+      # Windows answers WSAEACCES for a port another socket holds
+      # exclusively - every listener here does - as well as for one it
+      # reserves, so the sentence names both.
+      {% if flag?(:win32) %}
+        return "access denied: another socket holds the port, or the system reserves it"
+      {% else %}
+        return "permission denied"
+      {% end %}
+    end
+    return "not an address this host can use" if unusable?
     "error #{@code}"
+  end
+
+  # EACCES: a port the system keeps from this user.
+  private def denied? : Bool
+    {% if flag?(:win32) %} @code == 10013 {% else %} @code == 13 {% end %}
+  end
+
+  # EADDRNOTAVAIL: an address that is not this host's, or the wildcard a
+  # server prints, which Windows will not connect to.
+  private def unusable? : Bool
+    {% if flag?(:win32) %} @code == 10049 {% elsif flag?(:darwin) %} @code == 49 {% else %} @code == 99 {% end %}
   end
 
   private def reset? : Bool
@@ -506,9 +528,14 @@ pub class IyiSocket
     __sys_set_reuseaddr(fd)
     __sys_set_v6only(fd) if family == AF_INET6
 
-    if __sys_bind(fd, addr, family) < 0
+    # With the reason, which the refusal dropped: a port somebody holds
+    # and one the system forbids - on Windows, a range Hyper-V or WSL
+    # reserved - read alike.
+    bound = __sys_bind(fd, addr, family)
+    if bound < 0
+      code = __sys_code(bound.to_i64)
       __sys_close(fd)
-      raise "cannot bind socket to #{host}:#{port}"
+      raise "cannot bind socket to #{host}:#{port}: #{SocketError.new("bind", code).reason}"
     end
 
     if __sys_listen(fd, backlog) < 0

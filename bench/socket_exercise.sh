@@ -366,10 +366,18 @@ refuses "an empty unix socket path" unix_empty "a unix socket path is empty" \
 # names. On Windows a bind to 127.0.0.1:P went through while 0.0.0.0:P
 # listened, and the other way round, and the more specific listener took
 # the connections - from another process as readily as from this one.
-refuses "a port held on every address, bound on one" port_held_any "cannot bind socket" \
+refuses "a port held on every address, bound on one" port_held_any "cannot bind socket to 127.0.0.1:[0-9]*: [a-z]" \
   "IyiSocket.listen(\"127.0.0.1\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).local_port"
-refuses "a port held on one address, bound on every one" port_held_one "cannot bind socket" \
+refuses "a port held on one address, bound on every one" port_held_one "cannot bind socket to 0.0.0.0:[0-9]*: [a-z]" \
   "IyiSocket.listen(\"0.0.0.0\", IyiSocket.listen(\"127.0.0.1\", 0).local_port).local_port"
+# The wildcard a server prints is not an address Windows connects to,
+# and the refusal was "error 10049", a number with no sentence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a connect to the wildcard address" connect_any "not an address this host can use" \
+      "IyiSocket.connect(\"0.0.0.0\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).or_panic.to_unsafe"
+    ;;
+esac
 refuses "a port asked of a unix socket" unix_port "a unix socket has no port" \
   "IyiSocket.new(0, 1).local_port"
 refuses "a dotted tail past six groups" addr_tail "a dotted tail after more than six groups" \

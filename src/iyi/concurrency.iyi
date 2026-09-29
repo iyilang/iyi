@@ -463,6 +463,13 @@ class IyiFiber
   # one nonce, and the losers go stale by arithmetic.
   property park_nonce : UInt64
 
+  # The receive node this fiber parked with last, kept for its next
+  # receive (`Channel#park_receive_node`): a ring of tasks passing a
+  # value parks on every receive, and a node a park was fifteen million
+  # allocations in crystal-metric's Threadring. Reused only once no
+  # queue holds it.
+  property spare_waiter : IyiWaiter?
+
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
   # chunk.
@@ -518,6 +525,7 @@ class IyiFiber
     @wait_fd = -1
     @wait_dir = 0
     @park_nonce = 0_u64
+    @spare_waiter = nil
     @next_fiber = nil
     @prev_fiber = nil
     @prev_child = nil
@@ -692,8 +700,21 @@ class IyiWaiter
   @fiber : IyiFiber
   @nonce : UInt64
   property next_node : IyiWaiter?
+  # In a channel's queue: set when parked there, cleared by the one walk
+  # that takes a node off a queue's head (`Channel#unlink_receiver`). A
+  # node still linked - left behind by a cancelled park, or one of a
+  # `select`'s arms - is never parked again, or its link would join two
+  # queues.
+  property linked : Bool
 
   def initialize(@fiber : IyiFiber, @nonce : UInt64)
+    @next_node = nil
+    @linked = false
+  end
+
+  # The same node for another park of the same fiber.
+  def renew(nonce : UInt64) : Nil
+    @nonce = nonce
     @next_node = nil
   end
 
@@ -721,8 +742,27 @@ class IyiSendNode(T)
   property next_node : IyiSendNode(T)?
   @value : T
   @taken : Bool
+  # In a channel's queue, as `IyiWaiter#linked` is; and read by the
+  # sender that parked with it, which is when its receipt is no longer
+  # needed. The channel keeps one node to park its next sender with
+  # (`Channel#park_send_node`), and hands it out again only when both
+  # hold: a node taken off the queue has a sender yet to wake and read
+  # `delivered?`, and a node read and still queued is a cancelled park's.
+  property linked : Bool
+  property read : Bool
 
   def initialize(@fiber : IyiFiber, @nonce : UInt64, @value : T)
+    @next_node = nil
+    @taken = false
+    @linked = false
+    @read = false
+  end
+
+  # The same node for another sender's park.
+  def renew(fiber : IyiFiber, nonce : UInt64, value : T) : Nil
+    @fiber = fiber
+    @nonce = nonce
+    @value = value
     @next_node = nil
     @taken = false
   end
@@ -2517,13 +2557,23 @@ end
 # tested for gating. `select` is answered by this protocol — a node per
 # arm, one nonce, losers stale by arithmetic — at the bottom of the class.
 class Channel(T)
-  @items : Array(T)
+  # The values in hand, a ring: `@count` of them from `@first`. An array
+  # shifted from the front steps its buffer past the slot and gives up a
+  # slot of capacity with it, so a channel that handed values over one at
+  # a time grew a new buffer every few sends - an allocation per four
+  # messages in a ring of tasks. The ring keeps its slots.
+  @ring : Pointer(T)
+  @first : Int32
+  @count : Int32
+  @slots : Int32
   @capacity : Int32
   @closed : Bool
   @recv_head : IyiWaiter?
   @recv_tail : IyiWaiter?
   @send_head : IyiSendNode(T)?
   @send_tail : IyiSendNode(T)?
+  # The send node the last parked sender used (`park_send_node`).
+  @spare_send : IyiSendNode(T)?
 
   def initialize
     initialize(0)
@@ -2531,13 +2581,17 @@ class Channel(T)
 
   def initialize(capacity : Int32)
     raise "a channel's capacity is not negative" if capacity < 0
-    @items = Array(T).new(capacity < 1 ? 1 : capacity)
+    @slots = capacity < 1 ? 1 : capacity
+    @ring = Pointer(T).malloc(@slots.to_u64)
+    @first = 0
+    @count = 0
     @capacity = capacity
     @closed = false
     @recv_head = nil
     @recv_tail = nil
     @send_head = nil
     @send_tail = nil
+    @spare_send = nil
   end
 
   def send(value : T) : Nil | ChannelClosed | Cancelled
@@ -2550,7 +2604,9 @@ class Channel(T)
     # delivered, whatever else has happened since.
     node = park_send_node(fiber, IyiScheduler.park(fiber), value)
     IyiScheduler.reschedule
-    return nil if node.delivered?
+    delivered = node.delivered?
+    node.read = true
+    return nil if delivered
     return Cancelled.new if fiber.cancelled
     ChannelClosed.new
   end
@@ -2591,19 +2647,19 @@ class Channel(T)
   # in the gap — cooperative scheduling is the lock.
 
   def receive_ready? : Bool
-    @closed || !@items.empty? || sender_waiting?
+    @closed || @count > 0 || sender_waiting?
   end
 
   # Assumes `receive_ready?`: the buffer, then a parked sender's box,
   # then the refusal.
   def take_now : T | ChannelClosed
-    unless @items.empty?
-      value = @items.shift
+    if @count > 0
+      value = shift_item
       # The buffer has room now; the oldest parked sender's value moves
       # in, so parked sends complete in the order they parked.
       refill = take_sender
       if refill.is_a?(IyiSendNode(T))
-        @items << refill.take
+        push_item(refill.take)
         IyiScheduler.enqueue(refill.fiber)
       end
       return value
@@ -2621,7 +2677,7 @@ class Channel(T)
   end
 
   def send_ready? : Bool
-    @closed || @items.size < @capacity || receiver_waiting?
+    @closed || @count < @capacity || receiver_waiting?
   end
 
   # Assumes `send_ready?`. A parked receiver is a completed rendezvous:
@@ -2630,11 +2686,11 @@ class Channel(T)
   def put_now(value : T) : Nil | ChannelClosed
     return ChannelClosed.new if @closed
     if wake_receiver
-      @items << value
+      push_item(value)
       return nil
     end
-    if @items.size < @capacity
-      @items << value
+    if @count < @capacity
+      push_item(value)
       return nil
     end
     raise "put_now on a full channel"
@@ -2648,10 +2704,45 @@ class Channel(T)
     IyiSendSelect(T).new(self, value)
   end
 
+  # Onto the ring's end. A rendezvous channel's one slot can be asked for
+  # more: two senders that each woke a receiver before either receiver ran
+  # have both values in hand, so a full ring doubles.
+  private def push_item(value : T) : Nil
+    if @count == @slots
+      grown = Pointer(T).malloc((@slots * 2).to_u64)
+      index = 0
+      while index < @count
+        grown[index] = @ring[(@first + index) % @slots]
+        index = index + 1
+      end
+      @ring = grown
+      @first = 0
+      @slots = @slots * 2
+    end
+    at = @first + @count
+    at = at - @slots if at >= @slots
+    @ring[at] = value
+    @count = @count + 1
+  end
+
+  private def shift_item : T
+    value = @ring[@first]
+    @first = @first + 1 == @slots ? 0 : @first + 1
+    @count = @count - 1
+    value
+  end
+
   # `select`'s arms park through these with one shared nonce; a plain
   # call parks with a fresh nonce of its own.
   def park_receive_node(fiber : IyiFiber, nonce : UInt64) : Nil
-    waiter = IyiWaiter.new(fiber, nonce)
+    waiter = fiber.spare_waiter
+    if waiter.is_a?(IyiWaiter) && !waiter.linked
+      waiter.renew(nonce)
+    else
+      waiter = IyiWaiter.new(fiber, nonce)
+      fiber.spare_waiter = waiter
+    end
+    waiter.linked = true
     tail = @recv_tail
     if tail.is_a?(IyiWaiter)
       tail.next_node = waiter
@@ -2662,7 +2753,18 @@ class Channel(T)
   end
 
   def park_send_node(fiber : IyiFiber, nonce : UInt64, value : T) : IyiSendNode(T)
-    node = IyiSendNode(T).new(fiber, nonce, value)
+    # A ring of tasks parks on every send: a node a park was an allocation
+    # a message. A `select`'s arm never marks its node read, so a node
+    # parked by a select is never handed out again.
+    node = @spare_send
+    if node.is_a?(IyiSendNode(T)) && node.read && !node.linked
+      node.renew(fiber, nonce, value)
+    else
+      node = IyiSendNode(T).new(fiber, nonce, value)
+      @spare_send = node
+    end
+    node.read = false
+    node.linked = true
     tail = @send_tail
     if tail.is_a?(IyiSendNode(T))
       tail.next_node = node
@@ -2679,9 +2781,16 @@ class Channel(T)
       head = @recv_head
       return false unless head.is_a?(IyiWaiter)
       return true if head.current?
-      @recv_head = head.next_node
-      @recv_tail = nil if @recv_head.is_a?(Nil)
+      unlink_receiver(head)
     end
+  end
+
+  # The head off the receive queue, and no longer linked anywhere.
+  private def unlink_receiver(head : IyiWaiter) : Nil
+    @recv_head = head.next_node
+    @recv_tail = nil if @recv_head.is_a?(Nil)
+    head.next_node = nil
+    head.linked = false
   end
 
   private def sender_waiting? : Bool
@@ -2689,9 +2798,15 @@ class Channel(T)
       head = @send_head
       return false unless head.is_a?(IyiSendNode(T))
       return true if head.current?
-      @send_head = head.next_node
-      @send_tail = nil if @send_head.is_a?(Nil)
+      unlink_sender(head)
     end
+  end
+
+  private def unlink_sender(head : IyiSendNode(T)) : Nil
+    @send_head = head.next_node
+    @send_tail = nil if @send_head.is_a?(Nil)
+    head.next_node = nil
+    head.linked = false
   end
 
   # True when a parked receiver was woken; stale nodes — parks their
@@ -2701,8 +2816,7 @@ class Channel(T)
     while true
       head = @recv_head
       return false unless head.is_a?(IyiWaiter)
-      @recv_head = head.next_node
-      @recv_tail = nil if @recv_head.is_a?(Nil)
+      unlink_receiver(head)
       next unless head.current?
       IyiScheduler.enqueue(head.fiber)
       return true
@@ -2716,8 +2830,7 @@ class Channel(T)
     while true
       head = @send_head
       return nil unless head.is_a?(IyiSendNode(T))
-      @send_head = head.next_node
-      @send_tail = nil if @send_head.is_a?(Nil)
+      unlink_sender(head)
       next unless head.current?
       return head
     end

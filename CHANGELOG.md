@@ -24,6 +24,22 @@
 
 ### Changed
 
+- **A message through a channel allocates nothing.** Every park took a
+  node from the heap - a receiver's and, where the value's next owner had
+  not parked yet, a sender's - and the channel's buffer, an array shifted
+  from the front, grew a new buffer every few messages: 55 bytes a round
+  trip between two tasks, 31 a message around a ring, and in
+  crystal-metric's `Threadring` fifteen million allocations and a hundred
+  collections, the benchmark iyi trailed Crystal on by 1.7x. A fiber keeps
+  its receive node and a channel its send node, each handed out again once
+  no queue holds it and, for a send, once its sender has read whether the
+  value was delivered; the buffer is a ring. A ring of 503 tasks passes 3
+  million messages in 110 ms where it took 200, with no collection.
+  `bench/concurrency_exercise.sh` counts the bytes a ring and a ping-pong
+  allocate for 100,000 messages, requires none, checks that a sender's
+  receipt survives the next sender's park, and proves each check fails
+  with a node allocated for every park or handed out before it was read.
+
 - **`Base64.encode` reads six bytes and writes eight characters at a
   time.** It went a byte and a character at a time, through a
   64-character table: in a plain build five times a pass that only adds
@@ -11511,7 +11527,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,401-line library and nothing else. Every other
+  written against iyi's own 18,514-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

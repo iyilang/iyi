@@ -350,6 +350,21 @@ sleep_proof "a sleep queue that puts the latest first" latest \
    { print } END { if (!found) exit 3 }' \
   'FAIL: sleep: a sleeper woke before'
 
+# ── 7b. Failure proofs: a node taken from the heap for every park, and a
+#      send node handed out while its sender has yet to read it ───────────
+sleep_proof "a receive node allocated for every park" fresh_waiter \
+  '/^    if waiter.is_a\?\(IyiWaiter\) && !waiter.linked$/ { print "    if waiter.is_a?(IyiWaiter) && false"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: ring:'
+sleep_proof "a send node allocated for every park" fresh_sender \
+  '/^    if node.is_a\?\(IyiSendNode\(T\)\) && node.read && !node.linked$/ { print "    if node.is_a?(IyiSendNode(T)) && false"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: ring:'
+sleep_proof "a send node handed out before its sender read it" unread_sender \
+  '/^    if node.is_a\?\(IyiSendNode\(T\)\) && node.read && !node.linked$/ { print "    if node.is_a?(IyiSendNode(T)) && !node.linked"; found = 1; next }
+   { print } END { if (!found) exit 3 }' \
+  'FAIL: receipt:'
+
 # ── 8. Failure proof: an io list walked for every event ─────────────────
 case "$(uname -s)" in
   Linux)

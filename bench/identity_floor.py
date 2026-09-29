@@ -169,6 +169,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # choice between them, so it mentions both by necessity.
     (r'ends_with\?\(".iyi"\) \? "iyi" : "Crystal"', "the line that picks which language a file is"),
     (r"Crystal (caches|runs|raises|takes|answers|defines)", "a sentence about the other language"),
+    # kostya's benchmark suite for the other language is a repository named
+    # `crystal-metric`; iyi's port of it is measured against it by name.
+    (r"\bcrystal-metric\b", "the name of the other language's benchmark suite"),
     (r"\bshared with Crystal", "the one-name rule (SPEC.md III.1.7a) naming the other language"),
     # `iyi migrate` and `iyi bind` are about the other language by
     # definition: a Crystal project, a Crystal file kept as Crystal, the

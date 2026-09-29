@@ -1592,15 +1592,17 @@ pub class IyiSocket
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
-    # Nothing, and not for want of the option. SO_REUSEADDR on Windows lets a
-    # *different* socket bind a port this one is already bound to, and the
-    # last binder takes the packets; what the POSIX arms ask for with it is
-    # only the waiver of the TIME_WAIT wait on a port nobody holds. Setting
-    # it here would hand any program on the machine the port `listen` just
-    # took. Windows does not need the waiver either: a listening socket's
-    # port is free again as soon as it closes.
+    # Not SO_REUSEADDR, which on Windows lets a *different* socket bind a
+    # port this one is already bound to, and the last binder takes the
+    # packets; what the POSIX arms ask for with it is only the waiver of
+    # the TIME_WAIT wait, which Windows does not impose on a listener's
+    # port. The opposite: SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR, -5). Without
+    # it the port was not the listener's either - a bind to 127.0.0.1:P went
+    # through while 0.0.0.0:P listened, and the other way round, from any
+    # process, and the more specific listener took the connections.
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      0
+      val = 1_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), SOL_SOCKET, -5, pointerof(val).as(Void*), 4)
     end
 
     # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41). Windows' default already, and

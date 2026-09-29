@@ -374,6 +374,17 @@
 
 ### Fixed
 
+- **On Windows, a listening port is the listener's.** A bind to
+  127.0.0.1:P went through while `IyiSocket.listen` held 0.0.0.0:P, and
+  the other way round, from this process or any other, and the more
+  specific listener took the connections: measured, a second process
+  listening on 127.0.0.1 read what a client sent to the iyi server.
+  Windows leaves a port open to such binds unless the listener sets
+  SO_EXCLUSIVEADDRUSE, which it does now; a port closed after a
+  connection is still listened on again at once. `bench/socket_exercise.sh`
+  binds each way onto a held port and requires the refusal; the old
+  module bound both.
+
 - **On Windows, a read Windows refuses is a failure, not an empty file.**
   Every failed `ReadFile` answered 0, the end of the file, so `File.read`
   of a file whose byte range another process had locked answered "" with

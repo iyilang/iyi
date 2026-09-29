@@ -8441,6 +8441,13 @@ end
   def __iyi_defer_pop_run : Nil
     IyiDefers.pop_run
   end
+
+  # `exit` where there are no tasks: the one registry's cleanups, then the
+  # process (the concurrency targets' is in concurrency.iyi).
+  def exit(status : Int32 = 0) : NoReturn
+    IyiDefers.drain
+    __iyi_exit(status)
+  end
 {% end %}
 
 # `raise` is a panic. It prints once, at the point of the bug, then

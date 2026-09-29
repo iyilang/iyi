@@ -5,8 +5,9 @@
 # by registry, pending defers run innermost-first, a
 # panicking task dies at its boundary while its group cancels the
 # siblings, the boundary re-raises in the owner exactly once, a panic
-# with no boundary above it exits 1 after its defers ran, and `.or_panic`
-# is a real panic. The no-panic path rides the same registry and is
+# with no boundary above it exits 1 after its defers ran, `exit` ends
+# with the status it is given after the calling task's defers, and
+# `.or_panic` is a real panic. The no-panic path rides the same registry and is
 # asserted unchanged.
 set -euo pipefail
 
@@ -93,6 +94,59 @@ site "main.iyi:6" "main panic missing site"
 echo "$out" | grep -q "second defer" || fail "second defer did not run: $out"
 echo "$out" | grep -q "first defer" || fail "first defer did not run: $out"
 step "an unbounded panic exits 1 after its defers, innermost first"
+
+# ── 2b. `exit` is the other ending: the status the program chose, after
+#      the cleanups the calling task deferred, innermost first, and
+#      nothing after it runs - not the rest of the function, not the line
+#      that called it. No panic is printed, because nothing went wrong ──
+cat > "$work/leave.iyi" <<'EOF'
+module leave
+
+pub def go : Int32
+  defer puts "first defer"
+  defer puts "second defer"
+  puts "before exit"
+  exit 3 if true
+  puts "after exit"
+  0
+end
+
+puts go
+puts "caller went on"
+EOF
+run "$work/leave.iyi"
+[ "$code" = 3 ] || fail "exit 3 exited $code: $out"
+[ "$out" = "$(printf 'before exit\nsecond defer\nfirst defer')" ] || fail "exit did not end after its task's defers, innermost first: $out"
+step "exit ends with its status after the task's defers, innermost first"
+
+# ── 2c. `exit` from a task ends the process: that task's cleanups run,
+#      the group's sibling does not get to print, and a plain `exit` is 0 ─
+cat > "$work/leave_task.iyi" <<'EOF'
+module leave_task
+
+pub def run_all : Int32
+  group do |g|
+    g.spawn {
+      defer puts "task defer"
+      exit
+      1
+    }
+    g.spawn {
+      sleep(2000)
+      puts "sibling finished"
+      2
+    }
+  end
+  puts "after group"
+  0
+end
+
+puts run_all
+EOF
+run "$work/leave_task.iyi"
+[ "$code" = 0 ] || fail "a bare exit from a task exited $code: $out"
+[ "$out" = "task defer" ] || fail "exit from a task: wanted only its own defer, got: $out"
+step "exit from a task ends the process, after that task's defers"
 
 # ── 3. `.or_panic` is a real panic now: through the task boundary,
 #      carrying the error's message ────────────────────────────────────

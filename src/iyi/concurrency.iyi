@@ -2303,6 +2303,25 @@ def __iyi_defer_pop_run : Nil
   node.run
 end
 
+# The program ends here, with *status* as its exit code. What this task
+# deferred runs first, innermost first, as a panic's cleanups do; then the
+# process ends and every other task with it, their cleanups not run -
+# Go's `os.Exit` and Crystal's `exit` alike. A failure a person should
+# read about is a panic (`raise`, SPEC.md III.1.4); this is the other
+# kind of ending, a program that has answered and says so in its status,
+# as `diff` and `grep` do with 1. Before this a program reached for the
+# runtime's own `__iyi_exit`, which skipped the cleanups too.
+def exit(status : Int32 = 0) : NoReturn
+  fiber = IyiScheduler.current
+  while true
+    node = fiber.defers
+    break unless node.is_a?(IyiDeferNode)
+    fiber.defers = node.next_node
+    node.run
+  end
+  __iyi_exit(status)
+end
+
 # ── The public primitives ──────────────────────────────────────────────
 
 # Park for *ms* milliseconds. `Cancelled` when the group said stop —

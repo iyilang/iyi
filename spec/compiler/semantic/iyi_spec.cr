@@ -380,10 +380,6 @@ describe "Semantic: iyi" do
       assert_error "Int32::MAX", "There is no `Int32::MAX`: the edges are the literals, 2147483647 and -2147483648"
     end
 
-    it "says a program has no exit, and what a failure is" do
-      assert_error "exit 1", "There is no `exit`: a program ends when its last line runs, and a failure is a panic"
-    end
-
     it "names stdin.gets for gets" do
       assert_error "line = gets", "`stdin.gets` reads a line"
     end

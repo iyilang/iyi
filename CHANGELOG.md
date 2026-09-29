@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`exit(status = 0)`.** A program that has answered and says what it
+  found in its status - `diff`'s 1, `grep`'s - had no way to: the error
+  for `exit` said a failure is a panic, and a panic prints a line and a
+  site. crystal-metric's port called the runtime's own `__iyi_exit`, which
+  skipped the cleanups too. `exit` runs the calling task's pending defers,
+  innermost first, then ends the process and every task with it, their
+  cleanups not run - Go's `os.Exit` and Crystal's `exit` alike - and is
+  `NoReturn`. SPEC.md III.1.4 says so; `bench/panics.sh` checks the status,
+  the defers' order, that nothing after the call runs, and that a task's
+  `exit` runs that task's defers only.
+
 - **`%g` and `%G` in `sprintf`, `printf` and `String#%`.** The shorter
   of `%f` and `%e` by C's rule - `%e` when the exponent is under -4 or at
   least the precision, `%f` otherwise, trailing zeros trimmed unless `#`
@@ -11527,7 +11538,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,514-line library and nothing else. Every other
+  written against iyi's own 18,540-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

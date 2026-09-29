@@ -196,7 +196,6 @@ module Iyi
     "p"       => "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel::{p}`.",
     "pp"      => "`puts value.inspect` is the spelling here; `pp` comes with `import std/kernel::{pp}`.",
     "require" => "iyi has no `require`: a module is reached with `import`, and `--crystal` gives a program Crystal's library.",
-    "exit"    => "There is no `exit`: a program ends when its last line runs, and a failure is a panic - `raise \"why\"`, or `assert` - which exits 1 with the sentence (SPEC.md III.1.4).",
     "gets"    => "`stdin.gets` reads a line, a `String?` that is nil at the end; there is no bare `gets`.",
     "printf"  => "`printf`, `sprintf` and `String#%` come with `import std/format::{printf}`.",
     "sprintf" => "`printf`, `sprintf` and `String#%` come with `import std/format::{sprintf}`.",

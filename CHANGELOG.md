@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`std/colorize` writes no escapes into a redirected standard error.**
+  Whether to paint is one answer for the program, and text is painted
+  before anyone knows which stream it goes to; only standard output was
+  asked whether it is a terminal, so `prog 2> err.log` from a terminal
+  wrote `\e[31merr\e[0m` into err.log. Both streams must be terminals
+  now, as Crystal's `on_tty_only!` asks. `bench/std_colorize_exercise.sh`
+  runs a program with a console on standard output and a file on
+  standard error; the old module wrote the escapes.
+
 - **A program on Windows puts the console's mode back as it ends.**
   Writing to a console turns VT processing on, and the console outlives
   the program: it was left on for whatever ran there next - a console at

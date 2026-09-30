@@ -97,14 +97,18 @@ pub struct Colorize
     @@enabled = value
   end
 
-  # The environment's answer, read once: standard output must be a terminal,
-  # `NO_COLOR` set to anything but `""` refuses, `TERM=dumb` refuses, and
-  # nothing else is asked. The terminal test is first because it is the one
-  # a reader cannot set: escapes in a file are a defect in every
-  # environment, and this module wrote them there until the prelude could
-  # answer the question (`__iyi_isatty`).
+  # The environment's answer, read once: standard output and standard
+  # error must both be terminals, `NO_COLOR` set to anything but `""`
+  # refuses, `TERM=dumb` refuses, and nothing else is asked. The terminal
+  # test is first because it is the one a reader cannot set: escapes in a
+  # file are a defect in every environment, and this module wrote them
+  # there until the prelude could answer the question (`__iyi_isatty`).
+  # Both, as Crystal's `on_tty_only!` asks, because the answer is one for
+  # the program and text is painted before anyone knows which stream it
+  # goes to: with only standard output asked, `prog 2> err.log` from a
+  # terminal wrote escapes into err.log.
   def self.environment_allows? : Bool
-    return false unless __iyi_isatty(1)
+    return false unless __iyi_isatty(1) && __iyi_isatty(2)
     if no_color = Program.env("NO_COLOR")
       return false unless no_color.empty?
     end

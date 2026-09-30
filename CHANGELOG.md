@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **On Windows, `iyi run` passes on a program's negative exit status.**
+  A program's `exit(-1)` ends it with 0xFFFFFFFF, which Crystal's
+  `Process::Status` reads as an NTSTATUS error, so `iyi run` said
+  "Process terminated abnormally, the cause is unknown (status
+  0xffffffff)" and exited 1 where the program itself exits -1. A status
+  with the customer bit set is an application's, never the system's, and
+  is passed on as the exit code now; a fault the system raised is still
+  named. `bench/verbs_exercise.sh` runs `exit(-1)` and requires the
+  runner's status to be the program's and its output empty; the old
+  runner exited 1 with the sentence.
+
 - **`Dir.cd` keeps `PWD`, so a relative path expands where the program
   is.** `Path#expand` and `File.expand_path` read `PWD` first - the path
   the person walked, symlinks and all - and `Dir.cd` left it naming where

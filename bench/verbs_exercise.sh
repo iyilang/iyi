@@ -206,6 +206,23 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# A program's own exit status is `iyi run`'s, a negative one too. On
+# Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
+# end: "terminated abnormally, the cause is unknown", and exit 1.
+# Compared with the program's own status as this shell reads it, which
+# is not 255 everywhere: Git's shell on Windows reads 0xFFFFFFFF as 127.
+printf 'module neg\n\nexit(-1)\n' > neg.iyi
+"$IYI" build -o neg neg.iyi > neg.build 2>&1
+./neg > /dev/null 2>&1
+own_code=$?
+"$IYI" run neg.iyi > neg.out 2>&1
+neg_code=$?
+if [ "$neg_code" -eq "$own_code" ] && [ ! -s neg.out ]; then
+  echo "  a program's exit(-1): the runner exits with its status ($own_code here), and says nothing"
+else
+  echo "  a program's exit(-1): the program exits $own_code, the runner $neg_code, saying: $(head -c 200 neg.out)"
+  status=1
+fi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
 # Two `iyi run`s at once of programs with one basename. The runner linked

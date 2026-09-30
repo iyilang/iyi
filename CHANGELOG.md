@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **The math gate's failure proofs test the checks they name.** Each
+  ran the broken copy as `iyi run std_math_exercise.iyi <oracle files>`,
+  and without `--` those files were compiled as more source: every proof
+  that had the oracle's answers failed on the build, not at a check, and
+  read "caught" - the proofs this changelog cites for exp, pow, log, the
+  trigonometric, hyperbolic, error, gamma and Bessel functions, cbrt,
+  hypot and atan2 among them. Four more wrote `x = x`, which does not
+  compile. The run takes `--` now, a proof is caught only when the
+  program itself fails - a check or a panic - and the four break their
+  terms as `x * 1.0`. With the proofs real, all fifty are caught but one,
+  atan2's middle carry, whose 2^-64 error the answers never showed; it is
+  replaced by the slow product left unnormalised, which they do.
+
 - **`std/compress` refuses an incomplete Huffman code, and reads every
   gzip member.** A dynamic block whose literal/length, distance or
   code-length code left bit patterns unused was decoded anyway, so a

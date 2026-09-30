@@ -96,6 +96,14 @@
 
 ### Changed
 
+- **The sweep reads a page's idle bit once.** It tested the bit for every
+  chunk, and a small class has a hundred chunks on a page. The bit is
+  read when the walk enters a page and trusted to its end, which the
+  locking already allows: the slice's own runs set bits below the
+  cursor's page and a carve clears bits below the cursor's word. The
+  sweep of binary trees at depth 14 went from 190 million instructions
+  to 151. The sweep exercise proves a bit trusted past its page fails.
+
 - **The write barrier resolves a stored word once.** It found the
   object with `IyiRoots.base_of`, then `gray` found its mark byte by the
   same arithmetic, and the thread's worker was read for every store
@@ -11923,7 +11931,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,820-line library and nothing else. Every other
+  written against iyi's own 18,830-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

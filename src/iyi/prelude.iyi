@@ -5943,6 +5943,13 @@ require "./file"
         freed = 0_u64
         kept = 0_u64
         kept_bytes = 0_u64
+        # The page the idle bit was last read for, and where it ends: the
+        # bit is a page's, and a small class has a hundred chunks on one.
+        # This slice's own runs set bits of pages below the cursor's, and
+        # a carve clears bits below the sixty-four-page word the cursor is
+        # in (`IyiHeap.reopen_in`), so the page the walk is on keeps the
+        # answer it had.
+        page_next = 0_u64
         while cursor < stop
           if cursor >= region_low && cursor < region_high
             # Uncarved: past the region in one step, the run closed.
@@ -5952,9 +5959,10 @@ require "./file"
             end
             cursor = first + (region_high - first + chunk - 1_u64).unsafe_div(chunk) * chunk
             byte = 0_u64
+            page_next = 0_u64
             next
           end
-          if IyiHeap.page_idle?(arena, cursor)
+          if cursor >= page_next && IyiHeap.page_idle?(arena, cursor)
             # On an idle page: past the run of them in one step, likewise,
             # the warm ones aged against this epoch's budget on the way.
             if run_low != 0
@@ -5969,8 +5977,10 @@ require "./file"
             age_idle(arena, page_low, page_end)
             cursor = first + (page_end - first + chunk - 1_u64).unsafe_div(chunk) * chunk
             byte = 0_u64
+            page_next = 0_u64
             next
           end
+          page_next = (cursor | (IyiHeap::PAGE &- 1_u64)) &+ 1_u64 if cursor >= page_next
           # The chunk's entry and colour, not its line: a slice reads the
           # tables and touches a live object's memory not at all.
           if byte == 0

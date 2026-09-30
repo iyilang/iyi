@@ -307,6 +307,17 @@ group do |g|
       fail("a .cmd found by its name was run")
     end
 
+    puts "== a variable's name is one name in any case, in any script"
+    # `ÇAY` and `çay` are one variable on Windows; ASCII folding left
+    # `env: {"çay" => ...}` beside the variable it meant to replace.
+    ENV["IYI_ÇAY"] = "old"
+    folded = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => "new"}), "env")
+    removed = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => nil}), "env")
+    ENV.delete("IYI_ÇAY")
+    fail("a name in another case, replaced: #{folded.stdout.inspect}") unless folded.stdout == "new\n"
+    fail("a name in another case, removed: #{removed.stdout.inspect}") unless removed.stdout == "<unset>\n"
+    puts "  IYI_çay replaced and removed IYI_ÇAY"
+
     puts "== text a Windows command line cannot carry is refused"
     # Not UTF-8, an argument has no UTF-16 spelling: the conversion was
     # null, and a null command line is Windows' cue to run the program

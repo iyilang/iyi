@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Process.run(env:)` on Windows matches a variable's name in another
+  case in any script.** Windows holds `ÇAY` and `çay` as one variable; the
+  names were compared with `upcase`, which folds ASCII alone, so
+  `env: {"çay" => "new"}` stood beside `ÇAY=old` in the child's block
+  rather than replacing it, and `{"çay" => nil}` removed nothing. Names
+  are compared as Windows compares them (`CompareStringOrdinal`, case
+  ignored). `bench/std_process_exercise.iyi` replaces and removes a
+  variable by its name in the other case.
+
 - **`Process.run` of a name whose only match on `PATH` is a `.cmd` or
   `.bat` says it is a batch file.** npm, yarn and code are `.cmd` shims,
   and the search looked for `NAME.exe` and `NAME.com` alone: the answer

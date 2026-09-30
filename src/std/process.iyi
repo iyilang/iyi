@@ -89,6 +89,7 @@ module std/process
   end
 {% elsif flag?(:win32) %}
   lib LibKernel32
+    fun CompareStringOrdinal(one : UInt16*, one_length : Int32, other : UInt16*, other_length : Int32, ignore_case : Int32) : Int32
     fun CreateProcessW(application : UInt16*, command_line : UInt16*, process_attributes : Void*,
                        thread_attributes : Void*, inherit_handles : Int32, creation_flags : Int32,
                        environment : Void*, current_directory : UInt16*, startup_info : Void*,
@@ -339,9 +340,18 @@ class ProcessChild
     {% end %}
   end
 
+  # On Windows as Windows compares two names, case folded in every script:
+  # `ÇAY` and `çay` are one variable there, and folding ASCII alone left
+  # `env: {"çay" => ...}` beside the variable it meant to replace or
+  # remove.
   def self.same_name?(one : String, other : String) : Bool
     {% if flag?(:win32) %}
-      one.upcase == other.upcase
+      return true if one.upcase == other.upcase
+      wide_one = __iyi_win_env_wide(one.to_unsafe, one.bytesize)
+      wide_other = __iyi_win_env_wide(other.to_unsafe, other.bytesize)
+      return false if wide_one.address == 0_u64 || wide_other.address == 0_u64
+      # CSTR_EQUAL, lengths from the terminators.
+      LibKernel32.CompareStringOrdinal(wide_one, -1, wide_other, -1, 1) == 2
     {% else %}
       one == other
     {% end %}

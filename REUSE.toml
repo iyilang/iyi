@@ -33,13 +33,14 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2005-2020 Rich Felker, et al."
 SPDX-License-Identifier = "MIT"
 
-# iyi: `Math.erf` and `erfc` are CORE-MATH's, as glibc 2.43 carries them,
+# iyi: `Math.erf`, `erfc`, `asinh`, `acosh` and `atanh` are CORE-MATH's, as
+# glibc 2.43 carries them,
 # ported with their tables; the notice is beside the code. The math gate's
 # oracle is glibc's files as published, with their own headers.
 [[annotations]]
 path = ["src/std/math.iyi", "bench/libm_oracle/core_math/**"]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "Copyright (c) 2022-2025 Alexei Sibidanov, Paul Zimmermann, Tom Hubrecht and Claude-Pierre Jeannerod"
+SPDX-FileCopyrightText = "Copyright (c) 2022-2026 Alexei Sibidanov, Paul Zimmermann, Tom Hubrecht and Claude-Pierre Jeannerod"
 SPDX-License-Identifier = "MIT"
 
 # iyi: the port of kostya's crystal-metric that `bench/metric_port.sh` gates.

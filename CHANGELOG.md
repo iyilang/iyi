@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **`Math.asinh`, `acosh` and `atanh` are correctly rounded, and
+  glibc's.** They were series near zero and `log1p` forms elsewhere, and
+  answered differently from glibc 2.43 for 43,123, 25,295 and 1,765 of
+  250,000 arguments. They are CORE-MATH's (MIT), which glibc 2.43 carries,
+  with their tables and the double-double helpers they share; the answer
+  out of the domain is glibc's own, NaN for `acosh(x < 1)` and
+  `atanh(|x| > 1)` and an infinity at `atanh(+-1)`. On a machine without
+  FMA they cost what the old ones did, twice glibc's. The oracle carries
+  glibc's five files and the math gate requires 205,000 arguments of each
+  to the last bit - the whole range, 1 from above for acosh and from
+  below for atanh, the subnormals - and proves the check fails with the
+  shared two-sum losing its low part, acosh near 1 without its square
+  root's correction, and atanh's 1 - |x| rounded.
+
 - **`Math.erf` and `erfc` are correctly rounded, and glibc's.** They were
   a series and a continued fraction to about 1e-15, and `erf` of a
   subnormal panicked "arithmetic overflow" - its series never stopped.

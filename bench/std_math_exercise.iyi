@@ -273,7 +273,7 @@ puts "  they compile without the consumer importing std/float, and overflow to i
 
 # The oracles `bench/std_math_exercise.sh` writes from the code glibc
 # builds these from - Arm's, fdlibm's for log10, expm1, log1p, sinh, cosh
-# and tanh, and CORE-MATH's for erf and erfc -
+# and tanh, and CORE-MATH's for erf, erfc, asinh, acosh and atanh -
 # compiled from `bench/libm_oracle`: pairs of doubles, an argument and its
 # answer, for the one-argument functions, and triples, a base, an exponent
 # and the power, for pow. Every answer is required to the last bit.
@@ -326,6 +326,9 @@ against(args[9], "cosh", "glibc's", 250000) { |x| Math.cosh(x) } if args.size > 
 against(args[10], "tanh", "glibc's", 250000) { |x| Math.tanh(x) } if args.size > 10
 against(args[11], "erf", "glibc's", 200000) { |x| Math.erf(x) } if args.size > 11
 against(args[12], "erfc", "glibc's", 200000) { |x| Math.erfc(x) } if args.size > 12
+against(args[13], "asinh", "glibc's", 200000) { |x| Math.asinh(x) } if args.size > 13
+against(args[14], "acosh", "glibc's", 200000) { |x| Math.acosh(x) } if args.size > 14
+against(args[15], "atanh", "glibc's", 200000) { |x| Math.atanh(x) } if args.size > 15
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

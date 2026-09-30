@@ -55,7 +55,8 @@ port of:
   distribute this software is freely granted, provided that this notice is
   preserved."
 - [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
-- [CORE-MATH][], as glibc 2.43 carries it (`Math.erf` and `erfc` in
+- [CORE-MATH][], as glibc 2.43 carries it (`Math.erf`, `erfc`, `asinh`,
+  `acosh` and `atanh` in
   `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 

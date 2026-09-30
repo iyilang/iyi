@@ -1886,19 +1886,876 @@ pub struct Math
     tanh(value.to_f64)
   end
 
-  def self.asinh(value : Float64) : Float64
-    return value if value == 0.0 || value != value || value == 2.0 * value
-    v = value.abs
-    res = 0.0
-    if v < 1.0e-4
-      v2 = v * v
-      res = v - v * v2 * (1.0 / 6.0 - v2 * (3.0 / 40.0 - v2 * (5.0 / 112.0)))
-    elsif v > 1.0e8
-      res = log(v) + LOG2
-    else
-      res = log1p(v + v * v / (1.0 + sqrt(1.0 + v * v)))
+  # asinh, acosh, atanh: CORE-MATH's correctly rounded binary64 versions as
+  # glibc 2.43 ships them (sysdeps/ieee754/dbl-64/s_asinh.c, e_acosh.c,
+  # e_atanh.c, s_asincosh_data.c, s_atanh_data.c, ddcoremath.h).
+  # Copyright (c) 2023-2026 Alexei Sibidanov; MIT licence.
+  # Tables hold each double's IEEE bits; ASINH_B/ATANH_B interleave c0, c1.
+
+  private ASINH_TINY_SCALE   = -8.6736173798840355e-19
+  private ASINH_ZERO_EPS     =  1.6349768761081407e-16
+  private ASINH_L2H          =     0.69314718055989033
+  private ASINH_L2L          =  5.4979230187083712e-14
+  private ASINH_EPS          =  1.6299999999999999e-19
+  private ASINH_INV_LOG2     =      1.4426950408889634
+  private ASINH_REFINE_BIAS  =      1.0000076293945312
+  private ASINH_REFINE_L20   =     0.34657359027994517
+  private ASINH_REFINE_L21   =  2.7489615093542512e-14
+  private ASINH_REFINE_L22   = -6.5623492088926277e-28
+  private ACOSH_ONE_EPS      =    8.81239525796218e-16
+  private ACOSH_ONE_EPS_ABS  =  4.9303806576313238e-32
+  private ACOSH_EPS          =                 2.8e-19
+  private ATANH_TINY_SCALE   =  2.7755575615628914e-17
+  private ATANH_THIRD_LO     =  1.8503717077085941e-17
+  private ATANH_THIRD        =     0.33333333333333331
+  private ATANH_ZERO_EPS     =  2.0122792321330962e-16
+  private ATANH_ZERO_EPS_ABS =  9.8607613152626476e-32
+  private ATANH_L2H          =     0.34657359027997359
+  private ATANH_L2L          = -9.3209433686215166e-16
+  private ATANH_EPS          =  3.8000000000000001e-23
+  private ATANH_EPS_DX2      =  1.7763568394002505e-15
+  private ATANH_INV_LOG2     =      2.8853900817779268
+  private ATANH_REFINE_L22   =  9.7352254619037222e-32
+
+  private ASINH_ZERO_CH = [
+    0xbfc5555555555555_u64, 0xbc65555555555555_u64, 0x3fb3333333333333_u64, 0x3c499999999949df_u64,
+    0xbfa6db6db6db6db7_u64, 0x3c32492496091b0c_u64, 0x3f9f1c71c71c71c7_u64, 0x3c1c71a35cfa0671_u64,
+    0xbf96e8ba2e8ba2e9_u64, 0x3c317f937248cf81_u64, 0x3f91c4ec4ec4ec4f_u64, 0xbc374e3c1dfd4c3d_u64,
+    0xbf8c999999999977_u64, 0xbc238e7a467ecc55_u64, 0x3f87a87878786c7e_u64, 0x3c2a83c7bace55eb_u64,
+    0xbf83fde50d764083_u64, 0xbc2d024df7fa0542_u64, 0x3f812ef3ceae4d12_u64, 0xbc2ba9c13deb261f_u64,
+    0xbf7df3bd104aa267_u64, 0xbc1546da9bc5b32a_u64, 0x3f7a685fc5de7a04_u64, 0x3c140d284a1d67f9_u64,
+  ]
+
+  private ASINH_ZERO_CL = [
+    0xbf77828d553ec800_u64, 0x3f751712f7bee368_u64, 0xbf72e6d98527bcc6_u64, 0x3f70095da47b392c_u64,
+    0xbf63b92d6368192c_u64,
+  ]
+
+  private ASINH_CL2 = [
+    0xbfc5555555555555_u64, 0x3fb3333327c57c60_u64,
+  ]
+
+  private ASINH_CL4 = [
+    0xbfc5555555555555_u64, 0x3fb333333332f2ff_u64, 0xbfa6db6d9a665159_u64, 0x3f9f186866d775f0_u64,
+  ]
+
+  private ASINH_CL7 = [
+    0xbfc5555555555555_u64, 0x3fb3333333333310_u64, 0xbfa6db6db6da466c_u64, 0x3f9f1c71c2ea7be4_u64,
+    0xbf96e8b651b09d72_u64, 0x3f91c309fc0e69c2_u64, 0xbf8bab7833c1e000_u64,
+  ]
+
+  private ASINH_DB = [
+    0x3fd00f9476450863_u64, 0x3fcfcb35067f343c_u64, 0x3c60000000000000_u64, 0x3fd1f0a79315b287_u64,
+    0x3fd1b68aae88feba_u64, 0x3c70000000000000_u64, 0x3fd2b9618ff7acb7_u64, 0x3fd27781d9aa4e25_u64,
+    0xbc70000000000000_u64, 0x3fd389ef683f3aa7_u64, 0x3fd33f52db6df1af_u64, 0x3c70000000000000_u64,
+    0x3fd3b07e0c779dda_u64, 0x3fd364303e1ad8f6_u64, 0x3c70000000000000_u64, 0x3fd48441df33b6d3_u64,
+    0x3fd42e385800f0a4_u64, 0x3c70000000000000_u64, 0x3fd687bd068c1c1e_u64, 0x3fd616cc75d49226_u64,
+    0xbc70000000000000_u64, 0x3fd8740c4453a056_u64, 0x3fd7e4f2ad132a1d_u64, 0x3c70000000000000_u64,
+    0x3fd891acda11167e_u64, 0x3fd8009d924a3ffd_u64, 0x3c70000000000000_u64, 0x3fdbafc3479fc9cc_u64,
+    0x3fdae3773250e7d2_u64, 0x3c70000000000000_u64, 0x3fdc59869f17b483_u64, 0x3fdb7efa91915c95_u64,
+    0x3c70000000000000_u64, 0x3fdc8be879787986_u64, 0x3fdbad0485e0fe0a_u64, 0xbc70000000000000_u64,
+    0x3fde73b46abb01e1_u64, 0x3fdd68039861ab53_u64, 0x3c70000000000000_u64, 0x3fded6236da268b0_u64,
+    0x3fddc0cb8f638126_u64, 0x3c70000000000000_u64, 0x3fdf399ebafc1951_u64, 0x3fde1a4f519fab77_u64,
+    0xbc70000000000000_u64, 0x3fdf70975ab0d471_u64, 0x3fde4bae8bcd6ea6_u64, 0x3c70000000000000_u64,
+    0x3fdfbdd4a37760b7_u64, 0x3fde90f16eb88c09_u64, 0x3c70000000000000_u64, 0x3fdfee72efb4bfdd_u64,
+    0x3fdebc791a88bed8_u64, 0x3c70000000000000_u64, 0x3fe02339d6bdb741_u64, 0x3fdf0b2264e34555_u64,
+    0x3c70000000000000_u64, 0x3fe09e7c831b1a23_u64, 0x3fdfe694c3c89138_u64, 0x3c70000000000000_u64,
+    0x3fe16d32c862fc3b_u64, 0x3fe0a9c9334066db_u64, 0xbc80000000000000_u64, 0x3fe857954132083d_u64,
+    0x3fe67425fe575c88_u64, 0xbc80000000000000_u64, 0x3fe8a5c3b60f7e11_u64, 0x3fe6b23ad4415a17_u64,
+    0xbc80000000000000_u64, 0x3fe9740eb419dd04_u64, 0x3fe754ab7535d47d_u64, 0x3c80000000000000_u64,
+    0x3fea16d9cc06011a_u64, 0x3fe7d3755d851062_u64, 0xbc80000000000000_u64, 0x3febb635be2213d1_u64,
+    0x3fe91167cae3cfa9_u64, 0x3c80000000000000_u64, 0x3fed4b21ebf542f0_u64, 0x3fea3fc7e4dd47d1_u64,
+    0xbc80000000000000_u64, 0x3ff7b8516ffd2406_u64, 0x3ff2f5d3b178914a_u64, 0x3c90000000000000_u64,
+    0x3ff9295b9116e2e2_u64, 0x3ff3bffa88639760_u64, 0x3c90000000000000_u64, 0x3fffedc65e327140_u64,
+    0x3ff710f91e844f9b_u64, 0x3c90000000000000_u64, 0x40057e377b3f0b4b_u64, 0x3ffb6e2c73f41415_u64,
+    0x3c90000000000000_u64, 0x4026056b06a21918_u64, 0x4008c0a26d055288_u64, 0x3ca0000000000000_u64,
+    0x403843e1b5e5979c_u64, 0x400f0f978201eb84_u64, 0x3ca0000000000000_u64, 0x409fee8f69c4cd25_u64,
+    0x4020a19aebb51e90_u64, 0xbcc0000000000000_u64, 0x4170fbc6c02b1c90_u64, 0x40316369cd53bb69_u64,
+    0x3cd0000000000000_u64,
+  ]
+
+  private ASINH_T1 = [
+    0x3ff0000000000000_u64, 0x3feea4afa0000000_u64, 0x3fed5818e0000000_u64, 0x3fec199be0000000_u64,
+    0x3feae89f98000000_u64, 0x3fe9c49180000000_u64, 0x3fe8ace540000000_u64, 0x3fe7a11470000000_u64,
+    0x3fe6a09e68000000_u64, 0x3fe5ab07e0000000_u64, 0x3fe4bfdad8000000_u64, 0x3fe3dea650000000_u64,
+    0x3fe306fe08000000_u64, 0x3fe2387a70000000_u64, 0x3fe172b840000000_u64, 0x3fe0b55870000000_u64,
+    0x3fe0000000000000_u64,
+  ]
+
+  private ASINH_T2 = [
+    0x3ff0000000000000_u64, 0x3fefe9d968000000_u64, 0x3fefd3c228000000_u64, 0x3fefbdba38000000_u64,
+    0x3fefa7c180000000_u64, 0x3fef91d800000000_u64, 0x3fef7bfdb0000000_u64, 0x3fef663278000000_u64,
+    0x3fef507658000000_u64, 0x3fef3ac948000000_u64, 0x3fef252b38000000_u64, 0x3fef0f9c20000000_u64,
+    0x3feefa1bf0000000_u64, 0x3feee4aaa0000000_u64, 0x3feecf4830000000_u64, 0x3feeb9f488000000_u64,
+  ]
+
+  private ASINH_T3 = [
+    0x3ff0000000000000_u64, 0x3feffe9d20000000_u64, 0x3feffd3a58000000_u64, 0x3feffbd798000000_u64,
+    0x3feffa74e8000000_u64, 0x3feff91248000000_u64, 0x3feff7afb8000000_u64, 0x3feff64d38000000_u64,
+    0x3feff4eac8000000_u64, 0x3feff38868000000_u64, 0x3feff22618000000_u64, 0x3feff0c3d0000000_u64,
+    0x3fefef61a0000000_u64, 0x3fefedff78000000_u64, 0x3fefec9d68000000_u64, 0x3fefeb3b60000000_u64,
+  ]
+
+  private ASINH_T4 = [
+    0x3ff0000000000000_u64, 0x3fefffe9d0000000_u64, 0x3fefffd3a0000000_u64, 0x3fefffbd78000000_u64,
+    0x3fefffa748000000_u64, 0x3fefff9118000000_u64, 0x3fefff7ae8000000_u64, 0x3fefff64c0000000_u64,
+    0x3fefff4e90000000_u64, 0x3fefff3860000000_u64, 0x3fefff2238000000_u64, 0x3fefff0c08000000_u64,
+    0x3feffef5d8000000_u64, 0x3feffedfa8000000_u64, 0x3feffec980000000_u64, 0x3feffeb350000000_u64,
+  ]
+
+  private ASINH_LL = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000000_u64, 0x3f962e432b240000_u64,
+    0xbd5745af34bb54b8_u64, 0xb9e17e3ec05cde70_u64, 0x3fa62e42e4a80000_u64, 0x3d3111a4eadf3120_u64,
+    0x3a2cff3027abb119_u64, 0x3fb0a2b233f10000_u64, 0xbd588ac4ec78af80_u64, 0x3a24fa087ca75dfd_u64,
+    0x3fb62e43056c0000_u64, 0x3d16bd65e8b0b700_u64, 0xba0b18e160362c24_u64, 0x3fbbb9d3cbd60000_u64,
+    0x3d5de14aa55ec2b0_u64, 0xba1c6ac3f1862a6b_u64, 0x3fc0a2b244da0000_u64, 0x3d594def487fea70_u64,
+    0xba1dead1a4581acf_u64, 0x3fc3687aa9b78000_u64, 0x3d49cec9a50db220_u64, 0x3a234a70684f8e0e_u64,
+    0x3fc62e42faba0000_u64, 0xbd3d69047a3aeb00_u64, 0xba04e061f79144e2_u64, 0x3fc8f40b56d28000_u64,
+    0x3d5de7d755fd2e20_u64, 0x3a1bdc7ecf001489_u64, 0x3fcbb9d3b61f0000_u64, 0x3d1c14f1445b1200_u64,
+    0x3a2a1d78cbdc5b58_u64, 0x3fce7f9c11f08000_u64, 0xbd46e3e0000dae70_u64, 0x3a16a4559fadde98_u64,
+    0x3fd0a2b242ec4000_u64, 0x3d5bb7cf852a5fe8_u64, 0x3a2a6aef11ee43bd_u64, 0x3fd205966c764000_u64,
+    0x3d2ad3a5f2142940_u64, 0x3a25cc344fa10652_u64, 0x3fd3687a98aac000_u64, 0x3d21623671842f00_u64,
+    0xba10b428fe1f9e43_u64, 0x3fd4cb5ec93f4000_u64, 0x3d53d50980ea5130_u64, 0x3a267f0ea083b1c4_u64,
+    0x3fd62e42fefa4000_u64, 0xbd38432a1b0e2640_u64, 0x3a2803f2f6af40f3_u64, 0x0000000000000000_u64,
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0x3f562e462b400000_u64, 0x3d5061d003b97318_u64,
+    0x3a2d7faee66a2e1e_u64, 0x3f662e44c9200000_u64, 0x3d595a7bff5e2390_u64, 0xba0f7e788a871350_u64,
+    0x3f70a2b1e3300000_u64, 0x3d42a3a1a65aa3a0_u64, 0xba254599c9605442_u64, 0x3f762e4367c00000_u64,
+    0xbd24a995b6d9ddc0_u64, 0xb9b56bb79b254f33_u64, 0x3f7bb9d449a00000_u64, 0x3d58a119c42e9bc0_u64,
+    0xba28ecf7d8d661f1_u64, 0x3f80a2b1f1900000_u64, 0x3d58863771bd10a8_u64, 0x3a1e9731de7f0155_u64,
+    0x3f83687ad1100000_u64, 0x3d5e026a347ca1c8_u64, 0x39efadc62522444d_u64, 0x3f862e436f280000_u64,
+    0x3d525b84f71b70b8_u64, 0xb9ffcb3f98612d27_u64, 0x3f88f40b7b380000_u64, 0xbd462a0a4fd47580_u64,
+    0x3a23cb3c35d9f6a1_u64, 0x3f8bb9d3abb00000_u64, 0xbd50ec48f94d7860_u64, 0xba26b47d410e4cc7_u64,
+    0x3f8e7f9bb2300000_u64, 0x3d4e4415cbc97a00_u64, 0xba23729fdb677231_u64, 0x3f90a2b224780000_u64,
+    0xbd5cb73f4505b030_u64, 0xba21b3b3a3bc370a_u64, 0x3f92059691e80000_u64, 0xbd4abcc3412f2640_u64,
+    0xba0fe6e998e48673_u64, 0x3f93687a76800000_u64, 0xbd543901e5c97a90_u64, 0x39fb54cdd52a5d88_u64,
+    0x3f94cb5eb5d80000_u64, 0xbd58f106f00f13b8_u64, 0xba28f793f5fce148_u64, 0x3f962e432b240000_u64,
+    0xbd5745af34bb54b8_u64, 0xb9e17e3ec05cde70_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0x0000000000000000_u64, 0x3f162e7b00000000_u64, 0xbd3868625640a680_u64, 0xba234bf0db910f65_u64,
+    0x3f262e35f6000000_u64, 0xbd42ee3d96b696a0_u64, 0x3a1a2948cd558655_u64, 0x3f30a2b4b2000000_u64,
+    0x3d053edbcf116500_u64, 0xb9ecfc26ccf6d0e4_u64, 0x3f362e4be1000000_u64, 0x3cb783e334614000_u64,
+    0xba204b96da30e63a_u64, 0x3f3bb9e085000000_u64, 0xbd460785f20acb20_u64, 0xb9ff33369bf7dff1_u64,
+    0x3f40a2b94d000000_u64, 0x3d5fd4b3a2733530_u64, 0xb9f685a35575eff1_u64, 0x3f4368810f800000_u64,
+    0x3d07ded26dc81300_u64, 0xb9f4c4d1abca79bf_u64, 0x3f462e4787800000_u64, 0x3d57d2bee9a1f630_u64,
+    0x3a2860233b7ad130_u64, 0x3f48f40cb4800000_u64, 0xbd5af034eaf471c0_u64, 0x3a1ae748822d57b7_u64,
+    0x3f4bb9d094000000_u64, 0xbd57a223013a20f0_u64, 0xba21e499087075b6_u64, 0x3f4e7fa32c800000_u64,
+    0xbd4b2e67b1b59bd0_u64, 0xba254a41eda30fa6_u64, 0x3f50a2b237000000_u64, 0xbd37ad97ff4ac7a0_u64,
+    0x3a2f932da91371dd_u64, 0x3f52059a33800000_u64, 0xbd396422d90df400_u64, 0xba190800fbbf2ed3_u64,
+    0x3f53687982400000_u64, 0x3d30f90540018120_u64, 0x3a29567e01e48f9a_u64, 0x3f54cb602c000000_u64,
+    0xbd40d709a5ec0b50_u64, 0x3a1253dfd44635d2_u64, 0x3f562e462b400000_u64, 0x3d5061d003b97318_u64,
+    0x3a2d7faee66a2e1e_u64, 0x0000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0x3ed63007c0000000_u64, 0xbd4db0e38e5aaaa0_u64, 0x3a2259a7b94815b9_u64, 0x3ee6300f60000000_u64,
+    0x3d32b1c755804380_u64, 0x3a278cabba01e3e4_u64, 0x3ef0a21150000000_u64, 0xbd55ff2237307590_u64,
+    0x3a08074feacfe49d_u64, 0x3ef62e1ec0000000_u64, 0xbd285d6f6487ce40_u64, 0x3a205485074b9276_u64,
+    0x3efbba3010000000_u64, 0xbd4af5d58a7c9210_u64, 0xba230a8c0fd2ff5f_u64, 0x3f00a32298000000_u64,
+    0x3d4590faa0883bd0_u64, 0x3a295e9bda999947_u64, 0x3f03682f10000000_u64, 0x3d5f0224376efaf8_u64,
+    0xba25843c0db50d10_u64, 0x3f062e3d80000000_u64, 0xbd4142c13daed4a0_u64, 0x3a2c68a61183ce87_u64,
+    0x3f08f44dd8000000_u64, 0xbd4aa489f3999310_u64, 0x3a111c5c376854ea_u64, 0x3f0bb96010000000_u64,
+    0x3d59904d8b6a3638_u64, 0x3a28c89554493c8f_u64, 0x3f0e7f7440000000_u64, 0x3d55785ddbe7cba8_u64,
+    0x3a1e7ff3cde7d70c_u64, 0x3f10a2c530000000_u64, 0xbd46d9e8780d0d50_u64, 0x3a1ad9c178106693_u64,
+    0x3f1205d134000000_u64, 0xbd4214a2e893fcc0_u64, 0x3a2548a9500c9822_u64, 0x3f13685e28000000_u64,
+    0x3d4e235886461030_u64, 0x3a12a97b26da2d88_u64, 0x3f14cb6c18000000_u64, 0x3d52b7cfcea9e0d8_u64,
+    0xba25095048a6b824_u64, 0x3f162e7b00000000_u64, 0xbd3868625640a680_u64, 0xba234bf0db910f65_u64,
+  ]
+
+  private ASINH_REFINE_CH = [
+    0x3fe0000000000000_u64, 0x39024b67ee516e3b_u64, 0xbfd0000000000000_u64, 0xb91932ce43199a8d_u64,
+    0x3fc5555555555555_u64, 0x3c655540c15cf91f_u64,
+  ]
+
+  private ASINH_REFINE_CL = [
+    0xbfc0000000000000_u64, 0x3fb9999999a0754f_u64, 0xbfb55555555c3157_u64,
+  ]
+
+  private ACOSH_ONE_CH = [
+    0xbfb5555555555555_u64, 0xbc55555555554af1_u64, 0x3f93333333333333_u64, 0x3c29999998933f0e_u64,
+    0xbf76db6db6db6db7_u64, 0x3c024929b16ec6b7_u64, 0x3f5f1c71c71c71c7_u64, 0x3bdc56d45e265e2c_u64,
+    0xbf46e8ba2e8ba2e9_u64, 0x3be6d50ce7188d3d_u64, 0x3f31c4ec4ec4ec43_u64, 0x3bdc6791d1cf399a_u64,
+    0xbf1c99999999914f_u64, 0x3bbee0d9408a2e2a_u64, 0x3f07a878787648e2_u64, 0xbba1cea281e08012_u64,
+    0xbef3fde50d0cb4b9_u64, 0x3b70335101403d9d_u64, 0x3ee12ef3bf8a0a74_u64, 0x3aff9c6b51787043_u64,
+  ]
+
+  private ACOSH_ONE_CL = [
+    0xbecdf3b9d1296ea9_u64, 0x3eba681d7d2298eb_u64, 0xbea77ead7b1ca449_u64, 0x3e94edd2ddb3721f_u64,
+    0xbe81bf173531ee23_u64, 0x3e6613229230e255_u64,
+  ]
+
+  private ACOSH_CL9 = [
+    0xbfb5555555555555_u64, 0x3f93333333332f95_u64, 0xbf76db6db6d5534c_u64, 0x3f5f1c71c1e04356_u64,
+    0xbf46e8b8e3e40d58_u64, 0x3f31c4ba825ac4fe_u64, 0xbf1c9045534e6d9e_u64, 0x3f071fedae26a76b_u64,
+    0xbeef1f4f8cc65342_u64,
+  ]
+
+  private ACOSH_CL4 = [
+    0x3bd5c4b6148816e2_u64, 0xbfd000000000005c_u64, 0xbfb7fffffebf3e6c_u64, 0xbfaaab6691f2bae7_u64,
+  ]
+
+  private ACOSH_CL3 = [
+    0xbbc7f77c8429c6c6_u64, 0xbfcffffffffff214_u64, 0xbfb8000268641bfe_u64,
+  ]
+
+  private ACOSH_CL2 = [
+    0x3bc7a0ed2effdd10_u64, 0xbfd000000017d048_u64,
+  ]
+
+  private ACOSH_DB = [
+    0x3ff5bff041b260fe_u64, 0x3fea6031cd5f93ba_u64, 0x3c80000000000000_u64, 0x3ff9efdca62b700a_u64,
+    0x3ff104b648f113a1_u64, 0x3c90000000000000_u64, 0x3ff9efdca62b700a_u64, 0x3ff104b648f113a1_u64,
+    0x3c90000000000000_u64, 0x3ffa5bf3acfde4b2_u64, 0x3ff1585720f35cd9_u64, 0xbc90000000000000_u64,
+    0x400d888dd2101d93_u64, 0x3fffaf8b7a12cf9f_u64, 0xbc90000000000000_u64, 0x4040151def34c2b8_u64,
+    0x4010a7b6e3fed720_u64, 0x3cb0000000000000_u64, 0x40645ea160ddc71f_u64, 0x401725811dcf6782_u64,
+    0x3cb0000000000000_u64, 0x40813570067acc9f_u64, 0x401c04672343dccf_u64, 0xbcb0000000000000_u64,
+    0x4092a686e4b567ce_u64, 0x401f1c928e7f1e65_u64, 0x3cb0000000000000_u64, 0x40ecb62eec26bd78_u64,
+    0x402759a2ad4c4d56_u64, 0x3cc0000000000000_u64,
+  ]
+
+  private ATANH_C9 = [
+    0x3fc999999999999a_u64, 0x3fc2492492492244_u64, 0x3fbc71c71c79715f_u64, 0x3fb745d16f777723_u64,
+    0x3fb3b13ca4174634_u64, 0x3fb110c9724989bd_u64, 0x3fae2d17608a5b2e_u64, 0x3faa0b56308cba0b_u64,
+    0x3fafb6341208ad2e_u64,
+  ]
+
+  private ATANH_C5 = [
+    0xbff0000000000000_u64, 0x3ff5555555555530_u64, 0xbfffffffffffffa0_u64, 0x40099999e33a6366_u64,
+    0xc01555559ef9525f_u64,
+  ]
+
+  private ATANH_DB = [
+    0x3fd2dbb7b1c91363_u64, 0x3fd36f33d51c264d_u64, 0x3c70000000000000_u64, 0x3fdc493dc899e4a5_u64,
+    0x3fde611aa58ab608_u64, 0xbc70000000000000_u64,
+  ]
+
+  private ASINH_B = [
+    301_i64, 27565_i64, 7189_i64, 24786_i64, 13383_i64, 22167_i64, 18923_i64, 19696_i64,
+    23845_i64, 17361_i64, 28184_i64, 15150_i64, 31969_i64, 13054_i64, 35231_i64, 11064_i64,
+    37996_i64, 9173_i64, 40288_i64, 7372_i64, 42129_i64, 5657_i64, 43542_i64, 4020_i64,
+    44546_i64, 2457_i64, 45160_i64, 962_i64, 45399_i64, -468_i64, 45281_i64, -1838_i64,
+    44821_i64, -3151_i64, 44032_i64, -4412_i64, 42929_i64, -5622_i64, 41522_i64, -6786_i64,
+    39825_i64, -7905_i64, 37848_i64, -8982_i64, 35602_i64, -10020_i64, 33097_i64, -11020_i64,
+    30341_i64, -11985_i64, 27345_i64, -12916_i64, 24115_i64, -13816_i64, 20661_i64, -14685_i64,
+    16989_i64, -15526_i64, 13107_i64, -16339_i64, 9022_i64, -17126_i64, 4740_i64, -17889_i64,
+  ]
+
+  private ASINH_R1 = [
+    0x3ff0000000000000_u64, 0x3fef507600000000_u64, 0x3feea4b000000000_u64, 0x3fedfc9800000000_u64,
+    0x3fed581800000000_u64, 0x3fecb72000000000_u64, 0x3fec199c00000000_u64, 0x3feb7f7600000000_u64,
+    0x3feae8a000000000_u64, 0x3fea550400000000_u64, 0x3fe9c49200000000_u64, 0x3fe9373800000000_u64,
+    0x3fe8ace600000000_u64, 0x3fe8258a00000000_u64, 0x3fe7a11400000000_u64, 0x3fe71f7600000000_u64,
+    0x3fe6a09e00000000_u64, 0x3fe6247e00000000_u64, 0x3fe5ab0800000000_u64, 0x3fe5342c00000000_u64,
+    0x3fe4bfda00000000_u64, 0x3fe44e0800000000_u64, 0x3fe3dea600000000_u64, 0x3fe371a800000000_u64,
+    0x3fe306fe00000000_u64, 0x3fe29e9e00000000_u64, 0x3fe2387a00000000_u64, 0x3fe1d48800000000_u64,
+    0x3fe172b800000000_u64, 0x3fe1130200000000_u64, 0x3fe0b55800000000_u64, 0x3fe059b000000000_u64,
+    0x3fe0000000000000_u64,
+  ]
+
+  private ASINH_R2 = [
+    0x3ff0000000000000_u64, 0x3feffa7400000000_u64, 0x3feff4ea00000000_u64, 0x3fefef6200000000_u64,
+    0x3fefe9da00000000_u64, 0x3fefe45200000000_u64, 0x3fefdecc00000000_u64, 0x3fefd94600000000_u64,
+    0x3fefd3c200000000_u64, 0x3fefce3e00000000_u64, 0x3fefc8bc00000000_u64, 0x3fefc33a00000000_u64,
+    0x3fefbdba00000000_u64, 0x3fefb83a00000000_u64, 0x3fefb2bc00000000_u64, 0x3fefad3e00000000_u64,
+    0x3fefa7c200000000_u64, 0x3fefa24600000000_u64, 0x3fef9cca00000000_u64, 0x3fef975000000000_u64,
+    0x3fef91d800000000_u64, 0x3fef8c6000000000_u64, 0x3fef86e800000000_u64, 0x3fef817200000000_u64,
+    0x3fef7bfe00000000_u64, 0x3fef768a00000000_u64, 0x3fef711600000000_u64, 0x3fef6ba400000000_u64,
+    0x3fef663200000000_u64, 0x3fef60c200000000_u64, 0x3fef5b5200000000_u64, 0x3fef55e400000000_u64,
+    0x3fef507600000000_u64,
+  ]
+
+  private ASINH_L1 = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbd1269e2038315b3_u64, 0x3f962e4eacd40000_u64,
+    0xbd23f2558bddfc47_u64, 0x3fa62e3ce7218000_u64, 0x3d207ea13c34efb5_u64, 0x3fb0a2ab6d3ec000_u64,
+    0x3d38f3e77084d3ba_u64, 0x3fb62e4a86d8c000_u64, 0xbd18d92a005f1a7e_u64, 0x3fbbb9db7062c000_u64,
+    0x3d358239e799bfe5_u64, 0x3fc0a2b1a22cc000_u64, 0xbd3a93fcf5f593b7_u64, 0x3fc3687f0a298000_u64,
+    0xbd1db4cac32fd2b5_u64, 0x3fc62e4116b64000_u64, 0xbd10e65a92ee0f3b_u64, 0x3fc8f409e4df6000_u64,
+    0xbd38261383d475f1_u64, 0x3fcbb9d15001c000_u64, 0xbd3359886207513b_u64, 0x3fce7f9a8c940000_u64,
+    0x3d3811f87496ceb7_u64, 0x3fd0a2b052ddb000_u64, 0x3d34991ec6cb435c_u64, 0x3fd205955ef73000_u64,
+    0xbd34581abfeb8927_u64, 0x3fd3687bd9121000_u64, 0x3d3cab48f6942703_u64, 0x3fd4cb5e8f2b5000_u64,
+    0xbd0df2c452fde132_u64, 0x3fd62e4420e20000_u64, 0x3d26109f4fdb74bd_u64, 0x3fd791292c46a000_u64,
+    0xbd36b95fbdac7696_u64, 0x3fd8f40af84e7000_u64, 0x3d17394fa880cbda_u64, 0x3fda56ed8f865000_u64,
+    0xbd150b06a94eccab_u64, 0x3fdbb9d6505b4000_u64, 0xbd3be2abf0b38989_u64, 0x3fdd1cb91e728000_u64,
+    0xbd37d6bf1e34da04_u64, 0x3fde7f9d139e2000_u64, 0xbd3423c1e14de6ed_u64, 0x3fdfe27db9b0e000_u64,
+    0x3d3c46f1a0efbbc2_u64, 0x3fe0a2b25060a800_u64, 0x3d2834fe4e3e6018_u64, 0x3fe154244482a000_u64,
+    0x3d16a03d0f02b650_u64, 0x3fe2059731298800_u64, 0x3d3d437056526f30_u64, 0x3fe2b707145de000_u64,
+    0xbd2a0233728405c5_u64, 0x3fe3687b0e0b2800_u64, 0xbd24dbdda10d2bf1_u64, 0x3fe419ec5d3f6800_u64,
+    0x3d3f7d0a25d154f2_u64, 0x3fe4cb5f9fc02000_u64, 0x3d315ede4d803b18_u64, 0x3fe57cd28421a800_u64,
+    0x3d2ef35793c76730_u64, 0x3fe62e42fefa3800_u64,
+  ]
+
+  private ASINH_L2 = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0x3d35abdac3638e99_u64, 0x3f4631ec81e00000_u64,
+    0xbd216b8be9bbe239_u64, 0x3f562fd812700000_u64, 0xbd3364c6315542eb_u64, 0x3f60a25205080000_u64,
+    0x3d2734abe459c900_u64, 0x3f662dadc1d00000_u64, 0x3d30cf8a761431bf_u64, 0x3f6bb9ff94d00000_u64,
+    0x3d2da2718eb78708_u64, 0x3f70a2a2def80000_u64, 0x3d334ada62c59b93_u64, 0x3f7368c0fae40000_u64,
+    0x3d3d09ab376682d4_u64, 0x3f762e58e4f80000_u64, 0xbd23cb7b94329211_u64, 0x3f78f46bd28c0000_u64,
+    0xbd2eec5c297c41d0_u64, 0x3f7bb9f831200000_u64, 0xbd36411b9395d150_u64, 0x3f7e7fff8f300000_u64,
+    0xbd31c0e59a43053c_u64, 0x3f80a2c0006e0000_u64, 0x3d16506596e077b6_u64, 0x3f8205bdb6f00000_u64,
+    0x3d3e256bce6faa27_u64, 0x3f836877c86e0000_u64, 0x3ccbd42467b0c8d1_u64, 0x3f84cb6f55780000_u64,
+    0xbd3c4f92132ff0f0_u64, 0x3f862e230e8c0000_u64, 0xbd380be08bfab390_u64, 0x3f87911440f60000_u64,
+    0xbd3f0b1319ceb1f7_u64, 0x3f88f443020a0000_u64, 0x3d2a65fcfb8de99b_u64, 0x3f8a572dbef40000_u64,
+    0x3d14233885d3779c_u64, 0x3f8bb9d449a60000_u64, 0x3d3f46a59e646edb_u64, 0x3f8d1cb8491c0000_u64,
+    0xbd3c3d2f11c11446_u64, 0x3f8e7fd9d2aa0000_u64, 0x3d27763f78a1e0cc_u64, 0x3f8fe2b6f9780000_u64,
+    0x3d3b4c37fc60c043_u64, 0x3f90a2a7c7a50000_u64, 0xbd15b8a822859be3_u64, 0x3f915412ca860000_u64,
+    0xbd3f2d8c9fc06400_u64, 0x3f92059c90050000_u64, 0xbd3e80e79c20378d_u64, 0x3f92b703f49b0000_u64,
+    0x3d368256e4329bdb_u64, 0x3f93688a1a8d0000_u64, 0x3d37e9741da248c3_u64, 0x3f9419edc7ba0000_u64,
+    0x3d2e330dccce602b_u64, 0x3f94cb7034fa0000_u64, 0x3ce2f32b5d18eefb_u64, 0x3f957cd011870000_u64,
+    0xbd1269e2038315b3_u64, 0x3f962e4eacd40000_u64,
+  ]
+
+  private ASINH_C = [
+    0xbfe0000000000000_u64, 0x3fd5555555555530_u64, 0xbfcfffffffffffa0_u64, 0x3fc99999e33a6366_u64,
+    0xbfc555559ef9525f_u64,
+  ]
+
+  private ATANH_CH = [
+    0x3fd5555555555555_u64, 0x3c75555555555555_u64, 0x3fc999999999999a_u64, 0xbc6999999999611c_u64,
+    0x3fc2492492492492_u64, 0x3c62492490f76b25_u64, 0x3fbc71c71c71c71c_u64, 0x3c5c71cd5c38a112_u64,
+    0x3fb745d1745d1746_u64, 0xbc47556c4165f4ca_u64, 0x3fb3b13b13b13b14_u64, 0xbc4b893c3b36052e_u64,
+    0x3fb1111111111105_u64, 0x3c44e1afd723ed1f_u64, 0x3fae1e1e1e1e2678_u64, 0xbc4f86ea96fb1435_u64,
+    0x3faaf286bc9f90cc_u64, 0x3c31e51a6e54fde9_u64, 0x3fa8618618c779b6_u64, 0xbc2ab913de95c3bf_u64,
+    0x3fa642c84aa383eb_u64, 0x3c4632e747641b12_u64, 0x3fa47ae2d205013c_u64, 0xbc30c9617e7bcff2_u64,
+    0x3fa2f664d60473f9_u64, 0x3c23adb3e2b7f35e_u64,
+  ]
+
+  private ATANH_CL = [
+    0x3fa1a9a91fd692af_u64, 0x3fa06dfbb35e7f44_u64, 0x3fa037bed4d7588f_u64, 0x3f95aca6d6d720d6_u64,
+    0x3fa99ea5700d53a5_u64,
+  ]
+
+  private ATANH_B = [
+    301_i64, 27565_i64, 7189_i64, 24786_i64, 13383_i64, 22167_i64, 18923_i64, 19696_i64,
+    23845_i64, 17361_i64, 28184_i64, 15150_i64, 31969_i64, 13054_i64, 35231_i64, 11064_i64,
+    37996_i64, 9173_i64, 40288_i64, 7372_i64, 42129_i64, 5657_i64, 43542_i64, 4020_i64,
+    44546_i64, 2457_i64, 45160_i64, 962_i64, 45399_i64, -468_i64, 45281_i64, -1838_i64,
+    44821_i64, -3151_i64, 44032_i64, -4412_i64, 42929_i64, -5622_i64, 41522_i64, -6786_i64,
+    39825_i64, -7905_i64, 37848_i64, -8982_i64, 35602_i64, -10020_i64, 33097_i64, -11020_i64,
+    30341_i64, -11985_i64, 27345_i64, -12916_i64, 24115_i64, -13816_i64, 20661_i64, -14685_i64,
+    16989_i64, -15526_i64, 13107_i64, -16339_i64, 9022_i64, -17126_i64, 4740_i64, -17889_i64,
+  ]
+
+  private ATANH_R1 = [
+    0x3ff0000000000000_u64, 0x3fef507600000000_u64, 0x3feea4b000000000_u64, 0x3fedfc9800000000_u64,
+    0x3fed581800000000_u64, 0x3fecb72000000000_u64, 0x3fec199c00000000_u64, 0x3feb7f7600000000_u64,
+    0x3feae8a000000000_u64, 0x3fea550400000000_u64, 0x3fe9c49200000000_u64, 0x3fe9373800000000_u64,
+    0x3fe8ace600000000_u64, 0x3fe8258a00000000_u64, 0x3fe7a11400000000_u64, 0x3fe71f7600000000_u64,
+    0x3fe6a09e00000000_u64, 0x3fe6247e00000000_u64, 0x3fe5ab0800000000_u64, 0x3fe5342c00000000_u64,
+    0x3fe4bfda00000000_u64, 0x3fe44e0800000000_u64, 0x3fe3dea600000000_u64, 0x3fe371a800000000_u64,
+    0x3fe306fe00000000_u64, 0x3fe29e9e00000000_u64, 0x3fe2387a00000000_u64, 0x3fe1d48800000000_u64,
+    0x3fe172b800000000_u64, 0x3fe1130200000000_u64, 0x3fe0b55800000000_u64, 0x3fe059b000000000_u64,
+    0x3fe0000000000000_u64,
+  ]
+
+  private ATANH_R2 = [
+    0x3ff0000000000000_u64, 0x3feffa7400000000_u64, 0x3feff4ea00000000_u64, 0x3fefef6200000000_u64,
+    0x3fefe9da00000000_u64, 0x3fefe45200000000_u64, 0x3fefdecc00000000_u64, 0x3fefd94600000000_u64,
+    0x3fefd3c200000000_u64, 0x3fefce3e00000000_u64, 0x3fefc8bc00000000_u64, 0x3fefc33a00000000_u64,
+    0x3fefbdba00000000_u64, 0x3fefb83a00000000_u64, 0x3fefb2bc00000000_u64, 0x3fefad3e00000000_u64,
+    0x3fefa7c200000000_u64, 0x3fefa24600000000_u64, 0x3fef9cca00000000_u64, 0x3fef975000000000_u64,
+    0x3fef91d800000000_u64, 0x3fef8c6000000000_u64, 0x3fef86e800000000_u64, 0x3fef817200000000_u64,
+    0x3fef7bfe00000000_u64, 0x3fef768a00000000_u64, 0x3fef711600000000_u64, 0x3fef6ba400000000_u64,
+    0x3fef663200000000_u64, 0x3fef60c200000000_u64, 0x3fef5b5200000000_u64, 0x3fef55e400000000_u64,
+    0x3fef507600000000_u64,
+  ]
+
+  private ATANH_L1 = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbe4532c1269e2038_u64, 0x3f862e5000000000_u64,
+    0x3e4ce42d81b54e84_u64, 0x3f962e3c00000000_u64, 0xbe525826f815ec3d_u64, 0x3fa0a2ac00000000_u64,
+    0x3e50db1b1e7cee11_u64, 0x3fa62e4a00000000_u64, 0xbe51f3a8c6c95003_u64, 0x3fabb9dc00000000_u64,
+    0xbe5774cd4fb8c30d_u64, 0x3fb0a2b200000000_u64, 0x3e2452e56c030a0a_u64, 0x3fb3687f00000000_u64,
+    0x3e36b63c4966a79a_u64, 0x3fb62e4100000000_u64, 0xbe3b20a21ccb525e_u64, 0x3fb8f40a00000000_u64,
+    0x3e54006cfb3d8f85_u64, 0x3fbbb9d100000000_u64, 0xbe5cdb026b310c41_u64, 0x3fbe7f9b00000000_u64,
+    0xbe569124fdc0f16d_u64, 0x3fc0a2b080000000_u64, 0xbe5084656cdc2727_u64, 0x3fc2059580000000_u64,
+    0xbe5376fa8b0357fd_u64, 0x3fc3687c00000000_u64, 0x3e3e56ae55a47b4a_u64, 0x3fc4cb5e80000000_u64,
+    0x3e5070ff8834eeb4_u64, 0x3fc62e4400000000_u64, 0x3e5623516109f4fe_u64, 0x3fc7912900000000_u64,
+    0xbe2ec656b95fbdac_u64, 0x3fc8f40b00000000_u64, 0x3e3f0ca2e729f510_u64, 0x3fca56ed80000000_u64,
+    0xbe57d260a858354a_u64, 0x3fcbb9d680000000_u64, 0x3e4e7279075503d3_u64, 0x3fcd1cb900000000_u64,
+    0x3e439e1a0a503873_u64, 0x3fce7f9d00000000_u64, 0x3e5cd86d7b87c3d6_u64, 0x3fcfe27d80000000_u64,
+    0x3e5060ab88de341e_u64, 0x3fd0a2b240000000_u64, 0x3e320a860d3f9390_u64, 0x3fd1542440000000_u64,
+    0xbe4dacee95fc2f10_u64, 0x3fd2059740000000_u64, 0x3e545de3a86e0aca_u64, 0x3fd2b70700000000_u64,
+    0x3e4c164cbfb991af_u64, 0x3fd3687b00000000_u64, 0x3e5d3f66b24225ef_u64, 0x3fd419ec40000000_u64,
+    0x3e5fc023efa144ba_u64, 0x3fd4cb5f80000000_u64, 0x3e3086a8af6f26c0_u64, 0x3fd57cd280000000_u64,
+    0xbe105c610ca86c39_u64, 0x3fd62e4300000000_u64,
+  ]
+
+  private ATANH_L2 = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbe337e152a129e4e_u64, 0x3f36320000000000_u64,
+    0xbe53f6c916b8be9c_u64, 0x3f46300000000000_u64, 0x3e520505936739d5_u64, 0x3f50a24000000000_u64,
+    0xbe523e2e8cb541ba_u64, 0x3f562dc000000000_u64, 0xbdfacb7983ac4f5e_u64, 0x3f5bba0000000000_u64,
+    0x3e36f7c7689c63ae_u64, 0x3f60a2a000000000_u64, 0x3e1f5ca695b4c58b_u64, 0x3f6368c000000000_u64,
+    0xbe4c6c18bd953226_u64, 0x3f662e6000000000_u64, 0x3e57a516c34846bd_u64, 0x3f68f46000000000_u64,
+    0xbe4f3b83dd8b8530_u64, 0x3f6bba0000000000_u64, 0xbe0c3459046e4e57_u64, 0x3f6e800000000000_u64,
+    0x3d9b5c7e34cb79f6_u64, 0x3f70a2c000000000_u64, 0xbe42487e9af9a692_u64, 0x3f7205c000000000_u64,
+    0x3e5f21bbc4ad79ce_u64, 0x3f73687000000000_u64, 0xbe2550ffc857b731_u64, 0x3f74cb7000000000_u64,
+    0x3e487458ec1b7b34_u64, 0x3f762e2000000000_u64, 0x3e5103d4fe83ee81_u64, 0x3f77911000000000_u64,
+    0x3e4810483d3b398c_u64, 0x3f78f44000000000_u64, 0xbe42085cb340608e_u64, 0x3f7a573000000000_u64,
+    0x3e512698a119c42f_u64, 0x3f7bb9d000000000_u64, 0xbe5edb8c172b4c33_u64, 0x3f7d1cc000000000_u64,
+    0xbe58b55b87a5e238_u64, 0x3f7e7fe000000000_u64, 0x3e5be5e17763f78a_u64, 0x3f7fe2b000000000_u64,
+    0xbe1c2d496790073e_u64, 0x3f80a2a800000000_u64, 0x3e56542f523abeec_u64, 0x3f81541000000000_u64,
+    0xbe5b7fdbe5b193f8_u64, 0x3f8205a000000000_u64, 0x3e5fa4d42fe30c7c_u64, 0x3f82b70000000000_u64,
+    0x3e50d46ad04adc86_u64, 0x3f83688800000000_u64, 0xbe51c22d02d17c4c_u64, 0x3f8419f000000000_u64,
+    0x3e1a7d1e330dccce_u64, 0x3f84cb7000000000_u64, 0x3e0187025e656ba3_u64, 0x3f857cd000000000_u64,
+    0xbe4532c1269e2038_u64, 0x3f862e5000000000_u64,
+  ]
+
+  private ASINH_MASK52  = 0x000fffffffffffff_u64
+  private ASINH_ONE_EXP = 0x3ff0000000000000_u64
+
+  private def self.asinh_at(t : Pointer(UInt64), i : Int32) : Float64
+    IyiFloatText.from_bits(t[i])
+  end
+
+  private def self.asinh_fabs(x : Float64) : Float64
+    IyiFloatText.from_bits(IyiFloatText.bits_of(x) & 0x7fffffffffffffff_u64)
+  end
+
+  # ddcoremath.h fasttwosum
+  private def self.asinh_fast_two_sum(x : Float64, y : Float64) : {Float64, Float64}
+    s = x + y
+    z = s - x
+    {s, y - z}
+  end
+
+  # ddcoremath.h fasttwosub
+  private def self.asinh_fast_two_sub(x : Float64, y : Float64) : {Float64, Float64}
+    s = x - y
+    z = x - s
+    {s, z - y}
+  end
+
+  # ddcoremath.h adddd
+  private def self.asinh_add_dd(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    s = xh + ch
+    d = s - xh
+    {s, ((ch - d) + (xh + (d - s))) + (xl + cl)}
+  end
+
+  # ddcoremath.h muldd_acc
+  private def self.asinh_muldd_acc(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    ahlh = ch * xl
+    alhh = cl * xh
+    ahhh = ch * xh
+    ahhl = Math.fma(ch, xh, ahhh * -1.0)
+    ahhl = ahhl + (alhh + ahlh)
+    h = ahhh + ahhl
+    {h, (ahhh - h) + ahhl}
+  end
+
+  # ddcoremath.h muldd_acc2
+  private def self.asinh_muldd_acc2(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    ahlh = ch * xl
+    alhh = cl * xh
+    ahhh = ch * xh
+    ahhl = Math.fma(ch, xh, ahhh * -1.0)
+    ahhl = ahhl + (alhh + ahlh)
+    asinh_fast_two_sum(ahhh, ahhl)
+  end
+
+  # ddcoremath.h mulddd
+  private def self.asinh_mulddd(xh : Float64, xl : Float64, ch : Float64) : {Float64, Float64}
+    ahlh = ch * xl
+    ahhh = ch * xh
+    ahhl = Math.fma(ch, xh, ahhh * -1.0)
+    ahhl = ahhl + ahlh
+    h = ahhh + ahhl
+    {h, (ahhh - h) + ahhl}
+  end
+
+  # ddcoremath.h mulddd3
+  private def self.asinh_mulddd3(xh : Float64, xl : Float64, ch : Float64) : {Float64, Float64}
+    hh = xh * ch
+    {hh, Math.fma(ch, xh, hh * -1.0) + xl * ch}
+  end
+
+  # ddcoremath.h polydd: c holds n {hi, lo} rows, l the low tail in.
+  private def self.asinh_polydd(xh : Float64, xl : Float64, n : Int32, c : Pointer(UInt64), l : Float64) : {Float64, Float64}
+    i = n - 1
+    ch, cl = asinh_fast_two_sum(asinh_at(c, 2 * i), l)
+    cl = cl + asinh_at(c, 2 * i + 1)
+    while i > 0
+      i -= 1
+      ch, cl = asinh_muldd_acc(xh, xl, ch, cl)
+      c0 = asinh_at(c, 2 * i)
+      th = ch + c0
+      tl = (c0 - th) + ch
+      ch = th
+      cl = cl + (tl + asinh_at(c, 2 * i + 1))
     end
-    value < 0.0 ? 0.0 - res : res
+    {ch, cl}
+  end
+
+  # ddcoremath.h polydd3
+  private def self.asinh_polydd3(xh : Float64, xl : Float64, n : Int32, c : Pointer(UInt64), l : Float64) : {Float64, Float64}
+    i = n - 1
+    ch, cl = asinh_fast_two_sum(asinh_at(c, 2 * i), l)
+    cl = cl + asinh_at(c, 2 * i + 1)
+    while i > 0
+      i -= 1
+      ch, cl = asinh_muldd_acc2(xh, xl, ch, cl)
+      th, tl = asinh_fast_two_sum(asinh_at(c, 2 * i), ch)
+      ch = th
+      cl = cl + (tl + asinh_at(c, 2 * i + 1))
+    end
+    {ch, cl}
+  end
+
+  # The final bit fix of the refinements: a low part exactly a power of two
+  # moves one ulp toward the tail w.
+  private def self.asinh_nudge(v1 : Float64, v2 : Float64) : Float64
+    t = IyiFloatText.bits_of(v1)
+    return v1 if t & ASINH_MASK52 != 0_u64
+    w = IyiFloatText.bits_of(v2)
+    if (w ^ t).unsafe_shr(63_u64) != 0_u64
+      t = t &- 1_u64
+    else
+      t = t &+ 1_u64
+    end
+    IyiFloatText.from_bits(t)
+  end
+
+  # Index j into r1/r2, l1/l2 from the mantissa bits t (s_asinh.c, e_acosh.c,
+  # e_atanh.c): b interleaves the c0, c1 fields of B.
+  private def self.asinh_index(t : UInt64, b : Pointer(Int64)) : UInt64
+    i = t.unsafe_shr(47_u64).unsafe_to_i32
+    d = (t & 0x00007fffffffffff_u64).unsafe_to_i64
+    c0 = b[2 * i].unsafe_to_u64.unsafe_shl(33_u64)
+    c1 = b[2 * i + 1] &* d.unsafe_shr(16_i64)
+    (t &+ c0 &+ c1.unsafe_to_u64).unsafe_shr(42_u64)
+  end
+
+  # Binary search of an exception table of {x, h, l} rows; sgn multiplies
+  # both parts (1.0 for acosh).
+  private def self.asinh_db_search(db : Pointer(UInt64), rows : Int32, ax : Float64, sgn : Float64, f : Float64) : Float64
+    a = 0
+    b = rows - 1
+    m = (a + b) // 2
+    while a <= b
+      key = asinh_at(db, 3 * m)
+      if key < ax
+        a = m + 1
+      elsif key == ax
+        return sgn * asinh_at(db, 3 * m + 1) + sgn * asinh_at(db, 3 * m + 2)
+      else
+        b = m - 1
+      end
+      m = (a + b) // 2
+    end
+    f
+  end
+
+  # log(2^e (1 + x)) for the refinements: the t1..t4 / LL tables, sum
+  # L[0..2] of the four table entries plus e log 2.
+  private def self.asinh_ll_sum(i1 : Int32, i2 : Int32, i3 : Int32, i4 : Int32, k : Int32) : Float64
+    ll = ASINH_LL.to_unsafe
+    (asinh_at(ll, i1 * 3 + k) + asinh_at(ll, (17 + i2) * 3 + k)) + (asinh_at(ll, (34 + i3) * 3 + k) + asinh_at(ll, (51 + i4) * 3 + k))
+  end
+
+  # s_asinh.c as_asinh_zero
+  private def self.asinh_zero(x : Float64, x2h : Float64, x2l : Float64) : Float64
+    cl = ASINH_ZERO_CL.to_unsafe
+    y2 = x2h * (asinh_at(cl, 0) + x2h * (asinh_at(cl, 1) + x2h * (asinh_at(cl, 2) + x2h * (asinh_at(cl, 3) + x2h * asinh_at(cl, 4)))))
+    y1, y2 = asinh_polydd(x2h, x2l, 12, ASINH_ZERO_CH.to_unsafe, y2)
+    y1, y2 = asinh_muldd_acc(y1, y2, x2h, x2l)
+    y1, y2 = asinh_mulddd(y1, y2, x)
+    y0, y1 = asinh_fast_two_sum(x, y1)
+    y1, y2 = asinh_fast_two_sum(y1, y2)
+    y0 + asinh_nudge(y1, y2)
+  end
+
+  # s_asinh.c as_asinh_refine
+  private def self.asinh_refine(x : Float64, zh : Float64, zl : Float64, a : Float64) : Float64
+    t = IyiFloatText.bits_of(zh)
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - 0x3ff + (zl == 0.0 ? 1 : 0)
+    t = (t & ASINH_MASK52) | ASINH_ONE_EXP
+    ed = e.to_f64
+    v = IyiFloatText.bits_of(a - ed + ASINH_REFINE_BIAS)
+    i = (v &- ASINH_ONE_EXP).unsafe_shr(36_u64)
+    i1 = (i.unsafe_shr(12_u64) & 0x1f_u64).unsafe_to_i32
+    i2 = (i.unsafe_shr(8_u64) & 0xf_u64).unsafe_to_i32
+    i3 = (i.unsafe_shr(4_u64) & 0xf_u64).unsafe_to_i32
+    i4 = (i & 0xf_u64).unsafe_to_i32
+    el2 = ASINH_REFINE_L22 * ed
+    el1 = ASINH_REFINE_L21 * ed
+    el0 = ASINH_REFINE_L20 * ed
+    l0 = asinh_ll_sum(i1, i2, i3, i4, 0)
+    l1 = asinh_ll_sum(i1, i2, i3, i4, 1)
+    l2 = asinh_ll_sum(i1, i2, i3, i4, 2)
+    l0 = l0 + el0
+    t12 = asinh_at(ASINH_T1.to_unsafe, i1) * asinh_at(ASINH_T2.to_unsafe, i2)
+    t34 = asinh_at(ASINH_T3.to_unsafe, i3) * asinh_at(ASINH_T4.to_unsafe, i4)
+    th = t12 * t34
+    tl = Math.fma(t12, t34, th * -1.0)
+    tf = IyiFloatText.from_bits(t)
+    dh = th * tf
+    dl = Math.fma(th, tf, dh * -1.0)
+    sh = tl * tf
+    sl = Math.fma(tl, tf, sh * -1.0)
+    xh, xl = asinh_fast_two_sum(dh - 1.0, dl)
+    if zl != 0.0
+      t = IyiFloatText.bits_of(zl) &- e.to_i64.unsafe_shl(52_i64).unsafe_to_u64
+      xl = xl + th * IyiFloatText.from_bits(t)
+    end
+    xh, xl = asinh_add_dd(xh, xl, sh, sl)
+    cl = ASINH_REFINE_CL.to_unsafe
+    sl = xh * (asinh_at(cl, 0) + xh * (asinh_at(cl, 1) + xh * asinh_at(cl, 2)))
+    sh, sl = asinh_polydd(xh, xl, 3, ASINH_REFINE_CH.to_unsafe, sl)
+    sh, sl = asinh_muldd_acc(xh, xl, sh, sl)
+    sh, sl = asinh_add_dd(sh, sl, el1, el2)
+    sh, sl = asinh_add_dd(sh, sl, l1, l2)
+    v0, v2 = asinh_fast_two_sum(l0, sh)
+    v1, v2 = asinh_fast_two_sum(v2, sl)
+    v0, v1 = asinh_fast_two_sum(v0, v1)
+    v1, v2 = asinh_fast_two_sum(v1, v2)
+    s2 = Math.copysign(2.0, x)
+    v0 = v0 * s2
+    v1 = asinh_nudge(v1 * s2, v2 * s2)
+    t = IyiFloatText.bits_of(v1)
+    t0 = IyiFloatText.bits_of(v0)
+    er = (t &+ 41_u64) & ASINH_MASK52
+    de = (t0.unsafe_shr(52_u64) & 0x7ff_u64) &- (t.unsafe_shr(52_u64) & 0x7ff_u64)
+    res = v0 + v1
+    return asinh_db_search(ASINH_DB.to_unsafe, 35, asinh_fabs(x), Math.copysign(1.0, x), res) if de > 99_u64 || er < 80_u64
+    res
+  end
+
+  # e_acosh.c as_acosh_one
+  private def self.acosh_one(x : Float64, sh : Float64, sl : Float64) : Float64
+    cl = ACOSH_ONE_CL.to_unsafe
+    y2 = x * (asinh_at(cl, 0) + x * (asinh_at(cl, 1) + x * (asinh_at(cl, 2) + x * (asinh_at(cl, 3) + x * (asinh_at(cl, 4) + x * asinh_at(cl, 5))))))
+    y1, y2 = asinh_polydd3(x, 0.0, 10, ACOSH_ONE_CH.to_unsafe, y2)
+    y1, y2 = asinh_mulddd(y1, y2, x)
+    y0, y1 = asinh_fast_two_sum(1.0, y1)
+    y1 = y1 + y2
+    y0, y1 = asinh_muldd_acc2(y0, y1, sh, sl)
+    y0 + y1
+  end
+
+  # e_acosh.c as_acosh_refine
+  private def self.acosh_refine(x : Float64, a : Float64) : Float64
+    ix = IyiFloatText.bits_of(x)
+    zh = x
+    zl = 0.0
+    if ix < 0x4190000000000000_u64
+      x2h = x * x
+      x2l = Math.fma(x, x, x2h * -1.0)
+      wh, wl = asinh_fast_two_sum(x2h - 1.0, x2l)
+      sh = Math.sqrt(wh)
+      ish = 0.5 / wh
+      sl = (ish * sh) * (wl - Math.fma(sh, sh, wh * -1.0))
+      zh, zl = asinh_fast_two_sum(x, sh)
+      zl = zl + sl
+      zh, zl = asinh_fast_two_sum(zh, zl)
+    elsif ix < 0x4330000000000000_u64
+      zh = 2.0 * x
+      zl = -0.5 / x
+    end
+    t = IyiFloatText.bits_of(zh)
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - 0x3ff + (zl == 0.0 ? 1 : 0)
+    t = (t & ASINH_MASK52) | ASINH_ONE_EXP
+    ed = e.to_f64
+    v = IyiFloatText.bits_of(a - ed + ASINH_REFINE_BIAS)
+    i = (v &- ASINH_ONE_EXP).unsafe_shr(36_u64)
+    i1 = (i.unsafe_shr(12_u64) & 0x1f_u64).unsafe_to_i32
+    i2 = (i.unsafe_shr(8_u64) & 0xf_u64).unsafe_to_i32
+    i3 = (i.unsafe_shr(4_u64) & 0xf_u64).unsafe_to_i32
+    i4 = (i & 0xf_u64).unsafe_to_i32
+    el2 = ASINH_REFINE_L22 * ed
+    el1 = ASINH_REFINE_L21 * ed
+    el0 = ASINH_REFINE_L20 * ed
+    l0 = asinh_ll_sum(i1, i2, i3, i4, 0)
+    l1 = asinh_ll_sum(i1, i2, i3, i4, 1)
+    l2 = asinh_ll_sum(i1, i2, i3, i4, 2)
+    l0 = l0 + el0
+    t12 = asinh_at(ASINH_T1.to_unsafe, i1) * asinh_at(ASINH_T2.to_unsafe, i2)
+    t34 = asinh_at(ASINH_T3.to_unsafe, i3) * asinh_at(ASINH_T4.to_unsafe, i4)
+    th = t12 * t34
+    tl = Math.fma(t12, t34, th * -1.0)
+    tf = IyiFloatText.from_bits(t)
+    dh = th * tf
+    dl = Math.fma(th, tf, dh * -1.0)
+    sh = tl * tf
+    sl = Math.fma(tl, tf, sh * -1.0)
+    xh, xl = asinh_fast_two_sum(dh - 1.0, dl)
+    if zl != 0.0
+      t = IyiFloatText.bits_of(zl) &- e.to_i64.unsafe_shl(52_i64).unsafe_to_u64
+      xl = xl + th * IyiFloatText.from_bits(t)
+    end
+    xh, xl = asinh_add_dd(xh, xl, sh, sl)
+    cl = ASINH_REFINE_CL.to_unsafe
+    sl = xh * (asinh_at(cl, 0) + xh * (asinh_at(cl, 1) + xh * asinh_at(cl, 2)))
+    sh, sl = asinh_polydd3(xh, xl, 3, ASINH_REFINE_CH.to_unsafe, sl)
+    sh, sl = asinh_muldd_acc2(xh, xl, sh, sl)
+    sh, sl = asinh_add_dd(sh, sl, el1, el2)
+    sh, sl = asinh_add_dd(sh, sl, l1, l2)
+    v0, v2 = asinh_fast_two_sum(l0, sh)
+    v1, v2 = asinh_fast_two_sum(v2, sl)
+    v0 = v0 * 2.0
+    v1 = asinh_nudge(v1 * 2.0, v2 * 2.0)
+    t = IyiFloatText.bits_of(v1)
+    t0 = IyiFloatText.bits_of(v0)
+    er = (t &+ 7_u64) & ASINH_MASK52
+    de = (t0.unsafe_shr(52_u64) & 0x7ff_u64) &- (t.unsafe_shr(52_u64) & 0x7ff_u64)
+    res = v0 + v1
+    return asinh_db_search(ACOSH_DB.to_unsafe, 10, x, 1.0, res) if de > 102_u64 || er < 15_u64
+    res
+  end
+
+  # e_atanh.c as_atanh_zero
+  private def self.atanh_zero(x : Float64) : Float64
+    x2 = x * x
+    x2l = Math.fma(x, x, x2 * -1.0)
+    cl = ATANH_CL.to_unsafe
+    y2 = x2 * (asinh_at(cl, 0) + x2 * (asinh_at(cl, 1) + x2 * (asinh_at(cl, 2) + x2 * (asinh_at(cl, 3) + x2 * asinh_at(cl, 4)))))
+    y1, y2 = asinh_polydd3(x2, x2l, 13, ATANH_CH.to_unsafe, y2)
+    y1, y2 = asinh_mulddd3(y1, y2, x)
+    y1, y2 = asinh_muldd_acc2(x2, x2l, y1, y2)
+    y0, y1 = asinh_fast_two_sum(x, y1)
+    y1, y2 = asinh_fast_two_sum(y1, y2)
+    y0 + asinh_nudge(y1, y2)
+  end
+
+  # e_atanh.c as_atanh_refine
+  private def self.atanh_refine(x : Float64, zh : Float64, zl : Float64, a : Float64) : Float64
+    t = IyiFloatText.bits_of(zh)
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - 0x3ff
+    t = (t & ASINH_MASK52) | ASINH_ONE_EXP
+    ed = e.to_f64
+    v = IyiFloatText.bits_of(a - ed + ASINH_REFINE_BIAS)
+    i = (v &- ASINH_ONE_EXP).unsafe_shr(36_u64)
+    i1 = i.unsafe_shr(12_u64).unsafe_to_i32
+    i2 = (i.unsafe_shr(8_u64) & 0xf_u64).unsafe_to_i32
+    i3 = (i.unsafe_shr(4_u64) & 0xf_u64).unsafe_to_i32
+    i4 = (i & 0xf_u64).unsafe_to_i32
+    el2 = ATANH_REFINE_L22 * ed
+    el1 = ATANH_L2L * ed
+    el0 = ATANH_L2H * ed
+    l0 = asinh_ll_sum(i1, i2, i3, i4, 0) + el0
+    l1 = asinh_ll_sum(i1, i2, i3, i4, 1)
+    l2 = asinh_ll_sum(i1, i2, i3, i4, 2)
+    t12 = asinh_at(ASINH_T1.to_unsafe, i1) * asinh_at(ASINH_T2.to_unsafe, i2)
+    t34 = asinh_at(ASINH_T3.to_unsafe, i3) * asinh_at(ASINH_T4.to_unsafe, i4)
+    th = t12 * t34
+    tl = Math.fma(t12, t34, th * -1.0)
+    tf = IyiFloatText.from_bits(t)
+    dh = th * tf
+    dl = Math.fma(th, tf, dh * -1.0)
+    sh = tl * tf
+    sl = Math.fma(tl, tf, sh * -1.0)
+    xh, xl = asinh_fast_two_sum(dh - 1.0, dl)
+    t = IyiFloatText.bits_of(zl) &- e.to_i64.unsafe_shl(52_i64).unsafe_to_u64
+    xl = xl + th * IyiFloatText.from_bits(t)
+    xh, xl = asinh_add_dd(xh, xl, sh, sl)
+    cl = ASINH_REFINE_CL.to_unsafe
+    sl = xh * (asinh_at(cl, 0) + xh * (asinh_at(cl, 1) + xh * asinh_at(cl, 2)))
+    sh, sl = asinh_polydd(xh, xl, 3, ASINH_REFINE_CH.to_unsafe, sl)
+    sh, sl = asinh_muldd_acc(xh, xl, sh, sl)
+    sh, sl = asinh_add_dd(sh, sl, el1, el2)
+    sh, sl = asinh_add_dd(sh, sl, l1, l2)
+    v0, v2 = asinh_fast_two_sum(l0, sh)
+    v1, v2 = asinh_fast_two_sum(v2, sl)
+    v1 = asinh_nudge(v1, v2)
+    t = IyiFloatText.bits_of(v1)
+    t0 = IyiFloatText.bits_of(v0)
+    er = (t &+ 1_u64) & ASINH_MASK52
+    de = (t0.unsafe_shr(52_u64) & 0x7ff_u64) &- (t.unsafe_shr(52_u64) & 0x7ff_u64)
+    sgn = Math.copysign(1.0, x)
+    res = v0 * sgn + v1 * sgn
+    return asinh_db_search(ATANH_DB.to_unsafe, 2, asinh_fabs(x), sgn, res) if de > 104_u64 || er < 3_u64
+    res
+  end
+
+  # Correctly rounded (CORE-MATH, s_asinh.c): odd, asinh(+-0) = +-0,
+  # +-inf and NaN come back as x + x.
+  def self.asinh(value : Float64) : Float64
+    x = value
+    u = IyiFloatText.bits_of(x) & 0x7fffffffffffffff_u64
+    ax = IyiFloatText.from_bits(u)
+    if u < 0x3fbb000000000000_u64
+      # |x| < 0x1.bp-4
+      if u < 0x3e57137449123ef7_u64
+        return x if u == 0_u64
+        return Math.fma(ASINH_TINY_SCALE, x, x)
+      end
+      x2h = x * x
+      x2l = Math.fma(x, x, x2h * -1.0)
+      x3h = x2h * x
+      sl = 0.0
+      if u < 0x3f93000000000000_u64
+        if u < 0x3f30000000000000_u64
+          c = ASINH_CL2.to_unsafe
+          if u < 0x3e5a000000000000_u64
+            sl = x3h * asinh_at(c, 0)
+          else
+            sl = x3h * (asinh_at(c, 0) + x2h * asinh_at(c, 1))
+          end
+        else
+          c = ASINH_CL4.to_unsafe
+          sl = x3h * (asinh_at(c, 0) + x2h * (asinh_at(c, 1) + x2h * (asinh_at(c, 2) + x2h * asinh_at(c, 3))))
+        end
+      else
+        c = ASINH_CL7.to_unsafe
+        c1 = asinh_at(c, 1) + x2h * asinh_at(c, 2)
+        c3 = asinh_at(c, 3) + x2h * asinh_at(c, 4)
+        c5 = asinh_at(c, 5) + x2h * asinh_at(c, 6)
+        x4 = x2h * x2h
+        sl = x3h * (asinh_at(c, 0) + x2h * (c1 + x4 * (c3 + x4 * c5)))
+      end
+      eps = ASINH_ZERO_EPS * x3h
+      lb = x + (sl - eps)
+      ub = x + (sl + eps)
+      return lb if lb == ub
+      return asinh_zero(x, x2h, x2l)
+    end
+    x2h = 0.0
+    x2l = 0.0
+    ah = ax
+    al = 0.0
+    off = 0x3ff
+    if u < 0x4190000000000000_u64
+      x2h = x * x
+      x2l = Math.fma(x, x, x2h * -1.0)
+      th = 0.0
+      tl = 0.0
+      if u < 0x3ff0000000000000_u64
+        th, tl = asinh_fast_two_sum(1.0, x2h)
+      else
+        th, tl = asinh_fast_two_sum(x2h, 1.0)
+      end
+      tl = tl + x2l
+      ah = Math.sqrt(th)
+      rs = 0.5 / th
+      al = (tl - Math.fma(ah, ah, th * -1.0)) * (rs * ah)
+      ah, tl = asinh_fast_two_sum(ah, ax)
+      al = al + tl
+    elsif u < 0x4330000000000000_u64
+      ah = 2.0 * ax
+      al = 0.5 / ax
+    else
+      return x + x if u >= 0x7ff0000000000000_u64
+      off = 0x3fe
+    end
+    t = IyiFloatText.bits_of(ah)
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - off
+    t = t & ASINH_MASK52
+    ed = e.to_f64
+    j = asinh_index(t, ASINH_B.to_unsafe)
+    t = t | ASINH_ONE_EXP
+    i1 = j.unsafe_shr(5_u64).unsafe_to_i32
+    i2 = (j & 0x1f_u64).unsafe_to_i32
+    r = asinh_at(ASINH_R1.to_unsafe, i1) * asinh_at(ASINH_R2.to_unsafe, i2)
+    dx = Math.fma(r, IyiFloatText.from_bits(t), -1.0)
+    dx2 = dx * dx
+    c = ASINH_C.to_unsafe
+    f = dx2 * ((asinh_at(c, 0) + dx * asinh_at(c, 1)) + dx2 * ((asinh_at(c, 2) + dx * asinh_at(c, 3)) + dx2 * asinh_at(c, 4)))
+    l1 = ASINH_L1.to_unsafe
+    l2 = ASINH_L2.to_unsafe
+    lh = ASINH_L2H * ed + (asinh_at(l1, 2 * i1 + 1) + asinh_at(l2, 2 * i2 + 1))
+    ll = ASINH_L2L * ed + asinh_at(l1, 2 * i1) + asinh_at(l2, 2 * i2) + al / ah + f
+    ll = ll + dx
+    sgn = Math.copysign(1.0, x)
+    lh = lh * sgn
+    ll = ll * sgn
+    lb = lh + (ll - ASINH_EPS)
+    ub = lh + (ll + ASINH_EPS)
+    return lb if lb == ub
+    return asinh_zero(x, x2h, x2l) if ax < 0.25
+    asinh_refine(x, ah, al, ASINH_INV_LOG2 * asinh_fabs(lb))
   end
 
   def self.asinh(value : Float32) : Float32
@@ -1909,13 +2766,88 @@ pub struct Math
     asinh(value.to_f64)
   end
 
+  # Correctly rounded (CORE-MATH, e_acosh.c): NaN below 1 (and for NaN),
+  # acosh(1) = 0, acosh(inf) = inf.
   def self.acosh(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value || value < 1.0
-    return 0.0 if value == 1.0
-    return value if value == 2.0 * value
-    return log(value) + LOG2 if value > 1.0e8
-    t = value - 1.0
-    log1p(t + sqrt(t * (t + 2.0)))
+    x = value
+    ix = IyiFloatText.bits_of(x)
+    if ix >= 0x7ff0000000000000_u64
+      # x < 0, NaN or +inf
+      return x + x if ix == 0x7ff0000000000000_u64 || ix.unsafe_shl(1_u64) > 0xffe0000000000000_u64
+      return (x - x) / (x - x)
+    end
+    if ix <= 0x3ff0000000000000_u64
+      return 0.0 if ix == 0x3ff0000000000000_u64
+      return (x - x) / (x - x)
+    end
+    g = 0.0
+    off = 0x3fe
+    t = ix
+    if ix < 0x3ff1e83e425aee63_u64
+      # 1 < x < 0x1.1e83e425aee63p+0
+      z = x - 1.0
+      iz = -0.25 / z
+      zt = 2.0 * z
+      sh = Math.sqrt(zt)
+      sl = Math.fma(sh, sh, zt * -1.0) * (sh * iz)
+      c = ACOSH_CL9.to_unsafe
+      z2 = z * z
+      z4 = z2 * z2
+      p = asinh_at(c, 0) + z * (((asinh_at(c, 1) + z * asinh_at(c, 2)) + z2 * (asinh_at(c, 3) + z * asinh_at(c, 4))) + z4 * ((asinh_at(c, 5) + z * asinh_at(c, 6)) + z2 * (asinh_at(c, 7) + z * asinh_at(c, 8))))
+      ds = Math.fma(sh * z, p, sl)
+      eps = ds * ACOSH_ONE_EPS - ACOSH_ONE_EPS_ABS * sh
+      lb = sh + (ds - eps)
+      ub = sh + (ds + eps)
+      return lb if lb == ub
+      return acosh_one(z, sh, sl)
+    elsif ix < 0x405bf00000000000_u64
+      off = 0x3ff
+      x2h = x * x
+      wh = x2h - 1.0
+      wl = Math.fma(x, x, x2h * -1.0)
+      sh = Math.sqrt(wh)
+      ish = 0.5 / wh
+      sl = (wl - Math.fma(sh, sh, wh * -1.0)) * (sh * ish)
+      th, tl = asinh_fast_two_sum(x, sh)
+      tl = tl + sl
+      t = IyiFloatText.bits_of(th)
+      g = tl / th
+    elsif ix < 0x4087100000000000_u64
+      c = ACOSH_CL4.to_unsafe
+      z = 1.0 / (x * x)
+      g = asinh_at(c, 0) + z * (asinh_at(c, 1) + z * (asinh_at(c, 2) + z * asinh_at(c, 3)))
+    elsif ix < 0x40e0100000000000_u64
+      c = ACOSH_CL3.to_unsafe
+      z = 1.0 / (x * x)
+      g = asinh_at(c, 0) + z * (asinh_at(c, 1) + z * asinh_at(c, 2))
+    elsif ix < 0x41ea000000000000_u64
+      c = ACOSH_CL2.to_unsafe
+      z = 1.0 / (x * x)
+      g = asinh_at(c, 0) + z * asinh_at(c, 1)
+    end
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - off
+    t = t & ASINH_MASK52
+    ed = e.to_f64
+    j = asinh_index(t, ASINH_B.to_unsafe)
+    t = t | ASINH_ONE_EXP
+    i1 = j.unsafe_shr(5_u64).unsafe_to_i32
+    i2 = (j & 0x1f_u64).unsafe_to_i32
+    r = asinh_at(ASINH_R1.to_unsafe, i1) * asinh_at(ASINH_R2.to_unsafe, i2)
+    dx = Math.fma(r, IyiFloatText.from_bits(t), -1.0)
+    dx2 = dx * dx
+    c = ASINH_C.to_unsafe
+    f = dx2 * ((asinh_at(c, 0) + dx * asinh_at(c, 1)) + dx2 * ((asinh_at(c, 2) + dx * asinh_at(c, 3)) + dx2 * asinh_at(c, 4)))
+    l1 = ASINH_L1.to_unsafe
+    l2 = ASINH_L2.to_unsafe
+    lh = (asinh_at(l1, 2 * i1 + 1) + asinh_at(l2, 2 * i2 + 1)) + ASINH_L2H * ed
+    ll = dx + ASINH_L2L * ed
+    ll = ll + g
+    ll = ll + (asinh_at(l1, 2 * i1) + asinh_at(l2, 2 * i2))
+    ll = ll + f
+    lb = lh + (ll - ACOSH_EPS)
+    ub = lh + (ll + ACOSH_EPS)
+    return lb if lb == ub
+    acosh_refine(x, ASINH_INV_LOG2 * lb)
   end
 
   def self.acosh(value : Float32) : Float32
@@ -1926,20 +2858,75 @@ pub struct Math
     acosh(value.to_f64)
   end
 
+  # Correctly rounded (CORE-MATH, e_atanh.c): odd, atanh(+-1) = +-inf, NaN
+  # beyond 1 in magnitude (and for NaN).
   def self.atanh(value : Float64) : Float64
-    return value if value == 0.0 || value != value
-    v = value.abs
-    return 0.0 / 0.0 if v > 1.0
-    res = 0.0
-    if v == 1.0
-      res = 1.0 / 0.0
-    elsif v < 1.0e-4
-      v2 = v * v
-      res = v + v * v2 * (1.0 / 3.0 + v2 * (1.0 / 5.0 + v2 * (1.0 / 7.0)))
-    else
-      res = 0.5 * log1p(2.0 * v / (1.0 - v))
+    x = value
+    aix = IyiFloatText.bits_of(x) & 0x7fffffffffffffff_u64
+    ax = IyiFloatText.from_bits(aix)
+    if aix >= 0x3ff0000000000000_u64
+      return (x < 0.0 ? -1.0 : 1.0) / 0.0 if aix == 0x3ff0000000000000_u64
+      return x + x if aix > 0x7ff0000000000000_u64
+      return (x - x) / (x - x)
     end
-    value < 0.0 ? 0.0 - res : res
+    if aix < 0x3fd0000000000000_u64
+      # |x| < 0x1p-2
+      return Math.fma(x, ATANH_TINY_SCALE, x) if aix < 0x3e4d12ed0af1a27f_u64
+      x2 = x * x
+      c = ATANH_C9.to_unsafe
+      dx2 = Math.fma(x, x, x2 * -1.0)
+      x4 = x2 * x2
+      x3 = x2 * x
+      x8 = x4 * x4
+      dx3 = Math.fma(x2, x, x3 * -1.0) + dx2 * x
+      p = (asinh_at(c, 0) + x2 * asinh_at(c, 1)) + x4 * (asinh_at(c, 2) + x2 * asinh_at(c, 3)) + x8 * ((asinh_at(c, 4) + x2 * asinh_at(c, 5)) + x4 * (asinh_at(c, 6) + x2 * asinh_at(c, 7)) + x8 * asinh_at(c, 8))
+      t = Math.fma(x2, p, ATANH_THIRD_LO)
+      ph, pl = asinh_fast_two_sum(ATANH_THIRD, t)
+      ph, pl = asinh_muldd_acc(ph, pl, x3, dx3)
+      ph, tl = asinh_fast_two_sum(x, ph)
+      pl = pl + tl
+      eps = x * (x4 * ATANH_ZERO_EPS + ATANH_ZERO_EPS_ABS)
+      lb = ph + (pl - eps)
+      ub = ph + (pl + eps)
+      return lb if lb == ub
+      return atanh_zero(x)
+    end
+    ph, pl = asinh_fast_two_sum(1.0, ax)
+    qh, ql = asinh_fast_two_sub(1.0, ax)
+    iqh = 1.0 / qh
+    th = ph * iqh
+    tl = Math.fma(ph, iqh, th * -1.0) + (pl + ph * (Math.fma(qh * -1.0, iqh, 1.0) - ql * iqh)) * iqh
+    c = ATANH_C5.to_unsafe
+    t = IyiFloatText.bits_of(th)
+    e = t.unsafe_shr(52_u64).unsafe_to_i32 - 0x3ff
+    t = t & ASINH_MASK52
+    ed = e.to_f64
+    j = asinh_index(t, ATANH_B.to_unsafe)
+    t = t | ASINH_ONE_EXP
+    i1 = j.unsafe_shr(5_u64).unsafe_to_i32
+    i2 = (j & 0x1f_u64).unsafe_to_i32
+    tf = IyiFloatText.from_bits(t)
+    r = (0.5 * asinh_at(ATANH_R1.to_unsafe, i1)) * asinh_at(ATANH_R2.to_unsafe, i2)
+    dx = Math.fma(r, tf, -0.5)
+    dx2 = dx * dx
+    rx = r * tf
+    dxl = Math.fma(r, tf, rx * -1.0)
+    f = dx2 * ((asinh_at(c, 0) + dx * asinh_at(c, 1)) + dx2 * (asinh_at(c, 2) + dx * asinh_at(c, 3) + dx2 * asinh_at(c, 4)))
+    l1 = ATANH_L1.to_unsafe
+    l2 = ATANH_L2.to_unsafe
+    lh = (asinh_at(l1, 2 * i1 + 1) + asinh_at(l2, 2 * i2 + 1)) + ATANH_L2H * ed
+    lh, ll = asinh_fast_two_sum(lh, rx - 0.5)
+    ll = ll + (ATANH_L2L * ed + (asinh_at(l1, 2 * i1) + asinh_at(l2, 2 * i2)) + dxl + 0.5 * tl / th)
+    ll = ll + f
+    sgn = Math.copysign(1.0, x)
+    lh = lh * sgn
+    ll = ll * sgn
+    eps = ATANH_EPS + dx2 * ATANH_EPS_DX2
+    lb = lh + (ll - eps)
+    ub = lh + (ll + eps)
+    return lb if lb == ub
+    th, tl = asinh_fast_two_sum(th, tl)
+    atanh_refine(x, th, tl, ATANH_INV_LOG2 * asinh_fabs(lh + ll))
   end
 
   def self.atanh(value : Float32) : Float32

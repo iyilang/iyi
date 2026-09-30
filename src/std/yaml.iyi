@@ -1494,17 +1494,20 @@ pub class Parser
       fail("unknown escape '\\#{e.unsafe_chr}'", at)
       return at + 2
     end
+    # Short of its digits, the escape says what it wants: `"C:\Users\bob"`
+    # - a Windows path - was "unknown escape '\U'", which `\U` is not.
+    wants = "escape '\\#{e.unsafe_chr}' wants #{digits} hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar"
     point = 0
     i = 0
     while i < digits
       p = at + 2 + i
       if p >= @ends[@line]
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       d = @bytes[p].unsafe_chr.to_i?(16)
       if d.nil?
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       point = point * 16 + d

@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **YAML says what a short `\x`, `\u` or `\U` escape wants.** A Windows
+  path in double quotes, `path: "C:\Users\bob"`, was refused with
+  "unknown escape '\U'" - and `\U` is a known escape, the eight-digit
+  one, followed here by `sers`. The sentence names the digits it wants
+  and how a backslash is written: "escape '\U' wants 8 hexadecimal
+  digits: a backslash in double quotes is '\\', or single-quote the
+  scalar". `bench/std_yaml_exercise.iyi` refuses the path with that
+  sentence; the old module gave the other.
+
 - **`YAML.dump` quotes a string that starts with `?` or a byte order
   mark.** `?x` was written bare, and `YAML.parse` refuses a plain scalar
   that starts with `?` ("a scalar cannot start with '?'"), so the dump of

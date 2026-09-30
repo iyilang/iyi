@@ -112,6 +112,9 @@ refused("{a: 1, a: 2}\n", "duplicate key \"a\" at line 1, column 8")
 refused("[1, 1", "unterminated flow sequence at line 1, column 1")
 refused("*nope\n", "unknown anchor *nope at line 1, column 1")
 refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
+# A Windows path in double quotes: `\U` is an escape, short of its eight
+# digits, and was reported as unknown.
+refused("path: \"C:\\Users\\bob\"\n", "escape '\\U' wants 8 hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar at line 1, column 10")
 refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
 refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
 refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")

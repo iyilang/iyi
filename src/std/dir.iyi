@@ -6,6 +6,7 @@
 module std/dir
 
 import std/path::{Path}
+import std/env::{ENV}
 
 {% if flag?(:darwin) %}
   lib LibC
@@ -379,6 +380,12 @@ pub class Dir
         raise "Cannot change directory to: #{target}"
       end
     {% end %}
+    # And `PWD` with it, as a shell's `cd` keeps it: `Path#expand` reads
+    # `PWD` first - the path the person walked - and after a `Dir.cd` it
+    # named where the program had been, so `File.expand_path("x")`
+    # answered a file in the old directory. Only where it is set; a
+    # program started without one is not given one.
+    ENV["PWD"] = current if ENV.has_key?("PWD")
     target
   end
 

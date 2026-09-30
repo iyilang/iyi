@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Dir.cd` keeps `PWD`, so a relative path expands where the program
+  is.** `Path#expand` and `File.expand_path` read `PWD` first - the path
+  the person walked, symlinks and all - and `Dir.cd` left it naming where
+  the program started: after `Dir.cd("sub")`, `File.expand_path("x")`
+  answered a file in the old directory. `Dir.cd` sets `PWD` to the new
+  directory now, as a shell's `cd` does, where it was set at all.
+  `bench/std_dir_exercise.iyi` expands a name inside a `Dir.cd` block;
+  the old module answered the old directory.
+
 - **`File.match?` reads a pattern the way `Dir.glob` does.** `*` crossed
   separators, so `File.match?("a/b/c.txt", "*.txt")` was true of a path
   `Dir.glob("*.txt")` never answers, and `?` matched a separator. Both

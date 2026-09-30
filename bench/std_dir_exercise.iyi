@@ -218,6 +218,12 @@ puts "\n== current working directory and cd"
 current_before = Dir.current
 Dir.cd(sub_created) do
   assert_str slashed(sub_created), slashed(Dir.current), "Dir.current inside cd block matches target"
+  # A relative path expands under the directory the program is in, not
+  # under the one `PWD` named when it started: `Dir.cd` left `PWD` behind,
+  # and `expand_path` reads it first.
+  if Program.env("PWD")
+    assert_str slashed(sub_created) + "/x", slashed(File.expand_path("x")), "expand_path after Dir.cd is under the new directory"
+  end
 end
 assert_str current_before, Dir.current, "Dir.current restored after cd block"
 puts "  temporary directory change with automatic restore"

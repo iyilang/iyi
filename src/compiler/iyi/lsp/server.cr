@@ -902,17 +902,7 @@ module Iyi::Lsp
 
       uris = @documents.keys.dup
       if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          # Read as posix before the skip tests: a glob yields the platform's
-          # own separators, so a backslashed path went past `/.` and `/lib/`
-          # and the `.git` and `lib` trees were indexed anyway.
-          #
-          # And the posix reading is what the URI is built from — a `file://`
-          # URI has one separator, and this side's spelling has to be the one
-          # `path_of` hands back for a buffer the client named.
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
+        workspace_files(root, with_lib: false).each do |(file, _)|
           uri = uri_of(file)
           uris << uri unless uris.includes?(uri)
           break if uris.size >= 200
@@ -1076,13 +1066,10 @@ module Iyi::Lsp
 
       outside = 0_u64
       if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.")
+        workspace_files(root, with_lib: true).each do |(file, in_lib)|
           info = File.info?(file)
           next unless info
-          if posix.includes?("/lib/")
+          if in_lib
             outside = outside &* prime &+ stable(file) &+ stamp_of(info)
             next
           end
@@ -1094,7 +1081,7 @@ module Iyi::Lsp
           header, imports = header_and_imports(file, info)
           nodes[file] = Node.new(stamp_of(info), header, imports)
         end
-        Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
+        workspace_files(root, with_lib: true, manifests: true).each do |(file, _)|
           info = File.info?(file)
           next unless info
           outside = outside &* prime &+ stable(file) &+ stamp_of(info)
@@ -1111,9 +1098,10 @@ module Iyi::Lsp
           replacements.each_value do |target|
             local = File.expand_path(target, File.dirname(file))
             next unless Dir.exists?(local)
-            Dir.glob(::Path[local].to_posix.join("**", "*.iyi"), ::Path[local].to_posix.join("iyi.mod")) do |replaced|
-              replaced = fs_path(replaced)
-              next if ::Path[replaced].to_posix.to_s.includes?("/.")
+            replaced_files = workspace_files(local, with_lib: true).map(&.[0])
+            manifest = File.join(local, Mod::Installer::MANIFEST)
+            replaced_files << manifest if File.file?(manifest)
+            replaced_files.each do |replaced|
               if replaced_info = File.info?(replaced)
                 outside = outside &* prime &+ stable(replaced) &+ stamp_of(replaced_info)
               end
@@ -1706,10 +1694,7 @@ module Iyi::Lsp
     private def workspace_entries : Array({String, String})
       entries = @documents.map { |doc_uri, doc_text| {path_of(doc_uri), doc_text} }
       if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
+        workspace_files(root, with_lib: false).each do |(file, _)|
           # By path, not by a URI rebuilt from it: an editor's own URI for
           # this file is spelled its way (`%3A`, `%20`), and open buffers
           # are already in the list above, with their unsaved text.
@@ -2193,10 +2178,7 @@ module Iyi::Lsp
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
       if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
+        workspace_files(root, with_lib: false).each do |(file, _)|
           paths << file unless paths.includes?(file)
           break if paths.size >= 2000
         end
@@ -3333,6 +3315,58 @@ module Iyi::Lsp
     # other two (steps 9, 31c and 32 of `bench/lsp_session.py`, the first
     # times it ran there). Everything that enters as a path goes through
     # here first.
+    # The workspace's `.iyi` files under *root*, each with whether it sits
+    # under a `lib` directory - a dependency's checkout - and without those
+    # when *with_lib* is false. A directory whose name starts with `.` is
+    # not the project's (`.git`, an editor's own), and is skipped.
+    #
+    # Asked of the names below the root, not of the whole path: the walks
+    # tested `/.` and `/lib/` against the absolute path, so a project under
+    # `~/.config`, `C:\Users\me\.work` or any `lib` directory had every file
+    # skipped - references and rename silently missed the importers, and a
+    # rename left a program that did not compile. A directory that will not
+    # list is skipped rather than failing the request (an ACL'd junction in
+    # a home directory failed every workspace question with -32602), and a
+    # link to a directory is not followed: a junction loop listed the same
+    # files dozens of times under paths too long to open.
+    #
+    # With *manifests*, the `iyi.mod` and `iyi.sum` files instead.
+    private def workspace_files(root : String, *, with_lib : Bool, limit : Int32 = 2000, manifests : Bool = false) : Array({String, Bool})
+      found = [] of {String, Bool}
+      walk_workspace(fs_path(root), false, with_lib, manifests, limit, found)
+      found
+    end
+
+    private def walk_workspace(dir : String, in_lib : Bool, with_lib : Bool, manifests : Bool, limit : Int32, found : Array({String, Bool})) : Nil
+      names = begin
+        Dir.children(dir)
+      rescue File::Error
+        return
+      end
+      names.sort!.each do |name|
+        return if found.size >= limit
+        next if name.starts_with?('.')
+        path = File.join(dir, name)
+        if workspace_directory?(path)
+          next if name == "lib" && !with_lib
+          walk_workspace(path, in_lib || name == "lib", with_lib, manifests, limit, found)
+        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && File.file?(path)
+          found << {path, in_lib}
+        end
+      end
+    end
+
+    # A directory to walk into: a real one, not a link to one.
+    private def workspace_directory?(path : String) : Bool
+      {% if flag?(:win32) %}
+        attributes = LibC.GetFileAttributesW(Crystal::System.to_wstr(path))
+        attributes != LibC::INVALID_FILE_ATTRIBUTES && attributes.bits_set?(LibC::FILE_ATTRIBUTE_DIRECTORY) &&
+          !attributes.bits_set?(LibC::FILE_ATTRIBUTE_REPARSE_POINT)
+      {% else %}
+        !!File.info?(path, follow_symlinks: false).try(&.directory?)
+      {% end %}
+    end
+
     private def fs_path(path : String) : String
       {% if flag?(:win32) %}
         path.tr("/", "\\")

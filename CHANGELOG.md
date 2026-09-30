@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **The language server's workspace is what is under its root, wherever
+  the root is.** Each workspace walk skipped a file whose absolute path
+  held `/.` or `/lib/` - meant for `.git` and a dependency's `lib` inside
+  the project - so a project under `~/.config`, `C:\Users\me\.work` or any
+  `lib` directory had no files: references and rename missed every
+  importer, and a rename left a program calling a name that no longer
+  existed. One walk serves all of them now, and judges only the names
+  below the root. It also steps past a directory it may not list, which
+  failed every workspace question with -32602, and does not follow a
+  junction or a symlink to a directory, where a junction back to the root
+  listed the same files dozens of times. Step 18j of
+  `bench/lsp_session.py` renames in a project under `.outer` and under
+  `lib`, with a looping and a denied junction on Windows; the old server
+  edited the def alone.
+
 - **On Windows, a file the system holds exists.** The paging file, and
   any file held so that even its attributes are refused
   (ERROR_SHARING_VIOLATION), answered `File.exists?` false and

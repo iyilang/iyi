@@ -1110,6 +1110,56 @@ def main():
     for uri in (nest_lib_uri, nest_use_uri):
         c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
 
+    # 18j. Where the project sits is not what it holds. The workspace walk
+    #      skipped a file whose absolute path had `/.` or `/lib/` in it -
+    #      meant for `.git` and a dependency's `lib` inside the root - so a
+    #      project under `~/.config` or any `lib` directory had no files:
+    #      a rename edited the def and left its importer calling a name
+    #      that no longer exists. A server of its own, rooted there.
+    for parent in (".outer", "lib"):
+        proj = os.path.join(work, "placed", parent, "proj")
+        os.makedirs(proj)
+        placed_lib = os.path.join(proj, "greet.iyi")
+        placed_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+        with open(placed_lib, "w", newline="") as f:
+            f.write(placed_text)
+        with open(os.path.join(proj, "app.iyi"), "w", newline="") as f:
+            f.write("module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n")
+        # And on Windows two junctions the walk has to step past: one back
+        # to the root, which it followed until the paths were too long to
+        # open, and one this user may not list, which failed every
+        # workspace question with -32602 "Access is denied".
+        denied = None
+        if os.name == "nt" and parent == "lib":
+            subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(proj, "loop"), proj], capture_output=True)
+            os.makedirs(os.path.join(work, "placed", "elsewhere"))
+            denied = os.path.join(proj, "legacy")
+            subprocess.run(["cmd", "/c", "mklink", "/J", denied, os.path.join(work, "placed", "elsewhere")], capture_output=True)
+            subprocess.run(["icacls", denied, "/deny", os.environ["USERNAME"] + ":(RD)", "/L"], capture_output=True)
+        e = Client()
+        e.send("initialize", {"rootUri": file_uri(proj), "capabilities": {}})
+        e.send("initialized", {}, wait=False)
+        placed_uri = file_uri(placed_lib)
+        e.send("textDocument/didOpen",
+               {"textDocument": {"uri": placed_uri, "languageId": "iyi",
+                                 "version": 1, "text": placed_text}}, wait=False)
+        e.diagnostics(placed_uri)
+        placed = (e.send("textDocument/rename",
+                         {"textDocument": {"uri": placed_uri},
+                          "position": {"line": 2, "character": 9},
+                          "newName": "holler"}).get("result") or {}).get("changes", {})
+        placed_files = sorted(u.rsplit("/", 1)[-1] for u in placed)
+        e.send("shutdown", {})
+        e.send("exit", {}, wait=False)
+        e.proc.wait(timeout=10)
+        if denied:
+            subprocess.run(["icacls", denied, "/remove:d", os.environ["USERNAME"], "/L"], capture_output=True)
+            for junction in (denied, os.path.join(proj, "loop")):
+                os.rmdir(junction)
+        step(f"18j{parent}", f"a project under a `{parent}` directory renames into its importer",
+             placed_files == ["app.iyi", "greet.iyi"],
+             f"rename edited {placed_files}")
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

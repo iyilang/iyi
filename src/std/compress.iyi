@@ -671,13 +671,37 @@ pub struct Gzip
     end
   end
 
+  # Every member, joined: a gzip file is a series of members (RFC 1952
+  # §2.2) - what `cat a.gz b.gz` makes, and what gzip, zcat and Python
+  # read whole. Only the first was read, and the rest dropped without a
+  # word. Zero bytes after the last member are padding, as gzip and
+  # Python take them; anything else there is refused.
   def self.decompress(data : String) : String
-    raise "gzip: the stream is shorter than its header" if data.bytesize < 10
+    first, at = member(data, 0)
+    return first if at == data.bytesize
+    out = String::Builder.new
+    out << first
     p = data.to_unsafe
-    raise "gzip: not a gzip stream" unless p[0] == 0x1f_u8 && p[1] == 0x8b_u8
-    raise "gzip: not a deflate stream (method #{p[2]})" unless p[2] == 8_u8
-    flags = p[3].to_i32
-    pos = 10
+    while at < data.bytesize
+      if p[at] == 0_u8
+        at = at + 1
+        next
+      end
+      raise "gzip: #{data.bytesize - at} bytes after the last member are not a gzip member" unless at + 1 < data.bytesize && p[at] == 0x1f_u8 && p[at + 1] == 0x8b_u8
+      part, at = member(data, at)
+      out << part
+    end
+    out.to_s
+  end
+
+  # The member that starts at *start*, and where the next one would.
+  private def self.member(data : String, start : Int32) : {String, Int32}
+    raise "gzip: the stream is shorter than its header" if data.bytesize < start + 10
+    p = data.to_unsafe
+    raise "gzip: not a gzip stream" unless p[start] == 0x1f_u8 && p[start + 1] == 0x8b_u8
+    raise "gzip: not a deflate stream (method #{p[start + 2]})" unless p[start + 2] == 8_u8
+    flags = p[start + 3].to_i32
+    pos = start + 10
     if (flags & 4) != 0 # FEXTRA
       raise "gzip: the stream ends inside its header" if data.bytesize < pos + 2
       xlen = p[pos].to_i32 | (p[pos + 1].to_i32 << 8)
@@ -691,8 +715,8 @@ pub struct Gzip
     end
     pos = pos + 2 if (flags & 2) != 0 # FHCRC
     raise "gzip: the stream ends inside its header" if data.bytesize < pos
-    # The last member's trailer names its length; for the one member this
-    # reads, that is the length the result will have.
+    # The last member's trailer names its length, which for a file of one
+    # member is the length the result will have: a capacity guess.
     expected = data.bytesize >= pos + 8 ? get_le(p + (data.bytesize - 4).to_i64).to_i64 : 0_i64
     sink, used = Deflate.inflate(data, pos, expected)
     raise "gzip: the stream ends before its trailer" if data.bytesize - used < 8
@@ -701,7 +725,7 @@ pub struct Gzip
     got_crc = CRC32.checksum(sink)
     raise "gzip: the checksum does not match (#{Zlib.hex(got_crc)}, stream says #{Zlib.hex(want_crc)})" unless got_crc == want_crc
     raise "gzip: the length does not match (#{sink.bytesize}, stream says #{want_size})" unless sink.bytesize.to_u32 == want_size
-    sink
+    {sink, used + 8}
   end
 
   private def self.skip_zero_terminated(data : String, pos : Int32) : Int32

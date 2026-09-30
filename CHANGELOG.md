@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`Gzip.decompress` reads every member of a gzip file.** A gzip file is
+  a series of members (RFC 1952 §2.2), which is what `cat a.gz b.gz`
+  makes and what gzip, zcat and Python read whole; only the first was
+  read, and the rest dropped without a word - a GNU `gzip` pair of
+  100,001 bytes came back as 1. Every member is read and joined now, zero
+  padding after the last is taken as gzip takes it, and other bytes there
+  are refused. `bench/std_compress_exercise.iyi` decompresses three
+  joined members; the old module returned the first.
+
 - **`Unicode.capitalize` gives the titlecase of a letter with an iota
   subscript, and a final sigma after the first letter.** The block form
   of `Unicode.titlecase` fell back to the full uppercase where its table

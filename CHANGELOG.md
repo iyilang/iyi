@@ -564,6 +564,15 @@
 
 ### Fixed
 
+- **`std/int` has the unchecked conversions between integers.** It wrote
+  the checked and the `?` form for every pair of integer types and the
+  unchecked form only from a double, while the compiler's hint for
+  `x.unsafe_to_u32` said `import std/int` - which did not give it.
+  `unsafe_to_u32`, `unsafe_to_i8`, `unsafe_to_u128` and the rest now keep
+  the low bits, and a wider target is extended by the sign of the type the
+  value leaves. The int exercise checks nine of them and proves the
+  checked instruction in their place fails it.
+
 - **`(-0.0).abs` is `0.0`,** as it is in Crystal. `Float64#abs` and
   `Float32#abs` were a comparison, and `-0.0 < 0.0` is false, so a
   negative zero kept its sign - and `log10(-0.0)`, whose glibc answer is

@@ -74,6 +74,22 @@ assert_true 3.0e38.to_u128 == 300000000000000012135895401846682943488_u128, "3e3
 assert_true 255.9.to_u == 255_u32, "255.9 to_u"
 puts "  a double truncates, then the truncation is range-checked"
 
+# The unchecked conversions keep the low bits, and a wider target is
+# extended by the sign of the type the value leaves. `std/int` wrote the
+# checked and the `?` form for every pair and the unchecked form for a
+# double only, while the compiler's hint sent `x.unsafe_to_u32` here.
+puts "\n== unchecked conversions"
+assert_true (-1).unsafe_to_u32 == 4294967295_u32, "-1 unsafe_to_u32"
+assert_true 4294967297_u64.unsafe_to_u32 == 1_u32, "2^32 + 1 unsafe_to_u32"
+assert_true 65537.unsafe_to_u16 == 1_u16, "65537 unsafe_to_u16"
+assert_true 255_u8.unsafe_to_i8 == -1_i8, "255 unsafe_to_i8"
+assert_true (-2_i8).unsafe_to_i128 == -2_i128, "-2_i8 unsafe_to_i128 extends the sign"
+assert_true (-1_i8).unsafe_to_u128 == 340282366920938463463374607431768211455_u128, "-1_i8 unsafe_to_u128 extends the sign"
+assert_true 4294967295_u32.unsafe_to_i64 == 4294967295_i64, "a UInt32 extends by zeros"
+assert_true 65535_u16.unsafe_to_i16 == -1_i16, "65535 unsafe_to_i16"
+assert_true 340282366920938463463374607431768211455_u128.unsafe_to_u == 4294967295_u32, "UInt128 unsafe_to_u"
+puts "  low bits kept, wider targets extended by the source's sign"
+
 puts "\n== traits"
 assert_true (1_i8 <=> 2_i8) == -1, "i8 cmp"
 assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"

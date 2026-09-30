@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- **`std/yaml`'s header says `0777` is 777.** It listed `0777` among the
+  plain scalars read as strings; the reader follows the 1.2 core schema,
+  whose integer is `[-+]?[0-9]+`, and reads the decimal 777, as it
+  should. `bench/std_yaml_exercise.iyi` asserts what the header says.
+
 - **YAML says what a short `\x`, `\u` or `\U` escape wants.** A Windows
   path in double quotes, `path: "C:\Users\bob"`, was refused with
   "unknown escape '\U'" - and `\U` is a known escape, the eight-digit

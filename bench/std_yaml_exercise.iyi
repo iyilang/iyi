@@ -98,6 +98,9 @@ docs = YAML.parse_all("1\n---\n2\n")
 assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "two documents")
 keys = YAML.parse("1: one\ntrue: x\n")
 assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
+# The core schema's integer is `[-+]?[0-9]+`: `0777` is 777, as the header
+# says now - it said a string, and a program trusting it compared a string.
+assert_true(YAML.parse("0777\n") == Any.new(777_i64) && YAML.parse("0o17\n") == Any.new(15_i64), "0777 is 777, 0o17 is 15")
 assert_str("x", keys[Any.new(true)].as_s, "boolean key")
 h = Hash(Any, Int32).new
 h[YAML.parse("a: 1")] = 7

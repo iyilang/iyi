@@ -30,9 +30,9 @@
 #     `Int64`; `1.5`, `.5`, `7.`, `1e3`, `1.0e+20`, `.inf`, `-.inf`, `.nan`
 #     are `Float64`; a decimal integer past the `Int64` range is read as a
 #     `Float64`; everything else is a `String`. So `yes`, `no`, `on`,
-#     `off`, `0777`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings
-#     here, where a 1.1 reader would make some of them booleans, octal
-#     numbers, or a timestamp. Keys resolve the same way: `1: one` has the
+#     `off`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings here,
+#     and `0777` is the decimal 777, where a 1.1 reader would make some of
+#     them booleans, an octal number, or a timestamp. Keys resolve the same way: `1: one` has the
 #     `Int64` key 1, `true: x` the `Bool` key true.
 #
 # What it refuses, each with a sentence that says where:

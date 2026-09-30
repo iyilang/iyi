@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`std/http` reads a repeated header as one list, and refuses two
+  different `Content-Length`s and a signed one.** Headers went into a
+  hash keyed by their spelling: a repeat overwrote the first
+  (`Set-Cookie: a=1` then `b=2` kept `b=2`), and the same name in another
+  case sat beside it where `header` found only one - so a request with
+  `Content-Length: 3` and `content-length: 10` was read by the first, and
+  which length a server believes decides where the next request begins
+  (RFC 9112 §6.3). A repeat is joined after a comma now (RFC 9110 §5.3;
+  `Set-Cookie` arrives folded the same way), two different lengths are a
+  400 on the server and a panic in the client, and a length is digits
+  only, where `+2` was 2. `bench/std_http_exercise.iyi` checks each; the
+  old module kept one cookie.
+
 - **`BigInt.new("_")` is refused.** Underscores between digits are
   skipped, and a string of nothing else had no digits left, which read as
   0. It panics now with "invalid BigInt: no digits, only underscores".

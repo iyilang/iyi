@@ -236,7 +236,9 @@ pub struct Server
       return ParsedRequest.new(nil, "header without a colon: #{line.inspect}", true, 0) unless colon
       name = line[0, colon]
       return ParsedRequest.new(nil, "not a header name: #{name.inspect}", true, 0) unless HTTP.token?(name)
-      headers[name] = HTTP.trim(line[colon + 1, line.bytesize - colon - 1])
+      if clash = HTTP.add_header(headers, name, HTTP.trim(line[colon + 1, line.bytesize - colon - 1]))
+        return ParsedRequest.new(nil, clash, true, 0)
+      end
     end
     path = target
     query = nil.as(String?)
@@ -263,8 +265,8 @@ pub struct Server
     end
     length = 0
     if cl = stub.header("Content-Length")
-      n = cl.to_i?
-      return ParsedRequest.new(nil, "Content-Length is not a number: #{cl.inspect}", true, 0) unless n && n >= 0
+      n = HTTP.content_length(cl)
+      return ParsedRequest.new(nil, "Content-Length is not a number: #{cl.inspect}", true, 0) unless n
       return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY
       length = n
     end
@@ -338,15 +340,17 @@ pub struct HTTP
       name = line[0, colon]
       raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
       val = line[colon + 1, line.bytesize - colon - 1]
-      headers[name] = trim(val)
+      if clash = add_header(headers, name, trim(val))
+        raise "HTTP: #{clash}"
+      end
     end
     response = Response.new(status, reason, headers, "")
     return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
     if te = response.header("Transfer-Encoding")
       body = decode_chunked(body) if same_name?(trim(te), "chunked")
     elsif cl = response.header("Content-Length")
-      n = cl.to_i?
-      raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n && n >= 0
+      n = content_length(cl)
+      raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n
       # Short of it is a connection that ended early, as a chunked body cut
       # inside a chunk is: it was answered as a whole 200 with the part
       # that came, a cut-off download read as a good one.
@@ -652,6 +656,40 @@ pub struct HTTP
       return "a chunk is not followed by CRLF" unless p[i] == 13_u8 && p[i + 1] == 10_u8
       i = i + 2
     end
+  end
+
+  # A header line into *headers*. A name already there in any case takes
+  # the new value after a comma (RFC 9110 §5.3), which is what a repeated
+  # field means - it was overwritten, or kept beside the first in another
+  # case where `header` found only one; `Set-Cookie`, whose values are not
+  # a list, arrives folded the same way. Two different `Content-Length`s
+  # are the reason the message cannot be read (RFC 9112 §6.3): which one
+  # a server believed decided where the next request began.
+  def self.add_header(headers : Hash(String, String), name : String, value : String) : String?
+    headers.each do |key, held|
+      next unless same_name?(key, name)
+      if same_name?(name, "Content-Length")
+        return nil if held == value
+        return "conflicting Content-Length: #{held.inspect} and #{value.inspect}"
+      end
+      headers[key] = held + ", " + value
+      return nil
+    end
+    headers[name] = value
+    nil
+  end
+
+  # A `Content-Length`: digits and nothing else (RFC 9110 §8.6), where
+  # `to_i?` took a sign - `+2` was a length.
+  def self.content_length(text : String) : Int32?
+    return nil if text.empty?
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return nil unless p[i] >= 48_u8 && p[i] <= 57_u8
+      i = i + 1
+    end
+    text.to_i?
   end
 
   # Without the blanks at either end (RFC 9112 §5.1: field values are

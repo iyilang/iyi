@@ -154,6 +154,18 @@ group do |g|
 end
 assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
 puts "  a body short of its Content-Length is refused"
+# A repeated header is one list, in any case; two different lengths are a
+# message nobody can read the same way twice, and a length is digits.
+cookies = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\nContent-Length: 2\r\n\r\nok")
+assert_str "a=1, b=2", cookies.header("Set-Cookie") || "", "a repeated header keeps every value"
+clash = Server.parse_request("POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabc")
+assert_true clash.request.nil? && (clash.error || "").starts_with?("conflicting Content-Length"), "two different lengths are refused: #{clash.error.inspect}"
+signed = Server.parse_request("POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\nabc")
+assert_true signed.request.nil? && (signed.error || "").starts_with?("Content-Length is not a number"), "a signed length is refused: #{signed.error.inspect}"
+twice = Server.parse_request("POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc")
+twice_body = (twice_request = twice.request) ? twice_request.body : "refused"
+assert_str "abc", twice_body, "the same length twice is one length"
+puts "  a repeated header is one list; two lengths, or a signed one, are refused"
 
 puts "\n== over a socket"
 # The server runs on a thread, and a thread's block may capture only what

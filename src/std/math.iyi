@@ -3198,28 +3198,187 @@ pub struct Math
     sqrt(value.to_f64)
   end
 
-  def self.cbrt(value : Float64) : Float64
-    return value if value == 2.0 * value || value != value
-    neg = value < 0.0
-    v = neg ? 0.0 - value : value
-    # v = m * 2^e with e a multiple of three, so the root is taken of a
-    # number in [0.5, 4) and scaled back exactly.
-    m, e = frexp(v)
-    r = (e % 3 + 3) % 3
-    m = m * (r == 0 ? 1.0 : (r == 1 ? 2.0 : 4.0))
-    e = e - r
-    res = exp(log(m) / 3.0)
-    res3 = res * res * res
-    res = res * (res3 + 2.0 * m) / (2.0 * res3 + m)
-    res = ldexp(res, e // 3)
-    if v <= 2.0e14 && v == v.to_i64.to_f64
-      iv = v.to_i64
-      ir = (res + 0.5).to_i64
-      if ir * ir * ir == iv
-        res = ir.to_f64
+  # hypot and cbrt: CORE-MATH's correctly rounded cr_hypot and cr_cbrt
+  # (hypot.c and cbrt.c at revision b1a4badf6765), ported operation for
+  # operation. hypot.c: Copyright (c) 2022-2026 Alexei Sibidanov; cbrt.c:
+  # Copyright (c) 2021-2022 Alexei Sibidanov; MIT licence. Round to nearest
+  # only: the directed-rounding branches of as_hypot_denorm, as_hypot_hard
+  # and cr_cbrt (and cbrt's rm > 0 worst-case list) are left out, as are
+  # the exception-flag save/restore and underflow/overflow triggers, which
+  # change no value; the u128 square in as_hypot_hard is trig_mul64's
+  # {hi, lo}. Tables hold cbrt.c's doubles as bits in their order.
+
+  private CBRT_ESCALE = [
+    0x3ff0000000000000_u64, 0x3ff428a2f98d728b_u64, 0x3ff965fea53d6e3d_u64,
+  ]
+  private CBRT_C = [
+    0x3fe1b0babccfef9c_u64, 0x3fe2c9a3e94d1da5_u64, 0xbfc4dc30b1a1ddba_u64, 0x3f97a8d3e4ec9b07_u64,
+  ]
+  private CBRT_RSC = [
+    0x3ff0000000000000_u64, 0xbff0000000000000_u64, 0x3fe0000000000000_u64, 0xbfe0000000000000_u64, 0x3fd0000000000000_u64, 0xbfd0000000000000_u64,
+  ]
+
+  # as_hypot_denorm: x = a * 2^-1074 >= y = b * 2^-1074 > 0, both subnormal.
+  private def self.hypot_denorm(a : UInt64, b : UInt64) : Float64
+    af = a.unsafe_to_i64.to_f64
+    bf = b.unsafe_to_i64.to_f64
+    a = a.unsafe_shl(1_u64)
+    b = b.unsafe_shl(1_u64)
+    rm = sqrt(af * af + bf * bf).to_u64
+    tm = rm.unsafe_shl(1_u64).unsafe_to_i64
+    d = ((a &* a) &+ (b &* b) &- (tm.unsafe_to_u64 &* tm.unsafe_to_u64)).unsafe_to_i64
+    while d > 2_i64 * tm
+      d = d - (2_i64 * tm + 1_i64)
+      tm = tm + 1_i64
+    end
+    while d < 0_i64
+      d = d + (2_i64 * tm - 1_i64)
+      tm = tm - 1_i64
+    end
+    rb = tm & 1_i64
+    rm = tm.unsafe_to_u64.unsafe_shr(1_u64)
+    rm = rm + rb.unsafe_to_u64 if d != 0_i64
+    IyiFloatText.from_bits(rm)
+  end
+
+  # as_hypot_hard: x^2 + y^2 exactly in 64 bits, refined integer square root.
+  private def self.hypot_hard(x : Float64, y : Float64) : Float64
+    xu = IyiFloatText.bits_of(x)
+    yu = IyiFloatText.bits_of(y)
+    bm = (xu & 0x000fffffffffffff_u64) | 0x0010000000000000_u64
+    lm = (yu & 0x000fffffffffffff_u64) | 0x0010000000000000_u64
+    be = xu.unsafe_shr(52_u64).unsafe_to_i32
+    le = yu.unsafe_shr(52_u64).unsafe_to_i32
+    ri = IyiFloatText.bits_of(sqrt(x * x + y * y))
+    bs = 2
+    rm = ri & 0x000fffffffffffff_u64
+    re = ri.unsafe_shr(52_u64).unsafe_to_i32 - 0x3ff
+    rm = rm | 0x0010000000000000_u64
+    i = 0
+    while i < 3
+      if rm == 0x0010000000000000_u64
+        rm = 0x001fffffffffffff_u64
+        re = re - 1
+      else
+        rm = rm - 1_u64
+      end
+      i = i + 1
+    end
+    bm = bm.unsafe_shl(bs.unsafe_to_u64)
+    m2 = bm &* bm
+    de = be - le
+    ls = bs - de
+    if ls >= 0
+      lm = lm.unsafe_shl(ls.unsafe_to_u64)
+      m2 = m2 &+ lm &* lm
+    else
+      hi, lo = trig_mul64(lm, lm)
+      s = (ls * -2).unsafe_to_u64
+      m2 = m2 &+ (lo.unsafe_shr(s) | hi.unsafe_shl(64_u64 - s))
+      m2 = m2 | 1_u64 if lo.unsafe_shl(64_u64 - s) != 0_u64
+    end
+    k = (bs + re).unsafe_to_u64
+    d = 0_i64
+    while true
+      rm = rm + (rm >= 0x0020000000000000_u64 ? 2_u64 : 1_u64)
+      tm = rm.unsafe_shl(k)
+      d = (m2 &- tm &* tm).unsafe_to_i64
+      break unless d > 0_i64
+    end
+    if d != 0_i64
+      # rounding to nearest (the directed-rounding branch is left out)
+      tm = rm.unsafe_shl(k) &- 1_u64.unsafe_shl(k - (rm <= 0x0020000000000000_u64 ? 1_u64 : 0_u64))
+      d = (m2 &- tm &* tm).unsafe_to_i64
+      if d != 0_i64
+        rm = rm - 1_u64 if d < 0_i64
+      else
+        rm = rm - (rm & 1_u64.unsafe_shl(1_u64 - (rm <= 0x0020000000000000_u64 ? 1_u64 : 0_u64)))
       end
     end
-    neg ? 0.0 - res : res
+    if rm >= 0x0020000000000000_u64
+      rm = rm.unsafe_shr(1_u64)
+      re = re + 1
+    end
+    e = (be - 1 + re).unsafe_to_i64
+    IyiFloatText.from_bits(e.unsafe_to_u64.unsafe_shl(52_u64) &+ rm)
+  end
+
+  def self.cbrt(value : Float64) : Float64
+    x = value
+    hx = IyiFloatText.bits_of(x)
+    mant = hx & 0x000fffffffffffff_u64
+    sign = hx.unsafe_shr(63_u64)
+    e = (hx.unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_u32
+    if ((e &+ 1_u32) & 0x7ff_u32) < 2_u32
+      ix = hx & 0x7fffffffffffffff_u64
+      return x + x if e == 0x7ff_u32 || ix == 0_u64
+      nz = ix.leading_zeros_count - 11
+      mant = mant.unsafe_shl(nz.unsafe_to_u64)
+      mant = mant & 0x000fffffffffffff_u64
+      e = e &- (nz - 1).unsafe_to_u32
+    end
+    e = e &+ 3072_u32
+    cvt1 = mant | 0x3ff0000000000000_u64
+    cvt5 = cvt1
+    et = e // 3_u32
+    it = e % 3_u32
+    cvt5 = cvt5 &+ it.unsafe_to_u64.unsafe_shl(52_u64)
+    cvt5 = cvt5 | sign.unsafe_shl(63_u64)
+    zz = IyiFloatText.from_bits(cvt5)
+    isc = CBRT_ESCALE[it.unsafe_to_i32] | sign.unsafe_shl(63_u64)
+    z = IyiFloatText.from_bits(cvt1)
+    r = 1.0 / z
+    rr = r * IyiFloatText.from_bits(CBRT_RSC[(it.unsafe_to_u64.unsafe_shl(1_u64) | sign).unsafe_to_i32])
+    z2 = z * z
+    c0 = IyiFloatText.from_bits(CBRT_C[0]) + z * IyiFloatText.from_bits(CBRT_C[1])
+    c2 = IyiFloatText.from_bits(CBRT_C[2]) + z * IyiFloatText.from_bits(CBRT_C[3])
+    y = c0 + z2 * c2
+    y2 = y * y
+    h = y2 * (y * r) - 1.0
+    y = y - (h * y) * (0.3333333333333333 - 0.2222222222222222 * h)
+    y = y * IyiFloatText.from_bits(isc)
+    y2 = y * y
+    y2l = fma(y, y, y2 * -1.0)
+    y3 = y2 * y
+    y3l = fma(y, y2, y3 * -1.0) + y * y2l
+    h = ((y3 - zz) + y3l) * rr
+    dy = h * (y * 0.3333333333333333)
+    y1 = y - dy
+    dy = (y - y1) - dy
+    # rounding to nearest: off[rm] is off[0] = 2^-53
+    ady = dy.abs
+    ady0 = (ady - 1.1102230246251565e-16).abs
+    ady1 = (ady - (2.220446049250313e-16 + 1.1102230246251565e-16)).abs
+    if ady0 < 2.6469779601696886e-23 || ady1 < 2.6469779601696886e-23
+      y2 = y1 * y1
+      y2l = fma(y1, y1, y2 * -1.0)
+      y3 = y2 * y1
+      y3l = fma(y1, y2, y3 * -1.0) + y1 * y2l
+      h = ((y3 - zz) + y3l) * rr
+      dy = h * (y1 * 0.3333333333333333)
+      y = y1 - dy
+      dy = (y1 - y) - dy
+      y1 = y
+      ady = dy.abs
+      ady0 = (ady - 1.1102230246251565e-16).abs
+      ady1 = (ady - (2.220446049250313e-16 + 1.1102230246251565e-16)).abs
+      if ady0 < 3.1554436208840472e-30 || ady1 < 3.1554436208840472e-30
+        azz = zz.abs
+        y1 = copysign(1.4758508835342132, zz) if azz == 3.2146036897957497
+        y1 = copysign(1.86925759992312, zz) if azz == 6.531417795099968
+        # the rm > 0 worst-case list is for directed roundings only
+      end
+    end
+    cvt3 = IyiFloatText.bits_of(y1) &+ (et.unsafe_to_u64 &- 1365_u64).unsafe_shl(52_u64)
+    m0 = cvt3.unsafe_shl(30_u64)
+    m1 = m0 >= 0x8000000000000000_u64 ? 0xffffffffffffffff_u64 : 0_u64
+    if (m0 ^ m1) <= 0x40000000_u64
+      cvt4 = (IyiFloatText.bits_of(y1) &+ 0x8000_u64) & 0xffffffffffff0000_u64
+      if ((IyiFloatText.from_bits(cvt4) - y1) - dy).abs < 8.673617379884035e-19 || zz.abs == 1.0
+        cvt3 = (cvt3 &+ 0x8000_u64) & 0xffffffffffff0000_u64
+      end
+    end
+    IyiFloatText.from_bits(cvt3)
   end
 
   def self.cbrt(value : Float32) : Float32
@@ -6545,21 +6704,72 @@ pub struct Math
     atanh(value.to_f64)
   end
 
-  # sqrt(x^2 + y^2) scaled by the larger magnitude, so that neither square
-  # overflows or underflows on its own.
   def self.hypot(x : Float64, y : Float64) : Float64
-    a = x.abs
-    b = y.abs
-    return 1.0 / 0.0 if a == 2.0 * a && a > 0.0 || b == 2.0 * b && b > 0.0
-    return 0.0 / 0.0 if a != a || b != b
-    if b > a
-      t = a
-      a = b
-      b = t
+    xu = IyiFloatText.bits_of(x)
+    yu = IyiFloatText.bits_of(y)
+    emsk = 0x7ff0000000000000_u64
+    ex = xu & emsk
+    ey = yu & emsk
+    ax = x.abs
+    ay = y.abs
+    if ex == emsk || ey == emsk
+      wx = xu.unsafe_shl(1_u64)
+      wy = yu.unsafe_shl(1_u64)
+      wm = emsk.unsafe_shl(1_u64)
+      ninf = (wx == wm) != (wy == wm)
+      nqnn = (wx.unsafe_shr(52_u64) == 0xfff_u64) != (wy.unsafe_shr(52_u64) == 0xfff_u64)
+      return wx == wm ? ax * ax : ay * ay if ninf && nqnn
+      return ax + ay
     end
-    return a if b == 0.0
-    r = b / a
-    a * sqrt(1.0 + r * r)
+    u = ax > ay ? ax : ay
+    v = ax > ay ? ay : ax
+    xd = IyiFloatText.bits_of(u)
+    yd = IyiFloatText.bits_of(v)
+    ey = yd
+    if ey.unsafe_shr(52_u64) == 0_u64
+      return u if ey == 0_u64
+      ex = xd
+      return hypot_denorm(ex, ey) if ex.unsafe_shr(52_u64) == 0_u64
+      nz = ey.leading_zeros_count
+      ey = ey.unsafe_shl((nz - 11).unsafe_to_u64)
+      ey = ey & 0x000fffffffffffff_u64
+      ey = ey &- (nz - 12).unsafe_to_u64.unsafe_shl(52_u64)
+      yd = ey
+    end
+    de = xd &- yd
+    return fma(7.450580596923828e-09, v, u) if de > 0x01b0000000000000_u64
+    off = 0x3ff0000000000000_u64 &- (xd & emsk)
+    xd = xd &+ off
+    yd = yd &+ off
+    x = IyiFloatText.from_bits(xd)
+    y = IyiFloatText.from_bits(yd)
+    x2 = x * x
+    dx2 = fma(x, x, x2 * -1.0)
+    y2 = y * y
+    dy2 = fma(y, y, y2 * -1.0)
+    r2 = x2 + y2
+    ir2 = 0.5 / r2
+    dr2 = ((x2 - r2) + y2) + (dx2 + dy2)
+    th = sqrt(r2)
+    rsqrt = th * ir2
+    dz = dr2 - fma(th, th, r2 * -1.0)
+    tl = rsqrt * dz
+    s = th + tl
+    tl = tl - (s - th)
+    th = s
+    thd = IyiFloatText.bits_of(th)
+    ey = IyiFloatText.bits_of(tl.abs)
+    ex = thd & emsk
+    aidr = ey &+ 0x3fe0000000000000_u64 &- ex
+    mid = (aidr &- 0x3c90000000000000_u64 &+ 16_u64).unsafe_shr(5_u64)
+    midm = (aidr &- 0x3c80000000000000_u64 &+ 16_u64).unsafe_shr(5_u64)
+    if mid == 0_u64 || midm == 0_u64 || aidr < 0x39b0000000000000_u64 || aidr > 0x3c9fffffffffff80_u64
+      thd = IyiFloatText.bits_of(hypot_hard(x, y))
+    end
+    thd = thd &- off
+    # as_hypot_overflow: 0x1.fffffffffffffp1023 * 2 rounds to +inf
+    return 1.7976931348623157e+308 + 1.7976931348623157e+308 if thd >= 0x7ff0000000000000_u64
+    IyiFloatText.from_bits(thd)
   end
 
   def self.hypot(x : Float32, y : Float32) : Float32

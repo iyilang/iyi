@@ -34,6 +34,18 @@
 
 ### Changed
 
+- **`Math.hypot` and `cbrt` are correctly rounded.** Against the true
+  value rounded to the nearest double they were wrong for 5,323 and 6,413
+  of 20,000 arguments; they are CORE-MATH's (MIT, revision b1a4badf6765)
+  now, the one 128-bit product in hypot taken by the shared 64-bit
+  multiply, and wrong for none. glibc 2.43's hypot is right on the same
+  20,000, so iyi's now answers as Crystal's does - but for pairs of
+  subnormals, where glibc's is not correctly rounded; its cbrt is wrong
+  for 10,817 of them, and there the two differ. The oracle carries the two
+  files and the math gate requires 145,000 cbrt arguments and 120,000
+  hypot pairs to the last bit and proves the check fails with cbrt's
+  residual losing its cube's low part and hypot's square losing its own.
+
 - **`Math.fma` without FMA hardware is three to four times as fast.**
   musl's arm took 10 ns a call on x86_64 without FMA3 (and on wasm32,
   which has no such instruction); the correctly rounded functions make a

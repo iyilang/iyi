@@ -125,7 +125,8 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
      "$REPO/bench/libm_oracle/core_math/asin.c" "$REPO/bench/libm_oracle/core_math/acos.c" \
      "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
      "$REPO/bench/libm_oracle/core_math/e_lgamma_r.c" "$REPO/bench/libm_oracle/core_math/tan.c" \
-     "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
+     "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" \
+     "$REPO/bench/libm_oracle/core_math/cbrt.c" "$REPO/bench/libm_oracle/core_math/hypot.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
     CM_BUILT=1
   elif [ -n "$ORACLE_BUILT" ]; then
     echo "the oracle's CORE-MATH and Bessel part did not build here:"
@@ -382,6 +383,38 @@ with open(sys.argv[2], "wb") as out:
     for n, x in pairs:
         out.write(struct.pack("<dd", n, x))
 PY
+  # cbrt's: the whole range, the subnormals, perfect cubes and their
+  # neighbours, both signs and the specials; hypot's: pairs at every
+  # exponent gap, near the overflow edge, both subnormal, one subnormal,
+  # near Pythagorean triples, and the specials crossed.
+  "$PY" - "$WORK/cbrt.in" "$WORK/hypot.in" <<'PY'
+import math, random, struct, sys
+random.seed(1637)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(80000)]
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+for k in range(1, 20000):
+    c = float(k) ** 3 * 2.0 ** (3 * random.randint(-300, 300))
+    xs += [c, math.nextafter(c, 0), math.nextafter(c, math.inf)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+ps = []
+for _ in range(80000):
+    x = random.choice([1, -1]) * 2 ** random.uniform(-1000, 1000)
+    ps.append((x, x * random.choice([1, -1]) * 2 ** random.uniform(-70, 70)))
+for _ in range(10000):
+    ps.append((random.uniform(1e307, 1.7e308), random.uniform(1e307, 1.7e308)))
+    ps.append((random.uniform(0, 2.2250738585072014e-308), random.uniform(0, 2.2250738585072014e-308)))
+    ps.append((random.uniform(0, 2.2250738585072014e-308), 2 ** random.uniform(-1022, -900)))
+for _ in range(10000):
+    a, b = random.randint(1, 10 ** 6), random.randint(1, 10 ** 6)
+    s = 2.0 ** random.randint(-500, 500)
+    ps.append(((a * a - b * b) * s, 2 * a * b * s))
+sp = [0.0, -0.0, 1.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+ps += [(a, b) for a in sp for b in sp]
+for path, rows in ((sys.argv[1], [(x,) for x in xs]), (sys.argv[2], ps)):
+    with open(path, "wb") as out:
+        for row in rows:
+            out.write(struct.pack("<%dd" % len(row), *row))
+PY
   "$WORK/libm_oracle" exp "$WORK/exp.in" "$WORK/exp.bin" &&
     "$WORK/libm_oracle" pow "$WORK/pow.in" "$WORK/pow.bin" &&
     "$WORK/libm_oracle" log "$WORK/log.in" "$WORK/log.bin" &&
@@ -410,12 +443,14 @@ PY
       "$WORK/libm_oracle_cm" y1 "$WORK/bessel.in" "$WORK/y1.bin" &&
       "$WORK/libm_oracle_cm" jn "$WORK/besseln.in" "$WORK/jn.bin" &&
       "$WORK/libm_oracle_cm" yn "$WORK/besseln.in" "$WORK/yn.bin" &&
+      "$WORK/libm_oracle_cm" cbrt "$WORK/cbrt.in" "$WORK/cbrt.bin" &&
+      "$WORK/libm_oracle_cm" hypot "$WORK/hypot.in" "$WORK/hypot.bin" &&
       "$WORK/libm_oracle_cm" sin "$WORK/trig.in" "$WORK/sin.bin" &&
       "$WORK/libm_oracle_cm" cos "$WORK/trig.in" "$WORK/cos.bin" &&
       "$WORK/libm_oracle_cm" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
       "$WORK/libm_oracle_cm" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
       ORACLE_CM=1 &&
-      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin"
+      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin $WORK/cbrt.bin $WORK/hypot.bin"
   fi
 fi
 
@@ -429,7 +464,7 @@ else
   echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
 fi
 [ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
-[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions against the oracle: not compared here, because its CORE-MATH part did not build or run"
+[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt and hypot against the oracle: not compared here, because its CORE-MATH part did not build or run"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -455,7 +490,7 @@ if [ -n "$ORACLE" ]; then
   done
 fi
 if [ -n "$ORACLE_CM" ]; then
-  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit"; do
+  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit" "== cbrt against CORE-MATH's cbrt, bit for bit" "== hypot against CORE-MATH's hypot, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
@@ -612,8 +647,10 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "sin below 2^31 reduced without pi/2^14's low part" '    rl = k * -7.474650873702107e-21' '    rl = 0.0'
   mutate "j0 below 2 with its numerator a term short" '    r2 = r[3] + z * r[4]' '    r2 = r[3]'
   mutate "yn's recurrence adding where it subtracts" '        b = ((i &+ i).to_f64 / x) * b - a' '        b = ((i &+ i).to_f64 / x) * b + a'
+  mutate "cbrt's residual without its cube's low part" '    y3l = fma(y, y2, y3 * -1.0) + y * y2l' '    y3l = 0.0'
+  mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
 else
-  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions: not run, the oracle's CORE-MATH part is not here"
+  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt and hypot: not run, the oracle's CORE-MATH part is not here"
 fi
 # musl's arm, with the processor's answer refused as above: an fma that
 # rounds twice, a product left where z's alignment put it, and a single's

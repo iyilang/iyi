@@ -2,14 +2,15 @@
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
  * log1p, sinh, cosh, tanh and the Bessel functions, and its CORE-MATH erf, erfc, asinh, acosh and
  * atanh, lgamma and tgamma behind the wrappers glibc's symbols are, and
- * CORE-MATH's own atan, asin, acos, sin, cos and tan (`core_math/`, linked with
+ * CORE-MATH's own atan, asin, acos, sin, cos, tan, cbrt and hypot (`core_math/`, linked with
  * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
  * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
  * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
  * `asin`, `acos`, `sin`, `cos`, `tan`, `lgamma`, `tgamma`, `j0`, `j1`, `y0`,
- * `y1`) reads doubles from
+ * `y1`, `cbrt`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
- * pairs and writes each with its power, and `oracle jn` or `yn` pairs of an
+ * pairs and writes each with its power, `oracle hypot` likewise, and
+ * `oracle jn` or `yn` pairs of an
  * order and an argument with the Bessel function's value.
  * The files are opened in binary, which a Windows C runtime's standard
  * streams are not. Built with contraction off: this is the algorithm as
@@ -52,6 +53,8 @@ double __ieee754_y0 (double);
 double __ieee754_y1 (double);
 double __ieee754_jn (int, double);
 double __ieee754_yn (int, double);
+double cr_cbrt (double);
+double cr_hypot (double, double);
 double __ieee754_lgamma_r (double, int *);
 double __ieee754_gamma_r (double, int *);
 
@@ -139,6 +142,8 @@ static double unary (const char *name, double x)
     return lgamma_posix (x);
   if (strcmp (name, "tgamma") == 0)
     return tgamma_posix (x);
+  if (strcmp (name, "cbrt") == 0)
+    return cr_cbrt (x);
 #endif
   return exp (x);
 }
@@ -159,6 +164,12 @@ int main (int argc, char **argv)
         fwrite (v, sizeof v[0], 3, out);
       }
 #ifdef IYI_ORACLE_CORE_MATH
+  else if (strcmp (argv[1], "hypot") == 0)
+    while (fread (v, sizeof v[0], 2, in) == 2)
+      {
+        v[2] = cr_hypot (v[0], v[1]);
+        fwrite (v, sizeof v[0], 3, out);
+      }
   else if (strcmp (argv[1], "jn") == 0 || strcmp (argv[1], "yn") == 0)
     /* Pairs of an order, as a double, and an argument. */
     while (fread (v, sizeof v[0], 2, in) == 2)

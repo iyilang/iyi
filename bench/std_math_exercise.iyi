@@ -387,6 +387,28 @@ if args.size > 29
   end
   puts "  every order from -5 to 30 and five large ones, every answer glibc's to the last bit"
 end
+# CORE-MATH's own cbrt and hypot, correctly rounded: glibc 2.43's cbrt is
+# not - it differs from this for about half the arguments - and its
+# hypot is, but for pairs of subnormals.
+against(args[30], "cbrt", "CORE-MATH's", 100000) { |x| Math.cbrt(x) } if args.size > 30
+if args.size > 31
+  puts "\n== hypot against CORE-MATH's hypot, bit for bit"
+  triples = File.read(args[31])
+  words = triples.to_unsafe.as(Pointer(UInt64))
+  cases = triples.bytesize // 24
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 3])
+    y = IyiFloatText.from_bits(words[index * 3 + 1])
+    want = IyiFloatText.from_bits(words[index * 3 + 2])
+    got = Math.hypot(x, y)
+    same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+    raise "ASSERTION FAILED: hypot(#{x}, #{y}) is #{got}, CORE-MATH's is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > 100000, "the hypot oracle had #{cases} cases"
+  puts "  #{cases} pairs, every answer CORE-MATH's to the last bit"
+end
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

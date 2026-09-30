@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **A `BitArray` prints in time linear in its size.** `to_s` grew a
+  string by one character per bit, copying it each time: 200,000 bits
+  took 46 s. It writes into one builder now, and the same print takes
+  under a millisecond. `bench/std_bit_array_exercise.iyi` prints 200,000
+  bits under a second; the old module took 38 s there.
+
 - **`BigRational#to_f64` keeps a float's precision for a small value.**
   It went through `to_big_d`, whose division keeps twenty digits past the
   point, so `1/10^30` was 0.0 and `1/(3*10^15)` kept five significant

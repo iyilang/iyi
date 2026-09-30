@@ -8593,6 +8593,95 @@ require "./file"
     __iyi_win_divmod128_signed(a.value, b.value, pointerof(quotient), pointerof(remainder))
     __iyi_win_answer128(pointerof(remainder).as(Void*))
   end
+
+  # The four conversions LLVM calls for a 128-bit integer turned into a
+  # float - `sitofp`/`uitofp` from `i128` have no instruction either - and
+  # which the msvc link step had no more than the division helpers above:
+  # `std/int`'s `x.to_f64` of a `UInt128`, or `Int128` arithmetic against a
+  # double, failed to link with
+  #
+  #   _main.o0.obj : error LNK2019: unresolved external symbol __floatuntidf
+  #
+  # unless LLVM could see the value was a widened 64-bit one. The call site
+  # is the division helpers' - the operand by address in rcx - measured
+  # the same way; the answer is an ordinary double or single, in xmm0,
+  # where a `Float64` or `Float32` return puts it.
+  #
+  # The rounding is done in integer words, once, to nearest with ties to
+  # even, which is what the instruction would do: converting the two halves
+  # and adding the doubles rounds twice and misses by one unit in the last
+  # place, and there is no `Float32` arithmetic here to round a single in.
+  # The bits come back as an IEEE pattern with *mantissa* stored bits and
+  # *bias*, and *top* the exponent that is infinity.
+  def __iyi_win_float_bits(high : UInt64, low : UInt64, mantissa : Int32, bias : Int32, top : Int32) : UInt64
+    return 0_u64 if high == 0_u64 && low == 0_u64
+    span = high != 0_u64 ? 64 + __iyi_win_bit_span(high) : __iyi_win_bit_span(low)
+    # The value's bits, top bit at 63; what does not fit leaves a 1 in bit
+    # 0, far below where the rounding looks, so an exact half past it is
+    # still read as more than a half.
+    word = 0_u64
+    if span <= 64
+      word = low.unsafe_shl((64 - span).to_u64)
+    else
+      over = span - 64
+      if over == 64
+        word = high
+        word = word | 1_u64 if low != 0_u64
+      else
+        word = high.unsafe_shl((64 - over).to_u64) | low.unsafe_shr(over.to_u64)
+        word = word | 1_u64 if low.unsafe_shl((64 - over).to_u64) != 0_u64
+      end
+    end
+    shift = (63 - mantissa).to_u64
+    kept = word.unsafe_shr(shift)
+    rest = word & (1_u64.unsafe_shl(shift) &- 1_u64)
+    half = 1_u64.unsafe_shl(shift &- 1_u64)
+    kept = kept &+ 1_u64 if rest > half || (rest == half && (kept & 1_u64) == 1_u64)
+    exponent = span - 1
+    if kept == 1_u64.unsafe_shl((mantissa + 1).to_u64)
+      kept = kept.unsafe_shr(1_u64)
+      exponent = exponent + 1
+    end
+    biased = exponent + bias
+    return (top.to_u64).unsafe_shl(mantissa.to_u64) if biased >= top
+    (biased.to_u64).unsafe_shl(mantissa.to_u64) | (kept & (1_u64.unsafe_shl(mantissa.to_u64) &- 1_u64))
+  end
+
+  # The magnitude's words and the sign bit of a signed operand: two's
+  # complement negated in words, so the most negative value, whose
+  # magnitude no `Int128` holds, comes out as the unsigned 2^127.
+  def __iyi_win_signed_float_bits(a : Pointer(Int128), mantissa : Int32, bias : Int32, top : Int32, sign : UInt64) : UInt64
+    words = a.as(Pointer(UInt64))
+    low = words.value
+    high = (words + 1_i64).value
+    return __iyi_win_float_bits(high, low, mantissa, bias, top) if high.unsafe_shr(63_u64) == 0_u64
+    borrow = low != 0_u64 ? 1_u64 : 0_u64
+    __iyi_win_float_bits((0_u64 &- high) &- borrow, 0_u64 &- low, mantissa, bias, top) | sign
+  end
+
+  fun __floatuntidf(a : Pointer(UInt128)) : Float64
+    words = a.as(Pointer(UInt64))
+    bits = __iyi_win_float_bits((words + 1_i64).value, words.value, 52, 1023, 2047)
+    pointerof(bits).as(Pointer(Float64)).value
+  end
+
+  fun __floattidf(a : Pointer(Int128)) : Float64
+    bits = __iyi_win_signed_float_bits(a, 52, 1023, 2047, 0x8000000000000000_u64)
+    pointerof(bits).as(Pointer(Float64)).value
+  end
+
+  fun __floatuntisf(a : Pointer(UInt128)) : Float32
+    words = a.as(Pointer(UInt64))
+    bits = __iyi_win_float_bits((words + 1_i64).value, words.value, 23, 127, 255)
+    # Little-endian: the low half of the word is the single.
+    pointerof(bits).as(Pointer(Float32)).value
+  end
+
+  fun __floattisf(a : Pointer(Int128)) : Float32
+    bits = __iyi_win_signed_float_bits(a, 23, 127, 255, 0x80000000_u64)
+    # Little-endian: the low half of the word is the single.
+    pointerof(bits).as(Pointer(Float32)).value
+  end
 {% end %}
 # ── end of the memory layer ─────────────────────────────────────────────
 

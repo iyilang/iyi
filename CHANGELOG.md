@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A 128-bit integer converts to a float on Windows.** `x.to_f64` or
+  `x.to_f32` of an `Int128` or `UInt128` whose value LLVM could not see
+  failed to link: the conversion is a call to compiler-rt's
+  `__floattidf`, `__floatuntidf`, `__floattisf` or `__floatuntisf`, and the
+  msvc link step has no compiler-rt, as it had none for 128-bit division.
+  The prelude's win32 arm defines the four, rounding once in integer words
+  to nearest with ties to even. `bench/std_int_exercise.iyi` converts the
+  edges of that rounding - exact halves, a half with a bit set far below
+  it in the low word, the word boundary, the most negative value - and a
+  few random values against Python's exact answers; with the old prelude
+  it does not link.
+
 - **`INI.parse` and `CSV.parse` read past a byte order mark.** Windows
   PowerShell 5.1's `Set-Content -Encoding UTF8`, older Notepad and
   Excel's "CSV UTF-8" put one at the front of a file. `INI.parse`
@@ -12432,7 +12444,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,916-line library and nothing else. Every other
+  written against iyi's own 19,005-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

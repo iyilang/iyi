@@ -206,7 +206,10 @@ jobs:
   samples:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
+    # cancellation at 45 on the next branch's - a budget the job had grown
+    # into, so a slow runner ended it in whatever step it had reached.
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"

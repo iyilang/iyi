@@ -1,14 +1,16 @@
 /*
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
- * log1p, sinh, cosh and tanh, and its CORE-MATH erf, erfc, asinh, acosh and
+ * log1p, sinh, cosh, tanh and the Bessel functions, and its CORE-MATH erf, erfc, asinh, acosh and
  * atanh, lgamma and tgamma behind the wrappers glibc's symbols are, and
  * CORE-MATH's own atan, asin, acos, sin, cos and tan (`core_math/`, linked with
  * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
  * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
  * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
- * `asin`, `acos`, `sin`, `cos`, `tan`, `lgamma`, `tgamma`) reads doubles from
+ * `asin`, `acos`, `sin`, `cos`, `tan`, `lgamma`, `tgamma`, `j0`, `j1`, `y0`,
+ * `y1`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
- * pairs and writes each with its power.
+ * pairs and writes each with its power, and `oracle jn` or `yn` pairs of an
+ * order and an argument with the Bessel function's value.
  * The files are opened in binary, which a Windows C runtime's standard
  * streams are not. Built with contraction off: this is the algorithm as
  * written, not the fused build glibc picks on a processor with FMA, which
@@ -39,6 +41,12 @@ double cr_acos (double);
 double cr_tan (double);
 double cr_sin (double);
 double cr_cos (double);
+double __ieee754_j0 (double);
+double __ieee754_j1 (double);
+double __ieee754_y0 (double);
+double __ieee754_y1 (double);
+double __ieee754_jn (int, double);
+double __ieee754_yn (int, double);
 double __ieee754_lgamma_r (double, int *);
 double __ieee754_gamma_r (double, int *);
 
@@ -112,6 +120,14 @@ static double unary (const char *name, double x)
     return cr_sin (x);
   if (strcmp (name, "cos") == 0)
     return cr_cos (x);
+  if (strcmp (name, "j0") == 0)
+    return __ieee754_j0 (x);
+  if (strcmp (name, "j1") == 0)
+    return __ieee754_j1 (x);
+  if (strcmp (name, "y0") == 0)
+    return __ieee754_y0 (x);
+  if (strcmp (name, "y1") == 0)
+    return __ieee754_y1 (x);
   if (strcmp (name, "lgamma") == 0)
     return lgamma_posix (x);
   if (strcmp (name, "tgamma") == 0)
@@ -132,6 +148,14 @@ int main (int argc, char **argv)
     while (fread (v, sizeof v[0], 2, in) == 2)
       {
         v[2] = pow (v[0], v[1]);
+        fwrite (v, sizeof v[0], 3, out);
+      }
+  else if (strcmp (argv[1], "jn") == 0 || strcmp (argv[1], "yn") == 0)
+    /* Pairs of an order, as a double, and an argument. */
+    while (fread (v, sizeof v[0], 2, in) == 2)
+      {
+        int n = (int) v[0];
+        v[2] = argv[1][0] == 'j' ? __ieee754_jn (n, v[1]) : __ieee754_yn (n, v[1]);
         fwrite (v, sizeof v[0], 3, out);
       }
   else

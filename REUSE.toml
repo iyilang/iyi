@@ -52,11 +52,11 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2024 Konstantin Makarchev"
 SPDX-License-Identifier = "MIT"
 
-# iyi: `Math.log10`, `expm1`, `log1p`, `sinh`, `cosh` and `tanh` are glibc's
-# fdlibm files, with Sun's notice, which is kept beside the port and in the
-# oracle's copies.
+# iyi: `Math.log10`, `expm1`, `log1p`, `sinh`, `cosh`, `tanh` and the Bessel
+# functions are glibc's fdlibm files, with Sun's notice, which is kept beside
+# the port and in the oracle's copies.
 [[annotations]]
-path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c", "bench/libm_oracle/e_sinh.c", "bench/libm_oracle/e_cosh.c", "bench/libm_oracle/s_tanh.c"]
+path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c", "bench/libm_oracle/e_sinh.c", "bench/libm_oracle/e_cosh.c", "bench/libm_oracle/s_tanh.c", "bench/libm_oracle/e_j0.c", "bench/libm_oracle/e_j1.c", "bench/libm_oracle/e_jn.c"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (C) 1993 by Sun Microsystems, Inc."
 SPDX-License-Identifier = "LicenseRef-SunPro"

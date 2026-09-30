@@ -4,6 +4,23 @@
 
 ### Added
 
+- **`Math.bessely0`, `bessely1`, `besselj` and `bessely`, and `besselj0`
+  and `besselj1` as glibc computes them.** The four were the rest of the
+  ten names Crystal's `Math` has and iyi's did not; the two iyi had were a
+  series and an asymptotic form, and differed from glibc 2.43 for 157,547
+  and 156,810 of 200,000 arguments. All six are fdlibm's `e_j0.c`,
+  `e_j1.c` and `e_jn.c` now, as glibc carries them, with what its
+  wrappers answer - NaN below zero and -inf at it for the second kind, an
+  infinity of the order's parity for `bessely(n, 0)` - and single and
+  generic overloads as Crystal has. Past 2 they take sin and cos, which
+  are CORE-MATH's in iyi and IBM's in glibc, so they differ from glibc's
+  where glibc's sin or cos is not correctly rounded: 204 and 195 of the
+  same 200,000. The oracle carries the three files on CORE-MATH's sin and
+  cos, and the math gate requires 127,000 arguments of each of the four
+  and 62,000 order-argument pairs of `besselj` and `bessely` to the last
+  bit, and proves the check fails with j0's numerator a term short and
+  yn's recurrence adding where it subtracts.
+
 - **`Math.isqrt`, `pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln`.** Six
   of the ten names Crystal's `Math` has and iyi's did not. `isqrt` and
   `pw2ceil` answer in the argument's own integer type, the root by the

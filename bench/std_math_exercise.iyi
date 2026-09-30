@@ -361,6 +361,32 @@ against(args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if args.si
 against(args[21], "tan", "CORE-MATH's", 200000) { |x| Math.tan(x) } if args.size > 21
 against(args[22], "sin", "CORE-MATH's", 200000) { |x| Math.sin(x) } if args.size > 22
 against(args[23], "cos", "CORE-MATH's", 200000) { |x| Math.cos(x) } if args.size > 23
+# The Bessel functions, fdlibm's as glibc carries them, on CORE-MATH's sin
+# and cos, which are iyi's: the oracle is named for the C function.
+against(args[24], "besselj0", "glibc's", 120000) { |x| Math.besselj0(x) } if args.size > 24
+against(args[25], "besselj1", "glibc's", 120000) { |x| Math.besselj1(x) } if args.size > 25
+against(args[26], "bessely0", "glibc's", 120000) { |x| Math.bessely0(x) } if args.size > 26
+against(args[27], "bessely1", "glibc's", 120000) { |x| Math.bessely1(x) } if args.size > 27
+if args.size > 29
+  puts "\n== jn and yn against glibc's, bit for bit"
+  [{args[28], true}, {args[29], false}].each do |pair|
+    triples = File.read(pair[0])
+    words = triples.to_unsafe.as(Pointer(UInt64))
+    cases = triples.bytesize // 24
+    index = 0
+    while index < cases
+      n = IyiFloatText.from_bits(words[index * 3]).to_i
+      x = IyiFloatText.from_bits(words[index * 3 + 1])
+      want = IyiFloatText.from_bits(words[index * 3 + 2])
+      got = pair[1] ? Math.besselj(n, x) : Math.bessely(n, x)
+      same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+      raise "ASSERTION FAILED: #{pair[1] ? "besselj" : "bessely"}(#{n}, #{x}) is #{got}, glibc's is #{want}" unless same
+      index = index + 1
+    end
+    assert_true cases > 60000, "the jn/yn oracle had #{cases} cases"
+  end
+  puts "  every order from -5 to 30 and five large ones, every answer glibc's to the last bit"
+end
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

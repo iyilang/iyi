@@ -1,9 +1,12 @@
 /*
  * iyi: what glibc's `e_log10.c`, `s_expm1.c`, `s_log1p.c`, `e_sinh.c`,
- * `e_cosh.c` and `s_tanh.c` read from glibc's internal headers, for
- * `bench/std_math_exercise.sh`'s oracle: the word access, no errno, and the
- * log and exp they build on, which in glibc are Arm's - the ones in this
- * directory - and fdlibm's expm1, `s_expm1.c` here.
+ * `e_cosh.c`, `s_tanh.c`, `e_j0.c`, `e_j1.c` and `e_jn.c` read from glibc's
+ * internal headers, for `bench/std_math_exercise.sh`'s oracle: the word
+ * access, no errno, and the log and exp they build on, which in glibc are
+ * Arm's - the ones in this directory - and fdlibm's expm1, `s_expm1.c`
+ * here. The Bessel functions' sin and cos are CORE-MATH's (`core_math/`),
+ * which iyi's are; glibc's own, IBM's, differ from them for about one
+ * argument in a thousand, and so do glibc's j0 and y0 there.
  */
 #ifndef IYI_MATH_PRIVATE
 #define IYI_MATH_PRIVATE
@@ -25,4 +28,16 @@ double log (double);
 double exp (double);
 #define __ieee754_exp exp
 double __expm1 (double);
+double cr_sin (double);
+double cr_cos (double);
+#define __sin cr_sin
+#define __cos cr_cos
+#define __sincos(x, s, c) (*(s) = cr_sin (x), *(c) = cr_cos (x))
+#define __ieee754_sqrt(x) __builtin_sqrt (x)
+#define SET_RESTORE_ROUND(m) ((void) 0)
+#define __feraiseexcept(e) ((void) 0)
+double __ieee754_j0 (double);
+double __ieee754_j1 (double);
+double __ieee754_y0 (double);
+double __ieee754_y1 (double);
 #endif

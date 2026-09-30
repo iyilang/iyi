@@ -2095,8 +2095,20 @@ pub struct Unicode
       end
     end
     return if yield_special(special_titlecase_table, cp) { |part| yield part.unsafe_chr }
+    # The full uppercase is the titlecase where the table above has no row
+    # (`ŉ` is `ʼN` both ways), but not for a character that has a
+    # titlecase of its own - one the simple mapping changes it to, or one
+    # that already is titlecase. Those are the 54 Greek letters with an
+    # iota subscript, whose uppercase is two code points and whose
+    # titlecase is one: `ᾳ` came out `ΑΙ` where the titlecase is `ᾼ`, and
+    # the already titlecase `ᾈ` came out `ἈΙ`.
+    simple = titlecase(char, options)
+    if simple.ord != cp || titlecase?(char)
+      yield simple
+      return
+    end
     return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
-    yield simple_upcase(cp).unsafe_chr
+    yield simple
   end
 
   # The case folding of one character where it is one code point (`Σ`, `σ`
@@ -2150,7 +2162,14 @@ pub struct Unicode
     return text.downcase if !options.turkic? && ascii_only?(text)
     source = codepoints(text)
     points = Array(Int32).new(source.size)
-    index = 0
+    downcase_into(points, source, 0, options)
+    from_codepoints(points)
+  end
+
+  # *source* from *start* on, lowered into *points*, a sigma's ending
+  # decided by all of *source*: what comes before *start* is context.
+  private def self.downcase_into(points : Array(Int32), source : Array(Int32), start : Int32, options : CaseOptions) : Nil
+    index = start
     while index < source.size
       cp = source[index]
       if cp == 0x3A3 && !options.ascii? && final_sigma?(source, index)
@@ -2160,7 +2179,6 @@ pub struct Unicode
       end
       index = index + 1
     end
-    from_codepoints(points)
   end
 
   # The first character in titlecase and the rest in lowercase: `"ǆemal"` is
@@ -2177,8 +2195,14 @@ pub struct Unicode
     end
     points = Array(Int32).new(text.size)
     titlecase(first, options) { |part| points << part.ord }
-    lowered = downcase(text[rest_at, text.bytesize - rest_at], options)
-    lowered.each_char { |char| points << char.ord }
+    if options.fold?
+      foldcase(text[rest_at, text.bytesize - rest_at]).each_char { |char| points << char.ord }
+    else
+      # The rest lowered with the first character in front of it: whether
+      # a sigma ends a word asks for a cased letter before it, and the
+      # rest lowered alone had none - `"ΩΣ"` came out `"Ωσ"`, not `"Ως"`.
+      downcase_into(points, codepoints(text), 1, options)
+    end
     from_codepoints(points)
   end
 

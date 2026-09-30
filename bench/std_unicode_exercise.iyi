@@ -44,5 +44,17 @@ assert_true Unicode.upcase('ǅ') == 'Ǆ', "char upcase of the Dž digraph"
 assert_true Unicode.titlecase('ǅ') == 'ǅ', "titlecase of the Dž digraph is itself"
 assert_str "ǆ", Unicode.downcase("ǅ"), "downcase of the Dž digraph"
 puts "  turkic i on ascii, and the titlecase digraphs"
+# A letter with an iota subscript has a two-point uppercase and a
+# one-point titlecase, and capitalize took the uppercase; the rows keep
+# the ones whose titlecase is their uppercase (`ŉ`, `ΐ`) as they were.
+assert_str "ᾼx", Unicode.capitalize("ᾳX"), "capitalize of alpha with ypogegrammeni"
+assert_str "ᾈ", Unicode.capitalize("ᾈ"), "an iota-subscript letter that is titlecase stays itself"
+assert_str "\u02BCN", Unicode.capitalize("\u0149"), "capitalize of n preceded by apostrophe is its uppercase"
+assert_str "\u0399\u0308\u0301", Unicode.capitalize("\u0390"), "capitalize of iota with dialytika and tonos is its uppercase"
+# The sigma that ends the first word is final: the rest was lowered alone,
+# with no cased letter in front of it.
+assert_str "Ως", Unicode.capitalize("ΩΣ"), "capitalize of a two-letter word ending in sigma"
+assert_str "Ας βγ", Unicode.capitalize("ΑΣ ΒΓ"), "capitalize with a final sigma before a space"
+puts "  capitalize: the iota subscript's titlecase, and the final sigma after the first letter"
 
 puts "\nALL CHECKS PASSED"

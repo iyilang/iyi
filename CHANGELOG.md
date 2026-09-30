@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`Unicode.capitalize` gives the titlecase of a letter with an iota
+  subscript, and a final sigma after the first letter.** The block form
+  of `Unicode.titlecase` fell back to the full uppercase where its table
+  had no row, and the 54 Greek letters with an iota subscript have a
+  two-point uppercase and a one-point titlecase: `ᾳ` came out `ΑΙ` where
+  the titlecase is `ᾼ`, and the already titlecase `ᾈ` came out `ἈΙ`. A
+  character the simple mapping changes, or one that is titlecase
+  already, takes its own titlecase now. And the rest of the string was
+  lowered on its own, with no cased letter before a sigma that ends the
+  first word: `"ΩΣ"` came out `"Ωσ"`, now `"Ως"`. Against Python 3.12
+  over every assigned code point, capitalize differs in 4 where it
+  differed in 58, the 4 being Unicode 16 and 17 data Python 3.12 does not
+  have. `bench/std_unicode_exercise.iyi` checks both; the old module
+  failed the first.
+
 - **`std/colorize` writes no escapes into a redirected standard error.**
   Whether to paint is one answer for the program, and text is painted
   before anyone knows which stream it goes to; only standard output was

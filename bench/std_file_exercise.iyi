@@ -264,6 +264,23 @@ assert_true File.match?("c.txt", "**/*.txt"), "**/ matches no directory at all"
 ta = File.tempfile("std_file_ex")
 tb = File.tempfile("std_file_ex")
 assert_true ta != tb, "tempfile names differ"
+# The block form deletes the file after the block only if it is still
+# there: a block that renamed it into place - the reason to write to a
+# temporary name - panicked in the delete after it.
+kept_at = "#{ta}.kept"
+File.tempfile("std_file_ex") do |scratch|
+  File.write(scratch, "whole")
+  File.rename(scratch, kept_at)
+end
+assert_true File.read(kept_at) == "whole", "a tempfile renamed in its block is kept"
+File.delete(kept_at)
+{% if flag?(:win32) %}
+  # A drive's root is its own real path, not `\\?\C:\`: the prefix came
+  # off only past eight characters, and `Path` read what was left as a
+  # share named `?`.
+  drive_root = (Program.cwd || "C:\\")[0, 3]
+  assert_true File.real_path(drive_root) == drive_root, "the real path of #{drive_root} is #{File.real_path(drive_root)}"
+{% end %}
 File.delete(ta)
 File.delete(tb)
 # A symlink planted where the next temporary file would go, pointing at a

@@ -550,7 +550,7 @@ PY
     # placeholder answered `file? false`; and a junction whose directory is
     # gone answered a followed `info?` with the link itself, where POSIX
     # `stat` of a dangling link is an error.
-    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])}"\n' > "$WORK/reparse_kind.iyi"
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])} #{File.executable?(Program.args[0])} #{File.real_path(Program.args[0]).downcase.ends_with?(File.basename(Program.args[0]).downcase)}"\n' > "$WORK/reparse_kind.iyi"
     printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?}"\n' > "$WORK/dangling.iyi"
     if ! "$IYI" build -o "$WORK/reparse_kind" "$WORK/reparse_kind.iyi" > "$WORK/reparse_kind.build" 2>&1 ||
        ! "$IYI" build -o "$WORK/dangling" "$WORK/dangling.iyi" > "$WORK/dangling.build" 2>&1; then
@@ -565,10 +565,13 @@ PY
         echo "  no app execution alias on this machine, so their kind is unmeasured"
       else
         answer="$("$WORK/reparse_kind" "$alias_exe" 2>&1)"
-        if [ "$answer" = "true false" ]; then
-          echo "  an app execution alias is a file, not a link"
+        # And the program it is: `executable?` said false of what
+        # `Process.run` runs, and `real_path` panicked - the alias does
+        # not open as data (ERROR_CANT_ACCESS_FILE, 1920).
+        if [ "$answer" = "true false true true" ]; then
+          echo "  an app execution alias is a file, not a link, is executable, and is its own real path"
         else
-          echo "  an app execution alias ($alias_exe) answered file?/symlink? $answer"
+          echo "  an app execution alias ($alias_exe) answered file?/symlink?/executable?/real_path $answer"
           status=1
         fi
       fi

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`File.real_path` of a drive's root is `C:\`, an app execution alias
+  is executable and has a real path, and `File.tempfile`'s block may
+  rename its file.** The `\\?\` prefix came off `GetFinalPathNameByHandleW`'s
+  answer only past eight characters, so `C:\` and `C:\c` kept it, and
+  `Path` read `\\?\C:\` as a share named `?`. An app execution alias -
+  `winget.exe`, `python.exe` under `WindowsApps` - does not open as data
+  (ERROR_CANT_ACCESS_FILE), so `readable?` and `executable?` said false
+  of a program `Process.run` runs, and `real_path` panicked; the alias
+  itself is opened instead. And `File.tempfile` with a block deleted its
+  file after the block unconditionally, so a block that renamed it into
+  place - what a temporary name is for - panicked "cannot delete".
+  `bench/std_file_exercise.iyi` and `.sh` check each; the old module
+  panicked at the tempfile.
+
 - **`Process.run` on Windows refuses text a command line cannot carry,
   searches a quoted `PATH` entry with a non-ASCII name, and names the
   command-line limit.** An argument that was not UTF-8 converted to a

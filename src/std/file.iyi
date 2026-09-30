@@ -932,8 +932,16 @@ class ::File
       flags = attributes != -1 && (attributes & 0x10) != 0 ? 0x2000000 : 0x80
       handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
-        return nil if Std::File::LibKernel32.GetLastError == 32
-        return false
+        error = Std::File::LibKernel32.GetLastError
+        return nil if error == 32
+        return false unless error == 1920
+        # ERROR_CANT_ACCESS_FILE: an app execution alias - `winget.exe`,
+        # `python.exe` under WindowsApps - which the file system will not
+        # open as data and `CreateProcess` runs. It answered not readable
+        # and not executable of a program `Process.run` ran. The alias
+        # itself is opened instead (FILE_FLAG_OPEN_REPARSE_POINT).
+        handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags | 0x200000, Pointer(Void).new(0_u64))
+        return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
       end
       Std::File::LibKernel32.CloseHandle(handle)
       true
@@ -1296,6 +1304,12 @@ class ::File
       raise "Cannot resolve realpath for #{p}: the path is not valid UTF-8" if wide.address == 0_u64
       handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
         3, 0x2000000, Pointer(Void).new(0_u64))
+      if handle.address &+ 1_u64 == 0_u64 && Std::File::LibKernel32.GetLastError == 1920
+        # An app execution alias, which does not open through: its own
+        # path is the one there is (see `win_opens?`).
+        handle = Std::File::LibKernel32.CreateFileW(wide, 0, 0x7, Pointer(Void).new(0_u64),
+          3, 0x2000000 | 0x200000, Pointer(Void).new(0_u64))
+      end
       raise "Cannot resolve realpath for #{p}: #{win_error}" if handle.address &+ 1_u64 == 0_u64
       room = 32768
       full = Pointer(UInt16).malloc(room.to_u64)
@@ -1304,8 +1318,10 @@ class ::File
       raise "Cannot resolve realpath for #{p}: #{win_error}" if written <= 0
       raise "Cannot resolve realpath for #{p}: the resolved path is #{written} characters, past the #{room} this asks for" if written >= room
       resolved = full
-      if written > 8 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
-        if full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
+      # From four characters on: a drive's root is `\\?\C:\`, seven, and it
+      # kept the prefix, which `Path` then read as a share named `?`.
+      if written >= 4 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16 && full[3] == 92_u16
+        if written > 8 && full[4] == 85_u16 && full[5] == 78_u16 && full[6] == 67_u16 && full[7] == 92_u16
           resolved = full + 6
           resolved[0] = 92_u16
           resolved[1] = 92_u16
@@ -1657,9 +1673,13 @@ class ::File
     {% end %}
   end
 
+  # The file is deleted after the block if it is still there: the block
+  # may have renamed it into place - write to a temporary name, then
+  # rename, is what the name is for - and `delete` of a path that is gone
+  # panicked after the block had done its work.
   def self.tempfile(prefix : String = "tmp", suffix : String = "", &block : String -> Nil) : Nil
     p = tempfile(prefix, suffix)
-    defer File.delete(p)
+    defer File.delete(p) if File.exists?(p)
     yield p
   end
 end

@@ -36,4 +36,9 @@ assert_str "", form["%"], "a lone % is a key"
 assert_str "", form["e"], "a key with no value"
 puts "  a malformed escape in a query is read, not refused"
 
+puts "\n== encode"
+assert_str "peter+%2B+paul", URI.encode("peter + paul", space_to_plus: true), "a '+' is %2B once a space is '+'"
+assert_str " +", URI.decode(URI.encode(" +", space_to_plus: true), plus_to_space: true), "encode with space_to_plus is undone by decode"
+puts "  a literal + is encoded when + stands for a space"
+
 puts "\nALL CHECKS PASSED"

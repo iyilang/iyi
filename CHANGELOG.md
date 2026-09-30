@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`URI.encode(s, space_to_plus: true)` escapes a literal `+`.** It
+  wrote a space as `+` and kept a `+` as it was, so `"a b"` and `"a+b"`
+  encoded alike and `decode(..., plus_to_space: true)` turned `" +"`
+  into two spaces - the one encoder of the module's that was not undone
+  by `decode`, which its header promises of all of them. A `+` is `%2B`
+  in that mode now, as Crystal's is. 200,000 cases against Crystal's
+  `URI` and Python's `urllib.parse` found 21,050 such answers and none
+  after; the uri exercise checks it and proves the check fails with the
+  `+` kept.
+
 - **The math oracle's CORE-MATH part builds without C23's `<stdbit.h>`.**
   glibc's lgamma includes it for `stdc_leading_zeros`, and mingw's gcc
   on the Windows runner has none, so there the gate compared none of

@@ -482,7 +482,7 @@ pub class URI
       b = raw[i]
       if b == 32_u8 && space_to_plus
         bytes << 43_u8 # '+'
-      elsif keep?(b, level)
+      elsif keep?(b, level) && !(b == 43_u8 && space_to_plus)
         bytes << b
       else
         bytes << 37_u8 # '%'
@@ -499,8 +499,9 @@ pub class URI
 
   # Percent-encodes every byte that is neither unreserved nor reserved,
   # `%` among them: `"%20"` becomes `"%2520"`, and a space `"%20"` (or
-  # `"+"` when *space_to_plus*). Bytes above ASCII are encoded one by one,
-  # so UTF-8 text round-trips through `decode`.
+  # `"+"` when *space_to_plus*, which then writes a `+` as `"%2B"`). Bytes
+  # above ASCII are encoded one by one, so UTF-8 text round-trips through
+  # `decode`.
   def self.encode(str : String, space_to_plus : Bool = false) : String
     percent_encode(str, 0, space_to_plus)
   end

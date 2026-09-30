@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`Float64#**` of a negative exponent and `round(digits)` answer at the
+  edges of a double's range, and a zero keeps its sign through `round`
+  and `trunc`.** `2.0 ** -1074` was 0.0, one over the infinite `2.0 **
+  1074`, where the smallest double, 5.0e-324, is the answer; the
+  reciprocal's power is taken when the power itself is past the range.
+  `2.0 ** -2147483648` panicked negating its exponent. `1e308.round(1)`
+  was Infinity and `1.5.round(400)` and `1.5.round(-400)` NaN, the scale
+  having left the range; they are `1e308`, `1.5` and `0.0`, and
+  `round(digits, mode)` likewise. `(-0.0).round`, `(-0.5).trunc` and
+  `(-0.3).round(ToZero)` were `0.0`; the sign is copied back and they are
+  `-0.0`, as the instruction and Crystal answer. `bench/std_float_exercise.iyi`
+  checks each; the old modules fail the first. `bench/number_exercise.sh`'s
+  proof that `round` is symmetric patches the new line.
+
 - **`Log` writes nothing at `Severity::None`.** None is the level that
   silences a logger, and an entry logged at None passed every level
   check, that one included: a logger set to None wrote it. None is a

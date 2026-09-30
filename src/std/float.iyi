@@ -309,13 +309,14 @@ import std/number
       end
 
       # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is
-      # answered as it is; NaN and the infinities likewise.
+      # answered as it is; NaN and the infinities likewise. The sign is
+      # copied back, so `(-0.5).trunc` is `-0.0`, as the instruction says.
       def trunc : {{ name.id }}
         return self if self != self || abs >= {{ f[3].id }}
         {% if name == "Float32" %}
-          to_i64.to_f32
+          to_f64.trunc.to_f32
         {% else %}
-          to_i64.to_f64
+          LibIyiRounding.copysign(to_i64.to_f64, self)
         {% end %}
       end
     end

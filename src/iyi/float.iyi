@@ -71,9 +71,18 @@ struct Float64
   end
 
   # A whole power, by squaring: `2.0 ** 10`. A negative exponent is one
-  # over the positive one.
+  # over the positive one - or, where the positive one is past a double's
+  # range, the reciprocal's power: `2.0 ** -1074` is 5.0e-324, the
+  # smallest double, where one over `2.0 ** 1074`, which is infinite, was
+  # 0.0. The exponent is not negated whole, which `-2147483648` has no
+  # room for: that panicked "arithmetic overflow".
   def **(exponent : Int32) : Float64
-    return 1.0 / (self ** -exponent) if exponent < 0
+    if exponent < 0
+      positive = (self ** (-1 - exponent)) * self
+      return 1.0 / positive if positive * 0.0 == 0.0 || positive != positive
+      inverse = 1.0 / self
+      return (inverse ** (-1 - exponent)) * inverse
+    end
     result = 1.0
     base = self
     while exponent > 0
@@ -152,7 +161,7 @@ struct Float64
               else
                 (whole / 2.0).floor * 2.0 == whole ? whole : whole + 1.0
               end
-    self < 0.0 ? nearest * -1.0 : nearest
+    LibIyiRounding.copysign(nearest, self)
   end
 
   # To `digits` places, a tie to the even one: scaled, rounded, scaled
@@ -160,14 +169,24 @@ struct Float64
   # `digits` rounds to tens, hundreds, ...: `1234.0.round(-2)` is 1200.0,
   # and `25.0.round(-1)` is 20.0. The scale for those divides first rather
   # than multiplying by a fraction, which no double spells exactly.
+  #
+  # Where the scale leaves a double's range the answer is at hand, and the
+  # arithmetic made Infinity or NaN of it: a double at 2^52 or past has no
+  # fraction to round (`1e308.round(1)` was Infinity), a scale past the
+  # range keeps every digit a double has (`1.5.round(400)` was NaN), and
+  # one past the range the other way is a zero (`1.5.round(-400)`).
   def round(digits : Int32) : Float64
     return round if digits == 0
     if digits < 0
       scale = 10.0 ** (0 - digits)
+      return LibIyiRounding.copysign(0.0, self) if scale * 0.0 != 0.0 && self * 0.0 == 0.0
       (self / scale).round * scale
     else
+      return self if self != self || abs >= 4503599627370496.0
       scale = 10.0 ** digits
-      (self * scale).round / scale
+      scaled = self * scale
+      return self if scaled * 0.0 != 0.0
+      scaled.round / scale
     end
   end
 end

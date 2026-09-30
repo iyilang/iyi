@@ -295,7 +295,7 @@ prove_fails "the instruction truncates" roundsd_mode float.iyi \
 # 8. And the rounding that has to be symmetric about zero.
 prove_fails "round is not symmetric" bad_round float.iyi \
   "number: round is symmetric" \
-  's/^    self < 0.0 ? nearest \* -1.0 : nearest$/    nearest/'
+  's/^    LibIyiRounding.copysign(nearest, self)$/    nearest/'
 
 # 8b. A tie decided away from zero, which is the other library's meaning
 #     of the same name.

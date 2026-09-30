@@ -132,4 +132,22 @@ assert_true List(Float32).new([1.5_f32, 2.5_f32]).sum == 4.0_f32, "f32 sum"
 assert_true 2.5_f32.round(RoundingMode::TiesEven) == 2.0_f32, "f32 ties even"
 puts "  Num and round(mode)"
 
+# The edges of a double's range. `2.0 ** -1074` is the smallest double,
+# where one over `2.0 ** 1074` - infinite - was 0.0, and
+# `2.0 ** -2147483648` panicked negating its exponent. `round(digits)`
+# answered Infinity or NaN where the scale left the range, and a zero lost
+# its sign through `round`, `trunc` and `round(mode)`.
+puts "\n== the edges of a double's range"
+negative_zero = ->(x : Float64) { x == 0.0 && 1.0 / x < 0.0 }
+assert_true 2.0 ** -1074 == 5.0e-324, "2.0 ** -1074 is the smallest double, not #{2.0 ** -1074}"
+assert_true 10.0 ** -320 == 1.0e-320, "10.0 ** -320 is 1e-320, not #{10.0 ** -320}"
+assert_true 2.0 ** -2147483648 == 0.0 && 0.5 ** -2147483648 == 1.0 / 0.0, "an exponent of Int32's least"
+assert_true 2.0 ** -3 == 0.125 && 10.0 ** -2 == 0.01, "an ordinary negative power"
+assert_true 1.0e308.round(1) == 1.0e308 && 1.5.round(400) == 1.5 && 1.5.round(-400) == 0.0, "round(digits) past the range"
+assert_true 1.0e308.round(1, RoundingMode::TiesAway) == 1.0e308 && 1.5.round(400, RoundingMode::ToZero) == 1.5, "round(digits, mode) past the range"
+assert_true 3.14159.round(2) == 3.14 && 1234.0.round(-2) == 1200.0, "round(digits) inside it"
+assert_true negative_zero.call((-0.0).round) && negative_zero.call((-0.3).round(RoundingMode::ToZero)), "round keeps a zero's sign"
+assert_true negative_zero.call((-0.5).trunc) && negative_zero.call((-0.0).trunc) && negative_zero.call((-1.5).round(-400)), "trunc and round(-400) keep it"
+puts "  **, round(digits) and a zero's sign"
+
 puts "\nALL CHECKS PASSED"

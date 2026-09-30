@@ -93,7 +93,9 @@ struct ::Float64
             even = (f / 2.0).floor * 2.0
             even == f ? f : f + 1.0
           end
-      self < 0.0 ? r * -1.0 : r
+      # The sign by copying, so a zero keeps its own: `(-0.0).round` and
+      # `(-0.3).round(ToZero)` were `0.0`.
+      LibIyiRounding.copysign(r, self)
     end
   end
 
@@ -102,14 +104,23 @@ struct ::Float64
   # `2.675.round(2, RoundingMode::TiesAway)`. A negative `digits` rounds to
   # tens, hundreds, ..., dividing by the scale first as the prelude's
   # `round(digits)` does.
+  # Past a double's range the answer is at hand, as for the prelude's.
   def round(digits : Int32, mode : Std::Number::RoundingMode) : Float64
     return round(mode) if digits == 0
     if digits < 0
       scale = 10.0 ** (0 - digits)
+      if scale * 0.0 != 0.0 && self * 0.0 == 0.0
+        whole = LibIyiRounding.copysign(0.0, self)
+        return whole if mode == Std::Number::RoundingMode::ToZero || self == 0.0
+        return mode == Std::Number::RoundingMode::ToPositive && self > 0.0 ? 1.0 / 0.0 : (mode == Std::Number::RoundingMode::ToNegative && self < 0.0 ? -1.0 / 0.0 : whole)
+      end
       (self / scale).round(mode) * scale
     else
+      return self if self != self || abs >= 4503599627370496.0
       scale = 10.0 ** digits
-      (self * scale).round(mode) / scale
+      scaled = self * scale
+      return self if scaled * 0.0 != 0.0
+      scaled.round(mode) / scale
     end
   end
 end

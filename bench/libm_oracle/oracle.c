@@ -1,10 +1,11 @@
 /*
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
  * log1p, sinh, cosh and tanh, and its CORE-MATH erf, erfc, asinh, acosh and
- * atanh (`core_math/`, linked with libm for their exact `fma`), as
- * `bench/std_math_exercise.sh` asks them. `oracle exp IN OUT` (or `exp2`,
- * `log`, `log2`, `log10`, `expm1`, `log1p`, `sinh`, `cosh`, `tanh`, `erf`,
- * `erfc`, `asinh`, `acosh`, `atanh`) reads doubles from
+ * atanh, and CORE-MATH's own atan, asin and acos (`core_math/`, linked with
+ * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
+ * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
+ * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
+ * `asin`, `acos`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
  * pairs and writes each with its power.
  * The files are opened in binary, which a Windows C runtime's standard
@@ -30,6 +31,9 @@ double __erfc (double);
 double __asinh (double);
 double __ieee754_acosh (double);
 double __ieee754_atanh (double);
+double cr_atan (double);
+double cr_asin (double);
+double cr_acos (double);
 
 static double unary (const char *name, double x)
 {
@@ -61,6 +65,12 @@ static double unary (const char *name, double x)
     return __ieee754_acosh (x);
   if (strcmp (name, "atanh") == 0)
     return __ieee754_atanh (x);
+  if (strcmp (name, "atan") == 0)
+    return cr_atan (x);
+  if (strcmp (name, "asin") == 0)
+    return cr_asin (x);
+  if (strcmp (name, "acos") == 0)
+    return cr_acos (x);
   return exp (x);
 }
 int main (int argc, char **argv)

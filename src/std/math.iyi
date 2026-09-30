@@ -1678,39 +1678,547 @@ pub struct Math
     copysign(1.0_f32, a) < 0.0_f32 ? b : a
   end
 
-  # atan of a value in [0, 1]: the angle is halved until it is small, then
-  # a series, then doubled back.
-  private def self.atan_unit(val : Float64) : Float64
-    reductions = 0
-    while val > 0.125
-      val = val / (1.0 + sqrt(1.0 + val * val))
-      reductions = reductions + 1
-    end
+  # atan, asin and acos: CORE-MATH's correctly rounded cr_atan, cr_asin and
+  # cr_acos (atan.c, asin.c, acos.c at revision b1a4badf6765), ported
+  # operation for operation. Copyright (c) 2022-2026 Alexei Sibidanov; MIT
+  # licence. Tables hold each double's bits in the C files' row-major order.
 
-    v2 = val * val
-    s = 1.0 / 19.0
-    s = s * v2 - 1.0 / 17.0
-    s = s * v2 + 1.0 / 15.0
-    s = s * v2 - 1.0 / 13.0
-    s = s * v2 + 1.0 / 11.0
-    s = s * v2 - 1.0 / 9.0
-    s = s * v2 + 1.0 / 7.0
-    s = s * v2 - 1.0 / 5.0
-    s = s * v2 + 1.0 / 3.0
-    res = val - v2 * val * s
+  private ATAN_A = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0x3f89224e047e368e_u64, 0x3c1a3ca6c727c59d_u64,
+    0x3f992346247a91f0_u64, 0x3bf138b0ef96a186_u64, 0x3fa2dbaae9a05db0_u64, 0x3c436e7f8a3f5e42_u64,
+    0x3fa927278a3b1162_u64, 0xbbfac986efb92662_u64, 0x3faf7495ea3f3783_u64, 0x3c406ec8011ee816_u64,
+    0x3fb2e239ccff3831_u64, 0xbc5858437d431332_u64, 0x3fb60b9f7597fdec_u64, 0xbc3cebd13eb7c513_u64,
+    0x3fb936bb8c5b2da2_u64, 0xbc5840cac0d81db5_u64, 0x3fbc63ce377fc802_u64, 0x3c5400b0fdaa109e_u64,
+    0x3fbf93183a8db9e9_u64, 0x3c40e04e06c86e72_u64, 0x3fc1626d85a91e70_u64, 0x3c4f7ad829163ca7_u64,
+    0x3fc2fcac73a60640_u64, 0xbc52680735ce2cd8_u64, 0x3fc4986a74cf4e57_u64, 0xbc690559690b42e4_u64,
+    0x3fc635c990ce0d36_u64, 0x3c591d29110b41aa_u64, 0x3fc7d4ec54fb5968_u64, 0xbc4ea90e27182780_u64,
+    0x3fc975f5e0553158_u64, 0xbc2dc82ac14e3e1c_u64, 0x3fcb1909efd8b762_u64, 0xbc573a10fd13daaf_u64,
+    0x3fccbe4ceb4b4cf2_u64, 0xbc63a7ffbeabda0b_u64, 0x3fce65e3f27c9f2a_u64, 0xbc6db6627a24d523_u64,
+    0x3fd007fa758626ae_u64, 0xbc645f97dd3099f6_u64, 0x3fd0de53475f3b3c_u64, 0xbc66293f68741816_u64,
+    0x3fd1b6103d3597e9_u64, 0xbc6ab240d40633e9_u64, 0x3fd28f459ecad74d_u64, 0xbc2de34d14e832e0_u64,
+    0x3fd36a08355c63dc_u64, 0x3c6af540d9fb4926_u64, 0x3fd4466d542bac92_u64, 0x3c6da60fdbc82ac4_u64,
+    0x3fd5248ae1701b17_u64, 0xbc792a601170138a_u64, 0x3fd604775fbb27df_u64, 0xbc67f1fca1d5d15b_u64,
+    0x3fd6e649f7d78649_u64, 0xbc64e223ea716c7b_u64, 0x3fd7ca1a832d0f84_u64, 0x3c7b24c824ac51fc_u64,
+    0x3fd8b00196b3d022_u64, 0x3c64314cd132ba43_u64, 0x3fd998188e816bf0_u64, 0xbc711f1e0817879a_u64,
+    0x3fda827999fcef32_u64, 0xbc6c3dea4dbad538_u64, 0x3fdb6f3fc8c61e5b_u64, 0x3c660d1b780ee3eb_u64,
+    0x3fdc5e87185e67b6_u64, 0xbc4ab5edb7dfa545_u64, 0x3fdd506c82a2c800_u64, 0xbc68e1437048b5bd_u64,
+    0x3fde450e0d273e7a_u64, 0xbc706951c97b050f_u64, 0x3fdf3c8ad985d9ee_u64, 0xbc414af9522ab518_u64,
+    0x3fe01b819b5a7cf7_u64, 0xbc7aba0d7d97d1f2_u64, 0x3fe09a4c59bd0d4d_u64, 0x3c4095bc4ebc2c42_u64,
+    0x3fe11ab7190834ec_u64, 0x3c8798826fa27774_u64, 0x3fe19cd3fe8e405d_u64, 0x3c8008f6258fc98f_u64,
+    0x3fe220b5ef047825_u64, 0xbc5462af7ceb7de6_u64, 0x3fe2a6709a74f289_u64, 0xbc71184dfd78b472_u64,
+    0x3fe32e1889047ffd_u64, 0x3c79141876dc40c5_u64, 0x3fe3b7c3289ed6f3_u64, 0x3c8481c20189726c_u64,
+    0x3fe44386db9ce5db_u64, 0x3c82e851bd025441_u64, 0x3fe4d17b087b265d_u64, 0x3c713ada9b8bc419_u64,
+    0x3fe561b82ab7f990_u64, 0xbc805b4c3c4cbee8_u64, 0x3fe5f457e4f4812e_u64, 0xbc85619249bd96f1_u64,
+    0x3fe6897514751db6_u64, 0xbc6b0a0fbcafc671_u64, 0x3fe7212be621be6d_u64, 0xbc819ff2dc66da45_u64,
+    0x3fe7bb99ed2990cf_u64, 0x3c81320449592d92_u64, 0x3fe858de3b716571_u64, 0xbc81fddcd2f3da8e_u64,
+    0x3fe8f9197bf85eeb_u64, 0x3c6d44a42e35cc97_u64, 0x3fe99c6e0f634394_u64, 0xbc7585a178b4a18d_u64,
+    0x3fea43002ae42850_u64, 0x3c6f95a531b3a970_u64, 0x3feaecf5f9ba35a6_u64, 0xbc396c2d43ca3392_u64,
+    0x3feb9a77c18c1af2_u64, 0xbc6a5bed94b05def_u64, 0x3fec4bb009e77983_u64, 0x3c454509d2bff511_u64,
+    0x3fed00cbc7384d2e_u64, 0xbc6b4c867cef300c_u64, 0x3fedb9fa89953fcf_u64, 0xbc1ddfac663d6bc6_u64,
+    0x3fee776eafc91706_u64, 0xbc7a510683ff7cb6_u64, 0x3fef395d9f0e3c92_u64, 0x3c44fdcd8e4e8710_u64,
+    0x3ff0000000000000_u64, 0x0000000000000000_u64, 0x3ff065c900aaf2d8_u64, 0xbc8deec7fc9042ad_u64,
+    0x3ff0ce29d0883c99_u64, 0xbc8395ae45e0657d_u64, 0x3ff139447e6a86ee_u64, 0x3c8332cf301a97f3_u64,
+    0x3ff1a73d55278c4b_u64, 0xbc86cc8c4b78213b_u64, 0x3ff2183b0c4573ff_u64, 0x3c870a90841da57a_u64,
+    0x3ff28c66fdaf8f09_u64, 0xbc6ba39bad450ee0_u64, 0x3ff303ed61109e20_u64, 0xbc88692946d9f93c_u64,
+    0x3ff37efd8d87607e_u64, 0x3c63b711bf765b58_u64, 0x3ff3fdca42847507_u64, 0x3c7c21387985b081_u64,
+    0x3ff48089f8bf42cc_u64, 0xbc87ddb19d3d0efc_u64, 0x3ff507773c537ead_u64, 0xbc7f5e354cf971f3_u64,
+    0x3ff592d11142fa55_u64, 0xbc700f0ad675330d_u64, 0x3ff622db63c8ecc2_u64, 0xbc82c93f50ab2c0e_u64,
+    0x3ff6b7df86265200_u64, 0x3c7bec391adc37d5_u64, 0x3ff7522cbdd428a8_u64, 0xbc69686ddc9ffcf5_u64,
+    0x3ff7f218e25a7461_u64, 0xbc78d16529514246_u64, 0x3ff89801106cc709_u64, 0xbc8092f51e9c2803_u64,
+    0x3ff9444a7462122a_u64, 0xbc807c06755404c4_u64, 0x3ff9f7632fa9e871_u64, 0x3c802e0d43abc92b_u64,
+    0x3ffab1c35d8a74ea_u64, 0x3c5d0184e48af6f7_u64, 0x3ffb73ee3c3ef16a_u64, 0x3c773be957380bc2_u64,
+    0x3ffc3e738086bc0f_u64, 0xbc702b6e26c84462_u64, 0x3ffd11f0dae40609_u64, 0x3c525c4f3ffa6e1f_u64,
+    0x3ffdef13b73c1406_u64, 0xbc5e302db3c6823f_u64, 0x3ffed69b4153a45d_u64, 0x3c73207830326c0e_u64,
+    0x3fffc95abad6cf4a_u64, 0xbc66308cee7927bf_u64, 0x4000641e192ceab3_u64, 0xbc70147ebf0df4c5_u64,
+    0x4000ea21d716fbf7_u64, 0xbc7168533cc41d8b_u64, 0x40017749711a6679_u64, 0xbc652a0b0333e9c5_u64,
+    0x40020c36c6a7f38e_u64, 0x3c68659eece35395_u64, 0x4002a99f50fd4f4f_u64, 0x3c820fcad18cb36f_u64,
+    0x4003504f333f9de6_u64, 0xbc752afdbd5a8c74_u64, 0x4004012ce2586a17_u64, 0xbc79747a792907d7_u64,
+    0x4004bd3d87fe0650_u64, 0x3c790c59393b52c8_u64, 0x400585aa4e1530fa_u64, 0x3c7af6934f13a3a8_u64,
+    0x40065bc6cc825147_u64, 0xbc48534dcab5ad3e_u64, 0x40074118e4b6a7c8_u64, 0xbc7555aa8bfca9a1_u64,
+    0x400837626d70fdb8_u64, 0xbc556b3fee9ca72b_u64, 0x400940ad30abc792_u64, 0x3c54b3fdd4fdc06c_u64,
+    0x400a5f59e90600dd_u64, 0x3c6285d367c55ddc_u64, 0x400b9633283b6d14_u64, 0xbc48712976f17a16_u64,
+    0x400ce885653127e7_u64, 0xbc3abe8ab65d49fc_u64, 0x400e5a3de972a377_u64, 0x3c5cd9be81ad764b_u64,
+    0x400ff01305ecd8dc_u64, 0x3c4742c2922656fa_u64, 0x4010d7dc7cff4c9e_u64, 0xbc77c842978bee09_u64,
+    0x4011d0143e71565f_u64, 0x3c67bc7dea7c3c03_u64, 0x4012e4ff1626b949_u64, 0x3c4aefbe25b404e9_u64,
+    0x40141bfee2424771_u64, 0xbc34bcfaaa95cb2c_u64, 0x40157be4eaa5e11b_u64, 0x3c50fe741e4ec679_u64,
+    0x40170d751908c1b1_u64, 0x3c5fe74a5b0ec709_u64, 0x4018dc25c117782b_u64, 0x3c50ca1c19f710ef_u64,
+    0x401af73f4ca3310f_u64, 0x3c52867b40ba77d6_u64, 0x401d7398d15e70db_u64, 0x3c60fd4e0d4b1547_u64,
+    0x4020372fb36b87e2_u64, 0x3c5c16c9ecc1621d_u64, 0x402208dbdae055ef_u64, 0x3c56b81a36e75e8c_u64,
+    0x40244e6c595afdcc_u64, 0xbc57c22045771848_u64, 0x4027398c57f3f1ad_u64, 0x3c5970503be105c0_u64,
+    0x402b1d03c03d2f7f_u64, 0xbc3f299d010aead2_u64, 0x403046e9fe60a77e_u64, 0x3c5d2b61deff33ec_u64,
+    0x40345affed201b55_u64, 0x3bf0e84d9567203a_u64, 0x403b267195b1ffae_u64, 0xbbfad44b44b92653_u64,
+    0x40445e2455e4aaa7_u64, 0xbc3296d577b5e21d_u64, 0x40545eed6854ce99_u64, 0x3c02db53886013ca_u64,
+    0x0000000000000000_u64, 0x0000000000000000_u64,
+  ]
+  private ATAN_C = [
+    419_u64, 81_u64, 0_u64, 500_u64, 81_u64, 0_u64, 582_u64, 163_u64,
+    0_u64, 745_u64, 163_u64, 0_u64, 908_u64, 326_u64, 0_u64, 1234_u64,
+    326_u64, 0_u64, 1559_u64, 651_u64, 0_u64, 2210_u64, 650_u64, 1_u64,
+    2860_u64, 1299_u64, 3_u64, 4156_u64, 1293_u64, 4_u64, 5444_u64, 2569_u64,
+    24_u64, 7989_u64, 2520_u64, 32_u64, 10476_u64, 4917_u64, 168_u64, 15224_u64,
+    4576_u64, 200_u64, 19601_u64, 8341_u64, 838_u64, 27105_u64, 6648_u64, 731_u64,
+    33036_u64, 10210_u64, 1998_u64, 41266_u64, 6292_u64, 1117_u64, 46469_u64, 7926_u64,
+    2048_u64, 52375_u64, 4038_u64, 849_u64, 55587_u64, 4591_u64, 1291_u64, 58906_u64,
+    2172_u64, 479_u64, 60612_u64, 2390_u64, 688_u64, 62325_u64, 1107_u64, 247_u64,
+    63192_u64, 1207_u64, 349_u64, 64056_u64, 556_u64, 124_u64, 64491_u64, 605_u64,
+    175_u64, 64923_u64, 278_u64, 62_u64, 65141_u64, 303_u64, 88_u64, 65358_u64,
+    139_u64, 31_u64, 65467_u64, 151_u64, 44_u64,
+  ]
+  private ATAN_DB = [
+    0x3f80dc89a3b55010_u64, 0x3f80dc70ac228717_u64, 0x3c20000000000000_u64, 0x3f7e3fb41d2d2260_u64,
+    0x3f7e3f9013a852f8_u64, 0x3c10000000000000_u64, 0x3fe7ba49f739829f_u64, 0x3fe46ac372243536_u64,
+    0x3920000000000000_u64, 0x3fca933fe176b375_u64, 0x3fca33f32ac5ceb5_u64, 0xb8f0000000000000_u64,
+    0x3f7bb04a79820063_u64, 0x3f7bb02ed5c5e956_u64, 0xb8c0000000000000_u64, 0x3f7cd30a9499618b_u64,
+    0x3f7cd2eb65f92a46_u64, 0xb8f0000000000000_u64, 0x3f8f44aa37b8e66b_u64, 0x3f8f440b04187c87_u64,
+    0xb8f0000000000000_u64, 0x3f7fd2ac95e57ef9_u64, 0x3f7fd2829febc03a_u64, 0xb8f0000000000000_u64,
+    0x3f96419079bbf601_u64, 0x3f9640aade8f5427_u64, 0x38d0000000000000_u64, 0x3fe7ba49f739829f_u64,
+    0x3fe46ac372243536_u64, 0x3910000000000000_u64, 0x3fcd768804487b07_u64, 0x3fccf5676f373ec1_u64,
+    0xb910000000000000_u64, 0x3f7bb04a79820063_u64, 0x3f7bb02ed5c5e956_u64, 0xb8c0000000000000_u64,
+  ]
+  private INVTRIG_CC = [
+    0x3ff0000000000000_u64, 0x0000000000000000_u64, 0x3fc5555555555555_u64, 0x3fb33333333333e4_u64,
+    0x3fa6db6db6d31f82_u64, 0x3f9f1c71f6889397_u64, 0x3f96e874b7045b46_u64, 0x3f91f753132271e2_u64,
+    0x3ff0055a27e0d033_u64, 0xbc9d9ba10494c062_u64, 0x3fc57c00cb5d6c4d_u64, 0x3fb37881f5649a75_u64,
+    0x3fa759af49d494dd_u64, 0x3fa002e1864dda2e_u64, 0x3f97c2d5d468cdd9_u64, 0x3f9292834c025357_u64,
+    0x3ff00abe0c129e1e_u64, 0x3c67ceb0ee49d42a_u64, 0x3fc5a3385d5c7ba5_u64, 0x3fb3bf51056f6637_u64,
+    0x3fa7dba76b124b37_u64, 0x3fa07be4b02e94c4_u64, 0x3f98a6bb92513f01_u64, 0x3f936afd4c615aec_u64,
+    0x3ff0102bcffd6acd_u64, 0xbc8c2294c65d2e86_u64, 0x3fc5caff17351901_u64, 0x3fb407abbc04feb3_u64,
+    0x3fa86179b8005949_u64, 0x3fa0f97520bd4e72_u64, 0x3f99950c5c89f3df_u64, 0x3f944f2344e7b664_u64,
+    0x3ff015a397cf0f1c_u64, 0xbc8eebd6ccfe3ee3_u64, 0x3fc5f3581be7b08b_u64, 0x3fb4519ddf1ae531_u64,
+    0x3fa8eb4b6ee35e92_u64, 0x3fa17bc85414cd46_u64, 0x3f9a8e5895e3fcf9_u64, 0x3f953fafdc629400_u64,
+    0x3ff01b2588811eeb_u64, 0x3c47193e5d0a915f_u64, 0x3fc61c46a67205d2_u64, 0x3fb49d33a6eeae0b_u64,
+    0x3fa979438563c014_u64, 0x3fa20316ae977f05_u64, 0x3f9b9339afb53aa4_u64, 0x3f963d6b02c42d0a_u64,
+    0x3ff020b1c7df0575_u64, 0xbc8dd547e329c1e5_u64, 0x3fc645ce0ab901bb_u64, 0x3fb4ea79c34fc7a6_u64,
+    0x3faa0b8ac08940ec_u64, 0x3fa28f9babd0629b_u64, 0x3f9ca452cf90a55e_u64, 0x3f97492b016730ef_u64,
+    0x3ff026487c8c5d71_u64, 0xbc95fd9b68dc3b6e_u64, 0x3fc66ff1b67d5d70_u64, 0x3fb5397d613373eb_u64,
+    0x3faaa24bce3aeb4a_u64, 0x3fa3219610b150ac_u64, 0x3f9dc251825103f1_u64, 0x3f9863d5a3932532_u64,
+    0x3ff02be9ce0b87cd_u64, 0x3c7e5d09da2e0f04_u64, 0x3fc69ab5325bc359_u64, 0x3fb58a4c3097aab3_u64,
+    0x3fab3db3605f46f2_u64, 0x3fa3b94821742cab_u64, 0x3f9eedee7da72a15_u64, 0x3f998e6179a3e9a0_u64,
+    0x3ff03195e4c483f1_u64, 0xbc95db10ad66eacb_u64, 0x3fc6c61c22d908f0_u64, 0x3fb5dcf46ab9f2cb_u64,
+    0x3fabddf049bb1f4d_u64, 0x3fa456f7db6ac768_u64, 0x3fa013f738bd7bb3_u64, 0x3f9ac9d739783d21_u64,
+    0x3ff0374cea0c0c9f_u64, 0xbc9917bff5241c76_u64, 0x3fc6f22a497b2ec0_u64, 0x3fb63184d8a79db5_u64,
+    0x3fac83339caf946e_u64, 0x3fa4faef331019d4_u64, 0x3fa0b8917547d678_u64, 0x3f9c17533f147e1c_u64,
+    0x3ff03d0f082afcc8_u64, 0xbc9018bbcddb49eb_u64, 0x3fc71ee385efdf06_u64, 0x3fb6880cda2d3885_u64,
+    0x3fad2db0cbfae54d_u64, 0x3fa5a57c56b50c5e_u64, 0x3fa16535a40098b2_u64, 0x3f9d780730b8ebb8_u64,
+    0x3ff042dc6a65ffbf_u64, 0xbc8c7ea28dce95d1_u64, 0x3fc74c4bd7412f9e_u64, 0x3fb6e09c6d2b72bc_u64,
+    0x3faddd9dcda253de_u64, 0x3fa656f1f62b5001_u64, 0x3fa21a5ae2ac77ee_u64, 0x3f9eed3bca067f0e_u64,
+    0x3ff048b53d05907b_u64, 0x3c9634fffed6e2a6_u64, 0x3fc77a675d1978be_u64, 0x3fb73b4435583415_u64,
+    0x3fae9333402ebbf3_u64, 0x3fa70fa78fd9f73f_u64, 0x3fa2d8804d934fe1_u64, 0x3fa03c29691a281c_u64,
+    0x3ff04e99ad5e4bcd_u64, 0xbc9e97a72fe827e0_u64, 0x3fc7a93a5917200c_u64, 0x3fb7981584731c05_u64,
+    0x3faf4eac9268fae2_u64, 0x3fa7cff9c3b19721_u64, 0x3fa3a02d9c1e0145_u64, 0x3fa10d64a0e56953_u64,
+    0x3ff05489e9d99995_u64, 0x3c8d177637ec6a2b_u64, 0x3fc7d8c930314681_u64, 0x3fb7f72262f532e4_u64,
+    0x3fb0082416e39013_u64, 0x3fa8984aac80ddf4_u64, 0x3fa471f3caf18eb8_u64, 0x3fa1eb1cce6dd570_u64,
+    0x3ff05a8621feb16b_u64, 0xbc7e5b33b1407c5f_u64, 0x3fc809186c2e57dd_u64, 0x3fb8587d99442dc8_u64,
+    0x3fb06c23d1dfcb7f_u64, 0x3fa969024036dd22_u64, 0x3fa54e6dd4d2af33_u64, 0x3fa2d62f439f2a31_u64,
+    0x3ff0608e867bff30_u64, 0x3c8cbef5d8580027_u64, 0x3fc83a2cbd2d8ba2_u64, 0x3fb8bc3ab9724c6e_u64,
+    0x3fb0d377ef1e0c39_u64, 0x3faa428eb7addf84_u64, 0x3fa636417bc01ff2_u64, 0x3fa3cf8acc7eb2a0_u64,
+    0x3ff066a34930ec8d_u64, 0xbc9480f445fedad1_u64, 0x3fc86c0afb447a74_u64, 0x3fb9226e29948d9c_u64,
+    0x3fb13e44a9b5a3a6_u64, 0x3fab2564fea8b3fe_u64, 0x3fa72a2023d92458_u64, 0x3fa4d8313cec3485_u64,
+    0x3ff06cc49d38146c_u64, 0xbc8b55394f4fc07b_u64, 0x3fc89eb82831feed_u64, 0x3fb98b2d2eb9bb23_u64,
+    0x3fb1acb01e9ab414_u64, 0x3fac12012cbd00c6_u64, 0x3fa82ac7c1d15c38_u64, 0x3fa5f13925c6edca_u64,
+    0x3ff072f2b6f1e601_u64, 0xbc92dcbb05419970_u64, 0x3fc8d2397127aebb_u64, 0x3fb9f68df88da51d_u64,
+    0x3fb21ee26a4f62a1_u64, 0x3fad08e707f7ae6f_u64, 0x3fa93903dee3feb0_u64, 0x3fa71bcfb5c57b59_u64,
+    0x3ff0792dcc0fbd20_u64, 0xbc75bf23ee4f9d54_u64, 0x3fc9069430ab508a_u64, 0x3fba64a7adb4cd85_u64,
+    0x3fb29505c8b48349_u64, 0x3fae0aa2921cfa60_u64, 0x3faa55aeb46f4322_u64, 0x3fa8593acad3bece_u64,
+    0x3ff07f76139f761d_u64, 0x3c9fa1046481bb82_u64, 0x3fc93bcdf091cca6_u64, 0x3fbad59278edc42f_u64,
+    0x3fb30f46b7261652_u64, 0x3faf17c8a17c843e_u64, 0x3fab81b2619e15b5_u64, 0x3fa9aadb395f5ae4_u64,
+    0x3ff085cbc61783c1_u64, 0x3c90a6e9efa20176_u64, 0x3fc971ec6c1531e4_u64, 0x3fbb496797068912_u64,
+    0x3fb38dd419140184_u64, 0x3fb0187bc3357bbb_u64, 0x3facbe0a3dcafe26_u64, 0x3fab122f4fa499d0_u64,
+    0x3ff08c2f1d638e4c_u64, 0x3c7b47c159534a3d_u64, 0x3fc9a8f592078624_u64, 0x3fbbc04165b57ab2_u64,
+    0x3fb410df5f4bed1d_u64, 0x3fb0ab6bdf478c71_u64, 0x3fae0bc44a945c64_u64, 0x3fac90d59bcd5701_u64,
+    0x3ff092a054f1a2fc_u64, 0xbc92f657224e9830_u64, 0x3fc9e0ef87243a2c_u64, 0x3fbc3a3b7366a278_u64,
+    0x3fb4989cb22e2175_u64, 0x3fb1450e5ba7ad39_u64, 0x3faf6c02c8f0ef93_u64, 0x3fae288ffc8d182c_u64,
+    0x3ff0991fa9bffbf4_u64, 0xbc5ca1140a1abbf4_u64, 0x3fca19e0a8823b80_u64, 0x3fbcb772900f9c24_u64,
+    0x3fb525431f0cbb2e_u64, 0x3fb1e5c2d06804e1_u64, 0x3fb06ffefa7aa6b8_u64, 0x3fafdb4704dca347_u64,
+    0x3ff09fad5a6b68f9_u64, 0x3c7aa1f06e92964e_u64, 0x3fca53cf8e28c50e_u64, 0x3fbd3804df1de350_u64,
+    0x3fb5b70cc8fa98dc_u64, 0x3fb28def298c979b_u64, 0x3fb13482f6347eeb_u64, 0x3fb0d586de48358c_u64,
+    0x3ff0a649a73e61f2_u64, 0x3c874ac0d817e9c7_u64, 0x3fca8ec30dc93891_u64, 0x3fbdbc11ea950625_u64,
+    0x3fb64e371d5616d3_u64, 0x3fb33e0023936249_u64, 0x3fb204426263066a_u64, 0x3fb1cd12e4629723_u64,
+    0x3ff0acf4d240ccc4_u64, 0x3c9da890f3b40bd3_u64, 0x3fcacac23da07797_u64, 0x3fbe43bab7741a98_u64,
+    0x3fb6eb030c631819_u64, 0x3fb3f669d2eb516e_u64, 0x3fb2e0006ae505ae_u64, 0x3fb2d58204457c82_u64,
+    0x3ff0b3af1f4880bb_u64, 0x3c7f450fb78d32ba_u64, 0x3fcb07d4778263af_u64, 0x3fbecf21db7be0ef_u64,
+    0x3fb78db5465013e4_u64, 0x3fb4b7a8376f0996_u64, 0x3fb3c88f9f2ef221_u64, 0x3fb3f02ad9eb9753_u64,
+    0x3ff0ba78d40a9260_u64, 0xbc957b07a441e242_u64, 0x3fcb46015c126262_u64, 0x3fbf5e6b94713f3d_u64,
+    0x3fb836967d0afecf_u64, 0x3fb5823fdd1707b9_u64, 0x3fb4bed355269dc2_u64, 0x3fb51e83065121cf_u64,
+    0x3ff0c152382d7366_u64, 0xbc9ee6913347c2a6_u64, 0x3fcb8550d62bfb6e_u64, 0x3fbff1bde0fa3cad_u64,
+    0x3fb8e5f3ab550989_u64, 0x3fb656be8b38ebaf_u64, 0x3fb5c3c13008a099_u64, 0x3fb662225a1b4f77_u64,
+  ]
+  private INVTRIG_S = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbc2912bd0d569a90_u64, 0x3fa91f65f10dd814_u64,
+    0xbc3e2718d26ed688_u64, 0x3fb917a6bc29b42c_u64, 0x3c513000a89a11e0_u64, 0x3fc2c8106e8e613a_u64,
+    0xbc626d19b9ff8d82_u64, 0x3fc8f8b83c69a60b_u64, 0xbc642deef11da2c4_u64, 0x3fcf19f97b215f1b_u64,
+    0xbc75d28da2c4612d_u64, 0x3fd294062ed59f06_u64, 0xbc1efdc0d58cf620_u64, 0x3fd58f9a75ab1fdd_u64,
+    0xbc672cedd3d5a610_u64, 0x3fd87de2a6aea963_u64, 0x3c65b362cb974183_u64, 0x3fdb5d1009e15cc0_u64,
+    0x3c5e0d891d3c6841_u64, 0x3fde2b5d3806f63b_u64, 0xbc8a5a014347406c_u64, 0x3fe073879922ffee_u64,
+    0x3c8b25dd267f6600_u64, 0x3fe1c73b39ae68c8_u64, 0xbc6efcc626f74a6f_u64, 0x3fe30ff7fce17035_u64,
+    0x3c68076a2cfdc6b3_u64, 0x3fe44cf325091dd6_u64, 0xbc875720992bfbb2_u64, 0x3fe57d69348ceca0_u64,
+    0xbc8bdd3413b26456_u64, 0x3fe6a09e667f3bcd_u64, 0xbc70f537acdf0ad7_u64, 0x3fe7b5df226aafaf_u64,
+    0xbc82c5e12ed1336d_u64, 0x3fe8bc806b151741_u64, 0xbc830ee286712474_u64, 0x3fe9b3e047f38741_u64,
+    0x3c39f630e8b6dac8_u64, 0x3fea9b66290ea1a3_u64, 0xbc8bc69f324e6d61_u64, 0x3feb728345196e3e_u64,
+    0xbc76e0b1757c8d07_u64, 0x3fec38b2f180bdb1_u64, 0xbc5e7b6bb5ab58ae_u64, 0x3feced7af43cc773_u64,
+    0x3c7457e610231ac2_u64, 0x3fed906bcf328d46_u64, 0xbc8014c76c126527_u64, 0x3fee212104f686e5_u64,
+    0x3c8760b1e2e3f81e_u64, 0x3fee9f4156c62dda_u64, 0x3c752c7adc6b4989_u64, 0x3fef0a7efb9230d7_u64,
+    0x3c7562172a361fd3_u64, 0x3fef6297cff75cb0_u64, 0xbc87a0a8ca13571f_u64, 0x3fefa7557f08a517_u64,
+    0xbc887df6378811c7_u64, 0x3fefd88da3d12526_u64, 0xbc6c57bc2e24aa15_u64, 0x3feff621e3796d7e_u64,
+    0x0000000000000000_u64, 0x3ff0000000000000_u64,
+  ]
+  private INVTRIG_C = [
+    0x3ff0000000000000_u64, 0xb93fc2c76456515b_u64, 0x3fc5555555555555_u64, 0x3c65555555623513_u64,
+    0x3fb3333333333333_u64, 0x3c49997e3427441b_u64, 0x3fa6db6db6db6db7_u64, 0xbc1cb95ff08658e6_u64,
+    0x3f9f1c71c71c6d5b_u64, 0x3c3b125bccdcc89e_u64,
+  ]
+  private INVTRIG_CT = [
+    0x3f96e8ba2ec8cb69_u64, 0x3f91c4ea7a15c997_u64, 0x3f8ca8355d39bb67_u64,
+  ]
+  private ASIN_OFF = [
+    0x3ff921fb54442d18_u64, 0x3c91a62633145c07_u64, 0xbff921fb54442d18_u64, 0xbc91a62633145c07_u64,
+  ]
+  private ASIN_DB = [
+    0x3e57137449123ef6_u64, 0x3e57137449123ef7_u64, 0xbaffffffffffffff_u64, 0x3e5d12ed0af1a27e_u64,
+    0x3e5d12ed0af1a27f_u64, 0xb7963676aa7969aa_u64, 0x3e851c4b960778f5_u64, 0x3e851c4b9607790d_u64,
+    0x3b2fffffffffffff_u64, 0x3e93cfc2a006a414_u64, 0x3e93cfc2a006a465_u64, 0xb7c1e68bc303367c_u64,
+    0x3e9cbaa95dadb559_u64, 0x3e9cbaa95dadb650_u64, 0x37f742593ef4c3d3_u64, 0x3ebacd69f89ad8f1_u64,
+    0x3ebacd69f89ae57a_u64, 0x381b0ddfe3e29b3c_u64, 0x3ef2bffffffc233b_u64, 0x3ef2c00000006ddd_u64,
+    0xb851c26f2054c230_u64, 0x3efff0f3022b2e9d_u64, 0x3efff0f3024065e7_u64, 0xbb9ffffffffffffe_u64,
+    0x3f13217783d70d1d_u64, 0x3f132177841ffbef_u64, 0xbbbfffffffffffff_u64, 0x3f1c373ff4aad79b_u64,
+    0x3f1c373ff594d65b_u64, 0xbbbfffffffffffff_u64, 0x3f6b3f28593cad2f_u64, 0x3f6b3f2ba40dbc66_u64,
+    0xb8b27ca20c684481_u64, 0x3f8e17b3f6bb5e6e_u64, 0x3f8e17faefac7797_u64, 0xb8f15a1c95184d1b_u64,
+    0x3f941d60a76a82ed_u64, 0x3f941db571d96126_u64, 0xb8ddf34bcdacf353_u64, 0x3f9921c0a0486537_u64,
+    0x3f99226605233224_u64, 0xb9338e672f1696d5_u64, 0x3f99c360a8dd681a_u64, 0x3f99c412d62c1440_u64,
+    0x3911edd261167baf_u64, 0x3f9d6315f7ee7e01_u64, 0x3f9d641e6d5e769a_u64, 0xb92af7dec023f5b9_u64,
+    0x3f9ea6fdc56fc61a_u64, 0x3f9ea829e3e988e5_u64, 0xb92f358e90326f9a_u64, 0x3fa2749dc4d19c6d_u64,
+    0x3fa275a3d78c01ec_u64, 0x39149ab71c17bd11_u64, 0x3fa69768dc89bb00_u64, 0x3fa69949b3d51fb1_u64,
+    0xb8e14b91318650e8_u64, 0x3faa4816b2066707_u64, 0x3faa4b0bfb0454d5_u64, 0x3c4fffffffffffff_u64,
+    0x3fad77b117f230d6_u64, 0x3fad7bdcd778049f_u64, 0x38daafc31a59e093_u64, 0x3fafc7a07b2549aa_u64,
+    0x3fafccdc252cad1f_u64, 0xb92dc02fdac5159a_u64, 0x3fb2df0542154f1b_u64, 0x3fb2e36813a98740_u64,
+    0xb9363abaa885a4da_u64, 0x3fb51cf5db1b1956_u64, 0x3fb5231b416ba885_u64, 0xb93e1e3f45d0bec3_u64,
+    0x3fcd0ef799001ba9_u64, 0x3fcd5064e6fe82c5_u64, 0xb9284b9ecb11e241_u64, 0x3fd4a8e1a96e38e3_u64,
+    0x3fd50954b7bbf87b_u64, 0xb93b9f88cfb1ef42_u64, 0x3fdceee68154d1c9_u64, 0x3fde05b0e0a809bc_u64,
+    0x394117d6aecd2594_u64, 0x3fdda4e0e6c717a5_u64, 0x3fded25c5eb8c916_u64, 0xb9289e120e5744a5_u64,
+    0x3fde9950730c4696_u64, 0x3fdfe767739d0f6d_u64, 0x38716376667a73f3_u64,
+  ]
 
-    while reductions > 0
-      res = res * 2.0
-      reductions = reductions - 1
+  # Nearest integer, ties to even, of 0 <= x < 2^52.
+  private def self.invtrig_roundeven(x : Float64) : Float64
+    (x + 4503599627370496.0) - 4503599627370496.0
+  end
+
+  private def self.invtrig_fasttwosum(x : Float64, y : Float64) : {Float64, Float64}
+    s = x + y
+    z = s - x
+    {s, y - z}
+  end
+
+  private def self.invtrig_fastsum(xh : Float64, xl : Float64, yh : Float64, yl : Float64) : {Float64, Float64}
+    sh, sl = invtrig_fasttwosum(xh, yh)
+    {sh, (xl + yl) + sl}
+  end
+
+  private def self.invtrig_muldd(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    ahhh = ch * xh
+    {ahhh, (cl * xh + ch * xl) + fma(ch, xh, ahhh * -1.0)}
+  end
+
+  # polydd over INVTRIG_C (n = 5); l is the low tail fed in.
+  private def self.invtrig_polydd(xh : Float64, xl : Float64, l : Float64) : {Float64, Float64}
+    c = INVTRIG_C.to_unsafe
+    ch, l = invtrig_fasttwosum(IyiFloatText.from_bits(c[8]), l)
+    cl = IyiFloatText.from_bits(c[9]) + l
+    i = 3
+    while i >= 0
+      ch, cl = invtrig_muldd(xh, xl, ch, cl)
+      ch, cl = invtrig_fastsum(IyiFloatText.from_bits(c[2 * i]), IyiFloatText.from_bits(c[2 * i + 1]), ch, cl)
+      i -= 1
     end
+    {ch, cl}
+  end
+
+  # asin(z + zl) + (f0h + f0l) on the shared table: row round(128 z^2), t the
+  # offset from it; {lb, ub} bracket the result.
+  private def self.invtrig_fast(z : Float64, zl : Float64, t : Float64, jd : Float64, f0h : Float64, f0l : Float64, eps : Float64) : {Float64, Float64}
+    c = INVTRIG_CC.to_unsafe
+    j = jd.unsafe_to_i32 * 8
+    t2 = t * t
+    d = t * ((IyiFloatText.from_bits(c[j + 2]) + t * IyiFloatText.from_bits(c[j + 3])) + t2 * ((IyiFloatText.from_bits(c[j + 4]) + t * IyiFloatText.from_bits(c[j + 5])) + t2 * (IyiFloatText.from_bits(c[j + 6]) + t * IyiFloatText.from_bits(c[j + 7]))))
+    fh = IyiFloatText.from_bits(c[j])
+    fl = IyiFloatText.from_bits(c[j + 1]) + d
+    fh, fl = invtrig_muldd(z, zl, fh, fl)
+    fh, fl = invtrig_fastsum(f0h, f0l, fh, fl)
+    {fh + (fl - eps), fh + (fl + eps)}
+  end
+
+  # The refinements' common start: sqrt(1 - x^2) as ch + cl, then the
+  # rotation by the table angle jf*pi/64 to v + dv, and the asin series of
+  # it (times s) as {fh, fl}.
+  private def self.invtrig_rotate(x : Float64, jf : Int32, s : Float64) : {Float64, Float64}
+    s2 = x * x
+    dx2 = fma(x, x, s2 * -1.0)
+    c2h, c2l = invtrig_fasttwosum(1.0, s2 * -1.0)
+    c2l = c2l - dx2
+    c2h, c2l = invtrig_fasttwosum(c2h, c2l)
+    ch = sqrt(c2h)
+    cl = (c2l - fma(ch, ch, c2h * -1.0)) * (0.5 / ch)
+    tab = INVTRIG_S.to_unsafe
+    big_ch = IyiFloatText.from_bits(tab[(32 - jf) * 2 + 1])
+    big_cl = IyiFloatText.from_bits(tab[(32 - jf) * 2])
+    big_sh = IyiFloatText.from_bits(tab[jf * 2 + 1])
+    big_sl = IyiFloatText.from_bits(tab[jf * 2])
+    ax = x.abs
+    dsh = ax - big_sh
+    dsl = big_sl * -1.0
+    dch = ch - big_ch
+    dcl = cl - big_cl
+    sc = fma(big_sh, dch, 0.09375) - 0.09375
+    dsc = fma(big_sh, dch, sc * -1.0)
+    cs = fma(big_ch, dsh, 0.09375) - 0.09375
+    dcs = fma(big_ch, dsh, cs * -1.0)
+    v = cs - sc
+    dv = (big_ch * dsl + big_cl * dsh) - (big_sh * dcl + big_sl * dch) - (dsc - dcs)
+    v, dv = invtrig_fasttwosum(v, dv)
+    ct = INVTRIG_CT.to_unsafe
+    v2, dv2 = invtrig_muldd(v, dv, v, dv)
+    v = v * s
+    dv = dv * s
+    fl = v2 * (IyiFloatText.from_bits(ct[0]) + v2 * (IyiFloatText.from_bits(ct[1]) + v2 * IyiFloatText.from_bits(ct[2])))
+    fh, fl = invtrig_polydd(v2, dv2, fl)
+    invtrig_muldd(v, dv, fh, fl)
+  end
+
+  private def self.atan_muldd_acc(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    ahlh = ch * xl
+    alhh = cl * xh
+    ahhh = ch * xh
+    ahhl = fma(ch, xh, ahhh * -1.0)
+    ahhl = ahhl + (alhh + ahlh)
+    invtrig_fasttwosum(ahhh, ahhl)
+  end
+
+  private def self.atan_adddd(xh : Float64, xl : Float64, ch : Float64, cl : Float64) : {Float64, Float64}
+    s = xh + ch
+    d = s - xh
+    {s, ((ch - d) + (xh + (d - s))) + (xl + cl)}
+  end
+
+  # as_atan_refine2's polydd over its 3-row ch.
+  private def self.atan_polydd(xh : Float64, xl : Float64, l : Float64) : {Float64, Float64}
+    ch = -0.14285714285714285 + l
+    cl = (-0.14285714285714285 - ch) + l + -7.930161522310759e-18
+    ch, cl = atan_muldd_acc(xh, xl, ch, cl)
+    th = ch + 0.2
+    tl = (0.2 - th) + ch
+    ch = th
+    cl = cl + (tl + -1.1102230246265417e-17)
+    ch, cl = atan_muldd_acc(xh, xl, ch, cl)
+    th = ch + -0.3333333333333333
+    tl = (-0.3333333333333333 - th) + ch
+    ch = th
+    cl = cl + (tl + -1.850371707708594e-17)
+    {ch, cl}
+  end
+
+  # as_atan_refine2: 0x1p-27 <= |x|, a the fast path's approximation.
+  private def self.atan_refine(x : Float64, a : Float64) : Float64
+    tab = ATAN_A.to_unsafe
+    phi = a.abs * 81.48733086305042 + 256.5
+    i = (IyiFloatText.bits_of(phi).unsafe_shr(44_u64) & 0xff_u64).unsafe_to_i32
+    h = 0.0
+    hl = 0.0
+    if i == 128
+      h = -1.0 / x
+      hl = fma(h, x, 1.0) * h
+    else
+      ta = copysign(IyiFloatText.from_bits(tab[i * 2]), x)
+      zta = x * ta
+      ztal = fma(x, ta, zta * -1.0)
+      zmta = x - ta
+      v = 1.0 + zta
+      d = 1.0 - v
+      ev = (d + zta) - ((d + v) - 1.0) + ztal
+      r = 1.0 / v
+      rl = (fma(r, v * -1.0, 1.0) - ev * r) * r
+      h = r * zmta
+      hl = fma(r, zmta, h * -1.0) + rl * zmta
+    end
+    h2, h2l = atan_muldd_acc(h, hl, h, hl)
+    h4 = h2 * h2
+    h3, h3l = atan_muldd_acc(h, hl, h2, h2l)
+    fl = h2 * ((0.1111111111111111 + h2 * -0.09090909090907358) + h4 * (0.07692307637971313 + h2 * -0.06665779689246536))
+    f, fl = atan_polydd(h2, h2l, fl)
+    f, fl = atan_muldd_acc(h3, h3l, f, fl)
+    ah = h
+    al = f
+    at = fl
+    if i != 0
+      df = 0.0
+      df = copysign(1.0, x) * IyiFloatText.from_bits(tab[i * 2 + 1]) if i < 128
+      id = copysign(i.to_f64, x)
+      ah = 0.012271846303085088 * id
+      al = 4.21117410793604e-17 * id
+      at = -9.794523599166037e-32 * id
+      al, at = atan_adddd(al, at, df, 0.0)
+      al, at = atan_adddd(al, at, h, hl)
+      al, at = atan_adddd(al, at, f, fl)
+    end
+    v0, v2 = invtrig_fasttwosum(ah, al)
+    v1, v2 = invtrig_fasttwosum(v2, at)
+    ax = x.abs
+    t0 = IyiFloatText.bits_of(v0)
+    t1 = IyiFloatText.bits_of(v1)
+    mask = 0x000fffffffffffff_u64
+    if ((t1 &+ 1_u64) & mask) <= 2_u64 || (t0.unsafe_shr(52_u64) & 0x7ff_u64) &- (t1.unsafe_shr(52_u64) & 0x7ff_u64) > 103_u64
+      db = ATAN_DB.to_unsafe
+      j = 0
+      while j < 12
+        if ax == IyiFloatText.from_bits(db[j * 3])
+          return copysign(IyiFloatText.from_bits(db[j * 3 + 1]), x) + copysign(1.0, x) * IyiFloatText.from_bits(db[j * 3 + 2])
+        end
+        j += 1
+      end
+      if t1 & mask == 0_u64
+        w = IyiFloatText.bits_of(v2)
+        t1 = (w ^ t1).unsafe_shr(63_u64) != 0_u64 ? t1 &- 1_u64 : t1 &+ 1_u64
+        v1 = IyiFloatText.from_bits(t1)
+      end
+    end
+    v1 + v0
+  end
+
+  private def self.asin_database(x : Float64, f : Float64) : Float64
+    db = ASIN_DB.to_unsafe
+    ax = x.abs
+    a = 0
+    b = 29
+    while a + 1 < b
+      m = (a + b) // 2
+      if IyiFloatText.from_bits(db[m * 3]) <= ax
+        a = m
+      else
+        b = m
+      end
+    end
+    return f unless IyiFloatText.from_bits(db[a * 3]) == ax
+    hi = IyiFloatText.from_bits(db[a * 3 + 1])
+    lo = IyiFloatText.from_bits(db[a * 3 + 2])
+    x > 0.0 ? hi + lo : hi * -1.0 - lo
+  end
+
+  # as_asin_refine, phi the fast path's approximation.
+  private def self.asin_refine(x : Float64, phi : Float64) : Float64
+    jf = invtrig_roundeven(phi.abs * 20.371832715762604).unsafe_to_i32
+    sgn = copysign(1.0, x)
+    jt = jf.to_f64 * sgn
+    fh, fl = invtrig_rotate(x, jf, sgn)
+    ph = jt * 0.04908738521234035
+    pl = 1.684469643174416e-16 * jt
+    ps = -3.917809439666406e-31 * jt
+    pl, ps = invtrig_fastsum(fh, fl, pl, ps)
+    ph, pl = invtrig_fasttwosum(ph, pl)
+    pl, ps = invtrig_fasttwosum(pl, ps)
+    ph, pl = invtrig_fasttwosum(ph, pl)
+    pl, ps = invtrig_fasttwosum(pl, ps)
+    th = IyiFloatText.bits_of(ph)
+    tl = IyiFloatText.bits_of(pl) & 0x7fffffffffffffff_u64
+    tn = (th & 0x7ff0000000000000_u64) &- 0x0350000000000000_u64
+    dn = (tl &- tn).unsafe_to_i64
+    de = (tn &- tl).unsafe_shr(52_u64)
+    res = ph + pl
+    res = asin_database(x, res) if (dn >= -2_i64 && dn <= 0_i64) || de > 47_u64
     res
   end
 
+  # as_acos_refine, phi the fast path's approximation.
+  private def self.acos_refine(x : Float64, phi : Float64) : Float64
+    jf = invtrig_roundeven((phi - 1.5707963267948966).abs * 20.371832715762604).unsafe_to_i32
+    sgn = copysign(1.0, x)
+    jt = 32.0 - jf.to_f64 * sgn
+    fh, fl = invtrig_rotate(x, jf, sgn * -1.0)
+    ph = jt * 0.04908738521234035
+    pl = 1.684469643174416e-16 * jt
+    ps = -3.917809439666406e-31 * jt
+    # sum: a two-sum (not fast) of fh and pl
+    sh = fh + pl
+    a_prime = sh - pl
+    b_prime = sh - a_prime
+    sl = (fh - a_prime) + (pl - b_prime)
+    pl = sh
+    ps = (fl + ps) + sl
+    ph, pl = invtrig_fasttwosum(ph, pl)
+    pl, ps = invtrig_fasttwosum(pl, ps)
+    ph, pl = invtrig_fasttwosum(ph, pl)
+    pl, ps = invtrig_fasttwosum(pl, ps)
+    t = IyiFloatText.bits_of(pl)
+    e = (t.unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_i64 &- 1023_i64
+    e = 52_i64 &- (107_i64 &+ e)
+    e = 0_i64 if e < 0_i64
+    e = 52_i64 if e > 52_i64
+    m = 0x0010000000000000_u64 &- 1_u64.unsafe_shl(e.unsafe_to_u64)
+    e = 64_i64 if e == 0_i64
+    if (t &+ 1_u64.unsafe_shl((e &- 1_i64).unsafe_to_u64)) & m == 0_u64
+      return 3.5762786865234566e-07 + 1.3234889800848443e-23 if x == 0.999999999999936
+      return 1.4877135408445967 + 5.551115123125783e-17 if x == 0.08298723566019295
+      return 1.5698246257648432 + 1.6653345369377348e-16 if x == 0.0009717008771394217
+      return 1.788139343261721e-07 + 6.617444900424222e-24 if x == 0.999999999999984
+      return 1.5325721397906955 - 1.5407439555097887e-33 if x == 0.038214879531014476
+      w = IyiFloatText.bits_of(ps)
+      t = (w ^ t).unsafe_shr(63_u64) != 0_u64 ? t &- 1_u64 : t &+ 1_u64
+      pl = IyiFloatText.from_bits(t)
+    end
+    ph + pl
+  end
+
   def self.atan(value : Float64) : Float64
-    return value if value == 0.0 || value != value
-    val = value.abs
-    res = val > 1.0 ? HALF_PI - atan_unit(1.0 / val) : atan_unit(val)
-    value < 0.0 ? 0.0 - res : res
+    x = value
+    bits = IyiFloatText.bits_of(x)
+    at = bits & 0x7fffffffffffffff_u64
+    if at < 0x3f7b21c475e6362a_u64
+      return x if at == 0_u64
+      return fma(-5.551115123125783e-17, x, x) if at < 0x3e40000000000000_u64
+      x2 = x * x
+      x3 = x * x2
+      x4 = x2 * x2
+      f = x3 * ((-0.3333333333333333 + x2 * 0.199999999999994) + x4 * (-0.1428571424743179 + x2 * 0.11110113960028833))
+      epsp = f * 1.2212453270876722e-15
+      epsm = f * 6.106226635438361e-16
+      ub = (f + epsp) + x
+      lb = (f - epsm) + x
+      return ub if ub == lb
+      return atan_refine(x, ub)
+    end
+    h = 0.0
+    ah = 0.0
+    al = 0.0
+    if at > 0x4062ded8e34a9035_u64
+      ah = copysign(1.5707963267948966, x)
+      al = copysign(6.123233995736766e-17, x)
+      if at >= 0x434d02967c31cdb5_u64
+        return x + x if at > 0x7ff0000000000000_u64
+        return ah + al
+      end
+      h = -1.0 / x
+    else
+      c = ATAN_C.to_unsafe
+      tab = ATAN_A.to_unsafe
+      k = (at.unsafe_shr(51_u64) &- 2030_u64).unsafe_to_i32 * 3
+      u = bits & 0x0007ffffffffffff_u64
+      ut = u.unsafe_shr(35_u64)
+      ut2 = (ut &* ut).unsafe_shr(16_u64)
+      i = ((c[k].unsafe_shl(16_u64) &+ ut &* c[k + 1]) &- ut2 &* c[k + 2]).unsafe_shr(25_u64).unsafe_to_i32
+      sgn = copysign(1.0, x)
+      ta = sgn * IyiFloatText.from_bits(tab[i * 2])
+      id = sgn * i.to_f64
+      al = sgn * IyiFloatText.from_bits(tab[i * 2 + 1]) + 4.2111741079360304e-17 * id
+      h = (x - ta) / (1.0 + x * ta)
+      ah = 0.012271846303085088 * id
+    end
+    h2 = h * h
+    h4 = h2 * h2
+    f = (1.0 + h2 * -0.333333333333331) + h4 * (0.1999999997326265 + h2 * -0.1428473928322857)
+    al = fma(h, f, al)
+    e = h * 8.743006318923108e-16
+    ub = (al + e) + ah
+    lb = (al - e) + ah
+    return ub if ub == lb
+    atan_refine(x, ub)
   end
 
   def self.atan(value : Float32) : Float32
@@ -1756,10 +2264,43 @@ pub struct Math
   end
 
   def self.asin(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value || value.abs > 1.0
-    return value if value == 0.0
-    return copysign(HALF_PI, value) if value.abs == 1.0
-    atan2(value, sqrt((1.0 - value) * (1.0 + value)))
+    x = value
+    bits = IyiFloatText.bits_of(x)
+    ax = bits.unsafe_shl(1_u64)
+    t = 0.0
+    z = 0.0
+    zl = 0.0
+    jd = 0.0
+    f0h = 0.0
+    f0l = 0.0
+    eps = 0.0
+    if ax > 0x7fc0000000000000_u64
+      off = ASIN_OFF.to_unsafe
+      k = bits.unsafe_shr(63_u64).unsafe_to_i32 * 2
+      f0h = IyiFloatText.from_bits(off[k])
+      f0l = IyiFloatText.from_bits(off[k + 1])
+      if ax >= 0x7fe0000000000000_u64
+        return f0h + f0l if ax == 0x7fe0000000000000_u64
+        return x + x if ax > 0xffe0000000000000_u64
+        return 0.0 / 0.0
+      end
+      t = 2.0 - 2.0 * x.abs
+      jd = invtrig_roundeven(t * 32.0)
+      z = copysign(sqrt(t), x * -1.0)
+      zl = fma(z, z, t * -1.0) * ((-0.5 / t) * z)
+      t = 0.25 * t - jd * 0.0078125
+      eps = (z * t).abs * 3.5475095083725705e-16
+    else
+      return fma(2.7755575615628914e-17, x, x) if ax < 0x7cae26e892247dec_u64
+      t = x * x
+      jd = invtrig_roundeven(t * 128.0)
+      t = fma(x, x, -0.0078125 * jd)
+      z = x
+      eps = (z * t).abs * 3.2526065174565133e-16
+    end
+    lb, ub = invtrig_fast(z, zl, t, jd, f0h, f0l, eps)
+    return asin_refine(x, lb) if lb != ub
+    lb
   end
 
   def self.asin(value : Float32) : Float32
@@ -1771,10 +2312,53 @@ pub struct Math
   end
 
   def self.acos(value : Float64) : Float64
-    return 0.0 / 0.0 if value != value || value.abs > 1.0
-    return 0.0 if value == 1.0
-    return PI if value == -1.0
-    2.0 * atan(sqrt((1.0 - value) / (1.0 + value)))
+    x = value
+    bits = IyiFloatText.bits_of(x)
+    ax = bits.unsafe_shl(1_u64)
+    t = 0.0
+    z = 0.0
+    zl = 0.0
+    jd = 0.0
+    f0h = 0.0
+    f0l = 0.0
+    eps = 0.0
+    if ax > 0x7fc0000000000000_u64
+      if bits.unsafe_shr(63_u64) != 0_u64
+        f0h = 3.141592653589793
+        f0l = 1.2246467991473532e-16
+      end
+      if ax >= 0x7fe0000000000000_u64
+        return f0h + f0l if ax == 0x7fe0000000000000_u64
+        return x + x if ax > 0xffe0000000000000_u64
+        return 0.0 / 0.0
+      end
+      t = 2.0 - 2.0 * x.abs
+      jd = invtrig_roundeven(t * 32.0)
+      z = copysign(sqrt(t), x)
+      zl = fma(z, z, t * -1.0) * ((-0.5 / t) * z)
+      t = 0.25 * t - jd * 0.0078125
+      eps = (z * t).abs * 3.434752482434078e-16 + 2.465190328815662e-32
+    else
+      f0h = 1.5707963267948966
+      f0l = 6.123233995736766e-17
+      if ax <= 0x7e00000000000000_u64
+        v = ax <= 0x791967670d2e8fe8_u64 ? 0.0 : (x * x) * (-0.16666666666666666 * x)
+        h, w = invtrig_fasttwosum(f0h, x * -1.0)
+        l = v + (w + f0l)
+        lb = h + (l - 1.990403348955723e-24)
+        ub = h + (l + 1.990403348955723e-24)
+        return acos_refine(x, lb) if lb != ub
+        return lb
+      end
+      t = x * x
+      jd = invtrig_roundeven(t * 128.0)
+      t = fma(x, x, -0.0078125 * jd)
+      z = x * -1.0
+      eps = (z * t) * 3.3393426912553537e-16
+    end
+    lb, ub = invtrig_fast(z, zl, t, jd, f0h, f0l, eps)
+    return acos_refine(x, lb) if lb != ub
+    lb
   end
 
   def self.acos(value : Float32) : Float32

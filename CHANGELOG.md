@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **`Math.atan`, `asin` and `acos` are correctly rounded.** Against the
+  true value rounded to the nearest double they were wrong for 1,913,
+  5,338 and 6,821 of 15,000 arguments each; they are CORE-MATH's (MIT,
+  revision b1a4badf6765) now, with their tables, and wrong for none.
+  glibc 2.43's are IBM's, wrong for 1, 11 and 5 of the same 15,000, so a
+  program printing them agrees with Crystal's everywhere but there -
+  where it disagreed for 18% to 29% of arguments before. `atan2`, built
+  on `atan`, follows. The oracle carries CORE-MATH's three files and the
+  math gate requires 180,000 arguments of each to the last bit - the
+  whole range, the small-argument band, both ends of [-1, 1] - and
+  proves the check fails with their shared two-sum losing its low part.
+
 - **`Math.asinh`, `acosh` and `atanh` are correctly rounded, and
   glibc's.** They were series near zero and `log1p` forms elsewhere, and
   answered differently from glibc 2.43 for 43,123, 25,295 and 1,765 of

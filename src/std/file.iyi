@@ -1490,9 +1490,9 @@ class ::File
         pi = pi + 1
       else
         return false if ni >= nlen
-        # On Windows `/` and `\` are one separator, and `Dir.glob` answers
-        # with either: its own results did not match the pattern that
-        # found them.
+        # On Windows `/` and `\` are one separator, and a path is spelled
+        # with either - `Dir.current` answers `\`, a program joins with `/`
+        # - so a name and a pattern each spelled their own way still match.
         {% if flag?(:win32) %}
           return false if nptr[ni] != pc && !((pc == 47_u8 || pc == 92_u8) && (nptr[ni] == 47_u8 || nptr[ni] == 92_u8))
         {% else %}

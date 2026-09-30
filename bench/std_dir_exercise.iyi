@@ -193,6 +193,25 @@ glob_deep = Dir.glob(listing_dir + "/**/*.txt")
 assert_true glob_deep.size == 2, "recursive glob finds both txt files"
 assert_true Dir.glob(listing_dir + "/no_such_pattern_*").empty?, "no-match glob is empty"
 assert_true Dir[listing_dir + "/*.txt"].size == 2, "Dir[] is glob"
+# A wildcard before the last segment, and a pattern that starts `./`:
+# both answered `[]`. And a path spelled with the pattern's separator, on
+# every walk: on Windows one answered `\` and the other `/`.
+Dir.mkdir(listing_dir + "/nested_dir/inner")
+File.write(listing_dir + "/nested_dir/inner/deep.txt", "d")
+File.write(listing_dir + "/nested_dir/one.txt", "o")
+middle = Dir.glob(listing_dir + "/nest*/*.txt")
+assert_true middle.size == 1 && middle[0] == listing_dir + "/nested_dir/one.txt", "a wildcard in a middle segment finds nested_dir/one.txt: #{middle.inspect}"
+two_down = Dir.glob(listing_dir + "/*/*/deep.txt")
+assert_true two_down.size == 1 && two_down[0] == listing_dir + "/nested_dir/inner/deep.txt", "two wildcard segments find deep.txt: #{two_down.inspect}"
+assert_str listing_dir + "/file_a.txt", Dir.glob(listing_dir + "/file_a.*")[0], "a match is spelled with the pattern's own separator"
+here = Dir.current
+Dir.cd(listing_dir)
+dotted = Dir.glob("./*.txt").sorted
+Dir.cd(here)
+assert_true dotted == ["./file_a.txt", "./file_b.txt"], "./*.txt answers the names under ./: #{dotted.inspect}"
+File.delete(listing_dir + "/nested_dir/inner/deep.txt")
+File.delete(listing_dir + "/nested_dir/one.txt")
+Dir.delete(listing_dir + "/nested_dir/inner")
 puts "  glob matching, hidden names, recursion, and empty results"
 
 puts "\n== current working directory and cd"

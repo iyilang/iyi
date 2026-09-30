@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`Dir.glob` finds a wildcard in any segment, and answers in the
+  pattern's spelling.** It listed the pattern's directory and matched
+  names in it, so a wildcard before the last segment answered nothing -
+  `src/*/main.iyi` and `d/s*/*.txt` were `[]` - and so did `./*.txt`,
+  whose names were matched without the `./` the pattern has. The walk
+  starts at the pattern's literal prefix now and goes one directory
+  deeper for each separator after it, into a directory only when the
+  pattern's part so far can match. And a path is joined with the
+  separator the pattern uses: on Windows `d/*.txt` answered `d\x.txt`
+  and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
+  globs through one and two wildcard segments and from `./`; the old
+  module answered `[]` for the first.
+
 ## 0.16.0 — 2026-09-30
 
 **The language takes regex literals and writes JSON itself.** `/a+b/`

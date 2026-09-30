@@ -628,64 +628,58 @@ pub class Dir
     glob(patterns)
   end
 
+  # The walk starts at the pattern's literal prefix - its bytes up to the
+  # separator before the first wildcard, as written - and goes one directory
+  # deeper for each separator the rest of the pattern has, or as deep as
+  # there is under a `**`. A path is built from the prefix and the names
+  # below it, joined with the separator the pattern uses, and matched whole.
+  #
+  # It listed the pattern's `dirname` and matched names in it, which answered
+  # nothing when a wildcard stood before the last segment - `src/*/x.iyi`
+  # and `d/s*/*.txt` were `[]` - and nothing for `./*.txt`, whose names were
+  # matched without the `./` the pattern has; and it joined with the
+  # platform's separator on one path and `/` on the other, so on Windows
+  # `d/*.txt` answered `d\x.txt` and `d/**/*.txt` answered `d/x.txt`.
   private def self.glob_single(pattern : String, &block : String -> Nil) : Nil
-    p = Path.new(pattern)
-    base_dir = p.dirname
-    file_pattern = p.basename
-
-    if pattern.includes?("**")
-      walk_recursive(glob_walk_root(pattern), pattern, 0, &block)
-    elsif base_dir == "." || base_dir.empty?
-      if Dir.exists?(".")
-        Dir.each_child(".") do |child|
-          if match_pattern(pattern, child)
-            yield child
-          end
-        end
-      end
-    else
-      if Dir.exists?(base_dir)
-        Dir.each_child(base_dir) do |child|
-          full = Path.new(base_dir).join(child).to_s
-          if match_pattern(file_pattern, child) || match_pattern(pattern, full)
-            yield full
-          end
-        end
-      end
-    end
-  end
-
-  # The pattern's own bytes up to the separator before the first `**`, sliced
-  # rather than rebuilt. The walk below compares the paths it builds against
-  # the pattern, so the root has to be the pattern's own text: rebuilding it
-  # from `Path#parts` put a Windows root back together as `C:\/Windows`, and
-  # every comparison after that failed on the one byte nobody wrote.
-  private def self.glob_walk_root(pattern : String) : String
     bytes = pattern.to_unsafe
     n = pattern.bytesize
+    first_wild = 0
+    while first_wild < n && bytes[first_wild] != 42_u8 && bytes[first_wild] != 63_u8
+      first_wild = first_wild + 1
+    end
     cut = -1
     at = 0
-    while at < n
-      break if bytes[at] == 42_u8 && (at + 1) < n && bytes[at + 1] == 42_u8
+    while at < first_wild
       cut = at if glob_sep?(bytes[at])
       at = at + 1
     end
-    return "." if cut < 0
-    # A pattern rooted at a separator keeps it: the root is that one byte.
-    len = cut == 0 ? 1 : cut
-    String.new(len) { |t| t.copy_from(bytes, len) }
+    prefix = cut < 0 ? "" : String.new(cut + 1) { |t| t.copy_from(bytes, cut + 1) }
+    # The separators after the prefix: each is where a deeper directory's
+    # part of the pattern ends, and the walk goes no deeper than they do.
+    ends = [] of Int32
+    at = cut + 1
+    while at < n
+      ends << at if glob_sep?(bytes[at])
+      at = at + 1
+    end
+    sep_at = ends.empty? ? cut : ends[0]
+    sep = sep_at < 0 ? "/" : String.new(1) { |t| t[0] = bytes[sep_at] }
+    deep = pattern.includes?("**")
+    glob_walk(prefix.empty? ? "." : prefix, prefix, pattern, ends, 0, deep, sep, &block)
   end
 
-  private def self.walk_recursive(dir : String, pattern : String, depth : Int32, &block : String -> Nil) : Nil
-    return if depth > 64
+  private def self.glob_walk(dir : String, shown : String, pattern : String, ends : Array(Int32), level : Int32,
+                             deep : Bool, sep : String, &block : String -> Nil) : Nil
+    return if level > 64
     return unless Dir.exists?(dir)
     Dir.each_child(dir) do |child|
-      full_path = (dir == "." ? child : dir + "/" + child)
-      if match_pattern(pattern, full_path)
-        yield full_path
-      end
-      if Dir.exists?(full_path)
-        walk_recursive(full_path, pattern, depth + 1, &block)
+      full = shown + child
+      yield full if match_pattern(pattern, full)
+      next unless deep || level < ends.size
+      # Only into a directory the pattern's part so far can match.
+      next unless deep || glob_match(pattern.to_unsafe, 0, ends[level], full.to_unsafe, 0, full.bytesize)
+      if Dir.exists?(full)
+        glob_walk(full, full + sep, pattern, ends, level + 1, deep, sep, &block)
       end
     end
   end

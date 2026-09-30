@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`File.readlink` of a link to a volume's GUID path or a share answers a
+  path Windows can open.** The NT prefix `\??\` came off whatever
+  followed it, so a junction to `\\?\Volume{...}\x` read back as the
+  relative `Volume{...}\x`, and a link to `\??\UNC\server\share` would
+  have as `UNC\server\share` [INFERENCE: no symbolic-link privilege here
+  to make one]. A drive after the prefix loses it, a share becomes
+  `\\server\share`, and anything else keeps it as `\\?\`.
+  `bench/std_file_exercise.sh` reads back a junction to a volume's GUID
+  path; the old module dropped the prefix.
+
 - **`Dir.children("")` is refused on Windows, as POSIX refuses it.** An
   empty path became a pattern for the current drive's root, so
   `Dir.children("")` listed `C:\` while `Dir.exists?("")` said false. It

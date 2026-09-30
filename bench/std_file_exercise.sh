@@ -588,6 +588,27 @@ PY
         echo "  a junction to nothing answered symlink?/info?.nil?/exists?/Dir.exists? $answer"
         status=1
       fi
+      # A junction to a volume's GUID path reads back as one: the NT prefix
+      # came off whatever followed it, and `Volume{...}\x` is a relative
+      # path to nowhere.
+      printf 'module main\n\nimport std/file::{File}\n\nputs File.readlink(Program.args[0])\n' > "$WORK/readlink.iyi"
+      volume="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" mountvol "$(cygpath -w "$WORK" | cut -c1-3)" /L 2>/dev/null | tr -d ' \r' | head -1)"
+      if [ -z "$volume" ]; then
+        echo "  mountvol names no volume here, so a junction to one is unmeasured"
+      elif ! "$IYI" build -o "$WORK/readlink" "$WORK/readlink.iyi" > "$WORK/readlink.build" 2>&1; then
+        echo "  the readlink program did not build"; sed -n '1,5p' "$WORK/readlink.build"; status=1
+      else
+        mkdir -p "$WORK/by_volume"
+        target="${volume}$(cygpath -w "$WORK/by_volume" | cut -c4-)"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/volume_junction")" "$target" > /dev/null
+        read_back="$("$WORK/readlink" "$WORK/volume_junction" 2>&1 | tr -d '\r')"
+        if [ "$read_back" = "$target" ]; then
+          echo "  a junction to a volume's GUID path reads back as that path"
+        else
+          echo "  a junction to $target read back as $read_back"
+          status=1
+        fi
+      fi
     fi
     ;;
 esac

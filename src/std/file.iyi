@@ -1263,8 +1263,21 @@ class ::File
       target = Pointer(UInt16).malloc((chars + 1).to_u64)
       target.copy_from((buffer + (names_at + name_offset).to_i64).as(UInt16*), chars)
       target[chars] = 0_u16
+      # The NT prefix `\??\` off: a drive after it is a drive (`C:\x`), a
+      # share after it `\??\UNC\server\share` is `\\server\share`, and
+      # anything else - a volume's GUID path - keeps the prefix in its
+      # Win32 spelling, `\\?\Volume{...}\`. It came off whatever followed,
+      # and a junction to a volume GUID read as the relative, unusable
+      # `Volume{...}\x`.
       if chars >= 4 && target[0] == 92_u16 && target[1] == 63_u16 && target[2] == 63_u16 && target[3] == 92_u16
-        target = target + 4
+        if chars >= 6 && target[5] == 58_u16
+          target = target + 4
+        elsif chars >= 8 && target[4] == 85_u16 && target[5] == 78_u16 && target[6] == 67_u16 && target[7] == 92_u16
+          target = target + 6
+          target[0] = 92_u16
+        else
+          target[1] = 92_u16
+        end
       end
       size = __iyi_utf8_size_from_wide(target)
       raise "Cannot readlink: #{p}: the target Windows stored is not convertible to UTF-8" if size <= 0

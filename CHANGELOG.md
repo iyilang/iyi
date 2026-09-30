@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`String#lines` ends a line at `\r\n` too.** It split at `\n` alone, so
+  a Windows text's lines kept their `\r`: `File.read(path).lines` of a
+  file of numbers panicked at the first `to_i` ("not a number: "1\r"")
+  where `File.read_lines` of the same file read 1, and Crystal's `lines`
+  gives `["1", ...]`. A `\r` inside a line stays. `bench/io_exercise.iyi`
+  reads a CRLF text's lines and sums two; the old prelude kept the `\r`.
+
 - **`OptionParser` reads grouped short flags, `--name=VALUE` flags and
   non-ASCII short flags.** Only the first flag of a group was read and
   the rest dropped in silence: `-vo out.txt` set `-v` and left `out.txt`

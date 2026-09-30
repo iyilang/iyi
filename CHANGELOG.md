@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`UUID.parse` refuses a hyphen out of its place, and reads Crystal's
+  other spellings.** Every hyphen was dropped wherever it stood, so
+  `6ba7b8109dad11d180b4-00c04fd430c8----`, 37 characters, read as a UUID,
+  where the header promised a panic on a length that is not one. A
+  hyphen belongs at the four places of the 36-character form; the bare
+  32 digits, `{...}` and `urn:uuid:...`, which Crystal's `UUID` reads,
+  are read too. `bench/std_uuid_exercise.sh` refuses four misplaced
+  spellings and `bench/std_uuid_exercise.iyi` reads the three others; the
+  old module read three of the four.
+
 - **YAML's keep chomping (`|+`, `>+`) keeps the line breaks the text has
   and no more.** A block scalar that ended the stream read one line break
   too many: `a: |+\n  x\n` gave `"x\n\n"` for `"x\n"`, with LF or CRLF,

@@ -91,6 +91,30 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/uuid-release.out" 2>/dev/null; then
 fi
 
 echo
+echo "== what parse refuses"
+# A hyphen belongs at four places of the 36-character form and nowhere
+# else: every hyphen was dropped wherever it stood, so a 37-character
+# string with a hyphen run at its end read as a UUID.
+cat >"$WORK/refuse.iyi" <<'IYI'
+module refuse
+
+import std/uuid::{UUID}
+
+puts UUID.parse(Program.args[0]).to_s
+IYI
+for bad in "6ba7b8109dad11d180b4-00c04fd430c8----" "550e8400e29b-41d4-a716-446655440000-" "550e8400-e29b41d4-a716-4466-55440000" "550e8400-e29b-41d4-a716-44665544000"; do
+  if "$IYI" run "$WORK/refuse.iyi" -- "$bad" >"$WORK/refuse.out" 2>&1; then
+    echo "  $bad was read as $(cat "$WORK/refuse.out")"
+    status=1
+  elif ! grep -q "UUID:" "$WORK/refuse.out"; then
+    echo "  $bad was refused without saying why: $(tail -1 "$WORK/refuse.out")"
+    status=1
+  else
+    echo "  $bad: $(tr -d '\r' <"$WORK/refuse.out" | grep -o 'UUID:.*' | head -1)"
+  fi
+done
+
+echo
 echo "== proving the checks can fail when the module is broken"
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"

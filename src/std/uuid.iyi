@@ -1,8 +1,10 @@
 # UUID version 4, RFC 4122, written in iyi.
 #
 # Sixteen random bytes, then version 4 and the RFC 4122 variant bits.
-# `UUID.v4` answers the hyphenated form; `parse` reads it back and
-# panics on a length or hex digit that is not one.
+# `UUID.v4` answers the hyphenated form; `parse` reads it back - and the
+# forms Crystal's reads, 32 bare digits, `{...}` and `urn:uuid:...` - and
+# panics on anything else: a hyphen out of its place, a length or a hex
+# digit that is not one.
 
 module std/uuid
 
@@ -30,7 +32,7 @@ pub struct UUID
   end
 
   def self.parse(text : String) : UUID
-    hex = compact(text)
+    hex = digits_of(text)
     raise "UUID: not 32 hex digits: #{text}" if hex.size != 32
     bytes = Array(UInt8).new(16) { 0_u8 }
     i = 0
@@ -82,11 +84,24 @@ pub struct UUID
     end
   end
 
-  private def self.compact(text : String) : Array(Char)
+  # The digits of one of the four spellings. Every hyphen was dropped
+  # wherever it stood, so `6ba7b8109dad11d180b4-00c04fd430c8----` read as
+  # a UUID.
+  private def self.digits_of(text : String) : Array(Char)
+    body = text
+    body = body[1, body.bytesize - 2] if body.bytesize == 38 && body.starts_with?('{') && body.ends_with?("}")
+    body = body[9, body.bytesize - 9] if body.bytesize == 45 && body.starts_with?("urn:uuid:")
     out = [] of Char
-    text.each_char do |ch|
-      next if ch == '-'
-      out << ch
+    index = 0
+    body.each_char do |ch|
+      if ch == '-'
+        raise "UUID: hyphens belong in the 36-character form only: #{text}" unless body.bytesize == 36
+        raise "UUID: a hyphen out of its place: #{text}" unless index == 8 || index == 13 || index == 18 || index == 23
+      else
+        raise "UUID: a hyphen missing: #{text}" if body.bytesize == 36 && (index == 8 || index == 13 || index == 18 || index == 23)
+        out << ch
+      end
+      index = index + 1
     end
     out
   end

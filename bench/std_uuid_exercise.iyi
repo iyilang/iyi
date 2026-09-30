@@ -23,5 +23,11 @@ u = UUID.v4
 assert_true u.version == 4, "v4 version"
 assert_true UUID.parse(u.to_s) == u, "v4 parses back"
 puts "  hyphenated form and version 4"
+# The other spellings Crystal's `UUID` reads: 32 bare digits, braced, and
+# a URN. Each is the same UUID.
+["550e8400e29b41d4a716446655440000", "{550e8400-e29b-41d4-a716-446655440000}", "urn:uuid:550e8400-e29b-41d4-a716-446655440000"].each do |form|
+  assert_true UUID.parse(form) == q, "#{form} is the same UUID"
+end
+puts "  bare, braced and URN forms"
 
 puts "\nALL CHECKS PASSED"

@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **`std/regex` answers as RE2 does in seven places, and its gate's
+  proofs test something.** The fast path read `[0-\x34]` as `0` to `\`
+  plus `x`, `3` and `4`; `\012` was NUL then `12`, not a newline; `{2}`,
+  `a*{2}` and `a{2}{3}` were literal text where every engine refuses
+  "nothing to repeat"; `\_` was refused; `(?<>a)` was accepted; a loop
+  whose body can match empty lost leftmost-first priority - `(|a)*`
+  found `aa` in `aa`, where RE2, PCRE and Python find the empty string -
+  the bug Go fixed as golang/go#46123, fixed the same way; and
+  `((a{1000}){1000}){1000}` ran 20 seconds into 2 GB and panicked, where
+  nested counts past 1,000 are refused now, as RE2 refuses them. 2.4
+  million cases against Go's two engines and Python found these, and none
+  after against Go. And every one of the gate's eleven negative proofs
+  had passed without testing: `iyi run` took the cases file as a second
+  source file, so the broken exercise failed on that. With `--` it is an
+  argument, and each proof is caught at its own check, as are eight new
+  ones.
+
 - **A program no longer faults when it outgrows a large buffer beside a
   mark.** `realloc` past 1 MiB frees the large chunk it outgrew, and that
   unlinked and unmapped it at once, under the lock; the mark's helpers

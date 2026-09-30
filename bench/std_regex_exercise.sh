@@ -192,6 +192,10 @@ refuses "an unmatched )" close_paren "regex: unmatched ')'" ')'
 refuses "nothing to repeat" repeat_nothing "regex: nothing to repeat" '*a'
 refuses "an unterminated class" class_open "regex: unterminated class" '[a'
 refuses "\\x without its digits" hex_short "regex: \\x needs two hex digits" '\x4'
+refuses "a count with nothing to repeat" count_nothing "regex: nothing to repeat" '{2}'
+refuses "a count after a quantifier" count_twice "regex: nothing to repeat" 'a*{2}'
+refuses "an empty group name" name_empty "regex: not a group name" '(?<>a)'
+refuses "nested counts past 1000" count_nested "regex: repeat count past 1000" '(a{1000}){2}'
 
 echo
 echo "== what a regex literal refuses, at the literal"
@@ -256,8 +260,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mutate() { # mutate <label> <old> <new>
-  local label="$1" old="$2" new="$3"
+# With <phrase>, the broken exercise must fail there, at the check that
+# proves the fix. With <pattern>, the fix is a refusal: the probe `refuses`
+# builds, on the broken copy, must answer <pattern> instead.
+mutate() { # mutate <label> <old> <new> [<phrase> [<pattern>]]
+  local label="$1" old="$2" new="$3" phrase="${4:-}" pattern="${5:-}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
@@ -276,8 +283,21 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" "$WORK/cases.txt" >"$WORK/mut.out" 2>&1; then
+  elif [ -n "$pattern" ]; then
+    if (export IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi"; refuses "$label" mutated_refusal "$phrase" "$pattern") >"$WORK/mut.out" 2>&1 &&
+       grep -q "it answered instead of refusing" "$WORK/mut.out"; then
+      echo "  $label: caught, /$pattern/ answered"
+    else
+      echo "  $label: the broken module still refused /$pattern/"
+      sed 's/^/    /' "$WORK/mut.out"
+      status=1
+    fi
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" -- "$WORK/cases.txt" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif [ -n "$phrase" ] && ! grep -qF -- "$phrase" "$WORK/mut.out"; then
+    echo "  $label: caught, but not at '$phrase'"
+    tail -3 "$WORK/mut.out" | sed 's/^/    /'
     status=1
   else
     echo "  $label: caught"
@@ -299,6 +319,14 @@ mutate "a table's missing entry kept as the match" '    pattern.replace(self) { 
 mutate "an automaton that keeps every bit" '      state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]' '      state = state.unsafe_shl(1_u64) | heads'
 mutate "a literal looked for from one byte past where it may start" '    text.byte_index(literal, from)' '    text.byte_index(literal, from + 1)'
 mutate "a pattern that forgets its source" 'RxRuns.parse(pattern), pattern)' 'RxRuns.parse(pattern), "")'
+mutate "a fast-path range that reads an escaped end as \\" '              return nil if high == 92_u8 || high < c' '              return nil if high < c' "a range ending in an escape, on the fast path"
+mutate "a star around an empty-matching body built as one loop" '    return optional(plus(atom, lazy), lazy) if nullable?(atom)' '' "a star whose body matched empty stops"
+mutate "x{n,} as n copies and a star" '    copies = unbounded ? times : hi' '    copies = unbounded ? lo + 1 : hi' "x{1,} is x+"
+mutate "\\0 without its octal digits" '      while k < 2 && @i < @n && peek >= 48_u8 && peek <= 55_u8' '      while false' "\\0 takes up to two more octal digits"
+mutate "\\_ refused as a letter" '    if RxCompiler.word?(b) && b != 95_u8' '    if RxCompiler.word?(b)' "unknown escape '\\_'"
+mutate "a count read as text where nothing precedes it" '    elsif b == 123_u8 && count_ahead?' '    elsif false' "regex: nothing to repeat" 'a*{2}'
+mutate "an empty group name taken" '        raise "regex: not a group name in /#{@pat}/" if @i < @n && peek == 62_u8 # (?<>' '' "regex: not a group name" '(?<>a)'
+mutate "nested counts that do not multiply" 'if @copies * times > 1000' 'if false' "regex: repeat count past 1000" '(a{1000}){2}'
 
 # A script with no module header imports `Regex` the same way. The compiler
 # declares an empty `Regex` of its own before any source is read - the

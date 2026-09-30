@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A program on Windows puts the console's mode back as it ends.**
+  Writing to a console turns VT processing on, and the console outlives
+  the program: it was left on for whatever ran there next - a console at
+  mode 3 was at 7 after `puts "hello"` - where the C runtime's own
+  teardown, and Crystal's, restore it. The mode a stream had before is
+  kept when it is changed and put back in `__iyi_exit` and in the fault
+  handler's exit. `bench/io_exercise.sh` runs a program in a console of
+  its own and reads the mode after; the old runtime left 7.
+
 - **`HTTP.get("http://[::1]:8080/")` sends `Host: [::1]:8080`.** The
   host line was built from the URL's `hostname`, which is the address
   without its brackets, so the request said `Host: ::1:8080` - no host a
@@ -13229,7 +13238,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,175-line library and nothing else. Every other
+  written against iyi's own 19,201-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

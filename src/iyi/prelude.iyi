@@ -595,6 +595,12 @@ end
     @@carry_out_length : Int32 = 0
     @@carry_err : UInt64 = 0_u64
     @@carry_err_length : Int32 = 0
+    # The console mode a stream had before VT processing was turned on
+    # here, and its handle, for `restore_vt`.
+    @@restore_out : UInt64 = 0_u64
+    @@restore_out_mode : Int32 = 0
+    @@restore_err : UInt64 = 0_u64
+    @@restore_err_mode : Int32 = 0
 
     def self.console?(fd : Int64, handle : Void*) : Bool
       return false if fd < 0_i64 || fd > 2_i64
@@ -613,7 +619,25 @@ end
       @@vt = @@vt | bit
       mode = uninitialized Int32
       return if LibC.GetConsoleMode(handle, pointerof(mode)) == 0
+      return if mode & 4 != 0
       LibC.SetConsoleMode(handle, mode | 4)
+      if fd == 2_i64
+        @@restore_err = handle.address
+        @@restore_err_mode = mode
+      else
+        @@restore_out = handle.address
+        @@restore_out_mode = mode
+      end
+      nil
+    end
+
+    # The modes `enable_vt` changed, put back as the process ends: the
+    # console outlives the program, and it was left with VT processing on
+    # for whatever ran in it next, where the C runtime's own teardown, and
+    # Crystal's, put the mode back.
+    def self.restore_vt : Nil
+      LibC.SetConsoleMode(Pointer(Void).new(@@restore_err), @@restore_err_mode) if @@restore_err != 0_u64
+      LibC.SetConsoleMode(Pointer(Void).new(@@restore_out), @@restore_out_mode) if @@restore_out != 0_u64
       nil
     end
 
@@ -1098,6 +1122,7 @@ end
   # the gate that runs it hung until the job was cancelled at 81 minutes.
   # With `TerminateProcess`, 0 in 1,150.
   def __iyi_exit(status : Int32) : NoReturn
+    IyiConsole.restore_vt
     LibC.TerminateProcess(LibC.GetCurrentProcess, status)
     # Not reached; the `NoReturn` this def promises is `ExitProcess`'s.
     LibC.ExitProcess(status)
@@ -9454,6 +9479,7 @@ end
   # ends the process without unwinding anything on this stack, and the
   # exit code is the same 1.
   def __iyi_win_fault_exit : NoReturn
+    IyiConsole.restore_vt
     LibC.TerminateProcess(LibC.GetCurrentProcess, 1_i32)
     # Unreachable: the process is gone. Spelled out because the type says
     # nothing returns from here and the binding above returns an Int32.

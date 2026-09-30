@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`sprintf` is right in four places it was not.** `%u` of a negative
+  Int64 printed it signed (`-5`, where C prints 18446744073709551611 and
+  an Int32 already wrapped); `%e` and `%g` took their exponent from the
+  shortest digits, one too high for a value just under a power of ten
+  whose shortest spelling is that power - `%.15e` of 1e23 was
+  `1.000000000000000e+23`, not `9.999999999999999e+22`; NaN ignored the
+  `+` and space flags that infinity honours; and `%.400g` of 0.0001
+  panicked "precision must be at most 400, not 403", inside the documented
+  limit, because `%g` asked `%f` for three places more - it moves the
+  point in the digits `%e` wrote now. 2.72 million cases against glibc's
+  `snprintf`, Python's `%` and the module's own integer rules found them,
+  about 13,700 wrong answers and three panics, and none after. The
+  format exercise checks each and proves each check fails with its fix
+  undone.
+
 - **The smallest `Time::Span` prints.** `to_s` negated the whole seconds
   before splitting them, and `-Int64::MIN` does not fit: the span
   `Span.seconds(Int64::MIN)` could be made and compared, and printing it

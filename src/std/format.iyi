@@ -322,6 +322,22 @@ module ::IyiFloatText
       digits = scaled_digits(f, e, precision - exp)
       attempts = attempts + 1
     end
+    # A guess one too high passes that count as well: at the shortest
+    # digits' exponent `%.15e` of 1e23 rounds to 1.000000000000000e+23,
+    # where the value's own digits are 9.999999999999999e+22. Only a
+    # 10...0 can be that, and the exponent below is the value's when its
+    # digits still fit there.
+    tail = 1
+    while tail < digits.bytesize && digits.to_unsafe[tail] == 48_u8
+      tail = tail + 1
+    end
+    if tail == digits.bytesize && digits.size == precision + 1 && digits.to_unsafe[0] == 49_u8
+      lower = scaled_digits(f, e, precision - exp + 1)
+      if lower.size == precision + 1
+        exp = exp - 1
+        digits = lower
+      end
+    end
 
     num = digits[0, 1]
     if precision > 0
@@ -525,7 +541,7 @@ module ::IyiFormat
     bits = IyiFloatText.bits_of(val)
     is_nan = (bits.unsafe_shr(52_u64) & 2047_u64 == 2047_u64) && (bits & 4503599627370495_u64 != 0_u64)
     if is_nan
-      return format_string_arg("NaN", minus, width, -1)
+      return format_string_arg(plus ? "+NaN" : (space ? " NaN" : "NaN"), minus, width, -1)
     end
 
     is_inf = (bits.unsafe_shr(52_u64) & 2047_u64 == 2047_u64) && (bits & 4503599627370495_u64 == 0_u64)
@@ -569,7 +585,7 @@ module ::IyiFormat
     bits = IyiFloatText.bits_of(val)
     is_nan = (bits.unsafe_shr(52_u64) & 2047_u64 == 2047_u64) && (bits & 4503599627370495_u64 != 0_u64)
     if is_nan
-      return format_string_arg("NaN", minus, width, -1)
+      return format_string_arg(plus ? "+NaN" : (space ? " NaN" : "NaN"), minus, width, -1)
     end
 
     is_inf = (bits.unsafe_shr(52_u64) & 2047_u64 == 2047_u64) && (bits & 4503599627370495_u64 == 0_u64)
@@ -625,7 +641,16 @@ module ::IyiFormat
       mantissa = scientific[0, marker]
       num_str = (hash ? mantissa : IyiFormat.trim_fraction(mantissa)) + scientific[marker, scientific.bytesize - marker]
     else
-      fixed = IyiFloatText.format_fixed(val.abs, prec - 1 - exp)
+      # The digits `%e` just wrote, the point moved: `%f` at P - 1 - X
+      # places rounds at the same place, and asked again of `format_fixed`
+      # those places pass MAX_PLACES for an X under zero at a precision
+      # within it - `%.400g` of 0.0001 panicked.
+      sig = scientific[0, 1] + (marker > 2 ? scientific[2, marker - 2] : "")
+      if exp >= 0
+        fixed = exp + 1 < prec ? sig[0, exp + 1] + "." + sig[exp + 1, prec - 1 - exp] : sig
+      else
+        fixed = "0." + ("0" * (0 - exp - 1)) + sig
+      end
       num_str = hash ? (fixed.index('.') ? fixed : fixed + ".") : IyiFormat.trim_fraction(fixed)
     end
 
@@ -738,7 +763,9 @@ module ::IyiFormat
       when Int32
         format_int64(val < 0 ? (val.to_i64 & 4294967295_i64) : val.to_i64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 10, false, false, minus, plus, space, zero, hash, width, precision)
+        # Unsigned is the word's bits, as an Int32's are above: `%u` of
+        # -5_i64 printed -5.
+        format_uint64(val.unsafe_to_u64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when UInt8

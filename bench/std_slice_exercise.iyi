@@ -86,6 +86,22 @@ def main : Nil
 
   puts "subslice range?: #{s_block[1..10]?.inspect}"
 
+  # A range that ends before it begins is empty, as the other library counts
+  # it: `s[3..1]` is the empty slice at 3, where this answered nil and `[]`
+  # panicked "range out of bounds". A start past the end is still nil.
+  reversed = s_block[3..1]?
+  puts "subslice reversed range: #{reversed.inspect}"
+  unless reversed.inspect == "Slice[]" && s_block[-2..-5]?.inspect == "Slice[]" && s_block[2...-9]?.inspect == "Slice[]" && s_block[4..2].size == 0 && s_block[6..3]?.nil?
+    raise "subslice reversed range: expected Slice[], got #{reversed.inspect}"
+  end
+
+  # And an end at the top of Int32 is out of bounds, not an overflow: the
+  # inclusive count `e - b + 1` panicked with "arithmetic overflow".
+  puts "subslice range to the top of Int32:"
+  top = s_block[0..2147483647]?
+  puts "  #{top.inspect}"
+  raise "subslice range to the top of Int32: expected nil, got #{top.inspect}" unless top.nil?
+
   puts "== copying and moving"
   dst = Slice(Int32).new(5, 0)
   src = Slice(Int32).new(3) { |i| i + 1 }
@@ -150,6 +166,12 @@ def main : Nil
   puts "== duplicates, conversions and strings"
   s_dup = f_slice.dup
   puts "dup: #{s_dup.to_s} same?=#{f_slice.same?(s_dup)} eq?=#{f_slice == s_dup}"
+
+  # A read-only slice duplicates too: the copy was filled through
+  # `copy_from` after it had taken the read-only flag, which refused.
+  ro_dup = s_ro.dup
+  puts "dup of a read-only slice: #{ro_dup.to_s} read_only?=#{ro_dup.read_only?}"
+  raise "dup of a read-only slice: expected Slice[0, 5, 10], read-only" unless ro_dup.to_s == "Slice[0, 5, 10]" && ro_dup.read_only?
 
   s_clone = f_slice.clone
   puts "clone: #{s_clone.to_s}"

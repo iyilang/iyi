@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every static_array section reported"
-for phrase in "== new" "== index"; do
+for phrase in "== new" "== index" "== compare" "== fill"; do
   if ! grep -q "$phrase" "$WORK/static_array-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -114,6 +114,50 @@ PY
     echo "  a broken static_array is caught"
   fi
 fi
+
+# Each further break is built before it is run: a broken copy that does not
+# compile also "fails", and proves nothing about the check.
+prove_fails() { # prove_fails <label> <name> <phrase> <old> <new>
+  local label="$1" name="$2" phrase="$3" old="$4" new="$5"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3"
+    return
+  fi
+  mkdir -p "$WORK/$name/std"
+  if ! "$PY" - "$old" "$new" <<PY
+import sys
+from pathlib import Path
+src = Path("$REPO/src/std/static_array.iyi").read_text()
+old, new = sys.argv[1], sys.argv[2]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/$name/std/static_array.iyi").write_text(src.replace(old, new, 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_static_array_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$name/build.log"
+    status=1
+  elif "$WORK/$name/program" >"$WORK/$name/out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/$name/out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '$p' "$WORK/$name/out"
+    status=1
+  else
+    printf '  %s: caught at "%s"\n' "$label" "$(grep -m1 -F -- "$phrase" "$WORK/$name/out" | sed 's/^iyi: panic: //')"
+  fi
+}
+
+prove_fails "<=> answering the other way" broken_cmp "ASSERTION FAILED: <=> is lexicographic" \
+  '      return cmp if cmp != 0' '      return 0 - cmp if cmp != 0'
+prove_fails "fill ending at s + c again" broken_fill_end "arithmetic overflow" \
+  '    limit = (c > N - s) ? N : (s + c)' '    limit = (s + c > N) ? N : (s + c)'
 
 echo
 if [ "$status" -eq 0 ]; then

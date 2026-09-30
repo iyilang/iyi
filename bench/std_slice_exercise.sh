@@ -214,4 +214,19 @@ prove_fails "broken overlapping move" "fail_move" "move_from overlapping right: 
 prove_fails "broken reverse" "fail_rev" "reverse: Slice\[8, 4, 6, 2\]" \
   's/def reverse : self/def reverse : self; return self/'
 
+# 4. Broken reversed range: the count taken before the end is known to be
+#    past the start goes negative, and a reversed range reads nil again
+prove_fails "reversed range as out of bounds" "fail_reversed" "subslice reversed range: nil" \
+  's/    if e >= b$/    if true/'
+
+# 5. Broken range end: the inclusive end added whatever the count, so an end
+#    at the top of Int32 overflows again
+prove_fails "inclusive end past Int32" "fail_range_top" "arithmetic overflow" \
+  's/count = count + 1 unless range.exclusive? || count > @size/count = count + 1 unless range.exclusive?/'
+
+# 6. Broken read-only dup: the copy filled through a read-only slice, which
+#    refuses, as it was
+prove_fails "read-only dup filled through copy_from" "fail_ro_dup" "cannot write to read-only target Slice" \
+  's/ptr.copy_from(@pointer, @size) if @size > 0/Slice(T).new(ptr, @size, read_only: @read_only).copy_from(self) if @size > 0/'
+
 exit "$status"

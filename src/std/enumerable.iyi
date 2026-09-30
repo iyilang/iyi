@@ -480,12 +480,16 @@ pub trait Enumerable
     result
   end
 
+  # Whether there is a previous element is a flag, not a nil: an element
+  # that is itself nil is still an element, and `[nil, 2]` has the pair
+  # `{nil, 2}`. The nil test skipped every pair whose first half was nil.
   def each_cons_pair(& : Elem, Elem -> Nil) : Nil
+    started = false
     previous = nil
     each do |e|
-      last = previous
-      yield last, e unless last.nil?
+      yield previous.as(Elem), e if started
       previous = e
+      started = true
     end
   end
 
@@ -498,19 +502,23 @@ pub trait Enumerable
     end
   end
 
+  # The same flag as `each_cons_pair`: with the nil test, a nil element
+  # read as "no previous element", so the block was never asked about the
+  # element after it and `[nil, nil, 1]` came back as one chunk.
   def chunk_while(& : Elem, Elem -> Bool) : Array(Array(Elem))
     chunks = [] of Array(Elem)
     current = [] of Elem
+    started = false
     previous = nil
     each do |e|
-      last = previous
-      if last.nil? || (yield last, e)
+      if !started || (yield previous.as(Elem), e)
         current << e
       else
         chunks << current
         current = [e]
       end
       previous = e
+      started = true
     end
     chunks << current unless current.empty?
     chunks
@@ -555,11 +563,14 @@ pub trait Enumerable
     result
   end
 
+  # A flag for "an element was seen", not a nil accumulator: a nil element
+  # reset the fold, so `[nil, 2]` answered 2 without calling the block.
   def reduce?(& : Elem, Elem -> Elem) : Elem?
+    found = false
     acc = nil
     each do |e|
-      current = acc
-      acc = current.nil? ? e : (yield current, e)
+      acc = found ? (yield acc.as(Elem), e) : e
+      found = true
     end
     acc
   end

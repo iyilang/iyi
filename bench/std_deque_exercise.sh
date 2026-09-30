@@ -252,6 +252,12 @@ prove_fails "vacated slot left as it was" broken_clear "assertion failed for pop
   "src.replace('    clear_slot(slot)\n    value', '    value')"
 prove_fails "delete that closes the gap from the wrong side" broken_delete "assertion failed for delete_at near the front" \
   "src.replace('return pop if index == @size - 1\n', 'return pop if index == @size - 1\n    index = @size - 1 - index\n')"
+# A concatenation onto itself read short. Putting back the walk over the
+# growing `other.size` is the bug itself, and a program that never ends
+# cannot be waited for here, so the proof shortens the snapshot instead,
+# and only for a deque handed itself: `+` concatenates another one first.
+prove_fails "concat onto itself that stops short" broken_concat_self "assertion failed for concat onto itself" \
+  "src.replace('    count = other.size\n', '    count = other.size\n    count = count - 1 if other.@buffer.address == @buffer.address\n', 1)"
 
 echo
 if [ "$status" -eq 0 ]; then

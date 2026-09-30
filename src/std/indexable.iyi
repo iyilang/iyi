@@ -298,9 +298,11 @@ pub trait Indexable
 
   # Returns a pseudo-random element using a 64-bit linear congruential generator
   # initialized with the given seed. Deterministic across runs for a given seed.
+  # The seed's bits are taken as they are: the checked `to_u64` panicked
+  # with "arithmetic overflow" for every negative seed.
   def sample(seed : Int32) : Elem
     raise "can't sample empty collection" if empty?
-    val = (seed.to_u64 &* 6364136223846793005_u64) &+ 1442695040888963407_u64
+    val = (seed.to_i64.unsafe_to_u64 &* 6364136223846793005_u64) &+ 1442695040888963407_u64
     idx = (val % size.to_u64).to_i32
     unsafe_fetch(idx)
   end
@@ -482,7 +484,10 @@ pub trait IndexableMutable : Indexable
     asked = offset
     offset = size + offset if offset < 0
     raise "index #{asked} out of range for #{size} elements" if offset < 0 || offset > size
-    raise "index #{asked + count} out of range for #{size} elements" if offset + count > size
+    # Compared as room left rather than as an end, and the end named in
+    # 64 bits: `offset + count` overflowed for a count near the top of
+    # `Int32`, and the refusal read "arithmetic overflow" instead of this.
+    raise "index #{asked.to_i64 + count} out of range for #{size} elements" if count > size - offset
     i = 0
     while i < count
       unsafe_put(offset + i, value)

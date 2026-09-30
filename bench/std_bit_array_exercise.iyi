@@ -41,6 +41,14 @@ assert_true("empty first? is nil", empty.first?.nil?)
 assert_true("empty last? is nil", empty.last?.nil?)
 assert_equal_str("empty to_s", empty.to_s, "BitArray[]")
 
+# The largest size the constructor accepts is a size it can make: the word
+# count rounded up as `(@size + 63) // 64` overflowed within 63 of it, and
+# the byte count `(@size + 7) // 8` within 7. 256 MiB of words, all set.
+largest = BitArray.new(2147483647, true)
+assert_equal_int("largest size", largest.size, 2147483647)
+assert_true("largest last bit", largest[2147483646])
+assert_equal_int("largest to_slice bytes", largest.to_slice.size, 268435456)
+
 default_false = BitArray.new(16)
 assert_equal_int("default false size", default_false.size, 16)
 assert_false("default false empty?", default_false.empty?)
@@ -442,5 +450,17 @@ rot_i64.rotate_in_place(3000000001_i64)
 assert_equal_str("rotate huge i64", rot_i64.to_s, "BitArray[00001]")
 rot_i64.rotate_in_place(3000000000_i64)
 assert_equal_str("rotate huge i64 multiple of size", rot_i64.to_s, "BitArray[00001]")
+
+# A rotation of more than 2^30 bits: the source index `(i + k) % @size`
+# overflowed once `i + k` passed Int32. A billion bits walked one at a time
+# is slow unoptimised, so the gate asks for it by name from the release build.
+if Program.args.size > 0 && Program.args[0] == "rotate_above_2_30"
+  n = 1073741826
+  big = BitArray.new(n)
+  big[n - 1] = true
+  big.rotate_in_place(n - 1)
+  assert_true("rotate above 2^30 bits", big[0] && !big[n - 1] && big.count(true) == 1)
+  puts "rotate above 2^30 bits: ok"
+end
 
 puts "\nALL CHECKS PASSED"

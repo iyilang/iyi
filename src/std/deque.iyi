@@ -306,10 +306,13 @@ pub class Deque(T)
     value
   end
 
-  # Appends every element of other; answers the deque.
+  # Appends every element of other; answers the deque. The count is read
+  # once: walking `other.size` while pushing grew it along with this deque
+  # when the two were one, so `d.concat(d)` never ended.
   def concat(other : Deque(T)) : Deque(T)
+    count = other.size
     i = 0
-    while i < other.size
+    while i < count
       push(other.unsafe_fetch(i))
       i = i + 1
     end

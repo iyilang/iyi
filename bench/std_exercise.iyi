@@ -403,6 +403,19 @@ assert_eq(zipped[0][1], 10, "enum: zip 0 1")
 # 71. sum_by
 assert_eq(seq.sum_by { |x| x * 2 }, 62, "enum: sum_by")
 
+# A nil element is an element. `each_cons_pair`, `chunk_while` and
+# `reduce?` read a nil "previous" as "no previous element", so every pair
+# after a nil was skipped, a nil glued its successor onto its chunk without
+# asking the block, and a fold that began at a nil restarted without the
+# block. What the other library answers for the same three.
+nil_pairs = [] of String
+([nil, 2, nil, 3] of Int32?).each_cons_pair { |a, b| nil_pairs << "#{a.inspect}-#{b.inspect}" }
+assert_str(nil_pairs.join(" "), "nil-2 2-nil nil-3", "enum: each_cons_pair after a nil element")
+nil_chunks = ([nil, nil, 1] of Int32?).chunk_while { |a, b| false }
+assert_eq(nil_chunks.size, 3, "enum: chunk_while after a nil element")
+nil_fold = ([nil, 2] of Int32?).reduce? { |acc, x| (acc || 0) + (x || 0) + 10 }
+assert_true(nil_fold == 12, "enum: reduce? from a nil element")
+
 puts "== std/list: immutable sequence"
 list = List.new([10, 20, 30]).appended(40)
 assert_eq(list.size, 4, "list: size")

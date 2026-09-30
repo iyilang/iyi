@@ -26,4 +26,20 @@ a[1] = 4
 assert_true a[1] == 4, "put"
 puts "  put"
 
+puts "\n== compare"
+# `<=>` forwarded to a `Slice#<=>` that does not exist, so this section did
+# not compile. Lexicographic, element by element.
+low = StaticArray(Int32, 3).new { |i| i }
+high = StaticArray(Int32, 3).new { |i| i * 2 }
+assert_str "-1 1 0", "#{low <=> high} #{high <=> low} #{low <=> low.dup}", "<=> is lexicographic"
+puts "  lexicographic"
+
+puts "\n== fill"
+# A count past the end runs to the end, as the other library clamps it:
+# `s + c` overflowed for a count near the top of Int32.
+f = StaticArray(Int32, 4).new(0)
+f.fill(7, 1, 2147483647)
+assert_str "StaticArray[0, 7, 7, 7]", f.to_s, "fill with a count to the top of Int32"
+puts "  a huge count runs to the end"
+
 puts "\nALL CHECKS PASSED"

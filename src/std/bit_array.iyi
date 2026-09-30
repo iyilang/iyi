@@ -10,12 +10,14 @@ struct ::BitArray
   getter size : Int32
   @bits : Pointer(UInt64)
 
+  # Rounded up without adding first: `(@size + 63) // 64` overflowed for
+  # the sizes within 63 of the largest the constructor accepts.
   private def malloc_size : Int32
-    (@size + 63) // 64
+    @size // 64 + (@size % 64 == 0 ? 0 : 1)
   end
 
   private def bytesize : Int32
-    (@size + 7) // 8
+    @size // 8 + (@size % 8 == 0 ? 0 : 1)
   end
 
   def initialize(size : Int, initial : Bool = false)
@@ -285,7 +287,9 @@ struct ::BitArray
     dup_copy = dup
     i = 0
     while i < @size
-      src_idx = (i + k) % @size
+      # Wrapped by subtraction: `(i + k) % @size` overflowed once the
+      # array held more than 2^30 bits.
+      src_idx = i < @size - k ? i + k : i - (@size - k)
       unsafe_put(i, dup_copy.unsafe_fetch(src_idx))
       i += 1
     end

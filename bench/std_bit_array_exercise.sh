@@ -102,10 +102,23 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/bit_array-release.out" 2>/dev/null; then
 fi
 
 echo
+echo "== a rotation of more than 2^30 bits (release build, by name)"
+"$WORK/bit_array-release" rotate_above_2_30 >"$WORK/bit_array-big.out" 2>&1
+big_code=$?
+if [ "$big_code" -ne 0 ] || ! grep -q "rotate above 2^30 bits: ok" "$WORK/bit_array-big.out"; then
+  echo "  FAIL: exit $big_code: $(sed -n '1p' "$WORK/bit_array-big.out")"
+  status=1
+else
+  echo "  a billion bits rotate without leaving Int32"
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 
+# An optional fifth argument is a mode the exercise runs by name, from a
+# release build, and a sixth the phrase the broken copy must fail with.
 prove_fails() {
-  local label="$1" name="$2" old="$3" new="$4"
+  local label="$1" name="$2" old="$3" new="$4" mode="${5:-}" phrase="${6:-}"
   mkdir -p "$WORK/patched-$name/std"
   if [ -z "$PY" ]; then
     echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
@@ -128,12 +141,18 @@ PY
 
   # Build first, then run: a patch that does not compile would also "fail",
   # and that proves nothing about whether the exercise catches the break.
-  if ! IYI_PATH="$WORK/patched-$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name.bin" "$REPO/bench/std_bit_array_exercise.iyi" >"$WORK/$name.mut.out" 2>&1; then
+  local flags=""
+  [ -n "$mode" ] && flags="--release"
+  if ! IYI_PATH="$WORK/patched-$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build $flags -o "$WORK/$name.bin" "$REPO/bench/std_bit_array_exercise.iyi" >"$WORK/$name.mut.out" 2>&1; then
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/$name.mut.out"
     status=1
-  elif "$WORK/$name.bin" >"$WORK/$name.mut.out" 2>&1; then
+  elif "$WORK/$name.bin" $mode >"$WORK/$name.mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif [ -n "$phrase" ] && ! grep -qF -- "$phrase" "$WORK/$name.mut.out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '1,2p' "$WORK/$name.mut.out"
     status=1
   else
     echo "  $label: a broken bit_array is caught"
@@ -171,6 +190,21 @@ prove_fails "fill start+count overflows Int32" broken_fill_overflow \
 prove_fails "rotate goes through Int32" broken_rotate_i32 \
   'k64 = n.to_i64 % @size.to_i64' \
   'k64 = n.to_i.to_i64 % @size.to_i64'
+
+# The two roundings and the rotation index put back as they were: each
+# overflows Int32 near its top, which only the new size and rotation checks
+# reach, and a panic there is the proof.
+prove_fails "word count rounded up by adding first" broken_words_round \
+  '@size // 64 + (@size % 64 == 0 ? 0 : 1)' \
+  '(@size + 63) // 64' "" "arithmetic overflow"
+
+prove_fails "byte count rounded up by adding first" broken_bytes_round \
+  '@size // 8 + (@size % 8 == 0 ? 0 : 1)' \
+  '(@size + 7) // 8' "" "arithmetic overflow"
+
+prove_fails "rotation index through i + k" broken_rotate_index \
+  'src_idx = i < @size - k ? i + k : i - (@size - k)' \
+  'src_idx = (i + k) % @size' rotate_above_2_30 "arithmetic overflow"
 echo
 echo "== what bit_array refuses"
 

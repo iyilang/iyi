@@ -112,9 +112,17 @@ struct ::StaticArray(T, N)
     false
   end
 
-  # Comparison based on lexicographical element order.
+  # Comparison based on lexicographical element order. Written out here: it
+  # forwarded to `Slice#<=>`, which the slice module does not have, so any
+  # call of this method failed to compile.
   def <=>(other : StaticArray(T, N)) : Int32
-    to_slice <=> other.to_slice
+    i = 0
+    while i < N
+      cmp = to_unsafe[i] <=> other.to_unsafe[i]
+      return cmp if cmp != 0
+      i += 1
+    end
+    0
   end
 
   # Returns a Slice backed by this static array.
@@ -150,7 +158,9 @@ struct ::StaticArray(T, N)
     c = count.to_i
     return self if c <= 0
     raise "Start out of bounds" if s < 0 || s > N
-    limit = (s + c > N) ? N : (s + c)
+    # Room left, not `s + c`: that overflowed for a count near the top of
+    # `Int32`, where the other library clamps the count to the end.
+    limit = (c > N - s) ? N : (s + c)
     while s < limit
       to_unsafe[s] = value
       s += 1

@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **Thirteen collection answers are right.** `each_cons_pair`,
+  `chunk_while` and `reduce?` used nil for "nothing yet", so a nil
+  element was skipped: `[nil, 2, nil, 3].each_cons_pair` yielded one pair
+  of three. `Deque#concat` of a deque onto itself never ended, rereading
+  a size that grew with each push. `StaticArray#<=>` called a `Slice#<=>`
+  that does not exist, so no caller compiled. `Slice#dup` of a read-only
+  slice panicked writing its own copy; a reversed range was nil or a
+  panic where the empty slice is the answer. `sample` with a negative
+  seed, and `fill`, a slice range, `StaticArray#fill`, `BitArray.new`
+  near 2^31 bits and `BitArray#rotate_in_place` past 2^30, overflowed
+  Int32 and panicked "arithmetic overflow" - each answers, or refuses in
+  its own sentence. 46 fuzz runs against Python's `itertools`, `bisect`
+  and `collections.deque` and the other library's API found these and
+  none after, and `std/iterator` agreed everywhere; each exercise checks
+  its fixes and proves each check fails with its fix undone.
+
 - **`std/http` refuses what is not HTTP, and no request can kill its
   server.** A malformed chunked body raised inside the connection's task:
   the client got nothing, and `serve` panicked when the listener closed;

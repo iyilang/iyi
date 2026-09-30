@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`iyi test --timeout` on Windows ends a test and whatever it started.**
+  A test's output comes through a pipe, and the wait for the test waits
+  for that pipe's end, which a program the test started holds open; only
+  the test was killed, so a test that ran `ping -n 25` answered "hung:
+  killed at 3.0s" after 25 seconds, with the pings printed after the
+  kill, and a test whose child never ends hung `iyi test` for good. The
+  test runs in a job object and the deadline ends the job.
+  `bench/test_verb.sh` times a test that starts `ping -n 25` against a
+  three-second deadline; the old binary took 27 seconds. [INFERENCE]
+  Linux and darwin have the same gap, unmeasured.
+
 - **Building over a program that is running, on Windows, moves it aside
   and writes the new one.** Windows will not write over a running program
   or a read-only file, and the linker said so only after the whole

@@ -72,6 +72,23 @@ status=$?
 [ $status -eq 1 ] || { echo "the hang was not a failure (exit $status, 124 is the harness hanging):"; cat hang.txt; exit 1; }
 grep -q 'hang_test.iyi: hung' hang.txt || { echo "the hang is unnamed:"; cat hang.txt; exit 1; }
 rm hang_test.iyi
+# And a test whose time runs out while a program it started runs: the
+# test's output comes through a pipe, and the child held it open, so only
+# the test was killed and the run waited out the child - `ping -n 25`
+# answered "hung" after 25 seconds. The deadline ends the whole tree.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    printf 'module hang_child_test\n\nimport std/process::{Process}\n\nProcess.run("ping", ["-n", "25", "127.0.0.1"], capture: false)\n' > hang_child_test.iyi
+    started=$(date +%s)
+    timeout 60 "$IYI" test --timeout 3 . > hang_child.txt 2>&1
+    status=$?
+    took=$(( $(date +%s) - started ))
+    [ $status -eq 1 ] && grep -q 'hang_child_test.iyi: hung' hang_child.txt ||
+      { echo "a test hung on its child was not killed (exit $status):"; cat hang_child.txt; exit 1; }
+    [ "$took" -lt 20 ] || { echo "a test hung on its child took ${took}s to be killed at 3"; exit 1; }
+    rm hang_child_test.iyi
+    ;;
+esac
 
 step "the discount says when it turns itself off"
 # `--affected` is an exactness claim — "only the tests whose imports reach

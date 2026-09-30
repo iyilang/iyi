@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`std/xml` names a UTF-16 document as unsupported.** Its header
+  promises an encoding other than UTF-8 or US-ASCII is named rather than
+  read as something else, and a document opening with UTF-16's byte order
+  mark - what Windows PowerShell 5.1's `Out-File`, `>` and
+  `Export-Clixml` write - was read as UTF-8 until it failed with "text
+  outside the root element at line 1, column 1". It is "encoding 'UTF-16'
+  is not supported: the input is read as UTF-8" now, as `encoding=
+  "ISO-8859-1"` is. `bench/std_xml_exercise.iyi` gives it both byte
+  orders; the old parser said "text outside the root element".
+
 - **`INI.build` refuses what `INI.parse` would read back as something
   else.** Keys and values were written verbatim, and INI has no escapes:
   a value `"hello\r\n[admin]\r\nrole=root"` wrote a section `admin` with a

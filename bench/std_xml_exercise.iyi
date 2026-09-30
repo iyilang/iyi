@@ -258,6 +258,10 @@ refused("", "document has no root element at line 1, column 1")
 refused("<!-- only -->", "document has no root element at line 1, column 14")
 refused(" <?xml version=\"1.0\"?><a/>", "processing instruction target 'xml' is reserved at line 1, column 2")
 refused("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a/>", "encoding 'ISO-8859-1' is not supported: the input is read as UTF-8 at line 1, column 1")
+# A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is named
+# by its byte order mark; it was "text outside the root element".
+refused("\xFF\xFE<\0a\0/\0>\0", "encoding 'UTF-16' is not supported: the input is read as UTF-8 at line 1, column 1")
+refused("\xFE\xFF\0<\0a\0/\0>", "encoding 'UTF-16' is not supported: the input is read as UTF-8 at line 1, column 1")
 refused("<?xml version=\"1.0\" standalone=\"maybe\"?><a/>", "standalone must be 'yes' or 'no', not 'maybe' at line 1, column 39")
 refused("<?xml version=\"1.0\" foo=\"1\"?><a/>", "'foo' is not an XML declaration attribute at line 1, column 28")
 refused("<?xml version=1.0?><a/>", "expected a quoted value at line 1, column 15")

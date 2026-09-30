@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A package's `iyi.sum` hash is the same on every platform.** The hash
+  covers each file's relative path and bytes; on Windows the path of a
+  file in a directory went in with `\`, and the bytes were the checkout's,
+  which Git for Windows' default `core.autocrlf=true` writes with CRLF. An
+  `iyi.sum` made on Linux was refused on Windows as tampering ("is not
+  what it was"), and the reverse. Paths are hashed with `/`, and the
+  clone keeps the committed bytes (`core.autocrlf=false` in its own
+  config). `bench/packages_get.sh` recomputes a package's sum from the
+  tag itself under a git configured for CRLF and compares.
+
 - **Builds starting at once no longer race to make the cache's
   directories.** `Dir.mkdir_p` looked and then made, and a directory
   another build made between the two failed the loser: with eight builds

@@ -59,7 +59,7 @@ module Iyi::Mod
           raise ex
         end
       else
-        args = ["clone", "--quiet", "--depth", "1", "--branch", tag, "--", remote, staging]
+        args = ["clone", "--quiet", "--config", KEEP_BYTES, "--depth", "1", "--branch", tag, "--", remote, staging]
         output = IO::Memory.new
         status = Process.run("git", args, output: output, error: output)
         unless status.success?
@@ -200,13 +200,21 @@ module Iyi::Mod
       SemanticVersion.parse(spelled)
     end
 
+    # The bytes a checkout writes are the bytes the tag holds, which is
+    # what `iyi.sum` hashes: Git for Windows' own default,
+    # `core.autocrlf=true`, wrote every text file with CRLF, and a package's
+    # sum on Windows was not its sum anywhere else - an `iyi.sum` made on
+    # Linux was refused as tampering. Written into the clone's own config,
+    # so the checkout a whole clone makes later keeps it too.
+    KEEP_BYTES = "core.autocrlf=false"
+
     # A whole clone of *path*'s repository at *into*: a pseudo-version's
     # commit is on no tag a shallow clone could ask for, and its version
     # needs the tags behind it.
     private def self.clone_history(path : String, into : String) : Nil
       remote = remote_for(path)
       output = IO::Memory.new
-      status = Process.run("git", ["clone", "--quiet", "--no-checkout", "--", remote, into], output: output, error: output)
+      status = Process.run("git", ["clone", "--quiet", "--config", KEEP_BYTES, "--no-checkout", "--", remote, into], output: output, error: output)
       unless status.success?
         raise ModError.new("cannot fetch #{path} from #{remote}:\n#{output.to_s.strip}")
       end

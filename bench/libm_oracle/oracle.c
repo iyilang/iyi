@@ -2,11 +2,11 @@
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
  * log1p, sinh, cosh and tanh, and its CORE-MATH erf, erfc, asinh, acosh and
  * atanh, lgamma and tgamma behind the wrappers glibc's symbols are, and
- * CORE-MATH's own atan, asin and acos (`core_math/`, linked with
+ * CORE-MATH's own atan, asin, acos and tan (`core_math/`, linked with
  * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
  * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
  * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
- * `asin`, `acos`, `lgamma`, `tgamma`) reads doubles from
+ * `asin`, `acos`, `tan`, `lgamma`, `tgamma`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
  * pairs and writes each with its power.
  * The files are opened in binary, which a Windows C runtime's standard
@@ -36,6 +36,7 @@ double __ieee754_atanh (double);
 double cr_atan (double);
 double cr_asin (double);
 double cr_acos (double);
+double cr_tan (double);
 double __ieee754_lgamma_r (double, int *);
 double __ieee754_gamma_r (double, int *);
 
@@ -103,6 +104,8 @@ static double unary (const char *name, double x)
     return cr_asin (x);
   if (strcmp (name, "acos") == 0)
     return cr_acos (x);
+  if (strcmp (name, "tan") == 0)
+    return cr_tan (x);
   if (strcmp (name, "lgamma") == 0)
     return lgamma_posix (x);
   if (strcmp (name, "tgamma") == 0)

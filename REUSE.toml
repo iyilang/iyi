@@ -35,7 +35,8 @@ SPDX-License-Identifier = "MIT"
 
 # iyi: `Math.erf`, `erfc`, `asinh`, `acosh`, `atanh`, `lgamma` and `tgamma`
 # are CORE-MATH's, as
-# glibc 2.43 carries them, and `atan`, `asin` and `acos` CORE-MATH's own,
+# glibc 2.43 carries them, and `atan`, `asin`, `acos` and `tan` CORE-MATH's
+# own,
 # ported with their tables; the notice is beside the code. The math gate's
 # oracle is glibc's files as published, with their own headers.
 [[annotations]]

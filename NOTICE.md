@@ -56,8 +56,8 @@ port of:
   preserved."
 - [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
 - [CORE-MATH][], as glibc 2.43 carries it and as published (`Math.erf`,
-  `erfc`, `asinh`, `acosh`, `atanh`, `lgamma`, `tgamma`, `atan`, `asin` and
-  `acos` in
+  `erfc`, `asinh`, `acosh`, `atanh`, `lgamma`, `tgamma`, `atan`, `asin`,
+  `acos` and `tan` in
   `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 

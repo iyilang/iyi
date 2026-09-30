@@ -71,6 +71,21 @@
 
 ### Fixed
 
+- **`Math.tan` of a large argument is its tangent, correctly rounded.** The
+  reduction by pi/2 gave up once x * 2/pi reached 2^63 and answered 0:
+  `Math.tan(1.0e300)` was 0.0 where it is 1.4214488238747245, and of
+  20,000 arguments across the range 14,965 came back wrong. It is
+  CORE-MATH's `tan` (MIT, revision b1a4badf6765) now, with its tables and
+  its 128-bit reduction written as two 64-bit words, and wrong for none;
+  glibc 2.43's, IBM's, is wrong for 46 of the same 20,000. On a machine
+  without FMA it costs 281 ns against glibc's 16, the price of the
+  software `fma` there. The oracle carries CORE-MATH's file and the math
+  gate requires 225,000 arguments to the last bit - the range to 2^1023,
+  each side of the first 20,000 multiples of pi/4, the worst cases for
+  reduction the literature names - and proves the check fails with the
+  128-bit product losing its middle carry and the small reduction losing
+  1/(2 pi)'s low part.
+
 - **`Math.fma` rounds once.** It was Dekker's exact product and two more
   additions, which round each, and answered the neighbour of the fused
   result for 6,231 of the 155,000 cases below; the single's was taken in

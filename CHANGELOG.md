@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **Two `SemanticVersion`s compare, and a version read from a CRLF file
+  parses.** `<=>`, `==`, `<` and a sort of two versions - or of two
+  pre-release tags - recursed until the stack ran out, which ended the
+  program: the `impl Comparable` declares `<=>(other : self)` to call the
+  struct's own, and the struct's was spelled the same, so the impl's
+  replaced it and called itself. The struct's own take `SemanticVersion`
+  and `Prerelease`, as `Time` and `Path` spell theirs. And the one
+  trailing line break the header tolerates is a CRLF too: `1.4.2\r\n`, a
+  `VERSION` file from a Windows checkout, was "not a semantic version".
+  `bench/std_semantic_version_exercise.iyi` compares, sorts and reads a
+  CRLF version; the old module died of the stack overflow.
+
 - **A program started without standard streams on Windows writes into
   nothing and goes on.** Started detached, as a service, or by a GUI
   program, a process has no standard output handle, and the first `puts`

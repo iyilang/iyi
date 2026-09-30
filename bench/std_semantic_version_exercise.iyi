@@ -25,4 +25,22 @@ assert_true SemanticVersion.parse?("1.0").nil?, "two fields are not a version"
 assert_true SemanticVersion.parse?("01.0.0").nil?, "leading zero"
 puts "  1.0 and 01.0.0 refused"
 
+puts "\n== compare"
+# Two versions compare: `<=>` recursed into itself until the stack ran out,
+# and so did `==`, `<` and a sort - the impl's `<=>(other : self)` replaced
+# the struct's own.
+one = SemanticVersion.parse("1.0.0")
+two = SemanticVersion.parse("2.0.0")
+rc = SemanticVersion.parse("2.0.0-rc.1")
+assert_true (one <=> two) == -1 && (two <=> one) == 1 && one == SemanticVersion.parse("1.0.0"), "<=> and =="
+assert_true one < rc && rc < two, "a pre-release sorts before its release"
+assert_str "1.0.0,2.0.0-rc.1,2.0.0", [two, one, rc].sorted.map(&.to_s).join(","), "sorted"
+puts "  <=>, ==, < and sorted"
+
+# A version read from a Windows file ends in CRLF, and the one trailing
+# line break the header tolerates is that, too.
+assert_str "1.4.2", SemanticVersion.parse("1.4.2\r\n").to_s, "CRLF"
+assert_true SemanticVersion.parse?("1.4.2\r").nil?, "a lone CR is not a line break"
+puts "  1.4.2 read from a CRLF file"
+
 puts "\nALL CHECKS PASSED"

@@ -71,7 +71,11 @@ pub struct SemanticVersion
       res
     end
 
-    def <=>(other : self) : Int32
+    # `Prerelease`, not `self`: the `impl Comparable` below declares
+    # `<=>(other : self)` to call this one, and a method spelled the same
+    # replaced this one - comparing two versions recursed until the stack
+    # ran out. `Time` and `Path` spell theirs the same way for this reason.
+    def <=>(other : Prerelease) : Int32
       if @identifiers.empty?
         return other.identifiers.empty? ? 0 : 1
       elsif other.identifiers.empty?
@@ -163,6 +167,8 @@ pub struct SemanticVersion
     stop = str.bytesize
 
     stop -= 1 if stop > 0 && bytes[stop - 1] == 10_u8 # '\n'
+    # And its `\r`: a version read from a Windows file ends in CRLF.
+    stop -= 1 if stop > 0 && bytes[stop - 1] == 13_u8 && stop < str.bytesize
 
     major_end = scan_field(bytes, 0, stop)
     return nil unless major_end
@@ -291,8 +297,9 @@ pub struct SemanticVersion
     end
   end
 
-  # Precedence, with build metadata ignored as the standard says.
-  def <=>(other : self) : Int32
+  # Precedence, with build metadata ignored as the standard says. The
+  # parameter is `SemanticVersion` for the reason `Prerelease#<=>` gives.
+  def <=>(other : SemanticVersion) : Int32
     r = @major == other.major ? 0 : (@major < other.major ? -1 : 1)
     return r unless r == 0
     r = @minor == other.minor ? 0 : (@minor < other.minor ? -1 : 1)

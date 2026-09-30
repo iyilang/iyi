@@ -28,4 +28,10 @@ assert_true painted.includes?("31"), "red is 31"
 assert_true painted.includes?("hi"), "keeps the text"
 puts "  red SGR when enabled"
 
+puts "\n== inspect and names"
+assert_str "\e[31m\"hi\"\e[0m", "hi".colorize.red.inspect, "inspect wraps the target's inspect"
+assert_str "hi".colorize.bold.to_s, "hi".colorize.mode(:bright).to_s, "mode(:bright) is bold"
+assert_str "hi", "hi".colorize.red.fore(:default).to_s, "fore(:default) takes the colour off"
+puts "  a painted string inspects with its quotes; :bright and :default are names"
+
 puts "\nALL CHECKS PASSED"

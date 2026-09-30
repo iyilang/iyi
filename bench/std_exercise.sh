@@ -188,6 +188,21 @@ prove_fails "chunk_while joins the element after a nil" nil_chunk_while "enumera
 prove_fails "reduce? restarts at a nil" nil_reduce "enumerable.iyi" "enum: reduce? from a nil element" \
   's/acc = found ? (yield acc\.as(Elem), e) : e/acc = acc.nil? ? e : (yield acc.as(Elem), e)/'
 
+# 16-18. The same nil test in `max_by`, `min_by` and `minmax_by`, put back:
+#     the element, not the key, deciding there was none. A panic has no
+#     assertion after it, so the proof is the sentence the check's call
+#     stops with.
+prove_fails "max_by refuses a nil answer" nil_max_by "enumerable.iyi" "panic: max_by of an empty collection" \
+  's/raise "max_by of an empty collection" if entry\[1\]\.nil?/raise "max_by of an empty collection" if entry[0].nil?/'
+prove_fails "min_by refuses a nil answer" nil_min_by "enumerable.iyi" "panic: min_by of an empty collection" \
+  's/raise "min_by of an empty collection" if entry\[1\]\.nil?/raise "min_by of an empty collection" if entry[0].nil?/'
+prove_fails "minmax_by refuses a nil answer" nil_minmax_by "enumerable.iyi" "panic: minmax_by of an empty collection" \
+  's/raise "minmax_by of an empty collection" if entry\[2\]\.nil?/raise "minmax_by of an empty collection" if entry[0].nil?/'
+
+# 19. `includes?` asking `<=>` again.
+prove_fails "includes? by ordering" cmp_includes "enumerable.iyi" "enum: includes? asks ==" \
+  's/return true if e == value/return true if (e <=> value) == 0/'
+
 echo
 echo "== one mistake, one sentence, whichever tower answers"
 # `first` of an empty receiver, a negative count and a zero step used to be
@@ -240,6 +255,12 @@ panics_with "a step of nothing, eagerly" each_step_zero "step size must be posit
   'List(Int32).new([1, 2, 3]).each_step(0) { |x| x }'
 panics_with "an index past a list" list_index "index 7 out of range for 3 elements" \
   'List(Int32).new([1, 2, 3])[7]'
+panics_with "max_by of an empty list" max_by_empty "max_by of an empty collection" \
+  'List(Int32).new([] of Int32).max_by { |x| x }'
+panics_with "min_by of an empty list" min_by_empty "min_by of an empty collection" \
+  'List(Int32).new([] of Int32).min_by { |x| x }'
+panics_with "minmax_by of an empty list" minmax_by_empty "minmax_by of an empty collection" \
+  'List(Int32).new([] of Int32).minmax_by { |x| x }[0]'
 
 echo
 echo "== the library is iyi all the way down"

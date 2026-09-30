@@ -142,6 +142,36 @@
 
 ### Fixed
 
+- **`OptionParser` reads bundles and every value spelling.** A short
+  argument read its first two bytes and dropped the rest, so `-vq` never
+  ran `-q`, `-vp80` never ran `-p`, and `-vx` and `-q=1` were accepted -
+  the exercise had pinned `-q=1` as "quiet", against the module's own
+  header, which sends a value given to a flag that takes none to
+  `invalid_option`. `--out=FILE` stored the flag under that whole name,
+  `-oFILE` panicked "not a flag", and `-é` was two bytes, half a
+  character. 360,000 specs and argument lists against Crystal's
+  `OptionParser` found these and none after; the exercise checks each and
+  proves each check fails with its fix undone.
+- **`Levenshtein` on bytes that are not UTF-8.** The non-ASCII path took
+  its bounds from `String#size` and indexed `String#chars`, which count
+  such bytes differently: `distance("\xC3A" + "é", "éx")` panicked "index
+  out of range" and `distance("\x80", "")` was 0. Sizes come from the
+  decoded characters now; 150,000 pairs against Python's dynamic
+  programs agreed before and after, and 200,000 invalid strings after.
+- **`Colorize` refuses a name it does not know, and `inspect` inspects.**
+  `colorize(:purple)` and `mode(:italic)` fell to `Default` and cleared
+  what was set, where Crystal raises "Unknown color: purple"; `mode(:bright)`
+  was no mode though `bright` is bold; and `inspect` returned `to_s`, the
+  quotes lost. 450,000 call chains against Crystal's `Colorize` found
+  these and none after.
+- **`max_by`, `min_by` and `minmax_by` over nilable elements, and
+  `includes?` of NaN.** The three used a nil element to mean "none yet"
+  - the same shape last round fixed in `each_cons_pair`, `chunk_while`
+  and `reduce?` - and panicked "max_by of an empty collection" on
+  `[nil, 1]`; `includes?` compared with `<=>`, so NaN was found in `[NaN]`
+  where `Array#includes?` says no. `std/string_pool` agreed with a model
+  of Crystal's on 300,000 operations.
+
 - **CSV, UUID, Base64 and INI read what Python and the other library
   read.** `CSV.parse` deleted a lone `\r`, joining the fields on either
   side, and a quote after it became literal; a blank line was one empty

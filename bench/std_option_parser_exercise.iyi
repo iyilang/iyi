@@ -13,6 +13,17 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# What one parse added to a log the handlers write to.
+def added(log : Array(String), from : Int32) : String
+  parts = [] of String
+  i = from
+  while i < log.size
+    parts << log[i]
+    i = i + 1
+  end
+  parts.join(",")
+end
+
 import std/option_parser::{OptionParser}
 
 puts "== flags"
@@ -38,7 +49,7 @@ handled.invalid_option { |flag| seen << "invalid " + flag }
 handled.missing_option { |flag| seen << "missing " + flag }
 left = handled.parse(["--nope", "-z", "-q=1", "--port=8080", "keep", "-q", "--port"])
 assert_str "8080", port, "a good flag after bad ones is still read"
-assert_str "invalid --nope,invalid -z,quiet,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
+assert_str "invalid --nope,invalid -z,invalid -q,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
 assert_str "keep", left.join(","), "operands survive"
 bare = OptionParser.new
 bare.on("--flag", "a switch") { |v| }
@@ -46,5 +57,37 @@ bare.invalid_option { |flag| seen << "no value for " + flag }
 bare.parse(["--flag=x"])
 assert_str "no value for --flag", seen.last, "a value for a switch is an invalid option"
 puts "  invalid_option and missing_option answer instead of a panic"
+
+puts "\n== short bundles and the value spellings"
+ran = [] of String
+bundles = OptionParser.new
+bundles.on("-v", "verbose") { |v| ran << "v" }
+bundles.on("-q", "quiet") { |v| ran << "q" }
+bundles.on("-p PORT", "port") { |v| ran << "p=" + v }
+bundles.invalid_option { |flag| ran << "invalid " + flag }
+bundles.parse(["-vq", "-qvp8080"])
+assert_str "v,q,q,v,p=8080", added(ran, 0), "a bundle runs every flag in it"
+mark = ran.size
+bundles.parse(["-vx", "-q=1"])
+assert_str "invalid -v,invalid -q", added(ran, mark), "a bundle with no such flag in it is an invalid option"
+long_eq = OptionParser.new
+long_eq.on("--out=FILE", "output") { |v| ran << "out=" + v }
+long_eq.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+long_eq.parse(["--out", "a", "--out=b"])
+assert_str "out=a,out=b", added(ran, mark), "--out=FILE takes a value"
+short_glued = OptionParser.new
+short_glued.on("-oFILE", "output") { |v| ran << "o=" + v }
+short_glued.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+short_glued.parse(["-o", "a", "-ob"])
+assert_str "o=a,o=b", added(ran, mark), "-oFILE takes a value"
+accent = OptionParser.new
+accent.on("-é", "accent") { |v| ran << "é=" + v }
+accent.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+accent.parse(["-é", "-ö"])
+assert_str "é=,invalid -ö", added(ran, mark), "a short flag is one character"
+puts "  -vqp8080 is -v -q -p 8080, and --out=FILE, -oFILE and -é are flags"
 
 puts "\nALL CHECKS PASSED"

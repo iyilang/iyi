@@ -96,6 +96,17 @@
 
 ### Changed
 
+- **The write barrier resolves a stored word once.** It found the
+  object with `IyiRoots.base_of`, then `gray` found its mark byte by the
+  same arithmetic, and the thread's worker was read for every store
+  under a mark - most of them a fresh object into a fresh object, born
+  black, with nothing to do. The barrier now takes `shade_word`'s single
+  pass: the arena, the chunk's index, its entry and its colour once, and
+  the worker only for a word that grays. A store of a black object under
+  a mark costs 92 instructions to 174; binary trees' wall time does not
+  move beyond noise. The concurrent mark exercise's barrier proof now
+  removes this path's shading.
+
 - **The mark's inner loop does less per object.** A scan worked the
   chunk's index out twice, called `shade_word` for every pointer and
   `push` from it, and `push` called `grow_stack` on every entry to learn
@@ -11912,7 +11923,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,789-line library and nothing else. Every other
+  written against iyi's own 18,820-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -136,7 +136,7 @@ grep '^machine:' machine.txt | sed 's/^/  /'
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
 cp "$REPO"/src/iyi/*.iyi patched/iyi/
-awk '{ sub(/mutator_shade\(w, base\) if base != 0/, "# the barrier shades nothing"); print }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi
+awk '{ if (sub(/return unless Pointer\(Atomic\(UInt8\)\)\.new\(mark\)\.value\.compare_and_set\(WHITE\.unsafe_to_u8, GRAY\.unsafe_to_u8\)\[1\]/, "return # the barrier shades nothing")) found = 1; print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi || { echo "the barrier's shading this proof removes is not in the prelude any more"; exit 1; }
 cmp -s patched/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o nobarrier > build-nobarrier.log 2>&1; then
   cat build-nobarrier.log; exit 1

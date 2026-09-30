@@ -4607,13 +4607,44 @@ require "./file"
       # that faulted had started a mark with a chunk gray.
       def self.barrier(address : UInt64, words : UInt64) : Nil
         return if LibIyiGCTable.__iyi_marking == 0_u8
-        w = worker
         index = 0_u64
         while index < words
-          base = IyiRoots.base_of(IyiHeap.read64(address + index * 8_u64))
-          mutator_shade(w, base) if base != 0
-          index = index + 1_u64
+          barrier_word(IyiHeap.read64(address &+ index &* 8_u64))
+          index = index &+ 1_u64
         end
+      end
+
+      # One stored word, shaded in `shade_word`'s single pass: the arena
+      # once, the chunk's index once, its entry and its colour read, and
+      # the worker's stack looked up only for a word that grays. Resolved
+      # by `IyiRoots.base_of` and again by `gray`, the chunk was worked out
+      # twice, and the thread's worker read, for every store under a mark
+      # - most of them a fresh object into a fresh object, born black and
+      # nothing to do: binary trees made 25 million such calls at a
+      # hundred instructions each. A word outside every arena - a large
+      # object, or no heap at all - takes the general path.
+      @[AlwaysInline]
+      def self.barrier_word(word : UInt64) : Nil
+        return if word == 0
+        arena = IyiHeap.arena_of(word)
+        if arena == 0
+          base = IyiRoots.base_of(word)
+          mutator_shade(worker, base) if base != 0
+          return
+        end
+        grid = IyiHeap.read64(arena &+ IyiHeap::OFF_GRID)
+        first = arena &+ grid.unsafe_shr(IyiHeap::GRID_SHIFT)
+        return if word < first
+        index = ((word &- first).unsafe_shr(3_u64) &* (grid & (1_u64.unsafe_shl(IyiHeap::GRID_SHIFT) &- 1_u64))).unsafe_shr(IyiHeap::MAGIC_SHIFT)
+        bits = IyiHeap.read8(arena &+ IyiHeap::META &+ index &* IyiHeap::META_ENTRY)
+        return if bits & IyiHeap::CARVED_FLAG == 0 || bits & IyiHeap::FREE_FLAG != 0
+        mark = IyiHeap.read64(arena &+ IyiHeap::OFF_MARKS) &+ index
+        # A plain read first: a compare-and-set that fails is still a
+        # locked write of the line (`gray`).
+        return if IyiHeap.read8(mark) != WHITE
+        return unless Pointer(Atomic(UInt8)).new(mark).value.compare_and_set(WHITE.unsafe_to_u8, GRAY.unsafe_to_u8)[1]
+        head = first &+ index &* IyiHeap.read64(arena &+ IyiHeap::OFF_CHUNK)
+        mutator_push(worker, bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head)
       end
 
       # The assist, GC_DESIGN.md Stage 9: a mutator that allocated a slice

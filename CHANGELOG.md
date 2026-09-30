@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **On Windows, a file the system holds exists.** The paging file, and
+  any file held so that even its attributes are refused
+  (ERROR_SHARING_VIOLATION), answered `File.exists?` false and
+  `File.info` "File not found" - about `C:\pagefile.sys`, which `dir`
+  lists. Both read the file's directory entry now when the attribute call
+  is refused that way. `bench/std_file_exercise.sh` asks the paging file
+  where there is one; the old modules answered false and panicked.
+
 - **On Windows, `iyi run` passes on a program's negative exit status.**
   A program's `exit(-1)` ends it with 0xFFFFFFFF, which Crystal's
   `Process::Status` reads as an NTSTATUS error, so `iyi run` said
@@ -12336,7 +12344,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,904-line library and nothing else. Every other
+  written against iyi's own 18,916-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

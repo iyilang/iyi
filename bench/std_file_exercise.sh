@@ -523,6 +523,28 @@ PY
         status=1
       fi
     fi
+    # A file the system holds without sharing refuses every attribute call
+    # - an ordinary exclusive open does not; the paging file does - and
+    # `File.exists?` said false and `File.info` "File not found" about a
+    # file `dir` lists. Asked of the paging file of whichever drive has one.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.exists?(Program.args[0])} #{File.file?(Program.args[0])} #{File.size(Program.args[0]) > 0}"\n' > "$WORK/held.iyi"
+    paging=""
+    for drive in C D E; do
+      [ -e "/$(echo $drive | tr 'A-Z' 'a-z')/pagefile.sys" ] && { paging="$drive:/pagefile.sys"; break; }
+    done
+    if [ -z "$paging" ]; then
+      echo "  no paging file on C:, D: or E:, so a file the system holds is unmeasured"
+    elif ! "$IYI" build -o "$WORK/held" "$WORK/held.iyi" > "$WORK/held.build" 2>&1; then
+      echo "  the held-file program did not build"; sed -n '1,10p' "$WORK/held.build"; status=1
+    else
+      answer="$("$WORK/held" "$paging" 2>&1)"
+      if [ "$answer" = "true true true" ]; then
+        echo "  $paging, held by the system, exists, is a file, and has a size"
+      else
+        echo "  $paging, held by the system, answered exists?/file?/size: $answer"
+        status=1
+      fi
+    fi
     # A reparse point is a link only by its tag. Every one was `Symlink`,
     # so an app execution alias - what `WindowsApps` holds - and a cloud
     # placeholder answered `file? false`; and a junction whose directory is

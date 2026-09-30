@@ -415,6 +415,8 @@ end
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileW(name : UInt16*) : Int32
     fun RemoveDirectoryW(name : UInt16*) : Int32
+    fun FindFirstFileW(name : UInt16*, data : Void*) : Void*
+    fun FindClose(handle : Void*) : Int32
     fun GetFileAttributesW(name : UInt16*) : Int32
     # Clearing FILE_ATTRIBUTE_READONLY, which is what stands between a
     # read-only file and `DeleteFileW`: POSIX asks the *directory* for
@@ -913,10 +915,20 @@ end
   # The attributes of a path, or -1 (INVALID_FILE_ATTRIBUTES) when there is
   # nothing there. `File` asks this rather than opening, because
   # `CreateFileW` without FILE_FLAG_BACKUP_SEMANTICS refuses a directory.
+  # A file another process holds without sharing - `pagefile.sys`, a
+  # database's lock file - refuses `GetFileAttributesW` with
+  # ERROR_SHARING_VIOLATION (32), and `File.exists?` said false about a
+  # file `dir` lists. Its directory entry answers without opening it.
   def __iyi_path_attributes(path : UInt8*) : Int32
     wide = __iyi_wide_path(path)
     return -1 if wide.address == 0_u64
-    LibC.GetFileAttributesW(wide)
+    attributes = LibC.GetFileAttributesW(wide)
+    return attributes unless attributes == -1 && LibC.GetLastError == 32
+    entry = Pointer(UInt32).malloc(148_u64) # WIN32_FIND_DATAW, 592 bytes
+    found = LibC.FindFirstFileW(wide, entry.as(Void*))
+    return -1 if found.address &+ 1_u64 == 0_u64
+    LibC.FindClose(found)
+    entry.as(Pointer(Int32)).value
   end
 
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE

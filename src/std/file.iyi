@@ -782,7 +782,16 @@ class ::File
       data = uninitialized Std::File::LibKernel32::WIN32_FILE_ATTRIBUTE_DATA
       # 0 is GetFileExInfoStandard, the one level this call answers.
       if Std::File::LibKernel32.GetFileAttributesExW(wpath, 0, pointerof(data)) == 0
-        return nil
+        # A file another process holds without sharing refuses the call
+        # (ERROR_SHARING_VIOLATION, 32), and `info` said "File not found"
+        # about `pagefile.sys`. Its directory entry carries the same
+        # fields, in the same order, for its first 36 bytes.
+        return nil unless Std::File::LibKernel32.GetLastError == 32
+        entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
+        found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
+        return nil if found.address == 0xFFFFFFFFFFFFFFFF_u64
+        Std::File::LibKernel32.FindClose(found)
+        pointerof(data).as(Pointer(UInt8)).copy_from(entry, 36)
       end
 
       attrs = data.dwFileAttributes

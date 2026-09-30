@@ -1,8 +1,9 @@
 /*
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
- * log1p, sinh, cosh and tanh, as `bench/std_math_exercise.sh` asks them.
- * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
- * `sinh`, `cosh`, `tanh`) reads doubles from
+ * log1p, sinh, cosh and tanh, and its CORE-MATH erf and erfc (`core_math/`,
+ * linked with libm for their exact `fma`), as `bench/std_math_exercise.sh`
+ * asks them. `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`,
+ * `expm1`, `log1p`, `sinh`, `cosh`, `tanh`, `erf`, `erfc`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
  * pairs and writes each with its power.
  * The files are opened in binary, which a Windows C runtime's standard
@@ -23,6 +24,8 @@ double __log1p (double);
 double __ieee754_sinh (double);
 double __ieee754_cosh (double);
 double __tanh (double);
+double __erf (double);
+double __erfc (double);
 
 static double unary (const char *name, double x)
 {
@@ -44,6 +47,10 @@ static double unary (const char *name, double x)
     return __ieee754_cosh (x);
   if (strcmp (name, "tanh") == 0)
     return __tanh (x);
+  if (strcmp (name, "erf") == 0)
+    return __erf (x);
+  if (strcmp (name, "erfc") == 0)
+    return __erfc (x);
   return exp (x);
 }
 int main (int argc, char **argv)

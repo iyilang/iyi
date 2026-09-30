@@ -55,6 +55,8 @@ port of:
   distribute this software is freely granted, provided that this notice is
   preserved."
 - [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
+- [CORE-MATH][], as glibc 2.43 carries it (`Math.erf` and `erfc` in
+  `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
 <!-- licenses -->
@@ -69,6 +71,7 @@ port of:
 [Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
 [crystal-metric]: https://github.com/kostya/crystal-metric
 [musl]: https://musl.libc.org/
+[CORE-MATH]: https://core-math.gitlabpages.inria.fr/
 [bdwgc]: http://www.hboehm.info/gc/
 [GMP]: https://gmplib.org/
 [libevent2]: http://libevent.org/

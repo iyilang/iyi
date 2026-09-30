@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **`Math.erf` and `erfc` are correctly rounded, and glibc's.** They were
+  a series and a continued fraction to about 1e-15, and `erf` of a
+  subnormal panicked "arithmetic overflow" - its series never stopped.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables: every answer is the double nearest the true value, so the same
+  as glibc's for every argument, FMA or not. On this change's machine,
+  which has no FMA and takes `Math.fma`'s software arm, erf costs 97 ns
+  and erfc 348 against glibc's 60 and 173. `bench/libm_oracle/core_math`
+  carries glibc's five files and the math gate requires 212,000
+  arguments of each to the last bit - 2^-70 to 32, the subnormals,
+  erfc's subnormal results and its negatives - and proves the check
+  fails with the fast path's two-sum losing its low part, erfc's 1/x
+  losing its, and 1 + erf rounded for a negative erfc.
+
 - **`Math.sinh`, `cosh` and `tanh` are glibc's.** They were a series near
   zero, `exp(x - ln 2)` past 709 and the textbook forms between, and
   answered differently from glibc 2.43 in the last bit for 952 arguments
@@ -11,7 +25,7 @@
   `e_sinh.c`, `e_cosh.c` and `s_tanh.c` now, glibc 2.43's, branch for
   branch at its thresholds, on the `exp` and `expm1` that are glibc's to
   the last bit already. `bench/libm_oracle` carries the three files and
-  `bench/std_math_exercise.sh` requires 270,000 arguments of each to the
+  `bench/std_math_exercise.sh` requires 264,000 arguments of each to the
   last bit - both sides of every threshold, both signs, the specials - and
   proves the check fails with each function's small-argument branch moved.
 

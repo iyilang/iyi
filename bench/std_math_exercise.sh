@@ -677,6 +677,9 @@ mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scal
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
 mutate "isqrt without halving its root" '        res = (res >> 1) + bit' '        res = res + bit'
 mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)[1]'
+mutate "erf of a single answered as a double" '  def self.erf(value : Float32) : Float32
+    erf(value.to_f64).to_f32' '  def self.erf(value : Float32) : Float64
+    erf(value.to_f64)'
 mutate "gcd on the positive side" 'x = a > 0 ? -a : a' 'x = a.abs'
 
 echo

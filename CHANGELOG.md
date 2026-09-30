@@ -127,6 +127,16 @@
 
 ### Fixed
 
+- **`Math.erf`, `erfc`, `gamma`, `lgamma` and `tgamma` of a single are
+  singles.** They had no Float32 overload, so `Math.erf(0.5_f32)` was the
+  double's answer, a Float64, where Crystal's is `erff`'s Float32; of
+  300,000 singles every other one came back unequal to glibc's. Each has
+  a Float32 and a generic overload now, as Crystal's `Math` does, and
+  `fma` its generic one; a single's answer is the correctly rounded
+  double's, rounded, and equal to glibc's erff on all 300,000. The math
+  exercise checks four singles against glibc's and proves the check fails
+  with erf's single answered as a double.
+
 - **`Math.sin` and `cos` of a large argument, correctly rounded.** They
   shared `tan`'s reduction and its give-up: `Math.sin(1.0e300)` was 0.0
   and `Math.cos(1.0e300)` 1.0, where they are -0.8178819121159085 and

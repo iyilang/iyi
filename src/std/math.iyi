@@ -4628,6 +4628,10 @@ pub struct Math
     {% end %}
   end
 
+  def self.fma(a : T, b : U, c : V) : Float64 forall T, U, V
+    fma(a.to_f64, b.to_f64, c.to_f64)
+  end
+
   # An exponent that stands for zero, an infinity or NaN once `fma_parts`
   # has taken the bias and the significand's width off it.
   private FMA_SPECIAL = 0x7ff - 0x3ff - 52 - 1
@@ -8320,8 +8324,38 @@ pub struct Math
     erf_erfc_accurate(value)
   end
 
+  # The single's: the double's answer rounded, which is the correctly
+  # rounded single but where rounding twice meets a halfway point.
+  def self.erf(value : Float32) : Float32
+    erf(value.to_f64).to_f32
+  end
+
+  def self.erf(value : T) : Float64 forall T
+    erf(value.to_f64)
+  end
+
+  # The single's: the double's answer rounded, which is the correctly
+  # rounded single but where rounding twice meets a halfway point.
+  def self.erfc(value : Float32) : Float32
+    erfc(value.to_f64).to_f32
+  end
+
+  def self.erfc(value : T) : Float64 forall T
+    erfc(value.to_f64)
+  end
+
   def self.gamma(value : Float64) : Float64
     tgamma(value)
+  end
+
+  # The single's: the double's answer rounded, which is the correctly
+  # rounded single but where rounding twice meets a halfway point.
+  def self.gamma(value : Float32) : Float32
+    gamma(value.to_f64).to_f32
+  end
+
+  def self.gamma(value : T) : Float64 forall T
+    gamma(value.to_f64)
   end
 
   # log|gamma(value)|, correctly rounded (CORE-MATH, as glibc 2.43): the
@@ -8331,12 +8365,32 @@ pub struct Math
     lgamma_core(value)
   end
 
+  # The single's: the double's answer rounded, which is the correctly
+  # rounded single but where rounding twice meets a halfway point.
+  def self.lgamma(value : Float32) : Float32
+    lgamma(value.to_f64).to_f32
+  end
+
+  def self.lgamma(value : T) : Float64 forall T
+    lgamma(value.to_f64)
+  end
+
   # gamma(value), correctly rounded (CORE-MATH, as glibc 2.43): +-0 answer
   # +-infinity, the negative whole numbers and -infinity NaN; past
   # 171.62 the answer overflows to infinity, and below -184 it is a zero
   # carrying gamma's sign.
   def self.tgamma(value : Float64) : Float64
     tgamma_core(value)
+  end
+
+  # The single's: the double's answer rounded, which is the correctly
+  # rounded single but where rounding twice meets a halfway point.
+  def self.tgamma(value : Float32) : Float32
+    tgamma(value.to_f64).to_f32
+  end
+
+  def self.tgamma(value : T) : Float64 forall T
+    tgamma(value.to_f64)
   end
 
   # lgamma and tgamma: CORE-MATH's correctly rounded binary64 lgamma and

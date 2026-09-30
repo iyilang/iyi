@@ -289,6 +289,12 @@ assert_str "Infinity", Math.exp(100.0_f32).to_s, "exp(100_f32)"
 assert_str "Infinity", Math.pow(2.0_f32, 200.0_f32).to_s, "pow(2_f32, 200_f32)"
 assert_str "-Infinity", Math.sinh(-100.0_f32).to_s, "sinh(-100_f32)"
 assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
+# erf, erfc, gamma and lgamma answer singles as the other library's do,
+# glibc's erff, erfcf, tgammaf and lgammaf to the last bit here.
+assert_str "0.5204999", Math.erf(0.5_f32).to_s, "erf(0.5_f32)"
+assert_str "0.03389485", Math.erfc(1.5_f32).to_s, "erfc(1.5_f32)"
+assert_str "11.631728", Math.gamma(4.5_f32).to_s, "gamma(4.5_f32)"
+assert_str "0.5723649", Math.lgamma(0.5_f32).to_s, "lgamma(0.5_f32)"
 puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
 # The oracles `bench/std_math_exercise.sh` writes from the code glibc

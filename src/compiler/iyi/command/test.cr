@@ -82,7 +82,7 @@ class Iyi::Command
         # The pattern is built in posix form because a backslash is an escape
         # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
         # nothing, so `iyi test` in a directory of tests found no tests.
-        Dir.glob(::Path[path].to_posix.join("**", "*_test.iyi")) { |file| files << file }
+        Dir.glob(Iyi.glob_root(path).join("**", "*_test.iyi")) { |file| files << file }
       elsif File.file?(path)
         files << path
       else

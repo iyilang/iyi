@@ -349,6 +349,34 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -R "$(cygpath -w locked/sloppy.iyi)" ;;
   *) chmod u+w locked/sloppy.iyi ;;
 esac
+# A directory given to `test` and `fmt` is a name, not a pattern: `proj
+# [v2]` and `x{a,b}` were read as a character class and a brace, and on
+# Windows a share's root, `\\server\share`, was looked for under the
+# current drive's root - the tests were not found, and `fmt --check`
+# passed having checked nothing.
+for dir in "proj [v2]" "x{a,b}"; do
+  mkdir -p "rooted/$dir"
+  printf 'module messy\n\nx=1\n' > "rooted/$dir/messy.iyi"
+  printf 'module fails_test\n\nexit(1)\n' > "rooted/$dir/fails_test.iyi"
+done
+roots=("rooted/proj [v2]" "rooted/x{a,b}")
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    share="$(cygpath -w "$WORK/rooted/proj [v2]")"
+    share="\\\\127.0.0.1\\${share:0:1}\$${share:2}"
+    [ -d "$share" ] && roots+=("$share")
+    ;;
+esac
+for root in "${roots[@]}"; do
+  "$IYI" fmt --check "$root" > rooted.fmt 2>&1; fmt_code=$?
+  "$IYI" test "$root" > rooted.test 2>&1; test_code=$?
+  if [ "$fmt_code" -eq 1 ] && [ "$(grep -c 'produced changes' rooted.fmt)" = "1" ] &&
+     [ "$test_code" -eq 1 ] && grep -q "0 passed, 1 failed" rooted.test; then
+    echo "  fmt --check and test of $root: the one messy file and the one failing test"
+  else
+    echo "  fmt --check and test of $root: fmt $fmt_code, test $test_code"; sed -n '1,3p' rooted.fmt rooted.test; status=1
+  fi
+done
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

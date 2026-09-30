@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A directory given to `iyi test`, `iyi fmt` and the other walking
+  verbs is a name, and a share's root is where a pattern on it starts.**
+  The directory went into a glob pattern as it was, so `proj [v2]` and
+  `x{a,b}` were a character class and a brace: `iyi test` there found no
+  tests, and `iyi fmt --check` exited 0 having checked nothing, which a CI
+  check reads as a pass. Its pattern characters are escaped now
+  (`Iyi.glob_root`), everywhere a verb globs under a directory. And on
+  Windows a pattern under `\\server\share` was looked for under the
+  current drive's root; the server and share are the pattern's start.
+  `bench/verbs_exercise.sh` runs `fmt --check` and `test` in `proj [v2]`,
+  `x{a,b}` and the first through `\\127.0.0.1\C$`, and expects the one
+  messy file and the one failing test in each; the old binary found
+  neither.
+
 - **On Windows a signal no `Signal.wait` names keeps its default.** The
   console handler answered every event whatever was waited for: a
   program waiting for `TERM` alone swallowed Ctrl-C and Ctrl-Break, and

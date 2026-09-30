@@ -191,7 +191,7 @@ class Iyi::Command
       walking = up
     end
 
-    files = single ? [single] : Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort
+    files = single ? [single] : Dir.glob(Iyi.glob_root(src).join("**", "*.cr")).sort
 
     # One file at a time only works from the *top*: a `.cr` file cannot
     # require an iyi module, and a `require` that finds one gets a
@@ -201,7 +201,7 @@ class Iyi::Command
     # a script.
     still_crystal = nil
     if single
-      requirers = Dir.glob(::Path[project_root].to_posix.join("**", "*.{cr,iyi}")).sort.reject do |file|
+      requirers = Dir.glob(Iyi.glob_root(project_root).join("**", "*.{cr,iyi}")).sort.reject do |file|
         file == single || shards_install?(file, project_root)
       end.select do |file|
         here = File.dirname(file)
@@ -277,7 +277,7 @@ class Iyi::Command
     # unit and has to require what it uses, and what one file uses was
     # required by another - `base_log_handler.cr` names `HTTP::Handler`
     # and requires nothing.
-    (single ? Dir.glob(::Path[src].to_posix.join("**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
+    (single ? Dir.glob(Iyi.glob_root(src).join("**", "*.cr")).sort.reject { |file| shards_install?(file, src) } : files).each do |file|
       migrate_source(file).each_line do |line|
         next unless (match = MigrateUnit::REQUIRE.match(line))
         target = match[1] || ""
@@ -385,7 +385,7 @@ class Iyi::Command
     # and its `lib` are where they were, and the module is written beside
     # them. Copying them onto themselves is all that would happen.
     assets = 0
-    Dir.glob(single ? [] of String : ::Path[src].to_posix.join("**", "*").to_s).sort.each do |file|
+    Dir.glob(single ? [] of String : Iyi.glob_root(src).join("**", "*").to_s).sort.each do |file|
       next unless File.file?(file)
       next if file.ends_with?(".cr")
       next if shards_install?(file, src)
@@ -944,7 +944,7 @@ class Iyi::Command
     # compiled the way it runs, as one program, because a front end per
     # file would cost a minute on a project with fifty of them.
     spec_dir = File.join(File.dirname(src), "spec")
-    specs = Dir.glob(::Path[spec_dir].to_posix.join("**", "*_spec.cr")).sort
+    specs = Dir.glob(Iyi.glob_root(spec_dir).join("**", "*_spec.cr")).sort
     unless specs.empty?
       # Named one by one rather than as `spec/**`, because the requires are
       # resolved from this source's own directory and a glob of them is
@@ -1994,7 +1994,7 @@ class Iyi::Command
       posix = ::Path[base].to_posix.to_s
       if posix.ends_with?("/**") || posix.ends_with?("/*")
         dir = posix.rchop("*").rchop("*").rchop("/")
-        pattern = posix.ends_with?("/**") ? ::Path[dir].to_posix.join("**", "*.cr") : ::Path[dir].to_posix.join("*.cr")
+        pattern = posix.ends_with?("/**") ? Iyi.glob_root(dir).join("**", "*.cr") : Iyi.glob_root(dir).join("*.cr")
         Dir.glob(pattern).sort.compact_map { |file| by_source[file]? }
       else
         file = base.ends_with?(".cr") ? base : base + ".cr"

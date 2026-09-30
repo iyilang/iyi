@@ -456,7 +456,7 @@ class Iyi::Command
     # come made every file of every part look like an entry of its own -
     # `asn1/identifier.cr` among them, which is one file of `asn1.cr`.
     reached = required_files(entry)
-    rest = Dir.glob(::Path[source].to_posix.join("**", "*.cr")).map { |path| File.expand_path(path) }
+    rest = Dir.glob(Iyi.glob_root(source).join("**", "*.cr")).map { |path| File.expand_path(path) }
       .sort.reject { |path| reached.includes?(path) }
     return [] of String if rest.empty?
 

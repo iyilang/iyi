@@ -334,7 +334,7 @@ class Iyi::Command
         previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
       end
 
-      Dir.glob(::Path[emit_dir].to_posix.join("**", "*.iyimod")) do |candidate|
+      Dir.glob(Iyi.glob_root(emit_dir).join("**", "*.iyimod")) do |candidate|
         begin
           artifact = IyiMod.read(candidate)
           if artifact.module_name == module_name

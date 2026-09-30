@@ -82,6 +82,23 @@ module Iyi
   # Swapped rather than normalised: `Path#normalize` also collapses `./` and
   # `//`, which would change what a POSIX build prints, and `Path#to_native`
   # translates no separators at all — it only relabels the kind.
+  # iyi: *dir* as the literal start of a glob pattern: posix, since a
+  # backslash is an escape in a pattern and not a separator, and with the
+  # pattern's own characters escaped, since a directory's name is a name.
+  # `proj [v2]` and `x{a,b}` were read as a character class and a brace,
+  # matched nothing, and `iyi test` found no tests there while `iyi fmt
+  # --check` passed having checked nothing.
+  def self.glob_root(dir : String | ::Path) : ::Path
+    posix = ::Path[dir].to_posix.to_s
+    escaped = String.build do |io|
+      posix.each_char do |char|
+        io << '\\' if char.in?('*', '?', '[', ']', '{', '}')
+        io << char
+      end
+    end
+    ::Path.posix(escaped)
+  end
+
   def self.native_path(path : String) : String
     {% if flag?(:win32) %}
       return path.tr("/", "\\") if path.includes?('/')

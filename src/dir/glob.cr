@@ -225,6 +225,24 @@ class Dir
         end
       end
 
+      {% if flag?(:win32) %}
+        # iyi: a UNC pattern's server and share are where it starts, not
+        # two directories under the current drive's root: `//server/share/
+        # dir/**` looked in `C:\server\share\dir`, found nothing, and
+        # `iyi fmt --check` of a directory on a share passed having checked
+        # nothing.
+        if glob.starts_with?("//") && !glob.starts_with?("///")
+          case last = list[-1]?
+          when ConstantDirectory
+            list[-1] = ConstantDirectory.new("\\\\" + last.path)
+            return list
+          when ConstantEntry
+            list[-1] = ConstantEntry.new("\\\\" + last.path, last.merged)
+            return list
+          end
+        end
+      {% end %}
+
       if glob.starts_with?('/')
         list << RootDirectory.new
       end

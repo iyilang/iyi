@@ -163,7 +163,7 @@ class Iyi::Command
         # a `src\` would have made the pattern `src\/**/*.cr` and matched
         # nothing. Nothing arrives spelled that way while `normalize_path`
         # chops it first, and now nothing depends on that.
-        directory = ::Path[filename].to_posix
+        directory = Iyi.glob_root(filename)
         filenames = Dir[directory.join("**", "*.cr")] + Dir[directory.join("**", "*.iyi")]
         format_many filenames
       else

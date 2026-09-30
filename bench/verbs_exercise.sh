@@ -380,6 +380,32 @@ for root in "${roots[@]}"; do
   fi
 done
 [ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
+# A program rebuilt while it runs, the everyday Windows loop: Windows will
+# not write over a running program, and the linker said so after the whole
+# compile - "LNK1104: cannot open file", exit status 1104. The running one
+# is moved aside, and the new one is written where it was.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    mkdir -p busy
+    printf 'module busy\n\nsleep(8000)\n' > busy/slow.iyi
+    printf 'module busy\n\nputs "second"\n' > busy/quick.iyi
+    if "$IYI" build -o busy/prog.exe busy/slow.iyi > busy.log 2>&1; then
+      busy/prog.exe &
+      running=$!
+      sleep 1
+      "$IYI" build -o busy/prog.exe busy/quick.iyi > busy.log 2>&1; rebuilt=$?
+      said="$(busy/prog.exe 2>&1 | tr -d '\r')"
+      if [ "$rebuilt" -eq 0 ] && [ "$said" = "second" ]; then
+        echo "  a program rebuilt while it runs: the running one moved aside, the new one runs"
+      else
+        echo "  a program rebuilt while it runs: build $rebuilt, it said '$said'"; sed -n '1,3p' busy.log; status=1
+      fi
+      kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
+    else
+      echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
+    fi
+    ;;
+esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

@@ -146,6 +146,29 @@ module Iyi
   # new file answered yes, and `-o` there came back as the linker's
   # LNK1104 after a whole compilation. So Windows is asked by making a
   # file, which is the question.
+  # iyi: on Windows, *path* made free for a new file: false only when it is
+  # there, cannot be opened for writing - a running program, a read-only
+  # file - and cannot be renamed either. Moved to `*.old`, or `*.old-<pid>`
+  # when an earlier one is still running and cannot be deleted.
+  def self.move_aside_if_busy(path : String) : Bool
+    return true unless File.file?(path)
+    begin
+      File.open(path, "r+") { }
+      return true
+    rescue File::Error
+    end
+    aside = "#{path}.old"
+    begin
+      File.delete(aside) if File.exists?(aside)
+    rescue File::Error
+      aside = "#{path}.old-#{Process.pid}"
+    end
+    File.rename(path, aside)
+    true
+  rescue File::Error
+    false
+  end
+
   def self.writable_directory?(directory : String) : Bool
     {% if flag?(:win32) %}
       probe = File.join(directory, ".iyi-write-probe-#{Process.pid}")

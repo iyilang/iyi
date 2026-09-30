@@ -1100,6 +1100,19 @@ class Iyi::Command
       unless Iyi.writable_directory?(directory)
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
+
+      # Windows will not write over a program that is running, nor over a
+      # read-only file, and the linker said so only after the whole
+      # compile: "LNK1104: cannot open file", exit status 1104, and the
+      # linker's command line on stderr. It does let the file be renamed,
+      # which is how `make -f Makefile.win` replaces a running `iyi.exe`,
+      # so the old program is moved aside - it goes on running - and the
+      # new one written where it was.
+      {% if flag?(:win32) %}
+        unless compiler.cross_compile? || Iyi.move_aside_if_busy(output_filename)
+          abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+        end
+      {% end %}
     end
 
     if run

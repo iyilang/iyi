@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **Building over a program that is running, on Windows, moves it aside
+  and writes the new one.** Windows will not write over a running program
+  or a read-only file, and the linker said so only after the whole
+  compile: "LNK1104: cannot open file", exit status 1104, and 1.8 KB of
+  the linker's command line on stderr - the everyday edit-run loop of a
+  server. It does let the file be renamed, which is how `make -f
+  Makefile.win` replaces a running `iyi.exe`: the old program is moved to
+  `*.old` and goes on running, and the new one is written where it was.
+  When even the rename is refused, the build stops before compiling and
+  says so. `bench/verbs_exercise.sh` rebuilds a program while it runs and
+  runs the new one; the old binary failed with LNK1104 (measured by the
+  hunt that found it).
+
 - **`Process.run(env:)` on Windows matches a variable's name in another
   case in any script.** Windows holds `ÇAY` and `çay` as one variable; the
   names were compared with `upcase`, which folds ASCII alone, so

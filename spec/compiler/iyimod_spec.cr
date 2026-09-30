@@ -2031,6 +2031,10 @@ describe Iyi::IyiMod do
   # Run, with the source deleted, because the point is not that the build is
   # allowed: it is that `LOW` is 1 on the far side and the `fun` still reaches
   # the intrinsic.
+  #
+  # And a macro in the `lib` is more of the `lib`: `std/math` writes its
+  # `llvm.fma` binding inside `{% if flag?(:aarch64) %}`, and on arm64 alone
+  # the `fun`s that expanded read as code and refused the module.
   it "carries a lib's declarations and the constants a macro writes" do
     with_tempdir("iyimod_lib_and_macro") do
       Dir.mkdir_p "boot"
@@ -2046,6 +2050,9 @@ describe Iyi::IyiMod do
           end
 
           fun plat_abs = "llvm.fabs.f64"(x : Float64) : Float64
+          {% for name in ["plat_sqrt"] %}
+            fun {{name.id}} = "llvm.sqrt.f64"(x : Float64) : Float64
+          {% end %}
         end
 
         pub struct Plat
@@ -2055,6 +2062,10 @@ describe Iyi::IyiMod do
 
           pub def self.magnitude(x : Float64) : Float64
             LibPlat.plat_abs(x)
+          end
+
+          pub def self.root(x : Float64) : Float64
+            LibPlat.plat_sqrt(x)
           end
         end
         IYI
@@ -2066,10 +2077,11 @@ describe Iyi::IyiMod do
         puts Boot::Plat::Plat::LOW
         puts Boot::Plat::Plat::HIGH
         puts Boot::Plat::Plat.magnitude(-2.5)
+        puts Boot::Plat::Plat.root(6.25)
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
-      expected = "1\n2\n2.5"
+      expected = "1\n2\n2.5\n2.5"
 
       producer = create_spec_compiler
       producer.prelude = "iyi/prelude"

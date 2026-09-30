@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`std/math` is consumable as an artifact on arm64.** Its `lib` binds
+  `llvm.fma` inside `{% if flag?(:aarch64) %}`, and the rule that a
+  `lib` body is declarations judged the macro's expansion as code: the
+  `fun`s it wrote read as "code inside a type body that has to run", so
+  on darwin arm64 alone every program building against std/math's
+  artifact was refused - `std_math_exercise`, `std_complex_exercise` and
+  `std_benchmark_exercise` in the std gate. A macro in a `lib` is judged
+  as more of the `lib` now. The iyimod spec writes a `fun` with a
+  `{% for %}` in a `lib`, which expands the same everywhere, and failed
+  on x86_64 before the fix.
+
 - **`sprintf` is right in four places it was not.** `%u` of a negative
   Int64 printed it signed (`-5`, where C prints 18446744073709551611 and
   an Int32 already wrapped); `%e` and `%g` took their exponent from the

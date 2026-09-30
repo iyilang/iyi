@@ -283,11 +283,28 @@ group do |g|
     File.write(batch, "@echo ran\r\n")
     refused = Process.run(batch)
     File.delete(batch)
+    batch_reason = ""
     case refused
     when ProcessError
+      batch_reason = refused.reason
       puts "  #{refused.reason}"
     else
       fail("a batch file was not refused")
+    end
+    # And by its bare name on PATH, as npm's and code's `.cmd` shims are
+    # found: it was "no such program", about a program that is there.
+    File.write(batch, "@echo ran\r\n")
+    kept_for_shim = Program.env("PATH") || ""
+    ENV["PATH"] = "#{directory_of(me)};#{kept_for_shim}"
+    shimmed = Process.run("iyi-process-probe")
+    ENV["PATH"] = kept_for_shim
+    File.delete(batch)
+    case shimmed
+    when ProcessError
+      fail("a .cmd found by its name was #{shimmed.reason}") unless shimmed.reason == batch_reason
+      puts "  and found by its bare name on PATH, the same"
+    else
+      fail("a .cmd found by its name was run")
     end
 
     puts "== text a Windows command line cannot carry is refused"

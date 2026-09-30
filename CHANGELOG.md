@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Process.run` of a name whose only match on `PATH` is a `.cmd` or
+  `.bat` says it is a batch file.** npm, yarn and code are `.cmd` shims,
+  and the search looked for `NAME.exe` and `NAME.com` alone: the answer
+  was "no such program", about a program that is there. Once nothing on
+  `PATH` runs, a `.cmd` or `.bat` of the name is the batch-file refusal,
+  as a batch file named in full already was; a program of the name
+  anywhere on `PATH` still wins. `bench/std_process_exercise.iyi` runs a
+  `.cmd` by its bare name; the old module said "no such program".
+
 - **A junction is a link to the compiler's own file layer on Windows, and
   a `**` walk does not go through one.** Only a symbolic link's reparse
   tag counted as a link, so a junction was a directory: a junction back to

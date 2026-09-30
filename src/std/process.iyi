@@ -468,10 +468,11 @@ class ProcessChild
     def self.find(command : String) : String | ProcessError
       if separator?(command)
         found = candidate(command)
-        return ProcessError.new(command, NOT_FOUND) unless found
+        return ProcessError.new(command, batch_beside?(command) ? BATCH : NOT_FOUND) unless found
         return batch?(found) ? ProcessError.new(command, BATCH) : found
       end
       path = Program.env("PATH") || ""
+      shim = false
       path.split(';').each do |entry|
         directory = entry
         # In bytes, as `[]` counts: in characters, a quoted entry with `ü`
@@ -483,8 +484,9 @@ class ProcessChild
         if found = candidate(joined)
           return batch?(found) ? ProcessError.new(command, BATCH) : found
         end
+        shim = true if !shim && batch_beside?(joined)
       end
-      ProcessError.new(command, NOT_FOUND)
+      ProcessError.new(command, shim ? BATCH : NOT_FOUND)
     end
 
     # The file a name means, as `CreateProcessW` would: itself when its last
@@ -496,6 +498,15 @@ class ProcessChild
       return "#{name}.exe" if file?("#{name}.exe")
       return "#{name}.com" if file?("#{name}.com")
       nil
+    end
+
+    # Whether a `.cmd` or `.bat` of *name* is there: asked once nothing ran,
+    # so a program of the name anywhere on `PATH` still wins, as
+    # `CreateProcessW`'s own search has it. npm, yarn and code are `.cmd`
+    # shims, and a name whose only match was one was "no such program"
+    # where the answer is the batch-file sentence.
+    def self.batch_beside?(name : String) : Bool
+      !extension?(name) && (file?("#{name}.cmd") || file?("#{name}.bat"))
     end
 
     def self.extension?(name : String) : Bool

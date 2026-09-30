@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **An imported module's file is named the way the platform spells it.**
+  The module path's `/` went into the resolved file name as it was, so on
+  Windows every diagnostic, `check -f json` and `fix --json` named
+  `C:\proj\app/deep/util.iyi`, which a tool matching paths does not match
+  to `C:\proj\app\deep\util.iyi`. `bench/agent_loop.py` checks an error in
+  an imported module's file; its two steps that expected the mixed
+  spelling of `calc/typo.iyi` expect the platform's now.
+
 - **`iyi fmt` of a file it may not write says so.** A read-only file -
   common on Windows, a locked checkout or an extracted archive - was
   reported as "there's a bug formatting", with a request to file one; it

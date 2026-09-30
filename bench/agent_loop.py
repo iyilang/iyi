@@ -117,6 +117,21 @@ def main():
          and all(isinstance(errors[0][k], int) for k in ("line", "column", "size")),
          f"{ {k: errors[0].get(k) for k in ('line', 'column', 'size')} }")
     os.remove(os.path.join(work, "cut.iyi"))  # unparseable files are always "affected"
+    # And an error inside an imported module names that module's file the
+    # way the platform spells it, as `test --json` does: on Windows it was
+    # `C:\\work\\calc/deep.iyi`, the module path's `/` inside a
+    # backslashed root, which no tool matching paths matches to the file.
+    os.makedirs(os.path.join(work, "calc", "deep"), exist_ok=True)
+    write("calc/deep/wrong.iyi", "module calc/deep/wrong\n\npub def answer : Int32\n  \"no\"\nend\n")
+    write("deep_user.iyi", "module deep_user\n\nimport calc/deep/wrong::{answer}\n\nputs answer\n")
+    proc = run("check", "-f", "json", "deep_user.iyi", cwd=work)
+    files = sorted({e["file"] for e in json.loads(proc.stderr) if "wrong" in e.get("file", "")})
+    native = os.path.join("calc", "deep", "wrong.iyi")
+    step("an imported module's error names its file natively",
+         proc.returncode == 1 and files != [] and all(f.endswith(native) and (os.sep == "/" or "/" not in f) for f in files),
+         f"files {files}")
+    os.remove(os.path.join(work, "deep_user.iyi"))
+    os.remove(os.path.join(work, "calc", "deep", "wrong.iyi"))
 
     # 4. fix: applies exactly that edit and converges
     proc = run("fix", "--json", "app.iyi", cwd=work)
@@ -170,11 +185,11 @@ def main():
     cause = fixed.get("cause", {})
     step("fix names the file the remaining error is in",
          not fixed["clean"] and fixed["applied"] == []
-         and cause.get("file", "").endswith("calc/typo.iyi") and cause.get("line") == 8,
+         and cause.get("file", "").endswith(os.path.join("calc", "typo.iyi")) and cause.get("line") == 8,
          f"cause {cause}")
     proc = run("fix", "bumps.iyi", cwd=work)
     step("and says so in prose",
-         "the cause is in calc/typo.iyi:8:3" in proc.stderr and "iyi fix calc/typo.iyi" in proc.stderr,
+         f"the cause is in {os.path.join('calc', 'typo.iyi')}:8:3" in proc.stderr and f"iyi fix {os.path.join('calc', 'typo.iyi')}" in proc.stderr,
          proc.stderr.strip().splitlines()[-1])
     proc = run("fix", "--json", "calc/typo.iyi", cwd=work)
     fixed = json.loads(proc.stdout)

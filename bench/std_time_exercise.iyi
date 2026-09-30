@@ -175,6 +175,27 @@ mono2 = Time.monotonic
 puts "  monotonic:   #{mono1.to_s}"
 assert_true(mono2 >= mono1, "monotonic clock must be non-decreasing")
 
+# The wall clock moves by less than a timer tick: on Windows it was read
+# with `GetSystemTimeAsFileTime`, which moves once per tick - 0.7 ms to
+# 15.6 ms apart - so a span between two readings under that was zero. The
+# smallest of five steps, each from one change of the clock to the next.
+finest = 1_000_000_000_i64
+5.times do
+  start = Time.utc
+  moved = start
+  while moved == start
+    moved = Time.utc
+  end
+  after = moved
+  while after == moved
+    after = Time.utc
+  end
+  step = (after - moved).total_nanoseconds.to_i64
+  finest = step if step < finest
+end
+puts "  wall clock steps: #{finest} ns"
+assert_true(finest < 100_000_i64, "the wall clock moves by less than 100 us, not by #{finest} ns")
+
 # ---------------------------------------------------------------------------
 # Span construction, accessors, and arithmetic
 # ---------------------------------------------------------------------------

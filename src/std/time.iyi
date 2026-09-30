@@ -9,7 +9,7 @@
 #     monotonic readings with zero new symbols beyond what concurrency already links.
 #   * On Linux, raw `clock_gettime` syscalls (228 on x86_64, 113 on aarch64)
 #     issue direct kernel requests with zero libc symbols.
-#   * On Windows, kernel32's `GetSystemTimeAsFileTime` and `QueryPerformanceCounter`
+#   * On Windows, kernel32's `GetSystemTimePreciseAsFileTime` and `QueryPerformanceCounter`
 #     provide nanosecond-scale wall and monotonic time.
 #   * On wasm32-wasi, WASI import `__wasi_clock_time_get` provides both clocks.
 #
@@ -418,14 +418,18 @@ pub struct Time
 
   {% elsif flag?(:windows) %}
     lib LibKernel32
-      fun GetSystemTimeAsFileTime(time : Int64*) : Void
+      fun GetSystemTimePreciseAsFileTime(time : Int64*) : Void
       fun QueryPerformanceCounter(count : Int64*) : Int32
       fun QueryPerformanceFrequency(freq : Int64*) : Int32
     end
 
     def self.wall_clock_nanoseconds : UInt64
       filetime = uninitialized Int64
-      LibKernel32.GetSystemTimeAsFileTime(pointerof(filetime))
+      # The precise one, as Crystal reads: `GetSystemTimeAsFileTime` moves
+      # once per timer tick, measured at 0.7 ms to 15.6 ms, so two readings
+      # a few hundred microseconds apart were the same instant and a span
+      # between them was zero.
+      LibKernel32.GetSystemTimePreciseAsFileTime(pointerof(filetime))
       epoch_diff = 116444736000000000_i64
       unix_100ns = filetime - epoch_diff
       unix_100ns.to_u64 * 100_u64

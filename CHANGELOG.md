@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`Time.utc` on Windows reads the precise clock.** It read
+  `GetSystemTimeAsFileTime`, which moves once per timer tick: the smallest
+  step measured was 0.5 ms, and 0.7 ms to 15.6 ms in a loop, so two
+  readings a few hundred microseconds apart were one instant and the span
+  between them zero. It reads `GetSystemTimePreciseAsFileTime`, as
+  Crystal does, and steps by 100 ns. `bench/std_time_exercise.iyi` asserts
+  a step under 100 us; the old module stepped by 507,800 ns.
+
 - **`sprintf` formats the whole integer tower and `Float32`, and `%c` any
   code point.** `%d` of an `Int8`, `Int16`, `UInt16`, `UInt32`, `Int128`,
   `UInt128` or `Float32` - the types `std/int` and `std/float` make

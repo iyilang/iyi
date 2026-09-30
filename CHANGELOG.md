@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`std/compress` refuses an incomplete Huffman code, and reads every
+  gzip member.** A dynamic block whose literal/length, distance or
+  code-length code left bit patterns unused was decoded anyway, so a
+  corrupt stream that used only the codes that existed came back as
+  plausible bytes with no error - zlib and puff refuse all three, and so
+  does this now, keeping the one exception, a lone one-bit distance
+  code. `Gzip.decompress` read the first member of a file and dropped the
+  rest without a word: `gzip -dc`, Crystal's reader and RFC 1952 read a
+  gzip file as the series of its members, and so does this. About
+  543,000 cases against Python's `zlib` and `gzip` found these and none
+  after; the compress exercise refuses the three codes and a cut second
+  member by name, and reads two members whole.
+
 - **`std/yaml` reads and writes fifteen things as YAML 1.2 and libyaml
   do.** Read: a plain scalar may start with `?` (`?a`), and its dump now
   reads back; a folded scalar keeps its leading empty lines, a literal

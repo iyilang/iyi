@@ -96,6 +96,18 @@
 
 ### Changed
 
+- **The mark's inner loop does less per object.** A scan worked the
+  chunk's index out twice, called `shade_word` for every pointer and
+  `push` from it, and `push` called `grow_stack` on every entry to learn
+  the stack had room; every address sum was overflow-checked. The index
+  is computed once, `shade_word` and `push` are inlined, the capacity is
+  read in place, and address arithmetic inside an arena wraps. The mark
+  of binary trees at depth 14 went from 105 million instructions to 70;
+  crystal-metric's Binarytrees 0.94 to 0.97 of its time, JsonParsePure
+  0.89, JsonGenerate 0.95. The mark exercise's black-shading proof
+  follows the new line, and a new one blackens the chunk after the
+  scanned one.
+
 - **Base64 decodes its whole groups by pointer.** The loop indexed the
   text and the answer by two Int32 counters, and each load and store
   sign-extended its index: crystal-metric's Base64Decode ran 0.80 s
@@ -11900,7 +11912,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,774-line library and nothing else. Every other
+  written against iyi's own 18,789-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

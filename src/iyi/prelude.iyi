@@ -4550,6 +4550,7 @@ require "./file"
       # mark of a tree keeps a stack as deep as the tree, and a stack of
       # any depth spills past SPILL_AT with helpers - so a copy is what
       # it costs, once per doubling. Answers the mapping.
+      @[NoInline]
       def self.grow_stack(w : UInt64, need : UInt64) : UInt64
         cap = IyiHeap.read64(w + W_CAP)
         return IyiHeap.read64(w + W_STACK) if need <= cap
@@ -4712,8 +4713,9 @@ require "./file"
       # subtrees), and a marker that only spilled a full stack never
       # shared a tree at all — measured, fifteen helpers idle through
       # binary trees.
+      @[AlwaysInline]
       def self.push(w : UInt64, base : UInt64) : Nil
-        len = IyiHeap.read64(w + W_LEN)
+        len = IyiHeap.read64(w &+ W_LEN)
         if @@workers > 1_u64
           if len >= SPILL_AT
             spill(w)
@@ -4732,8 +4734,12 @@ require "./file"
             IyiHeap.write64(w + W_SINCE, since)
           end
         end
-        IyiHeap.write64(grow_stack(w, len + 1_u64) + len * 8_u64, base)
-        IyiHeap.write64(w + W_LEN, len + 1_u64)
+        # The capacity read here and the growth called only past it: a
+        # call per push to learn the stack had room was a fifth of what
+        # the push cost.
+        stack = len < IyiHeap.read64(w &+ W_CAP) ? IyiHeap.read64(w &+ W_STACK) : grow_stack(w, len &+ 1_u64)
+        IyiHeap.write64(stack &+ len &* 8_u64, base)
+        IyiHeap.write64(w &+ W_LEN, len &+ 1_u64)
       end
 
       DONATE_EVERY = 256_u64
@@ -4814,6 +4820,12 @@ require "./file"
       # The chunk's byte is read once - free, or not white, and the
       # word is done with - and grayed by a compare-and-swap where
       # another worker may be at the same object.
+      #
+      # Inlined into the scan's loops, and its address arithmetic wraps:
+      # every value in it is inside the arena the directory answered,
+      # `word` at or past `first`, and the overflow checks were a tenth
+      # of what the mark executed.
+      @[AlwaysInline]
       def self.shade_word(w : UInt64, word : UInt64) : Nil
         return if word == 0
         arena = IyiHeap.arena_of(word)
@@ -4821,21 +4833,21 @@ require "./file"
           shade(w, IyiRoots.base_of(word))
           return
         end
-        grid = IyiHeap.read64(arena + IyiHeap::OFF_GRID)
-        first = arena + grid.unsafe_shr(IyiHeap::GRID_SHIFT)
+        grid = IyiHeap.read64(arena &+ IyiHeap::OFF_GRID)
+        first = arena &+ grid.unsafe_shr(IyiHeap::GRID_SHIFT)
         return if word < first
-        index = ((word - first).unsafe_shr(3_u64) * (grid & (1_u64.unsafe_shl(IyiHeap::GRID_SHIFT) - 1_u64))).unsafe_shr(IyiHeap::MAGIC_SHIFT)
+        index = ((word &- first).unsafe_shr(3_u64) &* (grid & (1_u64.unsafe_shl(IyiHeap::GRID_SHIFT) &- 1_u64))).unsafe_shr(IyiHeap::MAGIC_SHIFT)
         # The entry for carved, free and headed, the colour byte for
         # white. An uncarved chunk's entry is zero (`CARVED_FLAG`), a
         # free chunk's colour is white too, so the entry is the refusal
         # (`IyiHeap.free`, `sweep_slice`); neither the frontier nor the
         # idle bitmap is read, both being the carve's to write.
-        bits = IyiHeap.read8(arena + IyiHeap::META + index * IyiHeap::META_ENTRY)
+        bits = IyiHeap.read8(arena &+ IyiHeap::META &+ index &* IyiHeap::META_ENTRY)
         return if bits & IyiHeap::CARVED_FLAG == 0 || bits & IyiHeap::FREE_FLAG != 0
-        mark = IyiHeap.read64(arena + IyiHeap::OFF_MARKS) + index
+        mark = IyiHeap.read64(arena &+ IyiHeap::OFF_MARKS) &+ index
         return if IyiHeap.read8(mark) != WHITE
-        head = first + index * IyiHeap.read64(arena + IyiHeap::OFF_CHUNK)
-        base = bits & IyiHeap::HEADED_FLAG != 0 ? head + IyiHeap::HEADER : head
+        head = first &+ index &* IyiHeap.read64(arena &+ IyiHeap::OFF_CHUNK)
+        base = bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head
         if @@workers > 1_u64
           push(w, base) if Pointer(Atomic(UInt8)).new(mark).value.compare_and_set(WHITE.unsafe_to_u8, GRAY.unsafe_to_u8)[1]
         else
@@ -4928,8 +4940,11 @@ require "./file"
         # The arena once, for the chunk's entry, its layout, the
         # blackening and the live count; 0 for a large object, whose bits
         # are its word's and whose type id is under it.
+        # The chunk's index once, for its entry and its mark byte both,
+        # and the arithmetic on addresses inside the arena wrapping.
         arena = IyiHeap.arena_of(base)
-        byte = arena == 0 ? 0_u64 : IyiHeap.meta(arena, base)
+        slot = arena == 0 ? 0_u64 : IyiHeap.chunk_index(arena, base)
+        byte = arena == 0 ? 0_u64 : arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY
         bits = byte == 0 ? IyiHeap.read64(base - 8_u64) : IyiHeap.read8(byte)
         # Atomic first, before any id is trusted: an atomic chunk's word is
         # whatever its last owner left, and the id in it is nobody's layout.
@@ -4942,28 +4957,28 @@ require "./file"
           if bits & IyiHeap::UNTYPED_FLAG != 0
             entry = 0_u64
           else
-            type_id = bits & IyiHeap::HEADED_FLAG != 0 || byte == 0 ? IyiHeap.read64(base - 8_u64).unsafe_shr(IyiHeap::TYPE_SHIFT) : IyiHeap.read16(byte + 1_u64)
+            type_id = bits & IyiHeap::HEADED_FLAG != 0 || byte == 0 ? IyiHeap.read64(base - 8_u64).unsafe_shr(IyiHeap::TYPE_SHIFT) : IyiHeap.read16(byte &+ 1_u64)
             entry = layout_entry(w, type_id)
           end
           size = byte == 0 ? IyiHeap.size_of(base) : (bits & IyiHeap::HEADED_FLAG != 0 ? IyiHeap.arena_chunk(arena) - IyiHeap::HEADER : IyiHeap.arena_chunk(arena))
           if entry == 0
             cursor = base
-            limit = base + size
-            while cursor + 8_u64 <= limit
+            limit = base &+ size
+            while cursor &+ 8_u64 <= limit
               shade_word(w, IyiHeap.read64(cursor))
-              cursor = cursor + 8_u64
+              cursor = cursor &+ 8_u64
             end
           end
         end
         if entry != 0
           table = layouts_table
-          offsets = table + 8_u64 + IyiHeap.read64(table) * ENTRY + IyiHeap.read64(entry + 32_u64) * 8_u64
-          remaining = IyiHeap.read64(entry + 24_u64)
+          offsets = table &+ 8_u64 &+ IyiHeap.read64(table) &* ENTRY &+ IyiHeap.read64(entry &+ 32_u64) &* 8_u64
+          remaining = IyiHeap.read64(entry &+ 24_u64)
           index = 0_u64
           while index < remaining
-            offset = IyiHeap.read64(offsets + index * 8_u64)
-            shade_word(w, IyiHeap.read64(base + offset))
-            index = index + 1_u64
+            offset = IyiHeap.read64(offsets &+ index &* 8_u64)
+            shade_word(w, IyiHeap.read64(base &+ offset))
+            index = index &+ 1_u64
           end
         end
         # Black, by a plain store: only the worker that grayed it holds it,
@@ -4974,10 +4989,10 @@ require "./file"
           IyiHeap.write64(base - 8_u64, (word - (word & COLOUR)) | BLACK)
           size = IyiHeap.size_of(base) if size == 0
         else
-          IyiHeap.write8(IyiHeap.mark_byte(arena, base), BLACK)
+          IyiHeap.write8(IyiHeap.read64(arena &+ IyiHeap::OFF_MARKS) &+ slot, BLACK)
           size = (bits & IyiHeap::HEADED_FLAG != 0 ? IyiHeap.arena_chunk(arena) - IyiHeap::HEADER : IyiHeap.arena_chunk(arena)) if size == 0
         end
-        IyiHeap.write64(w + W_BYTES, IyiHeap.read64(w + W_BYTES) + size)
+        IyiHeap.write64(w &+ W_BYTES, IyiHeap.read64(w &+ W_BYTES) &+ size)
         count_live(w, arena)
       end
 

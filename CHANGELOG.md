@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **An owner that exits or panics inside a `group` does not wait out its
+  tasks.** A group's join is one of its owner's cleanups, and both `exit`
+  and a panic run those: `exit(4)` beside a task in a minute-long sleep
+  took the minute, and a panic was printed while the program went on
+  running until the sleep ended - forever beside a parked accept loop.
+  `exit` ends the process and every task with it, as its doc says, and
+  the join owes it no wait; a panicking owner cancels what it started
+  before it waits for it, as a failing child cancels its siblings.
+  `bench/concurrency_exercise.sh` ends an owner both ways beside a
+  sleeping task; the old runtime was still running after 20 seconds.
+
 - **A task's stack on Windows is committed as the task reaches it.**
   Windows charges committed memory to the commit limit whether it is
   touched or not, and every task's 256 KiB stack was committed whole:
@@ -13158,7 +13169,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,130-line library and nothing else. Every other
+  written against iyi's own 19,153-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

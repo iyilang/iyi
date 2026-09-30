@@ -237,6 +237,43 @@ if [ "$status" -ne 1 ]; then
 fi
 grep -q 'deadlock' deadlock.txt || { echo "died without naming the deadlock:"; cat deadlock.txt; exit 1; }
 
+# ── 3b. An owner that exits or panics does not wait out its tasks ─────────
+# `exit` ends the process and its tasks with it, and a panicking owner
+# stops what it started: both ran the group's join as a cleanup, and it
+# waited for a sibling's minute-long sleep - a minute each, and forever
+# beside a parked accept loop.
+step "an owner that exits or panics does not wait out a sleeping task"
+cat > ending.iyi <<'IYI'
+module ending
+
+group do |g|
+  g.spawn do
+    sleep(60000)
+    0
+  end
+  sleep(50)
+  exit(4) if Program.args[0] == "exit"
+  raise "the owner panicked"
+end
+IYI
+if ! "$IYI" build ending.iyi -o ending > build-ending.log 2>&1; then
+  echo "ending probe failed to build:"
+  tail -5 build-ending.log
+  exit 1
+fi
+for how in exit panic; do
+  started=$(date +%s)
+  timeout 30 ./ending "$how" > "ending-$how.txt" 2>&1
+  code=$?
+  took=$(( $(date +%s) - started ))
+  want=4; [ "$how" = panic ] && want=1
+  if [ "$code" -ne "$want" ] || [ "$took" -gt 10 ]; then
+    echo "an owner that ends by $how took ${took}s and exited $code (124 is the harness's timeout):"
+    cat "ending-$how.txt"
+    exit 1
+  fi
+done
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

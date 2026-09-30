@@ -897,6 +897,18 @@ class IyiSchedulerState
 end
 
 class IyiScheduler
+  # Set by `exit`: the process is ending, and a group's join owes it no
+  # wait (`IyiGroup#join`).
+  @@exiting = false
+
+  def self.exiting? : Bool
+    @@exiting
+  end
+
+  def self.exiting=(value : Bool) : Nil
+    @@exiting = value
+  end
+
   @[ThreadLocal]
   @@state : IyiSchedulerState?
   @@states_head : IyiSchedulerState?
@@ -2315,6 +2327,7 @@ end
 # runtime's own `__iyi_exit`, which skipped the cleanups too.
 def exit(status : Int32 = 0) : NoReturn
   fiber = IyiScheduler.current
+  IyiScheduler.exiting = true
   while true
     node = fiber.defers
     break unless node.is_a?(IyiDeferNode)
@@ -2518,6 +2531,16 @@ class IyiGroup
   # every task has finished, and `defer` is what guarantees "cannot":
   # a `return` out of the block still runs this.
   def join : Nil
+    # An `exit` runs this task's cleanups and ends the process, the other
+    # tasks with it: a group's join is one of those cleanups, and it waited
+    # for every task - `exit(4)` beside a sibling's minute-long sleep took
+    # the minute.
+    return if IyiScheduler.exiting?
+    # An owner leaving on a panic stops what it started before it waits for
+    # it, as a failing child stops its siblings: the panic was printed and
+    # the program went on running until a parked accept loop or a long
+    # sleep beside it ended by itself, which a server's never does.
+    cancel_children if IyiScheduler.current.panicked
     while @live > 0
       me = IyiScheduler.current
       @joiner = me

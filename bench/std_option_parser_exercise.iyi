@@ -38,7 +38,7 @@ handled.invalid_option { |flag| seen << "invalid " + flag }
 handled.missing_option { |flag| seen << "missing " + flag }
 left = handled.parse(["--nope", "-z", "-q=1", "--port=8080", "keep", "-q", "--port"])
 assert_str "8080", port, "a good flag after bad ones is still read"
-assert_str "invalid --nope,invalid -z,quiet,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
+assert_str "invalid --nope,invalid -z,invalid -q,quiet,missing --port", seen.join(","), "each mistake reaches its handler, in order"
 assert_str "keep", left.join(","), "operands survive"
 bare = OptionParser.new
 bare.on("--flag", "a switch") { |v| }
@@ -46,5 +46,35 @@ bare.invalid_option { |flag| seen << "no value for " + flag }
 bare.parse(["--flag=x"])
 assert_str "no value for --flag", seen.last, "a value for a switch is an invalid option"
 puts "  invalid_option and missing_option answer instead of a panic"
+
+puts "\n== grouped short flags, `--name=VALUE`, and a flag that is a character"
+# `-vo out` is `-v -o out`, and `-oout` is `-o out`: only the first flag of
+# a group was read, the rest dropped, and `-vz` never said `-z` was unknown.
+# `on("--name=NAME")`, Crystal's spelling, registered a flag nothing
+# matched. And a short flag is a character: `-é` was cut to one byte.
+grouped = OptionParser.new
+loud = false
+output = ""
+accent = false
+title = ""
+grouped_bad = [] of String
+grouped.on("-v", "verbose") { |v| loud = true }
+grouped.on("-o FILE", "output") { |v| output = v }
+grouped.on("-é", "accent") { |v| accent = true }
+grouped.on("--title=TITLE", "the title") { |v| title = v }
+grouped.invalid_option { |flag| grouped_bad << flag }
+operands = grouped.parse(["-vo", "out.txt", "-vz", "-é", "--title=x", "--title", "y", "left"])
+assert_true loud, "-v in a group is read"
+assert_str "out.txt", output, "-o at a group's end takes the next argument"
+assert_str "-z", grouped_bad.join(","), "an unknown flag in a group is reported"
+assert_true accent, "a non-ASCII short flag is one character"
+assert_str "y", title, "--title=TITLE registers --title taking a value"
+assert_str "left", operands.join(","), "the operands are what is left"
+glued = OptionParser.new
+glued_out = ""
+glued.on("-o FILE", "output") { |v| glued_out = v }
+glued.parse(["-oout.txt"])
+assert_str "out.txt", glued_out, "-oFILE is -o FILE"
+puts "  -vo out, -vz, -é, --title=TITLE and -oFILE"
 
 puts "\nALL CHECKS PASSED"

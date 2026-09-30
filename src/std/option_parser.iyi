@@ -1,8 +1,11 @@
 # Flag parsing, written in iyi.
 #
 # `on("--name VALUE", "help") { |v| ... }` and `on("-h", "help") { }`
-# register flags. `parse` walks `Program.args` (or the array given),
-# calls the blocks, and answers the leftover operands.
+# register flags; `--name=VALUE` is Crystal's spelling of the first and
+# means the same. `parse` walks `Program.args` (or the array given),
+# calls the blocks, and answers the leftover operands. Short flags group
+# as they do in every Unix tool: `-vo out` is `-v -o out`, and `-oout` is
+# `-o out`.
 #
 # What the person typed wrong is the program's to answer, the way
 # Crystal's `OptionParser` has it: `invalid_option { |flag| ... }` is
@@ -52,13 +55,28 @@ pub class OptionParser
 
   def on(flag : String, description : String, &block : String -> Nil) : Nil
     @help << "  #{flag}  #{description}"
-    takes = flag.includes?(" ")
-    name = flag.split(' ')[0]
-    if name.starts_with?("--")
+    # A value is named after a space or after `=`. `--name=NAME` was a
+    # flag called `--name=NAME`, which no argument matched: every
+    # `--name=x` was "unknown flag: --name".
+    cut = flag.bytesize
+    at = 0
+    while at < flag.bytesize
+      byte = flag.to_unsafe[at]
+      if byte == 32_u8 || byte == 61_u8
+        cut = at
+        break
+      end
+      at = at + 1
+    end
+    takes = cut < flag.bytesize
+    name = flag[0, cut]
+    if name.starts_with?("--") && name.bytesize > 2
       @long[name] = {takes, block}
-    elsif name.starts_with?("-") && name.bytesize == 2
+    elsif name.starts_with?("-") && !name.starts_with?("--") && name.bytesize > 1 && name.bytesize == 1 + char_width(name, 1)
       @short[name] = {takes, block}
     else
+      # `--` alone is the end of the flags, which `parse` answers itself;
+      # registered, it could never be reached.
       raise "option: not a flag: #{flag}"
     end
   end
@@ -109,23 +127,38 @@ pub class OptionParser
           end
         end
       elsif a.starts_with?("-") && a.bytesize >= 2 && a != "-"
-        name = a[0, 2]
-        spec = @short[name]?
-        if !spec
-          invalid(name, "unknown flag: #{name}")
-        elsif spec[0]
-          if a.bytesize > 2
-            spec[1].call(a[2, a.bytesize - 2])
-          else
-            i = i + 1
-            if i >= n
-              missing(name)
+        # A group: each flag in turn, until one takes a value, which is the
+        # rest of the argument or, with nothing left, the next one. Only
+        # the first was read, and the rest dropped in silence: `-vo out`
+        # set `-v` and left `out` an operand, and `-vz` never said `-z` was
+        # unknown. A flag is a character, not a byte: `-é` was `-\xC3`.
+        at = 1
+        while at < a.bytesize
+          width = char_width(a, at)
+          name = "-" + a[at, width]
+          at = at + width
+          spec = @short[name]?
+          if !spec
+            invalid(name, "unknown flag: #{name}")
+          elsif spec[0]
+            if at < a.bytesize
+              spec[1].call(a[at, a.bytesize - at])
             else
-              spec[1].call(args[i])
+              i = i + 1
+              if i >= n
+                missing(name)
+              else
+                spec[1].call(args[i])
+              end
             end
+            break
+          elsif at < a.bytesize && a.to_unsafe[at] == 61_u8
+            # `-q=1`: a value given to a switch, as `--flag=x` is.
+            invalid(name, "flag #{name} takes no value")
+            break
+          else
+            spec[1].call("")
           end
-        else
-          spec[1].call("")
         end
       else
         rest << a
@@ -133,6 +166,13 @@ pub class OptionParser
       i = i + 1
     end
     rest
+  end
+
+  # The bytes of the UTF-8 character that starts at *at*.
+  private def char_width(text : String, at : Int32) : Int32
+    lead = text.to_unsafe[at]
+    width = lead < 0x80_u8 ? 1 : (lead >= 0xF0_u8 ? 4 : (lead >= 0xE0_u8 ? 3 : 2))
+    width < text.bytesize - at ? width : text.bytesize - at
   end
 
   def help : String

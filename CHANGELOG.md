@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`OptionParser` reads grouped short flags, `--name=VALUE` flags and
+  non-ASCII short flags.** Only the first flag of a group was read and
+  the rest dropped in silence: `-vo out.txt` set `-v` and left `out.txt`
+  an operand, and `-vz` never said `-z` was unknown. A group is read flag
+  by flag now, a flag that takes a value taking the rest of the argument
+  or the next one (`-oout.txt`, `-vo out.txt`), and `-q=1` is a value
+  given to a switch, as `--flag=x` is. `on("--name=NAME")`, Crystal's
+  spelling, registered a flag named `--name=NAME` that nothing matched;
+  it is `--name` taking a value. And a short flag is a character: `-é`
+  was cut to a byte and reported as `-\xC3`. `on("--")` is refused, since
+  `--` ends the flags and could never reach it.
+  `bench/std_option_parser_exercise.iyi` checks each; the old module
+  fails the first.
+
 - **A JSON or YAML document the parser reads is one a task can use.**
   JSON read 512 levels of nesting, Crystal's limit, whose fibers have
   megabytes of stack; a task here has 256 KB, and a task parsing 480

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **The Tangut ideographs are letters.** The Character Database writes a
+  large range as its First and Last entries, and the table generator
+  joined a First by stride to the entry before it: U+16F50 and the Tangut
+  ideographs' First became one run of two points, and the 6,142
+  ideographs after U+17000, with the Tangut supplement's, were no letter
+  to `Unicode.letter?` or to `Char#letter?`. A First and its Last are a
+  run of their own now, and the regenerated tables differ from Python
+  3.12 in no letter where they differed in 6,143. The generator also
+  formats through `Iyi.format`, which it could no longer find by its old
+  name. `bench/std_unicode_exercise.iyi` asks for U+17001 and U+187F7;
+  the old tables said no.
+
 - **`Server.serve` reads a chunked request body in time linear in its
   size.** A chunked body has no length up front, so each read was added to
   what came before and the whole request parsed again: a copy of the body

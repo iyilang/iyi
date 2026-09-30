@@ -21,6 +21,11 @@ assert_true Unicode.letter?('A'), "A"
 assert_true Unicode.letter?('é'), "é"
 assert_true !Unicode.letter?('1'), "digit"
 assert_true Unicode.number?('3'), "3 is a number"
+# A range the Character Database writes as its First and Last entries is
+# every code point between them: the table joined the Tangut ideographs'
+# First to the letter before it, and the 6,142 after U+17000 were none.
+assert_true Unicode.letter?('\u{17000}') && Unicode.letter?('\u{17001}') && Unicode.letter?('\u{187F7}'), "the Tangut ideographs are letters"
+assert_true Unicode.letter?('\u{18D01}') && Unicode.letter?('\u{4E01}') && Unicode.letter?('\u{AC01}'), "and so are the Tangut supplement's, the CJK and the Hangul ranges'"
 puts "  letter? and number?"
 
 puts "\n== valid"

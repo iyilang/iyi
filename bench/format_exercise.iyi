@@ -343,6 +343,15 @@ raise "general: width and flags" unless sprintf("%10g|", -2.25) == "     -2.25|"
 raise "general: infinity" unless sprintf("%g", 1.0 / 0.0) == "Infinity"
 puts "    general: %g and %G choose the shorter notation and trim it"
 
+# Just under a power of ten that no double spells: `%.15e` of 1e23, which
+# is 99999999999999991611392, rounded its fifteen places up to the next
+# power and kept the exponent it had guessed from the shortest spelling,
+# 1.000000000000000e+23. C and Python answer 9.999999999999999e+22.
+e1 = sprintf("%.15e|%.16e|%.16g|%.16e|%.17g", 1e23, 1e-7, 1e23, 1e-75, 1e23)
+raise "format: an exponent under a power of ten failed: #{e1}" if e1 != "9.999999999999999e+22|9.9999999999999995e-08|9.999999999999999e+22|9.9999999999999996e-76|9.9999999999999992e+22"
+e2 = sprintf("%.2e|%.0e|%.2e|%.3e", 9.995, 9.5, 99.5, 5e-324)
+raise "format: an exponent a rounding carries failed: #{e2}" if e2 != "9.99e+00|1e+01|9.95e+01|4.941e-324"
+
 # 9. The rest of the tower, and a character by its code point. `%d` of an
 # `Int8`, `UInt32` or `Float32` panicked "wants a number"; an `Int128` is
 # written from its own digits, past 64 bits. `%c` of 233 panicked "233 is

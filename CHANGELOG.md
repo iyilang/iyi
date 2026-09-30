@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`%e` and `%g` find the exponent of a value just under a power of
+  ten.** `%.15e` of `1e23`, which is 99999999999999991611392, printed
+  1.000000000000000e+23, and `%.16e` of `1e-7` and `1e-75`, and `%.16g` of
+  `1e23`, went the same way: the exponent was guessed from the shortest
+  spelling, one place up, and held only to the digits asked for, which
+  rounded up to the next power too. It is held to 21 exact digits now,
+  and a rounding that carries into a new digit (`%.0e` of 9.5 is 1e+01)
+  moves it after. The answers are C's and Python's:
+  9.999999999999999e+22, 9.9999999999999995e-08. `bench/format_exercise.iyi`
+  prints nine such values; the old module failed the first line.
+
 - **`URI.encode(space_to_plus: true)` encodes a `+` as `%2B`.** It kept
   the reserved `+` and wrote a space as `+`, so "1+1=2" and "1 1=2" both
   came out "1+1=2" and `decode(plus_to_space: true)` gave the second for

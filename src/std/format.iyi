@@ -309,18 +309,27 @@ module ::IyiFloatText
     e = exponent_bits == 0_u64 ? -1074 : exponent_bits.to_i64.to_i32 - 1075
 
     # The decimal exponent, guessed from the shortest digits and then held
-    # to the exact digits: the shortest spelling of 99999999999999991611392
-    # is 1e+23, one place up, and rounding can carry the other way -
-    # `%.2e` of 9.995 is 1.00e+01. Either moves the exponent by one, and
-    # the digit count says which way.
+    # to the exact ones: the shortest spelling of 99999999999999991611392
+    # is 1e+23, one place up. Held to the digits of the precision asked,
+    # the guess stood whenever those rounded up to the next power of ten
+    # too - `%.15e` of that value was 1.000000000000000e+23, where it is
+    # 9.999999999999999e+22 - so it is held to 21 digits, more than any
+    # double is close to a power of ten by. Then rounding to the precision
+    # can carry into a new digit, `%.2e` of 9.995 is 1.00e+01, and that
+    # moves the exponent up one.
     res = dragon4(value.abs)
     exp = res[2] - 1
-    digits = scaled_digits(f, e, precision - exp)
+    probe = scaled_digits(f, e, 20 - exp)
     attempts = 0
-    while digits.size != precision + 1 && attempts < 4
-      exp = digits.size > precision + 1 ? exp + 1 : exp - 1
-      digits = scaled_digits(f, e, precision - exp)
+    while probe.size != 21 && attempts < 4
+      exp = probe.size > 21 ? exp + 1 : exp - 1
+      probe = scaled_digits(f, e, 20 - exp)
       attempts = attempts + 1
+    end
+    digits = scaled_digits(f, e, precision - exp)
+    if digits.size > precision + 1
+      exp = exp + 1
+      digits = digits[0, precision + 1]
     end
 
     num = digits[0, 1]

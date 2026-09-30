@@ -3425,11 +3425,14 @@ module Iyi::Lsp
       {% if flag?(:win32) %}
         if path.size > 2 && path[0] == '/' && path[2] == ':'
           path = path.lchop('/')
-        elsif uri.starts_with?("file://") && !path.starts_with?('/') && !path.starts_with?("localhost/")
+        elsif uri.starts_with?("file://") && !path.starts_with?('/') && !path.starts_with?("localhost/") &&
+              !(path.size > 1 && path[1] == ':')
           # `file://server/share/x`: the authority is a server, and the
           # path is a UNC one. Read as `server\share\x` it was relative to
           # the server's own directory, and a workspace on a share found
-          # none of its modules.
+          # none of its modules. A drive is not a server: `file://C:/x` is
+          # a spelling some clients send for `file:///C:/x`, and read as a
+          # share it named `\\C:\x`, which is nothing.
           path = "//" + path
         end
         path = path.tr("/", "\\")

@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A `file://C:/x` URI names a drive again, not a share.** The reading
+  of `file://server/share/x` as a UNC path (above) also took
+  `file://C:/x` - a spelling some clients send for `file:///C:/x` - for
+  a server named `C:`, and named `\\C:\x`, which is nothing:
+  `bench/lsp_memory.py`, which spells its URIs that way, got -32602 where
+  a crashed compile's waiter should be told the compile died. A drive
+  letter and a colon are a drive now. `bench/lsp_memory.py` failed in CI
+  on the change before and holds with this one.
+
 - **`Float64#**` of a negative exponent and `round(digits)` answer at the
   edges of a double's range, and a zero keeps its sign through `round`
   and `trunc`.** `2.0 ** -1074` was 0.0, one over the infinite `2.0 **

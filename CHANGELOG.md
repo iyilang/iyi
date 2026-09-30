@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`iyi doc` of a module that does not compile leaves no scratch
+  directory.** It compiles in a temporary directory it removes in an
+  `ensure`, and its refusal exits, which runs no `ensure`: every such doc
+  left an `iyi-doc-*` directory in the temporary directory (ten were
+  found from one day's gate runs). The directory is removed before the
+  refusal. `bench/mod_context.sh` runs the refusal with a temporary
+  directory of its own and looks in it afterwards.
+
 - **A build in a directory near MAX_PATH writes its program there.**
   Whether the output directory takes a file is asked by writing
   `.iyi-write-probe-<pid>` into it, a name longer than `m.exe`, and every

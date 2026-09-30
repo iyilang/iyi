@@ -329,6 +329,10 @@ class Iyi::Command
         # importing "twoheaders"` where `iyi run` answered `a file declares
         # one module, and this one already declares 'main'`.
         deepest = Iyi.deepest_error(ex)
+        # Removed here: `abort!` exits, and an exit runs no `ensure`, so
+        # every `iyi doc` of a module that does not compile left an
+        # `iyi-doc-*` directory in the temporary directory.
+        FileUtils.rm_rf(emit_dir)
         abort! "#{filename} does not compile alone: #{deepest.message.to_s.lines.first?}", :USAGE_ERROR
       ensure
         previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
@@ -345,6 +349,7 @@ class Iyi::Command
           next
         end
       end
+      FileUtils.rm_rf(emit_dir)
       abort! "compiled, but no artifact carries module '#{module_name}'", :USAGE_ERROR
     ensure
       FileUtils.rm_rf(emit_dir)

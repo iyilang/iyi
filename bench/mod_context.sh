@@ -486,6 +486,19 @@ elif ! grep -q "undefined method 'nonesuch_helper'" broken.txt; then
 else
   echo "a module that does not compile is answered with the reason it does not"
 fi
+# And `iyi doc` of it leaves nothing behind: it compiles in a scratch
+# directory it removes in an `ensure`, and the refusal exits, which runs
+# no `ensure` - every such doc left an `iyi-doc-*` directory in TEMP.
+scratch="$WORK/doc-tmp"
+mkdir -p "$scratch"
+TMPDIR="$scratch" TEMP="$(cygpath -w "$scratch" 2>/dev/null || echo "$scratch")" TMP="$(cygpath -w "$scratch" 2>/dev/null || echo "$scratch")" \
+  "$IYI" doc kit/all > broken_doc.txt 2>&1
+if [ -n "$(ls -A "$scratch")" ]; then
+  echo "FAIL: iyi doc of a module that does not compile left $(ls "$scratch" | head -1) behind"
+  status=1
+else
+  echo "iyi doc of a module that does not compile leaves no scratch directory"
+fi
 cd "$WORK" || exit 1
 
 # And what a facade hands on. `pub import` is a promise to the consumer:

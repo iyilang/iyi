@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`iyi fmt` of a file it may not write says so.** A read-only file -
+  common on Windows, a locked checkout or an extracted archive - was
+  reported as "there's a bug formatting", with a request to file one; it
+  is "cannot write '...': Access is denied." and exit 1 now.
+  `bench/verbs_exercise.sh` formats a read-only file; the old binary gave
+  the bug report.
+
 - **`File.real_path` of a drive's root is `C:\`, an app execution alias
   is executable and has a real path, and `File.tempfile`'s block may
   rename its file.** The `\\?\` prefix came off `GetFinalPathNameByHandleW`'s

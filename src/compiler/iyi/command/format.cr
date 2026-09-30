@@ -209,6 +209,13 @@ class Iyi::Command
     rescue ex : Iyi::SyntaxException
       print_error "syntax error in '#{filename}:#{ex.line_number}:#{ex.column_number}': #{ex.message}"
       @status_code = 1
+    rescue ex : File::Error
+      # The file system's refusal - a read-only file, which is common on
+      # Windows (a locked checkout, an extracted archive) - and not the
+      # formatter's: it was reported as a formatter bug, with a request to
+      # file one.
+      print_error "cannot write '#{filename}': #{ex.os_error.try(&.message) || ex.message}"
+      @status_code = 1
     rescue ex
       # iyi: this fork's tracker and this fork's command name. The advice
       # was `crystal tool format --show-backtrace`, which is a command the

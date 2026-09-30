@@ -326,6 +326,29 @@ for f in lit here interp; do
     echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
   fi
 done
+# A file fmt may not write is the file system's refusal, not a formatter
+# bug: a read-only file - common on Windows, a locked checkout or an
+# extracted archive - was reported as "there's a bug formatting", with a
+# request to file one.
+mkdir -p locked
+printf 'module locked\n\nputs(  1 )\n' > locked/sloppy.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +R "$(cygpath -w locked/sloppy.iyi)" ;;
+  *) chmod a-w locked/sloppy.iyi ;;
+esac
+if [ -w locked/sloppy.iyi ] && [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ]; then
+  echo "  fmt of a read-only file: root writes anything, unmeasured"
+elif "$IYI" fmt locked/sloppy.iyi > locked.out 2>&1; then
+  echo "  fmt of a read-only file answered success:"; sed -n '1,3p' locked.out; status=1
+elif grep -q "cannot write" locked.out && ! grep -q "bug" locked.out; then
+  echo "  fmt of a read-only file: $(tr -d '\r' < locked.out | head -1)"
+else
+  echo "  fmt of a read-only file:"; sed -n '1,3p' locked.out; status=1
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -R "$(cygpath -w locked/sloppy.iyi)" ;;
+  *) chmod u+w locked/sloppy.iyi ;;
+esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

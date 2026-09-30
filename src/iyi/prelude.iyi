@@ -9208,8 +9208,23 @@ class Program
         length = length + 1
       end
       piece = Pointer(UInt16).malloc((length + 1).to_u64)
+      # The program's own name first, by its own rule, and dropped: a
+      # quote runs to the next quote, no backslash is special, and nothing
+      # is skipped before it. A line that starts with a space has an empty
+      # name - the C runtime's `argv[0]` is `""` - and the first word is an
+      # argument; it was taken for the name, and lost.
       index = 0
-      first = true
+      if length > 0 && line[0] == 34_u16
+        index = 1
+        while index < length && line[index] != 34_u16
+          index = index + 1
+        end
+        index = index + 1 if index < length
+      else
+        while index < length && line[index] != 32_u16 && line[index] != 9_u16
+          index = index + 1
+        end
+      end
       while index < length
         # Whitespace between arguments: space and tab, as the parser
         # Windows documents treats them.
@@ -9240,6 +9255,13 @@ class Program
                 piece[taken] = 34_u16
                 taken = taken + 1
                 index = index + 1
+              elsif quoted && index + 1 < length && line[index + 1] == 34_u16
+                # The quote after them is a quote like any other, `""`
+                # inside quotes included: `"a\\""b"` is `a\"b`, where the
+                # doubled quote only toggled and was lost.
+                piece[taken] = 34_u16
+                taken = taken + 1
+                index = index + 2
               else
                 quoted = !quoted
                 index = index + 1
@@ -9268,15 +9290,10 @@ class Program
           end
         end
         piece[taken] = 0_u16
-        # The first argument is the program's own name, which every shell
-        # drops before handing the rest over.
-        unless first
-          size = __iyi_utf8_size_from_wide(piece)
-          if size > 0
-            result << String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(piece, target, size) }
-          end
+        size = __iyi_utf8_size_from_wide(piece)
+        if size > 0
+          result << String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(piece, target, size) }
         end
-        first = false
       end
       result
     {% else %}

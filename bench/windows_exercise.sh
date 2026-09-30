@@ -170,6 +170,33 @@ EOF
         grep "^env:" "$WORK/told.out" || true
         status=1
       fi
+      # And the splitting, on command lines no shell writes, handed over
+      # as they are by Python: a line that starts with a space has an
+      # empty program name, as the C runtime reads it, and `first` was
+      # taken for the name and lost; after an even run of backslashes the
+      # doubled quote inside quotes is a quote, and it was dropped.
+      PY=""
+      for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+          PY="$candidate"
+          break
+        fi
+      done
+      if [ -z "$PY" ]; then
+        echo "  the raw command lines: skipped, no python to hand them over"
+      else
+        raw() {
+          "$PY" -c 'import subprocess, sys; sys.stdout.write(subprocess.run(sys.argv[2], executable=sys.argv[1], capture_output=True, text=True, encoding="utf-8").stdout)' "$(cygpath -w "$WORK/told.exe")" "$1" | tr -d '\r' | grep '^arg' | tr '\n' '|'
+        }
+        spaced="$(raw ' first second')"
+        doubled="$(raw 'told "a\\""b" c')"
+        if [ "$spaced" = "arg 0: first 5|arg 1: second 6|" ] && [ "$doubled" = 'arg 0: a\"b 4|arg 1: c 1|' ]; then
+          echo "  a leading space and a doubled quote after backslashes split as the C runtime splits them"
+        else
+          echo "  the raw command lines split otherwise: [$spaced] [$doubled]"
+          status=1
+        fi
+      fi
     fi
 
     # 2b. What a short sleep costs. Windows rounds a millisecond timeout

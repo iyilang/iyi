@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`Program.args` on Windows splits two more command lines as the C
+  runtime does.** A line that starts with a space has an empty program
+  name, and the first word after it is an argument; the name was read
+  after skipping the space, so `first` was taken for it and lost. And
+  after an even run of backslashes, a doubled quote inside quotes is a
+  quote: `"a\\""b"` is `a\"b`, where the quote was dropped. The program's
+  name is read by its own rule now - a quote runs to the next quote, no
+  backslash is special - as the C runtime and `CommandLineToArgvW` read
+  it. `bench/windows_exercise.sh` hands both lines over raw; the old
+  prelude gave `[second]` and `a\b`.
+
 - **A child `Process.run` starts in another directory does not inherit a
   `PWD` naming this one.** `Path#expand` reads `PWD` first where it is
   kept, and a child given `chdir:` expanded its relative paths in the

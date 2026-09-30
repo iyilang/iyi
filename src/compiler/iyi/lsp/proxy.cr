@@ -138,7 +138,15 @@ module Iyi::Lsp
 
     def initialize(@input : IO = STDIN, @output : IO = STDOUT)
       @self_exe = Process.executable_path || "iyi"
+      @origin = IyiPath.origin
     end
+
+    # Where this binary started, pinned at startup and handed to every
+    # worker (`IyiPath::ORIGIN_VARIABLE`): a worker started a moment
+    # before a rebuild unlinked the binary asked for its own path after,
+    # found none, and every compile it ran answered "Missing executable
+    # path to expand $ORIGIN path".
+    @origin : String?
 
     # Editor → here. A fiber reads frames so the loop can also watch the
     # worker and the clock.
@@ -507,6 +515,7 @@ module Iyi::Lsp
       process = Process.new(
         @self_exe,
         ["lsp", "--worker"],
+        env: @origin.try { |origin| {IyiPath::ORIGIN_VARIABLE => origin} },
         input: Process::Redirect::Pipe,
         output: Process::Redirect::Pipe,
         error: Process::Redirect::Inherit,

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A language-server worker started as a rebuild unlinks the binary
+  still finds its library.** A worker pins where its binary started
+  (`$ORIGIN`) when it starts; the proxy retires and replaces workers
+  between requests, and a worker exec'd a moment before `make iyi`
+  unlinked the binary asked for its own path after, found none, and
+  answered every compile "Missing executable path to expand $ORIGIN
+  path". The proxy pins its own origin and hands it to each worker it
+  starts. Step 46 of `bench/lsp_session.py` failed this way twice on
+  Linux in CI once the session had done enough work before it for a
+  retirement to land there. [INFERENCE] The race cannot be made on
+  Windows, where a running binary is renamed rather than unlinked.
+
 - **An HTTP response whose body is short of its `Content-Length` is
   refused.** The body was cut to the length when longer and taken as it
   came when shorter, so a connection that ended early - a cut-off

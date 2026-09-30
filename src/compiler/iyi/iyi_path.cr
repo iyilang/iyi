@@ -72,10 +72,17 @@ module Iyi
     @@origin_resolved = false
     @@origin : String?
 
+    # The origin a language server's proxy pinned, handed to the workers it
+    # starts: a worker asks for its own path at startup, and a rebuild can
+    # unlink the binary between the worker's exec and that question.
+    ORIGIN_VARIABLE = "IYI_LSP_ORIGIN"
+
     def self.origin : String?
       unless @@origin_resolved
         if executable_path = Process.executable_path
           @@origin = File.dirname(executable_path)
+        elsif handed = ENV[ORIGIN_VARIABLE]?.presence
+          @@origin = handed
         end
         @@origin_resolved = true
       end

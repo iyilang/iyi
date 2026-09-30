@@ -78,26 +78,61 @@ build_and_run() {
 # over the range, the tiny, the ends and the special cases - and the
 # compiled oracle writes each with its answer.
 ORACLE=""
+ORACLE_CM=""
 CC="${CC:-cc}"
-if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
-   "$CC" -O2 -ffp-contract=off -fno-builtin -Dattribute_hidden= -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle" \
-     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" "$REPO/bench/libm_oracle/exp_data.c" \
-     "$REPO/bench/libm_oracle/pow.c" "$REPO/bench/libm_oracle/pow_log_data.c" \
-     "$REPO/bench/libm_oracle/log.c" "$REPO/bench/libm_oracle/log_data.c" \
-     "$REPO/bench/libm_oracle/exp2.c" "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
+# Two builds. The first is Arm's files and glibc's fdlibm ones and needs
+# nothing past a C compiler; the second adds `core_math/` and the Bessel
+# functions, which call libm's exact `fma` and CORE-MATH's sin and cos. A
+# toolchain that cannot build the second still checks everything the first
+# covers, and says what it could not.
+ORACLE_BUILT=""
+CM_BUILT=""
+if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
+  if "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle" \
+     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
+     "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \
+     "$REPO/bench/libm_oracle/pow_log_data.c" "$REPO/bench/libm_oracle/log.c" \
+     "$REPO/bench/libm_oracle/log_data.c" "$REPO/bench/libm_oracle/exp2.c" \
+     "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
+     "$REPO/bench/libm_oracle/e_log10.c" "$REPO/bench/libm_oracle/s_expm1.c" \
+     "$REPO/bench/libm_oracle/s_log1p.c" "$REPO/bench/libm_oracle/e_sinh.c" \
+     "$REPO/bench/libm_oracle/e_cosh.c" "$REPO/bench/libm_oracle/s_tanh.c" > "$WORK/libm_oracle.log" 2>&1; then
+    ORACLE_BUILT=1
+  else
+    echo "the oracle did not build here:"
+    sed -n '1,12p' "$WORK/libm_oracle.log"
+  fi
+  if [ -n "$ORACLE_BUILT" ] &&
+     "$CC" -O2 -ffp-contract=off -fno-builtin -DIYI_ORACLE_CORE_MATH -Dattribute_hidden= \
+       -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle_cm" \
+     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
+     "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \
+     "$REPO/bench/libm_oracle/pow_log_data.c" "$REPO/bench/libm_oracle/log.c" \
+     "$REPO/bench/libm_oracle/log_data.c" "$REPO/bench/libm_oracle/exp2.c" \
+     "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
      "$REPO/bench/libm_oracle/e_log10.c" "$REPO/bench/libm_oracle/s_expm1.c" \
      "$REPO/bench/libm_oracle/s_log1p.c" "$REPO/bench/libm_oracle/e_sinh.c" \
      "$REPO/bench/libm_oracle/e_cosh.c" "$REPO/bench/libm_oracle/s_tanh.c" \
-     "$REPO/bench/libm_oracle/e_j0.c" "$REPO/bench/libm_oracle/e_j1.c" "$REPO/bench/libm_oracle/e_jn.c" \
-     "$REPO/bench/libm_oracle/core_math/s_erf.c" "$REPO/bench/libm_oracle/core_math/s_erf_common.c" \
+     "$REPO/bench/libm_oracle/e_j0.c" "$REPO/bench/libm_oracle/e_j1.c" \
+     "$REPO/bench/libm_oracle/e_jn.c" "$REPO/bench/libm_oracle/core_math/s_erf.c" \
+     "$REPO/bench/libm_oracle/core_math/s_erf_common.c" \
      "$REPO/bench/libm_oracle/core_math/s_erf_data.c" "$REPO/bench/libm_oracle/core_math/s_erfc.c" \
-     "$REPO/bench/libm_oracle/core_math/s_erfc_data.c" "$REPO/bench/libm_oracle/core_math/s_asinh.c" \
-     "$REPO/bench/libm_oracle/core_math/e_acosh.c" "$REPO/bench/libm_oracle/core_math/e_atanh.c" \
-     "$REPO/bench/libm_oracle/core_math/s_asincosh_data.c" "$REPO/bench/libm_oracle/core_math/s_atanh_data.c" \
-     "$REPO/bench/libm_oracle/core_math/atan.c" "$REPO/bench/libm_oracle/core_math/asin.c" \
-     "$REPO/bench/libm_oracle/core_math/acos.c" "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
+     "$REPO/bench/libm_oracle/core_math/s_erfc_data.c" \
+     "$REPO/bench/libm_oracle/core_math/s_asinh.c" "$REPO/bench/libm_oracle/core_math/e_acosh.c" \
+     "$REPO/bench/libm_oracle/core_math/e_atanh.c" \
+     "$REPO/bench/libm_oracle/core_math/s_asincosh_data.c" \
+     "$REPO/bench/libm_oracle/core_math/s_atanh_data.c" "$REPO/bench/libm_oracle/core_math/atan.c" \
+     "$REPO/bench/libm_oracle/core_math/asin.c" "$REPO/bench/libm_oracle/core_math/acos.c" \
+     "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
      "$REPO/bench/libm_oracle/core_math/e_lgamma_r.c" "$REPO/bench/libm_oracle/core_math/tan.c" \
-     "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" -lm > "$WORK/libm_oracle.log" 2>&1; then
+     "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
+    CM_BUILT=1
+  elif [ -n "$ORACLE_BUILT" ]; then
+    echo "the oracle's CORE-MATH and Bessel part did not build here:"
+    sed -n '1,15p' "$WORK/libm_oracle_cm.log"
+  fi
+fi
+if [ -n "$ORACLE_BUILT" ]; then
   "$PY" - "$WORK/exp.in" <<'PY'
 import random, struct, sys
 random.seed(2718)
@@ -358,26 +393,30 @@ PY
     "$WORK/libm_oracle" sinh "$WORK/hyp.in" "$WORK/sinh.bin" &&
     "$WORK/libm_oracle" cosh "$WORK/hyp.in" "$WORK/cosh.bin" &&
     "$WORK/libm_oracle" tanh "$WORK/hyp.in" "$WORK/tanh.bin" &&
-    "$WORK/libm_oracle" erf "$WORK/erf.in" "$WORK/erf.bin" &&
-    "$WORK/libm_oracle" erfc "$WORK/erf.in" "$WORK/erfc.bin" &&
-    "$WORK/libm_oracle" asinh "$WORK/ash.in" "$WORK/asinh.bin" &&
-    "$WORK/libm_oracle" acosh "$WORK/ash.in" "$WORK/acosh.bin" &&
-    "$WORK/libm_oracle" atanh "$WORK/ash.in" "$WORK/atanh.bin" &&
-    "$WORK/libm_oracle" atan "$WORK/atan.in" "$WORK/atan.bin" &&
-    "$WORK/libm_oracle" asin "$WORK/asin.in" "$WORK/asin.bin" &&
-    "$WORK/libm_oracle" acos "$WORK/asin.in" "$WORK/acos.bin" &&
-    "$WORK/libm_oracle" tan "$WORK/trig.in" "$WORK/tan.bin" &&
-    "$WORK/libm_oracle" j0 "$WORK/bessel.in" "$WORK/j0.bin" &&
-    "$WORK/libm_oracle" j1 "$WORK/bessel.in" "$WORK/j1.bin" &&
-    "$WORK/libm_oracle" y0 "$WORK/bessel.in" "$WORK/y0.bin" &&
-    "$WORK/libm_oracle" y1 "$WORK/bessel.in" "$WORK/y1.bin" &&
-    "$WORK/libm_oracle" jn "$WORK/besseln.in" "$WORK/jn.bin" &&
-    "$WORK/libm_oracle" yn "$WORK/besseln.in" "$WORK/yn.bin" &&
-    "$WORK/libm_oracle" sin "$WORK/trig.in" "$WORK/sin.bin" &&
-    "$WORK/libm_oracle" cos "$WORK/trig.in" "$WORK/cos.bin" &&
-    "$WORK/libm_oracle" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
-    "$WORK/libm_oracle" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
-    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin $WORK/sinh.bin $WORK/cosh.bin $WORK/tanh.bin $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin"
+    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin $WORK/sinh.bin $WORK/cosh.bin $WORK/tanh.bin"
+  if [ -n "$ORACLE" ] && [ -n "$CM_BUILT" ]; then
+    "$WORK/libm_oracle_cm" erf "$WORK/erf.in" "$WORK/erf.bin" &&
+      "$WORK/libm_oracle_cm" erfc "$WORK/erf.in" "$WORK/erfc.bin" &&
+      "$WORK/libm_oracle_cm" asinh "$WORK/ash.in" "$WORK/asinh.bin" &&
+      "$WORK/libm_oracle_cm" acosh "$WORK/ash.in" "$WORK/acosh.bin" &&
+      "$WORK/libm_oracle_cm" atanh "$WORK/ash.in" "$WORK/atanh.bin" &&
+      "$WORK/libm_oracle_cm" atan "$WORK/atan.in" "$WORK/atan.bin" &&
+      "$WORK/libm_oracle_cm" asin "$WORK/asin.in" "$WORK/asin.bin" &&
+      "$WORK/libm_oracle_cm" acos "$WORK/asin.in" "$WORK/acos.bin" &&
+      "$WORK/libm_oracle_cm" tan "$WORK/trig.in" "$WORK/tan.bin" &&
+      "$WORK/libm_oracle_cm" j0 "$WORK/bessel.in" "$WORK/j0.bin" &&
+      "$WORK/libm_oracle_cm" j1 "$WORK/bessel.in" "$WORK/j1.bin" &&
+      "$WORK/libm_oracle_cm" y0 "$WORK/bessel.in" "$WORK/y0.bin" &&
+      "$WORK/libm_oracle_cm" y1 "$WORK/bessel.in" "$WORK/y1.bin" &&
+      "$WORK/libm_oracle_cm" jn "$WORK/besseln.in" "$WORK/jn.bin" &&
+      "$WORK/libm_oracle_cm" yn "$WORK/besseln.in" "$WORK/yn.bin" &&
+      "$WORK/libm_oracle_cm" sin "$WORK/trig.in" "$WORK/sin.bin" &&
+      "$WORK/libm_oracle_cm" cos "$WORK/trig.in" "$WORK/cos.bin" &&
+      "$WORK/libm_oracle_cm" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
+      "$WORK/libm_oracle_cm" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
+      ORACLE_CM=1 &&
+      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin"
+  fi
 fi
 
 # `Math.fma`'s cases carry their exact answers, which python works out
@@ -389,7 +428,8 @@ if [ -n "$PY" ] && "$PY" "$REPO/bench/std_math_fma.py" "$WORK/fma_doubles.bin" "
 else
   echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
 fi
-[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions against the oracle: not compared here, because its CORE-MATH part did not build or run"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -407,7 +447,15 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
   fi
 done
 if [ -n "$ORACLE" ]; then
-  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit" "== sinh against glibc's sinh, bit for bit" "== cosh against glibc's cosh, bit for bit" "== tanh against glibc's tanh, bit for bit" "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit"; do
+  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit" "== sinh against glibc's sinh, bit for bit" "== cosh against glibc's cosh, bit for bit" "== tanh against glibc's tanh, bit for bit"; do
+    if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
+      echo "  missing section: $phrase"
+      status=1
+    fi
+  done
+fi
+if [ -n "$ORACLE_CM" ]; then
+  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
@@ -494,10 +542,9 @@ PY
   fi
 }
 mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value * TWO_54)' 'bits = IyiFloatText.bits_of(value)'
-mutate "log10's exponent rounded the other way below one" '    i = k < 0_i64 ? 1_i64 : 0_i64' '    i = 0_i64'
-# The next three change `exp` by a unit or two in the last place, which the
-# relative checks above cannot see and the oracle can; without the oracle
-# they are not proven here.
+# The proofs below change a function by a unit or two in the last place,
+# which the relative checks above cannot see and the oracle can; without
+# the oracle, or its CORE-MATH part, they are not proven here.
 if [ -n "$ORACLE" ]; then
   mutate "exp's polynomial a term short" 'r2 * r2 * (EXP_C4 + r * EXP_C5)' 'r2 * r2 * EXP_C4'
   mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
@@ -520,6 +567,17 @@ if [ -n "$ORACLE" ]; then
   mutate "sinh's middle branch from 1 rather than 2^-28" '      return h * (2.0 * t - t * t / (t + 1.0)) if ix < 0x3ff00000_i64' '      return h * (2.0 * t - t * t / (t + 1.0)) if ix < 0x3e300000_i64'
   mutate "cosh by exp below 0.5 ln 2" '      if ix < 0x3fd62e43_i64' '      if ix < 0x3c800000_i64'
   mutate "tanh by one expm1 below 1" '      if ix >= 0x3ff00000_i64' '      if ix >= 0x3c800000_i64'
+  mutate "log2's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
+    rhi' ') * invc
+    rhi'
+  # Edges the relative checks let through and the oracle does not.
+  mutate "log10's exponent rounded the other way below one" '    i = k < 0_i64 ? 1_i64 : 0_i64' '    i = 0_i64'
+  mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
+  mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
+else
+  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh: not run, no oracle here"
+fi
+if [ -n "$ORACLE_CM" ]; then
   # erf and erfc fall back to an exact path when the fast one cannot
   # prove its rounding, so what is broken here is shared by both.
   mutate "erf's fast two-sum without its low part" '    {hi, b - e}' '    {hi, 0.0}'
@@ -554,11 +612,8 @@ if [ -n "$ORACLE" ]; then
   mutate "sin below 2^31 reduced without pi/2^14's low part" '    rl = k * -7.474650873702107e-21' '    rl = 0.0'
   mutate "j0 below 2 with its numerator a term short" '    r2 = r[3] + z * r[4]' '    r2 = r[3]'
   mutate "yn's recurrence adding where it subtracts" '        b = ((i &+ i).to_f64 / x) * b - a' '        b = ((i &+ i).to_f64 / x) * b + a'
-  mutate "log2's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
-    rhi' ') * invc
-    rhi'
 else
-  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions: not run, no oracle here"
+  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma and the Bessel functions: not run, the oracle's CORE-MATH part is not here"
 fi
 # musl's arm, with the processor's answer refused as above: an fma that
 # rounds twice, a product left where z's alignment put it, and a single's
@@ -582,8 +637,6 @@ else
   echo "  the fma proofs: not run, no python3 to write the cases with"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
-mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
-mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
 mutate "isqrt without halving its root" '        res = (res >> 1) + bit' '        res = res + bit'
 mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)[1]'

@@ -30,6 +30,11 @@ double __log1p (double);
 double __ieee754_sinh (double);
 double __ieee754_cosh (double);
 double __tanh (double);
+#ifdef IYI_ORACLE_CORE_MATH
+/* The second build: `core_math/` and the Bessel functions, which need
+   libm's exact fma and CORE-MATH's sin and cos. The first build has none
+   of it, so a C toolchain that cannot build this part still checks the
+   rest. */
 double __erf (double);
 double __erfc (double);
 double __asinh (double);
@@ -77,6 +82,7 @@ static double tgamma_posix (double x)
     }
   return sg < 0 ? -y : y;
 }
+#endif
 
 static double unary (const char *name, double x)
 {
@@ -98,6 +104,7 @@ static double unary (const char *name, double x)
     return __ieee754_cosh (x);
   if (strcmp (name, "tanh") == 0)
     return __tanh (x);
+#ifdef IYI_ORACLE_CORE_MATH
   if (strcmp (name, "erf") == 0)
     return __erf (x);
   if (strcmp (name, "erfc") == 0)
@@ -132,6 +139,7 @@ static double unary (const char *name, double x)
     return lgamma_posix (x);
   if (strcmp (name, "tgamma") == 0)
     return tgamma_posix (x);
+#endif
   return exp (x);
 }
 int main (int argc, char **argv)
@@ -150,6 +158,7 @@ int main (int argc, char **argv)
         v[2] = pow (v[0], v[1]);
         fwrite (v, sizeof v[0], 3, out);
       }
+#ifdef IYI_ORACLE_CORE_MATH
   else if (strcmp (argv[1], "jn") == 0 || strcmp (argv[1], "yn") == 0)
     /* Pairs of an order, as a double, and an argument. */
     while (fread (v, sizeof v[0], 2, in) == 2)
@@ -158,6 +167,7 @@ int main (int argc, char **argv)
         v[2] = argv[1][0] == 'j' ? __ieee754_jn (n, v[1]) : __ieee754_yn (n, v[1]);
         fwrite (v, sizeof v[0], 3, out);
       }
+#endif
   else
     while (fread (v, sizeof v[0], 1, in) == 1)
       {

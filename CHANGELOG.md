@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## 0.16.0 — 2026-09-30
+
+**The language takes regex literals and writes JSON itself.** `/a+b/`
+in an iyi file compiles once through `std/regex`, and `derive
+serializable` gives a struct or class `to_json` and `from_json`, a key
+per field (SPEC.md II.4). `exit(status)`, a range of characters and `%g`
+arrive with them. **One change breaks source:** assigning through `::`
+(`::foo = 1`) is a syntax error that names the local's spelling, where
+the `::` was dropped without a word. And `puts` of a string that already
+ends in a newline writes no second one, as Crystal's does.
+
+**Faster, and `Math` answers glibc's bits.** crystal-metric's port is a
+gate, and it runs in 0.84 of Crystal 1.21's time (geomean 0.86, three
+rounds on one machine). The collector hands a page of chunks out per
+carve, marks a small live set inside its stop, keeps the empty arenas a
+deep budget will fill again, and marks, sweeps and runs its write
+barrier in fewer instructions. `Math.exp`, `pow`, `log`, `exp2`, `log2`,
+`log10`, `expm1` and `log1p` are glibc's unfused routines to the last
+bit, `pow` three times as fast as before - a result can differ from
+0.15.4's in its last bit. Sorting, hashing, `BigInt` printing, reading
+JSON, Base64 and inflating cost what their input does. A class instance
+equals itself and hashes by its address, so a `Set` of them finds what
+was added to it.
+
+**Windows answers as the other platforms do.** Twenty-two fixes from
+running the library and the CLI there: files a program is denied, has
+open elsewhere, hides or links to; ports another program holds, large
+backlogs, a close under a parked read; Ctrl+Z at a console; paths in
+another case, drive-relative and `\\?\`. Two answers change: a read
+Windows refuses is a failure where it was an empty file, and a failed
+write panics once. `.iyimod` is still v54, so 0.15.4's artifacts are
+rebuilt only because the compiler's version is in their identity.
+
 ### Added
 
 - **`StaticArray#shuffle_in_place`.** `std/random` shuffled an `Array` as

@@ -142,6 +142,27 @@
 
 ### Fixed
 
+- **`std/http` refuses what is not HTTP, and no request can kill its
+  server.** A malformed chunked body raised inside the connection's task:
+  the client got nothing, and `serve` panicked when the listener closed;
+  a chunk size near 2^31 overflowed Int32 in both parsers. It is a 400
+  now, and a refusal. Two conflicting `Content-Length`s were accepted -
+  the first spelling won, a request-smuggling shape RFC 9112 6.3 refuses
+  - and a repeated field kept one value; repeats are combined in order,
+  and conflicting lengths refused. `Transfer-Encoding` with a length, or
+  in HTTP/1.0, kept the connection open; control bytes, bare CR and LF
+  were accepted in field values, targets and reason phrases, and one
+  echoed header then panicked the handler; `+20`, `099` and `HTTP/x`
+  status lines were read. The client returned an interim `100 Continue`
+  as the response, so its own `Expect: 100-continue` post to the
+  module's server came back as a 100; `format_response` wrote a length
+  and a body for 1xx, 204 and 304; and an absolute-form target gave the
+  handler the whole URI as its path. 230,000 requests, 250,000
+  responses, 150,000 round trips and 6,000 real connections against a
+  model of RFC 9110 and 9112, Crystal's `HTTP` and Python found these
+  and none after; the http exercise checks each and proves each check
+  fails with its fix undone.
+
 - **A float's zero keeps its sign, and `x ** Int32::MIN` answers.**
   `trunc` went through an integer, so `(-0.5).trunc` was `0.0`; `round`,
   `round(digits)` and `round(mode)` put the sign back with `self < 0.0`,

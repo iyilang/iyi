@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`URI.encode(space_to_plus: true)` encodes a `+` as `%2B`.** It kept
+  the reserved `+` and wrote a space as `+`, so "1+1=2" and "1 1=2" both
+  came out "1+1=2" and `decode(plus_to_space: true)` gave the second for
+  the first - where `std/uri`'s header promises every encoder is
+  injective and `decode` undoes it. `bench/std_uri_exercise.iyi`
+  round-trips three strings; the old module failed the first.
+
 - **`UUID.parse` refuses a hyphen out of its place, and reads Crystal's
   other spellings.** Every hyphen was dropped wherever it stood, so
   `6ba7b8109dad11d180b4-00c04fd430c8----`, 37 characters, read as a UUID,

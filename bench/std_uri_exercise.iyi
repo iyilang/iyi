@@ -34,6 +34,14 @@ assert_str "a/b:c", URI.new(path: "a/b:c").to_s, "a colon past the first segment
 assert_str "file:C:/x", URI.new(scheme: "file", path: "C:/x").to_s, "nor a path behind a scheme"
 puts "  a colon in a relative path's first segment"
 
+# Where a space is `+`, a `+` is `%2B`: "1+1=2" and "1 1=2" both encoded
+# to "1+1=2", and decoding gave the second for the first.
+["1+1=2", "1 1=2", "a+b c"].each do |text|
+  assert_str text, URI.decode(URI.encode(text, space_to_plus: true), plus_to_space: true), "#{text} round-trips with + for a space"
+end
+assert_true URI.encode("1+1=2", space_to_plus: true) != URI.encode("1 1=2", space_to_plus: true), "and the two encode apart"
+puts "  a + where a space is +"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"

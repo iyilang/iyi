@@ -6555,9 +6555,14 @@ require "./file"
           # names registered threads only: a program that never started a
           # thread has a main thread with no line until here, and the
           # helper would have stopped nobody and swept beside it. Before
-          # the lock, because registering takes it.
+          # the lock, because registering takes it. The count is read once,
+          # here, and every decision below is this read's: read again after
+          # the helpers were started, it was a thread's that had decided
+          # them meanwhile - none started, a mark handed to a helper 0 that
+          # did not exist, and every later collection waiting on it forever
+          # (8 IyiThreads with a GC.collect every 5 ms, 2 runs in 60).
           decide_helpers
-          if concurrent_possible?
+          if (wanted = @@helpers_wanted) > 0_u64
             IyiThread.register_current
             IyiThread.install_handler
           end
@@ -6569,9 +6574,9 @@ require "./file"
         end
         @@collecting = true
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-          start_helpers(@@helpers_wanted)
+          start_helpers(wanted)
           close_sweep_round
-          if concurrent_possible?
+          if wanted > 0_u64
             # The mark starts stopped and goes beside the program if the
             # live set turns out past the bound: then this thread goes
             # back to its allocation and helper 0 finishes the collection
@@ -6634,9 +6639,11 @@ require "./file"
       # How many helpers a mark may use, decided once, at the first
       # collection: what the program set, or the core count's default.
       def self.decide_helpers : Nil
+        # The count before the word that says it is decided: the other way
+        # round, a thread between the two found it decided and read 0.
         return if @@helpers_decided
-        @@helpers_decided = true
         @@helpers_wanted = default_helpers unless @@workers_set
+        @@helpers_decided = true
       end
 
       def self.collect_locked(eager : Bool) : Nil
@@ -6754,7 +6761,7 @@ require "./file"
         #
         # Both platforms measure, and darwin's turn came late. It kept the
         # estimate for a cycle on a measurement of a rule without its
-        # drain - `concurrent_possible?` opened to every collection while
+        # drain - the path beside the program opened to every collection while
         # the bounded mark below stayed Linux's, so every collection went
         # beside the program whatever it found, and churn's 122 of them
         # cost 0.49 s against 0.075. With the drain there too, churn's
@@ -6780,10 +6787,6 @@ require "./file"
         # third more. The last mark is a guess, and a wrong one costs this
         # bound's scanning once - not the estimate's whole mark.
         STW_MARK_SMALL = 8192_u64
-
-        def self.concurrent_possible? : Bool
-          @@helpers_wanted > 0_u64
-        end
 
         # The first stop, on the triggering thread, under the runtime lock.
         # The helpers are started before it: their first spawn is half a

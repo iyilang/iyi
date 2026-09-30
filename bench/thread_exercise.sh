@@ -395,6 +395,62 @@ if [ "$caught" -eq 0 ]; then
 fi
 echo "  $caught of five runs lost a list or died"
 
+# ── 5d. The first collection's helpers ────────────────────────────────────
+# How many helpers a mark may use is decided at the first collection, and
+# the word saying it was decided was written before the count: a thread
+# that read between the two started no helper, then read the count again,
+# handed the mark to a helper 0 that did not exist, and every collection
+# after waited on it forever - 31 runs in 200 of this program on a
+# twelve-core Windows machine. Eight threads cross the first budget
+# together, each holding a list past the stop's bound so the mark goes
+# beside the program; a hundred runs, and every one must end.
+step "threads crossing the first budget together: a hundred runs, and every one ends"
+cat > first.iyi <<'IYI'
+module first
+
+import std/gc::{GC}
+
+class Node
+  getter value : Int64
+  getter next_node : Node?
+
+  def initialize(@value : Int64, @next_node : Node?)
+  end
+end
+
+def build(n : Int32) : Node?
+  head = nil.as(Node?)
+  n.times { |i| head = Node.new(i.to_i64, head) }
+  head
+end
+
+threads = [] of IyiThread
+8.times do
+  threads << IyiThread.start do
+    keep = build(3000)
+    20.times { build(3000) }
+    puts "lost" unless keep.is_a?(Node)
+    nil
+  end
+end
+threads.each { |th| th.join }
+GC.collect
+puts "collected"
+IYI
+if ! "$IYI" build first.iyi -o first > build-first.log 2>&1; then
+  cat build-first.log; exit 1
+fi
+run=1
+while [ "$run" -le 100 ]; do
+  timeout -k 5 30 ./first > first.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q '^collected' first.txt; then
+    echo "run $run exited $code (124 is the harness's timeout):"; tail -3 first.txt; exit 1
+  fi
+  run=$((run + 1))
+done
+echo "  a hundred of a hundred ended"
+
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has
 # a mutable field — here an `Array`, whose size is assigned by its own

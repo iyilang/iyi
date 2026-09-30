@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **Threads crossing the first collection's budget together no longer
+  hang every later collection.** How many helpers a mark may use is
+  decided at the first collection, and the word saying it was decided
+  was written before the count: a thread that read between the two
+  started no helper, read the count again when choosing how to mark,
+  handed the mark to a helper 0 that did not exist, and `@@collecting`
+  was never cleared - the next `GC.collect`, and every collection after,
+  spun forever. Eight threads crossing the first budget together hung in
+  31 runs of 200 on a twelve-core Windows machine; a debugger on a hung
+  run read `collecting` 1 and `helpers` 0 with `helpers_wanted` 11. The
+  count is written first now, and a collection reads it once and makes
+  every decision from that read: 0 hangs in 1,600 runs. The same fix
+  ended the hunter's hang with eight threads of tasks and a `GC.collect`
+  every 5 ms, 2 runs in 60 before and 0 in 100 after.
+  `bench/thread_exercise.sh` runs the eight threads a hundred times; the
+  old runtime hung on the second run.
+
 - **A task a thread is switching into keeps its objects through a
   collection another thread runs.** A switch marked the fiber it enters
   running before its stack was the thread's, and the collector's fiber

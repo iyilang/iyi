@@ -346,6 +346,10 @@ pub struct HTTP
     elsif cl = response.header("Content-Length")
       n = cl.to_i?
       raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n && n >= 0
+      # Short of it is a connection that ended early, as a chunked body cut
+      # inside a chunk is: it was answered as a whole 200 with the part
+      # that came, a cut-off download read as a good one.
+      raise "HTTP: the body ended after #{body.bytesize} of its #{n} bytes" if body.bytesize < n
       body = body[0, n] if n < body.bytesize
     end
     Response.new(status, reason, headers, body)

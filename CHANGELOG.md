@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **An HTTP response whose body is short of its `Content-Length` is
+  refused.** The body was cut to the length when longer and taken as it
+  came when shorter, so a connection that ended early - a cut-off
+  download - was a whole `200` with the part that arrived; a chunked body
+  cut inside a chunk was already refused. It panics "the body ended after
+  N of its M bytes" now. `bench/std_http_exercise.iyi` parses a short
+  body; the old module answered it.
+
 - **`ENV.each` on Windows frees Windows' copy of the environment however
   the block leaves.** The copy was freed after the walk, and a block that
   returned early, broke or panicked skipped the free: 200,000 lookups

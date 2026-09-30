@@ -142,6 +142,19 @@ resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
 assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
 puts "  HEAD, 204 and a status with no reason"
 
+# A body short of its Content-Length is a connection that ended early, as
+# a chunked body cut inside a chunk is: it was a whole 200 with the part
+# that came, a cut-off download read as a good one.
+short = "answered"
+group do |g|
+  cut = g.spawn { HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial"); 0 }
+  outcome = cut.value
+  short = outcome.is_a?(Panicked) ? outcome.message.to_s : "answered"
+  0
+end
+assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
+puts "  a body short of its Content-Length is refused"
+
 puts "\n== over a socket"
 # The server runs on a thread, and a thread's block may capture only what
 # is Share (III.4.4): the listener's descriptor is a number, and what the

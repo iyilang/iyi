@@ -171,8 +171,26 @@ class ::String
     byte_slice(at, bytesize - at)
   end
 
+  # Characters of *chars*, not bytes: a byte mask built from `"©"` (C2 A9)
+  # took the last byte of `é` (C3 A9) with it and answered a lone C3, which
+  # is not a string. ASCII is the mask; a wider character is looked up whole.
   def lstrip(chars : String) : String
     return self if chars.empty?
+    mask = ascii_mask(chars)
+    at = 0
+    while at < bytesize
+      width = 1
+      while at + width < bytesize && (to_unsafe[at + width] & 0xC0_u8) == 0x80_u8
+        width = width + 1
+      end
+      break unless named_at?(at, width, mask, chars)
+      at = at + width
+    end
+    byte_slice(at, bytesize - at)
+  end
+
+  # The ASCII bytes of *chars*, as a 256-entry mask.
+  private def ascii_mask(chars : String) : Pointer(Bool)
     mask = Pointer(Bool).malloc(256_u64)
     i = 0
     while i < 256
@@ -181,15 +199,18 @@ class ::String
     end
     i = 0
     while i < chars.bytesize
-      mask[chars.to_unsafe[i].to_i] = true
+      mask[chars.to_unsafe[i].to_i] = true if chars.to_unsafe[i] < 0x80_u8
       i = i + 1
     end
+    mask
+  end
 
-    at = 0
-    while at < bytesize && mask[to_unsafe[at].to_i]
-      at = at + 1
-    end
-    byte_slice(at, bytesize - at)
+  # Whether the *width* bytes at *at*, one character, are one of *chars*. A
+  # whole character's bytes are found in well-formed UTF-8 only where that
+  # character starts, so the byte search is a character search.
+  private def named_at?(at : Int32, width : Int32, mask : Pointer(Bool), chars : String) : Bool
+    return mask[to_unsafe[at].to_i] if width == 1
+    !chars.index(byte_slice(at, width)).nil?
   end
 
   def rstrip : String
@@ -221,21 +242,15 @@ class ::String
 
   def rstrip(chars : String) : String
     return self if chars.empty?
-    mask = Pointer(Bool).malloc(256_u64)
-    i = 0
-    while i < 256
-      mask[i] = false
-      i = i + 1
-    end
-    i = 0
-    while i < chars.bytesize
-      mask[chars.to_unsafe[i].to_i] = true
-      i = i + 1
-    end
-
+    mask = ascii_mask(chars)
     last = bytesize
-    while last > 0 && mask[to_unsafe[last - 1].to_i]
-      last = last - 1
+    while last > 0
+      start = last - 1
+      while start > 0 && (to_unsafe[start] & 0xC0_u8) == 0x80_u8
+        start = start - 1
+      end
+      break unless named_at?(start, last - start, mask, chars)
+      last = start
     end
     byte_slice(0, last)
   end
@@ -257,7 +272,10 @@ class ::String
     self
   end
 
+  # `"\n"` is every line ending, as `chomp` with no argument reads it and as
+  # the other library answers: `"a\r\n".chomp("\n")` is `"a"`.
   def chomp(suffix : String) : String
+    return chomp if suffix == "\n"
     return self unless ends_with?(suffix)
     byte_slice(0, bytesize - suffix.bytesize)
   end
@@ -285,11 +303,19 @@ class ::String
     return [self] if limit == 1
     return [] of String if empty? && limit < 0
 
+    # Characters, and the limit counts them as it counts any other piece:
+    # `"abc".split("", 2)` is `["a", "bc"]`. An empty string is one empty
+    # piece, as it is with any other separator.
     if separator.empty?
+      return [self] if empty?
       pieces = [] of String
+      at = 0
       each_char do |c|
+        break if limit > 1 && pieces.size == limit - 1
         pieces << c.to_s
+        at = at + c.bytesize
       end
+      pieces << byte_slice(at, bytesize - at) if at < bytesize
       return pieces
     end
 
@@ -323,13 +349,13 @@ class ::String
     i = 0
     while i < bytesize
       b = to_unsafe[i].unsafe_chr
-      if b.whitespace?
+      if b.ascii_whitespace?
         if in_token
           pieces << byte_slice(token_start, i - token_start)
           in_token = false
           if limit > 1 && pieces.size == limit - 1
             j = i + 1
-            while j < bytesize && to_unsafe[j].unsafe_chr.whitespace?
+            while j < bytesize && to_unsafe[j].unsafe_chr.ascii_whitespace?
               j = j + 1
             end
             if j < bytesize
@@ -647,27 +673,32 @@ class ::String
     end
   end
 
+  # A run of one character becomes one of it, the characters compared by
+  # their bytes. A byte at a time, `"耀".squeeze` (E8 80 80) dropped a
+  # continuation byte and answered two bytes that are not a string, and
+  # `"éé"` stayed two.
   def squeeze : String
     return self if bytesize <= 1
-    dup_count = 0
-    i = 1
-    while i < bytesize
-      dup_count = dup_count + 1 if to_unsafe[i] == to_unsafe[i - 1]
-      i = i + 1
-    end
-    return self if dup_count == 0
-
-    String.new(bytesize - dup_count) do |buffer|
-      buffer[0] = to_unsafe[0]
-      at = 1
-      i = 1
-      while i < bytesize
-        b = to_unsafe[i]
-        if b != to_unsafe[i - 1]
-          buffer[at] = b
-          at = at + 1
+    source = to_unsafe
+    String.build(bytesize) do |io|
+      previous = 0
+      previous_width = 0
+      at = 0
+      while at < bytesize
+        width = 1
+        while at + width < bytesize && (source[at + width] & 0xC0_u8) == 0x80_u8
+          width = width + 1
         end
-        i = i + 1
+        same = width == previous_width
+        k = 0
+        while same && k < width
+          same = source[previous + k] == source[at + k]
+          k = k + 1
+        end
+        io.write(source + at, width) unless same
+        previous = at
+        previous_width = width
+        at = at + width
       end
     end
   end
@@ -788,8 +819,8 @@ class ::String
       at = at + 1
     end
     if start < bytesize
-      stop = source[bytesize - 1] == 13_u8 ? bytesize - 1 : bytesize
-      yield byte_slice(start, stop - start)
+      # No newline after it, so a `\r` here is text: `"b\r"` is `"b\r"`.
+      yield byte_slice(start, bytesize - start)
     end
   end
 

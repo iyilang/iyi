@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`std/text` treats a string as characters in six places it treated as
+  bytes or got wrong.** `squeeze` compared bytes: `"耀".squeeze` dropped a
+  continuation byte and answered invalid UTF-8, and `"ééé"` stayed three.
+  `strip`, `lstrip` and `rstrip` with a set of characters built a byte
+  mask: `"xé".rstrip("©")` cut `é` in half, and `"è".strip("é¨")` was
+  empty. `split` without a separator did not split on `\v` or `\f`,
+  which `blank?` and `strip` count as whitespace. `split("", limit)`
+  ignored the limit, and `"".split("")` was `[]`, not `[""]`.
+  `each_line` dropped a final `\r` with no newline after it, and
+  `chomp("\n")` left the `\r` of a `\r\n` - both unlike Crystal's. 300,000
+  cases over 36 operations against Crystal found them, and none after;
+  the text exercise checks each and proves each check fails with its fix
+  undone.
+
 - **Three Unicode answers are the database's.** 6,171 Tangut ideographs
   (U+17001..187FE, U+18D01..18D1D) were not letters: the table generator
   joined a `First>`..`Last>` range to the stride before it, and only the

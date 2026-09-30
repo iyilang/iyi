@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **The math oracle's CORE-MATH part builds without C23's `<stdbit.h>`.**
+  glibc's lgamma includes it for `stdc_leading_zeros`, and mingw's gcc
+  on the Windows runner has none, so there the gate compared none of
+  CORE-MATH's functions - it said so, and printed the missing header. The
+  oracle carries the one function on a 64-bit word, and its directory is
+  searched first, so every toolchain builds against the same one; lgamma
+  still answers glibc's on all 201,835 arguments.
+
 - **`std/math` is consumable as an artifact on arm64.** Its `lib` binds
   `llvm.fma` inside `{% if flag?(:aarch64) %}`, and the rule that a
   `lib` body is declarations judged the macro's expansion as code: the

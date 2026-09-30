@@ -89,6 +89,9 @@ module std/process
   end
 {% elsif flag?(:win32) %}
   lib LibKernel32
+    fun CreateJobObjectW(attributes : Void*, name : UInt16*) : Void*
+    fun AssignProcessToJobObject(job : Void*, process : Void*) : Int32
+    fun TerminateJobObject(job : Void*, exit_code : UInt32) : Int32
     fun CompareStringOrdinal(one : UInt16*, one_length : Int32, other : UInt16*, other_length : Int32, ignore_case : Int32) : Int32
     fun CreateProcessW(application : UInt16*, command_line : UInt16*, process_attributes : Void*,
                        thread_attributes : Void*, inherit_handles : Int32, creation_flags : Int32,
@@ -258,6 +261,8 @@ class ProcessChild
     @input : Pointer(Void) = Pointer(Void).new(0_u64)
     @output : Pointer(Void) = Pointer(Void).new(0_u64)
     @errors : Pointer(Void) = Pointer(Void).new(0_u64)
+    # The job the child runs in, so ending it ends what it started too.
+    @job : Pointer(Void) = Pointer(Void).new(0_u64)
     @@serial = Atomic(UInt64).new(0_u64)
   {% else %}
     @pid : Int32 = 0
@@ -765,6 +770,18 @@ class ProcessChild
         return ProcessError.new(command, failed, failed == ERROR_DIRECTORY ? chdir : nil)
       end
       @process = Pointer(Void).new(answer[0])
+      # In a job of its own: a cancelled run ended the child alone, and a
+      # program it had started - a shell's command, a server's worker -
+      # went on running, where the top of this file promises a task that
+      # stops leaves no program running. Without a job, the child alone.
+      job = LibKernel32.CreateJobObjectW(Pointer(Void).new(0_u64), Pointer(UInt16).new(0_u64))
+      if job.address != 0_u64
+        if LibKernel32.AssignProcessToJobObject(job, @process) != 0
+          @job = job
+        else
+          ::LibC.CloseHandle(job)
+        end
+      end
       ::LibC.CloseHandle(Pointer(Void).new(answer[1]))
       nil
     end
@@ -927,7 +944,12 @@ class ProcessChild
     end
 
     def kill : Nil
-      ::LibC.TerminateProcess(@process, 1) unless @ended
+      return if @ended
+      if @job.address != 0_u64
+        LibKernel32.TerminateJobObject(@job, 1)
+      else
+        ::LibC.TerminateProcess(@process, 1)
+      end
     end
 
     # After a kill, or a wait that could not be parked: the end is near.
@@ -941,6 +963,8 @@ class ProcessChild
       ::LibC.CloseHandle(@output) if @output.address != 0_u64
       ::LibC.CloseHandle(@errors) if @errors.address != 0_u64
       ::LibC.CloseHandle(@process) if @process.address != 0_u64
+      ::LibC.CloseHandle(@job) if @job.address != 0_u64
+      @job = Pointer(Void).new(0_u64)
       @input = Pointer(Void).new(0_u64)
       @output = Pointer(Void).new(0_u64)
       @errors = Pointer(Void).new(0_u64)

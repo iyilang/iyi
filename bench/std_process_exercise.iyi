@@ -95,6 +95,12 @@ if mode = args[0]?
     stdout.write("woke\n")
   when "deaf"
     stdout.write("not reading\n")
+  when "parent"
+    # Starts itself to write *args[1]* in 1.5 seconds, and waits for it.
+    Process.run(Process.executable || "", ["late", args[1]], capture: false)
+  when "late"
+    sleep(1500)
+    File.write(args[1], "the grandchild outlived the cancel\n")
   else
     fail("no child mode #{mode}")
   end
@@ -276,6 +282,22 @@ group do |g|
   fail("the run answered #{outcome}") unless outcome == "cancelled"
   fail("the cancelled run took #{waited} ms: its child was not ended") unless waited < 10000
   puts "  answered Cancelled, with its child ended"
+  {% if flag?(:win32) %}
+    # And what the child started: only the child was ended, and its own
+    # child went on and wrote its file.
+    marker = "#{directory_of(me)}\\iyi-process-grandchild.txt"
+    File.delete(marker) if File.exists?(marker)
+    group do |h|
+      h.spawn { Process.run(me, ["parent", marker]); 0 }
+      h.spawn do
+        sleep(500)
+        TaskFailed.new
+      end
+    end
+    sleep(2500)
+    fail("a cancelled run's grandchild went on: #{File.read(marker)}") if File.exists?(marker)
+    puts "  and what the child had started"
+  {% end %}
 
   {% if flag?(:win32) %}
     puts "== a batch file is refused"

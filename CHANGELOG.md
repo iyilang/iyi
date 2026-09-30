@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A cancelled `Process.run` on Windows ends what its child started
+  too.** Only the child was ended; a program it had started - a shell's
+  command, a server's worker - went on running, where `std/process`
+  promises a task that stops leaves no program running. The child runs in
+  a job object of its own, and cancelling ends the job.
+  `bench/std_process_exercise.iyi` cancels a child whose own child writes
+  a file 1.5 seconds later; with the old module the file was written.
+  [INFERENCE] Linux and darwin end the child's process alone as well,
+  unmeasured.
+
 - **`iyi test --timeout` on Windows ends a test and whatever it started.**
   A test's output comes through a pipe, and the wait for the test waits
   for that pipe's end, which a program the test started holds open; only

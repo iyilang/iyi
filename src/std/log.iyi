@@ -16,7 +16,7 @@
 #
 # Backends: `IOBackend` writes each entry to an IO through a `Formatter`
 # (`DefaultFormatter`: `2024-02-29T15:30:45.123456Z INFO - source: message`,
-# the source and its ` - ` omitted at the root); `MemoryBackend` keeps
+# the source and its `: ` omitted at the root, as Crystal's writes it); `MemoryBackend` keeps
 # the entries for a test to read back. A `Backend` of your own is a
 # class with `write(entry)` and `close`.
 #
@@ -246,15 +246,17 @@ pub class Logger
     child
   end
 
+  # None is a level and not a severity: an entry logged at None was
+  # written by a logger set to None, the one level meant to write nothing.
   def log(severity : Severity, message : String) : Nil
-    return if severity < level
+    return if severity < level || severity == Severity::None
     if b = backend
       b.write(Entry.new(@source, severity, message))
     end
   end
 
   def log(severity : Severity, &block : -> String) : Nil
-    return if severity < level
+    return if severity < level || severity == Severity::None
     if b = backend
       b.write(Entry.new(@source, severity, block.call))
     end

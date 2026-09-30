@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Log` writes nothing at `Severity::None`.** None is the level that
+  silences a logger, and an entry logged at None passed every level
+  check, that one included: a logger set to None wrote it. None is a
+  level and not a severity to log at now. `std/log`'s header also said
+  the root's line leaves out the ` - `; the formatter writes it, as
+  Crystal's does, and the header says so. `bench/std_log_exercise.iyi`
+  logs at None to a logger set to None and to one set to Trace; the old
+  module wrote both.
+
 - **The language server walks every folder of a multi-root workspace.**
   It took the first of `workspaceFolders` and walked that alone, so a
   rename in the second folder left its importers calling the old name,

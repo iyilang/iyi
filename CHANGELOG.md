@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **A task's stack on Windows is committed as the task reaches it.**
+  Windows charges committed memory to the commit limit whether it is
+  touched or not, and every task's 256 KiB stack was committed whole:
+  ten thousand parked tasks held 2,627 MB, and at forty thousand the
+  commit ran out and every new task panicked "VirtualAlloc commit
+  failed". A stack is made the way Windows makes a thread's now: 16 KB
+  committed at its top and a guard page under it, the switch installing
+  the stack's DeallocationStack in the TEB beside its base and limit, so
+  the kernel grows it a page at a time and answers STATUS_STACK_OVERFLOW
+  above the handler's committed room at the bottom. Ten thousand parked
+  tasks commit 540 MB and forty thousand 1,744 MB, where they held
+  10,026 MB. `bench/windows_exercise.sh` measures ten thousand from
+  outside; the old runtime committed 2,611 MB. The panics, thread,
+  concurrency, runtime and marking gates hold.
+
 - **`lstrip`, `rstrip` and `strip` of a set of characters, and `squeeze`,
   read characters, not bytes; `split("", limit)` reads its limit.** The
   set was a mask of its bytes, so stripping `é` also stripped the lead or
@@ -13143,7 +13158,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,114-line library and nothing else. Every other
+  written against iyi's own 19,130-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

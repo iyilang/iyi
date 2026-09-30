@@ -87,14 +87,18 @@ fun __iyi_ctx_swap(current : Pointer(UInt64), target : Pointer(UInt64)) : Nil
          movups %xmm15, 144(%rsp)
          movq %gs:0x08, %r8
          movq %gs:0x10, %r9
+         movq %gs:0x1478, %r10
          pushq %r8
          pushq %r9
+         pushq %r10
          movq %rsp, (%rcx)
          movq (%rdx), %rsp
+         popq %r10
          popq %r9
          popq %r8
          movq %r8, %gs:0x08
          movq %r9, %gs:0x10
+         movq %r10, %gs:0x1478
          movups 0(%rsp), %xmm6
          movups 16(%rsp), %xmm7
          movups 32(%rsp), %xmm8
@@ -481,11 +485,12 @@ class IyiFiber
     # it has to stand on the stack that faulted. Windows has no
     # `sigaltstack`: a vectored handler runs where the fault happened, so a
     # fiber whose stack ran out had nowhere to print from and the process
-    # died of a bare access violation. The stack therefore ends in three
-    # parts rather than one — from `base` up: one uncommitted page, the
-    # hard wall a frame that jumped the guard lands in; `GUARD_SLACK`
-    # committed bytes, which is the handler's room; and one committed page
-    # carrying PAGE_GUARD, which is what the program trips on.
+    # died of a bare access violation. The stack's bottom is therefore in
+    # two parts - from `base` up: one uncommitted page, the hard wall a
+    # frame that jumped everything lands in, and `GUARD_SLACK` and a page
+    # committed, which is the handler's room; the kernel's growth of the
+    # stack stops above them (`map_stack`), and answers there with
+    # STATUS_STACK_OVERFLOW.
     #
     # 16 KB because that is what `SetThreadStackGuarantee` reserves for the
     # same handler on a thread's own stack, and it is measured rather than
@@ -498,6 +503,13 @@ class IyiFiber
     # is the handler walking off the bottom of the guard page into the
     # page nobody committed.
     GUARD_SLACK = 16384_u64
+
+    # What a new stack starts with committed at its top; the kernel commits
+    # the rest a page at a time as the fiber reaches it. The whole 256 KiB
+    # was committed up front, and Windows charges committed memory to the
+    # commit limit whether it is touched or not: 10,000 tasks held 2,690
+    # MiB, and at 40,000 the commit ran out and each new task panicked.
+    INITIAL_COMMIT = 16384_u64
   {% end %}
 
   def initialize
@@ -577,24 +589,26 @@ class IyiFiber
       base_ptr = LibC.VirtualAlloc(nil, STACK_BYTES, 0x2000_i32, 1_i32)
       raise "VirtualAlloc reserve failed" if base_ptr.address == 0_u64
       base = base_ptr.address
-      committed = LibC.VirtualAlloc(Pointer(Void).new(base + PAGE), STACK_BYTES - PAGE, 0x1000_i32, 4_i32)
+      # A stack the way Windows makes a thread's, from the top down: the
+      # top INITIAL_COMMIT committed, and one PAGE_GUARD page (0x4 | 0x100)
+      # under it. The switch installs this stack's bounds in the TEB -
+      # StackBase, StackLimit and DeallocationStack - so a touch of the
+      # guard page is the kernel's to answer as for any thread: it commits
+      # that page, moves the guard one down, and lowers StackLimit. Only
+      # the pages a fiber reaches are ever committed.
+      top = base + STACK_BYTES
+      committed = LibC.VirtualAlloc(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), INITIAL_COMMIT + PAGE, 0x1000_i32, 4_i32)
       raise "VirtualAlloc commit failed" if committed.address == 0_u64
-      # The trip wire: PAGE_READWRITE | PAGE_GUARD (0x4 | 0x100) on the one
-      # page above the slack. Windows raises STATUS_GUARD_PAGE_VIOLATION
-      # the first time anything touches it and clears the attribute in the
-      # same breath, so the handler that runs next has this page *and* the
-      # slack under it committed and writable — which is the whole point,
-      # and the difference from the uncommitted page below, where a handler
-      # would fault again and the process would die without a word.
-      #
-      # Armed here and not in `settle_stack`: a stack comes back to the
-      # pool only from a fiber that finished, and a fiber that trips this
-      # guard never finishes — the handler exits the process. So a pooled
-      # stack's guard is still armed, and re-arming on every fiber start
-      # would be a syscall per connection for a page nobody disarmed.
       old = uninitialized Int32
-      armed = LibC.VirtualProtect(Pointer(Void).new(base + PAGE + GUARD_SLACK), PAGE, 0x104_i32, pointerof(old))
+      armed = LibC.VirtualProtect(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), PAGE, 0x104_i32, pointerof(old))
       raise "VirtualProtect for the fiber stack's guard page failed" if armed == 0
+      # And the handler's room, committed at the bottom where the kernel
+      # will not grow: DeallocationStack names the byte above it (see
+      # `settle_stack`), so the kernel answers STATUS_STACK_OVERFLOW there
+      # and the fault handler stands on this. One uncommitted page stays
+      # under it, the wall a frame that stepped over everything lands on.
+      slack = LibC.VirtualAlloc(Pointer(Void).new(base + PAGE), GUARD_SLACK + PAGE, 0x1000_i32, 4_i32)
+      raise "VirtualAlloc commit failed" if slack.address == 0_u64
     {% elsif flag?(:darwin) %}
       # libSystem's mmap: MAP_PRIVATE|MAP_ANON is 0x1002 here rather
       # than Linux's 0x22, and failure is MAP_FAILED (every bit set)
@@ -623,21 +637,21 @@ class IyiFiber
       ret_slot = entry_sp - 8_u64
       Pointer(UInt64).new(ret_slot).value = __iyi_fiber_entry_address
 
-      # The two TEB words, ten xmm registers (twenty words) and eight
+      # The three TEB words, ten xmm registers (twenty words) and eight
       # integer registers, in the order the switch pops them.
-      saved = ret_slot - 240_u64
-      # The TEB's StackLimit the switch installs, and it is the *usable*
-      # low end now: above the uncommitted page, above the handler's slack
-      # and above the guard page, because that is the first byte the
-      # program may have. Left at `base + PAGE` it named memory the
-      # program must not reach, and anything reading the limit — a Windows
-      # API asked on a fiber, the collector's `stack_base` — was told the
-      # stack was 20 KB longer than it is.
+      saved = ret_slot - 248_u64
+      # DeallocationStack: the lowest byte the kernel may grow the stack
+      # into, above the handler's committed room (`map_stack`).
       Pointer(UInt64).new(saved + 0_u64).value = base + PAGE + GUARD_SLACK + PAGE
-      Pointer(UInt64).new(saved + 8_u64).value = top
+      # StackLimit: the committed low end the stack starts with, above the
+      # guard page. A stack back from the pool may have grown lower, and a
+      # limit above what is committed only makes a large frame's probes
+      # touch pages that are already there.
+      Pointer(UInt64).new(saved + 8_u64).value = top - INITIAL_COMMIT
+      Pointer(UInt64).new(saved + 16_u64).value = top
       index = 0_i64
       while index < 28_i64
-        Pointer(UInt64).new(saved + 16_u64 + index * 8_u64).value = 0_u64
+        Pointer(UInt64).new(saved + 24_u64 + index * 8_u64).value = 0_u64
         index = index + 1
       end
       @sp = saved
@@ -1089,8 +1103,10 @@ class IyiScheduler
       while fiber.is_a?(IyiFiber)
         top = fiber.stack_top
         if top != 0
+          # Anywhere in the reservation: the pages the kernel had not grown
+          # into yet as well as the wall and the slack at its bottom.
           low = top - IyiFiber::STACK_BYTES
-          return true if address >= low && address < low + IyiFiber::PAGE + IyiFiber::GUARD_SLACK + IyiFiber::PAGE
+          return true if address >= low && address < top
         end
         fiber = fiber.next_fiber
       end

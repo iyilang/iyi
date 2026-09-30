@@ -222,6 +222,44 @@ EOF
       fi
     fi
 
+    # 2a'. What a parked task costs. Windows charges committed memory to the
+    # commit limit whether it is touched or not, and every task's 256 KiB
+    # stack was committed whole: ten thousand parked tasks held 2,627 MB,
+    # and at forty thousand the commit ran out and each new task panicked.
+    # A stack is committed from the top as the fiber reaches it now, as a
+    # thread's is. Ten thousand tasks, measured from outside by PowerShell,
+    # must stay under 1,200 MB; the committed-whole stacks were over twice
+    # that.
+    echo
+    echo "== Ten thousand parked tasks =="
+    cat > "$WORK/parked.iyi" <<'EOF'
+module parked
+
+group do |g|
+  10000.times do
+    g.spawn do
+      sleep(2500)
+      0
+    end
+  end
+end
+puts "parked and done"
+EOF
+    if ! "$IYI" build -o "$WORK/parked.exe" "$WORK/parked.iyi" > "$WORK/parked.log" 2>&1; then
+      echo "  the parked-task probe did not build"
+      tail -5 "$WORK/parked.log"
+      status=1
+    else
+      peak="$(powershell -NoProfile -Command "\$p = Start-Process -FilePath '$(cygpath -w "$WORK/parked.exe")' -PassThru -NoNewWindow -RedirectStandardOutput '$(cygpath -w "$WORK/parked.out")'; \$max = 0; while (-not \$p.HasExited) { try { \$p.Refresh(); if (\$p.PrivateMemorySize64 -gt \$max) { \$max = \$p.PrivateMemorySize64 } } catch {}; Start-Sleep -Milliseconds 100 }; [int](\$max / 1MB)" | tr -d '\r')"
+      if [ -n "$peak" ] && [ "$peak" -lt 1200 ] && grep -q "parked and done" "$WORK/parked.out"; then
+        echo "  ten thousand parked tasks committed ${peak} MB"
+      else
+        echo "  ten thousand parked tasks committed ${peak:-?} MB, over the 1,200 MB bar, or did not finish:"
+        sed -n '1,3p' "$WORK/parked.out"
+        status=1
+      fi
+    fi
+
     # 2b. What a short sleep costs. Windows rounds a millisecond timeout
     # up to the system timer tick, so the poller's own wait woke 15.6 ms
     # after a `sleep 1` and a hundred of them took 1,577 ms; with the

@@ -551,7 +551,7 @@ PY
     # gone answered a followed `info?` with the link itself, where POSIX
     # `stat` of a dangling link is an error.
     printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])} #{File.executable?(Program.args[0])} #{File.real_path(Program.args[0]).downcase.ends_with?(File.basename(Program.args[0]).downcase)}"\n' > "$WORK/reparse_kind.iyi"
-    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?}"\n' > "$WORK/dangling.iyi"
+    printf 'module main\n\nimport std/file::{File}\nimport std/dir::{Dir}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?} #{File.exists?(Program.args[0])} #{Dir.exists?(Program.args[0])}"\n' > "$WORK/dangling.iyi"
     if ! "$IYI" build -o "$WORK/reparse_kind" "$WORK/reparse_kind.iyi" > "$WORK/reparse_kind.build" 2>&1 ||
        ! "$IYI" build -o "$WORK/dangling" "$WORK/dangling.iyi" > "$WORK/dangling.build" 2>&1; then
       echo "  the reparse programs did not build"; sed -n '1,10p' "$WORK/reparse_kind.build" "$WORK/dangling.build"; status=1
@@ -579,10 +579,13 @@ PY
       MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/dangling_junction")" "$(cygpath -w "$WORK/gone_target")" > /dev/null
       rmdir "$WORK/gone_target"
       answer="$("$WORK/dangling" "$WORK/dangling_junction" 2>&1)"
-      if [ "$answer" = "true true" ]; then
-        echo "  a junction to nothing is a link, and following it answers nothing"
+      # And it does not exist, as POSIX `stat` of a dangling link fails:
+      # `File.exists?` and `Dir.exists?` said true while `File.directory?`
+      # said false and `Dir.children` panicked.
+      if [ "$answer" = "true true false false" ]; then
+        echo "  a junction to nothing is a link, following it answers nothing, and it does not exist"
       else
-        echo "  a junction to nothing answered symlink?/info?.nil? $answer"
+        echo "  a junction to nothing answered symlink?/info?.nil?/exists?/Dir.exists? $answer"
         status=1
       fi
     fi

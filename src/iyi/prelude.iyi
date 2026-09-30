@@ -923,6 +923,23 @@ end
     wide = __iyi_wide_path(path)
     return -1 if wide.address == 0_u64
     attributes = LibC.GetFileAttributesW(wide)
+    # A link - symbolic or a junction - answers for what it names, as
+    # POSIX `stat` does: a junction whose directory was gone answered
+    # `File.exists?` and `Dir.exists?` true, while `File.directory?`, which
+    # follows, said false and `Dir.children` panicked. Opened through, a
+    # link to nothing is not found; anything else it answers stands (an app
+    # execution alias does not open through, and exists).
+    if attributes != -1 && (attributes & 0x400) != 0
+      # FILE_READ_ATTRIBUTES, every share right, OPEN_EXISTING,
+      # FILE_FLAG_BACKUP_SEMANTICS so a directory opens.
+      through = LibC.CreateFileW(wide, 0x80, 7, nil, 3, 0x2000000, Pointer(Void).new(0_u64))
+      if through.address &+ 1_u64 == 0_u64
+        error = LibC.GetLastError
+        return -1 if error == 2 || error == 3
+      else
+        LibC.CloseHandle(through)
+      end
+    end
     return attributes unless attributes == -1 && LibC.GetLastError == 32
     entry = Pointer(UInt32).malloc(148_u64) # WIN32_FIND_DATAW, 592 bytes
     found = LibC.FindFirstFileW(wide, entry.as(Void*))

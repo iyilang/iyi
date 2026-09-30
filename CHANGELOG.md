@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **On Windows a link to nothing does not exist.** `File.exists?` and
+  `Dir.exists?` read a path's own attributes, which a link has whether or
+  not what it names is there: a junction whose directory was gone
+  answered both true, while `File.directory?`, which follows, said false
+  and `Dir.children` panicked. A link is opened through to answer, as
+  POSIX `stat` follows one, and a link to nothing is not there; an app
+  execution alias, which does not open through, still exists.
+  `bench/std_file_exercise.sh` asks both of a dangling junction; the old
+  prelude said true.
+
 - **`iyi check --affected` says why each consumer broke.** Each broken
   consumer was printed with the first line of its error's deepest
   message, which is empty for a trace: `main.iyi: ` and nothing, where
@@ -12835,7 +12845,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,041-line library and nothing else. Every other
+  written against iyi's own 19,058-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

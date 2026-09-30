@@ -195,7 +195,13 @@ prove_fails() {
 # Never blacken. The queue drains and every object stays gray, which is the
 # shape of a mark phase that loses track of what it has already scanned.
 prove_fails "no black shading" noblack "should be black" \
-  '{ if ($0 ~ /IyiHeap\.write8\(IyiHeap\.mark_byte\(arena, base\), BLACK\)/) next; print }'
+  '{ if ($0 ~ /IyiHeap\.write8\(IyiHeap\.read64\(arena &\+ IyiHeap::OFF_MARKS\) &\+ slot, BLACK\)/) next; print }'
+
+# The chunk's index is worked out once and serves its entry and its mark
+# byte both; blacken the chunk after it instead, and the object scanned
+# stays gray.
+prove_fails "the neighbour blackened" wrongslot "should be black" \
+  '{ sub(/IyiHeap::OFF_MARKS\) &\+ slot, BLACK\)/, "IyiHeap::OFF_MARKS) \\&+ slot \\&+ 1_u64, BLACK)"); print }'
 
 # Stop following pointers. Roots are marked and nothing they reach is, which is
 # the defect that frees a live object.

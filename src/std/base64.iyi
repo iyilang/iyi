@@ -54,29 +54,33 @@ pub struct Base64
   # answers the bytes written.
   private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32
     values = DECODE_VALUES.to_unsafe
-    o = 0
     acc = 0
     bits = 0
-    chars = 0
     pads = 0
     pads_needed = 0
-    i = 0
     # Whole groups of four data characters from the start, three bytes
     # each, until the first byte that is not one; the loop after takes it
-    # from there.
-    while i &+ 4 <= n
-      v0 = values[src[i].to_i32]
-      v1 = values[src[i &+ 1].to_i32]
-      v2 = values[src[i &+ 2].to_i32]
-      v3 = values[src[i &+ 3].to_i32]
+    # from there. Walked by pointer: indexed by two Int32 counters, each
+    # load and store sign-extended its index and the loop ran a third
+    # slower (crystal-metric's Base64Decode 1.16 s against Crystal's 0.84).
+    p = src
+    stop = src.address + n.to_u64
+    q = buf
+    while p.address + 4_u64 <= stop
+      v0 = values[p[0].to_i32]
+      v1 = values[p[1].to_i32]
+      v2 = values[p[2].to_i32]
+      v3 = values[p[3].to_i32]
       break if (v0 | v1 | v2 | v3) < 0
       group = v0.unsafe_shl(18) | v1.unsafe_shl(12) | v2.unsafe_shl(6) | v3
-      buf[o] = group.unsafe_shr(16).unsafe_to_u8
-      buf[o &+ 1] = group.unsafe_shr(8).unsafe_to_u8
-      buf[o &+ 2] = group.unsafe_to_u8
-      o = o &+ 3
-      i = i &+ 4
+      q[0] = group.unsafe_shr(16).unsafe_to_u8
+      q[1] = group.unsafe_shr(8).unsafe_to_u8
+      q[2] = group.unsafe_to_u8
+      q = q + 3
+      p = p + 4
     end
+    i = (p.address - src.address).to_i32
+    o = (q.address - buf.address).to_i32
     chars = i
     while i < n
       # Between groups with no padding seen, four data characters are three

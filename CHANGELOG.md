@@ -96,6 +96,43 @@
 
 ### Changed
 
+- **The sweep reads a page's idle bit once.** It tested the bit for every
+  chunk, and a small class has a hundred chunks on a page. The bit is
+  read when the walk enters a page and trusted to its end, which the
+  locking already allows: the slice's own runs set bits below the
+  cursor's page and a carve clears bits below the cursor's word. The
+  sweep of binary trees at depth 14 went from 190 million instructions
+  to 151. The sweep exercise proves a bit trusted past its page fails.
+
+- **The write barrier resolves a stored word once.** It found the
+  object with `IyiRoots.base_of`, then `gray` found its mark byte by the
+  same arithmetic, and the thread's worker was read for every store
+  under a mark - most of them a fresh object into a fresh object, born
+  black, with nothing to do. The barrier now takes `shade_word`'s single
+  pass: the arena, the chunk's index, its entry and its colour once, and
+  the worker only for a word that grays. A store of a black object under
+  a mark costs 92 instructions to 174; binary trees' wall time does not
+  move beyond noise. The concurrent mark exercise's barrier proof now
+  removes this path's shading.
+
+- **The mark's inner loop does less per object.** A scan worked the
+  chunk's index out twice, called `shade_word` for every pointer and
+  `push` from it, and `push` called `grow_stack` on every entry to learn
+  the stack had room; every address sum was overflow-checked. The index
+  is computed once, `shade_word` and `push` are inlined, the capacity is
+  read in place, and address arithmetic inside an arena wraps. The mark
+  of binary trees at depth 14 went from 105 million instructions to 70;
+  crystal-metric's Binarytrees 0.94 to 0.97 of its time, JsonParsePure
+  0.89, JsonGenerate 0.95. The mark exercise's black-shading proof
+  follows the new line, and a new one blackens the chunk after the
+  scanned one.
+
+- **Base64 decodes its whole groups by pointer.** The loop indexed the
+  text and the answer by two Int32 counters, and each load and store
+  sign-extended its index: crystal-metric's Base64Decode ran 0.80 s
+  where it runs 0.66 now, against Crystal's 0.84. The exercise's proofs
+  follow the loop, and one more breaks the hand-off to the byte loop.
+
 - **A deep budget keeps the empty arenas it will fill again.** The
   scavenge handed every empty arena but a cache's fill arena back to the
   kernel, and a program allocating a budget many arenas deep mapped them
@@ -563,16 +600,6 @@
   fails it at 22.9.
 
 ### Fixed
-
-- **`bench/concurrent_mark.iyi` holds in a plain build.** Its small-live-set
-  check asks that no collection over four thousand live objects go beside
-  the program, and ran with the two-hundred-thousand-node chain an earlier
-  section built still held by `chain`: a plain build keeps a variable's
-  stack slot for the whole program, so every mark was that chain's and
-  went beside it - 7 of 7 on Windows, where the exercise runner builds
-  plain, on master's runs too. A release build had reused the slot. The
-  chain is dropped before the check; its failure proof, the
-  thousand-object bound, still fails it.
 
 - **`fmt` keeps the line breaks a literal holds in a CRLF file.** A CRLF
   file is written back with CRLF, and every `\n` was turned - the ones
@@ -12233,7 +12260,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,848-line library and nothing else. Every other
+  written against iyi's own 18,904-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

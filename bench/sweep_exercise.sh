@@ -165,6 +165,12 @@ prove_fails "a batch left unstamped" batchstamp "batch:" \
 prove_fails "a batch not listed" batchlist "batch:" \
   '{ if ($0 ~ /^          table\[index\] = listed$/) { print "          # removed"; next } print }'
 
+# The idle bit read for the first page of a slice and trusted to its end:
+# the chunks of idle pages after it read as dead, are linked again, and
+# the pages come back from the kernel under the batch.
+prove_fails "an idle bit trusted past its page" stalepage "rounding:" \
+  '{ if (sub(/page_next = \(cursor \| \(IyiHeap::PAGE &- 1_u64\)\) &\+ 1_u64 if cursor >= page_next/, "page_next = stop if cursor >= page_next")) found = 1; print } END { if (!found) exit 3 }'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Sweeping: unreachable chunks come back and are handed out again, a live"

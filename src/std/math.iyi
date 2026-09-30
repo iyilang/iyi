@@ -4510,7 +4510,51 @@ pub struct Math
     bits != 0_u64 ? 1_u64 : 0_u64
   end
 
+  # The software arm's common case, Boldo and Melquiond's emulation (2008):
+  # the product exactly as ph + pl by Veltkamp's split and Dekker's
+  # product, z added to ph exactly as th + tl, tl + pl rounded to odd -
+  # the neighbour whose last bit is set, when the sum is inexact - and one
+  # rounding to nearest of th and that. Their theorem makes it the fused
+  # result when nothing underflows or overflows, so it is taken only with
+  # every exponent well inside the range and a result that is not tiny or
+  # zero; everything else is musl's, below. Three to four times as fast as musl's
+  # on the processor without FMA, where CORE-MATH's functions make a
+  # dozen calls apiece.
   private def self.soft_fma(x : Float64, y : Float64, z : Float64) : Float64
+    ex = (IyiFloatText.bits_of(x).unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_i32
+    ey = (IyiFloatText.bits_of(y).unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_i32
+    ez = (IyiFloatText.bits_of(z).unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_i32
+    # |x|, |y| in (2^-900, 2^500), |z| in (2^-900, 2^900), |x y| past 2^-900.
+    if ex > 123 && ex < 1523 && ey > 123 && ey < 1523 && ez > 123 && ez < 1923 && ex + ey > 2046 - 900
+      ph = x * y
+      tx = x * 134217729.0
+      xh = tx - (tx - x)
+      xl = x - xh
+      ty = y * 134217729.0
+      yh = ty - (ty - y)
+      yl = y - yh
+      pl = ((xh * yh - ph) + xh * yl + xl * yh) + xl * yl
+      th = z + ph
+      bp = th - z
+      tl = (z - (th - bp)) + (ph - bp)
+      v = tl + pl
+      bv = v - tl
+      err = (tl - (v - bv)) + (pl - bv)
+      if err != 0.0
+        bits = IyiFloatText.bits_of(v)
+        if bits & 1_u64 == 0_u64
+          # Toward err: away from zero when they share a sign.
+          bits = (err > 0.0) == (v > 0.0) ? bits &+ 1_u64 : bits &- 1_u64
+          v = IyiFloatText.from_bits(bits)
+        end
+      end
+      r = th + v
+      return r if r.abs > 1.0e-280
+    end
+    musl_fma(x, y, z)
+  end
+
+  private def self.musl_fma(x : Float64, y : Float64, z : Float64) : Float64
     mx, ex, sx = fma_parts(x)
     my, ey, sy = fma_parts(y)
     mz, ez, sz = fma_parts(z)

@@ -6,7 +6,8 @@ doubles to DOUBLES and singles to SINGLES. The answer is a * b + c taken
 exactly as a fraction and rounded once, to nearest with ties to even, so it
 is IEEE 754's `fusedMultiplyAdd` without asking any C library for it. The
 cases are the ones an fma gets wrong: sums that cancel, results on a
-halfway point or a hair off one, subnormal and overflowing results, the
+halfway point or a hair off one, the sums the software arm's fast path
+rounds twice without its round to odd, subnormal and overflowing results, the
 specials crossed with each other, and for singles the sums a double rounds
 onto a single's halfway point while the exact value is just off it - where
 a single's fma taken in double rounds twice.
@@ -110,6 +111,16 @@ for _ in range(10000):
     cases.append((a, b, c))
 for _ in range(30000):
     cases.append((rand_double(), rand_double(), rand_double()))
+# Where rounding tl + pl to nearest instead of to odd rounds twice: x*y is
+# 1 - 2^-2a, a double 1 and a low part below it, and z = 2^53 + 2k for an
+# odd k puts z + 1 on a halfway point the exact sum is just short of.
+for _ in range(20000):
+    a = rnd.randint(27, 50)
+    x, y = 1 + 2.0 ** -a, 1 - 2.0 ** -a
+    z = 2.0 ** 53 + 2 * (2 * rnd.randint(0, 2 ** 50) + 1)
+    sign = rnd.choice([1, -1])
+    sx, sy = rnd.randint(-200, 200), rnd.randint(-200, 200)
+    cases.append((math.ldexp(sign * x, sx), math.ldexp(y, sy), math.ldexp(sign * z, sx + sy)))
 
 with open(sys.argv[1], "wb") as out:
     for a, b, c in cases:

@@ -529,6 +529,9 @@ fi
 # cases exist for.
 if [ -n "$FMA" ]; then
   mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
+  mutate "the software fma's fast path without its round to odd" '      if err != 0.0
+        bits = IyiFloatText.bits_of(v)' '      if false
+        bits = IyiFloatText.bits_of(v)' '      fuses == 1' '      false'
   mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
   mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false'
   # And the instruction with its operands in the wrong order, b * c + a,

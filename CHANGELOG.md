@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **`Math.fma` without FMA hardware is three to four times as fast.**
+  musl's arm took 10 ns a call on x86_64 without FMA3 (and on wasm32,
+  which has no such instruction); the correctly rounded functions make a
+  dozen calls apiece there, and cos took 300 ns against glibc's 7. The
+  common case is Boldo and Melquiond's proved emulation now - the product
+  exact by Dekker's split, z added exactly, the low parts' sum rounded to
+  odd, one rounding to nearest - taken while every exponent is well
+  inside the range and the result is not tiny or zero, with musl's for
+  the rest: 3 ns a call, faster than glibc's software fma at 6; sin 18 ns,
+  cos 110 and tan 140 over [-10, 10], from 50, 300 and 280. The fma cases
+  gain 20,000 where rounding the low parts to nearest instead of to odd
+  rounds twice, and the math gate proves the check fails without that
+  step. On processors with FMA nothing changes: the instruction answers.
+
 - **`Math.lgamma`, `tgamma` and `gamma` are correctly rounded, and
   glibc's.** They were Lanczos and Stirling sums, and answered
   differently from glibc 2.43 for 60,071 and 90,098 of 100,000 arguments.

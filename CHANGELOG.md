@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`ENV.each` on Windows frees Windows' copy of the environment however
+  the block leaves.** The copy was freed after the walk, and a block that
+  returned early, broke or panicked skipped the free: 200,000 lookups
+  that stopped at the first match peaked at 1,331 MB, where a full walk
+  stays near 200 MB. The block is read whole and freed before the first
+  yield; the same program peaks at 291 MB. [INFERENCE] No gate holds
+  this: nothing in std measures a process's private memory.
+
 - **`HTML.escape(string, io)` writes UTF-8 text as it is.** Each byte that
   needed no escape went out as `byte.unsafe_chr`, a character whose code
   point is the byte, and `<<` wrote that as UTF-8: `café` came out

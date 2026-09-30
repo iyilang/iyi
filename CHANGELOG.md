@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **On Windows a signal no `Signal.wait` names keeps its default.** The
+  console handler answered every event whatever was waited for: a
+  program waiting for `TERM` alone swallowed Ctrl-C and Ctrl-Break, and
+  one waiting for `INT` alone held a closing console for Windows' five
+  seconds before it ended. The handler answers only for the signals a
+  `wait` has named, and passes the rest to Windows' own.
+  `bench/std_signal_exercise.sh` sends a Ctrl-Break into the console of a
+  program waiting for `TERM`; the old module kept it running ten seconds
+  after.
+
 - **A package's `iyi.sum` hash is the same on every platform.** The hash
   covers each file's relative path and bytes; on Windows the path of a
   file in a directory went in with `\`, and the bytes were the checkout's,

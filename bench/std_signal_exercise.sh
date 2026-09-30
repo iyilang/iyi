@@ -211,6 +211,50 @@ else
   fi
 fi
 
+# And a signal the program did not name keeps its default: waiting for TERM
+# alone, a Ctrl-Break still ends the process, as it ends one that waits for
+# nothing. The one console handler answered every event, and TERM's wait
+# swallowed Ctrl-C and Ctrl-Break. The program makes a console of its own
+# (`own_console`), so the break is sent in there, the way `console_close`
+# finds its window, by a Python that ignores the break itself.
+if [ "$WINDOWS" -eq 1 ] && [ -n "$PY" ]; then
+  echo
+  echo "== a Ctrl-Break nobody waits for"
+  said="$("$PY" - "$WORK/signal-plain.exe" "$WORK/break.out" <<'PY'
+import ctypes, subprocess, sys, time
+from ctypes import wintypes
+exe, out = sys.argv[1], sys.argv[2]
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+with open(out, "w") as f:
+    p = subprocess.Popen([exe, "external"], stdout=f, stderr=subprocess.STDOUT)
+deadline = time.time() + 10
+while time.time() < deadline and "ready" not in open(out).read():
+    time.sleep(0.1)
+if "ready" not in open(out).read():
+    p.kill(); print("never said ready"); sys.exit(0)
+ignore = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(lambda event: True)
+k32.FreeConsole()
+if not k32.AttachConsole(p.pid):
+    p.kill(); print("could not attach to its console (%d)" % ctypes.get_last_error()); sys.exit(0)
+k32.SetConsoleCtrlHandler(ignore, True)
+k32.GenerateConsoleCtrlEvent(1, 0)
+time.sleep(0.2)
+k32.FreeConsole()
+try:
+    print("0x%08x" % (p.wait(timeout=10) & 0xFFFFFFFF))
+except subprocess.TimeoutExpired:
+    p.kill(); print("still running ten seconds after the break")
+PY
+)"
+  if [ "$said" = "0xc000013a" ]; then
+    echo "  waiting for TERM, the program was ended by a Ctrl-Break, as Windows ends it"
+  else
+    echo "  waiting for TERM, a Ctrl-Break answered: $said (0xc000013a is Windows' own end)"
+    sed 's/^/    /' "$WORK/break.out"
+    status=1
+  fi
+fi
+
 echo
 echo "== proving the checks can fail when the module is broken"
 patched() { # patched <name> <old> <new>: a copy of std with one line changed

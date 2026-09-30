@@ -169,6 +169,9 @@ fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
 step "failure proof: a large block outgrown under a mark is unmapped beside the helpers"
+if ! grep -q "stayed mapped beside the helpers" answers.txt; then
+  echo "  not run: the program outgrew too few blocks under a mark here to check"
+else
 mkdir -p unmapped/iyi
 cp "$REPO"/src/iyi/*.iyi unmapped/iyi/
 awk '{ if (sub(/free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8/, "free_large(pointer.address - HEADER)")) found = 1; print } END { if (!found) exit 3 }' \
@@ -183,6 +186,7 @@ if [ "$code" -ne 1 ] || ! grep -q "large: a block outgrown under a mark was unma
   echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'large: a block outgrown' unmapped.txt)"
+fi
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi

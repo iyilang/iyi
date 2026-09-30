@@ -294,7 +294,9 @@
   one listed while its mark runs and the blocks freed after - all but
   what a stale word keeps, which on Windows is one, where a leak keeps
   every one - and proves the check fails with `free`'s look at the mark
-  removed.
+  removed. Where the race cannot be arranged - on darwin arm64 the grown
+  block's assist finished every mark before the old block was freed - it
+  says so, and the proof is not run there.
 
 - **Two `SemanticVersion`s compare.** `<=>` was declared on the struct
   with `other : self` and again in `impl Comparable`, whose body is `self

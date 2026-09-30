@@ -380,6 +380,19 @@ for root in "${roots[@]}"; do
   fi
 done
 [ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
+# `lib` is left alone however the directory is named: the exclude was
+# compared as a string prefix, and `fmt --check .` walked to `./lib/x.iyi`,
+# which never starts with `lib`, and checked what a bare `fmt --check`
+# leaves alone.
+mkdir -p excl/lib excl/src
+printf 'module messy\n\nx=1\n' > excl/lib/messy.iyi
+printf 'module messy\n\nx=1\n' > excl/src/messy.iyi
+(cd excl && "$IYI" fmt --check . > ../excl.out 2>&1)
+if grep -q 'src.messy.iyi' excl.out && ! grep -q 'lib.messy.iyi' excl.out; then
+  echo "  fmt --check . leaves lib alone, as fmt --check does"
+else
+  echo "  fmt --check . and lib:"; sed -n '1,3p' excl.out; status=1
+fi
 # A program rebuilt while it runs, the everyday Windows loop: Windows will
 # not write over a running program, and the linker said so after the whole
 # compile - "LNK1104: cannot open file", exit status 1104. The running one

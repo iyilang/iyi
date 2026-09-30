@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`iyi fmt --check .` leaves `lib` alone, as `iyi fmt --check` does.**
+  The excludes were compared as string prefixes, and a walk from `.` or
+  from an absolute directory named its files `.\.\lib\x.iyi` and
+  `C:\...\lib\x.iyi`, which never start with `.\lib`: `lib` and every
+  `-e` directory were checked after all. They are compared as paths now.
+  `bench/verbs_exercise.sh` runs `fmt --check .` over a messy `lib`; the
+  old binary reported it (measured by the hunt that found it).
+
 - **`iyi mod context` resolves an import from the root the entry's header
   names.** `app/main.iyi` declaring `module app/main` imports `app/util`
   from the directory above `app`, which is where a build looks after the

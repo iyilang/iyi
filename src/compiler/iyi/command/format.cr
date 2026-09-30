@@ -152,11 +152,21 @@ class Iyi::Command
       end
     end
 
+    # Under an exclude as a path is, not as a string starts: `fmt --check .`
+    # and `fmt --check <absolute dir>` walked to `.\.\lib\x.iyi` and
+    # `C:\...\lib\x.iyi`, which never start with `.\lib`, and checked the
+    # `lib` the bare `fmt --check` leaves alone.
+    private def excluded?(filename) : Bool
+      full = Iyi.path_key(File.expand_path(filename))
+      @excludes.any? do |exclude|
+        base = Iyi.path_key(File.expand_path(exclude))
+        full == base || !Iyi.path_under?(full, base).nil?
+      end
+    end
+
     private def format_file_or_directory(filename)
       if File.file?(filename)
-        unless @excludes.any? { |exclude| filename.starts_with?(exclude) }
-          format_file filename
-        end
+        format_file filename unless excluded?(filename)
       elsif Dir.exists?(filename)
         # Composed by `Path` rather than by interpolation, because a trailing
         # separator is its business: `chomp('/')` knew only the posix one, so

@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`CSV.parse` refuses a UTF-16 document.** A file opening with UTF-16's
+  byte order mark - Windows PowerShell 5.1's `Out-File` and `>` - was read
+  as UTF-8, and came back as fields like `ÿþ"Name"` with a NUL between
+  every two letters and no error. It panics now, naming UTF-16 and the
+  byte order mark. `bench/std_csv_exercise.iyi` parses one; the old
+  module returned the garbled rows.
+
 - **`std/xml` names a UTF-16 document as unsupported.** Its header
   promises an encoding other than UTF-8 or US-ASCII is named rather than
   read as something else, and a document opening with UTF-16's byte order

@@ -6,7 +6,7 @@
 # writes the same contract: a field is quoted when it holds a comma, a
 # quote or a line break, or is a row's only field and empty - written
 # bare, that row was nothing. A quote without its pair is `unterminated
-# quoted field`.
+# quoted field`, and a UTF-16 document is refused by its byte order mark.
 
 module std/csv
 
@@ -26,6 +26,12 @@ pub struct CSV
     # Past a byte order mark, which Excel writes into every "CSV UTF-8"
     # file: the first header field kept it, and `row[0] == "id"` was false.
     i = 3 if n >= 3 && src[0] == 0xEF_u8 && src[1] == 0xBB_u8 && src[2] == 0xBF_u8
+    # UTF-16's, FF FE or FE FF - what Windows PowerShell 5.1's `Out-File`
+    # and `>` write - was read as UTF-8: `"ÿþ\"Name\""` and every field
+    # after it with a NUL between its letters, and no error.
+    if n >= 2 && ((src[0] == 0xFF_u8 && src[1] == 0xFE_u8) || (src[0] == 0xFE_u8 && src[1] == 0xFF_u8))
+      raise "CSV: the document is UTF-16, by its byte order mark, and is read as UTF-8"
+    end
     while i < n
       b = src[i]
       if quoted

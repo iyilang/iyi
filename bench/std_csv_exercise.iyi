@@ -44,4 +44,17 @@ assert_true CSV.parse("a\n\"\"") == [["a"], [""]], "and as the last row"
 end
 puts "  a lone CR, and a row of one empty field"
 
+# A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is
+# refused by its byte order mark; it read as fields with a NUL between
+# every two letters, and no error.
+said = "parsed"
+group do |g|
+  attempt = g.spawn { CSV.parse("\xFF\xFE\"\0N\0\"\0\r\0\n\0") }
+  outcome = attempt.value
+  said = outcome.message.to_s if outcome.is_a?(Panicked)
+  0
+end
+assert_true said.includes?("UTF-16"), "a UTF-16 document is refused, not #{said.inspect}"
+puts "  a UTF-16 document is refused"
+
 puts "\nALL CHECKS PASSED"

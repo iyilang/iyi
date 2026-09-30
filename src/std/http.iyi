@@ -438,7 +438,11 @@ pub struct HTTP
     end
     port = uri.port
     port = 80 unless port
-    host_line = port == 80 ? host : "#{host}:#{port}"
+    # An IPv6 literal in its brackets, as the URL wrote it (RFC 9110
+    # §7.2): `hostname` is the address without them, and `Host: ::1:8080`
+    # named no host a server can split from its port.
+    named = host.includes?(":") ? "[#{host}]" : host
+    host_line = port == 80 ? named : "#{named}:#{port}"
     text = format_request(method, path, host_line, body, headers)
     sock = IyiSocket.connect(host, port)!
     defer sock.close

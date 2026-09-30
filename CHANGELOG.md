@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`HTTP.get("http://[::1]:8080/")` sends `Host: [::1]:8080`.** The
+  host line was built from the URL's `hostname`, which is the address
+  without its brackets, so the request said `Host: ::1:8080` - no host a
+  server can split from its port (RFC 9110 §7.2 keeps the brackets). A
+  literal with a colon is bracketed now. `bench/std_http_exercise.iyi`
+  asks a server on `::1` what it read; the old client sent the bare
+  address.
+
 - **A request whose chunk size is not one is answered 400 by
   `Server.serve`.** Every other malformed request was a 400 that says
   why; a chunked body's size line raised instead, so a client that sent

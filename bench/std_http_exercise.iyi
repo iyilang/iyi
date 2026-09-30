@@ -220,6 +220,25 @@ server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
+# An IPv6 literal's Host line keeps the URL's brackets: without them it
+# was `Host: ::1:<port>`, which no server can split into host and port.
+v6 = IyiSocket.listen("::1", 0)
+v6_port = v6.local_port
+v6_fd = v6.to_unsafe
+v6_server = IyiThread.start do
+  l = IyiSocket.new(v6_fd)
+  conn = l.accept.or_panic
+  saw = read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw)
+  conn.close
+  nil
+end
+r = HTTP.get("http://[::1]:#{v6_port}/six").or_panic
+assert_true r.body.includes?("Host: [::1]:#{v6_port}\r\n"), "an IPv6 Host keeps its brackets: #{r.body.inspect}"
+v6_server.join
+v6.close
+puts "  an IPv6 literal's Host line keeps its brackets"
+
 puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a
 # chunked request body, HEAD, a request that is not HTTP, and `Connection:

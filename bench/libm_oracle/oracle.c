@@ -2,14 +2,14 @@
  * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
  * log1p, sinh, cosh, tanh and the Bessel functions, and its CORE-MATH erf, erfc, asinh, acosh and
  * atanh, lgamma and tgamma behind the wrappers glibc's symbols are, and
- * CORE-MATH's own atan, asin, acos, sin, cos, tan, cbrt and hypot (`core_math/`, linked with
+ * CORE-MATH's own atan, asin, acos, sin, cos, tan, cbrt, hypot and atan2 (`core_math/`, linked with
  * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
  * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
  * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
  * `asin`, `acos`, `sin`, `cos`, `tan`, `lgamma`, `tgamma`, `j0`, `j1`, `y0`,
  * `y1`, `cbrt`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
- * pairs and writes each with its power, `oracle hypot` likewise, and
+ * pairs and writes each with its power, `oracle hypot` and `atan2` likewise, and
  * `oracle jn` or `yn` pairs of an
  * order and an argument with the Bessel function's value.
  * The files are opened in binary, which a Windows C runtime's standard
@@ -55,6 +55,7 @@ double __ieee754_jn (int, double);
 double __ieee754_yn (int, double);
 double cr_cbrt (double);
 double cr_hypot (double, double);
+double cr_atan2 (double, double);
 double __ieee754_lgamma_r (double, int *);
 double __ieee754_gamma_r (double, int *);
 
@@ -164,10 +165,10 @@ int main (int argc, char **argv)
         fwrite (v, sizeof v[0], 3, out);
       }
 #ifdef IYI_ORACLE_CORE_MATH
-  else if (strcmp (argv[1], "hypot") == 0)
+  else if (strcmp (argv[1], "hypot") == 0 || strcmp (argv[1], "atan2") == 0)
     while (fread (v, sizeof v[0], 2, in) == 2)
       {
-        v[2] = cr_hypot (v[0], v[1]);
+        v[2] = argv[1][0] == 'h' ? cr_hypot (v[0], v[1]) : cr_atan2 (v[0], v[1]);
         fwrite (v, sizeof v[0], 3, out);
       }
   else if (strcmp (argv[1], "jn") == 0 || strcmp (argv[1], "yn") == 0)

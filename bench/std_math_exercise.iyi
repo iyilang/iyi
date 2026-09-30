@@ -323,6 +323,26 @@ def against(path : String, name : String, source : String, least : Int32, & : Fl
   puts "  #{cases} arguments, every answer #{source} to the last bit"
 end
 
+# The same for a function of two, from a file of (x, y, answer) triples.
+def against_pairs(path : String, name : String, source : String, least : Int32, & : Float64, Float64 -> Float64) : Nil
+  puts "\n== #{name} against #{source} #{name}, bit for bit"
+  triples = File.read(path)
+  words = triples.to_unsafe.as(Pointer(UInt64))
+  cases = triples.bytesize // 24
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 3])
+    y = IyiFloatText.from_bits(words[index * 3 + 1])
+    want = IyiFloatText.from_bits(words[index * 3 + 2])
+    got = yield x, y
+    same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+    raise "ASSERTION FAILED: #{name}(#{x}, #{y}) is #{got}, #{source} is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > least, "the #{name} oracle had #{cases} cases"
+  puts "  #{cases} pairs, every answer #{source} to the last bit"
+end
+
 args = Program.args
 against(args[0], "exp", "Arm's", 300000) { |x| Math.exp(x) } if args.size > 0
 if args.size > 1
@@ -397,24 +417,10 @@ end
 # not - it differs from this for about half the arguments - and its
 # hypot is, but for pairs of subnormals.
 against(args[30], "cbrt", "CORE-MATH's", 100000) { |x| Math.cbrt(x) } if args.size > 30
-if args.size > 31
-  puts "\n== hypot against CORE-MATH's hypot, bit for bit"
-  triples = File.read(args[31])
-  words = triples.to_unsafe.as(Pointer(UInt64))
-  cases = triples.bytesize // 24
-  index = 0
-  while index < cases
-    x = IyiFloatText.from_bits(words[index * 3])
-    y = IyiFloatText.from_bits(words[index * 3 + 1])
-    want = IyiFloatText.from_bits(words[index * 3 + 2])
-    got = Math.hypot(x, y)
-    same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
-    raise "ASSERTION FAILED: hypot(#{x}, #{y}) is #{got}, CORE-MATH's is #{want}" unless same
-    index = index + 1
-  end
-  assert_true cases > 100000, "the hypot oracle had #{cases} cases"
-  puts "  #{cases} pairs, every answer CORE-MATH's to the last bit"
-end
+against_pairs(args[31], "hypot", "CORE-MATH's", 100000) { |x, y| Math.hypot(x, y) } if args.size > 31
+# CORE-MATH's atan2, correctly rounded; glibc 2.43's is IBM's, an ulp
+# away for 12,077 of 1,748,883 pairs of the port's.
+against_pairs(args[32], "atan2", "CORE-MATH's", 200000) { |y, x| Math.atan2(y, x) } if args.size > 32
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

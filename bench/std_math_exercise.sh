@@ -126,7 +126,8 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
      "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
      "$REPO/bench/libm_oracle/core_math/e_lgamma_r.c" "$REPO/bench/libm_oracle/core_math/tan.c" \
      "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" \
-     "$REPO/bench/libm_oracle/core_math/cbrt.c" "$REPO/bench/libm_oracle/core_math/hypot.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
+     "$REPO/bench/libm_oracle/core_math/cbrt.c" "$REPO/bench/libm_oracle/core_math/hypot.c" \
+     "$REPO/bench/libm_oracle/core_math/atan2.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
     CM_BUILT=1
   elif [ -n "$ORACLE_BUILT" ]; then
     echo "the oracle's CORE-MATH and Bessel part did not build here:"
@@ -387,7 +388,7 @@ PY
   # neighbours, both signs and the specials; hypot's: pairs at every
   # exponent gap, near the overflow edge, both subnormal, one subnormal,
   # near Pythagorean triples, and the specials crossed.
-  "$PY" - "$WORK/cbrt.in" "$WORK/hypot.in" <<'PY'
+  "$PY" - "$WORK/cbrt.in" "$WORK/hypot.in" "$WORK/atan2.in" <<'PY'
 import math, random, struct, sys
 random.seed(1637)
 xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(80000)]
@@ -410,7 +411,25 @@ for _ in range(10000):
     ps.append(((a * a - b * b) * s, 2 * a * b * s))
 sp = [0.0, -0.0, 1.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
 ps += [(a, b) for a in sp for b in sp]
-for path, rows in ((sys.argv[1], [(x,) for x in xs]), (sys.argv[2], ps)):
+# atan2's: every quadrant at quotients from 2^-1100 to 2^1100 (past 53
+# binades apart, its slow exact path), both near the halfway 1 and the
+# table's 64ths, subnormals, the huge and the specials crossed.
+qs = []
+for _ in range(150000):
+    ex = random.uniform(-500, 500)
+    ey = ex + random.uniform(-1100, 1100)
+    if -1074 < ey < 1023:
+        qs.append((random.choice([1, -1]) * 2 ** ey, random.choice([1, -1]) * 2 ** ex))
+for _ in range(60000):
+    x = random.choice([1, -1]) * 2 ** random.uniform(-60, 60)
+    t = random.randint(1, 64) / 64.0 * (1 + random.uniform(-1e-12, 1e-12))
+    qs.append((random.choice([1, -1]) * x * t, x) if random.random() < 0.5 else (x, random.choice([1, -1]) * x * t))
+for _ in range(10000):
+    qs.append((random.uniform(-2.2250738585072014e-308, 2.2250738585072014e-308), random.choice([1, -1]) * 2 ** random.uniform(-1074, 0)))
+    qs.append((random.uniform(-1.7e308, 1.7e308), random.uniform(-1.7e308, 1.7e308)))
+sp = [0.0, -0.0, 1.0, -1.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324, 1.7976931348623157e308]
+qs += [(a, b) for a in sp for b in sp]
+for path, rows in ((sys.argv[1], [(x,) for x in xs]), (sys.argv[2], ps), (sys.argv[3], qs)):
     with open(path, "wb") as out:
         for row in rows:
             out.write(struct.pack("<%dd" % len(row), *row))
@@ -445,12 +464,13 @@ PY
       "$WORK/libm_oracle_cm" yn "$WORK/besseln.in" "$WORK/yn.bin" &&
       "$WORK/libm_oracle_cm" cbrt "$WORK/cbrt.in" "$WORK/cbrt.bin" &&
       "$WORK/libm_oracle_cm" hypot "$WORK/hypot.in" "$WORK/hypot.bin" &&
+      "$WORK/libm_oracle_cm" atan2 "$WORK/atan2.in" "$WORK/atan2.bin" &&
       "$WORK/libm_oracle_cm" sin "$WORK/trig.in" "$WORK/sin.bin" &&
       "$WORK/libm_oracle_cm" cos "$WORK/trig.in" "$WORK/cos.bin" &&
       "$WORK/libm_oracle_cm" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
       "$WORK/libm_oracle_cm" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
       ORACLE_CM=1 &&
-      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin $WORK/cbrt.bin $WORK/hypot.bin"
+      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin $WORK/cbrt.bin $WORK/hypot.bin $WORK/atan2.bin"
   fi
 fi
 
@@ -464,7 +484,7 @@ else
   echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
 fi
 [ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
-[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt and hypot against the oracle: not compared here, because its CORE-MATH part did not build or run"
+[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt, hypot and atan2 against the oracle: not compared here, because its CORE-MATH part did not build or run"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -490,7 +510,7 @@ if [ -n "$ORACLE" ]; then
   done
 fi
 if [ -n "$ORACLE_CM" ]; then
-  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit" "== cbrt against CORE-MATH's cbrt, bit for bit" "== hypot against CORE-MATH's hypot, bit for bit"; do
+  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit" "== cbrt against CORE-MATH's cbrt, bit for bit" "== hypot against CORE-MATH's hypot, bit for bit" "== atan2 against CORE-MATH's atan2, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
@@ -649,8 +669,10 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "yn's recurrence adding where it subtracts" '        b = ((i &+ i).to_f64 / x) * b - a' '        b = ((i &+ i).to_f64 / x) * b + a'
   mutate "cbrt's residual without its cube's low part" '    y3l = fma(y, y2, y3 * -1.0) + y * y2l' '    y3l = 0.0'
   mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
+  mutate "atan2's quotient without the divisor's low part" '    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))' '    zl = rdh * (fma(dh, zh * -1.0, nh) + nl)'
+  mutate "atan2's slow product without its middle carries" '    cm = cm &+ sh' '    cm = cm &+ 0_u64'
 else
-  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt and hypot: not run, the oracle's CORE-MATH part is not here"
+  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt, hypot and atan2: not run, the oracle's CORE-MATH part is not here"
 fi
 # musl's arm, with the processor's answer refused as above: an fma that
 # rounds twice, a product left where z's alignment put it, and a single's
@@ -674,7 +696,7 @@ else
   echo "  the fma proofs: not run, no python3 to write the cases with"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
-mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
+mutate "atan2 blind to the sign of zero" '        return y if ix == 0_u64' '        return y'
 mutate "isqrt without halving its root" '        res = (res >> 1) + bit' '        res = res + bit'
 mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)[1]'
 mutate "erf of a single answered as a double" '  def self.erf(value : Float32) : Float32

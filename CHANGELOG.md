@@ -34,6 +34,21 @@
 
 ### Changed
 
+- **`Math.atan2` is correctly rounded.** It was `atan(y / x)` corrected
+  by pi, which rounds twice: against CORE-MATH's correctly rounded atan2
+  it was wrong for 211,999 of 1,748,883 pairs, and against glibc 2.43's
+  (IBM's) for 211,906. It is CORE-MATH's now (MIT, revision
+  b1a4badf6765), its 192-bit slow path in 64-bit words over the shared
+  multiply, the exception flags it sets and clears dropped - none feeds
+  an answer - and differs from none of those pairs; glibc's differs from
+  it for 12,077, each an ulp. A typical call costs 32 ns where it cost
+  28; the rare pair that needs the slow path costs microseconds. The
+  oracle carries `atan2.c` and `tint.h`, and the math gate requires
+  209,000 pairs - every quadrant, quotients from 2^-1100 to 2^1100, the
+  table's 64ths, subnormals, the specials crossed - to the last bit and
+  proves the check fails with the quotient losing its divisor's low
+  part and the slow product its middle carries.
+
 - **`Math.hypot` and `cbrt` are correctly rounded.** Against the true
   value rounded to the nearest double they were wrong for 5,323 and 6,413
   of 20,000 arguments; they are CORE-MATH's (MIT, revision b1a4badf6765)

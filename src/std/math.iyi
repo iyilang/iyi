@@ -30,9 +30,6 @@ pub struct Math
   LOG2  = 0.693147180559945309417
   LOG10 =  2.30258509299404568402
 
-  private HALF_PI    = 1.57079632679489661923
-  private QUARTER_PI = 0.78539816339744830962
-
   # sin and cos: CORE-MATH's correctly rounded cr_sin and cr_cos (sin.c,
   # cos.c at revision b1a4badf6765), ported operation for operation.
   # Copyright (c) 2022-2026 Paul Zimmermann and Tom Hubrecht and Alexei
@@ -5416,30 +5413,533 @@ pub struct Math
     atan(value.to_f64)
   end
 
+  # atan2: CORE-MATH's correctly rounded cr_atan2 (binary64/atan2/atan2.c
+  # and tint.h at revision b1a4badf6765), ported operation for operation.
+  # Copyright (c) 2023-2025 Paul Zimmermann and Alexei Sibidanov; MIT
+  # licence. Tables hold each double's bits in the C file's row-major order;
+  # a tint_t is five words h, m, l, ex, sgn: (-1)^sgn (h/2^64 + m/2^128 +
+  # l/2^192) 2^ex. Only the exception flags and errno were left out.
+
+  private ATAN2_T2 = [
+    0x0000000000000000_u64, 0x3f90000000000000_u64, 0x3fa0000000000000_u64, 0x3fa8000000000000_u64,
+    0x3fb0000000000000_u64, 0x3fb4000000000000_u64, 0x3fb8000000000000_u64, 0x3fbc000000000000_u64,
+    0x3fc0000000000000_u64, 0x3fc2000000000000_u64, 0x3fc4000000000000_u64, 0x3fc6000000000000_u64,
+    0x3fc8000000000000_u64, 0x3fca000000000000_u64, 0x3fcc000000000000_u64, 0x3fce000000000000_u64,
+    0x3fd0000000000000_u64, 0x3fd1000000000000_u64, 0x3fd2000000000000_u64, 0x3fd3000000000000_u64,
+    0x3fd4000000000000_u64, 0x3fd5000000000000_u64, 0x3fd6000000000000_u64, 0x3fd7000000000000_u64,
+    0x3fd8000000000000_u64, 0x3fd9000000000000_u64, 0x3fda000000000000_u64, 0x3fdb000000000000_u64,
+    0x3fdc000000000000_u64, 0x3fdd000000000000_u64, 0x3fde000000000000_u64, 0x3fdf000000000000_u64,
+    0x3fe0000000000000_u64, 0x3fe0800000000000_u64, 0x3fe1000000000000_u64, 0x3fe1800000000000_u64,
+    0x3fe2000000000000_u64, 0x3fe2800000000000_u64, 0x3fe3000000000000_u64, 0x3fe3800000000000_u64,
+    0x3fe4000000000000_u64, 0x3fe4800000000000_u64, 0x3fe5000000000000_u64, 0x3fe5800000000000_u64,
+    0x3fe6000000000000_u64, 0x3fe6800000000000_u64, 0x3fe7000000000000_u64, 0x3fe7800000000000_u64,
+    0x3fe8000000000000_u64, 0x3fe8800000000000_u64, 0x3fe9000000000000_u64, 0x3fe9800000000000_u64,
+    0x3fea000000000000_u64, 0x3fea800000000000_u64, 0x3feb000000000000_u64, 0x3feb800000000000_u64,
+    0x3fec000000000000_u64, 0x3fec800000000000_u64, 0x3fed000000000000_u64, 0x3fed800000000000_u64,
+    0x3fee000000000000_u64, 0x3fee800000000000_u64, 0x3fef000000000000_u64, 0x3fef800000000000_u64,
+    0x3ff0000000000000_u64,
+  ]
+  private ATAN2_F2 = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbca95220c39d4dff_u64, 0x3f8fff555bbb7300_u64,
+    0x3ca2542779d776de_u64, 0x3f9ffd55bba97600_u64, 0xbca6061bbe3de53c_u64, 0x3fa7fb818430da40_u64,
+    0xbca639269b0da47e_u64, 0x3faff55bb72cfe00_u64, 0xbc84a7663af440f7_u64, 0x3fb3f59f0e7c55a0_u64,
+    0x3cad1824d59f9e13_u64, 0x3fb7ee182602f100_u64, 0x3c8bef71e5340b31_u64, 0x3fbbe39ebe6f07c0_u64,
+    0x3cab8cb225e627d0_u64, 0x3fbfd5ba9aac2f60_u64, 0x3cab92de9bac94c2_u64, 0x3fc1e1fafb043720_u64,
+    0xbc9d3cb89e62dafd_u64, 0x3fc3d6eee8c66270_u64, 0xbca882a55960087a_u64, 0x3fc5c9811e3ec270_u64,
+    0x3c91347b0b4f881d_u64, 0x3fc7b97b4bce5b00_u64, 0x3ca873d8079ed0d2_u64, 0x3fc9a6a8e96c8620_u64,
+    0x3c9022f621a5c1cb_u64, 0x3fcb90d7529260a0_u64, 0x3ca9c648d1534598_u64, 0x3fcd77d5df205730_u64,
+    0xbc94ea9238610a08_u64, 0x3fcf5b75f92c80e0_u64, 0x3ca2c5c8e721970d_u64, 0x3fd09dc597d86360_u64,
+    0x3c630ca4748b1bf9_u64, 0x3fd18bf5a30bf178_u64, 0xbca20ef9ba6dbf90_u64, 0x3fd278372057ef48_u64,
+    0x3cae69c5abb498d2_u64, 0x3fd362773707ebc8_u64, 0x3c9a8a86f0ea9311_u64, 0x3fd44aa436c2af08_u64,
+    0x3c9db5336feef7f0_u64, 0x3fd530ad9951cd48_u64, 0x3c99636a3aa3b840_u64, 0x3fd614840309cfe0_u64,
+    0x3c81ce2a8c848b74_u64, 0x3fd6f61941e4def0_u64, 0xbc84b1bbd1ea6db3_u64, 0x3fd7d5604b63b3f8_u64,
+    0xbca4925e8b916e0b_u64, 0x3fd8b24d394a1b28_u64, 0x3c79e6c988fd0a77_u64, 0x3fd98cd5454d6b18_u64,
+    0xbcaa49bd836a1700_u64, 0x3fda64eec3cc2400_u64, 0xbcaca3cf09c6b5f8_u64, 0x3fdb3a911da65c70_u64,
+    0xbc7cc1ce70934c34_u64, 0x3fdc0db4c94ec9f0_u64, 0x3c82e982ddf3872a_u64, 0x3fdcde53432c1350_u64,
+    0xbc82ea406ee84d0f_u64, 0x3fddac670561bb50_u64, 0xbcade35847c81979_u64, 0x3fde77eb7f175a38_u64,
+    0xbc6a3992dc382a23_u64, 0x3fdf40dd0b541418_u64, 0xbc8b32c949c9d593_u64, 0x3fe0039c73c1a40c_u64,
+    0xbc7d5b495f6349e6_u64, 0x3fe0657e94db30d0_u64, 0xbcaf34582f6255fe_u64, 0x3fe0c6145b5b43dc_u64,
+    0x3c9ed42511e3f11d_u64, 0x3fe1255d9bfbd2a8_u64, 0xbc91cef189ff9e7f_u64, 0x3fe1835a88be7c14_u64,
+    0xbc5928df287a668f_u64, 0x3fe1e00babdefeb4_u64, 0xbcae3bde360c7ddb_u64, 0x3fe23b71e2cc9e6c_u64,
+    0x3c9bd86313ce4fde_u64, 0x3fe2958e59308e30_u64, 0xbca8e8a85803cc1d_u64, 0x3fe2ee628406cbcc_u64,
+    0xbc977ef7641c777f_u64, 0x3fe345f01cce37bc_u64, 0x3cab73ef3389d02f_u64, 0x3fe39c391cd41718_u64,
+    0x3c7ecf8b492644f0_u64, 0x3fe3f13fb89e96f4_u64, 0x3cac1125fd3810c7_u64, 0x3fe445065b795b54_u64,
+    0x3ca2483350fe548b_u64, 0x3fe4978fa3269ee0_u64, 0x3c84a33dbeb3796c_u64, 0x3fe4e8de5bb6ec04_u64,
+    0xbca46edd2af69483_u64, 0x3fe538f57b890620_u64, 0xbca2bcb93b18b52a_u64, 0x3fe587d81f732fbc_u64,
+    0x3c60028e4bc5e7ca_u64, 0x3fe5d58987169b18_u64, 0x3caed487acaf1174_u64, 0x3fe6220d115d7b8c_u64,
+    0xbca2dd4dfd7d1777_u64, 0x3fe66d663923e088_u64, 0x3c92bfe3cf3b9d79_u64, 0x3fe6b798920b3d98_u64,
+    0xbc78c34d25aadef6_u64, 0x3fe700a7c5784634_u64, 0xbc9f426acf4d3bdb_u64, 0x3fe748978fba8e10_u64,
+    0xbcaafe57dd9ff230_u64, 0x3fe78f6bbd5d3160_u64, 0xbc954fbef0e862ab_u64, 0x3fe7d528289fa094_u64,
+    0x3c990227758b11ba_u64, 0x3fe819d0b7158a4c_u64, 0x3ca16b66e7fc8b8c_u64, 0x3fe85d69576cc2c4_u64,
+    0xbc855b9a5e177a1b_u64, 0x3fe89ff5ff57f1f8_u64, 0x3cac27cfaa9f7a14_u64, 0x3fe8e17aa99cc05c_u64,
+    0x3c81a62633145c07_u64, 0x3fe921fb54442d18_u64,
+  ]
+  private ATAN2_O = [
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0x3ff921fb54442d18_u64, 0x3c91a62633145c07_u64,
+    0x0000000000000000_u64, 0x0000000000000000_u64, 0xbff921fb54442d18_u64, 0xbc91a62633145c07_u64,
+    0x400921fb54442d18_u64, 0x3ca1a62633145c07_u64, 0x3ff921fb54442d18_u64, 0x3c91a62633145c07_u64,
+    0xc00921fb54442d18_u64, 0xbca1a62633145c07_u64, 0xbff921fb54442d18_u64, 0xbc91a62633145c07_u64,
+  ]
+  private ATAN2_B = [
+    0xbfd55555555554d2_u64, 0x3fc999999860e1ca_u64, 0xbfc248ad469844a1_u64,
+  ]
+  private ATAN2_B2 = [
+    0xbfd5555555555555_u64, 0x3fc999999999755e_u64, 0xbfc24924883596f8_u64, 0x3fbc6f7d73531bc2_u64,
+  ]
+  private ATAN2_FINF = [
+    0x3c80000000000000_u64, 0x3fe921fb54442d18_u64, 0x3c90000000000000_u64, 0x4002d97c7f3321d2_u64,
+  ]
+  private ATAN2_P = [
+    0x82703f8b53112eca_u64, 0x71ce6279d467aa45_u64, 0x019c9b28466b6fc0_u64, 0xfffffffffffffff6_u64, 0x0000000000000000_u64,
+    0xb3cf74b427d53e03_u64, 0xee590b839e751890_u64, 0xf2570b12bcb2381a_u64, 0xfffffffffffffff8_u64, 0x0000000000000000_u64,
+    0xb08498b17b88c39a_u64, 0x11e37821d784d8fa_u64, 0x2795b14b84b9d78c_u64, 0xfffffffffffffffa_u64, 0x0000000000000000_u64,
+    0xfd4baa7bb52b0d83_u64, 0xb25425beb0a04dc3_u64, 0x92008d9fb34b68ff_u64, 0xfffffffffffffffb_u64, 0x0000000000000000_u64,
+    0x96541948b85fb386_u64, 0xe0b815ace425a859_u64, 0xbeca17c69bb4f7a0_u64, 0xfffffffffffffffd_u64, 0x0000000000000000_u64,
+    0x96aaa5d4baffc590_u64, 0xf23db783b6e4ce55_u64, 0x2c54e054d3b69f7e_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x83cd41b5fa862b11_u64, 0xad8f9d6e3eb9d833_u64, 0x4ef470d801fa03ca_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0xcbbc7752197cc106_u64, 0xbc66cfb3edefa6e3_u64, 0x568b2f9e4feb8910_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0x8cf8f7c585767042_u64, 0xcd92a5b9ac13d8c8_u64, 0x043bd4a023dbe04d_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xafdc36d6b36139bf_u64, 0x11df63474e3859d4_u64, 0x42b30b2c089a2b6c_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xc6f8fb1463822519_u64, 0x2f9f04cf55c10377_u64, 0x1c44675c6d483606_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xcce79f10f754e315_u64, 0x91ce47edcbc8a4ee_u64, 0xb2a6f721ac656b42_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xc090384dbd77132e_u64, 0x1dfb4d9a1d595de7_u64, 0xe506ca899a394f70_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xa556ac9eee25e867_u64, 0xd84dafa25141d203_u64, 0xf1c7c2a5156b3ec3_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0x81bd2677ddfcbc38_u64, 0x1df33f27dbb60939_u64, 0xcb4c2c73286a6c29_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xb9ed12169d72e8d9_u64, 0xc81d95dcef13c227_u64, 0x974b95796b93c332_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0xf2df6da875b666fa_u64, 0xc29dd3a69c274c65_u64, 0x83b9260976c8f0c5_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x902d34d4db910ed8_u64, 0x6f3ecddfd6af0a9f_u64, 0x8e950d7e70a8e9b2_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x9aefa41961ce1207_u64, 0xacd0317666753751_u64, 0x3eaf42a53fcc6534_u64, 0xfffffffffffffffd_u64, 0x0000000000000000_u64,
+    0x95db9977c5e6e263_u64, 0x85367a63fab8a720_u64, 0xfc2b63bd115998d8_u64, 0xfffffffffffffffc_u64, 0x0000000000000000_u64,
+    0x817cb6d8236d5f4d_u64, 0x70c7815f28909d9b_u64, 0x0c54e97155d12158_u64, 0xfffffffffffffffb_u64, 0x0000000000000000_u64,
+    0xc5eec4228c352098_u64, 0x789e56be1dee9b67_u64, 0xba25bda81292ccc1_u64, 0xfffffffffffffff9_u64, 0x0000000000000000_u64,
+    0x840c38ccfcb5dc64_u64, 0xb55a44095bf7f312_u64, 0x6668b8792d4ecd08_u64, 0xfffffffffffffff8_u64, 0x0000000000000000_u64,
+    0x97074af7b286b19e_u64, 0xc20aac21f3130f1d_u64, 0x369e9fdbdd48528a_u64, 0xfffffffffffffff6_u64, 0x0000000000000000_u64,
+    0x9054011c32d4b7a5_u64, 0xc68d3c5d525f4af4_u64, 0xeeb3c98615dee188_u64, 0xfffffffffffffff4_u64, 0x0000000000000000_u64,
+    0xdddb4a2eaab2bb15_u64, 0x753761a8f0e9aa8d_u64, 0x3f20620cd3e075bb_u64, 0xfffffffffffffff1_u64, 0x0000000000000000_u64,
+    0x80ef9a1b3e59abe5_u64, 0x18e6afe0651fdf49_u64, 0xd1c0329e6a702d9d_u64, 0xffffffffffffffef_u64, 0x0000000000000000_u64,
+    0xca16dd49cd30854c_u64, 0xbad8ca379401027c_u64, 0x1fc7f47985486f16_u64, 0xffffffffffffffeb_u64, 0x0000000000000000_u64,
+    0xa0ba01b8742ba801_u64, 0xe6dc14a9516d7f04_u64, 0x1f5303d878905d2f_u64, 0xffffffffffffffe7_u64, 0x0000000000000000_u64,
+    0x9c0440896ce6515c_u64, 0x0cf3470fa7f10ac3_u64, 0xa9dc80682c111a9d_u64, 0xffffffffffffffc5_u64, 0x0000000000000001_u64,
+  ]
+  private ATAN2_Q = [
+    0x82703f8b53112eca_u64, 0x71ce6279d467aa45_u64, 0x019c9b28466b6fc0_u64, 0xfffffffffffffff6_u64, 0x0000000000000000_u64,
+    0xb3cf74b427d53e03_u64, 0xee590b839e751890_u64, 0xf2570b12bcb238cf_u64, 0xfffffffffffffff8_u64, 0x0000000000000000_u64,
+    0xb33c44af0d43c9e8_u64, 0xf4426f84614701db_u64, 0x979e49dc5b858442_u64, 0xfffffffffffffffa_u64, 0x0000000000000000_u64,
+    0x8264d256f0bf4d61_u64, 0xee21431cc0f29764_u64, 0xce0cc1b593ac9952_u64, 0xfffffffffffffffc_u64, 0x0000000000000000_u64,
+    0x9d97c4947687b2ee_u64, 0xef4087c49dde5229_u64, 0x742bc6e02bfb6df8_u64, 0xfffffffffffffffd_u64, 0x0000000000000000_u64,
+    0xa0f888dc7aab949e_u64, 0xf623f19ac413db23_u64, 0x854744a164f70ecd_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x8fd9c7172ab0828e_u64, 0x1a9f72fadafc3dfb_u64, 0xaf96a180ea297178_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0xe38168b78a51ee15_u64, 0x604a47815c8091eb_u64, 0x9faaa42312e8eb30_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0xa164ccdbb65ee133_u64, 0xe623433c5e086402_u64, 0xcb228afd335a245f_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xced0c0cbe44fac2f_u64, 0xd7c2adfc7c5dda9e_u64, 0xa22b4a311cf5a5b1_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xf0e6660438c90371_u64, 0x3dca1a0f58f0d943_u64, 0x8a92b9de68c4488c_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0x8000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000000_u64, 0x0000000000000001_u64, 0x0000000000000000_u64,
+    0xf8ea68f9ad849103_u64, 0xb257e4bfc606967f_u64, 0x818fa2816928c4aa_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xddc64eeee3506234_u64, 0x47a33ea40a2b22e4_u64, 0xa6a2c129ace2470a_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xb52ddfba2d37c8e2_u64, 0x24551a9b19fa064a_u64, 0x3d78c68b54bc3850_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0x87ac113d26b683a1_u64, 0x4e97756c38785b0b_u64, 0xf75f0a4506931ba8_u64, 0x0000000000000000_u64, 0x0000000000000000_u64,
+    0xba065070b900f3d5_u64, 0xe49d8f9f238f1eeb_u64, 0x6805d48d67f1dcd9_u64, 0xffffffffffffffff_u64, 0x0000000000000000_u64,
+    0xe902d2a4bfc22441_u64, 0x945cfe6c83a5b828_u64, 0x519ebb457f8ccca0_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x84e405c915f7769b_u64, 0x0faaf34c3c51dd39_u64, 0xa97fa0ae99382c93_u64, 0xfffffffffffffffe_u64, 0x0000000000000000_u64,
+    0x896da46c7e6cebb3_u64, 0xe0afc0b6db3dbbf5_u64, 0x061ccff6e78efff4_u64, 0xfffffffffffffffd_u64, 0x0000000000000000_u64,
+    0x801a0c1a0dfefc92_u64, 0xf8e0a97902e08d47_u64, 0x81898e0b7d8ef0bc_u64, 0xfffffffffffffffc_u64, 0x0000000000000000_u64,
+    0xd59d088930df07db_u64, 0xa8cb00021849fbaf_u64, 0xf80cc91aa0bddf89_u64, 0xfffffffffffffffa_u64, 0x0000000000000000_u64,
+    0x9db56a6984b77231_u64, 0xcf7c2074e0480959_u64, 0x3316ecaa6aa4604e_u64, 0xfffffffffffffff9_u64, 0x0000000000000000_u64,
+    0xcb7450d9d62d2e68_u64, 0x9787b4265977d004_u64, 0xba615cee00a841d7_u64, 0xfffffffffffffff7_u64, 0x0000000000000000_u64,
+    0xe12a52e02b64b23e_u64, 0x97c9139a8ced716c_u64, 0x70a176ad2b5f16d2_u64, 0xfffffffffffffff5_u64, 0x0000000000000000_u64,
+    0xd057b6d0900ed30d_u64, 0x5e04bb17eb879a5e_u64, 0x23ed135b60bea070_u64, 0xfffffffffffffff3_u64, 0x0000000000000000_u64,
+    0x9b1f1ca22fef7ae5_u64, 0x19a687f0a4073eee_u64, 0x05a9ccbc8c14578b_u64, 0xfffffffffffffff1_u64, 0x0000000000000000_u64,
+    0xaeba710f053aac3b_u64, 0x30ea5d6fb116f775_u64, 0x8a9bcfef5698f8f1_u64, 0xffffffffffffffee_u64, 0x0000000000000000_u64,
+    0x84b9ada076cd007d_u64, 0x13e55006073f76b1_u64, 0x4cf4259968228f3e_u64, 0xffffffffffffffeb_u64, 0x0000000000000000_u64,
+    0xcca4b9046786937d_u64, 0x233c1e691c127c1f_u64, 0xf493e0b7a3de459a_u64, 0xffffffffffffffe6_u64, 0x0000000000000000_u64,
+  ]
+  private ATAN2_PI = [
+    0xc90fdaa22168c234_u64, 0xc4c6628b80dc1cd1_u64, 0x29024e088a67cc74_u64, 0x0000000000000002_u64, 0x0000000000000000_u64,
+  ]
+
+  private def self.atan2_row(t : Pointer(UInt64), i : Int32) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    {t[5 * i], t[5 * i + 1], t[5 * i + 2], t[5 * i + 3].unsafe_to_i64, t[5 * i + 4]}
+  end
+
+  # lshift / rshift: the 192-bit significand h:m:l shifted by k bits.
+  private def self.atan2_shl192(h : UInt64, m : UInt64, l : UInt64, k : UInt64) : {UInt64, UInt64, UInt64}
+    return {h, m, l} if k == 0_u64
+    return {0_u64, 0_u64, 0_u64} if k >= 192_u64
+    return {l.unsafe_shl(k &- 128_u64), 0_u64, 0_u64} if k >= 128_u64
+    if k >= 64_u64
+      return {m, l, 0_u64} if k == 64_u64
+      k = k &- 64_u64
+      return {m.unsafe_shl(k) | l.unsafe_shr(64_u64 &- k), l.unsafe_shl(k), 0_u64}
+    end
+    {h.unsafe_shl(k) | m.unsafe_shr(64_u64 &- k), m.unsafe_shl(k) | l.unsafe_shr(64_u64 &- k), l.unsafe_shl(k)}
+  end
+
+  private def self.atan2_shr192(h : UInt64, m : UInt64, l : UInt64, k : UInt64) : {UInt64, UInt64, UInt64}
+    return {h, m, l} if k == 0_u64
+    return {0_u64, 0_u64, 0_u64} if k >= 192_u64
+    return {0_u64, 0_u64, h.unsafe_shr(k &- 128_u64)} if k >= 128_u64
+    if k >= 64_u64
+      return {0_u64, h, m} if k == 64_u64
+      k = k &- 64_u64
+      return {0_u64, h.unsafe_shr(k), m.unsafe_shr(k) | h.unsafe_shl(64_u64 &- k)}
+    end
+    {h.unsafe_shr(k), m.unsafe_shr(k) | h.unsafe_shl(64_u64 &- k), l.unsafe_shr(k) | m.unsafe_shl(64_u64 &- k)}
+  end
+
+  # a - b modulo 2^192.
+  private def self.atan2_sub192(ah : UInt64, am : UInt64, al : UInt64, bh : UInt64, bm : UInt64, bl : UInt64) : {UInt64, UInt64, UInt64}
+    l = al &- bl
+    h, m = trig_sub128(ah, am, bh, bm)
+    h, m = trig_sub128(h, m, 0_u64, l > al ? 1_u64 : 0_u64)
+    {h, m, l}
+  end
+
+  # The leading zero count of a nonzero h:m:l.
+  private def self.atan2_clz192(h : UInt64, m : UInt64, l : UInt64) : UInt64
+    return trig_clz(h) if h != 0_u64
+    return 64_u64 &+ trig_clz(m) if m != 0_u64
+    128_u64 &+ trig_clz(l)
+  end
+
+  # cmp_tint_abs: -1, 0 or 1 as |a| <, = or > |b|.
+  private def self.atan2_cmp_abs(ah : UInt64, am : UInt64, al : UInt64, aex : Int64, bh : UInt64, bm : UInt64, bl : UInt64, bex : Int64) : Int32
+    return bh == 0_u64 ? 0 : -1 if ah == 0_u64
+    return 1 if bh == 0_u64
+    return aex > bex ? 1 : -1 if aex != bex
+    return trig_lt128(ah, am, bh, bm) ? -1 : 1 if ah != bh || am != bm
+    return 0 if al == bl
+    al < bl ? -1 : 1
+  end
+
+  # mul_tint: the product, with error < 10 ulps.
+  private def self.atan2_mul(ah : UInt64, am : UInt64, al : UInt64, aex : Int64, asg : UInt64, bh : UInt64, bm : UInt64, bl : UInt64, bex : Int64, bsg : UInt64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    rex = aex &+ bex
+    rh, rm = trig_mul64(ah, bh)
+    h, rl = trig_mul64(ah, bm)
+    rm = rm &+ h
+    rh = rh &+ (rm < h ? 1_u64 : 0_u64)
+    h, l = trig_mul64(am, bh)
+    rl = rl &+ l
+    cm = rl < l ? 1_u64 : 0_u64
+    rm = rm &+ h
+    rh = rh &+ (rm < h ? 1_u64 : 0_u64)
+    sh, sl = trig_add128(0_u64, trig_mul64(ah, bl)[0], 0_u64, trig_mul64(am, bm)[0])
+    sh, sl = trig_add128(sh, sl, 0_u64, trig_mul64(al, bh)[0])
+    cm = cm &+ sh
+    rl = rl &+ sl
+    cm = cm &+ (rl < sl ? 1_u64 : 0_u64)
+    rm = rm &+ cm
+    rh = rh &+ (rm < cm ? 1_u64 : 0_u64)
+    if rh.unsafe_shr(63_u64) == 0_u64
+      rh = rh.unsafe_shl(1_u64) | rm.unsafe_shr(63_u64)
+      rm = rm.unsafe_shl(1_u64) | rl.unsafe_shr(63_u64)
+      rl = rl.unsafe_shl(1_u64)
+      rex = rex &- 1_i64
+    end
+    {rh, rm, rl, rex, asg ^ bsg}
+  end
+
+  # add_tint: the sum, with error < 2 ulps.
+  private def self.atan2_add(ah : UInt64, am : UInt64, al : UInt64, aex : Int64, asg : UInt64, bh : UInt64, bm : UInt64, bl : UInt64, bex : Int64, bsg : UInt64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    c = atan2_cmp_abs(ah, am, al, aex, bh, bm, bl, bex)
+    if c == 0
+      return {0_u64, 0_u64, 0_u64, -1076_i64, 0_u64} if asg ^ bsg != 0_u64
+      return {ah, am, al, aex &+ 1_i64, asg}
+    end
+    if c < 0
+      ah, bh = bh, ah
+      am, bm = bm, am
+      al, bl = bl, al
+      aex, bex = bex, aex
+      asg, bsg = bsg, asg
+    end
+    sh = (aex &- bex).unsafe_to_u64
+    th, tm, tl = atan2_shr192(bh, bm, bl, sh)
+    if asg ^ bsg != 0_u64
+      th, tm, tl = atan2_sub192(ah, am, al, th, tm, tl)
+      ex = atan2_clz192(th, tm, tl)
+      if ex <= 1_u64 || sh == 0_u64
+        rh, rm, rl = atan2_shl192(th, tm, tl, ex)
+        return {rh, rm, rl, aex &- ex.unsafe_to_i64, asg}
+      end
+      th, tm, tl = atan2_shl192(bh, bm, bl, ex &- sh)
+      rh, rm, rl = atan2_shl192(ah, am, al, ex)
+      th, tm, tl = atan2_sub192(rh, rm, rl, th, tm, tl)
+      ex1 = atan2_clz192(th, tm, tl)
+      rh, rm, rl = atan2_shl192(th, tm, tl, ex1)
+      return {rh, rm, rl, aex &- (ex &+ ex1).unsafe_to_i64, asg}
+    end
+    rl = al &+ tl
+    cl = rl < al ? 1_u64 : 0_u64
+    rh, rm = trig_add128(ah, am, th, tm)
+    ch = trig_lt128(rh, rm, ah, am) ? 1_u64 : 0_u64
+    rh, rm = trig_add128(rh, rm, 0_u64, cl)
+    ch = ch &+ (trig_lt128(rh, rm, 0_u64, cl) ? 1_u64 : 0_u64)
+    return {rh, rm, rl, aex, asg} if ch == 0_u64
+    rl = rm.unsafe_shl(63_u64) | rl.unsafe_shr(1_u64)
+    rm = rh.unsafe_shl(63_u64) | rm.unsafe_shr(1_u64)
+    rh = ch.unsafe_shl(63_u64) | rh.unsafe_shr(1_u64)
+    {rh, rm, rl, aex &+ 1_i64, asg}
+  end
+
+  # tint_fromd: x exactly, for x not zero, infinite or NaN.
+  private def self.atan2_fromd(x : Float64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    u = IyiFloatText.bits_of(x)
+    ax = u & 0x7fffffffffffffff_u64
+    e = ax.unsafe_shr(52_u64)
+    return {0x8000000000000000_u64 | ax.unsafe_shl(11_u64), 0_u64, 0_u64, e.unsafe_to_i64 &- 0x3fe_i64, u.unsafe_shr(63_u64)} if e != 0_u64
+    e = trig_clz(ax)
+    {ax.unsafe_shl(e), 0_u64, 0_u64, -0x3f2_i64 &- e.unsafe_to_i64, u.unsafe_shr(63_u64)}
+  end
+
+  # tint_tod: a rounded to nearest; err bounds the error on l in ulps
+  # (0 for a value known to be a double, which is then truncated).
+  private def self.atan2_tod(ah : UInt64, am : UInt64, al : UInt64, aex : Int64, asg : UInt64, err : UInt64, y : Float64, x : Float64) : Float64
+    if aex >= 1025_i64
+      return asg != 0_u64 ? -8.98846567431158e+307 - 8.98846567431158e+307 : 8.98846567431158e+307 + 8.98846567431158e+307
+    end
+    if aex <= -1074_i64
+      tiny = IyiFloatText.from_bits(asg != 0_u64 ? 0x8000000000000001_u64 : 1_u64)
+      return tiny * 0.5 if aex < -1074_i64
+      return tiny * (ah == 0x8000000000000000_u64 && am == 0_u64 && al == 0_u64 ? 0.5 : 0.75)
+    end
+    hh = ah
+    mm = am
+    ll = al
+    ex = aex
+    low = hh & 0x7ff_u64
+    if (mm == 0_u64 && (low == 0_u64 || low == 0x400_u64) && ll < err) ||
+       (mm == 0xffffffffffffffff_u64 && (low == 0x3ff_u64 || low == 0x7ff_u64) && 0xffffffffffffffff_u64 &- ll < err)
+      raise "Unexpected worst-case found, please report to core-math@inria.fr: atan2 y,x=#{y},#{x}"
+    end
+    if ex <= -1022_i64
+      sh = (-1021_i64 &- ex).unsafe_to_u64
+      ll = mm.unsafe_shl(64_u64 &- sh) | ll.unsafe_shr(sh) | (ll > 0_u64 ? 1_u64 : 0_u64)
+      mm = hh.unsafe_shl(64_u64 &- sh) | mm.unsafe_shr(sh)
+      hh = hh.unsafe_shr(sh)
+      low = hh & 0x7ff_u64
+      ex = ex &+ sh.unsafe_to_i64
+    end
+    h = hh.unsafe_shr(11_u64).to_f64
+    l = 0.0
+    if err != 0_u64
+      if low < 0x400_u64
+        l = 0.25
+      elsif low > 0x400_u64
+        l = 0.75
+      else
+        l = mm == 0_u64 && ll == 0_u64 ? 0.5 : 0.75
+      end
+    end
+    s = asg != 0_u64 ? -1.0 : 1.0
+    h = fma(l, s, s * h)
+    h = h * 2.220446049250313e-16
+    h * IyiFloatText.from_bits((0x3fe_i64 &+ ex).unsafe_to_u64.unsafe_shl(52_u64))
+  end
+
+  # inv_tint: 1/a with absolute error < 2^-103.9 for 1 <= r <= 2.
+  private def self.atan2_inv(ah : UInt64, am : UInt64, al : UInt64, aex : Int64, asg : UInt64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    a = atan2_tod(ah, am, al, aex, asg, 0_u64, 0.0, 0.0)
+    subnormal = a.abs < 2.2250738585072014e-308
+    a = a * 9007199254740992.0 if subnormal
+    rh, rm, rl, rex, rsg = atan2_fromd(1.0 / a)
+    rex = rex &+ 53_i64 if subnormal
+    qh, qm, ql, qex, qsg = atan2_mul(ah, am, al, aex, asg, rh, rm, rl, rex, rsg)
+    qh, qm, ql, qex, qsg = atan2_add(0x8000000000000000_u64, 0_u64, 0_u64, 1_i64, 0_u64, qh, qm, ql, qex, 1_u64 &- qsg)
+    qh, qm, ql, qex, qsg = atan2_mul(rh, rm, rl, rex, rsg, qh, qm, ql, qex, qsg)
+    atan2_add(rh, rm, rl, rex, rsg, qh, qm, ql, qex, qsg)
+  end
+
+  # div_tint: b/a with relative error < 2^-185.53.
+  private def self.atan2_div(bh : UInt64, bm : UInt64, bl : UInt64, bex : Int64, bsg : UInt64, ah : UInt64, am : UInt64, al : UInt64, aex : Int64, asg : UInt64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    yh, ym, yl, yex, ysg = atan2_inv(ah, am, al, aex, asg)
+    rh, rm, rl, rex, rsg = atan2_mul(yh, ym, yl, yex, ysg, bh, bm, bl, bex, bsg)
+    zh, zm, zl, zex, zsg = atan2_mul(ah, am, al, aex, asg, rh, rm, rl, rex, rsg)
+    zh, zm, zl, zex, zsg = atan2_add(bh, bm, bl, bex, bsg, zh, zm, zl, zex, 1_u64 &- zsg)
+    zh, zm, zl, zex, zsg = atan2_mul(yh, ym, yl, yex, ysg, zh, zm, zl, zex, zsg)
+    atan2_add(rh, rm, rl, rex, rsg, zh, zm, zl, zex, zsg)
+  end
+
+  # div_tint_d: b/a for doubles.
+  private def self.atan2_div_d(b : Float64, a : Float64) : {UInt64, UInt64, UInt64, Int64, UInt64}
+    ah, am, al, aex, asg = atan2_fromd(a)
+    bh, bm, bl, bex, bsg = atan2_fromd(b)
+    atan2_div(bh, bm, bl, bex, bsg, ah, am, al, aex, asg)
+  end
+
+  # atan2_accurate: the [29,29] rational approximation of atan on [0, 1] in
+  # 192-bit arithmetic, for finite nonzero y and x.
+  private def self.atan2_accurate(y : Float64, x : Float64) : Float64
+    t = y / x
+    if t == 0.0
+      return t if x > 0.0
+      return y > 0.0 ? 3.141592653589793 + 1.2246467991473532e-16 : -3.141592653589793 - 1.2246467991473532e-16
+    end
+    corr = fma(t, x, y * -1.0)
+    if corr == 0.0 && x > 0.0 && t.abs <= 1.3538603431225864e-08
+      return fma(t, -5.551115123125783e-17, t) if y.abs >= 3.610388751729659e-276
+      corr = fma(t * 4.056481920730334e+31, x, (y * -1.0) * 4.056481920730334e+31)
+      return fma(t, -5.551115123125783e-17, t) if corr == 0.0
+    end
+    inv = y.abs > x.abs
+    zh, zm, zl, zex, zsg = inv ? atan2_div_d(x, y) : atan2_div_d(y, x)
+    if !inv && x > 0.0 && zex <= -96_i64
+      zl = zl &- 2_u64
+      zm = zm &- (zl < 2_u64 ? 1_u64 : 0_u64)
+      zh = zh &- (zm < 1_u64 ? 1_u64 : 0_u64)
+      return atan2_tod(zh, zm, zl, zex, zsg, 1_u64, y, x)
+    end
+    sz = zsg
+    ptab = ATAN2_P.to_unsafe
+    qtab = ATAN2_Q.to_unsafe
+    ph, pm, pl, pex, psg = atan2_row(ptab, 29)
+    qh, qm, ql, qex, qsg = atan2_row(qtab, 29)
+    i = 28
+    while i >= 0
+      ph, pm, pl, pex, psg = atan2_mul(ph, pm, pl, pex, psg, zh, zm, zl, zex, 0_u64)
+      qh, qm, ql, qex, qsg = atan2_mul(qh, qm, ql, qex, qsg, zh, zm, zl, zex, 0_u64)
+      ch, cm, cl, cex, csg = atan2_row(ptab, i)
+      ph, pm, pl, pex, psg = atan2_add(ph, pm, pl, pex, psg, ch, cm, cl, cex, csg)
+      ch, cm, cl, cex, csg = atan2_row(qtab, i)
+      qh, qm, ql, qex, qsg = atan2_add(qh, qm, ql, qex, qsg, ch, cm, cl, cex, csg)
+      i -= 1
+    end
+    ph, pm, pl, pex, psg = atan2_mul(ph, pm, pl, pex, psg, zh, zm, zl, zex, 0_u64)
+    zh, zm, zl, zex, zsg = atan2_div(ph, pm, pl, pex, psg, qh, qm, ql, qex, qsg)
+    err = 662_u64
+    zsg = sz
+    pih, pim, pil, piex, pisg = atan2_row(ATAN2_PI.to_unsafe, 0)
+    if inv
+      # pi/2 - atan(x/y) or -pi/2 - atan(x/y)
+      zh, zm, zl, zex, zsg = atan2_add(pih, pim, pil, piex &- 1_i64, pisg, zh, zm, zl, zex, 1_u64)
+      zsg = 1_u64 if sz != 0_u64
+      err = 524_u64
+    end
+    if x < 0.0
+      # to the opposite quadrant: pi added or subtracted
+      if zsg == 0_u64
+        zh, zm, zl, zex, zsg = atan2_add(pih, pim, pil, piex, pisg, zh, zm, zl, zex, 1_u64)
+        zsg = 1_u64
+      else
+        zh, zm, zl, zex, zsg = atan2_add(pih, pim, pil, piex, pisg, zh, zm, zl, zex, zsg)
+      end
+      err = 266_u64
+    end
+    atan2_tod(zh, zm, zl, zex, zsg, err, y, x)
+  end
+
+  # as_atan2_special: y or x zero, infinite or NaN.
+  private def self.atan2_special(y : Float64, x : Float64) : Float64
+    iy = IyiFloatText.bits_of(y)
+    ix = IyiFloatText.bits_of(x)
+    aiy = iy.unsafe_shl(1_u64)
+    aix = ix.unsafe_shl(1_u64)
+    inf = 0xffe0000000000000_u64
+    if aiy >= inf || aix >= inf
+      return y + x if aiy > inf || aix > inf
+      if aiy == inf && aix == inf
+        f = ATAN2_FINF.to_unsafe
+        k = ix.unsafe_shr(63_u64).unsafe_to_i32 * 2
+        return copysign(IyiFloatText.from_bits(f[k + 1]), y) + copysign(IyiFloatText.from_bits(f[k]), y)
+      end
+      if aix == inf
+        return copysign(3.141592653589793, y) + copysign(1.2246467991473532e-16, y) if x < 0.0
+        return copysign(0.0, y)
+      end
+      return copysign(1.5707963267948966, y) + copysign(6.123233995736766e-17, y)
+    end
+    if aiy == 0_u64 || aix == 0_u64
+      if aiy == 0_u64 && aix == 0_u64
+        return y if ix == 0_u64
+        return iy == 0_u64 ? 3.141592653589793 + 1.2246467991473532e-16 : -3.141592653589793 - 1.2246467991473532e-16
+      end
+      if aiy == 0_u64
+        return y / x if x > 0.0
+        return iy.unsafe_shr(63_u64) == 0_u64 ? 3.141592653589793 + 1.2246467991473532e-16 : -3.141592653589793 - 1.2246467991473532e-16
+      end
+      return y > 0.0 ? 1.5707963267948966 + 6.123233995736766e-17 : -1.5707963267948966 - 6.123233995736766e-17
+    end
+    0.0
+  end
+
   # The angle of (x, y), with the zeros' and infinities' signs read the
   # way C's atan2 reads them: atan2(0.0, -0.0) is pi, atan2(-0.0, -1.0) is
   # -pi, atan2(inf, inf) is pi/4.
   def self.atan2(y : Float64, x : Float64) : Float64
-    return 0.0 / 0.0 if x != x || y != y
-    y_neg = copysign(1.0, y) < 0.0
-    x_neg = copysign(1.0, x) < 0.0
-    if y == 0.0
-      return x_neg ? copysign(PI, y) : y
+    iy = IyiFloatText.bits_of(y)
+    ix = IyiFloatText.bits_of(x)
+    aiy = iy & 0x7fffffffffffffff_u64
+    return atan2_special(y, x) if aiy == 0_u64 || aiy >= 0x7ff0000000000000_u64
+    aix = ix & 0x7fffffffffffffff_u64
+    return atan2_special(y, x) if aix == 0_u64 || aix >= 0x7ff0000000000000_u64
+    ax = IyiFloatText.from_bits(aix)
+    ay = IyiFloatText.from_bits(aiy)
+    xm = ax >= ay ? ax : ay
+    ym = ax >= ay ? ay : ax
+    sy = iy.unsafe_shr(63_u64)
+    sx = ix.unsafe_shr(63_u64)
+    gt = aix < aiy ? 1_u64 : 0_u64
+    return atan2_accurate(y, x) if ((aix &- aiy) ^ (0_u64 &- gt)) >= 0x0350000000000000_u64
+    sgn = gt ^ sx ^ sy != 0_u64 ? -1.0 : 1.0
+    kw = (sx.unsafe_shl(2_u64) | sy.unsafe_shl(1_u64) | gt).unsafe_to_i32
+    jt = (IyiFloatText.bits_of(ym / xm + 2.0078125).unsafe_shr(45_u64) & 127_u64).unsafe_to_i32
+    f2 = ATAN2_F2.to_unsafe
+    o = ATAN2_O.to_unsafe
+    fh = IyiFloatText.from_bits(f2[2 * jt + 1]) * sgn
+    fl = IyiFloatText.from_bits(f2[2 * jt]) * sgn
+    fh = fh + IyiFloatText.from_bits(o[2 * kw])
+    fl = fl + IyiFloatText.from_bits(o[2 * kw + 1])
+    if xm < 1.1282464849155185e-277
+      xm = xm * 8.863311460481781e+276
+      ym = ym * 8.863311460481781e+276
     end
-    if x == 0.0
-      return copysign(HALF_PI, y)
+    if xm > 4.49423283715579e+307 && jt != 0
+      xm = xm * 0.5
+      ym = ym * 0.5
     end
-    if y == 2.0 * y
-      if x == 2.0 * x
-        return copysign(x_neg ? 3.0 * QUARTER_PI : QUARTER_PI, y)
-      end
-      return copysign(HALF_PI, y)
+    t0 = IyiFloatText.from_bits(ATAN2_T2.to_unsafe[jt])
+    zn = fma(t0 * -1.0, xm, ym)
+    zd = fma(t0, ym, xm)
+    z = zn / zd
+    b = ATAN2_B.to_unsafe
+    z2 = z * z
+    z = z * sgn
+    dz = (z * z2) * (IyiFloatText.from_bits(b[0]) + z2 * (IyiFloatText.from_bits(b[1]) + z2 * IyiFloatText.from_bits(b[2])))
+    eps = z.abs * 4.528712474471952e-16 + 8.077935669463161e-28
+    rh, z = trig_fasttwosum(fh, z)
+    rl = (fl + dz) + z
+    lb = rh + (rl - eps)
+    ub = rh + (rl + eps)
+    return ub if lb == ub
+    dh = ym * t0
+    dl = fma(ym, t0, dh * -1.0)
+    dh, e = trig_fasttwosum(xm, dh)
+    rdh = 1.0 / dh
+    dl = dl + e
+    nh = xm * t0
+    nl = fma(xm, t0, nh * -1.0)
+    dt = ym - nh
+    y1 = dt + nh
+    if y1 == ym
+      nh, nl = trig_fasttwosum(dt, nl * -1.0)
+    else
+      nh, nl = trig_fasttwosum(dt, (ym - y1) - nl)
     end
-    if x == 2.0 * x
-      return x_neg ? copysign(PI, y) : copysign(0.0, y)
-    end
-    return atan(y / x) if x > 0.0
-    y_neg ? atan(y / x) - PI : atan(y / x) + PI
+    zh = nh * rdh
+    z2 = zh * zh
+    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))
+    c = ATAN2_B2.to_unsafe
+    zl = zl + zh * z2 * ((IyiFloatText.from_bits(c[0]) + z2 * IyiFloatText.from_bits(c[1])) +
+                         (z2 * z2) * (IyiFloatText.from_bits(c[2]) + z2 * IyiFloatText.from_bits(c[3])))
+    zh = zh * sgn
+    zl = zl * sgn
+    eps = 1.1102230246251565e-15 * (zh.abs * z2 + 4.440892098500626e-16)
+    fh, sl = trig_fasttwosum(fh, zh)
+    fl = (fl + zl) + sl
+    lb = fh + (fl - eps)
+    ub = fh + (fl + eps)
+    return ub if lb == ub
+    atan2_accurate(y, x)
   end
 
   def self.atan2(y : Float32, x : Float32) : Float32

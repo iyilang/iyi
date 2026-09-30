@@ -255,6 +255,7 @@ pub struct Server
     if te = stub.header("Transfer-Encoding")
       return ParsedRequest.new(nil, "transfer encoding #{te.inspect} is not chunked", true, 0) unless HTTP.same_name?(HTTP.trim(te), "chunked")
       done = HTTP.chunked_end(after)
+      return ParsedRequest.new(nil, done, true, 0) if done.is_a?(String)
       return ParsedRequest.new(nil, nil, false, 0, 0, expects) unless done
       return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done > MAX_BODY
       body = HTTP.decode_chunked(after[0, done])
@@ -615,8 +616,11 @@ pub struct HTTP
 
   # Where a chunked body ends in `text` — the byte after the last chunk's
   # terminating CRLF (trailers included) — or nil when it has not all
-  # arrived. What `decode_chunked` will then read whole.
-  def self.chunked_end(text : String) : Int32?
+  # arrived. What `decode_chunked` will then read whole. A body that is
+  # not chunked is the reason why, which the server answers 400: raised,
+  # a client's bad chunk size was a panic in the server that answered it
+  # nothing, and a size near 2 GiB overflowed the arithmetic below.
+  def self.chunked_end(text : String) : Int32 | String | Nil
     p = text.to_unsafe
     n = text.bytesize
     i = 0
@@ -628,7 +632,7 @@ pub struct HTTP
         size_text = size_text[0, semi]
       end
       size = parse_hex(trim(size_text))
-      raise "HTTP: not a chunk size: #{size_text.inspect}" unless size
+      return "not a chunk size: #{size_text.inspect}" unless size
       i = line_end + 2
       if size == 0
         # Trailers, then a blank line.
@@ -639,9 +643,9 @@ pub struct HTTP
           i = t_end + 2
         end
       end
-      return nil if i + size + 2 > n
+      return nil if size > n - i - 2
       i = i + size
-      raise "HTTP: a chunk is not followed by CRLF" unless p[i] == 13_u8 && p[i + 1] == 10_u8
+      return "a chunk is not followed by CRLF" unless p[i] == 13_u8 && p[i + 1] == 10_u8
       i = i + 2
     end
   end

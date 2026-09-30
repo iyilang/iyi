@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A request whose chunk size is not one is answered 400 by
+  `Server.serve`.** Every other malformed request was a 400 that says
+  why; a chunked body's size line raised instead, so a client that sent
+  `zz` as a chunk size got its connection closed with no answer and the
+  server printed `iyi: panic: HTTP: not a chunk size: "zz"`, a client's
+  bad input reported as the server's bug. A size near 2 GiB overflowed
+  the length arithmetic the same way. `HTTP.chunked_end` answers the
+  reason now and the server writes it in a 400.
+  `bench/std_http_exercise.iyi` sends the bad size; the old server
+  answered nothing and the exercise stopped at "the server closed
+  mid-response".
+
 - **`sleep(0)` yields.** It returned at once, and it is the runtime's
   only way for a task to let another run without waiting on anything: a
   task polling a flag with `sleep(0)` spun fifty million times while the

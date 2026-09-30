@@ -276,6 +276,13 @@ group do |g|
     assert_true r6.body.starts_with?("not an HTTP/1 request"), "and says why: #{r6.body.inspect}"
     assert_str "", bad.read(16).or_panic, "and the connection is closed"
     bad.close
+    # A chunk size that is not one is a 400 too: it was a panic in the
+    # server's task, and the client was answered nothing.
+    chunky = IyiSocket.connect("127.0.0.1", sport).or_panic
+    chunky.write("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n").or_panic
+    r6b = HTTP.parse_response(read_response(chunky))
+    assert_true r6b.status == 400 && r6b.body.starts_with?("not a chunk size"), "a bad chunk size is 400 and says why: #{r6b.status} #{r6b.body.inspect}"
+    chunky.close
     # HTTP/1.0 closes by default.
     old = IyiSocket.connect("127.0.0.1", sport).or_panic
     old.write("GET /nothing HTTP/1.0\r\n\r\n").or_panic

@@ -1969,8 +1969,13 @@ pub struct BigRational
     BigDecimal.new(@numerator) / BigDecimal.new(@denominator)
   end
 
+  # Divided to twenty digits past the quotient's first, wherever that is:
+  # through `to_big_d`, which keeps twenty past the point, `1/10^30` was
+  # 0.0 and `1/(3*10^15)` kept five digits, 3.3333e-16.
   def to_f64 : Float64
-    to_big_d.to_f64
+    below = @denominator.to_s.bytesize - @numerator.abs.to_s.bytesize
+    precision = below > 0 ? below + 20 : 20
+    BigDecimal.new(@numerator).div(BigDecimal.new(@denominator), precision).to_f64
   end
 
   # A rational is stored reduced, so equal values have equal parts.

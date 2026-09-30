@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`BigRational#to_f64` keeps a float's precision for a small value.**
+  It went through `to_big_d`, whose division keeps twenty digits past the
+  point, so `1/10^30` was 0.0 and `1/(3*10^15)` kept five significant
+  digits, 3.3333e-16. It divides to twenty digits past the quotient's
+  first now: 1.0e-30 and 3.333333333333333e-16, and `(10^40+1)/7` and
+  `-5/10^320` match Python's correctly rounded division.
+  `bench/std_big_exercise.iyi` checks the first two; the old module gave
+  0.0.
+
 - **`CSV.parse` refuses a UTF-16 document.** A file opening with UTF-16's
   byte order mark - Windows PowerShell 5.1's `Out-File` and `>` - was read
   as UTF-8, and came back as fields like `ÿþ"Name"` with a NUL between

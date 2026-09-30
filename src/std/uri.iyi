@@ -356,6 +356,11 @@ pub class URI
       end
     elsif @path.starts_with?("//")
       parts << "/."
+    elsif @scheme.nil? && colon_in_first_segment?
+      # RFC 3986 section 4.2: a relative path whose first segment holds a
+      # colon is written behind `./`, or it reads back as a scheme - a
+      # Windows path, `C:/Users/x`, came back with the scheme `C`.
+      parts << "./"
     end
 
     parts << @path
@@ -368,6 +373,17 @@ pub class URI
       parts << ("#" + f)
     end
     parts.join("")
+  end
+
+  private def colon_in_first_segment? : Bool
+    at = 0
+    while at < @path.bytesize
+      byte = @path.to_unsafe[at]
+      return false if byte == 47_u8
+      return true if byte == 58_u8
+      at = at + 1
+    end
+    false
   end
 
   def dup : URI

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`URI#to_s` writes a relative path whose first segment holds a colon
+  behind `./`.** A Windows path is one: `URI.parse("./C:/Users/x").normalize`
+  wrote `C:/Users/x`, which parses back with the scheme `C` and the path
+  `/Users/x`. RFC 3986 section 4.2 has such a reference written as
+  `./C:/Users/x`, and `to_s` writes that now; a colon past the first
+  segment, or a path behind a scheme, needs nothing. `bench/std_uri_exercise.iyi`
+  round-trips the drive path; the old module wrote it bare.
+
 - **`CSV.parse` ends a row at a lone CR, and keeps a row of one empty
   field.** An unquoted CR not followed by LF was dropped, so `a\rb,c`
   read as `[["ab", "c"]]` where Crystal's reads `[["a"], ["b", "c"]]`; it

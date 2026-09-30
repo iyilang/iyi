@@ -109,7 +109,9 @@
   double and rounded twice, 19,766 of 112,000. Crystal's `Math.fma` is libm's, which rounds once. The
   instruction answers now where the processor has one - every aarch64
   processor, and an x86_64 one with FMA3 whose system saves the AVX
-  registers, asked once by `cpuid` and `xgetbv` - and musl's `fma` and
+  registers, asked once by `cpuid` and `xgetbv` in the prelude's
+  `IyiRounding`, beside `floor`'s `roundsd`, since a std module writes no
+  `asm` of its own - and musl's `fma` and
   `fmaf`, ported to iyi, where it has not; no libm is linked either way.
   `bench/std_math_fma.py` writes 155,000 double and 112,000 single cases
   with their answers worked out as fractions - cancelling sums, halfway
@@ -12412,7 +12414,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,904-line library and nothing else. Every other
+  written against iyi's own 18,947-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

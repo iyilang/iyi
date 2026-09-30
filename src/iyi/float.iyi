@@ -53,6 +53,49 @@ end
       end
       rounds == 1
     end
+
+    # 0 not asked yet, 1 the processor fuses, 2 it does not.
+    @@fuses : Int32 = 0
+
+    # FMA3 (leaf 1, ECX bit 12) and AVX's registers saved by the operating
+    # system: OSXSAVE (bit 27), AVX (bit 28), and XCR0's SSE and AVX state
+    # both on. An instruction the processor has and the system does not
+    # save is an invalid-opcode fault. `std/math`'s `fma` asks, as `floor`
+    # asks for `roundsd`, and takes musl's exact software arm on a no.
+    def self.fuses? : Bool
+      fuses = @@fuses
+      if fuses == 0
+        leaf = uninitialized UInt64
+        features = uninitialized UInt64
+        asm("cpuid" : "={rax}"(leaf), "={rcx}"(features)
+                    : "{rax}"(1_u64), "{rcx}"(0_u64)
+                    : "rbx", "rdx")
+        wanted = 0x18001000_u64
+        fuses = 2
+        if features & wanted == wanted
+          low = uninitialized UInt64
+          high = uninitialized UInt64
+          asm("xgetbv" : "={rax}"(low), "={rdx}"(high) : "{rcx}"(0_u64))
+          fuses = 1 if low & 6_u64 == 6_u64
+        end
+        @@fuses = fuses
+      end
+      fuses == 1
+    end
+
+    # a * b + c rounded once, by the instruction: for a caller that asked
+    # `fuses?` first.
+    def self.fma(a : Float64, b : Float64, c : Float64) : Float64
+      fused = uninitialized Float64
+      asm("vfmadd213sd $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
+      fused
+    end
+
+    def self.fma(a : Float32, b : Float32, c : Float32) : Float32
+      fused = uninitialized Float32
+      asm("vfmadd213ss $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
+      fused
+    end
   end
 {% end %}
 

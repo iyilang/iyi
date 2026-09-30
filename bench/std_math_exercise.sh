@@ -400,8 +400,9 @@ if [ -n "$FMA" ] && [ -n "$PY" ]; then
   echo
   echo "== fma's software arm, the processor's instruction refused"
   rm -rf "$WORK/software"
-  mkdir -p "$WORK/software/std"
-  "$PY" - "$REPO/src/std/math.iyi" "$WORK/software/std/math.iyi" <<'PY'
+  mkdir -p "$WORK/software/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/software/iyi/"
+  "$PY" - "$REPO/src/iyi/float.iyi" "$WORK/software/iyi/float.iyi" <<'PY'
 import sys
 src = open(sys.argv[1]).read()
 old = "      fuses == 1\n"
@@ -426,25 +427,26 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mutate() { # mutate <label> <old> <new> [<old2> <new2>]
+mutate() { # mutate <label> <old> <new> [<old2> <new2>]: math.iyi's, then the prelude's float.iyi's
   local label="$1" old="$2" new="$3" old2="${4:-}" new2="${5:-}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
   rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
+  mkdir -p "$WORK/patched/std" "$WORK/patched/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/patched/iyi/"
   OLD="$old" NEW="$new" OLD2="$old2" NEW2="$new2" "$PY" - <<PY
 import os
 from pathlib import Path
-src = Path("$REPO/src/std/math.iyi").read_text()
-for o, n in ((os.environ["OLD"], os.environ["NEW"]), (os.environ["OLD2"], os.environ["NEW2"])):
-    if not o:
-        continue
-    if o not in src:
-        raise SystemExit("patch site missing: " + o)
-    src = src.replace(o, n, 1)
-Path("$WORK/patched/std/math.iyi").write_text(src)
+for name, o, n in (("std/math.iyi", os.environ["OLD"], os.environ["NEW"]),
+                   ("iyi/float.iyi", os.environ["OLD2"], os.environ["NEW2"])):
+    src = Path("$REPO/src/" + name).read_text()
+    if o:
+        if o not in src:
+            raise SystemExit("patch site missing: " + o)
+        src = src.replace(o, n, 1)
+    Path("$WORK/patched/" + name).write_text(src)
 PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
@@ -532,7 +534,7 @@ if [ -n "$FMA" ]; then
   # And the instruction with its operands in the wrong order, b * c + a,
   # where the instruction is what runs.
   if [ "$(uname -s) $(uname -m)" = "Linux x86_64" ] && grep -qw fma /proc/cpuinfo; then
-    mutate "vfmadd with its operands in the wrong order" 'vfmadd213sd $3, $2, $0' 'vfmadd231sd $3, $2, $0'
+    mutate "vfmadd with its operands in the wrong order" '' '' 'vfmadd213sd $3, $2, $0' 'vfmadd231sd $3, $2, $0'
   else
     echo "  vfmadd with its operands in the wrong order: not proven here, because this is not an x86_64 Linux with FMA3"
   fi

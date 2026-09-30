@@ -9,8 +9,9 @@ import std/float
 # The hardware instructions this module names. A fused multiply-add is
 # among them on aarch64 only: `llvm.fma.f64` is one instruction there and
 # a call into libm on the x86-64 baseline, and the floor (SPEC.md III.9)
-# links no libm, so `fma` writes x86-64's instruction by hand where the
-# processor has it and takes musl's exact software arm where it has not.
+# links no libm, so `fma` asks the prelude's `IyiRounding` for x86-64's
+# instruction where the processor has it and takes musl's exact software
+# arm where it has not.
 lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64 llvm.fma.f64
   fun sqrt_f64 = "llvm.sqrt.f64"(x : Float64) : Float64
   fun sqrt_f32 = "llvm.sqrt.f32"(x : Float32) : Float32
@@ -4445,11 +4446,7 @@ pub struct Math
       LibLLVMMath.fma_f64(a, b, c)
     {% else %}
       {% if flag?(:x86_64) %}
-        if fuses?
-          fused = uninitialized Float64
-          asm("vfmadd213sd $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
-          return fused
-        end
+        return IyiRounding.fma(a, b, c) if IyiRounding.fuses?
       {% end %}
       soft_fma(a, b, c)
     {% end %}
@@ -4466,45 +4463,11 @@ pub struct Math
       LibLLVMMath.fma_f32(a, b, c)
     {% else %}
       {% if flag?(:x86_64) %}
-        if fuses?
-          fused = uninitialized Float32
-          asm("vfmadd213ss $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
-          return fused
-        end
+        return IyiRounding.fma(a, b, c) if IyiRounding.fuses?
       {% end %}
       soft_fmaf(a, b, c)
     {% end %}
   end
-
-  {% if flag?(:x86_64) %}
-    # 0 not asked yet, 1 the processor fuses, 2 it does not.
-    @@fuses : Int32 = 0
-
-    # FMA3 (leaf 1, ECX bit 12) and AVX's registers saved by the operating
-    # system: OSXSAVE (bit 27), AVX (bit 28), and XCR0's SSE and AVX state
-    # both on. An instruction the processor has and the system does not
-    # save is an invalid-opcode fault.
-    private def self.fuses? : Bool
-      fuses = @@fuses
-      if fuses == 0
-        leaf = uninitialized UInt64
-        features = uninitialized UInt64
-        asm("cpuid" : "={rax}"(leaf), "={rcx}"(features)
-                    : "{rax}"(1_u64), "{rcx}"(0_u64)
-                    : "rbx", "rdx")
-        wanted = 0x18001000_u64
-        fuses = 2
-        if features & wanted == wanted
-          low = uninitialized UInt64
-          high = uninitialized UInt64
-          asm("xgetbv" : "={rax}"(low), "={rdx}"(high) : "{rcx}"(0_u64))
-          fuses = 1 if low & 6_u64 == 6_u64
-        end
-        @@fuses = fuses
-      end
-      fuses == 1
-    end
-  {% end %}
 
   # An exponent that stands for zero, an infinity or NaN once `fma_parts`
   # has taken the bias and the significand's width off it.

@@ -564,6 +564,16 @@
 
 ### Fixed
 
+- **`bench/concurrent_mark.iyi` holds in a plain build.** Its small-live-set
+  check asks that no collection over four thousand live objects go beside
+  the program, and ran with the two-hundred-thousand-node chain an earlier
+  section built still held by `chain`: a plain build keeps a variable's
+  stack slot for the whole program, so every mark was that chain's and
+  went beside it - 7 of 7 on Windows, where the exercise runner builds
+  plain, on master's runs too. A release build had reused the slot. The
+  chain is dropped before the check; its failure proof, the
+  thousand-object bound, still fails it.
+
 - **`fmt` keeps the line breaks a literal holds in a CRLF file.** A CRLF
   file is written back with CRLF, and every `\n` was turned - the ones
   inside a string literal too, which are the program's data: `"one` /

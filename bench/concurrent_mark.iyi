@@ -307,6 +307,14 @@
   # bound and finishes stopped, where waking a helper for each of these
   # collections cost an allocation loop three times its time and 8 ms
   # pauses. With helpers to wake, not one goes beside the program.
+  #
+  # The chain above is two hundred thousand live objects while `chain`
+  # holds it, and a plain build keeps the variable's stack slot for the
+  # whole program: every one of these marks was that chain's, and went
+  # beside the program - measured, 7 of 7 on Windows, where the exercise
+  # runner builds plain; a release build had reused the slot. One cell
+  # holds it from here.
+  chain = Cell.new(nil, nil)
   IyiMark.workers = 15_u64
   IyiMark.auto = false
   small = Array(Payload).new(2000) { |index| Payload.new(index.to_u64) }

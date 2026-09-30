@@ -1100,16 +1100,17 @@ class IyiScheduler
     # faults a fiber's edge can raise both arrive at the same handler and
     # it has to tell them apart by address:
     #
-    #   * a guard-page violation on the PAGE_GUARD page `map_stack` armed,
-    #     which is the ordinary way a fiber runs out; and
-    #   * an access violation in the uncommitted page under the slack,
+    #   * STATUS_STACK_OVERFLOW, which the kernel answers when the stack it
+    #     grows a guard page at a time reaches the handler's room at its
+    #     bottom (`map_stack`) - the ordinary way a fiber runs out; and
+    #   * an access violation in the uncommitted page under that room,
     #     which is a frame big enough to step over the guard page whole.
     #
-    # The range is therefore the reservation's first page, the slack and
-    # the guard page — everything below the limit `settle_stack` installs.
-    # The slack itself is committed and never faults, so including it
-    # costs nothing and means a handler that overran its own room still
-    # says what happened rather than calling it a memory fault.
+    # The range is therefore the whole reservation: the pages the kernel
+    # had not grown into when the fault came, the wall and the room.
+    # Including the room, which is committed and never faults, means a
+    # handler that overran it still says what happened rather than
+    # calling it a memory fault.
     def self.fiber_guard_hit?(address : UInt64) : Bool
       fiber = @@all_head
       while fiber.is_a?(IyiFiber)
@@ -1214,14 +1215,22 @@ class IyiScheduler
   # switched to.
   def self.switch_to(fiber : IyiFiber) : Nil
     previous = current
-    fiber.state = IyiFiberState::Running
-    return if fiber.sp_slot.address == previous.sp_slot.address
+    if fiber.sp_slot.address == previous.sp_slot.address
+      fiber.state = IyiFiberState::Running
+      return
+    end
     if fiber.saved_sp == 0_u64
       maker = @@stack_maker
       maker.call(fiber) unless maker.is_a?(Nil)
     end
     state.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
+    # Running from here, on its own stack, and not before: the collector's
+    # fiber walk skips the running fiber, whose stack the thread's own scan
+    # covers from its sp, and a fiber marked running before the switch got
+    # there was covered by neither - a thread another thread stopped in
+    # between had what only that fiber's stack named freed under it.
+    current.state = IyiFiberState::Running
     # Back on this fiber's own stack, which is the first moment a stack
     # somebody else finished with can be taken back.
     reap_dying
@@ -1229,10 +1238,11 @@ class IyiScheduler
 
   # The trampoline lands here on a fresh fiber's first resume.
   def self.run_spawned_fiber : Nil
+    fiber = current
+    fiber.state = IyiFiberState::Running
     # A fresh fiber is also a successor: the switch that got here
     # returned into the trampoline rather than into `switch_to`.
     reap_dying
-    fiber = current
     body = fiber.proc
     body.call unless body.is_a?(Nil)
     fiber.state = IyiFiberState::Done

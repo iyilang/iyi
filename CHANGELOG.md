@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A task a thread is switching into keeps its objects through a
+  collection another thread runs.** A switch marked the fiber it enters
+  running before its stack was the thread's, and the collector's fiber
+  walk skips the running fiber, whose stack the thread's own scan covers
+  from its sp: a thread stopped between the two had that fiber's stack
+  scanned by nobody, and what only it named was freed. Eight
+  `IyiThread`s running tasks beside a `GC.collect` every 5 ms found a
+  corrupted list in 9 runs of 30 on Windows; six threads handing a token
+  between two tasks lost a list or died of a memory fault in 20 of 20.
+  The fiber is marked running on its own stack now, after the switch:
+  0 of 30 and 0 of 5. `bench/thread_exercise.sh` runs the six threads
+  five times and proves the check with the old switch in a copy of the
+  runtime, which lost a list in 5 runs of 5.
+
 - **An owner that exits or panics inside a `group` does not wait out its
   tasks.** A group's join is one of its owner's cleanups, and both `exit`
   and a panic run those: `exit(4)` beside a task in a minute-long sleep
@@ -13169,7 +13183,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,153-line library and nothing else. Every other
+  written against iyi's own 19,166-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

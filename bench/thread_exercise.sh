@@ -264,6 +264,137 @@ if [ "$code" -ne 1 ] || ! grep -q "registry:" stale.txt; then
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'registry:' stale.txt | sed 's/^FAIL: //')"
 
+# ── 5c. A task being switched to is a root ────────────────────────────────
+# A switch marked the fiber it enters running before its stack was the
+# thread's, and the fiber walk skips the running one: a thread stopped
+# between the two had that fiber's stack scanned by nobody, and what only
+# it named was freed. The fiber is marked on its own stack now. Two tasks per thread hand a token back and forth,
+# each holding a list only its own stack names, while the main thread
+# collects every millisecond; each checks its list every 64 trips.
+step "a task a thread is switching into keeps its objects"
+cat > switching.iyi <<'IYI'
+module switching
+
+import std/gc::{GC}
+
+class Node
+  getter value : Int64
+  getter next_node : Node?
+
+  def initialize(@value : Int64, @next_node : Node?)
+  end
+end
+
+def build(n : Int32, seed : Int64) : Node?
+  head = nil.as(Node?)
+  n.times { |i| head = Node.new(seed + i.to_i64, head) }
+  head
+end
+
+def intact?(head : Node?, n : Int32, seed : Int64) : Bool
+  i = n - 1
+  cur = head
+  while cur.is_a?(Node)
+    return false if cur.value != seed + i.to_i64
+    i = i - 1
+    cur = cur.next_node
+  end
+  i == -1
+end
+
+class Tally
+  @@page = 0_u64
+
+  def self.setup : Nil
+    @@page = __iyi_mmap(4096_u64).address
+  end
+
+  def self.wrong : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(@@page)
+  end
+
+  def self.finished : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(@@page + 8_u64)
+  end
+end
+
+def pair(id : Int32, trips : Int32) : Nil
+  there = Channel(Int32).new(1)
+  back = Channel(Int32).new(1)
+  group do |g|
+    2.times do |side|
+      g.spawn do
+        seed = (id * 10 + side).to_i64 * 1000000_i64
+        mine = build(300, seed)
+        wrong = 0
+        trips.times do |t|
+          if side == 0
+            there.send(t)
+            back.receive
+          else
+            there.receive
+            back.send(t)
+          end
+          build(20, 0_i64) if t % 8 == 0
+          wrong = wrong + 1 if t % 64 == 0 && !intact?(mine, 300, seed)
+        end
+        Tally.wrong.value.add(wrong.to_u64)
+        Tally.finished.value.add(1_u64)
+        0
+      end
+    end
+    0
+  end
+end
+
+Tally.setup
+threads = [] of IyiThread
+6.times do |id|
+  threads << IyiThread.start { pair(id + 1, 100000); nil }
+end
+while Tally.finished.value.get < 12_u64
+  GC.collect
+  sleep(1)
+end
+threads.each { |th| th.join }
+puts "wrong=#{Tally.wrong.value.get}"
+IYI
+if ! "$IYI" build switching.iyi -o switching > build-switching.log 2>&1; then
+  cat build-switching.log; exit 1
+fi
+run=1
+while [ "$run" -le 5 ]; do
+  timeout -k 5 120 ./switching > switching.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' switching.txt; then
+    echo "run $run exited $code:"; tail -3 switching.txt; exit 1
+  fi
+  run=$((run + 1))
+done
+echo "  five runs, no list lost"
+
+# The failure proof: the fiber marked running before the switch again, in
+# a copy.
+step "failure proof: a fiber marked running before the switch loses its list"
+mkdir -p skipping/iyi
+cp "$REPO"/src/iyi/*.iyi skipping/iyi/
+awk '/^    state.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; found = 1 } { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -o skipping-run > build-skipping.log 2>&1; then
+  cat build-skipping.log; exit 1
+fi
+caught=0
+run=1
+while [ "$run" -le 5 ]; do
+  timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
+  grep -q '^wrong=0$' skipping.txt || caught=$((caught + 1))
+  run=$((run + 1))
+done
+if [ "$caught" -eq 0 ]; then
+  echo "five runs with the fiber marked early all kept their lists"; exit 1
+fi
+echo "  $caught of five runs lost a list or died"
+
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has
 # a mutable field — here an `Array`, whose size is assigned by its own

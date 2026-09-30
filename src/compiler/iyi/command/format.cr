@@ -184,25 +184,9 @@ class Iyi::Command
     private def format_source(filename, source)
       result = format(filename, source)
 
-      # iyi: written back with the line endings the file had. The formatter
-      # emits `\n`, so a CRLF file came back with every one of its lines
-      # changed — a diff of the whole file for a tool that was asked to fix
-      # its indentation, on the platform this fork ships a binary for. And
-      # `--check` said "produced changes" about a file whose code was
-      # already formatted, naming neither the lines nor the reason.
-      #
-      # `iyi fix` has always kept them: it splices an edit into the bytes it
-      # read. Two verbs over the same file disagreed about what a line ends
-      # with, and this is the one that was rewriting.
-      #
-      # The first line ending in the file decides, which is `rustfmt`'s
-      # `newline_style = Auto`. Normalised before it is applied so that a
-      # raw CR already in the text cannot become `\r\r\n`.
-      result = iyi_with_crlf(filename, source, result) if iyi_crlf?(source)
-      # And the byte order mark it began with, which the lexer skips: a file
-      # saved with one came back without it, and `--check` failed a file
-      # whose code was already formatted.
-      result = "\uFEFF#{result}" if source.starts_with?('\uFEFF') && !result.starts_with?('\uFEFF')
+      # Written back with the line endings and the byte order mark the file
+      # had (`Iyi.as_written`).
+      result = Iyi.as_written(filename, source, result)
 
       @stdout.print result if @format_stdin
       return if result == source
@@ -238,92 +222,6 @@ class Iyi::Command
         print_error "there's a bug formatting '#{filename}', to show more information, please run:\n\n  $ #{File.basename(PROGRAM_NAME)} tool format --show-backtrace #{@format_stdin ? "-" : "'#{filename}'"}\n"
       end
       @status_code = 1
-    end
-
-    # iyi: whether this text's lines end with CRLF, decided by the first
-    # line ending in it — a file is one thing or the other, and asking the
-    # first is deterministic where counting is a tie away from surprising.
-    private def iyi_crlf?(source : String) : Bool
-      return false unless index = source.index('\n')
-      index > 0 && source[index - 1] == '\r'
-    end
-
-    # iyi: *result*, the formatter's, with the line endings *source* had.
-    # The code's lines end `\r\n`; a line break inside a literal - a string
-    # spanning lines, a heredoc - is the one the source had there, because
-    # it is the program's data and not the file's convention. Every `\n`
-    # was turned, and a literal holding a bare line break in a CRLF file
-    # came back holding `\r\n`: `"one` / `two"` printed seven bytes before
-    # `fmt` and eight after. The formatter moves no literal, so the breaks
-    # inside literals are the same, in the same order, in both texts; when
-    # the two parses do not agree on how many there are, every line is
-    # turned as before.
-    private def iyi_with_crlf(filename : String, source : String, result : String) : String
-      turned = result.gsub("\r\n", "\n").gsub('\n', "\r\n")
-      source_lines = iyi_literal_lines(filename, source)
-      result_lines = iyi_literal_lines(filename, result)
-      return turned unless source_lines && result_lines
-      endings = [] of String
-      iyi_each_line(source) do |number, text, ended|
-        endings << (text.ends_with?('\r') ? "\r\n" : "\n") if ended && source_lines.includes?(number)
-      end
-      wanted = 0
-      iyi_each_line(result) { |number, _, ended| wanted += 1 if ended && result_lines.includes?(number) }
-      return turned unless wanted == endings.size
-      index = 0
-      String.build(result.bytesize + result.bytesize // 16) do |io|
-        iyi_each_line(result) do |number, text, ended|
-          io << text.rchop('\r')
-          next unless ended
-          if result_lines.includes?(number)
-            io << endings[index]
-            index += 1
-          else
-            io << "\r\n"
-          end
-        end
-      end
-    end
-
-    # Each line of *text*: its number, its bytes without the `\n`, and
-    # whether a `\n` ends it - the last line may have none.
-    private def iyi_each_line(text : String, & : Int32, String, Bool ->) : Nil
-      line = 1
-      start = 0
-      while newline = text.byte_index('\n', start)
-        yield line, text.byte_slice(start, newline - start), true
-        start = newline + 1
-        line += 1
-      end
-      yield line, text.byte_slice(start, text.bytesize - start), false if start < text.bytesize
-    end
-
-    # The numbers of the lines whose line break a literal holds, or nil when
-    # *text* does not parse.
-    private def iyi_literal_lines(filename : String, text : String) : Set(Int32)?
-      lines = Set(Int32).new
-      parser = Parser.new(text)
-      parser.filename = filename
-      parser.parse.accept(LiteralLines.new(lines))
-      lines
-    rescue
-      nil
-    end
-
-    private class LiteralLines < Visitor
-      def initialize(@lines : Set(Int32))
-      end
-
-      def visit(node : StringLiteral | StringInterpolation | RegexLiteral)
-        if (from = node.location) && (to = node.end_location)
-          (from.line_number...to.line_number).each { |line| @lines << line }
-        end
-        true
-      end
-
-      def visit(node : ASTNode)
-        true
-      end
     end
 
     # This method is for mocking `Iyi.format` in test.

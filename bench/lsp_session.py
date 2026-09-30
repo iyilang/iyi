@@ -1307,6 +1307,42 @@ def main():
          formatted.count("\n") == sloppy.count("\n"),
          "one whole-document edit, call tightened")
 
+    # 25c. A CRLF buffer formats in CRLF, as `iyi format` writes a file:
+    #      a formatted one needs no edit, and a sloppy one's edit keeps
+    #      every line's `\r\n`. The server answered both with LF, a
+    #      whole-document rewrite on every save. And an edit whose range
+    #      runs past a line's end stops before its `\r`, which the spec
+    #      says and the server's offsets did not: the buffer lost the `\r`
+    #      and stopped matching the editor's.
+    crlf_path = os.path.join(work, "crlf.iyi")
+    crlf_text = "module crlf\r\n\r\nputs 1\r\nputs 2\r\n"
+    crlf_uri = file_uri(crlf_path)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": crlf_uri, "languageId": "iyi",
+                             "version": 1, "text": crlf_text}}, wait=False)
+    c.diagnostics(crlf_uri)
+    fmt = {"textDocument": {"uri": crlf_uri}, "options": {"tabSize": 2, "insertSpaces": True}}
+    clean = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 2},
+            "contentChanges": [{"range": {"start": {"line": 2, "character": 5},
+                                          "end": {"line": 2, "character": 100}},
+                                "text": "3"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    after_edit = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 3},
+            "contentChanges": [{"text": "module crlf\r\n\r\nputs(  3 )\r\nputs 2\r\n"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    sloppy_edits = c.send("textDocument/formatting", fmt)["result"] or []
+    sloppy_text = sloppy_edits[0]["newText"] if sloppy_edits else ""
+    step("25c", "a CRLF buffer formats in CRLF, and an edit past a line's end keeps its \\r",
+         clean == [] and after_edit == [] and
+         sloppy_text.count("\r\n") == 4 and sloppy_text.count("\n") == 4,
+         f"formatted: {clean!r}, after the edit: {len(after_edit or [])} edit(s), "
+         f"sloppy: {sloppy_text!r}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": crlf_uri}}, wait=False)
+
     # 25b. and formatting a buffer that imports a package. The host segment
     #      is one segment to the parser and three tokens to the lexer, and
     #      the formatter fell behind its own stream on it — raising a plain

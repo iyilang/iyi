@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **The language server formats a CRLF buffer in CRLF, and keeps its
+  `\r` through an edit.** Formatting answered a CRLF buffer with a
+  whole-document edit to LF - one on every save in an editor that formats
+  on save, for a file already formatted - and organizing imports wrote LF
+  lines into it; `iyi format` had kept a file's endings and byte order
+  mark, and the two share that step now (`Iyi.as_written`). And an edit
+  whose range ran past a line's end took the line's `\r` with it, where
+  LSP says such a position is the line's end: the server's buffer stopped
+  matching the editor's. Step 25c of `bench/lsp_session.py` formats a
+  formatted and a sloppy CRLF buffer and edits past a line's end; the old
+  server failed each.
+
 - **The language server names files by URIs an editor can use.** A URI
   in an answer was the path behind `file:///` as it stood: `#` in a
   directory's name made the rest of the path a fragment, `%41` decoded to

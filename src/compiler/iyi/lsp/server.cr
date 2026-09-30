@@ -2097,9 +2097,12 @@ module Iyi::Lsp
     private def on_formatting(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
       text = text_of(uri)
+      # In the buffer's own line endings, as `iyi format` writes a file: a
+      # formatted CRLF buffer was answered with a whole-document edit to
+      # LF, and every save in an editor that formats on save rewrote it.
       formatted =
         begin
-          Iyi.format(text, filename: path_of(uri))
+          Iyi.as_written(path_of(uri), text, Iyi.format(text, filename: path_of(uri)))
         rescue CodeError
           return respond_null(id)
         end
@@ -2526,9 +2529,13 @@ module Iyi::Lsp
       end
       return nil unless first && last
 
+      # The buffer's own line ending between the lines it writes: joined
+      # with `\n` alone, organizing a CRLF buffer's imports left LF lines
+      # in it.
+      ending = Iyi.crlf?(text) ? "\r\n" : "\n"
       organized = String.build do |io|
         modules.uniq!.sort!.each_with_index do |mod, index|
-          io << '\n' unless index.zero?
+          io << ending unless index.zero?
           io << "import " << mod
           if globs.includes?(mod)
             io << "::*"
@@ -2538,7 +2545,7 @@ module Iyi::Lsp
         end
       end
 
-      current = lines[first..last].join('\n')
+      current = lines[first..last].join(ending)
       return nil if current == organized
       {first, last, organized}
     end

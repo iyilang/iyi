@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A float's zero keeps its sign, and `x ** Int32::MIN` answers.**
+  `trunc` went through an integer, so `(-0.5).trunc` was `0.0`; `round`,
+  `round(digits)` and `round(mode)` put the sign back with `self < 0.0`,
+  which `-0.0` is not; and `remainder`, documented as C's `fmod` with the
+  dividend's sign, answered `0.0` for `-0.0` - each answers `-0.0` now,
+  as C's and Python's do. `2.0 ** Int32::MIN` negated the exponent and
+  panicked "arithmetic overflow"; it squares the half power instead and
+  answers `0.0`, as the other library's `powi` does. The integer side
+  - every base, conversion, division rule and bit operation against
+  Python - found nothing. The float exercise checks each and proves each
+  check fails with its fix broken.
+
 - **Five more gates' failure proofs need the broken copy to compile.**
   The base64, bit_array, compress, http and steppable exercises counted
   any failure of the patched build as the proof caught, and three of
@@ -12767,7 +12779,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,959-line library and nothing else. Every other
+  written against iyi's own 18,968-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

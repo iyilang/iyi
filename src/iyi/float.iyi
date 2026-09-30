@@ -114,8 +114,14 @@ struct Float64
   end
 
   # A whole power, by squaring: `2.0 ** 10`. A negative exponent is one
-  # over the positive one.
+  # over the positive one. The smallest exponent has no positive twin -
+  # negating it panicked "arithmetic overflow" - so its power is the square
+  # of the half, which is the same product the squaring loop would take.
   def **(exponent : Int32) : Float64
+    if exponent == -2147483648
+      half = self ** 1073741824
+      return 1.0 / (half * half)
+    end
     return 1.0 / (self ** -exponent) if exponent < 0
     result = 1.0
     base = self
@@ -182,9 +188,12 @@ struct Float64
   # is 2.0 and `3.5.round` is 4.0. `std/number` names the other modes.
   # The magnitude's fraction decides, not a sum: `(x + 0.5).floor` rounded
   # the sum first, and 0.49999999999999994 + 0.5 is 1.0. The sign goes
-  # back by a multiplication, so `(-0.25).round` is -0.0, as there.
+  # back by a multiplication, so `(-0.25).round` is -0.0, as there. A zero
+  # is its own nearest integer and is answered as it is: `-0.0 < 0.0` is
+  # false, and the sign test below answered `(-0.0).round` as 0.0.
   def round : Float64
     return self if self != self || abs >= 9007199254740992.0
+    return self if self == 0.0
     magnitude = abs
     whole = magnitude.floor
     fraction = magnitude - whole

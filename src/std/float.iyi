@@ -264,6 +264,9 @@ import std/number
         raise "modulo by zero" if other == 0.0{{ sfx.id }}
         return NAN if nan? || other.nan? || !infinite?.nil?
         return self if !other.infinite?.nil?
+        # A zero is its own remainder, sign and all: `-0.0 < 0.0` is false,
+        # and the test below answered `(-0.0).remainder(2.0)` as 0.0.
+        return self if self == 0.0{{ sfx.id }}
         ax = abs
         ay = other.abs
         while ax >= ay
@@ -309,14 +312,17 @@ import std/number
       end
 
       # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is
-      # answered as it is; NaN and the infinities likewise.
+      # answered as it is; NaN and the infinities likewise. A zero keeps the
+      # sign of what was truncated - `(-0.5).trunc` is -0.0, as `floor` and
+      # `ceil` answer - where the conversion through an integer lost it.
       def trunc : {{ name.id }}
         return self if self != self || abs >= {{ f[3].id }}
         {% if name == "Float32" %}
-          to_i64.to_f32
+          whole = to_i64.to_f32
         {% else %}
-          to_i64.to_f64
+          whole = to_i64.to_f64
         {% end %}
+        whole == 0.0{{ sfx.id }} ? self * 0.0{{ sfx.id }} : whole
       end
     end
   {% end %}

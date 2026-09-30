@@ -22,12 +22,16 @@
 module std/ini
 
 pub struct INI
+  # Past a byte order mark, which Windows PowerShell 5.1's `Set-Content
+  # -Encoding UTF8` and older Notepad write: it panicked "expected
+  # declaration at line 1, column 8" at a `[section]` behind one, and the
+  # first key of a file without a section kept it and never matched.
   def self.parse(string : String) : Hash(String, Hash(String, String))
-    parse_lines(string.lines)
+    parse_lines(string.lchop('\uFEFF').lines)
   end
 
   def self.parse(io : IO) : Hash(String, Hash(String, String))
-    parse_lines(io.read_all.lines)
+    parse(io.read_all)
   end
 
   private def self.parse_lines(lines : Array(String)) : Hash(String, Hash(String, String))

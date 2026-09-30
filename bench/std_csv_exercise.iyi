@@ -27,4 +27,9 @@ built = CSV.build(quoted)
 assert_true built.includes?("a,b"), "build keeps comma field"
 puts "  rows, quotes, build"
 
+# A byte order mark, which Excel writes into every "CSV UTF-8" file, is not
+# the first field's: `row[0] == "id"` was false.
+assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
+puts "  a byte order mark"
+
 puts "\nALL CHECKS PASSED"

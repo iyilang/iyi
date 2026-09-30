@@ -24,4 +24,12 @@ assert_true built.includes?("k=v"), "build top"
 assert_true built.includes?("[s]"), "build section"
 puts "  parse and build"
 
+# A byte order mark, which PowerShell 5.1 and older Notepad put at the
+# front of a UTF-8 file, is not the first key's and does not break a
+# section: it panicked at `[s]` and kept itself in a bare first key.
+marked = INI.parse("\uFEFF[s]\r\na=b\r\n")
+assert_str "b", marked["s"]["a"], "a section behind a byte order mark"
+assert_str "v", INI.parse("\uFEFFk=v\n")[""]["k"], "a first key behind a byte order mark"
+puts "  a byte order mark"
+
 puts "\nALL CHECKS PASSED"

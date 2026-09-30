@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`INI.parse` and `CSV.parse` read past a byte order mark.** Windows
+  PowerShell 5.1's `Set-Content -Encoding UTF8`, older Notepad and
+  Excel's "CSV UTF-8" put one at the front of a file. `INI.parse`
+  panicked "expected declaration" at a `[section]` behind it, and kept it
+  in a first key outside any section, which then matched nothing; the
+  first CSV field kept it, so `row[0] == "id"` was false. `yaml` and
+  `xml` already skipped it. `bench/std_ini_exercise.iyi` and
+  `bench/std_csv_exercise.iyi` parse a marked file; the old modules fail
+  both.
+
 - **`String#lines` ends a line at `\r\n` too.** It split at `\n` alone, so
   a Windows text's lines kept their `\r`: `File.read(path).lines` of a
   file of numbers panicked at the first `to_i` ("not a number: "1\r"")

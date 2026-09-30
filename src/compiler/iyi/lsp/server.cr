@@ -73,7 +73,7 @@ module Iyi::Lsp
     # The last published diagnostics, kept for codeAction to read back:
     # {line0, start_ch, end_ch, message, suggestion} per document.
     @published = {} of String => Array({Int32, Int32, Int32, String, String?})
-    @root : String?
+    @roots = [] of String
     @running = true
     # Set by `shutdown`. After it, the protocol says every request but
     # `exit` is answered -32600: a client that keeps asking is asking a
@@ -398,7 +398,7 @@ module Iyi::Lsp
         respond_error(nil, -32600, "invalid request: the frame's body is JSON but not an object")
       when "initialize"
         @initialized = true
-        @root = root_of(params)
+        @roots = roots_of(params)
         @snippets = params.try(&.dig?("capabilities", "textDocument", "completion", "completionItem", "snippetSupport")).try(&.as_bool?) == true
         respond(id.not_nil!) { |json| capabilities(json) }
       when "initialized"
@@ -906,12 +906,10 @@ module Iyi::Lsp
       end
 
       uris = @documents.keys.dup
-      if root = @root
-        workspace_files(root, with_lib: false).each do |(file, _)|
-          uri = uri_of(file)
-          uris << uri unless uris.includes?(uri)
-          break if uris.size >= 200
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        uri = uri_of(file)
+        uris << uri unless uris.includes?(uri)
+        break if uris.size >= 200
       end
 
       # The verdicts first, and *interruptibly*, because this is the one
@@ -1070,8 +1068,8 @@ module Iyi::Lsp
       end
 
       outside = 0_u64
-      if root = @root
-        workspace_files(root, with_lib: true).each do |(file, in_lib)|
+      unless @roots.empty?
+        each_workspace_file(with_lib: true) do |file, in_lib|
           info = File.info?(file)
           next unless info
           if in_lib
@@ -1086,7 +1084,7 @@ module Iyi::Lsp
           header, imports = header_and_imports(file, info)
           nodes[file] = Node.new(stamp_of(info), header, imports)
         end
-        workspace_files(root, with_lib: true, manifests: true).each do |(file, _)|
+        each_workspace_file(with_lib: true, manifests: true) do |file, _|
           info = File.info?(file)
           next unless info
           outside = outside &* prime &+ stable(file) &+ stamp_of(info)
@@ -1698,15 +1696,13 @@ module Iyi::Lsp
     # workspace" an ordinary request rather than an index.
     private def workspace_entries : Array({String, String})
       entries = @documents.map { |doc_uri, doc_text| {path_of(doc_uri), doc_text} }
-      if root = @root
-        workspace_files(root, with_lib: false).each do |(file, _)|
-          # By path, not by a URI rebuilt from it: an editor's own URI for
-          # this file is spelled its way (`%3A`, `%20`), and open buffers
-          # are already in the list above, with their unsaved text.
-          next if document_text(file)
-          entries << {file, File.read(file)}
-          break if entries.size >= 200
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        # By path, not by a URI rebuilt from it: an editor's own URI for
+        # this file is spelled its way (`%3A`, `%20`), and open buffers
+        # are already in the list above, with their unsaved text.
+        next if document_text(file)
+        entries << {file, File.read(file)}
+        break if entries.size >= 200
       end
       entries
     end
@@ -2190,11 +2186,9 @@ module Iyi::Lsp
       query = params["query"]?.try(&.as_s?) || ""
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
-      if root = @root
-        workspace_files(root, with_lib: false).each do |(file, _)|
-          paths << file unless paths.any? { |known| same_path?(known, file) }
-          break if paths.size >= 2000
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        paths << file unless paths.any? { |known| same_path?(known, file) }
+        break if paths.size >= 2000
       end
 
       results = [] of {String, Int32, String, Int32, Int32, Int32, String?}
@@ -3071,21 +3065,21 @@ module Iyi::Lsp
     # The arithmetic is `Text`'s: the proxy in front of this server keeps
     # the same buffers and has to apply the same changes.
 
-    # The workspace root the client named at initialize, for
-    # workspace/symbol to glob under.
-    private def root_of(params : JSON::Any?) : String?
-      return nil unless params
+    # The workspace's folders the client named at initialize, every one:
+    # only the first was walked, so in a multi-root workspace a rename in
+    # the second folder left its importers calling the old name, and
+    # workspace/symbol knew none of its defs. `rootUri` and `rootPath` are
+    # the older clients' one folder.
+    private def roots_of(params : JSON::Any?) : Array(String)
+      return [] of String unless params
       if folders = params["workspaceFolders"]?.try(&.as_a?)
-        if first = folders.first?
-          if folder_uri = first["uri"]?.try(&.as_s?)
-            return path_of(folder_uri)
-          end
-        end
+        roots = folders.compact_map { |folder| folder["uri"]?.try(&.as_s?).try { |folder_uri| path_of(folder_uri) } }
+        return roots unless roots.empty?
       end
       if root_uri = params["rootUri"]?.try(&.as_s?)
-        return path_of(root_uri)
+        return [path_of(root_uri)]
       end
-      params["rootPath"]?.try(&.as_s?)
+      params["rootPath"]?.try(&.as_s?).try { |path| [path] } || [] of String
     end
 
     # ── Code lens and its command ────────────────────────────────────────
@@ -3366,6 +3360,22 @@ module Iyi::Lsp
     # files dozens of times under paths too long to open.
     #
     # With *manifests*, the `iyi.mod` and `iyi.sum` files instead.
+    # Every folder's files, a file under two folders (one nested in the
+    # other) once.
+    private def each_workspace_file(*, with_lib : Bool, manifests : Bool = false, & : String, Bool ->) : Nil
+      seen = Set(String).new
+      @roots.each do |root|
+        workspace_files(root, with_lib: with_lib, manifests: manifests).each do |(file, in_lib)|
+          {% if flag?(:win32) %}
+            next unless seen.add?(file.downcase)
+          {% else %}
+            next unless seen.add?(file)
+          {% end %}
+          yield file, in_lib
+        end
+      end
+    end
+
     private def workspace_files(root : String, *, with_lib : Bool, limit : Int32 = 2000, manifests : Bool = false) : Array({String, Bool})
       found = [] of {String, Bool}
       walk_workspace(fs_path(root), false, with_lib, manifests, limit, found)

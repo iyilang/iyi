@@ -1160,6 +1160,43 @@ def main():
              placed_files == ["app.iyi", "greet.iyi"],
              f"rename edited {placed_files}")
 
+    # 18m. A multi-root workspace is every folder, not the first: a rename
+    #      in the second folder left its importer calling the old name, and
+    #      workspace/symbol knew nothing of it.
+    folders = [os.path.join(work, "roots", name) for name in ("first", "second")]
+    for folder in folders:
+        os.makedirs(folder)
+    with open(os.path.join(folders[0], "other.iyi"), "w", newline="") as f:
+        f.write("module other\n\nputs 1\n")
+    second_lib = os.path.join(folders[1], "greet.iyi")
+    second_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+    with open(second_lib, "w", newline="") as f:
+        f.write(second_text)
+    with open(os.path.join(folders[1], "app.iyi"), "w", newline="") as f:
+        f.write("module app\n\nimport greet::{shout}\n\ndef announce : String\n  shout(\"a\")\nend\n\nputs announce\n")
+    e = Client()
+    e.send("initialize", {"rootUri": file_uri(folders[0]), "capabilities": {},
+                          "workspaceFolders": [{"uri": file_uri(folder), "name": os.path.basename(folder)}
+                                               for folder in folders]})
+    e.send("initialized", {}, wait=False)
+    second_uri = file_uri(second_lib)
+    e.send("textDocument/didOpen",
+           {"textDocument": {"uri": second_uri, "languageId": "iyi",
+                             "version": 1, "text": second_text}}, wait=False)
+    e.diagnostics(second_uri)
+    multi = (e.send("textDocument/rename",
+                    {"textDocument": {"uri": second_uri},
+                     "position": {"line": 2, "character": 9},
+                     "newName": "holler"}).get("result") or {}).get("changes", {})
+    multi_files = sorted(u.rsplit("/", 1)[-1] for u in multi)
+    announced = [sym["name"] for sym in e.send("workspace/symbol", {"query": "announce"}).get("result") or []]
+    e.send("shutdown", {})
+    e.send("exit", {}, wait=False)
+    e.proc.wait(timeout=10)
+    step("18m", "a multi-root workspace is every folder, not the first",
+         multi_files == ["app.iyi", "greet.iyi"] and announced == ["announce"],
+         f"rename edited {multi_files}, workspace/symbol found {announced}")
+
     # 18k. The URIs an answer names are URIs: the client's own for a file
     #      it has open, and for any other one a percent-encoded URI that
     #      names that file. The path went behind `file:///` as it stood,

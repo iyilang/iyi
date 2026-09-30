@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **The language server walks every folder of a multi-root workspace.**
+  It took the first of `workspaceFolders` and walked that alone, so a
+  rename in the second folder left its importers calling the old name,
+  and workspace/symbol, references and workspace/diagnostic knew nothing
+  of it. Every folder is walked now, a file under two nested folders
+  once. Step 18m of `bench/lsp_session.py` renames a def in the second of
+  two folders and asks workspace/symbol for a def there; the old server
+  renamed one file and found nothing.
+
 - **A name brought in by an import, called with arguments none of its
   defs takes, is reported as that mismatch.** `import greet::{shout}`
   then `shout(42)` said "undefined method 'shout' for App:Module" and
@@ -12520,7 +12529,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,005-line library and nothing else. Every other
+  written against iyi's own 19,024-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

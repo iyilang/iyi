@@ -71,6 +71,23 @@
 
 ### Fixed
 
+- **`Math.sin` and `cos` of a large argument, correctly rounded.** They
+  shared `tan`'s reduction and its give-up: `Math.sin(1.0e300)` was 0.0
+  and `Math.cos(1.0e300)` 1.0, where they are -0.8178819121159085 and
+  -0.5753861119575491, and of 10,000 arguments across the range each got
+  about 5,660 wrong. They are CORE-MATH's (MIT, revision b1a4badf6765),
+  with their tables and their 128-bit arithmetic in two 64-bit words, and
+  wrong for none; glibc 2.43's, IBM's, are wrong for 21 and 14 of the
+  same 10,000. The three share the 128-bit multiply, and the old
+  reduction, its Taylor series and Dekker's product are gone. Correctly
+  rounded costs `fma`s: over [-10, 10] on a machine without FMA sin takes
+  50 ns and cos 290 against 13 before and glibc's 7 - CORE-MATH's C takes
+  24 and 144 there - and on one with FMA each is one instruction. The
+  oracle carries CORE-MATH's two files and the math gate requires 225,000
+  arguments of each to the last bit and proves the check fails with the
+  shared product losing its middle carry and each small reduction losing
+  its constant's low part.
+
 - **`Math.tan` of a large argument is its tangent, correctly rounded.** The
   reduction by pi/2 gave up once x * 2/pi reached 2^63 and answered 0:
   `Math.tan(1.0e300)` was 0.0 where it is 1.4214488238747245, and of

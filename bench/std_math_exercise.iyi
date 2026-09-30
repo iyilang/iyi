@@ -276,7 +276,7 @@ puts "  they compile without the consumer importing std/float, and overflow to i
 # builds these from - Arm's, fdlibm's for log10, expm1, log1p, sinh, cosh
 # and tanh, CORE-MATH's for erf, erfc, asinh, acosh, atanh, lgamma and
 # tgamma, and
-# CORE-MATH's own atan, asin, acos and tan -
+# CORE-MATH's own atan, asin, acos, sin, cos and tan -
 # compiled from `bench/libm_oracle`: pairs of doubles, an argument and its
 # answer, for the one-argument functions, and triples, a base, an exponent
 # and the power, for pow. Every answer is required to the last bit.
@@ -340,6 +340,8 @@ against(args[18], "acos", "CORE-MATH's", 150000) { |x| Math.acos(x) } if args.si
 against(args[19], "lgamma", "glibc's", 150000) { |x| Math.lgamma(x) } if args.size > 19
 against(args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if args.size > 20
 against(args[21], "tan", "CORE-MATH's", 200000) { |x| Math.tan(x) } if args.size > 21
+against(args[22], "sin", "CORE-MATH's", 200000) { |x| Math.sin(x) } if args.size > 22
+against(args[23], "cos", "CORE-MATH's", 200000) { |x| Math.cos(x) } if args.size > 23
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

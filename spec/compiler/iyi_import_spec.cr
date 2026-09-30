@@ -106,7 +106,7 @@ describe "Semantic: iyi import" do
 
       # Both importers still record the edge, because the second one adds no
       # initialiser and does constrain where the first one's may be moved to.
-      importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?("app/base.iyi")) }
+      importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?(File.join("app", "base.iyi"))) }
       importers.size.should eq 2
     end
   end
@@ -122,7 +122,7 @@ describe "Semantic: iyi import" do
       }) do
         program = semantic_iyi("main.iyi")
         program.iyi_module_paths.values.should eq ["app/dep"]
-        importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?("app/dep.iyi")) }
+        importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?(File.join("app", "dep.iyi"))) }
         importers.keys.map { |file| File.basename(file) }.should eq ["main.iyi"]
       end
     end

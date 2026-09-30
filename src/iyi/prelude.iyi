@@ -414,6 +414,7 @@ end
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun DeleteFileW(name : UInt16*) : Int32
+    fun RemoveDirectoryW(name : UInt16*) : Int32
     fun GetFileAttributesW(name : UInt16*) : Int32
     # Clearing FILE_ATTRIBUTE_READONLY, which is what stands between a
     # read-only file and `DeleteFileW`: POSIX asks the *directory* for
@@ -703,10 +704,49 @@ end
     def self.read(handle : Void*, buffer : Void*, count : UInt64) : Int64
       room = count // 3_u64
       room = 1_u64 if room == 0_u64
-      wide = Pointer(UInt16).malloc(room + 1_u64)
-      read = uninitialized Int32
-      return 0_i64 if LibC.ReadConsoleW(handle, wide.as(Void*), room.to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+      read_into(handle, buffer, count, Pointer(UInt16).malloc(room + 1_u64), room)
+    end
+
+    # A high surrogate a read ended on, and whether the next read starts a
+    # line: the console is one stream, read by whichever of `read` and
+    # the stdin reader's thread asks, never both at once.
+    @@carried : UInt16 = 0_u16
+    @@line_start = true
+
+    # The read itself, into *wide*, which has room for *capacity* units
+    # and the terminator. Two things a console says that bytes do not:
+    #
+    # Ctrl+Z at the start of a line, then Enter, is the end of the input -
+    # the convention the C runtime, Python, Go and Rust keep. It was read
+    # as a line holding byte 0x1A, and a program reading to the end of its
+    # input could be ended from the keyboard only by Ctrl+C.
+    #
+    # A line longer than a read is read in pieces, and a piece can end
+    # between the two halves of a surrogate pair. Each piece was converted
+    # alone, and the character past the 1,364th of a line came out as two
+    # U+FFFD. The high half is carried to the front of the next read.
+    def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
+      room = count // 3_u64
+      room = 1_u64 if room == 0_u64
+      room = capacity if room > capacity
+      start = 0
+      if @@carried != 0_u16 && room > 1_u64
+        wide[0] = @@carried
+        @@carried = 0_u16
+        start = 1
+      end
+      read = 0_i32
+      if LibC.ReadConsoleW(handle, (wide + start).as(Void*), (room - start.to_u64).to_i32, pointerof(read), Pointer(Void).new(0_u64)) == 0
+        return 0_i64
+      end
+      read = read + start
       return 0_i64 if read <= 0
+      return 0_i64 if @@line_start && wide[0] == 26_u16
+      if read > 1 && wide[read - 1] >= 0xD800_u16 && wide[read - 1] <= 0xDBFF_u16
+        read = read - 1
+        @@carried = wide[read]
+      end
+      @@line_start = wide[read - 1] == 10_u16
       wide[read] = 0_u16
       size = __iyi_utf8_size_from_wide(wide)
       return 0_i64 if size <= 1
@@ -898,11 +938,24 @@ end
     handle.address.to_i64
   end
 
+  # CREATE_ALWAYS refuses a file that is there with FILE_ATTRIBUTE_HIDDEN
+  # or _SYSTEM (0x2, 0x4) unless the create asks for the same attributes,
+  # so a file `attrib +h` had marked could be read and not rewritten -
+  # `File.write` panicked "cannot write" where POSIX writes a dotfile like
+  # any other. Such a file is opened as it is and emptied, which keeps
+  # its attributes.
   def __iyi_open_write(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
     handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 2, 128, Pointer(Void).new(0_u64))
+    if handle.address &+ 1_u64 == 0_u64 && LibC.GetLastError == 5
+      attributes = LibC.GetFileAttributesW(wide)
+      if attributes != -1 && (attributes & 0x10) == 0 && (attributes & 0x6) != 0
+        # TRUNCATE_EXISTING (5)
+        handle = LibC.CreateFileW(wide, 1073741824, 7, nil, 5, 128, Pointer(Void).new(0_u64))
+      end
+    end
     return -1_i64 if handle.address &+ 1_u64 == 0_u64
     handle.address.to_i64
   end
@@ -919,12 +972,23 @@ end
   # off and the delete tried again; if it still refuses, the attribute
   # goes back, because a file this could not remove is not a file this
   # may leave writable.
+  #
+  # A link to a directory - a junction, a directory symlink - is removed
+  # the way a directory is, which `DeleteFileW` refuses: `File.symlink?`
+  # said it was a link and `File.delete` could not remove it, where POSIX
+  # `unlink` removes a link whatever it points at. `RemoveDirectoryW` on
+  # the link takes the link and leaves the directory it named.
   def __iyi_unlink(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     return 0_i64 if LibC.DeleteFileW(wide) != 0
-    return -1_i64 if LibC.GetLastError != 5
+    error = LibC.GetLastError
     attributes = LibC.GetFileAttributesW(wide)
+    # FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT
+    if attributes != -1 && (attributes & 0x410) == 0x410
+      return LibC.RemoveDirectoryW(wide) != 0 ? 0_i64 : -1_i64
+    end
+    return -1_i64 if error != 5
     return -1_i64 if attributes == -1 || (attributes & 1) == 0
     # `attributes - 1` clears bit 0, which the line above proved is set:
     # the prelude has no `~`, and a program that imports nothing but the
@@ -935,11 +999,18 @@ end
     -1_i64
   end
 
+  # 0 at the end, -1 on a failure. Every failed `ReadFile` answered 0,
+  # and a read Windows refused - a byte range another process has
+  # locked, ERROR_LOCK_VIOLATION - came back from `File.read` as "", an
+  # empty file with no word. A pipe whose writer has gone
+  # (ERROR_BROKEN_PIPE, 109) and ERROR_HANDLE_EOF (38) are the end.
   def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     read = uninitialized Int32
     if LibC.ReadFile(Pointer(Void).new(fd.to_u64), buffer,
          count.to_i32, pointerof(read), nil) == 0
-      return 0_i64
+      error = LibC.GetLastError
+      return 0_i64 if error == 109 || error == 38
+      return -1_i64
     end
     read.to_i64
   end
@@ -8702,6 +8773,21 @@ private def __iyi_say(text : String) : Nil
   end
 end
 
+{% if flag?(:win32) %}
+  # A Windows build names the library's files `...\src\std/x.iyi`, the
+  # directory's separator the platform's and the module path's `/`, and
+  # `raise` looked for `/src/std/` alone: every panic `std` raised there
+  # named the library's own line - one a platform arm had moved, at
+  # that - where the rule is that it names none.
+  private def __iyi_backslashed_library_site?(file : String) : Bool
+    file.includes?("\\src\\iyi") || file.includes?("\\src\\std")
+  end
+{% else %}
+  private def __iyi_backslashed_library_site?(file : String) : Bool
+    false
+  end
+{% end %}
+
 def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
   {% if flag?(:darwin) %}
     callstack = uninitialized Void*[64]
@@ -8719,7 +8805,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   __iyi_say("\n")
   # The site, when it is the program's; a panic the library raises names
   # the library's own line, which is not where the bug is, and prints none.
-  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/")
+  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_backslashed_library_site?(file)
     __iyi_say("  at ")
     __iyi_say(file)
     __iyi_say(":")

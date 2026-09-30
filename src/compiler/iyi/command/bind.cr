@@ -124,7 +124,7 @@ class Iyi::Command
     # And one that is there and will not take a file: the first thing
     # written is the shard's bind log, and its "Permission denied" named
     # the log, not the flag.
-    if Dir.exists?(mods) && !File.writable?(mods)
+    if Dir.exists?(mods) && !Iyi.writable_directory?(mods)
       abort! "bind: --mods #{mods} will not take the .iyimod files: no permission to write there", :USAGE_ERROR
     end
     Dir.mkdir_p(mods)

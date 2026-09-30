@@ -86,6 +86,30 @@ printf 'module main\n\nputs "lonely"\n' > lonely_test.iyi
 "$IYI" test --affected calc/add.iyi . > sel.txt 2>&1
 grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel.txt ||
   { echo "the selection is not exact:"; cat sel.txt; exit 1; }
+# The same file under another spelling, where the file system says it is
+# one: in upper case, and on Windows with the drive letter an editor
+# writes lower case. The closure compared strings, and both selected
+# nothing - "0 to run, 1 skipped", a clean verdict about no tests.
+if [ CALC/ADD.IYI -ef calc/add.iyi ]; then
+  "$IYI" test --affected CALC/ADD.IYI . > sel_case.txt 2>&1
+  grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_case.txt ||
+    { echo "another case of the changed file selected otherwise:"; cat sel_case.txt; exit 1; }
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    lower="$(echo "$WORK" | cut -c1 | tr 'A-Z' 'a-z')$(echo "$WORK" | cut -c2-)/calc/add.iyi"
+    "$IYI" test --affected "$lower" . > sel_drive.txt 2>&1
+    grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_drive.txt ||
+      { echo "a lower-case drive letter selected otherwise:"; cat sel_drive.txt; exit 1; }
+    # And the 8.3 short name, which a CI runner's temporary directory is
+    # spelled in (`RUNNER~1`) while the working directory is the long one:
+    # the lower-case drive above selected nothing there for that reason.
+    short="$(cygpath -d "$WORK/calc/add.iyi")"
+    "$IYI" test --affected "$short" . > sel_short.txt 2>&1
+    grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_short.txt ||
+      { echo "the 8.3 short name selected otherwise ($short):"; cat sel_short.txt; exit 1; }
+    ;;
+esac
 "$IYI" test --affected nope.iyi . > off.txt 2>&1
 grep -q 'nope.iyi is not there, so every test ran' off.txt ||
   { echo "the discount turned off in silence:"; cat off.txt; exit 1; }
@@ -134,6 +158,18 @@ printf 'module wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wi
 [ $? -eq 1 ] || { echo "a test the kernel killed was not a failure:"; cat wild.txt; exit 1; }
 grep -q 'memory fault' wild.txt || { echo "the kernel's kill is not the evidence:"; cat wild.txt; exit 1; }
 rm wild_test.iyi
+
+step "a test leaves nothing in the temporary directory"
+# Each test is built to a temporary name and deleted after it runs. On
+# Windows the name had no extension, the build appended `.exe`, and the
+# delete asked for the name without it: every test left its program and
+# its `.pdb` behind, and a developer's %TEMP% held hundreds of them.
+mkdir -p scratch_tmp
+scratch="$WORK/scratch_tmp"
+TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" "$IYI" test math_test.iyi > tmp.txt 2>&1 ||
+  { echo "the test did not pass:"; cat tmp.txt; exit 1; }
+left="$(ls -A "$scratch")"
+[ -z "$left" ] || { echo "a test left behind:"; echo "$left"; exit 1; }
 
 echo "workdir $WORK"
 echo "test verb gate: every step held"

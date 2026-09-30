@@ -188,6 +188,17 @@ assert_true(Path.posix("/a") != Path.windows("/a"), "kinds differ")
 h = Hash(Path, Int32).new
 h[Path.windows("C:\\A")] = 1
 assert_true(h[Path.windows("c:\\a")]? == 1, "hash folds case on windows")
+# An anchored path that is not absolute: expand answered it as it was,
+# `\a` and `C:a`, where the answer promised is absolute. And a bare drive
+# joined with a name is drive-relative still, not the drive's root.
+base = Path.windows("C:\\base")
+assert_str("C:\\a", Path.windows("\\a").expand(base).to_s, "\\a expands onto the base's drive")
+assert_str("C:\\base\\a", Path.windows("C:a").expand(base).to_s, "C:a expands under a base on C:")
+assert_str("C:\\base\\a", Path.windows("c:a").expand(base).to_s, "a drive letter matches in either case")
+assert_str("D:\\a", Path.windows("D:a").expand(base).to_s, "D:a expands under D:'s root from a base on C:")
+assert_true(Path.windows("\\a").expand(base).absolute?, "an expanded rooted path is absolute")
+assert_str("C:a", Path.windows("C:").join("a").to_s, "a bare drive joined is drive-relative")
+assert_str("C:b", Path.windows("C:a").sibling("b").to_s, "a drive-relative sibling stays on the drive")
 puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
 
 puts "\n== path comparison via Comparable"

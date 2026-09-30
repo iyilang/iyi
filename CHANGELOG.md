@@ -602,6 +602,322 @@
 
 ### Fixed
 
+- **`fmt` keeps the line breaks a literal holds in a CRLF file.** A CRLF
+  file is written back with CRLF, and every `\n` was turned - the ones
+  inside a string literal too, which are the program's data: `"one` /
+  `two"` holding a bare line break printed 7 before `fmt` and 8 after. A
+  line break a literal holds now keeps the ending the source had there;
+  the code's lines end CRLF as before. The formatter moves no literal, so
+  the two parses agree on those breaks, and where they do not every line
+  is turned as it was. `bench/verbs_exercise.sh` formats a string with a
+  bare line break, a heredoc and an interpolated string, all in CRLF
+  files, and requires each unchanged; the old compiler changed the first.
+
+- **`iyi init`'s next step pastes into any shell.** It printed
+  `cd my app ğüş && iyi run hello.iyi`: one line joined with `&&`, which
+  Windows PowerShell 5.1 refuses as "not a valid statement separator", and
+  a directory with a space left unquoted, which no shell reads as one.
+  It is two lines now, the directory quoted when it has a space, and no
+  `cd` at all into the directory `init` was run in - `init x .` printed
+  `cd . &&`. `bench/init_project.sh` checks both; the old compiler fails
+  both.
+
+- **A `raise` inside `{% if %}` names its own line.** A macro written in
+  place - a `{% if %}` or `{% for %}` in a file - is expanded where it
+  stands, and `__LINE__` inside it, which is what `raise` reads, named the
+  line the expansion was put at, the `{% if`: a panic in a platform arm
+  cited a line that was not the `raise`'s. The expansion now keeps the
+  line each stretch of its text was written on, and `__LINE__` reads it;
+  a macro's own body still names the call, as before. `bench/panics.sh`
+  raises inside an `{% else %}` and requires line 8; the old compiler said
+  4. The compiler specs hold, 14,048 examples.
+
+- **On Windows, a UDP client that has sent nothing answers like one.**
+  Such a socket has no address yet, and Winsock refuses a receive and
+  `getsockname` on it with WSAEINVAL, where POSIX answers nothing queued
+  and port 0: `receive_from?` and `local_port` panicked on Windows alone.
+  They answer nil and 0 now, and a receive that would wait says the
+  socket has no address yet. `bench/std_udp_exercise.iyi` asks both of a
+  fresh client; the old module panicked at the first.
+
+- **On Windows, `File.readable?`, `writable?` and `executable?` answer
+  what Windows would allow.** They read a mode made up from the
+  attributes - 0o644 or 0o755 and the read-only bit - and an ACL is not
+  in it: a file this user was denied reading was `readable? true` and the
+  read then panicked, one denied writing was `writable? true`, and
+  `cmd.exe` was `executable? false`. The first two open the path for that
+  access now, the way POSIX `access` asks, and the way `File.read` and
+  `File.write` open it - a directory with backup semantics, a file
+  without, since on a file they let an elevated process past the ACL
+  and answered yes about a read that was then refused (the first CI run
+  of this, on a runner holding those privileges). A file another process
+  holds without sharing is answered from its attributes as before. A file is
+  executable by one of PATHEXT's extensions, and a directory when it can
+  be read. `bench/std_file_exercise.sh` denies a read and a write with
+  `icacls` and asks `cmd.exe`; the old module answered true, true, false.
+
+- **On Windows, closing a socket another task is reading ends it
+  gracefully.** A server that answered a request and closed the
+  connection while its next read was parked reset the connection instead
+  of ending it: the read posted beneath the parked task was still the
+  kernel's when `closesocket` ran, and the peer's first read answered
+  "reset by the peer" - the answer written before the close was lost. The
+  send side is shut down first now, a FIN behind what was written.
+  `bench/socket_exercise.iyi` answers and closes under a parked read and
+  requires the peer to read the answer and then the end; the old module
+  handed it the reset.
+
+- **On Windows, a directory that will not take a file is refused
+  before the work.** `-o`, `bind --mods` and `migrate --out` ask whether
+  the directory can be written before they spend a compilation on it,
+  and asked `File.writable?`, which on Windows answers a directory from
+  its attributes: the permission is an ACL they do not carry, so a
+  directory that refused this user every new file answered yes, and `-o`
+  there came back as the linker's LNK1104 after the whole build. Windows
+  is asked by making a file there now. `bench/verbs_exercise.sh` denies
+  the directory new files with `icacls` - where the mode bits it used
+  bind nothing - and drives all three; the old compiler answered with
+  the linker and with the first write's failure.
+
+- **A withdrawn read leaves standard input open.** A task whose group
+  failed while it waited on `stdin.gets` answered nil, as it should, but
+  the stream took the withdrawn read for the end of its input and kept
+  that for good: every read after it answered nil, and lines sent later
+  were never read. A withdrawn read is not the end now. Part 3 of
+  `bench/stdin_park.iyi`, which `bench/concurrency_exercise.sh` feeds a
+  third line, withdraws a line read and reads the next line; the old
+  prelude read nil.
+
+- **On Windows, a panic the library raises names no library line.** The
+  rule is that a panic in the program names its line and one the library
+  raises names none, since the library's line is not where the bug is.
+  `raise` recognised the library by `/src/std/` and `/src/iyi/`, and a
+  Windows build names those files `...\src\std/x.iyi`, so every such
+  panic there printed the library's line - often the line of a platform
+  arm rather than of the `raise`. And `bench/panics.sh`, which checks the
+  rule, looked for the same `/` and could not see it fail on Windows; it
+  takes either separator now, and fails the old prelude there.
+
+- **On Windows, the language server compiles an importer against a
+  nested module's unsaved buffer.** The resolver spells a module below
+  the root with the module path's own `/` inside a native root,
+  `C:\root\nest/lib.iyi`, and the server keys a buffer by the path its
+  URI names, `C:\root\nest\lib.iyi`; the two never met, so an importer
+  was compiled against the disk - a def renamed in `nest/lib`'s buffer
+  left `nest/use`'s verdict clean. A module at the root has no `/` in its
+  path, which is why step 9 never saw it. The lookup folds the spelling
+  now. Step 18i of `bench/lsp_session.py` renames in a nested module's
+  buffer and requires the importer's error; the old server reported none.
+
+- **On Windows, `iyi daemon start` says there is no daemon there.** It
+  told a Windows user to `make iyi-daemon`, a target `Makefile.win` does
+  not have: the server forks a child per build and Windows has no fork.
+  It says so now; an `IYI_DAEMON` the user set is still run.
+  `bench/verbs_exercise.sh` requires the sentence on Windows.
+
+- **On Windows, `File.write` rewrites a hidden or system file.** A create
+  that replaces refuses a file marked hidden or system unless it asks for
+  the same attributes, so `File.write` panicked "cannot write" about a file
+  `File.read` had just read, where POSIX writes a dotfile like any other.
+  Such a file is opened as it is and emptied now, and keeps its mark.
+  `bench/std_file_exercise.sh` writes a `+h` and a `+s` file; the old
+  prelude panicked on both.
+
+- **A refused bind says why, and so do two refusals that were numbers.**
+  `IyiSocket.listen` refused with "cannot bind socket to host:port" and
+  nothing after it, so a port in use and one the system reserves - on
+  Windows, a range Hyper-V or WSL keeps - read alike; the reason follows
+  now. And `SocketError#reason` names EACCES and EADDRNOTAVAIL, which were
+  "error 10013" and "error 10049" on Windows: the second is what a connect
+  to 0.0.0.0, the address a server prints, answers there.
+  `bench/socket_exercise.sh` requires a reason after each held-port
+  refusal and, on Windows, the sentence for a wildcard connect; the old
+  module gave none and "error 10049".
+
+- **On Windows, Ctrl+Z then Enter ends a console's input, and a long line
+  keeps its characters.** A program reading to the end of its input from
+  a console could be ended from the keyboard only by Ctrl+C: Ctrl+Z at the
+  start of a line, the end of input to the C runtime, Python, Go and
+  Rust, was read as a line holding 0x1A. And a line longer than one read
+  is read in pieces, each converted alone, so a character whose surrogate
+  pair a piece split - past the 1,364th of a line - came out as two
+  U+FFFD. The high half is carried to the next piece now. The two console
+  reads, the prelude's and the stdin reader thread's, are one.
+  `bench/io_exercise.sh` gives a program a console of its own from Python
+  and types into it; the old prelude read 1,370 bytes for 1,368 and never
+  saw the end.
+
+- **On Windows, a listener's backlog is the one it asked for.** Winsock
+  caps a backlog at 200 unless it is asked as SOMAXCONN_HINT, and turns
+  the next connect away as refused where Linux holds it until an accept:
+  220 connects to a listener asked for 256 lost 20, each after the two
+  seconds a refused connect takes there. A backlog past 200 is passed as
+  the hint now. `bench/socket_exercise.iyi` makes the 220 connects without
+  accepting, on Windows - darwin's kernel caps a backlog at 128 and leaves
+  the connects past it retrying, which hung the first CI run of it there;
+  the old module refused 20.
+
+- **On Windows, `File.rename` replaces a destination somebody has open.**
+  `MoveFileExW` refuses a destination with any open handle - this
+  program's own included - with "Access is denied", where POSIX `rename`
+  replaces the name and the reader keeps the file it opened. So writing a
+  temporary file and renaming it over one a reader held, the way a
+  program updates a file safely, panicked on Windows alone. Such a
+  refusal is retried as POSIX's rename, `FileRenameInfoEx` with its
+  replace and POSIX flags, which NTFS has had since Windows 10 1709; a
+  volume without it refuses as before. `bench/std_file_exercise.iyi`
+  renames over a file it holds open and reads both; the old module
+  panicked.
+
+- **On Windows, a reparse point is a link only when its tag says so.**
+  `File.info` called every reparse point a symlink, so an app execution
+  alias - what `%LOCALAPPDATA%\Microsoft\WindowsApps` holds - answered
+  `file? false` and `symlink? true`, and then `readlink` refused it as not a
+  link; a cloud placeholder, which OneDrive makes of every file it has not
+  downloaded, carries the same bit [INFERENCE: not measured here, no
+  placeholder on this machine]. The kind is read from the tag now:
+  symlinks, junctions and WSL's links are links, and everything else is
+  the file or directory it is. And a followed `info?` of a link whose
+  target will not open - a junction whose directory is gone - is nil, as
+  POSIX `stat` of a dangling link is an error; it answered the link
+  itself. `bench/std_file_exercise.sh` asks an app alias and a dangling
+  junction; the old module fails both.
+
+- **On Windows, `File.delete` removes a link to a directory.** A junction
+  - which any user may make - is a link `File.symlink?` answers true for,
+  and POSIX `unlink` removes a link whatever it names; `File.delete` asked
+  `DeleteFileW`, which refuses a directory, and panicked "cannot delete".
+  A directory link is removed the way a directory is now, and the
+  directory it named stays. `bench/std_file_exercise.sh` makes a junction
+  with `mklink /J` and deletes it; the old prelude panicked.
+
+- **A byte order mark does not hide a module's header.** The lexer skips
+  the mark a Windows editor may put at the front of a file; the three
+  readings of a header - a build's root, `iyi doc` and the language
+  server, each its own copy - read it as part of the first line. So a
+  module saved with one ran as a script and its imports were "can't find
+  module", `iyi doc` said it "declares no module", and `iyi fmt` wrote it
+  back without the mark, which `--check` then called unformatted. There
+  is one reading now, `Compiler.module_header_of`, past the mark, and
+  `fmt` keeps a mark the file had. `bench/verbs_exercise.sh` runs, docs,
+  checks and formats a module with one; the old compiler fails all four.
+
+- **`File.same?` is false for two files nothing could identify.** On
+  Windows `File.info` answers a file it cannot open with its attributes
+  alone and an identity of 0, and `same?` read 0 and 0 as one file: two
+  files of different sizes and contents, both denied to this user, were
+  `same? true`. No identity is no answer of sameness now.
+  `bench/std_file_exercise.sh` denies two files and asks; the old module
+  answered true.
+
+- **On Windows, `File.match?` takes either separator for either.**
+  It compared bytes, so `File.match?("a\\b.txt", "a/*.txt")` was false,
+  and `Dir.glob`, which answers with `\` after a `/` pattern, returned
+  paths that did not match the pattern that found them.
+  `bench/std_file_exercise.iyi` matches each way on Windows; the old module
+  fails the first.
+
+- **On Windows, a path in another case is the same path to the CLI.**
+  Three places compared paths as strings where NTFS does not: `iyi test
+  --affected` and `iyi check --affected` given the changed file with a
+  lower-case drive letter - what editors pass - or in another case
+  selected nothing and reported "0 to run" and "0 consumer(s) checked, all
+  compile", clean verdicts about nothing; the root a module's header names
+  was not found for `iyi run APP\MAIN.iyi`, so its imports were "can't find
+  module"; and an entry spelled `.IYI` was built against Crystal's library
+  and told of a `--crystal` it was never given. The language server reads
+  a header's root through the compiler's one reading now, not a copy of
+  it. The `--affected` comparison also spells out 8.3 short names, which
+  a string cannot fold: a CI runner's temporary directory is
+  `C:\Users\RUNNER~1\...` to `mktemp` and the long name to the working
+  directory, and there even the lower-case drive selected nothing.
+  `bench/test_verb.sh` selects by the changed file in upper case, with a
+  lower-case drive and by its short name, and `bench/verbs_exercise.sh`
+  runs `HDR/APP/MAIN.IYI`; the old compiler fails both.
+
+- **`Path#expand` answers an absolute path for Windows' rooted and
+  drive-relative names.** An anchor that was not absolute went through
+  as it was: `\a` expanded to `\a` and `C:a` to `C:a`, where the answer
+  promised is absolute. `\a` is rooted on the base's drive now, and `C:a`
+  is under the base when the base is on C: and under C:'s root when it is
+  not. And `Path.windows("C:").join("a")` is `C:a`, drive-relative as
+  `normalize` spells it, where it was `C:\a`, the drive's root - so the
+  sibling of `C:a` was `C:\b`. `bench/std_path_exercise.iyi` checks each
+  on every platform; the old module fails at the first expand and, with
+  expand fixed, at the join.
+
+- **On Windows, `iyi test` leaves nothing in the temporary directory.**
+  Each test is built to a temporary name and deleted after it runs; the
+  name had no extension, `build -o` appended `.exe`, and the delete asked
+  for the name without it, so every test left its program and its `.pdb`
+  in %TEMP% - this machine's held 275 of them. The name carries the
+  extension now and the `.pdb` goes with it; on darwin the `.dwarf`
+  dsymutil writes beside the program, which the check below found in
+  its first run there, goes too. `bench/test_verb.sh` runs a
+  test with the temporary directory pointed at an empty one and requires
+  it empty after; the old verb left the two files.
+
+- **On Windows, two `iyi run`s of programs with one name run side by
+  side.** The runner linked into one executable per basename in the
+  cache, and Windows will not write over an executable that is running:
+  while one `iyi run main.iyi` ran, any other `main.iyi` - another
+  program in another directory, or the same one - failed with "LNK1104:
+  cannot open file ...\iyi-run-main.exe.tmp.exe". Each runner links its
+  own now, named by its process id. A runner ended from outside -
+  `taskkill /F`, an editor's stop, which runs nothing in it - leaves its
+  program in the cache, and one per runner would pile up, so each run
+  takes away what a runner left over an hour ago. `bench/verbs_exercise.sh`
+  runs a second `main.iyi` while the first holds its executable, which the
+  old runner failed with LNK1104, and plants an old and a fresh leftover:
+  the old one goes, the fresh one stays.
+
+- **On Windows, a listening port is the listener's.** A bind to
+  127.0.0.1:P went through while `IyiSocket.listen` held 0.0.0.0:P, and
+  the other way round, from this process or any other, and the more
+  specific listener took the connections: measured, a second process
+  listening on 127.0.0.1 read what a client sent to the iyi server.
+  Windows leaves a port open to such binds unless the listener sets
+  SO_EXCLUSIVEADDRUSE, which it does now; a port closed after a
+  connection is still listened on again at once. `bench/socket_exercise.sh`
+  binds each way onto a held port and requires the refusal on Linux and
+  Windows - darwin lets the more specific bind through by BSD's design;
+  the old module bound both on Windows.
+
+- **On Windows, a read Windows refuses is a failure, not an empty file.**
+  Every failed `ReadFile` answered 0, the end of the file, so `File.read`
+  of a file whose byte range another process had locked answered "" with
+  no word. It refuses now with "it is a directory, or the read failed",
+  as a failed read does on the other platforms; a pipe whose writer has
+  gone is still the end. And a write that fails is refused once: its
+  bytes stayed buffered, and the `close` a `defer` ran flushed them again
+  and panicked a second time. `bench/std_file_exercise.sh` locks a range
+  from Python and reads and writes it; the old prelude answered 0 bytes
+  and panicked twice.
+
+- **`-o` refuses the source under any spelling of it.** The refusal of an
+  output that is the build's own source, or a module it read, compared
+  expanded paths as strings, and on Windows one file has many: `iyi build
+  -o PROG.iyi prog.iyi` linked the program over `prog.iyi`, exit 0, and so
+  did `-o "prog.iyi "`, `-o c:\...\prog.iyi` and `-o app/LIB.iyi` for an
+  imported `app/lib.iyi` - the source's only copy became an executable.
+  The file system is asked now whether the two are one file.
+  `bench/verbs_exercise.sh` builds onto the source in another case and,
+  on Windows, with a trailing space; the old compiler replaced the source
+  in all three.
+
+- **On Windows, `std/dir` answers for roots, bare drives and `\\?\`
+  paths.** `Dir.children("/")` and `Dir.children("\\")` panicked with
+  "Cannot open directory" on a directory `Dir.exists?` accepted: the
+  listing pattern put a second separator after the root, and `\\*` is the
+  start of a network path to Windows. `Dir.children("C:")` listed the
+  drive's root where `C:` is the current directory on C:.
+  `Dir.mkdir_p` joined every segment with `/`, so `C:rel\x` made `C:\rel`
+  at the drive's root and then panicked, and under a `\\?\` prefix, where
+  `/` is not a separator, it made the first segment and refused the rest.
+  And `Dir.tempdir` turned a TMP of `C:\` into `C:`, the current directory.
+  `bench/std_dir_exercise.iyi` checks each on Windows; putting any one of
+  the four fixes back fails it.
+
 - **`std/int` has the unchecked conversions between integers.** It wrote
   the checked and the `?` form for every pair of integer types and the
   unchecked form only from a double, while the compiler's hint for
@@ -940,6 +1256,19 @@
   refused now, with the reason. Step 18f of `bench/lsp_session.py`
   renames onto a sibling def and onto `puts`, both refused, and onto a
   free name, carried out; the old server carries out all three.
+
+- **A rename onto a name a module importing the def has is refused too.**
+  The check above asked only the def's own module. A module's own def
+  beats an imported one (SPEC.md II.3 rule 2), so renaming `loud/lib`'s
+  `shout` to `yell` moved `loud/app`'s `import loud/lib::{shout}` to
+  `{yell}`, and app's `puts shout("a")`, now `puts yell("a")`, called
+  app's own `yell` and printed "a!" where it had printed "A". Every
+  importer the rename compiles is asked now whether it brings the def in
+  unqualified and already has the new name, of its own or from another
+  import, and the rename is refused naming that module. Step 18h of
+  `bench/lsp_session.py` renames onto an importer's name, refused, and
+  onto a free name, which edits both files; the old server carries out
+  both.
 
 - **On Windows, `Process.run(chdir:)` into a long directory says why it
   cannot.** Windows refuses a working directory past 254 characters while
@@ -11932,7 +12261,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,830-line library and nothing else. Every other
+  written against iyi's own 18,904-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

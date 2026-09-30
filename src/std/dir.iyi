@@ -416,13 +416,17 @@ pub class Dir
   # One trailing separator off, as Crystal's `Dir.tempdir` answers: darwin
   # sets TMPDIR to `/var/folders/.../T/`, and every path joined onto it had
   # two separators and a `dirname` that was not the directory it came from.
-  # The root alone is left as it is.
+  # The root alone is left as it is - and on Windows a drive's root is
+  # `C:\`, whose separator is the root: without it `C:` is the current
+  # directory on that drive, and a TMP of `C:\` answered the directory
+  # the program happened to be in.
   def self.without_trailing_separator(dir : String) : String
     return dir if dir.bytesize <= 1
     last = dir[dir.bytesize - 1]
     trailing = last == '/'
     {% if flag?(:win32) %}
       trailing = trailing || last == '\\'
+      return dir if trailing && dir[dir.bytesize - 2] == ':'
     {% end %}
     trailing ? dir[0, dir.bytesize - 1] : dir
   end
@@ -511,14 +515,21 @@ pub class Dir
     segments = p.parts
     raise "Cannot create directory: #{p_str}" if segments.empty?
 
+    # Each prefix is joined with the platform's separator, and not after
+    # an anchor that ends in one or in a drive's colon. It was `/`
+    # always, and on Windows that is two different mistakes: `C:rel\x`,
+    # which is `rel\x` under the current directory on C:, became
+    # `C:/rel` - a directory created at the drive's root - and in a
+    # `\\?\` path, which Windows does not parse again, `/` is not a
+    # separator at all, so every segment after the first was refused.
     acc = ""
     segments.each do |seg|
       if acc.empty?
         acc = seg
-      elsif acc == "/" || acc == "\\"
+      elsif acc.ends_with?("/") || ({{ flag?(:win32) }} && (acc.ends_with?("\\") || acc.ends_with?(":")))
         acc = acc + seg
       else
-        acc = acc + "/" + seg
+        acc = acc + {{ flag?(:win32) ? "\\" : "/" }} + seg
       end
 
       if !exists?(acc)
@@ -795,18 +806,29 @@ pub class Dir
       # prefix means "do not parse this again" — the doubled separator then
       # reaches the file system as it is and `FindFirstFileW` refuses a
       # directory `Dir.exists?` accepts on the same string.
-      while length > 1 && (wide[length - 1] == 92_u16 || wide[length - 1] == 47_u16)
+      #
+      # A root keeps its separator, and gets no second one: `\` or `/`
+      # alone became `\\*` or `/\*`, which Windows reads as the start of
+      # a network path, so `Dir.children("/")` panicked on a directory
+      # `Dir.exists?` accepted. And a bare drive gets none: `C:` is the
+      # current directory on C:, and `C:\*` listed the drive's root.
+      while length > 1 && (wide[length - 1] == 92_u16 || wide[length - 1] == 47_u16) && wide[length - 2] != 58_u16
         length = length - 1
       end
+      last = length > 0 ? wide[length - 1] : 0_u16
+      separated = last == 92_u16 || last == 47_u16 || last == 58_u16
       pattern = Pointer(UInt16).malloc((length + 3).to_u64)
       index = 0
       while index < length
         pattern[index] = wide[index]
         index = index + 1
       end
-      pattern[length] = 92_u16     # '\'
-      pattern[length + 1] = 42_u16 # '*'
-      pattern[length + 2] = 0_u16
+      unless separated
+        pattern[index] = 92_u16 # '\'
+        index = index + 1
+      end
+      pattern[index] = 42_u16 # '*'
+      pattern[index + 1] = 0_u16
       pattern
     end
   {% end %}

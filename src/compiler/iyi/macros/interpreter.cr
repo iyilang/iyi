@@ -153,6 +153,13 @@ module Iyi
     end
 
     def visit(node : MacroLiteral)
+      # iyi: where this text was written, when the macro is written in place
+      # - a `{% if %}` or `{% for %}` in a file - so `__LINE__` inside it can
+      # name the line (`VirtualFile#line_origins`).
+      if !@in_macro && (location = node.location) && location.filename.is_a?(String)
+        pragmas = @macro_expansion_pragmas ||= {} of Int32 => Array(Lexer::LocPragma)
+        (pragmas[@str.pos.to_i32] ||= [] of Lexer::LocPragma) << Lexer::LocOriginPragma.new(location.line_number)
+      end
       @str << node.value
       false
     end

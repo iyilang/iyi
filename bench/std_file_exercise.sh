@@ -384,6 +384,186 @@ refuses "info on a path that does not exist" info_nonexistent "File not found: "
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
   'File.real_path("")'
 
+# A byte range another process has locked. Windows fails the read with
+# ERROR_LOCK_VIOLATION, and `File.read` answered "" with no word - the
+# failure spelled as an empty file. And a write that fails raised from
+# `flush` and again from the `close` its `defer` ran, which flushed the
+# same bytes again: two panics for one failure. POSIX has no mandatory
+# lock to hold a range with, so this is Windows' alone.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the locked-range reads are unmeasured"
+    else
+      locked="$WORK/locked.txt"
+      printf 'module main\n\nputs File.read(Program.args[0]).bytesize\n' > "$WORK/locked_read.iyi"
+      printf 'module main\n\nFile.write(Program.args[0], "replaced")\n' > "$WORK/locked_write.iyi"
+      if ! "$IYI" build -o "$WORK/locked_read" "$WORK/locked_read.iyi" > "$WORK/locked_read.build" 2>&1 ||
+         ! "$IYI" build -o "$WORK/locked_write" "$WORK/locked_write.iyi" > "$WORK/locked_write.build" 2>&1; then
+        echo "  the locked-range programs did not build"
+        sed -n '1,10p' "$WORK/locked_read.build" "$WORK/locked_write.build"
+        status=1
+      elif ! "$PY" - "$locked" "$WORK/locked_read.exe" "$WORK/locked_write.exe" > "$WORK/locked.out" 2>&1 <<'PY'
+import msvcrt, subprocess, sys
+path, reader, writer = sys.argv[1:4]
+with open(path, "wb") as f:
+    f.write(b"a locked range\n" * 3)
+held = open(path, "r+b")
+msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 10)
+bad = 0
+read = subprocess.run([reader, path], capture_output=True, text=True)
+if read.returncode == 0 or "the read failed" not in read.stderr + read.stdout:
+    print(f"  a read of a locked range answered {read.returncode}: {(read.stdout + read.stderr).strip()!r}")
+    bad += 1
+else:
+    print("  a read of a locked range refuses: the read failed")
+write = subprocess.run([writer, path], capture_output=True, text=True)
+panics = (write.stdout + write.stderr).count("iyi: panic:")
+if write.returncode == 0 or panics != 1:
+    print(f"  a write into a locked range exited {write.returncode} with {panics} panic(s)")
+    bad += 1
+else:
+    print("  a write into a locked range refuses once")
+held.seek(0)
+msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 10)
+held.close()
+sys.exit(1 if bad else 0)
+PY
+      then
+        cat "$WORK/locked.out"
+        status=1
+      else
+        cat "$WORK/locked.out"
+      fi
+    fi
+    # Two files Windows will not open for their identity - here, a denied
+    # SYNCHRONIZE right - are two files still. `info` falls back to the
+    # attributes, whose identity is 0, and `same?` read 0 and 0 as one
+    # file: two sizes, two contents, `same? true`.
+    printf 'one' > "$WORK/deny_a.txt"
+    printf 'second' > "$WORK/deny_b.txt"
+    printf 'module main\n\nimport std/file::{File}\n\nputs File.same?(Program.args[0], Program.args[1])\n' > "$WORK/deny_same.iyi"
+    if ! "$IYI" build -o "$WORK/deny_same" "$WORK/deny_same.iyi" > "$WORK/deny_same.build" 2>&1; then
+      echo "  the unopenable-files program did not build"; sed -n '1,10p' "$WORK/deny_same.build"; status=1
+    else
+      for f in deny_a deny_b; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /deny "$USERNAME:(S)" > /dev/null; done
+      answer="$("$WORK/deny_same" "$WORK/deny_a.txt" "$WORK/deny_b.txt" 2>&1)"
+      for f in deny_a deny_b; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /remove:d "$USERNAME" > /dev/null; done
+      if [ "$answer" = "false" ]; then
+        echo "  two files Windows will not open are not one file"
+      else
+        echo "  two files Windows will not open answered same? $answer"
+        status=1
+      fi
+    fi
+    # A junction, which any user may make: a link to a directory. POSIX
+    # `unlink` removes a link whatever it names, and `File.symlink?` said
+    # this was one - but `File.delete` asked `DeleteFileW`, which refuses a
+    # directory, and panicked "cannot delete".
+    mkdir -p "$WORK/junction_target"
+    printf 'kept' > "$WORK/junction_target/inside.txt"
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/junction")" "$(cygpath -w "$WORK/junction_target")" > /dev/null
+    printf 'module main\n\nimport std/file::{File}\n\nputs File.symlink?(Program.args[0])\nFile.delete(Program.args[0])\nputs File.exists?(Program.args[0])\n' > "$WORK/junction_delete.iyi"
+    if [ ! -d "$WORK/junction" ]; then
+      echo "  mklink /J made no junction, so its delete is unmeasured"
+    elif ! "$IYI" build -o "$WORK/junction_delete" "$WORK/junction_delete.iyi" > "$WORK/junction_delete.build" 2>&1; then
+      echo "  the junction program did not build"; sed -n '1,10p' "$WORK/junction_delete.build"; status=1
+    else
+      answer="$("$WORK/junction_delete" "$WORK/junction" 2>&1 | tr '\n' ' ')"
+      if [ "$answer" = "true false " ] && [ -f "$WORK/junction_target/inside.txt" ]; then
+        echo "  File.delete of a junction removes the link and leaves the directory"
+      else
+        echo "  File.delete of a junction: $answer"
+        status=1
+      fi
+    fi
+    # A hidden file, and a system one, is rewritten like any other: a
+    # create that replaces refuses them on Windows unless it asks for the
+    # same attributes, and `File.write` panicked "cannot write" about a
+    # file it could read. The attribute stays.
+    printf 'module main\n\nFile.write(Program.args[0], "rewritten")\nputs File.read(Program.args[0])\n' > "$WORK/hidden_write.iyi"
+    if ! "$IYI" build -o "$WORK/hidden_write" "$WORK/hidden_write.iyi" > "$WORK/hidden_write.build" 2>&1; then
+      echo "  the hidden-file program did not build"; sed -n '1,10p' "$WORK/hidden_write.build"; status=1
+    else
+      for mark in h s; do
+        printf 'before' > "$WORK/marked_$mark.txt"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +$mark "$(cygpath -w "$WORK/marked_$mark.txt")" > /dev/null
+        answer="$("$WORK/hidden_write" "$WORK/marked_$mark.txt" 2>&1)"
+        kept="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib "$(cygpath -w "$WORK/marked_$mark.txt")" | cut -c1-12 | tr -d ' ' | tr 'A-Z' 'a-z')"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -$mark "$(cygpath -w "$WORK/marked_$mark.txt")" > /dev/null
+        if [ "$answer" = "rewritten" ] && echo "$kept" | grep -q "$mark"; then
+          echo "  a file marked +$mark is rewritten and stays marked"
+        else
+          echo "  a file marked +$mark: wrote '$answer', attributes '$kept'"
+          status=1
+        fi
+      done
+    fi
+    # What `access` answers on POSIX, asked of Windows: a file this user is
+    # denied reading is not readable, one denied writing is not writable,
+    # and `cmd.exe` is executable. The made-up mode answered true, true
+    # and false.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.readable?(Program.args[0])} #{File.writable?(Program.args[0])} #{File.executable?(Program.args[0])}"\n' > "$WORK/access.iyi"
+    if ! "$IYI" build -o "$WORK/access" "$WORK/access.iyi" > "$WORK/access.build" 2>&1; then
+      echo "  the access program did not build"; sed -n '1,10p' "$WORK/access.build"; status=1
+    else
+      printf 'x' > "$WORK/no_read.txt"; printf 'x' > "$WORK/no_write.txt"
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/no_read.txt")" /deny "$USERNAME:(RD)" > /dev/null
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/no_write.txt")" /deny "$USERNAME:(WD)" > /dev/null
+      no_read="$("$WORK/access" "$WORK/no_read.txt" 2>&1)"
+      no_write="$("$WORK/access" "$WORK/no_write.txt" 2>&1)"
+      shell="$("$WORK/access" "$(cygpath -m "$SYSTEMROOT")/System32/cmd.exe" 2>&1)"
+      for f in no_read no_write; do
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/$f.txt")" /remove:d "$USERNAME" > /dev/null
+      done
+      if [ "$no_read" = "false true false" ] && [ "$no_write" = "true false false" ] && [ "$shell" = "true false true" ]; then
+        echo "  readable?, writable? and executable? answer as Windows would let them"
+      else
+        echo "  readable?/writable?/executable?: denied read '$no_read', denied write '$no_write', cmd.exe '$shell'"
+        status=1
+      fi
+    fi
+    # A reparse point is a link only by its tag. Every one was `Symlink`,
+    # so an app execution alias - what `WindowsApps` holds - and a cloud
+    # placeholder answered `file? false`; and a junction whose directory is
+    # gone answered a followed `info?` with the link itself, where POSIX
+    # `stat` of a dangling link is an error.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])}"\n' > "$WORK/reparse_kind.iyi"
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?}"\n' > "$WORK/dangling.iyi"
+    if ! "$IYI" build -o "$WORK/reparse_kind" "$WORK/reparse_kind.iyi" > "$WORK/reparse_kind.build" 2>&1 ||
+       ! "$IYI" build -o "$WORK/dangling" "$WORK/dangling.iyi" > "$WORK/dangling.build" 2>&1; then
+      echo "  the reparse programs did not build"; sed -n '1,10p' "$WORK/reparse_kind.build" "$WORK/dangling.build"; status=1
+    else
+      alias_exe=""
+      apps="$(cygpath -u "$LOCALAPPDATA")/Microsoft/WindowsApps"
+      for candidate in "$apps"/*.exe; do
+        [ -e "$candidate" ] && { alias_exe="$(cygpath -m "$candidate")"; break; }
+      done
+      if [ -z "$alias_exe" ]; then
+        echo "  no app execution alias on this machine, so their kind is unmeasured"
+      else
+        answer="$("$WORK/reparse_kind" "$alias_exe" 2>&1)"
+        if [ "$answer" = "true false" ]; then
+          echo "  an app execution alias is a file, not a link"
+        else
+          echo "  an app execution alias ($alias_exe) answered file?/symlink? $answer"
+          status=1
+        fi
+      fi
+      mkdir -p "$WORK/gone_target"
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/dangling_junction")" "$(cygpath -w "$WORK/gone_target")" > /dev/null
+      rmdir "$WORK/gone_target"
+      answer="$("$WORK/dangling" "$WORK/dangling_junction" 2>&1)"
+      if [ "$answer" = "true true" ]; then
+        echo "  a junction to nothing is a link, and following it answers nothing"
+      else
+        echo "  a junction to nothing answered symlink?/info?.nil? $answer"
+        status=1
+      fi
+    fi
+    ;;
+esac
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/file exercise holds"

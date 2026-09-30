@@ -92,6 +92,14 @@ for phrase in "== create, exists and file paths" \
     status=1
   fi
 done
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if ! grep -q "== windows roots, drives" "$WORK/dir-plain.out" 2>/dev/null; then
+      echo "  missing section: == windows roots, drives"
+      status=1
+    fi
+    ;;
+esac
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo

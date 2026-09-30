@@ -63,11 +63,11 @@ class IyiIO
     @eof && @read_pos >= @read_limit
   end
 
-  # A failed read is not an ended one: the kernel's error and its zero
-  # looked alike, and `File.read` of a directory answered "". Kept as a
-  # limit of -1, which no read leaves, so a stream keeps the size the
-  # sweep's proofs expect: they corrupt IO objects on purpose and pin
-  # a symptom a word more per stream moves.
+  # A failed read is not an ended one - `File.read` of a directory said ""
+  # - and is kept as a limit of -1, not a field the sweep's proofs would
+  # see the size of. Nor is a withdrawn one (-2, `low_level_read`): taken
+  # for the end, it ended for good a stream whose read a cancelled task
+  # had begun, and the next line was never read.
   def read_failed? : Bool
     @read_limit < 0
   end
@@ -79,8 +79,8 @@ class IyiIO
 
     count = low_level_read(@fd, @read_buffer.as(Void*), @read_capacity.to_u64)
     if count <= 0_i64
-      @read_limit = -1 if count < 0_i64
-      @eof = true
+      @read_limit = -1 if count < 0_i64 && count != -2_i64
+      @eof = true unless count == -2_i64
       return 0
     end
     @read_limit = count.to_i
@@ -343,12 +343,12 @@ class IyiIO
     if @write_pos > 0
       written = 0_i64
       total = @write_pos.to_i64
+      @write_pos = 0 # before the write: a refused one flushed again from `close`, a second panic
       while written < total
         n = low_level_write(@fd, (@write_buffer + written).as(Void*), (total - written).to_u64)
         raise "write failed: the reader is gone, or the device refused it" if n <= 0_i64
         written = written + n
       end
-      @write_pos = 0
     end
   end
 
@@ -363,7 +363,9 @@ class IyiIO
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
       if target_fd == 0_i64
         outcome = iyi_read(0, buffer, count)
-        return 0_i64 if outcome.is_a?(Cancelled)
+        # -2: withdrawn, which `fill_buffer` does not take for the end.
+        # No read(2) answers it: ENOENT is not a read's error.
+        return -2_i64 if outcome.is_a?(Cancelled)
         outcome
       else
         __iyi_read(target_fd.to_i32, buffer, count)
@@ -373,7 +375,7 @@ class IyiIO
         # Parked, as on Linux: a pipe or a console is read by a thread of
         # its own (`IyiStdinReader`), a disk file where it is asked.
         outcome = iyi_read(0, buffer, count)
-        return 0_i64 if outcome.is_a?(Cancelled)
+        return -2_i64 if outcome.is_a?(Cancelled)
         outcome
       else
         __iyi_file_read(target_fd, buffer, count)

@@ -96,9 +96,17 @@ class Iyi::Command
       puts "wrote #{Iyi.relative_filename(File.join(directory, name))}"
     end
 
-    where = directory == Dir.current ? "" : "cd #{Iyi.relative_filename(directory)} && "
+    # Two lines, not one joined with `&&`: Windows PowerShell 5.1 refuses
+    # `&&` ("not a valid statement separator"), and no one separator means
+    # the same in cmd, PowerShell and a POSIX shell. The directory quoted
+    # when it holds a space, which all three read alike; and none when it
+    # is this one, however it was spelled.
     puts
-    puts "#{where}#{Command.program_name} run #{name}.iyi    # builds and runs it"
+    unless Iyi.same_file?(directory, Dir.current)
+      shown = Iyi.relative_filename(directory)
+      puts "cd #{shown.includes?(' ') ? %("#{shown}") : shown}"
+    end
+    puts "#{Command.program_name} run #{name}.iyi    # builds and runs it"
   end
 
   # The two files, in the order they are written.

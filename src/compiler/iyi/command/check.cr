@@ -83,7 +83,7 @@ class Iyi::Command
         if Dir.exists?(value)
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
-        changed << File.expand_path(value)
+        changed << Iyi.file_key(File.expand_path(value))
         typed << value
       when "-f"
         as_json = options.shift? == "json"
@@ -115,7 +115,7 @@ class Iyi::Command
     Dir.glob("**/*.iyi") do |candidate|
       closure = test_import_closure(candidate)
       consumers << candidate if closure.nil? || !manifest_changed.empty? ||
-                                changed.any? { |path| closure.includes?(path) }
+                                closure.any? { |path| changed.includes?(Iyi.file_key(path)) }
     end
     consumers.sort!
 

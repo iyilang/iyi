@@ -277,25 +277,39 @@ module Iyi
       Dir.exists?(candidate) ? candidate : nil
     end
 
+    # The module path a file's header declares, or nil: its first line that
+    # is neither blank nor a comment, when that line is `module x`. The one
+    # reading - the build's root, `iyi doc` and the language server each
+    # had their own copy - and past a byte order mark, which the lexer
+    # skips and every copy read as part of the line: a file a Windows
+    # editor saved with one ran as a script whose imports could not be
+    # found, and `iyi doc` said it declared no module.
+    def self.module_header_of(text : String) : String?
+      text.lchop('\uFEFF').each_line do |line|
+        line = line.strip
+        next if line.empty? || line.starts_with?('#')
+        return nil unless line.starts_with?("module ")
+        module_path = line.lchop("module ").strip
+        return nil if module_path.empty? || module_path.includes?(' ')
+        return module_path
+      end
+      nil
+    end
+
     # The root the entry's header names, or nil: `module calc/parser` in
     # `/p/calc/parser.iyi` is `/p`.
     def self.header_root_of(path : String, text : String) : String?
-      header = nil
-      text.each_line do |line|
-        line = line.strip
-        next if line.empty? || line.starts_with?('#')
-        header = line
-        break
-      end
-      return nil unless header && header.starts_with?("module ")
-      module_path = header.lchop("module ").strip
-      return nil if module_path.empty? || module_path.includes?(' ')
+      module_path = module_header_of(text)
+      return nil unless module_path
       suffix = "/#{module_path}.iyi"
       # Asked of the posix reading: a module path is posix by grammar (R-1) and
       # a path is the platform's, so on Windows no entry ever ended with its own
       # header — every build fell back to the entry-dir rule and `import
       # shared/helper` from `pkg/eps_test.iyi` could not be found.
-      return nil unless ::Path[path].to_posix.to_s.ends_with?(suffix)
+      # And asked the way the file system compares: on Windows `APP\main.iyi`
+      # is `app/main.iyi`, and a path typed in another case found no root
+      # and then no module its header's imports named.
+      return nil unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end
@@ -3053,8 +3067,7 @@ module Iyi
       # against, is only known now - and linking the program over either
       # would replace it in silence, which is what `-o good.iyi good.iyi`
       # did to its source. Before the first object is written.
-      wanted = File.expand_path(output_filename)
-      if read = program.requires.find { |filename| File.expand_path(filename) == wanted }
+      if File.exists?(output_filename) && (read = program.requires.find { |filename| Iyi.same_file?(filename, output_filename) })
         raise Iyi::Error.new("#{Iyi.relative_filename(read)} is a file this build read, and linking the program " \
                              "over it would replace it. Name the program something else")
       end

@@ -34,7 +34,7 @@ class Iyi::Command
           abort! ex.message.to_s, :USAGE_ERROR
         end
       IyiMod.surface artifact, STDOUT
-    when filename.ends_with?(".iyi")
+    when Iyi.path_key(filename).ends_with?(".iyi")
       doc_file! filename, ".iyi module"
       doc_from_source(File.expand_path(filename))
     when filename == "prelude"
@@ -284,7 +284,7 @@ class Iyi::Command
       abort! "#{filename} declares no module, and a module is what `doc` reads", :USAGE_ERROR
     end
     module_root = doc_module_root(filename, module_name)
-    unless File.expand_path(File.join(module_root, "#{module_name}.iyi")) == filename
+    unless Iyi.same_file?(File.join(module_root, "#{module_name}.iyi"), filename)
       abort! "#{filename} declares `module #{module_name}`, and a module's path " \
              "is its file's path (SPEC.md R-1, IV.6): a module by that name is " \
              "read from #{module_name}.iyi", :USAGE_ERROR
@@ -358,13 +358,7 @@ class Iyi::Command
   # empty surface at exit 0 — a documented module reported as exporting
   # nothing, which is the worst of the three answers a verb can give.
   private def doc_module_header(source : String) : String?
-    source.each_line do |line|
-      text = line.strip
-      next if text.empty? || text.starts_with?('#')
-      return text.lchop("module").strip if text.starts_with?("module ")
-      break
-    end
-    nil
+    Compiler.module_header_of(source)
   end
 
   # And the directory that name is read from: `deep/inner/thing` is found

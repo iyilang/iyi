@@ -455,6 +455,7 @@ class Iyi::Command
       return
     end
 
+    Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable(config.output_filename)
 
     config.compile output_filename
@@ -1014,7 +1015,10 @@ class Iyi::Command
     # compiler knows before it reads anything. `--prelude` still wins, and a
     # `.cr` file is untouched — the two languages share this compiler and do
     # not share a standard library.
-    if !specified_prelude && sources.first?.try(&.filename.ends_with?(".iyi"))
+    # In the file system's case: on Windows `hello.IYI` is `hello.iyi`, and
+    # it was built against Crystal's library and told of a `--crystal` it
+    # was never given.
+    if !specified_prelude && sources.first?.try { |source| Iyi.path_key(source.filename).ends_with?(".iyi") }
       compiler.prelude = "iyi/prelude"
     end
 
@@ -1028,7 +1032,7 @@ class Iyi::Command
       output_filename = (output_path / "#{::Path[first_filename].stem}#{output_extension}").normalize.to_s
 
       # Check if we'll overwrite the main source file
-      if !compiler.no_codegen? && !run && first_filename == File.expand_path(output_filename)
+      if !compiler.no_codegen? && !run && Iyi.same_file?(first_filename, output_filename)
         abort! "compilation will overwrite source file '#{Iyi.relative_filename(first_filename)}', either change its extension to '.cr' or specify an output file with '-o'", :USAGE_ERROR
       end
     else
@@ -1045,8 +1049,7 @@ class Iyi::Command
       # same mistake one step removed, and is refused once it is known
       # (`Compiler#codegen`), before anything is written.
       if !compiler.no_codegen? && !run
-        expanded = File.expand_path(output_filename)
-        if source = sources.find { |candidate| candidate.filename == expanded }
+        if source = sources.find { |candidate| Iyi.same_file?(candidate.filename, output_filename) }
           abort! "-o #{output_filename} names #{Iyi.relative_filename(source.filename)}, the source it would build from, " \
                  "and linking there would replace it. Name the program something else", :USAGE_ERROR
         end
@@ -1079,7 +1082,7 @@ class Iyi::Command
       # the file. `-o ro/prog` under a mode-500 directory was three lines
       # of `ld.lld: error: cannot open output file`, once per link
       # attempt, for a permission bit.
-      unless File.writable?(directory)
+      unless Iyi.writable_directory?(directory)
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
     end

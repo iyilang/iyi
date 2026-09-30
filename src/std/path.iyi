@@ -382,7 +382,10 @@ pub struct Path
     return p if p.anchor
     return p if @name.empty?
 
-    if ends_with_separator?
+    # Nor after a bare drive: `C:` is the current directory on C:, and
+    # `C:` joined with `foo` is `C:foo`, the way `normalize` spells it;
+    # a separator there made it `C:\foo`, the drive's root.
+    if ends_with_separator? || (!posix? && @name.ends_with?(":"))
       Path.new(@name + part, @kind)
     else
       Path.new(@name + separator + part, @kind)
@@ -519,6 +522,25 @@ pub struct Path
                  Path.new(pwd, @kind)
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?
+    # A Windows path can be anchored and still not absolute, and `join`
+    # hands back an anchored part as it is: `\foo` and `C:foo` came out
+    # as themselves, where the answer promised is absolute. `\foo` is
+    # rooted on the base's drive. `C:foo` is under the base when the base
+    # is on C:, and under C:'s root otherwise, which is what Windows makes
+    # of a drive this process has not been to.
+    unless posix?
+      drive = p.drive
+      if drive && p.root.nil?
+        rest = p.name[drive.size, p.name.size - drive.size]
+        base_drive = base_dir.drive
+        if base_drive && base_drive.downcase == drive.downcase
+          return base_dir.join(rest).normalize
+        end
+        return Path.new(drive + separator + rest, @kind).normalize
+      elsif drive.nil? && p.root
+        return Path.new((base_dir.drive || "") + p.name, @kind).normalize
+      end
+    end
     base_dir.join(p).normalize
   end
 

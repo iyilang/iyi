@@ -160,6 +160,24 @@ File.chmod(onto_name, 0o644)
 File.delete(onto_name)
 puts "  a read-only destination is replaced by a rename"
 
+# And a destination somebody has open: the reader keeps the file it
+# opened, and the name is the new one. Windows refused `MoveFileExW` with
+# "Access is denied" while any handle was open - this program's own -
+# so writing a temporary file and renaming it over a file a reader held
+# panicked there alone.
+held_name = sandbox + "/rename_held.txt"
+fresh_name = sandbox + "/rename_fresh.txt"
+File.write(held_name, "old contents")
+File.write(fresh_name, "new contents")
+reader = File.open(held_name, "r")
+File.rename(fresh_name, held_name)
+assert_str "old contents", reader.read_all, "the open reader keeps the file it opened"
+reader.close
+assert_str "new contents", File.read(held_name), "the name is the renamed file's"
+assert_true !File.exists?(fresh_name), "the renamed file's old name is gone"
+File.delete(held_name)
+puts "  a destination somebody has open is replaced by a rename"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"
@@ -230,6 +248,12 @@ assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
+{% if flag?(:win32) %}
+  # Either separator matches either: `Dir.glob` answers in both, and its
+  # own results did not match the pattern that found them.
+  assert_true File.match?("a\\b.txt", "a/*.txt"), "a backslash in the name matches a slash in the pattern"
+  assert_true File.match?("a/b.txt", "a\\*.txt"), "a slash in the name matches a backslash in the pattern"
+{% end %}
 ta = File.tempfile("std_file_ex")
 tb = File.tempfile("std_file_ex")
 assert_true ta != tb, "tempfile names differ"

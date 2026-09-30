@@ -42,6 +42,12 @@ assert_true server_port > 0, "OS assigns port > 0"
 assert_str "127.0.0.1", server.local_address, "bound local address is 127.0.0.1"
 
 client = UdpSocket.client
+# A client that has sent nothing has no address yet, and nothing can have
+# come to it: a receive that does not wait answers nothing, and its port
+# is 0. Windows refuses both calls on such a socket (WSAEINVAL), and they
+# panicked there, "cannot receive from UDP socket".
+assert_true client.receive_from?.nil?, "an unbound client has nothing queued"
+assert_int 0, client.local_port, "an unbound client's port is 0"
 sent = client.send_to("ping loopback", "127.0.0.1", server_port)
 assert_int 13, sent, "sent byte count"
 

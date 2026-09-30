@@ -54,7 +54,9 @@ class Iyi::Program
 
   def parse_macro_source(generated_source, macro_expansion_pragmas, the_macro, node, vars, current_def = nil, inside_type = false, inside_exp = false, visibility : Visibility = :public, &)
     parser = @program.new_parser(generated_source, var_scopes: [vars.dup])
-    parser.filename = VirtualFile.new(the_macro, generated_source, node.location)
+    virtual = VirtualFile.new(the_macro, generated_source, node.location)
+    virtual.line_origins = line_origins_of(generated_source, macro_expansion_pragmas)
+    parser.filename = virtual
     parser.macro_expansion_pragmas = macro_expansion_pragmas
     parser.visibility = visibility
     parser.def_nest = 1 if current_def && !current_def.is_a?(External)
@@ -63,6 +65,35 @@ class Iyi::Program
     parser.wants_doc = @program.wants_doc?
     generated_node = Prof.span("  macro: reparse") { yield parser }
     Prof.span("  macro: normalize") { normalize(generated_node, inside_exp: inside_exp, current_def: current_def) }
+  end
+
+  # iyi: an inline macro's `LocOriginPragma`s as lines: the expansion's
+  # line at each pragma is the origin's, and each line after it the next
+  # one, until the next pragma. Read before the parse, which consumes the
+  # pragmas.
+  private def line_origins_of(source : String, pragmas : Hash(Int32, Array(Lexer::LocPragma))?) : Hash(Int32, Int32)?
+    return nil unless pragmas
+    starts = [] of {Int32, Int32}
+    pragmas.each do |position, list|
+      list.each do |pragma|
+        starts << {position, pragma.line_number} if pragma.is_a?(Lexer::LocOriginPragma)
+      end
+    end
+    return nil if starts.empty?
+    # The expansion's line at each byte where a line starts.
+    line_starts = [0]
+    source.each_byte.with_index { |byte, index| line_starts << index + 1 if byte == '\n'.ord }
+    origins = {} of Int32 => Int32
+    starts.each_with_index do |(position, origin), index|
+      first = (line_starts.bsearch_index { |start| start > position } || line_starts.size)
+      last = if following = starts[index + 1]?
+               (line_starts.bsearch_index { |start| start > following[0] } || line_starts.size) - 1
+             else
+               line_starts.size
+             end
+      (first..last).each { |line| origins[line] = origin + line - first }
+    end
+    origins
   end
 
   record MacroRunResult, stdout : String, stderr : String, status : Process::Status

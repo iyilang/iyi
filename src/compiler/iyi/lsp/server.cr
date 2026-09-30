@@ -1592,7 +1592,7 @@ module Iyi::Lsp
         if def_name_taken?(params, new_name)
           raise Refused.new("'#{new_name}' is already a method where this one is, and the rename would make the two one")
         end
-        references, declarations = reference_sites(params)
+        references, declarations = reference_sites(params, renaming_to: new_name)
       end
       if references.empty? && declarations.empty?
         raise Refused.new("nothing renameable under the cursor: rename serves defs, their calls and local variables")
@@ -1651,7 +1651,12 @@ module Iyi::Lsp
     # graph reaches one of them compile — the rest could not hold a
     # reference, and are not asked. On a 32-module corpus that is the
     # difference between 1.7 s and the importers' share of it.
-    private def reference_sites(params : JSON::Any) : {Array({Location, Int32}), Array({Location, Int32})}
+    #
+    # A rename passes its new name, and every compile asked is asked
+    # whether a module in it imports the def and already has that name
+    # (`ReferencesVisitor#importer_taking`): the importers are only
+    # compiled here, so only here can the rename be refused for them.
+    private def reference_sites(params : JSON::Any, renaming_to : String? = nil) : {Array({Location, Int32}), Array({Location, Int32})}
       if local = local_at(params)
         return local.split
       end
@@ -1668,6 +1673,7 @@ module Iyi::Lsp
 
       first = @analysis.references_at(path, text, overrides_for(path), target)
       return {references, declarations} unless first
+      refuse_importer(first, renaming_to) if renaming_to
       references.concat first.references
       declarations.concat first.declarations
 
@@ -1676,11 +1682,20 @@ module Iyi::Lsp
         next if entry_path == path
         visitor = @analysis.references_at(entry_path, entry_text, overrides_for(entry_path), target)
         next unless visitor
+        refuse_importer(visitor, renaming_to) if renaming_to
         references.concat visitor.references
         declarations.concat visitor.declarations
       end
 
       {dedupe(references), dedupe(declarations)}
+    end
+
+    private def refuse_importer(visitor : ReferencesVisitor, name : String) : Nil
+      file = visitor.importer_taking(name)
+      return unless file
+      text = document_text(file) || (File.read(file) if File.file?(file))
+      importer = (text && Exports.header_of(text)) || file
+      raise Refused.new("'#{name}' is already a name in #{importer}, which imports this method, and the rename would make the two one there")
     end
 
     # The entry set a session-wide question compiles: open buffers

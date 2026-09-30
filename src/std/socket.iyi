@@ -189,7 +189,29 @@ pub struct SocketError
     return "nothing is at that path" if missing?
     return "timed out" if timed_out?
     return "no route to the host" if unreachable?
+    if denied?
+      # Windows answers WSAEACCES for a port another socket holds
+      # exclusively - every listener here does - as well as for one it
+      # reserves, so the sentence names both.
+      {% if flag?(:win32) %}
+        return "access denied: another socket holds the port, or the system reserves it"
+      {% else %}
+        return "permission denied"
+      {% end %}
+    end
+    return "not an address this host can use" if unusable?
     "error #{@code}"
+  end
+
+  # EACCES: a port the system keeps from this user.
+  private def denied? : Bool
+    {% if flag?(:win32) %} @code == 10013 {% else %} @code == 13 {% end %}
+  end
+
+  # EADDRNOTAVAIL: an address that is not this host's, or the wildcard a
+  # server prints, which Windows will not connect to.
+  private def unusable? : Bool
+    {% if flag?(:win32) %} @code == 10049 {% elsif flag?(:darwin) %} @code == 49 {% else %} @code == 99 {% end %}
   end
 
   private def reset? : Bool
@@ -506,9 +528,14 @@ pub class IyiSocket
     __sys_set_reuseaddr(fd)
     __sys_set_v6only(fd) if family == AF_INET6
 
-    if __sys_bind(fd, addr, family) < 0
+    # With the reason, which the refusal dropped: a port somebody holds
+    # and one the system forbids - on Windows, a range Hyper-V or WSL
+    # reserved - read alike.
+    bound = __sys_bind(fd, addr, family)
+    if bound < 0
+      code = __sys_code(bound.to_i64)
       __sys_close(fd)
-      raise "cannot bind socket to #{host}:#{port}"
+      raise "cannot bind socket to #{host}:#{port}: #{SocketError.new("bind", code).reason}"
     end
 
     if __sys_listen(fd, backlog) < 0
@@ -875,6 +902,14 @@ pub class IyiSocket
   # answer EOF rather than a reset is `closesocket`'s.
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
+      # The send side ends first (SD_SEND, 1): a FIN behind whatever was
+      # written. `closesocket` with a read still posted beneath a parked
+      # task - the kernel's until its completion is dequeued - reset the
+      # connection instead, and the peer lost what had been written before
+      # the close: "reset by the peer" where it should have read the answer
+      # and then the end. On a listener, or a socket never connected, the
+      # shutdown refuses and changes nothing.
+      LibWs2_32.shutdown(__sys_handle(fd), 1)
       LibWs2_32.closesocket(__sys_handle(fd))
     {% else %}
       __iyi_close(fd.to_i64)
@@ -1245,6 +1280,7 @@ pub class IyiSocket
       fun accept(s : UInt64, addr : Void*, addrlen : Int32*) : UInt64
       fun recv(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
       fun send(s : UInt64, buf : Void*, len : Int32, flags : Int32) : Int32
+      fun shutdown(s : UInt64, how : Int32) : Int32
       fun closesocket(s : UInt64) : Int32
       fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
       fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32) : Int32
@@ -1385,8 +1421,13 @@ pub class IyiSocket
       0
     end
 
+    # Winsock caps a backlog at SOMAXCONN, 200, and turns the next connect
+    # away as refused - where Linux holds it - unless the backlog is asked
+    # as SOMAXCONN_HINT(n), which is -n: 220 connects to a listener asked
+    # for 256 lost 20.
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
-      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), backlog) != 0
+      hinted = backlog > 200 ? -backlog : backlog
+      return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), hinted) != 0
       0
     end
 
@@ -1592,15 +1633,17 @@ pub class IyiSocket
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
-    # Nothing, and not for want of the option. SO_REUSEADDR on Windows lets a
-    # *different* socket bind a port this one is already bound to, and the
-    # last binder takes the packets; what the POSIX arms ask for with it is
-    # only the waiver of the TIME_WAIT wait on a port nobody holds. Setting
-    # it here would hand any program on the machine the port `listen` just
-    # took. Windows does not need the waiver either: a listening socket's
-    # port is free again as soon as it closes.
+    # Not SO_REUSEADDR, which on Windows lets a *different* socket bind a
+    # port this one is already bound to, and the last binder takes the
+    # packets; what the POSIX arms ask for with it is only the waiver of
+    # the TIME_WAIT wait, which Windows does not impose on a listener's
+    # port. The opposite: SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR, -5). Without
+    # it the port was not the listener's either - a bind to 127.0.0.1:P went
+    # through while 0.0.0.0:P listened, and the other way round, from any
+    # process, and the more specific listener took the connections.
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      0
+      val = 1_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), SOL_SOCKET, -5, pointerof(val).as(Void*), 4)
     end
 
     # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41). Windows' default already, and

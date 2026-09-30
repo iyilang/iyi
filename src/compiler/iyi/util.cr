@@ -109,6 +109,80 @@ module Iyi
     relative.to_s
   end
 
+  # iyi: *path* spelled the way the platform's file system compares names:
+  # as it is on Linux, and on Windows with one separator and one case,
+  # because NTFS does not tell `C:\App\Util.iyi` from `c:/app/util.iyi`.
+  # For a path that may not exist yet, or a set of them, where
+  # `same_file?` cannot ask. Every comparison that did not do this
+  # answered differently for a drive letter an editor lowercased.
+  def self.path_key(path : String) : String
+    {% if flag?(:win32) %}
+      path.tr("/", "\\").downcase
+    {% else %}
+      path
+    {% end %}
+  end
+
+  # iyi: whether a file can be made in *directory*. `File.writable?` of a
+  # directory answers from its attributes, and on Windows the permission
+  # is an ACL they do not carry: a directory that refused this user every
+  # new file answered yes, and `-o` there came back as the linker's
+  # LNK1104 after a whole compilation. So Windows is asked by making a
+  # file, which is the question.
+  def self.writable_directory?(directory : String) : Bool
+    {% if flag?(:win32) %}
+      probe = File.join(directory, ".iyi-write-probe-#{Process.pid}")
+      begin
+        File.write(probe, "")
+      rescue File::Error
+        return false
+      end
+      File.delete?(probe)
+      true
+    {% else %}
+      File.writable?(directory)
+    {% end %}
+  end
+
+  # iyi: `path_key` of the file's real path, when there is a file: Windows
+  # has one more spelling a string cannot fold, the 8.3 short name - a CI
+  # runner's temporary directory is `C:\Users\RUNNER~1\...` to `mktemp`
+  # and `C:\Users\runneradmin\...` to `Dir.current` - and only the file
+  # system knows the two are one. A path that is not there keeps its own.
+  def self.file_key(path : String) : String
+    return path_key(path) unless File.exists?(path)
+    real = File.realpath(path)
+    {% if flag?(:win32) %}
+      # `realpath` there is `GetFullPathNameW`, which keeps a short name
+      # as it is; `GetLongPathNameW` spells every component out.
+      wide = Crystal::System.to_wstr(real)
+      buffer = Slice(UInt16).new(260)
+      length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      if length >= buffer.size
+        buffer = Slice(UInt16).new(length)
+        length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      end
+      real = String.from_utf16(buffer[0, length]) if 0 < length < buffer.size
+    {% end %}
+    path_key(real)
+  rescue File::Error
+    path_key(path)
+  end
+
+  # iyi: whether *a* and *b* name one file - asked of the file system,
+  # which is the only thing that knows. A string compare of the expanded
+  # paths is the same answer on Linux and wrong on Windows, where NTFS
+  # ignores case and Win32 drops a trailing space or dot: `-o PROG.iyi
+  # prog.iyi`, `-o c:\...\main.iyi` and `-o "prog.iyi "` each linked the
+  # program over its only source, exit 0. Two paths that do not both
+  # exist are the same file only if they are the same string.
+  def self.same_file?(a : String, b : String) : Bool
+    return true if File.expand_path(a) == File.expand_path(b)
+    File.exists?(a) && File.exists?(b) && File.same?(a, b, follow_symlinks: true)
+  rescue File::Error
+    false
+  end
+
   def self.print_error(msg, color, stderr = STDERR, leading_error = true)
     stderr.print "Error: ".colorize.toggle(color).red.bold if leading_error
     stderr.puts msg.colorize.toggle(color).bright
@@ -118,8 +192,34 @@ module Iyi
     CacheDir.instance.join("#{Iyi::Command.program_name}-run-#{basename}.tmp")
   end
 
+  # iyi: the temporary programs runners left behind: a runner removes its
+  # own when the program ends, and one ended from outside - `taskkill /F`,
+  # an editor's stop button, which is `TerminateProcess` and runs nothing -
+  # leaves its program and its `.pdb` in the cache. Named one per runner
+  # (below), they would pile up; so each run takes away what an hour-old
+  # runner left. An hour, because a younger file may be a program another
+  # runner has just linked and not yet started; on Windows a running one
+  # refuses the delete anyway.
+  def self.sweep_run_leftovers : Nil
+    dir = CacheDir.instance.dir
+    prefix = "#{Iyi::Command.program_name}-run-"
+    cutoff = Time.utc - 1.hour
+    Dir.each_child(dir) do |name|
+      next unless name.starts_with?(prefix) && name.includes?(".tmp")
+      path = File.join(dir, name)
+      next unless (info = File.info?(path)) && info.modification_time < cutoff
+      File.delete?(path) rescue nil
+    end
+  rescue File::Error
+  end
+
+  # iyi: one per runner, by its process id. It was one per basename, and
+  # Windows will not write over an executable that is running: two `iyi
+  # run main.iyi` at once - two different programs in two directories,
+  # or one twice - and the second failed to link, `LNK1104: cannot open
+  # file ...\iyi-run-main.exe.tmp.exe`.
   def self.temp_executable(basename)
-    name = tempfile(basename)
+    name = tempfile("#{basename}-#{Process.pid}")
     {% if flag?(:win32) %}
       name += ".exe"
     {% end %}

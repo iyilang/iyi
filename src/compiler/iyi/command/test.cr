@@ -121,10 +121,10 @@ class Iyi::Command
       # the other reason to say which file it was.
       discount_off = affected.reject { |changed| File.file?(changed) }
       if discount_off.empty?
-        changed = affected.map { |changed| File.expand_path(changed) }
+        changed = affected.map { |changed| Iyi.file_key(File.expand_path(changed)) }
         selected = files.select do |file|
           closure = test_import_closure(file)
-          closure.nil? || changed.any? { |path| closure.includes?(path) }
+          closure.nil? || closure.any? { |path| changed.includes?(Iyi.file_key(path)) }
         end
         skipped = files.size - selected.size
         files = selected
@@ -261,7 +261,11 @@ class Iyi::Command
     started = Time.instant
     output = IO::Memory.new
 
-    binary = File.tempname("iyi-test", nil)
+    # With the executable's extension, which `build -o` appends to a name
+    # that has none: without it the delete below asked for a name nothing
+    # had, and on Windows every test left its program and its `.pdb` in
+    # %TEMP%.
+    binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
     begin
       build_status = Process.run(
         Process.executable_path.not_nil!,
@@ -294,6 +298,13 @@ class Iyi::Command
       end
     ensure
       File.delete?(binary)
+      # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
+      # `.dwarf` dsymutil makes, which the new check found there too.
+      {% if flag?(:win32) %}
+        File.delete?(binary.rchop(".exe") + ".pdb")
+      {% elsif flag?(:darwin) %}
+        File.delete?("#{binary}.dwarf")
+      {% end %}
     end
   end
 

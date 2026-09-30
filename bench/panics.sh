@@ -346,7 +346,9 @@ EOF
 run "$work/site.iyi"
 [ "$code" = 1 ] || fail "std panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: slice size must be positive" || fail "std panic missing message: $out"
-echo "$out" | grep -q "at.*src/std" && fail "a std panic named a library line: $out"
+# Either separator: a Windows build names the file `...\src\std/x.iyi`,
+# and a pattern with `/` alone let a library line through there unseen.
+echo "$out" | grep -qE 'at.*src[/\\]std' && fail "a std panic named a library line: $out"
 cat > "$work/index.iyi" <<'EOF'
 module index
 
@@ -362,7 +364,7 @@ EOF
 run "$work/index.iyi"
 [ "$code" = 1 ] || fail "prelude panic exit was $code, wanted 1"
 echo "$out" | grep -q "^iyi: panic: index 5 out of range for 3 elements" || fail "prelude panic missing message: $out"
-echo "$out" | grep -q "at.*src/iyi" && fail "a prelude panic named a library line: $out"
+echo "$out" | grep -qE 'at.*src[/\\]iyi' && fail "a prelude panic named a library line: $out"
 # On Darwin, the panic raises a backtrace through libSystem's backtrace and
 # points at the program rather than the library. Windows captures its
 # callers too (`RtlCaptureStackBackTrace`) but prints none without a
@@ -373,6 +375,30 @@ if [ "$(uname -s)" = Darwin ]; then
     || fail "library panic named no frame in the program: $out"
 fi
 step "a panic the library raises names no library line, prelude or std"
+
+# ── 9b. and the program's own line inside a macro written in place: a
+#      `{% if %}` is expanded where it stands, and a `raise` inside one
+#      named the `{% if` line - where the expansion was put, not where the
+#      `raise` is. `__LINE__` is what `raise` reads, and it reads the
+#      line the text was written on now. ───────────────────────────────
+cat > "$work/inplace.iyi" <<'EOF'
+module inplace
+
+def boom(x : Int32) : Nil
+  {% if 1 == 2 %}
+    puts "never"
+  {% else %}
+    y = x + 1
+    raise "boom #{y}"
+  {% end %}
+end
+
+boom(1)
+EOF
+run "$work/inplace.iyi"
+[ "$code" = 1 ] || fail "the in-place panic exit was $code, wanted 1"
+echo "$out" | grep -q "at .*inplace\.iyi:8$" || fail "a raise inside {% if %} did not name its own line, 8: $out"
+step "a raise inside a macro written in place names its own line"
 
 # ── 9a. a program that imports `std/debug` gets its callers named: the
 #      resolver reads the program's own debug information — DWARF beside a

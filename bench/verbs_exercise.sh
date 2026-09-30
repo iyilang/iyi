@@ -208,6 +208,107 @@ printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iy
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# Two `iyi run`s at once of programs with one basename. The runner linked
+# into one executable per basename, and Windows will not write over one
+# that is running: the second failed with `LNK1104: cannot open file
+# ...\iyi-run-main.exe.tmp.exe`. Each runner has its own now.
+mkdir -p twin_a twin_b
+# The first holds its executable open until the second has run: it says
+# it started, and waits (a minute at most) for the second to be done.
+printf 'module main\n\nFile.write("twin_a.started", "1")\ni = 0\nwhile i < 600 && !File.exists?("twin_b.done")\n  sleep(100)\n  i = i + 1\nend\nputs "a"\n' > twin_a/main.iyi
+printf 'module main\n\nputs "b"\n' > twin_b/main.iyi
+"$IYI" run twin_a/main.iyi > twin_a.out 2>&1 &
+twin_a=$!
+i=0
+while [ ! -f twin_a.started ] && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+if "$IYI" run twin_b/main.iyi > twin_b.out 2>&1 && grep -qx b twin_b.out; then
+  echo "  a run beside a running program of the same name: runs"
+else
+  echo "  a run beside a running program of the same name did not run:"
+  sed -n '1,3p' twin_b.out
+  status=1
+fi
+touch twin_b.done
+wait "$twin_a"
+grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
+# What a runner ended from outside leaves - `taskkill /F` runs no code
+# in it, so its program stays in the cache under the runner's own name -
+# the next run takes away once it is an hour old, and not before: a
+# younger one may be another runner's, linked and about to start.
+mkdir -p "$WORK/runcache"
+: > "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+: > "$WORK/runcache/iyi-run-main-99998.tmp.exe"
+touch -d '2 hours ago' "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
+if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
+  echo "  a runner's leftover from two hours ago is still in the cache"; status=1
+elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
+  echo "  a runner's leftover from just now was taken"; status=1
+else
+  echo "  an old runner's leftover is taken, a fresh one kept"
+fi
+# A path in another case, where the file system says it is the same
+# file. The root a header names was found by comparing strings, so `iyi
+# run HDR/APP/MAIN.IYI` found none, and the import beside the header was
+# "can't find module"; and an entry spelled `.IYI` was built against
+# Crystal's library, told of a `--crystal` it was never given.
+mkdir -p hdr/app
+printf 'module app/util\n\npub def answer : Int32\n  42\nend\n' > hdr/app/util.iyi
+printf 'module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > hdr/app/main.iyi
+if [ HDR/APP/MAIN.IYI -ef hdr/app/main.iyi ]; then
+  if "$IYI" run HDR/APP/MAIN.IYI > hdr_case.out 2>&1 && grep -qx 42 hdr_case.out; then
+    echo "  a module run by its path in another case: resolves its imports"
+  else
+    echo "  a module run by its path in another case did not run:"
+    sed -n '1,3p' hdr_case.out
+    status=1
+  fi
+fi
+# A byte order mark, which a Windows editor may put at the front of a
+# file. The lexer skips it; the three readings of a header did not, so a
+# module saved with one ran as a script and its import beside the header
+# was "can't find module", `iyi doc` said it "declares no module", and
+# `fmt` wrote the file back without the mark and `--check` called a
+# formatted file unformatted.
+mkdir -p bom/app
+printf '\357\273\277module app/util\n\npub def answer : Int32\n  42\nend\n' > bom/app/util.iyi
+printf '\357\273\277module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > bom/app/main.iyi
+cp bom/app/util.iyi bom/util.keep
+if "$IYI" run bom/app/main.iyi > bom_run.out 2>&1 && grep -qx 42 bom_run.out; then
+  echo "  a module saved with a byte order mark: resolves its imports"
+else
+  echo "  a module saved with a byte order mark did not run:"; sed -n '1,3p' bom_run.out; status=1
+fi
+if "$IYI" doc bom/app/util.iyi > bom_doc.out 2>&1 && grep -q 'answer' bom_doc.out; then
+  echo "  iyi doc of a module saved with a byte order mark: its surface"
+else
+  echo "  iyi doc of a module saved with a byte order mark:"; sed -n '1,3p' bom_doc.out; status=1
+fi
+if "$IYI" fmt --check bom/app/util.iyi > bom_fmt.out 2>&1; then
+  echo "  fmt --check of a formatted file with a byte order mark: clean"
+else
+  echo "  fmt --check of a formatted file with a byte order mark:"; sed -n '1,3p' bom_fmt.out; status=1
+fi
+"$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
+cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
+# A CRLF file keeps its CRLF through `fmt`, and a literal keeps the line
+# breaks it holds, which are the program's data: every `\n` was turned, so
+# a string holding a bare line break gained a `\r` and printed eight bytes
+# where it had printed seven. A heredoc's opener and the lines inside an
+# interpolated string are the other two places a line break can sit.
+mkdir -p crlf
+printf 'module m\r\n\r\ns = "one\ntwo"\r\nputs s.bytesize\r\n' > crlf/lit.iyi
+printf 'module h\r\n\r\ntext = <<-EOS\r\n  hello\r\n  world\r\n  EOS\r\nputs text.bytesize\r\n' > crlf/here.iyi
+printf 'module p\r\n\r\ndef f(x : Int32) : Int32\r\n  x + 1\r\nend\r\n\r\nputs "a#{f(1)}b\r\nc"\r\n' > crlf/interp.iyi
+for f in lit here interp; do
+  cp "crlf/$f.iyi" "crlf/$f.keep"
+  "$IYI" fmt "crlf/$f.iyi" > /dev/null 2>&1
+  if cmp -s "crlf/$f.iyi" "crlf/$f.keep"; then
+    echo "  fmt of a formatted CRLF file with line breaks in a literal ($f): unchanged"
+  else
+    echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
+  fi
+done
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"
@@ -309,6 +410,14 @@ refuses "a socket path past the kernel's limit, with no server to exec" "the soc
 # takes, so the case above is an ordering rather than a blanket refusal.
 refuses "a server binary that is not there" "IYI_DAEMON points at" -- \
   env IYI_DAEMON="$WORK/absent-daemon" "$IYI" daemon start --socket "$WORK/short.sock"
+# Windows has no fork, so no daemon: it was told to `make iyi-daemon`, a
+# target Makefile.win does not have.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a daemon on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon start --socket "$WORK/short.sock"
+    ;;
+esac
 refuses "a socket path past the kernel's limit, building" "the socket path is" -- \
   "$IYI" daemon build --socket "$long" -o d1 good.iyi
 refuses "no daemon on a socket that is there to take" "no daemon listening on" -- \
@@ -395,8 +504,30 @@ cp app/lib.iyi lib.keep
 refuses "an output that is an imported module" "a file this build read" -- \
   "$IYI" build -o app/lib.iyi user.iyi
 cmp -s app/lib.iyi lib.keep || { echo "  the refusal came after the module was replaced"; status=1; }
+# The same file under another spelling. NTFS and APFS ignore case, and
+# Win32 drops a trailing space, and the refusal compared strings:
+# `-o GOOD.iyi good.iyi` on Windows linked the program over its source,
+# exit 0. Asked only where the file system says the two names are one.
+if [ GOOD.iyi -ef good.iyi ]; then
+  refuses "an output that is the source in another case" "the source it would build from" -- \
+    "$IYI" build -o GOOD.iyi good.iyi
+  cmp -s good.iyi good.keep || { echo "  GOOD.iyi replaced good.iyi"; cp good.keep good.iyi; status=1; }
+  refuses "an output that is an imported module in another case" "a file this build read" -- \
+    "$IYI" build -o app/LIB.iyi user.iyi
+  cmp -s app/lib.iyi lib.keep || { echo "  app/LIB.iyi replaced app/lib.iyi"; cp lib.keep app/lib.iyi; status=1; }
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "an output that is the source with a trailing space" "the source it would build from" -- \
+      "$IYI" build -o "good.iyi " good.iyi
+    cmp -s good.iyi good.keep || { echo "  \"good.iyi \" replaced good.iyi"; cp good.keep good.iyi; status=1; }
+    ;;
+esac
 mkdir -p "$WORK/readonly"
-chmod 500 "$WORK/readonly"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *) chmod 500 "$WORK/readonly" ;;
+esac
 # A directory this process cannot write into. `chmod 500` does not bite as
 # root, which is what CI runs as (see the unreadable module further down,
 # which is `/proc/self/mem` for the same reason): the build really did
@@ -409,12 +540,20 @@ unwritable=""
 # compiler can be sent: handed `/proc/prog` it resolves the name against the
 # current drive and writes the program into `C:\proc`, so the case reported
 # that nothing was refused after the build had quietly succeeded.
+# On Windows the mode bits are not the permission, an ACL is: a deny of
+# write on the directory is what binds there, and the compiler's question -
+# `File.writable?` of a directory - answered yes to it, so the refusal came
+# as the linker's LNK1104 after a whole compilation.
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) candidates="$WORK/readonly" ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /deny "$USERNAME:(WD,AD)" > /dev/null
+    candidates="$WORK/readonly" ;;
   *) candidates="$WORK/readonly /sys /proc" ;;
 esac
+# Asked by writing, not by `test -w`: under Git's shell that reads the
+# mode bits and says yes to a directory an ACL denies.
 for candidate in $candidates; do
-  if [ -d "$candidate" ] && [ ! -w "$candidate" ]; then
+  if [ -d "$candidate" ] && ! (touch "$candidate/.iyi_probe" && rm -f "$candidate/.iyi_probe") 2>/dev/null; then
     unwritable="$candidate"
     break
   fi
@@ -426,7 +565,11 @@ else
   echo "  an output directory that will not take the file: nothing here refuses"
   echo "  this process, so this case had nothing to drive"
 fi
-chmod 700 "$WORK/readonly"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /remove:d "$USERNAME" > /dev/null ;;
+  *) chmod 700 "$WORK/readonly" ;;
+esac
 # And the library the program compiles against. With IYI_PATH pointed
 # somewhere empty, the prelude is not found - and the answer was Crystal's
 # advice about `shards install` and `shard.yml`, to an author whose
@@ -785,12 +928,20 @@ refuses "an empty shard name" "the shard name is empty" -- \
 # `--out` naming a file of mkdir's "File exists". `$unwritable` is the
 # directory found above, since a mode bit does not bind as root.
 if [ -n "$unwritable" ]; then
-  chmod 500 "$WORK/readonly"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /deny "$USERNAME:(WD,AD)" > /dev/null ;;
+    *) chmod 500 "$WORK/readonly" ;;
+  esac
   refuses "a --mods directory that will not take the files" "no permission to write there" -- \
     "$IYI" bind --lib bindhere/lib --mods "$unwritable"
   refuses "a --out directory that will not take the modules" "no permission to write there" -- \
     "$IYI" migrate tree --out "$unwritable"
-  chmod 700 "$WORK/readonly"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w "$WORK/readonly")" /remove:d "$USERNAME" > /dev/null ;;
+    *) chmod 700 "$WORK/readonly" ;;
+  esac
 fi
 # As the author typed it, like `--lib` and `--mods` above: the expanded
 # path was a different string on Windows — 8.3 names long, separators

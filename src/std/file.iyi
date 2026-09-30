@@ -122,6 +122,10 @@ import std/path::{Path}
     fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
     fun GetFileInformationByHandle(handle : Void*, info : BY_HANDLE_FILE_INFORMATION*) : Int32
+    fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
+    fun FindFirstFileW(name : UInt16*, data : Void*) : Void*
+    fun SetFileInformationByHandle(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
+    fun FindClose(handle : Void*) : Int32
     fun CloseHandle(handle : Void*) : Int32
     fun SetFileTime(handle : Void*, creation : Int64*, access : Int64*, write : Int64*) : Int32
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
@@ -681,8 +685,11 @@ class ::File
       @permissions.owner_execute?
     end
 
+    # An identity of 0 is none: Windows answers a path it could not open
+    # with the attributes alone (`info?`), and two such files - different
+    # sizes, different contents - were the same file.
     def same_file?(other : Info) : Bool
-      @dev == other.dev && @ino == other.ino
+      @ino != 0_u64 && @dev == other.dev && @ino == other.ino
     end
   end
 
@@ -788,28 +795,61 @@ class ::File
       # FILE_FLAG_OPEN_REPARSE_POINT (0x200000) off resolves a symlink to its
       # target, which is the whole difference between `stat` and `lstat` here.
       # A path another process holds exclusively opens for neither, and then
-      # the attributes above are the whole answer and the identity stays 0 —
-      # `same_file?` reads two of those as the same file, which is as far as
-      # attribute data can go.
+      # the attributes above are the whole answer and the identity stays 0,
+      # which `same_file?` reads as no identity at all.
       dev = 0_i64
       ino = 0_u64
+      opened = false
+      tag = 0_u32
       open_flags = follow_symlinks ? 0x2000000 : 0x2200000
       handle = Std::File::LibKernel32.CreateFileW(wpath, 0, 0x7, Pointer(Void).new(0_u64), 3, open_flags, Pointer(Void).new(0_u64))
       if handle.address != 0xFFFFFFFFFFFFFFFF_u64
         by_handle = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
         if Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(by_handle)) != 0
+          opened = true
           attrs = by_handle.dwFileAttributes
           size = ((by_handle.nFileSizeHigh.to_u64 << 32) | by_handle.nFileSizeLow.to_u64).to_i64
           write_ticks = ((by_handle.ftLastWriteTimeHigh.to_u64 << 32) | by_handle.ftLastWriteTimeLow.to_u64).to_i64
           dev = by_handle.dwVolumeSerialNumber.to_i64
           ino = (by_handle.nFileIndexHigh.to_u64 << 32) | by_handle.nFileIndexLow.to_u64
+          # FileAttributeTagInfo (9): the attributes, then the tag.
+          if !follow_symlinks && (attrs & 0x400_u32) != 0_u32
+            tag_info = Pointer(UInt32).malloc(2_u64)
+            if Std::File::LibKernel32.GetFileInformationByHandleEx(handle, 9, tag_info.as(Void*), 8_u32) != 0
+              tag = tag_info[1]
+            end
+          end
         end
         Std::File::LibKernel32.CloseHandle(handle)
       end
 
-      # A reparse point is read first: a directory symlink carries the
-      # directory attribute too.
-      file_type = if (attrs & 0x400_u32) != 0_u32
+      # A reparse point is a link only by its tag. Every one used to be
+      # `Symlink`: an app execution alias - `WindowsApps\*.exe` - and a
+      # cloud placeholder, which OneDrive makes of every file it has not
+      # downloaded, answered `file? false`, and `readlink` then refused
+      # them as "not a link". A followed open that succeeded has resolved
+      # every link, so a reparse bit left on its answer is not one; an
+      # unfollowed open, or none, asks the tag: IO_REPARSE_TAG_SYMLINK,
+      # _MOUNT_POINT (a junction) and _LX_SYMLINK (WSL's) are links.
+      link = false
+      if (attrs & 0x400_u32) != 0_u32 && !(follow_symlinks && opened)
+        if !opened
+          entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
+          found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
+          if found.address != 0xFFFFFFFFFFFFFFFF_u64
+            Std::File::LibKernel32.FindClose(found)
+            tag = (entry + 36).as(Pointer(UInt32)).value # dwReserved0
+          end
+        end
+        link = tag == 0xA000000C_u32 || tag == 0xA0000003_u32 || tag == 0xA000001D_u32
+      end
+      # A followed link whose target would not open is a link to nothing
+      # this process can stat, which POSIX `stat` answers with an error.
+      return nil if link && follow_symlinks
+
+      # The link is read first: a directory symlink carries the directory
+      # attribute too.
+      file_type = if link
                     Type::Symlink
                   elsif (attrs & 0x10_u32) != 0_u32
                     Type::Directory
@@ -862,9 +902,43 @@ class ::File
     inf ? inf.symlink? : false
   end
 
+  {% if flag?(:win32) %}
+    # Windows' answer to POSIX `access`: open the path for *access* and see.
+    # The mode `info` reports is made up from the attributes - 0o644 or
+    # 0o755 and the read-only bit - and an ACL is not in it, so a file
+    # this user was denied answered `readable? true` and the read then
+    # panicked. A path another process holds without sharing refuses every
+    # open (ERROR_SHARING_VIOLATION, 32), which says nothing about the
+    # permission, and is answered from the attributes as before.
+    private def self.win_opens?(path : String, access : Int32) : Bool?
+      wide = __iyi_wide_path(sys_path(path))
+      return false if wide.address == 0_u64
+      # Every share right and OPEN_EXISTING, opened the way `File.read`
+      # and `File.write` open it: BACKUP_SEMANTICS only for a directory,
+      # which opens no other way. On a file it would let a process holding
+      # the backup and restore privileges - an elevated administrator's,
+      # a CI runner's - past the ACL, and answer yes about a file the
+      # program's own read is then refused.
+      attributes = Std::File::LibKernel32.GetFileAttributesW(wide)
+      flags = attributes != -1 && (attributes & 0x10) != 0 ? 0x2000000 : 0x80
+      handle = Std::File::LibKernel32.CreateFileW(wide, access, 0x7, Pointer(Void).new(0_u64), 3, flags, Pointer(Void).new(0_u64))
+      if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+        return nil if Std::File::LibKernel32.GetLastError == 32
+        return false
+      end
+      Std::File::LibKernel32.CloseHandle(handle)
+      true
+    end
+  {% end %}
+
   def self.readable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 4) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, -2147483648) # GENERIC_READ
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.readable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.readable? : false
@@ -874,15 +948,32 @@ class ::File
   def self.writable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 2) == 0
+    {% elsif flag?(:win32) %}
+      opened = win_opens?(path.to_s, 0x40000000) # GENERIC_WRITE
+      return opened unless opened.nil?
+      inf = info?(path)
+      inf ? inf.writable? : false
     {% else %}
       inf = info?(path)
       inf ? inf.writable? : false
     {% end %}
   end
 
+  # On Windows a file runs by its extension, one of PATHEXT's - what cmd
+  # and `CreateProcess`'s search go by - and a directory is searchable
+  # when it can be read. `cmd.exe` answered false: the made-up mode gave
+  # the execute bit to directories alone.
   def self.executable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 1) == 0
+    {% elsif flag?(:win32) %}
+      inf = info?(path)
+      return false unless inf
+      return readable?(path) if inf.directory?
+      extension = extname(path).upcase
+      return false if extension.empty?
+      pathext = Program.env("PATHEXT") || ".COM;.EXE;.BAT;.CMD"
+      pathext.upcase.split(';').includes?(extension) && readable?(path)
     {% else %}
       inf = info?(path)
       inf ? inf.executable? : false
@@ -975,6 +1066,41 @@ class ::File
     true
   end
 
+  {% if flag?(:win32) %}
+    # A destination some process has open refuses `MoveFileExW` with
+    # ERROR_ACCESS_DENIED - one this program opened too - where POSIX
+    # `rename` replaces it and the open handle keeps the old file. So the
+    # pattern every config writer uses, write a temporary file and rename
+    # it over the real one, panicked on Windows whenever a reader had the
+    # file. FileRenameInfoEx (22) with FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+    # and _POSIX_SEMANTICS (0x1 | 0x2) is POSIX's rename, on NTFS since
+    # Windows 10 1709; a volume that does not have it refuses, and the
+    # refusal stands. The name is the full path, `\\?\` form past MAX_PATH:
+    # FILE_RENAME_INFO is { UInt32 flags, 4 bytes padding, HANDLE root,
+    # UInt32 length in bytes, UInt16 name[] } on x64.
+    private def self.rename_posix(old_wide : UInt16*, new_path : String) : Bool
+      target = __iyi_wide_path(sys_path(expand_path(new_path)))
+      return false if target.address == 0_u64
+      chars = 0
+      while target[chars] != 0_u16
+        chars = chars + 1
+      end
+      # DELETE (0x10000), every share right, OPEN_EXISTING, a directory or a
+      # link opened as itself (BACKUP_SEMANTICS | OPEN_REPARSE_POINT).
+      handle = Std::File::LibKernel32.CreateFileW(old_wide, 0x10000, 0x7, Pointer(Void).new(0_u64), 3, 0x2200000, Pointer(Void).new(0_u64))
+      return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+      size = 20 + chars * 2 + 2
+      info = Pointer(UInt8).malloc(size.to_u64)
+      info.as(Pointer(UInt32)).value = 0x3_u32
+      (info + 8).as(Pointer(UInt64)).value = 0_u64
+      (info + 16).as(Pointer(UInt32)).value = (chars * 2).to_u32
+      (info + 20).as(Pointer(UInt16)).copy_from(target, chars + 1)
+      done = Std::File::LibKernel32.SetFileInformationByHandle(handle, 22, info.as(Void*), size.to_u32) != 0
+      Std::File::LibKernel32.CloseHandle(handle)
+      done
+    end
+  {% end %}
+
   def self.rename(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1001,15 +1127,18 @@ class ::File
         # goes back when that still refuses, the same shape
         # `__iyi_unlink` and `Dir.delete` have.
         replaced = false
-        if Std::File::LibKernel32.GetLastError == 5
+        code = Std::File::LibKernel32.GetLastError
+        refusal = win_error
+        if code == 5
           attributes = Std::File::LibKernel32.GetFileAttributesW(new_wide)
           if attributes != -1 && (attributes & 1) != 0 &&
              Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes - 1) != 0
             replaced = Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) != 0
             Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes) unless replaced
           end
+          replaced = replaced || rename_posix(old_wide, n)
         end
-        raise "Cannot rename #{o} to #{n}: #{win_error}" unless replaced
+        raise "Cannot rename #{o} to #{n}: #{refusal}" unless replaced
       end
     {% end %}
   end
@@ -1360,7 +1489,15 @@ class ::File
         ni = ni + 1
         pi = pi + 1
       else
-        return false if ni >= nlen || nptr[ni] != pc
+        return false if ni >= nlen
+        # On Windows `/` and `\` are one separator, and `Dir.glob` answers
+        # with either: its own results did not match the pattern that
+        # found them.
+        {% if flag?(:win32) %}
+          return false if nptr[ni] != pc && !((pc == 47_u8 || pc == 92_u8) && (nptr[ni] == 47_u8 || nptr[ni] == 92_u8))
+        {% else %}
+          return false if nptr[ni] != pc
+        {% end %}
         ni = ni + 1
         pi = pi + 1
       end

@@ -283,6 +283,26 @@ module Iyi
     # Empty everywhere else, so a build costs one hash lookup per import.
     property iyi_file_overrides = {} of String => String
 
+    # The buffer for *filename*, asked the way the file system compares:
+    # the resolver spells a nested module `C:\root\calc/lexer.iyi`, with the
+    # module path's own `/`, and the server keys a buffer by the path its
+    # URI names, `C:\root\calc\lexer.iyi`. On Windows the two never met, so
+    # an importer compiled against the disk and not against an unsaved
+    # edit - a rename in the buffer left the importer's verdict clean.
+    # The buffers are the open documents, a handful, so the fold is a scan.
+    def iyi_file_override(filename : String) : String?
+      overrides = @iyi_file_overrides
+      return nil if overrides.empty?
+      if text = overrides[filename]?
+        return text
+      end
+      {% if flag?(:win32) %}
+        key = Iyi.path_key(filename)
+        overrides.each { |path, text| return text if Iyi.path_key(path) == key }
+      {% end %}
+      nil
+    end
+
     # iyi: the project root, when a tool knows better than "the entry
     # file's directory". `iyi lsp` derives it from the file's own module
     # header — IV.6 read backwards: a file whose path ends with its

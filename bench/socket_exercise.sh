@@ -80,7 +80,11 @@ fi
 
 echo
 echo "== every socket check reported"
-for phrase in connect_accept message_exchange short_read closed_peer ipv6 unix timeout; do
+phrases="connect_accept message_exchange short_read closed_peer ipv6 unix timeout closed_under_read"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
+esac
+for phrase in $phrases; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
@@ -362,6 +366,30 @@ refuses "a negative timeout" timeout_negative "negative timeout: -1" \
   "IyiSocket.new(0).read_timeout_ms = -1"
 refuses "an empty unix socket path" unix_empty "a unix socket path is empty" \
   "IyiSocket.connect_unix(\"\").or_panic.to_unsafe"
+# A port somebody listens on is theirs, whichever address either side
+# names. On Windows a bind to 127.0.0.1:P went through while 0.0.0.0:P
+# listened, and the other way round, and the more specific listener took
+# the connections - from another process as readily as from this one.
+# Not darwin's: BSD's SO_REUSEADDR is what lets a bind name an address
+# more specific than a listener's wildcard, by design, and the listener
+# asks for it there as on Linux, which refuses it anyway.
+case "$(uname -s)" in
+  Darwin) echo "  a port held on another address: darwin lets a more specific bind through, by BSD's design; not asked" ;;
+  *)
+    refuses "a port held on every address, bound on one" port_held_any "cannot bind socket to 127.0.0.1:[0-9]*: [a-z]" \
+      "IyiSocket.listen(\"127.0.0.1\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).local_port"
+    refuses "a port held on one address, bound on every one" port_held_one "cannot bind socket to 0.0.0.0:[0-9]*: [a-z]" \
+      "IyiSocket.listen(\"0.0.0.0\", IyiSocket.listen(\"127.0.0.1\", 0).local_port).local_port"
+    ;;
+esac
+# The wildcard a server prints is not an address Windows connects to,
+# and the refusal was "error 10049", a number with no sentence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "a connect to the wildcard address" connect_any "not an address this host can use" \
+      "IyiSocket.connect(\"0.0.0.0\", IyiSocket.listen(\"0.0.0.0\", 0).local_port).or_panic.to_unsafe"
+    ;;
+esac
 refuses "a port asked of a unix socket" unix_port "a unix socket has no port" \
   "IyiSocket.new(0, 1).local_port"
 refuses "a dotted tail past six groups" addr_tail "a dotted tail after more than six groups" \

@@ -25,6 +25,15 @@ def refused(source : String, sentence : String) : Nil
   puts "  #{err}"
 end
 
+# The document `source` reads to, or a failed assertion naming `msg` (not
+# the parser's own panic) when the reader refuses it.
+def reads(source : String, msg : String) : Any
+  parser = Parser.new(source)
+  docs = parser.parse_all
+  raise "ASSERTION FAILED: #{msg}: refused with #{parser.error.inspect}" if docs.nil?
+  docs.size == 0 ? Any.new(nil) : docs[0]
+end
+
 puts "== scalars and collections"
 doc = YAML.parse("a: 1\nb: [true, null, hello]\n")
 assert_true(doc.size == 2, "two keys")
@@ -51,11 +60,25 @@ assert_true(entries.size == 3, "block scalars as sequence entries do not eat the
 assert_str("x\n", entries[0].as_s, "literal entry")
 assert_str("y z", entries[1].as_s, "folded entry")
 assert_true(entries[2].as_i == 2_i64, "the entry after a block scalar")
-assert_str("x\ny\n", YAML.parse("- |\n  x\n  y")[0].as_s, "a literal entry ending the stream without a line break")
+assert_str("x\ny", YAML.parse("- |\n  x\n  y")[0].as_s, "a literal entry ending the stream without a line break keeps no line feed it lacks")
 assert_str("a b", YAML.parse("- a\n  b\n- 2\n")[0].as_s, "a plain scalar folded inside a sequence entry")
 assert_str("x\ny\n", YAML.parse("a:\n  - |\n    x\n    y\n  - 2\n")["a"][0].as_s, "a literal entry in a nested sequence")
 assert_str("1", YAML.parse("!<tag:yaml.org,2002:str> 1\n").as_s, "a verbatim core tag")
+assert_str("?a", reads("?a\n", "a plain scalar may start with '?'").as_s, "a plain scalar may start with '?'")
+assert_str("\na\n", reads(">\n\n  a\n", "a folded scalar keeps its leading empty lines").as_s, "a folded scalar keeps its leading empty lines")
+assert_str("a\n   \nb\n", reads("|\n  a\n     \n  b\n", "spaces past the indentation on a blank line are text").as_s, "spaces past the indentation on a blank line are text")
+assert_str("a\n", reads("|+\n  a\n", "keep chomping adds no line after the stream's last line break").as_s, "keep chomping adds no line after the stream's last line break")
+assert_str("a\t b", reads("\"a\\t\n b\"", "an escaped tab before a folded line break stays").as_s, "an escaped tab before a folded line break stays")
+assert_str("a b", reads("\"a \\\n  b\"", "blanks before an escaped line break stay").as_s, "blanks before an escaped line break stay")
+assert_str("a\nb", reads("\"a\\\n\n  b\"", "an empty line after an escaped line break is a line feed").as_s, "an empty line after an escaped line break is a line feed")
+assert_str("b", reads("[\"a\":b]", "a quoted key in a flow sequence takes an adjacent ':'")[0]["a"].as_s, "a quoted key in a flow sequence takes an adjacent ':'")
+assert_str("a b", reads("[a\n b]", "a plain scalar folds across lines in a flow collection")[0].as_s, "a plain scalar folds across lines in a flow collection")
+assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scalar")["a"].as_s, "a tag over an empty node tags the empty scalar")
+assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
+assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")
+assert_str("", reads("[!!str ]", "properties over nothing in a flow collection are the empty scalar")[0].as_s, "properties over nothing in a flow collection are the empty scalar")
 puts "  integers, floats, null, 1.2 strings, quotes, folded, literal and verbatim tags"
+puts "  '?' plain starts, block scalar blank lines and chomping, quoted folding, flow folding, tags over nothing"
 
 puts "\n== dump round trip"
 again = YAML.parse(YAML.dump(doc))
@@ -68,7 +91,14 @@ assert_str("- a", YAML.parse(YAML.dump(Any.new([Any.new("- a")] of Any)))[0].as_
 merge_key = YAML.parse("\"<<\": 1\n")
 assert_str("\"<<\": 1\n", YAML.dump(merge_key), "the merge key is quoted when dumped as a plain key")
 assert_true(YAML.parse(YAML.dump(merge_key)) == merge_key, "a quoted << key reads back")
+bom = YAML.dump(Any.new("\uFEFF"))
+assert_str("\"\\ufeff\"\n", bom, "a byte order mark is escaped when dumped")
+assert_str("\uFEFF", YAML.parse(bom).as_s, "a dumped byte order mark reads back")
+assert_str("\"\\x80\\u2028\"\n", YAML.dump(Any.new("\u0080\u2028")), "a C1 control and a 1.1 line break are escaped when dumped")
+asked = YAML.parse?(YAML.dump(Any.new("?a")))
+assert_true(!asked.nil? && asked.as_s == "?a", "a dumped string starting with '?' reads back")
 puts "  dump reads back as the same Any; entry-like strings and << are quoted"
+puts "  a byte order mark, C1 controls and 1.1 line breaks are escaped; '?a' reads back"
 
 puts "\n== anchors, aliases, merge"
 anchored = YAML.parse("x: &a [1, 2]\ny: *a\n")
@@ -120,9 +150,15 @@ refused("!!seq {a: 1}\n", "!!seq on a mapping at line 1, column 7")
 refused("\"\\uD800\"\n", "surrogate code point \\uD800 in escape at line 1, column 2")
 refused("- a: b: c\n", "a mapping value is not allowed here at line 1, column 7")
 refused("!<tag:yaml.org,2002:foo> 1\n", "unknown tag !<tag:yaml.org,2002:foo> at line 1, column 1")
+refused("a: - b\n", "a sequence entry is not allowed here at line 1, column 4")
+refused("a: b # c\n  d\n", "unexpected content at line 2, column 3")
+refused("[1,#c\n]\n", "a value was expected at line 1, column 4")
+refused("[? a]\n", "an explicit '?' key is not supported at line 1, column 2")
+refused("[- a]\n", "a sequence entry is not allowed here at line 1, column 2")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
 puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles,"
 puts "  control characters, stray entries, directives, tags, surrogates, alias expansion"
+puts "  entries after a key, text after a comment, '#', '?' and '-' starting a flow node"
 
 puts "\nALL CHECKS PASSED"

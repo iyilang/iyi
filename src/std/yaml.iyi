@@ -30,10 +30,10 @@
 #     `Int64`; `1.5`, `.5`, `7.`, `1e3`, `1.0e+20`, `.inf`, `-.inf`, `.nan`
 #     are `Float64`; a decimal integer past the `Int64` range is read as a
 #     `Float64`; everything else is a `String`. So `yes`, `no`, `on`,
-#     `off`, `0777`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings
-#     here, where a 1.1 reader would make some of them booleans, octal
-#     numbers, or a timestamp. Keys resolve the same way: `1: one` has the
-#     `Int64` key 1, `true: x` the `Bool` key true.
+#     `off`, `1_000`, `1.2.3`, `22:30` and `2001-12-14` are strings here,
+#     and `0777` is the decimal 777, where a 1.1 reader would make some of
+#     them booleans, octal numbers, or a timestamp. Keys resolve the same
+#     way: `1: one` has the `Int64` key 1, `true: x` the `Bool` key true.
 #
 # What it refuses, each with a sentence that says where:
 #   a tab in indentation, a control character, a quoted string that does
@@ -53,8 +53,10 @@
 # `YAML.parse?` answers nil for any of these; `YAML.parse` panics with the
 # sentence. `YAML.dump` writes a value back as block YAML that this parser
 # reads to an equal value: numbers, booleans and nil stay what they are as
-# values and as keys, and a string that would read as something else is
-# quoted. A collection cannot be written as a key.
+# values and as keys, a string that would read as something else is
+# quoted, and a character a reader would not take raw (a control, a byte
+# order mark, a 1.1 line break) is escaped. A collection cannot be written
+# as a key.
 #
 # `Any` holds a document: `raw` is the union, `as_x`/`as_x?` are the
 # pairs, `[]`/`[]?`/`dig`/`dig?` walk it, `==` is structural and `hash`
@@ -960,10 +962,10 @@ pub class Parser
   # then an alias, a quoted or plain scalar, a flow collection, a block
   # scalar, or (after properties alone) the block node on the lines below.
   # Requires the rest of the value's last line to be empty and steps past
-  # it.
-  private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool) : Any
+  # it. `outer_tag` is a tag that stood alone on the line above.
+  private def parse_inline_node(pos : Int32, parent : Int32, sequence_at_parent : Bool, outer_tag : String? = nil) : Any
     anchor = nil.as(String?)
-    tag = nil.as(String?)
+    tag = outer_tag
     anchor_pos = pos
     while true
       b = pos < @ends[@line] ? @bytes[pos] : 0_u8
@@ -991,8 +993,29 @@ pub class Parser
     if line_end?(pos)
       # Properties alone on the line: the node is below.
       @line = @line + 1
-      value = parse_block_node(parent, sequence_at_parent)
-      value = apply_tag(tag, value, anchor_pos)
+      if tag.nil? || tag == "!!seq" || tag == "!!map"
+        value = parse_block_node(parent, sequence_at_parent)
+        value = apply_tag(tag, value, anchor_pos)
+      else
+        # A scalar tag is checked against the text below as written, and
+        # with nothing below it tags the empty scalar. Both went through
+        # the node below once resolved: `a: !!str` was refused as "!!str
+        # on null" and `!!str` over a `1` on the next line as "on an
+        # integer".
+        skip_blank_lines
+        empty = @line >= @starts.size || document_marker?(@line)
+        if !empty && indent_of(@line) <= parent
+          empty = !(sequence_at_parent && indent_of(@line) == parent && sequence_entry?(@line))
+        end
+        if empty
+          value = apply_tag(tag, Any.new(""), anchor_pos)
+        elsif sequence_entry?(@line) || key_colon(@line) >= 0
+          value = apply_tag(tag, parse_block_node(parent, sequence_at_parent), anchor_pos)
+        else
+          refuse_tab(@line)
+          value = parse_inline_node(@heads[@line], parent, sequence_at_parent, tag) if @error.nil?
+        end
+      end
     else
       if pos != anchor_pos
         # Properties in front of what would otherwise be a key: `&a k: v`.
@@ -1045,8 +1068,17 @@ pub class Parser
       expect_line_end(@flow_end)
       return apply_tag(tag, Any.new(text), pos)
     end
-    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || b == 63_u8
+    # `?` and `-` start a plain scalar unless a blank follows them: `?a`
+    # is text (it was refused, and the emitter writes it plain), while
+    # `- b` after a key is a sequence entry where none may start (it was
+    # read as the text "- b").
+    lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
+    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || (b == 63_u8 && lone)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
+      return Any.new(nil)
+    end
+    if b == 45_u8 && lone
+      fail("a sequence entry is not allowed here", pos)
       return Any.new(nil)
     end
     text = parse_plain_block(pos, parent)
@@ -1288,6 +1320,9 @@ pub class Parser
     blanks = 0
     look = @line + 1
     while look < @starts.size
+      # A comment after the text ends the scalar: `a: b # c` over an
+      # indented `d` read as "b d", the comment dropped from its middle.
+      break if skip_blank(@flow_end) < @ends[@line]
       break if document_marker?(look)
       if blank_line?(look)
         # A comment line ends the scalar; whitespace-only lines fold.
@@ -1359,38 +1394,24 @@ pub class Parser
     opener = pos
     @buffer.clear
     at = pos + 1
-    blanks = 0
-    pending_space = false
+    # The buffer's length up to its last byte that folding must keep: a
+    # non-blank, an escape (`\t`, `\ `, `\x20` are text, not trailing
+    # blanks), or what a line break folded to.
+    hard = 0
     while true
       if at >= @ends[@line]
         # The line ended inside the string: fold onto the next line.
-        trim_trailing_blanks
-        look = @line + 1
-        while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
-          blanks = blanks + 1
-          look = look + 1
-        end
-        if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
-          fail("unterminated quoted string", opener)
-          return ""
-        end
-        if blanks == 0
-          @buffer << 32_u8 unless pending_space == false && false
-        else
-          while blanks > 0
-            @buffer << 10_u8
-            blanks = blanks - 1
-          end
-        end
-        pending_space = false
-        @line = look
-        at = skip_blank(@starts[look])
+        trim_trailing_blanks(hard)
+        at = next_quoted_line(opener, parent, flow, false)
+        return "" if @error
+        hard = @buffer.size
         next
       end
       b = @bytes[at]
       if b == quote
         if quote == 39_u8 && at + 1 < @ends[@line] && @bytes[at + 1] == 39_u8
           @buffer << 39_u8
+          hard = @buffer.size
           at = at + 2
           next
         end
@@ -1399,32 +1420,59 @@ pub class Parser
       end
       if quote == 34_u8 && b == 92_u8
         if at + 1 >= @ends[@line]
-          # Escaped line break: join with nothing.
-          trim_trailing_blanks
-          look = @line + 1
-          if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
-            fail("unterminated quoted string", opener)
-            return ""
-          end
-          @line = look
-          at = skip_blank(@starts[look])
+          # Escaped line break: the break is dropped and the blanks before
+          # the backslash stay (they were trimmed), and an empty line
+          # below is still a line feed (it was a refusal or a space).
+          at = next_quoted_line(opener, parent, flow, true)
+          return "" if @error
+          hard = @buffer.size
           next
         end
         at = escape(at)
         return "" if @error
+        hard = @buffer.size
         next
       end
       @buffer << b
+      hard = @buffer.size unless blank_byte?(b)
       at = at + 1
     end
     ""
   end
 
-  private def trim_trailing_blanks : Nil
+  # Past the line break a quoted scalar did not close before: writes what
+  # it folds to (a space, nothing after an escaped break, a line feed per
+  # empty line either way), moves to the next line with text and answers
+  # where that text starts.
+  private def next_quoted_line(opener : Int32, parent : Int32, flow : Bool, escaped : Bool) : Int32
+    blanks = 0
+    look = @line + 1
+    while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
+      blanks = blanks + 1
+      look = look + 1
+    end
+    if look >= @starts.size || document_marker?(look) || (!flow && indent_of(look) <= parent)
+      fail("unterminated quoted string", opener)
+      return 0
+    end
+    if blanks == 0
+      @buffer << 32_u8 unless escaped
+    else
+      while blanks > 0
+        @buffer << 10_u8
+        blanks = blanks - 1
+      end
+    end
+    @line = look
+    skip_blank(@starts[look])
+  end
+
+  # Drops the blanks the buffer ends with, back to `floor` at most.
+  private def trim_trailing_blanks(floor : Int32) : Nil
     # The buffer has no pop; rebuild without trailing blanks.
     text = @buffer.to_s
     count = text.bytesize
-    while count > 0 && blank_byte?(text.to_unsafe[count - 1])
+    while count > floor && blank_byte?(text.to_unsafe[count - 1])
       count = count - 1
     end
     return if count == text.bytesize
@@ -1543,13 +1591,23 @@ pub class Parser
     if explicit > 0
       indent = parent < 0 ? explicit : parent + explicit
     else
+      # The first line with text sets the indentation, or an empty line
+      # before it with more spaces: the text line is then less indented
+      # and ends the scalar (a comment there is a trailing comment). Only
+      # the text line counted, and the empty lines' extra spaces went
+      # missing (see below).
       look = @line + 1
       while look < @starts.size
         content = skip_blank(@starts[look])
         if content < @ends[look]
-          indent = content - @starts[look]
+          indent = content - @starts[look] if content - @starts[look] > indent
           break
         end
+        spaces = 0
+        while @starts[look] + spaces < @ends[look] && @bytes[@starts[look] + spaces] == 32_u8
+          spaces = spaces + 1
+        end
+        indent = spaces if spaces > indent
         look = look + 1
       end
       floor = parent + 1
@@ -1566,7 +1624,11 @@ pub class Parser
       while start + spaces < finish && @bytes[start + spaces] == 32_u8
         spaces = spaces + 1
       end
-      if start + spaces >= finish
+      # A line of spaces past the indentation is text (those spaces); it
+      # was read as an empty line. The line after a final line break is
+      # no line at all; read as one, it added a line feed under `+`.
+      if start + spaces >= finish && spaces <= indent
+        break if finish >= @size
         lines << ""
         look = look + 1
         next
@@ -1607,7 +1669,13 @@ pub class Parser
         end
         more = blank_byte?(text.to_unsafe[0])
         if first
+          # Empty lines before the first text are line feeds; they were
+          # dropped.
           first = false
+          while blanks > 0
+            @buffer << 10_u8
+            blanks = blanks - 1
+          end
         elsif previous_more || more
           @buffer << 10_u8
           while blanks > 0
@@ -1627,14 +1695,18 @@ pub class Parser
         @buffer << text
       end
     end
+    # The final line break is the one after the last text line: a stream
+    # that ends on that line has none to keep or clip, and `|` over `x`
+    # with no line break after it is "x", not "x\n".
+    final = lines.size > 0 && @ends[last_content] < @size
     if chomp == 1
-      @buffer << 10_u8 if lines.size > 0
+      @buffer << 10_u8 if final
       while trailing > 0
         @buffer << 10_u8
         trailing = trailing - 1
       end
     elsif chomp == 0
-      @buffer << 10_u8 if lines.size > 0
+      @buffer << 10_u8 if final
     end
     Any.new(@buffer.to_s)
   end
@@ -1686,7 +1758,10 @@ pub class Parser
       item = parse_flow_node(pos)
       break if @error
       pos = skip_flow_space(@flow_end)
-      if pos >= 0 && @bytes[pos] == 58_u8 && value_indicator?(pos, true, @ends[@line])
+      # After a quoted key the `:` needs no blank, as in a flow mapping:
+      # `["a":b]` was refused.
+      quoted_key = @bytes[item_pos] == 34_u8 || @bytes[item_pos] == 39_u8
+      if pos >= 0 && @bytes[pos] == 58_u8 && (quoted_key || value_indicator?(pos, true, @ends[@line]))
         # `[key: value]`: a one-pair mapping.
         pair = Hash(Any, Any).new
         pos = skip_flow_space(pos + 1)
@@ -1849,22 +1924,74 @@ pub class Parser
       name = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
       value = resolve_alias(name, pos)
       @flow_end = finish
-    elsif b == 44_u8 || b == 93_u8 || b == 125_u8 || b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 124_u8 || b == 62_u8
+    elsif (b == 44_u8 || b == 93_u8 || b == 125_u8) && !(anchor.nil? && tag.nil?)
+      # Properties over nothing are the empty scalar: `[!!str ]` is [""]
+      # and `[&a ]` is [nil]. They were refused as a missing value.
+      value = tag.nil? ? Any.new(nil) : Any.new("")
+      @flow_end = pos
+    elsif (b == 63_u8 || b == 45_u8) && (pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1]) ||
+          (b == 63_u8 && (@bytes[pos + 1] == 44_u8 || @bytes[pos + 1] == 93_u8 || @bytes[pos + 1] == 125_u8)))
+      # `[? a]` is an explicit key and `[- a]` a block entry where none
+      # may be; both were read as the strings "? a" and "- a".
+      if b == 63_u8
+        fail("an explicit '?' key is not supported", pos)
+      else
+        fail("a sequence entry is not allowed here", pos)
+      end
+    elsif b == 44_u8 || b == 93_u8 || b == 125_u8 || b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 124_u8 || b == 62_u8 || b == 35_u8
+      # A `#` with no blank before it is no comment, and no scalar starts
+      # with it either: `[1,#c` read the string "#c".
       fail("a value was expected", pos)
     else
-      stop = plain_piece_end(pos, true)
-      if stop == pos
+      if plain_piece_end(pos, true) == pos
         fail("a value was expected", pos)
       else
-        text = String.new(stop - pos) { |t| t.copy_from(@bytes + pos, stop - pos) }
+        text = parse_plain_flow(pos)
         value = tag.nil? ? Scalar.resolve(text) : Any.new(text)
-        @flow_end = stop
       end
     end
     return Any.new(nil) if @error
     value = apply_tag(tag, value, anchor_pos)
     close_anchor(anchor, value)
     value
+  end
+
+  # A plain scalar in a flow collection, folded across the lines below
+  # while each line it is on ends with it: a space, or a line feed per
+  # empty line, as in block context. A comment, a flow indicator or a
+  # value indicator ends it. It stopped at the line end, so `[a\n b]`
+  # was refused for want of a `,`. Leaves `@flow_end` after it.
+  private def parse_plain_flow(pos : Int32) : String
+    @buffer.clear
+    stop = plain_piece_end(pos, true)
+    @buffer.append(@bytes + pos, stop - pos)
+    @flow_end = stop
+    while skip_blank(stop) >= @ends[@line]
+      blanks = 0
+      look = @line + 1
+      while look < @starts.size && !document_marker?(look) && skip_blank(@starts[look]) >= @ends[look]
+        blanks = blanks + 1
+        look = look + 1
+      end
+      break if look >= @starts.size || document_marker?(look)
+      start = skip_blank(@starts[look])
+      b = @bytes[start]
+      break if b == 35_u8 || b == 44_u8 || b == 91_u8 || b == 93_u8 || b == 123_u8 || b == 125_u8
+      break if b == 58_u8 && value_indicator?(start, true, @ends[look])
+      @line = look
+      stop = plain_piece_end(start, true)
+      if blanks == 0
+        @buffer << 32_u8
+      else
+        while blanks > 0
+          @buffer << 10_u8
+          blanks = blanks - 1
+        end
+      end
+      @buffer.append(@bytes + start, stop - start)
+      @flow_end = stop
+    end
+    @buffer.to_s
   end
 
   # ------------------------------------------------------------------
@@ -2047,6 +2174,7 @@ class Emitter
     while i < size
       b = bytes[i]
       return false if b < 32_u8 || b == 127_u8
+      return false if b >= 0x80_u8 && escaped_point(bytes, i, size) >= 0
       if b == 58_u8 && (i + 1 == size || blank_byte?(bytes[i + 1]))
         return false
       end
@@ -2087,6 +2215,19 @@ class Emitter
         buffer << "\\x"
         buffer << hex_digit(b.to_i32 >> 4)
         buffer << hex_digit(b.to_i32 & 15)
+      elsif b >= 0x80_u8 && escaped_point(bytes, i, text.bytesize) >= 0
+        point = escaped_point(bytes, i, text.bytesize)
+        if point < 0x100
+          buffer << "\\x"
+          i = i + 1
+        else
+          buffer << "\\u"
+          buffer << hex_digit(point >> 12)
+          buffer << hex_digit((point >> 8) & 15)
+          i = i + 2
+        end
+        buffer << hex_digit((point >> 4) & 15)
+        buffer << hex_digit(point & 15)
       else
         buffer << b
       end
@@ -2094,6 +2235,26 @@ class Emitter
     end
     buffer << 34_u8
     buffer.to_s
+  end
+
+  # The character at `i`, when it is one written as an escape though it
+  # is not ASCII: a C1 control U+0080 to U+009F and the non-characters
+  # U+FFFE and U+FFFF (not printable, so a reader refuses them raw),
+  # U+FEFF (a byte order mark, dropped at the start of a stream: the
+  # string "\uFEFF" read back as null), and U+0085, U+2028 and U+2029
+  # (line breaks to a YAML 1.1 reader). Its code point, or -1.
+  private def escaped_point(bytes : Pointer(UInt8), i : Int32, size : Int32) : Int32
+    b = bytes[i]
+    if b == 0xC2_u8 && i + 1 < size && bytes[i + 1] >= 0x80_u8 && bytes[i + 1] <= 0x9F_u8
+      return bytes[i + 1].to_i32
+    end
+    return -1 unless i + 2 < size
+    c = bytes[i + 1]
+    d = bytes[i + 2]
+    return d.to_i32 - 0xA8 + 0x2028 if b == 0xE2_u8 && c == 0x80_u8 && (d == 0xA8_u8 || d == 0xA9_u8)
+    return 0xFEFF if b == 0xEF_u8 && c == 0xBB_u8 && d == 0xBF_u8
+    return d.to_i32 - 0xBE + 0xFFFE if b == 0xEF_u8 && c == 0xBF_u8 && (d == 0xBE_u8 || d == 0xBF_u8)
+    -1
   end
 
   private def hex_digit(value : Int32) : UInt8

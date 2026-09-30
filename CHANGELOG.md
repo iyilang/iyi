@@ -142,6 +142,25 @@
 
 ### Fixed
 
+- **`std/yaml` reads and writes fifteen things as YAML 1.2 and libyaml
+  do.** Read: a plain scalar may start with `?` (`?a`), and its dump now
+  reads back; a folded scalar keeps its leading empty lines, a literal
+  one the spaces of a line past its indentation, and `|+` no phantom
+  line at the end of input, where a block scalar ending without a line
+  break gets none either; escaped blanks survive a fold (`"a\t\n b"` is
+  `a\t b`) and an escaped line break is folded as the spec says; a
+  quoted key pairs in a flow sequence (`["a":b]`), a plain scalar folds
+  across lines in flow, a tag alone on its line applies to the empty or
+  the written scalar below, and `[!!str ]` is the empty string. Refused
+  where it was misread: `a: - b`, a comment inside a folded plain
+  scalar (it had been dropped from the value), `[1,#c]`, `[- a]` and
+  `[? a]`. Written: the BOM, C1 controls, U+FFFE, U+FFFF, U+0085, U+2028
+  and U+2029 are escaped - the dump had written them raw, read the BOM
+  back as nothing, and 17,433 dumps of 200,000 were refused by libyaml.
+  200,000 streams, as many mutated, 200,000 dumped trees and 400,000
+  scalars against libyaml and the 1.2 core schema found these; the yaml
+  exercise checks each and proves each check fails with its fix undone.
+
 - **`std/regex` answers as RE2 does in seven places, and its gate's
   proofs test something.** The fast path read `[0-\x34]` as `0` to `\`
   plus `x`, `3` and `4`; `\012` was NUL then `12`, not a newline; `{2}`,

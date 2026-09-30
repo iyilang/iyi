@@ -263,6 +263,25 @@ assert_true Math.gcd(12, 18) == 6, "gcd(12, 18)"
 assert_true Math.lcm(-4, 6) == 12, "lcm(-4, 6)"
 puts "  fma rounds once; min/max symmetric in NaN and the zeros; gcd at the minimum"
 
+# The other library's integer and exponent helpers, with C's answers at
+# the edges: ilogb of zero and NaN is the least Int32, of an infinity the
+# greatest, and a subnormal's exponent is its own.
+puts "\n== isqrt, pw2ceil, ilogb, logb, scalbn, scalbln"
+assert_true Math.isqrt(0) == 0 && Math.isqrt(15) == 3 && Math.isqrt(16) == 4, "isqrt of small numbers"
+assert_true Math.isqrt(9223372036854775807_i64) == 3037000499_i64, "isqrt of Int64's largest"
+assert_true Math.pw2ceil(33) == 64 && Math.pw2ceil(64) == 64 && Math.pw2ceil(-5) == 1, "pw2ceil"
+assert_true Math.pw2ceil(1073741824) == 1073741824 && Math.pw2ceil(100_i64) == 128_i64, "pw2ceil at the top and in Int64"
+assert_true Math.ilogb(0.0) == -2147483648 && Math.ilogb(NAN) == -2147483648 && Math.ilogb(INF) == 2147483647, "ilogb's specials"
+assert_true Math.ilogb(5e-324) == -1074 && Math.ilogb(-8.0) == 3 && Math.ilogb(0.75) == -1, "ilogb"
+assert_same -INF, Math.logb(0.0), "logb(0)"
+assert_same INF, Math.logb(-INF), "logb(-inf)"
+assert_same -1074.0, Math.logb(5e-324), "logb of the least subnormal"
+assert_same 12.0, Math.scalbn(1.5, 3), "scalbn"
+assert_same 5e-324, Math.scalbn(1.0, -1074), "scalbn to the least subnormal"
+assert_same INF, Math.scalbln(1.0, 5000000000_i64), "scalbln past Int32"
+assert_same 0.0, Math.scalbln(1.0, -5000000000_i64), "scalbln below Int32"
+puts "  the integer root and power of two in the value's type, the exponent functions as C answers them"
+
 puts "\n== the Float32 overloads"
 assert_str "0.84147096", Math.sin(1.0_f32).to_s, "sin(1_f32)"
 assert_str "1.0", Math.min(1.0_f32, 2.0_f32).to_s, "min of singles"

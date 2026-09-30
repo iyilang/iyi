@@ -10317,4 +10317,95 @@ pub struct Math
     return (a - a) if a == 0 || b == 0
     (a.abs // gcd(a, b)) * b.abs
   end
+
+  # The largest r with r * r <= value, in the value's own type, by the
+  # other library's bit-at-a-time method. A negative value panics, where
+  # that library raises.
+  def self.isqrt(value : ::Int) : ::Int
+    raise "Input must be non-negative integer" if value < 0
+    return value if value < 2
+    res = value - value
+    bit = (res + 1) << (res.leading_zeros_count - 2)
+    bit = bit >> (value.leading_zeros_count & ~0x3)
+    while bit != 0
+      if value >= res + bit
+        value = value - (res + bit)
+        res = (res >> 1) + bit
+      else
+        res = res >> 1
+      end
+      bit = bit >> 2
+    end
+    res
+  end
+
+  # The least power of two not below v, 1 for v <= 1, in v's type; one
+  # the type cannot hold panics "arithmetic overflow".
+  def self.pw2ceil(v : ::Int) : ::Int
+    one = v - v + 1
+    return one if v <= 1
+    power = one << ((v - v).leading_zeros_count - (v - 1).leading_zeros_count)
+    raise "arithmetic overflow" if power < v
+    power
+  end
+
+  # The exponent of value as an integer, as C's ilogb and glibc answer it:
+  # a subnormal's true exponent, -2147483648 for zero and NaN, 2147483647
+  # for an infinity.
+  def self.ilogb(value : Float64) : Int32
+    return -2147483648 if value == 0.0 || value != value
+    return 2147483647 if value == 2.0 * value
+    frexp(value)[1] - 1
+  end
+
+  def self.ilogb(value : Float32) : Int32
+    ilogb(value.to_f64)
+  end
+
+  def self.ilogb(value : T) : Int32 forall T
+    ilogb(value.to_f64)
+  end
+
+  # The exponent of value as a double: -inf for zero, +inf for an
+  # infinity, NaN for NaN, as C's logb.
+  def self.logb(value : Float64) : Float64
+    return -1.0 / 0.0 if value == 0.0
+    return value * value if value != value || value == 2.0 * value
+    ilogb(value).to_f64
+  end
+
+  def self.logb(value : Float32) : Float32
+    logb(value.to_f64).to_f32
+  end
+
+  def self.logb(value : T) : Float64 forall T
+    logb(value.to_f64)
+  end
+
+  # value * 2^exp, rounded once: `ldexp` under C's other name.
+  def self.scalbn(value : Float64, exp : Int32) : Float64
+    ldexp(value, exp)
+  end
+
+  def self.scalbn(value : Float32, exp : Int32) : Float32
+    ldexp(value.to_f64, exp).to_f32
+  end
+
+  def self.scalbn(value : T, exp : U) : Float64 forall T, U
+    ldexp(value.to_f64, exp.to_i32)
+  end
+
+  # scalbn with an Int64 exponent: past the range an Int32 holds every
+  # answer is zero or an infinity already, so the exponent is clamped.
+  def self.scalbln(value : Float64, exp : Int64) : Float64
+    ldexp(value, exp > 100000_i64 ? 100000 : (exp < -100000_i64 ? -100000 : exp.to_i32))
+  end
+
+  def self.scalbln(value : Float32, exp : Int64) : Float32
+    scalbln(value.to_f64, exp).to_f32
+  end
+
+  def self.scalbln(value : T, exp : U) : Float64 forall T, U
+    scalbln(value.to_f64, exp.to_i64)
+  end
 end

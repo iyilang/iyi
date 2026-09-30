@@ -365,7 +365,7 @@ fi
 
 echo
 echo "== every math section reported"
-for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "== exp, exp2, expm1, log1p" "== pow" "== atan, atan2, asin, acos" "== the hyperbolic functions and hypot, cbrt" "== gamma, lgamma" "== erf, erfc" "== fma, min, max, gcd" "== the Float32 overloads"; do
+for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "== exp, exp2, expm1, log1p" "== pow" "== atan, atan2, asin, acos" "== the hyperbolic functions and hypot, cbrt" "== gamma, lgamma" "== erf, erfc" "== fma, min, max, gcd" "== isqrt, pw2ceil, ilogb, logb, scalbn, scalbln" "== the Float32 overloads"; do
   if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -548,6 +548,8 @@ mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scal
 mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
 mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
+mutate "isqrt without halving its root" '        res = (res >> 1) + bit' '        res = res + bit'
+mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)[1]'
 mutate "gcd on the positive side" 'x = a > 0 ? -a : a' 'x = a.abs'
 
 echo

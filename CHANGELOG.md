@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- **`Math.isqrt`, `pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln`.** Six
+  of the ten names Crystal's `Math` has and iyi's did not. `isqrt` and
+  `pw2ceil` answer in the argument's own integer type, the root by the
+  other library's bit-at-a-time method; a negative `isqrt` and a power of
+  two the type cannot hold panic, where that library raises. `ilogb` and
+  `logb` answer as C does at the edges - the least `Int32` for zero and
+  NaN, the greatest for an infinity, -inf from `logb(0)`, a subnormal's
+  own exponent - and `scalbn` is `ldexp`, `scalbln` its Int64 form. The
+  math exercise checks each at its edges and proves the checks fail with
+  the root not halved and the exponent one too high.
+
 ### Changed
 
 - **`Math.fma` without FMA hardware is three to four times as fast.**

@@ -262,21 +262,30 @@
   end
 
   # ── The stop-the-world mark over the same chain, for the pause ────────
+  # In a frame of its own, so the chain dies with it. Held by a top-level
+  # local until the moves below assigned it again, the chain's head sat
+  # in a slot the Windows build kept, and the small live set's check
+  # found 200,000 cells alive beside it.
+  @[NoInline]
+  def stw_pause_over_chain : UInt64
+    chain = build_chain(1_u64)
+    IyiMark.collect
+    IyiMark.collect
+    stw_pauses = 0_u64
+    round = 0
+    while round < 5
+      started = IyiMark.pause_total_ns
+      IyiMark.collect
+      stw_pauses = stw_pauses + (IyiMark.pause_total_ns - started)
+      round = round + 1
+    end
+    fail("the chain's tail lost its payload under a stop-the-world mark") unless tail(chain).payload.is_a?(Payload)
+    stw_pauses.unsafe_div(5_u64)
+  end
+
   IyiMark.auto = false
   IyiMark.workers = 0_u64
-  chain = build_chain(1_u64)
-  IyiMark.collect
-  IyiMark.collect
-  stw_pauses = 0_u64
-  round = 0
-  while round < 5
-    started = IyiMark.pause_total_ns
-    IyiMark.collect
-    stw_pauses = stw_pauses + (IyiMark.pause_total_ns - started)
-    round = round + 1
-  end
-  stw_mean = stw_pauses.unsafe_div(5_u64)
-  fail("the chain's tail lost its payload under a stop-the-world mark") unless tail(chain).payload.is_a?(Payload)
+  stw_mean = stw_pause_over_chain
 
   # ── A barrier that runs after its mark has ended ──────────────────────
   # A store reads the marking flag and its barrier runs after it, and a
@@ -311,6 +320,11 @@
   IyiMark.auto = false
   small = Array(Payload).new(2000) { |index| Payload.new(index.to_u64) }
   IyiMark.collect
+  small_live = IyiMark.bytes_marked
+  # What the mark found is the premise: anything else still alive makes
+  # the live set large, and a mark over it goes beside the program as it
+  # should.
+  fail("small: the live set is #{small_live.to_i64} bytes, not two thousand payloads: something else is still alive") if small_live > 2097152_u64
   IyiMark.auto = true
   small_collections = IyiMark.collections
   small_beside = IyiMark.concurrent_collections
@@ -322,9 +336,9 @@
   small_collections = IyiMark.collections - small_collections
   small_beside = IyiMark.concurrent_collections - small_beside
   fail("small: eight budgets of churn triggered no collection") if small_collections == 0_u64
-  fail("small: #{small_beside.to_i64} of #{small_collections.to_i64} collections over #{IyiMark.kept.to_i64} live objects ran beside the program") if small_beside != 0_u64
+  fail("small: #{small_beside.to_i64} of #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes ran beside the program") if small_beside != 0_u64
   fail("small: a payload of the live set came back wrong") unless small[1999].seed == 1999_u64 && small[1999].intact?
-  puts "small: #{small_collections.to_i64} collections over #{IyiMark.kept.to_i64} live objects, every one finished in its stop"
+  puts "small: #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes, every one finished in its stop"
 
   # ── The moves, under marks beside the program ─────────────────────────
   IyiMark.workers = 15_u64

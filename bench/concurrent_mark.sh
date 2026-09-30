@@ -4,11 +4,12 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Seven steps, the last four failure proofs:
+# Eight steps, the last five failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
-#      after the collection.
+#      after the collection; and large blocks outgrown by `realloc` under
+#      a running mark stay mapped beside the helpers, and are freed after.
 #   2. The pauses, printed: the stop-the-world mark over the same chain
 #      against a concurrent collection's two stops, and the longest the
 #      program's thread spent waking the helpers, which on Windows is
@@ -25,10 +26,14 @@
 #   5. Failure proof: the barrier's own look at the marking flag removed;
 #      a barrier run after its mark ended grays a holder, the next mark
 #      sweeps the payload it held, and the program exits 1 saying so.
-#   6. Failure proof, on Windows: the helpers given back the boost a
+#   6. Failure proof: `free`'s look at the mark removed; a large block
+#      outgrown under a mark is unmapped beside the helpers at once, which
+#      is how a helper walking the large list faulted, and the program
+#      exits 1 saying so.
+#   7. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#   7. Failure proof, on Windows: the cap on the helpers beside a busy
+#   8. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
 set -u
 
@@ -71,7 +76,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
-grep -E '^(stray|small|moves|pause|wake|share):' answers.txt | sed 's/^/  /'
+grep -E '^(stray|small|moves|pause|large|wake|share):' answers.txt | sed 's/^/  /'
 
 # What the machine takes away on its own: a thread per core that reads the
 # clock and does nothing else - no allocation, so no collection - for a
@@ -162,6 +167,22 @@ if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.tx
   echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
+
+step "failure proof: a large block outgrown under a mark is unmapped beside the helpers"
+mkdir -p unmapped/iyi
+cp "$REPO"/src/iyi/*.iyi unmapped/iyi/
+awk '{ if (sub(/free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8/, "free_large(pointer.address - HEADER)")) found = 1; print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > unmapped/iyi/prelude.iyi || { echo "the look at the mark this proof removes is not in the prelude any more"; exit 1; }
+cmp -s unmapped/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
+  cat build-unmapped.log; exit 1
+fi
+timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "large: a block outgrown under a mark was unmapped" unmapped.txt; then
+  echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 'large: a block outgrown' unmapped.txt)"
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi

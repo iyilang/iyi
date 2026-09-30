@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A program no longer faults when it outgrows a large buffer beside a
+  mark.** `realloc` past 1 MiB frees the large chunk it outgrew, and that
+  unlinked and unmapped it at once, under the lock; the mark's helpers
+  walk the large list without it - for every scanned word no arena holds
+  - and may have the chunk queued. A helper read the unmapped node's link
+  and the program died of SIGSEGV: one run in four of a program that
+  parsed 200,000 semantic versions and joined a 4 MB report, found by the
+  semantic_version fuzz and caught in a core dump; `-Dgc_none` and
+  `-Dgc_boehm` never faulted. Under a running mark the chunk stays mapped
+  and listed and the sweep after the mark frees it: 0 faults in 60 runs.
+  `bench/concurrent_mark.sh` outgrows blocks under marks, requires each
+  one listed while its mark runs and every one freed after, and proves
+  the check fails with `free`'s look at the mark removed.
+
 - **Two `SemanticVersion`s compare.** `<=>` was declared on the struct
   with `other : self` and again in `impl Comparable`, whose body is `self
   <=> other`; the impl's definition replaced the struct's and called
@@ -12679,7 +12693,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,950-line library and nothing else. Every other
+  written against iyi's own 18,959-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

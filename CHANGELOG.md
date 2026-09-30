@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **`std/hpack` follows a SETTINGS change, and refuses where it
+  panicked.** Setting `protocol_max_table_size` on a `Decoder` or an
+  `Encoder` wrote the codec's field and never the dynamic table's, so a
+  raised limit still refused a size update to it ("exceeds protocol limit
+  4096"), and a lowered one neither shrank the encoder's table nor sent
+  the size update RFC 7541 4.2 requires - the peer's table stayed above
+  the new limit. The decoder counted a header list in Int32 and panicked
+  "arithmetic overflow" on 600 KB of input once the limits were set to
+  Int32's largest; `Huffman.decode`'s bound check and
+  `Huffman.encoded_size` overflowed the same way; and `Integer.decode`
+  read a negative offset from the end. Found against a decoder written
+  from RFC 7541 - Appendix C verbatim, 280,000 blocks, every integer
+  prefix and Huffman code - and none after; `std/digest` agreed with
+  Python's `hashlib` and `zlib` everywhere. The hpack exercise checks
+  each and proves each check fails with its fix undone.
+
 - **`std/text` treats a string as characters in six places it treated as
   bytes or got wrong.** `squeeze` compared bytes: `"耀".squeeze` dropped a
   continuation byte and answered invalid UTF-8, and `"ééé"` stayed three.

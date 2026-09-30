@@ -711,4 +711,67 @@ assert_int(222, dec_c5.dynamic_table.size, "C.5.2 dynamic size 222")
 
 puts "  overflow is HpackError, two size updates evict, mid-block size refused, C.5.1-C.5.2 match"
 
+# ===========================================================================
+# 10. SETTINGS changes, caller bounds, counts past Int32
+# ===========================================================================
+puts "\n== SETTINGS changes, caller bounds, counts past Int32"
+
+# SETTINGS_HEADER_TABLE_SIZE raised after the codec was made: a size up to
+# the new limit is the peer's to use (RFC 7541 6.3).
+dec_up = Decoder.new
+dec_up.protocol_max_table_size = 8192
+up = [] of UInt8
+Integer.encode(8192_u64, 5, 0x20_u8, up)
+up_r = dec_up.decode(Bytes.new(up.size) { |i| up[i] })
+assert_true(!up_r.is_a?(HpackError), "decoder takes a raised SETTINGS")
+assert_int(8192, dec_up.dynamic_table.max_size, "decoder takes a raised SETTINGS")
+enc_up = Encoder.new
+enc_up.protocol_max_table_size = 8192
+assert_true(!enc_up.set_max_table_size(8192).is_a?(HpackError), "encoder takes a raised SETTINGS")
+assert_int(8192, enc_up.dynamic_table.max_size, "encoder takes a raised SETTINGS")
+
+# Lowered: the encoder's table follows and says so at the next block
+# (RFC 7541 4.2), also when its own size was already below the new limit,
+# since the peer's table is the size the old limit let it start at.
+enc_dn = Encoder.new(use_huffman: false)
+dec_dn = Decoder.new
+dec_dn.decode(enc_dn.encode([HeaderField.new("x-long-header-name", "some value that is long enough")]))
+enc_dn.protocol_max_table_size = 100
+dec_dn.protocol_max_table_size = 100
+w_dn = enc_dn.encode([HeaderField.new("x-long-header-name", "some value that is long enough")])
+assert_u8(0x3f_u8, w_dn[0], "lowered SETTINGS is signalled")
+assert_u8(0x45_u8, w_dn[1], "lowered SETTINGS is signalled")
+assert_true(!dec_dn.decode(w_dn).is_a?(HpackError), "lowered SETTINGS is signalled")
+assert_int(100, dec_dn.dynamic_table.max_size, "lowered SETTINGS is signalled")
+enc_sm = Encoder.new(max_table_size: 64, protocol_max_table_size: 65536)
+enc_sm.protocol_max_table_size = 4096
+assert_bytes([0x3f_u8, 0x21_u8], enc_sm.encode([] of HeaderField), "lowered SETTINGS is signalled below it too")
+puts "  a raised or lowered SETTINGS reaches both tables and is signalled"
+
+# A caller's offset or length out of bounds is an HpackError: a negative
+# offset read the last byte, and a length near Int32's largest overflowed.
+ib = Bytes.new(2) { |i| 0x0a_u8 }
+assert_true(Integer.decode(ib, -1, 5).is_a?(HpackError), "negative integer offset refused")
+hb = Bytes.new(4) { |i| 0xff_u8 }
+assert_true(Huffman.decode(hb, 2, 2147483647).is_a?(HpackError), "huffman length past Int32 refused")
+puts "  a Huffman length past Int32 is refused"
+
+# With no list or count limit, one 4,064-octet entry indexed 600,000 times
+# passes Int32 octets: counted and refused, not an overflow panic.
+big = [] of UInt8
+big << 0x40_u8
+Integer.encode(1_u64, 7, 0_u8, big)
+big << 'a'.ord.to_u8
+Integer.encode(4031_u64, 7, 0_u8, big)
+4031.times { big << 'v'.ord.to_u8 }
+600000.times { big << 0xbe_u8 }
+big_r = Decoder.new(4096, 4096, 2147483647, 2147483647).decode(Bytes.new(big.size) { |i| big[i] })
+raise "ASSERTION FAILED: list past Int32 octets must be refused" unless big_r.is_a?(HpackError)
+assert_str("Decompression bomb: decoded header list exceeds 2147483647 octets", big_r.message, "list past Int32 octets refused")
+puts "  a header list past Int32 octets is counted"
+
+# Thirty bits a byte: 71,582,789 newlines are 2,147,483,670 bits.
+assert_true(Huffman.encoded_size("\n" * 71582789) == 268435459, "huffman size past Int32 bits")
+puts "  a Huffman size past Int32 bits is counted"
+
 puts "\nALL CHECKS PASSED"

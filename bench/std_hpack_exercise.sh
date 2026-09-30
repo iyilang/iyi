@@ -88,7 +88,8 @@ for phrase in "== RFC 7541 integer codec" \
               "== table size update" \
               "== realistic round trip" \
               "== decoder refusals on malformed and truncated wire" \
-              "== overflow, two size updates, mid-block size, C.5"; do
+              "== overflow, two size updates, mid-block size, C.5" \
+              "== SETTINGS changes, caller bounds, counts past Int32"; do
   if ! grep -q "$phrase" "$WORK/hpack-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -151,6 +152,88 @@ PY
     echo "  a missing two-size-update is caught"
   fi
 fi
+
+# Each fix below undone in a copy must be caught where its check says: an
+# assertion by its message, an overflow by the panic before its own line.
+fix_proof() { # fix_proof <label> <name> <phrase> <line it must not reach> <old> <new> [<old> <new>]...
+  local label="$1" name="$2" phrase="$3" unreached="$4"
+  shift 4
+  if [ -z "$PY" ]; then
+    echo "  skipped: no working python3, so $label is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$name/std"
+  if ! "$PY" - "$@" <<PY
+import sys
+from pathlib import Path
+src = Path("$REPO/src/std/hpack.iyi").read_text()
+pairs = sys.argv[1:]
+for k in range(0, len(pairs), 2):
+    if pairs[k] not in src:
+        raise SystemExit("patch site missing: " + pairs[k])
+    src = src.replace(pairs[k], pairs[k + 1])
+Path("$WORK/$name/std/hpack.iyi").write_text(src)
+PY
+  then
+    echo "  the patch for $label did not apply"
+    status=1
+  elif IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpack_exercise.iyi" >"$WORK/$name.out" 2>&1; then
+    echo "  the exercise PASSED with $label"
+    status=1
+  elif grep -qF -- "$phrase" "$WORK/$name.out" && { [ -z "$unreached" ] || ! grep -qF -- "$unreached" "$WORK/$name.out"; }; then
+    echo "  $label is caught"
+  else
+    echo "  $label failed, but not at '$phrase':"
+    tail -2 "$WORK/$name.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+fix_proof "a decoder SETTINGS the table never hears" fix_dec_settings \
+  "decoder takes a raised SETTINGS" "" \
+  '    @dynamic_table.settings_max_size = limit
+  end
+
+  def decode(' \
+  '  end
+
+  def decode('
+fix_proof "an encoder SETTINGS the table never hears" fix_enc_settings \
+  "encoder takes a raised SETTINGS" "" \
+  '    @dynamic_table.settings_max_size = limit
+    if lowered' \
+  '    if lowered'
+fix_proof "a lowered SETTINGS left unsignalled" fix_enc_lowered \
+  "lowered SETTINGS is signalled" "" \
+  '    if lowered
+' \
+  '    if false
+'
+fix_proof "a lowered SETTINGS signalled only above the table" fix_enc_below \
+  "lowered SETTINGS is signalled below it too" "" \
+  '    if lowered
+      set_max_table_size(@dynamic_table.max_size > limit ? limit : @dynamic_table.max_size)' \
+  '    if @dynamic_table.max_size > limit
+      set_max_table_size(limit)'
+fix_proof "a negative integer offset read from the end" fix_int_offset \
+  "negative integer offset refused" "" \
+  '    if offset < 0
+      return HpackError.new("Integer decode' \
+  '    if false
+      return HpackError.new("Integer decode'
+fix_proof "a Huffman bound that adds offset and length" fix_huff_bound \
+  "arithmetic overflow" "a Huffman length past Int32 is refused" \
+  'offset > bytes.size || length > bytes.size - offset' \
+  'offset + length > bytes.size'
+fix_proof "a header list counted in Int32" fix_list_i32 \
+  "arithmetic overflow" "a header list past Int32 octets is counted" \
+  'total_uncompressed_size = 0_i64' 'total_uncompressed_size = 0_i32' \
+  'bytesize.to_i64' 'bytesize' \
+  '@max_header_list_size.to_i64' '@max_header_list_size'
+fix_proof "a Huffman size counted in Int32" fix_size_i32 \
+  "arithmetic overflow" "a Huffman size past Int32 bits is counted" \
+  'total_bits = 0_i64' 'total_bits = 0_i32' \
+  'HUFFMAN_LENS[byte_val].to_i64' 'HUFFMAN_LENS[byte_val]' \
+  '((total_bits + 7_i64) // 8_i64).to_i32' '(total_bits + 7) // 8'
 
 echo
 echo "== what integer encoding refuses"

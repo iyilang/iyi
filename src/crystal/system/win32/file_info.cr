@@ -55,7 +55,7 @@ module Crystal::System::FileInfo
       # See: https://msdn.microsoft.com/en-us/library/windows/desktop/aa365511(v=vs.85).aspx
       if @file_attributes.dwFileAttributes.bits_set?(LibC::FILE_ATTRIBUTE_REPARSE_POINT)
         case @reparse_tag
-        when LibC::IO_REPARSE_TAG_SYMLINK
+        when LibC::IO_REPARSE_TAG_SYMLINK, LibC::IO_REPARSE_TAG_MOUNT_POINT
           ::File::Type::Symlink
         when LibC::IO_REPARSE_TAG_AF_UNIX
           ::File::Type::Socket

@@ -54,7 +54,12 @@ module Crystal::System::Dir
 
   def self.data_to_entry(data)
     name = String.from_utf16(data.cFileName.to_unsafe)[0]
-    unless data.dwFileAttributes.bits_set?(LibC::FILE_ATTRIBUTE_REPARSE_POINT) && data.dwReserved0 == LibC::IO_REPARSE_TAG_SYMLINK
+    # iyi: a junction is a link, as a symbolic link is: counted a
+    # directory, a `**` glob walked through one - a junction back to the
+    # project made `iyi test`, `fmt` and `check` recurse until the path
+    # was too long to open.
+    unless data.dwFileAttributes.bits_set?(LibC::FILE_ATTRIBUTE_REPARSE_POINT) &&
+           (data.dwReserved0 == LibC::IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == LibC::IO_REPARSE_TAG_MOUNT_POINT)
       dir = data.dwFileAttributes.bits_set?(LibC::FILE_ATTRIBUTE_DIRECTORY)
     end
     native_hidden = data.dwFileAttributes.bits_set?(LibC::FILE_ATTRIBUTE_HIDDEN)

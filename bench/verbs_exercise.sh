@@ -353,7 +353,8 @@ esac
 # [v2]` and `x{a,b}` were read as a character class and a brace, and on
 # Windows a share's root, `\\server\share`, was looked for under the
 # current drive's root - the tests were not found, and `fmt --check`
-# passed having checked nothing.
+# passed having checked nothing. And a junction back to the project was
+# walked through, until the path was too long to open.
 for dir in "proj [v2]" "x{a,b}"; do
   mkdir -p "rooted/$dir"
   printf 'module messy\n\nx=1\n' > "rooted/$dir/messy.iyi"
@@ -365,6 +366,7 @@ case "$(uname -s)" in
     share="$(cygpath -w "$WORK/rooted/proj [v2]")"
     share="\\\\127.0.0.1\\${share:0:1}\$${share:2}"
     [ -d "$share" ] && roots+=("$share")
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/rooted/x{a,b}/loop")" "$(cygpath -w "$WORK/rooted/x{a,b}")" > /dev/null
     ;;
 esac
 for root in "${roots[@]}"; do
@@ -377,6 +379,7 @@ for root in "${roots[@]}"; do
     echo "  fmt --check and test of $root: fmt $fmt_code, test $test_code"; sed -n '1,3p' rooted.fmt rooted.test; status=1
   fi
 done
+[ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

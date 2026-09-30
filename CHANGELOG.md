@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A junction is a link to the compiler's own file layer on Windows, and
+  a `**` walk does not go through one.** Only a symbolic link's reparse
+  tag counted as a link, so a junction was a directory: a junction back to
+  the project made `iyi test`, `iyi fmt --check`, `iyi fix` and `iyi check
+  --affected` recurse until the path was too long to open, and `iyi test`
+  of the directory ran for 42 seconds building twenty nested copies of
+  one test. A junction is a link now - `File.info(follow_symlinks:
+  false)`, a directory entry, and `File.readlink`, which answers its
+  target - as it already was to iyi's own `std/file`.
+  `bench/verbs_exercise.sh` puts a junction to its own directory inside
+  one of the directories it walks.
+
 - **A directory given to `iyi test`, `iyi fmt` and the other walking
   verbs is a name, and a share's root is where a pattern on it starts.**
   The directory went into a glob pattern as it was, so `proj [v2]` and

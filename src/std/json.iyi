@@ -15,7 +15,7 @@
 # anything that is not a JSON document (bare words, leading zeros, a trailing
 # comma, a raw control character, invalid UTF-8 or a lone surrogate inside a
 # string, an invalid escape, a byte order mark, text after the root value,
-# nesting past 512 levels, a number too large for a Float64) and an object
+# nesting past 256 levels, a number too large for a Float64) and an object
 # that names the same key twice, in `JSON.parse` and in the `PullParser`
 # alike. `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
 #
@@ -1234,7 +1234,15 @@ class Lexer
   end
 end
 
-MAX_NESTING = 512
+# The deepest document read: deep enough for any data a person wrote, and
+# shallow enough for a task's stack. It was 512, Crystal's, whose fibers
+# have megabytes; a task here has 256 KB (`IyiFiber::STACK_BYTES`), and a
+# task that parsed 480 nested arrays - a request body, in a server whose
+# handlers are tasks - died of a stack overflow that took the whole
+# process, and `==` on two such values died at 334. At 256 a plain build
+# parses, compares, prints and hashes the deepest document in a task with
+# a fifth of the stack to spare.
+MAX_NESTING = 256
 
 # The powers of ten a double holds exactly, for the lexer's fast path.
 POW10 = [1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,

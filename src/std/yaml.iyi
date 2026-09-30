@@ -574,7 +574,13 @@ end
 # Reads one stream. Every failure is recorded once in `@error` and every
 # loop returns as soon as one is recorded; nothing is raised inside.
 pub class Parser
-  DEPTH_LIMIT = 256
+  # Deep enough for any document a person wrote, and shallow enough for a
+  # task's 256 KB stack: at 256 a task parsing a 256-deep flow sequence,
+  # or comparing two 128 deep, died of a stack overflow that took the
+  # whole process - a config a server reads in a handler, say. At 100 a
+  # plain build parses, compares, prints, hashes and dumps the deepest in
+  # a task with room to spare.
+  DEPTH_LIMIT = 100
   # How many nodes aliases may add to a stream, counted as they are
   # expanded; the sentence below spells the same number.
   ALIAS_NODE_LIMIT = 1_000_000_i64

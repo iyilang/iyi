@@ -521,9 +521,29 @@ refused_with("{\"a\":", "unexpected end of input at line 1, column 6")
 refused_with("]", "unexpected ']' at line 1, column 1")
 refused_with(":", "unexpected ':' at line 1, column 1")
 refused_with("[\"\u00e9\u00e9\", 1 x]", "bare identifier 'x' at line 1, column 10")
-deep_text = "[" * 513 + "]" * 513
-refused_with(deep_text, "nesting depth of 513 exceeds maximum depth 512 at line 1, column 513")
-assert_true(JSON.parse("[" * 512 + "]" * 512).size == 1, "512 levels are read")
+deep_text = "[" * 257 + "]" * 257
+refused_with(deep_text, "nesting depth of 257 exceeds maximum depth 256 at line 1, column 257")
+assert_true(JSON.parse("[" * 256 + "]" * 256).size == 1, "256 levels are read")
+# And in a task, whose stack is 256 KB: the deepest document read is one a
+# task can parse, compare and print. At 512 a task died of a stack
+# overflow at 480 levels, and `==` at 334, and the whole process with it.
+deepest_array = "[" * 256 + "]" * 256
+deepest_object = "{\"a\":" * 256 + "1" + "}" * 256
+in_task = false
+group do |g|
+  g.spawn do
+    [deepest_array, deepest_object].each do |deepest|
+      one = JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not print back in a task" unless one.to_json == deepest
+      one.hash
+      one.inspect
+    end
+    in_task = true
+    0
+  end
+end
+assert_true(in_task, "the deepest document is parsed, compared, printed and hashed in a task")
 puts "  #{52} malformed inputs, each refused with its sentence and location"
 
 # ---------------------------------------------------------------------------

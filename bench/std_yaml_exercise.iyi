@@ -122,6 +122,27 @@ refused("- a: b: c\n", "a mapping value is not allowed here at line 1, column 7"
 refused("!<tag:yaml.org,2002:foo> 1\n", "unknown tag !<tag:yaml.org,2002:foo> at line 1, column 1")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
+refused("[" * 101 + "]" * 101, "nesting deeper than 100 levels at line 1, column 101")
+# The deepest document read is one a task can use: parse, compare, print,
+# hash and dump. At a limit of 256 a task died of a stack overflow parsing
+# 256 nested sequences and comparing 128, and the process with it.
+deepest_seq = "[" * 100 + "]" * 100
+deepest_map = "{a: " * 100 + "1" + "}" * 100
+in_task = false
+group do |g|
+  g.spawn do
+    [deepest_seq, deepest_map].each do |deepest|
+      one = YAML.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == YAML.parse(deepest)
+      one.inspect
+      one.hash
+      raise "ASSERTION FAILED: the deepest document does not dump back in a task" unless YAML.parse(YAML.dump(one)) == one
+    end
+    in_task = true
+    0
+  end
+end
+assert_true in_task, "the deepest document is parsed, compared, printed, hashed and dumped in a task"
 puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles,"
 puts "  control characters, stray entries, directives, tags, surrogates, alias expansion"
 

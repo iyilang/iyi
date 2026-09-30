@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A JSON or YAML document the parser reads is one a task can use.**
+  JSON read 512 levels of nesting, Crystal's limit, whose fibers have
+  megabytes of stack; a task here has 256 KB, and a task parsing 480
+  nested arrays - a request body, in a server whose handlers are tasks -
+  died of a stack overflow that ended the whole process, where the
+  document was inside the limit; `==` died at 334. YAML read 256 and a
+  task died comparing 128. The limits are 256 for JSON and 100 for YAML
+  now, measured to leave a plain build's task room to parse, compare,
+  print and hash the deepest document read. `bench/std_json_exercise.iyi`
+  and `bench/std_yaml_exercise.iyi` do each at the limit in a task and
+  refuse one level past it; the old modules accept the deeper document.
+
 - **The language server formats a CRLF buffer in CRLF, and keeps its
   `\r` through an edit.** Formatting answered a CRLF buffer with a
   whole-document edit to LF - one on every save in an editor that formats

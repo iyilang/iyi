@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`GC`'s out-of-memory specs have a compiler's time.** Each compiles
+  and runs a program, as every spec tagged `slow` does, and unlike those
+  they had the harness's plain 15 seconds: on a loaded Windows runner the
+  first one's compile ran past it and failed "The language's gates". They
+  are tagged `slow` now and have the 60 seconds the others have; with the
+  harness cut to one second, untagged they time out and tagged they pass.
+
 - **`Math.erf`, `erfc`, `gamma`, `lgamma` and `tgamma` of a single are
   singles.** They had no Float32 overload, so `Math.erf(0.5_f32)` was the
   double's answer, a Float64, where Crystal's is `erff`'s Float32; of

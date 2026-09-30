@@ -279,6 +279,7 @@ big_panics_with "a digit the base does not have" bad_digit "invalid BigInt digit
 big_panics_with "a base past 36" bad_base "invalid base: 37 (must be 2..36)" 'BigInt.new("1").to_s(37)'
 big_panics_with "a negative exponent" neg_exp "negative exponent: -1" '2.to_big ** -1'
 big_panics_with "a value too wide for Int64" i64_overflow "does not fit in Int64" 'BigInt.new("18446744073709551615").to_i64'
+big_panics_with "underscores and no digit" only_underscore "invalid BigInt: no digits, only underscores" 'BigInt.new("_")'
 
 # ---------------------------------------------------------------------------
 # Negative proofs: each check is proven to fail when its mechanism is broken

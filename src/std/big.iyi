@@ -157,6 +157,8 @@ pub struct BigInt
       end
       digits << digit.to_u8
     end
+    # Underscores and no digit: `"_"` was 0.
+    raise "invalid BigInt: no digits, only underscores" if digits.empty?
 
     result = BigInt.from_digits(digits, actual_base)
     sign < 0 ? result.negate : result

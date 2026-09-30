@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **`BigInt.new("_")` is refused.** Underscores between digits are
+  skipped, and a string of nothing else had no digits left, which read as
+  0. It panics now with "invalid BigInt: no digits, only underscores".
+  `bench/std_big_exercise.sh` asks for the refusal; the old module
+  answered 0.
+
 - **A `BigDecimal` with many zeros prints in time linear in its size.**
   `to_s` grew its zeros by one at a time, copying the string for each, so
   `1e50000` took 2.9 s to print where the same value as a `BigInt` took

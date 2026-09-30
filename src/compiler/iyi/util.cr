@@ -174,8 +174,15 @@ module Iyi
       probe = File.join(directory, ".iyi-write-probe-#{Process.pid}")
       begin
         File.write(probe, "")
-      rescue File::Error
+      rescue File::AccessDeniedError
         return false
+      rescue File::Error
+        # Not a refusal: the probe's own name is longer than the output's,
+        # and in a directory near MAX_PATH it was the probe that did not
+        # fit - "no permission to write there", from a directory that
+        # takes the program, and only for a five-digit process id. The
+        # linker answers for the file itself.
+        return true
       end
       File.delete?(probe)
       true

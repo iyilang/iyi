@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A build in a directory near MAX_PATH writes its program there.**
+  Whether the output directory takes a file is asked by writing
+  `.iyi-write-probe-<pid>` into it, a name longer than `m.exe`, and every
+  failure was reported as a denial: in a 235-character directory a build
+  was refused "no permission to write there" whenever the process id had
+  five digits, and ran with four. Only a denial is a denial now; the
+  linker answers for the file itself. `bench/verbs_exercise.sh` builds in
+  a 245-character directory, where the probe does not fit whatever the
+  process id.
+
 - **A cancelled `Process.run` on Windows ends what its child started
   too.** Only the child was ended; a program it had started - a shell's
   command, a server's worker - went on running, where `std/process`

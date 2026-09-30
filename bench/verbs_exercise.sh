@@ -404,6 +404,21 @@ case "$(uname -s)" in
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
     fi
+    # A directory the program fits in and the write probe does not: the
+    # probe's name, `.iyi-write-probe-<pid>`, is longer than `m.exe`, and
+    # near MAX_PATH the probe failed and was told as "no permission to
+    # write there" - for five-digit process ids only. 245 characters: the
+    # probe does not fit whatever the pid, the program does.
+    deep="$WORK"
+    while [ ${#deep} -lt 233 ]; do deep="$deep/dddddddddd"; done
+    deep="$deep/$(printf '%*s' $((245 - ${#deep} - 1)) '' | tr ' ' 'e')"
+    mkdir -p "$deep" && printf 'module m\n\nputs "deep"\n' > "$deep/m.iyi"
+    (cd "$deep" && "$IYI" build m.iyi > "$WORK/deep.log" 2>&1); deep_code=$?
+    if [ "$deep_code" -eq 0 ] && [ -f "$deep/m.exe" ]; then
+      echo "  a build in a ${#deep}-character directory writes its program there"
+    else
+      echo "  a build in a ${#deep}-character directory: exit $deep_code"; sed -n '1,3p' "$WORK/deep.log"; status=1
+    fi
     ;;
 esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is

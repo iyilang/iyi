@@ -357,6 +357,17 @@ raise "general: NaN takes the sign flags" unless sprintf("%+g|% f|%+e", 0.0 / 0.
 raise "general: every precision up to the limit" unless sprintf("%.400g", 0.0001).bytesize == 68
 puts "    general: %g and %G choose the shorter notation and trim it"
 
+# A verb of several bytes is named whole in the refusal: its lead byte
+# read as a character of its own was `%Ã` for `%é`.
+verb_said = "formatted"
+group do |g|
+  attempt = g.spawn { sprintf("%é", 1) }
+  outcome = attempt.value
+  verb_said = outcome.message.to_s if outcome.is_a?(Panicked)
+  0
+end
+raise "format: a verb of two bytes was refused as #{verb_said.inspect}" unless verb_said == "unknown format specifier '%é'"
+
 # Just under a power of ten that no double spells: `%.15e` of 1e23, which
 # is 99999999999999991611392, rounded its fifteen places up to the next
 # power and kept the exponent it had guessed from the shortest spelling,

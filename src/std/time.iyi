@@ -937,7 +937,10 @@ pub struct Time
       end
       offset_sec = sign * (oh.to_i64 * 3600_i64 + om.to_i64 * 60_i64)
     else
-      raise "invalid timezone designator in RFC 3339: #{tz_char}"
+      # The character whole: its lead byte on its own was `Â` for `²`.
+      str[idx, len - idx].each_char do |char|
+        raise "invalid timezone designator in RFC 3339: #{char}"
+      end
     end
 
     # The offset ends the string. `...Zjunk` and `...+05:30:00` both parsed,

@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **A refusal names a character of several bytes whole.** The RFC 3339
+  parser and `sprintf` named the character they refused by its lead byte
+  alone, read as a character of its own: `...45²Z` was refused with
+  "invalid timezone designator in RFC 3339: Â", and `sprintf("%é", 1)`
+  with "unknown format specifier '%Ã'". Both name `²` and `%é` now.
+  `bench/std_time_exercise.sh` and `bench/format_exercise.iyi` check the
+  sentences; the old modules named the lead byte.
+
 - **The caret under an error's line sits under its column when the line
   has tabs inside it.** Every character in front of the column was
   counted as one space, so in `puts(\tx,\t\tx.nope)` the caret stood at

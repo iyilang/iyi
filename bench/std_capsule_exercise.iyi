@@ -191,6 +191,25 @@ trunc_buf[0] = 0x40_u8 # indicates 2-byte varint, but only 1 byte present
 assert_true VarInt.decode?(trunc_buf).nil?, "truncated 2-byte varint returns nil"
 assert_true VarInt.decode?(Bytes.new(0)).nil?, "empty buffer returns nil"
 assert_true VarInt.decode?(trunc_buf, offset: 5).nil?, "offset beyond buffer returns nil"
+
+# A varint that starts within 8 bytes of the end of a buffer of 2^31 - 1
+# bytes: its room is `size - offset`, where `offset + 8` overflowed Int32 and
+# panicked. The buffer is a view whose last 8 bytes are `edge_tail`, so no
+# 2 GiB is allocated; nothing before them is read.
+edge_n = 2147483647
+edge_tail = Bytes.new(8)
+edge = Bytes.new(Pointer(UInt8).new(edge_tail.to_unsafe.address &- (edge_n - 8).to_u64), edge_n)
+edge_tail[7] = 0xc0_u8
+assert_true VarInt.decode?(edge, edge_n - 1).nil?, "8-byte varint in the last byte of a 2^31 - 1 buffer is truncated"
+edge_tail[7] = 0x40_u8
+assert_true VarInt.decode?(edge, edge_n - 1).nil?, "2-byte varint in the last byte of a 2^31 - 1 buffer is truncated"
+edge_tail[6] = 0x05_u8
+assert_true Capsule.decode?(edge, edge_n - 2).nil?, "capsule length truncated at the end of a 2^31 - 1 buffer"
+assert_true HttpDatagram.decode?(edge, edge_n - 1).nil?, "datagram id truncated at the end of a 2^31 - 1 buffer"
+edge_tail[6] = 0x40_u8
+ev, en = VarInt.decode(edge, edge_n - 2)
+assert_u64 64_u64, ev, "2-byte varint ending a 2^31 - 1 buffer"
+assert_i32 2, en, "2-byte varint ending a 2^31 - 1 buffer consumed"
 puts "  RFC 9000 VarInt encoding, decoding, boundaries, and strictness"
 
 puts "\n== datagram"
@@ -212,8 +231,16 @@ assert_u64 16_u64, dg19.stream_id, "stream_id from qid 4"
 dg1 = HttpDatagram.from_stream_id(1_u64, Bytes.new(0))
 assert_u64 0_u64, dg1.quarter_stream_id, "qid from stream 1"
 assert_u64 0_u64, dg1.stream_id, "stream_id from qid 0 (1 // 4 * 4)"
-dg_maxq = HttpDatagram.new(VarInt::MAX, Bytes.new(0))
-assert_u64 18446744073709551612_u64, dg_maxq.stream_id, "MAX qid * 4 fits UInt64"
+# RFC 9297 Section 2.1: a stream ID is at most 2^62 - 1, so a Quarter Stream
+# ID is at most 2^60 - 1 and a larger one on the wire is an error.
+qid_max = 1152921504606846975_u64
+dg_maxq = HttpDatagram.new(qid_max, Bytes.new(0))
+assert_u64 VarInt::MAX - 3_u64, dg_maxq.stream_id, "largest quarter stream id maps to the largest request stream"
+dg_maxq_dec, dg_maxq_n = HttpDatagram.decode(dg_maxq.encode)
+assert_u64 qid_max, dg_maxq_dec.quarter_stream_id, "2^60 - 1 quarter stream id round trips"
+assert_i32 8, dg_maxq_n, "2^60 - 1 quarter stream id consumed"
+assert_true HttpDatagram.decode?(VarInt.encode(qid_max + 1_u64)).nil?, "2^60 quarter stream id is refused"
+assert_true HttpDatagram.decode?(VarInt.encode(VarInt::MAX)).nil?, "2^62 - 1 quarter stream id is refused"
 
 # Datagram encoding and decoding with binary payload
 pay = Bytes.new(5)
@@ -478,8 +505,16 @@ assert_true CapsuleProtocol.is_capsule_protocol_header?("?1"), "is_capsule_proto
 assert_true CapsuleProtocol.is_capsule_protocol_header?("?1 "), "is_capsule_protocol_header ?1 "
 assert_false CapsuleProtocol.is_capsule_protocol_header?("?0"), "is_capsule_protocol_header ?0"
 assert_false CapsuleProtocol.is_capsule_protocol_header?(""), "is_capsule_protocol_header empty"
-assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", "?1;foo=bar"), "structured-field parameters are not accepted"
-assert_false CapsuleProtocol.valid_header?("Capsule-Protocol", " ?1"), "leading space is not accepted"
+# RFC 9297 Section 3.4: an Item Structured Field whose parameters receivers
+# MUST ignore; RFC 8941 Section 4.2 drops spaces on either side of the Item.
+assert_true CapsuleProtocol.valid_header?("Capsule-Protocol", "?1;foo=bar"), "structured-field parameters are ignored"
+assert_true CapsuleProtocol.valid_header?("Capsule-Protocol", " ?1"), "leading space is dropped"
+assert_true CapsuleProtocol.is_capsule_protocol_header?("?1;a;b=?0;c=\"x;y\";d=:YWJj:;e=-1.5;f=tok/1  "), "every bare-item kind as a parameter"
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?0;a=1"), "false with parameters is still false"
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?1;A=1"), "an uppercase parameter key is not an Item"
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?1 ;a"), "a space before a parameter is not an Item"
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?1;a=1.2345"), "a four-digit fraction is not an Item"
+assert_false CapsuleProtocol.is_capsule_protocol_header?("?1, ?1"), "a List is not an Item"
 assert_false ExtendedConnect.valid_request?("CONNECT", "webtransport", nil, "example.com", "/wt"), "nil scheme"
 assert_false ExtendedConnect.valid_response?(199), "response 199 is invalid"
 assert_false ExtendedConnect.valid_response?(300), "response 300 is invalid"

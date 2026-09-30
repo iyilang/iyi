@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`std/capsule` follows RFC 9297 in three places.** `VarInt.decode?`
+  added the offset to the varint's length, which overflowed Int32 near
+  the end of a 2 GiB buffer and panicked where the input is merely
+  incomplete - `Capsule` and `HttpDatagram` decoding with it. Quarter
+  Stream IDs past 2^60-1 were accepted, which RFC 9297 2.1 makes an
+  `H3_DATAGRAM_ERROR`; the exercise had pinned a stream ID of
+  18446744073709551612. And the `Capsule-Protocol` header accepted only
+  the strings `?1` and `?1 `, where 3.4 makes it an RFC 8941 Item whose
+  unknown parameters receivers MUST ignore: `?1;foo=bar` is true now, and
+  what is not an Item is false. About 2.1 million cases against a model
+  written from RFCs 9000, 9297 and 8941 found these and none after; the
+  exercise checks each and proves each check fails with its fix undone.
+
 - **`ENV.delete` removes every entry of a name, and `Log.for` keeps a
   leading dot.** An environment may hold a name twice - `execve` allows
   it - and `delete` removed only the first entry, so the variable came

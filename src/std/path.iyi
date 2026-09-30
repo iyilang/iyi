@@ -21,8 +21,8 @@
 #
 # `expand(base, home:)` makes the path absolute under *base*, which is
 # `Program.env("PWD")` when not given, and the process's own directory
-# when no shell set that — cmd and PowerShell never do, so on Windows
-# this used to panic on every relative path. With neither, `expand`
+# when no shell set that; on Windows it is the process's own directory
+# always, since nothing there keeps `PWD` true. With neither, `expand`
 # panics rather than guess. `home: true` reads a leading `~` from
 # `HOME`, or from `USERPROFILE` on Windows, which is where that platform
 # keeps it.
@@ -209,9 +209,25 @@ pub struct Path
     anchor_end > 0 ? @name[0, anchor_end] : nil
   end
 
+  # A share is absolute without a separator after it: `\\server\share` is
+  # the share's root, as Windows and Python read it. It was relative, so
+  # after `Dir.cd` to a share every `expand` panicked "base is not
+  # absolute".
   def absolute? : Bool
     drive_end, anchor_end = anchor_indices
-    posix? ? anchor_end > 0 : (drive_end > 0 && anchor_end > drive_end)
+    posix? ? anchor_end > 0 : (drive_end > 0 && (anchor_end > drive_end || share?))
+  end
+
+  # A `\\server\share` drive, where `C:` is the other kind.
+  private def share? : Bool
+    drive_end, _ = anchor_indices
+    drive_end > 0 && sep?(@name.to_unsafe[0])
+  end
+
+  # The anchor with the root a share has whether written or not.
+  protected def rooted_anchor : String
+    found = anchor || ""
+    share? && root.nil? ? found + separator : found
   end
 
   def relative? : Bool
@@ -424,7 +440,10 @@ pub struct Path
     rooted = root != nil
     all = parts
     norm = [] of String
-    norm << all[0] if anchor_end > 0
+    # A Windows anchor in Windows' separator, as the rest is joined: `C:/`
+    # and `//server/share/` were kept as written, so `C:/a/./b` normalized
+    # to `C:/a\b`, and `relative_to` found no path between it and `C:\a`.
+    norm << (posix? ? all[0] : Path.backslashed(all[0])) if anchor_end > 0
 
     i = anchor_end > 0 ? 1 : 0
     while i < all.size
@@ -453,8 +472,8 @@ pub struct Path
     target = normalize
     base_norm = base_path.to_kind(@kind).normalize
 
-    t_anchor = target.anchor || ""
-    b_anchor = base_norm.anchor || ""
+    t_anchor = target.rooted_anchor
+    b_anchor = base_norm.rooted_anchor
     return nil if compare_names(t_anchor, b_anchor) != 0
 
     t_parts = target.parts
@@ -492,8 +511,9 @@ pub struct Path
   end
 
   # Absolute and normalized, under *base* when relative. *base* is
-  # `Program.env("PWD")` when not given, the process's own directory
-  # when nothing set that, and a relative path with neither is refused.
+  # `Program.env("PWD")` when not given (on Windows, never), the
+  # process's own directory when nothing set that, and a relative path
+  # with neither is refused.
   # `home: true` reads a leading `~` from the home directory the
   # platform names (see `home_directory`).
   def expand(base : Path | String | Nil = nil, home : Bool = false) : Path
@@ -513,13 +533,16 @@ pub struct Path
                else
                  # `PWD` first, because a shell that keeps it keeps the
                  # path the person walked, symlinks and all; the
-                 # process's own directory when there is none, which is
-                 # every Windows shell — cmd and PowerShell do not set
-                 # the variable, so this raised on a relative path there
-                 # rather than expanding it.
-                 pwd = Program.env("PWD") || Program.cwd ||
-                       raise "cannot expand #{@name.inspect}: no base given, and neither PWD nor the process's own directory answers"
-                 Path.new(pwd, @kind)
+                 # process's own directory when there is none. On Windows
+                 # the process's own directory always: only Git Bash sets
+                 # `PWD` there, in its own `C:/...` spelling, and nothing
+                 # keeps it - a `cd` in cmd or PowerShell after it, or a
+                 # child started in another directory, left it naming a
+                 # directory the program was not in, and a relative path
+                 # expanded there. A rename onto an open file moved the
+                 # file into that other directory.
+                 pwd = {% if flag?(:win32) %} Program.cwd {% else %} Program.env("PWD") || Program.cwd {% end %}
+                 Path.new(pwd || raise("cannot expand #{@name.inspect}: no base given, and neither PWD nor the process's own directory answers"), @kind)
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?
     # A Windows path can be anchored and still not absolute, and `join`
@@ -531,7 +554,9 @@ pub struct Path
     unless posix?
       drive = p.drive
       if drive && p.root.nil?
-        rest = p.name[drive.size, p.name.size - drive.size]
+        # In bytes, as `[]` counts: in characters, a name with `ğ` in it
+        # lost a byte off its end for each (`C:ğ.txt` expanded to `ğ.tx`).
+        rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]
         base_drive = base_dir.drive
         if base_drive && base_drive.downcase == drive.downcase
           return base_dir.join(rest).normalize
@@ -562,7 +587,7 @@ pub struct Path
     parent.join(name)
   end
 
-  # Byte order; Windows names fold ASCII case.
+  # Byte order; Windows names fold ASCII case, and `/` is `\` there.
   private def compare_names(a : String, b : String) : Int32
     windows? ? Path.compare_strings_ci(a, b) : Path.compare_strings(a, b)
   end
@@ -582,7 +607,19 @@ pub struct Path
   end
 
   def hash : Int32
-    (windows? ? @name.downcase : @name).hash &* 31 &+ @kind.value.to_i32
+    (windows? ? Path.backslashed(@name.downcase) : @name).hash &* 31 &+ @kind.value.to_i32
+  end
+
+  # *text* with every `/` a `\`.
+  protected def self.backslashed(text : String) : String
+    String.new(text.bytesize) do |buffer|
+      index = 0
+      while index < text.bytesize
+        byte = text.to_unsafe[index]
+        buffer[index] = byte == 47_u8 ? 92_u8 : byte
+        index = index + 1
+      end
+    end
   end
 
   def self.compare_strings(s1 : String, s2 : String) : Int32
@@ -613,6 +650,8 @@ pub struct Path
       b2 = p2[i]
       b1 = b1 + 32_u8 if b1 >= 65_u8 && b1 <= 90_u8
       b2 = b2 + 32_u8 if b2 >= 65_u8 && b2 <= 90_u8
+      b1 = 92_u8 if b1 == 47_u8
+      b2 = 92_u8 if b2 == 47_u8
       return b1 < b2 ? -1 : 1 if b1 != b2
       i = i + 1
     end

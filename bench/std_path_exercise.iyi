@@ -153,7 +153,16 @@ raise "PWD is not set" if pwd.nil?
 assert_str(Path.new(home).join("x").normalize.to_s, Path.new("~/x").expand(home: true).to_s, "~ expands from the home variable")
 assert_str(Path.new(home).normalize.to_s, Path.new("~").expand(home: true).to_s, "~ alone is the home directory")
 assert_str("/cwd/~/x", Path.posix("~/x").expand("/cwd").to_s, "~ is a name unless home: true")
-assert_str(Path.posix(pwd).join("z").normalize.to_s, Path.posix("z").expand.to_s, "no base reads PWD")
+{% if flag?(:win32) %}
+  # On Windows the process's own directory, whatever `PWD` says: only Git
+  # Bash sets it there, and nothing keeps it true after a `cd` in another
+  # shell or a child started elsewhere. The driver pins a `PWD` naming no
+  # directory, and it is not read.
+  own = Program.cwd || raise "the process's own directory does not answer"
+  assert_str(Path.new(own).join("z").normalize.to_s, Path.new("z").expand.to_s, "no base reads the process's own directory, not PWD")
+{% else %}
+  assert_str(Path.posix(pwd).join("z").normalize.to_s, Path.posix("z").expand.to_s, "no base reads PWD")
+{% end %}
 puts "  base, Path base, absolute, ~, PWD verified"
 
 puts "\n== windows kind"
@@ -171,7 +180,11 @@ unc = Path.windows("\\\\server\\share\\x\\y")
 assert_str("\\\\server\\share", unc.drive.to_s, "UNC share is the drive")
 assert_str("\\", unc.root.to_s, "UNC root")
 assert_true(unc.absolute?, "UNC path with a root is absolute")
-assert_true(!Path.windows("\\\\server\\share").absolute?, "a bare UNC share has no root")
+# A share's root without a separator after it is still absolute, as
+# Windows reads it: after `Dir.cd` to one, every `expand` panicked.
+assert_true(Path.windows("\\\\server\\share").root.nil? && Path.windows("\\\\server\\share").absolute?, "a bare UNC share has no root and is absolute")
+assert_str("\\\\server\\share\\y", Path.windows("y").expand("\\\\server\\share").to_s, "expand under a share's root")
+assert_str("a", Path.windows("//server/share/a").relative_to("\\\\server\\share").to_s, "relative to a share's root")
 assert_str("\\\\server\\share\\|x|y", unc.parts.join("|"), "UNC parts")
 assert_str("\\\\server\\share\\x", unc.dirname, "UNC dirname")
 assert_str("C:\\", Path.windows("C:\\a").dirname, "dirname under a drive root")
@@ -199,6 +212,16 @@ assert_str("D:\\a", Path.windows("D:a").expand(base).to_s, "D:a expands under D:
 assert_true(Path.windows("\\a").expand(base).absolute?, "an expanded rooted path is absolute")
 assert_str("C:a", Path.windows("C:").join("a").to_s, "a bare drive joined is drive-relative")
 assert_str("C:b", Path.windows("C:a").sibling("b").to_s, "a drive-relative sibling stays on the drive")
+# A `/` anchor is a Windows anchor: `C:/a/./b` normalized to `C:/a\b`, and
+# `relative_to` found no path between it and `C:\a` - every path Git Bash
+# spells. And a drive-relative name with `ğ` lost a byte per `ğ`.
+assert_str("C:\\a\\b", Path.windows("C:/a/./b").normalize.to_s, "a / anchor normalizes to \\")
+assert_str("\\\\s\\sh\\b", Path.windows("//s/sh/a/../b").normalize.to_s, "and a // share")
+assert_str("b", Path.windows("C:/a/b").relative_to("C:\\a").to_s, "relative across the two spellings")
+assert_true(Path.windows("C:/a") == Path.windows("C:\\a"), "/ and \\ are one separator in ==")
+assert_true(h[Path.windows("c:/a")]? == 1, "and in the hash")
+assert_str("C:\\base\\ğ.txt", Path.windows("C:ğ.txt").expand(base).to_s, "a drive-relative name keeps its last bytes")
+assert_str("D:\\ğ", Path.windows("D:ğ").expand(base).to_s, "on another drive too")
 puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
 
 puts "\n== path comparison via Comparable"

@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **On Windows a relative path expands in the program's own directory,
+  and a Windows path's anchor is a Windows anchor.** `Path#expand` and
+  `File.expand_path` read `PWD` first. Only Git Bash sets it on Windows,
+  and nothing there keeps it true: a `cd` in cmd or PowerShell after it,
+  or a child started in another directory, left `PWD` naming a directory
+  the program was not in, a relative path expanded there, and
+  `File.rename` onto an open file moved the file into that directory.
+  Windows reads the process's own directory now. Git Bash's `PWD` is
+  spelled `C:/...`, and `normalize` kept a `C:/` or `//server/share/`
+  anchor as written, so `File.expand_path("foo")` gave `C:/Users\...` and
+  `relative_to` found no path between that and `C:\Users`. The anchor is
+  written with `\` now, and `==` and `hash` read `/` as `\` on Windows.
+  `\\server\share`, the share's root without a separator after it, was
+  not absolute, so every `expand` after a `Dir.cd` to a share panicked;
+  it is absolute. A drive-relative name had its byte count taken in
+  characters, so `C:ğ.txt` expanded to `...\ğ.tx`.
+  `bench/std_path_exercise.iyi` checks each; the old module fails.
+
 - **`%e` and `%g` find the exponent of a value just under a power of
   ten.** `%.15e` of `1e23`, which is 99999999999999991611392, printed
   1.000000000000000e+23, and `%.16e` of `1e-7` and `1e-75`, and `%.16g` of
@@ -12621,7 +12639,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,024-line library and nothing else. Every other
+  written against iyi's own 19,041-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

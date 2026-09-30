@@ -2128,9 +2128,10 @@ def main():
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,
-             "compiled with the executable moved aside, as a rebuild does"
-             if os.name == "nt" else
-             "compiled with the executable unlinked; $ORIGIN was pinned")
+             ("compiled with the executable moved aside, as a rebuild does"
+              if os.name == "nt" else
+              "compiled with the executable unlinked; $ORIGIN was pinned") +
+             ("" if held and "error" not in reply else f"; answered {json.dumps(reply)[:400]}"))
     else:
         step(46, "a rebuilt binary does not lobotomise the session", True,
              f"skipped: {binary} not present under this runner")

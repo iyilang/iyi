@@ -4,6 +4,20 @@
 
 ### Changed
 
+- **`Math.lgamma`, `tgamma` and `gamma` are correctly rounded, and
+  glibc's.** They were Lanczos and Stirling sums, and answered
+  differently from glibc 2.43 for 60,071 and 90,098 of 100,000 arguments.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables; what glibc's `lgamma` and `tgamma` symbols add around them is
+  kept too, so **`gamma(+-0.0)` is an infinity of zero's sign**, where it
+  was NaN, and a negative integer or -inf is NaN. On a machine without
+  FMA they cost 283 and 204 ns against glibc's 149 and 109, and 28 and
+  25 before. The oracle carries glibc's two files behind its wrappers'
+  answers and the math gate requires 201,000 arguments of each to the
+  last bit - the whole range, every integer and half-integer from -200 to
+  200 and each side of them, lgamma's zeros at 1 and 2 - and proves the
+  check fails with their shared two-sum losing its low part.
+
 - **`Math.atan`, `asin` and `acos` are correctly rounded.** Against the
   true value rounded to the nearest double they were wrong for 1,913,
   5,338 and 6,821 of 15,000 arguments each; they are CORE-MATH's (MIT,

@@ -94,7 +94,8 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
      "$REPO/bench/libm_oracle/core_math/e_acosh.c" "$REPO/bench/libm_oracle/core_math/e_atanh.c" \
      "$REPO/bench/libm_oracle/core_math/s_asincosh_data.c" "$REPO/bench/libm_oracle/core_math/s_atanh_data.c" \
      "$REPO/bench/libm_oracle/core_math/atan.c" "$REPO/bench/libm_oracle/core_math/asin.c" \
-     "$REPO/bench/libm_oracle/core_math/acos.c" -lm > "$WORK/libm_oracle.log" 2>&1; then
+     "$REPO/bench/libm_oracle/core_math/acos.c" "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
+     "$REPO/bench/libm_oracle/core_math/e_lgamma_r.c" -lm > "$WORK/libm_oracle.log" 2>&1; then
   "$PY" - "$WORK/exp.in" <<'PY'
 import random, struct, sys
 random.seed(2718)
@@ -272,6 +273,28 @@ for path, values in ((sys.argv[1], xs), (sys.argv[2], ys)):
         for v in values:
             out.write(struct.pack("<d", v))
 PY
+  # lgamma's and tgamma's, one set: the whole range, the band where tgamma
+  # is finite, the negatives down to where it underflows, each side of the
+  # integers and half-integers from -200 to 200, near lgamma's zeros at 1
+  # and 2, the tiny, the subnormals and the specials.
+  "$PY" - "$WORK/gamma.in" <<'PY'
+import random, struct, sys
+random.seed(1729 * 2)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(50000)]
+xs += [random.uniform(-185, 172) for _ in range(80000)]
+xs += [random.uniform(0, 10) for _ in range(30000)]
+xs += [random.choice([1.0, 2.0]) + random.choice([1, -1]) * 2 ** random.uniform(-52, -2) for _ in range(20000)]
+for k in range(-400, 401):
+    for _ in range(20):
+        xs.append(k / 2 + random.choice([1, -1]) * 2 ** random.uniform(-50, -3))
+    xs.append(k / 2)
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+xs += [0.0, -0.0, 1.0, 2.0, -1.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324,
+       171.62437695630272, 171.6243769563027, 1.7976931348623157e308, -1.7976931348623157e308]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
   "$WORK/libm_oracle" exp "$WORK/exp.in" "$WORK/exp.bin" &&
     "$WORK/libm_oracle" pow "$WORK/pow.in" "$WORK/pow.bin" &&
     "$WORK/libm_oracle" log "$WORK/log.in" "$WORK/log.bin" &&
@@ -291,7 +314,9 @@ PY
     "$WORK/libm_oracle" atan "$WORK/atan.in" "$WORK/atan.bin" &&
     "$WORK/libm_oracle" asin "$WORK/asin.in" "$WORK/asin.bin" &&
     "$WORK/libm_oracle" acos "$WORK/asin.in" "$WORK/acos.bin" &&
-    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin $WORK/sinh.bin $WORK/cosh.bin $WORK/tanh.bin $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin"
+    "$WORK/libm_oracle" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
+    "$WORK/libm_oracle" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
+    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin $WORK/sinh.bin $WORK/cosh.bin $WORK/tanh.bin $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin"
 fi
 
 # `Math.fma`'s cases carry their exact answers, which python works out
@@ -303,7 +328,7 @@ if [ -n "$PY" ] && "$PY" "$REPO/bench/std_math_fma.py" "$WORK/fma_doubles.bin" "
 else
   echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
 fi
-[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin and acos against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin, acos, lgamma and tgamma against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -321,7 +346,7 @@ for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "
   fi
 done
 if [ -n "$ORACLE" ]; then
-  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit" "== sinh against glibc's sinh, bit for bit" "== cosh against glibc's cosh, bit for bit" "== tanh against glibc's tanh, bit for bit" "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit"; do
+  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit" "== sinh against glibc's sinh, bit for bit" "== cosh against glibc's cosh, bit for bit" "== tanh against glibc's tanh, bit for bit" "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
@@ -449,11 +474,18 @@ if [ -n "$ORACLE" ]; then
   end
 
   private def self.invtrig_fastsum'
+  mutate "lgamma's and tgamma's fast two-sum without its low part" '    {s, y - z}
+  end
+
+  private def self.gamma_twosum' '    {s, 0.0}
+  end
+
+  private def self.gamma_twosum'
   mutate "log2's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
     rhi' ') * invc
     rhi'
 else
-  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin and acos: not run, no oracle here"
+  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh, tanh, erf, erfc, asinh, acosh, atanh, atan, asin, acos, lgamma and tgamma: not run, no oracle here"
 fi
 # musl's arm, with the processor's answer refused as above: an fma that
 # rounds twice, a product left where z's alignment put it, and a single's
@@ -477,7 +509,6 @@ mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scal
 mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
 mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
 mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
-mutate "gamma with a pole answered" 'return 0.0 / 0.0 if value <= 0.0 && value == value.floor' '# poles answered'
 mutate "gcd on the positive side" 'x = a > 0 ? -a : a' 'x = a.abs'
 
 echo

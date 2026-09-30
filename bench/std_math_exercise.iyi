@@ -206,7 +206,8 @@ puts "  none of them overflow, underflow or cancel at the extremes"
 puts "\n== gamma, lgamma"
 assert_same INF, Math.gamma(INF), "gamma(inf)"
 assert_same NAN, Math.gamma(-INF), "gamma(-inf)"
-assert_same NAN, Math.gamma(0.0), "gamma(0)"
+assert_same INF, Math.gamma(0.0), "gamma(0)"
+assert_same -INF, Math.gamma(-0.0), "gamma(-0)"
 assert_same NAN, Math.gamma(-1.0), "gamma(-1)"
 assert_same NAN, Math.gamma(-100.0), "gamma(-100)"
 assert_same 2.0, Math.gamma(3.0), "gamma(3)"
@@ -228,7 +229,7 @@ assert_close 0.5723649429247004, Math.lgamma(0.5), "lgamma(0.5)"
 assert_close 24.924132002217277, Math.lgamma(14.9), "lgamma(14.9)"
 assert_close -0.05624371649767457, Math.lgamma(-2.5), "lgamma(-2.5)"
 assert_same INF, Math.lgamma(-1.0), "lgamma at a pole"
-puts "  whole arguments are factorials, the poles are NaN, lgamma goes past the overflow"
+puts "  whole arguments are factorials, zero is an infinity of its sign, the negative integers are NaN, lgamma goes past the overflow"
 
 puts "\n== erf, erfc"
 assert_same 0.0, Math.erf(0.0), "erf(0)"
@@ -273,7 +274,8 @@ puts "  they compile without the consumer importing std/float, and overflow to i
 
 # The oracles `bench/std_math_exercise.sh` writes from the code glibc
 # builds these from - Arm's, fdlibm's for log10, expm1, log1p, sinh, cosh
-# and tanh, CORE-MATH's for erf, erfc, asinh, acosh and atanh, and
+# and tanh, CORE-MATH's for erf, erfc, asinh, acosh, atanh, lgamma and
+# tgamma, and
 # CORE-MATH's own atan, asin and acos -
 # compiled from `bench/libm_oracle`: pairs of doubles, an argument and its
 # answer, for the one-argument functions, and triples, a base, an exponent
@@ -335,6 +337,8 @@ against(args[15], "atanh", "glibc's", 200000) { |x| Math.atanh(x) } if args.size
 against(args[16], "atan", "CORE-MATH's", 150000) { |x| Math.atan(x) } if args.size > 16
 against(args[17], "asin", "CORE-MATH's", 150000) { |x| Math.asin(x) } if args.size > 17
 against(args[18], "acos", "CORE-MATH's", 150000) { |x| Math.acos(x) } if args.size > 18
+against(args[19], "lgamma", "glibc's", 150000) { |x| Math.lgamma(x) } if args.size > 19
+against(args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if args.size > 20
 
 # `bench/std_math_fma.py`'s cases, named by the environment because they
 # need python and no C compiler: quadruples a, b, c and a * b + c taken

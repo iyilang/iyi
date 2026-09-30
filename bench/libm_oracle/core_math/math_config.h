@@ -22,6 +22,7 @@ static inline double asdouble (uint64_t i) { union { uint64_t i; double f; } u =
 static inline uint64_t asuint64 (double f) { union { double f; uint64_t i; } u = { f }; return u.i; }
 static inline double roundeven_finite (double x) { return __builtin_roundeven (x); }
 static inline double __math_erange (double x) { return x; }
+static inline double __math_uflow_value (double x) { return x; }
 static inline double __math_invalid (double x) { return (x - x) / (x - x); }
 static inline double __math_divzero (uint32_t s) { return (s ? -1.0 : 1.0) / 0.0; }
 static inline double __math_check_uflow_lt (double x, double y) { (void) y; return x; }

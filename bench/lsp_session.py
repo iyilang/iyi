@@ -1160,6 +1160,57 @@ def main():
              placed_files == ["app.iyi", "greet.iyi"],
              f"rename edited {placed_files}")
 
+    # 18k. The URIs an answer names are URIs: the client's own for a file
+    #      it has open, and for any other one a percent-encoded URI that
+    #      names that file. The path went behind `file:///` as it stood,
+    #      so `#` made the rest of the path a fragment, `%41` decoded to
+    #      another name, and a space never equalled the spelling an editor
+    #      sent - here VS Code's, `c%3A` and all.
+    from urllib.parse import quote
+    odd = os.path.join(work, "odd #1 50%41 \u011f")
+    os.makedirs(odd)
+    odd_lib = os.path.join(odd, "greet.iyi")
+    odd_app = os.path.join(odd, "app.iyi")
+    with open(odd_lib, "w", newline="") as f:
+        f.write("module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n")
+    odd_app_text = "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n"
+    with open(odd_app, "w", newline="") as f:
+        f.write(odd_app_text)
+    absolute = os.path.abspath(odd_app).replace("\\", "/")
+    if os.name == "nt":
+        vscode_uri = "file:///" + absolute[0].lower() + "%3A" + quote(absolute[2:])
+    else:
+        vscode_uri = "file://" + quote(absolute)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": vscode_uri, "languageId": "iyi",
+                             "version": 1, "text": odd_app_text}}, wait=False)
+    c.diagnostics(vscode_uri)
+    at_call = {"textDocument": {"uri": vscode_uri}, "position": {"line": 4, "character": 6}}
+    found = c.send("textDocument/definition", at_call).get("result") or []
+    found_uri = found[0]["uri"] if found else ""
+    renamed = (c.send("textDocument/rename", dict(at_call, newName="holler")).get("result") or {}).get("changes", {})
+    keys = sorted(renamed)
+    others = [k for k in keys if k != vscode_uri]
+    step("18k", "answers name files by the client's URI, or by an encoded one",
+         found_uri != "" and uri_path(found_uri) == uri_path(file_uri(odd_lib)) and os.path.exists(uri_path(found_uri)) and
+         vscode_uri in keys and len(keys) == 2 and
+         all(os.path.exists(uri_path(k)) for k in others),
+         f"definition {found_uri!r}, rename keys {keys}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": vscode_uri}}, wait=False)
+    # And a file on a share: `file://server/share/...` names a UNC path.
+    #  Its authority was read as the path's first segment, relative to the
+    #  server's own directory, and the module beside it was not found.
+    share = r"\\127.0.0.1\C$"
+    if os.name == "nt" and os.path.splitdrive(odd_app)[0].upper() == "C:" and os.path.exists(share):
+        unc_uri = pathlib.Path(share + odd_app[2:]).as_uri()
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": unc_uri, "languageId": "iyi",
+                                 "version": 1, "text": odd_app_text}}, wait=False)
+        unc_diags = [d["message"][:60] for d in c.diagnostics(unc_uri)["diagnostics"]]
+        c.send("textDocument/didClose", {"textDocument": {"uri": unc_uri}}, wait=False)
+        step("18k-unc", "a file on a share finds the module beside it", unc_diags == [],
+             f"{unc_uri}: {unc_diags}")
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",

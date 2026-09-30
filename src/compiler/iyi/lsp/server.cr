@@ -479,7 +479,12 @@ module Iyi::Lsp
         @documents.delete(uri)
         @versions.delete(uri)
         @published.delete(uri)
-        @analysis.close(path_of(uri))
+        # Not while the file is open under another spelling of it: the
+        # analysis is kept by path, and closing one spelling dropped the
+        # other's last good result - completion and hover went empty in the
+        # buffer still open.
+        closed = path_of(uri)
+        @analysis.close(closed) unless @documents.each_key.any? { |open| same_path?(path_of(open), closed) }
       when "textDocument/hover"
         on_hover(id.not_nil!, params.not_nil!)
       when "textDocument/definition"
@@ -2179,7 +2184,7 @@ module Iyi::Lsp
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
       if root = @root
         workspace_files(root, with_lib: false).each do |(file, _)|
-          paths << file unless paths.includes?(file)
+          paths << file unless paths.any? { |known| same_path?(known, file) }
           break if paths.size >= 2000
         end
       end
@@ -2584,7 +2589,7 @@ module Iyi::Lsp
         (edits[uri_of(old_path)] ||= [] of {Int32, Int32, Int32, String})
           .concat module_mention_edits(text, old_mod, new_mod)
         workspace_entries.each do |(entry_path, entry_text)|
-          next if entry_path == old_path
+          next if same_path?(entry_path, old_path)
           mentions = module_mention_edits(entry_text, old_mod, new_mod)
           next if mentions.empty?
           (edits[uri_of(entry_path)] ||= [] of {Int32, Int32, Int32, String})
@@ -3380,19 +3385,53 @@ module Iyi::Lsp
       {% if flag?(:win32) %}
         if path.size > 2 && path[0] == '/' && path[2] == ':'
           path = path.lchop('/')
+        elsif uri.starts_with?("file://") && !path.starts_with?('/') && !path.starts_with?("localhost/")
+          # `file://server/share/x`: the authority is a server, and the
+          # path is a UNC one. Read as `server\share\x` it was relative to
+          # the server's own directory, and a workspace on a share found
+          # none of its modules.
+          path = "//" + path
         end
         path = path.tr("/", "\\")
       {% end %}
       path
     end
 
+    # The URI for *path*: the client's own, when the file is open under
+    # one - so an answer names the file the way the editor does, and two
+    # spellings of one file are never both in a response - and otherwise
+    # one built the way RFC 8089 spells it, percent-encoded. It was the
+    # path behind `file:///` as it stood: `#` and `%` in a directory's
+    # name made a URI that named another file (`C#proj/greet.iyi` is the
+    # fragment `proj/greet.iyi` of `C`), and a space or `ğ` made one no
+    # client's spelling ever equalled, so an editor did not recognise the
+    # files an answer named.
     private def uri_of(path : String) : String
+      @documents.each_key do |uri|
+        return uri if same_path?(path_of(uri), path)
+      end
       {% if flag?(:win32) %}
         posix = path.tr("\\", "/")
-        return "file:///" + posix if posix.size > 1 && posix[1] == ':'
-        "file://" + posix
+        if posix.size > 1 && posix[1] == ':'
+          "file:///" + posix[0, 2] + URI.encode_path(posix[2..])
+        elsif posix.starts_with?("//")
+          "file:" + URI.encode_path(posix)
+        else
+          "file://" + URI.encode_path(posix)
+        end
       {% else %}
-        "file://" + path
+        "file://" + URI.encode_path(path)
+      {% end %}
+    end
+
+    # One file under two spellings: on Windows the separators and the case
+    # are the file system's to ignore, and a path from the resolver mixes
+    # `\` with a module path's `/`.
+    private def same_path?(one : String, other : String) : Bool
+      {% if flag?(:win32) %}
+        fs_path(one).compare(fs_path(other), case_insensitive: true) == 0
+      {% else %}
+        one == other
       {% end %}
     end
 
@@ -3429,12 +3468,7 @@ module Iyi::Lsp
     # on Windows without regard to case, which is what the filesystem does.
     private def document_text(filename : String) : String?
       @documents.each do |uri, text|
-        doc_path = path_of(uri)
-        {% if flag?(:win32) %}
-          return text if doc_path.compare(filename, case_insensitive: true) == 0
-        {% else %}
-          return text if doc_path == filename
-        {% end %}
+        return text if same_path?(path_of(uri), filename)
       end
       nil
     end
@@ -3443,7 +3477,7 @@ module Iyi::Lsp
       overrides = {} of String => String
       @documents.each do |uri, text|
         doc_path = path_of(uri)
-        overrides[doc_path] = text unless doc_path == path
+        overrides[doc_path] = text unless same_path?(doc_path, path)
       end
       overrides
     end

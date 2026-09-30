@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **The language server names files by URIs an editor can use.** A URI
+  in an answer was the path behind `file:///` as it stood: `#` in a
+  directory's name made the rest of the path a fragment, `%41` decoded to
+  another name, and a space or a `ğ` made a URI no editor's spelling ever
+  equalled, so the files a rename or a definition named were not the
+  editor's files. An answer names an open file by the client's own URI
+  now and any other by one percent-encoded as RFC 8089 spells it; so one
+  file is not listed twice under two spellings, which workspace/diagnostic
+  did with the disk's stale verdict second. A `file://server/share/...`
+  URI is a UNC path on Windows - its server was read as a directory
+  relative to the server's own, and a workspace on a share found none of
+  its modules. And closing a file open under two spellings no longer
+  drops the analysis the other is still using. Step 18k of
+  `bench/lsp_session.py` opens a file under VS Code's spelling in a
+  directory named `odd #1 50%41 ğ`, and on Windows through
+  `\\127.0.0.1\C$`; the old server answered unencoded URIs and "can't find
+  module".
+
 - **The language server's workspace is what is under its root, wherever
   the root is.** Each workspace walk skipped a file whose absolute path
   held `/.` or `/lib/` - meant for `.git` and a dependency's `lib` inside

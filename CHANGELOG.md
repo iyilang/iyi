@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`iyi doc` and `iyi mod context` see a project whose directory's name
+  holds `;` (`:` elsewhere).** The module's root travelled to the compile
+  as the front of `IYI_PATH`, which is split on the platform's list
+  separator: a project in `a;b` arrived as two entries that are not
+  directories, and `iyi doc app/lib` answered "can't find module
+  'app/lib'" - `mod context` the same, with exit 0 - about a module
+  `iyi run` builds. The root is the compile's project root now, where an
+  import is resolved first. `bench/mod_context.sh` documents and grounds
+  a project in `semi;colon`; the old binary could not (measured by the
+  hunt that found it).
+
 - **`iyi fmt --check .` leaves `lib` alone, as `iyi fmt --check` does.**
   The excludes were compared as string prefixes, and a walk from `.` or
   from an absolute directory named its files `.\.\lib\x.iyi` and

@@ -385,11 +385,11 @@ class Iyi::Command
     compiler.emit_iyimod = emit_dir
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new
-    previous_path = ENV["IYI_PATH"]?
+    # The module's root as the project's, where the import is resolved
+    # first - not as the front of `IYI_PATH`, which a `;` in the root's
+    # name split in two on Windows (see `iyi doc`).
+    compiler.iyi_project_root = module_root
     begin
-      # The delimiter is the platform's, because `IyiPath` splits on the
-      # platform's: a `:`-joined list is one unusable entry on Windows.
-      ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
       compiler.compile(
         Compiler::Source.new(entry, File.read(entry)),
         File.join(emit_dir, "unused"))
@@ -399,8 +399,6 @@ class Iyi::Command
       # reason: this answer is what a reader acts on.
       deepest = Iyi.deepest_error(ex)
       return {written, nil, "does not compile alone: #{deepest.message.to_s.lines.first?}", nil}
-    ensure
-      previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
     end
 
     Dir.glob(Iyi.glob_root(emit_dir).join("**", "*.iyimod")) do |candidate|

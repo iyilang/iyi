@@ -613,4 +613,27 @@ else
 fi
 cd "$WORK" || exit 1
 
+# A project whose directory's name holds the platform's path-list
+# separator: the module's root travelled as the front of `IYI_PATH`, and
+# `a;b` (`a:b` elsewhere) arrived as two entries, so `iyi doc` and `mod
+# context` answered "can't find module" about a module `iyi run` builds.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) listed="$WORK/semi;colon" ;;
+  *) listed="$WORK/semi:colon" ;;
+esac
+mkdir -p "$listed/app"
+cd "$listed" || exit 1
+printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > app/lib.iyi
+printf 'import app/lib::{value}\n\nputs value\n' > user.iyi
+"$IYI" doc app/lib > listed_doc.txt 2>&1
+"$IYI" mod context user.iyi > listed_ctx.txt 2>&1
+if grep -q "pub def value : Int32" listed_doc.txt && grep -q "pub def value : Int32" listed_ctx.txt; then
+  echo "a project in $(basename "$listed") is documented and grounded"
+else
+  echo "FAIL: a project in $(basename "$listed"): doc and mod context answered"
+  sed -n '1,2p' listed_doc.txt listed_ctx.txt | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

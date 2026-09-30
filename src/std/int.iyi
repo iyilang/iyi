@@ -15,7 +15,8 @@
 #
 # What it refuses: arithmetic that leaves the type panics with "arithmetic
 # overflow" (the `&+` family wraps instead); a conversion that does not fit
-# panics the same way, and the `to_i8?` family answers nil instead; a double
+# panics the same way, the `to_i8?` family answers nil instead, and the
+# `unsafe_to_i8` family keeps the low bits; a double
 # converts by truncating first, so `127.9.to_i8` is 127 and `(-0.5).to_u16`
 # is 0, and what is refused is a truncation the type does not hold; `//` and
 # `%` by zero panic "division by zero" / "modulo by zero"; `digits` of a
@@ -104,7 +105,9 @@ module std/int
   {% for from in types %}
     struct ::{{ from[0].id }}
       # Conversions: the checked form panics "arithmetic overflow" when the
-      # value does not fit; the `?` form answers nil instead. A pair the
+      # value does not fit; the `?` form answers nil instead; the unchecked
+      # form is the instruction - truncated, or extended by the sign of the
+      # type it leaves - as the prelude's `unsafe_to_u8` is. A pair the
       # prelude already declares is not declared twice.
       {% for conv in convs %}
         {% to_name = conv[1] %}
@@ -113,6 +116,10 @@ module std/int
           @[::Primitive(:convert)]
           @[Raises]
           def {{ conv[0].id }} : {{ to_name.id }}
+          end
+
+          @[::Primitive(:unchecked_convert)]
+          def unsafe_{{ conv[0].id }} : {{ to_name.id }}
           end
         {% end %}
 

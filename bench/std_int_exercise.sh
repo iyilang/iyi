@@ -75,7 +75,7 @@ fi
 
 echo
 echo "== every int section reported"
-for phrase in "== add" "== bits" "== comparison with doubles" "== conversion from doubles" "== traits"; do
+for phrase in "== add" "== bits" "== comparison with doubles" "== conversion from doubles" "== unchecked conversions" "== traits"; do
   if ! grep -q "$phrase" "$WORK/int-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -153,6 +153,32 @@ PY
     status=1
   else
     echo "  a broken int is caught"
+  fi
+
+  # The unchecked conversions checked instead: the first one that wraps
+  # panics, and the exercise has to say so.
+  mkdir -p "$WORK/checked/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/int.iyi").read_text()
+old = "@[::Primitive(:unchecked_convert)]\n          def unsafe_{{ conv[0].id }} : {{ to_name.id }}"
+if old not in src:
+    raise SystemExit("patch site missing")
+new = "@[::Primitive(:convert)]\n          @[Raises]\n          def unsafe_{{ conv[0].id }} : {{ to_name.id }}"
+Path("$WORK/checked/std/int.iyi").write_text(src.replace(old, new, 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the unchecked patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/checked${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_int_exercise.iyi" >"$WORK/checked.out" 2>&1; then
+    echo "  the exercise PASSED with the unchecked conversions checked"
+    status=1
+  elif ! grep -q "arithmetic overflow" "$WORK/checked.out"; then
+    echo "  checked conversions failed, but not at an overflow:"
+    sed -n '1,3p' "$WORK/checked.out"
+    status=1
+  else
+    printf '  unchecked conversions checked: exits at "%s"\n' "$(grep -m1 'arithmetic overflow' "$WORK/checked.out" | sed 's/^iyi: panic: //')"
   fi
 fi
 

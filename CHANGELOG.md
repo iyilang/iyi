@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`YAML.dump` quotes a string that starts with `?` or a byte order
+  mark.** `?x` was written bare, and `YAML.parse` refuses a plain scalar
+  that starts with `?` ("a scalar cannot start with '?'"), so the dump of
+  a value did not read back, which `YAML.dump` promises; a string that
+  started with U+FEFF was written bare at the stream's start, where the
+  reader skips it as a byte order mark. Both are quoted now. A probe of
+  51 strings through `dump` and `parse`, as a value and as a key, found
+  these three failures and none after. `bench/std_yaml_exercise.iyi`
+  round-trips both; the old module refuses the first.
+
 - **A `file://C:/x` URI names a drive again, not a share.** The reading
   of `file://server/share/x` as a UNC path (above) also took
   `file://C:/x` - a spelling some clients send for `file:///C:/x` - for

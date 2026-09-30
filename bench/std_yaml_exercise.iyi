@@ -64,6 +64,13 @@ assert_true(YAML.dump(doc).starts_with?("a: 1"), "dump is block YAML")
 assert_true(YAML.parse(YAML.dump(Any.new(nil))).null?, "dumped null")
 assert_str("\"- a\"\n", YAML.dump(Any.new("- a")), "a string that looks like a sequence entry is quoted")
 assert_str("\"? a\"\n", YAML.dump(Any.new("? a")), "a string that looks like an explicit key is quoted")
+# `?x` was dumped bare, which the reader refuses, and a leading byte order
+# mark bare, which the reader skips: neither read back to what was dumped.
+["?x", "\uFEFFmarked"].each do |text|
+  assert_true(YAML.parse(YAML.dump(Any.new(text))) == Any.new(text), "#{text.inspect} reads back from its dump")
+  keyed = Any.new({Any.new(text) => Any.new(text)} of Any => Any)
+  assert_true(YAML.parse(YAML.dump(keyed)) == keyed, "#{text.inspect} as a key and a value reads back")
+end
 assert_str("- a", YAML.parse(YAML.dump(Any.new([Any.new("- a")] of Any)))[0].as_s, "an entry-like string reads back inside a sequence")
 merge_key = YAML.parse("\"<<\": 1\n")
 assert_str("\"<<\": 1\n", YAML.dump(merge_key), "the merge key is quoted when dumped as a plain key")

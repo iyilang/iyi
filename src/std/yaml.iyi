@@ -2042,7 +2042,12 @@ class Emitter
     bytes = text.to_unsafe
     first = bytes[0]
     return false if blank_byte?(first) || blank_byte?(bytes[size - 1])
-    if first == 45_u8 || first == 63_u8 || first == 58_u8
+    # `?` is quoted whatever follows it: the reader refuses a plain scalar
+    # that starts with one, so `?x` dumped bare did not read back. And a
+    # byte order mark first, which the reader skips at a stream's start.
+    return false if first == 63_u8
+    return false if size >= 3 && first == 0xEF_u8 && bytes[1] == 0xBB_u8 && bytes[2] == 0xBF_u8
+    if first == 45_u8 || first == 58_u8
       return false if size == 1 || blank_byte?(bytes[1])
     elsif indicator?(first)
       return false

@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **`Complex` keeps its zeros' signs and divides at any magnitude.**
+  `conj`, unary minus, `Number - Complex` and `sqrt` negated as `0.0 - x`,
+  which turns -0.0 into 0.0 - so the conjugate of -1+0i sat on the wrong
+  side of `log`'s branch cut and answered +pi i; `to_s` chose its joiner
+  with `imag >= 0.0`, printing `1.0 + -0.0i` and `1.0 - NaNi`. Division
+  went through `abs2`, which overflows past 1e154 and underflows below
+  1e-162: `(1+1i) / (1e200+1e200i)` was 0 and `/ (1e-200+1e-200i)`
+  panicked "Division by zero", as did `/ 0.0`, where a float's quotient
+  is infinite. It divides by Smith's scaled quotient now, `Number /
+  Complex` is `self * other.inv`, `sign` scales before it divides, and a
+  real complex hashes as its real part. 434,256 cases over 42 fields
+  against the other library's `Complex` and Python's `cmath` found these
+  and none after - but where glibc's `hypot`, `atan2`, `exp`, `sin` or
+  `cos` misround and iyi's are correct; `std/random` matched PCG32 on 16
+  million draws. The complex exercise checks each and proves each check
+  fails with its fix undone.
+
 - **Thirteen collection answers are right.** `each_cons_pair`,
   `chunk_while` and `reduce?` used nil for "nothing yet", so a nil
   element was skipped: `[nil, 2, nil, 3].each_cons_pair` yielded one pair

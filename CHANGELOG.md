@@ -225,8 +225,10 @@
   `-Dgc_boehm` never faulted. Under a running mark the chunk stays mapped
   and listed and the sweep after the mark frees it: 0 faults in 60 runs.
   `bench/concurrent_mark.sh` outgrows blocks under marks, requires each
-  one listed while its mark runs and every one freed after, and proves
-  the check fails with `free`'s look at the mark removed.
+  one listed while its mark runs and the blocks freed after - all but
+  what a stale word keeps, which on Windows is one, where a leak keeps
+  every one - and proves the check fails with `free`'s look at the mark
+  removed.
 
 - **Two `SemanticVersion`s compare.** `<=>` was declared on the struct
   with `other : self` and again in `impl Comparable`, whose body is `self

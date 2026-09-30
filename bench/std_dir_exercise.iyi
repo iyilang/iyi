@@ -306,4 +306,16 @@ clean_tree(sandbox)
 Dir.delete?(sandbox)
 assert_true !Dir.exists?(sandbox), "sandbox removed after exercise"
 
+# An empty path names no directory, as POSIX `opendir("")` fails: on
+# Windows it listed the current drive's root while `Dir.exists?("")` said
+# false.
+listed = "listed"
+group do |g|
+  empty = g.spawn { Dir.children(""); 0 }
+  outcome = empty.value
+  listed = outcome.is_a?(Panicked) ? outcome.message.to_s : "listed"
+  0
+end
+assert_true !Dir.exists?("") && listed.includes?("Cannot open directory"), "Dir.children(\"\") is refused, not #{listed}"
+
 puts "\nALL CHECKS PASSED"

@@ -794,6 +794,10 @@ pub class Dir
     # business of its. A null pointer is the conversion having failed, which
     # the callers read as the directory not opening.
     protected def self.find_pattern(dir_path : String) : UInt16*
+      # An empty path names no directory, as POSIX `opendir("")` fails: it
+      # became a pattern for the current drive's root, and
+      # `Dir.children("")` listed `C:\` while `Dir.exists?("")` said false.
+      return Pointer(UInt16).new(0_u64) if dir_path.empty?
       wide = __iyi_wide_path(c_str(dir_path))
       return wide if wide.address == 0_u64
       length = 0

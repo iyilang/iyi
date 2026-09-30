@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`Dir.children("")` is refused on Windows, as POSIX refuses it.** An
+  empty path became a pattern for the current drive's root, so
+  `Dir.children("")` listed `C:\` while `Dir.exists?("")` said false. It
+  panics "Cannot open directory" now, as `opendir("")` fails elsewhere.
+  `bench/std_dir_exercise.iyi` asks for it in a task; the old module
+  listed the root.
+
 - **On Windows a link to nothing does not exist.** `File.exists?` and
   `Dir.exists?` read a path's own attributes, which a link has whether or
   not what it names is there: a junction whose directory was gone

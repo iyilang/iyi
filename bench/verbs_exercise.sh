@@ -291,6 +291,24 @@ else
 fi
 "$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
 cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
+# A CRLF file keeps its CRLF through `fmt`, and a literal keeps the line
+# breaks it holds, which are the program's data: every `\n` was turned, so
+# a string holding a bare line break gained a `\r` and printed eight bytes
+# where it had printed seven. A heredoc's opener and the lines inside an
+# interpolated string are the other two places a line break can sit.
+mkdir -p crlf
+printf 'module m\r\n\r\ns = "one\ntwo"\r\nputs s.bytesize\r\n' > crlf/lit.iyi
+printf 'module h\r\n\r\ntext = <<-EOS\r\n  hello\r\n  world\r\n  EOS\r\nputs text.bytesize\r\n' > crlf/here.iyi
+printf 'module p\r\n\r\ndef f(x : Int32) : Int32\r\n  x + 1\r\nend\r\n\r\nputs "a#{f(1)}b\r\nc"\r\n' > crlf/interp.iyi
+for f in lit here interp; do
+  cp "crlf/$f.iyi" "crlf/$f.keep"
+  "$IYI" fmt "crlf/$f.iyi" > /dev/null 2>&1
+  if cmp -s "crlf/$f.iyi" "crlf/$f.keep"; then
+    echo "  fmt of a formatted CRLF file with line breaks in a literal ($f): unchanged"
+  else
+    echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
+  fi
+done
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"

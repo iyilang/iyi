@@ -564,6 +564,17 @@
 
 ### Fixed
 
+- **`fmt` keeps the line breaks a literal holds in a CRLF file.** A CRLF
+  file is written back with CRLF, and every `\n` was turned - the ones
+  inside a string literal too, which are the program's data: `"one` /
+  `two"` holding a bare line break printed 7 before `fmt` and 8 after. A
+  line break a literal holds now keeps the ending the source had there;
+  the code's lines end CRLF as before. The formatter moves no literal, so
+  the two parses agree on those breaks, and where they do not every line
+  is turned as it was. `bench/verbs_exercise.sh` formats a string with a
+  bare line break, a heredoc and an interpolated string, all in CRLF
+  files, and requires each unchanged; the old compiler changed the first.
+
 - **`iyi init`'s next step pastes into any shell.** It printed
   `cd my app ğüş && iyi run hello.iyi`: one line joined with `&&`, which
   Windows PowerShell 5.1 refuses as "not a valid statement separator", and

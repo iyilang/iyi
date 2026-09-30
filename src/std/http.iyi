@@ -90,8 +90,12 @@ struct ParsedRequest
   # And whether that head asked `Expect: 100-continue`: the client waits
   # to be told to send the body.
   getter expects : Bool
+  # A chunked request whose head is in and whose body is not: the request
+  # with an empty body, `consumed` bytes of head behind it. The server
+  # reads the body as it arrives (`HTTP.read_chunked`).
+  getter chunked : Request?
 
-  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false)
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false, @chunked : Request? = nil)
   end
 end
 
@@ -149,17 +153,31 @@ pub struct Server
       if req = parsed.request
         continued = false
         buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]
-        response = handler.call(req)
-        wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), parsed.close))
-        # A client that went away before its answer is gone; its
-        # connection ends here, and the server goes on.
-        return unless wrote.is_a?(Int32)
-        return if parsed.close
+        return unless answered?(client, handler, req, parsed.close)
         next
       end
       if reason = parsed.error
         client.write(format_response(Response.new(400, reason + "\n"), false, true))
         return
+      end
+      # A chunked body is decoded as it arrives. It was added to what came
+      # before and the whole request parsed again after every read, a copy
+      # of the body so far per read: 16 MB took 11.5 s chunked and 0.24 s
+      # with a `Content-Length`.
+      if head = parsed.chunked
+        if !continued && parsed.expects
+          return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
+        end
+        continued = false
+        read = HTTP.read_chunked(client, buffer[parsed.consumed, buffer.bytesize - parsed.consumed], MAX_BODY)
+        return if read.nil?
+        if read.is_a?(String)
+          client.write(format_response(Response.new(400, read + "\n"), false, true))
+          return
+        end
+        body, buffer = read
+        return unless answered?(client, handler, Request.new(head.method, head.path, head.query, head.headers, body), parsed.close)
+        next
       end
       # Not a whole request yet: read more, or stop at the client's close.
       # When the head says how long the request is, read until it is all
@@ -202,6 +220,15 @@ pub struct Server
         end
       end
     end
+  end
+
+  # The handler's answer to *req*, written: whether the connection goes on.
+  # A client that went away before its answer is gone; its connection ends
+  # here, and the server goes on.
+  private def self.answered?(client : IyiSocket, handler : Proc(Request, Response), req : Request, close : Bool) : Bool
+    response = handler.call(req)
+    wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), close))
+    wrote.is_a?(Int32) && !close
   end
 
   # A request off the front of `text`, if a whole one is there. No
@@ -258,7 +285,7 @@ pub struct Server
       return ParsedRequest.new(nil, "transfer encoding #{te.inspect} is not chunked", true, 0) unless HTTP.same_name?(HTTP.trim(te), "chunked")
       done = HTTP.chunked_end(after)
       return ParsedRequest.new(nil, done, true, 0) if done.is_a?(String)
-      return ParsedRequest.new(nil, nil, false, 0, 0, expects) unless done
+      return ParsedRequest.new(nil, nil, close, body_start, 0, expects, Request.new(method, path, query, headers, "")) unless done
       return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done > MAX_BODY
       body = HTTP.decode_chunked(after[0, done])
       return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, body_start + done)
@@ -620,6 +647,84 @@ pub struct HTTP
         "Server Error"
       end
     end
+  end
+
+  # A chunked body read off *client* as it arrives, *held* the bytes of it
+  # already read: the body and what came after it, the reason it is not
+  # one, or nil when the connection ended first. Each read is decoded into
+  # the body once; only an unfinished size line is carried to the next.
+  def self.read_chunked(client : IyiSocket, held : String, limit : Int32) : {String, String} | String | Nil
+    body = String::Builder.new
+    data = held
+    pos = 0
+    total = 0
+    while true
+      line_end = find_crlf(data, pos)
+      while line_end.nil?
+        return "a chunk size line past 4096 bytes" if data.bytesize - pos > 4096
+        more = read_more(client)
+        return nil unless more
+        data = data[pos, data.bytesize - pos] + more
+        pos = 0
+        line_end = find_crlf(data, pos)
+      end
+      size_text = data[pos, line_end - pos]
+      if semi = size_text.index(';')
+        size_text = size_text[0, semi]
+      end
+      size = parse_hex(trim(size_text))
+      return "not a chunk size: #{size_text.inspect}" unless size
+      pos = line_end + 2
+      if size == 0
+        # Trailers, then a blank line.
+        while true
+          t_end = find_crlf(data, pos)
+          while t_end.nil?
+            return "trailers past 4096 bytes" if data.bytesize - pos > 4096
+            more = read_more(client)
+            return nil unless more
+            data = data[pos, data.bytesize - pos] + more
+            pos = 0
+            t_end = find_crlf(data, pos)
+          end
+          if t_end == pos
+            pos = pos + 2
+            return {body.to_s, data[pos, data.bytesize - pos]}
+          end
+          pos = t_end + 2
+        end
+      end
+      return "chunked body past #{limit} bytes" if size > limit - total
+      total = total + size
+      remaining = size
+      while remaining > 0
+        if pos == data.bytesize
+          more = read_more(client)
+          return nil unless more
+          data = more
+          pos = 0
+        end
+        take = data.bytesize - pos
+        take = remaining if take > remaining
+        body.write(data.to_unsafe + pos, take)
+        pos = pos + take
+        remaining = remaining - take
+      end
+      while data.bytesize - pos < 2
+        more = read_more(client)
+        return nil unless more
+        data = data[pos, data.bytesize - pos] + more
+        pos = 0
+      end
+      return "a chunk is not followed by CRLF" unless data.to_unsafe[pos] == 13_u8 && data.to_unsafe[pos + 1] == 10_u8
+      pos = pos + 2
+    end
+  end
+
+  private def self.read_more(client : IyiSocket) : String?
+    more = client.read(65536)
+    return nil unless more.is_a?(String) && more.bytesize > 0
+    more
   end
 
   # Where a chunked body ends in `text` — the byte after the last chunk's

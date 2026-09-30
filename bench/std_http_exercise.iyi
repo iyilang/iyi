@@ -266,6 +266,8 @@ group do |g|
         Response.new(200, req.body, {"X-Query" => req.query || "-", "X-Agent" => req.header("user-agent") || "-"})
       elsif req.path == "/nothing"
         Response.new(204)
+      elsif req.path == "/size"
+        Response.new(200, req.body.bytesize.to_s)
       elsif req.path == "/stop"
         listener.close
         Response.new(200, "bye")
@@ -368,15 +370,31 @@ group do |g|
     upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
     assert_true r10.status == 200 && r10.body == upload, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
     assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
+    # The same for a chunked body, which is decoded as it arrives: it was
+    # added to what came before and parsed again after every read, and
+    # 16 MB in 64 KB chunks took 8.8 s where this takes a tenth of one.
+    framed = String::Builder.new(16900000)
+    framed << "POST /size HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    piece = "c" * 65536
+    256.times { framed << "10000\r\n" << piece << "\r\n" }
+    framed << "0\r\n\r\n"
+    chunked_started = __iyi_monotonic_ns
+    up = IyiSocket.connect("127.0.0.1", sport).or_panic
+    up.write(framed.to_s).or_panic
+    r12 = HTTP.parse_response(read_response(up))
+    chunked_ms = (__iyi_monotonic_ns - chunked_started) // 1000000_i64
+    up.close
+    assert_true r12.status == 200 && r12.body == "16777216", "a 16 MB chunked upload arrived whole (#{r12.body} bytes)"
+    assert_true chunked_ms < 4000, "a 16 MB chunked upload is decoded as it arrives: it took #{chunked_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 211, "the block ran 211 times (the 400 never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 212, "the block ran 212 times (the 400 never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 201 lean requests, 100-continue, a 24 MB upload, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400, Connection: close, HTTP/1.0, 201 lean requests, 100-continue, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the

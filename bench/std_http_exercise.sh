@@ -271,9 +271,10 @@ PY
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca'
 mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body if'
-mutate "a server that forgets keep-alive" 'return if parsed.close' 'return if true'
+mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
+mutate "a server that parses a chunked body again after every read" 'if head = parsed.chunked' 'if head = nil.as(Request?)'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler)' '          accepted = client

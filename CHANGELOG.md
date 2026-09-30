@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`Server.serve` reads a chunked request body in time linear in its
+  size.** A chunked body has no length up front, so each read was added to
+  what came before and the whole request parsed again: a copy of the body
+  so far per read, and 16 MB in 64 KB chunks took 8.8 s where the same
+  body with a `Content-Length` took 0.24 s. Once the head is in, the body
+  is decoded as it arrives (`HTTP.read_chunked`), each read into the body
+  once, and the 16 MB take 140 ms; a bad size, a chunk without its CRLF
+  and a body past the limit are still a 400, and a request pipelined after
+  the body is still read. `bench/std_http_exercise.iyi` uploads the 16 MB
+  under 4 s, and its mutation that parses again after every read is
+  caught.
+
 - **The Turkic downcase of `I` with a combining dot above is `i`.**
   SpecialCasing takes the dot into the letter (After_I, Not_Before_Dot),
   and `Unicode.downcase("I\u0307", Turkic)` lowered one character at a

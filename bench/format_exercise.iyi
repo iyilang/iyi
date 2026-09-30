@@ -17,6 +17,8 @@
 # 1. Field width: values narrower than width pad to the minimum width.
 import std/format::{sprintf, printf}
 import std/gc::{GC}
+import std/int
+import std/float
 
 w1 = sprintf("%10s", "hello")
 raise "format: width string failed" if w1 != "     hello"
@@ -340,5 +342,21 @@ raise "general: uppercase" unless sprintf("%G", 1.23456789e-5) == "1.23457E-05"
 raise "general: width and flags" unless sprintf("%10g|", -2.25) == "     -2.25|" && sprintf("%-8g|", 0.5) == "0.5     |" && sprintf("%+g", 7) == "+7" && sprintf("%08g", 1.5) == "000001.5"
 raise "general: infinity" unless sprintf("%g", 1.0 / 0.0) == "Infinity"
 puts "    general: %g and %G choose the shorter notation and trim it"
+
+# 9. The rest of the tower, and a character by its code point. `%d` of an
+# `Int8`, `UInt32` or `Float32` panicked "wants a number"; an `Int128` is
+# written from its own digits, past 64 bits. `%c` of 233 panicked "233 is
+# out of char range", and `%c` of "é" answered its first byte.
+t1 = sprintf("[%d|%+05d|%x|%u]", -5_i8, 5_i16, 255_u16, 4000000000_u32)
+raise "format: tower int failed: #{t1}" if t1 != "[-5|+0005|ff|4000000000]"
+t2 = sprintf("[%.2f|%e]", 1.5_f32, 2.5_f32)
+raise "format: tower float failed: #{t2}" if t2 != "[1.50|2.500000e+00]"
+t3 = sprintf("[%d|%#x|%-6d|%08d|%.3d]", 170141183460469231731687303715884105727_i128, -255_i128, 7_i128, -7_i128, 0_i128)
+raise "format: Int128 failed: #{t3}" if t3 != "[170141183460469231731687303715884105727|-0xff|7     |-0000007|000]"
+t4 = sprintf("[%X|%b|%.0d]", 340282366920938463463374607431768211455_u128, 5_u128, 0_u128)
+raise "format: UInt128 failed: #{t4}" if t4 != "[FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF|101|]"
+c1 = sprintf("[%c|%c|%c|%3c]", 0xE9, "é", 0x1F600, 65)
+raise "format: %c of a code point failed: #{c1}" if c1 != "[é|é|😀|  A]"
+puts "    tower: Int8 to UInt128 and Float32, and %c of any code point"
 
 puts "    all format checks passed"

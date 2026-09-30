@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`sprintf` formats the whole integer tower and `Float32`, and `%c` any
+  code point.** `%d` of an `Int8`, `Int16`, `UInt16`, `UInt32`, `Int128`,
+  `UInt128` or `Float32` - the types `std/int` and `std/float` make
+  usable - panicked "wants a number"; they widen without loss now, and a
+  128-bit value is written from its own digits, all 39 of `Int128`'s
+  largest. `%c` of 233 panicked "233 is out of char range", `chr` being
+  ASCII, where Crystal's `%c` prints `é`; a number is a code point now,
+  and a surrogate or a value past U+10FFFF is refused with a sentence.
+  `%c` of a string took its first byte, half of an `é`, and takes its
+  first character. `bench/format_exercise.iyi` formats each; the old
+  module panics at the first.
+
 - **A 128-bit integer converts to a float on Windows.** `x.to_f64` or
   `x.to_f32` of an `Int128` or `UInt128` whose value LLVM could not see
   failed to link: the conversion is a call to compiler-rt's

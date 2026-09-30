@@ -686,18 +686,28 @@ module ::IyiFormat
     end
   end
 
+  # A number is a code point, as Crystal's `%c` has it: `%c` of 233 is
+  # `é`, where it panicked "233 is out of char range" (`chr` is ASCII).
+  # Anything else is its first character, not its first byte, which cut
+  # `é` in half.
   def self.format_char_arg(val, minus : Bool, width : Int32) : String
     ch = case val
          when Char
            val
          when Int32
-           val.chr
+           code_point(val.to_i64)
          when Int64
-           val.to_i32.chr
+           code_point(val)
          when UInt8
-           val.to_i32.chr
+           code_point(val.to_i64)
          else
-           val.to_s.empty? ? ' ' : val.to_s[0]
+           first = ' '
+           taken = false
+           val.to_s.each_char do |c|
+             first = c unless taken
+             taken = true
+           end
+           first
          end
     s = ch.to_s
     if width > 1
@@ -708,7 +718,26 @@ module ::IyiFormat
     end
   end
 
+  def self.code_point(code : Int64) : Char
+    raise "%c of #{code}: not a Unicode code point" if code < 0_i64 || code > 0x10FFFF_i64 || (code >= 0xD800_i64 && code <= 0xDFFF_i64)
+    code.to_i32.unsafe_chr
+  end
+
   def self.format_arg(val, verb : Char, minus : Bool, plus : Bool, space : Bool, zero : Bool, hash : Bool, width : Int32, precision : Int32) : String
+    # The rest of the tower `std/int` and `std/float` make usable is
+    # formatted as the prelude's own four are: `%d` of an `Int8`, `UInt32`
+    # or `Float32` panicked "wants a number". A value is widened without
+    # loss; an `Int128` or `UInt128` is written from its own digits.
+    case val
+    when Int8, Int16
+      return format_arg(val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
+    when UInt16, UInt32
+      return format_arg(val.to_u64, verb, minus, plus, space, zero, hash, width, precision)
+    when Float32
+      return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision)
+    when Int128, UInt128
+      return format_wide(val, verb, minus, plus, space, zero, hash, width, precision)
+    end
     case verb
     when 's'
       format_string_arg(val.to_s, minus, width, precision)
@@ -872,6 +901,49 @@ module ::IyiFormat
       end
     else
       raise "unknown format specifier '%#{verb}'"
+    end
+  end
+
+  # An `Int128` or `UInt128`: an integer verb writes its digits, which may
+  # not fit 64 bits; a float verb its nearest double, as `%f` of an
+  # `Int64` is.
+  def self.format_wide(val, verb : Char, minus : Bool, plus : Bool, space : Bool, zero : Bool, hash : Bool, width : Int32, precision : Int32) : String
+    base = case verb
+           when 'd', 'i', 'u' then 10
+           when 'x', 'X'      then 16
+           when 'o'           then 8
+           when 'b'           then 2
+           else                    0
+           end
+    if base == 0
+      return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision) if verb == 'f' || verb == 'e' || verb == 'E' || verb == 'g' || verb == 'G'
+      return format_arg(val.to_s, verb, minus, plus, space, zero, hash, width, precision) if verb == 's' || verb == 'p'
+      raise "%#{verb} wants a character, and #{val} is a #{val.class}" if verb == 'c'
+      raise "unknown format specifier '%#{verb}'"
+    end
+    text = val.to_s(base)
+    negative = text.starts_with?('-')
+    digits = negative ? text[1, text.bytesize - 1] : text
+    digits = digits.upcase if verb == 'X'
+    digits = "" if digits == "0" && precision == 0
+    sign = negative ? "-" : ((verb == 'd' || verb == 'i') ? (plus ? "+" : (space ? " " : "")) : "")
+    prefix = ""
+    if hash && text != "0"
+      prefix = base == 16 ? (verb == 'X' ? "0X" : "0x") : (base == 8 ? "0o" : (base == 2 ? "0b" : ""))
+    end
+    if precision >= 0
+      zero = false
+      digits = ("0" * (precision - digits.bytesize)) + digits if digits.bytesize < precision
+    end
+    total_len = sign.bytesize + prefix.bytesize + digits.bytesize
+    return sign + prefix + digits if total_len >= width
+    pad_count = width - total_len
+    if minus
+      sign + prefix + digits + (" " * pad_count)
+    elsif zero
+      sign + prefix + ("0" * pad_count) + digits
+    else
+      (" " * pad_count) + sign + prefix + digits
     end
   end
 

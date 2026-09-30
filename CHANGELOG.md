@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **YAML's keep chomping (`|+`, `>+`) keeps the line breaks the text has
+  and no more.** A block scalar that ended the stream read one line break
+  too many: `a: |+\n  x\n` gave `"x\n\n"` for `"x\n"`, with LF or CRLF,
+  because the empty stretch after the stream's last line break was
+  counted as a blank line. It is not a line. `bench/std_yaml_exercise.iyi`
+  reads six block scalars at a stream's end, kept, clipped and stripped;
+  the old module failed the first.
+
 - **`std/yaml`'s header says `0777` is 777.** It listed `0777` among the
   plain scalars read as strings; the reader follows the 1.2 core schema,
   whose integer is `[-+]?[0-9]+`, and reads the decimal 777, as it

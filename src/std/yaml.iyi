@@ -1576,6 +1576,9 @@ pub class Parser
         spaces = spaces + 1
       end
       if start + spaces >= finish
+        # The stream's end after its last line break is no line: counted
+        # as a blank one, `|+` kept a line break the text does not have.
+        break if start == @size && look == @starts.size - 1
         lines << ""
         look = look + 1
         next

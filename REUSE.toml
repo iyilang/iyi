@@ -25,6 +25,14 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2018-2025 Arm Limited"
 SPDX-License-Identifier = "MIT"
 
+# iyi: `Math.fma`'s software arm is musl's `fma` and `fmaf`, in iyi; the
+# notice is beside the code.
+[[annotations]]
+path = ["src/std/math.iyi"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2005-2020 Rich Felker, et al."
+SPDX-License-Identifier = "MIT"
+
 # iyi: the port of kostya's crystal-metric that `bench/metric_port.sh` gates.
 [[annotations]]
 path = ["bench/metric/**"]

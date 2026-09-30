@@ -198,6 +198,16 @@ PY
     "$WORK/libm_oracle" log1p "$WORK/log1p.in" "$WORK/log1p.bin" &&
     ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin"
 fi
+
+# `Math.fma`'s cases carry their exact answers, which python works out
+# with fractions, so they need no C compiler and run wherever python does.
+FMA=""
+if [ -n "$PY" ] && "$PY" "$REPO/bench/std_math_fma.py" "$WORK/fma_doubles.bin" "$WORK/fma_singles.bin"; then
+  export IYI_MATH_FMA_DOUBLES="$WORK/fma_doubles.bin" IYI_MATH_FMA_SINGLES="$WORK/fma_singles.bin"
+  FMA=1
+else
+  echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
+fi
 [ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10 and pow against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
 
 echo "== the std/math exercise, plain build"
@@ -223,6 +233,10 @@ if [ -n "$ORACLE" ]; then
     fi
   done
 fi
+if [ -n "$FMA" ] && ! grep -q "== fma against the exact sum rounded once, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
+  echo "  missing section: == fma against the exact sum rounded once, bit for bit"
+  status=1
+fi
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo
@@ -233,24 +247,58 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/math-release.out" 2>/dev/null; then
   status=1
 fi
 
+# x86_64 fuses with `vfmadd` where the processor has FMA3, which every CI
+# runner's does, so musl's arm would go unrun there; the same exercise
+# once more with the processor's answer taken to be no.
+if [ -n "$FMA" ] && [ -n "$PY" ]; then
+  echo
+  echo "== fma's software arm, the processor's instruction refused"
+  rm -rf "$WORK/software"
+  mkdir -p "$WORK/software/std"
+  "$PY" - "$REPO/src/std/math.iyi" "$WORK/software/std/math.iyi" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+old = "      fuses == 1\n"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+open(sys.argv[2], "w").write(src.replace(old, "      false\n"))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  software: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/software${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build --release -o "$WORK/software/program" \
+         "$REPO/bench/std_math_exercise.iyi" > "$WORK/software/build" 2>&1 &&
+       "$WORK/software/program" > "$WORK/software/out" 2>&1 &&
+       grep -q "ALL CHECKS PASSED" "$WORK/software/out"; then
+    grep -A1 "== fma against" "$WORK/software/out" | sed -n '2p'
+  else
+    echo "  software: musl's arm did not answer as the instruction does"
+    tail -3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
+    status=1
+  fi
+fi
+
 echo
 echo "== proving the checks can fail when the module is broken"
-mutate() { # mutate <label> <old> <new>
-  local label="$1" old="$2" new="$3"
+mutate() { # mutate <label> <old> <new> [<old2> <new2>]
+  local label="$1" old="$2" new="$3" old2="${4:-}" new2="${5:-}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  OLD="$old" NEW="$new" "$PY" - <<PY
+  OLD="$old" NEW="$new" OLD2="$old2" NEW2="$new2" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/math.iyi").read_text()
-old = os.environ["OLD"]
-if old not in src:
-    raise SystemExit("patch site missing: " + old)
-Path("$WORK/patched/std/math.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+for o, n in ((os.environ["OLD"], os.environ["NEW"]), (os.environ["OLD2"], os.environ["NEW2"])):
+    if not o:
+        continue
+    if o not in src:
+        raise SystemExit("patch site missing: " + o)
+    src = src.replace(o, n, 1)
+Path("$WORK/patched/std/math.iyi").write_text(src)
 PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
@@ -293,6 +341,24 @@ if [ -n "$ORACLE" ]; then
     rhi'
 else
   echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10 and pow: not run, no oracle here"
+fi
+# musl's arm, with the processor's answer refused as above: an fma that
+# rounds twice, a product left where z's alignment put it, and a single's
+# sum not sent to its odd neighbour - the double rounding the halfway
+# cases exist for.
+if [ -n "$FMA" ]; then
+  mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
+  mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
+  mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false'
+  # And the instruction with its operands in the wrong order, b * c + a,
+  # where the instruction is what runs.
+  if [ "$(uname -s) $(uname -m)" = "Linux x86_64" ] && grep -qw fma /proc/cpuinfo; then
+    mutate "vfmadd with its operands in the wrong order" 'vfmadd213sd $3, $2, $0' 'vfmadd231sd $3, $2, $0'
+  else
+    echo "  vfmadd with its operands in the wrong order: not proven here, because this is not an x86_64 Linux with FMA3"
+  fi
+else
+  echo "  the fma proofs: not run, no python3 to write the cases with"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
 mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'

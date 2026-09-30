@@ -53,6 +53,7 @@ port of:
   Sun Microsystems' notice: "Permission to use, copy, modify, and
   distribute this software is freely granted, provided that this notice is
   preserved."
+- [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
 <!-- licenses -->
@@ -66,6 +67,7 @@ port of:
 <!-- libraries -->
 [Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
 [crystal-metric]: https://github.com/kostya/crystal-metric
+[musl]: https://musl.libc.org/
 [bdwgc]: http://www.hboehm.info/gc/
 [GMP]: https://gmplib.org/
 [libevent2]: http://libevent.org/

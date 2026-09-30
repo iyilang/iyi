@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`Math.fma` rounds once.** It was Dekker's exact product and two more
+  additions, which round each, and answered the neighbour of the fused
+  result for 6,231 of the 155,000 cases below; the single's was taken in
+  double and rounded twice, 19,766 of 112,000. Crystal's `Math.fma` is libm's, which rounds once. The
+  instruction answers now where the processor has one - every aarch64
+  processor, and an x86_64 one with FMA3 whose system saves the AVX
+  registers, asked once by `cpuid` and `xgetbv` - and musl's `fma` and
+  `fmaf`, ported to iyi, where it has not; no libm is linked either way.
+  `bench/std_math_fma.py` writes 155,000 double and 112,000 single cases
+  with their answers worked out as fractions - cancelling sums, halfway
+  results and results a hair off them, subnormals, overflow, the specials,
+  and the sums a double rounds onto a single's halfway point - and
+  `bench/std_math_exercise.sh` requires every one to the last bit, once
+  more with x86_64's software arm forced, and proves the checks fail with
+  an fma that rounds twice, a misaligned product, a single rounded twice,
+  and `vfmadd` given its operands in the wrong order.
+
 ## 0.16.0 — 2026-09-30
 
 **The language takes regex literals and writes JSON itself.** `/a+b/`

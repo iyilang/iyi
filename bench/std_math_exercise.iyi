@@ -321,4 +321,44 @@ against(args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if args.size 
 against(args[6], "expm1", "glibc's", 150000) { |x| Math.expm1(x) } if args.size > 6
 against(args[7], "log1p", "glibc's", 150000) { |x| Math.log1p(x) } if args.size > 7
 
+# `bench/std_math_fma.py`'s cases, named by the environment because they
+# need python and no C compiler: quadruples a, b, c and a * b + c taken
+# exactly and rounded once, doubles and then singles. Every answer is
+# required to the last bit, from whichever arm the processor takes -
+# `bench/std_math_exercise.sh` runs this once more with x86_64's software
+# arm forced.
+fma_doubles = Program.env("IYI_MATH_FMA_DOUBLES")
+fma_singles = Program.env("IYI_MATH_FMA_SINGLES")
+if fma_doubles.is_a?(String) && fma_singles.is_a?(String)
+  puts "\n== fma against the exact sum rounded once, bit for bit"
+  quads = File.read(fma_doubles)
+  words = quads.to_unsafe.as(Pointer(UInt64))
+  cases = quads.bytesize // 32
+  index = 0
+  while index < cases
+    a = IyiFloatText.from_bits(words[index * 4])
+    b = IyiFloatText.from_bits(words[index * 4 + 1])
+    c = IyiFloatText.from_bits(words[index * 4 + 2])
+    want = IyiFloatText.from_bits(words[index * 4 + 3])
+    got = Math.fma(a, b, c)
+    same = IyiFloatText.bits_of(got) == words[index * 4 + 3] || (got != got && want != want)
+    raise "ASSERTION FAILED: fma(#{a}, #{b}, #{c}) is #{got}, rounded once it is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > 150000, "the fma cases were #{cases}"
+  quads = File.read(fma_singles)
+  singles = quads.to_unsafe.as(Pointer(Float32))
+  single_cases = quads.bytesize // 16
+  index = 0
+  while index < single_cases
+    got = Math.fma(singles[index * 4], singles[index * 4 + 1], singles[index * 4 + 2])
+    want = singles[index * 4 + 3]
+    same = IyiFloatText.bits_of(got.to_f64) == IyiFloatText.bits_of(want.to_f64) || (got != got && want != want)
+    raise "ASSERTION FAILED: fma(#{singles[index * 4]}_f32, #{singles[index * 4 + 1]}_f32, #{singles[index * 4 + 2]}_f32) is #{got}, rounded once it is #{want}" unless same
+    index = index + 1
+  end
+  assert_true single_cases > 100000, "the single fma cases were #{single_cases}"
+  puts "  #{cases} doubles and #{single_cases} singles, every sum rounded once"
+end
+
 puts "\nALL CHECKS PASSED"

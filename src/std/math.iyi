@@ -6,15 +6,20 @@ module std/math
 import std/int
 import std/float
 
-# The two hardware instructions this module names. A fused multiply-add
-# is not among them: `llvm.fma.f64` is one instruction on aarch64 and a
-# call into libm on the x86-64 baseline, and the floor (SPEC.md III.9)
-# links no libm, so the exact product below is Dekker's, in iyi.
-lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64
+# The hardware instructions this module names. A fused multiply-add is
+# among them on aarch64 only: `llvm.fma.f64` is one instruction there and
+# a call into libm on the x86-64 baseline, and the floor (SPEC.md III.9)
+# links no libm, so `fma` writes x86-64's instruction by hand where the
+# processor has it and the exact product below is Dekker's, in iyi.
+lib LibLLVMMath # llvm.sqrt.f64 llvm.copysign.f64 llvm.fma.f64
   fun sqrt_f64 = "llvm.sqrt.f64"(x : Float64) : Float64
   fun sqrt_f32 = "llvm.sqrt.f32"(x : Float32) : Float32
   fun copysign_f64 = "llvm.copysign.f64"(mag : Float64, sgn : Float64) : Float64
   fun copysign_f32 = "llvm.copysign.f32"(mag : Float32, sgn : Float32) : Float32
+  {% if flag?(:aarch64) %}
+    fun fma_f64 = "llvm.fma.f64"(a : Float64, b : Float64, c : Float64) : Float64
+    fun fma_f32 = "llvm.fma.f32"(a : Float32, b : Float32, c : Float32) : Float32
+  {% end %}
 end
 
 pub struct Math
@@ -1388,24 +1393,236 @@ pub struct Math
     LibLLVMMath.copysign_f32(mag, sgn)
   end
 
-  # a * b + c with the product taken exactly: its rounding error is
-  # recovered by Dekker's split and folded into the sum, so `fma(1e16,
-  # 1e16, -1e32)` is the digits a plain `a * b + c` throws away. The last
-  # two additions can each round, which a hardware fma would not; that is
-  # the width of the difference, and it is rare.
+  # a * b + c rounded once, as IEEE 754 defines it and as the other
+  # library's `Math.fma` answers through libm. The instruction where the
+  # processor has one: every aarch64 processor (`fmadd`, LLVM's intrinsic),
+  # and an x86_64 one with FMA3 and an operating system that saves its
+  # registers, asked once by `cpuid` and `xgetbv` as `Float64#floor` asks
+  # for `roundsd`. Elsewhere musl's `fma` (MIT; Copyright 2005-2020 Rich
+  # Felker, et al.), in iyi: the significands as integers, their product's
+  # 128 bits exact, the sum aligned with a sticky bit, one rounding at the
+  # conversion back. This was Dekker's product and two more additions,
+  # which round each, and answered the neighbour of the fused result for
+  # arguments that cancel.
   def self.fma(a : Float64, b : Float64, c : Float64) : Float64
-    p = a * b
-    return p + c if p != p || p == 2.0 * p || c != c || c == 2.0 * c
-    e = prod_err(a, b, p)
-    s = p + c
-    bb = s - p
-    t = (p - (s - bb)) + (c - bb)
-    s + (t + e)
+    {% if flag?(:aarch64) %}
+      LibLLVMMath.fma_f64(a, b, c)
+    {% else %}
+      {% if flag?(:x86_64) %}
+        if fuses?
+          fused = uninitialized Float64
+          asm("vfmadd213sd $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
+          return fused
+        end
+      {% end %}
+      soft_fma(a, b, c)
+    {% end %}
   end
 
-  # In double, where the product of two singles is exact.
+  # The single's: the instruction where there is one, and otherwise
+  # musl's `fmaf` - the product of two singles is exact in a double and
+  # the sum rounds once there, which is right unless that double sits on
+  # a single's halfway point or among the subnormals; then the sum's
+  # rounding error, which is exact, sends it to the odd neighbour, which
+  # the conversion to a single cannot then misround.
   def self.fma(a : Float32, b : Float32, c : Float32) : Float32
-    (a.to_f64 * b.to_f64 + c.to_f64).to_f32
+    {% if flag?(:aarch64) %}
+      LibLLVMMath.fma_f32(a, b, c)
+    {% else %}
+      {% if flag?(:x86_64) %}
+        if fuses?
+          fused = uninitialized Float32
+          asm("vfmadd213ss $3, $2, $0" : "=x"(fused) : "0"(a), "x"(b), "x"(c))
+          return fused
+        end
+      {% end %}
+      soft_fmaf(a, b, c)
+    {% end %}
+  end
+
+  {% if flag?(:x86_64) %}
+    # 0 not asked yet, 1 the processor fuses, 2 it does not.
+    @@fuses : Int32 = 0
+
+    # FMA3 (leaf 1, ECX bit 12) and AVX's registers saved by the operating
+    # system: OSXSAVE (bit 27), AVX (bit 28), and XCR0's SSE and AVX state
+    # both on. An instruction the processor has and the system does not
+    # save is an invalid-opcode fault.
+    private def self.fuses? : Bool
+      fuses = @@fuses
+      if fuses == 0
+        leaf = uninitialized UInt64
+        features = uninitialized UInt64
+        asm("cpuid" : "={rax}"(leaf), "={rcx}"(features)
+                    : "{rax}"(1_u64), "{rcx}"(0_u64)
+                    : "rbx", "rdx")
+        wanted = 0x18001000_u64
+        fuses = 2
+        if features & wanted == wanted
+          low = uninitialized UInt64
+          high = uninitialized UInt64
+          asm("xgetbv" : "={rax}"(low), "={rdx}"(high) : "{rcx}"(0_u64))
+          fuses = 1 if low & 6_u64 == 6_u64
+        end
+        @@fuses = fuses
+      end
+      fuses == 1
+    end
+  {% end %}
+
+  # An exponent that stands for zero, an infinity or NaN once `fma_parts`
+  # has taken the bias and the significand's width off it.
+  private FMA_SPECIAL = 0x7ff - 0x3ff - 52 - 1
+
+  # musl's `normalize`: the significand with its hidden bit, shifted left
+  # one so the product has room, the exponent that goes with it, and the
+  # sign. A subnormal is scaled into the normal range first; a zero comes
+  # out one past FMA_SPECIAL, an infinity or NaN at it.
+  private def self.fma_parts(x : Float64) : {UInt64, Int32, Bool}
+    ix = IyiFloatText.bits_of(x)
+    e = ix.unsafe_shr(52_u64).unsafe_to_i32
+    sign = e & 0x800 != 0
+    e = e & 0x7ff
+    if e == 0
+      ix = IyiFloatText.bits_of(x * 9223372036854775808.0)
+      e = (ix.unsafe_shr(52_u64) & 0x7ff_u64).unsafe_to_i32
+      e = e != 0 ? e - 63 : 0x800
+    end
+    ix = ((ix & 0xfffffffffffff_u64) | 0x10000000000000_u64).unsafe_shl(1_u64)
+    {ix, e - (0x3ff + 52 + 1), sign}
+  end
+
+  # The 128-bit product of two significands of 54 bits, as its high and
+  # low words, from 32-bit halves: the middle sum cannot carry out.
+  private def self.fma_wide(x : UInt64, y : UInt64) : {UInt64, UInt64}
+    xlo = x & 0xffffffff_u64
+    xhi = x.unsafe_shr(32_u64)
+    ylo = y & 0xffffffff_u64
+    yhi = y.unsafe_shr(32_u64)
+    t1 = xlo &* ylo
+    t2 = xlo &* yhi &+ xhi &* ylo
+    t3 = xhi &* yhi
+    lo = t1 &+ t2.unsafe_shl(32_u64)
+    {t3 &+ t2.unsafe_shr(32_u64) &+ (t1 > lo ? 1_u64 : 0_u64), lo}
+  end
+
+  # Whether any of the bits a shift would drop is set: the sticky bit.
+  private def self.fma_sticky(bits : UInt64) : UInt64
+    bits != 0_u64 ? 1_u64 : 0_u64
+  end
+
+  private def self.soft_fma(x : Float64, y : Float64, z : Float64) : Float64
+    mx, ex, sx = fma_parts(x)
+    my, ey, sy = fma_parts(y)
+    mz, ez, sz = fma_parts(z)
+    return x * y + z if ex >= FMA_SPECIAL || ey >= FMA_SPECIAL
+    if ez >= FMA_SPECIAL
+      return x * y if ez > FMA_SPECIAL
+      return z
+    end
+    rhi, rlo = fma_wide(mx, my)
+    # The exponents aligned: z shifted up by as much of the gap as keeps
+    # it in 128 bits, the product down by the rest with a sticky bit.
+    e = ex + ey
+    d = ez - e
+    zhi = 0_u64
+    zlo = 0_u64
+    if d > 0
+      if d < 64
+        zlo = mz.unsafe_shl(d.to_u64)
+        zhi = mz.unsafe_shr((64 - d).to_u64)
+      else
+        zhi = mz
+        e = ez - 64
+        d = d - 64
+        if d >= 64
+          rlo = 1_u64
+          rhi = 0_u64
+        elsif d > 0
+          rlo = rhi.unsafe_shl((64 - d).to_u64) | rlo.unsafe_shr(d.to_u64) | fma_sticky(rlo.unsafe_shl((64 - d).to_u64))
+          rhi = rhi.unsafe_shr(d.to_u64)
+        end
+      end
+    else
+      d = 0 - d
+      if d == 0
+        zlo = mz
+      elsif d < 64
+        zlo = mz.unsafe_shr(d.to_u64) | fma_sticky(mz.unsafe_shl((64 - d).to_u64))
+      else
+        zlo = 1_u64
+      end
+    end
+    sign = sx != sy
+    nonzero = true
+    if sign == sz
+      rlo = rlo &+ zlo
+      rhi = rhi &+ zhi &+ (rlo < zlo ? 1_u64 : 0_u64)
+    else
+      before = rlo
+      rlo = rlo &- zlo
+      rhi = rhi &- zhi &- (before < rlo ? 1_u64 : 0_u64)
+      if rhi.unsafe_shr(63_u64) != 0_u64
+        rlo = 0_u64 &- rlo
+        rhi = 0_u64 &- rhi &- fma_sticky(rlo)
+        sign = !sign
+      end
+      nonzero = rhi != 0_u64
+    end
+    # The top 63 bits of the sum in rhi, its last bit sticky.
+    if nonzero
+      e = e + 64
+      d = rhi.leading_zeros_count - 1
+      rhi = rhi.unsafe_shl(d.to_u64) | rlo.unsafe_shr((64 - d).to_u64) | fma_sticky(rlo.unsafe_shl(d.to_u64))
+    elsif rlo != 0_u64
+      d = rlo.leading_zeros_count - 1
+      rhi = d < 0 ? rlo.unsafe_shr(1_u64) | (rlo & 1_u64) : rlo.unsafe_shl(d.to_u64)
+    else
+      # An exact zero, whose sign is the product's and z's to settle.
+      return x * y + z
+    end
+    e = e - d
+    i = rhi.unsafe_to_i64
+    i = 0_i64 &- i if sign
+    r = i.to_f64
+    if e < -1022 - 62
+      # Subnormal before rounding: the conversion must be the only
+      # rounding, so the bits the scaling would drop are folded into one.
+      if e == -1022 - 63
+        top = sign ? -9223372036854775808.0 : 9223372036854775808.0
+        return sign ? -2.2250738585072014e-308 : 2.2250738585072014e-308 if r == top
+        if rhi.unsafe_shl(53_u64) != 0_u64
+          i = (rhi.unsafe_shr(1_u64) | (rhi & 1_u64) | 0x4000000000000000_u64).unsafe_to_i64
+          i = 0_i64 &- i if sign
+          r = 2.0 * i.to_f64 - top
+        end
+      else
+        i = (rhi.unsafe_shr(10_u64) | fma_sticky(rhi.unsafe_shl(54_u64))).unsafe_shl(10_u64).unsafe_to_i64
+        i = 0_i64 &- i if sign
+        r = i.to_f64
+      end
+    end
+    ldexp(r, e)
+  end
+
+  private def self.soft_fmaf(x : Float32, y : Float32, z : Float32) : Float32
+    xy = x.to_f64 * y.to_f64
+    wide = z.to_f64
+    r = xy + wide
+    bits = IyiFloatText.bits_of(r)
+    e = bits.unsafe_shr(52_u64) & 0x7ff_u64
+    halfway = bits & 0x1fffffff_u64 == 0x10000000_u64
+    tiny = e <= 0x3ff_u64 - 126_u64 && e >= 0x3ff_u64 - 149_u64
+    return r.to_f32 if !halfway && !tiny
+    if e != 0x7ff_u64
+      s = bits.unsafe_shr(63_u64)
+      t = (s == 1_u64) == (xy < wide) ? xy - r + wide : wide - r + xy
+      if t != 0.0
+        bits = bits &- (s ^ (t < 0.0 ? 1_u64 : 0_u64))
+        bits = bits | 1_u64
+      end
+    end
+    IyiFloatText.from_bits(bits).to_f32
   end
 
   # The rounding error of `p = a * b`: the exact product is `p + err`.

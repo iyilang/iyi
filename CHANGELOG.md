@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`INI.build` refuses what `INI.parse` would read back as something
+  else.** Keys and values were written verbatim, and INI has no escapes:
+  a value `"hello\r\n[admin]\r\nrole=root"` wrote a section `admin` with a
+  key `role` of its own, and a padded value came back unpadded, though the
+  module promises that `parse(build(x))` round-trips. `build` panics now,
+  naming the section, the key and the reason, for a line break in a name
+  or a value, a `]` in a section's name, a key that is empty, holds `=`
+  or opens with `#`, `;` or `[`, and blanks at either end of a key or a
+  value. `bench/std_ini_exercise.iyi` asks for each refusal; the old
+  module wrote the injected section.
+
 - **`Gzip.decompress` reads every member of a gzip file.** A gzip file is
   a series of members (RFC 1952 §2.2), which is what `cat a.gz b.gz`
   makes and what gzip, zcat and Python read whole; only the first was

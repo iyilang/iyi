@@ -32,4 +32,31 @@ assert_str "b", marked["s"]["a"], "a section behind a byte order mark"
 assert_str "v", INI.parse("\uFEFFk=v\n")[""]["k"], "a first key behind a byte order mark"
 puts "  a byte order mark"
 
+# What `parse` would read back as something else is refused, not written:
+# a value holding a line break wrote a section and a key of its own, and a
+# padded value came back unpadded. What can be written round-trips.
+def build_refusal(ini : Hash(String, Hash(String, String))) : String
+  said = "built"
+  group do |g|
+    attempt = g.spawn { INI.build(ini) }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+injected = build_refusal({"s" => {"motd" => "hello\r\n[admin]\r\nrole=root"}})
+assert_true injected.includes?("holds a line break"), "a value with a line break is refused, not #{injected.inspect}"
+padded = build_refusal({"s" => {"pad" => "  two spaces  "}})
+assert_true padded.includes?("blanks at either end"), "a padded value is refused, not #{padded.inspect}"
+assert_true build_refusal({"s" => {"a=b" => "c"}}).includes?("holds `=`"), "a key holding = is refused"
+assert_true build_refusal({"s]x" => {"a" => "b"}}).includes?("holds `]`"), "a section name holding ] is refused"
+plain = {"s" => {"hash" => "#not a comment", "eq" => "a=b=c"}}
+back = INI.parse(INI.build(plain))
+assert_true back.keys == ["s"] && back["s"].keys == ["hash", "eq"], "what can be written round-trips its names"
+assert_str "#not a comment", back["s"]["hash"], "a value opening with # round-trips"
+assert_str "a=b=c", back["s"]["eq"], "a value holding = round-trips"
+puts "  build refuses a line break, padding, a key with = and a section with ]"
+
 puts "\nALL CHECKS PASSED"

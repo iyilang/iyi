@@ -102,7 +102,8 @@
   locking already allows: the slice's own runs set bits below the
   cursor's page and a carve clears bits below the cursor's word. The
   sweep of binary trees at depth 14 went from 190 million instructions
-  to 151. The sweep exercise proves a bit trusted past its page fails.
+  to 151. The sweep exercise proves on Linux that a bit trusted past its
+  page fails; darwin arm64's 16 KB pages keep idle ones out of the check.
 
 - **The write barrier resolves a stored word once.** It found the
   object with `IyiRoots.base_of`, then `gray` found its mark byte by the

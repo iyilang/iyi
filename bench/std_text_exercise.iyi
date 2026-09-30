@@ -243,6 +243,16 @@ raise "utf8: ascii pad" unless "42".rjust(5) == "   42"
 # String chars decoding:
 decoded_chars = s_utf8.chars
 raise "utf8: chars size" unless decoded_chars.size == 5
+# Characters, not bytes: a byte mask of `é` stripped the lead or tail byte
+# of any character sharing one, and left invalid UTF-8 behind.
+raise "string: rstrip chars keeps a character that shares a byte" unless "Ω".rstrip("é") == "Ω" && "é".rstrip("Ω") == "é"
+raise "string: lstrip chars keeps a character that shares a byte" unless "Ãx".lstrip("é") == "Ãx"
+raise "string: strip non-ASCII chars" unless "éxΩé".strip("é") == "xΩ" && "ééaé".lstrip("é") == "aé" && "aéé".rstrip("é") == "a"
+# And squeeze compares characters: `ッ` is E3 83 83, and lost a byte.
+raise "string: squeeze keeps a character with a repeated byte" unless "ッ".squeeze == "ッ" && "キャッシュ".squeeze == "キャッシュ"
+raise "string: squeeze a run of a multi-byte character" unless "ççaa".squeeze == "ça"
+# And split("", limit) reads its limit.
+raise "string: split empty with a limit" unless "abc".split("", 2) == ["a", "bc"] && "ğüş".split("", 2) == ["ğ", "üş"] && "abc".split("") == ["a", "b", "c"]
 raise "utf8: chars[0]" unless decoded_chars[0] == 'h'
 raise "utf8: chars[1]" unless decoded_chars[1] == 'é'
 raise "utf8: chars[2]" unless decoded_chars[2] == 'l'

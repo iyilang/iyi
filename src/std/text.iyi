@@ -171,25 +171,47 @@ class ::String
     byte_slice(at, bytesize - at)
   end
 
+  # Characters, not bytes: a byte mask of `chars` held the bytes of `é`, and
+  # stripped the lead or the tail byte of any character sharing one -
+  # `"Ω".rstrip("é")` left a lone 0xCE. A character is a unit here, the
+  # way `delete` and `squeeze(chars)` read one.
   def lstrip(chars : String) : String
     return self if chars.empty?
-    mask = Pointer(Bool).malloc(256_u64)
-    i = 0
-    while i < 256
-      mask[i] = false
-      i = i + 1
-    end
-    i = 0
-    while i < chars.bytesize
-      mask[chars.to_unsafe[i].to_i] = true
-      i = i + 1
-    end
-
     at = 0
-    while at < bytesize && mask[to_unsafe[at].to_i]
-      at = at + 1
+    while at < bytesize
+      width = char_width_at(at)
+      break unless named_char?(chars, at, width)
+      at = at + width
     end
     byte_slice(at, bytesize - at)
+  end
+
+  # The bytes of the character that starts at *at*.
+  protected def char_width_at(at : Int32) : Int32
+    lead = to_unsafe[at]
+    width = lead < 0x80_u8 ? 1 : (lead >= 0xF0_u8 ? 4 : (lead >= 0xE0_u8 ? 3 : (lead >= 0xC0_u8 ? 2 : 1)))
+    width < bytesize - at ? width : bytesize - at
+  end
+
+  # Whether the character of *width* bytes at *at* is one of *chars*'.
+  private def named_char?(chars : String, at : Int32, width : Int32) : Bool
+    probe = 0
+    while probe + width <= chars.bytesize
+      step = chars.char_width_at(probe)
+      return true if step == width && chars.byte_run_of?(probe, self, at, width)
+      probe = probe + step
+    end
+    false
+  end
+
+  # Whether *width* bytes of *other* at *from* are this string's at *at*.
+  protected def byte_run_of?(at : Int32, other : String, from : Int32, width : Int32) : Bool
+    index = 0
+    while index < width
+      return false unless to_unsafe[at + index] == other.to_unsafe[from + index]
+      index = index + 1
+    end
+    true
   end
 
   def rstrip : String
@@ -219,23 +241,17 @@ class ::String
     matched == text.bytesize
   end
 
+  # Characters, as `lstrip(chars)` reads them, found from the back.
   def rstrip(chars : String) : String
     return self if chars.empty?
-    mask = Pointer(Bool).malloc(256_u64)
-    i = 0
-    while i < 256
-      mask[i] = false
-      i = i + 1
-    end
-    i = 0
-    while i < chars.bytesize
-      mask[chars.to_unsafe[i].to_i] = true
-      i = i + 1
-    end
-
     last = bytesize
-    while last > 0 && mask[to_unsafe[last - 1].to_i]
-      last = last - 1
+    while last > 0
+      start = last - 1
+      while start > 0 && last - start < 4 && (to_unsafe[start] & 0xC0_u8) == 0x80_u8
+        start = start - 1
+      end
+      break unless char_width_at(start) == last - start && named_char?(chars, start, last - start)
+      last = start
     end
     byte_slice(0, last)
   end
@@ -286,9 +302,18 @@ class ::String
     return [] of String if empty? && limit < 0
 
     if separator.empty?
+      # Every character a piece, up to *limit*, the last holding the rest:
+      # the limit was not read here, and `"abc".split("", 2)` was three.
       pieces = [] of String
-      each_char do |c|
-        pieces << c.to_s
+      at = 0
+      while at < bytesize
+        if limit > 0 && pieces.size == limit - 1
+          pieces << byte_slice(at, bytesize - at)
+          break
+        end
+        width = char_width_at(at)
+        pieces << byte_slice(at, width)
+        at = at + width
       end
       return pieces
     end
@@ -647,27 +672,18 @@ class ::String
     end
   end
 
+  # A run of the same character becomes one, compared per character: the
+  # bytes were compared, and `ッ` (E3 83 83) lost a byte of itself.
   def squeeze : String
     return self if bytesize <= 1
-    dup_count = 0
-    i = 1
-    while i < bytesize
-      dup_count = dup_count + 1 if to_unsafe[i] == to_unsafe[i - 1]
-      i = i + 1
-    end
-    return self if dup_count == 0
-
-    String.new(bytesize - dup_count) do |buffer|
-      buffer[0] = to_unsafe[0]
-      at = 1
-      i = 1
-      while i < bytesize
-        b = to_unsafe[i]
-        if b != to_unsafe[i - 1]
-          buffer[at] = b
-          at = at + 1
-        end
-        i = i + 1
+    String.build(bytesize) do |io|
+      started = false
+      previous = ' '
+      each_char do |c|
+        next if started && c == previous
+        io << c
+        previous = c
+        started = true
       end
     end
   end

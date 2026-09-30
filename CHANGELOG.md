@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`lstrip`, `rstrip` and `strip` of a set of characters, and `squeeze`,
+  read characters, not bytes; `split("", limit)` reads its limit.** The
+  set was a mask of its bytes, so stripping `é` also stripped the lead or
+  tail byte of any character sharing one: `"Ω".rstrip("é")` left a lone
+  0xCE, invalid UTF-8. `squeeze` compared bytes, and `ッ` (E3 83 83) lost
+  one of its own. `"abc".split("", 2)` answered three pieces.
+  `bench/std_text_exercise.iyi` checks each in its UTF-8 section; the old
+  module failed the first.
+
 - **A language-server worker started as a rebuild unlinks the binary
   still finds its library.** A worker pins where its binary started
   (`$ORIGIN`) when it starts; the proxy retires and replaces workers

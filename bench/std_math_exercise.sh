@@ -104,6 +104,7 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
   fi
   if [ -n "$ORACLE_BUILT" ] &&
      "$CC" -O2 -ffp-contract=off -fno-builtin -DIYI_ORACLE_CORE_MATH -Dattribute_hidden= \
+       -D__builtin_roundeven=__builtin_rint \
        -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle_cm" \
      "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
      "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \

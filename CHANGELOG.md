@@ -276,7 +276,12 @@
   CORE-MATH's functions - it said so, and printed the missing header. The
   oracle carries the one function on a 64-bit word, and its directory is
   searched first, so every toolchain builds against the same one; lgamma
-  still answers glibc's on all 201,835 arguments.
+  still answers glibc's on all 201,835 arguments. The next thing each
+  runner lacked was rounding to even: mingw's libm has no `roundeven` for
+  gcc's `__builtin_roundeven` to call, and Apple's clang no such builtin.
+  The part builds it as `__builtin_rint`, which every toolchain has and
+  which is the same function under the rounding to nearest the oracle
+  never leaves; every CORE-MATH answer here is unchanged.
 
 - **`std/math` is consumable as an artifact on arm64.** Its `lib` binds
   `llvm.fma` inside `{% if flag?(:aarch64) %}`, and the rule that a

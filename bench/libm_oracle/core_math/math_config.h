@@ -3,7 +3,11 @@
  * `math_config.h` - not Arm's, one directory up, which a quoted include
  * from here does not reach - for `bench/std_math_exercise.sh`'s oracle:
  * the bit casts, rounding to even, the special results without errno or
- * the exception flags, and glibc's branch hints.
+ * the exception flags, and glibc's branch hints. `__builtin_roundeven`,
+ * here and in CORE-MATH's own files, is `__builtin_rint` by the gate's command
+ * line: the oracle never leaves rounding to nearest, where the two are
+ * one function, and Apple's clang has no such builtin and mingw's libm
+ * no `roundeven` for gcc's to call.
  */
 #ifndef IYI_CORE_MATH_CONFIG
 #define IYI_CORE_MATH_CONFIG

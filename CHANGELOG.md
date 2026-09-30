@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **The language server runs a buffer that has no file behind it.** VS
+  Code's `untitled:` buffer was run from a scratch file beside the
+  server's working directory, named after the URI, `:` included; NTFS
+  reads a `:` in a name as a stream's, so `▶ run` failed with "The
+  directory name is invalid" and left an empty `.untitled` file behind.
+  Such a buffer runs from a directory of its own under the temporary
+  directory, removed after. Step 43c of `bench/lsp_session.py` runs one
+  and looks for the stray file; the old server failed both. Step 45 now
+  asks again, once, when a delta request is answered in full: the proxy
+  retires a worker that has grown between any two requests, and a fresh
+  worker's full answer is the protocol's fallback, which the step had
+  read as a failure once the session did more work before it.
+
 - **Call hierarchy lists the calls written, not one the compiler made.**
   Incoming calls to any def listed the def's own file as a caller, at
   the def's own line, beside the real callers: a call the compiler makes

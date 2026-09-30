@@ -3191,7 +3191,24 @@ module Iyi::Lsp
       path = path_of(uri)
 
       scratch = nil
-      if (text = @documents[uri]?) && (!File.file?(path) || File.read(path) != text)
+      scratch_dir = nil
+      if !uri.starts_with?("file:")
+        # A buffer with no file behind it - VS Code's `untitled:` - runs
+        # from a directory of its own. Beside the server's working
+        # directory its scratch name held the scheme's `:`, which NTFS
+        # reads as a stream's name: the run failed "The directory name is
+        # invalid" and left an empty `.untitled` file behind.
+        text = @documents[uri]? || raise BadParams.new("#{uri} is not open, and names no file")
+        scratch_dir = File.join(Dir.tempdir, "iyi-lsp-#{Random::Secure.hex(8)}")
+        Dir.mkdir(scratch_dir)
+        tail = uri[Math.max(uri.rindex(':') || -1, uri.rindex('/') || -1) + 1..]
+        name = String.build do |io|
+          tail.each_char { |char| io << (char.ascii_alphanumeric? || char == '-' || char == '_' ? char : '_') }
+        end
+        scratch = File.join(scratch_dir, "#{name.empty? ? "untitled" : name}.iyi")
+        File.write(scratch, text)
+        path = scratch
+      elsif (text = @documents[uri]?) && (!File.file?(path) || File.read(path) != text)
         scratch = File.join(File.dirname(path), ".#{File.basename(path, ".iyi")}.iyi-lsp.iyi")
         File.write(scratch, text)
         path = scratch
@@ -3211,12 +3228,12 @@ module Iyi::Lsp
         error: Process::Redirect::Pipe)
 
       @running_verbs += 1
-      spawn { supervise_verb(id, process, scratch) }
+      spawn { supervise_verb(id, process, scratch, scratch_dir) }
     end
 
     # The verb, watched from its own fiber: the loop is free the whole
     # time, and the answer joins the queue when the program is done.
-    private def supervise_verb(id : JSON::Any, process : Process, scratch : String?) : Nil
+    private def supervise_verb(id : JSON::Any, process : Process, scratch : String?, scratch_dir : String?) : Nil
       output = IO::Memory.new
       error = IO::Memory.new
       spawn { capture(process.output, output) }
@@ -3265,6 +3282,7 @@ module Iyi::Lsp
     ensure
       @running_verbs -= 1
       File.delete(scratch) if scratch && File.file?(scratch)
+      Dir.delete(scratch_dir) if scratch_dir && Dir.exists?(scratch_dir)
     end
 
     # What one run may say into a session that outlives it. A program

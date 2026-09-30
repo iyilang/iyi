@@ -1934,6 +1934,30 @@ def main():
          f"answered in {waited * 1000:.0f} ms while the program slept, "
          f"then the run said {ran.get('output', '').split()[-1]!r}")
 
+    # 43c. and a buffer with no file behind it runs, and leaves nothing
+    #      behind. VS Code's `untitled:` buffer was run from a scratch
+    #      file beside the server's working directory whose name held the
+    #      scheme's `:`, which NTFS reads as a stream's name: the run
+    #      failed "The directory name is invalid" and left an empty
+    #      `.untitled` there.
+    untitled_uri = "untitled:Untitled-1"
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": untitled_uri, "languageId": "iyi",
+                             "version": 1,
+                             "text": 'module scratch\n\nputs "from nowhere"\n'}},
+           wait=False)
+    c.diagnostics(untitled_uri)
+    ran = c.send("workspace/executeCommand",
+                 {"command": "iyi.run", "arguments": [untitled_uri]})["result"] or {}
+    stray = [n for n in os.listdir(os.getcwd()) if n.startswith(".untitled")]
+    step("43c", "a buffer with no file behind it runs, and leaves nothing behind",
+         ran.get("ok") and ran.get("output", "").strip() == "from nowhere" and not stray,
+         f"ok {ran.get('ok')}, output {ran.get('output', '')!r}, "
+         f"error {ran.get('error', '')[:160]!r}, left {stray}")
+    for name in stray:
+        os.remove(os.path.join(os.getcwd(), name))
+    c.send("textDocument/didClose", {"textDocument": {"uri": untitled_uri}}, wait=False)
+
     # 44. snippet completion: a callable with parameters lands with the
     #     cursor inside its parentheses, because initialize said the
     #     client renders snippets.
@@ -1957,18 +1981,27 @@ def main():
     # 45. semantic tokens delta: one appended line moves a few
     #     integers, not the file's whole stream, and the splice
     #     reconstructs exactly what a full answer says.
-    reply = c.send("textDocument/semanticTokens/full",
-                   {"textDocument": {"uri": shapes_uri}})
-    first = reply["result"]
-    c.send("textDocument/didChange",
-           {"textDocument": {"uri": shapes_uri, "version": 2},
-            "contentChanges": [{"text": shapes_text + "# renk\n"}]},
-           wait=False)
-    c.diagnostics(shapes_uri)
-    reply = c.send("textDocument/semanticTokens/full/delta",
-                   {"textDocument": {"uri": shapes_uri},
-                    "previousResultId": first["resultId"]})
-    delta = reply["result"]
+    #     The proxy retires a worker that has grown, between any two
+    #     requests, and a fresh worker knows no earlier resultId: its full
+    #     answer then is the protocol's fallback, not a failure. So a full
+    #     answer where a delta was asked is asked again, once.
+    retired = 0
+    for attempt in range(2):
+        reply = c.send("textDocument/semanticTokens/full",
+                       {"textDocument": {"uri": shapes_uri}})
+        first = reply["result"]
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": shapes_uri, "version": 2 + attempt},
+                "contentChanges": [{"text": shapes_text + "# renk\n" * (attempt + 1)}]},
+               wait=False)
+        c.diagnostics(shapes_uri)
+        reply = c.send("textDocument/semanticTokens/full/delta",
+                       {"textDocument": {"uri": shapes_uri},
+                        "previousResultId": first["resultId"]})
+        delta = reply["result"]
+        if "data" not in delta:
+            break
+        retired += 1
     rebuilt = list(first["data"])
     for e in delta.get("edits", []):
         rebuilt[e["start"]:e["start"] + e["deleteCount"]] = e["data"]
@@ -1978,7 +2011,7 @@ def main():
     step(45, "semantic token deltas splice to the full answer",
          "edits" in delta and "data" not in delta and rebuilt == fresh,
          f"{len(delta.get('edits', []))} edit(s) over "
-         f"{len(first['data'])} ints")
+         f"{len(first['data'])} ints, {retired} full answer(s) first")
 
     # 46. the binary is rebuilt under the running session, and the
     #     session holds: `make iyi` unlinks the executable, which makes

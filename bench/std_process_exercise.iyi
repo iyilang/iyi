@@ -203,6 +203,17 @@ group do |g|
   fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
   fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
   puts "  one variable given and one removed, for the child alone"
+  # A child started elsewhere does not inherit a `PWD` naming here, which
+  # `Path#expand` reads first: the child expanded its relative paths in
+  # the parent's directory. Unless `env:` says what `PWD` is.
+  ENV["PWD"] = Program.cwd || "/somewhere"
+  moved = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me)), "env")
+  fail("a child started elsewhere read PWD #{moved.stdout.inspect}") unless moved.stdout == "<unset>\n"
+  told_pwd = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me), env: {"PWD" => "/given"}), "env")
+  fail("a PWD given to it read #{told_pwd.stdout.inspect}") unless told_pwd.stdout == "/given\n"
+  stayed = ran(Process.run(me, ["env", "PWD"]), "env")
+  fail("a child started here read PWD #{stayed.stdout.inspect}") unless stayed.stdout == "#{Program.env("PWD")}\n"
+  puts "  and does not read a PWD naming this program's directory"
   {% if flag?(:win32) %}
     # One variable, as Windows has it: a name given in another case
     # replaces it rather than standing beside it.

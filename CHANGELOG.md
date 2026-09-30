@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **A child `Process.run` starts in another directory does not inherit a
+  `PWD` naming this one.** `Path#expand` reads `PWD` first where it is
+  kept, and a child given `chdir:` expanded its relative paths in the
+  parent's directory. `PWD` is removed for such a child, unless `env:`
+  gives one. `bench/std_process_exercise.iyi` asks a child started
+  elsewhere for its `PWD`; the old module handed it the parent's.
+
 - **On Windows a relative path expands in the program's own directory,
   and a Windows path's anchor is a Windows anchor.** `Path#expand` and
   `File.expand_path` read `PWD` first. Only Git Bash sets it on Windows,

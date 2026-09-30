@@ -205,6 +205,17 @@ pub struct Process
     raise "Process.run: the command is empty" if command.empty?
     ProcessChild.check_text(command, "the command")
     args.each { |arg| ProcessChild.check_text(arg, "an argument") }
+    # A child started in another directory does not inherit a `PWD` that
+    # names this one: `Path#expand` reads `PWD` first, and the child
+    # expanded its relative paths here. Removed, the child reads its own
+    # directory - unless *env* says what `PWD` is.
+    if chdir && Program.env("PWD") && !(env && env.has_key?("PWD"))
+      moved = {"PWD" => nil} of String => String?
+      if given = env
+        given.each { |name, value| moved[name] = value }
+      end
+      env = moved
+    end
     environment = ProcessChild.environment(env)
     if directory = chdir
       ProcessChild.check_text(directory, "the directory")

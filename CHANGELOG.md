@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **The Turkic downcase of `I` with a combining dot above is `i`.**
+  SpecialCasing takes the dot into the letter (After_I, Not_Before_Dot),
+  and `Unicode.downcase("I\u0307", Turkic)` lowered one character at a
+  time: `ı` with the dot left over it, U+0131 U+0307. It is `i` now.
+  `bench/std_unicode_exercise.iyi` checks it; the old module gave the
+  dotless letter and the dot.
+
 - **A long path spelled with `\\.\` is read on Windows.** Past 248
   characters a path is given the `\\?\` form, and one already written
   with the device namespace's `\\.\` was taken for a share and made

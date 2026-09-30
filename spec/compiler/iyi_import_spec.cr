@@ -246,6 +246,21 @@ describe "Semantic: iyi import" do
       end
     end
 
+    # An imported name called with arguments none of its defs takes is
+    # that def's mismatch: it was "undefined method" and a hint to import
+    # the very name the file had imported.
+    it "says an imported name was called with arguments its defs do not take" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dep::{value}\n\nvalue(\"x\")\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value(n : Int32) : Int32\n  n\nend\n",
+      }) do
+        error = expect_raises(Iyi::TypeException, /expected argument #1 to 'App::Dep\.value' to be Int32, not String/) do
+          semantic_iyi("main.iyi")
+        end
+        error.message.to_s.should_not contain("brought it into scope")
+      end
+    end
+
     it "says when the name is there and was not marked `pub`" do
       with_iyi_modules({
         "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nsecret\n",

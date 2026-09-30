@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A name brought in by an import, called with arguments none of its
+  defs takes, is reported as that mismatch.** `import greet::{shout}`
+  then `shout(42)` said "undefined method 'shout' for App:Module" and
+  told the person to write `import greet::{shout}` - the line the file
+  already had - because the lookup through an import's names looked only
+  for a match. It says what `Greet.shout(42)` says now: "expected
+  argument #1 to 'Greet.shout' to be String, not Int32", with the
+  overloads. `spec/compiler/iyi_import_spec.cr` has the case; without the
+  change it fails.
+
 - **Rename takes the names the compiler takes.** The language server
   refused every non-ASCII name - "'şarkı' is not an iyi variable name" -
   where `def söyle(şarkı : String)` compiles and runs; its checks were

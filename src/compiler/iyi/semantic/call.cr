@@ -415,6 +415,14 @@ class Iyi::Call
     empty_match = matches.empty? &&
                   (def_name == "new" || owner.metaclass? || !owner.abstract_leaf?)
 
+    # iyi: a name an import brought in, called with arguments none of its
+    # defs takes, is that def's mismatch. It was "undefined method 'shout'
+    # for App:Module" and a hint to import the name the file had just
+    # imported: the walk above looks only for a match.
+    if matches.empty? && !obj && search_in_toplevel && (imported = iyi_imported_owner(owner, def_name))
+      raise_matches_not_found(imported.metaclass, def_name, arg_types, named_args_types, matches, with_autocast: with_autocast, number_autocast: !program.has_flag?("no_number_autocast"))
+    end
+
     if partial_match || empty_match
       raise_matches_not_found(matches.owner || owner, def_name, arg_types, named_args_types, matches, with_autocast: with_autocast, number_autocast: !program.has_flag?("no_number_autocast"))
     end
@@ -432,6 +440,21 @@ class Iyi::Call
     end
 
     instantiate signature, matches, using_owner || owner, self_type, with_autocast
+  end
+
+  # iyi: the module an import in one of *owner*'s scopes brought
+  # *def_name* in from, when that module declares it: the same walk as the
+  # lookup's, asked only once the lookup has failed.
+  private def iyi_imported_owner(owner, def_name) : Type?
+    scope_type = owner.instance_type
+    while scope_type
+      scope_type.using_modules?.try &.each do |using_module|
+        return using_module.type if using_module.exports?(def_name) && using_module.type.defs.try(&.has_key?(def_name))
+      end
+      break if scope_type == program
+      scope_type = scope_type.is_a?(NamedType) ? scope_type.namespace : nil
+    end
+    nil
   end
 
   def lookup_matches_checking_expansion(owner, signature, search_in_parents = true, with_autocast = false)

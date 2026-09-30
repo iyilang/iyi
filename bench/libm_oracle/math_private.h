@@ -1,8 +1,9 @@
 /*
- * iyi: what glibc's `e_log10.c`, `s_expm1.c` and `s_log1p.c` read from
- * glibc's internal headers, for `bench/std_math_exercise.sh`'s oracle: the
- * word access, no errno, and the log `e_log10.c` builds on, which in glibc
- * is Arm's `log` - the one in this directory.
+ * iyi: what glibc's `e_log10.c`, `s_expm1.c`, `s_log1p.c`, `e_sinh.c`,
+ * `e_cosh.c` and `s_tanh.c` read from glibc's internal headers, for
+ * `bench/std_math_exercise.sh`'s oracle: the word access, no errno, and the
+ * log and exp they build on, which in glibc are Arm's - the ones in this
+ * directory - and fdlibm's expm1, `s_expm1.c` here.
  */
 #ifndef IYI_MATH_PRIVATE
 #define IYI_MATH_PRIVATE
@@ -16,8 +17,12 @@
 #define fabs(x) __builtin_fabs (x)
 #define GET_HIGH_WORD(i, d) do { uint64_t iyi_w_; double iyi_d_ = (d); memcpy (&iyi_w_, &iyi_d_, 8); (i) = (uint32_t) (iyi_w_ >> 32); } while (0)
 #define GET_LOW_WORD(i, d) do { uint64_t iyi_w_; double iyi_d_ = (d); memcpy (&iyi_w_, &iyi_d_, 8); (i) = (uint32_t) iyi_w_; } while (0)
+#define EXTRACT_WORDS(hi, lo, d) do { uint64_t iyi_w_; double iyi_d_ = (d); memcpy (&iyi_w_, &iyi_d_, 8); (hi) = (int32_t) (iyi_w_ >> 32); (lo) = (int32_t) (uint32_t) iyi_w_; } while (0)
 #define SET_HIGH_WORD(d, v) do { uint64_t iyi_w_; memcpy (&iyi_w_, &(d), 8); iyi_w_ = (iyi_w_ & 0xffffffffULL) | ((uint64_t) (uint32_t) (v) << 32); memcpy (&(d), &iyi_w_, 8); } while (0)
 #define __set_errno(e) ((void) 0)
 double log (double);
 #define __ieee754_log log
+double exp (double);
+#define __ieee754_exp exp
+double __expm1 (double);
 #endif

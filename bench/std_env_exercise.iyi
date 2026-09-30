@@ -196,6 +196,40 @@ end
 ENV.delete(K2)
 puts "  a variable set and one overwritten read back after two collections, #{churn.size} strings between"
 
+puts "\n== a name the environment holds twice"
+# `execve` hands a program whatever table it is given, the same name twice
+# included, and `unsetenv` removes every entry of the name. The table is
+# built here as the C runtime would hand it over: the environment as it is,
+# then K3 twice. Deleting only the first brought the variable back with
+# the second value. Windows' block holds a name once, and keeps no table.
+{% if !flag?(:wasm32) && !flag?(:win32) %}
+  was = __iyi_environ
+  count = 0
+  if was.address != 0_u64
+    while was[count].address != 0_u64
+      count = count + 1
+    end
+  end
+  twice = Pointer(UInt8*).malloc((count + 3).to_u64)
+  count.times { |i| twice[i] = was[i] }
+  ["#{K3}=first", "#{K3}=second"].each_with_index do |text, i|
+    entry = Pointer(UInt8).malloc((text.bytesize + 1).to_u64)
+    entry.copy_from(text.to_unsafe, text.bytesize)
+    entry[text.bytesize] = 0_u8
+    twice[count + i] = entry
+  end
+  twice[count + 2] = Pointer(UInt8).new(0_u64)
+  __iyi_set_environ(twice)
+  assert_str "first", ENV[K3], "the first of two entries is the value"
+  assert_str_nilable "first", ENV.delete(K3), "delete answers the first entry"
+  assert_nil ENV[K3]?, "no entry of a deleted name is left"
+  assert_true !ENV.has_key?(K3), "has_key? after deleting a name held twice"
+  assert_true !ENV.keys.includes?(K3), "keys after deleting a name held twice"
+  puts "  every entry of a name held twice is deleted"
+{% else %}
+  puts "  not measured: this platform keeps no environ table to hold it twice"
+{% end %}
+
 # Clean up all created variables
 ENV.delete(K1)
 ENV.delete(K2)

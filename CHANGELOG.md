@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`ENV.delete` removes every entry of a name, and `Log.for` keeps a
+  leading dot.** An environment may hold a name twice - `execve` allows
+  it - and `delete` removed only the first entry, so the variable came
+  back with its second value and a child still inherited it; every entry
+  goes now, as `unsetenv` and Python's `os.environ.pop` remove them.
+  `Log.for(".a")` reported the source `a`, the name of another logger:
+  a child named `""` under the root took the root's "no dot" rule. 3
+  million environment operations against a Python model, with and
+  without duplicate names, and Crystal's `Log` found these and none
+  after; each exercise checks its fix and proves the check fails.
+
 - **`OptionParser` reads bundles and every value spelling.** A short
   argument read its first two bytes and dropped the rest, so `-vq` never
   ran `-q`, `-vp80` never ran `-p`, and `-vx` and `-q=1` were accepted -

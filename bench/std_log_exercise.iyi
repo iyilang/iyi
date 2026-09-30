@@ -28,4 +28,15 @@ child = Log.for("db.pool")
 assert_str "db.pool", child.source, "source"
 puts "  Log.for keeps the dotted source"
 
+puts "\n== empty segments"
+# A leading dot is a child named "" under the root, and its source is
+# still the whole name: ".db" is not "db", which is another logger.
+assert_str ".db", Log.for(".db").source, "leading dot"
+assert_str ".", Log.for(".").source, "a lone dot"
+assert_str "..db", Log.for("..db").source, "two leading dots"
+assert_str "db..pool", Log.for("db..pool").source, "a doubled dot"
+assert_str "db.", Log.for("db.").source, "a trailing dot"
+assert_true Log.for(".db").object_id != Log.for("db").object_id, ".db and db are two loggers"
+puts "  Log.for keeps leading, doubled and trailing dots in the source"
+
 puts "\nALL CHECKS PASSED"

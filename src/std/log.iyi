@@ -240,7 +240,10 @@ pub class Logger
       return child
     end
 
-    child_source = @source.empty? ? name : "#{@source}.#{name}"
+    # Only the root drops the dot: a child named "" under it has an empty
+    # source too, and `Log.for(".a")` answered "a", the source of another
+    # logger.
+    child_source = @parent.nil? && @source.empty? ? name : "#{@source}.#{name}"
     child = Logger.new(child_source, nil, nil, self)
     @children[name] = child
     child

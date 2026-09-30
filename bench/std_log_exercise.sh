@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every log section reported"
-for phrase in "== info" "== child"; do
+for phrase in "== info" "== child" "== empty segments"; do
   if ! grep -q "$phrase" "$WORK/log-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -112,6 +112,31 @@ PY
     status=1
   else
     echo "  a broken log is caught"
+  fi
+
+  # A child's source dropped its dot whenever the parent's source was
+  # empty, which a child named "" has too: `Log.for(".db")` answered "db".
+  mkdir -p "$WORK/rootdot/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/log.iyi").read_text()
+old = 'child_source = @parent.nil? && @source.empty? ? name'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/rootdot/std/log.iyi").write_text(src.replace(old, 'child_source = @source.empty? ? name', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the empty-segment patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/rootdot${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_log_exercise.iyi" >"$WORK/rootdot.out" 2>&1; then
+    echo "  the exercise PASSED with a leading dot dropped from the source"
+    status=1
+  elif ! grep -q "ASSERTION FAILED: leading dot" "$WORK/rootdot.out"; then
+    echo "  a dropped leading dot failed somewhere else:"
+    sed 's/^/    /' "$WORK/rootdot.out"
+    status=1
+  else
+    echo "  a source that drops a leading dot is caught"
   fi
 fi
 

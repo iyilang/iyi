@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **Five more gates' failure proofs need the broken copy to compile.**
+  The base64, bit_array, compress, http and steppable exercises counted
+  any failure of the patched build as the proof caught, and three of
+  their patches did not compile: http's `ca = ca` and `body = body if`,
+  which iyi refuses as expressions with no effect, and steppable's
+  deleted `impl Steppable for Float64`. Each helper builds the broken copy
+  first now and fails the gate, naming it, if it does not compile; the
+  three patches break their mechanisms in code that compiles, and all
+  thirty-nine proofs are caught at run time.
+
 - **The math gate's failure proofs test the checks they name.** Each
   ran the broken copy as `iyi run std_math_exercise.iyi <oracle files>`,
   and without `--` those files were compiled as more source: every proof

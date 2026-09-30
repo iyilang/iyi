@@ -126,7 +126,13 @@ PY
     return
   fi
 
-  if IYI_PATH="$WORK/patched-$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_bit_array_exercise.iyi" >"$WORK/$name.mut.out" 2>&1; then
+  # Build first, then run: a patch that does not compile would also "fail",
+  # and that proves nothing about whether the exercise catches the break.
+  if ! IYI_PATH="$WORK/patched-$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name.bin" "$REPO/bench/std_bit_array_exercise.iyi" >"$WORK/$name.mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$name.mut.out"
+    status=1
+  elif "$WORK/$name.bin" >"$WORK/$name.mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

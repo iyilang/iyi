@@ -117,7 +117,13 @@ PY
   then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_base64_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  # Build first, then run: a patch that does not compile would also "fail",
+  # and that proves nothing about whether the exercise catches the break.
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_base64_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/mut.out"
+    status=1
+  elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

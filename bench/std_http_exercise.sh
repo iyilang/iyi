@@ -261,7 +261,13 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 120 "$IYI" run "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  # Build first, then run: a patch that does not compile would also "fail",
+  # and that proves nothing about whether the exercise catches the break.
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/mut.out"
+    status=1
+  elif timeout 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else
@@ -269,8 +275,8 @@ PY
   fi
 }
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
-mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca'
-mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body if'
+mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
+mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body + "" if'
 mutate "a server that forgets keep-alive" 'return if parsed.close' 'return if true'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'

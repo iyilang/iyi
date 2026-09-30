@@ -176,7 +176,14 @@ COMPILER="$REPO/.build/iyi"
 # `kill`, and finds its own executable with `_NSGetExecutablePath`: all
 # libSystem's. Linux spells the same with `clone`, `execve`, `wait4`, `kill`
 # and `/proc/self/exe`, by syscall.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath"
+# The eight 128-bit helpers - `__divti3`, `__modti3`, `__udivti3`,
+# `__umodti3` and the four int-to-float conversions - are calls LLVM makes
+# for a division or conversion no instruction does, and arrived when
+# `bench/std_int_exercise.iyi` began converting and printing 128-bit values
+# the optimiser cannot see. libSystem re-exports compiler-rt, which
+# defines them; Linux links libgcc's copies into the program; Windows has
+# neither and the prelude's win32 arm defines them itself.
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

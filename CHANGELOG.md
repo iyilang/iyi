@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A program started without standard streams on Windows writes into
+  nothing and goes on.** Started detached, as a service, or by a GUI
+  program, a process has no standard output handle, and the first `puts`
+  failed and panicked "write failed: the reader is gone", ending a
+  program a C program started the same way outlives. What is written to
+  a standard stream the process was never given is discarded, as the C
+  runtime does, and a read of a missing standard input is its end.
+  `bench/windows_exercise.sh` runs a program with `DETACHED_PROCESS`; the
+  old prelude exited 1 before its first line was done.
+
 - **`iyi doc` and `iyi mod context` see a project whose directory's name
   holds `;` (`:` elsewhere).** The module's root travelled to the compile
   as the front of `IYI_PATH`, which is split on the platform's list
@@ -13075,7 +13085,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,101-line library and nothing else. Every other
+  written against iyi's own 19,114-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

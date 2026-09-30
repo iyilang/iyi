@@ -778,8 +778,19 @@ end
 
   def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     handle = __iyi_std_handle(fd)
+    # A standard stream the process was never given - started detached, as
+    # a service, or by a GUI program - has no handle, and what is written
+    # to it goes nowhere, as the C runtime has it. The write failed, and
+    # the program's first `puts` panicked "write failed" and ended it.
+    return count.to_i64 if fd >= 1_i64 && fd <= 2_i64 && __iyi_win_no_handle?(handle)
     return IyiConsole.write(fd, handle, buffer, count) if IyiConsole.console?(fd, handle)
     __iyi_win_write_file(handle, buffer, count)
+  end
+
+  # Null, or INVALID_HANDLE_VALUE: `GetStdHandle`'s two ways of saying
+  # there is no such stream.
+  def __iyi_win_no_handle?(handle : Void*) : Bool
+    handle.address == 0_u64 || handle.address == 0xFFFFFFFFFFFFFFFF_u64
   end
 
   def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -789,6 +800,8 @@ end
   def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     if fd == 0_i64
       handle = LibC.GetStdHandle(-10)
+      # No standard input at all is an input with nothing in it.
+      return 0_i64 if __iyi_win_no_handle?(handle)
     else
       handle = Pointer(Void).new(fd.to_u64)
     end

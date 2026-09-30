@@ -196,6 +196,29 @@ EOF
           echo "  the raw command lines split otherwise: [$spaced] [$doubled]"
           status=1
         fi
+        # A program started without standard streams - detached, as a
+        # service or a GUI program starts one - writes into nothing and
+        # goes on: its first `puts` panicked "write failed" and ended it.
+        cat > "$WORK/detached.iyi" <<'EOF'
+module detached
+
+import std/file::{File}
+
+puts "into nothing"
+STDERR.puts "and nothing"
+File.write(Program.args[0], "went on\n")
+EOF
+        if ! "$IYI" build -o "$WORK/detached.exe" "$WORK/detached.iyi" > "$WORK/detached.log" 2>&1; then
+          echo "  the detached probe did not build"; tail -5 "$WORK/detached.log"; status=1
+        else
+          code="$("$PY" -c 'import subprocess, sys; print(subprocess.run([sys.argv[1], sys.argv[2]], creationflags=subprocess.DETACHED_PROCESS).returncode)' "$(cygpath -w "$WORK/detached.exe")" "$(cygpath -w "$WORK/detached.txt")")"
+          if [ "$code" = "0" ] && [ "$(tr -d '\r' < "$WORK/detached.txt" 2>/dev/null)" = "went on" ]; then
+            echo "  a program started detached writes into nothing and goes on"
+          else
+            echo "  a program started detached exited $code, and wrote '$(cat "$WORK/detached.txt" 2>/dev/null)'"
+            status=1
+          fi
+        fi
       fi
     fi
 

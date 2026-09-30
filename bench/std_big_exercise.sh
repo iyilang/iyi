@@ -279,6 +279,9 @@ big_panics_with "a digit the base does not have" bad_digit "invalid BigInt digit
 big_panics_with "a base past 36" bad_base "invalid base: 37 (must be 2..36)" 'BigInt.new("1").to_s(37)'
 big_panics_with "a negative exponent" neg_exp "negative exponent: -1" '2.to_big ** -1'
 big_panics_with "a value too wide for Int64" i64_overflow "does not fit in Int64" 'BigInt.new("18446744073709551615").to_i64'
+big_panics_with "a string of underscores" no_digits 'invalid BigInt: no digits in "_"' 'BigInt.new("_")'
+big_panics_with "a sign and underscores" sign_no_digits 'invalid BigInt: no digits in "-_"' 'BigInt.new("-_")'
+big_panics_with "a decimal exponent past Int32" dec_exp_range 'decimal exponent out of range: "1e99999999999"' 'BigDecimal.new("1e99999999999")'
 
 # ---------------------------------------------------------------------------
 # Negative proofs: each check is proven to fail when its mechanism is broken
@@ -409,6 +412,13 @@ prove_fails "printing copies per chunk" no_print_split "base: printing 7 costs i
 #     per digit did
 prove_fails "parsing copies per chunk" no_parse_split "base: parsing 7 costs its digits" \
   's/if count > per \* DIGITS_SPLIT_LIMBS$/if false/;s/^      carry = value$/      carry = value + limbs.dup.size.to_u64 * 0_u64/'
+
+# A rational's float through twenty decimal places again, and its
+# halfway rounded up rather than to even.
+prove_fails "rational to_f64 through BigDecimal" no_rat_f64 "rational: to_f64 tiny" \
+  's/^    return 0.0 if zero?$/    return to_big_d.to_f64/'
+prove_fails "rational to_f64 ties away from even" no_rat_even "rational: to_f64 subnormal ties to even" \
+  's/^    q = q + half if (q \& half) != 0_i64 \&\& (q \& (3_i64 \* half - 1_i64)) != 0_i64$/    q = q + half if (q \& half) != 0_i64/'
 
 echo
 if [ "$status" -eq 0 ]; then

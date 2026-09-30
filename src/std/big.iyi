@@ -157,6 +157,8 @@ pub struct BigInt
       end
       digits << digit.to_u8
     end
+    # Underscores are skipped, so `_`, `-_` and `0x_` get here with none.
+    raise "invalid BigInt: no digits in \"#{str}\"" if digits.empty?
 
     result = BigInt.from_digits(digits, actual_base)
     sign < 0 ? result.negate : result
@@ -1559,6 +1561,9 @@ pub struct BigDecimal
         while idx < len
           eb = ptr[idx]
           if eb >= 48_u8 && eb <= 57_u8
+            # The scale is an Int32: an exponent of ten digits had panicked
+            # "arithmetic overflow" here or in the scale below.
+            raise "decimal exponent out of range: \"#{str}\"" if exp_digits >= 100_000_000
             exp_digits = exp_digits * 10 + (eb - 48_u8).to_i32
           else
             raise "not a decimal: \"#{str}\""
@@ -1969,8 +1974,53 @@ pub struct BigRational
     BigDecimal.new(@numerator) / BigDecimal.new(@denominator)
   end
 
+  # The Float64 nearest this value, ties to even, as python's
+  # `float(Fraction)` answers. This had gone through `to_big_d`, twenty
+  # fractional digits: every value under 5e-21 was 0.0 and every one under
+  # 1e-3 lost significant digits. The quotient is taken to 55 or 56 bits -
+  # 55 at the smallest exponent, where the subnormals start - with a sticky
+  # low bit for a nonzero remainder, rounded to the bits a Float64 keeps (53,
+  # fewer as a subnormal), and scaled by the power of two it was shifted by,
+  # which is exact: a value past the largest Float64 is Infinity.
   def to_f64 : Float64
-    to_big_d.to_f64
+    return 0.0 if zero?
+    a = @numerator.abs
+    b = @denominator
+    diff = BigRational.bit_length(a) - BigRational.bit_length(b)
+    shift = (diff > -1021 ? diff : -1021) - 55
+    qr = shift >= 0 ? a.divmod(b << shift) : (a << (0 - shift)).divmod(b)
+    q = qr[0].to_i64
+    q = q | 1_i64 unless qr[1].zero?
+    bits = 0
+    while (q >> bits) > 0_i64
+      bits = bits + 1
+    end
+    # The bits below the kept ones: 2 or 3 for a normal value, 2 for a
+    # subnormal, whose last bit stands for 2^-1074 where q's stands for 2^-1076.
+    extra = (bits > -1021 - shift ? bits : -1021 - shift) - 53
+    half = 1_i64 << (extra - 1)
+    q = q + half if (q & half) != 0_i64 && (q & (3_i64 * half - 1_i64)) != 0_i64
+    q = q - (q & (2_i64 * half - 1_i64))
+    f = q.to_f64
+    e = shift
+    while e != 0
+      step = e > 1000 ? 1000 : (e < -1000 ? -1000 : e)
+      f = f * (2.0 ** step)
+      e = e - step
+    end
+    negative? ? f * -1.0 : f
+  end
+
+  # The bits |value| takes to write.
+  protected def self.bit_length(value : BigInt) : Int32
+    return 0 if value.zero?
+    top = value.limbs.last
+    bits = (value.limbs.size - 1) * 32
+    while top > 0_u64
+      top = top.unsafe_shr(1_u64)
+      bits = bits + 1
+    end
+    bits
   end
 
   # A rational is stored reduced, so equal values have equal parts.

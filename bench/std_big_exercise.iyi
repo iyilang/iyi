@@ -448,6 +448,16 @@ raise "rational: negative power" unless (BigRational.new(2, 3) ** -2).to_s == "9
 raise "rational: int overloads" unless (BigRational.new(1, 2) + 1).to_s == "3/2" && (BigRational.new(1, 2) * 4_i64).to_s == "2" && (BigRational.new(1, 2) / 2.to_big).to_s == "1/4"
 raise "rational: to_big_i truncates" unless BigRational.new(-7, 2).to_big_i == -3
 raise "rational: to_f64" unless BigRational.new(1, 4).to_f64 == 0.25
+# The nearest Float64 at any size, ties to even, as python's float(Fraction):
+# through twenty decimal places 1/10^25 had been 0.0, 1/(3*10^12) had kept
+# eight digits, and every subnormal had been 0.0.
+raise "rational: to_f64 tiny" unless BigRational.new(1.to_big, 10.to_big ** 25).to_f64 == 1.0e-25
+raise "rational: to_f64 negative tiny" unless BigRational.new(0.to_big - 1, 10.to_big ** 25).to_f64 == 1.0e-25 * -1.0
+raise "rational: to_f64 keeps every digit" unless BigRational.new(1.to_big, 3.to_big * 10.to_big ** 12).to_f64 == 1.0 / 3.0e12
+raise "rational: to_f64 least subnormal" unless BigRational.new(1.to_big, 2.to_big ** 1074).to_f64 == 5.0e-324
+raise "rational: to_f64 subnormal ties to even" unless BigRational.new(1.to_big, 2.to_big ** 1075).to_f64 == 0.0 && BigRational.new(3.to_big, 2.to_big ** 1075).to_f64 == 1.0e-323
+raise "rational: to_f64 normal ties to even" unless BigRational.new(2.to_big ** 53 + 1, 1.to_big).to_f64 == 2.0 ** 53 && BigRational.new(2.to_big ** 53 + 3, 2.to_big ** 60).to_f64 == (2.0 ** 53 + 4.0) / 2.0 ** 60
+raise "rational: to_f64 near and past the largest Float64" unless BigRational.new(2.to_big ** 1024, 3.to_big).to_f64 == 5.992310449541053e+307 && BigRational.new(2.to_big ** 1024, 1.to_big).to_f64 > 1.7976931348623157e308
 
 rat_pairs = [
   ["6/4", "1/6"], ["-3/-9", "2/3"], ["3/-9", "1/2"], ["1/3", "1/6"], ["2/3", "4/9"],

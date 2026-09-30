@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`BigRational#to_f64` is the nearest Float64, and `std/big` refuses
+  two inputs it took.** `to_f64` went through `to_big_d`, twenty decimal
+  places, so every value under 5e-21 was 0.0 (1/10^25, every subnormal)
+  and every one under 1e-3 lost digits - 38.6% of random rationals were
+  not the nearest double. It divides to 55 bits with a sticky bit and
+  rounds once, ties to even, as Python's `float(Fraction)` does; Crystal's
+  truncates (`mpq_get_d`), and iyi's `BigDecimal#to_f64` already rounded.
+  `BigInt.new("_")`, `"-_"` and `"0x_"` were 0 and are refused, "no
+  digits"; `BigDecimal.new("1e99999999999")` panicked "arithmetic
+  overflow" and is refused, "decimal exponent out of range". 2.6 million
+  cases over 26 properties against Python's `int`, `decimal` and
+  `fractions` found these and nothing else; the big exercise checks each
+  and proves the float checks fail with the old path and with ties
+  rounded away from even.
+
 - **`String#to_f` reads an exponent of seven digits whole.** It stopped
   reading one at 100,000, though the digits before it move the exponent
   by up to the text's own length: `"0." + 999,999 zeros + "1e1000000"`

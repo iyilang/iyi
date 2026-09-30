@@ -6,6 +6,7 @@
 module bench/std_html_exercise
 
 import std/html::{HTML}
+import std/io
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -20,6 +21,15 @@ assert_str("&amp;&lt;&gt;&quot;&#39;", HTML.escape("&<>\"'"), "the five")
 assert_str("plain", HTML.escape("plain"), "nothing to escape")
 assert_str("café &amp; bar", HTML.escape("café & bar"), "UTF-8 left alone, & escaped")
 puts "  &, <, >, quote and apostrophe; UTF-8 bytes kept"
+sandbox = Program.args.size > 0 ? Program.args[0] : __DIR__
+sink_path = sandbox + "/std_html_exercise_escape.txt"
+sink = File.open(sink_path, "w")
+HTML.escape("café & <b> 😀 'q' né", sink)
+sink.close
+written = File.read(sink_path)
+File.delete(sink_path)
+assert_str("café &amp; &lt;b&gt; 😀 &#39;q&#39; né", written, "escape to an IO copies UTF-8 bytes as they are")
+puts "  escape to an IO writes the same bytes"
 
 puts "\n== unescape"
 assert_str("&<>\"'", HTML.unescape("&amp;&lt;&gt;&quot;&#39;"), "the five named")
@@ -33,6 +43,8 @@ assert_true(replacement.bytesize == 3 && replacement.to_unsafe[0] == 0xEF_u8, "a
 assert_true(HTML.unescape("&#x110000;").bytesize == 3, "past U+10FFFF is U+FFFD")
 assert_str("&unknown;", HTML.unescape("&unknown;"), "unknown named entity is kept")
 assert_str("a <b> & c \"d\" 'e' café", HTML.unescape(HTML.escape("a <b> & c \"d\" 'e' café")), "escape then unescape")
-puts "  named, decimal, hex, astral, overflow, unknown, round trip"
+assert_str("<b", HTML.unescape("&ltb"), "the longest name that is an entity: &lt, then b")
+assert_str("©2024 &x ¬it; ∉", HTML.unescape("&copy2024 &ampx &notit; &notin;"), "the longest name wins, with or without a semicolon")
+puts "  named, decimal, hex, astral, overflow, unknown, longest name, round trip"
 
 puts "\nALL CHECKS PASSED"

@@ -142,6 +142,34 @@
 
 ### Fixed
 
+- **`HTML.unescape` takes the longest entity name, and `HTML.escape` to
+  an IO writes UTF-8.** Unescaping looked up only the whole run of
+  letters and digits, so `&ltb`, `&copy2024` and `&notit;` were left as
+  they were, where the longest name that is an entity (`&lt`, `&copy`,
+  `&not`) is decoded, as Crystal's and Python's are. `escape(string, io)`
+  wrote each byte as a character, so every non-ASCII byte became two:
+  `café` was `cafÃ©`. 600,000 unescapes against Crystal's algorithm over
+  the module's 253 names and 400,000 escapes found these and none after;
+  the html exercise checks both and proves each check fails.
+- **`std/xml` refuses twelve kinds of document it read.** An entity's
+  replacement text was pasted in as text wherever it was referenced, so
+  a `<` reached an attribute value and markup or `]]>` reached content,
+  and an attribute's tabs and newlines were not normalised; the reserved
+  `xmlns` URI could be bound, and the `xml` one as the default; a raw
+  U+FFFE, invalid UTF-8 or a non-ASCII byte under `encoding="US-ASCII"`
+  was accepted where the same character as a reference was refused; the
+  XML declaration took any order, repeats and any version; `%` in an
+  entity value and `<!ENTITY %p` without a space got through; PI targets
+  and entity names took a colon; `<!DOCTYPEa>` was a DOCTYPE; a
+  malformed reference in an unused entity was kept; a skipped
+  declaration ran past the next one's `<`; and one 1 MB entity referenced
+  1,000 times expanded to 1 GB in 2 GB of memory - expansion is bounded
+  in bytes now, at 100 times the input or 8 MiB, as expat's is. A
+  US-ASCII document is written back with references, and a CDATA
+  section's `\r` reads back as `\r`. 720,000 documents against expat
+  and 250,000 built trees found these and none after; the xml exercise
+  checks each and proves each check fails.
+
 - **`std/hpack` follows a SETTINGS change, and refuses where it
   panicked.** Setting `protocol_max_table_size` on a `Decoder` or an
   `Encoder` wrote the codec's field and never the dynamic table's, so a

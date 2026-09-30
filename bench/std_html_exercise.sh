@@ -54,7 +54,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "$WORK" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -106,13 +106,51 @@ PY
   if [ $? -ne 0 ]; then
     echo "  the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched_amp${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_html_exercise.iyi" >"$WORK/amp.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched_amp${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_html_exercise.iyi" -- "$WORK" >"$WORK/amp.out" 2>&1; then
     echo "  the exercise PASSED with & left raw"
     status=1
   else
     echo "  an escape that leaves & raw is caught"
   fi
 fi
+
+echo
+echo "== proving the checks can fail when the module is broken"
+mutate() { # mutate <label> <old> <new> <phrase>
+  local label="$1" old="$2" new="$3" phrase="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy with"
+    return 0
+  fi
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  OLD="$old" NEW="$new" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/html.iyi").read_text()
+old = os.environ["OLD"]
+if old not in src:
+    raise SystemExit("patch site missing: " + old)
+Path("$WORK/patched/std/html.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_html_exercise.iyi" -- "$WORK" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -q "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at its own check:"
+    grep -m1 panic "$WORK/mut.out" || sed -n '1,8p' "$WORK/mut.out"
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+mutate "only the whole alphanumeric run looked up" \
+  '              n = n - 1 if cp < 0' '              n = 1 if cp < 0' 'the longest name that is an entity'
+mutate "escape to an IO drops the bytes after the last reference" \
+  '    io.write(raw + run_start, len - run_start) if len > run_start' '    nil' 'escape to an IO'
 
 echo
 if [ "$status" -eq 0 ]; then

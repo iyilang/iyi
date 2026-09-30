@@ -902,8 +902,16 @@ end
     # full path, and putting one on a short path costs a resolution nothing
     # asked for.
     return wide if written < IYI_WIN_PATH_LIMIT
-    # Already prefixed: `\\?\` in the source survives GetFullPathNameW.
-    return full if full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 63_u16
+    # Already prefixed: `\\?\` in the source survives GetFullPathNameW, and
+    # so does the device namespace's `\\.\`, which names the same objects
+    # (both are `\??\` inside) but is still held to MAX_PATH. It was taken
+    # for a share and made `\\?\UNC\.\C:\...`, which names nothing, and
+    # a long path spelled with it failed where the same path spelled plain
+    # or with `\\?\` was read.
+    if full[0] == 92_u16 && full[1] == 92_u16 && (full[2] == 63_u16 || full[2] == 46_u16) && full[3] == 92_u16
+      full[2] = 63_u16
+      return full
+    end
     unc = full[0] == 92_u16 && full[1] == 92_u16
     # `\\?\` is four characters, `\\?\UNC\` eight, and a share drops the two
     # leading separators it replaces.

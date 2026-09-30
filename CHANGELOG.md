@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A long path spelled with `\\.\` is read on Windows.** Past 248
+  characters a path is given the `\\?\` form, and one already written
+  with the device namespace's `\\.\` was taken for a share and made
+  `\\?\UNC\.\C:\...`, which names nothing: a 310-character file spelled
+  with `\\.\` did not exist, while the same path spelled plain or with
+  `\\?\` was read. `\\.\` becomes `\\?\` there now, which names the same
+  object. `bench/std_dir_exercise.iyi` makes a 250-character directory
+  and reads through `\\.\`; the old runtime said it did not exist.
+
 - **`Time#to_unix_ms` refuses a time past the milliseconds an Int64
   holds with the module's sentence.** `Time.utc` accepts every Int32
   year, and `Time.utc(300000000, 1, 1).to_unix_ms` died of the prelude's
@@ -13365,7 +13374,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,201-line library and nothing else. Every other
+  written against iyi's own 19,209-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

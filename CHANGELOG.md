@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`iyi mod context` resolves an import from the root the entry's header
+  names.** `app/main.iyi` declaring `module app/main` imports `app/util`
+  from the directory above `app`, which is where a build looks after the
+  entry's own directory; `mod context` looked only in `app`, and answered
+  "does not resolve: no file, no artifact and no requirement covers it",
+  exit 0, about the module the same file builds against - in the verb
+  AI_FIRST.md offers a model for grounding. `bench/mod_context.sh` grounds
+  such an entry; the old binary answered "does not resolve".
+
 - **`File.readlink` of a link to a volume's GUID path or a share answers a
   path Windows can open.** The NT prefix `\??\` came off whatever
   followed it, so a junction to `\\?\Volume{...}\x` read back as the

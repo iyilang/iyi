@@ -344,7 +344,7 @@ class Iyi::Command
   # — which is the point: the module compiles alone (R-1), and this is that
   # fact worn as a tool.
   private def mod_context_block(written : String, entry_dir : String, table : Array({String, String}), emit_dir : String, artifact_root : String) : ContextBlock
-    source_path, expected_name = mod_context_resolve(written, entry_dir, table)
+    source_path, expected_name = mod_context_resolve(written, entry_dir, table, artifact_root)
     unless source_path
       # No source anywhere, which is how a library arrives (III.7): the
       # artifact *is* the surface, and reading one costs nothing next to
@@ -418,8 +418,8 @@ class Iyi::Command
   # longest prefix, then the entry file's directory, then `IYI_PATH`. The
   # name an artifact carries is the in-package path for a package, the
   # written path otherwise.
-  private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String})) : {String?, String}
-    candidate, name = mod_context_names(written, entry_dir, table)
+  private def mod_context_resolve(written : String, entry_dir : String, table : Array({String, String}), header_root : String? = nil) : {String?, String}
+    candidate, name = mod_context_names(written, entry_dir, table, header_root)
     {File.file?(candidate) ? candidate : nil, name}
   end
 
@@ -439,7 +439,7 @@ class Iyi::Command
   # `import app/lib` names `app/lib.iyi` after the file is deleted exactly
   # as it did before — which is what lets `check --affected app/lib.iyi`
   # find the importers a deletion breaks.
-  private def mod_context_names(written : String, entry_dir : String, table : Array({String, String})) : {String, String}
+  private def mod_context_names(written : String, entry_dir : String, table : Array({String, String}), header_root : String? = nil) : {String, String}
     # A short name the manifest gives is the path it names, as in a build.
     written = Mod::Installer.expand(written, table)
     table.each do |(prefix, checkout)|
@@ -457,6 +457,16 @@ class Iyi::Command
 
     local = File.join(entry_dir, "#{written}.iyi")
     return {local, written} if File.file?(local)
+
+    # Then the root the entry's own header names, as a build asks it
+    # (`SemanticVisitor#resolve_import`): `app/main.iyi` declaring `module
+    # app/main` imports `app/util` from the directory above `app`, and this
+    # answered "does not resolve" - exit 0 - about the module the same
+    # file builds against.
+    if header_root && header_root != entry_dir
+      rooted = Iyi.native_path(File.join(header_root, "#{written}.iyi"))
+      return {rooted, written} if File.file?(rooted)
+    end
 
     # Then the search path, which is where the library lives: a build
     # resolves `import std/path` from `IYI_PATH` and this did not look

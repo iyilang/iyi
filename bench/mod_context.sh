@@ -595,4 +595,22 @@ else
 fi
 cd "$WORK" || exit 1
 
+# An entry below its project's root, `app/main.iyi` declaring `module
+# app/main`: its import of `app/util` is resolved from above `app`, as a
+# build resolves it, and not reported as not resolving, exit 0.
+mkdir -p "$WORK/headed/app"
+cd "$WORK/headed" || exit 1
+printf 'module app/util\n\npub def answer : Int32\n  42\nend\n' > app/util.iyi
+printf 'module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > app/main.iyi
+unset IYI_PATH
+"$IYI" mod context app/main.iyi > headed.txt 2>&1
+if grep -q "does not resolve" headed.txt || ! grep -q "pub def answer : Int32" headed.txt; then
+  echo "FAIL: an entry below its root did not ground its import by the header's root"
+  sed -n '1,4p' headed.txt | sed 's/^/  /'
+  status=1
+else
+  echo "an entry below its root grounds its imports from the root its header names"
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

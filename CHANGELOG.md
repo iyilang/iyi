@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **The caret under an error's line sits under its column when the line
+  has tabs inside it.** Every character in front of the column was
+  counted as one space, so in `puts(\tx,\t\tx.nope)` the caret stood at
+  column 17 while two tabs had put `nope` at 34. The caret line carries
+  the shown line's tabs now, and a terminal expands both the same way.
+  `bench/verbs_exercise.sh` checks the caret line byte for byte; the old
+  compiler wrote seventeen spaces.
+
 - **`std/http` reads a repeated header as one list, and refuses two
   different `Content-Length`s and a signed one.** Headers went into a
   hash keyed by their spelling: a repeat overwrote the first

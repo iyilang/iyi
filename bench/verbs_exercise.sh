@@ -1007,6 +1007,20 @@ else
   "$IYI" mod context user.iyi --json | sed -n '1,2p'
   status=1
 fi
+# The caret under a line with tabs inside it: every character before the
+# column was counted as one space, so two tabs that pushed `nope` to
+# column 34 left the caret at 17. The caret line carries the shown line's
+# tabs now, and a terminal expands both the same way.
+printf 'module tabbed\n\nx = 1\nputs(\tx,\t\tx.nope)\n' > tabbed.iyi
+"$IYI" check tabbed.iyi > tabbed.out 2>&1
+caret_line="$(grep -A1 '^ 4 | ' tabbed.out | sed -n '2p')"
+if [ "$caret_line" = "$(printf '          \t  \t\t  ^---')" ]; then
+  echo "  the caret under a line with tabs carries the line's tabs"
+else
+  echo "  the caret under a line with tabs is not under the column:"
+  sed -n '1,8p' tabbed.out | cat -A
+  status=1
+fi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" doc binary.iyi
 refuses "doc on a file that declares no module" "declares no module" -- \

@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`Time#to_unix_ms` refuses a time past the milliseconds an Int64
+  holds with the module's sentence.** `Time.utc` accepts every Int32
+  year, and `Time.utc(300000000, 1, 1).to_unix_ms` died of the prelude's
+  bare "arithmetic overflow" from the multiply. It is "time out of range:
+  ... seconds from the epoch is past the milliseconds an Int64 holds" now,
+  as the module refuses a year no Int32 holds; the last millisecond that
+  fits is still answered. `bench/std_time_exercise.sh` asks for the
+  sentence; the old module said "arithmetic overflow".
+
 - **A refusal names a character of several bytes whole.** The RFC 3339
   parser and `sprintf` named the character they refused by its lead byte
   alone, read as a character of its own: `...45²Z` was refused with

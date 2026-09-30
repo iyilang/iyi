@@ -166,6 +166,7 @@ pub struct ProcessError
     return "permission denied" if denied?
     {% if flag?(:win32) %}
       return "not a program Windows can run" if @code == 193
+      return "the command line is past Windows' 32,767 characters" if @code == 206
     {% else %}
       return "not a format this system can run" if @code == 8
     {% end %}
@@ -473,7 +474,10 @@ class ProcessChild
       path = Program.env("PATH") || ""
       path.split(';').each do |entry|
         directory = entry
-        directory = directory[1, directory.size - 2] if directory.size >= 2 && directory.starts_with?('"') && directory.ends_with?("\"")
+        # In bytes, as `[]` counts: in characters, a quoted entry with `ü`
+        # in it lost a byte off its end per such character, and named no
+        # directory.
+        directory = directory[1, directory.bytesize - 2] if directory.bytesize >= 2 && directory.starts_with?('"') && directory.ends_with?("\"")
         next if directory.empty?
         joined = directory.ends_with?("\\") || directory.ends_with?("/") ? "#{directory}#{command}" : "#{directory}\\#{command}"
         if found = candidate(joined)
@@ -627,10 +631,20 @@ class ProcessChild
       end
       text = line.to_s
       wide_line = __iyi_win_env_wide(text.to_unsafe, text.bytesize)
+      # Windows' command line is UTF-16, and text that is not UTF-8 has no
+      # spelling in it. The conversion answered null for it, and a null
+      # line is Windows' cue to use the program's name alone: the child ran
+      # with no arguments at all, and the run said it went well.
+      raise "Process.run: the command or an argument is not valid UTF-8, which a Windows command line cannot carry" if wide_line.address == 0_u64
       wide_path = __iyi_wide_path(path.to_unsafe)
       wide_directory = Pointer(UInt16).new(0_u64)
       if directory = chdir
         wide_directory = __iyi_wide_path(directory.to_unsafe)
+      end
+      # Before any handle is made, so a refusal leaves none behind.
+      block = Pointer(UInt16).new(0_u64)
+      if entries = environment
+        block = ProcessChild.environment_block(entries)
       end
 
       theirs = Pointer(Pointer(Void)).malloc(3_u64)
@@ -710,12 +724,8 @@ class ProcessChild
       # bInheritHandles, and EXTENDED_STARTUPINFO_PRESENT. The environment
       # is this process's own block, which `ENV[]=` writes, unless `env:`
       # gave one, which is UTF-16 (CREATE_UNICODE_ENVIRONMENT).
-      block = Pointer(UInt16).new(0_u64)
       flags = 0x00080000
-      if entries = environment
-        block = ProcessChild.environment_block(entries)
-        flags = flags | 0x400
-      end
+      flags = flags | 0x400 if environment
       made_it = LibKernel32.CreateProcessW(wide_path, wide_line, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64),
         count > 0 ? 1 : 0, flags, block.as(Void*), wide_directory, info.as(Void*), answer.as(Void*))
       failed = made_it == 0 ? ::LibC.GetLastError : 0
@@ -741,7 +751,13 @@ class ProcessChild
     # `NAME=VALUE`, NUL after each, and a NUL after the last: an empty
     # environment is the two NULs alone.
     def self.environment_block(entries : Array(String)) : Pointer(UInt16)
-      wides = entries.map { |entry| __iyi_win_env_wide(entry.to_unsafe, entry.bytesize) }
+      # A name or value that is not UTF-8 converted to null, and the length
+      # below read address 0: the program died of a memory fault.
+      wides = entries.map do |entry|
+        wide = __iyi_win_env_wide(entry.to_unsafe, entry.bytesize)
+        raise "Process.run: an environment name or value is not valid UTF-8" if wide.address == 0_u64
+        wide
+      end
       total = 1
       lengths = wides.map do |wide|
         length = 0

@@ -290,6 +290,45 @@ group do |g|
       fail("a batch file was not refused")
     end
 
+    puts "== text a Windows command line cannot carry is refused"
+    # Not UTF-8, an argument has no UTF-16 spelling: the conversion was
+    # null, and a null command line is Windows' cue to run the program
+    # with no arguments at all - it ran, and the run said it went well. In
+    # `env:`, the block's length was read at address 0.
+    not_utf8 = "caf\xE9"
+    said = [] of String
+    group do |h|
+      told_arg = h.spawn { Process.run(me, ["argv", "one", not_utf8]); 0 }
+      told_env = h.spawn { Process.run(me, ["env", "IYI_NOT_UTF8"], env: {"IYI_NOT_UTF8" => not_utf8}); 0 }
+      [told_arg.value, told_env.value].each do |outcome|
+        said << (outcome.is_a?(Panicked) ? outcome.message.to_s : "ran")
+      end
+      0
+    end
+    fail("an argument that is not UTF-8: #{said[0]}") unless said[0].includes?("not valid UTF-8")
+    fail("an environment value that is not UTF-8: #{said[1]}") unless said[1].includes?("not valid UTF-8")
+    puts "  #{said[0]}"
+
+    puts "== a quoted PATH entry with a non-ASCII name is searched"
+    # Its quotes were cut off by a count of characters, and `[]` counts
+    # bytes: every `ü` cost the name a byte off its end.
+    quoted = "#{directory_of(me)}\\iyi ünï dir"
+    Dir.mkdir_p(quoted)
+    File.write("#{quoted}\\iyi-process-ünï.exe", File.read(me))
+    kept_path = Program.env("PATH") || ""
+    ENV["PATH"] = "\"#{quoted}\";#{kept_path}"
+    found = Process.run("iyi-process-ünï", ["env", "IYI_PROCESS_PROBE"])
+    ENV["PATH"] = kept_path
+    case found
+    when ProcessResult
+      fail("the program found on a quoted entry said #{found.stdout.inspect}") unless found.stdout == "değer-日本\n"
+      puts "  found and ran from #{quoted}"
+    when ProcessError
+      fail("a quoted PATH entry was not searched: #{found.message}")
+    else
+      fail("the quoted PATH run answered Cancelled")
+    end
+
     puts "== a working directory Windows will not take is named for what it is"
     # 270 characters, past the 254 a working directory may have while long
     # paths are off. Refused there as "the directory name is invalid", and

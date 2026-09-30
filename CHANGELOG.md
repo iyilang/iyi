@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **`Process.run` on Windows refuses text a command line cannot carry,
+  searches a quoted `PATH` entry with a non-ASCII name, and names the
+  command-line limit.** An argument that was not UTF-8 converted to a
+  null command line, which is Windows' cue to run the program with no
+  arguments at all: the child ran without `--dry-run` or anything else,
+  and the run answered success. An `env:` value that was not UTF-8 made
+  the environment block's length be read at address 0, and the program
+  died of a memory fault. Both are panics with a sentence now, before any
+  handle is made. A quoted `PATH` entry had its quotes cut off by a count
+  of characters where `[]` counts bytes, so `"C:\ünï dir"` named no
+  directory and the program was "no such program". And a command line
+  past 32,767 characters was "error 206"; it says so.
+  `bench/std_process_exercise.iyi` checks the first three; the old module
+  died of the memory fault.
+
 - **`Program.args` on Windows splits two more command lines as the C
   runtime does.** A line that starts with a space has an empty program
   name, and the first word after it is an argument; the name was read

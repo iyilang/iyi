@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **A `BigDecimal` with many zeros prints in time linear in its size.**
+  `to_s` grew its zeros by one at a time, copying the string for each, so
+  `1e50000` took 2.9 s to print where the same value as a `BigInt` took
+  57 ms. The zeros are one string each now. `bench/std_big_exercise.iyi`
+  prints `1e50000` and `1e-50000` under a second; the old module took
+  4.9 s there.
+
 - **A `BitArray` prints in time linear in its size.** `to_s` grew a
   string by one character per bit, copying it each time: 200,000 bits
   took 46 s. It writes into one builder now, and the same print takes

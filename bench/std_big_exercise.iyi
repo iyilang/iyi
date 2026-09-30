@@ -455,6 +455,15 @@ tiny = BigRational.new(BigInt.new(1), BigInt.new(10) ** 30).to_f64
 raise "rational: to_f64 of 1/10^30 is #{tiny}" unless tiny == 1.0e-30
 third = BigRational.new(BigInt.new(1), BigInt.new(3) * BigInt.new(10) ** 15).to_f64
 raise "rational: to_f64 of 1/(3*10^15) is #{third}" unless third == 3.333333333333333e-16
+# A decimal's zeros are one string each: grown by a zero at a time, the
+# string was copied per zero and 1e50000 took 2.9 s to print.
+zeros_started = __iyi_monotonic_ns
+wide = BigDecimal.new(BigInt.new(1), -50000).to_s
+narrow = BigDecimal.new(BigInt.new(1), 50000).to_s
+zeros_ms = (__iyi_monotonic_ns - zeros_started) // 1000000
+raise "decimal: 1e50000 printed #{wide.bytesize} characters" unless wide.bytesize == 50001 && wide.ends_with?("00")
+raise "decimal: 1e-50000 printed #{narrow.bytesize} characters" unless narrow.bytesize == 50002 && narrow.starts_with?("0.00")
+raise "decimal: 1e50000 and 1e-50000 took #{zeros_ms} ms to print" unless zeros_ms < 1000
 
 rat_pairs = [
   ["6/4", "1/6"], ["-3/-9", "2/3"], ["3/-9", "1/2"], ["1/3", "1/6"], ["2/3", "4/9"],

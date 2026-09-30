@@ -1736,21 +1736,14 @@ pub struct BigDecimal
     v_str = @value.abs.to_s
     prefix = negative? ? "-" : ""
 
+    # The zeros in one string each: a string grown by one per zero copied
+    # it per zero, and `1e50000` took 2.9 s to print where the same value
+    # as a BigInt took 57 ms.
     if @scale <= 0
-      zeros = ""
-      i = 0
-      while i < -@scale
-        zeros = zeros + "0"
-        i = i + 1
-      end
+      zeros = "0" * -@scale
       prefix + v_str + zeros
     elsif v_str.size <= @scale
-      leading_zeros = ""
-      i = 0
-      while i < (@scale - v_str.size)
-        leading_zeros = leading_zeros + "0"
-        i = i + 1
-      end
+      leading_zeros = "0" * (@scale - v_str.size)
       prefix + "0." + leading_zeros + v_str
     else
       split_pos = v_str.size - @scale

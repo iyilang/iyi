@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Call hierarchy lists the calls written, not one the compiler made.**
+  Incoming calls to any def listed the def's own file as a caller, at
+  the def's own line, beside the real callers: a call the compiler makes
+  where the def is written resolved to the def and was counted. A call
+  sitting where its target is written is left out. Step 28b of
+  `bench/lsp_session.py` asks `render`'s callers; the old server answered
+  lines 15 and 19, `render`'s own line and its one call.
+
 - **`URI#to_s` writes a relative path whose first segment holds a colon
   behind `./`.** A Windows path is one: `URI.parse("./C:/Users/x").normalize`
   wrote `C:/Users/x`, which parses back with the scheme `C` and the path

@@ -1437,6 +1437,19 @@ def main():
          "render" in callers and "paint" in callees,
          f"paint <- {callers}, render -> {callees}")
 
+    # 28b. and a def's callers are the calls the person wrote: `render`
+    #      is called once, at the file's last line. Incoming calls to any
+    #      def also listed the def's own file as a caller at the def's own
+    #      line - a call the compiler made there.
+    render_callers = []
+    if render_items:
+        reply = c.send("callHierarchy/incomingCalls", {"item": render_items[0]})
+        render_callers = [(e["from"]["name"], [r["start"]["line"] for r in e["fromRanges"]])
+                          for e in reply["result"] or []]
+    step("28b", "a def's incoming calls are the calls written",
+         [lines for _, lines in render_callers] == [[19]],
+         f"render <- {render_callers}")
+
     # 29. selectionRange: expand from inside the string literal, out
     #     through the def, to the file — strictly nested.
     reply = c.send("textDocument/selectionRange",

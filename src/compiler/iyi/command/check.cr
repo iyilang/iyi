@@ -157,8 +157,18 @@ class Iyi::Command
       STDOUT.puts
     else
       failures.each do |(consumer, error)|
-        deepest = error.is_a?(TypeException) ? error.deepest_error_message.to_s : error.message.to_s
-        puts "#{consumer}: #{deepest.lines.first?}"
+        # The first line that says something: a trace's deepest message is
+        # empty, and every broken consumer was named with a blank reason.
+        # The chain's last message that says something, which is the error
+        # itself under the `instantiating ...` frames above it.
+        sentence = nil
+        link = error.as(Exception?)
+        while link
+          line = link.message.to_s.lines.find { |text| !text.strip.empty? }
+          sentence = line.strip if line
+          link = link.responds_to?(:inner) ? link.inner : nil
+        end
+        puts "#{consumer}: #{sentence || "does not compile"}"
       end
       unless missing.empty?
         puts "#{missing.join(", ")} is not there, so the consumers are whoever imports that path"

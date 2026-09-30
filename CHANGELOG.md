@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`iyi check --affected` says why each consumer broke.** Each broken
+  consumer was printed with the first line of its error's deepest
+  message, which is empty for a trace: `main.iyi: ` and nothing, where
+  `iyi check main.iyi` said "undefined method 'nope' for Int32". The line
+  is the last message down the error's chain that says something.
+  `bench/agent_loop.py` checks a consumer whose break is in the changed
+  module's own body; an intermediate fix printed its `instantiating`
+  frame and failed the step.
+
 - **`iyi doc` of a module that does not compile leaves no scratch
   directory.** It compiles in a temporary directory it removes in an
   `ensure`, and its refusal exits, which runs no `ensure`: every such doc

@@ -475,6 +475,22 @@ def main():
     proc = run("check", "--affected", "calc/add.iyi", cwd=work)
     step("a surface break names its consumers",
          proc.returncode == 1 and "broke" in proc.stdout, proc.stdout.splitlines()[-1])
+    # And each with its reason: the line was `consumer.iyi: ` and nothing,
+    # or the `instantiating ...` frame above the error.
+    named = [line for line in proc.stdout.splitlines() if ": " in line and "consumer(s)" not in line]
+    # One whose break is in the module's own body, reached through a call:
+    # the error sits under an `instantiating` frame, which is what was
+    # printed, or nothing.
+    write("calc/sub.iyi", "module calc/sub\n\npub def sub : Int32\n  1.nope\nend\n")
+    write("sub_user.iyi", "module sub_user\n\nimport calc/sub::{sub}\n\nputs sub\n")
+    deep = run("check", "--affected", "calc/sub.iyi", cwd=work)
+    named += [line for line in deep.stdout.splitlines() if line.startswith("sub_user.iyi:")]
+    os.remove(os.path.join(work, "calc", "sub.iyi"))
+    os.remove(os.path.join(work, "sub_user.iyi"))
+    step("each broken consumer says why",
+         any("undefined method 'nope'" in line for line in named)
+         and all(line.split(": ", 1)[1].strip() and "instantiating" not in line for line in named),
+         f"{named[:3]}")
     write("calc/add.iyi", (
         "module calc/add\n\n"
         "# Adds two integers.\n"

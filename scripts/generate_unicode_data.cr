@@ -112,6 +112,17 @@ def strides(entries, targets, &)
   stride = nil
 
   entries.each do |entry|
+    # A `First>`..`Last>` pair is one range whatever stride the run before it
+    # had. Joined to that run, the `Last>` began a run of its own and every
+    # code point between the two was lost (U+17001..U+187FE, Tangut).
+    if first_entry && last_entry && entry.name.ends_with?("First>")
+      stride = 1 if first_entry.name.ends_with?("First>") && last_entry.name.ends_with?("Last>")
+      strides << Stride.new(first_entry.codepoint, last_entry.codepoint, stride || 1)
+      first_entry = entry
+      last_entry = entry
+      stride = nil
+      next
+    end
     if first_entry
       if last_entry
         current_stride = entry.codepoint - last_entry.codepoint
@@ -247,8 +258,11 @@ body.each_line do |line|
     special_cases_upcase << SpecialCase.new(codepoint, upcase)
   end
 
+  # A titlecase of one code point is a row too where the uppercase is longer:
+  # a reader falls back to the uppercase, and `ᾀ` titlecases to `ᾈ` where it
+  # upcases to `Ἀ`, `Ι`.
   titlecase = pieces[2].split.map(&.to_i(16))
-  if titlecase.size > 1
+  if titlecase.size > 1 || upcase.size > 1
     while titlecase.size < 3
       titlecase << 0
     end

@@ -21,6 +21,10 @@ assert_true Unicode.letter?('A'), "A"
 assert_true Unicode.letter?('é'), "é"
 assert_true !Unicode.letter?('1'), "digit"
 assert_true Unicode.number?('3'), "3 is a number"
+# Tangut: a `First>`..`Last>` range the table generator joined to the stride
+# before it, so only its two ends were letters.
+assert_true Unicode.letter?('\u{17001}'), "a Tangut ideograph inside its range"
+assert_true Unicode.letter?('\u{18D01}'), "a Tangut supplement ideograph inside its range"
 puts "  letter? and number?"
 
 puts "\n== valid"
@@ -44,5 +48,12 @@ assert_true Unicode.upcase('ǅ') == 'Ǆ', "char upcase of the Dž digraph"
 assert_true Unicode.titlecase('ǅ') == 'ǅ', "titlecase of the Dž digraph is itself"
 assert_str "ǆ", Unicode.downcase("ǅ"), "downcase of the Dž digraph"
 puts "  turkic i on ascii, and the titlecase digraphs"
+# The iota-subscript letters titlecase to one code point, which is not
+# their two-letter uppercase: `ᾀ` upcases to `ἈΙ` and titlecases to `ᾈ`.
+assert_str "ᾈ", Unicode.capitalize("ᾀ"), "titlecase of alpha with psili and ypogegrammeni"
+assert_str "ᾼ", Unicode.capitalize("ᾳ"), "titlecase of alpha with ypogegrammeni"
+# The first letter is still before the rest when the final sigma is decided.
+assert_str "Ας", Unicode.capitalize("ΑΣ"), "final sigma after the capitalized letter"
+puts "  one-code-point titlecase and the final sigma after the first letter"
 
 puts "\nALL CHECKS PASSED"

@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **Three Unicode answers are the database's.** 6,171 Tangut ideographs
+  (U+17001..187FE, U+18D01..18D1D) were not letters: the table generator
+  joined a `First>`..`Last>` range to the stride before it, and only the
+  range's two ends survived. The 54 Greek letters with iota subscript
+  titlecased to their two-letter uppercase - `capitalize("ᾀ")` was `ἈΙ`,
+  not `ᾈ` - because a one-code-point titlecase was recorded only where
+  the titlecase itself was longer. And `capitalize("ΑΣ")` was `Ασ`: the
+  rest was lowercased apart from the first letter, so the final sigma
+  never saw the letter before it. The generator is fixed and
+  `src/unicode/data.cr` regenerated, so `--crystal`'s `Char#letter?` and
+  titlecase answer the same (Crystal 1.21 has all three); `std/unicode`'s
+  tables are regenerated from it. Every code point against the UCD 17.0.0
+  files, NormalizationTest's 801,360 checks and 200,000 random strings
+  found these and nothing else; the unicode exercise checks each and
+  proves the sigma check fails with the first letter unseen.
+
 - **`BigRational#to_f64` is the nearest Float64, and `std/big` refuses
   two inputs it took.** `to_f64` went through `to_big_d`, twenty decimal
   places, so every value under 5e-21 was 0.0 (1/10^25, every subnormal)

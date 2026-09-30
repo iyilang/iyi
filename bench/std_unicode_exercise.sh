@@ -136,6 +136,9 @@ mutate "turkic downcase ignored on ascii" \
 mutate "digraph upcase missing" \
   'return cp - 1 if cp == 0x1C5 || cp == 0x1C8 || cp == 0x1CB || cp == 0x1F2' \
   ''
+mutate "final sigma judged without the letters before it" \
+  'if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index)' \
+  'if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index) && index > from'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -25,4 +25,30 @@ assert_true SemanticVersion.parse?("1.0").nil?, "two fields are not a version"
 assert_true SemanticVersion.parse?("01.0.0").nil?, "leading zero"
 puts "  1.0 and 01.0.0 refused"
 
+puts "\n== order"
+# Every comparison went through `<=>`, which the `impl Comparable` had
+# replaced with a call to itself: the stack ran out on the first one.
+a = SemanticVersion.parse("1.0.0")
+b = SemanticVersion.parse("0.9.0")
+assert_true (a <=> b) == 1, "1.0.0 <=> 0.9.0 is 1"
+assert_true b < a, "0.9.0 < 1.0.0"
+assert_true SemanticVersion.parse("1.0.0+a") != SemanticVersion.parse("1.0.0+b"), "build metadata distinguishes"
+assert_true (SemanticVersion.parse("1.0.0+a") <=> SemanticVersion.parse("1.0.0+b")) == 0, "build metadata does not order"
+# The standard's own example, section 11, shuffled.
+spec = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"]
+shuffled = [spec[5], spec[0], spec[7], spec[2], spec[6], spec[1], spec[4], spec[3]]
+assert_str spec.join(" < "), shuffled.map { |s| SemanticVersion.parse(s) }.sorted.map { |v| v.to_s }.join(" < "), "the standard's precedence example sorts"
+puts "  #{spec.size} versions in the standard's order"
+
+puts "\n== prerelease identifiers"
+# Only a run of digits is numeric: a leading `-` makes an identifier
+# alphanumeric, which the number -1 (and `-0`, printed `0`) was not.
+assert_str "1.0.0--0", SemanticVersion.parse("1.0.0--0").to_s, "a signed identifier is alphanumeric, and prints as written"
+assert_true SemanticVersion.parse("1.0.0-1") < SemanticVersion.parse("1.0.0--1"), "numeric 1 before alphanumeric -1"
+# A number past Int32 is still a number: by value, and before letters.
+assert_true SemanticVersion.parse("1.0.0-99999999999") < SemanticVersion.parse("1.0.0-100000000000"), "numbers past Int32 order by value"
+assert_true SemanticVersion.parse("1.0.0-99999999999") < SemanticVersion.parse("1.0.0-0a"), "a number past Int32 before an alphanumeric"
+assert_true SemanticVersion.parse("1.0.0-2147483647") < SemanticVersion.parse("1.0.0-2147483648"), "Int32::MAX before the number after it"
+puts "  -1, -0 and numbers past Int32 ordered as the standard says"
+
 puts "\nALL CHECKS PASSED"

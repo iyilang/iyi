@@ -142,6 +142,25 @@
 
 ### Fixed
 
+- **Two `SemanticVersion`s compare.** `<=>` was declared on the struct
+  with `other : self` and again in `impl Comparable`, whose body is `self
+  <=> other`; the impl's definition replaced the struct's and called
+  itself, so every comparison, `==` and sort overflowed the stack (a hang
+  under `--release`). A prerelease identifier with a sign was read as a
+  signed number - `1.0.0--0` printed as `1.0.0-0` and ordered as 0 - and
+  one past Int32 was compared as bytes, not by value. 800,000 strings
+  against semver.org 2.0.0's grammar and precedence found these and none
+  after; the exercise compares, sorts semver.org's example, and proves
+  each check fails with its fix undone.
+- **`Path` on Windows normalises its anchor, and four answers are
+  python's `ntpath`'s.** `normalize` copied the anchor as written, so
+  `C:/a/b` became `C:/a\b`, `//srv/sh//x` kept its doubled separator, and
+  `relative_to?` then refused `C:\a` as a different anchor; a UNC share's
+  "extension" held a separator; `expand` of `C:é` cut `é` in half, a
+  character count used as a byte count; and `foo:` joined as a bare
+  drive. 500,000 rows against `posixpath` and `ntpath` found these and
+  none after; the exercise checks each and proves each check fails.
+
 - **`HTML.unescape` takes the longest entity name, and `HTML.escape` to
   an IO writes UTF-8.** Unescaping looked up only the whole run of
   letters and digits, so `&ltb`, `&copy2024` and `&notit;` were left as

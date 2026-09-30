@@ -11,7 +11,8 @@
 # arrives, and nothing else outside the grammar is.
 #
 # Ordering is the standard's: numeric fields, then prerelease identifiers
-# (numeric before alphanumeric, numeric by value, alphanumeric by bytes,
+# (numeric before alphanumeric, numeric by value however long, a numeric
+# identifier being digits only so `-1` is alphanumeric, alphanumeric by bytes,
 # a shorter list first, and no prerelease after every prerelease). Build
 # metadata never orders (`1.0.0+a` and `1.0.0+b` compare equal) but does
 # distinguish (`==` and `hash` read it), so a set of versions keeps both.
@@ -28,7 +29,8 @@ pub struct SemanticVersion
   getter prerelease : Prerelease
 
   # The dot-separated identifiers after `-`; a numeric identifier is held
-  # as a number so that `beta.2 < beta.11`.
+  # as a number so that `beta.2 < beta.11`, and one too long for an Int32
+  # is held as its digits and still ordered as a number.
   struct Prerelease
     getter identifiers : Array(String | Int32)
 
@@ -39,7 +41,10 @@ pub struct SemanticVersion
       i = 0
       while i < parts.size
         part = parts[i]
-        if n = part.to_i?
+        n = part.to_i?
+        # Digits only: `to_i?` reads a sign, and the alphanumeric `-1`
+        # became the number -1, ordered before `1`, with `-0` printed `0`.
+        if n && part.to_unsafe[0] >= 48_u8 && part.to_unsafe[0] <= 57_u8
           identifiers << n
         else
           identifiers << part
@@ -71,7 +76,10 @@ pub struct SemanticVersion
       res
     end
 
-    def <=>(other : self) : Int32
+    # `Prerelease`, not `self`: spelled `self` it was the very method the
+    # `impl Comparable` below defines, which replaced it, and that one's
+    # `self <=> other` then called itself until the stack ran out.
+    def <=>(other : Prerelease) : Int32
       if @identifiers.empty?
         return other.identifiers.empty? ? 0 : 1
       elsif other.identifiers.empty?
@@ -99,10 +107,28 @@ pub struct SemanticVersion
       else
         if y.is_a?(Int32)
           1
+        elsif digits?(x) || digits?(y)
+          # A digit run held as a string is a number past Int32: numeric
+          # before alphanumeric, a longer number the larger. Compared as
+          # bytes, `100000000000` came before `99999999999`.
+          return digits?(x) ? -1 : 1 unless digits?(x) && digits?(y)
+          return x.bytesize < y.bytesize ? -1 : 1 if x.bytesize != y.bytesize
+          x == y ? 0 : (x < y ? -1 : 1)
         else
           x == y ? 0 : (x < y ? -1 : 1)
         end
       end
+    end
+
+    private def digits?(s : String) : Bool
+      return false if s.empty?
+      ptr = s.to_unsafe
+      i = 0
+      while i < s.bytesize
+        return false unless ptr[i] >= 48_u8 && ptr[i] <= 57_u8
+        i += 1
+      end
+      true
     end
 
     def ==(other : Prerelease) : Bool
@@ -291,8 +317,11 @@ pub struct SemanticVersion
     end
   end
 
-  # Precedence, with build metadata ignored as the standard says.
-  def <=>(other : self) : Int32
+  # Precedence, with build metadata ignored as the standard says. The
+  # parameter is `SemanticVersion` for the reason `Prerelease#<=>` gives:
+  # as `self` the `impl Comparable` replaced this, and every `<=>`, `==`,
+  # `<` and sort recursed until the stack ran out (a hang under --release).
+  def <=>(other : SemanticVersion) : Int32
     r = @major == other.major ? 0 : (@major < other.major ? -1 : 1)
     return r unless r == 0
     r = @minor == other.minor ? 0 : (@minor < other.minor ? -1 : 1)

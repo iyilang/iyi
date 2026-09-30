@@ -161,6 +161,50 @@ PY
   fi
 fi
 
+# Each fix, broken back, must be caught at the check written for it: the
+# module is patched the way the proof above patches it, and the run's
+# output must carry *expect*.
+caught_at() {
+  local label="$1" old="$2" new="$3" expect="$4"
+  rm -rf "$WORK/patched_fix" && mkdir -p "$WORK/patched_fix/std"
+  OLD="$old" NEW="$new" "$PY" - <<PY
+import os
+src = open("$REPO/src/std/path.iyi").read()
+old, new = os.environ["OLD"], os.environ["NEW"]
+if old not in src:
+    raise SystemExit("patch site missing")
+open("$WORK/patched_fix/std/path.iyi", "w").write(src.replace(old, new, 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched_fix${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" HOME=/home/gate PWD=/pwd/gate "$IYI" run "$REPO/bench/std_path_exercise.iyi" >"$WORK/fix.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF "$expect" "$WORK/fix.out"; then
+    echo "  $label: failed, but not at \"$expect\":"
+    grep -v '^oracle ' "$WORK/fix.out" | tail -3 | sed 's/^/    /'
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+
+if [ -n "$PY" ]; then
+  caught_at "a windows anchor kept as written by normalize" \
+    'norm << (posix? ? "/" : backslashed(drive || "") + (rooted ? "\\" : ""))' 'norm << all[0]' \
+    'a windows anchor normalizes to its own separator'
+  caught_at "an extension read off a UNC share" \
+    'return "" if trimmed_end <= anchor_end' '# no anchor test' \
+    'a UNC share has no extension'
+  caught_at "a drive-relative rest cut by characters" \
+    'rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]' 'rest = p.name[drive.size, p.name.size - drive.size]' \
+    'a drive-relative non-ASCII name expands whole'
+  caught_at "any name ending in : joined like a drive" \
+    '(drive_end == 2 && anchor_end == 2 && @name.bytesize == 2)' '(!posix? && @name.ends_with?(":"))' \
+    'only a bare drive joins without a separator'
+fi
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/path exercise holds"

@@ -179,6 +179,18 @@ prove_fails "general notation keeps its zeros" no_trim "general: trailing zeros 
 prove_fails "general notation never switches" no_switch "general: large switches to exponent" \
   's/^    if exp < -4 || exp >= prec$/    if false/'
 
+# 9. %u of a negative Int64 signed again, the exponent of the shortest
+#    digits trusted, NaN deaf to + and space, and %g's fixed notation
+#    asked of %f's limited places once more.
+prove_fails "unsigned Int64 signed again" no_u64 "format: boundary negative int64 unsigned" \
+  's/format_uint64(val\.unsafe_to_u64, 10, false, false/format_int64(val, 10, false, false/'
+prove_fails "the shortest digits' exponent trusted" no_lower "the exponent is the value's" \
+  's/^      if lower\.size == precision + 1$/      if false/'
+prove_fails "NaN drops the sign flags" no_nan_sign "general: NaN takes the sign flags" \
+  's/plus ? "+NaN" : (space ? " NaN" : "NaN")/"NaN"/'
+prove_fails "%g fixed from %f's places" no_g_digits "precision must be at most 400, not 403" \
+  's/^        fixed = "0\." + ("0" \* (0 - exp - 1)) + sig$/        fixed = IyiFloatText.format_fixed(val.abs, prec - 1 - exp)/'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Format strings: width, alignment, zero pad, precision, bases, negatives,"

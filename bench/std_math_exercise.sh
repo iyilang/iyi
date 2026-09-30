@@ -78,15 +78,63 @@ build_and_run() {
 # over the range, the tiny, the ends and the special cases - and the
 # compiled oracle writes each with its answer.
 ORACLE=""
+ORACLE_CM=""
 CC="${CC:-cc}"
-if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1 &&
-   "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle" \
-     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" "$REPO/bench/libm_oracle/exp_data.c" \
-     "$REPO/bench/libm_oracle/pow.c" "$REPO/bench/libm_oracle/pow_log_data.c" \
-     "$REPO/bench/libm_oracle/log.c" "$REPO/bench/libm_oracle/log_data.c" \
-     "$REPO/bench/libm_oracle/exp2.c" "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
+# Two builds. The first is Arm's files and glibc's fdlibm ones and needs
+# nothing past a C compiler; the second adds `core_math/` and the Bessel
+# functions, which call libm's exact `fma` and CORE-MATH's sin and cos. A
+# toolchain that cannot build the second still checks everything the first
+# covers, and says what it could not.
+ORACLE_BUILT=""
+CM_BUILT=""
+if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
+  if "$CC" -O2 -ffp-contract=off -fno-builtin -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle" \
+     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
+     "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \
+     "$REPO/bench/libm_oracle/pow_log_data.c" "$REPO/bench/libm_oracle/log.c" \
+     "$REPO/bench/libm_oracle/log_data.c" "$REPO/bench/libm_oracle/exp2.c" \
+     "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
      "$REPO/bench/libm_oracle/e_log10.c" "$REPO/bench/libm_oracle/s_expm1.c" \
-     "$REPO/bench/libm_oracle/s_log1p.c" > "$WORK/libm_oracle.log" 2>&1; then
+     "$REPO/bench/libm_oracle/s_log1p.c" "$REPO/bench/libm_oracle/e_sinh.c" \
+     "$REPO/bench/libm_oracle/e_cosh.c" "$REPO/bench/libm_oracle/s_tanh.c" > "$WORK/libm_oracle.log" 2>&1; then
+    ORACLE_BUILT=1
+  else
+    echo "the oracle did not build here:"
+    sed -n '1,12p' "$WORK/libm_oracle.log"
+  fi
+  if [ -n "$ORACLE_BUILT" ] &&
+     "$CC" -O2 -ffp-contract=off -fno-builtin -DIYI_ORACLE_CORE_MATH -Dattribute_hidden= \
+       -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle_cm" \
+     "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
+     "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \
+     "$REPO/bench/libm_oracle/pow_log_data.c" "$REPO/bench/libm_oracle/log.c" \
+     "$REPO/bench/libm_oracle/log_data.c" "$REPO/bench/libm_oracle/exp2.c" \
+     "$REPO/bench/libm_oracle/log2.c" "$REPO/bench/libm_oracle/log2_data.c" \
+     "$REPO/bench/libm_oracle/e_log10.c" "$REPO/bench/libm_oracle/s_expm1.c" \
+     "$REPO/bench/libm_oracle/s_log1p.c" "$REPO/bench/libm_oracle/e_sinh.c" \
+     "$REPO/bench/libm_oracle/e_cosh.c" "$REPO/bench/libm_oracle/s_tanh.c" \
+     "$REPO/bench/libm_oracle/e_j0.c" "$REPO/bench/libm_oracle/e_j1.c" \
+     "$REPO/bench/libm_oracle/e_jn.c" "$REPO/bench/libm_oracle/core_math/s_erf.c" \
+     "$REPO/bench/libm_oracle/core_math/s_erf_common.c" \
+     "$REPO/bench/libm_oracle/core_math/s_erf_data.c" "$REPO/bench/libm_oracle/core_math/s_erfc.c" \
+     "$REPO/bench/libm_oracle/core_math/s_erfc_data.c" \
+     "$REPO/bench/libm_oracle/core_math/s_asinh.c" "$REPO/bench/libm_oracle/core_math/e_acosh.c" \
+     "$REPO/bench/libm_oracle/core_math/e_atanh.c" \
+     "$REPO/bench/libm_oracle/core_math/s_asincosh_data.c" \
+     "$REPO/bench/libm_oracle/core_math/s_atanh_data.c" "$REPO/bench/libm_oracle/core_math/atan.c" \
+     "$REPO/bench/libm_oracle/core_math/asin.c" "$REPO/bench/libm_oracle/core_math/acos.c" \
+     "$REPO/bench/libm_oracle/core_math/e_gamma_r.c" \
+     "$REPO/bench/libm_oracle/core_math/e_lgamma_r.c" "$REPO/bench/libm_oracle/core_math/tan.c" \
+     "$REPO/bench/libm_oracle/core_math/sin.c" "$REPO/bench/libm_oracle/core_math/cos.c" \
+     "$REPO/bench/libm_oracle/core_math/cbrt.c" "$REPO/bench/libm_oracle/core_math/hypot.c" \
+     "$REPO/bench/libm_oracle/core_math/atan2.c" -lm > "$WORK/libm_oracle_cm.log" 2>&1; then
+    CM_BUILT=1
+  elif [ -n "$ORACLE_BUILT" ]; then
+    echo "the oracle's CORE-MATH and Bessel part did not build here:"
+    sed -n '1,15p' "$WORK/libm_oracle_cm.log"
+  fi
+fi
+if [ -n "$ORACLE_BUILT" ]; then
   "$PY" - "$WORK/exp.in" <<'PY'
 import random, struct, sys
 random.seed(2718)
@@ -188,6 +236,204 @@ for path, values in ((sys.argv[1], xs), (sys.argv[2], ys), (sys.argv[3], zs), (s
         for v in values:
             out.write(struct.pack("<d", v))
 PY
+  # sinh's, cosh's and tanh's: every branch fdlibm takes and each side of
+  # its thresholds - 2^-55 and 2^-28, cosh's 0.5 ln 2, 1, 22, log(DBL_MAX)
+  # and the overflow threshold - both signs, and the specials.
+  "$PY" - "$WORK/hyp.in" <<'PY'
+import random, struct, sys
+random.seed(1729)
+xs = [random.uniform(-25, 25) for _ in range(100000)]
+xs += [random.uniform(-1, 1) for _ in range(50000)]
+xs += [random.choice([1, -1]) * 10 ** random.uniform(-20, 0) for _ in range(50000)]
+xs += [random.choice([1, -1]) * random.uniform(20, 712) for _ in range(50000)]
+for edge in (2.0 ** -55, 2.0 ** -28, 0.34657359027997264, 1.0, 22.0, 709.782712893384, 710.4758600739439):
+    xs += [random.choice([1, -1]) * edge * (1 + random.uniform(-1e-6, 1e-6)) for _ in range(2000)]
+    xs += [edge, -edge]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324, 1e-310, 710.4758600739440,
+       710.4758600739439, 1e300, -1e300]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
+  # erf's and erfc's: the magnitudes from 2^-70 to 32, where erf's
+  # tiny formula, its two polynomial tables and erfc's asymptotic tables
+  # and underflow each take over; the band where erfc's result is
+  # subnormal; erfc's negatives out to where it is 2; the subnormals and
+  # the specials.
+  "$PY" - "$WORK/erf.in" <<'PY'
+import random, struct, sys
+random.seed(1830)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-70, 5) for _ in range(80000)]
+xs += [random.uniform(-6, 6) for _ in range(60000)]
+xs += [random.uniform(1.7, 28) for _ in range(40000)]
+xs += [random.uniform(25.8, 27.3) for _ in range(20000)]
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+for edge in (5.9215871957945065, 2.0 ** -61, 5.86183139113198, 27.226017111108366, 0.0625, 0.125, 1.0):
+    xs += [random.choice([1, -1]) * edge * (1 + random.uniform(-1e-9, 1e-9)) for _ in range(1000)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324, 1e300, -1e300]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
+  # asinh's, acosh's and atanh's, one set for the three: the magnitudes
+  # across the whole range, 1 from above to 2^60 for acosh, 1 from below
+  # for atanh, the tiny, the subnormals, the out-of-domain and the specials.
+  "$PY" - "$WORK/ash.in" <<'PY'
+import random, struct, sys
+random.seed(1885)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(60000)]
+xs += [random.choice([1, -1]) * 2 ** random.uniform(-40, 40) for _ in range(60000)]
+xs += [1 + 2 ** random.uniform(-52, 6) for _ in range(40000)]
+xs += [random.choice([1, -1]) * (1 - 2 ** random.uniform(-53, -1)) for _ in range(40000)]
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+xs += [0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 0.25, -0.25, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324,
+       1.0000000000000002, 0.9999999999999999, -0.9999999999999999, 1.7976931348623157e308]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
+  # atan's, asin's and acos's: atan over the whole range and the band its
+  # small-argument refinement takes, asin and acos across [-1, 1], near
+  # the ends and near zero, the out-of-domain, the subnormals, the specials.
+  "$PY" - "$WORK/atan.in" "$WORK/asin.in" <<'PY'
+import random, struct, sys
+random.seed(1914)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(60000)]
+xs += [random.choice([1, -1]) * 2 ** random.uniform(-30, 60) for _ in range(80000)]
+xs += [random.choice([1, -1]) * 2 ** random.uniform(-27, -7.2) for _ in range(40000)]
+xs += [0.0, -0.0, 1.0, -1.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324, 1.7976931348623157e308]
+ys = [random.uniform(-1, 1) for _ in range(80000)]
+ys += [random.choice([1, -1]) * (1 - 2 ** random.uniform(-53, -1)) for _ in range(60000)]
+ys += [random.choice([1, -1]) * 2 ** random.uniform(-1074, 0) for _ in range(40000)]
+ys += [0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 1.0000000000000002, -1.0000000000000002, 2.0, float("inf"), float("-inf"),
+       float("nan"), 5e-324, -5e-324]
+for path, values in ((sys.argv[1], xs), (sys.argv[2], ys)):
+    with open(path, "wb") as out:
+        for v in values:
+            out.write(struct.pack("<d", v))
+PY
+  # lgamma's and tgamma's, one set: the whole range, the band where tgamma
+  # is finite, the negatives down to where it underflows, each side of the
+  # integers and half-integers from -200 to 200, near lgamma's zeros at 1
+  # and 2, the tiny, the subnormals and the specials.
+  "$PY" - "$WORK/gamma.in" <<'PY'
+import random, struct, sys
+random.seed(1729 * 2)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(50000)]
+xs += [random.uniform(-185, 172) for _ in range(80000)]
+xs += [random.uniform(0, 10) for _ in range(30000)]
+xs += [random.choice([1.0, 2.0]) + random.choice([1, -1]) * 2 ** random.uniform(-52, -2) for _ in range(20000)]
+for k in range(-400, 401):
+    for _ in range(20):
+        xs.append(k / 2 + random.choice([1, -1]) * 2 ** random.uniform(-50, -3))
+    xs.append(k / 2)
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+xs += [0.0, -0.0, 1.0, 2.0, -1.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324,
+       171.62437695630272, 171.6243769563027, 1.7976931348623157e308, -1.7976931348623157e308]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
+  # sin's, cos's and tan's: the whole range to 2^1023, where the reduction takes the table
+  # of 2/pi's bits; [-10, 10]; each side of the multiples of pi/2 and
+  # pi/4, the poles and zeros a reduction can lose; the worst cases for
+  # reduction the literature names; the tiny and the specials.
+  "$PY" - "$WORK/trig.in" <<'PY'
+import math, random, struct, sys
+random.seed(3141)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-40, 1023) for _ in range(80000)]
+xs += [random.uniform(-10, 10) for _ in range(80000)]
+for k in range(1, 20001):
+    x = k * math.pi / 4
+    xs += [x, math.nextafter(x, 0), math.nextafter(x, math.inf)]
+for x in (6381956970095103 * 2.0 ** 797, 5261692873635770 * 2.0 ** 499, float.fromhex("0x1.6ac5b262ca1ffp+851"),
+          float.fromhex("0x1.61a3db8c8d129p+1023"), float.fromhex("0x1.dffffffffff1fp-22"),
+          float.fromhex("0x1.dfffffffffc7cp-21")):
+    xs += [x, -x, math.nextafter(x, 0), math.nextafter(x, math.inf)]
+xs += [random.choice([1, -1]) * 2 ** random.uniform(-1074, -26) for _ in range(5000)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+PY
+  # The Bessel functions': the magnitudes from 2^-60 to 2^60, [0, 100]
+  # densely, each side of fdlibm's thresholds, the negatives, the
+  # subnormals and the specials; and for jn and yn every order from -5 to
+  # 30 and a few large ones against a sample of those.
+  "$PY" - "$WORK/bessel.in" "$WORK/besseln.in" <<'PY'
+import random, struct, sys
+random.seed(1824)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-60, 60) for _ in range(60000)]
+xs += [random.uniform(0, 100) for _ in range(60000)]
+for edge in (2.0 ** -27, 2.0 ** -13, 2.0 ** -3, 1.0, 2.0, 2.857142857142857, 4.545454545454545, 8.0, 2.0 ** 129, 2.0 ** 302):
+    xs += [edge * (1 + random.uniform(-1e-9, 1e-9)) for _ in range(500)]
+    xs += [edge, -edge]
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(2000)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+orders = list(range(-5, 31)) + [50, 100, -100, 1000, -1000]
+pairs = []
+for n in orders:
+    for _ in range(1500):
+        pairs.append((float(n), random.choice([random.uniform(0, 3 * abs(n) + 5), 2 ** random.uniform(-30, 40)])))
+    for x in (0.0, -0.0, -1.5, float("inf"), float("nan"), 5e-324, float(abs(n))):
+        pairs.append((float(n), x))
+with open(sys.argv[1], "wb") as out:
+    for x in xs:
+        out.write(struct.pack("<d", x))
+with open(sys.argv[2], "wb") as out:
+    for n, x in pairs:
+        out.write(struct.pack("<dd", n, x))
+PY
+  # cbrt's: the whole range, the subnormals, perfect cubes and their
+  # neighbours, both signs and the specials; hypot's: pairs at every
+  # exponent gap, near the overflow edge, both subnormal, one subnormal,
+  # near Pythagorean triples, and the specials crossed.
+  "$PY" - "$WORK/cbrt.in" "$WORK/hypot.in" "$WORK/atan2.in" <<'PY'
+import math, random, struct, sys
+random.seed(1637)
+xs = [random.choice([1, -1]) * 2 ** random.uniform(-1074, 1023) for _ in range(80000)]
+xs += [random.choice([1, -1]) * random.uniform(0, 2.2250738585072014e-308) for _ in range(5000)]
+for k in range(1, 20000):
+    c = float(k) ** 3 * 2.0 ** (3 * random.randint(-300, 300))
+    xs += [c, math.nextafter(c, 0), math.nextafter(c, math.inf)]
+xs += [0.0, -0.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+ps = []
+for _ in range(80000):
+    x = random.choice([1, -1]) * 2 ** random.uniform(-1000, 1000)
+    ps.append((x, x * random.choice([1, -1]) * 2 ** random.uniform(-70, 70)))
+for _ in range(10000):
+    ps.append((random.uniform(1e307, 1.7e308), random.uniform(1e307, 1.7e308)))
+    ps.append((random.uniform(0, 2.2250738585072014e-308), random.uniform(0, 2.2250738585072014e-308)))
+    ps.append((random.uniform(0, 2.2250738585072014e-308), 2 ** random.uniform(-1022, -900)))
+for _ in range(10000):
+    a, b = random.randint(1, 10 ** 6), random.randint(1, 10 ** 6)
+    s = 2.0 ** random.randint(-500, 500)
+    ps.append(((a * a - b * b) * s, 2 * a * b * s))
+sp = [0.0, -0.0, 1.0, float("inf"), float("-inf"), float("nan"), 5e-324, 1.7976931348623157e308]
+ps += [(a, b) for a in sp for b in sp]
+# atan2's: every quadrant at quotients from 2^-1100 to 2^1100 (past 53
+# binades apart, its slow exact path), both near the halfway 1 and the
+# table's 64ths, subnormals, the huge and the specials crossed.
+qs = []
+for _ in range(150000):
+    ex = random.uniform(-500, 500)
+    ey = ex + random.uniform(-1100, 1100)
+    if -1074 < ey < 1023:
+        qs.append((random.choice([1, -1]) * 2 ** ey, random.choice([1, -1]) * 2 ** ex))
+for _ in range(60000):
+    x = random.choice([1, -1]) * 2 ** random.uniform(-60, 60)
+    t = random.randint(1, 64) / 64.0 * (1 + random.uniform(-1e-12, 1e-12))
+    qs.append((random.choice([1, -1]) * x * t, x) if random.random() < 0.5 else (x, random.choice([1, -1]) * x * t))
+for _ in range(10000):
+    qs.append((random.uniform(-2.2250738585072014e-308, 2.2250738585072014e-308), random.choice([1, -1]) * 2 ** random.uniform(-1074, 0)))
+    qs.append((random.uniform(-1.7e308, 1.7e308), random.uniform(-1.7e308, 1.7e308)))
+sp = [0.0, -0.0, 1.0, -1.0, float("inf"), float("-inf"), float("nan"), 5e-324, -5e-324, 1.7976931348623157e308]
+qs += [(a, b) for a in sp for b in sp]
+for path, rows in ((sys.argv[1], [(x,) for x in xs]), (sys.argv[2], ps), (sys.argv[3], qs)):
+    with open(path, "wb") as out:
+        for row in rows:
+            out.write(struct.pack("<%dd" % len(row), *row))
+PY
   "$WORK/libm_oracle" exp "$WORK/exp.in" "$WORK/exp.bin" &&
     "$WORK/libm_oracle" pow "$WORK/pow.in" "$WORK/pow.bin" &&
     "$WORK/libm_oracle" log "$WORK/log.in" "$WORK/log.bin" &&
@@ -196,9 +442,49 @@ PY
     "$WORK/libm_oracle" log10 "$WORK/log10.in" "$WORK/log10.bin" &&
     "$WORK/libm_oracle" expm1 "$WORK/expm1.in" "$WORK/expm1.bin" &&
     "$WORK/libm_oracle" log1p "$WORK/log1p.in" "$WORK/log1p.bin" &&
-    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin"
+    "$WORK/libm_oracle" sinh "$WORK/hyp.in" "$WORK/sinh.bin" &&
+    "$WORK/libm_oracle" cosh "$WORK/hyp.in" "$WORK/cosh.bin" &&
+    "$WORK/libm_oracle" tanh "$WORK/hyp.in" "$WORK/tanh.bin" &&
+    ORACLE="$WORK/exp.bin $WORK/pow.bin $WORK/log.bin $WORK/exp2.bin $WORK/log2.bin $WORK/log10.bin $WORK/expm1.bin $WORK/log1p.bin $WORK/sinh.bin $WORK/cosh.bin $WORK/tanh.bin"
+  if [ -n "$ORACLE" ] && [ -n "$CM_BUILT" ]; then
+    "$WORK/libm_oracle_cm" erf "$WORK/erf.in" "$WORK/erf.bin" &&
+      "$WORK/libm_oracle_cm" erfc "$WORK/erf.in" "$WORK/erfc.bin" &&
+      "$WORK/libm_oracle_cm" asinh "$WORK/ash.in" "$WORK/asinh.bin" &&
+      "$WORK/libm_oracle_cm" acosh "$WORK/ash.in" "$WORK/acosh.bin" &&
+      "$WORK/libm_oracle_cm" atanh "$WORK/ash.in" "$WORK/atanh.bin" &&
+      "$WORK/libm_oracle_cm" atan "$WORK/atan.in" "$WORK/atan.bin" &&
+      "$WORK/libm_oracle_cm" asin "$WORK/asin.in" "$WORK/asin.bin" &&
+      "$WORK/libm_oracle_cm" acos "$WORK/asin.in" "$WORK/acos.bin" &&
+      "$WORK/libm_oracle_cm" tan "$WORK/trig.in" "$WORK/tan.bin" &&
+      "$WORK/libm_oracle_cm" j0 "$WORK/bessel.in" "$WORK/j0.bin" &&
+      "$WORK/libm_oracle_cm" j1 "$WORK/bessel.in" "$WORK/j1.bin" &&
+      "$WORK/libm_oracle_cm" y0 "$WORK/bessel.in" "$WORK/y0.bin" &&
+      "$WORK/libm_oracle_cm" y1 "$WORK/bessel.in" "$WORK/y1.bin" &&
+      "$WORK/libm_oracle_cm" jn "$WORK/besseln.in" "$WORK/jn.bin" &&
+      "$WORK/libm_oracle_cm" yn "$WORK/besseln.in" "$WORK/yn.bin" &&
+      "$WORK/libm_oracle_cm" cbrt "$WORK/cbrt.in" "$WORK/cbrt.bin" &&
+      "$WORK/libm_oracle_cm" hypot "$WORK/hypot.in" "$WORK/hypot.bin" &&
+      "$WORK/libm_oracle_cm" atan2 "$WORK/atan2.in" "$WORK/atan2.bin" &&
+      "$WORK/libm_oracle_cm" sin "$WORK/trig.in" "$WORK/sin.bin" &&
+      "$WORK/libm_oracle_cm" cos "$WORK/trig.in" "$WORK/cos.bin" &&
+      "$WORK/libm_oracle_cm" lgamma "$WORK/gamma.in" "$WORK/lgamma.bin" &&
+      "$WORK/libm_oracle_cm" tgamma "$WORK/gamma.in" "$WORK/tgamma.bin" &&
+      ORACLE_CM=1 &&
+      ORACLE="$ORACLE $WORK/erf.bin $WORK/erfc.bin $WORK/asinh.bin $WORK/acosh.bin $WORK/atanh.bin $WORK/atan.bin $WORK/asin.bin $WORK/acos.bin $WORK/lgamma.bin $WORK/tgamma.bin $WORK/tan.bin $WORK/sin.bin $WORK/cos.bin $WORK/j0.bin $WORK/j1.bin $WORK/y0.bin $WORK/y1.bin $WORK/jn.bin $WORK/yn.bin $WORK/cbrt.bin $WORK/hypot.bin $WORK/atan2.bin"
+  fi
 fi
-[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10 and pow against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+
+# `Math.fma`'s cases carry their exact answers, which python works out
+# with fractions, so they need no C compiler and run wherever python does.
+FMA=""
+if [ -n "$PY" ] && "$PY" "$REPO/bench/std_math_fma.py" "$WORK/fma_doubles.bin" "$WORK/fma_singles.bin"; then
+  export IYI_MATH_FMA_DOUBLES="$WORK/fma_doubles.bin" IYI_MATH_FMA_SINGLES="$WORK/fma_singles.bin"
+  FMA=1
+else
+  echo "fma against the exact sum: not compared here, because there is no python3 to write the cases with"
+fi
+[ -z "$ORACLE" ] && echo "exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh against the oracle: not compared here, because there is no C compiler or no python3 to build and drive the oracle with"
+[ -z "$ORACLE_CM" ] && echo "erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt, hypot and atan2 against the oracle: not compared here, because its CORE-MATH part did not build or run"
 
 echo "== the std/math exercise, plain build"
 build_and_run "plain" math-plain
@@ -209,19 +495,31 @@ fi
 
 echo
 echo "== every math section reported"
-for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "== exp, exp2, expm1, log1p" "== pow" "== atan, atan2, asin, acos" "== the hyperbolic functions and hypot, cbrt" "== gamma, lgamma" "== erf, erfc" "== fma, min, max, gcd" "== the Float32 overloads"; do
+for phrase in "== sqrt" "== sincos" "== frexp and ldexp" "== log, log2, log10" "== exp, exp2, expm1, log1p" "== pow" "== atan, atan2, asin, acos" "== the hyperbolic functions and hypot, cbrt" "== gamma, lgamma" "== erf, erfc" "== fma, min, max, gcd" "== isqrt, pw2ceil, ilogb, logb, scalbn, scalbln" "== the Float32 overloads"; do
   if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
 if [ -n "$ORACLE" ]; then
-  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit"; do
+  for phrase in "== exp against Arm's exp, bit for bit" "== pow against Arm's pow, bit for bit" "== log against Arm's log, bit for bit" "== exp2 against Arm's exp2, bit for bit" "== log2 against Arm's log2, bit for bit" "== log10 against glibc's log10, bit for bit" "== expm1 against glibc's expm1, bit for bit" "== log1p against glibc's log1p, bit for bit" "== sinh against glibc's sinh, bit for bit" "== cosh against glibc's cosh, bit for bit" "== tanh against glibc's tanh, bit for bit"; do
     if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
       echo "  missing section: $phrase"
       status=1
     fi
   done
+fi
+if [ -n "$ORACLE_CM" ]; then
+  for phrase in "== erf against glibc's erf, bit for bit" "== erfc against glibc's erfc, bit for bit" "== asinh against glibc's asinh, bit for bit" "== acosh against glibc's acosh, bit for bit" "== atanh against glibc's atanh, bit for bit" "== atan against CORE-MATH's atan, bit for bit" "== asin against CORE-MATH's asin, bit for bit" "== acos against CORE-MATH's acos, bit for bit" "== lgamma against glibc's lgamma, bit for bit" "== tgamma against glibc's tgamma, bit for bit" "== tan against CORE-MATH's tan, bit for bit" "== sin against CORE-MATH's sin, bit for bit" "== cos against CORE-MATH's cos, bit for bit" "== besselj0 against glibc's besselj0, bit for bit" "== bessely1 against glibc's bessely1, bit for bit" "== jn and yn against glibc's, bit for bit" "== cbrt against CORE-MATH's cbrt, bit for bit" "== hypot against CORE-MATH's hypot, bit for bit" "== atan2 against CORE-MATH's atan2, bit for bit"; do
+    if ! grep -q "$phrase" "$WORK/math-plain.out" 2>/dev/null; then
+      echo "  missing section: $phrase"
+      status=1
+    fi
+  done
+fi
+if [ -n "$FMA" ] && ! grep -q "== fma against the exact sum rounded once, bit for bit" "$WORK/math-plain.out" 2>/dev/null; then
+  echo "  missing section: == fma against the exact sum rounded once, bit for bit"
+  status=1
 fi
 [ "$status" -eq 0 ] && echo "  sections reported"
 
@@ -233,24 +531,60 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/math-release.out" 2>/dev/null; then
   status=1
 fi
 
+# x86_64 fuses with `vfmadd` where the processor has FMA3, which every CI
+# runner's does, so musl's arm would go unrun there; the same exercise
+# once more with the processor's answer taken to be no.
+if [ -n "$FMA" ] && [ -n "$PY" ]; then
+  echo
+  echo "== fma's software arm, the processor's instruction refused"
+  rm -rf "$WORK/software"
+  mkdir -p "$WORK/software/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/software/iyi/"
+  "$PY" - "$REPO/src/iyi/float.iyi" "$WORK/software/iyi/float.iyi" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+old = "      fuses == 1\n"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+open(sys.argv[2], "w").write(src.replace(old, "      false\n"))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  software: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/software${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build --release -o "$WORK/software/program" \
+         "$REPO/bench/std_math_exercise.iyi" > "$WORK/software/build" 2>&1 &&
+       "$WORK/software/program" > "$WORK/software/out" 2>&1 &&
+       grep -q "ALL CHECKS PASSED" "$WORK/software/out"; then
+    grep -A1 "== fma against" "$WORK/software/out" | sed -n '2p'
+  else
+    echo "  software: musl's arm did not answer as the instruction does"
+    tail -3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
+    status=1
+  fi
+fi
+
 echo
 echo "== proving the checks can fail when the module is broken"
-mutate() { # mutate <label> <old> <new>
-  local label="$1" old="$2" new="$3"
+mutate() { # mutate <label> <old> <new> [<old2> <new2>]: math.iyi's, then the prelude's float.iyi's
+  local label="$1" old="$2" new="$3" old2="${4:-}" new2="${5:-}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
   rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
-  OLD="$old" NEW="$new" "$PY" - <<PY
+  mkdir -p "$WORK/patched/std" "$WORK/patched/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/patched/iyi/"
+  OLD="$old" NEW="$new" OLD2="$old2" NEW2="$new2" "$PY" - <<PY
 import os
 from pathlib import Path
-src = Path("$REPO/src/std/math.iyi").read_text()
-old = os.environ["OLD"]
-if old not in src:
-    raise SystemExit("patch site missing: " + old)
-Path("$WORK/patched/std/math.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+for name, o, n in (("std/math.iyi", os.environ["OLD"], os.environ["NEW"]),
+                   ("iyi/float.iyi", os.environ["OLD2"], os.environ["NEW2"])):
+    src = Path("$REPO/src/" + name).read_text()
+    if o:
+        if o not in src:
+            raise SystemExit("patch site missing: " + o)
+        src = src.replace(o, n, 1)
+    Path("$WORK/patched/" + name).write_text(src)
 PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
@@ -262,13 +596,10 @@ PY
     echo "  $label: caught"
   fi
 }
-mutate "no huge-arg guard in sin/cos" 'return {0.0, 1.0} if q_f.abs >= 9223372036854775808.0' '# no huge-arg guard'
 mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value * TWO_54)' 'bits = IyiFloatText.bits_of(value)'
-mutate "the third part of pi/2 as it was" 'P3 = 2.02226624879595063154e-21' 'P3 = 6.12323399573676588613e-17'
-mutate "log10's exponent rounded the other way below one" '    i = k < 0_i64 ? 1_i64 : 0_i64' '    i = 0_i64'
-# The next three change `exp` by a unit or two in the last place, which the
-# relative checks above cannot see and the oracle can; without the oracle
-# they are not proven here.
+# The proofs below change a function by a unit or two in the last place,
+# which the relative checks above cannot see and the oracle can; without
+# the oracle, or its CORE-MATH part, they are not proven here.
 if [ -n "$ORACLE" ]; then
   mutate "exp's polynomial a term short" 'r2 * r2 * (EXP_C4 + r * EXP_C5)' 'r2 * r2 * EXP_C4'
   mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
@@ -288,18 +619,89 @@ if [ -n "$ORACLE" ]; then
   mutate "log2 near one with r in one part" '      hi = rhi * LOG2_INVLN2HI
       lo = rlo * LOG2_INVLN2HI + r * LOG2_INVLN2LO' '      hi = r * LOG2_INVLN2HI
       lo = r * LOG2_INVLN2LO'
+  mutate "sinh's middle branch from 1 rather than 2^-28" '      return h * (2.0 * t - t * t / (t + 1.0)) if ix < 0x3ff00000_i64' '      return h * (2.0 * t - t * t / (t + 1.0)) if ix < 0x3e300000_i64'
+  mutate "cosh by exp below 0.5 ln 2" '      if ix < 0x3fd62e43_i64' '      if ix < 0x3c800000_i64'
+  mutate "tanh by one expm1 below 1" '      if ix >= 0x3ff00000_i64' '      if ix >= 0x3c800000_i64'
   mutate "log2's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc
     rhi' ') * invc
     rhi'
+  # Edges the relative checks let through and the oracle does not.
+  mutate "log10's exponent rounded the other way below one" '    i = k < 0_i64 ? 1_i64 : 0_i64' '    i = 0_i64'
+  mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
+  mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
 else
-  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10 and pow: not run, no oracle here"
+  echo "  the last-bit proofs of exp, exp2, expm1, log, log1p, log2, log10, pow, sinh, cosh and tanh: not run, no oracle here"
+fi
+if [ -n "$ORACLE_CM" ]; then
+  # erf and erfc fall back to an exact path when the fast one cannot
+  # prove its rounding, so what is broken here is shared by both.
+  mutate "erf's fast two-sum without its low part" '    {hi, b - e}' '    {hi, 0.0}'
+  mutate "erfc past 2.88 without 1/x's low part" '    yl = yh * fma(x * -1.0, yh, 1.0)' '    yl = 0.0'
+  mutate "erfc of a negative with 1 + erf rounded" '      h, t = erf_fast_two_sum(1.0, h)' '      h, t = {1.0 + h, 0.0}'
+  mutate "asinh's fast two-sum without its low part" '    {s, y - z}' '    {s, 0.0}'
+  mutate "acosh near 1 without the square root's correction" '      sl = Math.fma(sh, sh, zt * -1.0) * (sh * iz)' '      sl = 0.0'
+  mutate "atanh's 1 - |x| rounded" '    qh, ql = asinh_fast_two_sub(1.0, ax)' '    qh, ql = {1.0 - ax, 0.0}'
+  mutate "atan's, asin's and acos's fast two-sum without its low part" '    {s, y - z}
+  end
+
+  private def self.invtrig_fastsum' '    {s, 0.0}
+  end
+
+  private def self.invtrig_fastsum'
+  mutate "lgamma's and tgamma's fast two-sum without its low part" '    {s, y - z}
+  end
+
+  private def self.gamma_twosum' '    {s, 0.0}
+  end
+
+  private def self.gamma_twosum'
+  mutate "sin's, cos's and tan's 128-bit product without its middle carry" '    hi = (xh &* yh) &+ lh.unsafe_shr(32_u64) &+ hl.unsafe_shr(32_u64) &+ mid.unsafe_shr(32_u64)' '    hi = (xh &* yh) &+ lh.unsafe_shr(32_u64) &+ hl.unsafe_shr(32_u64)'
+  mutate "tan below 2 pi reduced without 1/(2 pi)'s low part" '      l = fma(-9.839338337591243e-18, x, l)
+    else
+      tt = TAN_T.to_unsafe' '      l = l
+    else
+      tt = TAN_T.to_unsafe'
+  mutate "cos below 2 pi reduced without 1/(2 pi)'s low part" '      l = fma(-9.839338337591243e-18, x, l)
+      err1 = 4.554824318475813e-32 * h' '      l = l
+      err1 = 4.554824318475813e-32 * h'
+  mutate "sin below 2^31 reduced without pi/2^14's low part" '    rl = k * -7.474650873702107e-21' '    rl = 0.0'
+  mutate "j0 below 2 with its numerator a term short" '    r2 = r[3] + z * r[4]' '    r2 = r[3]'
+  mutate "yn's recurrence adding where it subtracts" '        b = ((i &+ i).to_f64 / x) * b - a' '        b = ((i &+ i).to_f64 / x) * b + a'
+  mutate "cbrt's residual without its cube's low part" '    y3l = fma(y, y2, y3 * -1.0) + y * y2l' '    y3l = 0.0'
+  mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
+  mutate "atan2's quotient without the divisor's low part" '    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))' '    zl = rdh * (fma(dh, zh * -1.0, nh) + nl)'
+  mutate "atan2's slow product without its middle carries" '    cm = cm &+ sh' '    cm = cm &+ 0_u64'
+else
+  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt, hypot and atan2: not run, the oracle's CORE-MATH part is not here"
+fi
+# musl's arm, with the processor's answer refused as above: an fma that
+# rounds twice, a product left where z's alignment put it, and a single's
+# sum not sent to its odd neighbour - the double rounding the halfway
+# cases exist for.
+if [ -n "$FMA" ]; then
+  mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
+  mutate "the software fma's fast path without its round to odd" '      if err != 0.0
+        bits = IyiFloatText.bits_of(v)' '      if false
+        bits = IyiFloatText.bits_of(v)' '      fuses == 1' '      false'
+  mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
+  mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false'
+  # And the instruction with its operands in the wrong order, b * c + a,
+  # where the instruction is what runs.
+  if [ "$(uname -s) $(uname -m)" = "Linux x86_64" ] && grep -qw fma /proc/cpuinfo; then
+    mutate "vfmadd with its operands in the wrong order" '' '' 'vfmadd213sd $3, $2, $0' 'vfmadd231sd $3, $2, $0'
+  else
+    echo "  vfmadd with its operands in the wrong order: not proven here, because this is not an x86_64 Linux with FMA3"
+  fi
+else
+  echo "  the fma proofs: not run, no python3 to write the cases with"
 fi
 mutate "exp's overflow scale a power off" 'return 5.486124068793689e+303 * (scale + scale * tmp)' 'return 2.7430620343968443e+303 * (scale + scale * tmp)'
-mutate "pow's odd power of a negative base positive" 'sign_bias = 0x40000_u64 if yint == 1' 'sign_bias = 0_u64 if yint == 1'
-mutate "exp2's overflow scale halved" '        return 2.0 * (scale + scale * tmp)' '        return scale + scale * tmp'
-mutate "atan2 blind to the sign of zero" 'return x_neg ? copysign(PI, y) : y' 'return y'
-mutate "erfc as 1 - erf everywhere" 'return 1.0 - erf(value) if value < 1.0' 'return 1.0 - erf(value)'
-mutate "gamma with a pole answered" 'return 0.0 / 0.0 if value <= 0.0 && value == value.floor' '# poles answered'
+mutate "atan2 blind to the sign of zero" '        return y if ix == 0_u64' '        return y'
+mutate "isqrt without halving its root" '        res = (res >> 1) + bit' '        res = res + bit'
+mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)[1]'
+mutate "erf of a single answered as a double" '  def self.erf(value : Float32) : Float32
+    erf(value.to_f64).to_f32' '  def self.erf(value : Float32) : Float64
+    erf(value.to_f64)'
 mutate "gcd on the positive side" 'x = a > 0 ? -a : a' 'x = a.abs'
 
 echo

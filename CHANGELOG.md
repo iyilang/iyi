@@ -2,6 +2,144 @@
 
 ## Unreleased
 
+### Added
+
+- **`Math.bessely0`, `bessely1`, `besselj` and `bessely`, and `besselj0`
+  and `besselj1` as glibc computes them.** The four were the rest of the
+  ten names Crystal's `Math` has and iyi's did not; the two iyi had were a
+  series and an asymptotic form, and differed from glibc 2.43 for 157,547
+  and 156,810 of 200,000 arguments. All six are fdlibm's `e_j0.c`,
+  `e_j1.c` and `e_jn.c` now, as glibc carries them, with what its
+  wrappers answer - NaN below zero and -inf at it for the second kind, an
+  infinity of the order's parity for `bessely(n, 0)` - and single and
+  generic overloads as Crystal has. Past 2 they take sin and cos, which
+  are CORE-MATH's in iyi and IBM's in glibc, so they differ from glibc's
+  where glibc's sin or cos is not correctly rounded: 204 and 195 of the
+  same 200,000. The oracle carries the three files on CORE-MATH's sin and
+  cos, and the math gate requires 127,000 arguments of each of the four
+  and 62,000 order-argument pairs of `besselj` and `bessely` to the last
+  bit, and proves the check fails with j0's numerator a term short and
+  yn's recurrence adding where it subtracts.
+
+- **`Math.isqrt`, `pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln`.** Six
+  of the ten names Crystal's `Math` has and iyi's did not. `isqrt` and
+  `pw2ceil` answer in the argument's own integer type, the root by the
+  other library's bit-at-a-time method; a negative `isqrt` and a power of
+  two the type cannot hold panic, where that library raises. `ilogb` and
+  `logb` answer as C does at the edges - the least `Int32` for zero and
+  NaN, the greatest for an infinity, -inf from `logb(0)`, a subnormal's
+  own exponent - and `scalbn` is `ldexp`, `scalbln` its Int64 form. The
+  math exercise checks each at its edges and proves the checks fail with
+  the root not halved and the exponent one too high.
+
+### Changed
+
+- **`Math.atan2` is correctly rounded.** It was `atan(y / x)` corrected
+  by pi, which rounds twice: against CORE-MATH's correctly rounded atan2
+  it was wrong for 211,999 of 1,748,883 pairs, and against glibc 2.43's
+  (IBM's) for 211,906. It is CORE-MATH's now (MIT, revision
+  b1a4badf6765), its 192-bit slow path in 64-bit words over the shared
+  multiply, the exception flags it sets and clears dropped - none feeds
+  an answer - and differs from none of those pairs; glibc's differs from
+  it for 12,077, each an ulp. A typical call costs 32 ns where it cost
+  28; the rare pair that needs the slow path costs microseconds. The
+  oracle carries `atan2.c` and `tint.h`, and the math gate requires
+  209,000 pairs - every quadrant, quotients from 2^-1100 to 2^1100, the
+  table's 64ths, subnormals, the specials crossed - to the last bit and
+  proves the check fails with the quotient losing its divisor's low
+  part and the slow product its middle carries.
+
+- **`Math.hypot` and `cbrt` are correctly rounded.** Against the true
+  value rounded to the nearest double they were wrong for 5,323 and 6,413
+  of 20,000 arguments; they are CORE-MATH's (MIT, revision b1a4badf6765)
+  now, the one 128-bit product in hypot taken by the shared 64-bit
+  multiply, and wrong for none. glibc 2.43's hypot is right on the same
+  20,000, so iyi's now answers as Crystal's does - but for pairs of
+  subnormals, where glibc's is not correctly rounded; its cbrt is wrong
+  for 10,817 of them, and there the two differ. The oracle carries the two
+  files and the math gate requires 145,000 cbrt arguments and 120,000
+  hypot pairs to the last bit and proves the check fails with cbrt's
+  residual losing its cube's low part and hypot's square losing its own.
+
+- **`Math.fma` without FMA hardware is three to four times as fast.**
+  musl's arm took 10 ns a call on x86_64 without FMA3 (and on wasm32,
+  which has no such instruction); the correctly rounded functions make a
+  dozen calls apiece there, and cos took 300 ns against glibc's 7. The
+  common case is Boldo and Melquiond's proved emulation now - the product
+  exact by Dekker's split, z added exactly, the low parts' sum rounded to
+  odd, one rounding to nearest - taken while every exponent is well
+  inside the range and the result is not tiny or zero, with musl's for
+  the rest: 3 ns a call, faster than glibc's software fma at 6; sin 18 ns,
+  cos 110 and tan 140 over [-10, 10], from 50, 300 and 280. The fma cases
+  gain 20,000 where rounding the low parts to nearest instead of to odd
+  rounds twice, and the math gate proves the check fails without that
+  step. On processors with FMA nothing changes: the instruction answers.
+
+- **`Math.lgamma`, `tgamma` and `gamma` are correctly rounded, and
+  glibc's.** They were Lanczos and Stirling sums, and answered
+  differently from glibc 2.43 for 60,071 and 90,098 of 100,000 arguments.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables; what glibc's `lgamma` and `tgamma` symbols add around them is
+  kept too, so **`gamma(+-0.0)` is an infinity of zero's sign**, where it
+  was NaN, and a negative integer or -inf is NaN. On a machine without
+  FMA they cost 283 and 204 ns against glibc's 149 and 109, and 28 and
+  25 before. The oracle carries glibc's two files behind its wrappers'
+  answers and the math gate requires 201,000 arguments of each to the
+  last bit - the whole range, every integer and half-integer from -200 to
+  200 and each side of them, lgamma's zeros at 1 and 2 - and proves the
+  check fails with their shared two-sum losing its low part.
+
+- **`Math.atan`, `asin` and `acos` are correctly rounded.** Against the
+  true value rounded to the nearest double they were wrong for 1,913,
+  5,338 and 6,821 of 15,000 arguments each; they are CORE-MATH's (MIT,
+  revision b1a4badf6765) now, with their tables, and wrong for none.
+  glibc 2.43's are IBM's, wrong for 1, 11 and 5 of the same 15,000, so a
+  program printing them agrees with Crystal's everywhere but there -
+  where it disagreed for 18% to 29% of arguments before. `atan2`, built
+  on `atan`, follows. The oracle carries CORE-MATH's three files and the
+  math gate requires 180,000 arguments of each to the last bit - the
+  whole range, the small-argument band, both ends of [-1, 1] - and
+  proves the check fails with their shared two-sum losing its low part.
+
+- **`Math.asinh`, `acosh` and `atanh` are correctly rounded, and
+  glibc's.** They were series near zero and `log1p` forms elsewhere, and
+  answered differently from glibc 2.43 for 43,123, 25,295 and 1,765 of
+  250,000 arguments. They are CORE-MATH's (MIT), which glibc 2.43 carries,
+  with their tables and the double-double helpers they share; the answer
+  out of the domain is glibc's own, NaN for `acosh(x < 1)` and
+  `atanh(|x| > 1)` and an infinity at `atanh(+-1)`. On a machine without
+  FMA they cost what the old ones did, twice glibc's. The oracle carries
+  glibc's five files and the math gate requires 205,000 arguments of each
+  to the last bit - the whole range, 1 from above for acosh and from
+  below for atanh, the subnormals - and proves the check fails with the
+  shared two-sum losing its low part, acosh near 1 without its square
+  root's correction, and atanh's 1 - |x| rounded.
+
+- **`Math.erf` and `erfc` are correctly rounded, and glibc's.** They were
+  a series and a continued fraction to about 1e-15, and `erf` of a
+  subnormal panicked "arithmetic overflow" - its series never stopped.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables: every answer is the double nearest the true value, so the same
+  as glibc's for every argument, FMA or not. On this change's machine,
+  which has no FMA and takes `Math.fma`'s software arm, erf costs 97 ns
+  and erfc 348 against glibc's 60 and 173. `bench/libm_oracle/core_math`
+  carries glibc's five files and the math gate requires 212,000
+  arguments of each to the last bit - 2^-70 to 32, the subnormals,
+  erfc's subnormal results and its negatives - and proves the check
+  fails with the fast path's two-sum losing its low part, erfc's 1/x
+  losing its, and 1 + erf rounded for a negative erfc.
+
+- **`Math.sinh`, `cosh` and `tanh` are glibc's.** They were a series near
+  zero, `exp(x - ln 2)` past 709 and the textbook forms between, and
+  answered differently from glibc 2.43 in the last bit for 952 arguments
+  of sinh in 100,000, 217 of cosh and 4,863 of tanh. They are fdlibm's
+  `e_sinh.c`, `e_cosh.c` and `s_tanh.c` now, glibc 2.43's, branch for
+  branch at its thresholds, on the `exp` and `expm1` that are glibc's to
+  the last bit already. `bench/libm_oracle` carries the three files and
+  `bench/std_math_exercise.sh` requires 264,000 arguments of each to the
+  last bit - both sides of every threshold, both signs, the specials - and
+  proves the check fails with each function's small-argument branch moved.
+
 ### Fixed
 
 - **`iyi mod context` resolves an import from the root the entry's header
@@ -12,7 +150,6 @@
   exit 0, about the module the same file builds against - in the verb
   AI_FIRST.md offers a model for grounding. `bench/mod_context.sh` grounds
   such an entry; the old binary answered "does not resolve".
-
 - **`File.readlink` of a link to a volume's GUID path or a share answers a
   path Windows can open.** The NT prefix `\??\` came off whatever
   followed it, so a junction to `\\?\Volume{...}\x` read back as the
@@ -22,14 +159,12 @@
   `\\server\share`, and anything else keeps it as `\\?\`.
   `bench/std_file_exercise.sh` reads back a junction to a volume's GUID
   path; the old module dropped the prefix.
-
 - **`Dir.children("")` is refused on Windows, as POSIX refuses it.** An
   empty path became a pattern for the current drive's root, so
   `Dir.children("")` listed `C:\` while `Dir.exists?("")` said false. It
   panics "Cannot open directory" now, as `opendir("")` fails elsewhere.
   `bench/std_dir_exercise.iyi` asks for it in a task; the old module
   listed the root.
-
 - **On Windows a link to nothing does not exist.** `File.exists?` and
   `Dir.exists?` read a path's own attributes, which a link has whether or
   not what it names is there: a junction whose directory was gone
@@ -39,7 +174,6 @@
   execution alias, which does not open through, still exists.
   `bench/std_file_exercise.sh` asks both of a dangling junction; the old
   prelude said true.
-
 - **`iyi check --affected` says why each consumer broke.** Each broken
   consumer was printed with the first line of its error's deepest
   message, which is empty for a trace: `main.iyi: ` and nothing, where
@@ -48,7 +182,6 @@
   `bench/agent_loop.py` checks a consumer whose break is in the changed
   module's own body; an intermediate fix printed its `instantiating`
   frame and failed the step.
-
 - **`iyi doc` of a module that does not compile leaves no scratch
   directory.** It compiles in a temporary directory it removes in an
   `ensure`, and its refusal exits, which runs no `ensure`: every such doc
@@ -56,7 +189,6 @@
   found from one day's gate runs). The directory is removed before the
   refusal. `bench/mod_context.sh` runs the refusal with a temporary
   directory of its own and looks in it afterwards.
-
 - **A build in a directory near MAX_PATH writes its program there.**
   Whether the output directory takes a file is asked by writing
   `.iyi-write-probe-<pid>` into it, a name longer than `m.exe`, and every
@@ -66,7 +198,6 @@
   linker answers for the file itself. `bench/verbs_exercise.sh` builds in
   a 245-character directory, where the probe does not fit whatever the
   process id.
-
 - **A cancelled `Process.run` on Windows ends what its child started
   too.** Only the child was ended; a program it had started - a shell's
   command, a server's worker - went on running, where `std/process`
@@ -76,7 +207,6 @@
   a file 1.5 seconds later; with the old module the file was written.
   [INFERENCE] Linux and darwin end the child's process alone as well,
   unmeasured.
-
 - **`iyi test --timeout` on Windows ends a test and whatever it started.**
   A test's output comes through a pipe, and the wait for the test waits
   for that pipe's end, which a program the test started holds open; only
@@ -87,7 +217,6 @@
   `bench/test_verb.sh` times a test that starts `ping -n 25` against a
   three-second deadline; the old binary took 27 seconds. [INFERENCE]
   Linux and darwin have the same gap, unmeasured.
-
 - **Building over a program that is running, on Windows, moves it aside
   and writes the new one.** Windows will not write over a running program
   or a read-only file, and the linker said so only after the whole
@@ -100,7 +229,6 @@
   says so. `bench/verbs_exercise.sh` rebuilds a program while it runs and
   runs the new one; the old binary failed with LNK1104 (measured by the
   hunt that found it).
-
 - **`Process.run(env:)` on Windows matches a variable's name in another
   case in any script.** Windows holds `ÇAY` and `çay` as one variable; the
   names were compared with `upcase`, which folds ASCII alone, so
@@ -109,7 +237,6 @@
   are compared as Windows compares them (`CompareStringOrdinal`, case
   ignored). `bench/std_process_exercise.iyi` replaces and removes a
   variable by its name in the other case.
-
 - **`Process.run` of a name whose only match on `PATH` is a `.cmd` or
   `.bat` says it is a batch file.** npm, yarn and code are `.cmd` shims,
   and the search looked for `NAME.exe` and `NAME.com` alone: the answer
@@ -118,7 +245,6 @@
   as a batch file named in full already was; a program of the name
   anywhere on `PATH` still wins. `bench/std_process_exercise.iyi` runs a
   `.cmd` by its bare name; the old module said "no such program".
-
 - **A junction is a link to the compiler's own file layer on Windows, and
   a `**` walk does not go through one.** Only a symbolic link's reparse
   tag counted as a link, so a junction was a directory: a junction back to
@@ -130,7 +256,6 @@
   target - as it already was to iyi's own `std/file`.
   `bench/verbs_exercise.sh` puts a junction to its own directory inside
   one of the directories it walks.
-
 - **A directory given to `iyi test`, `iyi fmt` and the other walking
   verbs is a name, and a share's root is where a pattern on it starts.**
   The directory went into a glob pattern as it was, so `proj [v2]` and
@@ -144,7 +269,6 @@
   `x{a,b}` and the first through `\\127.0.0.1\C$`, and expects the one
   messy file and the one failing test in each; the old binary found
   neither.
-
 - **On Windows a signal no `Signal.wait` names keeps its default.** The
   console handler answered every event whatever was waited for: a
   program waiting for `TERM` alone swallowed Ctrl-C and Ctrl-Break, and
@@ -154,7 +278,6 @@
   `bench/std_signal_exercise.sh` sends a Ctrl-Break into the console of a
   program waiting for `TERM`; the old module kept it running ten seconds
   after.
-
 - **A package's `iyi.sum` hash is the same on every platform.** The hash
   covers each file's relative path and bytes; on Windows the path of a
   file in a directory went in with `\`, and the bytes were the checkout's,
@@ -164,7 +287,6 @@
   clone keeps the committed bytes (`core.autocrlf=false` in its own
   config). `bench/packages_get.sh` recomputes a package's sum from the
   tag itself under a git configured for CRLF and compares.
-
 - **Builds starting at once no longer race to make the cache's
   directories.** `Dir.mkdir_p` looked and then made, and a directory
   another build made between the two failed the loser: with eight builds
@@ -173,7 +295,6 @@
   exists". A directory made meanwhile is made. Measured with forty-eight
   builds, eight at a time: none failed. [INFERENCE] No gate holds this;
   the race is not reproducible on demand.
-
 - **An imported module's file is named the way the platform spells it.**
   The module path's `/` went into the resolved file name as it was, so on
   Windows every diagnostic, `check -f json` and `fix --json` named
@@ -181,14 +302,12 @@
   to `C:\proj\app\deep\util.iyi`. `bench/agent_loop.py` checks an error in
   an imported module's file; its two steps that expected the mixed
   spelling of `calc/typo.iyi` expect the platform's now.
-
 - **`iyi fmt` of a file it may not write says so.** A read-only file -
   common on Windows, a locked checkout or an extracted archive - was
   reported as "there's a bug formatting", with a request to file one; it
   is "cannot write '...': Access is denied." and exit 1 now.
   `bench/verbs_exercise.sh` formats a read-only file; the old binary gave
   the bug report.
-
 - **`File.real_path` of a drive's root is `C:\`, an app execution alias
   is executable and has a real path, and `File.tempfile`'s block may
   rename its file.** The `\\?\` prefix came off `GetFinalPathNameByHandleW`'s
@@ -202,7 +321,6 @@
   place - what a temporary name is for - panicked "cannot delete".
   `bench/std_file_exercise.iyi` and `.sh` check each; the old module
   panicked at the tempfile.
-
 - **`Process.run` on Windows refuses text a command line cannot carry,
   searches a quoted `PATH` entry with a non-ASCII name, and names the
   command-line limit.** An argument that was not UTF-8 converted to a
@@ -217,7 +335,6 @@
   past 32,767 characters was "error 206"; it says so.
   `bench/std_process_exercise.iyi` checks the first three; the old module
   died of the memory fault.
-
 - **`Program.args` on Windows splits two more command lines as the C
   runtime does.** A line that starts with a space has an empty program
   name, and the first word after it is an argument; the name was read
@@ -228,14 +345,12 @@
   backslash is special - as the C runtime and `CommandLineToArgvW` read
   it. `bench/windows_exercise.sh` hands both lines over raw; the old
   prelude gave `[second]` and `a\b`.
-
 - **A child `Process.run` starts in another directory does not inherit a
   `PWD` naming this one.** `Path#expand` reads `PWD` first where it is
   kept, and a child given `chdir:` expanded its relative paths in the
   parent's directory. `PWD` is removed for such a child, unless `env:`
   gives one. `bench/std_process_exercise.iyi` asks a child started
   elsewhere for its `PWD`; the old module handed it the parent's.
-
 - **On Windows a relative path expands in the program's own directory,
   and a Windows path's anchor is a Windows anchor.** `Path#expand` and
   `File.expand_path` read `PWD` first. Only Git Bash sets it on Windows,
@@ -253,25 +368,12 @@
   it is absolute. A drive-relative name had its byte count taken in
   characters, so `C:ğ.txt` expanded to `...\ğ.tx`.
   `bench/std_path_exercise.iyi` checks each; the old module fails.
-
-- **`%e` and `%g` find the exponent of a value just under a power of
-  ten.** `%.15e` of `1e23`, which is 99999999999999991611392, printed
-  1.000000000000000e+23, and `%.16e` of `1e-7` and `1e-75`, and `%.16g` of
-  `1e23`, went the same way: the exponent was guessed from the shortest
-  spelling, one place up, and held only to the digits asked for, which
-  rounded up to the next power too. It is held to 21 exact digits now,
-  and a rounding that carries into a new digit (`%.0e` of 9.5 is 1e+01)
-  moves it after. The answers are C's and Python's:
-  9.999999999999999e+22, 9.9999999999999995e-08. `bench/format_exercise.iyi`
-  prints nine such values; the old module failed the first line.
-
 - **`URI.encode(space_to_plus: true)` encodes a `+` as `%2B`.** It kept
   the reserved `+` and wrote a space as `+`, so "1+1=2" and "1 1=2" both
   came out "1+1=2" and `decode(plus_to_space: true)` gave the second for
   the first - where `std/uri`'s header promises every encoder is
   injective and `decode` undoes it. `bench/std_uri_exercise.iyi`
   round-trips three strings; the old module failed the first.
-
 - **`UUID.parse` refuses a hyphen out of its place, and reads Crystal's
   other spellings.** Every hyphen was dropped wherever it stood, so
   `6ba7b8109dad11d180b4-00c04fd430c8----`, 37 characters, read as a UUID,
@@ -281,7 +383,6 @@
   are read too. `bench/std_uuid_exercise.sh` refuses four misplaced
   spellings and `bench/std_uuid_exercise.iyi` reads the three others; the
   old module read three of the four.
-
 - **YAML's keep chomping (`|+`, `>+`) keeps the line breaks the text has
   and no more.** A block scalar that ended the stream read one line break
   too many: `a: |+\n  x\n` gave `"x\n\n"` for `"x\n"`, with LF or CRLF,
@@ -289,12 +390,10 @@
   counted as a blank line. It is not a line. `bench/std_yaml_exercise.iyi`
   reads six block scalars at a stream's end, kept, clipped and stripped;
   the old module failed the first.
-
 - **`std/yaml`'s header says `0777` is 777.** It listed `0777` among the
   plain scalars read as strings; the reader follows the 1.2 core schema,
   whose integer is `[-+]?[0-9]+`, and reads the decimal 777, as it
   should. `bench/std_yaml_exercise.iyi` asserts what the header says.
-
 - **YAML says what a short `\x`, `\u` or `\U` escape wants.** A Windows
   path in double quotes, `path: "C:\Users\bob"`, was refused with
   "unknown escape '\U'" - and `\U` is a known escape, the eight-digit
@@ -303,7 +402,6 @@
   digits: a backslash in double quotes is '\\', or single-quote the
   scalar". `bench/std_yaml_exercise.iyi` refuses the path with that
   sentence; the old module gave the other.
-
 - **`YAML.dump` quotes a string that starts with `?` or a byte order
   mark.** `?x` was written bare, and `YAML.parse` refuses a plain scalar
   that starts with `?` ("a scalar cannot start with '?'"), so the dump of
@@ -313,7 +411,6 @@
   51 strings through `dump` and `parse`, as a value and as a key, found
   these three failures and none after. `bench/std_yaml_exercise.iyi`
   round-trips both; the old module refuses the first.
-
 - **A `file://C:/x` URI names a drive again, not a share.** The reading
   of `file://server/share/x` as a UNC path (above) also took
   `file://C:/x` - a spelling some clients send for `file:///C:/x` - for
@@ -322,7 +419,6 @@
   a crashed compile's waiter should be told the compile died. A drive
   letter and a colon are a drive now. `bench/lsp_memory.py` failed in CI
   on the change before and holds with this one.
-
 - **`Float64#**` of a negative exponent and `round(digits)` answer at the
   edges of a double's range, and a zero keeps its sign through `round`
   and `trunc`.** `2.0 ** -1074` was 0.0, one over the infinite `2.0 **
@@ -336,7 +432,6 @@
   `-0.0`, as the instruction and Crystal answer. `bench/std_float_exercise.iyi`
   checks each; the old modules fail the first. `bench/number_exercise.sh`'s
   proof that `round` is symmetric patches the new line.
-
 - **`Log` writes nothing at `Severity::None`.** None is the level that
   silences a logger, and an entry logged at None passed every level
   check, that one included: a logger set to None wrote it. None is a
@@ -345,7 +440,6 @@
   Crystal's does, and the header says so. `bench/std_log_exercise.iyi`
   logs at None to a logger set to None and to one set to Trace; the old
   module wrote both.
-
 - **The language server walks every folder of a multi-root workspace.**
   It took the first of `workspaceFolders` and walked that alone, so a
   rename in the second folder left its importers calling the old name,
@@ -354,7 +448,6 @@
   once. Step 18m of `bench/lsp_session.py` renames a def in the second of
   two folders and asks workspace/symbol for a def there; the old server
   renamed one file and found nothing.
-
 - **A name brought in by an import, called with arguments none of its
   defs takes, is reported as that mismatch.** `import greet::{shout}`
   then `shout(42)` said "undefined method 'shout' for App:Module" and
@@ -364,7 +457,6 @@
   argument #1 to 'Greet.shout' to be String, not Int32", with the
   overloads. `spec/compiler/iyi_import_spec.cr` has the case; without the
   change it fails.
-
 - **Rename takes the names the compiler takes.** The language server
   refused every non-ASCII name - "'şarkı' is not an iyi variable name" -
   where `def söyle(şarkı : String)` compiles and runs; its checks were
@@ -372,7 +464,6 @@
   is still refused when the lexer would read it as a constant (`Şarkı`).
   Step 25d of `bench/lsp_session.py` renames a local to `şarkı`, a def to
   `söyle`, and back; the old server refused the first.
-
 - **The language server runs a buffer that has no file behind it.** VS
   Code's `untitled:` buffer was run from a scratch file beside the
   server's working directory, named after the URI, `:` included; NTFS
@@ -385,7 +476,6 @@
   retires a worker that has grown between any two requests, and a fresh
   worker's full answer is the protocol's fallback, which the step had
   read as a failure once the session did more work before it.
-
 - **Call hierarchy lists the calls written, not one the compiler made.**
   Incoming calls to any def listed the def's own file as a caller, at
   the def's own line, beside the real callers: a call the compiler makes
@@ -393,7 +483,6 @@
   sitting where its target is written is left out. Step 28b of
   `bench/lsp_session.py` asks `render`'s callers; the old server answered
   lines 15 and 19, `render`'s own line and its one call.
-
 - **`URI#to_s` writes a relative path whose first segment holds a colon
   behind `./`.** A Windows path is one: `URI.parse("./C:/Users/x").normalize`
   wrote `C:/Users/x`, which parses back with the scheme `C` and the path
@@ -401,7 +490,6 @@
   `./C:/Users/x`, and `to_s` writes that now; a colon past the first
   segment, or a path behind a scheme, needs nothing. `bench/std_uri_exercise.iyi`
   round-trips the drive path; the old module wrote it bare.
-
 - **`CSV.parse` ends a row at a lone CR, and keeps a row of one empty
   field.** An unquoted CR not followed by LF was dropped, so `a\rb,c`
   read as `[["ab", "c"]]` where Crystal's reads `[["a"], ["b", "c"]]`; it
@@ -410,7 +498,6 @@
   back as `[["a"]]`; the parser keeps it and `build` writes it as `""`.
   `bench/std_csv_exercise.iyi` parses both and round-trips three tables
   through `build`; the old module fails at the lone CR.
-
 - **`Time.utc` on Windows reads the precise clock.** It read
   `GetSystemTimeAsFileTime`, which moves once per timer tick: the smallest
   step measured was 0.5 ms, and 0.7 ms to 15.6 ms in a loop, so two
@@ -418,7 +505,6 @@
   between them zero. It reads `GetSystemTimePreciseAsFileTime`, as
   Crystal does, and steps by 100 ns. `bench/std_time_exercise.iyi` asserts
   a step under 100 us; the old module stepped by 507,800 ns.
-
 - **`sprintf` formats the whole integer tower and `Float32`, and `%c` any
   code point.** `%d` of an `Int8`, `Int16`, `UInt16`, `UInt32`, `Int128`,
   `UInt128` or `Float32` - the types `std/int` and `std/float` make
@@ -430,7 +516,6 @@
   `%c` of a string took its first byte, half of an `é`, and takes its
   first character. `bench/format_exercise.iyi` formats each; the old
   module panics at the first.
-
 - **A 128-bit integer converts to a float on Windows.** `x.to_f64` or
   `x.to_f32` of an `Int128` or `UInt128` whose value LLVM could not see
   failed to link: the conversion is a call to compiler-rt's
@@ -442,7 +527,6 @@
   it in the low word, the word boundary, the most negative value - and a
   few random values against Python's exact answers; with the old prelude
   it does not link.
-
 - **`INI.parse` and `CSV.parse` read past a byte order mark.** Windows
   PowerShell 5.1's `Set-Content -Encoding UTF8`, older Notepad and
   Excel's "CSV UTF-8" put one at the front of a file. `INI.parse`
@@ -452,14 +536,12 @@
   `xml` already skipped it. `bench/std_ini_exercise.iyi` and
   `bench/std_csv_exercise.iyi` parse a marked file; the old modules fail
   both.
-
 - **`String#lines` ends a line at `\r\n` too.** It split at `\n` alone, so
   a Windows text's lines kept their `\r`: `File.read(path).lines` of a
   file of numbers panicked at the first `to_i` ("not a number: "1\r"")
   where `File.read_lines` of the same file read 1, and Crystal's `lines`
   gives `["1", ...]`. A `\r` inside a line stays. `bench/io_exercise.iyi`
   reads a CRLF text's lines and sums two; the old prelude kept the `\r`.
-
 - **`OptionParser` reads grouped short flags, `--name=VALUE` flags and
   non-ASCII short flags.** Only the first flag of a group was read and
   the rest dropped in silence: `-vo out.txt` set `-v` and left `out.txt`
@@ -473,7 +555,6 @@
   `--` ends the flags and could never reach it.
   `bench/std_option_parser_exercise.iyi` checks each; the old module
   fails the first.
-
 - **A JSON or YAML document the parser reads is one a task can use.**
   JSON read 512 levels of nesting, Crystal's limit, whose fibers have
   megabytes of stack; a task here has 256 KB, and a task parsing 480
@@ -485,7 +566,6 @@
   print and hash the deepest document read. `bench/std_json_exercise.iyi`
   and `bench/std_yaml_exercise.iyi` do each at the limit in a task and
   refuse one level past it; the old modules accept the deeper document.
-
 - **The language server formats a CRLF buffer in CRLF, and keeps its
   `\r` through an edit.** Formatting answered a CRLF buffer with a
   whole-document edit to LF - one on every save in an editor that formats
@@ -497,7 +577,6 @@
   matching the editor's. Step 25c of `bench/lsp_session.py` formats a
   formatted and a sloppy CRLF buffer and edits past a line's end; the old
   server failed each.
-
 - **The language server names files by URIs an editor can use.** A URI
   in an answer was the path behind `file:///` as it stood: `#` in a
   directory's name made the rest of the path a fragment, `%41` decoded to
@@ -515,7 +594,6 @@
   directory named `odd #1 50%41 ğ`, and on Windows through
   `\\127.0.0.1\C$`; the old server answered unencoded URIs and "can't find
   module".
-
 - **The language server's workspace is what is under its root, wherever
   the root is.** Each workspace walk skipped a file whose absolute path
   held `/.` or `/lib/` - meant for `.git` and a dependency's `lib` inside
@@ -530,7 +608,6 @@
   `bench/lsp_session.py` renames in a project under `.outer` and under
   `lib`, with a looping and a denied junction on Windows; the old server
   edited the def alone.
-
 - **On Windows, a file the system holds exists.** The paging file, and
   any file held so that even its attributes are refused
   (ERROR_SHARING_VIOLATION), answered `File.exists?` false and
@@ -538,7 +615,6 @@
   lists. Both read the file's directory entry now when the attribute call
   is refused that way. `bench/std_file_exercise.sh` asks the paging file
   where there is one; the old modules answered false and panicked.
-
 - **On Windows, `iyi run` passes on a program's negative exit status.**
   A program's `exit(-1)` ends it with 0xFFFFFFFF, which Crystal's
   `Process::Status` reads as an NTSTATUS error, so `iyi run` said
@@ -549,7 +625,6 @@
   named. `bench/verbs_exercise.sh` runs `exit(-1)` and requires the
   runner's status to be the program's and its output empty; the old
   runner exited 1 with the sentence.
-
 - **`Dir.cd` keeps `PWD`, so a relative path expands where the program
   is.** `Path#expand` and `File.expand_path` read `PWD` first - the path
   the person walked, symlinks and all - and `Dir.cd` left it naming where
@@ -558,14 +633,12 @@
   directory now, as a shell's `cd` does, where it was set at all.
   `bench/std_dir_exercise.iyi` expands a name inside a `Dir.cd` block;
   the old module answered the old directory.
-
 - **`File.match?` reads a pattern the way `Dir.glob` does.** `*` crossed
   separators, so `File.match?("a/b/c.txt", "*.txt")` was true of a path
   `Dir.glob("*.txt")` never answers, and `?` matched a separator. Both
   stay inside a segment now, and `**` crosses, `**/` matching no
   directory at all as well. `bench/std_file_exercise.iyi` checks each;
   the old module fails the first.
-
 - **`Dir.glob` finds a wildcard in any segment, and answers in the
   pattern's spelling.** It listed the pattern's directory and matched
   names in it, so a wildcard before the last segment answered nothing -
@@ -578,6 +651,118 @@
   and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
   globs through one and two wildcard segments and from `./`; the old
   module answered `[]` for the first.
+
+- **The math oracle's CORE-MATH part builds without C23's `<stdbit.h>`.**
+  glibc's lgamma includes it for `stdc_leading_zeros`, and mingw's gcc
+  on the Windows runner has none, so there the gate compared none of
+  CORE-MATH's functions - it said so, and printed the missing header. The
+  oracle carries the one function on a 64-bit word, and its directory is
+  searched first, so every toolchain builds against the same one; lgamma
+  still answers glibc's on all 201,835 arguments.
+
+- **`std/math` is consumable as an artifact on arm64.** Its `lib` binds
+  `llvm.fma` inside `{% if flag?(:aarch64) %}`, and the rule that a
+  `lib` body is declarations judged the macro's expansion as code: the
+  `fun`s it wrote read as "code inside a type body that has to run", so
+  on darwin arm64 alone every program building against std/math's
+  artifact was refused - `std_math_exercise`, `std_complex_exercise` and
+  `std_benchmark_exercise` in the std gate. A macro in a `lib` is judged
+  as more of the `lib` now. The iyimod spec writes a `fun` with a
+  `{% for %}` in a `lib`, which expands the same everywhere, and failed
+  on x86_64 before the fix.
+
+- **`sprintf` is right in four places it was not.** `%u` of a negative
+  Int64 printed it signed (`-5`, where C prints 18446744073709551611 and
+  an Int32 already wrapped); `%e` and `%g` took their exponent from the
+  shortest digits, one too high for a value just under a power of ten
+  whose shortest spelling is that power - `%.15e` of 1e23 was
+  `1.000000000000000e+23`, not `9.999999999999999e+22`; NaN ignored the
+  `+` and space flags that infinity honours; and `%.400g` of 0.0001
+  panicked "precision must be at most 400, not 403", inside the documented
+  limit, because `%g` asked `%f` for three places more - it moves the
+  point in the digits `%e` wrote now. 2.72 million cases against glibc's
+  `snprintf`, Python's `%` and the module's own integer rules found them,
+  about 13,700 wrong answers and three panics, and none after. The
+  format exercise checks each and proves each check fails with its fix
+  undone.
+
+- **The smallest `Time::Span` prints.** `to_s` negated the whole seconds
+  before splitting them, and `-Int64::MIN` does not fit: the span
+  `Span.seconds(Int64::MIN)` could be made and compared, and printing it
+  panicked "arithmetic overflow". It takes each part signed now, as the
+  accessors do, and makes the part positive, as Crystal's does, and
+  prints Crystal's `-106751991167300.15:30:08`. The time exercise prints
+  the smallest and largest spans, and failed before the fix. Found by
+  1.95 million calendar, span and RFC 3339 cases against Python's
+  `datetime` and a model of Crystal's `Time::Span`, all of which agree.
+
+- **`GC`'s out-of-memory specs have a compiler's time.** Each compiles
+  and runs a program, as every spec tagged `slow` does, and unlike those
+  they had the harness's plain 15 seconds: on a loaded Windows runner the
+  first one's compile ran past it and failed "The language's gates". They
+  are tagged `slow` now and have the 60 seconds the others have; with the
+  harness cut to one second, untagged they time out and tagged they pass.
+
+- **`Math.erf`, `erfc`, `gamma`, `lgamma` and `tgamma` of a single are
+  singles.** They had no Float32 overload, so `Math.erf(0.5_f32)` was the
+  double's answer, a Float64, where Crystal's is `erff`'s Float32; of
+  300,000 singles every other one came back unequal to glibc's. Each has
+  a Float32 and a generic overload now, as Crystal's `Math` does, and
+  `fma` its generic one; a single's answer is the correctly rounded
+  double's, rounded, and equal to glibc's erff on all 300,000. The math
+  exercise checks four singles against glibc's and proves the check fails
+  with erf's single answered as a double.
+
+- **`Math.sin` and `cos` of a large argument, correctly rounded.** They
+  shared `tan`'s reduction and its give-up: `Math.sin(1.0e300)` was 0.0
+  and `Math.cos(1.0e300)` 1.0, where they are -0.8178819121159085 and
+  -0.5753861119575491, and of 10,000 arguments across the range each got
+  about 5,660 wrong. They are CORE-MATH's (MIT, revision b1a4badf6765),
+  with their tables and their 128-bit arithmetic in two 64-bit words, and
+  wrong for none; glibc 2.43's, IBM's, are wrong for 21 and 14 of the
+  same 10,000. The three share the 128-bit multiply, and the old
+  reduction, its Taylor series and Dekker's product are gone. Correctly
+  rounded costs `fma`s: over [-10, 10] on a machine without FMA sin takes
+  50 ns and cos 290 against 13 before and glibc's 7 - CORE-MATH's C takes
+  24 and 144 there - and on one with FMA each is one instruction. The
+  oracle carries CORE-MATH's two files and the math gate requires 225,000
+  arguments of each to the last bit and proves the check fails with the
+  shared product losing its middle carry and each small reduction losing
+  its constant's low part.
+
+- **`Math.tan` of a large argument is its tangent, correctly rounded.** The
+  reduction by pi/2 gave up once x * 2/pi reached 2^63 and answered 0:
+  `Math.tan(1.0e300)` was 0.0 where it is 1.4214488238747245, and of
+  20,000 arguments across the range 14,965 came back wrong. It is
+  CORE-MATH's `tan` (MIT, revision b1a4badf6765) now, with its tables and
+  its 128-bit reduction written as two 64-bit words, and wrong for none;
+  glibc 2.43's, IBM's, is wrong for 46 of the same 20,000. On a machine
+  without FMA it costs 281 ns against glibc's 16, the price of the
+  software `fma` there. The oracle carries CORE-MATH's file and the math
+  gate requires 225,000 arguments to the last bit - the range to 2^1023,
+  each side of the first 20,000 multiples of pi/4, the worst cases for
+  reduction the literature names - and proves the check fails with the
+  128-bit product losing its middle carry and the small reduction losing
+  1/(2 pi)'s low part.
+
+- **`Math.fma` rounds once.** It was Dekker's exact product and two more
+  additions, which round each, and answered the neighbour of the fused
+  result for 6,231 of the 155,000 cases below; the single's was taken in
+  double and rounded twice, 19,766 of 112,000. Crystal's `Math.fma` is libm's, which rounds once. The
+  instruction answers now where the processor has one - every aarch64
+  processor, and an x86_64 one with FMA3 whose system saves the AVX
+  registers, asked once by `cpuid` and `xgetbv` in the prelude's
+  `IyiRounding`, beside `floor`'s `roundsd`, since a std module writes no
+  `asm` of its own - and musl's `fma` and
+  `fmaf`, ported to iyi, where it has not; no libm is linked either way.
+  `bench/std_math_fma.py` writes 155,000 double and 112,000 single cases
+  with their answers worked out as fractions - cancelling sums, halfway
+  results and results a hair off them, subnormals, overflow, the specials,
+  and the sums a double rounds onto a single's halfway point - and
+  `bench/std_math_exercise.sh` requires every one to the last bit, once
+  more with x86_64's software arm forced, and proves the checks fail with
+  an fma that rounds twice, a misaligned product, a single rounded twice,
+  and `vfmadd` given its operands in the wrong order.
 
 ## 0.16.0 — 2026-09-30
 
@@ -12871,7 +13056,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,058-line library and nothing else. Every other
+  written against iyi's own 19,101-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

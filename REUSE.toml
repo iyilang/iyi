@@ -25,6 +25,26 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2018-2025 Arm Limited"
 SPDX-License-Identifier = "MIT"
 
+# iyi: `Math.fma`'s software arm is musl's `fma` and `fmaf`, in iyi; the
+# notice is beside the code.
+[[annotations]]
+path = ["src/std/math.iyi"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2005-2020 Rich Felker, et al."
+SPDX-License-Identifier = "MIT"
+
+# iyi: `Math.erf`, `erfc`, `asinh`, `acosh`, `atanh`, `lgamma` and `tgamma`
+# are CORE-MATH's, as
+# glibc 2.43 carries them, and `atan`, `asin`, `acos`, `sin`, `cos`, `tan`,
+# `cbrt`, `hypot` and `atan2` CORE-MATH's own,
+# ported with their tables; the notice is beside the code. The math gate's
+# oracle is glibc's files as published, with their own headers.
+[[annotations]]
+path = ["src/std/math.iyi", "bench/libm_oracle/core_math/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "Copyright (c) 2022-2026 Alexei Sibidanov, Paul Zimmermann, Tom Hubrecht and Claude-Pierre Jeannerod"
+SPDX-License-Identifier = "MIT"
+
 # iyi: the port of kostya's crystal-metric that `bench/metric_port.sh` gates.
 [[annotations]]
 path = ["bench/metric/**"]
@@ -32,10 +52,11 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (c) 2024 Konstantin Makarchev"
 SPDX-License-Identifier = "MIT"
 
-# iyi: `Math.log10`, `expm1` and `log1p` are glibc's fdlibm files, with
-# Sun's notice, which is kept beside the port and in the oracle's copies.
+# iyi: `Math.log10`, `expm1`, `log1p`, `sinh`, `cosh`, `tanh` and the Bessel
+# functions are glibc's fdlibm files, with Sun's notice, which is kept beside
+# the port and in the oracle's copies.
 [[annotations]]
-path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c"]
+path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/libm_oracle/s_log1p.c", "bench/libm_oracle/e_sinh.c", "bench/libm_oracle/e_cosh.c", "bench/libm_oracle/s_tanh.c", "bench/libm_oracle/e_j0.c", "bench/libm_oracle/e_j1.c", "bench/libm_oracle/e_jn.c"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (C) 1993 by Sun Microsystems, Inc."
 SPDX-License-Identifier = "LicenseRef-SunPro"

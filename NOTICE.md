@@ -48,11 +48,17 @@ port of:
 
 - [Arm optimized-routines][] (`Math.exp`, `exp2`, `log`, `log2` and `pow` in `src/std/math.iyi`, and
   `bench/libm_oracle/`) - [MIT][]
-- fdlibm, as glibc carries it (`Math.log10`, `expm1` and `log1p`, and their
+- fdlibm, as glibc carries it (`Math.log10`, `expm1`, `log1p`, `sinh`, `cosh`,
+  `tanh` and the Bessel functions, and their
   copies in `bench/libm_oracle/`) -
   Sun Microsystems' notice: "Permission to use, copy, modify, and
   distribute this software is freely granted, provided that this notice is
   preserved."
+- [musl][] (`Math.fma`'s software arm in `src/std/math.iyi`) - [MIT][]
+- [CORE-MATH][], as glibc 2.43 carries it and as published (`Math.erf`,
+  `erfc`, `asinh`, `acosh`, `atanh`, `lgamma`, `tgamma`, `atan`, `asin`,
+  `acos`, `sin`, `cos`, `tan`, `cbrt`, `hypot` and `atan2` in
+  `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
 <!-- licenses -->
@@ -66,6 +72,8 @@ port of:
 <!-- libraries -->
 [Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
 [crystal-metric]: https://github.com/kostya/crystal-metric
+[musl]: https://musl.libc.org/
+[CORE-MATH]: https://core-math.gitlabpages.inria.fr/
 [bdwgc]: http://www.hboehm.info/gc/
 [GMP]: https://gmplib.org/
 [libevent2]: http://libevent.org/

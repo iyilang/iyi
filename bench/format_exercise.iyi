@@ -295,6 +295,11 @@ raise "format: boundary max uint64 dec failed" if bd21 != "18446744073709551615"
 bd22 = sprintf("%x", max_u64)
 raise "format: boundary max uint64 hex failed" if bd22 != "ffffffffffffffff"
 
+# `%u` of a negative Int64 is its unsigned twin, as an Int32's already was:
+# it printed -5.
+bd23 = sprintf("%u", -5_i64)
+raise "format: boundary negative int64 unsigned failed" if bd23 != "18446744073709551611"
+
 puts "    boundary: wider than field, precision 0, and minimum/maximum 32-bit and 64-bit integers"
 
 # Rounding, which is where `%f` and `%e` disagreed with every reference
@@ -318,6 +323,10 @@ raise "round: exponent tie below" unless sprintf("%.2e", 9.995) == "9.99e+00"
 raise "round: exponent tie above" unless sprintf("%.2e", 1.005) == "1.00e+00"
 raise "round: an exact quarter is exact" unless sprintf("%.3f", 0.0625) == "0.062"
 raise "round: nothing else moved" unless sprintf("%.4f", 3.14159) == "3.1416"
+# The exponent of the value, not of its shortest digits: 1e23 is stored as
+# 99999999999999991611392, whose shortest spelling is one place up, and at
+# that exponent 15 places round to 1.000000000000000e+23.
+raise "round: the exponent is the value's" unless sprintf("%.15e", 1e23) == "9.999999999999999e+22" && sprintf("%.16e", 1e-6) == "9.9999999999999995e-07"
 puts "    rounding: half to even, and the value decides its own tie"
 
 # `%g`, the shorter notation, by C's rule: `%e` when the exponent is under
@@ -341,6 +350,11 @@ raise "general: # keeps the zeros" unless sprintf("%#g", 1.5) == "1.50000" && sp
 raise "general: uppercase" unless sprintf("%G", 1.23456789e-5) == "1.23457E-05"
 raise "general: width and flags" unless sprintf("%10g|", -2.25) == "     -2.25|" && sprintf("%-8g|", 0.5) == "0.5     |" && sprintf("%+g", 7) == "+7" && sprintf("%08g", 1.5) == "000001.5"
 raise "general: infinity" unless sprintf("%g", 1.0 / 0.0) == "Infinity"
+raise "general: the exponent is the value's" unless sprintf("%.16g", 1e23) == "9.999999999999999e+22" && sprintf("%.17g", 1e-19) == "9.9999999999999998e-20"
+raise "general: NaN takes the sign flags" unless sprintf("%+g|% f|%+e", 0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0) == "+NaN| NaN|+NaN"
+# 400 significant digits of 0.0001 are 403 places, which `%f` refuses:
+# `%g` took its fixed notation from `%f` and panicked inside the limit.
+raise "general: every precision up to the limit" unless sprintf("%.400g", 0.0001).bytesize == 68
 puts "    general: %g and %G choose the shorter notation and trim it"
 
 # Just under a power of ten that no double spells: `%.15e` of 1e23, which

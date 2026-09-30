@@ -1,9 +1,17 @@
 /*
- * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1
- * and log1p, as `bench/std_math_exercise.sh` asks them. `oracle exp IN OUT`
- * (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`) reads doubles from
+ * iyi: Arm's exp, exp2, log, log2 and pow, and glibc's fdlibm log10, expm1,
+ * log1p, sinh, cosh, tanh and the Bessel functions, and its CORE-MATH erf, erfc, asinh, acosh and
+ * atanh, lgamma and tgamma behind the wrappers glibc's symbols are, and
+ * CORE-MATH's own atan, asin, acos, sin, cos, tan, cbrt, hypot and atan2 (`core_math/`, linked with
+ * libm for their exact `fma`), as `bench/std_math_exercise.sh` asks them.
+ * `oracle exp IN OUT` (or `exp2`, `log`, `log2`, `log10`, `expm1`, `log1p`,
+ * `sinh`, `cosh`, `tanh`, `erf`, `erfc`, `asinh`, `acosh`, `atanh`, `atan`,
+ * `asin`, `acos`, `sin`, `cos`, `tan`, `lgamma`, `tgamma`, `j0`, `j1`, `y0`,
+ * `y1`, `cbrt`) reads doubles from
  * IN and writes each with its answer to OUT; `oracle pow IN OUT` reads
- * pairs and writes each with its power.
+ * pairs and writes each with its power, `oracle hypot` and `atan2` likewise, and
+ * `oracle jn` or `yn` pairs of an
+ * order and an argument with the Bessel function's value.
  * The files are opened in binary, which a Windows C runtime's standard
  * streams are not. Built with contraction off: this is the algorithm as
  * written, not the fused build glibc picks on a processor with FMA, which
@@ -11,6 +19,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 double exp (double);
 double pow (double, double);
 double log (double);
@@ -19,6 +28,65 @@ double log2 (double);
 double __ieee754_log10 (double);
 double __expm1 (double);
 double __log1p (double);
+double __ieee754_sinh (double);
+double __ieee754_cosh (double);
+double __tanh (double);
+#ifdef IYI_ORACLE_CORE_MATH
+/* The second build: `core_math/` and the Bessel functions, which need
+   libm's exact fma and CORE-MATH's sin and cos. The first build has none
+   of it, so a C toolchain that cannot build this part still checks the
+   rest. */
+double __erf (double);
+double __erfc (double);
+double __asinh (double);
+double __ieee754_acosh (double);
+double __ieee754_atanh (double);
+double cr_atan (double);
+double cr_asin (double);
+double cr_acos (double);
+double cr_tan (double);
+double cr_sin (double);
+double cr_cos (double);
+double __ieee754_j0 (double);
+double __ieee754_j1 (double);
+double __ieee754_y0 (double);
+double __ieee754_y1 (double);
+double __ieee754_jn (int, double);
+double __ieee754_yn (int, double);
+double cr_cbrt (double);
+double cr_hypot (double, double);
+double cr_atan2 (double, double);
+double __ieee754_lgamma_r (double, int *);
+double __ieee754_gamma_r (double, int *);
+
+/* What the x86_64 libm's lgamma and tgamma symbols answer around glibc's
+   __ieee754 functions: math/w_lgamma_main.c and math/w_tgamma_compat.c
+   under _POSIX_, with the returns of sysdeps/ieee754/k_standard.c. */
+static double lgamma_posix (double x)
+{
+  int sg;
+  double y = __ieee754_lgamma_r (x, &sg);
+  if (!isfinite (y) && isfinite (x))
+    y = HUGE_VAL;
+  return y;
+}
+
+static double tgamma_posix (double x)
+{
+  int sg;
+  double y = __ieee754_gamma_r (x, &sg);
+  if ((!isfinite (y) || y == 0) && (isfinite (x) || (isinf (x) && x < 0.0)))
+    {
+      if (x == 0.0)
+        y = copysign (HUGE_VAL, x);
+      else if (floor (x) == x && x < 0.0)
+        y = NAN;
+      else if (y != 0)
+        y = copysign (HUGE_VAL, x);
+    }
+  return sg < 0 ? -y : y;
+}
+#endif
 
 static double unary (const char *name, double x)
 {
@@ -34,6 +102,50 @@ static double unary (const char *name, double x)
     return __expm1 (x);
   if (strcmp (name, "log1p") == 0)
     return __log1p (x);
+  if (strcmp (name, "sinh") == 0)
+    return __ieee754_sinh (x);
+  if (strcmp (name, "cosh") == 0)
+    return __ieee754_cosh (x);
+  if (strcmp (name, "tanh") == 0)
+    return __tanh (x);
+#ifdef IYI_ORACLE_CORE_MATH
+  if (strcmp (name, "erf") == 0)
+    return __erf (x);
+  if (strcmp (name, "erfc") == 0)
+    return __erfc (x);
+  if (strcmp (name, "asinh") == 0)
+    return __asinh (x);
+  if (strcmp (name, "acosh") == 0)
+    return __ieee754_acosh (x);
+  if (strcmp (name, "atanh") == 0)
+    return __ieee754_atanh (x);
+  if (strcmp (name, "atan") == 0)
+    return cr_atan (x);
+  if (strcmp (name, "asin") == 0)
+    return cr_asin (x);
+  if (strcmp (name, "acos") == 0)
+    return cr_acos (x);
+  if (strcmp (name, "tan") == 0)
+    return cr_tan (x);
+  if (strcmp (name, "sin") == 0)
+    return cr_sin (x);
+  if (strcmp (name, "cos") == 0)
+    return cr_cos (x);
+  if (strcmp (name, "j0") == 0)
+    return __ieee754_j0 (x);
+  if (strcmp (name, "j1") == 0)
+    return __ieee754_j1 (x);
+  if (strcmp (name, "y0") == 0)
+    return __ieee754_y0 (x);
+  if (strcmp (name, "y1") == 0)
+    return __ieee754_y1 (x);
+  if (strcmp (name, "lgamma") == 0)
+    return lgamma_posix (x);
+  if (strcmp (name, "tgamma") == 0)
+    return tgamma_posix (x);
+  if (strcmp (name, "cbrt") == 0)
+    return cr_cbrt (x);
+#endif
   return exp (x);
 }
 int main (int argc, char **argv)
@@ -52,6 +164,22 @@ int main (int argc, char **argv)
         v[2] = pow (v[0], v[1]);
         fwrite (v, sizeof v[0], 3, out);
       }
+#ifdef IYI_ORACLE_CORE_MATH
+  else if (strcmp (argv[1], "hypot") == 0 || strcmp (argv[1], "atan2") == 0)
+    while (fread (v, sizeof v[0], 2, in) == 2)
+      {
+        v[2] = argv[1][0] == 'h' ? cr_hypot (v[0], v[1]) : cr_atan2 (v[0], v[1]);
+        fwrite (v, sizeof v[0], 3, out);
+      }
+  else if (strcmp (argv[1], "jn") == 0 || strcmp (argv[1], "yn") == 0)
+    /* Pairs of an order, as a double, and an argument. */
+    while (fread (v, sizeof v[0], 2, in) == 2)
+      {
+        int n = (int) v[0];
+        v[2] = argv[1][0] == 'j' ? __ieee754_jn (n, v[1]) : __ieee754_yn (n, v[1]);
+        fwrite (v, sizeof v[0], 3, out);
+      }
+#endif
   else
     while (fread (v, sizeof v[0], 1, in) == 1)
       {

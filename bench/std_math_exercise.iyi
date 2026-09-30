@@ -206,7 +206,8 @@ puts "  none of them overflow, underflow or cancel at the extremes"
 puts "\n== gamma, lgamma"
 assert_same INF, Math.gamma(INF), "gamma(inf)"
 assert_same NAN, Math.gamma(-INF), "gamma(-inf)"
-assert_same NAN, Math.gamma(0.0), "gamma(0)"
+assert_same INF, Math.gamma(0.0), "gamma(0)"
+assert_same -INF, Math.gamma(-0.0), "gamma(-0)"
 assert_same NAN, Math.gamma(-1.0), "gamma(-1)"
 assert_same NAN, Math.gamma(-100.0), "gamma(-100)"
 assert_same 2.0, Math.gamma(3.0), "gamma(3)"
@@ -228,7 +229,7 @@ assert_close 0.5723649429247004, Math.lgamma(0.5), "lgamma(0.5)"
 assert_close 24.924132002217277, Math.lgamma(14.9), "lgamma(14.9)"
 assert_close -0.05624371649767457, Math.lgamma(-2.5), "lgamma(-2.5)"
 assert_same INF, Math.lgamma(-1.0), "lgamma at a pole"
-puts "  whole arguments are factorials, the poles are NaN, lgamma goes past the overflow"
+puts "  whole arguments are factorials, zero is an infinity of its sign, the negative integers are NaN, lgamma goes past the overflow"
 
 puts "\n== erf, erfc"
 assert_same 0.0, Math.erf(0.0), "erf(0)"
@@ -262,6 +263,25 @@ assert_true Math.gcd(12, 18) == 6, "gcd(12, 18)"
 assert_true Math.lcm(-4, 6) == 12, "lcm(-4, 6)"
 puts "  fma rounds once; min/max symmetric in NaN and the zeros; gcd at the minimum"
 
+# The other library's integer and exponent helpers, with C's answers at
+# the edges: ilogb of zero and NaN is the least Int32, of an infinity the
+# greatest, and a subnormal's exponent is its own.
+puts "\n== isqrt, pw2ceil, ilogb, logb, scalbn, scalbln"
+assert_true Math.isqrt(0) == 0 && Math.isqrt(15) == 3 && Math.isqrt(16) == 4, "isqrt of small numbers"
+assert_true Math.isqrt(9223372036854775807_i64) == 3037000499_i64, "isqrt of Int64's largest"
+assert_true Math.pw2ceil(33) == 64 && Math.pw2ceil(64) == 64 && Math.pw2ceil(-5) == 1, "pw2ceil"
+assert_true Math.pw2ceil(1073741824) == 1073741824 && Math.pw2ceil(100_i64) == 128_i64, "pw2ceil at the top and in Int64"
+assert_true Math.ilogb(0.0) == -2147483648 && Math.ilogb(NAN) == -2147483648 && Math.ilogb(INF) == 2147483647, "ilogb's specials"
+assert_true Math.ilogb(5e-324) == -1074 && Math.ilogb(-8.0) == 3 && Math.ilogb(0.75) == -1, "ilogb"
+assert_same -INF, Math.logb(0.0), "logb(0)"
+assert_same INF, Math.logb(-INF), "logb(-inf)"
+assert_same -1074.0, Math.logb(5e-324), "logb of the least subnormal"
+assert_same 12.0, Math.scalbn(1.5, 3), "scalbn"
+assert_same 5e-324, Math.scalbn(1.0, -1074), "scalbn to the least subnormal"
+assert_same INF, Math.scalbln(1.0, 5000000000_i64), "scalbln past Int32"
+assert_same 0.0, Math.scalbln(1.0, -5000000000_i64), "scalbln below Int32"
+puts "  the integer root and power of two in the value's type, the exponent functions as C answers them"
+
 puts "\n== the Float32 overloads"
 assert_str "0.84147096", Math.sin(1.0_f32).to_s, "sin(1_f32)"
 assert_str "1.0", Math.min(1.0_f32, 2.0_f32).to_s, "min of singles"
@@ -269,10 +289,19 @@ assert_str "Infinity", Math.exp(100.0_f32).to_s, "exp(100_f32)"
 assert_str "Infinity", Math.pow(2.0_f32, 200.0_f32).to_s, "pow(2_f32, 200_f32)"
 assert_str "-Infinity", Math.sinh(-100.0_f32).to_s, "sinh(-100_f32)"
 assert_str "1024.0", Math.pow(2.0_f32, 10.0_f32).to_s, "pow(2_f32, 10_f32)"
+# erf, erfc, gamma and lgamma answer singles as the other library's do,
+# glibc's erff, erfcf, tgammaf and lgammaf to the last bit here.
+assert_str "0.5204999", Math.erf(0.5_f32).to_s, "erf(0.5_f32)"
+assert_str "0.03389485", Math.erfc(1.5_f32).to_s, "erfc(1.5_f32)"
+assert_str "11.631728", Math.gamma(4.5_f32).to_s, "gamma(4.5_f32)"
+assert_str "0.5723649", Math.lgamma(0.5_f32).to_s, "lgamma(0.5_f32)"
 puts "  they compile without the consumer importing std/float, and overflow to infinity"
 
 # The oracles `bench/std_math_exercise.sh` writes from the code glibc
-# builds these from - Arm's, and fdlibm's for log10, expm1 and log1p -
+# builds these from - Arm's, fdlibm's for log10, expm1, log1p, sinh, cosh
+# and tanh, CORE-MATH's for erf, erfc, asinh, acosh, atanh, lgamma and
+# tgamma, and
+# CORE-MATH's own atan, asin, acos, sin, cos and tan -
 # compiled from `bench/libm_oracle`: pairs of doubles, an argument and its
 # answer, for the one-argument functions, and triples, a base, an exponent
 # and the power, for pow. Every answer is required to the last bit.
@@ -287,11 +316,31 @@ def against(path : String, name : String, source : String, least : Int32, & : Fl
     want = IyiFloatText.from_bits(words[index * 2 + 1])
     got = yield x
     same = IyiFloatText.bits_of(got) == words[index * 2 + 1] || (got != got && want != want)
-    raise "ASSERTION FAILED: #{name}(#{x}) is #{got}, Arm's is #{want}" unless same
+    raise "ASSERTION FAILED: #{name}(#{x}) is #{got}, #{source} is #{want}" unless same
     index = index + 1
   end
   assert_true cases > least, "the #{name} oracle had #{cases} cases"
   puts "  #{cases} arguments, every answer #{source} to the last bit"
+end
+
+# The same for a function of two, from a file of (x, y, answer) triples.
+def against_pairs(path : String, name : String, source : String, least : Int32, & : Float64, Float64 -> Float64) : Nil
+  puts "\n== #{name} against #{source} #{name}, bit for bit"
+  triples = File.read(path)
+  words = triples.to_unsafe.as(Pointer(UInt64))
+  cases = triples.bytesize // 24
+  index = 0
+  while index < cases
+    x = IyiFloatText.from_bits(words[index * 3])
+    y = IyiFloatText.from_bits(words[index * 3 + 1])
+    want = IyiFloatText.from_bits(words[index * 3 + 2])
+    got = yield x, y
+    same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+    raise "ASSERTION FAILED: #{name}(#{x}, #{y}) is #{got}, #{source} is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > least, "the #{name} oracle had #{cases} cases"
+  puts "  #{cases} pairs, every answer #{source} to the last bit"
 end
 
 args = Program.args
@@ -320,5 +369,97 @@ against(args[4], "log2", "Arm's", 150000) { |x| Math.log2(x) } if args.size > 4
 against(args[5], "log10", "glibc's", 150000) { |x| Math.log10(x) } if args.size > 5
 against(args[6], "expm1", "glibc's", 150000) { |x| Math.expm1(x) } if args.size > 6
 against(args[7], "log1p", "glibc's", 150000) { |x| Math.log1p(x) } if args.size > 7
+against(args[8], "sinh", "glibc's", 250000) { |x| Math.sinh(x) } if args.size > 8
+against(args[9], "cosh", "glibc's", 250000) { |x| Math.cosh(x) } if args.size > 9
+against(args[10], "tanh", "glibc's", 250000) { |x| Math.tanh(x) } if args.size > 10
+against(args[11], "erf", "glibc's", 200000) { |x| Math.erf(x) } if args.size > 11
+against(args[12], "erfc", "glibc's", 200000) { |x| Math.erfc(x) } if args.size > 12
+against(args[13], "asinh", "glibc's", 200000) { |x| Math.asinh(x) } if args.size > 13
+against(args[14], "acosh", "glibc's", 200000) { |x| Math.acosh(x) } if args.size > 14
+against(args[15], "atanh", "glibc's", 200000) { |x| Math.atanh(x) } if args.size > 15
+# CORE-MATH's own, correctly rounded: glibc 2.43's are IBM's, which are
+# not quite, and differ from these for about 5 arguments in 10,000.
+against(args[16], "atan", "CORE-MATH's", 150000) { |x| Math.atan(x) } if args.size > 16
+against(args[17], "asin", "CORE-MATH's", 150000) { |x| Math.asin(x) } if args.size > 17
+against(args[18], "acos", "CORE-MATH's", 150000) { |x| Math.acos(x) } if args.size > 18
+against(args[19], "lgamma", "glibc's", 150000) { |x| Math.lgamma(x) } if args.size > 19
+against(args[20], "tgamma", "glibc's", 150000) { |x| Math.tgamma(x) } if args.size > 20
+against(args[21], "tan", "CORE-MATH's", 200000) { |x| Math.tan(x) } if args.size > 21
+against(args[22], "sin", "CORE-MATH's", 200000) { |x| Math.sin(x) } if args.size > 22
+against(args[23], "cos", "CORE-MATH's", 200000) { |x| Math.cos(x) } if args.size > 23
+# The Bessel functions, fdlibm's as glibc carries them, on CORE-MATH's sin
+# and cos, which are iyi's: the oracle is named for the C function.
+against(args[24], "besselj0", "glibc's", 120000) { |x| Math.besselj0(x) } if args.size > 24
+against(args[25], "besselj1", "glibc's", 120000) { |x| Math.besselj1(x) } if args.size > 25
+against(args[26], "bessely0", "glibc's", 120000) { |x| Math.bessely0(x) } if args.size > 26
+against(args[27], "bessely1", "glibc's", 120000) { |x| Math.bessely1(x) } if args.size > 27
+if args.size > 29
+  puts "\n== jn and yn against glibc's, bit for bit"
+  [{args[28], true}, {args[29], false}].each do |pair|
+    triples = File.read(pair[0])
+    words = triples.to_unsafe.as(Pointer(UInt64))
+    cases = triples.bytesize // 24
+    index = 0
+    while index < cases
+      n = IyiFloatText.from_bits(words[index * 3]).to_i
+      x = IyiFloatText.from_bits(words[index * 3 + 1])
+      want = IyiFloatText.from_bits(words[index * 3 + 2])
+      got = pair[1] ? Math.besselj(n, x) : Math.bessely(n, x)
+      same = IyiFloatText.bits_of(got) == words[index * 3 + 2] || (got != got && want != want)
+      raise "ASSERTION FAILED: #{pair[1] ? "besselj" : "bessely"}(#{n}, #{x}) is #{got}, glibc's is #{want}" unless same
+      index = index + 1
+    end
+    assert_true cases > 60000, "the jn/yn oracle had #{cases} cases"
+  end
+  puts "  every order from -5 to 30 and five large ones, every answer glibc's to the last bit"
+end
+# CORE-MATH's own cbrt and hypot, correctly rounded: glibc 2.43's cbrt is
+# not - it differs from this for about half the arguments - and its
+# hypot is, but for pairs of subnormals.
+against(args[30], "cbrt", "CORE-MATH's", 100000) { |x| Math.cbrt(x) } if args.size > 30
+against_pairs(args[31], "hypot", "CORE-MATH's", 100000) { |x, y| Math.hypot(x, y) } if args.size > 31
+# CORE-MATH's atan2, correctly rounded; glibc 2.43's is IBM's, an ulp
+# away for 12,077 of 1,748,883 pairs of the port's.
+against_pairs(args[32], "atan2", "CORE-MATH's", 200000) { |y, x| Math.atan2(y, x) } if args.size > 32
+
+# `bench/std_math_fma.py`'s cases, named by the environment because they
+# need python and no C compiler: quadruples a, b, c and a * b + c taken
+# exactly and rounded once, doubles and then singles. Every answer is
+# required to the last bit, from whichever arm the processor takes -
+# `bench/std_math_exercise.sh` runs this once more with x86_64's software
+# arm forced.
+fma_doubles = Program.env("IYI_MATH_FMA_DOUBLES")
+fma_singles = Program.env("IYI_MATH_FMA_SINGLES")
+if fma_doubles.is_a?(String) && fma_singles.is_a?(String)
+  puts "\n== fma against the exact sum rounded once, bit for bit"
+  quads = File.read(fma_doubles)
+  words = quads.to_unsafe.as(Pointer(UInt64))
+  cases = quads.bytesize // 32
+  index = 0
+  while index < cases
+    a = IyiFloatText.from_bits(words[index * 4])
+    b = IyiFloatText.from_bits(words[index * 4 + 1])
+    c = IyiFloatText.from_bits(words[index * 4 + 2])
+    want = IyiFloatText.from_bits(words[index * 4 + 3])
+    got = Math.fma(a, b, c)
+    same = IyiFloatText.bits_of(got) == words[index * 4 + 3] || (got != got && want != want)
+    raise "ASSERTION FAILED: fma(#{a}, #{b}, #{c}) is #{got}, rounded once it is #{want}" unless same
+    index = index + 1
+  end
+  assert_true cases > 150000, "the fma cases were #{cases}"
+  quads = File.read(fma_singles)
+  singles = quads.to_unsafe.as(Pointer(Float32))
+  single_cases = quads.bytesize // 16
+  index = 0
+  while index < single_cases
+    got = Math.fma(singles[index * 4], singles[index * 4 + 1], singles[index * 4 + 2])
+    want = singles[index * 4 + 3]
+    same = IyiFloatText.bits_of(got.to_f64) == IyiFloatText.bits_of(want.to_f64) || (got != got && want != want)
+    raise "ASSERTION FAILED: fma(#{singles[index * 4]}_f32, #{singles[index * 4 + 1]}_f32, #{singles[index * 4 + 2]}_f32) is #{got}, rounded once it is #{want}" unless same
+    index = index + 1
+  end
+  assert_true single_cases > 100000, "the single fma cases were #{single_cases}"
+  puts "  #{cases} doubles and #{single_cases} singles, every sum rounded once"
+end
 
 puts "\nALL CHECKS PASSED"

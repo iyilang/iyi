@@ -1392,6 +1392,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # binds `llvm.sqrt.f64` and `llvm.copysign.f64` and every consumer was told
   # it "has code inside a type body that has to run", about two intrinsics.
   #
+  # A macro in a `lib` body expands to more of the body, and is judged by
+  # the same rule: `std/math` binds `llvm.fma` inside `{% if flag?(:aarch64)
+  # %}`, and read as code its `fun`s refused the module on arm64 only - the
+  # expansion is empty everywhere else.
+  #
   # A constant is deliberately not in the list. `SOL_SOCKET = 0xffff` inside a
   # `lib` is a value, nothing carries a lib's constants today, and the
   # conservative answer is the right one until something does.
@@ -1399,10 +1404,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     case node
     when Expressions
       node.expressions.any? { |child| iyi_lib_body_initialiser?(child) }
-    when FunDef, TypeDef, CStructOrUnionDef, ExternalVar
+    when FunDef, TypeDef, CStructOrUnionDef, ExternalVar, Nop
       false
     else
-      iyi_initialiser?(node)
+      if expansion = iyi_expansion(node)
+        iyi_lib_body_initialiser?(expansion)
+      else
+        iyi_initialiser?(node)
+      end
     end
   end
 

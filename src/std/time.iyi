@@ -300,13 +300,20 @@ pub struct Span
   end
 
   def to_s : String
-    sec_abs = @seconds < 0 ? -@seconds : @seconds
+    # The parts are taken signed, as the accessors take them, and each is
+    # made positive: negating the seconds first overflowed for the
+    # smallest span, and `Span.seconds(Int64::MIN).to_s` panicked
+    # "arithmetic overflow" where it prints `-106751991167300.15:30:08`.
+    # No part of it is that large.
     ns_abs = @nanoseconds < 0 ? -@nanoseconds : @nanoseconds
-
-    d = sec_abs // 86400_i64
-    h = ((sec_abs % 86400_i64) // 3600_i64).to_i32
-    m = ((sec_abs % 3600_i64) // 60_i64).to_i32
-    s = (sec_abs % 60_i64).to_i32
+    d = days
+    d = 0_i64 - d if d < 0_i64
+    h = hours
+    h = 0 - h if h < 0
+    m = minutes
+    m = 0 - m if m < 0
+    s = seconds
+    s = 0 - s if s < 0
 
     prefix = (@seconds < 0 || @nanoseconds < 0) ? "-" : ""
 

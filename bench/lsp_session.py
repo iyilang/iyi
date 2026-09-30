@@ -1421,8 +1421,9 @@ def main():
          not uni_diags and
          step_three == step_two.replace("şarkı", "tune") and
          constant is not None,
-         f"after two renames {step_two!r}, diagnostics {uni_diags!r}, back {step_three!r}, "
-         f"Şarkı refused: {constant is not None}")
+         # ascii(): a runner's console may be cp1252, which has no `ş`.
+         f"after two renames {ascii(step_two)}, diagnostics {ascii(uni_diags)}, back {ascii(step_three)}, "
+         f"the constant-cased name refused: {constant is not None}")
     c.send("textDocument/didClose", {"textDocument": {"uri": uni_uri}}, wait=False)
 
     # 25b. and formatting a buffer that imports a package. The host segment

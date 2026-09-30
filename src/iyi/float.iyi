@@ -1338,7 +1338,10 @@ module IyiFloatText
         while at < size
           byte = bytes[at]
           raise "not a number: #{text.inspect}" if byte < 48_u8 || byte > 57_u8
-          read = read * 10 + (byte - 48_u8).to_i32 if read < 100000
+          # Read past what any double needs: the digits move the exponent
+          # by up to the text's length, and a cap of 100000 read
+          # "0.<999999 zeros>1e1000000" as 0.0.
+          read = read * 10 + (byte - 48_u8).to_i32 if read < 100000000
           at = at + 1
         end
         exponent = exponent + (exponent_negative ? 0 - read : read)
@@ -1407,7 +1410,7 @@ module IyiFloatText
         while at < size
           byte = bytes[at]
           raise "not a number: #{text.inspect}" if byte < 48_u8 || byte > 57_u8
-          read = read * 10 + (byte - 48_u8).to_i32 if read < 100000
+          read = read * 10 + (byte - 48_u8).to_i32 if read < 100000000
           at = at + 1
         end
         exponent = exponent + (exponent_negative ? 0 - read : read)

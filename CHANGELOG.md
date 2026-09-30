@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`String#to_f` reads an exponent of seven digits whole.** It stopped
+  reading one at 100,000, though the digits before it move the exponent
+  by up to the text's own length: `"0." + 999,999 zeros + "1e1000000"`
+  is 1.0 and read as 0.0, and `"1" + a million zeros + "e-1000000"` was
+  refused by `JSON.parse` as out of range. Both parsers, the word one and
+  the bignum one, read to nine digits now, which no text that fits in
+  memory outgrows. Found through `JSON.parse` against Python's `json`;
+  the float text gate reads three such numbers and proves the check fails
+  with the old cap, and the json exercise reads two.
+
 - **`URI.encode(s, space_to_plus: true)` escapes a literal `+`.** It
   wrote a space as `+` and kept a `+` as it was, so `"a b"` and `"a+b"`
   encoded alike and `decode(..., plus_to_space: true)` turned `" +"`
@@ -12556,7 +12566,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 18,947-line library and nothing else. Every other
+  written against iyi's own 18,950-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

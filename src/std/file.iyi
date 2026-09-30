@@ -1463,8 +1463,20 @@ class ::File
     raise "cannot read #{path}: it is a directory, or the read failed" if io.read_failed?
   end
 
+  # Whether *path* matches the glob *pattern*, the way `Dir.glob` reads
+  # one: `*` and `?` stay inside a segment and `**` crosses separators.
+  # `*` crossed them here, so `File.match?("a/b/c.txt", "*.txt")` was true
+  # of a path `Dir.glob("*.txt")` never answers.
   def self.match?(path : String | Path, pattern : String) : Bool
     glob_match_at(path.to_s, 0, pattern, 0)
+  end
+
+  private def self.glob_separator?(c : UInt8) : Bool
+    {% if flag?(:win32) %}
+      c == 47_u8 || c == 92_u8
+    {% else %}
+      c == 47_u8
+    {% end %}
   end
 
   private def self.glob_match_at(name : String, ni : Int32, pattern : String, pi : Int32) : Bool
@@ -1475,17 +1487,22 @@ class ::File
     while pi < plen
       pc = pptr[pi]
       if pc == 42_u8
+        crosses = pi + 1 < plen && pptr[pi + 1] == 42_u8
         while pi < plen && pptr[pi] == 42_u8
           pi = pi + 1
         end
-        return true if pi == plen
+        # `**/` also matches no directory at all.
+        if crosses && pi < plen && glob_separator?(pptr[pi])
+          return true if glob_match_at(name, ni, pattern, pi + 1)
+        end
         while ni <= nlen
           return true if glob_match_at(name, ni, pattern, pi)
+          break if ni == nlen || (!crosses && glob_separator?(nptr[ni]))
           ni = ni + 1
         end
         return false
       elsif pc == 63_u8
-        return false if ni >= nlen
+        return false if ni >= nlen || glob_separator?(nptr[ni])
         ni = ni + 1
         pi = pi + 1
       else

@@ -248,6 +248,13 @@ assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
+# A segment's wildcards stay in their segment, and `**` crosses, as
+# `Dir.glob` reads them: `*` crossed, and `a/b/c.txt` matched `*.txt`.
+assert_true !File.match?("a/b/c.txt", "*.txt"), "* does not cross a separator"
+assert_true !File.match?("a/b", "a?b"), "? does not match a separator"
+assert_true File.match?("a/b/c.txt", "a/*/c.txt"), "* matches one segment"
+assert_true File.match?("a/b/c.txt", "**/*.txt"), "** crosses separators"
+assert_true File.match?("c.txt", "**/*.txt"), "**/ matches no directory at all"
 {% if flag?(:win32) %}
   # Either separator matches either: a path is spelled with both on
   # Windows, and a name and its pattern need not agree on which.

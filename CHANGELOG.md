@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`File.match?` reads a pattern the way `Dir.glob` does.** `*` crossed
+  separators, so `File.match?("a/b/c.txt", "*.txt")` was true of a path
+  `Dir.glob("*.txt")` never answers, and `?` matched a separator. Both
+  stay inside a segment now, and `**` crosses, `**/` matching no
+  directory at all as well. `bench/std_file_exercise.iyi` checks each;
+  the old module fails the first.
+
 - **`Dir.glob` finds a wildcard in any segment, and answers in the
   pattern's spelling.** It listed the pattern's directory and matched
   names in it, so a wildcard before the last segment answered nothing -

@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`HTML.escape(string, io)` writes UTF-8 text as it is.** Each byte that
+  needed no escape went out as `byte.unsafe_chr`, a character whose code
+  point is the byte, and `<<` wrote that as UTF-8: `café` came out
+  `cafÃ©`, and `日本` as mojibake. And without `std/io` imported the
+  method did not compile at all, `IyiIO` having no `<<`. The text goes out
+  in byte runs through `IyiIO#write` now. `bench/std_html_exercise.iyi`
+  escapes into a file and reads it back; the old module did not compile
+  there.
+
 - **Two `SemanticVersion`s compare, and a version read from a CRLF file
   parses.** `<=>`, `==`, `<` and a sort of two versions - or of two
   pre-release tags - recursed until the stack ran out, which ended the

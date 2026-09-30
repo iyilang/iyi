@@ -22,27 +22,32 @@ pub struct HTML
   # >  -> &gt;
   # "  -> &quot;
   # ' -> &#39;
+  # What needs no escape goes out as the bytes it is, a run at a time. It
+  # went out a byte at a time as `b.unsafe_chr`, a character whose code
+  # point is the byte, which `<<` writes as UTF-8: every byte of `é` or
+  # `日` became two, and the text was mojibake.
   def self.escape(string : String, io : IyiIO) : Nil
     raw = string.to_unsafe
     len = string.bytesize
+    run = 0
     i = 0
     while i < len
-      case b = raw[i]
-      when 38_u8 # &
-        io << "&amp;"
-      when 60_u8 # <
-        io << "&lt;"
-      when 62_u8 # >
-        io << "&gt;"
-      when 34_u8 # "
-        io << "&quot;"
-      when 39_u8 # '
-        io << "&#39;"
-      else
-        io << b.unsafe_chr
+      entity = case raw[i]
+               when 38_u8 then "&amp;"
+               when 60_u8 then "&lt;"
+               when 62_u8 then "&gt;"
+               when 34_u8 then "&quot;"
+               when 39_u8 then "&#39;"
+               else            nil
+               end
+      if entity
+        io.write(raw + run, i - run) if i > run
+        io.write(entity)
+        run = i + 1
       end
       i = i + 1
     end
+    io.write(raw + run, len - run) if len > run
   end
 
   def self.escape(string : String) : String

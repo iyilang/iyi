@@ -19,6 +19,14 @@ puts "== escape"
 assert_str("&amp;&lt;&gt;&quot;&#39;", HTML.escape("&<>\"'"), "the five")
 assert_str("plain", HTML.escape("plain"), "nothing to escape")
 assert_str("café &amp; bar", HTML.escape("café & bar"), "UTF-8 left alone, & escaped")
+# And written to an IO, the same text: each byte of a character past ASCII
+# went out as a character of its own, and `é` was written as `Ã©`.
+escaped_path = "std_html_exercise_escape.txt"
+escaped_io = File.open(escaped_path, "w")
+HTML.escape("café <b> 日本", escaped_io)
+escaped_io.close
+assert_str("café &lt;b&gt; 日本", File.read(escaped_path), "escape into an IO keeps UTF-8")
+File.delete(escaped_path)
 puts "  &, <, >, quote and apostrophe; UTF-8 bytes kept"
 
 puts "\n== unescape"

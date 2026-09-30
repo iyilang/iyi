@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Builds starting at once no longer race to make the cache's
+  directories.** `Dir.mkdir_p` looked and then made, and a directory
+  another build made between the two failed the loser: with eight builds
+  of one file at once, about one run in three had a build fail "that
+  cannot be a directory" or "Cannot create a file when that file already
+  exists". A directory made meanwhile is made. Measured with forty-eight
+  builds, eight at a time: none failed. [INFERENCE] No gate holds this;
+  the race is not reproducible on demand.
+
 - **An imported module's file is named the way the platform spells it.**
   The module path's `/` went into the resolved file name as it was, so on
   Windows every diagnostic, `check -f json` and `fix --json` named

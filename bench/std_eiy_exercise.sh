@@ -5,15 +5,19 @@
 #
 # Proves:
 #   * `Eiy.render`, `Eiy.embed` and `Eiy.def_to_s` of bench/std_eiy_exercise.eiy
-#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a comment, an escaped
-#     tag, quotes, backslashes, `#{` and UTF-8 text) print the expected text
-#     byte for byte, plain and with --release.
+#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a two-line comment,
+#     an escaped tag, quotes, backslashes, `#{`, UTF-8 text, and
+#     bench/std_eiy_exercise_part.eiy rendered from inside it) print the
+#     expected text byte for byte, plain and with --release.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
 #   * Negative proofs: a copy of the module with `-%>` trimming broken, with
-#     columns counted in bytes, and with `#` left unescaped in template text is
-#     caught, each at its named check.
+#     columns counted in bytes, with `#` left unescaped in template text, with
+#     bytes that are not UTF-8 left unescaped, with a comment tag spliced in
+#     as code, with `render`'s buffer under a fixed name, with `def_to_s`'s
+#     parameter named `io`, and with a Buffer that needs `write` of its target
+#     is caught, each at its named check.
 #   * Refusals: a template with an open tag and a template that is not there
 #     are refused at build time with their sentences; the runtime API panics
 #     with the same sentences.
@@ -121,7 +125,7 @@ build_and_run "std_eiy" exercise-eiy "$REPO/bench/std_eiy_exercise.iyi"
 
 echo
 echo "== every eiy check reported"
-for check in "render:" "embed: into a Buffer" "embed: into stdout" "def_to_s:" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
+for check in "render:" "embed: into a Buffer" "embed: a Buffer printed into another Buffer" "embed: into stdout" "def_to_s:" "a template's own" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
   if ! grep -qF -- "$check" "$WORK/exercise-eiy.out" 2>/dev/null; then
     echo "  missing: $check"
     status=1
@@ -195,6 +199,24 @@ prove_fails "a column counted in bytes" patched_column "token 2 at 2:7" \
 # generated program, and the build refuses the name the template never meant.
 prove_fails "template text spliced in unescaped" patched_quote "undefined local variable or method 'raw'" \
   "content.replace(\"elsif b == 35 # '#'\", \"elsif b == 36 # '#'\")"
+# The compiler reads a string literal as UTF-8 and stops with an internal
+# error at a byte that is not, so such a byte in template text has to be
+# written out.
+prove_fails "text that is not UTF-8 spliced in as itself" patched_utf8 "text that is not UTF-8 is written as \\x escapes" \
+  "content.replace('elsif b < 32 || b >= 127', 'elsif b < 32 || b == 127')"
+# Spliced in as code, the comment's second line runs and drops an item.
+prove_fails "a comment tag spliced in as code" patched_comment "render of the template" \
+  "content.replace(\"unless str_val.starts_with?('#')\", \"unless false && str_val.starts_with?('#')\")"
+# Under a fixed name the template's inner `render` replaces the outer buffer,
+# and what the outer printed before it is lost.
+prove_fails "render's buffer under a fixed name" patched_nested "render of the template" \
+  "content.replace('%buf', '__buf__')"
+# Named `io`, the parameter is what the part template's own `|io|` hides, and
+# the template prints to its string.
+prove_fails "def_to_s's parameter named io" patched_io "undefined method 'print' for String" \
+  "content.replace('def to_s(__io__) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, __io__)', 'def to_s(io) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, io)')"
+prove_fails "a Buffer that writes to its target" patched_buffer "undefined method 'write' for Std::Eiy::Eiy::Buffer" \
+  "content.replace('io.print(to_s)', 'io.write(to_s)')"
 
 # ---------------------------------------------------------------------------
 # What the template compiler refuses

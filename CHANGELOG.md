@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`Eiy` templates: bytes that are not UTF-8, comments over lines, and
+  nested renders.** Template text with a byte like Latin-1 `\xE9` went
+  into the generated string literal as it was, and the compiler stopped
+  on it - "you've found a bug in the iyi compiler"; such bytes are
+  written as `\xHH` now and render as they were. A `<%# %>` comment over
+  several lines ran its later lines as code, against the module's "a
+  comment: nothing runs". `Eiy.render` inside a rendered template lost
+  the outer text before it. `def_to_s` named its parameter `io`, which a
+  template's own block parameter could hide; it is `__io__`, as ECR's.
+  And `Buffer#to_s(io)` called `write`, so one buffer could not print
+  into another. About a million templates against ECR's lexer and
+  renderer found these - the lexing and trimming agreed byte for byte -
+  and none after; the exercise checks each and proves each fails.
+
 - **`std/capsule` follows RFC 9297 in three places.** `VarInt.decode?`
   added the offset to the varint's length, which overflowed Int32 near
   the end of a 2 GiB buffer and panicked where the input is merely

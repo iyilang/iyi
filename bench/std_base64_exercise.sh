@@ -97,8 +97,10 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-broken() { # broken <label> <old> <new>
-  local label="$1"
+# With a <phrase>, the exercise must fail at it: at the check written for
+# that break, not at an earlier one.
+broken() { # broken <label> <old> <new> [<phrase>]
+  local label="$1" phrase="${4:-}"
   if [ -z "$PY" ]; then
     echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
     return
@@ -126,6 +128,10 @@ PY
   elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
+  elif [ -n "$phrase" ] && ! grep -qF -- "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '1,4p' "$WORK/mut.out"
+    status=1
   else
     echo "  $label: caught"
   fi
@@ -142,6 +148,7 @@ broken "six bytes read in the wrong order" '(w.unsafe_shr(40) & 0xFF_u64)
 ' '(w.unsafe_shr(32) & 0xFF_u64)
 '
 broken "a character pair written backwards" 'chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8)' 'chars[k & 63].to_i32 | chars[k.unsafe_shr(6)].to_i32.unsafe_shl(8)'
+broken "vertical tab and form feed refused again" 'next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)' 'next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8' "base64: invalid byte 11"
 # The byte loop is cheap enough on arm64 that it stays inside two and a half
 # byte sums there: darwin arm64 let it through. The check runs everywhere;
 # its proof on Linux x86_64, where the byte loop is twice the word loop.

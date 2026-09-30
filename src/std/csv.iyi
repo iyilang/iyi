@@ -2,9 +2,11 @@
 #
 # `CSV.parse` reads a document into rows of fields. A field may be
 # quoted; a quote inside a quoted field is doubled. The separator is
-# a comma. Lines end at LF or CRLF. `CSV.build` writes the same
+# a comma. Lines end at LF, CRLF or a lone CR, and a blank line is a row
+# of no fields, as in the other library. `CSV.build` writes the same
 # contract: a field is quoted when it holds a comma, a quote or a
-# line break. A quote without its pair is `unterminated quoted field`.
+# line break, and a row of one empty field is written `""`. A quote
+# without its pair is `unterminated quoted field`.
 
 module std/csv
 
@@ -18,6 +20,9 @@ pub struct CSV
     field = Pointer(UInt8).malloc((n + 1).to_u64)
     flen = 0
     quoted = false
+    # The field opened with a quote: `""` is a field even with no bytes in
+    # it, and a last line of just `""` was dropped as if it were nothing.
+    opened = false
     while i < n
       b = src[i]
       if quoted
@@ -38,19 +43,24 @@ pub struct CSV
       else
         if b == 34_u8 && flen == 0
           quoted = true
+          opened = true
           i = i + 1
         elsif b == 44_u8 # comma
           row << take(field, flen)
           flen = 0
+          opened = false
           i = i + 1
-        elsif b == 10_u8
-          row << take(field, flen)
+        elsif b == 10_u8 || b == 13_u8
+          # A lone CR ends the line as the other library's does: it was
+          # dropped, joining the text either side of it into one field.
+          # A blank line is a row of no fields there, not of one empty one.
+          row << take(field, flen) if row.size > 0 || flen > 0 || opened
           flen = 0
+          opened = false
           rows << row
           row = [] of String
           i = i + 1
-        elsif b == 13_u8
-          i = i + 1
+          i = i + 1 if b == 13_u8 && i < n && src[i] == 10_u8
         else
           field[flen] = b
           flen = flen + 1
@@ -59,7 +69,7 @@ pub struct CSV
       end
     end
     raise "unterminated quoted field" if quoted
-    if flen > 0 || row.size > 0 || (n > 0 && src[n - 1] == 44_u8)
+    if flen > 0 || row.size > 0 || opened
       row << take(field, flen)
       rows << row
     end
@@ -74,6 +84,9 @@ pub struct CSV
       while r < rows.size
         io << '\n' if r > 0
         fields = rows[r]
+        # One empty field bare is a blank line, which reads back as a row of
+        # no fields, or as nothing at the end: quoted, it is the field.
+        io << "\"\"" if fields.size == 1 && fields[0].empty?
         c = 0
         while c < fields.size
           io << ',' if c > 0

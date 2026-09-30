@@ -27,4 +27,19 @@ built = CSV.build(quoted)
 assert_true built.includes?("a,b"), "build keeps comma field"
 puts "  rows, quotes, build"
 
+puts "\n== line ends and empty fields"
+# A lone CR ends a line, as in the other library: it was dropped, and the
+# text either side of it ran into one field (`a"b"`).
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\r\"b\"").inspect, "a lone CR ends the line"
+# A blank line is a row of no fields there, not a row of one empty field.
+assert_str "[[\"a\"], [], [\"b\"]]", CSV.parse("a\n\nb\n").inspect, "a blank line is a row of no fields"
+# `""` is a field with nothing in it, last line or not: it was dropped.
+assert_str "[[\"a\"], [\"\"]]", CSV.parse("a\n\"\"").inspect, "a last line of one quoted empty field"
+# Written bare, a row of one empty field was a blank line, and the last
+# one vanished on the way back.
+lone = [[""], ["a"], [""]]
+assert_str "\"\"\na\n\"\"", CSV.build(lone), "a row of one empty field is written quoted"
+assert_str lone.inspect, CSV.parse(CSV.build(lone)).inspect, "a row of one empty field round trips"
+puts "  lone CR, blank line, quoted empty field, both ways"
+
 puts "\nALL CHECKS PASSED"

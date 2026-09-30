@@ -73,7 +73,7 @@ fi
 
 echo
 echo "== every csv section reported"
-for phrase in "== parse"; do
+for phrase in "== parse" "== line ends and empty fields"; do
   if ! grep -q "$phrase" "$WORK/csv-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -111,6 +111,48 @@ elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run
 else
   echo "  a broken csv is caught"
 fi
+
+# Each fix undone in a copy: the exercise must fail at the check written
+# for it - not at an earlier one, and not by failing to compile.
+broken() { # broken <label> <old> <new> <phrase>
+  local label="$1" phrase="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
+    return
+  fi
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  if ! OLD="$2" NEW="$3" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/csv.iyi").read_text()
+old = os.environ["OLD"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path("$WORK/patched/std/csv.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_csv_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/mut.out"
+    status=1
+  elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '1,4p' "$WORK/mut.out"
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+broken "a lone CR dropped again" 'elsif b == 10_u8 || b == 13_u8' 'elsif b == 10_u8' "ASSERTION FAILED: a lone CR ends the line"
+broken "a blank line read as one empty field" 'row << take(field, flen) if row.size > 0 || flen > 0 || opened' 'row << take(field, flen)' "ASSERTION FAILED: a blank line is a row of no fields"
+broken "a last quoted empty field dropped" 'if flen > 0 || row.size > 0 || opened' 'if flen > 0 || row.size > 0' "ASSERTION FAILED: a last line of one quoted empty field"
+broken "a lone empty field written bare" 'io << "\"\"" if fields.size == 1 && fields[0].empty?' '' "ASSERTION FAILED: a row of one empty field is written quoted"
 
 echo
 if [ "$status" -eq 0 ]; then

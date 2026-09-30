@@ -103,7 +103,9 @@ pub struct Base64
       end
       b = src[i]
       i = i + 1
-      next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8
+      # ASCII whitespace, as the header says: `\v` and `\f` were refused as
+      # invalid bytes.
+      next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)
       if b == 61_u8 # '='
         if pads == 0
           raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6

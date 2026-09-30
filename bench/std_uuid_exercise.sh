@@ -116,6 +116,73 @@ PY
 fi
 
 echo
+echo "== what parse refuses"
+# A hyphen anywhere but 8, 13, 18 and 23 of the 36: every `-` was taken
+# out wherever it stood, and these were read as UUIDs. A probe program per
+# text, built against SEARCH - the module under test, unless the proof
+# below points it at a broken copy.
+SEARCH="$IYI_PATH"
+refuses() { # refuses <label> <name> <phrase> <text>
+  local label="$1" name="$2" phrase="$3" text="$4"
+  printf 'module main\n\nimport std/uuid::{UUID}\n\nputs UUID.parse(%s).to_s\n' "$text" > "$WORK/$name.iyi"
+  if ! IYI_PATH="$SEARCH" "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: it answered instead of refusing: $(cat "$WORK/$name.out")"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.out"; then
+    echo "  $label: refused, but not with '$phrase'"
+    sed -n '1,3p' "$WORK/$name.out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(sed -n '1p' "$WORK/$name.out" | sed 's/^iyi: panic: //')"
+}
+refuses "a hyphen past the end" trailing "UUID: not 32 hex digits" '"550e8400-e29b-41d4-a716-446655440000-"'
+refuses "a hyphen one place early" early "UUID: not 32 hex digits" '"550e840-0e29b-41d4-a716-446655440000"'
+refuses "a hyphen inside the first group" inside "UUID: not 32 hex digits" '"5-50e8400e29b41d4a716446655440000"'
+
+echo
+echo "== proving the refusals can fail when the module is broken"
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uuid.iyi").read_text()
+old = 'out << ch unless hyphenated && (k == 8 || k == 13 || k == 18 || k == 23)'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path("$WORK/patched/std/uuid.iyi").write_text(src.replace(old, "out << ch unless ch == '-'", 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the patch did not apply"
+    status=1
+  else
+    # The same check, run on the copy that takes every hyphen out again: it
+    # must report the answer, which a copy that did not compile cannot give.
+    said="$(SEARCH="$WORK/patched${PSEP}$IYI_PATH"; refuses "every hyphen taken out" loose "UUID: not 32 hex digits" '"550e8400-e29b-41d4-a716-446655440000-"')"
+    if printf '%s\n' "$said" | grep -qF "it answered instead of refusing"; then
+      echo "  every hyphen taken out again: caught"
+    else
+      echo "  every hyphen taken out again: the refusal check held on a broken module"
+      printf '%s\n' "$said" | sed 's/^/  /'
+      status=1
+    fi
+  fi
+fi
+
+echo
 if [ "$status" -eq 0 ]; then
   echo "the std/uuid exercise holds"
 else

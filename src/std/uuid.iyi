@@ -1,8 +1,9 @@
 # UUID version 4, RFC 4122, written in iyi.
 #
 # Sixteen random bytes, then version 4 and the RFC 4122 variant bits.
-# `UUID.v4` answers the hyphenated form; `parse` reads it back and
-# panics on a length or hex digit that is not one.
+# `UUID.v4` answers the hyphenated form; `parse` reads it back, or the
+# 32 digits with no hyphens, and panics on a length, hyphen or hex digit
+# that is not one.
 
 module std/uuid
 
@@ -82,11 +83,17 @@ pub struct UUID
     end
   end
 
+  # The hyphens of the hyphenated form, at 8, 13, 18 and 23 of its 36, out;
+  # any other hyphen stays in and is not a hex digit. Every `-` was taken
+  # out wherever it stood, so `5-50e8400e29b41d4a716446655440000-` was read
+  # as a UUID, which the other library refuses.
   private def self.compact(text : String) : Array(Char)
+    hyphenated = text.bytesize == 36 && text[8] == '-' && text[13] == '-' && text[18] == '-' && text[23] == '-'
     out = [] of Char
+    k = 0
     text.each_char do |ch|
-      next if ch == '-'
-      out << ch
+      out << ch unless hyphenated && (k == 8 || k == 13 || k == 18 || k == 23)
+      k = k + 1
     end
     out
   end

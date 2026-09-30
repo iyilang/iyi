@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **CSV, UUID, Base64 and INI read what Python and the other library
+  read.** `CSV.parse` deleted a lone `\r`, joining the fields on either
+  side, and a quote after it became literal; a blank line was one empty
+  field rather than an empty row; a last field of `""` was dropped with
+  its row; and `CSV.build` wrote a row of one empty field as a blank
+  line, which read back as nothing. `UUID.parse` removed every hyphen
+  wherever it stood, so `550e840-0e29b-...` and a trailing `-` parsed as
+  a valid UUID; hyphens count only at the four places they belong now.
+  `Base64.decode` and `INI.parse` refused `\v` and `\f`, which their own
+  headers call whitespace. 750,000 cases against Python's `base64`,
+  `uuid`, `csv` and `configparser` and the other library's modules found
+  these and none after; each exercise checks its fixes and proves each
+  check fails with its fix undone.
+
 - **`Complex` keeps its zeros' signs and divides at any magnitude.**
   `conj`, unary minus, `Number - Complex` and `sqrt` negated as `0.0 - x`,
   which turns -0.0 into 0.0 - so the conjugate of -1+0i sat on the wrong

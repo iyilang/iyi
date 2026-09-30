@@ -96,6 +96,12 @@
 
 ### Changed
 
+- **Base64 decodes its whole groups by pointer.** The loop indexed the
+  text and the answer by two Int32 counters, and each load and store
+  sign-extended its index: crystal-metric's Base64Decode ran 0.80 s
+  where it runs 0.66 now, against Crystal's 0.84. The exercise's proofs
+  follow the loop, and one more breaks the hand-off to the byte loop.
+
 - **A deep budget keeps the empty arenas it will fill again.** The
   scavenge handed every empty arena but a cache's fill arena back to the
   kernel, and a program allocating a budget many arenas deep mapped them

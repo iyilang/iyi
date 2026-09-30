@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **The smallest `Time::Span` prints.** `to_s` negated the whole seconds
+  before splitting them, and `-Int64::MIN` does not fit: the span
+  `Span.seconds(Int64::MIN)` could be made and compared, and printing it
+  panicked "arithmetic overflow". It takes each part signed now, as the
+  accessors do, and makes the part positive, as Crystal's does, and
+  prints Crystal's `-106751991167300.15:30:08`. The time exercise prints
+  the smallest and largest spans, and failed before the fix. Found by
+  1.95 million calendar, span and RFC 3339 cases against Python's
+  `datetime` and a model of Crystal's `Time::Span`, all of which agree.
+
 - **`GC`'s out-of-memory specs have a compiler's time.** Each compiles
   and runs a program, as every spec tagged `slow` does, and unlike those
   they had the harness's plain 15 seconds: on a loaded Windows runner the

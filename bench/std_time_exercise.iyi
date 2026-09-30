@@ -203,6 +203,13 @@ assert_equal(-6_i64 * 3600_i64, s_neg.to_i, "Span negation")
 s_diff = s_hours - s_mins
 assert_equal(6_i64 * 3600_i64 - 45_i64 * 60_i64, s_diff.to_i, "Span subtraction")
 
+# The smallest span prints, as Crystal's does: `to_s` negated the seconds
+# before splitting them, and `Span.seconds(Int64::MIN).to_s` panicked
+# "arithmetic overflow".
+assert_true(Span.seconds(-9223372036854775808_i64).to_s == "-106751991167300.15:30:08", "Span#to_s of the smallest span")
+assert_true(Span.new(-9223372036854775808_i64, -5).to_s == "-106751991167300.15:30:08.000000005", "Span#to_s of the smallest span and 5ns")
+assert_true(Span.new(9223372036854775807_i64, 999999999).to_s == "106751991167300.15:30:07.999999999", "Span#to_s of the largest span")
+
 # Comparisons via Comparable
 assert_true(s_mins < s_hours, "Span <")
 assert_true(s_hours > s_mins, "Span >")

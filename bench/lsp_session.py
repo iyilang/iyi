@@ -1343,6 +1343,51 @@ def main():
          f"sloppy: {sloppy_text!r}")
     c.send("textDocument/didClose", {"textDocument": {"uri": crlf_uri}}, wait=False)
 
+    # 25d. Rename takes the names the compiler takes: `şarkı` for a local,
+    #      `söyle` for a def, and back from one to ASCII. It refused every
+    #      non-ASCII name ("'şarkı' is not an iyi variable name"), where
+    #      `def söyle(şarkı : String)` compiles. A name the lexer reads as a
+    #      constant, `Şarkı`, is still refused for a local.
+    def applied(text, edits):
+        lines = text.split("\n")
+        for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+            r = e["range"]
+            line = lines[r["start"]["line"]]
+            lines[r["start"]["line"]] = line[:r["start"]["character"]] + e["newText"] + line[r["end"]["character"]:]
+        return "\n".join(lines)
+    uni_path = os.path.join(work, "uni.iyi")
+    uni_uri = file_uri(uni_path)
+    uni_text = 'module uni\n\ndef sing(song : String) : String\n  song + song\nend\n\nputs sing("la")\n'
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": uni_uri, "languageId": "iyi",
+                             "version": 1, "text": uni_text}}, wait=False)
+    c.diagnostics(uni_uri)
+    def renamed(line, character, name):
+        reply = c.send("textDocument/rename",
+                       {"textDocument": {"uri": uni_uri},
+                        "position": {"line": line, "character": character},
+                        "newName": name})
+        return reply.get("result"), reply.get("error")
+    to_local, _ = renamed(3, 3, "şarkı")
+    step_one = applied(uni_text, (to_local or {}).get("changes", {}).get(uni_uri, []))
+    to_def, _ = renamed(6, 6, "söyle")
+    step_two = applied(step_one, (to_def or {}).get("changes", {}).get(uni_uri, []))
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": uni_uri, "version": 2},
+            "contentChanges": [{"text": step_two}]}, wait=False)
+    uni_diags = c.diagnostics(uni_uri)["diagnostics"]
+    back, _ = renamed(3, 4, "tune")
+    step_three = applied(step_two, (back or {}).get("changes", {}).get(uni_uri, []))
+    _, constant = renamed(3, 4, "Şarkı")
+    step("25d", "rename takes the names the compiler takes, in any script",
+         step_two == 'module uni\n\ndef söyle(şarkı : String) : String\n  şarkı + şarkı\nend\n\nputs söyle("la")\n' and
+         not uni_diags and
+         step_three == step_two.replace("şarkı", "tune") and
+         constant is not None,
+         f"after two renames {step_two!r}, diagnostics {uni_diags!r}, back {step_three!r}, "
+         f"Şarkı refused: {constant is not None}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": uni_uri}}, wait=False)
+
     # 25b. and formatting a buffer that imports a package. The host segment
     #      is one segment to the parser and three tokens to the lexer, and
     #      the formatter fell behind its own stream on it — raising a plain

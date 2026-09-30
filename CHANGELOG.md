@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Rename takes the names the compiler takes.** The language server
+  refused every non-ASCII name - "'şarkı' is not an iyi variable name" -
+  where `def söyle(şarkı : String)` compiles and runs; its checks were
+  ASCII-only. They ask the lexer's own rule now, and a local's new name
+  is still refused when the lexer would read it as a constant (`Şarkı`).
+  Step 25d of `bench/lsp_session.py` renames a local to `şarkı`, a def to
+  `söyle`, and back; the old server refused the first.
+
 - **The language server runs a buffer that has no file behind it.** VS
   Code's `untitled:` buffer was run from a scratch file beside the
   server's working directory, named after the URI, `:` included; NTFS

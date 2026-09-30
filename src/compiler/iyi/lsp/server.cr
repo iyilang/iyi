@@ -1774,12 +1774,14 @@ module Iyi::Lsp
       end
     end
 
+    # A name by the lexer's own rule (`Lexer.ident_start?`): `şarkı` and
+    # `söyle` are names the compiler takes, and rename refused them.
     private def valid_name?(name : String) : Bool
       return false if name.empty?
-      return false unless name[0].ascii_letter? || name[0] == '_'
+      return false unless Iyi::Lexer.ident_start?(name[0])
       body = name.ends_with?('?') || name.ends_with?('!') ? name.rchop : name
       return false if body.empty?
-      body.each_char.all? { |ch| ch.alphanumeric? || ch == '_' }
+      body.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
     end
 
     # ── Document symbols ─────────────────────────────────────────────────
@@ -1960,10 +1962,13 @@ module Iyi::Lsp
 
     # A variable's name: a lower-case letter or `_` first, letters, digits
     # and `_` after, no `?` or `!`, and not a keyword.
+    # Not a constant: the lexer reads a name that starts upper or title
+    # case as one, in any script.
     private def valid_local?(name : String) : Bool
       return false if name.empty? || KEYWORDS.includes?(name)
-      return false unless name[0].ascii_lowercase? || name[0] == '_'
-      name.each_char.all? { |ch| ch.ascii_alphanumeric? || ch == '_' }
+      first = name[0]
+      return false unless Iyi::Lexer.ident_start?(first) && !first.uppercase? && !first.titlecase?
+      name.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
     end
 
     private def local_sites(text : String, path : String, target : Location, lines : Array(String)) : LocalSites?

@@ -32,4 +32,16 @@ puts "  rows, quotes, build"
 assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
 puts "  a byte order mark"
 
+# A lone CR ends a row, as in Crystal's: it was dropped, and `a\rb` read as
+# `ab`. And a row that is one empty field survives: `""` was no row, and
+# `CSV.build([["a"], [""]])` wrote `a\n`, which read back as one row.
+lone = CSV.parse("a\rb,c\n")
+assert_true lone.size == 2 && lone[0] == ["a"] && lone[1] == ["b", "c"], "a lone CR ends a row"
+assert_true CSV.parse("\"\"") == [[""]], "a quoted empty field alone is a row"
+assert_true CSV.parse("a\n\"\"") == [["a"], [""]], "and as the last row"
+[[["a"], [""]], [[""]], [["x", ""], [""], ["y"]]].each do |table|
+  assert_true CSV.parse(CSV.build(table)) == table, "#{table} reads back from what build wrote"
+end
+puts "  a lone CR, and a row of one empty field"
+
 puts "\nALL CHECKS PASSED"

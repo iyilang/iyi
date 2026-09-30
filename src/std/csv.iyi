@@ -2,9 +2,11 @@
 #
 # `CSV.parse` reads a document into rows of fields. A field may be
 # quoted; a quote inside a quoted field is doubled. The separator is
-# a comma. Lines end at LF or CRLF. `CSV.build` writes the same
-# contract: a field is quoted when it holds a comma, a quote or a
-# line break. A quote without its pair is `unterminated quoted field`.
+# a comma. Lines end at LF, CRLF or a lone CR, as in Crystal's. `CSV.build`
+# writes the same contract: a field is quoted when it holds a comma, a
+# quote or a line break, or is a row's only field and empty - written
+# bare, that row was nothing. A quote without its pair is `unterminated
+# quoted field`.
 
 module std/csv
 
@@ -18,6 +20,9 @@ pub struct CSV
     field = Pointer(UInt8).malloc((n + 1).to_u64)
     flen = 0
     quoted = false
+    # A field that opened a quote is a field even when empty: `""` alone was
+    # no row at all, where Crystal reads `[[""]]`.
+    opened = false
     # Past a byte order mark, which Excel writes into every "CSV UTF-8"
     # file: the first header field kept it, and `row[0] == "id"` was false.
     i = 3 if n >= 3 && src[0] == 0xEF_u8 && src[1] == 0xBB_u8 && src[2] == 0xBF_u8
@@ -41,18 +46,22 @@ pub struct CSV
       else
         if b == 34_u8 && flen == 0
           quoted = true
+          opened = true
           i = i + 1
         elsif b == 44_u8 # comma
           row << take(field, flen)
           flen = 0
+          opened = false
           i = i + 1
-        elsif b == 10_u8
+        elsif b == 13_u8 && i + 1 < n && src[i + 1] == 10_u8
+          i = i + 1
+        elsif b == 10_u8 || b == 13_u8
+          # A lone CR ends a row too: it was dropped, and `a\rb` read as `ab`.
           row << take(field, flen)
           flen = 0
+          opened = false
           rows << row
           row = [] of String
-          i = i + 1
-        elsif b == 13_u8
           i = i + 1
         else
           field[flen] = b
@@ -62,7 +71,7 @@ pub struct CSV
       end
     end
     raise "unterminated quoted field" if quoted
-    if flen > 0 || row.size > 0 || (n > 0 && src[n - 1] == 44_u8)
+    if flen > 0 || opened || row.size > 0 || (n > 0 && src[n - 1] == 44_u8)
       row << take(field, flen)
       rows << row
     end
@@ -77,6 +86,11 @@ pub struct CSV
       while r < rows.size
         io << '\n' if r > 0
         fields = rows[r]
+        if fields.size == 1 && fields[0].empty?
+          io << "\"\""
+          r = r + 1
+          next
+        end
         c = 0
         while c < fields.size
           io << ',' if c > 0

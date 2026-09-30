@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`CSV.parse` ends a row at a lone CR, and keeps a row of one empty
+  field.** An unquoted CR not followed by LF was dropped, so `a\rb,c`
+  read as `[["ab", "c"]]` where Crystal's reads `[["a"], ["b", "c"]]`; it
+  ends a row now. A row that was one quoted empty field, `""`, was no row
+  at all, and `CSV.build` wrote such a row bare, so `[["a"], [""]]` came
+  back as `[["a"]]`; the parser keeps it and `build` writes it as `""`.
+  `bench/std_csv_exercise.iyi` parses both and round-trips three tables
+  through `build`; the old module fails at the lone CR.
+
 - **`Time.utc` on Windows reads the precise clock.** It read
   `GetSystemTimeAsFileTime`, which moves once per timer tick: the smallest
   step measured was 0.5 ms, and 0.7 ms to 15.6 ms in a loop, so two

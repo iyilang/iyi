@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`sleep(0)` yields.** It returned at once, and it is the runtime's
+  only way for a task to let another run without waiting on anything: a
+  task polling a flag with `sleep(0)` spun fifty million times while the
+  task that would have set the flag never ran. Zero or less puts the
+  task at the back of the run queue now, so every task already runnable
+  runs first, as Crystal's `sleep 0` and Go's `Gosched` do; the poller
+  saw the flag after one spin. `bench/concurrency_exercise.sh` polls with
+  it; the old runtime gave up after a million spins.
+
 - **Threads crossing the first collection's budget together no longer
   hang every later collection.** How many helpers a mark may use is
   decided at the first collection, and the word saying it was decided
@@ -13200,7 +13209,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,166-line library and nothing else. Every other
+  written against iyi's own 19,175-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

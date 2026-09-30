@@ -274,6 +274,49 @@ for how in exit panic; do
   fi
 done
 
+# ── 3c. `sleep(0)` yields ─────────────────────────────────────────────────
+# The runtime's one way for a task to let another run without waiting on
+# anything: it returned at once, and a task polling a flag with it spun
+# fifty million times while the task that would set the flag never ran.
+step "sleep(0) lets a runnable task run"
+cat > yielding.iyi <<'IYI'
+module yielding
+
+flag = false
+spins = 0
+group do |g|
+  g.spawn do
+    while !flag
+      spins = spins + 1
+      sleep(0)
+      if spins > 1000000
+        puts "sleep(0) never let the setter run: #{spins} spins"
+        exit(2)
+      end
+    end
+    puts "saw the flag after #{spins} spins"
+    0
+  end
+  g.spawn do
+    flag = true
+    0
+  end
+  0
+end
+IYI
+if ! "$IYI" build yielding.iyi -o yielding > build-yielding.log 2>&1; then
+  echo "yielding probe failed to build:"
+  tail -5 build-yielding.log
+  exit 1
+fi
+timeout 60 ./yielding > yielding.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q '^saw the flag after 1 spins' yielding.txt; then
+  echo "a task yielding with sleep(0) exited $code:"
+  cat yielding.txt
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

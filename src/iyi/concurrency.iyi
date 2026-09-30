@@ -1265,7 +1265,15 @@ class IyiScheduler
   def self.sleep_current(ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
-    return nil if ms <= 0
+    if ms <= 0
+      # A yield: to the back of the run queue, so every task already
+      # runnable runs first. It returned at once, and a task polling with
+      # `sleep(0)` spun 50 million times while the task that would have
+      # set its flag never ran - the runtime has no other way to yield.
+      enqueue(fiber)
+      reschedule
+      return fiber.cancelled ? Cancelled.new : nil
+    end
     fiber.deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
     fiber.state = IyiFiberState::Sleeping
     sleep_insert(fiber)
@@ -2351,7 +2359,8 @@ end
 
 # Park for *ms* milliseconds. `Cancelled` when the group said stop —
 # immediately if it already had, which is what lets `!` drain a cancelled
-# task through every later wait it would have done.
+# task through every later wait it would have done. Zero or less is a
+# yield: every task already runnable runs before this one goes on.
 def sleep(ms : Int32) : Nil | Cancelled
   IyiScheduler.sleep_current(ms)
 end

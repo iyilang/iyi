@@ -206,6 +206,45 @@ PY
   fi
 }
 seek_broken
+# File.match?'s pattern language, each mechanism broken in a copy that
+# compiles: the check that names it has to fail.
+match_broken() { # match_broken <label> <dir> <old> <new> <phrase>
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$2/std" "$WORK/$2-sandbox"
+  if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/file.iyi" "$WORK/$2/std/file.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+assert src.count(os.environ["OLD"]) == 1
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $1: the patch did not apply"
+    status=1
+  elif TMPDIR="$WORK/$2-sandbox" IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/$2-sandbox" >"$WORK/$2.out" 2>&1; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif grep -q "$5" "$WORK/$2.out"; then
+    echo "  $1: caught"
+  else
+    echo "  $1: failed, but not at its check"
+    tail -3 "$WORK/$2.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+match_broken "a star that crosses a separator" star_sep '          if !in_globstar && pi < sn && glob_sep?(s[pi])' '          if false' "a star stays inside a segment"
+match_broken "? as one byte" q_byte '            pi = glob_char(s, sn, pi)[1]' '            pi = pi + 1' "? is one character"
+match_broken "braces read as text" brace_text '        elsif c == 123_u8' '        elsif c == 0_u8' "braces choose a branch"
+match_broken "a negated class read plain" class_neg '            negated = true' '            negated = false' "a class and its negation"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *) match_broken "a backslash read as itself" no_escape '      if c == 92_u8
+        raise "File.match?: a pattern ends' '      if false
+        raise "File.match?: a pattern ends' "a backslash escapes" ;;
+esac
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # The exercise asks Windows whether this account may make a symlink

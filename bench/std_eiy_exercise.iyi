@@ -2,17 +2,21 @@
 #
 # Proves:
 #   * `Eiy.render` of bench/std_eiy_exercise.eiy — output tags, `if`, a block,
-#     `<%-` and `-%>` trimming, a comment over two lines, an escaped tag,
-#     quotes, backslashes, `#{` and UTF-8 text — is the expected text, byte
-#     for byte.
-#   * `Eiy.embed` into an `Eiy::Buffer` and into `stdout` prints the same text.
-#   * `Eiy.def_to_s` in a class defines `to_s` and `to_s(io)` from the template.
+#     `<%-` and `-%>` trimming, a comment over two lines that runs nothing, an
+#     escaped tag, quotes, backslashes, `#{`, UTF-8 text, and a second
+#     template rendered from inside it — is the expected text, byte for byte.
+#   * `Eiy.embed` into an `Eiy::Buffer` and into `stdout` prints the same
+#     text, and a Buffer prints itself into another Buffer.
+#   * `Eiy.def_to_s` in a class defines `to_s` and `to_s(io)` from the
+#     template, and a template whose own block names a value `io` prints
+#     through `to_s(io)` all the same.
 #   * `Eiy::Lexer` token types, values, trimming flags and positions, with the
 #     column counted in characters on a line with non-ASCII text.
-#   * `Eiy.process_string` is the generated source, exactly; `process_file` of
-#     the template is `process_string` of its text; `process_string?` and
-#     `next_token?` answer nil on a tag that is never closed and `error` says
-#     where; `Eiy.locate` finds a template beside its caller.
+#   * `Eiy.process_string` is the generated source, exactly, with text that
+#     is not UTF-8 written as `\x` escapes; `process_file` of the template is
+#     `process_string` of its text; `process_string?` and `next_token?` answer
+#     nil on a tag that is never closed and `error` says where; `Eiy.locate`
+#     finds a template beside its caller.
 #
 # Run via:
 #     ./bin/iyi run bench/std_eiy_exercise.iyi
@@ -42,6 +46,7 @@ EXPECTED = "Merhaba dünya!\n" \
            "<% not a tag %>\n" \
            "  - çay (4 bytes)\n" \
            "  - kahve (5 bytes)\n" \
+           "in brackets: [çay][kahve]\n" \
            "☕ 2 çeşit\n"
 
 class Menu
@@ -53,6 +58,17 @@ class Menu
   end
 
   Eiy.def_to_s("std_eiy_exercise.eiy")
+end
+
+# Its template names its block's value `io`, the name a `to_s(io)` is
+# usually written with.
+class Basket
+  getter items : Array(String)
+
+  def initialize(@items : Array(String))
+  end
+
+  Eiy.def_to_s("std_eiy_exercise_part.eiy")
 end
 
 # ---------------------------------------------------------------------------
@@ -76,6 +92,10 @@ buffer = Eiy::Buffer.new
 Eiy.embed("std_eiy_exercise.eiy", buffer)
 assert_text(EXPECTED, buffer.to_s, "embed into a Buffer")
 puts "  embed: into a Buffer, the same text"
+buffer_copy = Eiy::Buffer.new
+buffer.to_s(buffer_copy)
+assert_text(EXPECTED, buffer_copy.to_s, "a Buffer printed into another Buffer")
+puts "  embed: a Buffer printed into another Buffer, the same text"
 puts "  embed: into stdout, between the rules"
 puts "  ----"
 Eiy.embed("std_eiy_exercise.eiy", stdout)
@@ -90,6 +110,7 @@ menu = Menu.new("Ayşe", false, ["su"])
 menu_expected = "Merhaba Ayşe!\n" \
                 "<% not a tag %>\n" \
                 "  - su (2 bytes)\n" \
+                "in brackets: [su]\n" \
                 "☕ 1 çeşit\n"
 assert_text(menu_expected, menu.to_s, "def_to_s to_s")
 menu_buffer = Eiy::Buffer.new
@@ -97,6 +118,10 @@ menu.to_s(menu_buffer)
 assert_text(menu_expected, menu_buffer.to_s, "def_to_s to_s(io)")
 assert_text(menu_expected, "#{menu}", "def_to_s under interpolation")
 puts "  def_to_s: to_s and to_s(io) agree, and `if` took the other branch"
+basket_buffer = Eiy::Buffer.new
+Basket.new(["çay", "su"]).to_s(basket_buffer)
+assert_text("[çay][su]", basket_buffer.to_s, "def_to_s to_s(io) of a template with its own io")
+puts "  def_to_s: a template's own `io` is its own"
 
 # ---------------------------------------------------------------------------
 # lexer tokens
@@ -156,10 +181,11 @@ generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
                      "out.print(\"d\")\n" \
                      "#<loc:push>#<loc:\"t.eiy\",2,23> end \n#<loc:pop>\n"
 assert_text(generated_expected, generated, "process_string output")
-# A comment is a comment to its last line; spliced in as code, its second
-# line ran.
-commented = Eiy.process_string("a<%# one\ntwo -%>\nb", "t.eiy", "out")
-assert_text("out.print(\"a\")\nout.print(\"b\")\n", commented, "a comment over two lines generates nothing")
+# Text that is not UTF-8 is written as `\x` escapes: the compiler reads a
+# literal as UTF-8, and a byte that is not stops it with an internal error.
+# UTF-8 stays itself; an overlong or surrogate spelling is not UTF-8.
+latin1 = Eiy.process_string("caf\xE9 ☕ \xED\xA0\x80\xC0\xAF.", "", "out")
+assert_text("out.print(\"caf\\xE9 ☕ \\xED\\xA0\\x80\\xC0\\xAF.\")\n", latin1, "text that is not UTF-8 is written as \\x escapes")
 
 template_path = Eiy.locate("std_eiy_exercise.eiy", __FILE__)
 # The directory part comes from `__FILE__`, so it carries whatever separator
@@ -181,11 +207,6 @@ open_lexer = Eiy::Lexer.new("çay <%% never")
 assert_true(open_lexer.next_token.string?, "text before the open tag lexes")
 assert_true(open_lexer.next_token?.nil?, "next_token? answers nil at the open tag")
 assert_text("unterminated <%% tag at line 1, column 5", open_lexer.error || "(no error)", "the lexer's sentence")
-# Text that is not UTF-8 (Latin-1 `é` is the byte 0xE9) is written as an
-# escape, and UTF-8 as itself. Spliced in raw, the byte made the generated
-# source invalid UTF-8, and the compiler stopped on it.
-latin = Eiy.process_string("caf\xE9 \xC3\xA7 \xC3", "", "out")
-assert_text("out.print(\"caf\\xE9 \u00E7 \\xC3\")\n", latin, "a Latin-1 byte, not UTF-8, written as an escape")
 puts "  generated source exact; process_file, locate, process_string? and the lexer's error all answer"
 
 puts "ALL CHECKS PASSED"

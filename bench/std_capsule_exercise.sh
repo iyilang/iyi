@@ -5,9 +5,13 @@
 #     bash bench/std_capsule_exercise.sh
 #
 # Proves the exercise holds plain and --release, that a broken datagram
-# mapping is caught, and what `capsule` refuses: 62-bit integer overflow,
-# explicit length mismatch, overlong varints in strict mode, and truncated
-# buffers or length overruns in datagram and capsule framing.
+# mapping, an Int32 room check that overflows at the end of a 2^31 - 1 byte
+# buffer, a Quarter Stream ID bound of 2^62 - 1 rather than 2^60 - 1, and a
+# Capsule-Protocol value whose parameters are not parsed are each caught,
+# and what `capsule` refuses: 62-bit integer overflow, explicit length
+# mismatch, overlong varints in strict mode, Quarter Stream IDs past
+# 2^60 - 1, and truncated buffers or length overruns in datagram and capsule
+# framing.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -97,26 +101,41 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-if [ -z "$PY" ]; then
-  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
-elif ! "$PY" - <<PY
+# broken <label> <name> <old> <new>: the module with <old> made <new> still
+# builds, and the exercise fails on it.
+broken() {
+  local label="$1" name="$2"
+  mkdir -p "$WORK/$name/std"
+  if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/capsule.iyi" "$WORK/$name/std/capsule.iyi" <<'PY'
+import os, sys
 from pathlib import Path
-src = Path("$REPO/src/std/capsule.iyi").read_text()
-old = '@quarter_stream_id * 4_u64'
+src = Path(sys.argv[1]).read_text()
+old, new = os.environ["OLD"], os.environ["NEW"]
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/capsule.iyi").write_text(src.replace(old, '@quarter_stream_id * 2_u64', 1))
+Path(sys.argv[2]).write_text(src.replace(old, new, 1))
 PY
-then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_capsule_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/exercise" "$REPO/bench/std_capsule_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
+    echo "  $label: the broken module did not build"
+    sed 's/^/    /' "$WORK/$name/build.log" | tail -6
+    status=1
+  elif "$WORK/$name/exercise" >"$WORK/$name/run.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  else
+    echo "  $label is caught: $(grep -m1 -E 'ASSERTION FAILED|panic' "$WORK/$name/run.out")"
+  fi
+}
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
 else
-  echo "  a broken capsule is caught"
-  sed 's/^/    /' "$WORK/mut.out" | tail -4
+  broken "a broken datagram mapping" mut-mapping '@quarter_stream_id * 4_u64' '@quarter_stream_id * 2_u64'
+  broken "a room check that overflows Int32" mut-room 'return nil if room < 8' 'return nil if offset + 8 > bytes.size'
+  broken "a 2^62 - 1 Quarter Stream ID bound" mut-qid 'MAX_QUARTER_STREAM_ID = 1152921504606846975_u64' 'MAX_QUARTER_STREAM_ID = 4611686018427387903_u64'
+  broken "Capsule-Protocol parameters left unparsed" mut-params 'while i < n && p[i] == 59_u8' 'while false && i < n && p[i] == 59_u8'
 fi
 
 echo
@@ -160,10 +179,13 @@ refuses "truncated varint on empty buffer" varint_trunc "varint truncated: buffe
 refuses "negative varint encoding length" varint_neg_len "invalid varint encoding length" 'VarInt.encode(1_u64, -1)'
 refuses "truncated datagram on empty buffer" datagram_trunc "http datagram truncated: buffer empty or ends before payload" 'HttpDatagram.decode(Bytes.new(0))'
 refuses "overlong datagram qid in strict mode" datagram_overlong "overlong varint encoding" 'b = Bytes.new(3); b[0] = 0x40_u8; b[1] = 0x00_u8; b[2] = 0xaa_u8; HttpDatagram.decode(b, 0, true)'
-refuses "datagram quarter stream id exceeding 62-bit MAX" datagram_qid_overflow "http datagram quarter stream id exceeds maximum 62-bit integer" 'HttpDatagram.new(4611686018427387904_u64, Bytes.new(0))'
+refuses "datagram quarter stream id past 2^60 - 1" datagram_qid_overflow "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.new(1152921504606846976_u64, Bytes.new(0))'
+refuses "decoded quarter stream id past 2^60 - 1" datagram_qid_decoded "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.decode(VarInt.encode(1152921504606846976_u64))'
+refuses "stream id past 2^62 - 1" datagram_sid_overflow "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.from_stream_id(18446744073709551615_u64, Bytes.new(0))'
 refuses "truncated capsule on empty buffer" capsule_trunc "truncated capsule: buffer empty or offset beyond end" 'Capsule.decode(Bytes.new(0))'
 refuses "capsule truncated before length" capsule_len_trunc "truncated capsule: buffer ends before capsule length" 'b = Bytes.new(1); b[0] = 0x00_u8; Capsule.decode(b)'
 refuses "capsule length overrunning buffer" capsule_overrun "capsule length overruns buffer" 'b = Bytes.new(3); b[0] = 0x00_u8; b[1] = 0x10_u8; b[2] = 0xAA_u8; Capsule.decode(b)'
+refuses "varint truncated at the end of a 2^31 - 1 byte buffer" varint_edge_trunc "varint truncated: 2-byte varint requires 2 bytes, but only 1 available" 't = Bytes.new(8); t[7] = 0x40_u8; b = Bytes.new(Pointer(UInt8).new(t.to_unsafe.address &- 2147483639_u64), 2147483647); VarInt.decode(b, 2147483646)'
 
 echo
 if [ "$status" -eq 0 ]; then

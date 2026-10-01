@@ -16,7 +16,7 @@
 #
 # Backends: `IOBackend` writes each entry to an IO through a `Formatter`
 # (`DefaultFormatter`: `2024-02-29T15:30:45.123456Z INFO - source: message`,
-# the source and its `: ` omitted at the root, as Crystal's writes it); `MemoryBackend` keeps
+# the source and its ` - ` omitted at the root); `MemoryBackend` keeps
 # the entries for a test to read back. A `Backend` of your own is a
 # class with `write(entry)` and `close`.
 #
@@ -223,16 +223,14 @@ pub class Logger
   end
 
   # The logger for *child_name* under this one, created on first ask;
-  # `"a.b"` is the child `b` of the child `a`. An empty segment names no
-  # logger: `".a"` and `"a..b"` are `"a"` and `"a.b"`, and `"."` is this
-  # one. Each `""` was a child of its own, so `Log.for(".a")` was a second
-  # logger with the source `a` that did not follow `Log.for("a").level=`.
+  # `"a.b"` is the child `b` of the child `a`.
   def for(child_name : String) : Logger
     return self if child_name.empty?
 
+    parts = child_name.split('.')
     current = self
-    child_name.split('.').each do |part|
-      current = current.get_or_create_child(part) unless part.empty?
+    parts.each do |part|
+      current = current.get_or_create_child(part)
     end
     current
   end
@@ -242,7 +240,10 @@ pub class Logger
       return child
     end
 
-    child_source = @source.empty? ? name : "#{@source}.#{name}"
+    # Only the root drops the dot: a child named "" under it has an empty
+    # source too, and `Log.for(".a")` answered "a", the source of another
+    # logger.
+    child_source = @parent.nil? && @source.empty? ? name : "#{@source}.#{name}"
     child = Logger.new(child_source, nil, nil, self)
     @children[name] = child
     child

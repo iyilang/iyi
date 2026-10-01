@@ -415,6 +415,18 @@ nil_chunks = ([nil, nil, 1] of Int32?).chunk_while { |a, b| false }
 assert_eq(nil_chunks.size, 3, "enum: chunk_while after a nil element")
 nil_fold = ([nil, 2] of Int32?).reduce? { |acc, x| (acc || 0) + (x || 0) + 10 }
 assert_true(nil_fold == 12, "enum: reduce? from a nil element")
+# `max_by`, `min_by` and `minmax_by` read a nil answer as "no element" the
+# same way, and refused a list whose answer was a nil element as empty;
+# `Array#max_by` and the other library answer the nil.
+nilable = List(Int32?).new([nil, 1] of Int32?)
+assert_str(nilable.max_by { |x| x || 5 }.inspect, "nil", "enum: max_by of a nil element")
+assert_str(nilable.min_by { |x| x || -5 }.inspect, "nil", "enum: min_by of a nil element")
+assert_str(nilable.minmax_by { |x| x || -5 }[0].inspect, "nil", "enum: minmax_by of a nil element")
+# And `includes?` asks `==`, as `Array#includes?` does: `<=>` answering 0
+# found a NaN in a list of NaNs.
+nan_list = List(Float64).new([0.0 / 0.0])
+assert_true(!nan_list.includes?(0.0 / 0.0), "enum: includes? asks == (no NaN is equal)")
+assert_true(List(Float64).new([1.5, 2.5]).includes?(2.5), "enum: includes? finds an equal float")
 
 # And the plain `max_by`, `min_by` and `minmax_by`, which took the nil their
 # `?` forms answer for "nothing" as nothing: a nil element that won raised

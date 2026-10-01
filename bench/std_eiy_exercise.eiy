@@ -2,10 +2,11 @@ Merhaba <%= name %>!
 <%- if show -%>
   shown: <%= 1 + 2 %> "quoted" \ #{raw} <tag>
 <%- end -%>
-<%# a comment over two lines, printed nowhere, its second line run nowhere:
-items << "the comment ran" -%>
+<%# a comment, printed nowhere; its second line would drop an item if it ran:
+items.pop -%>
 <%% not a tag %>
 <% items.each do |item| -%>
   - <%= item %> (<%= item.bytesize %> bytes)
 <% end -%>
+in brackets: <%= Eiy.render("std_eiy_exercise_part.eiy") %>
 ☕ <%= items.size %> çeşit

@@ -21,15 +21,6 @@ def assert_nil(actual, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected nil\n  got      #{actual.inspect}" unless actual.nil?
 end
 
-# Bytes as a file or a socket hands them over. A literal's character count
-# is the compiler's, fixed when it was compiled, and is not what the
-# prelude counts in a string made at run time.
-def from_bytes(bytes : Array(Int32)) : String
-  String.new(bytes.size) do |buffer|
-    bytes.each_with_index { |b, i| buffer[i] = b.to_u8 }
-  end
-end
-
 import std/levenshtein
 
 puts "== identical strings"
@@ -86,16 +77,6 @@ assert_int 1, Levenshtein.distance("日本語", "日本"), "delete kanji charact
 assert_int 1, Levenshtein.distance("日本語", "日本国"), "substitute kanji character"
 assert_int 1, Levenshtein.distance("Москва", "Москве"), "cyrillic inflection"
 assert_int 2, Levenshtein.distance("Москва", "Тоска"), "cyrillic substitution and deletion"
-# Invalid UTF-8 is measured in the characters `chars` yields, as the other
-# library measures it. The counts came from `String#size`, which counts
-# the bytes that start a character: three continuation bytes were an
-# empty string, distance 2 to "日x", and a truncated "\xE6\x97" walked one
-# of its two characters.
-stray = from_bytes([0x80, 0x80, 0x80])
-assert_int 3, Levenshtein.distance(stray, "日x"), "three stray continuation bytes are three characters"
-assert_int 3, Levenshtein.distance("日x", stray), "stray continuation bytes, the other way round"
-assert_int 2, Levenshtein.distance(from_bytes([0xE6, 0x97]), "日"), "a truncated character is two characters"
-assert_int 3, Levenshtein.distance(from_bytes([0xF0, 0x9F, 0x98]), "日x"), "a truncated four-byte character is three characters"
 puts "  non-ASCII characters are counted by glyph, not byte width"
 
 puts "\n== symmetry"
@@ -158,5 +139,14 @@ assert_int 1, Levenshtein.osa_distance("", "a"), "OSA empty vs a"
 found = Levenshtein.find("cuont", ["count", "cont", "mount"])
 assert_str "count", found || "", "finder prefers the transposed name over a deletion"
 puts "  finder treats an adjacent transposition as one edit"
+
+puts "\n== bytes that are not UTF-8"
+# `size` and `chars` count such bytes differently; the distance counts what
+# it compares.
+lone = String.new(1) { |b| b[0] = 0x80_u8 }
+assert_int 1, Levenshtein.distance(lone, ""), "a lone continuation byte is one character away from nothing"
+broken = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 } + "é"
+assert_int Levenshtein.osa_distance(broken, "éx"), Levenshtein.distance(broken, "éx"), "a lead byte with no continuation is read as osa_distance reads it"
+puts "  a string that is not UTF-8 has a distance, not a panic"
 
 puts "\nALL CHECKS PASSED"

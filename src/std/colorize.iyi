@@ -140,8 +140,12 @@ pub struct Colorize
       Object(T).new(@target, @fore, @back, @mode, enabled)
     end
 
+    # A name that is no colour raises, as the other library's `fore(:purple)`
+    # does: answering `Default` painted a typo in no colour at all, and
+    # `on(:purpel)` quietly cleared a background already set.
     private def parse_color(symbol : Symbol) : ColorANSI
       case symbol
+      when :default       then ColorANSI::Default
       when :black         then ColorANSI::Black
       when :red           then ColorANSI::Red
       when :green         then ColorANSI::Green
@@ -158,7 +162,7 @@ pub struct Colorize
       when :light_magenta then ColorANSI::LightMagenta
       when :light_cyan    then ColorANSI::LightCyan
       when :white         then ColorANSI::White
-      else                     ColorANSI::Default
+      else                     raise "Unknown color: #{symbol}"
       end
     end
 
@@ -202,15 +206,19 @@ pub struct Colorize
       Object(T).new(@target, @fore, @back, mode, @enabled)
     end
 
+    # `:bright` is `:bold`, as the `bright` method is; a name that is no mode
+    # raises rather than answering `Default`, which cleared the mode already
+    # set: `bold.mode(:italic)` printed the text plain.
     def mode(sym : Symbol) : self
       m = case sym
-          when :bold      then Mode::Bold
-          when :dim       then Mode::Dim
-          when :underline then Mode::Underline
-          when :blink     then Mode::Blink
-          when :reverse   then Mode::Reverse
-          when :hidden    then Mode::Hidden
-          else                 Mode::Default
+          when :default       then Mode::Default
+          when :bold, :bright then Mode::Bold
+          when :dim           then Mode::Dim
+          when :underline     then Mode::Underline
+          when :blink         then Mode::Blink
+          when :reverse       then Mode::Reverse
+          when :hidden        then Mode::Hidden
+          else                     raise "Unknown mode: #{sym}"
           end
       mode(m)
     end
@@ -383,7 +391,18 @@ pub struct Colorize
     end
 
     def to_s : String
-      target_str = @target.to_s
+      wrap(@target.to_s)
+    end
+
+    # The target written down, painted: `"hi".colorize.red.inspect` is the
+    # escape around `"\"hi\""`, the way the other library has it. It was
+    # `to_s`, so a coloured string inspected lost its quotes and read as a
+    # name.
+    def inspect : String
+      wrap(@target.inspect)
+    end
+
+    private def wrap(target_str : String) : String
       return target_str unless Colorize.enabled? && @enabled
 
       parts = [] of String
@@ -429,12 +448,8 @@ pub struct Colorize
       io.write(to_s)
     end
 
-    def inspect : String
-      to_s
-    end
-
     def inspect(io) : Nil
-      io.write(to_s)
+      io.write(inspect)
     end
   end
 

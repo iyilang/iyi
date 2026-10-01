@@ -13,6 +13,17 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# What one parse added to a log the handlers write to.
+def added(log : Array(String), from : Int32) : String
+  parts = [] of String
+  i = from
+  while i < log.size
+    parts << log[i]
+    i = i + 1
+  end
+  parts.join(",")
+end
+
 import std/option_parser::{OptionParser}
 
 puts "== flags"
@@ -47,34 +58,36 @@ bare.parse(["--flag=x"])
 assert_str "no value for --flag", seen.last, "a value for a switch is an invalid option"
 puts "  invalid_option and missing_option answer instead of a panic"
 
-puts "\n== grouped short flags, `--name=VALUE`, and a flag that is a character"
-# `-vo out` is `-v -o out`, and `-oout` is `-o out`: only the first flag of
-# a group was read, the rest dropped, and `-vz` never said `-z` was unknown.
-# `on("--name=NAME")`, Crystal's spelling, registered a flag nothing
-# matched. And a short flag is a character: `-é` was cut to one byte.
-grouped = OptionParser.new
-loud = false
-output = ""
-accent = false
-title = ""
-grouped_bad = [] of String
-grouped.on("-v", "verbose") { |v| loud = true }
-grouped.on("-o FILE", "output") { |v| output = v }
-grouped.on("-é", "accent") { |v| accent = true }
-grouped.on("--title=TITLE", "the title") { |v| title = v }
-grouped.invalid_option { |flag| grouped_bad << flag }
-operands = grouped.parse(["-vo", "out.txt", "-vz", "-é", "--title=x", "--title", "y", "left"])
-assert_true loud, "-v in a group is read"
-assert_str "out.txt", output, "-o at a group's end takes the next argument"
-assert_str "-z", grouped_bad.join(","), "an unknown flag in a group is reported"
-assert_true accent, "a non-ASCII short flag is one character"
-assert_str "y", title, "--title=TITLE registers --title taking a value"
-assert_str "left", operands.join(","), "the operands are what is left"
-glued = OptionParser.new
-glued_out = ""
-glued.on("-o FILE", "output") { |v| glued_out = v }
-glued.parse(["-oout.txt"])
-assert_str "out.txt", glued_out, "-oFILE is -o FILE"
-puts "  -vo out, -vz, -é, --title=TITLE and -oFILE"
+puts "\n== short bundles and the value spellings"
+ran = [] of String
+bundles = OptionParser.new
+bundles.on("-v", "verbose") { |v| ran << "v" }
+bundles.on("-q", "quiet") { |v| ran << "q" }
+bundles.on("-p PORT", "port") { |v| ran << "p=" + v }
+bundles.invalid_option { |flag| ran << "invalid " + flag }
+bundles.parse(["-vq", "-qvp8080"])
+assert_str "v,q,q,v,p=8080", added(ran, 0), "a bundle runs every flag in it"
+mark = ran.size
+bundles.parse(["-vx", "-q=1"])
+assert_str "invalid -v,invalid -q", added(ran, mark), "a bundle with no such flag in it is an invalid option"
+long_eq = OptionParser.new
+long_eq.on("--out=FILE", "output") { |v| ran << "out=" + v }
+long_eq.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+long_eq.parse(["--out", "a", "--out=b"])
+assert_str "out=a,out=b", added(ran, mark), "--out=FILE takes a value"
+short_glued = OptionParser.new
+short_glued.on("-oFILE", "output") { |v| ran << "o=" + v }
+short_glued.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+short_glued.parse(["-o", "a", "-ob"])
+assert_str "o=a,o=b", added(ran, mark), "-oFILE takes a value"
+accent = OptionParser.new
+accent.on("-é", "accent") { |v| ran << "é=" + v }
+accent.invalid_option { |flag| ran << "invalid " + flag }
+mark = ran.size
+accent.parse(["-é", "-ö"])
+assert_str "é=,invalid -ö", added(ran, mark), "a short flag is one character"
+puts "  -vqp8080 is -v -q -p 8080, and --out=FILE, -oFILE and -é are flags"
 
 puts "\nALL CHECKS PASSED"

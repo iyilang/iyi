@@ -1,11 +1,8 @@
 # Flag parsing, written in iyi.
 #
 # `on("--name VALUE", "help") { |v| ... }` and `on("-h", "help") { }`
-# register flags; `--name=VALUE` is Crystal's spelling of the first and
-# means the same. `parse` walks `Program.args` (or the array given),
-# calls the blocks, and answers the leftover operands. Short flags group
-# as they do in every Unix tool: `-vo out` is `-v -o out`, and `-oout` is
-# `-o out`.
+# register flags. `parse` walks `Program.args` (or the array given),
+# calls the blocks, and answers the leftover operands.
 #
 # What the person typed wrong is the program's to answer, the way
 # Crystal's `OptionParser` has it: `invalid_option { |flag| ... }` is
@@ -53,32 +50,42 @@ pub class OptionParser
     handler.call(flag)
   end
 
+  # A value is taken by `--name VALUE`, `--name=VALUE`, `-n VALUE` and
+  # `-nVALUE`, the four spellings the other library reads. Only the space
+  # form was: `--name=VALUE` was stored under the key `--name=VALUE`, which
+  # no argument ever looks up, and `-nVALUE` refused itself as not a flag.
+  # A short flag is one character, not one byte: `-é` was refused too.
   def on(flag : String, description : String, &block : String -> Nil) : Nil
     @help << "  #{flag}  #{description}"
-    # A value is named after a space or after `=`. `--name=NAME` was a
-    # flag called `--name=NAME`, which no argument matched: every
-    # `--name=x` was "unknown flag: --name".
-    cut = flag.bytesize
-    at = 0
-    while at < flag.bytesize
-      byte = flag.to_unsafe[at]
-      if byte == 32_u8 || byte == 61_u8
-        cut = at
-        break
+    takes = flag.includes?(" ")
+    name = flag.split(' ')[0]
+    if name.starts_with?("--")
+      eq = name.index('=')
+      if eq
+        takes = true
+        name = name[0, eq]
       end
-      at = at + 1
-    end
-    takes = cut < flag.bytesize
-    name = flag[0, cut]
-    if name.starts_with?("--") && name.bytesize > 2
       @long[name] = {takes, block}
-    elsif name.starts_with?("-") && !name.starts_with?("--") && name.bytesize > 1 && name.bytesize == 1 + char_width(name, 1)
+    elsif name.starts_with?("-") && name.bytesize >= 2
+      at = char_end(name, 1)
+      if at < name.bytesize
+        takes = true
+        name = name[0, at]
+      end
       @short[name] = {takes, block}
     else
-      # `--` alone is the end of the flags, which `parse` answers itself;
-      # registered, it could never be reached.
       raise "option: not a flag: #{flag}"
     end
+  end
+
+  # Where the character starting at byte *at* ends: a short flag is `-`
+  # and one character, and cutting it at two bytes handed `invalid_option`
+  # half of an `é`.
+  private def char_end(s : String, at : Int32) : Int32
+    b = s.to_unsafe[at]
+    width = b < 0xC0_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))
+    e = at + width
+    e > s.bytesize ? s.bytesize : e
   end
 
   def parse : Array(String)
@@ -127,38 +134,28 @@ pub class OptionParser
           end
         end
       elsif a.starts_with?("-") && a.bytesize >= 2 && a != "-"
-        # A group: each flag in turn, until one takes a value, which is the
-        # rest of the argument or, with nothing left, the next one. Only
-        # the first was read, and the rest dropped in silence: `-vo out`
-        # set `-v` and left `out` an operand, and `-vz` never said `-z` was
-        # unknown. A flag is a character, not a byte: `-é` was `-\xC3`.
-        at = 1
-        while at < a.bytesize
-          width = char_width(a, at)
-          name = "-" + a[at, width]
-          at = at + width
-          spec = @short[name]?
-          if !spec
-            invalid(name, "unknown flag: #{name}")
-          elsif spec[0]
-            if at < a.bytesize
-              spec[1].call(a[at, a.bytesize - at])
-            else
-              i = i + 1
-              if i >= n
-                missing(name)
-              else
-                spec[1].call(args[i])
-              end
-            end
-            break
-          elsif at < a.bytesize && a.to_unsafe[at] == 61_u8
-            # `-q=1`: a value given to a switch, as `--flag=x` is.
-            invalid(name, "flag #{name} takes no value")
-            break
+        at = char_end(a, 1)
+        name = a[0, at]
+        spec = @short[name]?
+        if !spec
+          invalid(name, "unknown flag: #{name}")
+        elsif spec[0]
+          if a.bytesize > at
+            spec[1].call(a[at, a.bytesize - at])
           else
-            spec[1].call("")
+            i = i + 1
+            if i >= n
+              missing(name)
+            else
+              spec[1].call(args[i])
+            end
           end
+        elsif a.bytesize == at
+          spec[1].call("")
+        elsif bundle?(a)
+          run_bundle(a)
+        else
+          invalid(name, "flag #{name} takes no value")
         end
       else
         rest << a
@@ -168,11 +165,38 @@ pub class OptionParser
     rest
   end
 
-  # The bytes of the UTF-8 character that starts at *at*.
-  private def char_width(text : String, at : Int32) : Int32
-    lead = text.to_unsafe[at]
-    width = lead < 0x80_u8 ? 1 : (lead >= 0xF0_u8 ? 4 : (lead >= 0xE0_u8 ? 3 : 2))
-    width < text.bytesize - at ? width : text.bytesize - at
+  # `-vq` is `-v -q`, and `-vp8080` is `-v -p 8080`: every character up to
+  # the first flag that takes a value is a flag, and what follows that one
+  # is its value, the reading the other library gives. Only the first
+  # character was read and the rest dropped, so `-vq` never ran `-q` and
+  # `-vx`, with no `-x`, passed as `-v`. A bundle with a character that is
+  # no flag runs none of it: it is `-v` handed a value it does not take.
+  private def bundle?(a : String) : Bool
+    pos = 1
+    while pos < a.bytesize
+      e = char_end(a, pos)
+      spec = @short["-" + a[pos, e - pos]]?
+      return false unless spec
+      return true if spec[0]
+      pos = e
+    end
+    true
+  end
+
+  private def run_bundle(a : String) : Nil
+    pos = 1
+    while pos < a.bytesize
+      e = char_end(a, pos)
+      spec = @short["-" + a[pos, e - pos]]?
+      if spec
+        if spec[0]
+          spec[1].call(a[e, a.bytesize - e])
+          return
+        end
+        spec[1].call("")
+      end
+      pos = e
+    end
   end
 
   def help : String

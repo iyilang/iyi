@@ -532,17 +532,10 @@ if ! grep -q "ALL CHECKS PASSED" "$WORK/math-release.out" 2>/dev/null; then
   status=1
 fi
 
-# aarch64's `Math.fma` is the instruction and nothing else: musl's arm is
-# not compiled there, so neither its run below nor the proofs that break it
-# test anything, and darwin arm64 reported the four as PASSED on a broken
-# module.
-SOFT_FMA=1
-case "$(uname -m)" in arm64 | aarch64) SOFT_FMA="" ;; esac
-
 # x86_64 fuses with `vfmadd` where the processor has FMA3, which every CI
 # runner's does, so musl's arm would go unrun there; the same exercise
 # once more with the processor's answer taken to be no.
-if [ -n "$FMA" ] && [ -n "$PY" ] && [ -n "$SOFT_FMA" ]; then
+if [ -n "$FMA" ] && [ -n "$PY" ]; then
   echo
   echo "== fma's software arm, the processor's instruction refused"
   rm -rf "$WORK/software"
@@ -688,16 +681,22 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
   mutate "atan2's quotient without the divisor's low part" '    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))' '    zl = rdh * (fma(dh, zh * -1.0, nh) + nl)'
   mutate "atan2's slow product left unnormalised" '      rex = rex &- 1_i64' '      rex = rex &- 0_i64'
-  if [ -n "$SOFT_FMA" ]; then
-    mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
-    mutate "the software fma's fast path without its round to odd" '      if err != 0.0
+  # The software arm runs where the processor's instruction can be
+  # refused: x86_64, whose proofs refuse it in the prelude. aarch64 always
+  # fuses with its own instruction and never reaches `soft_fma`, so there
+  # a break in it changes nothing - the proofs had read "caught" there only
+  # while the oracle's files were compiled as source.
+  case "$(uname -m)" in
+    x86_64 | amd64 | AMD64)
+      mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
+      mutate "the software fma's fast path without its round to odd" '      if err != 0.0
         bits = IyiFloatText.bits_of(v)' '      if false
         bits = IyiFloatText.bits_of(v)' '      fuses == 1' '      false'
-    mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
-    mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false'
-  else
-    echo "  musl's fma arm broken four ways: not proven here, because $(uname -m)'s fma is the instruction alone"
-  fi
+      mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
+      mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false' ;;
+    *)
+      echo "  the software fma's four proofs: not run here, because $(uname -m) fuses with its own instruction and never runs the software arm" ;;
+  esac
   # And the instruction with its operands in the wrong order, b * c + a,
   # where the instruction is what runs.
   if [ "$(uname -s) $(uname -m)" = "Linux x86_64" ] && grep -qw fma /proc/cpuinfo; then

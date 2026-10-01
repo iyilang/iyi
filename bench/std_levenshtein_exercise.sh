@@ -4,8 +4,7 @@
 #     bash bench/std_levenshtein_exercise.sh
 #
 # Proves the exercise holds plain and --release, that all sections report,
-# and that a broken distance calculation is caught, invalid UTF-8 measured
-# by `String#size` among them.
+# and that a broken distance calculation is caught.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -87,7 +86,8 @@ for phrase in \
   "== multibyte and unicode" \
   "== symmetry" \
   "== finder and candidate search" \
-  "== finder transposition (OSA)"; do
+  "== finder transposition (OSA)" \
+  "== bytes that are not UTF-8"; do
   if ! grep -q "$phrase" "$WORK/levenshtein-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -202,7 +202,8 @@ PY
   fi
 fi
 
-# Mutation 5: invalid UTF-8 measured by String#size, not by its chars
+# Mutation 5: the character loops bounded by `size` again, which counts bytes
+# that are not UTF-8 differently from the `chars` the loops index
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -210,19 +211,26 @@ else
   "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/levenshtein.iyi").read_text()
-old = 's_size = chars1.size\n      t_size = chars2.size'
-if old not in src:
-    raise SystemExit("patch site missing: chars1.size")
-Path("$WORK/patched5/std/levenshtein.iyi").write_text(src.replace(old, 's_size = string1.size\n      t_size = string2.size', 1))
+call = 'char_distance(string1.chars, string2.chars)'
+head = 'char_distance(chars1 : Array(Char), chars2 : Array(Char)) : Int32\n    s_size = chars1.size\n    t_size = chars2.size\n'
+if call not in src or head not in src:
+    raise SystemExit("patch site missing: char_distance")
+src = src.replace(call, 'char_distance(string1.chars, string2.chars, string1.size, string2.size)', 1)
+src = src.replace(head, 'char_distance(chars1 : Array(Char), chars2 : Array(Char), s_size : Int32, t_size : Int32) : Int32\n', 1)
+Path("$WORK/patched5/std/levenshtein.iyi").write_text(src)
 PY
   if [ $? -ne 0 ]; then
-    echo "  the size patch did not apply"
+    echo "  the size-bounded patch did not apply"
     status=1
   elif IYI_PATH="$WORK/patched5${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_levenshtein_exercise.iyi" >"$WORK/mut5.out" 2>&1; then
-    echo "  the exercise PASSED with invalid UTF-8 measured by size"
+    echo "  the exercise PASSED with loops bounded by size"
     status=1
+  elif grep -q "ASSERTION FAILED: a lone continuation byte is one character away from nothing" "$WORK/mut5.out"; then
+    echo "  loops bounded by size are caught"
   else
-    echo "  invalid UTF-8 measured by String#size is caught"
+    echo "  loops bounded by size failed, but not at the lone continuation byte"
+    tail -3 "$WORK/mut5.out" | sed 's/^/    /'
+    status=1
   fi
 fi
 

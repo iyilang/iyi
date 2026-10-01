@@ -68,8 +68,9 @@ pub struct Eiy
       @parts.join("")
     end
 
+    # `print`, the one verb a template's target has, so a Buffer can be one.
     def to_s(io) : Nil
-      io.write(to_s)
+      io.print(to_s)
     end
   end
 
@@ -408,9 +409,8 @@ pub struct Eiy
 
         suppress_trailing_whitespace(token, suppress_trailing)
 
-        # `<%# note %>` is a comment as a whole, over two lines as over one.
-        # Spliced in as code, only its first line was one: `<%# a\nputs 1 %>`
-        # ran `puts 1`.
+        # A comment tag prints and runs nothing, however many lines it has:
+        # spliced in as code, every line after its first would run.
         unless str_val.starts_with?('#')
           parts << "#<loc:push>"
           append_loc(parts, filename, line_number, column_number)
@@ -427,8 +427,7 @@ pub struct Eiy
   end
 
   # *text* as an iyi string literal: quotes, backslashes and `#` escaped,
-  # control bytes written out, UTF-8 as itself, and a byte that is not
-  # UTF-8, a Latin-1 `é` (0xE9) among them, as `\xHH`.
+  # control bytes and bytes that are not UTF-8 written out, UTF-8 as itself.
   private def self.quote(text : String) : String
     parts = [] of String
     parts << "\""
@@ -438,6 +437,13 @@ pub struct Eiy
     i = 0
     while i < len
       b = raw[i].to_i32
+      if b >= 128
+        size = utf8_size(raw, i, len)
+        if size > 0
+          i += size
+          next
+        end
+      end
       escape =
         if b == 34 # '"'
           "\\\""
@@ -451,77 +457,57 @@ pub struct Eiy
           "\\r"
         elsif b == 9
           "\\t"
-        elsif b < 32 || b == 127
+        elsif b < 32 || b >= 127
           "\\x#{HEX[b // 16]}#{HEX[b % 16]}"
         else
           nil
         end
-      # Past ASCII, a well-formed UTF-8 sequence goes in whole, as itself,
-      # and any other byte as `\xHH`. Spliced in raw, a Latin-1 byte made the
-      # generated source invalid UTF-8, and the compiler stopped on it with
-      # an InvalidByteSequenceError trace.
-      width = 1
-      if b >= 128
-        width = utf8_width(raw, len, i)
-        if width == 0
-          escape = "\\x#{HEX[b // 16]}#{HEX[b % 16]}"
-          width = 1
-        end
-      end
       if escape
         parts << text[run_start, i - run_start] if i > run_start
         parts << escape
         run_start = i + 1
       end
-      i += width
+      i += 1
     end
     parts << text[run_start, len - run_start] if len > run_start
     parts << "\""
     parts.join("")
   end
 
-  # The length of the well-formed UTF-8 sequence that starts at *at*, or 0
-  # when the bytes there are not one: a stray continuation byte, an overlong
-  # form, a surrogate, past U+10FFFF, or cut short.
-  private def self.utf8_width(bytes : Pointer(UInt8), size : Int32, at : Int32) : Int32
-    lead = bytes[at]
-    need = 0
-    low = 0x80_u8
-    high = 0xBF_u8
-    if lead >= 0xC2_u8 && lead <= 0xDF_u8
-      need = 1
-    elsif lead == 0xE0_u8
-      need = 2
-      low = 0xA0_u8
-    elsif lead == 0xED_u8
-      need = 2
-      high = 0x9F_u8
-    elsif lead >= 0xE1_u8 && lead <= 0xEF_u8
-      need = 2
-    elsif lead == 0xF0_u8
-      need = 3
-      low = 0x90_u8
-    elsif lead == 0xF4_u8
-      need = 3
-      high = 0x8F_u8
-    elsif lead >= 0xF1_u8 && lead <= 0xF3_u8
-      need = 3
+  HEX = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
+
+  # How many bytes the UTF-8 character starting at *i* takes, or 0 when the
+  # bytes there are not one. The compiler reads a literal as UTF-8 and stops
+  # at a byte that is not, so such a byte has to be written as `\x`.
+  private def self.utf8_size(raw : Pointer(UInt8), i : Int32, len : Int32) : Int32
+    b = raw[i].to_i32
+    lo = 0x80
+    hi = 0xBF
+    size = 0
+    if b >= 0xC2 && b <= 0xDF
+      size = 2
+    elsif b >= 0xE0 && b <= 0xEF
+      size = 3
+      lo = 0xA0 if b == 0xE0 # overlong
+      hi = 0x9F if b == 0xED # surrogate
+    elsif b >= 0xF0 && b <= 0xF4
+      size = 4
+      lo = 0x90 if b == 0xF0 # overlong
+      hi = 0x8F if b == 0xF4 # past U+10FFFF
     else
       return 0
     end
-    taken = 1
-    while taken <= need
-      return 0 if at + taken >= size
-      byte = bytes[at + taken]
-      return 0 if byte < low || byte > high
-      low = 0x80_u8
-      high = 0xBF_u8
-      taken += 1
+    return 0 if i + size > len
+    c = raw[i + 1].to_i32
+    return 0 if c < lo || c > hi
+    k = 2
+    while k < size
+      c = raw[i + k].to_i32
+      return 0 if c < 0x80 || c > 0xBF
+      k += 1
     end
-    taken
+    size
   end
-
-  HEX = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
 
   private def self.suppress_leading_indentation(token : Lexer::Token, string : String) : String
     if (token.output? || token.control?) && token.suppress_leading?
@@ -577,10 +563,9 @@ pub struct Eiy
     {{ run("./eiy/process", @caller.first.filename || "", filename, io_name.id.stringify) }}
   end
 
-  # The template at *filename*, rendered to a `String`. The buffer's name
-  # is fresh per expansion: it was `__buf__`, and a template that
-  # renders another reassigned it, so `A<%= Eiy.render("inner.eiy") %>B`
-  # gave `iB`, the outer text lost.
+  # The template at *filename*, rendered to a `String`. The buffer's name is
+  # the macro's own, so a template that renders another one inside it does
+  # not replace the buffer it is printing to.
   macro render(filename)
     begin
       %buf = ::Std::Eiy::Eiy::Buffer.new
@@ -590,9 +575,8 @@ pub struct Eiy
   end
 
   # Defines `to_s(io)` and `to_s` from the template at *filename*. The
-  # parameter is `__io__`, as `Eiy.process_string`'s default names it: named
-  # `io`, it hid a method `io` of the class, and `<%= io %>` printed the
-  # buffer to itself.
+  # parameter is `__io__`, a name no template means, so a template's own
+  # `io` stays its own.
   macro def_to_s(filename)
     def to_s(__io__) : Nil
       ::Std::Eiy::Eiy.embed({{filename}}, __io__)

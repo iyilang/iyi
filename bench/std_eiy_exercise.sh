@@ -5,21 +5,22 @@
 #
 # Proves:
 #   * `Eiy.render`, `Eiy.embed` and `Eiy.def_to_s` of bench/std_eiy_exercise.eiy
-#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a comment, an escaped
-#     tag, quotes, backslashes, `#{` and UTF-8 text) print the expected text
-#     byte for byte, plain and with --release; so does a Latin-1 template,
-#     its bytes as they are.
+#     (output tags, `if`, a block, `<%-`/`-%>` trimming, a two-line comment,
+#     an escaped tag, quotes, backslashes, `#{`, UTF-8 text, and
+#     bench/std_eiy_exercise_part.eiy rendered from inside it) print the
+#     expected text byte for byte, plain and with --release.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
 #   * Negative proofs: a copy of the module with `-%>` trimming broken, with
-#     columns counted in bytes, and with `#` left unescaped in template text is
-#     caught, each at its named check.
+#     columns counted in bytes, with `#` left unescaped in template text, with
+#     bytes that are not UTF-8 left unescaped, with a comment tag spliced in
+#     as code, with `render`'s buffer under a fixed name, with `def_to_s`'s
+#     parameter named `io`, and with a Buffer that needs `write` of its target
+#     is caught, each at its named check.
 #   * Refusals: a template with an open tag and a template that is not there
 #     are refused at build time with their sentences; the runtime API panics
 #     with the same sentences.
-#   * A template that renders another keeps the text around it, and
-#     `def_to_s` leaves a class's own `io` to the template.
 #   * Dependency floor: the exercise binary adds no symbol and no library.
 #
 # Needs `make` for bin/iyi, plus `nm`, and `otool` on Darwin or `readelf` on Linux.
@@ -124,7 +125,7 @@ build_and_run "std_eiy" exercise-eiy "$REPO/bench/std_eiy_exercise.iyi"
 
 echo
 echo "== every eiy check reported"
-for check in "render:" "embed: into a Buffer" "embed: into stdout" "def_to_s:" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
+for check in "render:" "embed: into a Buffer" "embed: a Buffer printed into another Buffer" "embed: into stdout" "def_to_s:" "a template's own" "lexer:" "generated source exact" "ALL CHECKS PASSED"; do
   if ! grep -qF -- "$check" "$WORK/exercise-eiy.out" 2>/dev/null; then
     echo "  missing: $check"
     status=1
@@ -198,6 +199,24 @@ prove_fails "a column counted in bytes" patched_column "token 2 at 2:7" \
 # generated program, and the build refuses the name the template never meant.
 prove_fails "template text spliced in unescaped" patched_quote "undefined local variable or method 'raw'" \
   "content.replace(\"elsif b == 35 # '#'\", \"elsif b == 36 # '#'\")"
+# The compiler reads a string literal as UTF-8 and stops with an internal
+# error at a byte that is not, so such a byte in template text has to be
+# written out.
+prove_fails "text that is not UTF-8 spliced in as itself" patched_utf8 "text that is not UTF-8 is written as \\x escapes" \
+  "content.replace('elsif b < 32 || b >= 127', 'elsif b < 32 || b == 127')"
+# Spliced in as code, the comment's second line runs and drops an item.
+prove_fails "a comment tag spliced in as code" patched_comment "render of the template" \
+  "content.replace(\"unless str_val.starts_with?('#')\", \"unless false && str_val.starts_with?('#')\")"
+# Under a fixed name the template's inner `render` replaces the outer buffer,
+# and what the outer printed before it is lost.
+prove_fails "render's buffer under a fixed name" patched_nested "render of the template" \
+  "content.replace('%buf', '__buf__')"
+# Named `io`, the parameter is what the part template's own `|io|` hides, and
+# the template prints to its string.
+prove_fails "def_to_s's parameter named io" patched_io "undefined method 'print' for String" \
+  "content.replace('def to_s(__io__) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, __io__)', 'def to_s(io) : Nil\n      ::Std::Eiy::Eiy.embed({{filename}}, io)')"
+prove_fails "a Buffer that writes to its target" patched_buffer "undefined method 'write' for Std::Eiy::Eiy::Buffer" \
+  "content.replace('io.print(to_s)', 'io.write(to_s)')"
 
 # ---------------------------------------------------------------------------
 # What the template compiler refuses
@@ -234,48 +253,6 @@ printf 'ok\n  x <%%= nonexistent_thing %%>\n' > "$WORK/bad_name.eiy"
 eiy_build_refuses "a name the template does not have" bad_name "bad_name.eiy:2:9"
 
 echo
-echo "== templates that render templates, and a class's own io"
-eiy_renders() { # eiy_renders <label> <name> <expected output> <program after the import>
-  local label="$1" name="$2" expected="$3" body="$4"
-  printf 'module main\n\nimport std/eiy::{Eiy}\n%s\n' "$body" > "$WORK/$name.iyi"
-  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
-    echo "  $label: the program did not build"
-    sed -n '1,10p' "$WORK/$name.build"
-    status=1
-    return
-  fi
-  local got
-  got="$("$WORK/$name" 2>&1)"
-  if [ "$got" != "$expected" ]; then
-    echo "  $label: printed '$got', not '$expected'"
-    status=1
-    return
-  fi
-  printf '  %s: %s\n' "$label" "$got"
-}
-# The buffer `render` collects into was `__buf__`, and the inner render
-# reassigned the outer one's: the program printed `iB`.
-printf 'i' > "$WORK/inner.eiy"
-printf 'A<%%= Eiy.render("inner.eiy") %%>B' > "$WORK/outer.eiy"
-eiy_renders "a template that renders another" nested "AiB" '
-puts Eiy.render("outer.eiy")'
-# `def_to_s`'s parameter was `io`, so `<%= io %>` in `to_s(io)` printed
-# the buffer into itself (`io=io=`) where the class's own `io` was meant.
-printf 'io=<%%= io %%>' > "$WORK/own_io.eiy"
-eiy_renders "def_to_s in a class with a method io" own_io "io=field io=field" '
-class Holder
-  def io : String
-    "field"
-  end
-
-  Eiy.def_to_s("own_io.eiy")
-end
-
-buffer = Eiy::Buffer.new
-Holder.new.to_s(buffer)
-puts "#{Holder.new.to_s} #{buffer.to_s}"'
-
-echo
 echo "== what the runtime API refuses"
 eiy_panics_with() { # eiy_panics_with <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
@@ -307,16 +284,6 @@ eiy_panics_with "an open output tag, lexed" open_lexed "unterminated <%= tag at 
   '(l = Eiy::Lexer.new("a\n<%= b"); l.next_token; l.next_token).value'
 eiy_panics_with "a template file that is not there, processed" open_file "cannot read /nowhere/t.eiy" \
   'Eiy.process_file("/nowhere/t.eiy")'
-
-echo
-echo "== a Latin-1 template"
-# Its 0xE9 went into the generated source raw, and the compiler stopped on
-# it with an InvalidByteSequenceError trace.
-printf 'caf\351 <%%= 1 %%>' > "$WORK/latin1.eiy"
-eiy_renders "a Latin-1 template, rendered byte for byte" latin1 "99,97,102,233,32,49" '
-import std/text
-
-puts Eiy.render("latin1.eiy").bytes.map(&.to_s).join(",")'
 
 # ---------------------------------------------------------------------------
 # Dependency floor audit

@@ -11,16 +11,9 @@ module ::Levenshtein
   def self.distance(string1 : String, string2 : String) : Int32
     return 0 if string1 == string2
 
-    # One byte is one character when no byte continues another, and the
-    # rows walk bytes. Otherwise they walk `chars`, and the counts are the
-    # arrays' own: `String#size` counts the bytes that start a character,
-    # which for invalid UTF-8 is not how many `chars` yields - three
-    # continuation bytes read at run time have size 0 and three characters,
-    # so their distance to "日x" was the empty string's 2, not 3, and a
-    # truncated "\xE6\x97" walked one of its two characters.
     if string1.bytesize == string1.size && string2.bytesize == string2.size
-      s_size = string1.bytesize
-      t_size = string2.bytesize
+      s_size = string1.size
+      t_size = string2.size
 
       return t_size if s_size == 0
       return s_size if t_size == 0
@@ -57,45 +50,54 @@ module ::Levenshtein
 
       last_cost
     else
-      chars1 = string1.chars
-      chars2 = string2.chars
-      s_size = chars1.size
-      t_size = chars2.size
-
-      return t_size if s_size == 0
-      return s_size if t_size == 0
-
-      if t_size > s_size
-        chars1, chars2 = chars2, chars1
-        t_size, s_size = s_size, t_size
-      end
-
-      costs = Array(Int32).new(t_size + 1) { |i| i }
-      last_cost = 0
-
-      i = 0
-      while i < s_size
-        last_cost = i + 1
-        c1 = chars1[i]
-        j = 0
-        while j < t_size
-          sub_cost = c1 == chars2[j] ? 0 : 1
-          cost = last_cost + 1
-          c2 = costs[j + 1] + 1
-          cost = c2 if c2 < cost
-          c3 = costs[j] + sub_cost
-          cost = c3 if c3 < cost
-
-          costs[j] = last_cost
-          last_cost = cost
-          j = j + 1
-        end
-        costs[t_size] = last_cost
-        i = i + 1
-      end
-
-      last_cost
+      char_distance(string1.chars, string2.chars)
     end
+  end
+
+  # The characters are counted as `chars` decodes them, not by `size`.
+  # The two disagree on bytes that are not UTF-8 - `size` counts every byte
+  # that is no continuation byte, `chars` takes a lead byte's continuation
+  # on trust - and the loops bounded by `size` ran past `chars`: `"\xC3A"`
+  # is two by `size` and one character, and `distance("\xC3Aé", "éx")`
+  # panicked with an index out of range, where a lone `"\x80"` (`size` 0)
+  # was distance 0 from `""`.
+  private def self.char_distance(chars1 : Array(Char), chars2 : Array(Char)) : Int32
+    s_size = chars1.size
+    t_size = chars2.size
+
+    return t_size if s_size == 0
+    return s_size if t_size == 0
+
+    if t_size > s_size
+      chars1, chars2 = chars2, chars1
+      t_size, s_size = s_size, t_size
+    end
+
+    costs = Array(Int32).new(t_size + 1) { |i| i }
+    last_cost = 0
+
+    i = 0
+    while i < s_size
+      last_cost = i + 1
+      c1 = chars1[i]
+      j = 0
+      while j < t_size
+        sub_cost = c1 == chars2[j] ? 0 : 1
+        cost = last_cost + 1
+        c2 = costs[j + 1] + 1
+        cost = c2 if c2 < cost
+        c3 = costs[j] + sub_cost
+        cost = c3 if c3 < cost
+
+        costs[j] = last_cost
+        last_cost = cost
+        j = j + 1
+      end
+      costs[t_size] = last_cost
+      i = i + 1
+    end
+
+    last_cost
   end
 
   # Optimal string alignment: Levenshtein plus an adjacent transposition as

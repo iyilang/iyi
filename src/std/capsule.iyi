@@ -15,6 +15,8 @@
 #    Quarter Stream IDs map datagrams to HTTP/3 request streams:
 #      quarter_stream_id = stream_id // 4
 #      stream_id = quarter_stream_id * 4
+#    A stream ID is at most 2^62 - 1, so a Quarter Stream ID is at most
+#    2^60 - 1 (Section 2.1); a larger one is refused, not carried.
 #    Provides `HttpDatagram` with encoding and decoding over byte slices.
 #
 # 3. The Capsule Protocol (RFC 9297 Section 3):
@@ -128,6 +130,9 @@ pub struct VarInt
   # Decodes a QUIC variable-length integer, returning nil if truncated, overlong, or reserved.
   def self.decode?(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {UInt64, Int32}?
     return nil if offset < 0 || offset >= bytes.size
+    # The room left is measured as `size - offset`, which cannot overflow;
+    # `offset + 8` did, and panicked, for an offset within 8 of 2^31 - 1.
+    room = bytes.size - offset
 
     b0 = bytes[offset]
     prefix = (b0.to_i32 >> 6) & 0x03
@@ -136,12 +141,12 @@ pub struct VarInt
       val = (b0 & 0x3f_u8).to_u64
       {val, 1}
     elsif prefix == 1_u8
-      return nil if offset + 2 > bytes.size
+      return nil if room < 2
       val = (b0 & 0x3f_u8).to_u64.unsafe_shl(8_u64) | bytes[offset + 1].to_u64
       return nil if strict && val <= MAX_1BYTE
       {val, 2}
     elsif prefix == 2_u8
-      return nil if offset + 4 > bytes.size
+      return nil if room < 4
       val = (b0 & 0x3f_u8).to_u64.unsafe_shl(24_u64) |
             bytes[offset + 1].to_u64.unsafe_shl(16_u64) |
             bytes[offset + 2].to_u64.unsafe_shl(8_u64) |
@@ -149,7 +154,7 @@ pub struct VarInt
       return nil if strict && val <= MAX_2BYTE
       {val, 4}
     else # prefix == 3_u8
-      return nil if offset + 8 > bytes.size
+      return nil if room < 8
       val = (b0 & 0x3f_u8).to_u64.unsafe_shl(56_u64) |
             bytes[offset + 1].to_u64.unsafe_shl(48_u64) |
             bytes[offset + 2].to_u64.unsafe_shl(40_u64) |
@@ -199,12 +204,16 @@ end
 # =============================================================================
 
 pub struct HttpDatagram
+  # The largest legal Quarter Stream ID (RFC 9297 Section 2.1): the largest
+  # stream ID, 2^62 - 1, divided by four.
+  pub MAX_QUARTER_STREAM_ID = 1152921504606846975_u64
+
   @quarter_stream_id : UInt64
   @payload : Bytes
 
   def initialize(@quarter_stream_id : UInt64, @payload : Bytes)
-    if @quarter_stream_id > VarInt::MAX
-      raise "http datagram quarter stream id exceeds maximum 62-bit integer (2^62 - 1): #{@quarter_stream_id}"
+    if @quarter_stream_id > MAX_QUARTER_STREAM_ID
+      raise "http datagram quarter stream id exceeds maximum 2^60 - 1: #{@quarter_stream_id}"
     end
   end
 
@@ -243,13 +252,15 @@ pub struct HttpDatagram
   end
 
   # Decodes an HTTP Datagram from a byte slice.
-  # Decodes an HTTP Datagram, returning nil if truncated.
+  # Decodes an HTTP Datagram, returning nil if truncated or if the Quarter
+  # Stream ID is past 2^60 - 1, which RFC 9297 Section 2.1 makes an error.
   def self.decode?(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {HttpDatagram, Int32}?
     return nil if offset < 0 || offset >= bytes.size
 
     q_res = VarInt.decode?(bytes, offset, strict: strict)
     return nil if q_res.nil?
     qid, qid_len = q_res
+    return nil if qid > MAX_QUARTER_STREAM_ID
 
     payload_offset = offset + qid_len
     payload_size = bytes.size - payload_offset
@@ -265,12 +276,17 @@ pub struct HttpDatagram
     {new(qid, payload), bytes.size - offset}
   end
 
-  # Decodes an HTTP Datagram from a byte slice, raising on truncation.
+  # Decodes an HTTP Datagram from a byte slice, raising on truncation or on
+  # a Quarter Stream ID past 2^60 - 1.
   # Overlong quarter-stream IDs in strict mode raise the varint overlong
   # sentence rather than pretending the buffer was truncated.
   def self.decode(bytes : Bytes, offset : Int32 = 0, strict : Bool = false) : {HttpDatagram, Int32}
     res = decode?(bytes, offset, strict: false)
     if res.nil?
+      q_res = VarInt.decode?(bytes, offset)
+      if !q_res.nil? && q_res[0] > MAX_QUARTER_STREAM_ID
+        raise "http datagram quarter stream id exceeds maximum 2^60 - 1: #{q_res[0]}"
+      end
       raise "http datagram truncated: buffer empty or ends before payload"
     end
     if strict
@@ -534,10 +550,122 @@ pub struct CapsuleProtocol
 
   # Checks if a header key-value pair enables the Capsule Protocol.
   def self.valid_header?(name : String, value : String) : Bool
-    name.downcase == "capsule-protocol" && (value == "?1" || value == "?1 ")
+    name.downcase == "capsule-protocol" && is_capsule_protocol_header?(value)
   end
 
+  # True when the value, parsed as an Item Structured Field (RFC 8941
+  # Section 4.2), is the Boolean true. Its parameters are parsed and then
+  # ignored, as RFC 9297 Section 3.4 requires of unknown ones; a value that
+  # does not parse as an Item is as if the field were absent.
   def self.is_capsule_protocol_header?(value : String) : Bool
-    value == "?1" || value == "?1 "
+    p = value.to_unsafe
+    n = value.bytesize
+    i = skip_spaces(p, 0, n)
+    return false unless i + 2 <= n && p[i] == 63_u8 && p[i + 1] == 49_u8
+    i = i + 2
+    while i < n && p[i] == 59_u8
+      i = skip_spaces(p, i + 1, n)
+      return false unless i < n && (lcalpha?(p[i]) || p[i] == 42_u8)
+      i = i + 1
+      while i < n && (lcalpha?(p[i]) || digit?(p[i]) || p[i] == 95_u8 || p[i] == 45_u8 || p[i] == 46_u8 || p[i] == 42_u8)
+        i = i + 1
+      end
+      if i < n && p[i] == 61_u8
+        i = bare_item_end(p, i + 1, n)
+        return false if i < 0
+      end
+    end
+    skip_spaces(p, i, n) == n
+  end
+
+  private def self.skip_spaces(p : Pointer(UInt8), i : Int32, n : Int32) : Int32
+    while i < n && p[i] == 32_u8
+      i = i + 1
+    end
+    i
+  end
+
+  private def self.lcalpha?(b : UInt8) : Bool
+    b >= 97_u8 && b <= 122_u8
+  end
+
+  private def self.alpha?(b : UInt8) : Bool
+    lcalpha?(b) || (b >= 65_u8 && b <= 90_u8)
+  end
+
+  private def self.digit?(b : UInt8) : Bool
+    b >= 48_u8 && b <= 57_u8
+  end
+
+  # tchar (RFC 9110 Section 5.6.2) and the ":" and "/" a token may also hold.
+  private def self.token_char?(b : UInt8) : Bool
+    return true if alpha?(b) || digit?(b)
+    case b
+    when 33_u8, 35_u8, 36_u8, 37_u8, 38_u8, 39_u8, 42_u8, 43_u8, 45_u8, 46_u8, 47_u8, 58_u8, 94_u8, 95_u8, 96_u8, 124_u8, 126_u8
+      true
+    else
+      false
+    end
+  end
+
+  # Where the bare item (RFC 8941 Section 4.2.3) starting at *i* ends, or -1
+  # when there is none there.
+  private def self.bare_item_end(p : Pointer(UInt8), i : Int32, n : Int32) : Int32
+    return -1 if i >= n
+    c = p[i]
+    if c == 45_u8 || digit?(c)
+      i = i + 1 if c == 45_u8
+      return -1 unless i < n && digit?(p[i])
+      digits = 0
+      point = -1
+      while i < n
+        if digit?(p[i])
+          digits = digits + 1
+        elsif point < 0 && p[i] == 46_u8
+          return -1 if digits > 12
+          point = digits
+        else
+          break
+        end
+        i = i + 1
+        return -1 if digits > 15
+      end
+      return -1 if point >= 0 && (digits == point || digits - point > 3)
+      i
+    elsif c == 34_u8
+      i = i + 1
+      while i < n
+        b = p[i]
+        if b == 92_u8
+          return -1 unless i + 1 < n && (p[i + 1] == 34_u8 || p[i + 1] == 92_u8)
+          i = i + 2
+        elsif b == 34_u8
+          return i + 1
+        elsif b < 32_u8 || b > 126_u8
+          return -1
+        else
+          i = i + 1
+        end
+      end
+      -1
+    elsif c == 42_u8 || alpha?(c)
+      i = i + 1
+      while i < n && token_char?(p[i])
+        i = i + 1
+      end
+      i
+    elsif c == 58_u8
+      i = i + 1
+      while i < n && p[i] != 58_u8
+        b = p[i]
+        return -1 unless alpha?(b) || digit?(b) || b == 43_u8 || b == 47_u8 || b == 61_u8
+        i = i + 1
+      end
+      i < n ? i + 1 : -1
+    elsif c == 63_u8
+      i + 1 < n && (p[i + 1] == 48_u8 || p[i + 1] == 49_u8) ? i + 2 : -1
+    else
+      -1
+    end
   end
 end

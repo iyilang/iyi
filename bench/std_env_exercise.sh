@@ -87,7 +87,7 @@ fi
 
 echo
 echo "== every env section reported"
-for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection"; do
+for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection" "== a name the environment holds twice"; do
   if ! grep -q "$phrase" "$WORK/env-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -125,6 +125,40 @@ elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run
 else
   echo "  a broken env is caught"
 fi
+
+# `delete` stopped at the first entry of the name, and a name the table
+# held twice came back with the second value. Put back, it must be caught
+# where the exercise holds a name twice, and nowhere earlier.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/firstonly/std"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the first-entry-only proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/env.iyi").read_text()
+old = '        unless offset == k_len && entry[k_len] == 61_u8\n          ptr[kept] = entry\n'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+new = old.replace('== 61_u8', '== 61_u8 && kept == index', 1)
+Path("$WORK/firstonly/std/env.iyi").write_text(src.replace(old, new, 1))
+PY
+    then
+      echo "  the first-entry-only patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/firstonly${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/firstonly.out" 2>&1; then
+      echo "  the exercise PASSED with delete removing the first entry only"
+      status=1
+    elif ! grep -q "ASSERTION FAILED: no entry of a deleted name is left" "$WORK/firstonly.out"; then
+      echo "  a delete of the first entry only failed somewhere else:"
+      sed 's/^/    /' "$WORK/firstonly.out"
+      status=1
+    else
+      echo "  a delete that leaves a second entry of the name is caught"
+    fi
+    ;;
+esac
 
 # On Linux and darwin a table `ENV[]=` builds is installed into the C
 # runtime's `environ`, which the collector does not scan, so the prelude

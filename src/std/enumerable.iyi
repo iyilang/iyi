@@ -304,8 +304,11 @@ pub trait Enumerable
   # and failing at instantiation with a message naming neither the bound nor
   # the element type.
 
+  # Equality, as `Array#includes?` asks it: `<=>` answering 0 is ordering,
+  # and for a float it said a NaN was present in a list of NaNs, which no
+  # `==` says and `[nan].includes?(nan)` does not.
   def includes?(value : Elem) : Bool where Elem : Comparable
-    each { |e| return true if (e <=> value) == 0 }
+    each { |e| return true if e == value }
     false
   end
 
@@ -364,6 +367,23 @@ pub trait Enumerable
   # ---- needing something of the block's result type -------------------------
 
   def max_by?(& : Elem -> U) : Elem? forall U : Comparable
+    max_by_entry { |e| yield e }[0]
+  end
+
+  # Whether there was an element is the key's to say, not the element's: a
+  # nil element can be the largest, and `found.nil?` refused
+  # `List.new([nil, 1]).max_by { |x| x ? x : 5 }` as empty where
+  # `Array#max_by` and the other library answer nil. `min_by` and
+  # `minmax_by` read the key the same way.
+  def max_by(& : Elem -> U) : Elem forall U : Comparable
+    entry = max_by_entry { |e| yield e }
+    raise "max_by of an empty collection" if entry[1].nil?
+    entry[0].as(Elem)
+  end
+
+  # The first element with the largest key, and that key: nil only when
+  # there was no element.
+  private def max_by_entry(& : Elem -> U) : Tuple(Elem?, U?) forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
@@ -374,20 +394,7 @@ pub trait Enumerable
         best_key = key
       end
     end
-    best
-  end
-
-  # Whether anything was seen is a flag, as in `reduce?`, not the nil the
-  # `?` form answers: a nil element is an element, and `[nil, nil]` keyed
-  # by anything raised "max_by of an empty collection".
-  def max_by(& : Elem -> U) : Elem forall U : Comparable
-    seen = false
-    found = max_by? do |e|
-      seen = true
-      yield e
-    end
-    raise "max_by of an empty collection" unless seen
-    found.as(Elem)
+    {best, best_key}
   end
 
   def group_by(& : Elem -> U) : Hash(U, Array(Elem)) forall U : Hashable
@@ -609,6 +616,16 @@ pub trait Enumerable
   end
 
   def min_by?(& : Elem -> U) : Elem? forall U : Comparable
+    min_by_entry { |e| yield e }[0]
+  end
+
+  def min_by(& : Elem -> U) : Elem forall U : Comparable
+    entry = min_by_entry { |e| yield e }
+    raise "min_by of an empty collection" if entry[1].nil?
+    entry[0].as(Elem)
+  end
+
+  private def min_by_entry(& : Elem -> U) : Tuple(Elem?, U?) forall U : Comparable
     best = nil
     best_key = nil
     each do |e|
@@ -619,19 +636,7 @@ pub trait Enumerable
         best_key = key
       end
     end
-    best
-  end
-
-  # The flag `max_by` keeps: `[nil, 4]` keyed with the nil lowest raised
-  # "min_by of an empty collection" instead of answering nil.
-  def min_by(& : Elem -> U) : Elem forall U : Comparable
-    seen = false
-    found = min_by? do |e|
-      seen = true
-      yield e
-    end
-    raise "min_by of an empty collection" unless seen
-    found.as(Elem)
+    {best, best_key}
   end
 
   def max_of?(& : Elem -> U) : U? forall U : Comparable
@@ -686,6 +691,19 @@ pub trait Enumerable
   end
 
   def minmax_by?(& : Elem -> U) : Tuple(Elem?, Elem?) forall U : Comparable
+    entry = minmax_by_entry { |e| yield e }
+    {entry[0], entry[1]}
+  end
+
+  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
+    entry = minmax_by_entry { |e| yield e }
+    raise "minmax_by of an empty collection" if entry[2].nil?
+    {entry[0].as(Elem), entry[1].as(Elem)}
+  end
+
+  # The first smallest and first largest elements, and the smallest key,
+  # which is nil only when there was no element.
+  private def minmax_by_entry(& : Elem -> U) : Tuple(Elem?, Elem?, U?) forall U : Comparable
     min_elem = nil
     max_elem = nil
     min_key = nil
@@ -703,19 +721,7 @@ pub trait Enumerable
         max_key = key
       end
     end
-    {min_elem, max_elem}
-  end
-
-  # The same flag: `[nil, 3]` keyed with the nil lowest has the pair
-  # `{nil, 3}`, and raised "minmax_by of an empty collection" for it.
-  def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
-    seen = false
-    pair = minmax_by? do |e|
-      seen = true
-      yield e
-    end
-    raise "minmax_by of an empty collection" unless seen
-    {pair[0].as(Elem), pair[1].as(Elem)}
+    {min_elem, max_elem, min_key}
   end
 
   def minmax_of?(& : Elem -> U) : Tuple(U?, U?) forall U : Comparable

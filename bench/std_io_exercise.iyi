@@ -16,6 +16,10 @@
 #     consumed delimiter.
 #   * `Hexdump` lines are exact for a full line, a short line and empty input.
 #   * `MultiWriter` writes to every stream, `Memory` included.
+#   * A `\r` that ends the stream is kept by `chomp` (Memory, Sized, a file);
+#     a Delimited with only its delimiter left is at eof; a large count or
+#     limit allocates what is read, not the count; with `std/file` imported a
+#     Memory's `pos` is an Int64 and `pos=` through an `IyiIO` moves it.
 #
 # Run via:
 #     ./bin/iyi run bench/std_io_exercise.iyi
@@ -23,6 +27,8 @@
 module bench/std_io_exercise
 
 import std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}
+import std/file
+import std/gc::{GC}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond
@@ -109,12 +115,27 @@ assert_int(14_i64, given.size.to_i64, "Memory.new(text) copies the bytes")
 assert_str("héllo", given.read_line(true).to_s, "chomp drops CR LF")
 assert_str("wörld", given.read_line(true).to_s, "the last line has no line end")
 assert_true(given.read_line(true).nil?, "then nil")
+# A `\r` ends a line only before its `\n`; one that ends the stream is
+# content, as the other library's `gets(chomp: true)` keeps it.
+lone = Memory.new("a\r\nb\r")
+assert_str("a", lone.read_line(true).to_s, "chomp drops the CR of a CR LF")
+assert_str("b\r", lone.read_line(true).to_s, "chomp keeps a CR that ends the stream")
 given.rewind
 assert_str("héllo\r\nwörld", given.read_all, "read_all after rewind")
 assert_true(!given.closed?, "open until closed")
 given.close
 assert_true(given.closed?, "closed? after close")
 assert_true(given.eof?, "closed is eof")
+
+# With `std/file` imported every `IyiIO` has a `pos : Int64`: a Memory's
+# answers the same type, and `pos=` through an `IyiIO` moves its cursor,
+# not a descriptor it does not have.
+placed = Memory.new("abcdef")
+placed.read_bytes(2)
+as_io = placed.as(IyiIO)
+assert_int(2_i64, as_io.pos, "pos through an IyiIO is the Memory's cursor")
+as_io.pos = 4_i64
+assert_str("ef", placed.read_all, "pos= through an IyiIO moves the Memory's cursor")
 
 emoji = Memory.new("a€🎉")
 assert_true(emoji.read_char == 'a', "read_char ascii")
@@ -163,6 +184,16 @@ assert_true(file.read_char == 'é', "a two-byte character split across buffers")
 assert_true(file.read_char == '\u0442', "another")
 assert_true(file.read_char == '\u0430', "and another")
 assert_true(file.lines(true) == ["", "gamma"], "lines(chomp) on a file")
+cr_path = sandbox + "/std_io_exercise_cr_#{args.size}.txt"
+File.write(cr_path, "one\r\ntwo\r")
+cr_file = File.open(cr_path, "r", 4)
+assert_true(cr_file.lines(true) == ["one", "two\r"], "lines(chomp) on a file keeps a CR that ends it")
+cr_file.close
+cr_file = File.open(cr_path, "r", 4)
+cr_file.read_byte
+assert_int(1_i64, cr_file.pos, "pos on a file with std/io imported")
+cr_file.close
+File.delete(cr_path)
 file.close
 
 sink = Memory.new
@@ -319,6 +350,12 @@ head = Delimited.new(inner, "--")
 assert_str("hé", head.read_bytes(3), "read_bytes on a Delimited counts bytes")
 assert_str("llo", head.read_all, "the rest up to the delimiter")
 assert_str("wörld", inner.read_all, "the inner stream after the delimiter")
+only = Memory.new("ab--cd")
+ahead = Delimited.new(only, "--")
+assert_str("ab", ahead.read_bytes(2), "the content before the delimiter")
+assert_true(ahead.eof?, "a Delimited with only its delimiter left is at eof")
+assert_true(ahead.read_byte.nil?, "and its read answers nil")
+assert_str("cd", only.read_all, "the inner stream after a looked-ahead delimiter")
 puts "  delimiter partial matches, held prefixes and empty content handled"
 
 sized_source = Memory.new("héllo wörld\nsecond\n")
@@ -338,6 +375,29 @@ assert_true(sized.read_byte == 116_u8, "read_byte on a Sized")
 assert_str("wo\n", sized.read_bytes(10), "read_bytes on a Sized is cut to the limit")
 assert_true(sized.read_line.nil?, "spent")
 assert_str("three", sized_source.read_all, "the rest is the inner stream's")
+carriage = Sized.new(Memory.new("x\r\r\ny\rz"), 6)
+assert_true(carriage.lines(true) == ["x\r", "y\r"], "lines(chomp) on a Sized keeps a CR that ends it")
+
+# A count is a most: reading two bytes under a limit of 100 MB allocates
+# about two bytes, not the limit - through a reader, and through a Sized
+# over a file, whose own `read_bytes` allocates the count it is asked for.
+most_path = sandbox + "/std_io_exercise_most_#{args.size}.txt"
+File.write(most_path, "ef")
+most_file = File.open(most_path)
+GC.disable
+most_before = GC.stats.bytes_since_collection
+wide = Sized.new(Delimited.new(Memory.new("ab-"), "-"), 100_000_000)
+wide_got = wide.read_all
+direct_got = Delimited.new(Memory.new("cd-"), "-").read_bytes(100_000_000)
+file_got = Sized.new(most_file, 100_000_000).read_all
+most_after = GC.stats.bytes_since_collection
+GC.enable
+most_file.close
+File.delete(most_path)
+assert_str("ab", wide_got, "a Sized under a large limit reads what there is")
+assert_str("cd", direct_got, "read_bytes on a Delimited with a large count reads what there is")
+assert_str("ef", file_got, "a Sized over a file under a large limit reads what there is")
+assert_true(most_after - most_before < 1_000_000_u64, "a large count allocates what is read, not the count: #{most_after - most_before} bytes")
 generous = Sized.new(Memory.new("ab"), 100)
 assert_str("ab", generous.read_all, "a limit past the stream answers the stream")
 assert_int(98_i64, generous.remaining.to_i64, "remaining counts what was read")

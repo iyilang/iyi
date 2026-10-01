@@ -179,8 +179,6 @@
   prints them. `bench/enum_exercise.iyi` checks both; the old prelude
   printed "Read".
 
-- **`max_by`, `min_by` and `minmax_by` answer a nil element.** The plain forms took the nil that their `?` forms answer for "nothing" as meaning nothing, so on any `Enumerable` but `Array` (which has its own) a nil element that won raised. `[nil, nil].max_by` panicked "max_by of an empty collection", `[nil, 4]` with the nil keyed lowest panicked "min_by of an empty collection", and `minmax_by` of `[nil, 3]` panicked "minmax_by of an empty collection". Whether anything was seen is now a flag, as it is for `reduce?`, and an empty collection still raises. The std exercise checks all three on a `List(Int32?)`, and proves that each check fails with its nil test put back.
-
 - **`Indexable#join` is linear.** It added each element to the text so far, copying that text once per element: 20,000 elements took 1.8 s where the same array's `join` took 1 ms, and 40,000 took 7.5 s. It writes into one builder now, as `Array#join` does. The indexable exercise's `MinimalSeq` never reached this method, because it is also `Enumerable` and so gets that trait's `join`. The exercise therefore adds a type that is `Indexable` and nothing else, checks its `join` against the array's, and holds a `join` of 20,000 to twenty times the array's time plus 200 ms. The old method stops the gate at "20,000 elements took 1726 ms".
 
 - **`NamedTuple#clone` compiles for plain values.** It asked every value for `clone`, and the prelude gives `clone` to neither `Int32` nor `String`, so `{a: 1, b: "x"}.clone` failed with "undefined method 'clone' for Int32": only a named tuple whose values all had a `clone` compiled. A value whose type has `clone` is now cloned and any other is kept as it is. The named_tuple exercise clones plain values, and a plain value beside a cloneable one (the cloneable one comes back as a distinct instance). The old method does not compile the exercise.
@@ -202,25 +200,15 @@
 
 - **`Math.gcd` and `Math.lcm` take unsigned integers.** The signature took any two integers, but Euclid ran on the negative side through unary minus, which no unsigned type has. `Math.gcd(12_u32, 18_u32)` and `Math.lcm(4_u64, 6_u64)` failed to compile inside math.iyi. An unsigned pair now stays on its own side of zero: 6, 12, and `gcd(18446744073709551615_u64, 5_u64)` is 5. A signed pair keeps the negative side, so `gcd(-2147483648, 6)` is still 2. Both arguments are now one type, as `%` takes one. Two variables of different widths are refused at the caller's line, where they failed inside math.iyi before. A literal takes the other argument's type: `Math.gcd(4, 6_i64)` is 2. A float is refused at the call with a sentence. `bench/std_math_exercise.iyi` checks UInt8, UInt32 and UInt64 pairs and the literal case. The old module did not compile there, and the gate's new mutation, an unsigned pair negated, is caught.
 
-- **`Levenshtein.distance` counts invalid UTF-8 in the characters it compares.** Off the single-byte path, the loop bounds came from `String#size`, which counts the bytes that start a character, while the elements came from `chars`. Three stray continuation bytes read at run time have size 0 and three characters, so their distance to "日x" was 2, not 3. A truncated `"\xE6\x97"` was 1 from "日", not 2. The counts are now the `chars` arrays' own, as `osa_distance`'s already were, and agree with Crystal's 3 and 2. `bench/std_levenshtein_exercise.iyi` builds such strings from bytes at run time (a literal's count is fixed by the compiler, so a literal does not show the bug). The old module answered 2 for 3, and the gate's new mutation, sizes from `String#size`, is caught.
-
 - **An iterator adaptor advances the iterator it was built on.** `Iterator.of`'s sources (`ArrayIterator`, `RangeIterator`, `KeyIterator`, `ValueIterator`, `EntryIterator`) were structs, so each adaptor took a copy. `it.first(2).to_a` and then `it.to_a` gave `[1, 2]` and `[1, 2, 3, 4]` where Crystal gives `[1, 2]` and `[3, 4]`. They are classes now, as Crystal's are; the adaptors stay structs. `bench/std_iterator_exercise.iyi` checks an array, a range and a hash source after an adaptor. The old module gave `[1, 2] [1, 2, 3, 4]`, and the gate's new mutation, a struct source, is caught.
 
 - **`Float64#step` gives the other library's values from either side of zero, ends at a NaN, and refuses a zero step.** Below zero, a double tested `(current + step) <=> limit` instead of `(limit - step) <=> current`. The two round differently: `(-2.8).step(to: -1.8, by: 0.5)` gave `[-2.8, -2.3]` where Crystal gives three values. Over 193,492 (start, limit, step, exclusive) cases between -3.0 and 3.0, 168 differed from Crystal in count or last value. None differ now. A double always subtracts; an integer still picks the side that cannot overflow. The prelude's `<=>` sorts NaN above every number, so `0.0.step(to: NaN, by: 1.0)` was still going after 3,000,000 values; a NaN limit, start or step now walks nothing, as in Crystal. A zero step yielded `[]` with a limit and the start forever without one. It now panics `zero step size` unless the walk is already at its limit (`1.step(to: 1, by: 0)` is `[1]`). `bench/std_steppable_exercise.iyi` checks the three negative-start walks, the NaN walks, and the zero-step refusals. The old module answered `[]` where the refusal was expected, and the gate's new mutations, a double adding first and NaN unguarded, are caught.
-
-- **`Log.for` with an empty segment names the logger without it.** `Log.for(".a")` made a second logger with the source `a`, so an Info entry through it was written past the Error level set on `Log.for("a")`, and `Log.for(".")` was not the root. An empty segment no longer names a logger: `.a` is `a`, `a..b` is `a.b` and `.` is the root. `bench/std_log_exercise.iyi` checks all three. The old module wrote the entry (`1 written`).
 
 - **`derive serializable` keeps a field's default when its key is missing.** A field written `@port : Int32 = 8080` was refused by name (`JSON for Conf has no key "port"`), and `@host : String? = "localhost"` was overwritten with nil, where the other library's `JSON::Serializable` keeps both defaults. A missing key now leaves the default in place, and a key that is present wins, `null` included. Whether a field has a default is asked of the type when `initialize(pull)` is compiled, because the derive's declaration carries only names and types. `bench/std_json_exercise.iyi` reads a `Listener` with both kinds of default. The old derive wrote `"host":null` there.
 
 - **`JSON.from_json` and `JSON.to_json` take a type that admits nil.** The doc promised "one of those or `nil`", but `JSON.from_json("5", Int32?)`, `Array(Int32?)`, `Hash(String, String?)`, `JSON.to_json([1, nil] of Int32?)` and a derived field of `Array(String?)` did not compile. Reading ended in `(Int32 | Nil).new`, and writing matched the whole union against the `ToJSON` overload. A nilable type now reads `null` as nil and anything else as the other type, and on the way out a nil is written as `null` before the rest is dispatched. `bench/std_json_exercise.iyi` reads and writes each one. With the old module it did not build (`wrong number of arguments for '(Int32 | Nil).new'`).
 
 - **`PullParser#read_raw` passes a number through as it was written.** It rebuilt each number from the Int64 or Float64 it parsed to. `[12345678901234567890, 1E+2, 0.1, -0, 1.50]` came back as `[1.2345678901234567e+19,100.0,0.1,0,1.5]`, and `{"id":18446744073709551615}` as `{"id":1.8446744073709552e+19}`, which `JSON.from_json(..., Hash(String, UInt64))` refused with "expected int, got Float". A number is now written as its own text, as the other library's `read_raw` writes it. `bench/std_json_exercise.iyi` checks both. The old code failed at "read_raw writes a number as its own text".
-
-- **A `<%# %>` comment over two lines runs nothing.** Only the comment's first line was a comment. The tag was spliced in as code, so `<%# multi\nputs "COMMENT RAN" %>` printed COMMENT RAN on every render. A tag that starts with `#` now generates nothing. The comment in `bench/std_eiy_exercise.eiy` spans two lines, with `items << "the comment ran"` on the second, and `bench/std_eiy_exercise.iyi` checks that `process_string` of a two-line comment is empty. The old module ran that line and rendered a third item (`☕ 3 çeşit`), failing at "render of the template".
-
-- **An eiy template that is not UTF-8 builds.** A Latin-1 template's `é` (0xE9) went into the generated source raw, and the compiler stopped on it with an InvalidByteSequenceError trace. Each byte that is not part of a well-formed UTF-8 sequence is now written as `\xHH`, so the rendered text keeps the template's own bytes (`caf\xE9 1`), and UTF-8 is still written as itself. `bench/std_eiy_exercise.iyi` checks the generated source of `caf\xE9 ç \xC3`, and `bench/std_eiy_exercise.sh` renders a Latin-1 template byte for byte. The old module wrote the bytes raw, and that build stopped with the trace.
-
-- **`Eiy.render` nested in a template keeps the outer text, and `Eiy.def_to_s` leaves a class's own `io` to the template.** `render` collected into a variable named `__buf__`, and a template that rendered another reassigned it, so `A<%= Eiy.render("inner.eiy") %>B` gave `iB`. `def_to_s` named its parameter `io`, which hid a method `io` of the class: in `to_s(io)`, `<%= io %>` printed the buffer into itself (`io=io=`), while `to_s` gave `io=my-io-field`. The buffer is now a fresh macro variable, and the parameter is `__io__`, the name the other library's ECR uses. `bench/std_eiy_exercise.sh` builds both from templates it writes and expects `AiB` and `io=field io=field`. The old module printed `iB` and `io=field io=io=`.
 
 - **A Hash's keys that share their low bits are not one run of probes.**
   The table picked a key's slot from its hash's low bits as they were,
@@ -927,19 +915,6 @@
   where `File.read_lines` of the same file read 1, and Crystal's `lines`
   gives `["1", ...]`. A `\r` inside a line stays. `bench/io_exercise.iyi`
   reads a CRLF text's lines and sums two; the old prelude kept the `\r`.
-- **`OptionParser` reads grouped short flags, `--name=VALUE` flags and
-  non-ASCII short flags.** Only the first flag of a group was read and
-  the rest dropped in silence: `-vo out.txt` set `-v` and left `out.txt`
-  an operand, and `-vz` never said `-z` was unknown. A group is read flag
-  by flag now, a flag that takes a value taking the rest of the argument
-  or the next one (`-oout.txt`, `-vo out.txt`), and `-q=1` is a value
-  given to a switch, as `--flag=x` is. `on("--name=NAME")`, Crystal's
-  spelling, registered a flag named `--name=NAME` that nothing matched;
-  it is `--name` taking a value. And a short flag is a character: `-é`
-  was cut to a byte and reported as `-\xC3`. `on("--")` is refused, since
-  `--` ends the flags and could never reach it.
-  `bench/std_option_parser_exercise.iyi` checks each; the old module
-  fails the first.
 - **A JSON or YAML document the parser reads is one a task can use.**
   JSON read 512 levels of nesting, Crystal's limit, whose fibers have
   megabytes of stack; a task here has 256 KB, and a task parsing 480
@@ -1018,12 +993,6 @@
   directory now, as a shell's `cd` does, where it was set at all.
   `bench/std_dir_exercise.iyi` expands a name inside a `Dir.cd` block;
   the old module answered the old directory.
-- **`File.match?` reads a pattern the way `Dir.glob` does.** `*` crossed
-  separators, so `File.match?("a/b/c.txt", "*.txt")` was true of a path
-  `Dir.glob("*.txt")` never answers, and `?` matched a separator. Both
-  stay inside a segment now, and `**` crosses, `**/` matching no
-  directory at all as well. `bench/std_file_exercise.iyi` checks each;
-  the old module fails the first.
 - **`Dir.glob` finds a wildcard in any segment, and answers in the
   pattern's spelling.** It listed the pattern's directory and matched
   names in it, so a wildcard before the last segment answered nothing -
@@ -1036,6 +1005,113 @@
   and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
   globs through one and two wildcard segments and from `./`; the old
   module answered `[]` for the first.
+- **`File.match?` speaks the pattern language it is named for.** It knew
+  `*` and `?` and nothing else, byte by byte: `*` crossed separators, so
+  `a/b.txt` matched `*.txt`; `?` took one byte of a two-byte character;
+  `[a-c]`, `[^a]`, `{a,b}`, `**` and `\*` were literal text; and
+  `*a*a*a*a*a*a*a*a*a*a*b` against forty `a`s did not finish. It is the
+  other library's linear-time matcher now (after the glob-match crate
+  and research.swtch.com/glob), with Windows' rule kept - either
+  separator for either, so a pattern's `\` is a separator there - and the
+  argument order kept, `path` first, where the other library takes the
+  pattern first. 400,000 pattern and name pairs against Crystal's
+  `File.match?`, braces nested three deep, Unicode ranges and escapes
+  among them, agree on every answer; the file exercise checks each part
+  and proves five of them fail when broken.
+
+- **`std/io` keeps a final `\r`, knows a spent `Delimited`, and reads a
+  large limit without allocating it.** `read_line(chomp)` stripped a `\r`
+  that ended the stream with no `\n` after it - on a `Memory`, on a
+  `Sized` or `Delimited`, and in the prelude's reader for files and pipes
+  whose last line spans buffers - where only a `\r\n` is a line ending,
+  as `std/text`'s `each_line` already reads it. `Delimited#eof?` said
+  false with only the delimiter left, and the next read answered nil.
+  `Sized` over a limit of 2^31-1 asked its inner stream for the whole
+  limit and allocated it: 1.5 GB and 4 seconds to read two bytes; reads
+  go 64 KB at a time now. And `Memory#pos` answered Int32 where
+  `std/file`'s `IyiIO#pos` is Int64, so a program importing both did not
+  compile. 200,000 random operation scripts against the other library's
+  `IO` found these and none after; the io exercise checks each and proves
+  each check fails with its fix undone.
+
+- **The math oracle scales into the subnormals itself.** glibc's erfc
+  rounds a subnormal result with glibc's own `__ldexp`, which rounds
+  once; the oracle had it call the platform's `ldexp`, and on darwin
+  arm64 - the first run where the CORE-MATH part built there - erfc of
+  26.62825219194711 came back an ulp below the correctly rounded
+  2.41698865125757e-310 that iyi answers and mpmath confirms, and the
+  gate failed iyi for it. The oracle carries musl's `scalbn` (MIT), whose
+  last multiply is its only rounding, so its answers are glibc's on every
+  platform; on Linux all 32 comparisons are unchanged.
+
+- **`Eiy` templates: bytes that are not UTF-8, comments over lines, and
+  nested renders.** Template text with a byte like Latin-1 `\xE9` went
+  into the generated string literal as it was, and the compiler stopped
+  on it - "you've found a bug in the iyi compiler"; such bytes are
+  written as `\xHH` now and render as they were. A `<%# %>` comment over
+  several lines ran its later lines as code, against the module's "a
+  comment: nothing runs". `Eiy.render` inside a rendered template lost
+  the outer text before it. `def_to_s` named its parameter `io`, which a
+  template's own block parameter could hide; it is `__io__`, as ECR's.
+  And `Buffer#to_s(io)` called `write`, so one buffer could not print
+  into another. About a million templates against ECR's lexer and
+  renderer found these - the lexing and trimming agreed byte for byte -
+  and none after; the exercise checks each and proves each fails.
+
+- **`std/capsule` follows RFC 9297 in three places.** `VarInt.decode?`
+  added the offset to the varint's length, which overflowed Int32 near
+  the end of a 2 GiB buffer and panicked where the input is merely
+  incomplete - `Capsule` and `HttpDatagram` decoding with it. Quarter
+  Stream IDs past 2^60-1 were accepted, which RFC 9297 2.1 makes an
+  `H3_DATAGRAM_ERROR`; the exercise had pinned a stream ID of
+  18446744073709551612. And the `Capsule-Protocol` header accepted only
+  the strings `?1` and `?1 `, where 3.4 makes it an RFC 8941 Item whose
+  unknown parameters receivers MUST ignore: `?1;foo=bar` is true now, and
+  what is not an Item is false. About 2.1 million cases against a model
+  written from RFCs 9000, 9297 and 8941 found these and none after; the
+  exercise checks each and proves each check fails with its fix undone.
+
+- **`ENV.delete` removes every entry of a name, and `Log.for` keeps a
+  leading dot.** An environment may hold a name twice - `execve` allows
+  it - and `delete` removed only the first entry, so the variable came
+  back with its second value and a child still inherited it; every entry
+  goes now, as `unsetenv` and Python's `os.environ.pop` remove them.
+  `Log.for(".a")` reported the source `a`, the name of another logger:
+  a child named `""` under the root took the root's "no dot" rule. 3
+  million environment operations against a Python model, with and
+  without duplicate names, and Crystal's `Log` found these and none
+  after; each exercise checks its fix and proves the check fails.
+
+- **`OptionParser` reads bundles and every value spelling.** A short
+  argument read its first two bytes and dropped the rest, so `-vq` never
+  ran `-q`, `-vp80` never ran `-p`, and `-vx` and `-q=1` were accepted -
+  the exercise had pinned `-q=1` as "quiet", against the module's own
+  header, which sends a value given to a flag that takes none to
+  `invalid_option`. `--out=FILE` stored the flag under that whole name,
+  `-oFILE` panicked "not a flag", and `-é` was two bytes, half a
+  character. 360,000 specs and argument lists against Crystal's
+  `OptionParser` found these and none after; the exercise checks each and
+  proves each check fails with its fix undone.
+- **`Levenshtein` on bytes that are not UTF-8.** The non-ASCII path took
+  its bounds from `String#size` and indexed `String#chars`, which count
+  such bytes differently: `distance("\xC3A" + "é", "éx")` panicked "index
+  out of range" and `distance("\x80", "")` was 0. Sizes come from the
+  decoded characters now; 150,000 pairs against Python's dynamic
+  programs agreed before and after, and 200,000 invalid strings after.
+- **`Colorize` refuses a name it does not know, and `inspect` inspects.**
+  `colorize(:purple)` and `mode(:italic)` fell to `Default` and cleared
+  what was set, where Crystal raises "Unknown color: purple"; `mode(:bright)`
+  was no mode though `bright` is bold; and `inspect` returned `to_s`, the
+  quotes lost. 450,000 call chains against Crystal's `Colorize` found
+  these and none after.
+- **`max_by`, `min_by` and `minmax_by` over nilable elements, and
+  `includes?` of NaN.** The three used a nil element to mean "none yet"
+  - the same shape last round fixed in `each_cons_pair`, `chunk_while`
+  and `reduce?` - and panicked "max_by of an empty collection" on
+  `[nil, 1]`; `includes?` compared with `<=>`, so NaN was found in `[NaN]`
+  where `Array#includes?` says no. `std/string_pool` agreed with a model
+  of Crystal's on 300,000 operations.
+
 - **CSV, UUID, Base64 and INI read what Python and the other library
   read.** `CSV.parse` deleted a lone `\r`, joining the fields on either
   side, and a quote after it became literal; a blank line was one empty
@@ -1137,7 +1213,13 @@
   program itself fails - a check or a panic - and the four break their
   terms as `x * 1.0`. With the proofs real, all fifty are caught but one,
   atan2's middle carry, whose 2^-64 error the answers never showed; it is
-  replaced by the slow product left unnormalised, which they do.
+  replaced by the slow product left unnormalised, which they do. The
+  software fma's four proofs run where the software arm can: on x86_64,
+  whose instruction the proofs refuse; aarch64 always fuses and never
+  reaches it, and on darwin arm64 they now say so, where they had read
+  "caught" only while the oracle's files were compiled as source. Run
+  real, the darwin gate also compared every CORE-MATH function for the
+  first time, and they agree.
 
 - **`std/compress` refuses an incomplete Huffman code, and reads every
   gzip member.** A dynamic block whose literal/length, distance or

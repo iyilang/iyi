@@ -73,7 +73,7 @@ fi
 
 echo
 echo "== every colorize section reported"
-for phrase in "== disabled" "== enabled"; do
+for phrase in "== disabled" "== enabled" "== inspect and names"; do
   if ! grep -q "$phrase" "$WORK/colorize-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -86,6 +86,33 @@ echo "== the same program with optimisation on (--release)"
 build_and_run "release" colorize-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/colorize-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
+  status=1
+fi
+
+echo
+echo "== a name that is no colour or mode is refused"
+# `fore(:purple)` raises in the other library, and a program cannot catch a
+# panic, so the refusal is proven here: the program must stop, and with the
+# sentence that names the typo. Answering `Default` painted it in no colour.
+mkdir -p "$WORK/names"
+refused() {
+  local path="$1" name="$2" call="$3" message="$4"
+  printf 'import std/colorize::{Colorize}\nColorize.enabled = true\nputs "x".colorize%s.to_s\n' "$call" >"$WORK/names/$name.iyi"
+  if IYI_PATH="$path" "$IYI" run "$WORK/names/$name.iyi" >"$WORK/names/$name.out" 2>&1; then
+    return 1
+  fi
+  grep -q "$message" "$WORK/names/$name.out"
+}
+if refused "$IYI_PATH" color '(:purple)' "Unknown color: purple"; then
+  echo "  fore(:purple) is refused"
+else
+  echo "  fore(:purple) was not refused with \"Unknown color: purple\""
+  status=1
+fi
+if refused "$IYI_PATH" mode '.bold.mode(:italic)' "Unknown mode: italic"; then
+  echo "  mode(:italic) is refused"
+else
+  echo "  mode(:italic) was not refused with \"Unknown mode: italic\""
   status=1
 fi
 
@@ -151,6 +178,81 @@ PY
     fi
     ;;
 esac
+# A copy of the module with each replacement made, or the reason it could
+# not be: `broken_copy DIR OLD NEW [OLD NEW]...`.
+broken_copy() {
+  local dir="$1"
+  shift
+  mkdir -p "$WORK/$dir/std"
+  "$PY" - "$WORK/$dir/std/colorize.iyi" "$@" <<PY
+import sys
+from pathlib import Path
+src = Path("$REPO/src/std/colorize.iyi").read_text()
+args = sys.argv[2:]
+for old, new in zip(args[0::2], args[1::2]):
+    if old not in src:
+        raise SystemExit("patch site missing: " + old)
+    src = src.replace(old, new, 1)
+Path(sys.argv[1]).write_text(src)
+PY
+}
+
+# The exercise, run on a broken copy, must stop at the check named.
+caught_at() {
+  local dir="$1" label="$2" message="$3"
+  if IYI_PATH="$WORK/$dir${PSEP}$IYI_PATH" "$IYI" run "$REPO/bench/std_colorize_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
+    echo "  the exercise PASSED with $label"
+    status=1
+  elif grep -q "ASSERTION FAILED: $message" "$WORK/$dir.out"; then
+    echo "  $label is caught"
+  else
+    echo "  $label failed, but not at \"$message\""
+    tail -3 "$WORK/$dir.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+
+if [ -n "$PY" ]; then
+  if broken_copy inspect 'wrap(@target.inspect)' 'wrap(@target.to_s)'; then
+    caught_at inspect "inspect written as to_s" "inspect wraps the target's inspect"
+  else
+    echo "  the inspect patch did not apply"
+    status=1
+  fi
+  if broken_copy bright 'when :bold, :bright then Mode::Bold' 'when :bold          then Mode::Bold' \
+       'else                     raise "Unknown mode: #{sym}"' 'else                     Mode::Default'; then
+    caught_at bright ":bright read as no mode" "mode(:bright) is bold"
+  else
+    echo "  the bright patch did not apply"
+    status=1
+  fi
+  if ! broken_copy nocolor 'else                     raise "Unknown color: #{symbol}"' 'else                     ColorANSI::Default'; then
+    echo "  the unknown-colour patch did not apply"
+    status=1
+  elif refused "$WORK/nocolor${PSEP}$IYI_PATH" nocolor '(:purple)' "Unknown color: purple"; then
+    echo "  an unknown colour answered Default was not caught"
+    status=1
+  elif grep -q "^x$" "$WORK/names/nocolor.out"; then
+    echo "  an unknown colour answered Default is caught"
+  else
+    echo "  the unknown-colour copy failed without printing: it did not build"
+    tail -3 "$WORK/names/nocolor.out" | sed 's/^/    /'
+    status=1
+  fi
+  if ! broken_copy nomode 'else                     raise "Unknown mode: #{sym}"' 'else                     Mode::Default'; then
+    echo "  the unknown-mode patch did not apply"
+    status=1
+  elif refused "$WORK/nomode${PSEP}$IYI_PATH" nomode '.bold.mode(:italic)' "Unknown mode: italic"; then
+    echo "  an unknown mode answered Default was not caught"
+    status=1
+  elif grep -q "^x$" "$WORK/names/nomode.out"; then
+    echo "  an unknown mode answered Default is caught"
+  else
+    echo "  the unknown-mode copy failed without printing: it did not build"
+    tail -3 "$WORK/names/nomode.out" | sed 's/^/    /'
+    status=1
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -48,6 +48,26 @@ impl Enumerable for MinimalSeq(T) forall T
   type Elem = T
 end
 
+# A sequence that is `Indexable` and nothing else, so that what it is asked
+# is answered by this trait: `MinimalSeq` is `Enumerable` too, and where the
+# two traits both write a method - `join` - it gets the later impl's.
+pub struct IndexOnly
+  def initialize(@data : Array(Int32))
+  end
+end
+
+impl Indexable for IndexOnly
+  type Elem = Int32
+
+  def size : Int32
+    @data.size
+  end
+
+  def unsafe_fetch(index : Int32) : Int32
+    @data.unsafe_fetch(index)
+  end
+end
+
 def assert_true(cond : Bool, msg : String) : Nil
   raise "assertion failed: #{msg}" unless cond
 end
@@ -218,6 +238,22 @@ assert_true(seq.rindex { |x| x <= 3 } == 2, "seq rindex predicate")
 assert_equal("1,3,5", seq.values_at(0, 2, 4).join(","), "seq values_at splat")
 assert_equal("2,4", seq.values_at([1, 3]).join(","), "seq values_at array")
 assert_equal("1-2-3-4-5", seq.join("-"), "seq join")
+# `Indexable#join` itself, which `MinimalSeq` does not reach, into one
+# builder: adding each element to the text so far copied that text once per
+# element, and 20,000 elements took 1.8 s where the same array's `join`
+# took 1 ms. A bound, not a benchmark: twenty times the array's time and
+# 200 ms over.
+assert_equal("1-2-3", IndexOnly.new([1, 2, 3]).join("-"), "indexable join")
+assert_equal("", IndexOnly.new([] of Int32).join("-"), "indexable join of nothing")
+long_data = Array(Int32).new(20000) { |i| i % 10 }
+join_started = __iyi_monotonic_ns
+long_joined = IndexOnly.new(long_data).join(",")
+seq_join_ns = __iyi_monotonic_ns - join_started
+join_started = __iyi_monotonic_ns
+array_joined = long_data.join(",")
+array_join_ns = __iyi_monotonic_ns - join_started
+assert_true(long_joined == array_joined, "indexable join of 20,000 elements matches the array's")
+assert_true(seq_join_ns <= array_join_ns * 20 + 200_000_000_i64, "indexable join in linear time: 20,000 elements took #{seq_join_ns // 1000000} ms where the array's took #{array_join_ns // 1000000} ms")
 assert_equal("1,2,3,4,5", seq.to_a.join(","), "seq to_a")
 assert_true(seq.bsearch { |x| x >= 3 } == 3, "seq bsearch")
 assert_true(seq.bsearch_index { |x| x >= 3 } == 2, "seq bsearch_index")

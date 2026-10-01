@@ -18,6 +18,8 @@
 # nesting past 256 levels, a number too large for a Float64) and an object
 # that names the same key twice, in `JSON.parse` and in the `PullParser`
 # alike. `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
+# Nor does `JSON.to_json` write such an object: two keys of a Hash written
+# as one text (`nil` and `"null"`, `1` and `"1"`) are refused, naming both.
 #
 # What the writer refuses: `NaN` and `Infinity`, which are not JSON numbers;
 # a value where an object key is due, a field outside an object, a second
@@ -2394,12 +2396,29 @@ pub struct JSON
     end
   end
 
-  # A key that is not a string is written by its `to_s`; `nil` as `"null"`,
-  # the word a JSON null is.
-  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+  # A String key is written as it is, and two of them are never one text.
+  def self.write_value(val : Hash(String, V), b : Builder) : Nil forall V
     b.object do
       val.each do |k, v|
-        b.field(key_text(k))
+        b.field(k)
+        write_or_null(v, b)
+      end
+    end
+  end
+
+  # Any other key is written by its `to_s`, `nil` as `"null"`, the word a
+  # JSON null is, so two keys can be one text: `{nil => 1, "null" => 2}`
+  # was written `{"null":1,"null":2}`, which `JSON.parse` refuses
+  # ("duplicate key 'null' at line 1, column 11"). The texts written are
+  # kept, and a repeat is refused, naming both keys.
+  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+    written = Hash(String, K).new
+    b.object do
+      val.each do |k, v|
+        text = key_text(k)
+        raise "the keys #{written[text].inspect} and #{k.inspect} are both written as #{text.inspect}" if written.has_key?(text)
+        written[text] = k
+        b.field(text)
         write_or_null(v, b)
       end
     end

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`JSON.to_json` refuses a Hash with two keys written as one text,
+  naming both, where it wrote the key twice.** A key that is not a String
+  is written by its `to_s`, and `nil` as `"null"`, so `{nil => 1, "null"
+  => 2}` was written `{"null":1,"null":2}`, and `1` and `"1"` the same
+  way, which the module's own `JSON.parse` refuses ("duplicate key 'null'
+  at line 1, column 11"). The writer keeps the texts it has written and
+  panics with `the keys nil and "null" are both written as "null"`; a
+  `Hash(String, V)` takes its own overload and keeps none.
+  `bench/std_json_exercise.iyi` checks both pairs and that a nil key
+  beside `"nil"` is still written; the old module answered "accepted",
+  writing both keys.
+
 - **The JSON writer writes the bytes of a string that are not UTF-8 as
   `\ufffd`, so what `JSON.to_json` writes `JSON.parse` reads.** The plain
   writer copied every byte past 0x7F: `JSON.to_json("a\xFFb")` wrote the

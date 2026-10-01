@@ -443,6 +443,38 @@ assert_text("[[1],[]]", JSON.to_json([[1_i64], [] of Int64]), "Array(Array(Int64
 assert_text("{\"k\":[1.5],\"m\":[]}", JSON.to_json({"k" => [1.5], "m" => [] of Float64}), "Hash(String, Array(Float64))")
 assert_text("{\"1\":true}", JSON.to_json({1 => true}), "Hash with an integer key is written by to_s")
 assert_text("{\"null\":1}", JSON.to_json({nil => 1}), "Hash with a nil key is written as \"null\"")
+# Two keys that are one text were written twice, `{"null":1,"null":2}`,
+# which `JSON.parse` refused ("duplicate key 'null' at line 1, column
+# 11"). The writer refuses them, naming both; keys whose text differs are
+# written as before.
+nil_beside_text = {} of String? => Int32
+nil_beside_text[nil] = 1
+nil_beside_text["nil"] = 2
+assert_text("{\"null\":1,\"nil\":2}", JSON.to_json(nil_beside_text), "a nil key beside a String key")
+nil_and_null = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of String? => Int32
+    keys[nil] = 1
+    keys["null"] = 2
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  nil_and_null = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys nil and \"null\" are both written as \"null\"", nil_and_null, "nil and \"null\" as keys of one Hash refused")
+one_and_text = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of Int32 | String => Bool
+    keys[1] = true
+    keys["1"] = false
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  one_and_text = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys 1 and \"1\" are both written as \"1\"", one_and_text, "1 and \"1\" as keys of one Hash refused")
 assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
 assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
 assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")
@@ -489,6 +521,7 @@ assert_text("1", JSON.to_json(1.as(Int32?)), "an Int32? holding 1")
 assert_text("null", JSON.to_json(nil.as(Int32?)), "an Int32? holding nil")
 assert_text("{\"tags\":[\"a\",null]}", Tagged.from_json("{\"tags\": [\"a\", null]}").to_json, "a derived Array(String?) field")
 puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes, a ToJSON struct and each of them or nil"
+puts "  two keys of a Hash written as one text (nil and \"null\", 1 and \"1\") refused, naming both"
 
 puts "\n== derive serializable"
 

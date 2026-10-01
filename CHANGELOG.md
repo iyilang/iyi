@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A second `impl T for S` of a trait without associated types is
+  refused.** It was accepted, and its methods replaced the first one's
+  without a word: two impls answering `f` with 1 and 2 printed 2. The
+  check that refused a second impl of a trait with associated types holds
+  for a trait with neither associated types nor parameters now: "S already
+  implements T: a trait is implemented once for a type, and a second impl
+  would replace the first one's methods". An impl for a subclass of a type
+  that implements the trait is still the subclass's.
+  `spec/compiler/semantic/iyi_spec.cr` checks both; the old compiler
+  raised nothing.
+
 - **A `protected` method is out of reach of another module under the
   same root.** The namespace climb that decides `protected` went past the
   module to the path segment its siblings share: `mm/lib` and `mm/u3` are

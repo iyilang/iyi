@@ -900,7 +900,19 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # about which impl it meant — which is exactly what making the element type a
   # parameter would have cost. Where the trait does have parameters, several
   # impls are the point, so they are left alone.
+  #
+  # A trait with neither is implemented once too. A second `impl T for S`
+  # was accepted and its methods replaced the first's without a word: two
+  # impls answering `f` with 1 and 2 printed 2. The orphan rule keeps a
+  # second impl out of every other module (IV.4), so this is the module's
+  # own second impl, and the first shows in the type's own `include` list.
   private def check_single_impl(node : ImplDef, trait_type, target_type)
+    if trait_type.is_a?(TraitType)
+      if target_type.parents.try &.any?(&.same?(trait_type))
+        node.raise "#{target_type} already implements #{trait_type}: a trait is implemented once for a type, and a second impl would replace the first one's methods — see SPEC.md II.6"
+      end
+      return
+    end
     return unless trait_type.is_a?(GenericTraitType)
     return if trait_type.assoc_types.empty?
     return unless trait_type.trait_params.empty?

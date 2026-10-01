@@ -1553,7 +1553,9 @@ rule, which is the whole reason the distinction exists: **a trait that declares
 associated types can be implemented only once for a given type.** A second impl
 answering `Elem` differently would make a call on that type ambiguous, which is
 the cost that ruled out making the element type a parameter. A trait with
-parameters has no such rule, because several impls are the point of it.
+parameters has no such rule, because several impls are the point of it. A trait
+with neither is implemented once as well: a second `impl T for S` had replaced
+the first one's methods without a word, and is refused the same way.
 
 One gap the implementation found, and it is on the parameter side: two impls of
 the same parameterised trait for one type **collide when their methods take the

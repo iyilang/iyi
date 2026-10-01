@@ -286,6 +286,13 @@ class Iyi::CodeGenVisitor
                    !target_def.iyi_from_artifact? &&
                    !compiled_elsewhere
 
+      # iyi: a declaration is external whatever the build's module count.
+      # `codegen_fun_signature` internalises every def of a single-module
+      # build, which on a def whose body is an artifact's is invalid IR -
+      # "Global is external, but doesn't have external or weak linkage!",
+      # from `--release --use-iyimod` and a cross-compile against artifacts.
+      context.fun.linkage = LLVM::Linkage::External unless needs_body
+
       # iyi: what this unit *defines*, so the artifact can say so (SPEC.md
       # IV.1g). A consumer compiles what the artifact does not define, and
       # every rule that tried to work that out from the shape of the def was

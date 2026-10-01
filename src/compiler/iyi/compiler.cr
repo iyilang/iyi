@@ -3072,9 +3072,14 @@ module Iyi
                              "over it would replace it. Name the program something else")
       end
 
+      # iyi: a `--release` build that writes artifacts keeps a unit per type:
+      # an artifact's object code is its type's unit, and under one module
+      # there is none - the `.iyimod` said "object code (none)" and a
+      # consumer failed to link against it. A cross-compile and an `--emit`
+      # still write one module, which is the one file they answer.
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
         program.codegen node, debug: debug, frame_pointers: frame_pointers,
-          single_module: @single_module || @cross_compile || !@emit_targets.none?
+          single_module: @cross_compile || !@emit_targets.none? || (@single_module && @emit_iyimod.nil?)
       end
 
       output_dir = CacheDir.instance.directory_for(sources)

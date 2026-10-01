@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A `--release` build that writes artifacts writes their object code,
+  and a `--release` build reads them.** `--release` forced one LLVM
+  module, so with `--emit-iyimod` no type had a unit of its own and every
+  artifact said "object code (none)": a consumer failed to link. And a
+  single-module consumer internalised the declarations it read from an
+  artifact, which LLVM refuses - "Global is external, but doesn't have
+  external or weak linkage!", reported as a bug in the compiler, from
+  `--release --use-iyimod` and from a cross-compile against artifacts.
+  A release build that writes artifacts keeps a unit per type now, and a
+  declaration is external in every build. Found by the arithmetic fuzz;
+  the iyimod spec builds a module `--release` into an artifact, requires
+  its object code, and runs a `--release` program against it, and failed
+  before.
+
 - **`UInt8` and `UInt64` divided by a double are doubles.** `std/int`
   wrote `/(Float64)` only for the widths the prelude does not divide,
   and the prelude divides only `Int32` and `Int64`, so `UInt8` and

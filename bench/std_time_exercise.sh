@@ -270,6 +270,10 @@ time_panics_with "milliseconds past an Int64" unix_ms_far "is past the milliseco
   'Time.utc(300000000, 1, 1).to_unix_ms'
 time_panics_with "a designator of two bytes" parse_tz_utf8 "invalid timezone designator in RFC 3339: ²" \
   'Time.parse_rfc3339("2024-02-29T12:30:45²Z").to_rfc3339'
+# The 808 milliseconds above Int64::MIN answer now; the one below it is
+# still refused.
+time_panics_with "the millisecond below Int64::MIN" unix_ms_min "-9223372036854776 seconds from the epoch is past the milliseconds an Int64 holds" \
+  'Time.unix(-9223372036854776_i64, 191999999).to_unix_ms'
 time_panics_with "a year past Int32, parsed" parse_y2g "year out of range in RFC 3339 string" \
   'Time.parse_rfc3339("2147483648-01-01T00:00:00Z").to_rfc3339'
 time_panics_with "a year past Int32, from the epoch" unix_1e17 "year out of range" \

@@ -259,6 +259,14 @@ assert_equal(9223372036854775807_i64, (-Span.seconds(-9223372036854775807_i64)).
 assert_equal(Time::MAX_SECONDS - Time::MIN_SECONDS, (Time.unix(Time::MAX_SECONDS) - Time.unix(Time::MIN_SECONDS)).to_i, "Time - Time across the whole range")
 puts "  Span accessors, operators (+, -, -@, cmp) and Time arithmetic verified"
 
+# Both ends of the milliseconds an Int64 holds come back: the lowest 808
+# were refused, so `Time.unix_ms(Int64::MIN).to_unix_ms` panicked where
+# `Time.unix_ms(Int64::MAX).to_unix_ms` answered.
+[-9223372036854775808_i64, -9223372036854775001_i64, -9223372036854775000_i64, -1001_i64, -1_i64, 0_i64, 9223372036854775807_i64].each do |ms|
+  assert_equal(ms, Time.unix_ms(ms).to_unix_ms, "Time.unix_ms(#{ms}).to_unix_ms round-trips")
+end
+puts "  Time.unix_ms round-trips at both ends of an Int64"
+
 # ---------------------------------------------------------------------------
 # RFC 3339 formatting and parsing
 # ---------------------------------------------------------------------------

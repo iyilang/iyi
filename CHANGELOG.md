@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`Time#to_unix_ms` answers the lowest milliseconds an Int64 holds.**
+  The top edge was checked to the millisecond and the bottom one to the
+  second: all of `-9223372036854776` was refused though 808 of its
+  milliseconds fit, so `Time.unix_ms(Int64::MIN).to_unix_ms` panicked
+  "time out of range: -9223372036854776 seconds from the epoch is past
+  the milliseconds an Int64 holds" where `Time.unix_ms(Int64::MAX)`
+  came back. A negative second is taken one up and its milliseconds from
+  1000 down now, so the product fits, and the millisecond below
+  `Int64::MIN` is still refused. `bench/std_time_exercise.iyi`
+  round-trips seven values from `Int64::MIN` to `Int64::MAX`; the old
+  module panicked at the first.
+
 - **`Time.utc` refuses a millisecond and a nanosecond that pass one
   second between them.** Each was checked on its own and their sum was
   carried into the next second in silence: `Time.utc(2024, 12, 31, 23,

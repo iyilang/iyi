@@ -723,13 +723,17 @@ pub struct Time
   # Refused with the module's sentence past the milliseconds an Int64
   # holds, some 292 million years either side of 1970, where the multiply
   # was the prelude's bare "arithmetic overflow" for a year `Time.utc`
-  # accepts, 300,000,000.
+  # accepts, 300,000,000. Both edges answer to the last millisecond that
+  # fits: the lowest 808 an Int64 holds were refused, so
+  # `Time.unix_ms(Int64::MIN).to_unix_ms` panicked. A negative second is
+  # taken one up and its milliseconds from 1000 down, so the product fits
+  # too.
   def to_unix_ms : Int64
     ms = (@nanoseconds // 1000000).to_i64
-    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854775_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64)
+    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854776_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64) || (@seconds == -9223372036854776_i64 && ms < 192_i64)
       raise "time out of range: #{@seconds} seconds from the epoch is past the milliseconds an Int64 holds"
     end
-    @seconds * 1000_i64 + ms
+    @seconds < 0_i64 ? (@seconds + 1_i64) * 1000_i64 + (ms - 1000_i64) : @seconds * 1000_i64 + ms
   end
 
   def to_unix_f : Float64

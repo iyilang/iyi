@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`Dir.glob`'s `**` does not walk through a link, and goes as deep
+  as the tree does.** It followed a junction or symlink back up the
+  tree at every level, and only a cap of 64 levels ended the walk: with
+  one link `d/loop` to `d`, `**/*.txt` answered the one file under it
+  64 times, and two such links branched twice a level [INFERENCE: past
+  any finish; the run that tried died of the buffer fault above after
+  2.7 s]. The same cap cut a real tree off without a word: a file 70
+  levels down was not found. `**` does not go into a link now, as the
+  other library's and the shells' do not, and there is no cap; the same
+  check is `lstat`'s on Linux [INFERENCE: not run on Linux].
+  `bench/std_dir_exercise.sh` walks a junction back to its directory,
+  and the exercise finds a file 70 levels down; the old module answered
+  64 and nothing.
+
 - **`Dir.glob` speaks `File.match?`'s pattern language, in linear
   time.** It had a matcher of its own that `File.match?`'s fix did not
   reach: `?` took one byte, so `?.txt` missed `ü.txt`; `[ab].*` and

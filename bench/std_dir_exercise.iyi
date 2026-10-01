@@ -261,6 +261,16 @@ assert_true !glob_star.any? { |p| p.includes?(".hidden_glob") }, "glob * skips h
 
 glob_deep = Dir.glob(listing_dir + "/**/*.txt")
 assert_true glob_deep.size == 2, "recursive glob finds both txt files"
+# `**` goes as deep as the tree does. A cap of 64 levels, all that ended a
+# walk through a link back up the tree, stopped it without a word, and a
+# file 70 down was not found; bench/std_dir_exercise.sh walks the link.
+bottom = sandbox + "/deep"
+70.times { bottom = bottom + "/d" }
+Dir.mkdir_p(bottom)
+File.write(bottom + "/bottom.txt", "b")
+deepest = Dir.glob(sandbox + "/deep/**/bottom.txt")
+assert_true deepest == [bottom + "/bottom.txt"], "** finds a file 70 levels down: #{deepest.size}"
+puts "  ** to any depth"
 assert_true Dir.glob(listing_dir + "/no_such_pattern_*").empty?, "no-match glob is empty"
 assert_true Dir[listing_dir + "/*.txt"].size == 2, "Dir[] is glob"
 # A wildcard before the last segment, and a pattern that starts `./`:

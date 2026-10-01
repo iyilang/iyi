@@ -4,7 +4,8 @@
 #     bash bench/std_dir_exercise.sh
 #
 # Proves the exercise holds plain and --release, that broken dot-entry filtering
-# and a dead glob matcher are caught, and what directory operations refuse:
+# and a dead glob matcher are caught, that `**` does not walk through a link
+# back up the tree, and what directory operations refuse:
 # opening non-existent paths or files, deleting non-empty or non-existent
 # directories, creating existing directories, mkdir_p through a file, and
 # operating on closed directory handles.
@@ -156,6 +157,41 @@ elif IYI_PATH="$WORK/patched_glob${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI
 else
   echo "  dead glob matcher is caught"
 fi
+
+echo
+echo "== a ** walk does not go through a link"
+# A link back to its own directory: `**` walked it again at every level,
+# so the one file under it came back 64 times - and two such links
+# branched past any finish - until a cap of 64 levels stopped the walk.
+# A junction on Windows, which any user may make; a symlink elsewhere.
+mkdir -p "$WORK/looped/d"
+printf 'x' > "$WORK/looped/d/x.txt"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/looped/d/loop")" "$(cygpath -w "$WORK/looped/d")" > /dev/null
+    ;;
+  *) ln -s "$WORK/looped/d" "$WORK/looped/d/loop" ;;
+esac
+printf 'module main\n\nimport std/dir::{Dir}\n\nputs Dir.glob(Program.args[0] + "/**/*.txt").size\n' > "$WORK/looped.iyi"
+if [ ! -d "$WORK/looped/d/loop" ]; then
+  echo "  no link was made, so a walk past one is unmeasured"
+else
+  answer="$("$IYI" run "$WORK/looped.iyi" -- "$WORK/looped" 2>&1)"
+  if [ "$answer" = "1" ]; then
+    echo "  ** answers the file once, past a link back to its directory"
+  else
+    echo "  ** past a link back to its directory answered: $answer"
+    status=1
+  fi
+fi
+# The link goes before the trap's `rm -rf`, which was seen to refuse a
+# junction with "Permission denied" and leave the scratch directory.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    [ -d "$WORK/looped/d/loop" ] && MSYS_NO_PATHCONV=1 cmd /c rmdir "$(cygpath -w "$WORK/looped/d/loop")"
+    ;;
+  *) rm -f "$WORK/looped/d/loop" ;;
+esac
 
 echo
 echo "== what dir operations refuse"

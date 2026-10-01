@@ -113,10 +113,20 @@ assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  
 assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")
 assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
 assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\\u00e9\\ufffd\\ufffd\\ud83d\\ude00\"]", Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any).to_ascii_json, "ascii-only writes bytes that are not a code point as \\ufffd, one per ill-formed subpart")
+# And the plain writer the same: it copied those bytes, so
+# `JSON.to_json("a\xffb")` was text `JSON.parse` refused ("invalid UTF-8
+# byte 255 in string at line 1, column 3"). Both writers write one value.
+ill_formed = Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any)
+assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\u00e9\\ufffd\\ufffd\u{1F600}\"]", ill_formed.to_json, "the plain writer writes bytes that are not a code point as \\ufffd and copies the rest")
+assert_true(JSON.parse(ill_formed.to_json) == JSON.parse(ill_formed.to_ascii_json), "both writers' text reads back as one value")
+assert_text("a\uFFFDb", JSON.parse(JSON.to_json("a\xffb")).as_s, "JSON.to_json of a byte 0xff reads back as U+FFFD")
+assert_text("{\"a\\ufffdb\":1}", JSON.to_json({"a\xffb" => 1}), "and in a key")
+assert_text("\"\\ufffd\\ufffd\\ufffd\"", JSON.to_json("\xed\xa0\x80"), "an encoded surrogate is three ill-formed subparts")
 assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
 assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
 assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
 puts "  compact, pretty (two spaces and a tab), ascii-only and every escape written back"
+puts "  bytes that are not a code point written as \\ufffd by both writers, so the text reads back"
 
 # ---------------------------------------------------------------------------
 # Pull parser

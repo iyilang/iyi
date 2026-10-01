@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **The JSON writer writes the bytes of a string that are not UTF-8 as
+  `\ufffd`, so what `JSON.to_json` writes `JSON.parse` reads.** The plain
+  writer copied every byte past 0x7F: `JSON.to_json("a\xFFb")` wrote the
+  0xFF raw and `JSON.parse` refused the text ("invalid UTF-8 byte 255 in
+  string at line 1, column 3"), a Hash key the same way, and an encoded
+  surrogate `"\xED\xA0\x80"` was refused as a "malformed UTF-8 sequence
+  starting with byte 237". Each ill-formed subpart is now written as
+  `\ufffd`, as `to_ascii_json` already did, so both writers' text reads
+  back as one value: `"a\ufffdb"` reads as "a\uFFFDb" and the surrogate is
+  three `\ufffd`. Replaced rather than refused because a String holds any
+  bytes, a file name or a log line, and a refusal would panic the program
+  writing it; well-formed text is copied byte for byte as before.
+  `bench/std_json_exercise.iyi` checks the plain text, a key, the
+  surrogate, the read-back and that both writers agree; the old module
+  wrote the bytes 0xFF 0xFE raw where `\ufffd\ufffd` was expected.
+
 - **A `JSON::Any` array or object is a key that spreads.** `Any#hash`
   combined an array's elements as `31 * h + e` and an object's pairs as
   the sum of `31 * k.hash + v.hash`, with an integer hashing as itself:

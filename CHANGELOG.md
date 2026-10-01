@@ -142,6 +142,8 @@
 
 ### Fixed
 
+
+
 - **On Windows `Dir.glob` of a `\\?\` path globs the directory it
   names.** The scan for the pattern's first wildcard stopped at the `?`
   of `\\?\`, so the walk began at `\\` and a `\\?\` pattern answered

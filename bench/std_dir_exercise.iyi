@@ -427,6 +427,38 @@ puts "  deletion outcomes for empty and non-empty paths"
   assert_true Dir.exists?("\\\\.\\" + long_dir), "a long directory spelled with \\\\.\\ exists"
   assert_str "deep", File.read("\\\\.\\" + long_dir + "\\long.txt"), "a long file spelled with \\\\.\\ reads"
 
+  # A name with an unpaired surrogate has no UTF-8 spelling, and a listing
+  # steps over it: it was answered as U+FFFD, a name that is not there.
+  # It is made and removed through the wide calls, there being no iyi
+  # String that spells it.
+  lib LibWideName
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+    fun CloseHandle(handle : Void*) : Int32
+    fun DeleteFileW(name : UInt16*) : Int32
+  end
+
+  lone_dir = sandbox + "/lone"
+  Dir.mkdir(lone_dir)
+  File.write(lone_dir + "/ok.txt", "k")
+  lone_wide = __iyi_wide_path(backslashed(lone_dir).to_unsafe)
+  lone_length = 0
+  while lone_wide[lone_length] != 0_u16
+    lone_length = lone_length + 1
+  end
+  lone_name = Pointer(UInt16).malloc((lone_length + 9).to_u64)
+  lone_name.copy_from(lone_wide, lone_length)
+  tail = [92_u16, 120_u16, 0xD800_u16, 121_u16, 46_u16, 116_u16, 120_u16, 116_u16, 0_u16] # \x?y.txt
+  tail.each_with_index { |unit, index| lone_name[lone_length + index] = unit }
+  lone_handle = LibWideName.CreateFileW(lone_name, 0x40000000, 0, Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))
+  assert_true lone_handle.address != 0xFFFFFFFFFFFFFFFF_u64, "a name with an unpaired surrogate was made"
+  LibWideName.CloseHandle(lone_handle)
+  lone_children = Dir.children(lone_dir)
+  lone_glob = Dir.glob(lone_dir + "/*")
+  LibWideName.DeleteFileW(lone_name)
+  assert_true lone_children == ["ok.txt"] && lone_glob == [lone_dir + "/ok.txt"], "a name UTF-8 cannot spell is stepped over: #{lone_children.inspect}"
+  puts "  a name UTF-8 cannot spell is stepped over"
+
   # A drive's root keeps the separator that makes it the root.
   assert_str "C:\\", Dir.without_trailing_separator("C:\\"), "a drive's root keeps its separator"
   assert_str "C:\\tmp", Dir.without_trailing_separator("C:\\tmp\\"), "any other directory drops it"

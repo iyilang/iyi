@@ -219,6 +219,10 @@ assert_equal("count block", it_cnt_blk.count { |x| x % 2 == 1 }.to_s, "3")
 puts "iterator: terminals predicates"
 assert_true("any? non-empty", Iterator.of([1]).any?)
 assert_true("any? empty is false", !Iterator.of([] of Int32).any?)
+# Truthy, as the other library's `any?` without a block answers: it was
+# "is there an element", and a source of falses answered true.
+assert_true("any? of falses is false", !Iterator.of([false, false]).any?)
+assert_true("any? finds a truthy element after a false", Iterator.of([false, true]).any?)
 assert_true("any? block true", Iterator.of([1, 2, 3]).any? { |x| x == 2 })
 assert_true("any? block false", !Iterator.of([1, 2, 3]).any? { |x| x == 99 })
 

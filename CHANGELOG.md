@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`Iterator#any?` without a block asks for a truthy element.** It asked
+  whether there was an element at all, so `Iterator.of([false, false]).any?`
+  was true where Crystal's is false. It pulls until a truthy element now,
+  which for a source with no `false` in it is still one pull.
+  `bench/std_iterator_exercise.iyi` checks a source of falses and one with a
+  true after a false; the old module answered true to the first.
+
 - **`Enumerable#minmax?` and `#minmax` walk the collection once.** They were
   `min?` and then `max?`, two walks, so a source that can be read once (a
   pipe, a generator) answered `{1, nil}` for `[3, 1, 4, 1, 5]`, and `minmax`

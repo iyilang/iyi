@@ -237,13 +237,18 @@ pub trait Iterator
     count
   end
 
-  # Pulls one element to answer, and that element is gone: an iterator is a
-  # pull, so a predicate over one cannot be free. The block form below reads
-  # as much as it has to and no more. Said here because a method spelled
-  # like a question that quietly takes an element is the kind of thing a
-  # caller finds out from the answer to the *next* question.
+  # Whether an element is truthy, which is what the other library's `any?`
+  # answers: this said whether there was an element at all, so
+  # `Iterator.of([false, false]).any?` was true. It pulls until it meets a
+  # truthy element, and what it pulled is gone: an iterator is a pull, so a
+  # predicate over one cannot be free. For a source with no `false` in it
+  # that is one element. The block form below reads as much as it has to
+  # and no more. Said here because a method spelled like a question that
+  # quietly takes elements is the kind of thing a caller finds out from the
+  # answer to the *next* question.
   def any? : Bool
-    !self.next.nil?
+    each { |e| return true if e }
+    false
   end
 
   def any?(& : Elem -> Bool) : Bool

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **A tuple with an element that cannot exist is stored without a
+  compiler crash.** After `return nil if x.nil?` with `x` always nil,
+  `{x, 1}` is a `Tuple(NoReturn, Int32)`, and storing it - `pairs << pr`
+  - stopped the compiler with "BUG: trying to assign Int32 <- NoReturn".
+  The store skips an element no run reaches, as an assignment of such a
+  value already did. The codegen spec checks it and crashed before; the
+  other compiler crashes the same way.
+
 - **An iterator adaptor that counts shares its count.** `take`, `skip`,
   the two whiles, `chain`, `flat_map`, `each_cons`, `with_index`,
   `cycle(n)` and `step` were structs, and `first(n)` takes its receiver

@@ -212,6 +212,14 @@ mutate "XML declaration attributes in any order" \
   '      if !in_place && (attr_name == "version"' '      if false && (attr_name == "version"' 'accepted .*standalone=.*version='
 mutate "any text as a version" \
   '        if !Parser.version_number?(attr_val)' '        if false' 'accepted .*1<0'
+mutate "a declaration running into the next" \
+  '      fail("expected '"'"'>'"'"' to end the #{what}")' '      nil' 'accepted .*ELEMENT a ANY'
+mutate "a content model group joined by both , and |" \
+  '          if groups.last != 0_u8 && groups.last != b' '          if false' 'accepted .*(a,b|c)'
+mutate "an attribute-list default not given" \
+  '    defaults = @attribute_defaults[name]?' '    defaults = @attribute_defaults["\n"]?' 'attribute default is given to the element'
+mutate "a value of a type other than CDATA kept as written" \
+  '      attr_val = Parser.collapse_spaces(attr_val) if tokenized?(name, attr_name)' '      nil' 'written NMTOKENS value'
 mutate "a parameter entity reference kept as text in an entity value" \
   '      elsif b == 37_u8' '      elsif false' 'accepted .*%p;'
 mutate "no space after the % of a parameter entity" \

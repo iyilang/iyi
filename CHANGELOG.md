@@ -142,6 +142,29 @@
 
 ### Fixed
 
+- **`std/xml` reads `<!ELEMENT>`, `<!ATTLIST>` and `<!NOTATION>` by their
+  XML 1.0 productions: a malformed one is refused, an attribute's default
+  is given to an element without it, and a value whose declared type is
+  not CDATA is trimmed and its spaces collapsed.** The three were skipped
+  to their `>` unread. `<!DOCTYPE a [<!ATTLIST a x CDATA "1">]><a/>` read
+  as `<a/>`, as did `#FIXED "fixed"`; an NMTOKENS `x="  p   q  "` kept its
+  spaces; `<!ATTLIST r xmlns:p CDATA "u">` left `<r><p:x/></r>` refused
+  ("namespace prefix 'p' of <p:x> is not declared"); and `<!ELEMENT>`,
+  `<!ATTLIST r a CDATA>`, `<!ELEMENT r (a,|b)>`, `<!NOTATION n>`,
+  `<!ATTLIST garbage !!! ??? >`, `<!ATTLIST r a CDATA "&undef;">` and
+  `<!ATTLIST r a CDATA "<">` were accepted, where expat 2.7.1 refuses all
+  seven. Each is now read by productions [45]-[60] and [82]; a default is
+  read as a written value is (references expanded with the entities
+  declared so far, `<` refused), the first declaration of an attribute
+  counts, and an element's missing defaults are added before its
+  namespaces are bound. A namespace declaration the tag cannot make is
+  refused once the tag is read, as an undeclared prefix already was and
+  as expat does: `<a xmlns:x="" b="<"/>` now names the `<`. On 155
+  declaration documents the parser accepts and refuses what expat does,
+  with the same attribute values. `bench/std_xml_exercise.iyi` checks the
+  seven refusals and the defaults; the old module gave the round-trip
+  document's root no declared `note`.
+
 - **A document declared US-ASCII writes a character past U+007F in CDATA
   as a reference, and `to_xml` refuses one in a comment, a processing
   instruction or a name.** CDATA was written as UTF-8 whatever the

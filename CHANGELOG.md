@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **A program `Process.run` starts on Windows may start one of its own
+  outside its job, as it may from a shell, and is in the job before it
+  runs.** Each child runs in a job of its own so that a cancel ends what it
+  started; the job allowed no breakaway, so a child's `CreateProcess` with
+  CREATE_BREAKAWAY_FROM_JOB was refused "Access is denied" under
+  `Process.run` alone: Python's `subprocess.run` with that creation flag
+  answered `[WinError 5]` there and ran from bash or PowerShell. The job
+  allows it now (JOB_OBJECT_LIMIT_BREAKAWAY_OK). And the child was put in
+  the job after it had started running, so a program it started first was
+  outside what a cancel ends [INFERENCE: the race was not reproduced]; it is
+  created suspended now and let go once it is in the job.
+  `bench/std_process_exercise.iyi` has the child start one with that flag,
+  under `iyi run` and as a built program, and its check that a cancel ends
+  the grandchild still holds; the old module answered "refused: error 5".
+
 - **A connected UDP socket whose peer is gone answers as on Windows:
   the next send goes and nothing is queued.** Linux and BSD report the
   peer's ICMP port-unreachable to a connected datagram socket's next

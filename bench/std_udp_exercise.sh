@@ -105,10 +105,10 @@ else
 from pathlib import Path
 # The parser is std/socket's now, so the module broken is that one.
 src = Path("$REPO/src/std/socket.iyi").read_text()
-old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"'
+old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if localhost?(host)'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
+Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if localhost?(host)', 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the patch did not apply"

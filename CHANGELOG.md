@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`localhost` is resolved in any case and with one trailing dot.**
+  `IyiSocket.parse_ip`, which `connect`, `listen`, `UdpSocket` and
+  `HTTP.request` all reach, matched the host against `"localhost"`
+  exactly, so `LOCALHOST`, `Localhost` and `localhost.` were refused
+  with "cannot resolve address: \"LOCALHOST\"", where getaddrinfo,
+  Python and curl answer 127.0.0.1: a host name's case is not part of
+  it (RFC 4343), and the trailing dot is the name written fully
+  qualified. They resolve to 127.0.0.1 now, and `localhost..` is still
+  refused. `bench/socket_exercise.iyi` resolves the three spellings and
+  talks over a listener on `LOCALHOST` through `localhost.`; the old
+  module panicked "cannot resolve address: \"LOCALHOST\"".
+
 - **`Int64` and `UInt64` compare with a `Float64` exactly, in both
   operand orders.** The prelude declared the six comparisons as the
   instruction, which converts the integer to a double first:

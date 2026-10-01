@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **`Unicode.downcase` and `Unicode.capitalize` choose the final sigma by
+  Unicode's Cased and Case_Ignorable properties.** Both were approximated:
+  Cased as Ll, Lu and Lt, which misses Other_Lowercase and Other_Uppercase
+  (`ª`, `ʰ`, `Ⅻ`, `Ⓐ`), and Case_Ignorable as every mark plus eighteen code
+  points, which counts spacing marks (Mc) and misses format characters other
+  than the soft hyphen, modifier letters and modifier symbols. `"ΑΣ\u200BΑ"`
+  and `"ΑΣ\u0384Α"` lowered to a final `ς`, and `"Α\u02BCΣ"`, `"\u216BΣ"`
+  and `"ΑΣ\u0903Α"` to `σ`. Both properties are now tables that
+  `scripts/generate_unicode_std.py` writes from `DerivedCoreProperties.txt`
+  of the module's release, 17.0.0, and the five strings give Python's σ, σ,
+  ς, ς and ς. Over every code point whose two properties are the same in
+  Unicode 15.0 and 17.0 (1,111,868), put before, between and after a sigma,
+  the sigma now matches Python 3.12's `str.lower`; the old module differed
+  at 1,325 of them. `bench/std_unicode_exercise.iyi` checks the five strings
+  and `capitalize("\u216BΣ")`; the old module answered `ας\u200Bα` for the
+  first and `Ⅻσ` for the last.
+
 - **`Unicode.downcase` with `CaseOptions::Turkic` lowers `I` and a combining
   dot above to `i` when marks of other classes sit between them, so the NFD
   and NFC of `İ` with a dot below agree.** Only the code point right after

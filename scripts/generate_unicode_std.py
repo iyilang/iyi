@@ -6,9 +6,17 @@
 The source is `src/unicode/data.cr`, the table of the Unicode Character
 Database that `scripts/generate_unicode_data.cr` downloads and writes for the
 compatibility library, and `src/unicode/unicode.cr`, which names the UCD
-version it was written from. Nothing is fetched: the repository already
-carries the data, and both libraries answering from one table is what lets
+version it was written from. The repository already carries that data, and
+both libraries answering from one table is what lets
 `bench/std_unicode_exercise.sh` diff them.
+
+Two properties are not in it, because the compatibility library has no use
+for them: Cased and Case_Ignorable, which decide the final sigma. They are
+read from `DerivedCoreProperties.txt` of the same release, fetched from
+unicode.org as `scripts/generate_unicode_data.cr` fetches the rest. Before
+they were generated, the module approximated them by hand (Ll, Lu and Lt for
+Cased; every mark and a list of eighteen code points for Case_Ignorable) and
+chose the wrong sigma in 378 of 20,000 sampled strings.
 
 What is written, between the `# tables-begin` and `# tables-end` lines of the
 module, is one string constant per table: decimal integers separated by
@@ -26,6 +34,7 @@ from __future__ import annotations
 
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -36,6 +45,7 @@ MODULE = REPO / "src" / "std" / "unicode.iyi"
 BEGIN = "  # tables-begin"
 END = "  # tables-end"
 WIDTH = 96
+UCD_ROOT = "https://www.unicode.org/Public/{version}/ucd/"
 
 
 def read_tables(text: str) -> dict[str, list[tuple[int, ...]]]:
@@ -72,6 +82,26 @@ def version(text: str) -> str:
     if not found:
         sys.exit("no VERSION in " + str(UNICODE))
     return found.group(1)
+
+
+def derived_core_properties(ucd: str, names: tuple[str, ...]) -> dict[str, set[int]]:
+    """The code points of each named property in DerivedCoreProperties.txt of release *ucd*."""
+    url = UCD_ROOT.format(version=ucd) + "DerivedCoreProperties.txt"
+    with urllib.request.urlopen(url) as response:
+        text = response.read().decode("utf-8")
+    if not text.startswith(f"# DerivedCoreProperties-{ucd}.txt"):
+        sys.exit(f"{url} does not name release {ucd} on its first line")
+    properties: dict[str, set[int]] = {name: set() for name in names}
+    for line in text.splitlines():
+        fields = [field.strip() for field in line.split("#", 1)[0].split(";")]
+        if len(fields) < 2 or fields[1] not in properties:
+            continue
+        span = fields[0].split("..")
+        properties[fields[1]].update(range(int(span[0], 16), int(span[-1], 16) + 1))
+    for name, points in properties.items():
+        if not points:
+            sys.exit(f"{url} has no {name} lines")
+    return properties
 
 
 def expand(strided: list[tuple[int, ...]]) -> set[int]:
@@ -134,8 +164,9 @@ def literal(name: str, comment: str, values: list[int]) -> str:
 
 
 def main() -> None:
-    tables = read_tables(DATA.read_text())
-    ucd = version(UNICODE.read_text())
+    tables = read_tables(DATA.read_text(encoding="utf-8"))
+    ucd = version(UNICODE.read_text(encoding="utf-8"))
+    derived = derived_core_properties(ucd, ("Cased", "Case_Ignorable"))
 
     def strided(*names: str) -> list[tuple[int, int, int]]:
         points: set[int] = set()
@@ -158,6 +189,8 @@ def main() -> None:
     lowercase = strided("category_Ll")
     uppercase = strided("category_Lu")
     titlecase = strided("category_Lt")
+    cased = runs(derived["Cased"])
+    case_ignorable = runs(derived["Case_Ignorable"])
 
     upcase = keyed("upcase_ranges", 3)
     downcase = keyed("downcase_ranges", 3)
@@ -186,6 +219,8 @@ def main() -> None:
         literal("LOWERCASE", f"{len(lowercase)} rows of {{from, to, stride}}: general category Ll.", flat(lowercase)),
         literal("UPPERCASE", f"{len(uppercase)} rows of {{from, to, stride}}: general category Lu.", flat(uppercase)),
         literal("TITLECASE", f"{len(titlecase)} rows of {{from, to, stride}}: general category Lt.", flat(titlecase)),
+        literal("CASED", f"{len(cased)} rows of {{from, to, stride}}: the Cased property of DerivedCoreProperties (Lowercase, Uppercase and Lt).", flat(cased)),
+        literal("CASE_IGNORABLE", f"{len(case_ignorable)} rows of {{from, to, stride}}: the Case_Ignorable property of DerivedCoreProperties (Mn, Me, Cf, Lm, Sk and the word-internal punctuation).", flat(case_ignorable)),
         literal("UPCASE", f"{len(upcase)} rows of {{from, to, delta}}: the simple uppercase mapping of every code point in the range is itself plus delta.", flat(upcase)),
         literal("DOWNCASE", f"{len(downcase)} rows of {{from, to, delta}}: the simple lowercase mapping is itself plus delta.", flat(downcase)),
         literal("ALTERNATE", f"{len(alternate)} rows of {{from, to}}: ranges where the even code points are uppercase and the odd ones their lowercase.", flat(alternate)),
@@ -201,11 +236,12 @@ def main() -> None:
         literal("COMPOSITION", f"{len(compositions)} rows of {{first, second, composed}}: canonical compositions, the exclusions already left out, sorted by first then second.", flat(compositions)),
     ]
 
-    module = MODULE.read_text()
+    module = MODULE.read_text(encoding="utf-8")
     begin = module.index(BEGIN)
     end = module.index(END)
     generated = BEGIN + "\n" + "\n\n".join(sections) + "\n" + END
-    MODULE.write_text(module[:begin] + generated + module[end + len(END):])
+    # The module's lines end in LF on every platform; a Windows text write would end them in CRLF.
+    MODULE.write_text(module[:begin] + generated + module[end + len(END):], encoding="utf-8", newline="\n")
     total = sum(len(section) for section in sections)
     print(f"wrote {len(sections) - 1} tables ({total} bytes) for Unicode {ucd} into {MODULE.relative_to(REPO)}")
 

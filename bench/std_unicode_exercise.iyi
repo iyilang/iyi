@@ -69,5 +69,17 @@ assert_str "Ας", Unicode.capitalize("ΑΣ"), "final sigma after the capitalize
 assert_str "\u02BCN", Unicode.capitalize("\u0149"), "capitalize of n preceded by apostrophe is its uppercase"
 assert_str "\u0399\u0308\u0301", Unicode.capitalize("\u0390"), "capitalize of iota with dialytika and tonos is its uppercase"
 puts "  one-code-point titlecase and the final sigma after the first letter"
+# Cased and Case_Ignorable are the Unicode properties, not general
+# categories: a format character (Cf), a modifier symbol (Sk) and a
+# modifier letter (Lm) are looked through, a spacing mark (Mc) is not, and
+# the Roman numeral `Ⅻ` (Nl, Other_Uppercase) is cased. The answers are
+# Python's str.lower; the approximation gave ς, ς, σ, σ and σ.
+assert_str "ασ\u200Bα", Unicode.downcase("ΑΣ\u200BΑ"), "a zero width space inside a word is case-ignorable"
+assert_str "ασ\u0384α", Unicode.downcase("ΑΣ\u0384Α"), "the Greek tonos inside a word is case-ignorable"
+assert_str "α\u02BCς", Unicode.downcase("Α\u02BCΣ"), "a modifier apostrophe before the final sigma is looked through"
+assert_str "\u217Bς", Unicode.downcase("\u216BΣ"), "a sigma after the cased Roman numeral twelve is final"
+assert_str "ας\u0903α", Unicode.downcase("ΑΣ\u0903Α"), "a spacing mark ends the word before it"
+assert_str "\u216Bς", Unicode.capitalize("\u216BΣ"), "capitalize judges the final sigma by the same properties"
+puts "  the final sigma by the Cased and Case_Ignorable properties"
 
 puts "\nALL CHECKS PASSED"

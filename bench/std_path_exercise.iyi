@@ -212,16 +212,25 @@ assert_str("D:\\a", Path.windows("D:a").expand(base).to_s, "D:a expands under D:
 assert_true(Path.windows("\\a").expand(base).absolute?, "an expanded rooted path is absolute")
 assert_str("C:a", Path.windows("C:").join("a").to_s, "a bare drive joined is drive-relative")
 assert_str("C:b", Path.windows("C:a").sibling("b").to_s, "a drive-relative sibling stays on the drive")
-# A `/` anchor is a Windows anchor: `C:/a/./b` normalized to `C:/a\b`, and
-# `relative_to` found no path between it and `C:\a` - every path Git Bash
-# spells. And a drive-relative name with `ğ` lost a byte per `ğ`.
-assert_str("C:\\a\\b", Path.windows("C:/a/./b").normalize.to_s, "a / anchor normalizes to \\")
-assert_str("\\\\s\\sh\\b", Path.windows("//s/sh/a/../b").normalize.to_s, "and a // share")
-assert_str("b", Path.windows("C:/a/b").relative_to("C:\\a").to_s, "relative across the two spellings")
+# The anchor is spelled the kind's own way by normalize: `C:/` stayed as
+# written, `C:/a/b` normalized to `C:/a\b`, and relative_to refused a base
+# that named the same drive root with the other separator.
+assert_str("C:\\a\\b", Path.windows("C:/a/b").normalize.to_s, "a windows anchor normalizes to its own separator")
+assert_str("\\a", Path.windows("/a").normalize.to_s, "a windows root normalizes to \\")
+assert_str("\\\\srv\\sh\\x", Path.windows("//srv/sh//x").normalize.to_s, "a UNC anchor normalizes to one \\ root")
+assert_str("b", Path.windows("C:/a/b").relative_to("C:\\a").to_s, "C:/ and C:\\ are one anchor to relative_to")
+# A UNC share is an anchor, not a file name: `\\srv\a.\` had the
+# extension `.\`, with a stem and extension that did not spell it.
+assert_str("", Path.windows("\\\\srv\\a.\\").extension, "a UNC share has no extension")
+assert_str("\\\\srv\\a.\\", Path.windows("\\\\srv\\a.\\").stem, "a UNC share is its own stem")
+# The rest of a drive-relative name was cut by characters, not bytes.
+assert_str("C:\\base\\\u00e9", Path.windows("C:\u00e9").expand(base).to_s, "a drive-relative non-ASCII name expands whole")
+assert_str("D:\\\u00e9x", Path.windows("D:\u00e9x").expand(base).to_s, "a non-ASCII name on another drive expands whole")
+# Only a bare drive joins without a separator; `foo:` is a name.
+assert_str("foo:\\bar", Path.windows("foo:").join("bar").to_s, "only a bare drive joins without a separator")
+# `/` and `\` are one separator to `==` and to a hash as well.
 assert_true(Path.windows("C:/a") == Path.windows("C:\\a"), "/ and \\ are one separator in ==")
 assert_true(h[Path.windows("c:/a")]? == 1, "and in the hash")
-assert_str("C:\\base\\ğ.txt", Path.windows("C:ğ.txt").expand(base).to_s, "a drive-relative name keeps its last bytes")
-assert_str("D:\\ğ", Path.windows("D:ğ").expand(base).to_s, "on another drive too")
 puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
 
 puts "\n== path comparison via Comparable"

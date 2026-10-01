@@ -138,7 +138,7 @@ prove_fails "Enumerable minmax inverted" no_minmax "enumerable.iyi" "enum: minma
 
 # 5. Enumerable each_cons_pair skips yields
 prove_fails "Enumerable each_cons_pair broken" no_cons_pair "enumerable.iyi" "enum: each_cons_pair" \
-  's/yield last, e unless last\.nil?/previous = nil/'
+  's/yield previous\.as(Elem), e if started/previous = nil/'
 
 # 6. Enumerable to_h corrupted
 prove_fails "Enumerable to_h corrupted" no_to_h "enumerable.iyi" "enum: to_h" \
@@ -178,6 +178,15 @@ prove_fails "an append that copies twice" no_owning "list.iyi" "list: an append 
 #     list's, and the caller's next push lands in the list.
 prove_fails "a list that keeps the caller's array" no_copy "list.iyi" "list: the caller's array is not the list's" \
   's/@items = items.dup/@items = items/'
+
+# 13-15. A nil element read back as "no previous element": the nil test
+#     each of the three used before the flag, put back.
+prove_fails "each_cons_pair skips the pair after a nil" nil_cons_pair "enumerable.iyi" "enum: each_cons_pair after a nil element" \
+  's/yield previous\.as(Elem), e if started/yield previous.as(Elem), e unless previous.nil?/'
+prove_fails "chunk_while joins the element after a nil" nil_chunk_while "enumerable.iyi" "enum: chunk_while after a nil element" \
+  's/if !started || (yield previous\.as(Elem), e)/if previous.nil? || (yield previous.as(Elem), e)/'
+prove_fails "reduce? restarts at a nil" nil_reduce "enumerable.iyi" "enum: reduce? from a nil element" \
+  's/acc = found ? (yield acc\.as(Elem), e) : e/acc = acc.nil? ? e : (yield acc.as(Elem), e)/'
 
 echo
 echo "== one mistake, one sentence, whichever tower answers"

@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== over a socket" "== the server, from a raw socket" "== a burst of connections"; do
+for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -261,7 +261,13 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 120 "$IYI" run "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  # Build first, then run: a patch that does not compile would also "fail",
+  # and that proves nothing about whether the exercise catches the break.
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/mut.out"
+    status=1
+  elif timeout 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else
@@ -269,8 +275,8 @@ PY
   fi
 }
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
-mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca'
-mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body if'
+mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
+mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body + "" if'
 mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
@@ -283,6 +289,22 @@ mutate "a server whose tasks share the accept loop's variable" '          spawn_
             0
           end'
 mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
+mutate "a malformed chunked body that raises in the server" 'return "not a chunk size: #{size_text.inspect}" unless size' 'raise "HTTP: not a chunk size: #{size_text.inspect}" unless size'
+mutate "a chunk's end added past Int32's" 'return nil if size > n - i - 2' 'return nil if i + size + 2 > n'
+mutate "a decoded chunk's end added past Int32's" 'raise "HTTP: chunked body ends inside a chunk" if size > n - i' 'raise "HTTP: chunked body ends inside a chunk" if i + size > n'
+mutate "control characters let into a field value" 'return "header #{name} contains a control character" if control?(value)' ''
+mutate "control characters let into a request target" 'target.bytesize == 0 || HTTP.control?(target)' 'target.bytesize == 0'
+mutate "a control character written into a request" 'raise "HTTP: header #{name} contains a control character" if control?(value)' ''
+mutate "a control character written into an answer" 'raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)' ''
+mutate "control characters let into a reason" 'raise "HTTP: not a status line: #{line}" if control?(reason)' ''
+mutate "repeated fields told apart by case" 'key = name.downcase' 'key = name'
+mutate "two lengths that differ read as the first" 'return nil unless trim(part) == first' 'return nil if false'
+mutate "chunks beside a length that keep the connection" 'close = true if stub.header("Content-Length") || version == "HTTP/1.0"' 'close = true if false'
+mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(code_text) && code >= 100' 'code_text.bytesize == 3'
+mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
+mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
+mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'
 
 echo
 if [ "$status" -eq 0 ]; then

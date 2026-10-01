@@ -34,14 +34,6 @@ assert_str "a/b:c", URI.new(path: "a/b:c").to_s, "a colon past the first segment
 assert_str "file:C:/x", URI.new(scheme: "file", path: "C:/x").to_s, "nor a path behind a scheme"
 puts "  a colon in a relative path's first segment"
 
-# Where a space is `+`, a `+` is `%2B`: "1+1=2" and "1 1=2" both encoded
-# to "1+1=2", and decoding gave the second for the first.
-["1+1=2", "1 1=2", "a+b c"].each do |text|
-  assert_str text, URI.decode(URI.encode(text, space_to_plus: true), plus_to_space: true), "#{text} round-trips with + for a space"
-end
-assert_true URI.encode("1+1=2", space_to_plus: true) != URI.encode("1 1=2", space_to_plus: true), "and the two encode apart"
-puts "  a + where a space is +"
-
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"
@@ -55,5 +47,10 @@ assert_str "A b", form["d"], "an escape and a plus are decoded"
 assert_str "", form["%"], "a lone % is a key"
 assert_str "", form["e"], "a key with no value"
 puts "  a malformed escape in a query is read, not refused"
+
+puts "\n== encode"
+assert_str "peter+%2B+paul", URI.encode("peter + paul", space_to_plus: true), "a '+' is %2B once a space is '+'"
+assert_str " +", URI.decode(URI.encode(" +", space_to_plus: true), plus_to_space: true), "encode with space_to_plus is undone by decode"
+puts "  a literal + is encoded when + stands for a space"
 
 puts "\nALL CHECKS PASSED"

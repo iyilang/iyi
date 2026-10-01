@@ -144,6 +144,23 @@ prove_fails "base parsing broken" no_base "string: to_i base 16" \
 prove_fails "chomp crlf broken" no_chomp "string: chomp crlf" \
   's/return byte_slice(0, bytesize - 2)/return self/'
 
+# Characters, not bytes: a wide character in the set stripped whatever
+# wide character was there; "\n" to chomp only a newline; \v and \f not
+# separators; the limit ignored with an empty separator; a squeezed run
+# written one byte of its character; a final \r dropped.
+prove_fails "strip chars takes any wide character" strip_wide "string: rstrip chars shares a byte" \
+  's/^    !chars.index(byte_slice(at, width)).nil?$/    true/'
+prove_fails "chomp of a newline only a newline" chomp_nl "string: chomp newline" \
+  '/^    return chomp if suffix == "\\n"$/d'
+prove_fails "split blind to vertical tab" split_vt "string: split vertical tab and form feed" \
+  's/^      if b.ascii_whitespace?$/      if b.whitespace?/'
+prove_fails "empty separator ignores the limit" split_limit "string: split empty separator limit" \
+  '/^        break if limit > 1 \&\& pieces.size == limit - 1$/d'
+prove_fails "squeeze writes a byte of each character" squeeze_byte "string: squeeze" \
+  's/^        io.write(source + at, width) unless same$/        io.write(source + at, 1) unless same/'
+prove_fails "each_line drops a final cr" line_cr "utf8: each_line final cr" \
+  's/^      yield byte_slice(start, bytesize - start)$/      yield byte_slice(start, source[bytesize - 1] == 13_u8 ? bytesize - start - 1 : bytesize - start)/'
+
 # 5. String split broken
 prove_fails "string split broken" no_split "string: split str" \
   's/byte_slice(start, idx - start)/"broken"/'

@@ -450,6 +450,19 @@ its first touch: 2 MB resident per worker for 4 KB used, 34 MB across
 sixteen, so the stacks refused huge pages by `madvise` - and begin at
 64 KB now and grow, the footprint section says.
 
+And one thing a fuzz of `std/semantic_version` found after. The program
+frees a large chunk itself when `realloc` outgrows it, under the lock,
+and that unlinked the node and unmapped it at once. The helpers walk
+the large list without the lock - `containing_large`, for every scanned
+word no arena holds - and may have the chunk grayed and queued: a helper
+read the unmapped node's link and faulted, in one run of four of a
+program joining a 4 MB string beside a mark over 200,000 versions. Under
+a mark the chunk stays mapped and listed now, and the sweep after the
+mark frees it; the look at the flag is under the lock the mark raises
+and lowers it under. `bench/concurrent_mark.sh` outgrows blocks under
+marks, requires each still listed while the mark runs and each freed
+after, and its proof removes the look.
+
 The budget is twice what survived, and what was allocated under the
 mark did not survive anything: born gray, so counted marked, but not
 live in the sense the budget wants, and counted the other way a program

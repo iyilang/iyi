@@ -51,8 +51,11 @@ pub struct INI
       len = line.bytesize
       len -= 1 if len > 0 && raw[len - 1] == 13_u8 # a CRLF file's '\r'
 
+      # Leading whitespace is ASCII whitespace, as the other library skips
+      # it: only space and tab were, so `\v[s]` was refused as a key with no
+      # `=` and a line of just `\f` was not the blank line it is.
       offset = 0
-      while offset < len && (raw[offset] == 32_u8 || raw[offset] == 9_u8)
+      while offset < len && (raw[offset] == 32_u8 || (raw[offset] >= 9_u8 && raw[offset] <= 13_u8))
         offset += 1
       end
       next if offset >= len

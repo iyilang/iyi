@@ -50,11 +50,12 @@ pub struct Complex
     to_f64.to_f32
   end
 
+  # The joiner is the imaginary part's sign bit and its magnitude follows,
+  # as the other library prints: comparing `>= 0.0` printed `1.0 + -0.0i`
+  # for a negative zero and `1.0 - NaNi` for NaN.
   def to_s : String
-    r = @real.to_s
-    sign_str = @imag >= 0.0 ? " + " : " - "
-    im = @imag >= 0.0 ? @imag.to_s : (0.0 - @imag).to_s
-    r + sign_str + im + "i"
+    joiner = @imag.nan? || Math.copysign(1.0, @imag) > 0.0 ? " + " : " - "
+    @real.to_s + joiner + @imag.abs.to_s + "i"
   end
 
   def to_s(io : IyiIO) : ::Nil
@@ -77,10 +78,27 @@ pub struct Complex
     @real * @real + @imag * @imag
   end
 
+  # The other library's cases, one by one: dividing by `abs` answered NaN
+  # for an infinite part, 0 once `abs` overflowed (both parts 1.5e308),
+  # and a magnitude of 1.414 for two subnormal parts, whose `abs` rounds.
   def sign : Complex
     return self if zero?
-    mag = abs
-    Complex.new(@real / mag, @imag / mag)
+    return Complex.new(Float64::NAN, Float64::NAN) if @real.nan? || @imag.nan?
+    return Complex.new(@real > 0.0 ? 1.0 : -1.0, @imag) if @real != 0.0 && @imag == 0.0
+    return Complex.new(@real, @imag > 0.0 ? 1.0 : -1.0) if @real == 0.0 && @imag != 0.0
+    real_inf = @real.infinite?
+    imag_inf = @imag.infinite?
+    if real_inf && imag_inf
+      half = Math.sqrt(0.5)
+      Complex.new(half * real_inf, half * imag_inf)
+    elsif imag_inf
+      Complex.new(Math.copysign(0.0, @real), imag_inf)
+    elsif real_inf
+      Complex.new(real_inf, Math.copysign(0.0, @imag))
+    else
+      angle = phase
+      Complex.new(Math.cos(angle), Math.sin(angle))
+    end
   end
 
   def phase : Float64
@@ -91,8 +109,10 @@ pub struct Complex
     {abs, phase}
   end
 
+  # Negated, not subtracted from 0.0: `0.0 - 0.0` is `+0.0`, so the
+  # conjugate of `-1 + 0i` sat above the branch cut and its log was `+pi i`.
   def conj : Complex
-    Complex.new(@real, 0.0 - @imag)
+    Complex.new(@real, -@imag)
   end
 
   def inv : Complex
@@ -112,7 +132,7 @@ pub struct Complex
   end
 
   def - : Complex
-    Complex.new(0.0 - @real, 0.0 - @imag)
+    Complex.new(-@real, -@imag)
   end
 
   def -(other : Complex) : Complex
@@ -132,15 +152,37 @@ pub struct Complex
     Complex.new(@real * n, @imag * n)
   end
 
+  # Smith's scaled quotient, as the other library divides: through
+  # `abs2`, a divisor past 1e154 squared to infinity and gave 0, and one
+  # under 1e-162 squared to 0 and panicked "Division by zero". A zero
+  # divisor answers what a float quotient does, infinities and NaN.
   def /(other : Complex) : Complex
-    d = other.abs2
-    raise "Division by zero" if d == 0.0
-    Complex.new((@real * other.real + @imag * other.imag) / d, (@imag * other.real - @real * other.imag) / d)
+    if other.real.nan? || other.imag.nan?
+      Complex.new(Float64::NAN, Float64::NAN)
+    elsif other.imag.abs < other.real.abs
+      r = other.imag / other.real
+      d = other.real + r * other.imag
+      if d.nan? || d == 0.0
+        Complex.new(Float64::NAN, Float64::NAN)
+      else
+        Complex.new((@real + @imag * r) / d, (@imag - @real * r) / d)
+      end
+    elsif other.imag == 0.0
+      Complex.new(@real / other.real, @imag / other.real)
+    else
+      r = other.real / other.imag
+      d = other.imag + r * other.real
+      if d.nan? || d == 0.0
+        Complex.new(Float64::NAN, Float64::NAN)
+      else
+        Complex.new((@real * r + @imag) / d, (@imag * r - @real) / d)
+      end
+    end
   end
 
+  # A zero divisor is a float quotient's infinities and NaN, not a panic.
   def /(other : ::Number) : Complex
     n = other.to_f64
-    raise "Division by zero" if n == 0.0
     Complex.new(@real / n, @imag / n)
   end
 
@@ -148,8 +190,14 @@ pub struct Complex
     self
   end
 
+  # The parts' own hashes, the imaginary one left out when it is zero as
+  # the other library does, so `Complex.new(x, 0)` hashes as `x`, which it
+  # equals. `to_i64` of a part panicked "arithmetic overflow" past 2^63 or
+  # at NaN and infinity, and `to_i32` of that past 2^31.
   def hash : Int32
-    @real.to_i64.to_i32 ^ @imag.to_i64.to_i32
+    h = @real.hash
+    return h if @imag == 0.0
+    (h.to_i64.unsafe_to_u64 &* 0x100000001B3_u64 ^ @imag.hash.to_i64.unsafe_to_u64).hash
   end
 
   def self.zero : Complex
@@ -193,7 +241,8 @@ pub struct Complex
          else
            @imag.abs / Math.sqrt(2.0 * (r + @real))
          end
-    Complex.new(re, @imag >= 0.0 ? im : 0.0 - im)
+    # Negated: `0.0 - im` lost the sign of an imaginary part that underflowed.
+    Complex.new(re, @imag >= 0.0 ? im : -im)
   end
 end
 
@@ -206,9 +255,12 @@ struct ::Number
     Std::Complex::Complex.new(0, self)
   end
 
+  # Spelled in full: this file's import of `Math` does not reach the
+  # reopened `::Number`, so `0.5.cis` failed to compile ("undefined
+  # constant Math") unless the caller had imported `Math` itself.
   def cis : Std::Complex::Complex
     val = to_f64
-    Std::Complex::Complex.new(Math.cos(val), Math.sin(val))
+    Std::Complex::Complex.new(Std::Math::Math.cos(val), Std::Math::Math.sin(val))
   end
 
   def +(other : Std::Complex::Complex) : Std::Complex::Complex
@@ -216,15 +268,23 @@ struct ::Number
   end
 
   def -(other : Std::Complex::Complex) : Std::Complex::Complex
-    Std::Complex::Complex.new(to_f64 - other.real, 0.0 - other.imag)
+    Std::Complex::Complex.new(to_f64 - other.real, -other.imag)
   end
 
   def *(other : Std::Complex::Complex) : Std::Complex::Complex
     other * self
   end
 
+  # Times the inverse, as the other library divides a number by a complex:
+  # dividing `Complex.new(self, 0)` rounded otherwise, and panicked
+  # "Division by zero" once the divisor's `abs2` underflowed to 0.
   def /(other : Std::Complex::Complex) : Std::Complex::Complex
-    Std::Complex::Complex.new(self, 0) / other
+    self * other.inv
+  end
+
+  # `1.0 == Complex.new(1, 0)` was false while the reverse was true.
+  def ==(other : Std::Complex::Complex) : ::Bool
+    other == self
   end
 end
 

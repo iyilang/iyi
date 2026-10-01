@@ -165,12 +165,23 @@ pub struct Slice(T)
   end
 
   # Returns a subslice covering *range*, or nil if out of bounds.
+  #
+  # A range that ends before it begins is empty, not out of bounds, as the
+  # other library counts it: `s[3..1]` is the empty slice at 3. The count is
+  # taken only once the end is known to be past the start, and the
+  # inclusive end is added only while the count can still fit, so an end
+  # near the top of `Int32` answers nil instead of overflowing.
   def []?(range : Range(Int32, Int32)) : Slice(T)?
     b = range.begin
     e = range.end
     b = b + @size if b < 0
+    return nil if b < 0
     e = e + @size if e < 0
-    count = range.exclusive? ? (e - b) : (e - b + 1)
+    count = 0
+    if e >= b
+      count = e - b
+      count = count + 1 unless range.exclusive? || count > @size
+    end
     self[b, count]?
   end
 
@@ -351,12 +362,13 @@ pub struct Slice(T)
     ary
   end
 
-  # Returns a new slice with copied contents.
+  # Returns a new slice with copied contents. The copy is filled before it
+  # takes this slice's read-only flag: `copy_from` into a read-only copy
+  # refused, so a read-only slice could not be duplicated at all.
   def dup : Slice(T)
     ptr = @size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(@size.to_u64)
-    copy = Slice(T).new(ptr, @size, read_only: @read_only)
-    copy.copy_from(self) if @size > 0
-    copy
+    ptr.copy_from(@pointer, @size) if @size > 0
+    Slice(T).new(ptr, @size, read_only: @read_only)
   end
 
   # Returns a copy of this slice.

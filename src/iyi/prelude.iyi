@@ -3144,8 +3144,17 @@ require "./file"
           write64(head + OFF_INDEX, slot)
           table[index] = head
         else
+          # A large chunk under a running mark stays mapped and listed, and
+          # the sweep after the mark frees it: the helpers walk the large
+          # list without the lock (`containing_large`, for every word no
+          # arena holds) and may have the chunk grayed and queued, and
+          # `realloc` grows a buffer past 1 MiB through here. Unmapped
+          # beside them, a helper read the freed node's link and faulted -
+          # one run in four of a program joining a 4 MB string. The flag
+          # is read under the lock the mark raises and lowers it under,
+          # so no mark begins or ends between the look and the unmap.
           lock
-          free_large(pointer.address - HEADER)
+          free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
           unlock
         end
       end

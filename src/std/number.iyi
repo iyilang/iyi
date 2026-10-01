@@ -66,6 +66,10 @@ end
 struct ::Float64
   def round(mode : Std::Number::RoundingMode) : Float64
     return self if self != self || abs >= 9007199254740992.0
+    # A zero is its own answer in every mode, sign and all: `-0.0 < 0.0`
+    # is false, and the sign test below answered `(-0.0).round(TiesAway)`
+    # as 0.0.
+    return self if self == 0.0
     if mode == Std::Number::RoundingMode::ToZero
       self < 0.0 ? ceil : floor
     elsif mode == Std::Number::RoundingMode::ToPositive
@@ -93,9 +97,7 @@ struct ::Float64
             even = (f / 2.0).floor * 2.0
             even == f ? f : f + 1.0
           end
-      # The sign by copying, so a zero keeps its own: `(-0.0).round` and
-      # `(-0.3).round(ToZero)` were `0.0`.
-      LibIyiRounding.copysign(r, self)
+      self < 0.0 ? r * -1.0 : r
     end
   end
 

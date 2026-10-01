@@ -146,6 +146,92 @@ PY
   fi
 fi
 
+# One proof per reading fix: the module is copied with one site patched
+# back to (or towards) what it did before, as the proofs above do, and
+# the exercise must then fail at the check that guards that fix, not
+# merely fail.
+prove_caught() {
+  local name="$1" what="$2" message="$3" old="$4" new="$5"
+  echo
+  echo "== proving the checks can fail when $what"
+  if [ -z "$PY" ]; then
+    echo "  skipped: no working python3, so the broken copy could not be made"
+    return
+  fi
+  mkdir -p "$WORK/patched_$name/std"
+  if ! OLD="$old" NEW="$new" SRC="$REPO/src/std/yaml.iyi" DST="$WORK/patched_$name/std/yaml.iyi" "$PY" - <<'PY'
+import os
+from pathlib import Path
+src = Path(os.environ["SRC"]).read_text()
+old = os.environ["OLD"]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path(os.environ["DST"]).write_text(src.replace(old, os.environ["NEW"], 1))
+PY
+  then
+    echo "  the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched_$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 60 "$IYI" run "$REPO/bench/std_yaml_exercise.iyi" >"$WORK/$name.out" 2>&1; then
+    echo "  the exercise PASSED with $what"
+    status=1
+  elif ! grep -qF -- "ASSERTION FAILED: $message" "$WORK/$name.out"; then
+    echo "  the exercise failed, but not at \"$message\":"
+    grep -m1 'ASSERTION FAILED\|panic' "$WORK/$name.out" | sed 's/^/    /'
+    status=1
+  else
+    echo "  caught: $message"
+  fi
+}
+
+prove_caught qplain "a plain scalar may not start with '?'" \
+  "a plain scalar may start with '?'" \
+  '(b == 63_u8 && lone)' 'b == 63_u8'
+prove_caught entry "'- b' after a key reads as text" \
+  'accepted "a: - b' \
+  'if b == 45_u8 && lone' 'if b == 45_u8 && lone && false'
+prove_caught folded "a folded scalar drops its leading empty lines" \
+  "a folded scalar keeps its leading empty lines" \
+  $'first = false\n          while blanks > 0' $'first = false\n          while blanks > 0 && false'
+prove_caught spaced "spaces past the indentation make an empty line" \
+  "spaces past the indentation on a blank line are text" \
+  'if start + spaces >= finish && spaces <= indent' 'if start + spaces >= finish'
+prove_caught keep "the line after the stream's last line break is kept" \
+  "keep chomping adds no line after the stream's last line break" \
+  'break if finish >= @size' 'break if finish >= @size && false'
+prove_caught esctab "folding trims escaped blanks" \
+  "an escaped tab before a folded line break stays" \
+  'trim_trailing_blanks(hard)' 'trim_trailing_blanks(0)'
+prove_caught escbreak "an escaped line break folds like a plain one" \
+  "blanks before an escaped line break stay" \
+  'next_quoted_line(opener, parent, flow, true)' 'next_quoted_line(opener, parent, flow, false)'
+prove_caught jsonkey "a quoted key in a flow sequence needs a blank after ':'" \
+  "a quoted key in a flow sequence takes an adjacent ':'" \
+  '(quoted_key || value_indicator?(pos, true, @ends[@line]))' '(value_indicator?(pos, true, @ends[@line]))'
+prove_caught flowfold "a plain scalar in a flow collection stops at its line end" \
+  "a plain scalar folds across lines in a flow collection" \
+  'while skip_blank(stop) >= @ends[@line]' 'while skip_blank(stop) >= @ends[@line] && false'
+prove_caught tagbelow "a scalar tag alone on its line applies to the resolved node below" \
+  "a tag over an empty node tags the empty scalar" \
+  'if tag.nil? || tag == "!!seq" || tag == "!!map"' 'if true'
+prove_caught flowempty "properties over nothing in a flow collection are refused" \
+  "properties over nothing in a flow collection are the empty scalar" \
+  '(b == 44_u8 || b == 93_u8 || b == 125_u8) && !(anchor.nil? && tag.nil?)' '(b == 44_u8 || b == 93_u8 || b == 125_u8) && !(anchor.nil? && tag.nil?) && false'
+prove_caught comment "a plain scalar folds on past a comment" \
+  'accepted "a: b # c' \
+  'break if skip_blank(@flow_end) < @ends[@line]' 'break if skip_blank(@flow_end) < @ends[@line] && false'
+prove_caught hash "a '#' starts a flow scalar" \
+  'accepted "[1,#c' \
+  '|| b == 62_u8 || b == 35_u8' '|| b == 62_u8'
+prove_caught flowentry "'? a' and '- a' read as text in a flow collection" \
+  'accepted "[? a]' \
+  'elsif (b == 63_u8 || b == 45_u8) && (pos + 1' 'elsif false && (b == 63_u8 || b == 45_u8) && (pos + 1'
+prove_caught escapes "the dump writes a byte order mark and C1 controls raw" \
+  "a byte order mark is escaped when dumped" \
+  $'size : Int32) : Int32\n    b = bytes[i]' $'size : Int32) : Int32\n    return -1\n    b = bytes[i]'
+prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
+  "a literal entry ending the stream without a line break keeps no line feed it lacks" \
+  'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/yaml exercise holds"

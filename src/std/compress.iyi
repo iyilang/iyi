@@ -230,6 +230,9 @@ class Huffman
   # the code's length, or 0 where the code is longer. `decode` looked
   # every code up a bit at a time, which was most of inflating.
   @fast : Pointer(Int32)
+  # What the lengths leave of the 2^15 bit patterns: 0 for a complete
+  # code, 2^15 for no codes at all.
+  @left : Int32
 
   FAST = 9
 
@@ -248,7 +251,8 @@ class Huffman
       i = i + 1
     end
     # Over-subscribed lengths make an ambiguous code; incomplete ones are
-    # legal only for a single-code distance tree, which the caller decides.
+    # legal only for a single one-bit code, which the caller decides
+    # (`incomplete?`).
     left = 1
     len = 1
     while len < 16
@@ -257,6 +261,7 @@ class Huffman
       raise "DEFLATE: the code lengths are over-subscribed" if left < 0
       len = len + 1
     end
+    @left = left
     offs = Pointer(Int32).malloc(16_u64)
     offs[1] = 0
     len = 1
@@ -301,6 +306,16 @@ class Huffman
       code = code << 1
       len = len + 1
     end
+  end
+
+  # Whether some bit pattern has no code though the table has codes. A
+  # dynamic block may leave patterns unused only with one code of one bit
+  # (*lone_ok*: a block that uses one distance, or only its end), and
+  # never in the code-length code; zlib and puff refuse every other such
+  # table, so a stream that has one is corrupt.
+  def incomplete?(lone_ok : Bool) : Bool
+    return false if @left == 0 || @left == 1 << 15
+    !(lone_ok && @count[1] == 1 && @left == 1 << 14)
   end
 
   def decode(r : BitReader) : Int32
@@ -517,6 +532,7 @@ pub struct Deflate
       i = i + 1
     end
     lencode = Huffman.new(lengths, 19)
+    raise "DEFLATE: the code-length code is incomplete" if lencode.incomplete?(false)
     i = 0
     while i < nlen + ndist
       sym = lencode.decode(r)
@@ -545,7 +561,9 @@ pub struct Deflate
     end
     raise "DEFLATE: the block has no end-of-block code" if lengths[256] == 0
     lit = Huffman.new(lengths, nlen)
+    raise "DEFLATE: the literal/length code is incomplete" if lit.incomplete?(true)
     dist = Huffman.new(lengths + nlen.to_i64, ndist)
+    raise "DEFLATE: the distance code is incomplete" if dist.incomplete?(true)
     {lit, dist}
   end
 
@@ -671,36 +689,34 @@ pub struct Gzip
     end
   end
 
-  # Every member, joined: a gzip file is a series of members (RFC 1952
-  # §2.2) - what `cat a.gz b.gz` makes, and what gzip, zcat and Python
-  # read whole. Only the first was read, and the rest dropped without a
-  # word. Zero bytes after the last member are padding, as gzip and
-  # Python take them; anything else there is refused.
+  # A gzip file is a series of members (RFC 1952 §2.2), and what it holds
+  # is what they hold, one after another, as gzip(1) and Crystal's reader
+  # read it. Bytes after a member that do not start another are left as
+  # zlib leaves them.
   def self.decompress(data : String) : String
-    first, at = member(data, 0)
-    return first if at == data.bytesize
-    out = String::Builder.new
-    out << first
-    p = data.to_unsafe
-    while at < data.bytesize
-      if p[at] == 0_u8
-        at = at + 1
-        next
-      end
-      raise "gzip: #{data.bytesize - at} bytes after the last member are not a gzip member" unless at + 1 < data.bytesize && p[at] == 0x1f_u8 && p[at + 1] == 0x8b_u8
-      part, at = member(data, at)
-      out << part
+    sink, used = member(data, 0)
+    return sink unless more?(data, used)
+    all = ByteBuffer.new(sink.bytesize * 2)
+    all.append(sink.to_unsafe, sink.bytesize)
+    while more?(data, used)
+      sink, used = member(data, used)
+      all.append(sink.to_unsafe, sink.bytesize)
     end
-    out.to_s
+    all.to_s
   end
 
-  # The member that starts at *start*, and where the next one would.
+  private def self.more?(data : String, pos : Int32) : Bool
+    data.bytesize - pos >= 2 && data.to_unsafe[pos] == 0x1f_u8 && data.to_unsafe[pos + 1] == 0x8b_u8
+  end
+
+  # One member from *start*: its bytes, and where the next begins.
   private def self.member(data : String, start : Int32) : {String, Int32}
-    raise "gzip: the stream is shorter than its header" if data.bytesize < start + 10
+    raise "gzip: the stream is shorter than its header" if data.bytesize - start < 10
     p = data.to_unsafe
-    raise "gzip: not a gzip stream" unless p[start] == 0x1f_u8 && p[start + 1] == 0x8b_u8
-    raise "gzip: not a deflate stream (method #{p[start + 2]})" unless p[start + 2] == 8_u8
-    flags = p[start + 3].to_i32
+    h = p + start.to_i64
+    raise "gzip: not a gzip stream" unless h[0] == 0x1f_u8 && h[1] == 0x8b_u8
+    raise "gzip: not a deflate stream (method #{h[2]})" unless h[2] == 8_u8
+    flags = h[3].to_i32
     pos = start + 10
     if (flags & 4) != 0 # FEXTRA
       raise "gzip: the stream ends inside its header" if data.bytesize < pos + 2
@@ -715,8 +731,8 @@ pub struct Gzip
     end
     pos = pos + 2 if (flags & 2) != 0 # FHCRC
     raise "gzip: the stream ends inside its header" if data.bytesize < pos
-    # The last member's trailer names its length, which for a file of one
-    # member is the length the result will have: a capacity guess.
+    # The last member's trailer names its length; for a file of one
+    # member, that is the length the result will have.
     expected = data.bytesize >= pos + 8 ? get_le(p + (data.bytesize - 4).to_i64).to_i64 : 0_i64
     sink, used = Deflate.inflate(data, pos, expected)
     raise "gzip: the stream ends before its trailer" if data.bytesize - used < 8

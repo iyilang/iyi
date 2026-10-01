@@ -82,6 +82,9 @@ assert_str "A", Base64.decode("QQ="), "partial padding"
 assert_str "ABCA", Base64.decode("QUJD\nQQ=\n=\n"), "whitespace between groups and padding"
 assert_str "ABCEFG", Base64.decode("QUJD\nRUZH"), "whole groups either side of a line break"
 assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
+# All six ASCII whitespace bytes, as the module's header says: `\v` and
+# `\f` were refused as invalid bytes.
+assert_str "ABCD", Base64.decode("QUJD\vRA=\f="), "vertical tab and form feed are whitespace"
 puts "  decode and round trip"
 
 puts "\nALL CHECKS PASSED"

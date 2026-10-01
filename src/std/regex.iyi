@@ -110,7 +110,9 @@ class RxRuns
             return nil if c == 92_u8 || c == 91_u8
             if i + 2 < n && p[i + 1] == 45_u8 && p[i + 2] != 93_u8
               high = p[i + 2]
-              return nil if high < c
+              # An escaped end, `[0-\x34]`, is the machine's to read: taken
+              # here as the byte `\` it made `[0-\x34]` match `x` and `A`.
+              return nil if high == 92_u8 || high < c
               x = c.to_i32
               while x <= high.to_i32
                 at[x] = 1_u8
@@ -601,6 +603,13 @@ class RxCompiler
   @i : Int32
   @nfa : RxNfa
   @depth : Int32
+  # How many times the counts enclosing the cursor copy what it parses.
+  @copies : Int32
+  # Scratch for `nullable?`: the question a state was last walked for,
+  # and last marked an open end for.
+  @stamp : Array(Int32)
+  @open : Array(Int32)
+  @asked : Int32
 
   def initialize(pattern : String)
     @pat = pattern
@@ -609,6 +618,10 @@ class RxCompiler
     @i = 0
     @nfa = RxNfa.new
     @depth = 0
+    @copies = 1
+    @stamp = [] of Int32
+    @open = [] of Int32
+    @asked = 0
   end
 
   def compile : RxNfa
@@ -690,7 +703,14 @@ class RxCompiler
     end
   end
 
+  # `x*` is one split that `x` loops back to, unless `x` can match empty:
+  # then it is `(x+)?`, as Go builds it. Looping back, an empty `x` came
+  # to the split this step had already visited and its thread was dropped,
+  # so the empty branch lost its priority: `(|a)*` on `aa` answered `aa`,
+  # where pcre2, Python and Go answer the empty match. Only then, since
+  # `(x+)?` of any `x` reorders the threads of a loop around it.
   private def star(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
+    return optional(plus(atom, lazy), lazy) if nullable?(atom)
     split = @nfa.add(3)
     if lazy
       @nfa.patch(split, -1, atom[0])
@@ -699,6 +719,30 @@ class RxCompiler
     end
     patch_outs(atom, split)
     {split, [split]}
+  end
+
+  # Whether *frag* can match empty: a path of splits and assertions from
+  # its start reaches one of its open ends. Stamped per question, so each
+  # costs the states it walks, not the whole machine.
+  private def nullable?(frag : {Int32, Array(Int32)}) : Bool
+    @asked = @asked + 1
+    while @stamp.size < @nfa.count
+      @stamp << 0
+      @open << 0
+    end
+    frag[1].each { |s| @open[s] = @asked }
+    todo = [frag[0]]
+    while !todo.empty?
+      s = todo.pop
+      next if s < 0 || @stamp[s] == @asked
+      @stamp[s] = @asked
+      k = @nfa.kind[s]
+      next if k <= 2 || k == 4
+      return true if @open[s] == @asked
+      todo << @nfa.out1[s]
+      todo << @nfa.out2[s] if k == 3
+    end
+    false
   end
 
   private def plus(atom : {Int32, Array(Int32)}, lazy : Bool) : {Int32, Array(Int32)}
@@ -728,45 +772,66 @@ class RxCompiler
   # each copy has states of its own. A `{` that is not one of those three
   # shapes is the literal byte, as RE2 and Python read it.
   private def counted(atom : {Int32, Array(Int32)}, atom_at : Int32, atom_end : Int32) : {Int32, Array(Int32)}
-    save = @i
+    return atom unless count_ahead?
     @i = @i + 1
     lo = digits
     hi = lo
     unbounded = false
-    if lo >= 0 && @i < @n && peek == 44_u8 # ,
+    if peek == 44_u8 # ,
       @i = @i + 1
       hi = digits
       unbounded = hi < 0
     end
-    unless lo >= 0 && @i < @n && peek == 125_u8 # }
-      @i = save
-      return atom
-    end
     @i = @i + 1
     raise "regex: repeat range out of order in /#{@pat}/" if !unbounded && hi < lo
     raise "regex: repeat count past 1000 in /#{@pat}/" if lo > 1000 || hi > 1000
+    # Copies multiply through nesting, and RE2 caps the product rather
+    # than each count: `((a{1000}){1000}){1000}` is a billion states, and
+    # built here it ran out of memory instead of being refused.
+    times = unbounded ? lo : hi
+    times = 1 if times < 1
+    raise "regex: repeat count past 1000 in /#{@pat}/ (nested counts multiply)" if @copies * times > 1000
     lazy = lazy_mark
     after = @i
-    copies = unbounded ? lo + 1 : hi
+    # `x{n,}` is n - 1 copies and `x+`, as RE2 expands it, so `x{1,}` is
+    # `x+`; n copies and `x*` differ from that where `x` can match empty.
+    copies = unbounded ? times : hi
+    outer = @copies
+    @copies = @copies * times
     frag = empty_fragment
     c = 0
     while c < copies
       @i = atom_at
       piece = parse_atom
       @i = after
-      if c >= lo
-        if unbounded
-          piece = star(piece, lazy)
-        else
-          piece = optional(piece, lazy)
-        end
+      if unbounded && c == copies - 1
+        piece = lo > 0 ? plus(piece, lazy) : star(piece, lazy)
+      elsif c >= lo
+        piece = optional(piece, lazy)
       end
       patch_outs(frag, piece[0])
       frag = {frag[0], piece[1]}
       c = c + 1
     end
     @i = after
+    @copies = outer
     frag
+  end
+
+  # Whether `{n}`, `{n,}` or `{n,m}` starts at the cursor, which stays
+  # where it is.
+  private def count_ahead? : Bool
+    return false unless @i < @n && peek == 123_u8
+    save = @i
+    @i = @i + 1
+    shaped = digits >= 0
+    if shaped && @i < @n && peek == 44_u8 # ,
+      @i = @i + 1
+      digits
+    end
+    shaped = shaped && @i < @n && peek == 125_u8 # }
+    @i = save
+    shaped
   end
 
   private def digits : Int32
@@ -802,6 +867,10 @@ class RxCompiler
       parse_escape
     elsif b == 42_u8 || b == 43_u8 || b == 63_u8
       raise "regex: nothing to repeat in /#{@pat}/"
+    elsif b == 123_u8 && count_ahead?
+      # A count here, `{2}` or the second of `a*{2}`, was read as its own
+      # text; pcre2, Python and Go refuse it, as `*` here is refused.
+      raise "regex: nothing to repeat in /#{@pat}/"
     else
       @i = @i + 1
       single(@nfa.add(0, b))
@@ -830,6 +899,7 @@ class RxCompiler
         if peek == 61_u8 || peek == 33_u8
           raise "regex: lookaround is refused in /#{@pat}/"
         end
+        raise "regex: not a group name in /#{@pat}/" if @i < @n && peek == 62_u8 # (?<>
         while @i < @n && peek != 62_u8
           raise "regex: not a group name in /#{@pat}/" unless RxCompiler.word?(peek)
           @i = @i + 1
@@ -888,15 +958,26 @@ class RxCompiler
   end
 
   # The byte an escape stands for, outside `\d\w\s\b` and their kin: the
-  # C escapes, `\xHH`, and any punctuation as itself. A letter or digit
-  # with no meaning is refused rather than read as the letter.
+  # C escapes, `\0` with up to two more octal digits, `\xHH`, and any
+  # punctuation, `_` included, as itself. A letter or digit with no
+  # meaning is refused rather than read as the letter.
   private def escaped_byte(b : UInt8) : UInt8
     return 10_u8 if b == 110_u8 # \n
     return 9_u8 if b == 116_u8  # \t
     return 13_u8 if b == 114_u8 # \r
     return 12_u8 if b == 102_u8 # \f
     return 11_u8 if b == 118_u8 # \v
-    return 0_u8 if b == 48_u8   # \0
+    # \0 alone made `\012` NUL then `12`; pcre2, Python and Go read a newline.
+    if b == 48_u8
+      value = 0
+      k = 0
+      while k < 2 && @i < @n && peek >= 48_u8 && peek <= 55_u8
+        value = value * 8 + (peek - 48_u8).to_i32
+        @i = @i + 1
+        k = k + 1
+      end
+      return value.to_u8
+    end
     return 27_u8 if b == 101_u8 # \e
     return 7_u8 if b == 97_u8   # \a
     if b == 120_u8              # \xHH
@@ -904,7 +985,7 @@ class RxCompiler
       lo = hex_digit
       return (hi * 16 + lo).to_u8
     end
-    if RxCompiler.word?(b)
+    if RxCompiler.word?(b) && b != 95_u8
       raise "regex: unknown escape '\\#{b.unsafe_chr}' in /#{@pat}/"
     end
     b

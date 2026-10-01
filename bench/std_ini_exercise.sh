@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every ini section reported"
-for phrase in "== parse"; do
+for phrase in "== parse" "== leading whitespace"; do
   if ! grep -q "$phrase" "$WORK/ini-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -114,6 +114,45 @@ PY
     echo "  a broken ini is caught"
   fi
 fi
+
+# Each fix undone in a copy: the exercise must fail at the check written
+# for it - not at an earlier one, and not by failing to compile.
+broken() { # broken <label> <old> <new> <phrase>
+  local label="$1" phrase="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
+    return
+  fi
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  if ! OLD="$2" NEW="$3" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/ini.iyi").read_text()
+old = os.environ["OLD"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path("$WORK/patched/std/ini.iyi").write_text(src.replace(old, os.environ["NEW"], 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_ini_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/mut.out"
+    status=1
+  elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '1,4p' "$WORK/mut.out"
+    status=1
+  else
+    echo "  $label: caught"
+  fi
+}
+broken "only space and tab skipped again" 'while offset < len && (raw[offset] == 32_u8 || (raw[offset] >= 9_u8 && raw[offset] <= 13_u8))' 'while offset < len && (raw[offset] == 32_u8 || raw[offset] == 9_u8)' "expected declaration at line 1, column 5"
 
 echo
 if [ "$status" -eq 0 ]; then

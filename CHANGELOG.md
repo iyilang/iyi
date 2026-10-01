@@ -142,18 +142,6 @@
 
 ### Fixed
 
-- **The Tangut ideographs are letters.** The Character Database writes a
-  large range as its First and Last entries, and the table generator
-  joined a First by stride to the entry before it: U+16F50 and the Tangut
-  ideographs' First became one run of two points, and the 6,142
-  ideographs after U+17000, with the Tangut supplement's, were no letter
-  to `Unicode.letter?` or to `Char#letter?`. A First and its Last are a
-  run of their own now, and the regenerated tables differ from Python
-  3.12 in no letter where they differed in 6,143. The generator also
-  formats through `Iyi.format`, which it could no longer find by its old
-  name. `bench/std_unicode_exercise.iyi` asks for U+17001 and U+187F7;
-  the old tables said no.
-
 - **`Server.serve` reads a chunked request body in time linear in its
   size.** A chunked body has no length up front, so each read was added to
   what came before and the whole request parsed again: a copy of the body
@@ -207,24 +195,11 @@
   `bench/verbs_exercise.sh` checks the caret line byte for byte; the old
   compiler wrote seventeen spaces.
 
-- **`std/http` reads a repeated header as one list, and refuses two
-  different `Content-Length`s and a signed one.** Headers went into a
-  hash keyed by their spelling: a repeat overwrote the first
-  (`Set-Cookie: a=1` then `b=2` kept `b=2`), and the same name in another
-  case sat beside it where `header` found only one - so a request with
-  `Content-Length: 3` and `content-length: 10` was read by the first, and
-  which length a server believes decides where the next request begins
-  (RFC 9112 §6.3). A repeat is joined after a comma now (RFC 9110 §5.3;
-  `Set-Cookie` arrives folded the same way), two different lengths are a
-  400 on the server and a panic in the client, and a length is digits
-  only, where `+2` was 2. `bench/std_http_exercise.iyi` checks each; the
-  old module kept one cookie.
-
-- **`BigInt.new("_")` is refused.** Underscores between digits are
-  skipped, and a string of nothing else had no digits left, which read as
-  0. It panics now with "invalid BigInt: no digits, only underscores".
-  `bench/std_big_exercise.sh` asks for the refusal; the old module
-  answered 0.
+- **A `Content-Length` is digits and nothing else.** `to_i?` took a sign,
+  so `Content-Length: +2` was a length of 2, on the server and in the
+  client (RFC 9110 §8.6 has digits only). It is refused as "not a
+  number" now, as a length of letters is. `bench/std_http_exercise.iyi`
+  sends `+3`; the old server read three bytes of body.
 
 - **A `BigDecimal` with many zeros prints in time linear in its size.**
   `to_s` grew its zeros by one at a time, copying the string for each, so
@@ -238,15 +213,6 @@
   took 46 s. It writes into one builder now, and the same print takes
   under a millisecond. `bench/std_bit_array_exercise.iyi` prints 200,000
   bits under a second; the old module took 38 s there.
-
-- **`BigRational#to_f64` keeps a float's precision for a small value.**
-  It went through `to_big_d`, whose division keeps twenty digits past the
-  point, so `1/10^30` was 0.0 and `1/(3*10^15)` kept five significant
-  digits, 3.3333e-16. It divides to twenty digits past the quotient's
-  first now: 1.0e-30 and 3.333333333333333e-16, and `(10^40+1)/7` and
-  `-5/10^320` match Python's correctly rounded division.
-  `bench/std_big_exercise.iyi` checks the first two; the old module gave
-  0.0.
 
 - **`CSV.parse` refuses a UTF-16 document.** A file opening with UTF-16's
   byte order mark - Windows PowerShell 5.1's `Out-File` and `>` - was read
@@ -276,30 +242,6 @@
   value. `bench/std_ini_exercise.iyi` asks for each refusal; the old
   module wrote the injected section.
 
-- **`Gzip.decompress` reads every member of a gzip file.** A gzip file is
-  a series of members (RFC 1952 §2.2), which is what `cat a.gz b.gz`
-  makes and what gzip, zcat and Python read whole; only the first was
-  read, and the rest dropped without a word - a GNU `gzip` pair of
-  100,001 bytes came back as 1. Every member is read and joined now, zero
-  padding after the last is taken as gzip takes it, and other bytes there
-  are refused. `bench/std_compress_exercise.iyi` decompresses three
-  joined members; the old module returned the first.
-
-- **`Unicode.capitalize` gives the titlecase of a letter with an iota
-  subscript, and a final sigma after the first letter.** The block form
-  of `Unicode.titlecase` fell back to the full uppercase where its table
-  had no row, and the 54 Greek letters with an iota subscript have a
-  two-point uppercase and a one-point titlecase: `ᾳ` came out `ΑΙ` where
-  the titlecase is `ᾼ`, and the already titlecase `ᾈ` came out `ἈΙ`. A
-  character the simple mapping changes, or one that is titlecase
-  already, takes its own titlecase now. And the rest of the string was
-  lowered on its own, with no cased letter before a sigma that ends the
-  first word: `"ΩΣ"` came out `"Ωσ"`, now `"Ως"`. Against Python 3.12
-  over every assigned code point, capitalize differs in 4 where it
-  differed in 58, the 4 being Unicode 16 and 17 data Python 3.12 does not
-  have. `bench/std_unicode_exercise.iyi` checks both; the old module
-  failed the first.
-
 - **`std/colorize` writes no escapes into a redirected standard error.**
   Whether to paint is one answer for the program, and text is painted
   before anyone knows which stream it goes to; only standard output was
@@ -325,18 +267,6 @@
   literal with a colon is bracketed now. `bench/std_http_exercise.iyi`
   asks a server on `::1` what it read; the old client sent the bare
   address.
-
-- **A request whose chunk size is not one is answered 400 by
-  `Server.serve`.** Every other malformed request was a 400 that says
-  why; a chunked body's size line raised instead, so a client that sent
-  `zz` as a chunk size got its connection closed with no answer and the
-  server printed `iyi: panic: HTTP: not a chunk size: "zz"`, a client's
-  bad input reported as the server's bug. A size near 2 GiB overflowed
-  the length arithmetic the same way. `HTTP.chunked_end` answers the
-  reason now and the server writes it in a 400.
-  `bench/std_http_exercise.iyi` sends the bad size; the old server
-  answered nothing and the exercise stopped at "the server closed
-  mid-response".
 
 - **`sleep(0)` yields.** It returned at once, and it is the runtime's
   only way for a task to let another run without waiting on anything: a
@@ -404,15 +334,6 @@
   outside; the old runtime committed 2,611 MB. The panics, thread,
   concurrency, runtime and marking gates hold.
 
-- **`lstrip`, `rstrip` and `strip` of a set of characters, and `squeeze`,
-  read characters, not bytes; `split("", limit)` reads its limit.** The
-  set was a mask of its bytes, so stripping `é` also stripped the lead or
-  tail byte of any character sharing one: `"Ω".rstrip("é")` left a lone
-  0xCE, invalid UTF-8. `squeeze` compared bytes, and `ッ` (E3 83 83) lost
-  one of its own. `"abc".split("", 2)` answered three pieces.
-  `bench/std_text_exercise.iyi` checks each in its UTF-8 section; the old
-  module failed the first.
-
 - **A language-server worker started as a rebuild unlinks the binary
   still finds its library.** A worker pins where its binary started
   (`$ORIGIN`) when it starts; the proxy retires and replaces workers
@@ -441,26 +362,11 @@
   yield; the same program peaks at 291 MB. [INFERENCE] No gate holds
   this: nothing in std measures a process's private memory.
 
-- **`HTML.escape(string, io)` writes UTF-8 text as it is.** Each byte that
-  needed no escape went out as `byte.unsafe_chr`, a character whose code
-  point is the byte, and `<<` wrote that as UTF-8: `café` came out
-  `cafÃ©`, and `日本` as mojibake. And without `std/io` imported the
-  method did not compile at all, `IyiIO` having no `<<`. The text goes out
-  in byte runs through `IyiIO#write` now. `bench/std_html_exercise.iyi`
-  escapes into a file and reads it back; the old module did not compile
-  there.
-
-- **Two `SemanticVersion`s compare, and a version read from a CRLF file
-  parses.** `<=>`, `==`, `<` and a sort of two versions - or of two
-  pre-release tags - recursed until the stack ran out, which ended the
-  program: the `impl Comparable` declares `<=>(other : self)` to call the
-  struct's own, and the struct's was spelled the same, so the impl's
-  replaced it and called itself. The struct's own take `SemanticVersion`
-  and `Prerelease`, as `Time` and `Path` spell theirs. And the one
-  trailing line break the header tolerates is a CRLF too: `1.4.2\r\n`, a
+- **A version read from a CRLF file parses.** The one trailing line break
+  `SemanticVersion.parse` tolerates is a CRLF too: `1.4.2\r\n`, a
   `VERSION` file from a Windows checkout, was "not a semantic version".
-  `bench/std_semantic_version_exercise.iyi` compares, sorts and reads a
-  CRLF version; the old module died of the stack overflow.
+  `bench/std_semantic_version_exercise.iyi` reads one; the old module
+  refused it.
 
 - **A program started without standard streams on Windows writes into
   nothing and goes on.** Started detached, as a service, or by a GUI
@@ -701,44 +607,18 @@
   gives one. `bench/std_process_exercise.iyi` asks a child started
   elsewhere for its `PWD`; the old module handed it the parent's.
 - **On Windows a relative path expands in the program's own directory,
-  and a Windows path's anchor is a Windows anchor.** `Path#expand` and
+  and `/` is `\` to a path's `==` and hash.** `Path#expand` and
   `File.expand_path` read `PWD` first. Only Git Bash sets it on Windows,
   and nothing there keeps it true: a `cd` in cmd or PowerShell after it,
   or a child started in another directory, left `PWD` naming a directory
   the program was not in, a relative path expanded there, and
   `File.rename` onto an open file moved the file into that directory.
-  Windows reads the process's own directory now. Git Bash's `PWD` is
-  spelled `C:/...`, and `normalize` kept a `C:/` or `//server/share/`
-  anchor as written, so `File.expand_path("foo")` gave `C:/Users\...` and
-  `relative_to` found no path between that and `C:\Users`. The anchor is
-  written with `\` now, and `==` and `hash` read `/` as `\` on Windows.
-  `\\server\share`, the share's root without a separator after it, was
-  not absolute, so every `expand` after a `Dir.cd` to a share panicked;
-  it is absolute. A drive-relative name had its byte count taken in
-  characters, so `C:ğ.txt` expanded to `...\ğ.tx`.
+  Windows reads the process's own directory now. `C:/a` and `C:\a` were
+  two paths to `==` and to a hash, and are one. `\\server\share`, the
+  share's root without a separator after it, was not absolute, so every
+  `expand` after a `Dir.cd` to a share panicked; it is absolute.
   `bench/std_path_exercise.iyi` checks each; the old module fails.
-- **`URI.encode(space_to_plus: true)` encodes a `+` as `%2B`.** It kept
-  the reserved `+` and wrote a space as `+`, so "1+1=2" and "1 1=2" both
-  came out "1+1=2" and `decode(plus_to_space: true)` gave the second for
-  the first - where `std/uri`'s header promises every encoder is
-  injective and `decode` undoes it. `bench/std_uri_exercise.iyi`
-  round-trips three strings; the old module failed the first.
-- **`UUID.parse` refuses a hyphen out of its place, and reads Crystal's
-  other spellings.** Every hyphen was dropped wherever it stood, so
-  `6ba7b8109dad11d180b4-00c04fd430c8----`, 37 characters, read as a UUID,
-  where the header promised a panic on a length that is not one. A
-  hyphen belongs at the four places of the 36-character form; the bare
-  32 digits, `{...}` and `urn:uuid:...`, which Crystal's `UUID` reads,
-  are read too. `bench/std_uuid_exercise.sh` refuses four misplaced
-  spellings and `bench/std_uuid_exercise.iyi` reads the three others; the
-  old module read three of the four.
-- **YAML's keep chomping (`|+`, `>+`) keeps the line breaks the text has
-  and no more.** A block scalar that ended the stream read one line break
-  too many: `a: |+\n  x\n` gave `"x\n\n"` for `"x\n"`, with LF or CRLF,
-  because the empty stretch after the stream's last line break was
-  counted as a blank line. It is not a line. `bench/std_yaml_exercise.iyi`
-  reads six block scalars at a stream's end, kept, clipped and stripped;
-  the old module failed the first.
+
 - **`std/yaml`'s header says `0777` is 777.** It listed `0777` among the
   plain scalars read as strings; the reader follows the 1.2 core schema,
   whose integer is `[-+]?[0-9]+`, and reads the decimal 777, as it
@@ -769,18 +649,15 @@
   letter and a colon are a drive now. `bench/lsp_memory.py` failed in CI
   on the change before and holds with this one.
 - **`Float64#**` of a negative exponent and `round(digits)` answer at the
-  edges of a double's range, and a zero keeps its sign through `round`
-  and `trunc`.** `2.0 ** -1074` was 0.0, one over the infinite `2.0 **
-  1074`, where the smallest double, 5.0e-324, is the answer; the
-  reciprocal's power is taken when the power itself is past the range.
-  `2.0 ** -2147483648` panicked negating its exponent. `1e308.round(1)`
-  was Infinity and `1.5.round(400)` and `1.5.round(-400)` NaN, the scale
-  having left the range; they are `1e308`, `1.5` and `0.0`, and
-  `round(digits, mode)` likewise. `(-0.0).round`, `(-0.5).trunc` and
-  `(-0.3).round(ToZero)` were `0.0`; the sign is copied back and they are
-  `-0.0`, as the instruction and Crystal answer. `bench/std_float_exercise.iyi`
-  checks each; the old modules fail the first. `bench/number_exercise.sh`'s
-  proof that `round` is symmetric patches the new line.
+  edges of a double's range.** `2.0 ** -1074` was 0.0, one over the
+  infinite `2.0 ** 1074`, where the smallest double, 5.0e-324, is the
+  answer; the reciprocal's power is taken when the power itself is past
+  the range. `1e308.round(1)` was Infinity and `1.5.round(400)` and
+  `1.5.round(-400)` NaN, the scale having left the range; they are
+  `1e308`, `1.5` and `0.0`, and `round(digits, mode)` likewise, and
+  `(-0.3).round(ToZero)` keeps its zero's sign. `bench/std_float_exercise.iyi`
+  checks each; the old modules fail the first.
+
 - **`Log` writes nothing at `Severity::None`.** None is the level that
   silences a logger, and an entry logged at None passed every level
   check, that one included: a logger set to None wrote it. None is a
@@ -839,14 +716,6 @@
   `./C:/Users/x`, and `to_s` writes that now; a colon past the first
   segment, or a path behind a scheme, needs nothing. `bench/std_uri_exercise.iyi`
   round-trips the drive path; the old module wrote it bare.
-- **`CSV.parse` ends a row at a lone CR, and keeps a row of one empty
-  field.** An unquoted CR not followed by LF was dropped, so `a\rb,c`
-  read as `[["ab", "c"]]` where Crystal's reads `[["a"], ["b", "c"]]`; it
-  ends a row now. A row that was one quoted empty field, `""`, was no row
-  at all, and `CSV.build` wrote such a row bare, so `[["a"], [""]]` came
-  back as `[["a"]]`; the parser keeps it and `build` writes it as `""`.
-  `bench/std_csv_exercise.iyi` parses both and round-trips three tables
-  through `build`; the old module fails at the lone CR.
 - **`Time.utc` on Windows reads the precise clock.** It read
   `GetSystemTimeAsFileTime`, which moves once per timer tick: the smallest
   step measured was 0.5 ms, and 0.7 ms to 15.6 ms in a loop, so two
@@ -1000,6 +869,303 @@
   and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
   globs through one and two wildcard segments and from `./`; the old
   module answered `[]` for the first.
+- **CSV, UUID, Base64 and INI read what Python and the other library
+  read.** `CSV.parse` deleted a lone `\r`, joining the fields on either
+  side, and a quote after it became literal; a blank line was one empty
+  field rather than an empty row; a last field of `""` was dropped with
+  its row; and `CSV.build` wrote a row of one empty field as a blank
+  line, which read back as nothing. `UUID.parse` removed every hyphen
+  wherever it stood, so `550e840-0e29b-...` and a trailing `-` parsed as
+  a valid UUID; hyphens count only at the four places they belong now.
+  `Base64.decode` and `INI.parse` refused `\v` and `\f`, which their own
+  headers call whitespace. 750,000 cases against Python's `base64`,
+  `uuid`, `csv` and `configparser` and the other library's modules found
+  these and none after; each exercise checks its fixes and proves each
+  check fails with its fix undone.
+
+- **`Complex` keeps its zeros' signs and divides at any magnitude.**
+  `conj`, unary minus, `Number - Complex` and `sqrt` negated as `0.0 - x`,
+  which turns -0.0 into 0.0 - so the conjugate of -1+0i sat on the wrong
+  side of `log`'s branch cut and answered +pi i; `to_s` chose its joiner
+  with `imag >= 0.0`, printing `1.0 + -0.0i` and `1.0 - NaNi`. Division
+  went through `abs2`, which overflows past 1e154 and underflows below
+  1e-162: `(1+1i) / (1e200+1e200i)` was 0 and `/ (1e-200+1e-200i)`
+  panicked "Division by zero", as did `/ 0.0`, where a float's quotient
+  is infinite. It divides by Smith's scaled quotient now, `Number /
+  Complex` is `self * other.inv`, `sign` scales before it divides, and a
+  real complex hashes as its real part. 434,256 cases over 42 fields
+  against the other library's `Complex` and Python's `cmath` found these
+  and none after - but where glibc's `hypot`, `atan2`, `exp`, `sin` or
+  `cos` misround and iyi's are correct; `std/random` matched PCG32 on 16
+  million draws. The complex exercise checks each and proves each check
+  fails with its fix undone.
+
+- **Thirteen collection answers are right.** `each_cons_pair`,
+  `chunk_while` and `reduce?` used nil for "nothing yet", so a nil
+  element was skipped: `[nil, 2, nil, 3].each_cons_pair` yielded one pair
+  of three. `Deque#concat` of a deque onto itself never ended, rereading
+  a size that grew with each push. `StaticArray#<=>` called a `Slice#<=>`
+  that does not exist, so no caller compiled. `Slice#dup` of a read-only
+  slice panicked writing its own copy; a reversed range was nil or a
+  panic where the empty slice is the answer. `sample` with a negative
+  seed, and `fill`, a slice range, `StaticArray#fill`, `BitArray.new`
+  near 2^31 bits and `BitArray#rotate_in_place` past 2^30, overflowed
+  Int32 and panicked "arithmetic overflow" - each answers, or refuses in
+  its own sentence. 46 fuzz runs against Python's `itertools`, `bisect`
+  and `collections.deque` and the other library's API found these and
+  none after, and `std/iterator` agreed everywhere; each exercise checks
+  its fixes and proves each check fails with its fix undone.
+
+- **`std/http` refuses what is not HTTP, and no request can kill its
+  server.** A malformed chunked body raised inside the connection's task:
+  the client got nothing, and `serve` panicked when the listener closed;
+  a chunk size near 2^31 overflowed Int32 in both parsers. It is a 400
+  now, and a refusal. Two conflicting `Content-Length`s were accepted -
+  the first spelling won, a request-smuggling shape RFC 9112 6.3 refuses
+  - and a repeated field kept one value; repeats are combined in order,
+  and conflicting lengths refused. `Transfer-Encoding` with a length, or
+  in HTTP/1.0, kept the connection open; control bytes, bare CR and LF
+  were accepted in field values, targets and reason phrases, and one
+  echoed header then panicked the handler; `+20`, `099` and `HTTP/x`
+  status lines were read. The client returned an interim `100 Continue`
+  as the response, so its own `Expect: 100-continue` post to the
+  module's server came back as a 100; `format_response` wrote a length
+  and a body for 1xx, 204 and 304; and an absolute-form target gave the
+  handler the whole URI as its path. 230,000 requests, 250,000
+  responses, 150,000 round trips and 6,000 real connections against a
+  model of RFC 9110 and 9112, Crystal's `HTTP` and Python found these
+  and none after; the http exercise checks each and proves each check
+  fails with its fix undone.
+
+- **A float's zero keeps its sign, and `x ** Int32::MIN` answers.**
+  `trunc` went through an integer, so `(-0.5).trunc` was `0.0`; `round`,
+  `round(digits)` and `round(mode)` put the sign back with `self < 0.0`,
+  which `-0.0` is not; and `remainder`, documented as C's `fmod` with the
+  dividend's sign, answered `0.0` for `-0.0` - each answers `-0.0` now,
+  as C's and Python's do. `2.0 ** Int32::MIN` negated the exponent and
+  panicked "arithmetic overflow"; it squares the half power instead and
+  answers `0.0`, as the other library's `powi` does. The integer side
+  - every base, conversion, division rule and bit operation against
+  Python - found nothing. The float exercise checks each and proves each
+  check fails with its fix broken.
+
+- **Five more gates' failure proofs need the broken copy to compile.**
+  The base64, bit_array, compress, http and steppable exercises counted
+  any failure of the patched build as the proof caught, and three of
+  their patches did not compile: http's `ca = ca` and `body = body if`,
+  which iyi refuses as expressions with no effect, and steppable's
+  deleted `impl Steppable for Float64`. Each helper builds the broken copy
+  first now and fails the gate, naming it, if it does not compile; the
+  three patches break their mechanisms in code that compiles, and all
+  thirty-nine proofs are caught at run time.
+
+- **The math gate's failure proofs test the checks they name.** Each
+  ran the broken copy as `iyi run std_math_exercise.iyi <oracle files>`,
+  and without `--` those files were compiled as more source: every proof
+  that had the oracle's answers failed on the build, not at a check, and
+  read "caught" - the proofs this changelog cites for exp, pow, log, the
+  trigonometric, hyperbolic, error, gamma and Bessel functions, cbrt,
+  hypot and atan2 among them. Four more wrote `x = x`, which does not
+  compile. The run takes `--` now, a proof is caught only when the
+  program itself fails - a check or a panic - and the four break their
+  terms as `x * 1.0`. With the proofs real, all fifty are caught but one,
+  atan2's middle carry, whose 2^-64 error the answers never showed; it is
+  replaced by the slow product left unnormalised, which they do.
+
+- **`std/compress` refuses an incomplete Huffman code, and reads every
+  gzip member.** A dynamic block whose literal/length, distance or
+  code-length code left bit patterns unused was decoded anyway, so a
+  corrupt stream that used only the codes that existed came back as
+  plausible bytes with no error - zlib and puff refuse all three, and so
+  does this now, keeping the one exception, a lone one-bit distance
+  code. `Gzip.decompress` read the first member of a file and dropped the
+  rest without a word: `gzip -dc`, Crystal's reader and RFC 1952 read a
+  gzip file as the series of its members, and so does this. About
+  543,000 cases against Python's `zlib` and `gzip` found these and none
+  after; the compress exercise refuses the three codes and a cut second
+  member by name, and reads two members whole.
+
+- **`std/yaml` reads and writes fifteen things as YAML 1.2 and libyaml
+  do.** Read: a plain scalar may start with `?` (`?a`), and its dump now
+  reads back; a folded scalar keeps its leading empty lines, a literal
+  one the spaces of a line past its indentation, and `|+` no phantom
+  line at the end of input, where a block scalar ending without a line
+  break gets none either; escaped blanks survive a fold (`"a\t\n b"` is
+  `a\t b`) and an escaped line break is folded as the spec says; a
+  quoted key pairs in a flow sequence (`["a":b]`), a plain scalar folds
+  across lines in flow, a tag alone on its line applies to the empty or
+  the written scalar below, and `[!!str ]` is the empty string. Refused
+  where it was misread: `a: - b`, a comment inside a folded plain
+  scalar (it had been dropped from the value), `[1,#c]`, `[- a]` and
+  `[? a]`. Written: the BOM, C1 controls, U+FFFE, U+FFFF, U+0085, U+2028
+  and U+2029 are escaped - the dump had written them raw, read the BOM
+  back as nothing, and 17,433 dumps of 200,000 were refused by libyaml.
+  200,000 streams, as many mutated, 200,000 dumped trees and 400,000
+  scalars against libyaml and the 1.2 core schema found these; the yaml
+  exercise checks each and proves each check fails with its fix undone.
+
+- **`std/regex` answers as RE2 does in seven places, and its gate's
+  proofs test something.** The fast path read `[0-\x34]` as `0` to `\`
+  plus `x`, `3` and `4`; `\012` was NUL then `12`, not a newline; `{2}`,
+  `a*{2}` and `a{2}{3}` were literal text where every engine refuses
+  "nothing to repeat"; `\_` was refused; `(?<>a)` was accepted; a loop
+  whose body can match empty lost leftmost-first priority - `(|a)*`
+  found `aa` in `aa`, where RE2, PCRE and Python find the empty string -
+  the bug Go fixed as golang/go#46123, fixed the same way; and
+  `((a{1000}){1000}){1000}` ran 20 seconds into 2 GB and panicked, where
+  nested counts past 1,000 are refused now, as RE2 refuses them. 2.4
+  million cases against Go's two engines and Python found these, and none
+  after against Go. And every one of the gate's eleven negative proofs
+  had passed without testing: `iyi run` took the cases file as a second
+  source file, so the broken exercise failed on that. With `--` it is an
+  argument, and each proof is caught at its own check, as are eight new
+  ones.
+
+- **A program no longer faults when it outgrows a large buffer beside a
+  mark.** `realloc` past 1 MiB frees the large chunk it outgrew, and that
+  unlinked and unmapped it at once, under the lock; the mark's helpers
+  walk the large list without it - for every scanned word no arena holds
+  - and may have the chunk queued. A helper read the unmapped node's link
+  and the program died of SIGSEGV: one run in four of a program that
+  parsed 200,000 semantic versions and joined a 4 MB report, found by the
+  semantic_version fuzz and caught in a core dump; `-Dgc_none` and
+  `-Dgc_boehm` never faulted. Under a running mark the chunk stays mapped
+  and listed and the sweep after the mark frees it: 0 faults in 60 runs.
+  `bench/concurrent_mark.sh` outgrows blocks under marks, requires each
+  one listed while its mark runs and the blocks freed after - all but
+  what a stale word keeps, which on Windows is one, where a leak keeps
+  every one - and proves the check fails with `free`'s look at the mark
+  removed. Where the race cannot be arranged - on darwin arm64 the grown
+  block's assist finished every mark before the old block was freed - it
+  says so, and the proof is not run there.
+
+- **Two `SemanticVersion`s compare.** `<=>` was declared on the struct
+  with `other : self` and again in `impl Comparable`, whose body is `self
+  <=> other`; the impl's definition replaced the struct's and called
+  itself, so every comparison, `==` and sort overflowed the stack (a hang
+  under `--release`). A prerelease identifier with a sign was read as a
+  signed number - `1.0.0--0` printed as `1.0.0-0` and ordered as 0 - and
+  one past Int32 was compared as bytes, not by value. 800,000 strings
+  against semver.org 2.0.0's grammar and precedence found these and none
+  after; the exercise compares, sorts semver.org's example, and proves
+  each check fails with its fix undone.
+- **`Path` on Windows normalises its anchor, and four answers are
+  python's `ntpath`'s.** `normalize` copied the anchor as written, so
+  `C:/a/b` became `C:/a\b`, `//srv/sh//x` kept its doubled separator, and
+  `relative_to?` then refused `C:\a` as a different anchor; a UNC share's
+  "extension" held a separator; `expand` of `C:é` cut `é` in half, a
+  character count used as a byte count; and `foo:` joined as a bare
+  drive. 500,000 rows against `posixpath` and `ntpath` found these and
+  none after; the exercise checks each and proves each check fails.
+
+- **`HTML.unescape` takes the longest entity name, and `HTML.escape` to
+  an IO writes UTF-8.** Unescaping looked up only the whole run of
+  letters and digits, so `&ltb`, `&copy2024` and `&notit;` were left as
+  they were, where the longest name that is an entity (`&lt`, `&copy`,
+  `&not`) is decoded, as Crystal's and Python's are. `escape(string, io)`
+  wrote each byte as a character, so every non-ASCII byte became two:
+  `café` was `cafÃ©`. 600,000 unescapes against Crystal's algorithm over
+  the module's 253 names and 400,000 escapes found these and none after;
+  the html exercise checks both and proves each check fails.
+- **`std/xml` refuses twelve kinds of document it read.** An entity's
+  replacement text was pasted in as text wherever it was referenced, so
+  a `<` reached an attribute value and markup or `]]>` reached content,
+  and an attribute's tabs and newlines were not normalised; the reserved
+  `xmlns` URI could be bound, and the `xml` one as the default; a raw
+  U+FFFE, invalid UTF-8 or a non-ASCII byte under `encoding="US-ASCII"`
+  was accepted where the same character as a reference was refused; the
+  XML declaration took any order, repeats and any version; `%` in an
+  entity value and `<!ENTITY %p` without a space got through; PI targets
+  and entity names took a colon; `<!DOCTYPEa>` was a DOCTYPE; a
+  malformed reference in an unused entity was kept; a skipped
+  declaration ran past the next one's `<`; and one 1 MB entity referenced
+  1,000 times expanded to 1 GB in 2 GB of memory - expansion is bounded
+  in bytes now, at 100 times the input or 8 MiB, as expat's is. A
+  US-ASCII document is written back with references, and a CDATA
+  section's `\r` reads back as `\r`. 720,000 documents against expat
+  and 250,000 built trees found these and none after; the xml exercise
+  checks each and proves each check fails.
+
+- **`std/hpack` follows a SETTINGS change, and refuses where it
+  panicked.** Setting `protocol_max_table_size` on a `Decoder` or an
+  `Encoder` wrote the codec's field and never the dynamic table's, so a
+  raised limit still refused a size update to it ("exceeds protocol limit
+  4096"), and a lowered one neither shrank the encoder's table nor sent
+  the size update RFC 7541 4.2 requires - the peer's table stayed above
+  the new limit. The decoder counted a header list in Int32 and panicked
+  "arithmetic overflow" on 600 KB of input once the limits were set to
+  Int32's largest; `Huffman.decode`'s bound check and
+  `Huffman.encoded_size` overflowed the same way; and `Integer.decode`
+  read a negative offset from the end. Found against a decoder written
+  from RFC 7541 - Appendix C verbatim, 280,000 blocks, every integer
+  prefix and Huffman code - and none after; `std/digest` agreed with
+  Python's `hashlib` and `zlib` everywhere. The hpack exercise checks
+  each and proves each check fails with its fix undone.
+
+- **`std/text` treats a string as characters in six places it treated as
+  bytes or got wrong.** `squeeze` compared bytes: `"耀".squeeze` dropped a
+  continuation byte and answered invalid UTF-8, and `"ééé"` stayed three.
+  `strip`, `lstrip` and `rstrip` with a set of characters built a byte
+  mask: `"xé".rstrip("©")` cut `é` in half, and `"è".strip("é¨")` was
+  empty. `split` without a separator did not split on `\v` or `\f`,
+  which `blank?` and `strip` count as whitespace. `split("", limit)`
+  ignored the limit, and `"".split("")` was `[]`, not `[""]`.
+  `each_line` dropped a final `\r` with no newline after it, and
+  `chomp("\n")` left the `\r` of a `\r\n` - both unlike Crystal's. 300,000
+  cases over 36 operations against Crystal found them, and none after;
+  the text exercise checks each and proves each check fails with its fix
+  undone.
+
+- **Three Unicode answers are the database's.** 6,171 Tangut ideographs
+  (U+17001..187FE, U+18D01..18D1D) were not letters: the table generator
+  joined a `First>`..`Last>` range to the stride before it, and only the
+  range's two ends survived. The 54 Greek letters with iota subscript
+  titlecased to their two-letter uppercase - `capitalize("ᾀ")` was `ἈΙ`,
+  not `ᾈ` - because a one-code-point titlecase was recorded only where
+  the titlecase itself was longer. And `capitalize("ΑΣ")` was `Ασ`: the
+  rest was lowercased apart from the first letter, so the final sigma
+  never saw the letter before it. The generator is fixed and
+  `src/unicode/data.cr` regenerated, so `--crystal`'s `Char#letter?` and
+  titlecase answer the same (Crystal 1.21 has all three); `std/unicode`'s
+  tables are regenerated from it. Every code point against the UCD 17.0.0
+  files, NormalizationTest's 801,360 checks and 200,000 random strings
+  found these and nothing else; the unicode exercise checks each and
+  proves the sigma check fails with the first letter unseen.
+
+- **`BigRational#to_f64` is the nearest Float64, and `std/big` refuses
+  two inputs it took.** `to_f64` went through `to_big_d`, twenty decimal
+  places, so every value under 5e-21 was 0.0 (1/10^25, every subnormal)
+  and every one under 1e-3 lost digits - 38.6% of random rationals were
+  not the nearest double. It divides to 55 bits with a sticky bit and
+  rounds once, ties to even, as Python's `float(Fraction)` does; Crystal's
+  truncates (`mpq_get_d`), and iyi's `BigDecimal#to_f64` already rounded.
+  `BigInt.new("_")`, `"-_"` and `"0x_"` were 0 and are refused, "no
+  digits"; `BigDecimal.new("1e99999999999")` panicked "arithmetic
+  overflow" and is refused, "decimal exponent out of range". 2.6 million
+  cases over 26 properties against Python's `int`, `decimal` and
+  `fractions` found these and nothing else; the big exercise checks each
+  and proves the float checks fail with the old path and with ties
+  rounded away from even.
+
+- **`String#to_f` reads an exponent of seven digits whole.** It stopped
+  reading one at 100,000, though the digits before it move the exponent
+  by up to the text's own length: `"0." + 999,999 zeros + "1e1000000"`
+  is 1.0 and read as 0.0, and `"1" + a million zeros + "e-1000000"` was
+  refused by `JSON.parse` as out of range. Both parsers, the word one and
+  the bignum one, read to nine digits now, which no text that fits in
+  memory outgrows. Found through `JSON.parse` against Python's `json`;
+  the float text gate reads three such numbers and proves the check fails
+  with the old cap, and the json exercise reads two.
+
+- **`URI.encode(s, space_to_plus: true)` escapes a literal `+`.** It
+  wrote a space as `+` and kept a `+` as it was, so `"a b"` and `"a+b"`
+  encoded alike and `decode(..., plus_to_space: true)` turned `" +"`
+  into two spaces - the one encoder of the module's that was not undone
+  by `decode`, which its header promises of all of them. A `+` is `%2B`
+  in that mode now, as Crystal's is. 200,000 cases against Crystal's
+  `URI` and Python's `urllib.parse` found 21,050 such answers and none
+  after; the uri exercise checks it and proves the check fails with the
+  `+` kept.
 
 - **The math oracle's CORE-MATH part builds without C23's `<stdbit.h>`.**
   glibc's lgamma includes it for `stdc_leading_zeros`, and mingw's gcc
@@ -1007,7 +1173,12 @@
   CORE-MATH's functions - it said so, and printed the missing header. The
   oracle carries the one function on a 64-bit word, and its directory is
   searched first, so every toolchain builds against the same one; lgamma
-  still answers glibc's on all 201,835 arguments.
+  still answers glibc's on all 201,835 arguments. The next thing each
+  runner lacked was rounding to even: mingw's libm has no `roundeven` for
+  gcc's `__builtin_roundeven` to call, and Apple's clang no such builtin.
+  The part builds it as `__builtin_rint`, which every toolchain has and
+  which is the same function under the rounding to nearest the oracle
+  never leaves; every CORE-MATH answer here is unchanged.
 
 - **`std/math` is consumable as an artifact on arm64.** Its `lib` binds
   `llvm.fma` inside `{% if flag?(:aarch64) %}`, and the rule that a
@@ -13405,7 +13576,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,209-line library and nothing else. Every other
+  written against iyi's own 19,224-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

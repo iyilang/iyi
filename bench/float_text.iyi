@@ -78,6 +78,14 @@ def check_parse(text : String, expected : String) : Nil
   end
 end
 
+def check_long(name : String, text : String, expected : String) : Nil
+  actual = text.to_f.to_s
+  if actual != expected
+    puts "float text: #{name} read as #{actual}, expected #{expected}"
+    __iyi_exit(1)
+  end
+end
+
 check_parse("0.1", "0.1")
 check_parse("2.5e-3", "0.0025")
 check_parse("1E10", "10000000000.0")
@@ -102,6 +110,12 @@ check_parse("9007199254740993.000000000000000000001", "9.007199254740994e+15")
 check_parse("1.000000000000000111022302462515654042363166809082031251", "1.0000000000000002")
 check_parse("1.000000000000000111022302462515654042363166809082031250", "1.0")
 check_parse("6915724680296.729980553", "6915724680296.73")
+# An exponent of seven digits, brought back into range by the digits' own
+# count: read whole, in the word parser and in the bignum one. Named
+# rather than printed, a million digits each.
+check_long("0.<999,999 zeros>1e1000000", "0." + "0" * 999999 + "1e1000000", "1.0")
+check_long("1<1,000,000 zeros>e-1000000", "1" + "0" * 1000000 + "e-1000000", "1.0")
+check_long("0.<999,999 zeros>1000000000000000111022302462515654042363166809082031251e1000000", "0." + "0" * 999999 + "1000000000000000111022302462515654042363166809082031251e1000000", "1.0000000000000002")
 check_parse("Infinity", "Infinity")
 check_parse("-Infinity", "-Infinity")
 check_parse("NaN", "NaN")

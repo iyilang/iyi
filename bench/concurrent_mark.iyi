@@ -379,6 +379,68 @@
 
   puts "moves: #{under_mark} of #{rounds} rounds moved a payload into a black holder under a running mark, #{concurrent.to_i64} collections ran beside the program, every payload intact"
   puts "pause: #{stw_mean.unsafe_div(1000_u64).to_i64} us to mark the chain stopped; beside the program the longest first stop was #{Stops.first.unsafe_div(1000_u64).to_i64} us, the longest second #{Stops.second.unsafe_div(1000_u64).to_i64} us, and #{IyiMark.finish_retries.to_i64} second stops retreated to mark what they found"
+
+  # ── A large block outgrown under a mark ───────────────────────────────
+  # `realloc` past 1 MiB frees the large chunk it outgrew. Under a mark
+  # the helpers walk the large list without the lock, for every word no
+  # arena holds, and may have that chunk queued: it stays mapped and
+  # listed until the sweep after the mark. Unmapped at once, a helper
+  # read the freed node's link and faulted - one run in four of a
+  # program joining a 4 MB string. The outgrown addresses are kept
+  # masked, so no word of this program's holds them, and they are gone
+  # after the collections that follow: kept, not leaked. Not every one -
+  # a stale word in a register or a dead slot keeps one on Windows,
+  # where Linux kept none - but a leak keeps all of them.
+  outgrown = Pointer(UInt64).malloc(64_u64)
+  large_under_mark = 0
+  large_round = 0
+  while large_round < 8 || (large_under_mark < 2 && large_round < 48)
+    IyiMark.auto = false
+    # Four chains, so the assist the grown block's allocation pays does
+    # not finish the mark before the old block is freed.
+    chains = [build_chain(3_u64), build_chain(4_u64), build_chain(5_u64), build_chain(6_u64)]
+    block = Pointer(UInt8).malloc(1_100_000_u64)
+    block.value = 5_u8
+    IyiMark.auto = true
+    marking = allocate_until_marking
+    grown = block.realloc(2_200_000_u64)
+    if marking && IyiMark.marking?
+      large_under_mark = large_under_mark + 1
+      fail("large: a block outgrown under a mark was unmapped beside the helpers") if IyiHeap.containing_large(block.as(Void*)) == 0_u64
+    end
+    fail("large: the grown block lost its first byte") unless grown.value == 5_u8
+    outgrown[large_round] = block.address ^ 0x5a5a5a5a5a5a5a5a_u64
+    block = Pointer(UInt8).new(0_u64)
+    grown = Pointer(UInt8).new(0_u64)
+    chains = [] of Cell
+    IyiMark.settle
+    large_round = large_round + 1
+  end
+  IyiMark.auto = false
+  # Where the grown block's assist or the helpers finish the mark before
+  # the old block is freed - darwin arm64 did, every round - the race is
+  # not this machine's to arrange, and it says so; the shell's proof is
+  # then not run either. Linux and Windows arrange it.
+  if large_under_mark < 2
+    puts "large: #{large_under_mark} of #{large_round} blocks were outgrown under a running mark here, too few to check"
+  else
+  # One more outgrown outside any mark and not counted, so the last
+  # counted block's address is in no register or slot a stale word could
+  # keep it by.
+  spare = Pointer(UInt8).malloc(1_100_000_u64).realloc(2_200_000_u64)
+  spare.value = 1_u8
+  spare = Pointer(UInt8).new(0_u64)
+  IyiMark.collect
+  IyiMark.collect
+  kept_large = 0
+  index = 0
+  while index < large_round
+    kept_large = kept_large + 1 if IyiHeap.containing_large(Pointer(Void).new(outgrown[index] ^ 0x5a5a5a5a5a5a5a5a_u64)) != 0_u64
+    index = index + 1
+  end
+  fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if kept_large >= large_under_mark
+  puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"
+  end
   # The helpers for each mark beside the program are woken by the
   # program's own thread, and the wake is the program's time. On Linux it
   # is one futex call; on Windows a woken helper ran above the thread that

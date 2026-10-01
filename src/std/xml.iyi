@@ -16,30 +16,44 @@
 # spaces, as XML 1.0 says. The serializer writes what a document reads back
 # as: `&amp; &lt; &gt;` and `&#13;` in text, `&quot;` and `&#9; &#10; &#13;` in
 # attribute values as well, `]]>` inside CDATA as the end of one section and
-# the start of the next, namespace declarations before attributes, an empty
-# element as `<a/>`, and a newline after the declaration and after every
-# top-level node. A comment or a processing instruction has no such escape,
-# so `--` in a comment, a comment ending in `-`, and `?>` in a processing
-# instruction are refused when the node is made or its text set.
+# the start of the next (and a carriage return in it as `&#13;` between two),
+# namespace declarations before attributes, an empty element as `<a/>`, and a
+# newline after the declaration and after every top-level node; a document
+# declared US-ASCII has every other character in its text and attribute
+# values written as a decimal reference. A comment or a processing
+# instruction has no such escape, so `--` in a comment, a comment ending in
+# `-`, and `?>` in a processing instruction are refused when the node is made
+# or its text set.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
 #     the `;`), and a character reference that is not an XML character
 #     (surrogates, U+0000 and the other C0 controls, anything past U+10FFFF);
 #   * `--` inside a comment and `]]>` in text; a control character (other than
-#     tab, newline and carriage return) anywhere;
+#     tab, newline and carriage return) anywhere; a byte that is not UTF-8, a
+#     character that is not an XML character (U+FFFE, U+FFFF, an encoded
+#     surrogate), and in a document declared US-ASCII any byte past 0x7F;
+#   * an XML declaration without its version first, or with `version`,
+#     `encoding`, `standalone` out of that order or twice, or a version that
+#     is not digits, a dot and digits;
 #   * a raw `<` in an attribute value, an attribute given twice - by one
 #     spelling or through two prefixes bound to the same uri - a namespace
-#     prefix nobody declared, a name with a colon first, last or twice, a
-#     declaration of the `xmlns` prefix or of `xml` to another uri, an
-#     unquoted value, a second root element, a closing tag that does not
-#     match, an unclosed anything;
+#     prefix nobody declared, a name with a colon first, last or twice or a
+#     local part that cannot start a name, a colon in an entity name or a
+#     processing instruction target, a declaration of the `xmlns` prefix or
+#     of `xml` to another uri, the `xml` or `xmlns` uri bound to any other
+#     prefix or to the default namespace, an unquoted value, a second root
+#     element, a closing tag that does not match, an unclosed anything;
 #   * an external DTD subset or entity (`SYSTEM`/`PUBLIC`) - there is no
 #     file or network access here, so there is no XXE;
-#   * more than `max_entity_expansions` entity expansions (1,000 by default)
-#     or an entity that expands more than ten levels deep, which is what a
-#     "billion laughs" document is;
+#   * more than `max_entity_expansions` entity expansions (1,000 by default),
+#     an entity that expands more than ten levels deep, or expansions that
+#     copy more than 100 times the document's size (8 MiB at least), which
+#     is what a "billion laughs" or a quadratic-blowup document is;
 #   * elements nested deeper than `max_depth` (256 by default);
+#   * an entity whose replacement text holds a `<` - markup where the
+#     reference is in content, an error where it is in an attribute value -
+#     or, in content, `]]>`;
 #   * markup inside an entity's replacement text, a parameter entity
 #     reference, and an encoding other than UTF-8 or US-ASCII: each is named
 #     as unsupported rather than read as something else.
@@ -71,6 +85,8 @@ end
 
 # The namespace the `xml:` prefix is bound to without a declaration.
 XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
+# The namespace the `xmlns` prefix is bound to; nothing may be bound to it.
+XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
 pub struct Namespace
   getter prefix : String
@@ -83,11 +99,13 @@ pub struct Namespace
     @prefix.empty?
   end
 
-  def to_s : String
+  # With *ascii*, a character past U+007F in the uri is written as a
+  # character reference, for a document declared US-ASCII.
+  def to_s(ascii : Bool = false) : String
     if @prefix.empty?
-      "xmlns=\"#{Std::Xml.escape_attribute(@uri)}\""
+      "xmlns=\"#{Std::Xml.escape_attribute(@uri, ascii)}\""
     else
-      "xmlns:#{@prefix}=\"#{Std::Xml.escape_attribute(@uri)}\""
+      "xmlns:#{@prefix}=\"#{Std::Xml.escape_attribute(@uri, ascii)}\""
     end
   end
 end
@@ -111,8 +129,9 @@ pub struct Attribute
     end
   end
 
-  def to_s : String
-    "#{@name}=\"#{Std::Xml.escape_attribute(@value)}\""
+  # With *ascii*, as `Namespace#to_s`.
+  def to_s(ascii : Bool = false) : String
+    "#{@name}=\"#{Std::Xml.escape_attribute(@value, ascii)}\""
   end
 end
 
@@ -439,20 +458,23 @@ pub class Node
     buf.join("")
   end
 
-  protected def serialize_node(buf : Array(String)) : Nil
+  # With *ascii* (a document declared US-ASCII), a character past U+007F in
+  # text or an attribute value is written as a character reference: written
+  # as its UTF-8 bytes, it made a document no other parser reads.
+  protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
       buf << "<"
       buf << @name
       ns_i = 0
       while ns_i < @namespaces.size
         buf << " "
-        buf << @namespaces[ns_i].to_s
+        buf << @namespaces[ns_i].to_s(ascii)
         ns_i = ns_i + 1
       end
       attr_i = 0
       while attr_i < @attributes.size
         buf << " "
-        buf << @attributes[attr_i].to_s
+        buf << @attributes[attr_i].to_s(ascii)
         attr_i = attr_i + 1
       end
       if @children.empty?
@@ -461,7 +483,7 @@ pub class Node
         buf << ">"
         c_i = 0
         while c_i < @children.size
-          @children[c_i].serialize_node(buf)
+          @children[c_i].serialize_node(buf, ascii)
           c_i = c_i + 1
         end
         buf << "</"
@@ -469,7 +491,7 @@ pub class Node
         buf << ">"
       end
     elsif @node_type.text?
-      buf << Std::Xml.escape(@content)
+      buf << Std::Xml.escape(@content, ascii)
     elsif @node_type.cdata?
       buf << "<![CDATA["
       serialize_cdata_body(buf)
@@ -489,7 +511,7 @@ pub class Node
     else
       c_i = 0
       while c_i < @children.size
-        @children[c_i].serialize_node(buf)
+        @children[c_i].serialize_node(buf, ascii)
         buf << "\n"
         c_i = c_i + 1
       end
@@ -497,9 +519,11 @@ pub class Node
   end
 
   # A CDATA section has no escape either, so `]]>` in its content is written
-  # as two sections, `...]]` and `>...`, which read back as the one run.
+  # as two sections, `...]]` and `>...`, which read back as the one run. A
+  # carriage return is written between two sections as `&#13;`: kept raw in
+  # the section, it read back as a newline.
   private def serialize_cdata_body(buf : Array(String)) : Nil
-    if !@content.includes?("]]>")
+    if !@content.includes?("]]>") && !@content.includes?("\r")
       buf << @content
       return
     end
@@ -507,12 +531,17 @@ pub class Node
     len = @content.bytesize
     run_start = 0
     i = 0
-    while i + 2 < len
-      if ptr[i] == 93_u8 && ptr[i + 1] == 93_u8 && ptr[i + 2] == 62_u8
+    while i < len
+      if i + 2 < len && ptr[i] == 93_u8 && ptr[i + 1] == 93_u8 && ptr[i + 2] == 62_u8
         buf << @content[run_start, i + 2 - run_start]
         buf << "]]><![CDATA["
         run_start = i + 2
         i = i + 2
+      elsif ptr[i] == 13_u8
+        buf << @content[run_start, i - run_start]
+        buf << "]]>&#13;<![CDATA["
+        run_start = i + 1
+        i = i + 1
       else
         i = i + 1
       end
@@ -556,7 +585,8 @@ pub class Document < Node
       buf << "\""
     end
     buf << "?>\n"
-    serialize_node(buf)
+    lowered = @encoding.downcase
+    serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")
     buf.join("")
   end
 end
@@ -575,7 +605,13 @@ pub class Parser
   @entities : Hash(String, String)
   @expansions : Int32
   @max_expansions : Int32
+  # Bytes of replacement text copied so far, and how many a document may
+  # have: 100 times its own size, and never less than 8 MiB.
+  @expanded_bytes : Int64
+  @max_expanded_bytes : Int64
   @error : String
+  @bad_at : Int32
+  @bad_message : String
 
   def initialize(input : String, @max_depth : Int32 = 256, @max_expansions : Int32 = 1000)
     @input = Parser.normalize_line_ends(input)
@@ -586,7 +622,13 @@ pub class Parser
     @depth = 0
     @entities = Hash(String, String).new
     @expansions = 0
+    @expanded_bytes = 0_i64
+    @max_expanded_bytes = @len.to_i64 * 100
+    @max_expanded_bytes = 8_i64 * 1024 * 1024 if @max_expanded_bytes < 8_i64 * 1024 * 1024
     @error = ""
+    bad = Parser.first_bad_character(@input, 0, false)
+    @bad_at = bad[0]
+    @bad_message = bad[1]
   end
 
   # The sentence the last parse failed with, or "" when it did not.
@@ -646,7 +688,13 @@ pub class Parser
   end
 
   # One byte on; a column is a character, so a continuation byte is not one.
+  # Every byte the parser reads passes here, so the first one that is not
+  # part of an XML character is refused where it stands, in document order.
   private def step : Nil
+    if @pos == @bad_at
+      fail(@bad_message)
+      return
+    end
     b = @input.to_unsafe[@pos]
     @pos = @pos + 1
     if b == 10_u8
@@ -655,6 +703,42 @@ pub class Parser
     elsif (b & 192_u8) != 128_u8
       @col = @col + 1
     end
+  end
+
+  # Where the first byte at or after *from* that does not begin an XML
+  # character is, with the sentence it is refused with; -1 and "" when there
+  # is none. Only a C0 control is caught where the text is read, so without
+  # this a byte that is not UTF-8, an encoded surrogate, U+FFFE and U+FFFF
+  # were read and written back, while their character references were
+  # refused. With *ascii*, any byte past 0x7F is one.
+  protected def self.first_bad_character(input : String, from : Int32, ascii : Bool) : Tuple(Int32, String)
+    ptr = input.to_unsafe
+    len = input.bytesize
+    i = from
+    while i < len
+      b = ptr[i]
+      if b < 128_u8
+        i = i + 1
+        next
+      end
+      byte = "0x" + Parser.hex4(b.to_i32)[2, 2]
+      return {i, "byte #{byte} is not US-ASCII, the declared encoding"} if ascii
+      n = b >= 0xF5_u8 ? 0 : (b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC2_u8 ? 2 : 0)))
+      return {i, "byte #{byte} is not UTF-8"} if n == 0 || i + n > len
+      cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+      k = 1
+      while k < n
+        c = ptr[i + k]
+        return {i, "byte #{byte} is not UTF-8"} if (c & 0xC0_u8) != 0x80_u8
+        cp = (cp << 6) | (c & 0x3F_u8).to_i32
+        k = k + 1
+      end
+      overlong = (n == 3 && cp < 0x800) || (n == 4 && cp < 0x10000)
+      return {i, "byte #{byte} is not UTF-8"} if overlong || cp > 0x10FFFF
+      return {i, "character U+#{Parser.hex4(cp)} is not an XML character"} unless xml_char?(cp)
+      i = i + n
+    end
+    {-1, ""}
   end
 
   private def skip_whitespace : Bool
@@ -701,6 +785,23 @@ pub class Parser
 
   private def fail_control(b : UInt8) : Nil
     fail("control character U+#{Parser.hex4(b.to_i32)} is not allowed")
+  end
+
+  # One or more digits, a dot, then digits: the version numbers the other
+  # library reads (`1.0`, `1.1`, `1.`).
+  protected def self.version_number?(value : String) : Bool
+    ptr = value.to_unsafe
+    len = value.bytesize
+    i = 0
+    while i < len && ptr[i] >= 48_u8 && ptr[i] <= 57_u8
+      i = i + 1
+    end
+    return false if i == 0 || i >= len || ptr[i] != 46_u8
+    i = i + 1
+    while i < len && ptr[i] >= 48_u8 && ptr[i] <= 57_u8
+      i = i + 1
+    end
+    i == len
   end
 
   protected def self.hex4(value : Int32) : String
@@ -770,18 +871,28 @@ pub class Parser
     b == 32_u8 || b == 9_u8 || b == 10_u8
   end
 
+  # The declaration is `version`, then `encoding`, then `standalone`, the
+  # first required and each at most once (XML 1.0, production [23]): taking
+  # any of them in any order, or none, read `<?xml ?>` and
+  # `<?xml standalone="yes" version="1.0"?>` as declarations.
   private def parse_xml_declaration(doc : Document) : Nil
     start_line = @line
     start_col = @col
     consume("<?xml")
     doc.encoding = ""
+    stage = 0 # 1 after version, 2 after encoding, 3 after standalone
     while @pos < @len
       had_space = skip_whitespace
-      return if consume("?>")
+      if consume("?>")
+        fail_at(start_line, start_col, "the XML declaration has no version") if stage == 0
+        return
+      end
       if !had_space
         fail("expected whitespace in the XML declaration")
         return
       end
+      attr_line = @line
+      attr_col = @col
       attr_name = parse_name
       return if failed?
       skip_whitespace
@@ -792,8 +903,21 @@ pub class Parser
       skip_whitespace
       attr_val = parse_quoted_literal
       return if failed?
+      in_place = (attr_name == "version" && stage == 0) || (attr_name == "encoding" && stage == 1) ||
+                 (attr_name == "standalone" && (stage == 1 || stage == 2))
+      if !in_place && (attr_name == "version" || attr_name == "encoding" || attr_name == "standalone")
+        fail_at(attr_line, attr_col, "'#{attr_name}' is out of place in the XML declaration: it is version, encoding, standalone, each once")
+        return
+      end
       if attr_name == "version"
+        # Digits, a dot, digits: `1.0`, `1.1`; any text was taken, a control
+        # character or a `<` included.
+        if !Parser.version_number?(attr_val)
+          fail_at(attr_line, attr_col, "version '#{attr_val}' is not a version number")
+          return
+        end
         doc.version = attr_val
+        stage = 1
       elsif attr_name == "encoding"
         lowered = attr_val.downcase
         if lowered != "utf-8" && lowered != "utf8" && lowered != "us-ascii" && lowered != "ascii"
@@ -801,6 +925,16 @@ pub class Parser
           return
         end
         doc.encoding = attr_val
+        stage = 2
+        # A US-ASCII document has no byte past 0x7F: one is refused where it
+        # stands rather than read as UTF-8.
+        if lowered == "us-ascii" || lowered == "ascii"
+          bad = Parser.first_bad_character(@input, @pos, true)
+          if bad[0] >= 0 && (@bad_at < 0 || bad[0] < @bad_at)
+            @bad_at = bad[0]
+            @bad_message = bad[1]
+          end
+        end
       elsif attr_name == "standalone"
         if attr_val == "yes"
           doc.standalone = true
@@ -810,6 +944,7 @@ pub class Parser
           fail("standalone must be 'yes' or 'no', not '#{attr_val}'")
           return
         end
+        stage = 3
       else
         fail("'#{attr_name}' is not an XML declaration attribute")
         return
@@ -824,7 +959,11 @@ pub class Parser
     start_line = @line
     start_col = @col
     consume("<!DOCTYPE")
-    skip_whitespace
+    # `<!DOCTYPEa>` is no DOCTYPE: the name follows whitespace.
+    if !skip_whitespace
+      fail("expected whitespace after <!DOCTYPE")
+      return
+    end
     parse_name
     return if failed?
     skip_whitespace
@@ -866,20 +1005,33 @@ pub class Parser
   end
 
   # A declaration that is not used: skipped to its `>`, quotes respected.
+  # A `<` outside quotes means the `>` is missing - the skip ran on through
+  # the next declaration and lost it - and a control character is refused
+  # here as everywhere else; both were skipped over.
   private def skip_declaration : Nil
     start_line = @line
     start_col = @col
+    step
     while @pos < @len
       b = byte_at(@pos)
       if b == 62_u8
         step
         return
+      elsif b == 60_u8
+        break
       elsif b == 34_u8 || b == 39_u8
         step
         while @pos < @len && byte_at(@pos) != b
+          if control?(byte_at(@pos))
+            fail_control(byte_at(@pos))
+            return
+          end
           step
         end
         step if @pos < @len
+      elsif control?(b)
+        fail_control(b)
+        return
       else
         step
       end
@@ -896,9 +1048,20 @@ pub class Parser
       return
     end
     parameter = consume("%")
-    skip_whitespace if parameter
+    # `<!ENTITY % p ...>`: the space after the `%` is not optional.
+    if parameter && !skip_whitespace
+      fail("expected whitespace after '%' in <!ENTITY")
+      return
+    end
+    name_line = @line
+    name_col = @col
     name = parse_name
     return if failed?
+    # Namespaces in XML, section 7: no entity name holds a colon.
+    if name.includes?(":")
+      fail_at(name_line, name_col, "entity name '#{name}' cannot hold a colon")
+      return
+    end
     if !skip_whitespace
       fail("expected whitespace after the entity name '#{name}'")
       return
@@ -935,6 +1098,11 @@ pub class Parser
         return parts.join("")
       elsif b == 60_u8
         fail("markup inside the value of entity '#{entity}' is not supported")
+        return ""
+      elsif b == 37_u8
+        # A `%` here starts a parameter entity reference, which the internal
+        # subset does not allow inside a declaration; it was kept as text.
+        fail("parameter entity references are not supported")
         return ""
       elsif b == 38_u8
         parts << slice_from(run_start)
@@ -987,6 +1155,12 @@ pub class Parser
     return Node.new_pi("", "") if failed?
     if target.downcase == "xml"
       fail_at(start_line, start_col, "processing instruction target '#{target}' is reserved")
+      return Node.new_pi("", "")
+    end
+    # Namespaces in XML, section 7: no processing instruction target holds
+    # a colon.
+    if target.includes?(":")
+      fail_at(start_line, start_col, "processing instruction target '#{target}' cannot hold a colon")
       return Node.new_pi("", "")
     end
     return Node.new_pi(target, "") if consume("?>")
@@ -1092,7 +1266,14 @@ pub class Parser
       skip_whitespace
       attr_val = parse_attribute_value
       return elem if failed?
+      # The uris of the `xml` and `xmlns` prefixes are theirs alone: no other
+      # prefix and not the default namespace may be bound to either
+      # (Namespaces in XML, 3). Only the `xml` uri on a prefix was refused.
       if attr_name == "xmlns"
+        if attr_val == XML_NAMESPACE || attr_val == XMLNS_NAMESPACE
+          fail_at(attr_line, attr_col, "the default namespace cannot be bound to the uri of the '#{attr_val == XML_NAMESPACE ? "xml" : "xmlns"}' prefix")
+          return elem
+        end
         elem.namespaces << Namespace.new("", attr_val)
       elsif attr_name.starts_with?("xmlns:")
         ns_prefix = attr_name[6, attr_name.bytesize - 6]
@@ -1107,6 +1288,9 @@ pub class Parser
           return elem
         elsif ns_prefix != "xml" && attr_val == XML_NAMESPACE
           fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to the uri of the 'xml' prefix")
+          return elem
+        elsif attr_val == XMLNS_NAMESPACE
+          fail_at(attr_line, attr_col, "namespace prefix '#{ns_prefix}' cannot be bound to the uri of the 'xmlns' prefix")
           return elem
         end
         elem.namespaces << Namespace.new(ns_prefix, attr_val)
@@ -1242,7 +1426,7 @@ pub class Parser
         return ""
       elsif b == 38_u8
         parts << slice_from(run_start)
-        parts << parse_reference(0)
+        parts << parse_reference(0, false, true)
         return "" if failed?
         run_start = @pos
       elsif b == 9_u8 || b == 10_u8
@@ -1288,8 +1472,9 @@ pub class Parser
 
   # At an `&`: the text the reference stands for. With *keep_names*, an
   # entity reference is checked for shape and answered as written (`&name;`),
-  # which is what an entity's own value keeps until it is used.
-  private def parse_reference(depth : Int32, keep_names : Bool = false) : String
+  # which is what an entity's own value keeps until it is used. With
+  # *in_attribute*, the reference stands in an attribute value.
+  private def parse_reference(depth : Int32, keep_names : Bool = false, in_attribute : Bool = false) : String
     ref_line = @line
     ref_col = @col
     ref_start = @pos
@@ -1319,11 +1504,17 @@ pub class Parser
       end
       return cp.unsafe_chr.to_s
     end
+    # `&a]b;` and `&0;` are no references: kept as written in an entity's
+    # value, they were accepted wherever that entity went unused.
+    if !Parser.name_shaped?(ref)
+      fail_at(ref_line, ref_col, "'&#{ref};' is not a reference: '#{ref}' is not a name")
+      return ""
+    end
     return slice_from(ref_start) if keep_names
-    expand_entity(ref, ref_line, ref_col, depth)
+    expand_entity(ref, ref_line, ref_col, depth, in_attribute)
   end
 
-  private def expand_entity(name : String, line : Int32, col : Int32, depth : Int32) : String
+  private def expand_entity(name : String, line : Int32, col : Int32, depth : Int32, in_attribute : Bool) : String
     return "<" if name == "lt"
     return ">" if name == "gt"
     return "&" if name == "amp"
@@ -1343,7 +1534,31 @@ pub class Parser
       fail_at(line, col, "entity expansion limit of #{@max_expansions} exceeded at &#{name};")
       return ""
     end
-    return value unless value.includes?("&")
+    # Counting expansions alone let one large entity used a thousand times
+    # make a thousand times the document: 1 MB of input read as 1 GB of text.
+    @expanded_bytes = @expanded_bytes + value.bytesize
+    if @expanded_bytes > @max_expanded_bytes
+      fail_at(line, col, "entity expansion past #{@max_expanded_bytes} bytes at &#{name};")
+      return ""
+    end
+    # The replacement text is read where the reference stands, and it was
+    # read as plain text everywhere. In an attribute value a `<` in it is an
+    # error (XML 1.0, "No < in Attribute Values") and its tabs and line ends
+    # are spaces (3.3.3); in content a `<` is markup, which is not supported,
+    # and `]]>` is refused as it is in text.
+    if value.includes?("<")
+      if in_attribute
+        fail_at(line, col, "entity &#{name}; holds a '<', which an attribute value cannot")
+      else
+        fail_at(line, col, "markup inside the value of entity '#{name}' is not supported")
+      end
+      return ""
+    end
+    if !in_attribute && value.includes?("]]>")
+      fail_at(line, col, "']]>' is not allowed in text, nor in the value of entity '#{name}'")
+      return ""
+    end
+    return (in_attribute ? Parser.attribute_spaces(value) : value) unless value.includes?("&")
 
     # The replacement text is read as content: a character reference is
     # decoded, an entity reference expanded a level deeper.
@@ -1354,7 +1569,8 @@ pub class Parser
     i = 0
     while i < len
       if ptr[i] == 38_u8
-        parts << value[run_start, i - run_start]
+        literal = value[run_start, i - run_start]
+        parts << (in_attribute ? Parser.attribute_spaces(literal) : literal)
         semi = i + 1
         while semi < len && ptr[semi] != 59_u8 && !reference_stop?(ptr[semi])
           semi = semi + 1
@@ -1378,7 +1594,7 @@ pub class Parser
           end
           parts << cp.unsafe_chr.to_s
         else
-          parts << expand_entity(ref, line, col, depth + 1)
+          parts << expand_entity(ref, line, col, depth + 1, in_attribute)
           return "" if failed?
         end
         i = semi + 1
@@ -1387,8 +1603,30 @@ pub class Parser
         i = i + 1
       end
     end
-    parts << value[run_start, len - run_start]
+    literal = value[run_start, len - run_start]
+    parts << (in_attribute ? Parser.attribute_spaces(literal) : literal)
     parts.join("")
+  end
+
+  # An entity's replacement text in an attribute value: a tab, newline or
+  # carriage return in it is a space, as one written in the value is. One
+  # that a character reference in the replacement text names is not.
+  protected def self.attribute_spaces(text : String) : String
+    ptr = text.to_unsafe
+    len = text.bytesize
+    i = 0
+    while i < len && ptr[i] != 9_u8 && ptr[i] != 10_u8 && ptr[i] != 13_u8
+      i = i + 1
+    end
+    return text if i == len
+    String.new(len) do |buffer|
+      buffer.copy_from(ptr, len)
+      while i < len
+        b = ptr[i]
+        buffer[i] = 32_u8 if b == 9_u8 || b == 10_u8 || b == 13_u8
+        i = i + 1
+      end
+    end
   end
 
   # -- names ---------------------------------------------------------------
@@ -1408,18 +1646,24 @@ pub class Parser
 
   # An element or attribute name is `local` or `prefix:local`, with neither
   # part empty (Namespaces in XML, productions [7] and [8]): a colon first,
-  # last, or twice is refused with the name's line and column.
+  # last, or twice is refused with the name's line and column, and so is a
+  # local part that does not start as a name does (`p:-a`, `p:1`), which was
+  # taken.
   private def qualified_name?(name : String, line : Int32, col : Int32) : Bool
     ptr = name.to_unsafe
     len = name.bytesize
     colons = 0
+    colon_at = 0
     i = 0
     while i < len
-      colons = colons + 1 if ptr[i] == 58_u8
+      if ptr[i] == 58_u8
+        colons = colons + 1
+        colon_at = i
+      end
       i = i + 1
     end
     return true if colons == 0
-    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8
+    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_start_byte?(ptr[colon_at + 1])
       return true
     end
     fail_at(line, col, "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local'")
@@ -1428,17 +1672,32 @@ pub class Parser
 
   # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue
   # one; any byte of a non-ASCII character does both.
+  protected def self.name_start_byte?(b : UInt8) : Bool
+    (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
+  end
+
+  protected def self.name_byte?(b : UInt8) : Bool
+    name_start_byte?(b) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 46_u8
+  end
+
+  # Whether all of *text* is one name.
+  protected def self.name_shaped?(text : String) : Bool
+    ptr = text.to_unsafe
+    len = text.bytesize
+    return false if len == 0 || !name_start_byte?(ptr[0])
+    i = 1
+    while i < len
+      return false unless name_byte?(ptr[i])
+      i = i + 1
+    end
+    true
+  end
+
   private def parse_name? : String?
     return nil if @pos >= @len
-    b = byte_at(@pos)
-    is_start = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
-    return nil unless is_start
+    return nil unless Parser.name_start_byte?(byte_at(@pos))
     start = @pos
-    while @pos < @len
-      b = byte_at(@pos)
-      is_char = (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 48_u8 && b <= 57_u8) ||
-                b == 95_u8 || b == 58_u8 || b == 45_u8 || b == 46_u8 || b >= 128_u8
-      break unless is_char
+    while @pos < @len && Parser.name_byte?(byte_at(@pos))
       step
     end
     slice_from(start)
@@ -1464,18 +1723,20 @@ pub def xml_char?(cp : Int32) : Bool
 end
 
 # *text* as character data: `&`, `<`, `>` and `\r` become references,
-# every other byte is copied as it is.
-pub def escape(text : String) : String
-  escape_bytes(text, false)
+# every other byte is copied as it is. With *ascii*, a character past U+007F
+# becomes a decimal reference as well, for a document declared US-ASCII.
+pub def escape(text : String, ascii : Bool = false) : String
+  escape_bytes(text, false, ascii)
 end
 
 # *text* for inside a double-quoted attribute value: `"` and a literal tab
 # or newline become references as well, so the value reads back unchanged.
-pub def escape_attribute(text : String) : String
-  escape_bytes(text, true)
+# *ascii* is as for `escape`.
+pub def escape_attribute(text : String, ascii : Bool = false) : String
+  escape_bytes(text, true, ascii)
 end
 
-def escape_bytes(text : String, attribute : Bool) : String
+def escape_bytes(text : String, attribute : Bool, ascii : Bool) : String
   ptr = text.to_unsafe
   len = text.bytesize
   parts = [] of String
@@ -1483,6 +1744,21 @@ def escape_bytes(text : String, attribute : Bool) : String
   i = 0
   while i < len
     b = ptr[i]
+    if ascii && b >= 128_u8
+      width = b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC0_u8 ? 2 : 1))
+      width = len - i if i + width > len
+      cp = width == 1 ? b.to_i32 : (b & (width == 2 ? 0x1F_u8 : (width == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+      k = 1
+      while k < width
+        cp = (cp << 6) | (ptr[i + k] & 0x3F_u8).to_i32
+        k = k + 1
+      end
+      parts << text[run_start, i - run_start] if i > run_start
+      parts << "&##{cp};"
+      i = i + width
+      run_start = i
+      next
+    end
     replacement = if b == 38_u8
                     "&amp;"
                   elsif b == 60_u8

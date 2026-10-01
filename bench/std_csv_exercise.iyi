@@ -32,18 +32,6 @@ puts "  rows, quotes, build"
 assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
 puts "  a byte order mark"
 
-# A lone CR ends a row, as in Crystal's: it was dropped, and `a\rb` read as
-# `ab`. And a row that is one empty field survives: `""` was no row, and
-# `CSV.build([["a"], [""]])` wrote `a\n`, which read back as one row.
-lone = CSV.parse("a\rb,c\n")
-assert_true lone.size == 2 && lone[0] == ["a"] && lone[1] == ["b", "c"], "a lone CR ends a row"
-assert_true CSV.parse("\"\"") == [[""]], "a quoted empty field alone is a row"
-assert_true CSV.parse("a\n\"\"") == [["a"], [""]], "and as the last row"
-[[["a"], [""]], [[""]], [["x", ""], [""], ["y"]]].each do |table|
-  assert_true CSV.parse(CSV.build(table)) == table, "#{table} reads back from what build wrote"
-end
-puts "  a lone CR, and a row of one empty field"
-
 # A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is
 # refused by its byte order mark; it read as fields with a NUL between
 # every two letters, and no error.
@@ -56,5 +44,20 @@ group do |g|
 end
 assert_true said.includes?("UTF-16"), "a UTF-16 document is refused, not #{said.inspect}"
 puts "  a UTF-16 document is refused"
+
+puts "\n== line ends and empty fields"
+# A lone CR ends a line, as in the other library: it was dropped, and the
+# text either side of it ran into one field (`a"b"`).
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\r\"b\"").inspect, "a lone CR ends the line"
+# A blank line is a row of no fields there, not a row of one empty field.
+assert_str "[[\"a\"], [], [\"b\"]]", CSV.parse("a\n\nb\n").inspect, "a blank line is a row of no fields"
+# `""` is a field with nothing in it, last line or not: it was dropped.
+assert_str "[[\"a\"], [\"\"]]", CSV.parse("a\n\"\"").inspect, "a last line of one quoted empty field"
+# Written bare, a row of one empty field was a blank line, and the last
+# one vanished on the way back.
+lone = [[""], ["a"], [""]]
+assert_str "\"\"\na\n\"\"", CSV.build(lone), "a row of one empty field is written quoted"
+assert_str lone.inspect, CSV.parse(CSV.build(lone)).inspect, "a row of one empty field round trips"
+puts "  lone CR, blank line, quoted empty field, both ways"
 
 puts "\nALL CHECKS PASSED"

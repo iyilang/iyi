@@ -85,6 +85,11 @@ assert_true(JSON.parse("-9223372036854775808").as_i64 == -9223372036854775808_i6
 assert_true(JSON.parse("9223372036854775808").kind == "float", "one past Int64 max is a float")
 assert_true(JSON.parse("0.1").as_f == 0.1 && JSON.parse("1.7976931348623157e308").as_f == 1.7976931348623157e308, "doubles read exactly")
 assert_true(JSON.parse?("[1, 2]").as(Any).size == 2, "parse? answers the value for a document")
+# A seven-digit exponent is read whole: the zeros before the 1 bring it
+# back into range, and a reader that stopped at 100000 answered 0.0.
+long_zeros = "0" * 999999
+assert_true(JSON.parse("0." + long_zeros + "1e1000000").as_f == 1.0, "a seven-digit exponent brought back by a million zeros")
+assert_true(JSON.parse("1" + long_zeros + "0e-1000000").as_f == 1.0, "a seven-digit negative exponent")
 puts "  name, items, nested, unicode: every value as the header promises"
 
 # ---------------------------------------------------------------------------

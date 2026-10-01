@@ -147,6 +147,11 @@ t.clear
 assert_true("clear", t.empty? && t.size == 0)
 t.push(1)
 assert_equal("usable after clear", t.to_s, "Deque{1}")
+# A deque concatenated onto itself doubles: `concat` walked `other.size`
+# while pushing, and when the two were one deque it never reached the end.
+w = Deque(Int32).new([1, 2, 3])
+w.concat(w)
+assert_equal("concat onto itself", w.to_s, "Deque{1, 2, 3, 1, 2, 3}")
 
 puts "deque: vacated slots"
 # `unsafe_fetch` reads past the size without checking, which is the one

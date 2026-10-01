@@ -59,4 +59,14 @@ assert_str "#not a comment", back["s"]["hash"], "a value opening with # round-tr
 assert_str "a=b=c", back["s"]["eq"], "a value holding = round-trips"
 puts "  build refuses a line break, padding, a key with = and a section with ]"
 
+puts "\n== leading whitespace"
+# ASCII whitespace before a line, as the other library skips it: `\v` and
+# `\f` were read as the start of a key, so the header after one was refused
+# (`expected declaration at line 1, column 5`) and a line of `\f` was no
+# blank line.
+spaced = INI.parse("\v[s]\n\fk = v\n\f\n")
+assert_true spaced.size == 1, "one section, #{spaced.size}"
+assert_str "v", spaced["s"]["k"], "a key after a form feed"
+puts "  vertical tab, form feed"
+
 puts "\nALL CHECKS PASSED"

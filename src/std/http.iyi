@@ -4,19 +4,23 @@
 # them speak `http://` only, to a numeric IPv4 host or `localhost` —
 # the same addresses `IyiSocket` will open. TLS is not in 0.x. A
 # request carries the caller's headers and body; the response's headers
-# are read by name without regard to case, and a chunked body arrives
-# joined. `format_request` / `parse_response` are the text; `request`
-# writes one and reads the other. A status line that is not HTTP is
-# refused with the first line, and a header that would break the
-# request's own lines is refused before it is written.
+# are read by name without regard to case, a field on several lines is
+# one field with its values joined by ", ", interim 1xx answers are read
+# past, and a chunked body arrives joined. `format_request` /
+# `parse_response` are the text; `request` writes one and reads the
+# other. A status line that is not HTTP is refused with the first line,
+# a header with a control character in its value is refused either way,
+# and one that would break the request's own lines is refused before it
+# is written.
 #
 # `Server.serve(listener) { |request| Response }` is the other side: a
 # fiber per connection under a group, each connection kept alive across
 # requests until the client says `Connection: close`, closes, or sends
 # something that is not HTTP (answered 400 and closed). The block gets a
-# `Request` — method, path, query, headers, body, read to the length the
-# client declared or de-chunked — and answers a `Response`, which is
-# written with its length. A `HEAD` is answered without the body. The
+# `Request` — method, path (an absolute-form target's own), query,
+# headers, body, read to the length the client declared or de-chunked —
+# and answers a `Response`, which is written with its length; a 1xx, 204
+# or 304 is written with neither. A `HEAD` is answered without the body. The
 # socket parks under the runtime, so a slow client costs one fiber; the
 # listener's `close` ends `serve`. Both halves are the same module so
 # what one writes the other reads, and `bench/std_http_exercise.sh`
@@ -252,26 +256,35 @@ pub struct Server
     version = rest[sp2 + 1, rest.bytesize - sp2 - 1]
     return ParsedRequest.new(nil, "not a method: #{method.inspect}", true, 0) unless HTTP.token?(method)
     return ParsedRequest.new(nil, "not an HTTP/1 request: #{version.inspect}", true, 0) unless version == "HTTP/1.1" || version == "HTTP/1.0"
-    return ParsedRequest.new(nil, "not a request target: #{target.inspect}", true, 0) if target.bytesize == 0
-    headers = {} of String => String
-    i = 1
-    while i < lines.size
-      line = lines[i]
-      i = i + 1
-      next if line.bytesize == 0
-      colon = line.index(':')
-      return ParsedRequest.new(nil, "header without a colon: #{line.inspect}", true, 0) unless colon
-      name = line[0, colon]
-      return ParsedRequest.new(nil, "not a header name: #{name.inspect}", true, 0) unless HTTP.token?(name)
-      if clash = HTTP.add_header(headers, name, HTTP.trim(line[colon + 1, line.bytesize - colon - 1]))
-        return ParsedRequest.new(nil, clash, true, 0)
+    # A control byte in the target - a bare CR, a NUL - is not part of any
+    # URI (RFC 9112 §2.2, §3.2); passed on, a query with a line break in it
+    # broke the answer of a block that echoed it into a header.
+    return ParsedRequest.new(nil, "not a request target: #{target.inspect}", true, 0) if target.bytesize == 0 || HTTP.control?(target)
+    headers = case fields = HTTP.parse_fields(lines)
+              in String
+                return ParsedRequest.new(nil, fields, true, 0)
+              in Hash(String, String)
+                fields
+              end
+    # The absolute form (RFC 9112 §3.2.2), which a server must accept,
+    # names the path after the authority: `http://h/x?q` is path `/x` and
+    # query `q`, as the other library reads it, where the block was handed
+    # `http://h/x` as the path.
+    origin = target
+    if authority = HTTP.absolute_form(target)
+      p = target.to_unsafe
+      after_authority = authority
+      while after_authority < target.bytesize && p[after_authority] != 47_u8 && p[after_authority] != 63_u8
+        after_authority = after_authority + 1
       end
+      origin = target[after_authority, target.bytesize - after_authority]
+      origin = "/" + origin if origin.bytesize == 0 || origin.starts_with?("?")
     end
-    path = target
+    path = origin
     query = nil.as(String?)
-    if q = target.index('?')
-      path = target[0, q]
-      query = target[q + 1, target.bytesize - q - 1]
+    if q = origin.index('?')
+      path = origin[0, q]
+      query = origin[q + 1, origin.bytesize - q - 1]
     end
     stub = Request.new(method, path, query, headers, "")
     close = version == "HTTP/1.0"
@@ -283,12 +296,24 @@ pub struct Server
     expects = version == "HTTP/1.1" && HTTP.same_name?(HTTP.trim(stub.header("Expect") || ""), "100-continue")
     if te = stub.header("Transfer-Encoding")
       return ParsedRequest.new(nil, "transfer encoding #{te.inspect} is not chunked", true, 0) unless HTTP.same_name?(HTTP.trim(te), "chunked")
-      done = HTTP.chunked_end(after)
-      return ParsedRequest.new(nil, done, true, 0) if done.is_a?(String)
-      return ParsedRequest.new(nil, nil, close, body_start, 0, expects, Request.new(method, path, query, headers, "")) unless done
-      return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done > MAX_BODY
-      body = HTTP.decode_chunked(after[0, done])
-      return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, body_start + done)
+      # A length beside the chunks, or chunks in HTTP/1.0, is framing that
+      # a reader ahead of this one may have taken otherwise (RFC 9112 §6.1,
+      # §6.3): the connection closes after the answer, where what followed
+      # was read as the next request.
+      close = true if stub.header("Content-Length") || version == "HTTP/1.0"
+      # A body that is not chunked is a 400, as any request that is not
+      # HTTP: `chunked_end` raised, and the connection's task panicked with
+      # no answer, and `serve` with it once the listener closed.
+      case done = HTTP.chunked_end(after)
+      in Nil
+        return ParsedRequest.new(nil, nil, close, body_start, 0, expects, Request.new(method, path, query, headers, ""))
+      in String
+        return ParsedRequest.new(nil, "chunked body: #{done}", true, 0)
+      in Int32
+        return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done > MAX_BODY
+        body = HTTP.decode_chunked(after[0, done])
+        return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, body_start + done)
+      end
     end
     length = 0
     if cl = stub.header("Content-Length")
@@ -303,21 +328,27 @@ pub struct Server
 
   # The response as it goes on the wire. `Content-Length` is the body's
   # (or the caller's, for a HEAD that describes a body it does not send),
-  # `Connection` says what the connection will do next.
+  # `Connection` says what the connection will do next. A 1xx, 204 or 304
+  # has no content (RFC 9110 §15), and writes neither a body nor a length
+  # of its own (§8.6): the body was read by the client as the start of the
+  # next answer, and `Content-Length: 0` on a 304 told a cache that the
+  # resource had become empty.
   def self.format_response(response : Response, head : Bool, close : Bool) : String
     text = "HTTP/1.1 #{response.status} #{response.reason}\r\n"
     has_length = false
     response.headers.each do |name, value|
       raise "HTTP: not a header name: #{name.inspect}" unless HTTP.token?(name)
       raise "HTTP: header #{name} contains a line break" if HTTP.has_break?(value)
+      raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)
       next if HTTP.same_name?(name, "Connection")
       has_length = true if HTTP.same_name?(name, "Content-Length")
       text = text + name + ": " + value + "\r\n"
     end
-    text = text + "Content-Length: #{response.body.bytesize}\r\n" unless has_length
+    bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304
+    text = text + "Content-Length: #{response.body.bytesize}\r\n" unless has_length || bodiless
     text = text + (close ? "Connection: close\r\n" : "Connection: keep-alive\r\n")
     text = text + "\r\n"
-    head ? text : text + response.body
+    head || bodiless ? text : text + response.body
   end
 end
 
@@ -329,12 +360,13 @@ pub struct HTTP
   # nothing to say still says `Content-Length: 0`.
   def self.format_request(method : String, path : String, host : String, body : String = "", headers : Hash(String, String) = {} of String => String) : String
     raise "HTTP: not a method: #{method.inspect}" unless token?(method)
-    raise "HTTP: not a request path: #{path.inspect}" if path.bytesize == 0 || has_space_or_break?(path)
-    raise "HTTP: not a host: #{host.inspect}" if host.bytesize == 0 || has_space_or_break?(host)
+    raise "HTTP: not a request path: #{path.inspect}" if path.bytesize == 0 || has_space_or_control?(path)
+    raise "HTTP: not a host: #{host.inspect}" if host.bytesize == 0 || has_space_or_control?(host)
     req = "#{method} #{path} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
     headers.each do |name, value|
       raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
       raise "HTTP: header #{name} contains a line break" if has_break?(value)
+      raise "HTTP: header #{name} contains a control character" if control?(value)
       if same_name?(name, "Host") || same_name?(name, "Connection") || same_name?(name, "Content-Length")
         raise "HTTP: #{name} is the request's own header"
       end
@@ -348,29 +380,31 @@ pub struct HTTP
 
   # The response as it came off the wire. `head` says the request was a
   # `HEAD`, whose answer carries the headers of a body it does not send.
+  # An interim answer - `100 Continue`, `103 Early Hints` - is read past to
+  # the final one after it (RFC 9110 §15.2): the server here answers
+  # `Expect: 100-continue` with a 100, and `HTTP.post` returned the 100.
+  # A `101` switches protocols, and HTTP ends with it.
   def self.parse_response(text : String, head : Bool = false) : Response
-    split_at = find_headers_end(text)
-    raise "HTTP: no header terminator" unless split_at
-    head_text = text[0, split_at]
-    body = text[split_at + 4, text.bytesize - split_at - 4]
-    lines = split_crlf(head_text)
-    raise "HTTP: empty response" if lines.size == 0
-    status, reason = parse_status(lines[0])
+    start = 0
+    status = 0
+    reason = ""
     headers = {} of String => String
-    i = 1
-    while i < lines.size
-      line = lines[i]
-      i = i + 1
-      next if line.bytesize == 0
-      colon = line.index(':')
-      raise "HTTP: header without a colon: #{line}" unless colon
-      name = line[0, colon]
-      raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
-      val = line[colon + 1, line.bytesize - colon - 1]
-      if clash = add_header(headers, name, trim(val))
-        raise "HTTP: #{clash}"
-      end
+    while true
+      split_at = find_headers_end(text, start)
+      raise "HTTP: no header terminator" unless split_at
+      lines = split_crlf(text[start, split_at - start])
+      raise "HTTP: empty response" if lines.size == 0
+      status, reason = parse_status(lines[0])
+      headers = case fields = parse_fields(lines)
+                in String
+                  raise "HTTP: " + fields
+                in Hash(String, String)
+                  fields
+                end
+      start = split_at + 4
+      break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize
     end
+    body = text[start, text.bytesize - start]
     response = Response.new(status, reason, headers, "")
     return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
     if te = response.header("Transfer-Encoding")
@@ -385,6 +419,68 @@ pub struct HTTP
       body = body[0, n] if n < body.bytesize
     end
     Response.new(status, reason, headers, body)
+  end
+
+  # The field lines after the first, or why they are not fields. A name
+  # repeated, in any case, is one field, its values joined in order with
+  # ", " (RFC 9110 §5.3): into a Hash by name, a second line spelled the
+  # same replaced the first and one spelled otherwise was an entry
+  # `header` never reached, so two different `Content-Length`s were read
+  # as whichever came first or last. A value with a control character in
+  # it - a CR or LF that ends no line, a NUL - is refused (§5.5) rather than
+  # handed to whoever reads it or echoes it into a header.
+  def self.parse_fields(lines : Array(String)) : Hash(String, String) | String
+    headers = {} of String => String
+    # The name as it was first spelled, by its lowercase, and the values
+    # after the first, joined once at the end: joining line by line copied
+    # the value so far per line.
+    spelled = {} of String => String
+    more = {} of String => Array(String)
+    i = 1
+    while i < lines.size
+      line = lines[i]
+      i = i + 1
+      next if line.bytesize == 0
+      colon = line.index(':')
+      return "header without a colon: #{line.inspect}" unless colon
+      name = line[0, colon]
+      return "not a header name: #{name.inspect}" unless token?(name)
+      value = trim(line[colon + 1, line.bytesize - colon - 1])
+      return "header #{name} contains a control character" if control?(value)
+      key = name.downcase
+      if first = spelled[key]?
+        if values = more[first]?
+          values << value
+        else
+          more[first] = [headers[first], value]
+        end
+      else
+        spelled[key] = name
+        headers[name] = value
+      end
+    end
+    more.each do |name, values|
+      headers[name] = values.join(", ")
+    end
+    headers
+  end
+
+  # A `Content-Length` as a number, or nil when it is not one. Repeated
+  # lines arrive joined, and are one length only when every one says the
+  # same (RFC 9112 §6.3).
+  def self.content_length(value : String) : Int32?
+    parts = value.split(',')
+    return nil if parts.size == 0
+    first = trim(parts[0])
+    parts.each do |part|
+      return nil unless trim(part) == first
+    end
+    # Digits and nothing else (RFC 9110 §8.6): `to_i?` took a sign, and
+    # `+2` was a length.
+    return nil unless first.bytesize > 0 && digits?(first)
+    n = first.to_i?
+    return nil unless n && n >= 0
+    n
   end
 
   # A chunked body (RFC 9112 §7.1) as one string: each chunk's size line
@@ -409,7 +505,8 @@ pub struct HTTP
       raise "HTTP: not a chunk size: #{size_text.inspect}" unless size
       i = line_end + 2
       break if size == 0
-      raise "HTTP: chunked body ends inside a chunk" if i + size > n
+      # `size` may be 2^31 - 1: `i + size` passed Int32's end and panicked.
+      raise "HTTP: chunked body ends inside a chunk" if size > n - i
       out.write(p + i, size)
       i = i + size
       raise "HTTP: a chunk is not followed by CRLF" unless i + 1 < n && p[i] == 13_u8 && p[i + 1] == 10_u8
@@ -418,10 +515,10 @@ pub struct HTTP
     out.to_s
   end
 
-  def self.find_headers_end(text : String) : Int32?
+  def self.find_headers_end(text : String, from : Int32 = 0) : Int32?
     p = text.to_unsafe
     n = text.bytesize
-    i = 0
+    i = from
     while i + 3 < n
       if p[i] == 13_u8 && p[i + 1] == 10_u8 && p[i + 2] == 13_u8 && p[i + 3] == 10_u8
         return i
@@ -555,14 +652,36 @@ pub struct HTTP
     false
   end
 
-  private def self.has_space_or_break?(text : String) : Bool
+  # A byte a request line may not carry: a blank, which ends its part, or
+  # a control character.
+  private def self.has_space_or_control?(text : String) : Bool
     p = text.to_unsafe
     i = 0
     while i < text.bytesize
-      return true if p[i] == 13_u8 || p[i] == 10_u8 || p[i] == 32_u8 || p[i] == 9_u8
+      return true if p[i] <= 32_u8 || p[i] == 127_u8
       i = i + 1
     end
     false
+  end
+
+  # A control character other than a tab, or DEL: what a field value may
+  # not hold (RFC 9110 §5.5), nor a request target or a reason phrase.
+  def self.control?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return true if (p[i] < 32_u8 && p[i] != 9_u8) || p[i] == 127_u8
+      i = i + 1
+    end
+    false
+  end
+
+  # For a request target in absolute form (RFC 9112 §3.2.2), where its
+  # authority starts: after `http://` or `https://`, in any case.
+  def self.absolute_form(target : String) : Int32?
+    return 7 if target.bytesize >= 7 && same_name?(target[0, 7], "http://")
+    return 8 if target.bytesize >= 8 && same_name?(target[0, 8], "https://")
+    nil
   end
 
   private def self.find_crlf(text : String, from : Int32) : Int32?
@@ -600,17 +719,31 @@ pub struct HTTP
   end
 
   private def self.parse_status(line : String) : {Int32, String}
-    # HTTP/1.1 200 OK
+    # HTTP/1.1 200 OK: the version is `HTTP/` DIGIT "." DIGIT and the
+    # status three digits from 100 (RFC 9112 §2.3, §4). Read by `to_i?`, a
+    # sign was a digit, so `+20` and `-99` were statuses, and so were 000
+    # to 099; `HTTP/x` was a version, and a reason could hold a bare CR.
     raise "HTTP: not a status line: #{line}" unless line.starts_with?("HTTP/")
     sp1 = line.index(' ')
-    raise "HTTP: not a status line: #{line}" unless sp1
+    raise "HTTP: not a status line: #{line}" unless sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])
     rest = line[sp1 + 1, line.bytesize - sp1 - 1]
     sp2 = rest.index(' ')
     code_text = sp2 ? rest[0, sp2] : rest
     code = code_text.to_i?
-    raise "HTTP: not a status line: #{line}" unless code && code_text.bytesize == 3
+    raise "HTTP: not a status line: #{line}" unless code && code_text.bytesize == 3 && digits?(code_text) && code >= 100
     reason = sp2 ? rest[sp2 + 1, rest.bytesize - sp2 - 1] : ""
+    raise "HTTP: not a status line: #{line}" if control?(reason)
     {code, reason}
+  end
+
+  private def self.digits?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      return false unless p[i] >= 48_u8 && p[i] <= 57_u8
+      i = i + 1
+    end
+    true
   end
 
   # The reason phrase a status carries (RFC 9110 §15), for a response the
@@ -673,7 +806,9 @@ pub struct HTTP
         size_text = size_text[0, semi]
       end
       size = parse_hex(trim(size_text))
-      return "not a chunk size: #{size_text.inspect}" unless size
+      unless size
+        return "not a chunk size: #{size_text.inspect}"
+      end
       pos = line_end + 2
       if size == 0
         # Trailers, then a blank line.
@@ -728,11 +863,9 @@ pub struct HTTP
   end
 
   # Where a chunked body ends in `text` — the byte after the last chunk's
-  # terminating CRLF (trailers included) — or nil when it has not all
-  # arrived. What `decode_chunked` will then read whole. A body that is
-  # not chunked is the reason why, which the server answers 400: raised,
-  # a client's bad chunk size was a panic in the server that answered it
-  # nothing, and a size near 2 GiB overflowed the arithmetic below.
+  # terminating CRLF (trailers included) — nil when it has not all
+  # arrived, or why it is not a chunked body. What `decode_chunked` will
+  # then read whole.
   def self.chunked_end(text : String) : Int32 | String | Nil
     p = text.to_unsafe
     n = text.bytesize
@@ -756,45 +889,13 @@ pub struct HTTP
           i = t_end + 2
         end
       end
+      # `size` may be 2^31 - 1: `i + size + 2` passed Int32's end and
+      # panicked.
       return nil if size > n - i - 2
       i = i + size
       return "a chunk is not followed by CRLF" unless p[i] == 13_u8 && p[i + 1] == 10_u8
       i = i + 2
     end
-  end
-
-  # A header line into *headers*. A name already there in any case takes
-  # the new value after a comma (RFC 9110 §5.3), which is what a repeated
-  # field means - it was overwritten, or kept beside the first in another
-  # case where `header` found only one; `Set-Cookie`, whose values are not
-  # a list, arrives folded the same way. Two different `Content-Length`s
-  # are the reason the message cannot be read (RFC 9112 §6.3): which one
-  # a server believed decided where the next request began.
-  def self.add_header(headers : Hash(String, String), name : String, value : String) : String?
-    headers.each do |key, held|
-      next unless same_name?(key, name)
-      if same_name?(name, "Content-Length")
-        return nil if held == value
-        return "conflicting Content-Length: #{held.inspect} and #{value.inspect}"
-      end
-      headers[key] = held + ", " + value
-      return nil
-    end
-    headers[name] = value
-    nil
-  end
-
-  # A `Content-Length`: digits and nothing else (RFC 9110 §8.6), where
-  # `to_i?` took a sign - `+2` was a length.
-  def self.content_length(text : String) : Int32?
-    return nil if text.empty?
-    p = text.to_unsafe
-    i = 0
-    while i < text.bytesize
-      return nil unless p[i] >= 48_u8 && p[i] <= 57_u8
-      i = i + 1
-    end
-    text.to_i?
   end
 
   # Without the blanks at either end (RFC 9112 §5.1: field values are

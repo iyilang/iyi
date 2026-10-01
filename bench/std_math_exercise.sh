@@ -104,6 +104,7 @@ if [ -n "$PY" ] && command -v "$CC" >/dev/null 2>&1; then
   fi
   if [ -n "$ORACLE_BUILT" ] &&
      "$CC" -O2 -ffp-contract=off -fno-builtin -DIYI_ORACLE_CORE_MATH -Dattribute_hidden= \
+       -D__builtin_roundeven=__builtin_rint \
        -I"$REPO/bench/libm_oracle" -o "$WORK/libm_oracle_cm" \
      "$REPO/bench/libm_oracle/oracle.c" "$REPO/bench/libm_oracle/exp.c" \
      "$REPO/bench/libm_oracle/exp_data.c" "$REPO/bench/libm_oracle/pow.c" \
@@ -589,11 +590,20 @@ PY
   if [ $? -ne 0 ]; then
     echo "  $label: the patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" $ORACLE >"$WORK/mut.out" 2>&1; then
+  # `--` before the oracle's files: without it `iyi run` compiled them as
+  # more source, the broken build failed on that, and every proof here
+  # read "caught" without a check having seen the break - as did four
+  # whose patch did not compile. So the failure has to be the program's:
+  # a check's, or a panic the broken module ran into.
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" -- $ORACLE >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
-  else
+  elif grep -q "ASSERTION FAILED\|iyi: panic:" "$WORK/mut.out"; then
     echo "  $label: caught"
+  else
+    echo "  $label: failed, but at no check:"
+    sed -n '1,4p' "$WORK/mut.out" | sed 's/^/    /'
+    status=1
   fi
 }
 mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value * TWO_54)' 'bits = IyiFloatText.bits_of(value)'
@@ -603,13 +613,13 @@ mutate "a subnormal left unscaled by frexp" 'bits = IyiFloatText.bits_of(value *
 if [ -n "$ORACLE" ]; then
   mutate "exp's polynomial a term short" 'r2 * r2 * (EXP_C4 + r * EXP_C5)' 'r2 * r2 * EXP_C4'
   mutate "exp's reduction without ln2's low part" 'r = value + kd * EXP_NEGLN2HI + kd * EXP_NEGLN2LO' 'r = value + kd * EXP_NEGLN2HI'
-  mutate "exp's subnormal result rounded twice" '      y = (hi + lo) - 1.0' '      y = y'
+  mutate "exp's subnormal result rounded twice" '      y = (hi + lo) - 1.0' '      y = y * 1.0'
   mutate "pow's logarithm a term short" 'ar2 * (POW_A5 + r * POW_A6)' 'ar2 * POW_A5'
   mutate "pow's product with y not split" '    ehi = yhi * lhi
     elo = ylo * lhi + exp * llo' '    ehi = exp * hi
     elo = exp * lo'
   mutate "pow's logarithm without its table's tail" '    lo1 = kd * POW_LN2LO + logctail' '    lo1 = kd * POW_LN2LO'
-  mutate "log near one squaring r in one part" '      lo = lo + LOG_B0 * rlo * (rhi + r)' '      lo = lo'
+  mutate "log near one squaring r in one part" '      lo = lo + LOG_B0 * rlo * (rhi + r)' '      lo = lo * 1.0'
   mutate "log's reduction without c's low part" ' - IyiFloatText.from_bits(table[i * 4 + 3])) * invc' ') * invc'
   mutate "log's polynomial a term short" 'r2 * (LOG_A3 + r * LOG_A4)' 'r2 * LOG_A3'
   mutate "log10 without log10(2)'s low part" '    z = y * LOG10_2LO + LOG10_IVLN10 * log(x)' '    z = LOG10_IVLN10 * log(x)'
@@ -658,11 +668,11 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "sin's, cos's and tan's 128-bit product without its middle carry" '    hi = (xh &* yh) &+ lh.unsafe_shr(32_u64) &+ hl.unsafe_shr(32_u64) &+ mid.unsafe_shr(32_u64)' '    hi = (xh &* yh) &+ lh.unsafe_shr(32_u64) &+ hl.unsafe_shr(32_u64)'
   mutate "tan below 2 pi reduced without 1/(2 pi)'s low part" '      l = fma(-9.839338337591243e-18, x, l)
     else
-      tt = TAN_T.to_unsafe' '      l = l
+      tt = TAN_T.to_unsafe' '      l = l * 1.0
     else
       tt = TAN_T.to_unsafe'
   mutate "cos below 2 pi reduced without 1/(2 pi)'s low part" '      l = fma(-9.839338337591243e-18, x, l)
-      err1 = 4.554824318475813e-32 * h' '      l = l
+      err1 = 4.554824318475813e-32 * h' '      l = l * 1.0
       err1 = 4.554824318475813e-32 * h'
   mutate "sin below 2^31 reduced without pi/2^14's low part" '    rl = k * -7.474650873702107e-21' '    rl = 0.0'
   mutate "j0 below 2 with its numerator a term short" '    r2 = r[3] + z * r[4]' '    r2 = r[3]'
@@ -670,15 +680,7 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "cbrt's residual without its cube's low part" '    y3l = fma(y, y2, y3 * -1.0) + y * y2l' '    y3l = 0.0'
   mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
   mutate "atan2's quotient without the divisor's low part" '    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))' '    zl = rdh * (fma(dh, zh * -1.0, nh) + nl)'
-  mutate "atan2's slow product without its middle carries" '    cm = cm &+ sh' '    cm = cm &+ 0_u64'
-else
-  echo "  the last-bit proofs of erf, erfc, asinh, acosh, atanh, atan, asin, acos, sin, cos, tan, lgamma, tgamma, the Bessel functions, cbrt, hypot and atan2: not run, the oracle's CORE-MATH part is not here"
-fi
-# musl's arm, with the processor's answer refused as above: an fma that
-# rounds twice, a product left where z's alignment put it, and a single's
-# sum not sent to its odd neighbour - the double rounding the halfway
-# cases exist for.
-if [ -n "$FMA" ]; then
+  mutate "atan2's slow product left unnormalised" '      rex = rex &- 1_i64' '      rex = rex &- 0_i64'
   mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
   mutate "the software fma's fast path without its round to odd" '      if err != 0.0
         bits = IyiFloatText.bits_of(v)' '      if false

@@ -1,4 +1,5 @@
-# Exercises `std/complex`: Complex abs, arithmetic, exp.
+# Exercises `std/complex`: Complex abs, arithmetic, exp, a zero's sign,
+# division at the ends of the range, sign, hashing and equality.
 #
 # Run via:
 #     ./bin/iyi run bench/std_complex_exercise.iyi
@@ -27,5 +28,34 @@ assert_true s.real == 4.0 && s.imag == 5.0, "add"
 e = Complex.new(0.0, 0.0).exp
 assert_true e.real == 1.0 && e.imag == 0.0, "e^0"
 puts "  add and e^0"
+
+# Every expected value below is what the other library's Complex answers
+# for the same call.
+puts "\n== a zero's sign"
+assert_str "1.0 - 0.0i", Complex.new(1.0, -0.0).to_s, "a negative zero prints as a minus"
+assert_str "1.0 + NaNi", Complex.new(1.0, 0.0 / 0.0).to_s, "NaN prints with a plus"
+assert_true Complex.new(-1.0, 0.0).conj.log.imag < 0.0, "the conjugate of -1 is below the branch cut"
+assert_str "-0.0 - 0.0i", (-Complex.new(0.0, 0.0)).to_s, "negation flips a zero"
+assert_str "1.0 - 0.0i", (2 - Complex.new(1.0, 0.0)).to_s, "a number minus a complex negates its imaginary zero"
+assert_str "1.0e+150 - 0.0i", Complex.new(1.0e300, -1.0e-300).sqrt.to_s, "a root's underflowed imaginary part keeps its sign"
+puts "  a zero keeps its sign through negation, the conjugate and the root, and prints it"
+
+puts "\n== division"
+assert_str "1.0e-200 + 0.0i", (Complex.new(1.0, 1.0) / Complex.new(1.0e200, 1.0e200)).to_s, "a divisor whose abs2 overflows"
+assert_str "1.0e+200 + 0.0i", (Complex.new(1.0, 1.0) / Complex.new(1.0e-200, 1.0e-200)).to_s, "a divisor whose abs2 underflows"
+assert_str "0.6000000000000001 - 1.2000000000000002i", (3 / Complex.new(1.0, 2.0)).to_s, "a number over a complex is times its inverse"
+puts "  a quotient at either end of the range, and a number's as the other library rounds it"
+
+puts "\n== sign"
+assert_str "1.0 + 0.0i", Complex.new(1.0 / 0.0, 1.0).sign.to_s, "an infinite part's sign is its axis"
+assert_str "0.7071067811865476 + 0.7071067811865475i", Complex.new(1.5e308, 1.5e308).sign.to_s, "a sign whose abs overflows"
+assert_str "0.7071067811865476 + 0.7071067811865475i", Complex.new(5.0e-324, 5.0e-324).sign.to_s, "a sign of subnormal parts"
+puts "  the sign has magnitude 1 for infinite, huge and subnormal parts"
+
+puts "\n== hash and equality"
+assert_true Complex.new(3.0, 0.0).hash == 3.0.hash, "a real complex hashes as its real part"
+assert_true Complex.new(1.0e300, 2.0).hash == Complex.new(1.0e300, 2.0).hash, "a huge part hashes"
+assert_true 1.0 == Complex.new(1.0, 0.0), "a number equals its complex"
+puts "  hashing follows ==, from either side"
 
 puts "\nALL CHECKS PASSED"

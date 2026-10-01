@@ -177,6 +177,55 @@ mutate "CDATA written whole" \
   '      serialize_cdata_body(buf)' '      buf << @content' 'splits the section'
 mutate "text= dropped on an element" \
   '      add_child(Node.new_text(value))' '      nil' 'text= replaces'
+mutate "an entity's '<' read as text in an attribute value" \
+  '    if value.includes?("<")' '    if false' 'accepted .*&#60;.*a b='
+mutate "an entity's ']]>' read as text" \
+  '    if !in_attribute && value.includes?("]]>")' '    if false' 'accepted .*]]&#62;'
+mutate "an entity's tabs kept in an attribute value" \
+  '    return (in_attribute ? Parser.attribute_spaces(value) : value) unless value.includes?("&")' \
+  '    return value unless value.includes?("&")' 'tabs and newlines are spaces in an attribute value'
+mutate "a prefix bound to the xmlns uri" \
+  '        elsif attr_val == XMLNS_NAMESPACE' '        elsif false' 'accepted .*xmlns:p=.*2000/xmlns/'
+mutate "the default namespace bound to the xml uri" \
+  '        if attr_val == XML_NAMESPACE || attr_val == XMLNS_NAMESPACE' '        if false' 'accepted .*xmlns=.*XML/1998/namespace'
+mutate "a character that is not an XML character read" \
+  '    if @pos == @bad_at' '    if false' 'accepted "<a>.*</a>"'
+mutate "UTF-8 read in a US-ASCII document" \
+  '        if lowered == "us-ascii" || lowered == "ascii"' '        if false' 'accepted .*US-ASCII.*caf'
+mutate "an XML declaration without a version" \
+  '        fail_at(start_line, start_col, "the XML declaration has no version") if stage == 0' '        nil' 'accepted "<?xml ?>'
+mutate "XML declaration attributes in any order" \
+  '      if !in_place && (attr_name == "version"' '      if false && (attr_name == "version"' 'accepted .*standalone=.*version='
+mutate "any text as a version" \
+  '        if !Parser.version_number?(attr_val)' '        if false' 'accepted .*1<0'
+mutate "a parameter entity reference kept as text in an entity value" \
+  '      elsif b == 37_u8' '      elsif false' 'accepted .*%p;'
+mutate "no space after the % of a parameter entity" \
+  '    if parameter && !skip_whitespace' '    if parameter && !skip_whitespace && false' 'accepted .*ENTITY %p'
+mutate "a colon in a processing instruction target" \
+  '    if target.includes?(":")' '    if false' 'accepted .*x:y'
+mutate "a colon in an entity name" \
+  '    if name.includes?(":")' '    if false' 'accepted .*ENTITY a:b'
+mutate "a local part that cannot start a name" \
+  ' && Parser.name_start_byte?(ptr[colon_at + 1])' '' 'accepted .*p:-a'
+mutate "no space after <!DOCTYPE" \
+  '    if !skip_whitespace
+      fail("expected whitespace after <!DOCTYPE")' '    if !skip_whitespace && false
+      fail("expected whitespace after <!DOCTYPE")' 'accepted .*DOCTYPEa'
+mutate "a reference in an entity value that is not a name" \
+  '    if !Parser.name_shaped?(ref)' '    if false' 'accepted .*a]b'
+mutate "a skipped declaration running into the next" \
+  '      elsif b == 60_u8
+        break' '      elsif false
+        break' 'accepted .*ELEMENT a ANY'
+mutate "a control character in a skipped declaration" \
+  '          if control?(byte_at(@pos))' '          if false' 'accepted .*ATTLIST a k CDATA'
+mutate "no byte budget on entity expansion" \
+  '    if @expanded_bytes > @max_expanded_bytes' '    if false' 'thousand times is refused'
+mutate "a US-ASCII document written as UTF-8" \
+  '    serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")' '    serialize_node(buf)' 'every other character as a reference'
+mutate "a carriage return kept raw in CDATA" \
+  '      elsif ptr[i] == 13_u8' '      elsif false' 'carriage return in CDATA'
 
 echo
 if [ "$status" -eq 0 ]; then

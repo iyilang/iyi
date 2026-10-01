@@ -9,8 +9,8 @@
 # longer the shortest), the notation's range widened (ten to the
 # fifteenth prints in fixed form), Grisu's proof skipped, the fast
 # parser's halfway case rounded up, a truncated word trusted without
-# checking the one above it, and the bignum parser's rounding made
-# truncation.
+# checking the one above it, the bignum parser's rounding made
+# truncation, and an exponent read to six digits.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -93,6 +93,8 @@ prove_fails "a truncated word trusted" trusted "float text: 9007199254740993.000
   '{ if ($0 ~ /^    return parse_exact\(text\) if truncated && /) { next } print }'
 prove_fails "parser truncates" truncate "float text:" \
   '{ if ($0 ~ /^    if half != 0_u64 && \(remainder \|\| \(q & 1_u64\) != 0_u64\)$/) { print "    if false"; next } print }'
+prove_fails "an exponent read to six digits" shortexp "float text: 0.<999,999 zeros>1e1000000 read as" \
+  '{ gsub(/if read < 100000000$/, "if read < 100000"); print }'
 
 echo
 if [ "$status" -eq 0 ]; then

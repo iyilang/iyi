@@ -249,6 +249,12 @@ pub class DynamicTable
     nil
   end
 
+  # The protocol's limit (SETTINGS_HEADER_TABLE_SIZE) as it changes during
+  # a connection; the size in use still moves only by `set_max_size`.
+  def settings_max_size=(limit : Int32) : Nil
+    @settings_max_size = limit
+  end
+
   def add(name : String, value : String, never_indexed : Bool = false) : Nil
     field = HeaderField.new(name, value, never_indexed)
     entry_size = field.size
@@ -393,6 +399,10 @@ pub class Integer
     if prefix_bits < 1 || prefix_bits > 8
       return HpackError.new("Invalid prefix_bits: #{prefix_bits}")
     end
+    # A negative offset read `bytes[-1]`, the last byte, and answered.
+    if offset < 0
+      return HpackError.new("Integer decode: offset #{offset} out of bounds")
+    end
     if offset >= bytes.size
       return HpackError.new("Unexpected EOF decoding integer")
     end
@@ -498,18 +508,21 @@ pub class Huffman
   end
 
   def self.encoded_size(input : String) : Int32
-    total_bits = 0_i32
+    # Int64: thirty bits a byte passed Int32 at 72 MB and panicked.
+    total_bits = 0_i64
     i = 0
     while i < input.bytesize
       byte_val = input.to_unsafe[i].to_i32
-      total_bits = total_bits + HUFFMAN_LENS[byte_val]
+      total_bits = total_bits + HUFFMAN_LENS[byte_val].to_i64
       i = i + 1
     end
-    (total_bits + 7) // 8
+    ((total_bits + 7_i64) // 8_i64).to_i32
   end
 
   def self.decode(bytes : Bytes, offset : Int32, length : Int32) : String | HpackError
-    if offset < 0 || length < 0 || offset + length > bytes.size
+    # `offset + length` overflowed and panicked on a length near Int32's
+    # largest; the room left after *offset* cannot.
+    if offset < 0 || length < 0 || offset > bytes.size || length > bytes.size - offset
       return HpackError.new("Huffman decode: offset/length out of bounds")
     end
     out_chars = [] of UInt8
@@ -568,7 +581,7 @@ end
 
 pub class Decoder
   getter dynamic_table : DynamicTable
-  property protocol_max_table_size : Int32
+  getter protocol_max_table_size : Int32
   property max_header_list_size : Int32
   property max_header_count : Int32
 
@@ -579,10 +592,20 @@ pub class Decoder
     @max_header_count = max_header_count
   end
 
+  # A SETTINGS_HEADER_TABLE_SIZE change reaches the table too: the limit
+  # was only this field's, and the table went on refusing an update above
+  # the size it was made with.
+  def protocol_max_table_size=(limit : Int32) : Nil
+    @protocol_max_table_size = limit
+    @dynamic_table.settings_max_size = limit
+  end
+
   def decode(payload : Bytes) : Array(HeaderField) | HpackError
     headers = [] of HeaderField
     offset = 0_i32
-    total_uncompressed_size = 0_i32
+    # Int64: with no list limit (Int32's largest), one 4 KB entry indexed
+    # 600,000 times passed Int32 and panicked where it should count.
+    total_uncompressed_size = 0_i64
     header_count = 0_i32
     seen_field = false
 
@@ -614,8 +637,8 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + field.name.bytesize + field.value.bytesize
-        if total_uncompressed_size > @max_header_list_size
+        total_uncompressed_size = total_uncompressed_size + field.name.bytesize.to_i64 + field.value.bytesize.to_i64
+        if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
 
@@ -661,8 +684,8 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
-        if total_uncompressed_size > @max_header_list_size
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
 
@@ -729,8 +752,8 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
-        if total_uncompressed_size > @max_header_list_size
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
 
@@ -776,8 +799,8 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize + val.bytesize
-        if total_uncompressed_size > @max_header_list_size
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
 
@@ -831,7 +854,7 @@ end
 
 pub class Encoder
   getter dynamic_table : DynamicTable
-  property protocol_max_table_size : Int32
+  getter protocol_max_table_size : Int32
   property use_huffman : Bool
 
   def initialize(max_table_size : Int32 = 4096, protocol_max_table_size : Int32 = 4096, use_huffman : Bool = true)
@@ -841,6 +864,20 @@ pub class Encoder
     @pending_table_size_update = false
     @pending_table_size = 0_i32
     @pending_min_table_size = 0_i32
+  end
+
+  # A SETTINGS_HEADER_TABLE_SIZE change reaches the table too: the limit
+  # was only this field's, so a raised one was refused by the table and a
+  # lowered one left the table above it (RFC 7541 4.2), with no update.
+  # A lowered limit is always signalled: the peer's table may still be the
+  # size the old limit let it start at, which this encoder never sent.
+  def protocol_max_table_size=(limit : Int32) : Nil
+    lowered = limit < @protocol_max_table_size
+    @protocol_max_table_size = limit
+    @dynamic_table.settings_max_size = limit
+    if lowered
+      set_max_table_size(@dynamic_table.max_size > limit ? limit : @dynamic_table.max_size)
+    end
   end
 
   def set_max_table_size(new_max : Int32) : Nil | HpackError

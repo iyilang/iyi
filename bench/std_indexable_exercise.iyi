@@ -149,6 +149,12 @@ assert_true(s_seed1 == s_seed2, "sample deterministic for same seed")
 s_block = arr.sample { |sz| 1 }
 assert_true(s_block == 20, "sample with custom block")
 
+# A negative seed is a seed: the checked `to_u64` panicked with "arithmetic
+# overflow" on every one. Its bits are the generator's input, so -1 is
+# 2^64 - 1 and lands on index 3 of 5, and the least Int32 on index 4.
+assert_true(arr.sample(-1) == 40, "sample with a negative seed")
+assert_true(arr.sample(-2147483648) == 50, "sample with the least seed")
+
 # Binary search
 bs_elem = arr.bsearch { |x| x >= 35 }
 assert_true(bs_elem == 40, "bsearch found")
@@ -368,6 +374,9 @@ if Program.args.size > 0
   when "probe_fill_past_end"
     puts "triggering fill past end raise:"
     mut.fill(0, 3, 3)
+  when "probe_fill_huge_count"
+    puts "triggering fill past end with a huge count raise:"
+    mut.fill(0, 1, 2147483647)
   when "probe_insert_out_of_range"
     puts "triggering insert out of range raise:"
     marr.insert(2, 0)

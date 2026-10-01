@@ -12,7 +12,8 @@
 #
 # Lexical operations: `basename`, `dirname`, `extension`, `stem`,
 # `parent`, `parents`, `parts`, `join` and `/`, `normalize` (`.` and `..`
-# folded, repeated separators collapsed, a trailing one dropped),
+# folded, repeated separators collapsed, a trailing one dropped, a
+# Windows anchor spelled with `\`: `C:/a` is `C:\a`),
 # `relative_to?` and `relative_to` (nil, or a panic, when the paths have
 # different anchors or the base climbs through `..` — where that leads
 # cannot be known without the file system), `sibling`, `to_posix` and
@@ -327,6 +328,10 @@ pub struct Path
   # The last `.suffix` of the basename, with its dot; none for a name
   # that starts with its only dot (`.bashrc`) or ends with one (`foo.`).
   def extension : String
+    # An anchor is no file name: the UNC share `\\srv\a.\` answered `.\`,
+    # a separator inside the extension, with a stem that did not add up.
+    _, anchor_end = anchor_indices
+    return "" if trimmed_end <= anchor_end
     base = basename
     len = base.bytesize
     ptr = base.to_unsafe
@@ -401,7 +406,10 @@ pub struct Path
     # Nor after a bare drive: `C:` is the current directory on C:, and
     # `C:` joined with `foo` is `C:foo`, the way `normalize` spells it;
     # a separator there made it `C:\foo`, the drive's root.
-    if ends_with_separator? || (!posix? && @name.ends_with?(":"))
+    # Only a bare drive, though: `foo:` is a name, and `foo:` joined with
+    # `bar` came out as `foo:bar`, one name where there were two.
+    drive_end, anchor_end = anchor_indices
+    if ends_with_separator? || (drive_end == 2 && anchor_end == 2 && @name.bytesize == 2)
       Path.new(@name + part, @kind)
     else
       Path.new(@name + separator + part, @kind)
@@ -440,10 +448,12 @@ pub struct Path
     rooted = root != nil
     all = parts
     norm = [] of String
-    # A Windows anchor in Windows' separator, as the rest is joined: `C:/`
-    # and `//server/share/` were kept as written, so `C:/a/./b` normalized
-    # to `C:/a\b`, and `relative_to` found no path between it and `C:\a`.
-    norm << (posix? ? all[0] : Path.backslashed(all[0])) if anchor_end > 0
+    # The anchor in the kind's own spelling: Windows kept `C:/` and `/` as
+    # written, so `C:/a/b` normalized to `C:/a\b`, and was refused as
+    # relative to `C:\a` over nothing but the anchor's separator.
+    if anchor_end > 0
+      norm << (posix? ? "/" : backslashed(drive || "") + (rooted ? "\\" : ""))
+    end
 
     i = anchor_end > 0 ? 1 : 0
     while i < all.size
@@ -554,8 +564,8 @@ pub struct Path
     unless posix?
       drive = p.drive
       if drive && p.root.nil?
-        # In bytes, as `[]` counts: in characters, a name with `ğ` in it
-        # lost a byte off its end for each (`C:ğ.txt` expanded to `ğ.tx`).
+        # Bytes, as the slice counts: `size` counts characters, and
+        # `C:é` expanded to a cut-off `C:\b\` plus half of the `é`.
         rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]
         base_drive = base_dir.drive
         if base_drive && base_drive.downcase == drive.downcase
@@ -607,17 +617,19 @@ pub struct Path
   end
 
   def hash : Int32
-    (windows? ? Path.backslashed(@name.downcase) : @name).hash &* 31 &+ @kind.value.to_i32
+    (windows? ? backslashed(@name.downcase) : @name).hash &* 31 &+ @kind.value.to_i32
   end
 
-  # *text* with every `/` a `\`.
-  protected def self.backslashed(text : String) : String
-    String.new(text.bytesize) do |buffer|
-      index = 0
-      while index < text.bytesize
-        byte = text.to_unsafe[index]
-        buffer[index] = byte == 47_u8 ? 92_u8 : byte
-        index = index + 1
+  # *s* with each `/` written `\`.
+  private def backslashed(s : String) : String
+    len = s.bytesize
+    ptr = s.to_unsafe
+    String.new(len) do |buf|
+      i = 0
+      while i < len
+        b = ptr[i]
+        buf[i] = b == 47_u8 ? 92_u8 : b
+        i = i + 1
       end
     end
   end

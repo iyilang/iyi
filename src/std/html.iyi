@@ -22,32 +22,38 @@ pub struct HTML
   # >  -> &gt;
   # "  -> &quot;
   # ' -> &#39;
-  # What needs no escape goes out as the bytes it is, a run at a time. It
-  # went out a byte at a time as `b.unsafe_chr`, a character whose code
-  # point is the byte, which `<<` writes as UTF-8: every byte of `é` or
-  # `日` became two, and the text was mojibake.
+  #
+  # Every other byte is copied as it is, by the run: writing each byte as a
+  # `Char` wrote a UTF-8 lead or continuation byte as the two-byte encoding
+  # of that code point, so "café" came out as "cafÃ©".
   def self.escape(string : String, io : IyiIO) : Nil
     raw = string.to_unsafe
     len = string.bytesize
-    run = 0
+    run_start = 0
     i = 0
     while i < len
-      entity = case raw[i]
-               when 38_u8 then "&amp;"
-               when 60_u8 then "&lt;"
-               when 62_u8 then "&gt;"
-               when 34_u8 then "&quot;"
-               when 39_u8 then "&#39;"
-               else            nil
-               end
-      if entity
-        io.write(raw + run, i - run) if i > run
-        io.write(entity)
-        run = i + 1
+      b = raw[i]
+      replacement = if b == 38_u8 # &
+                      "&amp;"
+                    elsif b == 60_u8 # <
+                      "&lt;"
+                    elsif b == 62_u8 # >
+                      "&gt;"
+                    elsif b == 34_u8 # "
+                      "&quot;"
+                    elsif b == 39_u8 # '
+                      "&#39;"
+                    else
+                      ""
+                    end
+      if !replacement.empty?
+        io.write(raw + run_start, i - run_start) if i > run_start
+        io.write(replacement)
+        run_start = i + 1
       end
       i = i + 1
     end
-    io.write(raw + run, len - run) if len > run
+    io.write(raw + run_start, len - run_start) if len > run_start
   end
 
   def self.escape(string : String) : String
@@ -787,15 +793,22 @@ pub struct HTML
             # Bare '&' followed by non-alphanumeric
             bytes << 38_u8
           else
-            name = string[name_start, ptr - name_start]
-            cp = named_entity_codepoint(name)
-
-            has_semi = ptr < len && raw[ptr] == 59_u8 # ';'
-            if has_semi
-              ptr = ptr + 1
+            # The longest name the table has wins, as the HTML5 rule reads
+            # it: `&ltb` is `<b` and `&copy2024` is `©2024`. Looking up
+            # only the whole alphanumeric run left both as written.
+            n = ptr - name_start
+            n = 8 if n > 8 # no name in the table is longer
+            cp = -1
+            while n >= 2 && cp < 0
+              cp = named_entity_codepoint(string[name_start, n])
+              n = n - 1 if cp < 0
             end
 
             if cp >= 0
+              ptr = name_start + n
+              if ptr < len && raw[ptr] == 59_u8 # ';'
+                ptr = ptr + 1
+              end
               append_codepoint(bytes, cp)
             else
               # Unknown named entity: preserve original text

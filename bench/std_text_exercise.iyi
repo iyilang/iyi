@@ -110,6 +110,13 @@ raise "string: chop keeps the rest intact" unless "✓✓".chop == "✓"
 
 raise "string: ends_with? char true" unless "hello".ends_with?('o')
 raise "string: ends_with? char false" if "hello".ends_with?('h')
+# A set of characters, not of bytes: `©` is C2 A9 and `é` is C3 A9, and a
+# byte mask took half of `é` and left a C3 that is not a string.
+raise "string: rstrip chars shares a byte" unless "xé".rstrip("©") == "xé"
+raise "string: lstrip chars shares a byte" unless "éx".lstrip("Ã") == "éx"
+raise "string: strip chars of other characters' bytes" unless "è".strip("é¨") == "è"
+# `"\n"` is every line ending, as `chomp` reads it.
+raise "string: chomp newline" unless "a\r\n".chomp("\n") == "a"
 puts "    strip and chomp: blank, presence, lstrip, rstrip, strip, chomp, and chop verified"
 
 # 5. Split, join, partition, and rpartition
@@ -127,6 +134,13 @@ raise "string: split str limit" unless sp4.size == 3 && sp4[2] == "c::d"
 
 sp5 = "x,y,z,w".split(',', 2)
 raise "string: split char limit" unless sp5.size == 2 && sp5[1] == "y,z,w"
+
+# `\v` and `\f` separate words here too, as `blank?` and `strip` see them.
+sp6 = "a\vb\fc d".split
+raise "string: split vertical tab and form feed" unless sp6.size == 4 && sp6[1] == "b" && sp6[2] == "c"
+sp7 = "abc".split("", 2)
+raise "string: split empty separator limit" unless sp7.size == 2 && sp7[0] == "a" && sp7[1] == "bc"
+raise "string: split empty string on empty separator" unless "".split("").size == 1
 
 part1 = "host:port:8080".partition(":")
 raise "string: partition found" unless part1[0] == "host" && part1[1] == ":" && part1[2] == "port:8080"
@@ -199,6 +213,9 @@ raise "string: count char" unless "banana".count('a') == 3
 raise "string: count str" unless "banana".count("an") == 2
 raise "string: center char pad" unless "hello".center(11, '-') == "---hello---"
 raise "string: center str pad" unless "hello".center(12, "-=") == "-=-hello-=-="
+# A run of a character, not of a byte: `耀` is E8 80 80.
+raise "string: squeeze multi-byte run" unless "ééé".squeeze == "é"
+raise "string: squeeze inside a character" unless "耀".squeeze == "耀"
 puts "    transformations: tr, delete, squeeze, count, and center verified"
 
 # 9. UTF-8 awareness and byte/character boundaries
@@ -289,6 +306,10 @@ reversed = s_utf8.reverse
 raise "utf8: reverse content" unless reversed == "olléh"
 raise "utf8: reverse size" unless reversed.size == 5
 raise "utf8: reverse bytesize" unless reversed.bytesize == 6
+# A `\r` with no newline after it is text.
+cr_lines = [] of String
+"a\r\nb\r".each_line { |l| cr_lines << l }
+raise "utf8: each_line final cr" unless cr_lines.size == 2 && cr_lines[0] == "a" && cr_lines[1] == "b\r"
 puts "    utf8 awareness: multi-byte characters, byte indexing, chars decoding, and reverse verified"
 
 # A `Char` above ASCII is more than one byte, and this family narrowed it to

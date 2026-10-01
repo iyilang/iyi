@@ -439,7 +439,7 @@ pub struct Unicode
   # 1 rows of {code point, first, second, third}: full lowercase mappings of more than one code point.
   SPECIAL_DOWNCASE = "304,105,775,0"
 
-  # 81 rows of {code point, first, second, third}: full titlecase mappings that differ from the uppercase mapping.
+  # 135 rows of {code point, first, second, third}: full titlecase mappings that differ from the uppercase mapping.
   SPECIAL_TITLECASE = "223,83,115,0,452,453,0,0,453,453,0,0,454,453,0,0,455,456,0,0,456,456,0,0,457,456,0,0,458,459,0," \
                       "0,459,459,0,0,460,459,0,0,497,498,0,0,498,498,0,0,499,498,0,0,1415,1333,1410,0,4304,4304,0,0," \
                       "4305,4305,0,0,4306,4306,0,0,4307,4307,0,0,4308,4308,0,0,4309,4309,0,0,4310,4310,0,0,4311,4311,0," \
@@ -448,11 +448,19 @@ pub struct Unicode
                       "4325,0,0,4326,4326,0,0,4327,4327,0,0,4328,4328,0,0,4329,4329,0,0,4330,4330,0,0,4331,4331,0,0," \
                       "4332,4332,0,0,4333,4333,0,0,4334,4334,0,0,4335,4335,0,0,4336,4336,0,0,4337,4337,0,0,4338,4338,0," \
                       "0,4339,4339,0,0,4340,4340,0,0,4341,4341,0,0,4342,4342,0,0,4343,4343,0,0,4344,4344,0,0,4345,4345," \
-                      "0,0,4346,4346,0,0,4349,4349,0,0,4350,4350,0,0,4351,4351,0,0,8114,8122,837,0,8116,902,837,0,8119," \
-                      "913,834,837,8130,8138,837,0,8132,905,837,0,8135,919,834,837,8178,8186,837,0,8180,911,837,0,8183," \
-                      "937,834,837,64256,70,102,0,64257,70,105,0,64258,70,108,0,64259,70,102,105,64260,70,102,108," \
-                      "64261,83,116,0,64262,83,116,0,64275,1348,1398,0,64276,1348,1381,0,64277,1348,1387,0,64278,1358," \
-                      "1398,0,64279,1348,1389,0"
+                      "0,0,4346,4346,0,0,4349,4349,0,0,4350,4350,0,0,4351,4351,0,0,8064,8072,0,0,8065,8073,0,0,8066," \
+                      "8074,0,0,8067,8075,0,0,8068,8076,0,0,8069,8077,0,0,8070,8078,0,0,8071,8079,0,0,8072,8072,0,0," \
+                      "8073,8073,0,0,8074,8074,0,0,8075,8075,0,0,8076,8076,0,0,8077,8077,0,0,8078,8078,0,0,8079,8079,0," \
+                      "0,8080,8088,0,0,8081,8089,0,0,8082,8090,0,0,8083,8091,0,0,8084,8092,0,0,8085,8093,0,0,8086,8094," \
+                      "0,0,8087,8095,0,0,8088,8088,0,0,8089,8089,0,0,8090,8090,0,0,8091,8091,0,0,8092,8092,0,0,8093," \
+                      "8093,0,0,8094,8094,0,0,8095,8095,0,0,8096,8104,0,0,8097,8105,0,0,8098,8106,0,0,8099,8107,0,0," \
+                      "8100,8108,0,0,8101,8109,0,0,8102,8110,0,0,8103,8111,0,0,8104,8104,0,0,8105,8105,0,0,8106,8106,0," \
+                      "0,8107,8107,0,0,8108,8108,0,0,8109,8109,0,0,8110,8110,0,0,8111,8111,0,0,8114,8122,837,0,8115," \
+                      "8124,0,0,8116,902,837,0,8119,913,834,837,8124,8124,0,0,8130,8138,837,0,8131,8140,0,0,8132,905," \
+                      "837,0,8135,919,834,837,8140,8140,0,0,8178,8186,837,0,8179,8188,0,0,8180,911,837,0,8183,937,834," \
+                      "837,8188,8188,0,0,64256,70,102,0,64257,70,105,0,64258,70,108,0,64259,70,102,105,64260,70,102," \
+                      "108,64261,83,116,0,64262,83,116,0,64275,1348,1398,0,64276,1348,1381,0,64277,1348,1387,0,64278," \
+                      "1358,1398,0,64279,1348,1389,0"
 
   # 104 rows of {code point, first, second, third}: full case foldings of more than one code point.
   SPECIAL_FOLD = "223,115,115,0,304,105,775,0,329,700,110,0,496,106,780,0,912,953,776,769,944,965,776,769,1415," \
@@ -2095,20 +2103,8 @@ pub struct Unicode
       end
     end
     return if yield_special(special_titlecase_table, cp) { |part| yield part.unsafe_chr }
-    # The full uppercase is the titlecase where the table above has no row
-    # (`ŉ` is `ʼN` both ways), but not for a character that has a
-    # titlecase of its own - one the simple mapping changes it to, or one
-    # that already is titlecase. Those are the 54 Greek letters with an
-    # iota subscript, whose uppercase is two code points and whose
-    # titlecase is one: `ᾳ` came out `ΑΙ` where the titlecase is `ᾼ`, and
-    # the already titlecase `ᾈ` came out `ἈΙ`.
-    simple = titlecase(char, options)
-    if simple.ord != cp || titlecase?(char)
-      yield simple
-      return
-    end
     return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
-    yield simple
+    yield simple_upcase(cp).unsafe_chr
   end
 
   # The case folding of one character where it is one code point (`Σ`, `σ`
@@ -2162,14 +2158,14 @@ pub struct Unicode
     return text.downcase if !options.turkic? && ascii_only?(text)
     source = codepoints(text)
     points = Array(Int32).new(source.size)
-    downcase_into(points, source, 0, options)
+    downcase_from(points, source, 0, options)
     from_codepoints(points)
   end
 
-  # *source* from *start* on, lowered into *points*, a sigma's ending
-  # decided by all of *source*: what comes before *start* is context.
-  private def self.downcase_into(points : Array(Int32), source : Array(Int32), start : Int32, options : CaseOptions) : Nil
-    index = start
+  # Appends the lowercase of `source[from..]`, the final sigma judged by the
+  # whole of *source*: the letters before *from* are still before it.
+  private def self.downcase_from(points : Array(Int32), source : Array(Int32), from : Int32, options : CaseOptions) : Nil
+    index = from
     while index < source.size
       cp = source[index]
       # The Turkic `I` with a combining dot above is the dotted `i`, the
@@ -2180,7 +2176,7 @@ pub struct Unicode
         index = index + 2
         next
       end
-      if cp == 0x3A3 && !options.ascii? && final_sigma?(source, index)
+      if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index)
         points << 0x3C2
       else
         downcase(cp.unsafe_chr, options) { |part| points << part.ord }
@@ -2190,27 +2186,15 @@ pub struct Unicode
   end
 
   # The first character in titlecase and the rest in lowercase: `"ǆemal"` is
-  # `"ǅemal"`, `"STRASSE"` is `"Strasse"`.
+  # `"ǅemal"`, `"STRASSE"` is `"Strasse"`. The first character is still a
+  # letter before the rest, so `"ΑΣ"` is `"Ας"`.
   def self.capitalize(text : String, options : CaseOptions = CaseOptions::None) : String
     check_utf8(text)
     return text if text.empty?
-    first = text[0]
-    rest_at = 0
-    text.each_char do |char|
-      first = char
-      rest_at = utf8_width(char.ord)
-      break
-    end
-    points = Array(Int32).new(text.size)
-    titlecase(first, options) { |part| points << part.ord }
-    if options.fold?
-      foldcase(text[rest_at, text.bytesize - rest_at]).each_char { |char| points << char.ord }
-    else
-      # The rest lowered with the first character in front of it: whether
-      # a sigma ends a word asks for a cased letter before it, and the
-      # rest lowered alone had none - `"ΩΣ"` came out `"Ωσ"`, not `"Ως"`.
-      downcase_into(points, codepoints(text), 1, options)
-    end
+    source = codepoints(text)
+    points = Array(Int32).new(source.size)
+    titlecase(source[0].unsafe_chr, options) { |part| points << part.ord }
+    downcase_from(points, source, 1, options)
     from_codepoints(points)
   end
 

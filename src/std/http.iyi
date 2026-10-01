@@ -368,7 +368,20 @@ pub struct Server
       raise "HTTP: header #{name} contains a line break" if HTTP.has_break?(value)
       raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)
       next if HTTP.same_name?(name, "Connection")
-      has_length = true if HTTP.same_name?(name, "Content-Length")
+      # The body is written whole, after its length: a caller's chunked
+      # framing went out beside `Content-Length` (RFC 9112 §6.1), and a
+      # caller's length was written whatever the body was, so "2" on
+      # "hello" was read as "he" and "llo" began the next answer. A length
+      # is the caller's only where no body follows it: a HEAD, or a 304
+      # that names the length a 200 would have (RFC 9110 §8.6).
+      raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")
+      if HTTP.same_name?(name, "Content-Length")
+        unless head || response.status == 304
+          n = HTTP.content_length(value)
+          raise "HTTP: #{name} #{value.inspect} is not the body's #{response.body.bytesize} bytes" unless n && n == response.body.bytesize.to_i64
+        end
+        has_length = true
+      end
       text = text + name + ": " + value + "\r\n"
     end
     bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304

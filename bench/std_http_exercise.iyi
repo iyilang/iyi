@@ -238,6 +238,18 @@ assert_str "refused: HTTP: header X-A contains a control character", answer { Se
 assert_str "refused: HTTP: not a status line: HTTP/1.1 200 O\rK", client_reads("HTTP/1.1 200 O\rK\r\n\r\n"), "a reason with a bare CR is refused"
 puts "  control characters in values, targets and reasons are refused"
 
+# A caller's length is the body's, or a HEAD's or a 304's own: "2" on
+# "hello" was read as "he", and "llo" began the next answer on the
+# connection. The body goes with its length, so a caller's chunked framing
+# went out beside `Content-Length: 5` and was refused by the client.
+assert_str "refused: HTTP: Content-Length \"2\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"Content-Length" => "2"}), false, false) }, "a length short of the body is not written"
+assert_str "refused: HTTP: content-length \"100\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"content-length" => "100"}), false, false) }, "a length past the body is not written"
+assert_str "refused: HTTP: Transfer-Encoding is not written; the body goes with its length", answer { Server.format_response(Response.new(200, "hello", {"Transfer-Encoding" => "chunked"}), false, false) }, "a caller's chunked framing is not written"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello", Server.format_response(Response.new(200, "hello", {"Content-Length" => "5"}), false, false), "the body's own length is written once"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(200, "", {"Content-Length" => "99"}), true, false), "a HEAD's length is the caller's"
+assert_str "HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(304, "", {"Content-Length" => "99"}), false, false), "and a 304's"
+puts "  a caller's Content-Length is the body's except on a HEAD or a 304, and its Transfer-Encoding is refused"
+
 # A field on several lines is one field, its values in order (RFC 9110
 # §5.3). The Hash kept the last line of a name spelled the same and the
 # first of one spelled otherwise: two different lengths were read as

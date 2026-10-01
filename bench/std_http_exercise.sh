@@ -317,6 +317,8 @@ mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
 mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'
+mutate "a caller's length written beside a body it does not measure" 'unless head || response.status == 304' 'unless true'
+mutate "a caller's chunked framing written beside a length" 'raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")' ''
 
 echo
 if [ "$status" -eq 0 ]; then

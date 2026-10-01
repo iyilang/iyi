@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **`Server.format_response` writes a caller's `Content-Length` only when
+  it is the body's, or on a HEAD or a 304, which send no body, and refuses
+  a caller's `Transfer-Encoding`.** A caller's length was written whatever
+  the body was: `Response.new(200, "hello", {"Content-Length" => "2"})`
+  went out as `Content-Length: 2` before `hello`, which the client read
+  as "he", leaving "llo" to begin the next answer on a kept-alive
+  connection, and "100" made the client refuse with "the body ended after
+  5 of its 100 bytes". `{"Transfer-Encoding" => "chunked"}` was written
+  beside `Content-Length: 5` and an unchunked body (RFC 9112 §6.1), which
+  the client refused ("chunked body ends inside a chunk size"). These are
+  refused now with "HTTP: Content-Length \"2\" is not the body's 5 bytes"
+  and "HTTP: Transfer-Encoding is not written; the body goes with its
+  length"; a length that matches is written once, and a HEAD's or a 304's
+  stays the caller's. `bench/std_http_exercise.iyi` checks each; the old
+  module wrote `Content-Length: 2` before `hello`.
+
 - **`Server.format_response` refuses a status outside 100 to 999, and a
   reason with a line break or a control character, before writing.** The
   status line went out unchecked: `Response.new(200, "OK\r\nSet-Cookie:

@@ -384,6 +384,10 @@ assert_eq(comp.size, 3, "enum: compact_map")
 # 67. find_value
 fv = seq.find_value { |x| x > 5 ? "big-#{x}" : nil }
 assert_true(!fv.nil? && fv == "big-9", "enum: find_value")
+# The first truthy answer, as the other library's: `false` was an answer,
+# so a predicate block found false where the other library finds true.
+assert_str(seq.find_value { |x| x > 5 }.inspect, "true", "enum: find_value takes the first truthy answer")
+assert_str(seq.find_value { |x| x > 100 }.inspect, "nil", "enum: find_value of all falses is nil")
 
 # 68. accumulate
 acc = small_seq.accumulate(0) { |a, b| a + b }

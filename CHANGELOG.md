@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`Enumerable#find_value` answers the first truthy block result.** It took
+  the first non-nil one, `false` included, so
+  `[1, 2, 3, 4].find_value { |i| i > 2 }` answered false where Crystal
+  documents true for that call, and `{ |i| i > 8 }` answered false where
+  Crystal answers nil: one call that compiles under both libraries and meant
+  two things. `bench/std_exercise.iyi` checks both; the old module answered
+  false to the first.
+
 - **`Iterator#zip` stops at the first exhausted source without pulling the
   second.** It asked both sources before looking at either answer, so each
   pull past the end of the first took an element of the second: after

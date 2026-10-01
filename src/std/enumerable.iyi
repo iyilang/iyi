@@ -559,10 +559,14 @@ pub trait Enumerable
     result
   end
 
+  # The first truthy answer, as the other library's: this took the first
+  # non-nil one, `false` included, so `[1, 2, 3, 4].find_value { |i| i > 2 }`
+  # answered false where the other library documents true for that very
+  # call, and `{ |i| i > 8 }` answered false where it answers nil.
   def find_value(& : Elem -> U?) : U? forall U
     each do |e|
       value = yield e
-      return value unless value.nil?
+      return value if value
     end
     nil
   end

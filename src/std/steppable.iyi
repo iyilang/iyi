@@ -15,6 +15,24 @@ pub class NumericStepIterator(T)
   def initialize(@current : T, @limit : T?, @step : T, @exclusive : ::Bool)
     @at_start = true
     @reached_end = false
+    # Refused, as the other library refuses it, unless the walk is already at
+    # its limit (`1.step(to: 1, by: 0)` is `[1]` there too). A zero step
+    # never reaches a limit and never leaves the start: `0.step(to: 10, by:
+    # 0)` quietly yielded nothing and `1.step(by: 0)` yielded 1 forever. A
+    # NaN step is no zero; it is turned away below as unordered.
+    limit = @limit
+    at_limit = !limit.nil? && (limit <=> @current) == 0
+    if !at_limit && !(@step > 0) && !(@step < 0) && !unordered?(@step)
+      StepRefusal.zero_step
+    end
+  end
+
+  # A NaN, which orders against nothing. The prelude's `<=>` sorts it above
+  # every number, so a NaN limit read as "still below it" on every step:
+  # `0.0.step(to: NaN, by: 1.0)` had not ended after 3,000,000 values,
+  # where the other library's `<=>` answers nil and the walk is empty.
+  private def unordered?(value : T) : ::Bool
+    value.is_a?(::Float) && value != value
   end
 
   def next : T?
@@ -24,6 +42,10 @@ pub class NumericStepIterator(T)
     if @at_start
       @at_start = false
       if !limit.nil?
+        if unordered?(limit) || unordered?(@current) || unordered?(@step)
+          @reached_end = true
+          return nil
+        end
         sign = (limit <=> @current)
         if sign == 0
           @reached_end = true
@@ -43,13 +65,19 @@ pub class NumericStepIterator(T)
       return @current
     end
 
-    # Room left versus the step. `@current + @step` overflows Int32 near MAX
-    # (MIN stepping down); `limit - @step` overflows near the other end when
-    # the step is large. Pick the subtraction when `@current` is already on the
-    # overflowing side of `+`, otherwise add first — the two cannot both fire
-    # for a value that still fits in the type.
+    # Room left versus the step, the other library's test: `(limit - @step)
+    # <=> @current`. On integers `@current + @step` overflows Int32 near MAX
+    # (MIN stepping down) and `limit - @step` near the other end when the
+    # step is large, so an integer subtracts when `@current` is already on
+    # the overflowing side of `+` and adds first otherwise - the two cannot
+    # both fire for a value that still fits in the type, and on integers
+    # they agree. A double cannot overflow, and the two round differently:
+    # `(-2.8).step(to: -1.8, by: 0.5)` added -2.3 + 0.5 = -1.7999999999999998,
+    # past -1.8, and stopped a value short of the other library's three,
+    # where the mirror `1.8.step(to: 2.8, by: 0.5)` gave three. A double
+    # always subtracts.
     step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
-    use_sub = (step_sign > 0 && @current > 0) || (step_sign < 0 && @current < 0)
+    use_sub = @current.is_a?(::Float) || (step_sign > 0 && @current > 0) || (step_sign < 0 && @current < 0)
     if use_sub
       gap = ((limit - @step) <=> @current)
       if gap == step_sign
@@ -94,6 +122,17 @@ end
 
 impl Iterator for NumericStepIterator(T) forall T
   type Elem = T
+end
+
+# The refusal, raised from a type that is not generic. A generic type's
+# lines are its artifact's in a program built from artifacts, so a raise in
+# `NumericStepIterator` named `mods\std\steppable.iyimod` there - a line of
+# the library, which a panic the library raises does not name - and the
+# same program built from source named none.
+struct StepRefusal
+  def self.zero_step : NoReturn
+    raise "zero step size"
+  end
 end
 
 pub trait Steppable

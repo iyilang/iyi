@@ -31,5 +31,42 @@ static inline double __math_invalid (double x) { return (x - x) / (x - x); }
 static inline double __math_divzero (uint32_t s) { return (s ? -1.0 : 1.0) / 0.0; }
 static inline double __math_check_uflow_lt (double x, double y) { (void) y; return x; }
 static inline double __math_check_uflow_zero_lt (double x, double y, double z) { (void) x; (void) y; return z; }
-#define __ldexp ldexp
+/* iyi: erfc's subnormal results round through `__ldexp`, and glibc's
+ * rounds to nearest there. The system's does not everywhere: on darwin
+ * the oracle's erfc(26.62825219194711) came out one unit low, as an
+ * ldexp that truncates into the subnormal range gives. So the oracle
+ * scales by its own - musl's scalbn: steps that stay exact while the
+ * value is normal, and one rounding at the end. */
+static inline double iyi_oracle_ldexp (double x, int n)
+{
+  double y = x;
+  if (n > 1023)
+    {
+      y *= 0x1p1023;
+      n -= 1023;
+      if (n > 1023)
+        {
+          y *= 0x1p1023;
+          n -= 1023;
+          if (n > 1023)
+            n = 1023;
+        }
+    }
+  else if (n < -1022)
+    {
+      /* the last multiplication's n stays below -53, so a subnormal
+         result is rounded once */
+      y *= 0x1p-1022 * 0x1p53;
+      n += 1022 - 53;
+      if (n < -1022)
+        {
+          y *= 0x1p-1022 * 0x1p53;
+          n += 1022 - 53;
+          if (n < -1022)
+            n = -1022;
+        }
+    }
+  return y * asdouble ((uint64_t) (0x3ff + n) << 52);
+}
+#define __ldexp iyi_oracle_ldexp
 #endif

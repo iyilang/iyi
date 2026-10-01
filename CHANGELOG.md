@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`Iterator#zip` stops at the first exhausted source without pulling the
+  second.** It asked both sources before looking at either answer, so each
+  pull past the end of the first took an element of the second: after
+  `a.zip(b).to_a` with `a` = `[1]` and `b` = `[10, 20, 30]`, `b.next` was 30
+  where Crystal and Python's `zip` give 20. It asks the second only when the
+  first has an element now. `bench/std_iterator_exercise.iyi` counts the
+  pulls; the old module pulled the longer source twice for its one pair.
+
 - **Sets of small integers spread as hash keys.** `Set#hash` summed its
   members' hashes, and an `Int32`'s hash is the value, so `{1, 4}` and
   `{2, 3}` hashed alike, the 11,175 sets `{i, j}` with i < j < 150 had 297

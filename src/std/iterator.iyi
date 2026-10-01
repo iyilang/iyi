@@ -724,10 +724,15 @@ pub struct ZipIterator(I1, T1, I2, T2)
   def initialize(@iter1 : I1, @iter2 : I2)
   end
 
+  # Asks the second source only when the first has an element. Asking both
+  # took one from the second each time the first had run out: after
+  # `a.zip(b).to_a` with `a` = [1] and `b` = [10, 20, 30], `b.next`
+  # answered 30 where the other library and Python's `zip` answer 20.
   def next : Tuple(T1, T2)?
     item1 = @iter1.next
+    return nil if item1.nil?
     item2 = @iter2.next
-    if item1.nil? || item2.nil?
+    if item2.nil?
       nil
     else
       {item1, item2}
@@ -738,10 +743,12 @@ end
 impl Iterator for ZipIterator(I1, T1, I2, T2) forall I1, T1, I2, T2
   type Elem = Tuple(T1, T2)
 
+  # Not asking the second source once the first has run out, as above.
   def next : Tuple(T1, T2)?
     item1 = @iter1.next
+    return nil if item1.nil?
     item2 = @iter2.next
-    if item1.nil? || item2.nil?
+    if item2.nil?
       nil
     else
       {item1, item2}

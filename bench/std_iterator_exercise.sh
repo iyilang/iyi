@@ -176,9 +176,10 @@ prove_fails "select predicate broken" broken_select "assertion failed for pipeli
 prove_fails "skip count broken" broken_skip "assertion failed for skip" \
   's/while @skipped < @n/while @skipped < 0/'
 
-# 5. Zip broken (prematurely halts pairing)
+# 5. Zip broken (prematurely halts pairing: every pull answers as though a
+#    source had run out)
 prove_fails "zip pairing broken" broken_zip "assertion failed for zip" \
-  's/item1 = @iter1\.next/item1 = nil/'
+  's/{item1, item2}/nil/'
 
 # 6. Chain broken (skips first iterator directly to second)
 prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \

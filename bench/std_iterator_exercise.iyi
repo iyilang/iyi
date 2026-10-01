@@ -155,6 +155,12 @@ puts "iterator: zip"
 it_z1 = Iterator.of([1, 2, 3])
 it_z2 = Iterator.of(["a", "b", "c", "d"])
 assert_equal("zip", it_z1.zip(it_z2).to_a.to_s, "[{1, \"a\"}, {2, \"b\"}, {3, \"c\"}]")
+# The second source is not asked once the first has run out: a zip of [1]
+# with a counter pulled the counter twice for its one pair, and with an
+# array of [10, 20, 30] left [30] where the other library leaves [20, 30].
+zip_counter = InfiniteCounter.new
+zip_pairs = Iterator.of([1]).zip(zip_counter).to_a
+assert_equal("zip pulls the longer source once per pair", "#{zip_pairs} #{zip_counter.pull_count}", "[{1, 0}] 1")
 
 puts "iterator: chain"
 it_c1 = Iterator.of([1, 2])

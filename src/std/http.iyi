@@ -555,6 +555,8 @@ pub struct HTTP
   def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled | SocketError
     uri = URI.parse(url)
     scheme = uri.scheme
+    # In any case (RFC 3986 §3.1): `HTTP://host/` was "only http://".
+    scheme = scheme.downcase if scheme
     raise "HTTP: TLS is not in 0.x; use http://" if scheme == "https"
     raise "HTTP: only http://" unless scheme == "http"
     host = uri.hostname

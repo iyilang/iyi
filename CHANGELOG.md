@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **`HTTP.get("HTTP://host/")` is a request.** A scheme is read in any
+  case (RFC 3986 §3.1), and the client compared it with `http` as written:
+  `HTTP://127.0.0.1:8080/hello` panicked "HTTP: only http://".
+  `bench/std_http_exercise.iyi` asks a server on `::1` through a scheme in
+  capitals; the old client panicked.
+
 - **`UdpSocket#send_to` takes an IPv6 literal in brackets.** `"[::1]"`,
   which `IyiSocket.connect` takes and a URL writes, was refused with
   "'[' is not a hex digit". The brackets are read past now.

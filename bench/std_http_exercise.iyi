@@ -346,11 +346,12 @@ v6_server = IyiThread.start do
   conn.close
   nil
 end
-r = HTTP.get("http://[::1]:#{v6_port}/six").or_panic
+# Written in capitals, as RFC 3986 lets a scheme be: it was "only http://".
+r = HTTP.get("HTTP://[::1]:#{v6_port}/six").or_panic
 assert_true r.body.includes?("Host: [::1]:#{v6_port}\r\n"), "an IPv6 Host keeps its brackets: #{r.body.inspect}"
 v6_server.join
 v6.close
-puts "  an IPv6 literal's Host line keeps its brackets"
+puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
 
 puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a

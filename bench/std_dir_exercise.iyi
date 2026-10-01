@@ -5,6 +5,9 @@
 
 module bench/std_dir_exercise
 
+# `Dir.glob`, matching with `File.match?`, is timed against a bound.
+import std/time::{Time}
+
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
 end
@@ -276,9 +279,45 @@ Dir.cd(listing_dir)
 dotted = Dir.glob("./*.txt").sorted
 Dir.cd(here)
 assert_true dotted == ["./file_a.txt", "./file_b.txt"], "./*.txt answers the names under ./: #{dotted.inspect}"
+# A class or a brace in a middle segment, which `File.match?` reads, and
+# a brace whose branches have different depths.
+braced_middle = Dir.glob(listing_dir + "/{nested_dir,none}/*.txt")
+assert_true braced_middle == [listing_dir + "/nested_dir/one.txt"], "a brace in a middle segment: #{braced_middle.inspect}"
+classed_middle = Dir.glob(listing_dir + "/nested_[d]ir/inner/*.txt")
+assert_true classed_middle == [listing_dir + "/nested_dir/inner/deep.txt"], "a class in a middle segment: #{classed_middle.inspect}"
+uneven = Dir.glob(listing_dir + "/{nested_dir/inner,none}/*.txt")
+assert_true uneven == [listing_dir + "/nested_dir/inner/deep.txt"], "a brace holding a separator: #{uneven.inspect}"
 File.delete(listing_dir + "/nested_dir/inner/deep.txt")
 File.delete(listing_dir + "/nested_dir/one.txt")
 Dir.delete(listing_dir + "/nested_dir/inner")
+# The pattern language is `File.match?`'s, and so is the algorithm. `?`
+# took one byte, so `?.txt` missed `ü.txt`; a class and a brace were
+# literal text, so `file_[ab].*` and `*.{txt,md}` answered `[]`; a `**`
+# matched from inside a name, so `**/*.txt` answered `.dotted.txt` by its
+# `dotted.txt`; and a `*` backtracked at every position, four times slower
+# for each star - nine against one forty-character name took 30 seconds.
+File.write(listing_dir + "/ü.txt", "u")
+File.write(listing_dir + "/notes.md", "m")
+one_char = Dir.glob(listing_dir + "/?.txt")
+assert_true one_char == [listing_dir + "/ü.txt"], "? is one character, both bytes of ü: #{one_char.inspect}"
+classed = Dir.glob(listing_dir + "/file_[ab].*").sorted
+assert_true classed == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt"], "a class matches: #{classed.inspect}"
+braced = Dir.glob(listing_dir + "/*.{txt,md}").sorted
+assert_true braced == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt", listing_dir + "/notes.md", listing_dir + "/ü.txt"], "a brace matches: #{braced.inspect}"
+File.write(listing_dir + "/.dotted.txt", "d")
+starred_deep = Dir.glob(listing_dir + "/**/*.txt").sorted
+assert_true starred_deep == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt", listing_dir + "/ü.txt"], "** and * answer no hidden name, nor the rest of one: #{starred_deep.inspect}"
+dot_named = Dir.glob(listing_dir + "/.*").sorted
+assert_true dot_named == [listing_dir + "/.dotted.txt", listing_dir + "/.hidden_glob"], "a segment written with a leading . answers hidden names: #{dot_named.inspect}"
+File.delete(listing_dir + "/.dotted.txt")
+File.write(listing_dir + "/" + "a" * 40, "")
+started = Time.monotonic
+starred = Dir.glob(listing_dir + "/" + "*a" * 9 + "*b")
+assert_true starred.empty? && (Time.monotonic - started).total_milliseconds < 2000, "nine stars against a forty-character name answer in under 2 seconds"
+File.delete(listing_dir + "/" + "a" * 40)
+File.delete(listing_dir + "/ü.txt")
+File.delete(listing_dir + "/notes.md")
+puts "  File.match?'s language and linear time"
 puts "  glob matching, hidden names, recursion, and empty results"
 
 puts "\n== current working directory and cd"

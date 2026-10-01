@@ -142,6 +142,24 @@
 
 ### Fixed
 
+- **`Dir.glob` speaks `File.match?`'s pattern language, in linear
+  time.** It had a matcher of its own that `File.match?`'s fix did not
+  reach: `?` took one byte, so `?.txt` missed `ü.txt`; `[ab].*` and
+  `*.{txt,md}` were literal text and answered `[]` where `File.match?`
+  said true, and a brace in a middle segment named a directory that was
+  not there; a `**` matched from inside a name, so `d/**/*.txt` answered
+  the hidden `d/.z.txt` and `d/**/.*` answered `d/s/y.txt`; and `*`
+  backtracked at every position, four times slower for each star - nine
+  stars against one forty-character name took 30 seconds. The walk
+  matches with `File.match?` now, a level's part of the pattern before
+  it goes into a directory, and answers in the pattern's spelling as
+  before. A name starting with `.` is answered, and walked into, only
+  where the pattern's segment for it starts with `.`, under `**` too.
+  `bench/std_dir_exercise.iyi` globs with `?`, a class and a brace in a
+  last and a middle segment, `**` past a hidden name, and nine stars
+  against a 2-second bound; the old matcher answered `[]` for a brace
+  in a middle segment.
+
 - **On Windows `Dir.cd` says why a long directory is refused.** The
   working directory holds 258 characters unless long paths are enabled,
   and the `\\?\` prefix a long path is given counts against them:

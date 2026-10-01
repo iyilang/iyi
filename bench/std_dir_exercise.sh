@@ -142,10 +142,10 @@ if [ -z "$PY" ]; then
 elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
-old = "glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)"
+old = "yield full if File.match?(full, matcher)"
 if old not in src:
     raise SystemExit("glob patch site missing")
-Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "false", 1))
+Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "yield full if false", 1))
 PY
 then
   echo "  the glob patch did not apply"

@@ -7,6 +7,9 @@ module std/dir
 
 import std/path::{Path}
 import std/env::{ENV}
+# `Dir.glob` matches with `File.match?` and asks `File.symlink?`; `std/file`
+# imports nothing of this module's.
+import std/file::{File}
 
 {% if flag?(:darwin) %}
   lib LibC
@@ -670,11 +673,25 @@ pub class Dir
   # matched without the `./` the pattern has; and it joined with the
   # platform's separator on one path and `/` on the other, so on Windows
   # `d/*.txt` answered `d\x.txt` and `d/**/*.txt` answered `d/x.txt`.
+  #
+  # The match is `File.match?`'s, its language and its linear algorithm. It
+  # was a matcher of its own that `File.match?`'s fix did not reach: `?`
+  # took one byte, so `?.txt` missed `ü.txt`; `[ab].*` and `*.{txt,md}`
+  # were literal text and answered `[]`; and `*` backtracked at every
+  # position, four times slower for each star - nine of them against one
+  # forty-character name took 30 seconds where `File.match?` takes none.
   private def self.glob_single(pattern : String, &block : String -> Nil) : Nil
     bytes = pattern.to_unsafe
     n = pattern.bytesize
     first_wild = 0
-    while first_wild < n && bytes[first_wild] != 42_u8 && bytes[first_wild] != 63_u8
+    # `\\?\` and `\\.\` are how a Windows path is spelled, not a wildcard:
+    # the scan stopped at that `?`, the walk began at `\\`, and the pattern
+    # answered `[]` for a directory `Dir.children` listed.
+    if {{ flag?(:win32) }} && n >= 4 && glob_sep?(bytes[0]) && glob_sep?(bytes[1]) &&
+       (bytes[2] == 63_u8 || bytes[2] == 46_u8) && glob_sep?(bytes[3])
+      first_wild = 4
+    end
+    while first_wild < n && !glob_wild?(bytes[first_wild])
       first_wild = first_wild + 1
     end
     cut = -1
@@ -684,40 +701,119 @@ pub class Dir
       at = at + 1
     end
     prefix = cut < 0 ? "" : String.new(cut + 1) { |t| t.copy_from(bytes, cut + 1) }
+    # `File.match?` reads a pattern's `\` as a separator on Windows but a
+    # `**` as one only between `/`s, so `d\**\x.txt` did not find `d\x.txt`;
+    # it is given the pattern with `/` alone, and the answers keep the
+    # spelling of the pattern as written.
+    matcher = pattern
+    {% if flag?(:win32) %}
+      matcher = String.new(n) do |t|
+        t.copy_from(bytes, n)
+        i = 0
+        while i < n
+          t[i] = 47_u8 if t[i] == 92_u8
+          i = i + 1
+        end
+      end
+    {% end %}
     # The separators after the prefix: each is where a deeper directory's
     # part of the pattern ends, and the walk goes no deeper than they do.
+    # Each level's part is matched before the walk goes into it, while the
+    # parts are whole patterns: a separator inside a `{...}` or a `[...]`
+    # gives the branches different depths, and from there on the walk only
+    # counts levels and leaves the deciding to the whole match.
     ends = [] of Int32
+    parts = [] of String
+    braces = 0
+    whole = true
     at = cut + 1
     while at < n
-      ends << at if glob_sep?(bytes[at])
+      c = bytes[at]
+      if c == 91_u8
+        # A class runs to its `]`, and its first member - after `[` or
+        # `[^` - may be a `]`, as `File.match?` reads one.
+        at = at + 1
+        at = at + 1 if at < n && bytes[at] == 94_u8
+        first = true
+        while at < n && (first || bytes[at] != 93_u8)
+          at = at + 1 if !{{ flag?(:win32) }} && bytes[at] == 92_u8 && at + 1 < n
+          if glob_sep?(bytes[at])
+            ends << at
+            whole = false
+          end
+          first = false
+          at = at + 1
+        end
+      elsif c == 123_u8
+        braces = braces + 1
+      elsif c == 125_u8 && braces > 0
+        braces = braces - 1
+      elsif !{{ flag?(:win32) }} && c == 92_u8 && at + 1 < n
+        # An escape: the byte behind it is literal, and an escaped `/` is
+        # still a level, but a part cut after the `\` is no pattern.
+        at = at + 1
+        if glob_sep?(bytes[at])
+          ends << at
+          whole = false
+        end
+      elsif glob_sep?(c)
+        ends << at
+        whole = false if braces > 0
+        parts << matcher[0, at] if whole
+      end
       at = at + 1
+    end
+    # A name that starts with `.` is hidden: a wildcard does not answer it,
+    # and the walk does not go into it, unless the pattern's own segment
+    # there starts with `.` - or with a `{`, whose branches decide. Past a
+    # `**`, or a separator inside braces, which segment a name is under is
+    # not known, and any segment starting so will do.
+    deep = pattern.includes?("**")
+    dots = [] of Bool
+    any_dot = false
+    start = cut + 1
+    level = 0
+    while start <= n
+      dot = start < n && (bytes[start] == 46_u8 || bytes[start] == 123_u8)
+      any_dot = any_dot || dot
+      dots << dot if !deep && level <= parts.size
+      start = level < ends.size ? ends[level] + 1 : n + 1
+      level = level + 1
     end
     sep_at = ends.empty? ? cut : ends[0]
     sep = sep_at < 0 ? "/" : String.new(1) { |t| t[0] = bytes[sep_at] }
-    deep = pattern.includes?("**")
-    glob_walk(prefix.empty? ? "." : prefix, prefix, pattern, ends, 0, deep, sep, &block)
+    glob_walk(prefix.empty? ? "." : prefix, prefix, matcher, parts, ends.size, dots, any_dot, 0, deep, sep, &block)
   end
 
-  private def self.glob_walk(dir : String, shown : String, pattern : String, ends : Array(Int32), level : Int32,
-                             deep : Bool, sep : String, &block : String -> Nil) : Nil
-    return if level > 64
+  private def self.glob_walk(dir : String, shown : String, matcher : String, parts : Array(String), limit : Int32,
+                             dots : Array(Bool), any_dot : Bool, level : Int32, deep : Bool, sep : String,
+                             &block : String -> Nil) : Nil
     return unless Dir.exists?(dir)
     Dir.each_child(dir) do |child|
+      next if child.starts_with?('.') && !(level < dots.size ? dots[level] : any_dot)
       full = shown + child
-      yield full if match_pattern(pattern, full)
-      next unless deep || level < ends.size
+      yield full if File.match?(full, matcher)
+      next unless deep || level < limit
       # Only into a directory the pattern's part so far can match.
-      next unless deep || glob_match(pattern.to_unsafe, 0, ends[level], full.to_unsafe, 0, full.bytesize)
-      if Dir.exists?(full)
-        glob_walk(full, full + sep, pattern, ends, level + 1, deep, sep, &block)
-      end
+      next unless deep || level >= parts.size || File.match?(full, parts[level])
+      next unless Dir.exists?(full)
+      # Under `**` the walk does not go through a link, as the other
+      # library's and the shells' do not. A junction back up the tree was
+      # walked again at every level - one file answered 64 times, and two
+      # such links branched past any finish - until a cap of 64 levels
+      # stopped the walk, which also cut a real tree 70 deep off without a
+      # word.
+      next if deep && File.symlink?(full)
+      glob_walk(full, full + sep, matcher, parts, limit, dots, any_dot, level + 1, deep, sep, &block)
     end
   end
 
-  # `*` / `?` stay inside one segment; `**` crosses a separator. A leading `.`
-  # in a segment matches only when the pattern has a `.` there (FNM_PERIOD).
-  private def self.match_pattern(pattern : String, name : String) : Bool
-    glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)
+  # What ends a pattern's literal prefix: `*`, `?`, `[` and `{`, and on
+  # posix the `\` that escapes the next byte. The scan knew `*` and `?`,
+  # so a pattern that began with a class or a brace was walked as a
+  # directory named by its text.
+  private def self.glob_wild?(c : UInt8) : Bool
+    c == 42_u8 || c == 63_u8 || c == 91_u8 || c == 123_u8 || (!{{ flag?(:win32) }} && c == 92_u8)
   end
 
   # Windows has two separators and a program mixes them without meaning to:
@@ -730,67 +826,6 @@ pub class Dir
     {% else %}
       c == 47_u8
     {% end %}
-  end
-
-  private def self.glob_match(p : UInt8*, pi : Int32, pn : Int32, s : UInt8*, si : Int32, sn : Int32) : Bool
-    star = 42_u8
-    qst = 63_u8
-    dot = 46_u8
-    while pi < pn
-      pc = p[pi]
-      if pc == star && (pi + 1) < pn && p[pi + 1] == star
-        while pi < pn && p[pi] == star
-          pi = pi + 1
-        end
-        pi = pi + 1 if pi < pn && glob_sep?(p[pi])
-        return true if pi >= pn
-        i = si
-        while i <= sn
-          return true if glob_match(p, pi, pn, s, i, sn)
-          break if i >= sn
-          i = i + 1
-        end
-        return false
-      elsif pc == star
-        pi = pi + 1
-        at_seg = si == 0 || (si > 0 && glob_sep?(s[si - 1]))
-        hide_dot = at_seg && si < sn && s[si] == dot
-        if pi >= pn
-          return false if hide_dot
-          j = si
-          while j < sn
-            return false if glob_sep?(s[j])
-            j = j + 1
-          end
-          return true
-        end
-        i = si
-        while i <= sn
-          return true if glob_match(p, pi, pn, s, i, sn)
-          break if i >= sn || glob_sep?(s[i])
-          break if hide_dot && i == si
-          i = i + 1
-        end
-        return false
-      elsif pc == qst
-        at_seg = si == 0 || (si > 0 && glob_sep?(s[si - 1]))
-        return false if si >= sn || glob_sep?(s[si])
-        return false if at_seg && s[si] == dot
-        pi = pi + 1
-        si = si + 1
-      elsif glob_sep?(pc)
-        # One separator answers for the other where both are separators: the
-        # pattern was written with one and the walk joins with `/`.
-        return false if si >= sn || !glob_sep?(s[si])
-        pi = pi + 1
-        si = si + 1
-      else
-        return false if si >= sn || s[si] != pc
-        pi = pi + 1
-        si = si + 1
-      end
-    end
-    si >= sn
   end
 
   protected def self.c_str(str : String) : UInt8*

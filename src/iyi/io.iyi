@@ -128,13 +128,15 @@ class IyiIO
   # it was a read and a copy per 4 KB, and an 86 MB file took 150 ms to
   # read where one read per doubling of the result takes a fraction. A
   # failed read leaves the limit at -1 as `fill_buffer` does, which is
-  # what `read_failed?` reports.
+  # what `read_failed?` reports. In Int64, up to one byte past what a
+  # string holds: in Int32, doubling 1 GiB panicked "arithmetic overflow",
+  # and `File.read` of any file over 1 GiB - 64 KiB with it.
   def read_all : String
     raise "cannot read from closed IO" if @closed
 
-    capacity = 8192
+    capacity = 8192_i64
     buffer = Pointer(UInt8).malloc(capacity.to_u64)
-    filled = 0
+    filled = 0_i64
 
     avail = @read_limit - @read_pos
     if avail > 0
@@ -143,15 +145,13 @@ class IyiIO
       end
       buffer = buffer.realloc(capacity.to_u64) if capacity > 8192
       buffer.copy_from(@read_buffer + @read_pos, avail)
-      filled = avail
+      filled = avail.to_i64
       @read_pos = @read_limit
     end
 
     until @eof
-      if capacity - filled < 65536
-        while capacity - filled < 65536
-          capacity = capacity * 2
-        end
+      if capacity - filled < 65536 && capacity < 2147483648_i64
+        capacity = capacity * 2
         buffer = buffer.realloc(capacity.to_u64)
       end
       got = low_level_read(@fd, (buffer + filled).as(Void*), (capacity - filled).to_u64)
@@ -160,12 +160,13 @@ class IyiIO
         @read_limit = got < 0_i64 ? -1 : 0
         @eof = true
       else
-        filled = filled + got.to_i
+        filled = filled + got
+        raise "the stream is past the 2147483647 bytes a string holds" if filled > 2147483647
       end
     end
 
-    String.new(filled) do |target|
-      target.copy_from(buffer, filled)
+    String.new(filled.to_i32) do |target|
+      target.copy_from(buffer, filled.to_i32)
     end
   end
 
@@ -208,8 +209,9 @@ class IyiIO
       end
     end
 
-    # Multi-buffer path: accumulate until newline or EOF
-    line_cap = 256
+    # Multi-buffer path: accumulate until newline or EOF. The capacity is
+    # Int64: in Int32, a line over 1 GiB panicked "arithmetic overflow".
+    line_cap = 256_i64
     line_buf = Pointer(UInt8).malloc(line_cap.to_u64)
     line_len = 0
 
@@ -225,30 +227,19 @@ class IyiIO
           end
           j = j + 1
         end
-
-        if found_idx >= 0
-          take = found_idx - @read_pos + 1
-          if (line_len + take) > line_cap
-            while (line_len + take) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
+        take = found_idx >= 0 ? found_idx - @read_pos + 1 : avail
+        wanted = line_len.to_i64 + take
+        raise "a line is past the 2147483647 bytes a string holds" if wanted > 2147483647
+        if wanted > line_cap
+          while wanted > line_cap
+            line_cap = line_cap * 2
           end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
-          line_len = line_len + take
-          @read_pos = found_idx + 1
-          break
-        else
-          if (line_len + avail) > line_cap
-            while (line_len + avail) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
-          end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, avail)
-          line_len = line_len + avail
-          @read_pos = @read_limit
+          line_buf = line_buf.realloc(line_cap.to_u64)
         end
+        (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
+        line_len = wanted.to_i32
+        @read_pos = @read_pos + take
+        break if found_idx >= 0
       end
 
       break if @eof

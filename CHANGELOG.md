@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`File.read`, `read_all` and `read_line` read past 1 GiB, and refuse
+  past 2,147,483,647 bytes by name.** `IyiIO#read_all` and `read_line`
+  doubled an `Int32` capacity, and doubling 1 GiB overflowed:
+  `File.read` of a 1,288,490,188-byte file panicked "arithmetic
+  overflow" after a 1.8 GB peak, and so did `read_line` of a line that
+  long. Both grow in `Int64` now, `read_all` up to one byte past what a
+  string holds: the file reads whole, and as one line, and a stream of
+  2 GiB panics with "the stream is past the 2147483647 bytes a string
+  holds" (`read_line`: "a line is past the 2147483647 bytes a string
+  holds"). bench/io_exercise.sh reads sparse files of both sizes both
+  ways on Windows, built with `--release`, where the first read takes
+  2.0 s and 3.6 GB at its peak; the old prelude answered "arithmetic
+  overflow" to all four.
+
 - **`read_bytes(count)` on a file allocates what arrives, not the
   count.** `IyiIO#read_bytes` allocated `count` bytes before it read
   anything, the bug std/io's `Reader` had: reading a 10-byte file with a

@@ -118,7 +118,7 @@ prove_fails "short reads fail" noshort "short_reads:" \
 
 # 3. Buffer boundary broken: take count in multi-buffer read_line corrupted
 prove_fails "read across buffer boundary fails" noboundary "buffer_boundary:" \
-  '{ if ($0 ~ /take = found_idx - @read_pos \+ 1/) { print "take = 1"; next } print }'
+  '{ if ($0 ~ /take = found_idx >= 0 \? found_idx - @read_pos \+ 1 : avail/) { print "        take = 1"; next } print }'
 
 # 4. EOF check broken: eof? always returns false
 prove_fails "eof check fails" noeof "eof:" \
@@ -263,6 +263,40 @@ PY
       else
         echo "  the program left the console's mode changed:"; sed 's/^/    /' "$WORK/vtmode.out"; status=1
       fi
+    fi
+
+    # 8. A stream past a gibibyte. `read_all` and `read_line` doubled an
+    #    Int32 capacity, and doubling 1 GiB panicked "arithmetic overflow":
+    #    `File.read` of a 1,288,490,188-byte file did, after a 1.8 GB peak.
+    #    That file reads whole, and as one line, and one of 2 GiB - a byte
+    #    past what a string holds - is refused by name both ways. Sparse
+    #    files, so nothing is written to the disk; built with --release,
+    #    where one read of the first took 2.0 s and 3.6 GB at its peak
+    #    (11.6 s in a plain build).
+    echo
+    echo "== a stream past a gibibyte"
+    printf 'module main\n\npath = Program.args[1]\nif Program.args[0] == "all"\n  puts "read_all #{File.read(path).bytesize}"\nelse\n  line = File.open(path).read_line\n  puts "read_line #{line ? line.bytesize : -1}"\nend\n' > "$WORK/big.iyi"
+    if ! "$IYI" build --release -o "$WORK/big" "$WORK/big.iyi" > "$WORK/big.build" 2>&1; then
+      echo "  the big-stream program did not build"; sed -n '1,10p' "$WORK/big.build"; status=1
+    else
+      for size in 1288490188 2147483648; do
+        : > "$WORK/big$size.bin"
+        fsutil sparse setflag "$(cygpath -w "$WORK/big$size.bin")" > /dev/null 2>&1
+        dd if=/dev/zero of="$WORK/big$size.bin" bs=1 count=0 seek="$size" 2>/dev/null
+      done
+      big_case() { # big_case <all|line> <size> <the line it answers>
+        "$WORK/big" "$1" "$WORK/big$2.bin" > "$WORK/big.out" 2>&1
+        if grep -qxF -- "$3" "$WORK/big.out"; then
+          echo "  $1 of $2 bytes: $3"
+        else
+          echo "  $1 of $2 bytes did not answer '$3':"; sed -n '1,3p' "$WORK/big.out" | sed 's/^/    /'; status=1
+        fi
+      }
+      big_case all 1288490188 "read_all 1288490188"
+      big_case line 1288490188 "read_line 1288490188"
+      big_case all 2147483648 "iyi: panic: the stream is past the 2147483647 bytes a string holds"
+      big_case line 2147483648 "iyi: panic: a line is past the 2147483647 bytes a string holds"
+      rm -f "$WORK"/big*.bin
     fi
     ;;
 esac

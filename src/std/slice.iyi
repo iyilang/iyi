@@ -439,21 +439,12 @@ pub struct Slice(T)
 
   # And hashing follows equality, or the `==` above buys nothing: a key is
   # found by its slot first and compared second, so two slices with equal
-  # contents have to land in one slot. `Object#hash` answered the type id,
-  # which put every `Slice(Int32)` in the same slot — correct and useless.
-  #
-  # Wrapping arithmetic, mixed the way `Indexable#hash` mixes: a hash is a
-  # number modulo the word, and written with the checked `*` this panics with
-  # "arithmetic overflow" as soon as `31 * h` leaves `Int32`.
-  def hash : Int32
-    h = @size
-    i = 0
-    while i < @size
-      h = (31 &* h) &+ @pointer[i].hash
-      i = i + 1
-    end
-    h
-  end
+  # contents have to land in one slot. That is `Indexable#hash`, from the
+  # impl below, which is `Array#hash` element for element. The copy this
+  # struct carried said it mixed as the trait does and was `31 * h + x`,
+  # under which `[a, b]` and `[a + 1, b - 31]` collide: a 150 by 150 grid of
+  # two-element slices had 4,769 distinct hashes for 22,500 slices, about
+  # five slices to a hash where every array had its own.
 end
 
 # The `unsafe_fetch` above has said "required for Indexable" since it was

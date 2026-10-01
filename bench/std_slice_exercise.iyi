@@ -201,6 +201,33 @@ def main : Nil
   puts "same self: #{eq1.same?(eq1)}"
   puts "same copy: #{eq1.same?(eq2)}"
 
+  # Equal contents hash alike, and a grid of two-element slices spreads:
+  # the hash was `31 * h + x`, which gave this grid 4,769 distinct hashes
+  # for 22,500 slices, about five slices to a hash where every array had
+  # its own.
+  raise "hash: equal slices hashed apart" unless eq1.hash == eq2.hash
+  grid_hashes = {} of Int32 => Bool
+  150.times { |x| 150.times { |y| grid_hashes[Slice(Int32).new(2) { |i| i == 0 ? x : y }.hash] = true } }
+  puts "hash spread: #{grid_hashes.size} distinct of 22500"
+  raise "hash spread: a 150 by 150 grid of slices had #{grid_hashes.size} distinct hashes" unless grid_hashes.size == 22500
+  started = __iyi_monotonic_ns
+  slice_keys = {} of Slice(Int32) => Int32
+  150.times { |x| 150.times { |y| slice_keys[Slice(Int32).new(2) { |i| i == 0 ? x : y }] = x * y } }
+  slice_ns = __iyi_monotonic_ns - started
+  started = __iyi_monotonic_ns
+  array_keys = {} of Array(Int32) => Int32
+  150.times { |x| 150.times { |y| array_keys[[x, y]] = x * y } }
+  array_ns = __iyi_monotonic_ns - started
+  found = slice_keys[Slice(Int32).new(2) { |i| i == 0 ? 149 : 17 }]?
+  puts "hash table: #{slice_keys.size} slice keys, [149, 17] => #{found.inspect}"
+  raise "hash table: expected 22500 keys and 2533 for [149, 17]" unless slice_keys.size == 22500 && found == 2533
+  # A bound, not a benchmark: twenty times the arrays' time and 200 ms
+  # over. A hash that answered one value for every slice, as the type's id
+  # did before this struct had one, took 3 s here where the arrays took 3 ms.
+  if slice_ns > array_ns * 20 + 200_000_000_i64
+    raise "hash table: 22500 slice keys took #{slice_ns // 1000000} ms where the same arrays took #{array_ns // 1000000} ms"
+  end
+
   puts "== enumerable integration"
   enum_s = Slice(Int32).new(5) { |i| (i + 1) * 3 }
   puts "each sum: #{enum_s.sum}"

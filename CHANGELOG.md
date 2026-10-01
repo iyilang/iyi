@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`Iterator#zip` and `#chain` refuse a non-iterator at the call, and a
+  chain of two element types yields both.** Their `O` was unbounded, so
+  `Iterator.of([1, 2]).zip([10, 20])` was refused from inside
+  std/iterator.iyi with "undefined constant O::Elem" and "Did you mean
+  'IO'?", a chain with an array with "undefined method 'next' for
+  Array(Int32)" at a line of `ChainIterator`, and
+  `Iterator.of([1, 2]).chain(Iterator.of(["a"]))` with a return-type error
+  inside `ChainIterator#next`. Both are bounded `forall O : Iterator` now,
+  as `Enumerable#zip` is, so the refusal names the caller's line, the
+  argument's type and `O`, and a chain yields `Elem | O::Elem`:
+  `[1, 2, "a"]`, as in Crystal. `bench/std_iterator_exercise.sh` builds all
+  three; the old module refused each inside the library.
+
 - **`Iterator#any?` without a block asks for a truthy element.** It asked
   whether there was an element at all, so `Iterator.of([false, false]).any?`
   was true where Crystal's is false. It pulls until a truthy element now,

@@ -134,12 +134,19 @@ pub trait Iterator
     SkipWhileIterator(self, Elem).new(self, func)
   end
 
-  def zip(other : O) : ZipIterator(self, Elem, O, O::Elem) forall O
+  # Bounded, as `Enumerable#zip` is (SPEC.md II.6 finding 6). Unbounded, a
+  # zip with an array was refused from inside this file, "undefined
+  # constant O::Elem" at the line below, and a chain with one from
+  # `ChainIterator#next`; with `forall O : Iterator` the refusal names the
+  # caller's line, the argument's type and `O`. A chain of two element
+  # types yields either, as the other library's does: it was a return-type
+  # error inside `ChainIterator`.
+  def zip(other : O) : ZipIterator(self, Elem, O, O::Elem) forall O : Iterator
     ZipIterator(self, Elem, O, O::Elem).new(self, other)
   end
 
-  def chain(other : O) : ChainIterator(self, O, Elem) forall O
-    ChainIterator(self, O, Elem).new(self, other)
+  def chain(other : O) : ChainIterator(self, O, Elem | O::Elem) forall O : Iterator
+    ChainIterator(self, O, Elem | O::Elem).new(self, other)
   end
 
   def flat_map(&func : Elem -> Array(U)) : FlatMapIterator(self, Elem, U) forall U

@@ -127,6 +127,48 @@ if ! grep -q "all iterator checks passed" "$WORK/iterator-release.out" 2>/dev/nu
 fi
 
 echo
+echo "== zip and chain take an iterator, and say so at the call"
+# `zip` and `chain` are bounded `forall O : Iterator`, as `Enumerable#zip`
+# is (SPEC.md II.6 finding 6). Unbounded, a zip with an array was refused
+# from inside std/iterator.iyi, "undefined constant O::Elem" and "Did you
+# mean 'IO'?", and a chain with one, or with another element type, from
+# `ChainIterator#next`. The refusal names the caller's line, `O` and the
+# method now, and a chain of two element types yields either, as the other
+# library's does.
+refused_at_call() { # refused_at_call <label> <name> <method> <expression>
+  local label="$1" name="$2" method="$3" expression="$4"
+  printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs (%s).to_a\n' \
+    "$expression" > "$WORK/$name.iyi"
+  if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" \
+       > "$WORK/$name.build" 2>&1; then
+    echo "  $label: it built"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "required by \`O\` in \`$method\`" "$WORK/$name.build" ||
+     ! grep -qF -- "$name.iyi:5" "$WORK/$name.build"; then
+    echo "  $label: refused, but not at the call"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  echo "  $label: refused at the call, naming \`O\` in \`$method\`"
+}
+refused_at_call "a zip with an array" zip_array zip 'Iterator.of([1, 2]).zip([10, 20])'
+refused_at_call "a chain with an array" chain_array chain 'Iterator.of([1, 2]).chain([10, 20])'
+printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs Iterator.of([1, 2]).chain(Iterator.of(["a"])).to_a\n' \
+  > "$WORK/chain_mixed.iyi"
+if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/chain_mixed" "$WORK/chain_mixed.iyi" \
+     > "$WORK/chain_mixed.build" 2>&1 &&
+   [ "$("$WORK/chain_mixed" | tr -d '\r')" = '[1, 2, "a"]' ]; then
+  echo '  a chain of Int32 and String yields both: [1, 2, "a"]'
+else
+  echo "  a chain of two element types did not yield both"
+  sed -n '1,8p' "$WORK/chain_mixed.build"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when an iterator mechanism is broken"
 
 prove_fails() {

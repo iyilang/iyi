@@ -82,24 +82,28 @@ struct ::BitArray
   end
 
   def [](index : Int) : Bool
-    idx = index.to_i
-    idx += @size if idx < 0
-    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    idx = index_within(index) || raise "Index out of bounds: #{index} (size: #{@size})"
     unsafe_fetch(idx)
   end
 
   def []?(index : Int) : Bool?
-    idx = index.to_i
-    idx += @size if idx < 0
-    return nil if idx < 0 || idx >= @size
-    unsafe_fetch(idx)
+    idx = index_within(index)
+    idx ? unsafe_fetch(idx) : nil
   end
 
   def []=(index : Int, value : Bool) : Bool
-    idx = index.to_i
-    idx += @size if idx < 0
-    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    idx = index_within(index) || raise "Index out of bounds: #{index} (size: #{@size})"
     unsafe_put(idx, value)
+  end
+
+  # *index*, counted from the end when negative, or nil when it is outside.
+  # Counted in `Int64` and narrowed after, as `rotate_in_place` counts:
+  # narrowed first, an index past `Int32` panicked "arithmetic overflow",
+  # in `[]?` too, where the other library answers nil.
+  private def index_within(index : Int) : Int32?
+    idx = index.to_i64
+    idx += @size if idx < 0
+    idx < 0 || idx >= @size ? nil : idx.to_i
   end
 
   def first : Bool
@@ -123,9 +127,7 @@ struct ::BitArray
   end
 
   def toggle(index : Int) : Nil
-    idx = index.to_i
-    idx += @size if idx < 0
-    raise "Index out of bounds: #{index} (size: #{@size})" if idx < 0 || idx >= @size
+    idx = index_within(index) || raise "Index out of bounds: #{index} (size: #{@size})"
     word_idx = idx // 64
     sub_idx = idx % 64
     mask = 1_u64.unsafe_shl(sub_idx.to_u64)
@@ -155,13 +157,17 @@ struct ::BitArray
   end
 
   def fill(value : Bool, start : Int, count : Int) : self
-    s = start.to_i
+    s = start.to_i64
     s += @size if s < 0
-    c = count.to_i
+    c = count.to_i64
     return self if c <= 0
     raise "Start out of bounds" if s < 0 || s > @size
-    limit = (c > @size - s) ? @size : (s + c)
-    i = s
+    # In `Int64`, as `index_within` counts, until the start is inside and the
+    # count is cut to the room left: narrowed first, a count of 2^32
+    # panicked "arithmetic overflow" where the other library fills to the
+    # end.
+    i = s.to_i
+    limit = c > @size - i ? @size : i + c.to_i
     while i < limit
       unsafe_put(i, value)
       i += 1
@@ -222,10 +228,8 @@ struct ::BitArray
   end
 
   def index(obj : Bool, offset : Int = 0) : Int32?
-    off = offset.to_i
-    off += @size if off < 0
-    return nil if off < 0 || off >= @size
-    i = off
+    i = index_within(offset)
+    return nil unless i
     while i < @size
       return i if unsafe_fetch(i) == obj
       i += 1
@@ -234,10 +238,8 @@ struct ::BitArray
   end
 
   def rindex(obj : Bool, offset : Int = @size - 1) : Int32?
-    off = offset.to_i
-    off += @size if off < 0
-    return nil if off < 0 || off >= @size
-    i = off
+    i = index_within(offset)
+    return nil unless i
     while i >= 0
       return i if unsafe_fetch(i) == obj
       i -= 1

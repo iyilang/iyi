@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`StaticArray` and `BitArray` take an `Int64` index past `Int32`:
+  `[]?` answers nil, `[]` refuses with the module's sentence, and `fill`,
+  `index`, `rindex` and `StaticArray#rotate_in_place` answer.** Each
+  narrowed its argument with a checked `to_i` before any bounds logic, so
+  `[]?(4294967296_i64)`, `fill(v, 0, 4294967296_i64)`,
+  `index(v, 4294967296_i64)` and
+  `StaticArray#rotate_in_place(3000000001_i64)` panicked "arithmetic
+  overflow". They count in `Int64` and narrow once the value is inside, as
+  `BitArray#rotate_in_place` already did: nil, a fill to the end, nil, and
+  `StaticArray[2, 3, 4, 1]` for `StaticArray[1, 2, 3, 4]`.
+  `bench/std_static_array_exercise.iyi` and
+  `bench/std_bit_array_exercise.iyi` check each; the old modules panicked
+  "arithmetic overflow" at the first, `[]?` of 2^32.
+
 - **`StaticArray#sort`, `sort_by` and their in-place forms make
   O(n log n) comparisons, and `sort_by` computes each key once.** They were
   an insertion sort of the module's own: 8,000 elements in reverse order

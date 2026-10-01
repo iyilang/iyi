@@ -56,6 +56,19 @@ f.fill(7, 1, 2147483647)
 assert_str "StaticArray[0, 7, 7, 7]", f.to_s, "fill with a count to the top of Int32"
 puts "  a huge count runs to the end"
 
+puts "\n== index past Int32"
+# Counted in Int64 by `index_within` and narrowed after: narrowed first,
+# each of these panicked "arithmetic overflow", `[]?` included, which
+# answers nil.
+wide = StaticArray(Int32, 4).new { |i| i + 1 }
+assert_true wide[4294967296_i64]?.nil? && wide[-4294967296_i64]?.nil?, "[]? past Int32 is nil"
+assert_true wide.index(1, 4294967296_i64).nil? && wide.rindex(1, -4294967296_i64).nil?, "index and rindex from past Int32 are nil"
+wide.rotate_in_place(3000000001_i64)
+assert_str "StaticArray[2, 3, 4, 1]", wide.to_s, "rotate by 3000000001_i64, a rotation by one"
+wide.fill(9, 2, 4294967296_i64)
+assert_str "StaticArray[2, 3, 9, 9]", wide.to_s, "fill with a count of 2^32 runs to the end"
+puts "  an index, a rotation and a fill count past Int32"
+
 puts "\n== hash"
 
 # Built with `new` and a block rather than the `StaticArray[...]` macro,

@@ -178,7 +178,7 @@ prove_fails "to_s grown by + again" broken_to_s "ASSERTION FAILED: to_s: 10,000 
 prove_fails "<=> answering the other way" broken_cmp "ASSERTION FAILED: <=> is lexicographic" \
   '      return cmp if cmp != 0' '      return 0 - cmp if cmp != 0'
 prove_fails "fill ending at s + c again" broken_fill_end "arithmetic overflow" \
-  '    limit = (c > N - s) ? N : (s + c)' '    limit = (s + c > N) ? N : (s + c)'
+  '    limit = c > N - i ? N : i + c.to_i' '    limit = i + c.to_i > N ? N : i + c.to_i'
 
 # The method renamed out of the way is the module as it was: no `hash` of
 # its own, so `Object#hash`, the type's id, for every value.

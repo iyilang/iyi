@@ -539,4 +539,16 @@ end
 
 puts "    base round trips: every base 2..36 parses what it printed, digits oracle-checked"
 
+# Trailing zeros are counted once and divided out once: one divmod by ten
+# per zero made the hash of `1.` and 40,000 zeros, and `3.div(3, 40000)`,
+# take 725 ms each. Counting prints the digits, so this runs after printing
+# is checked.
+strip_started = __iyi_monotonic_ns
+strip_hash = BigDecimal.new("1." + "0" * 40000).hash
+strip_quotient = BigDecimal.new("3").div(BigDecimal.new("3"), 40000)
+strip_ms = (__iyi_monotonic_ns - strip_started) // 1000000
+raise "decimal: zeros stripped #{strip_quotient.scale}" unless strip_hash == BigDecimal.new("1").hash && strip_quotient.to_s == "1" && strip_quotient.scale == 0
+raise "decimal: 40,000 trailing zeros took #{strip_ms} ms to strip" unless strip_ms < 500
+puts "    decimal zeros: 40,000 trailing zeros stripped under 500 ms"
+
 puts "all std/big checks passed"

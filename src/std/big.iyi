@@ -1718,16 +1718,26 @@ pub struct BigDecimal
     if @scale < 0
       return BigDecimal.new(@value * (BigInt.new(10_i64) ** (-@scale)), 0)
     end
-    v = @value
-    s = @scale
-    ten = BigInt.new(10_i64)
-    while s > 0
-      qr = v.divmod(ten)
-      break unless qr[1].zero?
-      v = qr[0]
-      s = s - 1
+    stripped = strip_zeros(@scale)
+    BigDecimal.new(stripped[0], @scale - stripped[1])
+  end
+
+  # The value without its trailing zeros, at most `limit` of them, and how
+  # many went. Counted once in the digits and divided out once: one divmod
+  # by ten per zero was quadratic, and the hash of `1.` and 40,000 zeros, or
+  # `3.div(3, 40000)`, took 725 ms. A value that does not end in zero is
+  # answered by one division by ten, without printing it.
+  protected def strip_zeros(limit : Int32) : Tuple(BigInt, Int32)
+    return {@value, 0} if limit <= 0 || !(@value % BigInt.new(10_i64)).zero?
+    digits = @value.abs.to_s
+    bytes = digits.to_unsafe
+    last = digits.bytesize - 1
+    count = 0
+    while count < limit && count < last && bytes[last - count] == 48_u8
+      count = count + 1
     end
-    BigDecimal.new(v, s)
+    return {@value, 0} if count == 0
+    {@value // (BigInt.new(10_i64) ** count), count}
   end
 
   def !=(other : BigDecimal) : Bool

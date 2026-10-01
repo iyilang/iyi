@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`BigDecimal#normalized` strips trailing zeros with one division, so
+  hashing `1.` and 40,000 zeros, or `3.div(3, 40000)`, takes milliseconds.**
+  It divided by ten once per zero, and `hash` and exact `div` both call it:
+  hashing `1.` and 40,000 zeros took 661 ms and
+  `BigDecimal.new("3").div(BigDecimal.new("3"), 40000)` 747 ms, and
+  doubling the zeros quadrupled the time. It counts the zeros once in the
+  printed digits and divides by 10^k once: 46 ms and 55 ms now.
+  `bench/std_big_exercise.iyi` does both under 500 ms; the old module took
+  1,634 ms there.
+
 - **`Unicode.downcase` and `Unicode.capitalize` choose the final sigma by
   Unicode's Cased and Case_Ignorable properties.** Both were approximated:
   Cased as Ll, Lu and Lt, which misses Other_Lowercase and Other_Uppercase

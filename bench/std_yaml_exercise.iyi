@@ -149,6 +149,13 @@ kept.each do |text, value|
 end
 assert_true(YAML.parse("0777\n") == Any.new(777_i64) && YAML.parse("0o17\n") == Any.new(15_i64), "0777 is 777, 0o17 is 15")
 assert_str("x", keys[Any.new(true)].as_s, "boolean key")
+# An Int32 reaches an integer key as `Any.new(1)` does: `keys[1]` panicked
+# "expected a sequence, not a mapping", and `[]?` and `dig?` answered nil.
+by_index = keys[1]?
+dug = keys.dig?(1)
+assert_true(!by_index.nil? && by_index.as_s == "one" && !dug.nil? && dug.as_s == "one", "an Int32 reaches an integer key through []? and dig?")
+assert_str("one", keys[1].as_s, "an Int32 reaches an integer key through []")
+assert_str("x", YAML.parse("a:\n  1: x\n").dig("a", 1).as_s, "dig walks to an integer key")
 h = Hash(Any, Int32).new
 h[YAML.parse("a: 1")] = 7
 assert_true(h[YAML.parse("a: 1")]? == 7, "Any hashes with ==")

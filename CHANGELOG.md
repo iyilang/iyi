@@ -142,6 +142,8 @@
 
 ### Fixed
 
+- **`YAML::Any#[]`, `[]?` and `dig?` take an `Int32` to a mapping's integer key.** The header says `1: one` has the `Int64` key 1, yet `YAML.parse("1: one")[1]` panicked with "expected a sequence, not a mapping", and `[]?(1)` and `dig?(1)` answered nil. Only `doc[Any.new(1)]` reached the key. On a mapping an `Int32` is now looked up as that integer key, as the other library's `YAML::Any` does, and on a sequence it is still an index. `bench/std_yaml_exercise.iyi` reads `keys[1]`, `keys[1]?`, `keys.dig?(1)` and `dig("a", 1)`. The old module answered nil there.
+
 - **A YAML quoted scalar spread over many lines reads in linear time.** Before each line break, folding a double- or single-quoted scalar trimmed the trailing blanks by copying everything read so far (`@buffer.to_s`). Lines of 11 bytes took 304, 1,256 and 4,887 ms for 5,000, 10,000 and 20,000 lines, while the same 220,000 bytes on one line took 5 ms. The buffer is now trimmed in place, and 20,000 lines read in 12 ms. `bench/std_yaml_exercise.iyi` requires a double- and a single-quoted scalar of 20,000 lines to read in under a second. The old module took 10,041 ms there.
 
 - **An enum member past Int32 is a hash key and a value.** An enum's

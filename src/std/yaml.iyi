@@ -236,11 +236,16 @@ pub struct Any
     self[Any.new(key)]?
   end
 
+  # An Int32 indexes a sequence and reaches an integer key of a mapping:
+  # `1: one` has the `Int64` key 1, and `doc[1]` panicked "expected a
+  # sequence, not a mapping" while `[]?` and `dig?` answered nil.
   def [](index : Int32) : Any
+    return self[Any.new(index)] if kind == KIND_HASH
     as_a[index]
   end
 
   def []?(index : Int32) : Any?
+    return self[Any.new(index)]? if kind == KIND_HASH
     a = as_a?
     return nil if a.nil?
     a[index]?

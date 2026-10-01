@@ -222,6 +222,10 @@ prove_caught flowempty "properties over nothing in a flow collection are refused
 prove_caught comment "a plain scalar folds on past a comment" \
   'accepted "a: b # c' \
   'break if skip_blank(@flow_end) < @ends[@line]' 'break if skip_blank(@flow_end) < @ends[@line] && false'
+prove_caught intkey "an Int32 never reaches an integer key" \
+  "an Int32 reaches an integer key through []? and dig?" \
+  $'    return self[Any.new(index)] if kind == KIND_HASH\n    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n    return self[Any.new(index)]? if kind == KIND_HASH\n' \
+  $'    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n'
 prove_caught hash "a '#' starts a flow scalar" \
   'accepted "[1,#c' \
   '|| b == 62_u8 || b == 35_u8' '|| b == 62_u8'

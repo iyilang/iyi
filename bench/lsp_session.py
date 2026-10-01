@@ -555,7 +555,27 @@ def main():
 
     names = list(flatten(reply["result"]))
     step(7, "documentSymbol lists the outline",
-         "App" in names and "run" in names, f"symbols {names}")
+         "app" in names and "run" in names, f"symbols {names}")
+
+    # 70l. and a symbol's selectionRange is its name. The file's module was
+    #      named `App`, the desugared spelling, and selected `mod` - the
+    #      `module` keyword's column for that name's length - and an enum
+    #      selected `enum`. The module is named as its header writes it.
+    unit_sel = ((reply["result"] or [{}])[0]).get("selectionRange", {})
+    renk_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-outline"), "renk.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": renk_uri, "languageId": "iyi", "version": 1,
+                             "text": "module renk\n\nenum Renk\n  Kirmizi\n  Yesil\nend\n\nputs Renk::Yesil\n"}},
+           wait=False)
+    c.diagnostics(renk_uri)
+    renk = c.send("textDocument/documentSymbol", {"textDocument": {"uri": renk_uri}})["result"] or [{}]
+    c.send("textDocument/didClose", {"textDocument": {"uri": renk_uri}}, wait=False)
+    spans = [(s["name"], s["selectionRange"]["start"]["character"], s["selectionRange"]["end"]["character"])
+             for s in [renk[0]] + renk[0].get("children", [])]
+    step("70l", "a symbol's selectionRange is its name",
+         (unit_sel.get("start", {}).get("character"), unit_sel.get("end", {}).get("character")) == (7, 10)
+         and spans == [("renk", 7, 11), ("Renk", 5, 9)],
+         f"app selects {unit_sel}, renk {spans}")
 
     # 8. iyi/contextPack: the agent's question, answered from the buffer.
     reply = c.send("iyi/contextPack", {"textDocument": {"uri": app_uri}})

@@ -1932,10 +1932,21 @@ module Iyi::Lsp
       end
     end
 
-    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+    # A symbol's selectionRange: its name where the line has it, from the
+    # column the outline gives on. That column is the file's module's
+    # `module` keyword - its name is the written `calc/lexer`, which the
+    # parser has no location for - and a name not on the line as such
+    # (`impl Paint for Dot`) keeps the column. The lexer reads line 1 past
+    # U+FEFF, and so does an editor's buffer.
+    private def selection_of(lines : Array(String), sym : Outline::Sym) : {Int32, Int32}
       name_line = lines[sym.name_line - 1]? || ""
-      sel_start = Lsp.character_of(name_line, sym.name_column)
-      sel_end = Lsp.character_of(name_line, sym.name_column + sym.name.size)
+      name_line = name_line.lchop('\uFEFF') if sym.name_line == 1
+      column = (name_line.index(sym.name, sym.name_column - 1) || sym.name_column - 1) + 1
+      {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + sym.name.size)}
+    end
+
+    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+      sel_start, sel_end = selection_of(lines, sym)
       json.object do
         json.field "name", sym.name
         json.field "kind", sym.kind
@@ -2361,9 +2372,8 @@ module Iyi::Lsp
     private def collect_workspace_symbols(symbols : Array(Outline::Sym), file : String, lines : Array(String), query : String, container : String?, into : Array({String, Int32, String, Int32, Int32, Int32, String?})) : Nil
       symbols.each do |sym|
         if fuzzy_match?(query, sym.name)
-          name_line = lines[sym.name_line - 1]? || ""
-          start_ch = Lsp.character_of(name_line, sym.name_column)
-          end_ch = Lsp.character_of(name_line, sym.name_column + sym.name.size)
+          # The outline's selectionRange, so the two land on one name.
+          start_ch, end_ch = selection_of(lines, sym)
           into << {sym.name, sym.kind, file, sym.name_line - 1, start_ch, end_ch, container}
         end
         collect_workspace_symbols(sym.children, file, lines, query, sym.name, into)

@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **The outline names a file's module as its header writes it, and a
+  symbol's selection is its name.** The module symbol was `Calc::Lexer`, a
+  spelling `module calc/lexer` does not have, selecting the keyword's
+  column for that name's length (`module calc`, and `mod` for `module
+  app`), and `enum Renk` selected `enum`; workspace symbols used the same
+  ranges. Both select the name now. `bench/lsp_session.py` step 7 expects
+  `app` and step 70l checks the two selections; the old server answered
+  `App`, (0,0)-(0,3) and `enum`.
+
 - **Auto-import completion writes its `import` line in the buffer's own
   line ending.** A CRLF buffer was handed `import greet::{shout}\n`, and a
   client that applies edits as written made the file mixed; organize

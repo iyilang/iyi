@@ -30,6 +30,13 @@ assert_true r.next_u == 17903413_u32, "second"
 assert_true r.next_bool == true, "bool"
 assert_true Random.new(1).rand(10) == 7, "bounded"
 assert_true Random.new(7, 3_u64).next_u == 3682281251_u32, "a second stream"
+# Any integer seed and sequence, as the other library takes them: two
+# plain literals were an ambiguous call between the overloads, and a
+# `UInt32` seed matched none.
+assert_true Random.new(7, 3).next_u == 3682281251_u32, "a second stream from two literals"
+seed32 = 7_u32
+stream16 = 3_u16
+assert_true Random.new(seed32, stream16).next_u == 3682281251_u32, "a UInt32 seed and a UInt16 stream"
 f = Random.new(42)
 assert_true f.rand == 0.7293618943001353, "a float, 53 bits"
 assert_true f.next_float == 0.27072010535091956, "and the next"

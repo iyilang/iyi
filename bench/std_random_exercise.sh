@@ -98,7 +98,8 @@ else
   # A bounded draw that answers zero, and the stream taken from the seed
   # rather than from the sequence - which is what this module did, and
   # why a seeded program printed other numbers than the other library's.
-  for label in bounded stream static; do
+  # And any integer's sequence dropped on the way to the generator's own.
+  for label in bounded stream static any; do
     rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
     PROOF="$label" "$PY" - <<PY
 import os
@@ -108,6 +109,7 @@ proofs = {
     "bounded": ("result.unsafe_mod(bound).to_i32", "0"),
     "stream": ("@inc = (sequence << 1) | 1_u64", "@inc = (seed << 1) | 1_u64"),
     "static": ("    i = N - 1\n", "    i = N - 2\n"),
+    "any": ("new(seed.to_u64, sequence.to_u64)", "new(seed.to_u64, 0_u64)"),
 }
 old, new = proofs[os.environ["PROOF"]]
 if old not in src:

@@ -57,12 +57,14 @@ pub class Random
     next_u
   end
 
-  def self.new(seed : Int32, sequence : UInt64 = 0_u64) : Random
-    new(seed.to_u64, sequence)
-  end
-
-  def self.new(seed : Int64, sequence : UInt64 = 0_u64) : Random
-    new(seed.to_u64, sequence)
+  # Any integer seed and sequence, as the other library takes them. There
+  # were two overloads, an `Int32` and an `Int64` seed with a `UInt64`
+  # sequence, beside this class's own `UInt64` pair: `Random.new(7, 3)`,
+  # the form the comment above writes, cast its literals to all three and
+  # was an ambiguous call, and a `UInt32` seed matched none of them. A
+  # negative seed or sequence panics in the conversion, as it raises there.
+  def self.new(seed : ::Int, sequence : ::Int = 0_u64) : Random
+    new(seed.to_u64, sequence.to_u64)
   end
 
   def self.new : Random

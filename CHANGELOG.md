@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`iyi fix` says what the remaining error is when its chain ends in a
+  type's trace.** `undefined method 'abss' for Int32` carries an `Int32
+  trace:` frame with no message under it, and the deepest message was
+  read from that frame. So `fix main.iyi`, with the typo in a module it
+  imports, printed `main.iyi:1:1: ` and `(in ...util.iyi:4)`, `--json`
+  gave `"remaining":"\n(in ...util.iyi:4)"`, and `[Foo.new].sorted` gave
+  `instantiating 'Array(Foo)#sorted()'` and nothing under it, while
+  `check` printed the error. The frame above the trace gives the message
+  now: "undefined method 'abss' for Int32 / Did you mean 'abs'?" and
+  "undefined method '<' for Foo"; a message in the file itself loses the
+  stray `\n` it ended with. The language server builds its diagnostics
+  the same way [INFERENCE: not measured there]. `bench/agent_loop.py`
+  asks `fix --json` for both; the old compiler answered the empty
+  message.
+
 - **`iyi fix DIR` and `iyi mod tidy` do not walk through a link back into
   the tree.** Both walk with a loop of their own and asked
   `File.directory?`, which follows a link, so a junction `src\loop` to

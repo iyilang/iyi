@@ -197,6 +197,23 @@ def main():
          fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("helperr", "helper")]
          and run("check", "bumps.iyi", cwd=work).returncode == 0,
          f"applied {fixed['applied']}")
+    # 4a''. and the remaining error is said. A chain whose last frame is a
+    # type's trace - `Int32 trace:` under `undefined method 'abss' for
+    # Int32` - carries no message there, and fix took the empty one:
+    # `remaining` was "\n(in ...abss.iyi:4)", and for `[Foo.new].sorted`
+    # the `instantiating` frame and nothing under it, while check printed
+    # the error each time.
+    write("calc/abss.iyi", "module calc/abss\n\npub def answer : Int32\n  42.abss\nend\n")
+    write("answers.iyi", "module answers\n\nimport calc/abss::{answer}\n\nputs answer\n")
+    write("sorts.iyi", "module sorts\n\nclass Foo\nend\n\nputs [Foo.new, Foo.new].sorted.size\n")
+    far = json.loads(run("fix", "--json", "answers.iyi", cwd=work).stdout).get("remaining", "")
+    near = json.loads(run("fix", "--json", "sorts.iyi", cwd=work).stdout).get("remaining", "")
+    step("fix says the remaining error, not the frame above it",
+         far.startswith("undefined method 'abss' for Int32")
+         and "\nundefined method '<' for Sorts::Foo" in near,
+         f"{far[:40]!r} {near[-40:]!r}")
+    for rel in ("calc/abss.iyi", "answers.iyi", "sorts.iyi"):
+        os.remove(os.path.join(work, rel))
 
     # 4a-3. three typos `fix` had nothing for, found by injecting typos
     # into every sample: a prelude method with an optional parameter

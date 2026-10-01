@@ -193,9 +193,14 @@ module Iyi
       end
     end
 
+    # iyi: the innermost message there is. A chain can end in a
+    # MethodTraceException - the `Int32 trace:` frame under `undefined
+    # method 'abss' for Int32` - which has no message, and returning its nil
+    # made `iyi fix` report the remaining error as "" with only `(in
+    # util.iyi:4)` after it. The frame above it says what went wrong.
     def deepest_error_message
       if inner = @inner
-        inner.deepest_error_message
+        inner.deepest_error_message || @message
       else
         @message
       end

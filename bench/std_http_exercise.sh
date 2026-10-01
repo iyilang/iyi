@@ -128,6 +128,8 @@ refuses "https" scheme_tls "HTTP: TLS is not in 0.x" \
   'HTTP.get("https://127.0.0.1/").or_panic.status'
 refuses "a Content-Length that is not a number" length_text "HTTP: Content-Length is not a number" \
   'HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\nabc").body'
+refuses "a Content-Length past Int32's" length_large "HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds" \
+  'HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc").body'
 refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends inside a chunk" \
   'HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nabc").body'
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
@@ -293,6 +295,7 @@ mutate "a server whose tasks share the accept loop's variable" '          spawn_
             handle(accepted, handler)
             0
           end'
+mutate "a length past Int32's read as no number" 'return 2147483648_i64 if n > 2147483647_i64' 'return nil if n > 2147483647_i64'
 mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 mutate "a malformed chunked body that raises in the server" 'return "not a chunk size: #{size_text.inspect}" unless size' 'raise "HTTP: not a chunk size: #{size_text.inspect}" unless size'
 mutate "a chunk's end added past Int32's" 'return nil if size > n - i - 2' 'return nil if i + size + 2 > n'

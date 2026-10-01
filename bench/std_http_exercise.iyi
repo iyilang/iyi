@@ -207,6 +207,13 @@ group do |g|
 end
 assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
 puts "  a body short of its Content-Length is refused"
+
+# A length past Int32's is a length too large, not "not a number".
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
+assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
+puts "  a Content-Length past Int32's is refused as too large on both sides"
 puts "\n== messages at the edges"
 # Each refusal below is a raise, caught as its task's value: the panic
 # lines it prints are those refusals.

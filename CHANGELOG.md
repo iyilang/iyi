@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A `Content-Length` past 2147483647 is refused as too large, on the
+  server and in the client, rather than as "not a number".** `content_length`
+  read the digits with `to_i?`, which answers nil past Int32: a request
+  with `Content-Length: 3000000000` was answered 400 "Content-Length is
+  not a number: \"3000000000\"", where 100000000 got "body past 67108864
+  bytes", and the client refused a 3 GB answer with "HTTP: Content-Length
+  is not a number: \"3000000000\"". The digits are read as an Int64 that
+  stops one past 2147483647: the server answers "body past 67108864 bytes"
+  (and so for 99999999999999999999999), and the client "HTTP:
+  Content-Length \"3000000000\" is past the 2147483647 bytes a string
+  holds", while 2147483647 itself is still a length. `bench/std_http_exercise.iyi`
+  checks both sides and its `.sh` refuses the 3 GB answer; the old module
+  answered "Content-Length is not a number: \"3000000000\"".
+
 - **`CSV.build` quotes a first field that opens with U+FEFF.**
   `CSV.parse` reads past a byte order mark at the front of the text, and
   `build` wrote such a field bare there, so `[["\uFEFFid", "x"],

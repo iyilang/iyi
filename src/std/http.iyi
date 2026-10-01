@@ -337,8 +337,10 @@ pub struct Server
     if cl = stub.header("Content-Length")
       n = HTTP.content_length(cl)
       return ParsedRequest.new(nil, "Content-Length is not a number: #{cl.inspect}", true, 0) unless n
-      return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY
-      length = n
+      # A length past 2147483647 is one too, read as one past it: it was
+      # answered "not a number", where it is a body too large.
+      return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY.to_i64
+      length = n.to_i32
     end
     return ParsedRequest.new(nil, nil, false, 0, body_start + length, expects) if after.bytesize < length
     ParsedRequest.new(Request.new(method, path, query, headers, after[0, length]), nil, close, body_start + length)
@@ -430,11 +432,13 @@ pub struct HTTP
     elsif cl = response.header("Content-Length")
       n = content_length(cl)
       raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n
+      raise "HTTP: Content-Length #{cl.inspect} is past the 2147483647 bytes a string holds" if n > 2147483647_i64
+      length = n.to_i32
       # Short of it is a connection that ended early, as a chunked body cut
       # inside a chunk is: it was answered as a whole 200 with the part
       # that came, a cut-off download read as a good one.
-      raise "HTTP: the body ended after #{body.bytesize} of its #{n} bytes" if body.bytesize < n
-      body = body[0, n] if n < body.bytesize
+      raise "HTTP: the body ended after #{body.bytesize} of its #{length} bytes" if body.bytesize < length
+      body = body[0, length] if length < body.bytesize
     end
     Response.new(status, reason, headers, body)
   end
@@ -485,8 +489,10 @@ pub struct HTTP
 
   # A `Content-Length` as a number, or nil when it is not one. Repeated
   # lines arrive joined, and are one length only when every one says the
-  # same (RFC 9112 §6.3).
-  def self.content_length(value : String) : Int32?
+  # same (RFC 9112 §6.3). A length past 2147483647 is still a length, too
+  # large for either side, and is read as one past it: `to_i?` answered
+  # nil for it, and 3000000000 was refused as "not a number".
+  def self.content_length(value : String) : Int64?
     parts = value.split(',')
     return nil if parts.size == 0
     first = trim(parts[0])
@@ -496,8 +502,14 @@ pub struct HTTP
     # Digits and nothing else (RFC 9110 §8.6): `to_i?` took a sign, and
     # `+2` was a length.
     return nil unless first.bytesize > 0 && digits?(first)
-    n = first.to_i?
-    return nil unless n && n >= 0
+    p = first.to_unsafe
+    n = 0_i64
+    i = 0
+    while i < first.bytesize
+      n = n * 10_i64 + (p[i] - 48_u8).to_i64
+      return 2147483648_i64 if n > 2147483647_i64
+      i = i + 1
+    end
     n
   end
 
